@@ -23727,6 +23727,12 @@ static void *spawn_handed;
 #define SIG_IGN ((void *)1)
 #define atomic_long_add(n, p) ((void)(n), (void)(p))
 #define atomic_long_inc(p) ((void)(p))
+/* The counter the environments kept on a device are held to is a real one:
+   the budget is a number that has to add up. */
+typedef long atomic_long_t;
+#define ATOMIC_LONG_INIT(v) (v)
+static long atomic_long_add_return(long n, atomic_long_t *p) { *p += n; return *p; }
+static void atomic_long_sub(long n, atomic_long_t *p) { *p -= n; }
 static long stat_task_ns, stat_spawns;
 #define user_mode_thread(fn, arg, sig) \
         ((void)(sig), spawn_handed=(arg), spawn_entered++, spawn_pid)
@@ -25733,6 +25739,86 @@ static void check_pointer_state(struct input_handle *handle) {
     check(desktop.shake_count==1,"shake ignores only subthreshold motion");
 }
 
+/* What the devices keep of environments, in all. An open file of /dev/spark
+   is a context of its own and anyone may open it, so the copy a launch leaves
+   for the next one is kept only when it is small and only while the sum of
+   all kept is: 80 contexts, each launched once under a generation, with a
+   block the size of a shell's, then of one just under the largest kept, then
+   of one past it. The sum stays under the budget, every launch goes ahead,
+   a repeat under a generation is a pointer while it is kept, and closing the
+   devices gives every byte back. */
+#ifndef SPARK_ENV_CACHE_ALL
+static void check_spawn_environment(void) {
+    check(0,"the environments kept on a device are held to a budget");
+}
+#else
+static void check_spawn_environment(void) {
+    enum { CONTEXTS = 80 };
+    static struct device_context contexts[CONTEXTS];
+    static struct file callers[CONTEXTS];
+    static unsigned char block[1u << 20];
+    char argv_block[]="/thing\0-v\0";
+    static const struct { unsigned count, bytes; const char *name; } shapes[] = {
+        {2, 8, "a shell's environment"},
+        {20000, 20008, "one just under the largest kept"},
+        {40000, 40008, "one past the largest kept"},
+    };
+
+    for (unsigned shape=0; shape<3; shape++) {
+        unsigned kept=0, launched=0;
+        long largest=0;
+        memset(contexts,0,sizeof(contexts));
+        memset(block,0,sizeof(block));
+        memcpy(block,"A=1\0B=2\0",8);
+        spark_env_cached=0;
+        for (unsigned i=0; i<CONTEXTS; i++) {
+            struct spawn request={.path=(unsigned long)"/thing",
+                .argv=(unsigned long)argv_block,.argv_bytes=sizeof(argv_block)-1,
+                .argv_count=2,.envp=(unsigned long)block,
+                .envp_bytes=shapes[shape].bytes,.envp_count=shapes[shape].count,
+                .envp_generation=7,.stdio={-1,-1,-1}};
+            callers[i].private_data=&contexts[i];
+            memset(open_files,0,sizeof(open_files));
+            spawn_entered=0; allocations=fail_allocation=0; copies=0; fail_copy=0;
+            launched+=device_ioctl(&callers[i],SPARK_IOCTL_SPAWN,(unsigned long)&request)==spawn_pid;
+            kept+=contexts[i].environment!=NULL;
+            if (contexts[i].environment && (long)contexts[i].environment->size>largest)
+                largest=(long)contexts[i].environment->size;
+        }
+        check(launched==CONTEXTS,"every launch goes ahead whether or not its environment is kept");
+        check(spark_env_cached>=0 && spark_env_cached<=(long)SPARK_ENV_CACHE_ALL,
+              "what the devices keep is never more than the budget");
+        check(largest<=(long)SPARK_ENV_CACHE_ONE,
+              "and none of it is larger than the largest kept");
+        if (shape==0) {
+            check(kept==CONTEXTS,"a shell's environment is kept on every device");
+            struct spawn again={.path=(unsigned long)"/thing",
+                .argv=(unsigned long)argv_block,.argv_bytes=sizeof(argv_block)-1,
+                .argv_count=2,.envp=(unsigned long)block,.envp_bytes=8,.envp_count=2,
+                .envp_generation=7,.stdio={-1,-1,-1}};
+            struct spawn_strings *held=contexts[3].environment;
+            memset(open_files,0,sizeof(open_files));
+            device_ioctl(&callers[3],SPARK_IOCTL_SPAWN,(unsigned long)&again);
+            check(((struct spawn_work *)spawn_handed)->environment==held && held,
+                  "a repeat under the same generation is the copy already kept");
+            again.envp_generation=8;
+            device_ioctl(&callers[3],SPARK_IOCTL_SPAWN,(unsigned long)&again);
+            check(contexts[3].environment && contexts[3].environment!=held &&
+                  spark_env_cached==(long)contexts[3].environment->size*(long)CONTEXTS,
+                  "a new generation replaces what was kept and the count follows");
+        } else if (shape==1) {
+            check(kept>=40 && kept<CONTEXTS,
+                  "past the budget an environment is copied for each launch and not kept");
+        } else
+            check(!kept && spark_env_cached==0,
+                  "an environment past the largest kept is never kept");
+        for (unsigned i=0; i<CONTEXTS; i++)
+            spark_environment_release(&contexts[i]);
+        check(spark_env_cached==0,"closing the devices gives every byte back");
+    }
+}
+#endif
+
 /* The settings requests, who may make them and that nothing is copied to or
    from a caller with settings_lock held. */
 static void check_settings_requests(void) {
@@ -25802,6 +25888,7 @@ int main(void) {
     check_console_teardown();
     check_focus_visibility();
     check_settings_requests();
+    check_spawn_environment();
     const unsigned capacities[]={0,111,112,113,4095,4096,4097,8192,SPARK_SNAPSHOT_MAX_BYTES};
     const unsigned records[]={0,1,32,171};
     unsigned char *output=malloc(SPARK_SNAPSHOT_MAX_BYTES+1);

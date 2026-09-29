@@ -1456,6 +1456,43 @@ static void spawn_strings_put(struct spawn_strings *strings)
                 kvfree(strings);
 }
 
+/*
+        What the devices keep of somebody's environment, in all.
+
+        A launch that names an environment generation leaves the copy it made
+        on the open file, so the next launch under it is a pointer and not a
+        copy of the block again. /dev/spark is open to everyone, an open file
+        is a context of its own, and an environment may be two mebibytes: a
+        process that opened the device four thousand times, which its default
+        limit lets it, and launched once on each with the largest block,
+        pinned eight gibibytes of kernel memory with no resident set of its
+        own to draw the out of memory killer's eye -- what it kills is
+        someone else's. So a copy is kept only when it is small, and only
+        while the sum of all that are kept is; past that a launch copies its
+        block every time, which is all it did before there was a cache. A
+        shell's environment is a few kilobytes; nothing that is a shell comes
+        near either number.
+*/
+#define SPARK_ENV_CACHE_ONE (256UL << 10)
+#define SPARK_ENV_CACHE_ALL (8UL << 20)
+
+static atomic_long_t spark_env_cached = ATOMIC_LONG_INIT(0);
+
+static bool spark_env_cache_take(size_t bytes)
+{
+        if (bytes > SPARK_ENV_CACHE_ONE)
+                return false;
+
+        if (atomic_long_add_return(bytes, &spark_env_cached) >
+            (long)SPARK_ENV_CACHE_ALL)
+        {
+                atomic_long_sub(bytes, &spark_env_cached);
+                return false;
+        }
+
+        return true;
+}
+
 static void spawn_free(struct spawn_work *work)
 {
         for (unsigned int i = 0; i < array_count(work->stdio); i++)
@@ -1680,6 +1717,7 @@ static int copy_strings(unsigned long user_block, unsigned int bytes,
                 return -ENOMEM;
 
         refcount_set(&strings->references, 1);
+        strings->size = sizeof(*strings) + pointer_bytes + bytes;
         vector = (char **)(strings + 1);
         strings->vector = vector;
         block = (char *)vector + pointer_bytes;
@@ -1710,6 +1748,22 @@ static int copy_strings(unsigned long user_block, unsigned int bytes,
 malformed:
         kvfree(strings);
         return -EINVAL;
+}
+
+// What a kept environment counted, given back as it stops being kept.
+static void spark_env_cache_give(struct spawn_strings *strings)
+{
+        if (strings)
+                atomic_long_sub(strings->size, &spark_env_cached);
+}
+
+// The device closes: the environment it kept, and who it was kept for.
+static void spark_environment_release(struct device_context *context)
+{
+        spark_env_cache_give(context->environment);
+        spawn_strings_put(context->environment);
+        put_pid(context->environment_owner);
+        put_cred(context->environment_cred);
 }
 
 static long do_spawn(struct file *file, struct spawn __user *request)
@@ -1802,19 +1856,35 @@ static long do_spawn(struct file *file, struct spawn __user *request)
 
                         if (args.envp_generation)
                         {
+                                bool keep = spark_env_cache_take(
+                                        work->environment->size);
+
                                 mutex_lock(&context->spawn_lock);
                                 old_environment = context->environment;
                                 old_owner = context->environment_owner;
                                 old_cred = context->environment_cred;
-                                refcount_inc(&work->environment->references);
-                                context->environment = work->environment;
-                                context->environment_generation =
-                                        args.envp_generation;
-                                context->environment_owner =
-                                        get_pid(task_tgid(current));
-                                context->environment_cred =
-                                        get_cred(current_cred());
+                                if (keep)
+                                {
+                                        refcount_inc(&work->environment->references);
+                                        context->environment = work->environment;
+                                        context->environment_generation =
+                                                args.envp_generation;
+                                        context->environment_owner =
+                                                get_pid(task_tgid(current));
+                                        context->environment_cred =
+                                                get_cred(current_cred());
+                                }
+                                else
+                                {
+                                        // Not kept, and what was kept is
+                                        // for a generation that is gone.
+                                        context->environment = NULL;
+                                        context->environment_generation = 0;
+                                        context->environment_owner = NULL;
+                                        context->environment_cred = NULL;
+                                }
                                 mutex_unlock(&context->spawn_lock);
+                                spark_env_cache_give(old_environment);
                                 spawn_strings_put(old_environment);
                                 put_pid(old_owner);
                                 put_cred(old_cred);

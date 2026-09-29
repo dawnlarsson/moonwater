@@ -123,6 +123,9 @@ static int spawn_terminal(void);
 struct spawn_strings
 {
         refcount_t references;
+        // What the one allocation is, the vector and the bytes behind it, so
+        // an environment a device keeps for the next launch can be counted.
+        size_t size;
         char **vector;
 };
 
@@ -320,9 +323,7 @@ static int device_close(struct inode *inode, struct file *file)
 #ifdef CONFIG_MOONWATER_CANVAS
         window_release(file);
 #endif
-        spawn_strings_put(context->environment);
-        put_pid(context->environment_owner);
-        put_cred(context->environment_cred);
+        spark_environment_release(context);
         kfree(context);
         return 0;
 }
