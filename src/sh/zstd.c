@@ -2098,6 +2098,24 @@ typedef struct
         bool valid;
 } zstd_fse_prior;
 
+/* What a block's tables become once it is written: the literal table it
+   sent, when it sent one, and the three sequence tables. */
+typedef struct
+{
+        bool fresh;
+        bool seqs;
+        zstd_fse_prior pending[3];
+} zstd_entropy_state;
+
+/* The tables a block starts from, kept to put back. */
+typedef struct
+{
+        zstd_fse_prior prior[3];
+        p32 huf_table[256];
+        p8 huf_length[256];
+        bool huf_valid;
+} zstd_snapshot;
+
 /* The optimal parser's statistics, libzstd's: counts of literal bytes,
    literal length codes, match length codes and offset codes from the
    sequences already chosen, and the cost in 1/256 bits of each whole. */
@@ -2192,6 +2210,15 @@ typedef struct
         p8 address_to lit_length_new;
         zstd_opt_node address_to opt;
         zstd_opt_match address_to matches;
+        /* The post-parse block splitter's scratch: the state a block leaves,
+           room for a trial block and for a block's chunks, and the literals
+           and source bytes before each sequence. */
+        zstd_entropy_state split_state;
+        zstd_snapshot snapshot;
+        p8 address_to trial_out;
+        p8 address_to split_out;
+        p32 address_to cum_lit;
+        p32 address_to cum_src;
         address_any output;
 } zstd_encoder;
 
@@ -2204,6 +2231,10 @@ static zstd_enc_seq zstd_seqs[ZSTD_ENC_SEQ_MAX];
 static p8 zstd_enc_lits[ZSTD_BLOCK_MAX + 64];
 static p8 zstd_enc_bits[ZSTD_BLOCK_MAX + 256];
 static p8 zstd_enc_block_out[ZSTD_BLOCK_MAX + 2048];
+static p8 zstd_enc_trial_out[ZSTD_BLOCK_MAX + 2048];
+static p8 zstd_enc_split_out[ZSTD_BLOCK_MAX + 2048 * 4];
+static p32 zstd_enc_cum_lit[ZSTD_ENC_SEQ_MAX + 2];
+static p32 zstd_enc_cum_src[ZSTD_ENC_SEQ_MAX + 2];
 static p8 zstd_packed_lits[ZSTD_BLOCK_MAX * 2 + 512];
 static p32 zstd_lit_table_new[256];
 static p8 zstd_lit_length_new[256];
@@ -2952,41 +2983,44 @@ zstd_bw_state(zstd_bw address_to w, zstd_cstate address_to st, p8 symbol)
         st->value = st->ct->state[(bipolar)(st->value >> nb) + st->ct->delta_find[symbol]];
 }
 
-/* One compressed block from the encoder's sequences and literals: 1 when
-   written, 0 when it would be no smaller than raw (nothing written and
-   nothing committed), -1 when the write failed. */
-static b32 zstd_entropy_block(zstd_encoder address_to e, positive n, bool last)
+/* One compressed block from nseq sequences and their nlit literals, of the
+   n source bytes they cover, into block (three bytes of header, then the
+   sections; room for a whole block): 1 with its size, or 0 when it would be
+   no smaller than raw.  Nothing is committed: the state it would leave is
+   in *state. */
+static b32 zstd_entropy_chunk(zstd_encoder address_to e, const zstd_enc_seq address_to seqs,
+                              positive const nseq, p8 address_to lits, positive const nlit,
+                              positive n, bool last, p8 address_to block,
+                              positive address_to size, zstd_entropy_state address_to state)
 {
-        p8 address_to const out = e->block_out + 3;
+        p8 address_to const out = block + 3;
         p8 address_to at = out;
-        positive const nseq = e->nseq;
         positive hn = 0;
         positive packed = 0;
         bool fresh = false;
-        zstd_fse_prior pending[3];
+        zstd_fse_prior address_to const pending = state->pending;
         p8 head[4];
 
         /* --fast sends its literals raw, as libzstd's negative levels
            do: the speed they ask for is mostly the Huffman pass. */
-        if (e->nlit && !(e->p.strategy == ZSTD_FAST && e->p.target_length))
-                packed = zstd_pack_literals(e, e->lits, e->nlit, at,
+        if (nlit && !(e->p.strategy == ZSTD_FAST && e->p.target_length))
+                packed = zstd_pack_literals(e, lits, nlit, at,
                                             address_of hn, address_of fresh);
         if (packed)
         {
                 memory_copy_apart(at + hn, e->packed, packed);
                 at += hn + packed;
         }
-        else if (e->nlit > 1 &&
-                 memory_span_byte(e->lits, e->lits[0], e->nlit) == e->nlit)
+        else if (nlit > 1 && memory_span_byte(lits, lits[0], nlit) == nlit)
         {
-                at += zstd_literals_header(at, 1, e->nlit);
-                *at++ = e->lits[0];
+                at += zstd_literals_header(at, 1, nlit);
+                *at++ = lits[0];
         }
         else
         {
-                at += zstd_literals_header(at, 0, e->nlit);
-                memory_copy_apart(at, e->lits, e->nlit);
-                at += e->nlit;
+                at += zstd_literals_header(at, 0, nlit);
+                memory_copy_apart(at, lits, nlit);
+                at += nlit;
         }
         if ((positive)(at - out) + 4 >= n)
                 return 0;
@@ -3018,9 +3052,9 @@ static b32 zstd_entropy_block(zstd_encoder address_to e, positive n, bool last)
 
                 for (positive i = 0; i < nseq; i++)
                 {
-                        ll_freq[e->seqs[i].ll_code]++;
-                        of_freq[e->seqs[i].of_code]++;
-                        ml_freq[e->seqs[i].ml_code]++;
+                        ll_freq[seqs[i].ll_code]++;
+                        of_freq[seqs[i].of_code]++;
+                        ml_freq[seqs[i].ml_code]++;
                 }
                 ll_mode = zstd_choose_table(address_of e->prior[0], address_of pending[0],
                                             ll_freq, nseq, 35, 9, zstd_ll_default, 35,
@@ -3045,8 +3079,8 @@ static b32 zstd_entropy_block(zstd_encoder address_to e, positive n, bool last)
                 bits.bits = 0;
                 bits.start = at;
                 bits.at = at;
-                bits.stop = e->block_out + ZSTD_BLOCK_MAX + 2048 - 8;
-                s = e->seqs + nseq - 1;
+                bits.stop = block + ZSTD_BLOCK_MAX + 2048 - 8;
+                s = seqs + nseq - 1;
                 if ((lt && !zstd_cstate_init2(address_of ls, lt, s->ll_code)) ||
                     (ot && !zstd_cstate_init2(address_of os, ot, s->of_code)) ||
                     (mt && !zstd_cstate_init2(address_of ms, mt, s->ml_code)))
@@ -3060,7 +3094,7 @@ static b32 zstd_entropy_block(zstd_encoder address_to e, positive n, bool last)
                 zstd_bw_flush(address_of bits);
                 for (positive i = nseq - 1; i--;)
                 {
-                        s = e->seqs + i;
+                        s = seqs + i;
                         if (ot)
                                 zstd_bw_state(address_of bits, address_of os, s->of_code);
                         if (mt)
@@ -3092,18 +3126,175 @@ static b32 zstd_entropy_block(zstd_encoder address_to e, positive n, bool last)
                         return 0;
         }
         zstd_block_header(head, last, 2, (positive)(at - out));
-        memory_copy_apart(e->block_out, head, 3);
-        if (!zstd_enc_emit(e, e->block_out, (positive)(at - e->block_out)))
-                return -1;
-        if (fresh)
+        memory_copy_apart(block, head, 3);
+        address_to size = (positive)(at - block);
+        state->fresh = fresh;
+        state->seqs = nseq != 0;
+        return 1;
+}
+
+/* The tables a written block leaves behind. */
+static fn zstd_entropy_commit(zstd_encoder address_to e, zstd_entropy_state address_to state)
+{
+        if (state->fresh)
         {
                 memory_copy_apart(e->huf_table, e->lit_table_new, sizeof(e->huf_table));
                 memory_copy_apart(e->huf_length, e->lit_length_new, sizeof(e->huf_length));
                 e->huf_valid = true;
         }
-        if (nseq)
-                memory_copy_apart(e->prior, pending, sizeof(pending));
+        if (state->seqs)
+                memory_copy_apart(e->prior, state->pending, sizeof(state->pending));
+}
+
+/* The encoder's own sequences and literals as one block, written: 1 when
+   written, 0 when it would be no smaller than raw (nothing written and
+   nothing committed), -1 when the write failed. */
+static b32 zstd_entropy_block(zstd_encoder address_to e, positive n, bool last)
+{
+        positive size;
+
+        if (!zstd_entropy_chunk(e, e->seqs, e->nseq, e->lits, e->nlit, n, last,
+                                e->block_out, address_of size, address_of e->split_state))
+                return 0;
+        if (!zstd_enc_emit(e, e->block_out, size))
+                return -1;
+        zstd_entropy_commit(e, address_of e->split_state);
         return 1;
+}
+
+/*
+        libzstd's split after the parse, for btopt and up: a block's
+        sequences are cut in halves where the halves written apart take fewer
+        bytes than the whole, recursively down to 300 sequences, and each
+        piece is a block of its own.  The sizes the halves are judged by are
+        the blocks themselves written into a scratch buffer, against the
+        tables the whole block would have started from; the pieces are then
+        written in turn, each leaving its tables for the next, and if any is
+        no smaller than raw the block goes out whole as it would have.
+*/
+#define ZSTD_SPLIT_MIN_SEQUENCES 300
+#define ZSTD_SPLIT_MAX 196
+
+/* The encoded size of sequences from first to stop, with its header. */
+static positive zstd_split_cost(zstd_encoder address_to e, positive first, positive stop,
+                                positive n, bool address_to compressed)
+{
+        positive const nseq = e->nseq;
+        positive const lit_from = e->cum_lit[first];
+        positive const lit_to = stop == nseq ? e->nlit : e->cum_lit[stop];
+        positive const source = (stop == nseq ? n : e->cum_src[stop]) - e->cum_src[first];
+        positive size;
+
+        if (!zstd_entropy_chunk(e, e->seqs + first, stop - first, e->lits + lit_from,
+                                lit_to - lit_from, source, false, e->trial_out,
+                                address_of size, address_of e->split_state))
+        {
+                address_to compressed = false;
+                return source + 3;
+        }
+        address_to compressed = true;
+        return size;
+}
+
+static fn zstd_snapshot_take(zstd_encoder address_to e)
+{
+        memory_copy_apart(e->snapshot.prior, e->prior, sizeof(e->prior));
+        memory_copy_apart(e->snapshot.huf_table, e->huf_table, sizeof(e->huf_table));
+        memory_copy_apart(e->snapshot.huf_length, e->huf_length, sizeof(e->huf_length));
+        e->snapshot.huf_valid = e->huf_valid;
+}
+
+static fn zstd_snapshot_put(zstd_encoder address_to e)
+{
+        memory_copy_apart(e->prior, e->snapshot.prior, sizeof(e->prior));
+        memory_copy_apart(e->huf_table, e->snapshot.huf_table, sizeof(e->huf_table));
+        memory_copy_apart(e->huf_length, e->snapshot.huf_length, sizeof(e->huf_length));
+        e->huf_valid = e->snapshot.huf_valid;
+}
+
+static fn zstd_split_derive(zstd_encoder address_to e, positive first, positive stop,
+                            positive whole, positive n, positive address_to cuts,
+                            positive address_to count)
+{
+        positive const middle = (first + stop) / 2;
+        positive left;
+        positive right;
+        bool compressed;
+        bool ignored;
+
+        if (stop - first < ZSTD_SPLIT_MIN_SEQUENCES || address_to count >= ZSTD_SPLIT_MAX)
+                return;
+        /* The second half is judged as it would be written, after the
+           first: from the tables the first leaves. */
+        left = zstd_split_cost(e, first, middle, n, address_of compressed);
+        if (compressed)
+        {
+                zstd_snapshot_take(e);
+                zstd_entropy_commit(e, address_of e->split_state);
+        }
+        right = zstd_split_cost(e, middle, stop, n, address_of ignored);
+        if (compressed)
+                zstd_snapshot_put(e);
+        if (left + right >= whole)
+                return;
+        zstd_split_derive(e, first, middle, left, n, cuts, count);
+        cuts[address_to count] = middle;
+        address_to count += 1;
+        zstd_split_derive(e, middle, stop, right, n, cuts, count);
+}
+
+/* The parsed block as one or several: same answers as zstd_entropy_block. */
+static b32 zstd_split_sequences(zstd_encoder address_to e, positive n, bool last)
+{
+        positive const nseq = e->nseq;
+        positive cuts[ZSTD_SPLIT_MAX + 1];
+        positive count = 0;
+        positive lit_sum = 0;
+        positive src_sum = 0;
+        positive at = 0;
+
+        if (nseq < 2 * ZSTD_SPLIT_MIN_SEQUENCES)
+                return zstd_entropy_block(e, n, last);
+        for (positive i = 0; i < nseq; i++)
+        {
+                e->cum_lit[i] = (p32)lit_sum;
+                e->cum_src[i] = (p32)src_sum;
+                lit_sum += e->seqs[i].lit;
+                src_sum += e->seqs[i].lit + e->seqs[i].match;
+        }
+        e->cum_lit[nseq] = (p32)lit_sum;
+        e->cum_src[nseq] = (p32)src_sum;
+        {
+                bool whole_ok;
+                positive const whole = zstd_split_cost(e, 0, nseq, n, address_of whole_ok);
+
+                zstd_split_derive(e, 0, nseq, whole, n, cuts, address_of count);
+        }
+        if (!count)
+                return zstd_entropy_block(e, n, last);
+        cuts[count] = nseq;
+        zstd_snapshot_take(e);
+        for (positive piece = 0; piece <= count; piece++)
+        {
+                positive const first = piece ? cuts[piece - 1] : 0;
+                positive const stop = cuts[piece];
+                positive const lit_from = e->cum_lit[first];
+                positive const lit_to = stop == nseq ? e->nlit : e->cum_lit[stop];
+                positive const source = (stop == nseq ? n : e->cum_src[stop]) - e->cum_src[first];
+                positive size;
+
+                if (!zstd_entropy_chunk(e, e->seqs + first, stop - first, e->lits + lit_from,
+                                        lit_to - lit_from, source, last && stop == nseq,
+                                        e->split_out + at, address_of size,
+                                        address_of e->split_state))
+                {
+                        zstd_snapshot_put(e);
+                        return zstd_entropy_block(e, n, last);
+                }
+                zstd_entropy_commit(e, address_of e->split_state);
+                at += size;
+        }
+        return zstd_enc_emit(e, e->split_out, at) ? 1 : -1;
 }
 
 /* A hash of the first `bytes` (4 to 8) bytes at p, `log` bits wide.  Eight
@@ -4832,6 +5023,10 @@ static bool zstd_encoder_open(zstd_encoder address_to e,
                 e->lits = zstd_enc_lits;
                 e->bits = zstd_enc_bits;
                 e->block_out = zstd_enc_block_out;
+                e->trial_out = zstd_enc_trial_out;
+                e->split_out = zstd_enc_split_out;
+                e->cum_lit = zstd_enc_cum_lit;
+                e->cum_src = zstd_enc_cum_src;
                 e->packed = zstd_packed_lits;
                 e->lit_table_new = zstd_lit_table_new;
                 e->lit_length_new = zstd_lit_length_new;
@@ -5107,7 +5302,9 @@ static bool zstd_encode_block(zstd_encoder address_to e, positive n, bool last)
                 memory_copy_apart(e->lits + e->nlit, anchor,
                                   (positive)(src + n - anchor));
                 e->nlit += (positive)(src + n - anchor);
-                written = zstd_entropy_block(e, n, last);
+                written = e->p.strategy >= ZSTD_BTOPT && e->p.window_log >= 17
+                              ? zstd_split_sequences(e, n, last)
+                              : zstd_entropy_block(e, n, last);
                 ok = written > 0;
                 if (!written)
                 {
@@ -5183,6 +5380,10 @@ static bool zstd_encoder_job_tables(zstd_encoder address_to e,
             (!(e->lits = memory_checked(ZSTD_BLOCK_MAX + 64)) ||
              !(e->bits = memory_checked(ZSTD_BLOCK_MAX + 256)) ||
              !(e->block_out = memory_checked(ZSTD_BLOCK_MAX + 2048)) ||
+             !(e->trial_out = memory_checked(ZSTD_BLOCK_MAX + 2048)) ||
+             !(e->split_out = memory_checked(ZSTD_BLOCK_MAX + 2048 * 4)) ||
+             !(e->cum_lit = memory_checked(sizeof(p32) * (ZSTD_ENC_SEQ_MAX + 2))) ||
+             !(e->cum_src = memory_checked(sizeof(p32) * (ZSTD_ENC_SEQ_MAX + 2))) ||
              !(e->packed = memory_checked(ZSTD_BLOCK_MAX * 2 + 512)) ||
              !(e->lit_table_new = memory_checked(sizeof(p32) * 256)) ||
              !(e->lit_length_new = memory_checked(256)) ||
