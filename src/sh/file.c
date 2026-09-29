@@ -5611,6 +5611,11 @@ typedef struct
            "invalid -B argument" for the letter and "invalid --block-size
            argument" for the word, and only the scan knows which arrived. */
         bool long_written;
+        /* The value of the option now being reported was written in the
+           same word, right after its letter (-j1), and not in the next one
+           or after another letter of a cluster. join's -j1 is a different
+           option from -j 1 in that one way. */
+        bool attached;
         /* getopt's order under POSIXLY_CORRECT: the first operand ends the
            options, and every word after it is an operand too. */
         bool posix_order;
@@ -5851,6 +5856,9 @@ static bool file_take_from(file_taking address_to taking, positive index)
                         argument_select(taking->selection, match.selection, letter);
                 string_address seen_value = long_option || optional || valued ? taking->value[bit] : null;
                 taking->long_written = long_option;
+                taking->attached = !long_option && match.value && cursor.word &&
+                                   cursor.word[0] == '-' && cursor.word[1] == letter &&
+                                   match.value == cursor.word + 2;
                 if (taking->seen ? !taking->seen(letter, seen_value)
                     : taking->seen_in && !taking->seen_in(letter, seen_value, taking->context))
                         return false;
@@ -22032,16 +22040,36 @@ static bool file_backup_made_at(string_address program, bipolar directory,
 static fn file_backup_told(string_address source, string_address destination,
                            string_address head, string_address mid)
 {
-        string_format(log, "%s%w%s%w", head, writer_terminal_quoted_name, source,
-                      mid, writer_terminal_quoted_name, destination);
+        //      The callers hand over the words with their quote marks on
+        //      ("renamed '", "' -> '"); the names bring their own, in the
+        //      shell's spelling, as GNU's quoteaf writes them.
+        p8 before[32];
+        p8 between[32];
+        positive head_length = string_length(head);
+        positive mid_length = string_length(mid);
+
+        if (head_length && head_length < sizeof(before))
+                head_length--;
+        else
+                head_length = 0;
+        if (mid_length > 2 && mid_length < sizeof(between))
+                mid_length -= 2;
+        else
+                mid_length = 0;
+        memory_copy(before, head, head_length);
+        before[head_length] = end;
+        memory_copy(between, mid + 1, mid_length);
+        between[mid_length] = end;
+        string_format(log, "%s%w%s%w", before, writer_shell_quoted_name, source,
+                      between, writer_shell_quoted_name, destination);
         if (file_backup_did)
         {
-                string_format(log, "' (backup: %w)\n",
+                string_format(log, " (backup: %w)\n",
                               writer_shell_quoted_name, file_backup_shown);
                 file_backup_did = false;
         }
         else
-                string_format(log, "'\n");
+                string_format(log, "\n");
 }
 
 static bool file_overwrite_kinds_ok(string_address program,
@@ -22637,7 +22665,11 @@ static b32 file_ln()
                 string_address target = file_operand_at(first);
                 p8 name[FILE_PATH_MAX];
 
-                path_tail_copy(name, FILE_PATH_MAX, target);
+                //      GNU joins "." to it, so the name in a message or a
+                //      -v line is ./name.
+                name[0] = '.';
+                name[1] = '/';
+                path_tail_copy(name + 2, FILE_PATH_MAX - 2, target);
 
                 return ln_make(target, name) ? 0 : 1;
         }
@@ -35800,10 +35832,47 @@ static fn cp_pair(string_address source, string_address destination)
                                       writer_shell_quoted_name, source,
                                       file_reason(source_directory));
                 else
-                        string_format(log_error,
-                                      "cp: cannot create regular file %w: %s\n",
-                                      writer_shell_quoted_name, destination,
-                                      file_reason(destination_directory));
+                {
+                        //      The source is real, so GNU has got as far as
+                        //      the copy: -v has written the arrow, and the
+                        //      refusal names what was being made.
+                        file_facts kept;
+                        bool known = file_look_code(source_directory, source_leaf,
+                                                    AT_SYMLINK_NOFOLLOW,
+                                                    address_of kept) >= 0;
+                        positive kind = known ? kept.mode & MODE_FORMAT : MODE_FILE;
+                        bool tree = kind == MODE_DIRECTORY && !cp_hard && !cp_symbolic;
+                        string_address given_name = given;
+
+                        if (!tree && cp_loud)
+                                file_backup_told(source, given_name, (string_address) "'",
+                                                 (string_address) "' -> '");
+                        if (tree)
+                                string_format(log_error,
+                                              "cp: cannot create directory %w: %s\n",
+                                              writer_shell_quoted_name, given_name,
+                                              file_reason(destination_directory));
+                        else if (cp_symbolic && !string_is(source, '/') &&
+                                 !cp_link_here(given_name))
+                                string_format(log_error,
+                                              "cp: %w: can make relative symbolic links only in current directory\n",
+                                              writer_terminal_name, given_name);
+                        else if (cp_hard || cp_symbolic)
+                                string_format(log_error,
+                                              cp_symbolic
+                                                  ? "cp: cannot create symbolic link %w to %w: %s\n"
+                                                  : "cp: cannot create hard link %w to %w: %s\n",
+                                              writer_shell_quoted_name, given_name,
+                                              writer_shell_quoted_name, source,
+                                              file_reason(destination_directory));
+                        else
+                                string_format(log_error,
+                                              kind == MODE_LINK && !cp_dereference
+                                                  ? "cp: cannot create symbolic link %w: %s\n"
+                                                  : "cp: cannot create regular file %w: %s\n",
+                                              writer_shell_quoted_name, given_name,
+                                              file_reason(destination_directory));
+                }
                 if (source_directory >= 0)
                         system_close(source_directory);
                 if (destination_directory >= 0)
@@ -36287,6 +36356,11 @@ static fn cp_keeps_read(string_address value, bool on)
 
 static bool cp_option_seen(p8 letter, string_address value)
 {
+        //      GNU warns as each --context=VALUE is read, so a bare --context
+        //      after it does not take the warning back.
+        if (letter == 'Z' && value)
+                log_error("cp: warning: ignoring --context; it requires an "
+                          "SELinux-enabled kernel\n", 0);
         if (!file_backup_seen((string_address) "cp", letter, value))
                 return false;
         if (!file_into_option_seen((string_address) "cp", letter, value))
@@ -36347,6 +36421,10 @@ static bool mv_option_seen(p8 letter, string_address value)
 
 static bool ln_option_seen(p8 letter, string_address value)
 {
+        //      The last word --backup was given is the one that counts; a
+        //      bare --backup after it does not take it back.
+        if (letter == 'B' && value)
+                file_backup_control_named = string_get(value) ? value : null;
         /* GNU ln.c stats every -t inside getopt, and a second one is
            refused there, before any later word is read. */
         if (letter != 't')
@@ -36461,9 +36539,6 @@ static b32 file_cp()
         //      mknod say "SELinux/SMACK-enabled". The reference warns after
         //      it has read the option values and before it weighs them
         //      against one another, so this sits between the two.
-        if (file_option_value(address_of taking, 'Z'))
-                log_error("cp: warning: ignoring --context; it requires an "
-                          "SELinux-enabled kernel\n", 0);
 
         // A label asked for by name is one this kernel cannot give.
         if (cp_wants_context)
@@ -37689,6 +37764,27 @@ static fn mv_one(string_address source, string_address destination)
                               source, file_reason(looked));
                 mv_status = 1;
                 goto finished;
+        }
+
+        //      The destination is looked at before anything is moved, and
+        //      any answer but "not there" ends it, as GNU's copy_internal
+        //      has it.
+        if (!slashed_destination)
+        {
+                file_facts probe;
+                bipolar probed = file_look_code(destination_directory,
+                                                destination_leaf,
+                                                AT_SYMLINK_NOFOLLOW,
+                                                address_of probe);
+
+                if (probed < 0 && probed != -ERROR_NO_ENTRY)
+                {
+                        string_format(log_error, "mv: cannot stat %w: %s\n",
+                                      writer_shell_quoted_name, destination,
+                                      file_reason(probed));
+                        mv_status = 1;
+                        goto finished;
+                }
         }
 
         /* A directory named twice into one target is tried once, as GNU's

@@ -4915,15 +4915,130 @@ static bool join_option_refused;
 
 static bool join_option_read(p8 letter, string_address value);
 
+/*
+        GNU reads join's operands in the order they come among the options,
+        and a word straight after "-j1" or "-j2" (written as one word) or
+        after -o's list may be that option's argument rather than a file.
+        The two newest names are kept with what preceded each; a third name
+        settles the oldest one as the field or the list it might have been,
+        at the moment it arrives, so the option that then disagrees is named
+        as GNU names it.
+*/
+enum { JOIN_OPERAND = 0, JOIN_J1 = 1, JOIN_J2 = 2, JOIN_LIST = 3 };
+static file_taking address_to join_taking;
+static positive join_prev;
+static positive join_pending[2];
+static string_address join_slot_name[2];
+static positive join_slot_status[2];
+static positive join_slots;
+static bool join_stopped;
+
 // A value refused here, as against an option the scan refused and already
 // named with its "Try" line, which is all GNU says of it.
 static bool join_option_seen(p8 letter, string_address value)
 {
-        bool taken = join_option_read(letter, value);
+        if (join_stopped)
+                return false;
 
-        if (!taken)
+        positive status = JOIN_OPERAND;
+
+        if (letter == 'j' && join_taking->attached &&
+            (value[0] == '1' || value[0] == '2') && !value[1])
+        {
+                join_pending[value[0] - '1']++;
+                status = value[0] == '1' ? JOIN_J1 : JOIN_J2;
+        }
+        else if (!join_option_read(letter, value))
+        {
                 join_option_refused = true;
-        return taken;
+                return false;
+        }
+        else if (letter == 'o' && !string_equals(value, "auto"))
+                status = JOIN_LIST;
+
+        join_prev = status;
+        return true;
+}
+
+// Whether a "--" came before this word, as getopt would have it: the
+// letters that take a value take the next word when nothing follows them.
+static bool join_after_dashes(b32 index)
+{
+        for (b32 at = 1; at < index; at++)
+        {
+                string_address word = program_argument(at);
+
+                if (string_equals(word, "--"))
+                        return true;
+                if (word[0] != '-' || !word[1] || word[1] == '-')
+                        continue;
+                for (positive i = 1; word[i]; i++)
+                        if (string_first_of("12aejotv", word[i]))
+                        {
+                                if (!word[i + 1])
+                                        at++;
+                                break;
+                        }
+        }
+
+        return false;
+}
+
+static fn join_operand(b32 index)
+{
+        if (join_stopped)
+                return;
+
+        string_address name = program_argument(index);
+        positive status = join_after_dashes(index) ? JOIN_OPERAND : join_prev;
+
+        join_prev = status == JOIN_LIST ? JOIN_LIST : JOIN_OPERAND;
+
+        if (join_slots == 2)
+        {
+                bool first = join_slot_status[0] == JOIN_OPERAND;
+                string_address held = join_slot_name[first];
+                positive kind = join_slot_status[first];
+                positive field;
+
+                if (kind == JOIN_OPERAND)
+                {
+                        text_operand_trouble("extra operand", name, null);
+                        join_stopped = true;
+                        return;
+                }
+                if (kind == JOIN_LIST)
+                {
+                        if (!join_output_add(held))
+                                join_stopped = true;
+                }
+                else
+                {
+                        join_pending[kind - 1]--;
+                        if (!join_number(held, address_of field))
+                        {
+                                join_complain("join: invalid field number: '%w'\n", held);
+                                join_stopped = true;
+                        }
+                        else if (!join_key_set((positive)(kind - 1), field))
+                                join_stopped = true;
+                }
+                if (join_stopped)
+                {
+                        join_option_refused = true;
+                        return;
+                }
+                if (!first)
+                {
+                        join_slot_name[0] = join_slot_name[1];
+                        join_slot_status[0] = join_slot_status[1];
+                }
+                join_slots = 1;
+        }
+
+        join_slot_name[join_slots] = name;
+        join_slot_status[join_slots] = status;
+        join_slots++;
 }
 
 static bool join_option_read(p8 letter, string_address value)
@@ -5536,11 +5651,16 @@ static b32 text_join()
         file_taking taking = {
             .program = (string_address)"join",
             .options = join_options,
-            .operand = text_file_add,
+            .operand = join_operand,
             .seen = join_option_seen,
         };
 
         text_begin("join");
+        join_taking = address_of taking;
+        join_prev = JOIN_OPERAND;
+        join_pending[0] = join_pending[1] = 0;
+        join_slots = 0;
+        join_stopped = false;
         text_delimiter = '\n';
         utility_arena.used = 0;
         join_key[0] = join_key[1] = 0;
@@ -5560,11 +5680,22 @@ static b32 text_join()
                                      ? 1
                                      : string_diagnostic(&text_diagnostic, 1, null, "invalid option value"));
 
-        if (text_files_count < 2)
-                return text_done(text_operand_trouble(text_files_count ? "missing operand after" : "missing operand",
-                                                      text_files_count ? text_file_name(0) : null, null));
-        if (text_files_count > 2)
-                return text_done(text_operand_trouble("extra operand", text_file_name(2), null));
+        if (join_stopped)
+                return text_done(1);
+
+        text_files_count = join_slots;
+        text_file_list = join_slot_name;
+
+        if (join_slots < 2)
+                return text_done(text_operand_trouble(join_slots ? "missing operand after" : "missing operand",
+                                                      join_slots ? program_argument(program_argument_count() - 1) : null,
+                                                      null));
+
+        //      A -j1 or -j2 that never had its field is the field it names.
+        for (positive side = 0; side < 2; side++)
+                if (join_pending[side] &&
+                    (!join_key_set(0, side) || !join_key_set(1, side)))
+                        return text_done(1);
 
         string_address left_name = text_file_name(0);
         string_address right_name = text_file_name(1);
@@ -9767,6 +9898,11 @@ static inline INLINE b32 text_head_tail(bool tail)
                 without -q, -v and the following-only words warned about above.
         */
         if (tail && !marked && !count && !tail_follow_mode)
+                return text_done(0);
+        //      Nor does one that skips as many as a file can hold: +N is N-1
+        //      skipped, and a count that saturates the way GNU's does is the
+        //      most there is.
+        if (tail && marked && count >= 0x7fffffffffffffffull && !tail_follow_mode)
                 return text_done(0);
 
         b32 inputs = text_input_count();
