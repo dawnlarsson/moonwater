@@ -8459,6 +8459,12 @@ FILES_SCENES = {
                   "env setfattr -n user.mid -v \"$(env printf '%01500d' 0)\" sb/x/y || exit 9\n", "",
                   "for n in cb cb/x cb/x/y cb/n; do [ -e $n ] || continue; echo \"== $n $(env stat -c %a $n)\"; "
                   "env getfattr -d --absolute-names $n 2>&1 | env grep -v '^#' | env md5sum; done\n"),
+    # a tree deeper than a path may be named in one piece: thirty levels of
+    # 200-byte names, each entry's path over 6000 bytes, which -printf and
+    # the walks must not cut.
+    "deeptree": ("python3 -c 'import os\nos.mkdir(\"top\")\nhere = os.open(\".\", os.O_RDONLY)\nos.chdir(\"top\")\n"
+                 "for i in range(30):\n    os.mkdir(\"d\" * 200)\n    os.chdir(\"d\" * 200)\n"
+                 "open(\"leaf\", \"w\").close()\nos.fchdir(here)' || exit 9\n", "", "cd /\n"),
     # a strip program that puts another file at the name (as a strip that
     # renames its result there does): the new file is given the mode.
     "stripswap": ("printf '#!/bin/sh\\nrm -f \"$1\" && cat sf > \"$1\"\\n' > sw && env chmod +x sw && "
@@ -8493,6 +8499,9 @@ FILES_SCENE_CASES = (
     ("xattr", "cp", "--preserve=all", "sf", "c"), ("xattr", "cp", "-a", "--no-preserve=xattr", "sf", "c"),
     ("xattr", "cp", "-a", "sd", "cd"), ("xattr", "cp", "-rp", "sd", "cd"), ("xattr", "mv", "sf", "m"),
     ("xattr", "cp", "-a", "sd", "cd"), ("xattr", "install", "-p", "sf", "c"),
+    ("deeptree", "find", "top", "-name", "leaf", "-printf", "%p\\0"), ("deeptree", "find", "top", "-name", "leaf", "-printf", "%P|%h|%f|%d\\n"),
+    ("deeptree", "find", "top", "-name", "leaf", "-printf", "[%50p]\\n"), ("deeptree", "find", "top", "-name", "leaf", "-print0"),
+    ("deeptree", "find", "top", "-name", "leaf", "-fprintf", "/dev/stdout", "%p\\n"),
     ("stripswap", "install", "-s", "--strip-program=./sw", "sf", "made"),
     ("stripswap", "install", "-s", "-m", "0640", "--strip-program=./sw", "sf", "made"),
     ("aclinherit", "install", "sf", "dd/x"), ("aclinherit", "install", "-m", "600", "sf", "dd/f"),

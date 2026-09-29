@@ -14274,14 +14274,27 @@ static bool find_exec_once(find_node address_to node)
         precision in front of a directive is applied to whatever it wrote,
         which is why every field is rendered into a buffer first.
 */
-static p8 find_field[FILE_PATH_MAX];
-static byte_store find_field_output = {find_field, sizeof(find_field) - 1, 0};
+//      One directive's answer, held whole: a path is as long as the tree it
+//      is in, which the pool's walks do not bound to PATH_MAX, so the store
+//      grows to what is written into it (a failure to grow is said, and the
+//      answer then ends where it fits).
+static byte_store find_field_output;
+#define find_field (find_field_output.bytes)
 
 static fn find_field_write(address_any text, positive length)
 {
-        byte_store_append_span(address_of find_field_output, text,
-                               length ? length : string_length(text));
-        find_field[find_field_output.used] = end;
+        if (!length)
+                length = string_length(text);
+        if (!byte_store_reserve(address_of find_field_output,
+                                find_field_output.used + length + 1, FILE_PATH_MAX))
+        {
+                string_report(log_error, false, "find: memory exhausted\n");
+                find_bad = true;
+                return;
+        }
+        memory_copy(find_field_output.bytes + find_field_output.used, text, length);
+        find_field_output.used += length;
+        find_field_output.bytes[find_field_output.used] = end;
 }
 
 
@@ -14450,11 +14463,27 @@ static bool find_printf_one(p8 letter, string_address format, positive address_t
                 find_field_write(find_path, 0);
                 return true;
         case 'f':
-                path_tail_copy(name, FILE_PATH_MAX, find_path);
-                find_field_write(name, 0);
-                return true;
         case 'h':
-                path_head_copy(name, FILE_PATH_MAX, find_path);
+                //      A path too long for the copies below is cut at its
+                //      last slash as it stands, which is all either asks of
+                //      one that is not a bare root.
+                if (string_length(find_path) >= FILE_PATH_MAX)
+                {
+                        string_address slash = string_last_of(find_path, '/');
+
+                        if (letter == 'f')
+                                find_field_write(slash ? slash + 1 : find_path, 0);
+                        else if (slash > find_path)
+                                find_field_write((address_any)find_path,
+                                                 (positive)(slash - find_path));
+                        else
+                                find_field_write(slash ? "/" : ".", 1);
+                        return true;
+                }
+                if (letter == 'f')
+                        path_tail_copy(name, FILE_PATH_MAX, find_path);
+                else
+                        path_head_copy(name, FILE_PATH_MAX, find_path);
                 find_field_write(name, 0);
                 return true;
         case 'H':
@@ -14644,12 +14673,78 @@ static CONST bool find_octal_digit(p8 byte)
         return (p8)(byte - '0') < 8;
 }
 
+/*
+        What -printf has made, written out a block at a time: an entry's line
+        is as long as its path, and a path in a tree the pool walks is not
+        bounded by PATH_MAX, so nothing here may cut a field to a buffer's
+        size -- find -printf '%p\0' used to end every name at 4095 bytes,
+        which is another name that exists, for xargs -0 rm to remove.
+*/
+static struct
+{
+        bipolar handle;
+        positive used;
+        p8 block[FILE_PATH_MAX];
+} find_out;
+
+static fn find_out_flush(void)
+{
+        if (find_out.handle >= 0)
+                system_write_all((positive)find_out.handle, find_out.block, find_out.used);
+        else if (find_out.used)
+                log(find_out.block, find_out.used);
+        find_out.used = 0;
+}
+
+static fn find_out_begin(bipolar handle)
+{
+        find_out.handle = handle;
+        find_out.used = 0;
+}
+
+static fn find_out_byte(p8 byte)
+{
+        if (find_out.used == sizeof(find_out.block))
+                find_out_flush();
+        find_out.block[find_out.used++] = byte;
+}
+
+static fn find_out_bytes(const p8 address_to bytes, positive length)
+{
+        while (length)
+        {
+                positive room = sizeof(find_out.block) - find_out.used;
+                positive now = min(room, length);
+
+                memory_copy(find_out.block + find_out.used, bytes, now);
+                find_out.used += now;
+                bytes += now;
+                length -= now;
+                if (find_out.used == sizeof(find_out.block))
+                        find_out_flush();
+        }
+}
+
+static fn find_out_fill(p8 byte, positive count)
+{
+        while (count)
+        {
+                positive room = sizeof(find_out.block) - find_out.used;
+                positive now = min(room, count);
+
+                memory_fill(find_out.block + find_out.used, byte, now);
+                find_out.used += now;
+                count -= now;
+                if (find_out.used == sizeof(find_out.block))
+                        find_out_flush();
+        }
+}
+
 static fn find_printf_walk(string_address format, bipolar handle)
 {
-        p8 line[FILE_PATH_MAX * 2];
-        positive used = 0;
+        find_out_begin(handle);
 
-        for (positive at = 0; string_get(format + at) && used + 1 < sizeof(line);)
+        for (positive at = 0; string_get(format + at);)
         {
                 p8 byte = string_get(format + at++);
 
@@ -14669,7 +14764,7 @@ static fn find_printf_walk(string_address format, bipolar handle)
                         // backslash and an 8, and \18 is \1 and an 8.
                         if (next && named != 0xff && !find_octal_digit(next))
                         {
-                                line[used++] = named;
+                                find_out_byte(named);
                                 at++;
                                 continue;
                         }
@@ -14687,23 +14782,23 @@ static fn find_printf_walk(string_address format, bipolar handle)
                                         digits++;
                                 }
 
-                                line[used++] = (p8)number;
+                                find_out_byte((p8)number);
                                 continue;
                         }
 
-                        line[used++] = byte;
+                        find_out_byte(byte);
                         continue;
                 }
 
                 if (byte != '%')
                 {
-                        line[used++] = byte;
+                        find_out_byte(byte);
                         continue;
                 }
 
                 if (string_is(format + at, '%'))
                 {
-                        line[used++] = '%';
+                        find_out_byte('%');
                         at++;
                         continue;
                 }
@@ -14729,8 +14824,8 @@ static fn find_printf_walk(string_address format, bipolar handle)
                 {
                         // A directive with nothing after it is written out
                         // as it stands, which is what the reference does.
-                        for (positive i = begin - 1; i < at && used + 1 < sizeof(line); i++)
-                                line[used++] = string_get(format + i);
+                        for (positive i = begin - 1; i < at; i++)
+                                find_out_byte(string_get(format + i));
                         break;
                 }
 
@@ -14746,13 +14841,14 @@ static fn find_printf_walk(string_address format, bipolar handle)
                 }
 
                 find_field_output.used = 0;
-                find_field[0] = end;
+                if (find_field)
+                        find_field[0] = end;
 
                 if (!find_printf_one(letter, format, address_of at))
                 {
                         // An unknown directive is written back as it stands.
-                        for (positive i = begin - 1; i < at && used + 1 < sizeof(line); i++)
-                                line[used++] = string_get(format + i);
+                        for (positive i = begin - 1; i < at; i++)
+                                find_out_byte(string_get(format + i));
                         continue;
                 }
 
@@ -14769,30 +14865,15 @@ static fn find_printf_walk(string_address format, bipolar handle)
                 positive pad = difference_or_zero(width, length);
 
                 if (!left)
-                {
-                        positive filling = min(pad, sizeof(line) - 1 - used);
-                        memory_fill(line + used, ' ', filling);
-                        used += filling;
-                        pad -= filling;
-                }
-
-                positive copying = min(length, sizeof(line) - 1 - used);
-                memory_copy(line + used, find_field, copying);
-                used += copying;
-
+                        find_out_fill(' ', pad);
+                find_out_bytes(find_field, length);
                 if (left)
-                {
-                        positive filling = min(pad, sizeof(line) - 1 - used);
-                        memory_fill(line + used, ' ', filling);
-                        used += filling;
-                }
+                        find_out_fill(' ', pad);
         }
 
-        if (handle >= 0)
-                system_write_all((positive)handle, line, used);
-        else
-                log(line, used);
+        find_out_flush();
 }
+
 
 // -fprint and friends write into a file rather than onto the output, and
 // the file is made once however many entries reach it.
