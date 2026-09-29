@@ -45108,10 +45108,10 @@ static b32 file_hostname()
 /*
         uname [-asnrvmpio]
 
-        -a is every field the kernel actually keeps. The system's own uname
-        adds a compiled in operating system name after them, which is not in
-        struct utsname and is not ours to claim, so -o names this system and
-        -a stops at the machine.
+        -a is every field the kernel keeps and then the operating system name
+        GNU compiles in, GNU/Linux, which is what -o answers as well: a script
+        that asks for -o asks what GNU answers, and this userland is the one
+        that name describes.
 
         By the same rule -p answers unknown, as GNU's does on Linux: the
         processor type is not a field the kernel keeps either, and the machine
@@ -45177,7 +45177,7 @@ static b32 file_uname()
             {'m', facts.machine, true, true},
             {'p', (string_address) "unknown", false, false},
             {'i', (string_address) "unknown", false, false},
-            {'o', (string_address) "Moonwater", false, true},
+            {'o', (string_address) "GNU/Linux", true, true},
         };
 
         bool all = (flags & FILE_FLAG('a')) != 0;
