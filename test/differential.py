@@ -8457,6 +8457,11 @@ FILES_SCENES = {
                   "env setfattr -n user.mid -v \"$(env printf '%01500d' 0)\" sb/x/y || exit 9\n", "",
                   "for n in cb cb/x cb/x/y cb/n; do [ -e $n ] || continue; echo \"== $n $(env stat -c %a $n)\"; "
                   "env getfattr -d --absolute-names $n 2>&1 | env grep -v '^#' | env md5sum; done\n"),
+    # a strip program that puts another file at the name (as a strip that
+    # renames its result there does): the new file is given the mode.
+    "stripswap": ("printf '#!/bin/sh\\nrm -f \"$1\" && cat sf > \"$1\"\\n' > sw && env chmod +x sw && "
+                  "echo data > sf || exit 9\n", "",
+                  "env stat -c '%a %s' made 2>&1; env cat made 2>&1\n"),
     # a directory with a default access list, and what a file put into it by
     # install carries: GNU sets the ACL from the mode, so it carries none.
     "aclinherit": ("env mkdir dd && env touch sf && env setfacl -d -m u:nobody:rwx dd || exit 9\n", "",
@@ -8486,6 +8491,8 @@ FILES_SCENE_CASES = (
     ("xattr", "cp", "--preserve=all", "sf", "c"), ("xattr", "cp", "-a", "--no-preserve=xattr", "sf", "c"),
     ("xattr", "cp", "-a", "sd", "cd"), ("xattr", "cp", "-rp", "sd", "cd"), ("xattr", "mv", "sf", "m"),
     ("xattr", "cp", "-a", "sd", "cd"), ("xattr", "install", "-p", "sf", "c"),
+    ("stripswap", "install", "-s", "--strip-program=./sw", "sf", "made"),
+    ("stripswap", "install", "-s", "-m", "0640", "--strip-program=./sw", "sf", "made"),
     ("aclinherit", "install", "sf", "dd/x"), ("aclinherit", "install", "-m", "600", "sf", "dd/f"),
     ("aclinherit", "install", "-t", "dd", "sf"), ("aclinherit", "install", "-p", "sf", "dd/x"),
     ("xattr_big", "cp", "-a", "sb", "cb"), ("xattr_big", "cp", "-r", "--preserve=xattr", "sb", "cb"),

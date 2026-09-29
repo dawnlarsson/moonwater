@@ -26681,11 +26681,16 @@ static positive csplit_suffix_format(string_address format, positive number,
 
 static bool csplit_name(csplit_state address_to state, positive number)
 {
+        /* The prefix is copied into the name below whatever the suffix
+           makes of it, so one that fills the name is refused first: -b
+           '%.0d' makes nothing of the number, and a 5000-byte -f prefix was
+           copied over the stack after it. */
+        if (state->prefix_length >= FILE_PATH_MAX)
+                return string_report(log_error, false, "csplit: output file name is too long\n");
+
         if (state->suffix)
         {
-                positive room = state->prefix_length < FILE_PATH_MAX
-                                    ? FILE_PATH_MAX - state->prefix_length - 1
-                                    : 0;
+                positive room = FILE_PATH_MAX - state->prefix_length - 1;
                 positive made = csplit_suffix_format(state->suffix, number,
                                                      state->name + state->prefix_length,
                                                      room);
@@ -26701,8 +26706,7 @@ static bool csplit_name(csplit_state address_to state, positive number)
         positive length = positive_into_base(suffix, number, 10, false);
         positive width = max(length, state->digits);
 
-        if (state->prefix_length >= FILE_PATH_MAX ||
-            width >= FILE_PATH_MAX - state->prefix_length)
+        if (width >= FILE_PATH_MAX - state->prefix_length)
                 return string_report(log_error, false, "csplit: output file name is too long\n");
 
         memory_copy_apart(state->name, state->prefix, state->prefix_length);
@@ -35500,6 +35504,18 @@ failed:
         return -ERROR_INVALID;
 }
 
+/* A file strip leaves at the name is one this process made or a copy of it:
+   a regular file with the one name, owned by the user the install runs as. */
+static bool install_strip_result_ours(bipolar handle)
+{
+        file_facts facts;
+
+        return file_look_code(handle, (string_address) "", AT_EMPTY_PATH,
+                              address_of facts) >= 0 &&
+               (facts.mode & MODE_FORMAT) == MODE_FILE && facts.hard_links == 1 &&
+               facts.owner == (p32)system_call(syscall(geteuid));
+}
+
 static bool install_attributes_handle(bipolar destination_handle,
                                       string_address destination,
                                       file_facts address_to source)
@@ -36054,6 +36070,18 @@ static fn install_pair(string_address source, string_address destination)
                         string_format(log_error, "install: cannot stat %w: %s\n",
                                       writer_shell_quoted_name, destination,
                                       file_reason(again));
+                else if (!install_strip_result_ours(again))
+                {
+                        /* Whatever now stands at the name is not what strip
+                           was given: the destination directory is the
+                           caller's to rename into while strip runs, and a
+                           root install would have made it root's, setuid
+                           bits and all. */
+                        string_format(log_error,
+                                      "install: %w changed while it was stripped\n",
+                                      writer_shell_quoted_name, destination);
+                        stripped = false;
+                }
                 else if (!install_attributes_handle(again, destination,
                                                     address_of from))
                         stripped = false;
