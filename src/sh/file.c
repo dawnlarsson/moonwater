@@ -6818,12 +6818,72 @@ static bipolar file_direct_endpoint_open(
     bipolar directory, string_address name,
     file_facts address_to entry, positive flags);
 
+#if MOONWATER_STRICT < STRICT_TIGHT
+/* The directory that holds the last name of a chain of links, and that name
+   in leaf, or -1 when leaf is not a link (or the chain is too long). A name
+   that leads nowhere still has a place to be made: GNU's open goes through
+   the link to make it. */
+static bipolar file_link_chain_open(bipolar directory, p8 address_to leaf,
+                                    positive room)
+{
+        bipolar held = -1;
+
+        for (positive hops = 0; hops < 40; hops++)
+        {
+                file_facts entry;
+                p8 target[FILE_PATH_MAX];
+
+                if (file_look_code(directory, (string_address)leaf, AT_SYMLINK_NOFOLLOW,
+                                   address_of entry) < 0 ||
+                    (entry.mode & MODE_FORMAT) != MODE_LINK)
+                        return held;
+
+                bipolar length = system_read_link_at(directory, (string_address)leaf, target,
+                                                     sizeof(target) - 1);
+
+                if (length <= 0)
+                        return held;
+                target[length] = end;
+
+                bipolar parent = system_open_parent_pinned(
+                    target[0] == '/' ? AT_FDCWD : directory, (string_address)target, leaf, room);
+
+                if (parent < 0)
+                        return held;
+                if (held >= 0)
+                        system_close(held);
+                held = parent;
+                directory = parent;
+        }
+        if (held >= 0)
+                system_close(held);
+        return -1;
+}
+#endif
+
 static bipolar file_staged_name_open_at(
     file_staged_name address_to stage, bipolar base, string_address path,
     positive mode, positive behavior, file_facts address_to input)
 {
         stage->directory = system_open_parent_pinned(base, path, stage->leaf,
                                                      FILE_PATH_MAX);
+#if MOONWATER_STRICT < STRICT_TIGHT
+        /*      A name that is a link is written through, as GNU's split, csplit
+                and every other tool that opens its output do; STRICT_TIGHT
+                replaces the link with the new file and never touches what it
+                points at. */
+        if (stage->directory >= 0 && (behavior & FILE_STAGED_STREAM_SPECIAL))
+        {
+                bipolar through = file_link_chain_open(stage->directory, stage->leaf,
+                                                       FILE_PATH_MAX);
+
+                if (through >= 0)
+                {
+                        system_close(stage->directory);
+                        stage->directory = through;
+                }
+        }
+#endif
         stage->handle = -1;
         stage->mode = mode & 07777;
         stage->direct = false;
@@ -25286,13 +25346,16 @@ static bool split_output_write(split_output address_to output,
                                        (string_address)": ", wrote.error ? wrote.error : -5);
                 return false;
         }
-        if (system_write_all((positive)output->stage.handle, bytes, length) !=
-            length)
         {
-                return string_report(log_error, false, "split: write error on %w\n",
-                              writer_shell_quoted_name, output->name);
+                system_write_result wrote = system_write_all_checked(
+                    (positive)output->stage.handle, bytes, length);
+
+                if (wrote.bytes == length)
+                        return true;
+                file_shell_name_reason(log_error, (string_address)"split: ", output->name,
+                                       (string_address)": ", wrote.error ? wrote.error : -5);
+                return false;
         }
-        return true;
 }
 
 static bool split_output_close(split_output address_to output)
@@ -25352,6 +25415,7 @@ static bool split_fixed(bipolar in, p64 length, positive measure,
                             : length ? (positive)((length - 1) / measure) + 1 : 0;
         p64 ordinary = distribute ? length / measure : measure;
         positive extra = distribute ? (positive)(length % measure) : 0;
+        file_copy_stop stopped = {0, 0};
 
         for (positive i = 0; i < chunks; i++)
         {
@@ -25404,9 +25468,14 @@ static bool split_fixed(bipolar in, p64 length, positive measure,
                               : file_copy_stream(in, output->stage.handle,
                                                  here, true,
                                                  address_of range_copy,
-                                                 address_of send_copy, null, null)))
+                                                 address_of send_copy, null,
+                                                 address_of stopped)))
                 {
-                        if (!bytes)
+                        if (!bytes && stopped.failure < 0)
+                                file_shell_name_reason(log_error, (string_address)"split: ",
+                                                       output->name, (string_address)": ",
+                                                       stopped.failure);
+                        else if (!bytes)
                                 log_error("split: read or write error\n", 0);
                         return false;
                 }
@@ -27038,10 +27107,12 @@ static bool csplit_section(csplit_state address_to state, positive from,
         bool identified = file_look(
             stage.handle, (string_address)"", AT_EMPTY_PATH,
             address_of made);
-        bool written = !length ||
-                       system_write_all((positive)stage.handle,
-                                        state->input + from,
-                                        length) == length;
+        system_write_result wrote = {0, 0};
+
+        if (length)
+                wrote = system_write_all_checked((positive)stage.handle,
+                                                 state->input + from, length);
+        bool written = !length || wrote.bytes == length;
         bipolar closed;
         if (identified && written)
                 closed = file_staged_name_finish(
@@ -27054,8 +27125,17 @@ static bool csplit_section(csplit_state address_to state, positive from,
 
         if (!identified || !written || closed < 0)
         {
-                return string_report(log_error, false, "csplit: write error on %w\n",
-                              writer_shell_quoted_name, state->name);
+                if (written)
+                        return string_report(log_error, false, "csplit: write error on %w\n",
+                                             writer_shell_quoted_name, state->name);
+
+                // What could not be written is taken away again, as GNU's
+                // cleanup does, the name of a link included.
+                if (!state->keep)
+                        (void)system_remove_at(AT_FDCWD, state->name, 0);
+                file_shell_name_reason(log_error, (string_address)"csplit: ", state->name,
+                                       (string_address)": ", wrote.error ? wrote.error : -5);
+                return false;
         }
         csplit_outputs[state->made++] = made;
 
