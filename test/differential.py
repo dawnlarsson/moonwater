@@ -8475,6 +8475,12 @@ FILES_SCENES = {
     "deeptree": ("python3 -c 'import os\nos.mkdir(\"top\")\nhere = os.open(\".\", os.O_RDONLY)\nos.chdir(\"top\")\n"
                  "for i in range(30):\n    os.mkdir(\"d\" * 200)\n    os.chdir(\"d\" * 200)\n"
                  "open(\"leaf\", \"w\").close()\nos.fchdir(here)' || exit 9\n", "", "cd /\n"),
+    # a file with a hole, one of zeros and one of both, and the blocks each
+    # copy of them takes (du) with whether it reads back the same (cmp).
+    "sparse": ("env truncate -s 4M f && echo x >> f && env head -c 1048576 /dev/zero > z && "
+               "(env seq 1 3000 | env head -c 8192; env head -c 20000 /dev/zero; env seq 1 100 | env head -c 100; "
+               "env head -c 5000 /dev/zero) > mix || exit 9\n", "",
+               "for n in f z mix; do [ -e g$n ] && env du -k g$n && env cmp $n g$n; done\n"),
     # what the clock says of the run: whether it lasted most of a second.
     "timed": ("s=$(env date +%s%N)\n", "", "e=$(env date +%s%N); if [ $((e - s)) -ge 800000000 ]; then echo slept; else echo short; fi\n"),
     # a strip program that puts another file at the name (as a strip that
@@ -8568,6 +8574,11 @@ FILES_SCENE_CASES = (
     ("tmax", "ls", "-lgo", "--time-style=+%Y", "f"),
     ("noco", "ls", "--color=always", "-d", "dir", "a.txt", "exe", "link", "dangling", "/dev/null", "loop"),
     ("dumbterm", "ls", "--color=always", "-d", "dir", "exe"), ("colorterm", "ls", "--color=always", "-d", "dir", "exe"),
+    # --sparse=never writes the holes out, --sparse=always makes one of every
+    # block of zeros, and auto keeps the input's own.
+    ("sparse", "cp", "--sparse=never", "f", "gf"), ("sparse", "cp", "--sparse=never", "z", "gz"), ("sparse", "cp", "--sparse=never", "mix", "gmix"), ("sparse", "cp", "--sparse=always", "f", "gf"), ("sparse", "cp", "--sparse=always", "z", "gz"), ("sparse", "cp", "--sparse=always", "mix", "gmix"), ("sparse", "cp", "--sparse=auto", "f", "gf"), ("sparse", "cp", "--sparse=auto", "z", "gz"), ("sparse", "cp", "--sparse=auto", "mix", "gmix"),
+    ("sparse", "cp", "--sparse=always", "-r", "f", "gf"), ("sparse", "cp", "--sparse=never", "-a", "mix", "gmix"),
+    ("sparse", "install", "f", "gf"), ("sparse", "mv", "mix", "gmix"),
     # A hex float whose mantissa outgrows the sum it is held in still sleeps
     # what it says: a second is at least most of one, by the clock.
     ("timed", "sleep", "0x80000000000000000000000000p-103"), ("timed", "sleep", "0xFFFFFFFFFFFFFFFFFFFFFFFFFFp-104"),

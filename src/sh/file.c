@@ -6492,12 +6492,73 @@ static bipolar file_open_same(bipolar directory, string_address name,
    stream agree on one length. */
 static fn file_copy_debug_said(void);
 
+/*
+        --sparse=always: the input is read a block at a time and a block of
+        zeros is skipped over in the output rather than written, wherever the
+        holes are or are not in the input, and the length is set at the end.
+        1 means copied, 0 that this cannot be done here (a destination that is
+        not a regular file, or no buffer) and the stream takes it, -1 a
+        failure. The destination is written as one whole file from its start.
+*/
+static bipolar file_copy_zero_holes(bipolar in, bipolar out)
+{
+        file_facts into;
+        p8 address_to buffer = file_transfer_buffer();
+
+        if (!buffer ||
+            file_look_code(out, (string_address)"", AT_EMPTY_PATH, address_of into) < 0 ||
+            (into.mode & MODE_FORMAT) != MODE_FILE)
+                return 0;
+
+        p64 total = 0;
+
+        for (;;)
+        {
+                bipolar got = system_read_retry((positive)in, buffer, FILE_TRANSFER_SIZE);
+
+                if (got < 0)
+                        return -1;
+                if (!got)
+                        break;
+
+                positive run = 0;
+
+                for (positive at = 0; at < (positive)got; at += FILE_BLOCK)
+                {
+                        positive length = min((positive)FILE_BLOCK, (positive)got - at);
+                        bool zeros = memory_span_byte(buffer + at, 0, length) == length;
+
+                        //      A run of blocks with data goes out in one write,
+                        //      a block of zeros ends it and is stepped over.
+                        if (!zeros)
+                                continue;
+                        if (at > run &&
+                            system_write_all((positive)out, buffer + run, at - run) != at - run)
+                                return -1;
+                        if (system_seek(out, length, 1) < 0)
+                                return -1;
+                        run = at + length;
+                }
+                if ((positive)got > run &&
+                    system_write_all((positive)out, buffer + run, (positive)got - run) !=
+                        (positive)got - run)
+                        return -1;
+                total += (p64)got;
+        }
+
+        return system_truncate_handle(out, total) < 0 ? -1 : 1;
+}
+
+static p8 cp_sparse_policy;
+
 static bool file_copy_handles_known(bipolar in, bipolar out,
                                     file_facts address_to facts)
 {
         file_debug_offload = '?';
         file_debug_sparse = 'n';
-        bipolar sparse = file_copy_sparse(in, out, facts);
+        bipolar sparse = cp_sparse_policy == 'n' ? 0
+                         : cp_sparse_policy == 'A' ? file_copy_zero_holes(in, out)
+                                                   : file_copy_sparse(in, out, facts);
         bool complete = sparse > 0;
 
         if (!sparse)
