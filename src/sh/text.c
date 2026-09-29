@@ -29286,12 +29286,12 @@ static b32 text_grep()
         What is not: l, which is a way of looking at a line rather than a way
         of changing one, and e, which runs a shell.
 */
-#define SED_COMMANDS_MAX 256
-#define SED_PROGRAMS_MAX 32
-#define SED_TEXT_MAX 16384
-#define SED_MAPS_MAX 8
-#define SED_SCRIPT_MAX 16384
-#define SED_FILES_MAX 16
+#define SED_COMMANDS_MAX 4096
+#define SED_PROGRAMS_MAX 512
+#define SED_TEXT_MAX (1 << 18)
+#define SED_MAPS_MAX 128
+#define SED_SCRIPT_MAX (1 << 19)
+#define SED_FILES_MAX 64
 #define SED_APPENDS_MAX SED_COMMANDS_MAX
 
 enum

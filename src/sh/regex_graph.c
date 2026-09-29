@@ -13,8 +13,8 @@
 */
 
 #define RX_NODE_MAX 8192
-#define RX_SET_MAX 64
-#define RX_HINT_MAX 40
+#define RX_SET_MAX 512
+#define RX_HINT_MAX 512
 #define RX_LITERAL_MAX 256
 #define RX_GROUP_MAX 9
 #define RX_SLOT_MAX 20
