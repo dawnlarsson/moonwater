@@ -44,9 +44,10 @@
 //  (index begin)
 //    routine                 replaces                                x86_64  arm64   riscv64 measured
 //    ----------------------  --------------------------------------  ------- ------- ------- --------
-//    htree_dirblock_to_tree  fs/ext4/namei.c htree_dirblock_to_tree  yes     no      no      getdents: 1000 names 92.5 -> 52.5 us (-43%), 100 names -36%, 16 names -19%; 8 names level
+//    htree_dirblock_to_tree  fs/ext4/namei.c htree_dirblock_to_tree  yes     yes     yes     x86_64 getdents: 1000 names 92.5 -> 52.5 us (-43%), 100 names -36%, 16 names -19%; 8 names level
+//    ext4_find_dest_de       fs/ext4/namei.c ext4_find_dest_de       yes     yes     yes     full 4 KiB block, 134 entries: 590 -> 350 ns (1.7x); guest create+unlink -2.7% (noise floor 4%)
 //
-//    1 routine.
+//    2 routines.
 //  (index end)
 */
 
@@ -59,8 +60,9 @@
 // encoded as short as it can be.
 #define MWSET(name) ".set " #name ", " __stringify(name) "\n"
 
-#ifdef CONFIG_X86_64
 #include <generated/asm-offsets.h>
+
+#ifdef CONFIG_X86_64
 
 // The one declaration in the file that is not assembly: a module parameter,
 // moonwater.dirhash_simd=0, which turns the wide directory hash off for a
@@ -107,7 +109,17 @@ module_param_named(dirhash_simd, moonwater_dirhash_simd, bool, 0644);
 //       An entry with no inode is skipped by the walk whatever its hash is,
 //       so with the batch on it is not hashed at all.
 //
-//       MEASURED. One getdents64 pass over one directory, microseconds, in a
+//       THE THREE ARCHITECTURES. All three replace the function. arm64 and
+//       riscv64 run the walk and the inlined entry checks and ask
+//       ext4fs_dirhash for every hash, the batch being x86_64's alone for now:
+//       may_use_simd() there is an inline of static keys, WARN_ON and the
+//       preempt and interrupt state that this file cannot repeat in assembly
+//       and be sure of without booting the machine, and the routine's
+//       arm64 and riscv64 bodies wait for that. Each is held to the C
+//       function by test/differential.py --harness kernel_ports, under
+//       qemu-user for the two.
+//
+//       MEASURED (x86_64, the wide hash on). One getdents64 pass over one directory, microseconds, in a
 //       KVM guest on a Ryzen 9 9950X (Zen 5), minimum over hundreds of short
 //       bursts, ext4 as the installer makes it. "before" is this kernel with
 //       the C function; "port" is this routine; "wide off" is the same image as
@@ -145,15 +157,13 @@ module_param_named(dirhash_simd, moonwater_dirhash_simd, bool, 0644);
 //       are the bottom of the frame. DIRENT_HTREE is passed as the literal
 //       3; the build asserts it, in namei.c, where the enum is.
 //
-//> arch x86_64
-//> perf getdents: 1000 names 92.5 -> 52.5 us (-43%), 100 names -36%, 16 names -19%; 8 names level
+//> arch x86_64 arm64 riscv64
+//> perf x86_64 getdents: 1000 names 92.5 -> 52.5 us (-43%), 100 names -36%, 16 names -19%; 8 names level
 //> replace fs/ext4/namei.c htree_dirblock_to_tree
 //> unstatic fs/ext4/namei.c __ext4_read_dirblock
 //> assert fs/ext4/namei.c DIRENT_HTREE == 3
 //> include <linux/buffer_head.h>
 //> include <linux/fs.h>
-//> include <asm/cpufeatures.h>
-//> include <asm/processor.h>
 //> include "../../../fs/ext4/ext4.h"
 //> offset MW_INODE_SB inode i_sb
 //> offset MW_INODE_FLAGS inode i_flags
@@ -167,16 +177,23 @@ module_param_named(dirhash_simd, moonwater_dirhash_simd, bool, 0644);
 //> offset MW_BH_SIZE buffer_head b_size
 //> offset MW_DX_HASH dx_hash_info hash
 //> offset MW_DX_MINOR dx_hash_info minor_hash
-//> offset MW_DX_VERSION dx_hash_info hash_version
-//> offset MW_DX_SEED dx_hash_info seed
-//> offset MW_CPU_CAP cpuinfo_x86 x86_capability
-//> const MW_DX_HALF_MD4 DX_HASH_HALF_MD4
-//> const MW_DX_HALF_MD4_U DX_HASH_HALF_MD4_UNSIGNED
 //> const MW_S_ENCRYPTED S_ENCRYPTED
 //> const MW_S_CASEFOLD S_CASEFOLD
 //> const MW_CSUM_FEATURE EXT4_FEATURE_RO_COMPAT_METADATA_CSUM
 //> const MW_FT_DIR_CSUM EXT4_FT_DIR_CSUM
 //> const MW_NAME_LEN EXT4_NAME_LEN
+//
+//       What only the x86_64 port reads: the hash version and seed the batch
+//       looks at, and the CPU feature word it asks about AVX2.
+//
+//> arch x86_64
+//> include <asm/cpufeatures.h>
+//> include <asm/processor.h>
+//> offset MW_DX_VERSION dx_hash_info hash_version
+//> offset MW_DX_SEED dx_hash_info seed
+//> offset MW_CPU_CAP cpuinfo_x86 x86_capability
+//> const MW_DX_HALF_MD4 DX_HASH_HALF_MD4
+//> const MW_DX_HALF_MD4_U DX_HASH_HALF_MD4_UNSIGNED
 //> const MW_AVX2_WORD (X86_FEATURE_AVX2 >> 5)
 //> const MW_AVX2_BIT (X86_FEATURE_AVX2 & 31)
 #ifdef CONFIG_X86_64
@@ -235,480 +252,205 @@ __asm__(
 
 __asm__(
     ASM_FUNC(htree_dirblock_to_tree)
-    "        push    %rbp\n"
-    "        push    %r15\n"
-    "        push    %r14\n"
-    "        push    %r13\n"
-    "        push    %r12\n"
-    "        push    %rbx\n"
-    "        sub     $L_FRAME, %rsp\n"
-    "        mov     %rdi, %r12\n"
-    "        mov     %rsi, %r13\n"
-    "        mov     %rcx, %r14\n"
-    "        mov     %edx, L_BLOCK(%rsp)\n"
-    "        mov     %r8d, L_SHASH(%rsp)\n"
-    "        mov     %r9d, L_SMINOR(%rsp)\n"
-    "        movl    $0, L_COUNT(%rsp)\n"
-    "        movq    $0, L_FSTR(%rsp)\n"
+    "        push    %rbp\n   push    %r15\n   push    %r14\n   push    %r13\n"
+    "        push    %r12\n   push    %rbx\n   sub     $L_FRAME, %rsp\n   mov     %rdi, %r12\n"
+    "        mov     %rsi, %r13\n   mov     %rcx, %r14\n   mov     %edx, L_BLOCK(%rsp)\n"
+    "        mov     %r8d, L_SHASH(%rsp)\n   mov     %r9d, L_SMINOR(%rsp)\n"
+    "        movl    $0, L_COUNT(%rsp)\n   movq    $0, L_FSTR(%rsp)\n"
     "        movq    $0, L_FSTR+8(%rsp)\n"
     "        # bh = ext4_read_dirblock(dir, block, DIRENT_HTREE): __ext4_read_dirblock(dir, block, 3, __func__, line)\n"
-    "        mov     %r13, %rdi\n"
-    "        mov     L_BLOCK(%rsp), %esi\n"
-    "        mov     $3, %edx\n"
-    "        lea     .Lmw_fn(%rip), %rcx\n"
-    "        mov     $1051, %r8d\n"
-    "        call    __ext4_read_dirblock\n"
-    "        cmp     $-4095, %rax\n"
-    "        jae     .Lmw_readerr\n"
-    "        mov     %rax, %r15\n"
+    "        mov     %r13, %rdi\n   mov     L_BLOCK(%rsp), %esi\n   mov     $3, %edx\n"
+    "        lea     .Lmw_fn(%rip), %rcx\n   mov     $1051, %r8d\n   call    __ext4_read_dirblock\n"
+    "        cmp     $-4095, %rax\n   jae     .Lmw_readerr\n   mov     %rax, %r15\n"
     "        # the block: where it starts and ends, how many inodes there are, whether checksums are on\n"
-    "        mov     MW_BH_DATA(%r15), %rbx\n"
-    "        mov     %rbx, L_BUF(%rsp)\n"
-    "        mov     MW_INODE_SB(%r13), %rax\n"
-    "        mov     MW_SB_BLOCKSIZE(%rax), %ecx\n"
-    "        mov     %ecx, L_BLKSZ(%rsp)\n"
-    "        lea     (%rbx,%rcx), %rdx\n"
-    "        mov     %rdx, L_END(%rsp)\n"
-    "        mov     MW_SB_FS_INFO(%rax), %rdx\n"
-    "        mov     MW_SBI_ES(%rdx), %rdx\n"
-    "        mov     MW_ES_INODES(%rdx), %esi\n"
-    "        mov     %esi, L_INODES(%rsp)\n"
-    "        xor     %esi, %esi\n"
-    "        testl   $MW_CSUM_FEATURE, MW_ES_RO_COMPAT(%rdx)\n"
-    "        setnz   %sil\n"
+    "        mov     MW_BH_DATA(%r15), %rbx\n   mov     %rbx, L_BUF(%rsp)\n"
+    "        mov     MW_INODE_SB(%r13), %rax\n   mov     MW_SB_BLOCKSIZE(%rax), %ecx\n"
+    "        mov     %ecx, L_BLKSZ(%rsp)\n   lea     (%rbx,%rcx), %rdx\n"
+    "        mov     %rdx, L_END(%rsp)\n   mov     MW_SB_FS_INFO(%rax), %rdx\n"
+    "        mov     MW_SBI_ES(%rdx), %rdx\n   mov     MW_ES_INODES(%rdx), %esi\n"
+    "        mov     %esi, L_INODES(%rsp)\n   xor     %esi, %esi\n"
+    "        testl   $MW_CSUM_FEATURE, MW_ES_RO_COMPAT(%rdx)\n   setnz   %sil\n"
     "        # ext4_hash_in_dirent(dir): casefolded and encrypted both\n"
     "        mov     MW_INODE_FLAGS(%r13), %eax\n"
     "        and     $(MW_S_ENCRYPTED|MW_S_CASEFOLD), %eax\n"
-    "        cmp     $(MW_S_ENCRYPTED|MW_S_CASEFOLD), %eax\n"
-    "        sete    %dl\n"
-    "        movzbl  %dl, %edx\n"
+    "        cmp     $(MW_S_ENCRYPTED|MW_S_CASEFOLD), %eax\n   sete    %dl\n   movzbl  %dl, %edx\n"
     "        mov     %edx, L_HID(%rsp)\n"
     "        # top = de + blocksize - ext4_dir_rec_len(0, csum ? NULL : dir): 8, and 8 more where the entries carry hashes\n"
-    "        mov     $8, %edi\n"
-    "        test    %esi, %esi\n"
-    "        jnz     1f\n"
+    "        mov     $8, %edi\n   test    %esi, %esi\n   jnz     1f\n"
     "        lea     (%rdi,%rdx,8), %edi\n"
-    "1:\n"
-    "        mov     L_END(%rsp), %rbp\n"
-    "        sub     %rdi, %rbp\n"
+    "1:      mov     L_END(%rsp), %rbp\n   sub     %rdi, %rbp\n"
 #ifdef CONFIG_FS_ENCRYPTION
-    "        testl   $MW_S_ENCRYPTED, MW_INODE_FLAGS(%r13)\n"
-    "        jz      .Lmw_setup\n"
-    "        mov     %r13, %rdi\n"
-    "        call    __fscrypt_prepare_readdir\n"
-    "        test    %eax, %eax\n"
-    "        js      .Lmw_brelse_exit\n"
-    "        mov     $MW_NAME_LEN, %edi\n"
-    "        lea     L_FSTR(%rsp), %rsi\n"
-    "        call    fscrypt_fname_alloc_buffer\n"
-    "        test    %eax, %eax\n"
-    "        js      .Lmw_brelse_exit\n"
+    "        testl   $MW_S_ENCRYPTED, MW_INODE_FLAGS(%r13)\n   jz      .Lmw_setup\n"
+    "        mov     %r13, %rdi\n   call    __fscrypt_prepare_readdir\n   test    %eax, %eax\n"
+    "        js      .Lmw_brelse_exit\n   mov     $MW_NAME_LEN, %edi\n"
+    "        lea     L_FSTR(%rsp), %rsi\n   call    fscrypt_fname_alloc_buffer\n"
+    "        test    %eax, %eax\n   js      .Lmw_brelse_exit\n"
 #endif
     ".Lmw_setup:\n"
     "        # the batch is for half_md4 names that are neither encrypted nor casefolded\n"
-    "        movl    $0, L_ON(%rsp)\n"
-    "        movl    $0, L_MCOUNT(%rsp)\n"
-    "        movl    $0, L_MNEXT(%rsp)\n"
-    "        testl   $(MW_S_ENCRYPTED|MW_S_CASEFOLD), MW_INODE_FLAGS(%r13)\n"
-    "        jnz     .Lmw_loop\n"
-    "        mov     MW_DX_VERSION(%r14), %eax\n"
-    "        xor     %edx, %edx\n"
-    "        cmp     $MW_DX_HALF_MD4, %eax\n"
-    "        je      1f\n"
-    "        cmp     $MW_DX_HALF_MD4_U, %eax\n"
-    "        jne     .Lmw_loop\n"
-    "        mov     $1, %edx\n"
-    "1:\n"
-    "        mov     %edx, L_FLAGS(%rsp)\n"
-    "        movl    $1, L_ON(%rsp)\n"
-    "        movl    $0x67452301, L_STATE(%rsp)\n"
-    "        movl    $0xefcdab89, L_STATE+4(%rsp)\n"
-    "        movl    $0x98badcfe, L_STATE+8(%rsp)\n"
-    "        movl    $0x10325476, L_STATE+12(%rsp)\n"
-    "        mov     MW_DX_SEED(%r14), %rax\n"
-    "        test    %rax, %rax\n"
-    "        jz      .Lmw_loop\n"
-    "        mov     (%rax), %ecx\n"
-    "        or      4(%rax), %ecx\n"
-    "        or      8(%rax), %ecx\n"
-    "        or      12(%rax), %ecx\n"
-    "        jz      .Lmw_loop\n"
-    "        mov     (%rax), %ecx\n"
-    "        mov     %ecx, L_STATE(%rsp)\n"
-    "        mov     4(%rax), %ecx\n"
-    "        mov     %ecx, L_STATE+4(%rsp)\n"
-    "        mov     8(%rax), %ecx\n"
-    "        mov     %ecx, L_STATE+8(%rsp)\n"
-    "        mov     12(%rax), %ecx\n"
+    "        movl    $0, L_ON(%rsp)\n   movl    $0, L_MCOUNT(%rsp)\n   movl    $0, L_MNEXT(%rsp)\n"
+    "        testl   $(MW_S_ENCRYPTED|MW_S_CASEFOLD), MW_INODE_FLAGS(%r13)\n   jnz     .Lmw_loop\n"
+    "        mov     MW_DX_VERSION(%r14), %eax\n   xor     %edx, %edx\n"
+    "        cmp     $MW_DX_HALF_MD4, %eax\n   je      1f\n   cmp     $MW_DX_HALF_MD4_U, %eax\n"
+    "        jne     .Lmw_loop\n   mov     $1, %edx\n"
+    "1:      mov     %edx, L_FLAGS(%rsp)\n   movl    $1, L_ON(%rsp)\n"
+    "        movl    $0x67452301, L_STATE(%rsp)\n   movl    $0xefcdab89, L_STATE+4(%rsp)\n"
+    "        movl    $0x98badcfe, L_STATE+8(%rsp)\n   movl    $0x10325476, L_STATE+12(%rsp)\n"
+    "        mov     MW_DX_SEED(%r14), %rax\n   test    %rax, %rax\n   jz      .Lmw_loop\n"
+    "        mov     (%rax), %ecx\n   or      4(%rax), %ecx\n   or      8(%rax), %ecx\n"
+    "        or      12(%rax), %ecx\n   jz      .Lmw_loop\n   mov     (%rax), %ecx\n"
+    "        mov     %ecx, L_STATE(%rsp)\n   mov     4(%rax), %ecx\n"
+    "        mov     %ecx, L_STATE+4(%rsp)\n   mov     8(%rax), %ecx\n"
+    "        mov     %ecx, L_STATE+8(%rsp)\n   mov     12(%rax), %ecx\n"
     "        mov     %ecx, L_STATE+12(%rsp)\n"
 
     "        # for (; de < top; de = ext4_next_entry(de, blocksize))\n"
-    ".Lmw_loop:\n"
-    "        cmp     %rbp, %rbx\n"
-    "        jae     .Lmw_done\n"
+    ".Lmw_loop:      cmp     %rbp, %rbx\n   jae     .Lmw_done\n"
     "        # ext4_check_dir_entry: the seven tests for an ordinary entry, in registers\n"
-    "        movzwl  4(%rbx), %eax\n"
-    "        lea     -1(%rax), %ecx\n"
-    "        cmp     $0xfffe, %ecx\n"
-    "        jae     7f\n"
-    "        mov     %eax, %ecx\n"
-    "        and     $0xfffc, %eax\n"
-    "        and     $3, %ecx\n"
-    "        shl     $16, %ecx\n"
-    "        or      %ecx, %eax\n"
-    "        jmp     8f\n"
-    "7:\n"
-    "        mov     L_BLKSZ(%rsp), %eax\n"
-    "8:\n"
-    "        mov     %rbx, %rdx\n"
-    "        sub     L_BUF(%rsp), %rdx\n"
-    "        lea     (%rdx,%rax), %ecx\n"
-    "        movzbl  6(%rbx), %esi\n"
-    "        cmpl    $0, L_HID(%rsp)\n"
-    "        jne     .Lmw_slow\n"
-    "        cmp     $12, %eax\n"
-    "        jl      .Lmw_slow\n"
-    "        test    $3, %al\n"
-    "        jnz     .Lmw_slow\n"
-    "        lea     11(%rsi), %edi\n"
-    "        and     $-4, %edi\n"
-    "        cmp     %edi, %eax\n"
-    "        jl      .Lmw_slow\n"
-    "        mov     MW_BH_SIZE(%r15), %r8d\n"
-    "        cmp     %r8d, %ecx\n"
-    "        jg      .Lmw_slow\n"
-    "        lea     -12(%r8), %edi\n"
-    "        cmp     %edi, %ecx\n"
-    "        jle     1f\n"
-    "        cmp     %r8d, %ecx\n"
-    "        jne     .Lmw_slow\n"
-    "1:\n"
-    "        mov     (%rbx), %edi\n"
-    "        cmp     L_INODES(%rsp), %edi\n"
-    "        ja      .Lmw_slow\n"
-    "        cmp     %r8d, %ecx\n"
-    "        jne     2f\n"
-    "        cmp     $1, %esi\n"
-    "        jne     2f\n"
-    "        cmpb    $'.', 8(%rbx)\n"
-    "        je      .Lmw_slow\n"
-    "2:\n"
-    "        cmpb    $MW_FT_DIR_CSUM, 7(%rbx)\n"
-    "        je      .Lmw_slow\n"
-    "        lea     -1(%rsi), %edi\n"
-    "        cmp     $1, %edi\n"
-    "        ja      .Lmw_ok\n"
-    "        cmpb    $'.', 8(%rbx)\n"
-    "        jne     .Lmw_ok\n"
-    "        cmpb    $'.', 9(%rbx)\n"
-    "        je      .Lmw_slow\n"
-    "        cmpb    $0, 9(%rbx)\n"
-    "        je      .Lmw_slow\n"
-    "        jmp     .Lmw_ok\n"
+    "        movzwl  4(%rbx), %eax\n   lea     -1(%rax), %ecx\n   cmp     $0xfffe, %ecx\n"
+    "        jae     7f\n   mov     %eax, %ecx\n   and     $0xfffc, %eax\n   and     $3, %ecx\n"
+    "        shl     $16, %ecx\n   or      %ecx, %eax\n   jmp     8f\n"
+    "7:      mov     L_BLKSZ(%rsp), %eax\n"
+    "8:      mov     %rbx, %rdx\n   sub     L_BUF(%rsp), %rdx\n   lea     (%rdx,%rax), %ecx\n"
+    "        movzbl  6(%rbx), %esi\n   cmpl    $0, L_HID(%rsp)\n   jne     .Lmw_slow\n"
+    "        cmp     $12, %eax\n   jl      .Lmw_slow\n   test    $3, %al\n   jnz     .Lmw_slow\n"
+    "        lea     11(%rsi), %edi\n   and     $-4, %edi\n   cmp     %edi, %eax\n"
+    "        jl      .Lmw_slow\n   mov     MW_BH_SIZE(%r15), %r8d\n   cmp     %r8d, %ecx\n"
+    "        jg      .Lmw_slow\n   lea     -12(%r8), %edi\n   cmp     %edi, %ecx\n   jle     1f\n"
+    "        cmp     %r8d, %ecx\n   jne     .Lmw_slow\n"
+    "1:      mov     (%rbx), %edi\n   cmp     L_INODES(%rsp), %edi\n   ja      .Lmw_slow\n"
+    "        cmp     %r8d, %ecx\n   jne     2f\n   cmp     $1, %esi\n   jne     2f\n"
+    "        cmpb    $'.', 8(%rbx)\n   je      .Lmw_slow\n"
+    "2:      cmpb    $MW_FT_DIR_CSUM, 7(%rbx)\n   je      .Lmw_slow\n   lea     -1(%rsi), %edi\n"
+    "        cmp     $1, %edi\n   ja      .Lmw_ok\n   cmpb    $'.', 8(%rbx)\n   jne     .Lmw_ok\n"
+    "        cmpb    $'.', 9(%rbx)\n   je      .Lmw_slow\n   cmpb    $0, 9(%rbx)\n"
+    "        je      .Lmw_slow\n   jmp     .Lmw_ok\n"
 
     "        # not certain: the real __ext4_check_dir_entry, which also says what is wrong\n"
-    ".Lmw_slow:\n"
-    "        mov     L_BLOCK(%rsp), %eax\n"
-    "        movzbl  MW_INODE_BLKBITS(%r13), %ecx\n"
-    "        shl     %cl, %rax\n"
-    "        mov     %rbx, %rdx\n"
-    "        sub     L_BUF(%rsp), %rdx\n"
-    "        add     %rdx, %rax\n"
-    "        mov     %eax, %eax\n"
-    "        mov     %rax, 16(%rsp)\n"
-    "        mov     L_BUF(%rsp), %rax\n"
-    "        mov     %rax, 0(%rsp)\n"
-    "        mov     MW_BH_SIZE(%r15), %eax\n"
-    "        mov     %rax, 8(%rsp)\n"
-    "        lea     .Lmw_fn(%rip), %rdi\n"
-    "        mov     $1077, %esi\n"
-    "        mov     %r13, %rdx\n"
-    "        xor     %ecx, %ecx\n"
-    "        mov     %rbx, %r8\n"
-    "        mov     %r15, %r9\n"
-    "        call    __ext4_check_dir_entry\n"
-    "        test    %eax, %eax\n"
-    "        jnz     .Lmw_done\n"
+    ".Lmw_slow:      mov     L_BLOCK(%rsp), %eax\n   movzbl  MW_INODE_BLKBITS(%r13), %ecx\n"
+    "        shl     %cl, %rax\n   mov     %rbx, %rdx\n   sub     L_BUF(%rsp), %rdx\n"
+    "        add     %rdx, %rax\n   mov     %eax, %eax\n   mov     %rax, 16(%rsp)\n"
+    "        mov     L_BUF(%rsp), %rax\n   mov     %rax, 0(%rsp)\n"
+    "        mov     MW_BH_SIZE(%r15), %eax\n   mov     %rax, 8(%rsp)\n"
+    "        lea     .Lmw_fn(%rip), %rdi\n   mov     $1077, %esi\n   mov     %r13, %rdx\n"
+    "        xor     %ecx, %ecx\n   mov     %rbx, %r8\n   mov     %r15, %r9\n"
+    "        call    __ext4_check_dir_entry\n   test    %eax, %eax\n   jnz     .Lmw_done\n"
 
     "        # the hash: from the batch, from the entry itself, or from ext4fs_dirhash\n"
-    ".Lmw_ok:\n"
-    "        cmpl    $0, L_HID(%rsp)\n"
-    "        jne     .Lmw_hid\n"
-    "        cmpl    $0, L_ON(%rsp)\n"
-    "        je      .Lmw_scalar\n"
-    "        cmpl    $0, (%rbx)\n"
-    "        je      .Lmw_next\n"
-    "        mov     L_MNEXT(%rsp), %eax\n"
-    "        cmp     L_MCOUNT(%rsp), %eax\n"
-    "        je      .Lmw_refill\n"
-    ".Lmw_lookup:\n"
-    "        mov     L_MNEXT(%rsp), %eax\n"
-    "        cmp     L_MCOUNT(%rsp), %eax\n"
-    "        jae     .Lmw_scalar\n"
-    "        movzwl  L_AT(%rsp,%rax,2), %ecx\n"
-    "        mov     %rbx, %rdx\n"
-    "        sub     L_BUF(%rsp), %rdx\n"
-    "        cmp     %edx, %ecx\n"
-    "        jne     .Lmw_scalar\n"
-    "        mov     %eax, %ecx\n"
-    "        shr     $4, %ecx\n"
-    "        shl     $7, %ecx\n"
-    "        and     $15, %eax\n"
-    "        lea     L_RES(%rsp,%rcx), %rsi\n"
-    "        mov     (%rsi,%rax,4), %edx\n"
-    "        mov     64(%rsi,%rax,4), %ecx\n"
-    "        and     $-2, %edx\n"
-    "        cmp     $0xfffffffe, %edx\n"
-    "        jne     1f\n"
-    "        mov     $0xfffffffc, %edx\n"
-    "1:\n"
-    "        mov     %edx, MW_DX_HASH(%r14)\n"
-    "        mov     %ecx, MW_DX_MINOR(%r14)\n"
-    "        incl    L_MNEXT(%rsp)\n"
-    "        jmp     .Lmw_hashed\n"
+    ".Lmw_ok:      cmpl    $0, L_HID(%rsp)\n   jne     .Lmw_hid\n   cmpl    $0, L_ON(%rsp)\n"
+    "        je      .Lmw_scalar\n   cmpl    $0, (%rbx)\n   je      .Lmw_next\n"
+    "        mov     L_MNEXT(%rsp), %eax\n   cmp     L_MCOUNT(%rsp), %eax\n   je      .Lmw_refill\n"
+    ".Lmw_lookup:      mov     L_MNEXT(%rsp), %eax\n   cmp     L_MCOUNT(%rsp), %eax\n"
+    "        jae     .Lmw_scalar\n   movzwl  L_AT(%rsp,%rax,2), %ecx\n   mov     %rbx, %rdx\n"
+    "        sub     L_BUF(%rsp), %rdx\n   cmp     %edx, %ecx\n   jne     .Lmw_scalar\n"
+    "        mov     %eax, %ecx\n   shr     $4, %ecx\n   shl     $7, %ecx\n   and     $15, %eax\n"
+    "        lea     L_RES(%rsp,%rcx), %rsi\n   mov     (%rsi,%rax,4), %edx\n"
+    "        mov     64(%rsi,%rax,4), %ecx\n   and     $-2, %edx\n   cmp     $0xfffffffe, %edx\n"
+    "        jne     1f\n   mov     $0xfffffffc, %edx\n"
+    "1:      mov     %edx, MW_DX_HASH(%r14)\n   mov     %ecx, MW_DX_MINOR(%r14)\n"
+    "        incl    L_MNEXT(%rsp)\n   jmp     .Lmw_hashed\n"
 
-    ".Lmw_hid:\n"
-    "        movzbl  6(%rbx), %ecx\n"
-    "        xor     %eax, %eax\n"
-    "        xor     %edx, %edx\n"
-    "        test    %ecx, %ecx\n"
-    "        jz      1f\n"
-    "        cmpl    $0, (%rbx)\n"
-    "        je      1f\n"
-    "        lea     11(%rcx), %ecx\n"
-    "        and     $-4, %ecx\n"
-    "        mov     (%rbx,%rcx), %eax\n"
+    ".Lmw_hid:      movzbl  6(%rbx), %ecx\n   xor     %eax, %eax\n   xor     %edx, %edx\n"
+    "        test    %ecx, %ecx\n   jz      1f\n   cmpl    $0, (%rbx)\n   je      1f\n"
+    "        lea     11(%rcx), %ecx\n   and     $-4, %ecx\n   mov     (%rbx,%rcx), %eax\n"
     "        mov     4(%rbx,%rcx), %edx\n"
-    "1:\n"
-    "        mov     %eax, MW_DX_HASH(%r14)\n"
-    "        mov     %edx, MW_DX_MINOR(%r14)\n"
+    "1:      mov     %eax, MW_DX_HASH(%r14)\n   mov     %edx, MW_DX_MINOR(%r14)\n"
     "        jmp     .Lmw_hashed\n"
 
-    ".Lmw_scalar:\n"
-    "        mov     %r13, %rdi\n"
-    "        lea     8(%rbx), %rsi\n"
-    "        movzbl  6(%rbx), %edx\n"
-    "        mov     %r14, %rcx\n"
-    "        call    ext4fs_dirhash\n"
-    "        test    %eax, %eax\n"
-    "        jns     .Lmw_hashed\n"
-    "        mov     %eax, L_COUNT(%rsp)\n"
-    "        jmp     .Lmw_done\n"
+    ".Lmw_scalar:      mov     %r13, %rdi\n   lea     8(%rbx), %rsi\n   movzbl  6(%rbx), %edx\n"
+    "        mov     %r14, %rcx\n   call    ext4fs_dirhash\n   test    %eax, %eax\n"
+    "        jns     .Lmw_hashed\n   mov     %eax, L_COUNT(%rsp)\n   jmp     .Lmw_done\n"
 
     "        # before the start of this readdir, or deleted: skip\n"
-    ".Lmw_hashed:\n"
-    "        mov     MW_DX_HASH(%r14), %eax\n"
-    "        cmp     L_SHASH(%rsp), %eax\n"
-    "        jb      .Lmw_next\n"
-    "        ja      1f\n"
-    "        mov     MW_DX_MINOR(%r14), %edx\n"
-    "        cmp     L_SMINOR(%rsp), %edx\n"
-    "        jb      .Lmw_next\n"
-    "1:\n"
-    "        cmpl    $0, (%rbx)\n"
-    "        je      .Lmw_next\n"
+    ".Lmw_hashed:      mov     MW_DX_HASH(%r14), %eax\n   cmp     L_SHASH(%rsp), %eax\n"
+    "        jb      .Lmw_next\n   ja      1f\n   mov     MW_DX_MINOR(%r14), %edx\n"
+    "        cmp     L_SMINOR(%rsp), %edx\n   jb      .Lmw_next\n"
+    "1:      cmpl    $0, (%rbx)\n   je      .Lmw_next\n"
 #ifdef CONFIG_FS_ENCRYPTION
-    "        testl   $MW_S_ENCRYPTED, MW_INODE_FLAGS(%r13)\n"
-    "        jnz     .Lmw_encstore\n"
+    "        testl   $MW_S_ENCRYPTED, MW_INODE_FLAGS(%r13)\n   jnz     .Lmw_encstore\n"
 #endif
-    "        lea     8(%rbx), %rax\n"
-    "        mov     %rax, L_TMP(%rsp)\n"
-    "        movzbl  6(%rbx), %eax\n"
-    "        mov     %eax, L_TMP+8(%rsp)\n"
-    "        mov     %r12, %rdi\n"
-    "        mov     MW_DX_HASH(%r14), %esi\n"
-    "        mov     MW_DX_MINOR(%r14), %edx\n"
-    "        mov     %rbx, %rcx\n"
-    "        lea     L_TMP(%rsp), %r8\n"
-    "        call    ext4_htree_store_dirent\n"
+    "        lea     8(%rbx), %rax\n   mov     %rax, L_TMP(%rsp)\n   movzbl  6(%rbx), %eax\n"
+    "        mov     %eax, L_TMP+8(%rsp)\n   mov     %r12, %rdi\n"
+    "        mov     MW_DX_HASH(%r14), %esi\n   mov     MW_DX_MINOR(%r14), %edx\n"
+    "        mov     %rbx, %rcx\n   lea     L_TMP(%rsp), %r8\n   call    ext4_htree_store_dirent\n"
     "        jmp     .Lmw_stored\n"
 #ifdef CONFIG_FS_ENCRYPTION
-    ".Lmw_encstore:\n"
-    "        mov     L_FSTR+8(%rsp), %eax\n"
-    "        mov     %eax, L_SAVELEN(%rsp)\n"
-    "        lea     8(%rbx), %rax\n"
-    "        mov     %rax, L_TMP(%rsp)\n"
-    "        movzbl  6(%rbx), %eax\n"
-    "        mov     %eax, L_TMP+8(%rsp)\n"
-    "        mov     %r13, %rdi\n"
-    "        mov     MW_DX_HASH(%r14), %esi\n"
-    "        mov     MW_DX_MINOR(%r14), %edx\n"
-    "        lea     L_TMP(%rsp), %rcx\n"
-    "        lea     L_FSTR(%rsp), %r8\n"
-    "        call    fscrypt_fname_disk_to_usr\n"
-    "        test    %eax, %eax\n"
-    "        jnz     .Lmw_storeerr\n"
-    "        mov     %r12, %rdi\n"
-    "        mov     MW_DX_HASH(%r14), %esi\n"
-    "        mov     MW_DX_MINOR(%r14), %edx\n"
-    "        mov     %rbx, %rcx\n"
-    "        lea     L_FSTR(%rsp), %r8\n"
-    "        call    ext4_htree_store_dirent\n"
-    "        mov     L_SAVELEN(%rsp), %ecx\n"
+    ".Lmw_encstore:      mov     L_FSTR+8(%rsp), %eax\n   mov     %eax, L_SAVELEN(%rsp)\n"
+    "        lea     8(%rbx), %rax\n   mov     %rax, L_TMP(%rsp)\n   movzbl  6(%rbx), %eax\n"
+    "        mov     %eax, L_TMP+8(%rsp)\n   mov     %r13, %rdi\n"
+    "        mov     MW_DX_HASH(%r14), %esi\n   mov     MW_DX_MINOR(%r14), %edx\n"
+    "        lea     L_TMP(%rsp), %rcx\n   lea     L_FSTR(%rsp), %r8\n"
+    "        call    fscrypt_fname_disk_to_usr\n   test    %eax, %eax\n   jnz     .Lmw_storeerr\n"
+    "        mov     %r12, %rdi\n   mov     MW_DX_HASH(%r14), %esi\n"
+    "        mov     MW_DX_MINOR(%r14), %edx\n   mov     %rbx, %rcx\n   lea     L_FSTR(%rsp), %r8\n"
+    "        call    ext4_htree_store_dirent\n   mov     L_SAVELEN(%rsp), %ecx\n"
     "        mov     %ecx, L_FSTR+8(%rsp)\n"
 #endif
-    ".Lmw_stored:\n"
-    "        test    %eax, %eax\n"
-    "        jnz     .Lmw_storeerr\n"
-    "        incl    L_COUNT(%rsp)\n"
-    ".Lmw_next:\n"
-    "        movzwl  4(%rbx), %eax\n"
-    "        lea     -1(%rax), %ecx\n"
-    "        cmp     $0xfffe, %ecx\n"
-    "        jae     7f\n"
-    "        mov     %eax, %ecx\n"
-    "        and     $0xfffc, %eax\n"
-    "        and     $3, %ecx\n"
-    "        shl     $16, %ecx\n"
-    "        or      %ecx, %eax\n"
-    "        jmp     8f\n"
-    "7:\n"
-    "        mov     L_BLKSZ(%rsp), %eax\n"
-    "8:\n"
-    "        add     %rax, %rbx\n"
-    "        jmp     .Lmw_loop\n"
-    ".Lmw_storeerr:\n"
-    "        mov     %eax, L_COUNT(%rsp)\n"
+    ".Lmw_stored:      test    %eax, %eax\n   jnz     .Lmw_storeerr\n   incl    L_COUNT(%rsp)\n"
+    ".Lmw_next:      movzwl  4(%rbx), %eax\n   lea     -1(%rax), %ecx\n   cmp     $0xfffe, %ecx\n"
+    "        jae     7f\n   mov     %eax, %ecx\n   and     $0xfffc, %eax\n   and     $3, %ecx\n"
+    "        shl     $16, %ecx\n   or      %ecx, %eax\n   jmp     8f\n"
+    "7:      mov     L_BLKSZ(%rsp), %eax\n"
+    "8:      add     %rax, %rbx\n   jmp     .Lmw_loop\n"
+    ".Lmw_storeerr:      mov     %eax, L_COUNT(%rsp)\n"
 
     "        # errout: brelse(bh); fscrypt_fname_free_buffer(&fname_crypto_str); return count\n"
-    ".Lmw_done:\n"
-    "        mov     %r15, %rdi\n"
-    "        call    __brelse\n"
+    ".Lmw_done:      mov     %r15, %rdi\n   call    __brelse\n"
 #ifdef CONFIG_FS_ENCRYPTION
-    "        testl   $MW_S_ENCRYPTED, MW_INODE_FLAGS(%r13)\n"
-    "        jz      1f\n"
-    "        lea     L_FSTR(%rsp), %rdi\n"
-    "        call    fscrypt_fname_free_buffer\n"
+    "        testl   $MW_S_ENCRYPTED, MW_INODE_FLAGS(%r13)\n   jz      1f\n"
+    "        lea     L_FSTR(%rsp), %rdi\n   call    fscrypt_fname_free_buffer\n"
     "1:\n"
 #endif
-    "        mov     L_COUNT(%rsp), %eax\n"
-    "        jmp     .Lmw_out\n"
+    "        mov     L_COUNT(%rsp), %eax\n   jmp     .Lmw_out\n"
 #ifdef CONFIG_FS_ENCRYPTION
-    ".Lmw_brelse_exit:\n"
-    "        mov     %eax, L_COUNT(%rsp)\n"
-    "        mov     %r15, %rdi\n"
-    "        call    __brelse\n"
-    "        mov     L_COUNT(%rsp), %eax\n"
+    ".Lmw_brelse_exit:      mov     %eax, L_COUNT(%rsp)\n   mov     %r15, %rdi\n"
+    "        call    __brelse\n   mov     L_COUNT(%rsp), %eax\n"
 #endif
     ".Lmw_readerr:\n"
-    ".Lmw_out:\n"
-    "        add     $L_FRAME, %rsp\n"
-    "        pop     %rbx\n"
-    "        pop     %r12\n"
-    "        pop     %r13\n"
-    "        pop     %r14\n"
-    "        pop     %r15\n"
-    "        pop     %rbp\n"
+    ".Lmw_out:      add     $L_FRAME, %rsp\n   pop     %rbx\n   pop     %r12\n   pop     %r13\n"
+    "        pop     %r14\n   pop     %r15\n   pop     %rbp\n"
     "        " ASM_RET
 
     "        # the batch: find the next live names from the entry in rbx, hash them together\n"
-    ".Lmw_refill:\n"
-    "        movl    $0, L_MCOUNT(%rsp)\n"
-    "        movl    $0, L_MNEXT(%rsp)\n"
-    "        xor     %r10d, %r10d\n"
-    "        mov     %rbx, %r11\n"
-    ".Lmw_fl:\n"
-    "        cmp     %rbp, %r11\n"
-    "        jae     .Lmw_fe\n"
-    "        cmp     $64, %r10d\n"
-    "        jae     .Lmw_fe\n"
-    "        lea     12(%r11), %rax\n"
-    "        cmp     L_END(%rsp), %rax\n"
-    "        ja      .Lmw_fe\n"
-    "        movzwl  4(%r11), %r8d\n"
-    "        lea     -1(%r8), %ecx\n"
-    "        cmp     $0xfffe, %ecx\n"
-    "        jae     7f\n"
-    "        mov     %r8d, %ecx\n"
-    "        and     $0xfffc, %r8d\n"
-    "        and     $3, %ecx\n"
-    "        shl     $16, %ecx\n"
-    "        or      %ecx, %r8d\n"
-    "        jmp     8f\n"
-    "7:\n"
-    "        mov     L_BLKSZ(%rsp), %r8d\n"
-    "8:\n"
-    "        cmp     $12, %r8d\n"
-    "        jb      .Lmw_fe\n"
-    "        test    $3, %r8b\n"
-    "        jnz     .Lmw_fe\n"
-    "        lea     (%r11,%r8), %rax\n"
-    "        cmp     L_END(%rsp), %rax\n"
-    "        ja      .Lmw_fe\n"
-    "        cmpl    $0, (%r11)\n"
-    "        je      .Lmw_fa\n"
-    "        movzbl  6(%r11), %ecx\n"
-    "        test    %ecx, %ecx\n"
-    "        jz      .Lmw_fa\n"
-    "        lea     8(%rcx), %eax\n"
-    "        cmp     %r8d, %eax\n"
-    "        ja      .Lmw_fa\n"
-    "        lea     31(%rcx), %eax\n"
-    "        and     $-32, %eax\n"
-    "        lea     8(%r11,%rax), %rax\n"
-    "        cmp     L_END(%rsp), %rax\n"
-    "        ja      .Lmw_fa\n"
-    "        mov     %r11, %rax\n"
-    "        sub     L_BUF(%rsp), %rax\n"
-    "        mov     %ax, L_AT(%rsp,%r10,2)\n"
-    "        add     $8, %eax\n"
-    "        mov     %eax, L_NOFF(%rsp,%r10,4)\n"
-    "        mov     %ecx, L_LEN(%rsp,%r10,4)\n"
+    ".Lmw_refill:      movl    $0, L_MCOUNT(%rsp)\n   movl    $0, L_MNEXT(%rsp)\n"
+    "        xor     %r10d, %r10d\n   mov     %rbx, %r11\n"
+    ".Lmw_fl:      cmp     %rbp, %r11\n   jae     .Lmw_fe\n   cmp     $64, %r10d\n"
+    "        jae     .Lmw_fe\n   lea     12(%r11), %rax\n   cmp     L_END(%rsp), %rax\n"
+    "        ja      .Lmw_fe\n   movzwl  4(%r11), %r8d\n   lea     -1(%r8), %ecx\n"
+    "        cmp     $0xfffe, %ecx\n   jae     7f\n   mov     %r8d, %ecx\n   and     $0xfffc, %r8d\n"
+    "        and     $3, %ecx\n   shl     $16, %ecx\n   or      %ecx, %r8d\n   jmp     8f\n"
+    "7:      mov     L_BLKSZ(%rsp), %r8d\n"
+    "8:      cmp     $12, %r8d\n   jb      .Lmw_fe\n   test    $3, %r8b\n   jnz     .Lmw_fe\n"
+    "        lea     (%r11,%r8), %rax\n   cmp     L_END(%rsp), %rax\n   ja      .Lmw_fe\n"
+    "        cmpl    $0, (%r11)\n   je      .Lmw_fa\n   movzbl  6(%r11), %ecx\n"
+    "        test    %ecx, %ecx\n   jz      .Lmw_fa\n   lea     8(%rcx), %eax\n"
+    "        cmp     %r8d, %eax\n   ja      .Lmw_fa\n   lea     31(%rcx), %eax\n"
+    "        and     $-32, %eax\n   lea     8(%r11,%rax), %rax\n   cmp     L_END(%rsp), %rax\n"
+    "        ja      .Lmw_fa\n   mov     %r11, %rax\n   sub     L_BUF(%rsp), %rax\n"
+    "        mov     %ax, L_AT(%rsp,%r10,2)\n   add     $8, %eax\n"
+    "        mov     %eax, L_NOFF(%rsp,%r10,4)\n   mov     %ecx, L_LEN(%rsp,%r10,4)\n"
     "        inc     %r10d\n"
-    ".Lmw_fa:\n"
-    "        add     %r8, %r11\n"
-    "        jmp     .Lmw_fl\n"
-    ".Lmw_fe:\n"
-    "        cmp     $16, %r10d\n"
-    "        jb      .Lmw_off\n"
-    "        mov     %r10d, L_N(%rsp)\n"
-    "        mov     L_NOFF-4(%rsp,%r10,4), %eax\n"
-    "        mov     L_LEN-4(%rsp,%r10,4), %ecx\n"
+    ".Lmw_fa:      add     %r8, %r11\n   jmp     .Lmw_fl\n"
+    ".Lmw_fe:      cmp     $16, %r10d\n   jb      .Lmw_off\n   mov     %r10d, L_N(%rsp)\n"
+    "        mov     L_NOFF-4(%rsp,%r10,4), %eax\n   mov     L_LEN-4(%rsp,%r10,4), %ecx\n"
     "        mov     %r10d, %edx\n"
-    ".Lmw_pad:\n"
-    "        test    $15, %edx\n"
-    "        jz      .Lmw_padded\n"
-    "        mov     %eax, L_NOFF(%rsp,%rdx,4)\n"
-    "        mov     %ecx, L_LEN(%rsp,%rdx,4)\n"
-    "        inc     %edx\n"
-    "        jmp     .Lmw_pad\n"
-    ".Lmw_padded:\n"
-    "        shr     $4, %edx\n"
-    "        mov     %edx, L_NCHUNK(%rsp)\n"
-    "        cmpb    $0, moonwater_dirhash_simd(%rip)\n"
-    "        je      .Lmw_off\n"
+    ".Lmw_pad:      test    $15, %edx\n   jz      .Lmw_padded\n"
+    "        mov     %eax, L_NOFF(%rsp,%rdx,4)\n   mov     %ecx, L_LEN(%rsp,%rdx,4)\n"
+    "        inc     %edx\n   jmp     .Lmw_pad\n"
+    ".Lmw_padded:      shr     $4, %edx\n   mov     %edx, L_NCHUNK(%rsp)\n"
+    "        cmpb    $0, moonwater_dirhash_simd(%rip)\n   je      .Lmw_off\n"
     "        testl   $(1<<MW_AVX2_BIT), boot_cpu_data+MW_CPU_CAP+4*MW_AVX2_WORD(%rip)\n"
-    "        jz      .Lmw_off\n"
-    "        call    irq_fpu_usable\n"
-    "        test    %al, %al\n"
-    "        jz      .Lmw_off\n"
-    "        mov     $2, %edi\n"
-    "        call    kernel_fpu_begin_mask\n"
-    "        movl    $0, L_K(%rsp)\n"
-    ".Lmw_chunk:\n"
-    "        mov     L_K(%rsp), %eax\n"
-    "        cmp     L_NCHUNK(%rsp), %eax\n"
-    "        jae     .Lmw_chunks\n"
-    "        mov     %eax, %ecx\n"
-    "        shl     $6, %ecx\n"
-    "        lea     L_NOFF(%rsp,%rcx), %rsi\n"
-    "        lea     L_LEN(%rsp,%rcx), %rdx\n"
-    "        shl     $1, %ecx\n"
-    "        lea     L_RES(%rsp,%rcx), %r9\n"
-    "        mov     L_BUF(%rsp), %rdi\n"
-    "        lea     L_STATE(%rsp), %rcx\n"
-    "        mov     L_FLAGS(%rsp), %r8d\n"
-    "        call    hash_half_md4_wide\n"
-    "        incl    L_K(%rsp)\n"
-    "        jmp     .Lmw_chunk\n"
-    ".Lmw_chunks:\n"
-    "        call    kernel_fpu_end\n"
-    "        mov     L_N(%rsp), %eax\n"
-    "        mov     %eax, L_MCOUNT(%rsp)\n"
-    "        jmp     .Lmw_lookup\n"
-    ".Lmw_off:\n"
-    "        movl    $0, L_ON(%rsp)\n"
-    "        jmp     .Lmw_scalar\n"
+    "        jz      .Lmw_off\n   call    irq_fpu_usable\n   test    %al, %al\n   jz      .Lmw_off\n"
+    "        mov     $2, %edi\n   call    kernel_fpu_begin_mask\n   movl    $0, L_K(%rsp)\n"
+    ".Lmw_chunk:      mov     L_K(%rsp), %eax\n   cmp     L_NCHUNK(%rsp), %eax\n"
+    "        jae     .Lmw_chunks\n   mov     %eax, %ecx\n   shl     $6, %ecx\n"
+    "        lea     L_NOFF(%rsp,%rcx), %rsi\n   lea     L_LEN(%rsp,%rcx), %rdx\n"
+    "        shl     $1, %ecx\n   lea     L_RES(%rsp,%rcx), %r9\n   mov     L_BUF(%rsp), %rdi\n"
+    "        lea     L_STATE(%rsp), %rcx\n   mov     L_FLAGS(%rsp), %r8d\n"
+    "        call    hash_half_md4_wide\n   incl    L_K(%rsp)\n   jmp     .Lmw_chunk\n"
+    ".Lmw_chunks:      call    kernel_fpu_end\n   mov     L_N(%rsp), %eax\n"
+    "        mov     %eax, L_MCOUNT(%rsp)\n   jmp     .Lmw_lookup\n"
+    ".Lmw_off:      movl    $0, L_ON(%rsp)\n   jmp     .Lmw_scalar\n"
 
     "        .pushsection .rodata.str1.1, \"aMS\", @progbits, 1\n"
     ".Lmw_fn:\n"
@@ -717,6 +459,769 @@ __asm__(
     ASM_END(htree_dirblock_to_tree)
 );
 #endif // CONFIG_X86_64
+
+#ifdef CONFIG_ARM64
+__asm__(
+    MWSET(MW_INODE_SB)
+    MWSET(MW_INODE_FLAGS)
+    MWSET(MW_INODE_BLKBITS)
+    MWSET(MW_SB_BLOCKSIZE)
+    MWSET(MW_SB_FS_INFO)
+    MWSET(MW_SBI_ES)
+    MWSET(MW_ES_INODES)
+    MWSET(MW_ES_RO_COMPAT)
+    MWSET(MW_BH_DATA)
+    MWSET(MW_BH_SIZE)
+    MWSET(MW_DX_HASH)
+    MWSET(MW_DX_MINOR)
+    MWSET(MW_S_ENCRYPTED)
+    MWSET(MW_S_CASEFOLD)
+    MWSET(MW_CSUM_FEATURE)
+    MWSET(MW_FT_DIR_CSUM)
+    MWSET(MW_NAME_LEN)
+    ".set L_ARG, 0\n"
+    ".set L_FSTR, 16\n"
+    ".set L_TMP, 32\n"
+    ".set L_BLOCK, 48\n"
+    ".set L_SHASH, 52\n"
+    ".set L_SMINOR, 56\n"
+    ".set L_COUNT, 60\n"
+    ".set L_SAVELEN, 64\n"
+    ".set L_INODES, 68\n"
+    ".set L_FRAME, 80\n"
+);
+
+__asm__(
+    ASM_FUNC(htree_dirblock_to_tree)
+    "        stp     x29, x30, [sp, #-96]!\n   mov     x29, sp\n   stp     x19, x20, [sp, #16]\n"
+    "        stp     x21, x22, [sp, #32]\n   stp     x23, x24, [sp, #48]\n"
+    "        stp     x25, x26, [sp, #64]\n   stp     x27, x28, [sp, #80]\n"
+    "        sub     sp, sp, #L_FRAME\n   mov     x19, x0\n   mov     x20, x1\n   mov     x21, x3\n"
+    "        str     w2, [sp, #L_BLOCK]\n   str     w4, [sp, #L_SHASH]\n"
+    "        str     w5, [sp, #L_SMINOR]\n   str     wzr, [sp, #L_COUNT]\n"
+    "        stp     xzr, xzr, [sp, #L_FSTR]\n"
+    "        # bh = ext4_read_dirblock(dir, block, DIRENT_HTREE): __ext4_read_dirblock(dir, block, 3, __func__, line)\n"
+    "        mov     x0, x20\n   ldr     w1, [sp, #L_BLOCK]\n   mov     w2, #3\n"
+    "        adrp    x3, .Lmw_fn\n   add     x3, x3, :lo12:.Lmw_fn\n   mov     w4, #1051\n"
+    "        bl      __ext4_read_dirblock\n   cmn     x0, #4095\n   b.hs    .Lmw_readerr\n"
+    "        mov     x22, x0\n"
+    "        # the block: where it starts, how long it is, how many inodes there are, whether checksums are on\n"
+    "        ldr     x25, [x22, #MW_BH_DATA]\n   ldr     x8, [x20, #MW_INODE_SB]\n"
+    "        ldr     x9, [x8, #MW_SB_BLOCKSIZE]\n   mov     w26, w9\n"
+    "        ldr     x10, [x8, #MW_SB_FS_INFO]\n   ldr     x10, [x10, #MW_SBI_ES]\n"
+    "        ldr     w11, [x10, #MW_ES_INODES]\n   str     w11, [sp, #L_INODES]\n"
+    "        ldr     w12, [x10, #MW_ES_RO_COMPAT]\n   tst     w12, #MW_CSUM_FEATURE\n"
+    "        cset    w12, ne\n"
+    "        # ext4_hash_in_dirent(dir): casefolded and encrypted both\n"
+    "        ldr     w13, [x20, #MW_INODE_FLAGS]\n"
+    "        mov     w15, #(MW_S_ENCRYPTED|MW_S_CASEFOLD)\n   and     w14, w13, w15\n"
+    "        cmp     w14, w15\n   cset    w27, eq\n"
+    "        # top = de + blocksize - ext4_dir_rec_len(0, csum ? NULL : dir): 8, and 8 more where the entries carry hashes\n"
+    "        mov     w15, #8\n   cbnz    w12, 1f\n   add     w15, w15, w27, lsl #3\n"
+    "1:      add x24, x25, x26\n"
+    "        sub     x24, x24, x15\n   mov     x23, x25\n"
+#ifdef CONFIG_FS_ENCRYPTION
+    "        tst     w13, #MW_S_ENCRYPTED\n   b.eq    .Lmw_loop\n   mov     x0, x20\n"
+    "        bl      __fscrypt_prepare_readdir\n   tbnz    w0, #31, .Lmw_brelse_exit\n"
+    "        mov     w0, #MW_NAME_LEN\n   add     x1, sp, #L_FSTR\n"
+    "        bl      fscrypt_fname_alloc_buffer\n   tbnz    w0, #31, .Lmw_brelse_exit\n"
+#endif
+    "                \n"
+    "        # for (; de < top; de = ext4_next_entry(de, blocksize))\n"
+    ".Lmw_loop:      cmp     x23, x24\n   b.hs    .Lmw_done\n"
+    "        # ext4_check_dir_entry: the seven tests for an ordinary entry, in registers\n"
+    "        ldrh    w0, [x23, #4]\n   sub     w1, w0, #1\n   mov     w2, #0xfffe\n"
+    "        cmp     w1, w2\n   b.hs    7f\n   and     w1, w0, #3\n   and     w0, w0, #0xfffc\n"
+    "        orr     w0, w0, w1, lsl #16\n   b       8f\n"
+    "7:      mov w0, w26\n"
+    "8:      cbnz    w27, .Lmw_slow\n   cmp     w0, #12\n   b.lt    .Lmw_slow\n   tst     w0, #3\n"
+    "        b.ne    .Lmw_slow\n   ldrb    w1, [x23, #6]\n   add     w2, w1, #11\n"
+    "        bic     w2, w2, #3\n   cmp     w0, w2\n   b.lt    .Lmw_slow\n   sub     x3, x23, x25\n"
+    "        add     w4, w3, w0\n   ldr     w5, [x22, #MW_BH_SIZE]\n   cmp     w4, w5\n"
+    "        b.gt    .Lmw_slow\n   sub     w6, w5, #12\n   cmp     w4, w6\n   b.le    1f\n"
+    "        cmp     w4, w5\n   b.ne    .Lmw_slow\n"
+    "1:      ldr w6, [x23]\n"
+    "        ldr     w7, [sp, #L_INODES]\n   cmp     w6, w7\n   b.hi    .Lmw_slow\n"
+    "        cmp     w4, w5\n   b.ne    2f\n   cmp     w1, #1\n   b.ne    2f\n"
+    "        ldrb    w8, [x23, #8]\n   cmp     w8, #46\n   b.eq    .Lmw_slow\n"
+    "2:      ldrb w8, [x23, #7]\n"
+    "        cmp     w8, #MW_FT_DIR_CSUM\n   b.eq    .Lmw_slow\n   sub     w9, w1, #1\n"
+    "        cmp     w9, #1\n   b.hi    .Lmw_ok\n   ldrb    w8, [x23, #8]\n   cmp     w8, #46\n"
+    "        b.ne    .Lmw_ok\n   ldrb    w8, [x23, #9]\n   cmp     w8, #46\n   b.eq    .Lmw_slow\n"
+    "        cbz     w8, .Lmw_slow\n   b       .Lmw_ok\n"
+    "                \n"
+    "        # not certain: the real __ext4_check_dir_entry, which also says what is wrong\n"
+    ".Lmw_slow:      ldr     w0, [sp, #L_BLOCK]\n   ldrb    w1, [x20, #MW_INODE_BLKBITS]\n"
+    "        lsl     x0, x0, x1\n   sub     x2, x23, x25\n   add     x0, x0, x2\n   mov     w0, w0\n"
+    "        str     x0, [sp, #L_ARG]\n   adrp    x0, .Lmw_fn\n   add     x0, x0, :lo12:.Lmw_fn\n"
+    "        mov     w1, #1077\n   mov     x2, x20\n   mov     x3, xzr\n   mov     x4, x23\n"
+    "        mov     x5, x22\n   mov     x6, x25\n   ldr     w7, [x22, #MW_BH_SIZE]\n"
+    "        bl      __ext4_check_dir_entry\n   cbnz    w0, .Lmw_done\n"
+    "                \n"
+    "        # the hash: from the entry itself, or from ext4fs_dirhash\n"
+    ".Lmw_ok:      cbnz    w27, .Lmw_hid\n   mov     x0, x20\n   add     x1, x23, #8\n"
+    "        ldrb    w2, [x23, #6]\n   mov     x3, x21\n   bl      ext4fs_dirhash\n"
+    "        tbz     w0, #31, .Lmw_hashed\n   str     w0, [sp, #L_COUNT]\n   b       .Lmw_done\n"
+    "                \n"
+    ".Lmw_hid:      ldrb    w1, [x23, #6]\n   mov     w9, #0\n   mov     w10, #0\n   cbz     w1, 1f\n"
+    "        ldr     w2, [x23]\n   cbz     w2, 1f\n   add     w1, w1, #11\n   bic     w1, w1, #3\n"
+    "        add     x3, x23, x1\n   ldr     w9, [x3]\n   ldr     w10, [x3, #4]\n"
+    "1:      str w9, [x21, #MW_DX_HASH]\n   str     w10, [x21, #MW_DX_MINOR]\n"
+    "                \n"
+    "        # before the start of this readdir, or deleted: skip\n"
+    ".Lmw_hashed:      ldr     w0, [x21, #MW_DX_HASH]\n   ldr     w1, [sp, #L_SHASH]\n"
+    "        cmp     w0, w1\n   b.lo    .Lmw_next\n   b.hi    1f\n"
+    "        ldr     w2, [x21, #MW_DX_MINOR]\n   ldr     w3, [sp, #L_SMINOR]\n   cmp     w2, w3\n"
+    "        b.lo    .Lmw_next\n"
+    "1:      ldr w0, [x23]\n"
+    "        cbz     w0, .Lmw_next\n"
+#ifdef CONFIG_FS_ENCRYPTION
+    "        ldr     w0, [x20, #MW_INODE_FLAGS]\n   tst     w0, #MW_S_ENCRYPTED\n"
+    "        b.ne    .Lmw_encstore\n"
+#endif
+    "        add     x0, x23, #8\n   ldrb    w1, [x23, #6]\n   stp     x0, x1, [sp, #L_TMP]\n"
+    "        mov     x0, x19\n   ldr     w1, [x21, #MW_DX_HASH]\n"
+    "        ldr     w2, [x21, #MW_DX_MINOR]\n   mov     x3, x23\n   add     x4, sp, #L_TMP\n"
+    "        bl      ext4_htree_store_dirent\n   b       .Lmw_stored\n"
+#ifdef CONFIG_FS_ENCRYPTION
+    ".Lmw_encstore:      ldr     w0, [sp, #L_FSTR+8]\n   str     w0, [sp, #L_SAVELEN]\n"
+    "        add     x0, x23, #8\n   ldrb    w1, [x23, #6]\n   stp     x0, x1, [sp, #L_TMP]\n"
+    "        mov     x0, x20\n   ldr     w1, [x21, #MW_DX_HASH]\n"
+    "        ldr     w2, [x21, #MW_DX_MINOR]\n   add     x3, sp, #L_TMP\n"
+    "        add     x4, sp, #L_FSTR\n   bl      fscrypt_fname_disk_to_usr\n"
+    "        cbnz    w0, .Lmw_storeerr\n   mov     x0, x19\n   ldr     w1, [x21, #MW_DX_HASH]\n"
+    "        ldr     w2, [x21, #MW_DX_MINOR]\n   mov     x3, x23\n   add     x4, sp, #L_FSTR\n"
+    "        bl      ext4_htree_store_dirent\n   ldr     w1, [sp, #L_SAVELEN]\n"
+    "        str     w1, [sp, #L_FSTR+8]\n"
+#endif
+    ".Lmw_stored:      cbnz    w0, .Lmw_storeerr\n   ldr     w1, [sp, #L_COUNT]\n"
+    "        add     w1, w1, #1\n   str     w1, [sp, #L_COUNT]\n"
+    ".Lmw_next:      ldrh    w0, [x23, #4]\n   sub     w1, w0, #1\n   mov     w2, #0xfffe\n"
+    "        cmp     w1, w2\n   b.hs    7f\n   and     w1, w0, #3\n   and     w0, w0, #0xfffc\n"
+    "        orr     w0, w0, w1, lsl #16\n   b       8f\n"
+    "7:      mov w0, w26\n"
+    "8:      add     x23, x23, x0\n   b       .Lmw_loop\n"
+    ".Lmw_storeerr:      str     w0, [sp, #L_COUNT]\n"
+    "                \n"
+    "        # errout: brelse(bh); fscrypt_fname_free_buffer(&fname_crypto_str); return count\n"
+    ".Lmw_done:      mov     x0, x22\n   bl      __brelse\n"
+#ifdef CONFIG_FS_ENCRYPTION
+    "        ldr     w0, [x20, #MW_INODE_FLAGS]\n   tst     w0, #MW_S_ENCRYPTED\n   b.eq    1f\n"
+    "        add     x0, sp, #L_FSTR\n   bl      fscrypt_fname_free_buffer\n"
+    "1:\n"
+#endif
+    "        ldr     w0, [sp, #L_COUNT]\n   b       .Lmw_out\n"
+#ifdef CONFIG_FS_ENCRYPTION
+    ".Lmw_brelse_exit:      str     w0, [sp, #L_COUNT]\n   mov     x0, x22\n   bl      __brelse\n"
+    "        ldr     w0, [sp, #L_COUNT]\n"
+#endif
+    ".Lmw_readerr:\n"
+    ".Lmw_out:      add     sp, sp, #L_FRAME\n   ldp     x27, x28, [sp, #80]\n"
+    "        ldp     x25, x26, [sp, #64]\n   ldp     x23, x24, [sp, #48]\n"
+    "        ldp     x21, x22, [sp, #32]\n   ldp     x19, x20, [sp, #16]\n"
+    "        ldp     x29, x30, [sp], #96\n"
+    "        " ASM_RET
+    "                \n"
+    "        .pushsection .rodata.str1.1, \"aMS\", %progbits, 1\n"
+    ".Lmw_fn:      .asciz \"htree_dirblock_to_tree\"\n"
+    "        .popsection\n"
+    ASM_END(htree_dirblock_to_tree)
+);
+#endif // CONFIG_ARM64
+
+
+#ifdef CONFIG_RISCV
+__asm__(
+    MWSET(MW_INODE_SB)
+    MWSET(MW_INODE_FLAGS)
+    MWSET(MW_INODE_BLKBITS)
+    MWSET(MW_SB_BLOCKSIZE)
+    MWSET(MW_SB_FS_INFO)
+    MWSET(MW_SBI_ES)
+    MWSET(MW_ES_INODES)
+    MWSET(MW_ES_RO_COMPAT)
+    MWSET(MW_BH_DATA)
+    MWSET(MW_BH_SIZE)
+    MWSET(MW_DX_HASH)
+    MWSET(MW_DX_MINOR)
+    MWSET(MW_S_ENCRYPTED)
+    MWSET(MW_S_CASEFOLD)
+    MWSET(MW_CSUM_FEATURE)
+    MWSET(MW_FT_DIR_CSUM)
+    MWSET(MW_NAME_LEN)
+    ".set L_ARG, 0\n"
+    ".set L_FSTR, 16\n"
+    ".set L_TMP, 32\n"
+    ".set L_BLOCK, 48\n"
+    ".set L_SHASH, 52\n"
+    ".set L_SMINOR, 56\n"
+    ".set L_COUNT, 60\n"
+    ".set L_SAVELEN, 64\n"
+    ".set L_RA, 80\n"
+    ".set L_S0, 88\n"
+    ".set L_S1, 96\n"
+    ".set L_S2, 104\n"
+    ".set L_S3, 112\n"
+    ".set L_S4, 120\n"
+    ".set L_S5, 128\n"
+    ".set L_S6, 136\n"
+    ".set L_S7, 144\n"
+    ".set L_S8, 152\n"
+    ".set L_S9, 160\n"
+    ".set L_S10, 168\n"
+    ".set L_FRAME, 176\n"
+);
+
+__asm__(
+    ASM_FUNC(htree_dirblock_to_tree)
+    "        addi    sp, sp, -L_FRAME\n   sd      ra, L_RA(sp)\n   sd      s0, L_S0(sp)\n"
+    "        sd      s1, L_S1(sp)\n   sd      s2, L_S2(sp)\n   sd      s3, L_S3(sp)\n"
+    "        sd      s4, L_S4(sp)\n   sd      s5, L_S5(sp)\n   sd      s6, L_S6(sp)\n"
+    "        sd      s7, L_S7(sp)\n   sd      s8, L_S8(sp)\n   sd      s9, L_S9(sp)\n"
+    "        sd      s10, L_S10(sp)\n   addi    s0, sp, L_FRAME\n   mv      s1, a0\n"
+    "        mv      s2, a1\n   mv      s3, a3\n   sw      a2, L_BLOCK(sp)\n"
+    "        sw      a4, L_SHASH(sp)\n   sw      a5, L_SMINOR(sp)\n   sw      zero, L_COUNT(sp)\n"
+    "        sd      zero, L_FSTR(sp)\n   sd      zero, L_FSTR+8(sp)\n"
+    "        # bh = ext4_read_dirblock(dir, block, DIRENT_HTREE): __ext4_read_dirblock(dir, block, 3, __func__, line)\n"
+    "        mv      a0, s2\n   lw      a1, L_BLOCK(sp)\n   li      a2, 3\n   lla     a3, .Lmw_fn\n"
+    "        li      a4, 1051\n   call    __ext4_read_dirblock\n   li      t0, -4095\n"
+    "        bgeu    a0, t0, .Lmw_readerr\n   mv      s4, a0\n"
+    "        # the block: where it starts, how long it is, how many inodes there are, whether checksums are on\n"
+    "        ld      s7, MW_BH_DATA(s4)\n   ld      t0, MW_INODE_SB(s2)\n"
+    "        ld      t1, MW_SB_BLOCKSIZE(t0)\n   slli    t1, t1, 32\n   srli    s8, t1, 32\n"
+    "        ld      t2, MW_SB_FS_INFO(t0)\n   ld      t2, MW_SBI_ES(t2)\n"
+    "        lwu     s10, MW_ES_INODES(t2)\n   lw      t3, MW_ES_RO_COMPAT(t2)\n"
+    "        andi    t3, t3, MW_CSUM_FEATURE\n"
+    "        # ext4_hash_in_dirent(dir): casefolded and encrypted both\n"
+    "        lw      t4, MW_INODE_FLAGS(s2)\n   li      t5, (MW_S_ENCRYPTED|MW_S_CASEFOLD)\n"
+    "        and     t4, t4, t5\n   sub     t4, t4, t5\n   seqz    s9, t4\n"
+    "        # top = de + blocksize - ext4_dir_rec_len(0, csum ? NULL : dir): 8, and 8 more where the entries carry hashes\n"
+    "        li      t6, 8\n   bnez    t3, 1f\n   slli    t4, s9, 3\n   add     t6, t6, t4\n"
+    "1:      add s6, s7, s8\n"
+    "        sub     s6, s6, t6\n   mv      s5, s7\n"
+#ifdef CONFIG_FS_ENCRYPTION
+    "        lw      t0, MW_INODE_FLAGS(s2)\n   li      t1, MW_S_ENCRYPTED\n   and     t0, t0, t1\n"
+    "        beqz    t0, .Lmw_loop\n   mv      a0, s2\n   call    __fscrypt_prepare_readdir\n"
+    "        bltz    a0, .Lmw_brelse_exit\n   li      a0, MW_NAME_LEN\n   addi    a1, sp, L_FSTR\n"
+    "        call    fscrypt_fname_alloc_buffer\n   bltz    a0, .Lmw_brelse_exit\n"
+#endif
+    "                \n"
+    "        # for (; de < top; de = ext4_next_entry(de, blocksize))\n"
+    ".Lmw_loop:      bgeu    s5, s6, .Lmw_done\n"
+    "        # ext4_check_dir_entry: the seven tests for an ordinary entry, in registers\n"
+    "        lhu     a0, 4(s5)\n   addi    t0, a0, -1\n   li      t1, 0xfffe\n"
+    "        bgeu    t0, t1, 7f\n   li      t1, 0xfffc\n   andi    t0, a0, 3\n"
+    "        and     a0, a0, t1\n   slli    t0, t0, 16\n   or      a0, a0, t0\n   j       8f\n"
+    "7:      mv a0, s8\n"
+    "8:      bnez    s9, .Lmw_slow\n   li      t0, 12\n   blt     a0, t0, .Lmw_slow\n"
+    "        andi    t0, a0, 3\n   bnez    t0, .Lmw_slow\n   lbu     a1, 6(s5)\n"
+    "        addi    t0, a1, 11\n   andi    t0, t0, -4\n   blt     a0, t0, .Lmw_slow\n"
+    "        sub     a2, s5, s7\n   addw    a3, a2, a0\n   lw      a4, MW_BH_SIZE(s4)\n"
+    "        bgt     a3, a4, .Lmw_slow\n   addiw   t0, a4, -12\n   ble     a3, t0, 1f\n"
+    "        bne     a3, a4, .Lmw_slow\n"
+    "1:      lwu t0, 0(s5)\n"
+    "        bgtu    t0, s10, .Lmw_slow\n   bne     a3, a4, 2f\n   li      t1, 1\n"
+    "        bne     a1, t1, 2f\n   lbu     t2, 8(s5)\n   li      t3, 46\n"
+    "        beq     t2, t3, .Lmw_slow\n"
+    "2:      lbu t2, 7(s5)\n"
+    "        li      t3, MW_FT_DIR_CSUM\n   beq     t2, t3, .Lmw_slow\n   addi    t0, a1, -1\n"
+    "        li      t1, 1\n   bgtu    t0, t1, .Lmw_ok\n   lbu     t2, 8(s5)\n   li      t3, 46\n"
+    "        bne     t2, t3, .Lmw_ok\n   lbu     t2, 9(s5)\n   beq     t2, t3, .Lmw_slow\n"
+    "        beqz    t2, .Lmw_slow\n   j       .Lmw_ok\n"
+    "                \n"
+    "        # not certain: the real __ext4_check_dir_entry, which also says what is wrong\n"
+    ".Lmw_slow:      lwu     t0, L_BLOCK(sp)\n   lbu     t1, MW_INODE_BLKBITS(s2)\n"
+    "        sll     t0, t0, t1\n   sub     t2, s5, s7\n   add     t0, t0, t2\n"
+    "        slli    t0, t0, 32\n   srli    t0, t0, 32\n   sd      t0, L_ARG(sp)\n"
+    "        lla     a0, .Lmw_fn\n   li      a1, 1077\n   mv      a2, s2\n   li      a3, 0\n"
+    "        mv      a4, s5\n   mv      a5, s4\n   mv      a6, s7\n   lw      a7, MW_BH_SIZE(s4)\n"
+    "        call    __ext4_check_dir_entry\n   bnez    a0, .Lmw_done\n"
+    "                \n"
+    "        # the hash: from the entry itself, or from ext4fs_dirhash\n"
+    ".Lmw_ok:      bnez    s9, .Lmw_hid\n   mv      a0, s2\n   addi    a1, s5, 8\n"
+    "        lbu     a2, 6(s5)\n   mv      a3, s3\n   call    ext4fs_dirhash\n"
+    "        bgez    a0, .Lmw_hashed\n   sw      a0, L_COUNT(sp)\n   j       .Lmw_done\n"
+    "                \n"
+    ".Lmw_hid:      lbu     a1, 6(s5)\n   li      a2, 0\n   li      a3, 0\n   beqz    a1, 1f\n"
+    "        lwu     t0, 0(s5)\n   beqz    t0, 1f\n   addi    t1, a1, 11\n   andi    t1, t1, -4\n"
+    "        add     t1, s5, t1\n   lw      a2, 0(t1)\n   lw      a3, 4(t1)\n"
+    "1:      sw a2, MW_DX_HASH(s3)\n   sw      a3, MW_DX_MINOR(s3)\n"
+    "                \n"
+    "        # before the start of this readdir, or deleted: skip\n"
+    ".Lmw_hashed:      lwu     t0, MW_DX_HASH(s3)\n   lwu     t1, L_SHASH(sp)\n"
+    "        bltu    t0, t1, .Lmw_next\n   bgtu    t0, t1, 1f\n   lwu     t2, MW_DX_MINOR(s3)\n"
+    "        lwu     t3, L_SMINOR(sp)\n   bltu    t2, t3, .Lmw_next\n"
+    "1:      lwu t0, 0(s5)\n   beqz    t0, .Lmw_next\n"
+#ifdef CONFIG_FS_ENCRYPTION
+    "        lw      t0, MW_INODE_FLAGS(s2)\n   li      t1, MW_S_ENCRYPTED\n   and     t0, t0, t1\n"
+    "        bnez    t0, .Lmw_encstore\n"
+#endif
+    "        addi    t0, s5, 8\n   lbu     t1, 6(s5)\n   sd      t0, L_TMP(sp)\n"
+    "        sd      t1, L_TMP+8(sp)\n   mv      a0, s1\n   lw      a1, MW_DX_HASH(s3)\n"
+    "        lw      a2, MW_DX_MINOR(s3)\n   mv      a3, s5\n   addi    a4, sp, L_TMP\n"
+    "        call    ext4_htree_store_dirent\n   j       .Lmw_stored\n"
+#ifdef CONFIG_FS_ENCRYPTION
+    ".Lmw_encstore:      lw      t0, L_FSTR+8(sp)\n   sw      t0, L_SAVELEN(sp)\n"
+    "        addi    t0, s5, 8\n   lbu     t1, 6(s5)\n   sd      t0, L_TMP(sp)\n"
+    "        sd      t1, L_TMP+8(sp)\n   mv      a0, s2\n   lw      a1, MW_DX_HASH(s3)\n"
+    "        lw      a2, MW_DX_MINOR(s3)\n   addi    a3, sp, L_TMP\n   addi    a4, sp, L_FSTR\n"
+    "        call    fscrypt_fname_disk_to_usr\n   bnez    a0, .Lmw_storeerr\n   mv      a0, s1\n"
+    "        lw      a1, MW_DX_HASH(s3)\n   lw      a2, MW_DX_MINOR(s3)\n   mv      a3, s5\n"
+    "        addi    a4, sp, L_FSTR\n   call    ext4_htree_store_dirent\n"
+    "        lw      t0, L_SAVELEN(sp)\n   sw      t0, L_FSTR+8(sp)\n"
+#endif
+    ".Lmw_stored:      bnez    a0, .Lmw_storeerr\n   lw      t0, L_COUNT(sp)\n   addiw   t0, t0, 1\n"
+    "        sw      t0, L_COUNT(sp)\n"
+    ".Lmw_next:      lhu     a0, 4(s5)\n   addi    t0, a0, -1\n   li      t1, 0xfffe\n"
+    "        bgeu    t0, t1, 7f\n   li      t1, 0xfffc\n   andi    t0, a0, 3\n"
+    "        and     a0, a0, t1\n   slli    t0, t0, 16\n   or      a0, a0, t0\n   j       8f\n"
+    "7:      mv a0, s8\n"
+    "8:      add     s5, s5, a0\n   j       .Lmw_loop\n"
+    ".Lmw_storeerr:      sw      a0, L_COUNT(sp)\n"
+    "                \n"
+    "        # errout: brelse(bh); fscrypt_fname_free_buffer(&fname_crypto_str); return count\n"
+    ".Lmw_done:      mv      a0, s4\n   call    __brelse\n"
+#ifdef CONFIG_FS_ENCRYPTION
+    "        lw      t0, MW_INODE_FLAGS(s2)\n   li      t1, MW_S_ENCRYPTED\n   and     t0, t0, t1\n"
+    "        beqz    t0, 1f\n   addi    a0, sp, L_FSTR\n   call    fscrypt_fname_free_buffer\n"
+    "1:\n"
+#endif
+    "        lw      a0, L_COUNT(sp)\n   j       .Lmw_out\n"
+#ifdef CONFIG_FS_ENCRYPTION
+    ".Lmw_brelse_exit:      sw      a0, L_COUNT(sp)\n   mv      a0, s4\n   call    __brelse\n"
+    "        lw      a0, L_COUNT(sp)\n"
+#endif
+    ".Lmw_readerr:\n"
+    ".Lmw_out:      ld      ra, L_RA(sp)\n   ld      s0, L_S0(sp)\n   ld      s1, L_S1(sp)\n"
+    "        ld      s2, L_S2(sp)\n   ld      s3, L_S3(sp)\n   ld      s4, L_S4(sp)\n"
+    "        ld      s5, L_S5(sp)\n   ld      s6, L_S6(sp)\n   ld      s7, L_S7(sp)\n"
+    "        ld      s8, L_S8(sp)\n   ld      s9, L_S9(sp)\n   ld      s10, L_S10(sp)\n"
+    "        addi    sp, sp, L_FRAME\n"
+    "        " ASM_RET
+    "                \n"
+    "        .pushsection .rodata.str1.1, \"aMS\", @progbits, 1\n"
+    ".Lmw_fn:      .asciz \"htree_dirblock_to_tree\"\n"
+    "        .popsection\n"
+    ASM_END(htree_dirblock_to_tree)
+);
+#endif // CONFIG_RISCV
+
+
+//
+//       ext4_find_dest_de -- fs/ext4/namei.c
+//
+//       int ext4_find_dest_de(struct inode *dir, struct buffer_head *bh,
+//                             void *buf, int buf_size,
+//                             struct ext4_filename *fname,
+//                             struct ext4_dir_entry_2 **dest_de)
+//
+//       Where a new name goes in a directory block: it walks the entries,
+//       refuses the name if one is already there, and stops at the first that
+//       has room for it (a deleted one is all room, a live one what its name
+//       leaves over). Every create, mkdir, link, symlink and rename into a
+//       directory runs it over the block, and the C calls out of line for
+//       every entry: __ext4_check_dir_entry, nine arguments, and ext4_match,
+//       which calls fscrypt_match_name. In a profile of create and unlink in
+//       a guest running this kernel those were about 17% of the pair, with
+//       the search that finds the name to delete.
+//
+//       The port is the C function's walk with both calls written out. The
+//       seven tests of __ext4_check_dir_entry for an ordinary entry are made
+//       in registers -- the real function is still what runs for a fake entry
+//       ("." and "..", the checksum tail), a directory that keeps hashes in
+//       its entries, and any entry that fails, so an error is reported by the
+//       same code in the same words -- and the name compare is made in place
+//       when the directory does not fold case and the name is there to
+//       compare: an entry in use, the same length, the same bytes, eight at a
+//       time on the machines that take unaligned loads. Anything else is the
+//       real ext4_match, which loses its static to be called. The record
+//       length is decoded twice, as the C does: against the superblock's block
+//       size for the check and against buf_size for the walk, which differ for
+//       an inline directory.
+//
+//       MEASURED. A microbenchmark, natively on a Ryzen 9 9950X (Zen 5): one
+//       call over a full 4 KiB block of 134 entries with names of 12 to 28
+//       characters, a name that is not there, so every entry is walked --
+//
+//           the C (GCC -O2)        590 ns      4.4 ns an entry
+//           this port              350 ns      2.6 ns an entry     1.7x
+//
+//       That is the whole of what is claimed: the loop is a chain, each
+//       entry's address the previous one's plus its record length, so the
+//       floor is the load-to-use of one rec_len per entry and not the
+//       arithmetic around it, and the gain is the two out-of-line calls and
+//       the nine arguments the C makes for every entry. A create is one call
+//       of this over the block it lands in. In a KVM guest, the same kernel
+//       with and without this port, three interleaved runs each, minimum over
+//       bursts: create + unlink 2989 -> 2909 ns (-2.7%), rename 4070 -> 3907
+//       (-4.0%), mkdir + rmdir -1.3%. The noise floor of that method is about 4%,
+//       so those are the sign of a small gain and not a measurement of one; the
+//       block is mostly not this loop's. The same image lists every directory
+//       of a reference ext4 image byte-for-byte as the host's kernel does.
+//
+//> arch x86_64 arm64 riscv64
+//> perf full 4 KiB block, 134 entries: 590 -> 350 ns (1.7x); guest create+unlink -2.7% (noise floor 4%)
+//> replace fs/ext4/namei.c ext4_find_dest_de
+//> unstatic fs/ext4/namei.c ext4_match
+//> include "../../../fs/ext4/ext4.h"
+//> offset MW_FN_NAME ext4_filename disk_name.name
+//> offset MW_FN_LEN ext4_filename disk_name.len
+//> const MW_EFSCORRUPTED EFSCORRUPTED
+//> const MW_EEXIST EEXIST
+//> const MW_ENOSPC ENOSPC
+#ifdef CONFIG_X86_64
+__asm__(
+    MWSET(MW_FN_NAME)
+    MWSET(MW_FN_LEN)
+    MWSET(MW_EFSCORRUPTED)
+    MWSET(MW_EEXIST)
+    MWSET(MW_ENOSPC)
+    ".set F_ARGS, 0\n"
+    ".set F_DEST, 32\n"
+    ".set F_BUFSZ, 40\n"
+    ".set F_OFF, 44\n"
+    ".set F_RECLEN, 48\n"
+    ".set F_INODES, 52\n"
+    ".set F_HID8, 56\n"
+    ".set F_HIDF, 60\n"
+    ".set F_BLKSZ, 64\n"
+    ".set F_FRAME, 72\n"
+);
+
+__asm__(
+    ASM_FUNC(ext4_find_dest_de)
+    "        push    %rbp\n   push    %r15\n   push    %r14\n   push    %r13\n"
+    "        push    %r12\n   push    %rbx\n   sub     $F_FRAME, %rsp\n   mov     %rdi, %r12\n"
+    "        mov     %rsi, %r13\n   mov     %rdx, %r14\n   mov     %r8, %r15\n"
+    "        mov     %r9, F_DEST(%rsp)\n   mov     %ecx, F_BUFSZ(%rsp)\n"
+    "        movl    $0, F_OFF(%rsp)\n"
+    "        # ext4_hash_in_dirent(dir): casefolded and encrypted both\n"
+    "        mov     MW_INODE_FLAGS(%r12), %eax\n"
+    "        and     $(MW_S_ENCRYPTED|MW_S_CASEFOLD), %eax\n"
+    "        cmp     $(MW_S_ENCRYPTED|MW_S_CASEFOLD), %eax\n   sete    %al\n   movzbl  %al, %eax\n"
+    "        mov     %eax, F_HIDF(%rsp)\n   shl     $3, %eax\n   mov     %eax, F_HID8(%rsp)\n"
+    "        # reclen = ext4_dir_rec_len(fname_len(fname), dir), an unsigned short; top = buf + buf_size - reclen\n"
+    "        mov     MW_FN_LEN(%r15), %edx\n   add     $11, %edx\n   and     $-4, %edx\n"
+    "        add     %eax, %edx\n   movzwl  %dx, %edx\n   mov     %edx, F_RECLEN(%rsp)\n"
+    "        movslq  F_BUFSZ(%rsp), %rcx\n   lea     (%r14,%rcx), %rbp\n   sub     %rdx, %rbp\n"
+    "        mov     MW_INODE_SB(%r12), %rax\n   mov     MW_SB_BLOCKSIZE(%rax), %ecx\n"
+    "        mov     %ecx, F_BLKSZ(%rsp)\n   mov     MW_SB_FS_INFO(%rax), %rax\n"
+    "        mov     MW_SBI_ES(%rax), %rax\n   mov     MW_ES_INODES(%rax), %esi\n"
+    "        mov     %esi, F_INODES(%rsp)\n   mov     %r14, %rbx\n"
+    "        # while (de <= top)\n"
+    ".Lfd_loop:      cmp     %rbp, %rbx\n   ja      .Lfd_after\n"
+    "        # ext4_check_dir_entry: the seven tests for an ordinary entry, in registers\n"
+    "        movzwl  4(%rbx), %eax\n   lea     -1(%rax), %ecx\n   cmp     $0xfffe, %ecx\n"
+    "        jae     7f\n   mov     %eax, %ecx\n   and     $0xfffc, %eax\n   and     $3, %ecx\n"
+    "        shl     $16, %ecx\n   or      %ecx, %eax\n   jmp     8f\n"
+    "7:      mov F_BLKSZ(%rsp), %eax\n"
+    "8:      cmpl    $0, F_HIDF(%rsp)\n   jne     .Lfd_slow\n   cmp     $12, %eax\n"
+    "        jl      .Lfd_slow\n   test    $3, %al\n   jnz     .Lfd_slow\n   movzbl  6(%rbx), %esi\n"
+    "        lea     11(%rsi), %edi\n   and     $-4, %edi\n   cmp     %edi, %eax\n"
+    "        jl      .Lfd_slow\n   mov     %rbx, %rdx\n   sub     %r14, %rdx\n"
+    "        lea     (%rdx,%rax), %ecx\n   mov     F_BUFSZ(%rsp), %r8d\n   cmp     %r8d, %ecx\n"
+    "        jg      .Lfd_slow\n   lea     -12(%r8), %edi\n   cmp     %edi, %ecx\n   jle     1f\n"
+    "        cmp     %r8d, %ecx\n   jne     .Lfd_slow\n"
+    "1:      mov (%rbx), %edi\n"
+    "        cmp     F_INODES(%rsp), %edi\n   ja      .Lfd_slow\n   cmp     %r8d, %ecx\n"
+    "        jne     2f\n   cmp     $1, %esi\n   jne     2f\n   cmpb    $46, 8(%rbx)\n"
+    "        je      .Lfd_slow\n"
+    "2:      cmpb $MW_FT_DIR_CSUM, 7(%rbx)\n"
+    "        je      .Lfd_slow\n   lea     -1(%rsi), %edi\n   cmp     $1, %edi\n   ja      .Lfd_ok\n"
+    "        cmpb    $46, 8(%rbx)\n   jne     .Lfd_ok\n   cmpb    $46, 9(%rbx)\n"
+    "        je      .Lfd_slow\n   cmpb    $0, 9(%rbx)\n   je      .Lfd_slow\n   jmp     .Lfd_ok\n"
+    "                \n"
+    "        # not certain: the real __ext4_check_dir_entry, which also says what is wrong\n"
+    ".Lfd_slow:      mov     F_OFF(%rsp), %eax\n   mov     %rax, 16(%rsp)\n"
+    "        mov     %r14, 0(%rsp)\n   mov     F_BUFSZ(%rsp), %eax\n   mov     %rax, 8(%rsp)\n"
+    "        lea     .Lfd_fn(%rip), %rdi\n   mov     $2050, %esi\n   mov     %r12, %rdx\n"
+    "        xor     %ecx, %ecx\n   mov     %rbx, %r8\n   mov     %r13, %r9\n"
+    "        call    __ext4_check_dir_entry\n   test    %eax, %eax\n   jnz     .Lfd_corrupt\n"
+    "                \n"
+    "        # ext4_match: an entry in use, a name to compare, and a directory that does not fold case\n"
+    ".Lfd_ok:      cmpl    $0, (%rbx)\n   je      .Lfd_no\n"
+    "        testl   $MW_S_CASEFOLD, MW_INODE_FLAGS(%r12)\n   jnz     .Lfd_slowmatch\n"
+    "        mov     MW_FN_NAME(%r15), %rsi\n   test    %rsi, %rsi\n   jz      .Lfd_slowmatch\n"
+    "        movzbl  6(%rbx), %eax\n   cmp     MW_FN_LEN(%r15), %eax\n   jne     .Lfd_no\n"
+    "        lea     8(%rbx), %rdi\n   cmp     $8, %eax\n   jae     5f\n   cmp     $4, %eax\n"
+    "        jae     4f\n   test    %eax, %eax\n   jz      .Lfd_exist\n   cmp     $2, %eax\n"
+    "        jae     3f\n   movzbl  (%rdi), %ecx\n   cmp     (%rsi), %cl\n   jne     .Lfd_no\n"
+    "        jmp     .Lfd_exist\n"
+    "3:      movzwl (%rdi), %ecx\n"
+    "        cmp     (%rsi), %cx\n   jne     .Lfd_no\n   movzwl  -2(%rdi,%rax), %ecx\n"
+    "        cmp     -2(%rsi,%rax), %cx\n   jne     .Lfd_no\n   jmp     .Lfd_exist\n"
+    "4:      mov (%rdi), %ecx\n"
+    "        cmp     (%rsi), %ecx\n   jne     .Lfd_no\n   mov     -4(%rdi,%rax), %ecx\n"
+    "        cmp     -4(%rsi,%rax), %ecx\n   jne     .Lfd_no\n   jmp     .Lfd_exist\n"
+    "5:      lea -8(%rax), %edx\n"
+    "        xor     %ecx, %ecx\n"
+    "6:      mov (%rdi,%rcx), %r8\n"
+    "        cmp     (%rsi,%rcx), %r8\n   jne     .Lfd_no\n   add     $8, %ecx\n"
+    "        cmp     %edx, %ecx\n   jb      6b\n   mov     (%rdi,%rdx), %r8\n"
+    "        cmp     (%rsi,%rdx), %r8\n   jne     .Lfd_no\n   jmp     .Lfd_exist\n"
+    ".Lfd_slowmatch:      mov     %r12, %rdi\n   mov     %r15, %rsi\n   mov     %rbx, %rdx\n"
+    "        call    ext4_match\n   test    %al, %al\n   jnz     .Lfd_exist\n"
+    "                \n"
+    "        # room: a deleted entry is all room, a live one what its name leaves over\n"
+    ".Lfd_no:      movzbl  6(%rbx), %eax\n   add     $11, %eax\n   and     $-4, %eax\n"
+    "        add     F_HID8(%rsp), %eax\n   cmpl    $0, (%rbx)\n   jne     1f\n"
+    "        xor     %eax, %eax\n"
+    "1:      movzwl  4(%rbx), %ecx\n   lea     -1(%rcx), %edx\n   cmp     $0xfffe, %edx\n"
+    "        jae     7f\n   mov     %ecx, %edx\n   and     $0xfffc, %ecx\n   and     $3, %edx\n"
+    "        shl     $16, %edx\n   or      %edx, %ecx\n   jmp     8f\n"
+    "7:      mov F_BUFSZ(%rsp), %ecx\n"
+    "8:      mov     %ecx, %edx\n   sub     %eax, %edx\n   cmp     F_RECLEN(%rsp), %edx\n"
+    "        jge     .Lfd_after\n   add     %rcx, %rbx\n   add     %ecx, F_OFF(%rsp)\n"
+    "        jmp     .Lfd_loop\n"
+    ".Lfd_after:      cmp     %rbp, %rbx\n   ja      .Lfd_nospc\n   mov     F_DEST(%rsp), %rax\n"
+    "        mov     %rbx, (%rax)\n   xor     %eax, %eax\n   jmp     .Lfd_out\n"
+    ".Lfd_nospc:      mov     $-MW_ENOSPC, %eax\n   jmp     .Lfd_out\n"
+    ".Lfd_exist:      mov     $-MW_EEXIST, %eax\n   jmp     .Lfd_out\n"
+    ".Lfd_corrupt:      mov     $-MW_EFSCORRUPTED, %eax\n"
+    ".Lfd_out:      add     $F_FRAME, %rsp\n   pop     %rbx\n   pop     %r12\n   pop     %r13\n"
+    "        pop     %r14\n   pop     %r15\n   pop     %rbp\n"
+    "        " ASM_RET
+    "                \n"
+    "        .pushsection .rodata.str1.1, \"aMS\", @progbits, 1\n"
+    ".Lfd_fn:      .asciz \"ext4_find_dest_de\"\n"
+    "        .popsection\n"
+    ASM_END(ext4_find_dest_de)
+);
+#endif // CONFIG_X86_64
+
+
+#ifdef CONFIG_ARM64
+__asm__(
+    MWSET(MW_FN_NAME)
+    MWSET(MW_FN_LEN)
+    MWSET(MW_EFSCORRUPTED)
+    MWSET(MW_EEXIST)
+    MWSET(MW_ENOSPC)
+    ".set F_ARG, 0\n"
+    ".set F_DEST, 16\n"
+    ".set F_BUFSZ, 24\n"
+    ".set F_OFF, 28\n"
+    ".set F_FRAME, 48\n"
+);
+
+__asm__(
+    ASM_FUNC(ext4_find_dest_de)
+    "        stp     x29, x30, [sp, #-96]!\n   mov     x29, sp\n   stp     x19, x20, [sp, #16]\n"
+    "        stp     x21, x22, [sp, #32]\n   stp     x23, x24, [sp, #48]\n"
+    "        stp     x25, x26, [sp, #64]\n   stp     x27, x28, [sp, #80]\n"
+    "        sub     sp, sp, #F_FRAME\n   mov     x19, x0\n   mov     x20, x1\n   mov     x21, x2\n"
+    "        mov     x22, x4\n   str     x5, [sp, #F_DEST]\n   str     w3, [sp, #F_BUFSZ]\n"
+    "        str     wzr, [sp, #F_OFF]\n"
+    "        # ext4_hash_in_dirent(dir): casefolded and encrypted both, kept as the eight bytes it adds to a record\n"
+    "        ldr     w8, [x19, #MW_INODE_FLAGS]\n   mov     w9, #(MW_S_ENCRYPTED|MW_S_CASEFOLD)\n"
+    "        and     w8, w8, w9\n   cmp     w8, w9\n   cset    w25, eq\n   lsl     w25, w25, #3\n"
+    "        # reclen = ext4_dir_rec_len(fname_len(fname), dir), an unsigned short; top = buf + buf_size - reclen\n"
+    "        ldr     w10, [x22, #MW_FN_LEN]\n   add     w10, w10, #11\n   bic     w10, w10, #3\n"
+    "        add     w10, w10, w25\n   and     w26, w10, #0xffff\n   ldrsw   x11, [sp, #F_BUFSZ]\n"
+    "        add     x24, x21, x11\n   sub     x24, x24, x26\n   ldr     x8, [x19, #MW_INODE_SB]\n"
+    "        ldr     x9, [x8, #MW_SB_BLOCKSIZE]\n   mov     w28, w9\n"
+    "        ldr     x9, [x8, #MW_SB_FS_INFO]\n   ldr     x9, [x9, #MW_SBI_ES]\n"
+    "        ldr     w27, [x9, #MW_ES_INODES]\n   mov     x23, x21\n"
+    "        # while (de <= top)\n"
+    ".Lfd_loop:      cmp     x23, x24\n   b.hi    .Lfd_after\n"
+    "        # ext4_check_dir_entry: the seven tests for an ordinary entry, in registers\n"
+    "        ldrh    w0, [x23, #4]\n   sub     w1, w0, #1\n   mov     w2, #0xfffe\n"
+    "        cmp     w1, w2\n   b.hs    7f\n   and     w1, w0, #3\n   and     w0, w0, #0xfffc\n"
+    "        orr     w0, w0, w1, lsl #16\n   b       8f\n"
+    "7:      mov w0, w28\n"
+    "8:      cbnz    w25, .Lfd_slow\n   cmp     w0, #12\n   b.lt    .Lfd_slow\n   tst     w0, #3\n"
+    "        b.ne    .Lfd_slow\n   ldrb    w1, [x23, #6]\n   add     w2, w1, #11\n"
+    "        bic     w2, w2, #3\n   cmp     w0, w2\n   b.lt    .Lfd_slow\n   sub     x3, x23, x21\n"
+    "        add     w4, w3, w0\n   ldr     w5, [sp, #F_BUFSZ]\n   cmp     w4, w5\n"
+    "        b.gt    .Lfd_slow\n   sub     w6, w5, #12\n   cmp     w4, w6\n   b.le    1f\n"
+    "        cmp     w4, w5\n   b.ne    .Lfd_slow\n"
+    "1:      ldr w6, [x23]\n"
+    "        cmp     w6, w27\n   b.hi    .Lfd_slow\n   cmp     w4, w5\n   b.ne    2f\n"
+    "        cmp     w1, #1\n   b.ne    2f\n   ldrb    w8, [x23, #8]\n   cmp     w8, #46\n"
+    "        b.eq    .Lfd_slow\n"
+    "2:      ldrb w8, [x23, #7]\n"
+    "        cmp     w8, #MW_FT_DIR_CSUM\n   b.eq    .Lfd_slow\n   sub     w9, w1, #1\n"
+    "        cmp     w9, #1\n   b.hi    .Lfd_ok\n   ldrb    w8, [x23, #8]\n   cmp     w8, #46\n"
+    "        b.ne    .Lfd_ok\n   ldrb    w8, [x23, #9]\n   cmp     w8, #46\n   b.eq    .Lfd_slow\n"
+    "        cbz     w8, .Lfd_slow\n   b       .Lfd_ok\n"
+    "                \n"
+    "        # not certain: the real __ext4_check_dir_entry, which also says what is wrong\n"
+    ".Lfd_slow:      ldr     w0, [sp, #F_OFF]\n   str     x0, [sp, #F_ARG]\n   adrp    x0, .Lfd_fn\n"
+    "        add     x0, x0, :lo12:.Lfd_fn\n   mov     w1, #2050\n   mov     x2, x19\n"
+    "        mov     x3, xzr\n   mov     x4, x23\n   mov     x5, x20\n   mov     x6, x21\n"
+    "        ldr     w7, [sp, #F_BUFSZ]\n   bl      __ext4_check_dir_entry\n"
+    "        cbnz    w0, .Lfd_corrupt\n"
+    "                \n"
+    "        # ext4_match: an entry in use, a name to compare, and a directory that does not fold case\n"
+    ".Lfd_ok:      ldr     w0, [x23]\n   cbz     w0, .Lfd_no\n"
+    "        ldr     w0, [x19, #MW_INODE_FLAGS]\n   tst     w0, #MW_S_CASEFOLD\n"
+    "        b.ne    .Lfd_slowmatch\n   ldr     x1, [x22, #MW_FN_NAME]\n"
+    "        cbz     x1, .Lfd_slowmatch\n   ldrb    w2, [x23, #6]\n"
+    "        ldr     w3, [x22, #MW_FN_LEN]\n   cmp     w2, w3\n   b.ne    .Lfd_no\n"
+    "        add     x0, x23, #8\n   cmp     w2, #8\n   b.hs    5f\n   cmp     w2, #4\n"
+    "        b.hs    4f\n   cbz     w2, .Lfd_exist\n   cmp     w2, #2\n   b.hs    3f\n"
+    "        ldrb    w3, [x0]\n   ldrb    w4, [x1]\n   cmp     w3, w4\n   b.ne    .Lfd_no\n"
+    "        b       .Lfd_exist\n"
+    "3:      ldrh w3, [x0]\n"
+    "        ldrh    w4, [x1]\n   cmp     w3, w4\n   b.ne    .Lfd_no\n   add     x5, x0, x2\n"
+    "        add     x6, x1, x2\n   ldrh    w3, [x5, #-2]\n   ldrh    w4, [x6, #-2]\n"
+    "        cmp     w3, w4\n   b.ne    .Lfd_no\n   b       .Lfd_exist\n"
+    "4:      ldr w3, [x0]\n"
+    "        ldr     w4, [x1]\n   cmp     w3, w4\n   b.ne    .Lfd_no\n   add     x5, x0, x2\n"
+    "        add     x6, x1, x2\n   ldr     w3, [x5, #-4]\n   ldr     w4, [x6, #-4]\n"
+    "        cmp     w3, w4\n   b.ne    .Lfd_no\n   b       .Lfd_exist\n"
+    "5:      sub w5, w2, #8\n"
+    "        mov     x6, xzr\n"
+    "6:      ldr x3, [x0, x6]\n"
+    "        ldr     x4, [x1, x6]\n   cmp     x3, x4\n   b.ne    .Lfd_no\n   add     w6, w6, #8\n"
+    "        cmp     w6, w5\n   b.lo    6b\n   ldr     x3, [x0, x5]\n   ldr     x4, [x1, x5]\n"
+    "        cmp     x3, x4\n   b.ne    .Lfd_no\n   b       .Lfd_exist\n"
+    ".Lfd_slowmatch:      mov     x0, x19\n   mov     x1, x22\n   mov     x2, x23\n"
+    "        bl      ext4_match\n   tst     w0, #0xff\n   b.ne    .Lfd_exist\n"
+    "                \n"
+    "        # room: a deleted entry is all room, a live one what its name leaves over\n"
+    ".Lfd_no:      ldrb    w0, [x23, #6]\n   add     w0, w0, #11\n   bic     w0, w0, #3\n"
+    "        add     w0, w0, w25\n   ldr     w1, [x23]\n   cmp     w1, #0\n"
+    "        csel    w0, wzr, w0, eq\n   ldrh    w1, [x23, #4]\n   sub     w2, w1, #1\n"
+    "        mov     w3, #0xfffe\n   cmp     w2, w3\n   b.hs    7f\n   and     w2, w1, #3\n"
+    "        and     w1, w1, #0xfffc\n   orr     w1, w1, w2, lsl #16\n   b       8f\n"
+    "7:      ldr w1, [sp, #F_BUFSZ]\n"
+    "8:      sub     w2, w1, w0\n   cmp     w2, w26\n   b.ge    .Lfd_after\n   add     x23, x23, x1\n"
+    "        ldr     w3, [sp, #F_OFF]\n   add     w3, w3, w1\n   str     w3, [sp, #F_OFF]\n"
+    "        b       .Lfd_loop\n"
+    ".Lfd_after:      cmp     x23, x24\n   b.hi    .Lfd_nospc\n   ldr     x0, [sp, #F_DEST]\n"
+    "        str     x23, [x0]\n   mov     w0, #0\n   b       .Lfd_out\n"
+    ".Lfd_nospc:      mov     w0, #-MW_ENOSPC\n   b       .Lfd_out\n"
+    ".Lfd_exist:      mov     w0, #-MW_EEXIST\n   b       .Lfd_out\n"
+    ".Lfd_corrupt:      mov     w0, #-MW_EFSCORRUPTED\n"
+    ".Lfd_out:      add     sp, sp, #F_FRAME\n   ldp     x27, x28, [sp, #80]\n"
+    "        ldp     x25, x26, [sp, #64]\n   ldp     x23, x24, [sp, #48]\n"
+    "        ldp     x21, x22, [sp, #32]\n   ldp     x19, x20, [sp, #16]\n"
+    "        ldp     x29, x30, [sp], #96\n"
+    "        " ASM_RET
+    "                \n"
+    "        .pushsection .rodata.str1.1, \"aMS\", %progbits, 1\n"
+    ".Lfd_fn:      .asciz \"ext4_find_dest_de\"\n"
+    "        .popsection\n"
+    ASM_END(ext4_find_dest_de)
+);
+#endif // CONFIG_ARM64
+
+
+#ifdef CONFIG_RISCV
+__asm__(
+    MWSET(MW_FN_NAME)
+    MWSET(MW_FN_LEN)
+    MWSET(MW_EFSCORRUPTED)
+    MWSET(MW_EEXIST)
+    MWSET(MW_ENOSPC)
+    ".set F_ARG, 0\n"
+    ".set F_DEST, 16\n"
+    ".set F_BUFSZ, 24\n"
+    ".set F_OFF, 28\n"
+    ".set F_RA, 40\n"
+    ".set F_S0, 48\n"
+    ".set F_S1, 56\n"
+    ".set F_S2, 64\n"
+    ".set F_S3, 72\n"
+    ".set F_S4, 80\n"
+    ".set F_S5, 88\n"
+    ".set F_S6, 96\n"
+    ".set F_S7, 104\n"
+    ".set F_S8, 112\n"
+    ".set F_S9, 120\n"
+    ".set F_S10, 128\n"
+    ".set F_FRAME, 144\n"
+);
+
+__asm__(
+    ASM_FUNC(ext4_find_dest_de)
+    "        addi    sp, sp, -F_FRAME\n   sd      ra, F_RA(sp)\n   sd      s0, F_S0(sp)\n"
+    "        sd      s1, F_S1(sp)\n   sd      s2, F_S2(sp)\n   sd      s3, F_S3(sp)\n"
+    "        sd      s4, F_S4(sp)\n   sd      s5, F_S5(sp)\n   sd      s6, F_S6(sp)\n"
+    "        sd      s7, F_S7(sp)\n   sd      s8, F_S8(sp)\n   sd      s9, F_S9(sp)\n"
+    "        sd      s10, F_S10(sp)\n   addi    s0, sp, F_FRAME\n   mv      s1, a0\n"
+    "        mv      s2, a1\n   mv      s3, a2\n   mv      s4, a4\n   sd      a5, F_DEST(sp)\n"
+    "        sw      a3, F_BUFSZ(sp)\n   sw      zero, F_OFF(sp)\n"
+    "        # ext4_hash_in_dirent(dir): casefolded and encrypted both, kept as the eight bytes it adds to a record\n"
+    "        lw      t0, MW_INODE_FLAGS(s1)\n   li      t1, (MW_S_ENCRYPTED|MW_S_CASEFOLD)\n"
+    "        and     t0, t0, t1\n   sub     t0, t0, t1\n   seqz    s7, t0\n   slli    s7, s7, 3\n"
+    "        # reclen = ext4_dir_rec_len(fname_len(fname), dir), an unsigned short; top = buf + buf_size - reclen\n"
+    "        lw      t0, MW_FN_LEN(s4)\n   addi    t0, t0, 11\n   andi    t0, t0, -4\n"
+    "        add     t0, t0, s7\n   slli    t0, t0, 48\n   srli    s8, t0, 48\n"
+    "        lw      t1, F_BUFSZ(sp)\n   add     s6, s3, t1\n   sub     s6, s6, s8\n"
+    "        ld      t0, MW_INODE_SB(s1)\n   ld      t1, MW_SB_BLOCKSIZE(t0)\n"
+    "        slli    t1, t1, 32\n   srli    s10, t1, 32\n   ld      t2, MW_SB_FS_INFO(t0)\n"
+    "        ld      t2, MW_SBI_ES(t2)\n   lwu     s9, MW_ES_INODES(t2)\n   mv      s5, s3\n"
+    "        # while (de <= top)\n"
+    ".Lfd_loop:      bgtu    s5, s6, .Lfd_after\n"
+    "        # ext4_check_dir_entry: the seven tests for an ordinary entry, in registers\n"
+    "        lhu     a0, 4(s5)\n   addi    t0, a0, -1\n   li      t6, 0xfffe\n"
+    "        bgeu    t0, t6, 7f\n   andi    t0, a0, 3\n   li      t6, 0xfffc\n"
+    "        and     a0, a0, t6\n   slli    t0, t0, 16\n   or      a0, a0, t0\n   j       8f\n"
+    "7:      mv a0, s10\n"
+    "8:      bnez    s7, .Lfd_slow\n   li      t0, 12\n   blt     a0, t0, .Lfd_slow\n"
+    "        andi    t0, a0, 3\n   bnez    t0, .Lfd_slow\n   lbu     a1, 6(s5)\n"
+    "        addi    t0, a1, 11\n   andi    t0, t0, -4\n   blt     a0, t0, .Lfd_slow\n"
+    "        sub     a2, s5, s3\n   addw    a3, a2, a0\n   lw      a4, F_BUFSZ(sp)\n"
+    "        bgt     a3, a4, .Lfd_slow\n   addiw   t0, a4, -12\n   ble     a3, t0, 1f\n"
+    "        bne     a3, a4, .Lfd_slow\n"
+    "1:      lwu t0, 0(s5)\n"
+    "        bgtu    t0, s9, .Lfd_slow\n   bne     a3, a4, 2f\n   li      t1, 1\n"
+    "        bne     a1, t1, 2f\n   lbu     t2, 8(s5)\n   li      t3, 46\n"
+    "        beq     t2, t3, .Lfd_slow\n"
+    "2:      lbu t2, 7(s5)\n"
+    "        li      t3, MW_FT_DIR_CSUM\n   beq     t2, t3, .Lfd_slow\n   addi    t0, a1, -1\n"
+    "        li      t1, 1\n   bgtu    t0, t1, .Lfd_ok\n   lbu     t2, 8(s5)\n   li      t3, 46\n"
+    "        bne     t2, t3, .Lfd_ok\n   lbu     t2, 9(s5)\n   beq     t2, t3, .Lfd_slow\n"
+    "        beqz    t2, .Lfd_slow\n   j       .Lfd_ok\n"
+    "                \n"
+    "        # not certain: the real __ext4_check_dir_entry, which also says what is wrong\n"
+    ".Lfd_slow:      lwu     t0, F_OFF(sp)\n   sd      t0, F_ARG(sp)\n   lla     a0, .Lfd_fn\n"
+    "        li      a1, 2050\n   mv      a2, s1\n   li      a3, 0\n   mv      a4, s5\n"
+    "        mv      a5, s2\n   mv      a6, s3\n   lw      a7, F_BUFSZ(sp)\n"
+    "        call    __ext4_check_dir_entry\n   bnez    a0, .Lfd_corrupt\n"
+    "                \n"
+    "        # ext4_match: an entry in use, a name to compare, and a directory that does not fold case\n"
+    ".Lfd_ok:      lwu     t0, 0(s5)\n   beqz    t0, .Lfd_no\n   lw      t0, MW_INODE_FLAGS(s1)\n"
+    "        li      t1, MW_S_CASEFOLD\n   and     t0, t0, t1\n   bnez    t0, .Lfd_slowmatch\n"
+    "        ld      a1, MW_FN_NAME(s4)\n   beqz    a1, .Lfd_slowmatch\n   lbu     a2, 6(s5)\n"
+    "        lw      a3, MW_FN_LEN(s4)\n   bne     a2, a3, .Lfd_no\n   addi    a0, s5, 8\n"
+    "6:      beqz a2, .Lfd_exist\n"
+    "        lbu     t0, 0(a0)\n   lbu     t1, 0(a1)\n   bne     t0, t1, .Lfd_no\n"
+    "        addi    a0, a0, 1\n   addi    a1, a1, 1\n   addi    a2, a2, -1\n   j       6b\n"
+    ".Lfd_slowmatch:      mv      a0, s1\n   mv      a1, s4\n   mv      a2, s5\n"
+    "        call    ext4_match\n   andi    a0, a0, 255\n   bnez    a0, .Lfd_exist\n"
+    "                \n"
+    "        # room: a deleted entry is all room, a live one what its name leaves over\n"
+    ".Lfd_no:      lbu     a0, 6(s5)\n   addi    a0, a0, 11\n   andi    a0, a0, -4\n"
+    "        add     a0, a0, s7\n   lwu     t0, 0(s5)\n   bnez    t0, 1f\n   li      a0, 0\n"
+    "1:      lhu     a1, 4(s5)\n   addi    t0, a1, -1\n   li      t6, 0xfffe\n   bgeu    t0, t6, 7f\n"
+    "        andi    t0, a1, 3\n   li      t6, 0xfffc\n   and     a1, a1, t6\n"
+    "        slli    t0, t0, 16\n   or      a1, a1, t0\n   j       8f\n"
+    "7:      lw a1, F_BUFSZ(sp)\n"
+    "8:      subw    a2, a1, a0\n   bge     a2, s8, .Lfd_after\n   add     s5, s5, a1\n"
+    "        lw      t0, F_OFF(sp)\n   addw    t0, t0, a1\n   sw      t0, F_OFF(sp)\n"
+    "        j       .Lfd_loop\n"
+    ".Lfd_after:      bgtu    s5, s6, .Lfd_nospc\n   ld      a0, F_DEST(sp)\n   sd      s5, 0(a0)\n"
+    "        li      a0, 0\n   j       .Lfd_out\n"
+    ".Lfd_nospc:      li      a0, -MW_ENOSPC\n   j       .Lfd_out\n"
+    ".Lfd_exist:      li      a0, -MW_EEXIST\n   j       .Lfd_out\n"
+    ".Lfd_corrupt:      li      a0, -MW_EFSCORRUPTED\n"
+    ".Lfd_out:      ld      ra, F_RA(sp)\n   ld      s0, F_S0(sp)\n   ld      s1, F_S1(sp)\n"
+    "        ld      s2, F_S2(sp)\n   ld      s3, F_S3(sp)\n   ld      s4, F_S4(sp)\n"
+    "        ld      s5, F_S5(sp)\n   ld      s6, F_S6(sp)\n   ld      s7, F_S7(sp)\n"
+    "        ld      s8, F_S8(sp)\n   ld      s9, F_S9(sp)\n   ld      s10, F_S10(sp)\n"
+    "        addi    sp, sp, F_FRAME\n"
+    "        " ASM_RET
+    "                \n"
+    "        .pushsection .rodata.str1.1, \"aMS\", @progbits, 1\n"
+    ".Lfd_fn:      .asciz \"ext4_find_dest_de\"\n"
+    "        .popsection\n"
+    ASM_END(ext4_find_dest_de)
+);
+#endif // CONFIG_RISCV
+
 
 #endif // KERNEL_KERNEL_C
 

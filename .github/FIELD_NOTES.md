@@ -132,6 +132,27 @@ copy to user space is `rep movsb`, which is already the floor.
 
 ---
 
+## 2026-09-29 · finding room in a directory block (`ext4_find_dest_de`)
+
+Every create, rename and mkdir walks the directory block it lands in, entry by entry,
+for a gap that fits. `kernel/kernel.c` carries that walk as assembly on x86_64, arm64
+and riscv64, packed two to four instructions a line like `lib.c`.
+
+- **Microbenchmark, native, Zen 5:** a full 4 KiB block of 134 entries, a name that is
+  not there: 590 ns in the C, 350 ns in the port (1.7x). The loop is a chain of one
+  record length per entry; the gain is the two calls and nine arguments the C makes
+  for each entry.
+- **In a guest, same kernel with and without it:** create + unlink 2989 -> 2909 ns
+  (-2.7%), rename -4.0%, mkdir + rmdir -1.3%; every other call within ±2%.
+
+**What it does not show.** The guest figures are inside this method's ±4% noise floor,
+so they show a small gain in one direction, not a size. Nothing here says a create is
+faster by 1.7x; the walk is a small share of a create. The arm64 and riscv64 ports are
+checked against the kernel's own C by a differential harness under qemu-user and both
+kernels build and link, but neither has been booted, and neither has been timed.
+
+---
+
 ## 2026-09-29 · kernel 7.2.8
 
 The pinned kernel moved from 7.2.6 to 7.2.8, the latest stable (7.3 is at rc5). The

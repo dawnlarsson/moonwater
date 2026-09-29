@@ -1645,15 +1645,14 @@ kernel_simd_callers()
                 /^[[:space:]]*(\/?\*|\/\/)/ { next }
                 ($0 ~ named || /##_wide/) &&
                     !/^void canvas_[a-z0-9_]*_wide\(/ &&
-                    !(/^[[:space:]]*"[[:space:]]*call[[:space:]]+hash_half_md4_wide\\n"$/ &&
-                      kernel_held && FILENAME ~ /kernel\.c$/) &&
+                    !(/call[[:space:]]+hash_half_md4_wide\\n/ && kernel_held && FILENAME ~ /kernel\.c$/) &&
                     !/^#define TARGET_PICK\(t, name\) \(\(t\)->simd \? name##_wide : name\)$/ &&
                     !/^#define TERM_PICK\(name\) \(term_simd \? name##_wide : name\)$/ {
                         print FILENAME ":" FNR ": a wide body named outside TARGET_PICK or TERM_PICK: " $0
                         bad = 1
                 }
-                FILENAME ~ /kernel\.c$/ && /^[[:space:]]*"[[:space:]]*call[[:space:]]+kernel_fpu_begin_mask\\n"$/ { kernel_begins++; kernel_held = 1 }
-                FILENAME ~ /kernel\.c$/ && /^[[:space:]]*"[[:space:]]*call[[:space:]]+kernel_fpu_end\\n"$/ { kernel_ends++; kernel_held = 0 }
+                FILENAME ~ /kernel\.c$/ && /^[[:space:]]*"[^#]*call[[:space:]]+kernel_fpu_begin_mask\\n/ { kernel_begins++; kernel_held = 1 }
+                FILENAME ~ /kernel\.c$/ && /^[[:space:]]*"[^#]*call[[:space:]]+kernel_fpu_end\\n/ { kernel_ends++; kernel_held = 0 }
                 FILENAME ~ /canvas\.c$/ && /canvas_simd_begin\(&/ { begins++; held = 1 }
                 FILENAME ~ /canvas\.c$/ && /canvas_simd_end\(&/ { ends++; held = 0 }
                 # The emulator takes its wide bodies on term_simd, which only
@@ -11156,6 +11155,7 @@ python3 test/differential.py --harness pane_restride || kit_failed=1
 python3 test/differential.py --harness pane_pages || kit_failed=1
 python3 test/differential.py --harness shared_page || kit_failed=1
 python3 test/differential.py --harness kernel_dirhash || kit_failed=1
+python3 test/differential.py --harness kernel_ports || kit_failed=1
 python3 test/differential.py --harness sort_spill_names || kit_failed=1
 python3 test/differential.py --harness dhcp_packets || kit_failed=1
 python3 test/differential.py --harness inventory_mutations || kit_failed=1

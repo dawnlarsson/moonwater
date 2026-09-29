@@ -27088,7 +27088,11 @@ int main(void) {
                 "static int htree_dirblock_to_tree(struct file *dir_file,\n"
                 "\t\t\t\t  struct inode *dir, ext4_lblk_t block,\n"
                 "\t\t\t\t  struct dx_hash_info *hinfo,\n"
-                "\t\t\t\t  __u32 start_hash, __u32 start_minor_hash)\n{\n\tint count = 0;\n\treturn count;\n}\n",
+                "\t\t\t\t  __u32 start_hash, __u32 start_minor_hash)\n{\n\tint count = 0;\n\treturn count;\n}\n\n"
+                "static bool ext4_match(struct inode *parent,\n\t\t\t      const struct ext4_filename *fname,\n"
+                "\t\t\t      struct ext4_dir_entry_2 *de)\n{\n\tif (!de->inode)\n\t\treturn false;\n\treturn true;\n}\n\n"
+                "int ext4_find_dest_de(struct inode *dir, struct buffer_head *bh,\n\t\t      void *buf, int buf_size,\n"
+                "\t\t      struct ext4_filename *fname,\n\t\t      struct ext4_dir_entry_2 **dest_de)\n{\n\tint nlen = 0;\n\treturn nlen;\n}\n",
             "linux/arch/x86/kernel/asm-offsets.c":
                 "#include <linux/kbuild.h>\n\nstatic void __used common(void)\n{\n}\n",
             "linux/kernel/sched/fair.c":
@@ -27124,7 +27128,9 @@ int main(void) {
             offsets = (tree / "linux/arch/x86/kernel/asm-offsets.c").read_text()
             return ("/* Moonwater: htree_dirblock_to_tree is in kernel/kernel.c */\nint htree_dirblock_to_tree("
                     in namei and "__u32 start_hash, __u32 start_minor_hash);\n" in namei and
-                    "int count = 0;" not in namei and
+                    "int count = 0;" not in namei and "int nlen = 0;" not in namei and
+                    "/* Moonwater: ext4_find_dest_de is in kernel/kernel.c */\nint ext4_find_dest_de(" in namei and
+                    "\nbool ext4_match(" in namei and "static bool ext4_match(" not in namei and
                     "\nstruct buffer_head *__ext4_read_dirblock(" in namei and
                     "static struct buffer_head *__ext4_read_dirblock(" not in namei and
                     "_Static_assert(DIRENT_HTREE == 3," in namei and
@@ -58941,6 +58947,678 @@ int main(int argc, char **argv)
     return checks.verdict("kernel dirhash: checks passed", "kernel-dirhash")
 
 
+KERNEL_PORTS_SHIM = r"""
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdarg.h>
+#include <stddef.h>
+#include <stdbool.h>
+typedef uint8_t u8; typedef uint16_t u16; typedef uint32_t u32; typedef uint64_t u64;
+typedef u8 __u8; typedef u32 __u32; typedef u32 __le32; typedef u16 __le16; typedef u32 ext4_lblk_t;
+typedef long long mw_loff_t;
+#define loff_t mw_loff_t
+#define unlikely(x) (x)
+#define likely(x) (x)
+static inline u32 rol32(u32 x, unsigned s) { return (x << s) | (x >> (32 - s)); }
+static inline u32 get_unaligned_be32(const void *p)
+{ const unsigned char *b = p; return ((u32)b[0] << 24) | ((u32)b[1] << 16) | ((u32)b[2] << 8) | b[3]; }
+#define S_ENCRYPTED (1 << 14)
+#define S_CASEFOLD (1 << 15)
+#define IS_ENCRYPTED(inode) ((inode)->i_flags & S_ENCRYPTED)
+#define IS_CASEFOLDED(inode) ((inode)->i_flags & S_CASEFOLD)
+#define EXT4_FEATURE_RO_COMPAT_METADATA_CSUM 0x0400
+#define EXT4_FT_DIR_CSUM 0xDE
+#define EXT4_NAME_LEN 255
+#define EXT4_DIR_PAD 4
+#define EXT4_DIR_ROUND (EXT4_DIR_PAD - 1)
+#define EXT4_MAX_REC_LEN ((1 << 16) - 1)
+#define EXT4_HTREE_EOF_32BIT ((1UL << (32 - 1)) - 1)
+#define DX_HASH_LEGACY 0
+#define DX_HASH_HALF_MD4 1
+#define DX_HASH_TEA 2
+#define DX_HASH_LEGACY_UNSIGNED 3
+#define DX_HASH_HALF_MD4_UNSIGNED 4
+#define DX_HASH_TEA_UNSIGNED 5
+#define X86_FEATURE_AVX2 (9 * 32 + 5)
+#define EIO 5
+#define ENOMEM 12
+#define EINVAL 22
+#define le32_to_cpu(x) (x)
+#define le16_to_cpu(x) (x)
+#define cpu_to_le32(x) (x)
+#define dxtrace(x)
+#define FSTR_INIT(n, l) { .name = n, .len = l }
+#define IS_ERR(p) ((unsigned long)(p) >= (unsigned long)-4095)
+#define PTR_ERR(p) ((long)(p))
+struct super_block { unsigned long s_blocksize; void *s_fs_info; };
+struct inode { struct super_block *i_sb; unsigned int i_flags; unsigned char i_blkbits; };
+struct buffer_head { char *b_data; size_t b_size; unsigned long b_blocknr; };
+struct file { void *private_data; };
+struct ext4_super_block { u32 s_inodes_count; u32 s_feature_ro_compat; };
+struct ext4_sb_info { struct ext4_super_block *s_es; };
+struct dx_hash_info { u32 hash; u32 minor_hash; int hash_version; u32 *seed; };
+struct fscrypt_str { unsigned char *name; u32 len; };
+struct ext4_dir_entry_2 { __le32 inode; __le16 rec_len; __u8 name_len; __u8 file_type; char name[EXT4_NAME_LEN]; };
+struct ext4_dir_entry_hash { __le32 hash; __le32 minor_hash; };
+struct cpuinfo_x86 { u32 x86_capability[32]; };
+typedef enum { EITHER, INDEX, DIRENT, DIRENT_HTREE } dirblock_type_t;
+
+#define IS_ENABLED(x) (x)
+#define EFSCORRUPTED 117
+#define EEXIST 17
+#define ENOSPC 28
+struct qstr { const unsigned char *name; u32 len; };
+struct fscrypt_name { const struct qstr *usr_fname; struct fscrypt_str disk_name; u32 hash; u32 minor_hash; struct fscrypt_str crypto_buf; bool is_nokey_name; };
+struct ext4_filename { const struct qstr *usr_fname; struct fscrypt_str disk_name; struct dx_hash_info hinfo; struct fscrypt_str crypto_buf; struct qstr cf_name; };
+#define SHA256_DIGEST_SIZE 32
+struct fscrypt_nokey_name { u32 dirhash[2]; u8 bytes[149]; u8 sha256[SHA256_DIGEST_SIZE]; };
+static inline void sha256(const u8 *data, size_t len, u8 *out) { (void)data; (void)len; memset(out, 0x5a, SHA256_DIGEST_SIZE); }
+bool fscrypt_match_name(const struct fscrypt_name *fname, const u8 *de_name, u32 de_name_len);
+bool fscrypt_has_encryption_key(const struct inode *inode);
+int generic_ci_match(const struct inode *parent, const struct qstr *name, const struct qstr *folded_name, const u8 *de_name, u32 de_name_len);
+static inline bool sb_no_casefold_compat_fallback(struct super_block *sb) { (void)sb; return false; }
+#define fname_name(p) ((p)->disk_name.name)
+#define fname_len(p) ((p)->disk_name.len)
+static inline struct ext4_sb_info *EXT4_SB(struct super_block *sb) { return sb->s_fs_info; }
+#define EXT4_LBLK_TO_B(inode, lblk) ((loff_t)(lblk) << (inode)->i_blkbits)
+#define EXT4_DIRENT_HASHES(entry) ((struct ext4_dir_entry_hash *)(((char *)(entry)) + ((8 + (entry)->name_len + EXT4_DIR_ROUND) & ~EXT4_DIR_ROUND)))
+#define EXT4_DIRENT_HASH(entry) le32_to_cpu(EXT4_DIRENT_HASHES(entry)->hash)
+#define EXT4_DIRENT_MINOR_HASH(entry) le32_to_cpu(EXT4_DIRENT_HASHES(entry)->minor_hash)
+static inline bool ext4_has_feature_metadata_csum(struct super_block *sb)
+{ return (EXT4_SB(sb)->s_es->s_feature_ro_compat & cpu_to_le32(EXT4_FEATURE_RO_COMPAT_METADATA_CSUM)) != 0; }
+static inline bool ext4_hash_in_dirent(const struct inode *inode) { return IS_CASEFOLDED(inode) && IS_ENCRYPTED(inode); }
+static inline unsigned int ext4_dir_rec_len(__u8 name_len, const struct inode *dir)
+{
+        int rec_len = (name_len + 8 + EXT4_DIR_ROUND);
+        if (dir && ext4_hash_in_dirent(dir))
+                rec_len += sizeof(struct ext4_dir_entry_hash);
+        return (rec_len & ~EXT4_DIR_ROUND);
+}
+static inline unsigned int ext4_rec_len_from_disk(__le16 dlen, unsigned blocksize)
+{
+        unsigned len = le16_to_cpu(dlen);
+        if (len == EXT4_MAX_REC_LEN || len == 0)
+                return blocksize;
+        return (len & 65532) | ((len & 3) << 16);
+}
+static inline struct ext4_dir_entry_2 *ext4_next_entry(struct ext4_dir_entry_2 *p, unsigned long blocksize)
+{ return (struct ext4_dir_entry_2 *)((char *)p + ext4_rec_len_from_disk(p->rec_len, blocksize)); }
+struct buffer_head *__ext4_read_dirblock(struct inode *inode, ext4_lblk_t block, dirblock_type_t type, const char *func, unsigned int line);
+#define ext4_read_dirblock(inode, block, type) __ext4_read_dirblock((inode), (block), (type), __func__, __LINE__)
+int __ext4_check_dir_entry(const char *function, unsigned int line, struct inode *dir, struct file *filp,
+                           struct ext4_dir_entry_2 *de, struct buffer_head *bh, char *buf, int size, unsigned int offset);
+#define ext4_check_dir_entry(dir, filp, de, bh, buf, size, offset) \
+        unlikely(__ext4_check_dir_entry(__func__, __LINE__, (dir), (filp), (de), (bh), (buf), (size), (offset)))
+void mw_error(const char *function, const char *format, ...);
+#define ext4_error_file(filp, func, line, blk, fmt, ...) mw_error(func, fmt, ##__VA_ARGS__)
+#define ext4_error_inode(inode, func, line, blk, fmt, ...) mw_error(func, fmt, ##__VA_ARGS__)
+int ext4fs_dirhash(const struct inode *dir, const char *name, int len, struct dx_hash_info *hinfo);
+int ext4_htree_store_dirent(struct file *dir_file, __u32 hash, __u32 minor_hash, struct ext4_dir_entry_2 *dirent, struct fscrypt_str *ent_name);
+void __brelse(struct buffer_head *bh);
+static inline void brelse(struct buffer_head *bh) { if (bh) __brelse(bh); }
+int __fscrypt_prepare_readdir(struct inode *dir);
+int fscrypt_fname_alloc_buffer(u32 max_encrypted_len, struct fscrypt_str *crypto_str);
+void fscrypt_fname_free_buffer(struct fscrypt_str *crypto_str);
+int fscrypt_fname_disk_to_usr(const struct inode *inode, u32 hash, u32 minor_hash, const struct fscrypt_str *iname, struct fscrypt_str *oname);
+static inline int fscrypt_prepare_readdir(struct inode *dir) { if (IS_ENCRYPTED(dir)) return __fscrypt_prepare_readdir(dir); return 0; }
+"""
+
+KERNEL_PORTS_COMMON = r"""
+/* ---- what the two implementations do, recorded ---- */
+struct record {
+        struct { u32 hash, minor, inode; u32 len; unsigned char file_type; unsigned char name[256]; } store[1200];
+        int stores;
+        char errors[40][200];
+        int nerrors;
+        int brelse, reads, allocs, frees;
+        int count;
+};
+static struct record R;
+static struct {
+        struct buffer_head bh;
+        long read_fail;
+        int store_fail_at, prepare_ret, alloc_ret, usr_fail_at, usr_calls;
+        int fpu_ok, haskey;
+} G;
+
+void mw_error(const char *function, const char *format, ...)
+{
+        if (R.nerrors < 40) {
+                size_t fl = strlen(function);   /* the oracle is compiled under another name: report it as the kernel's */
+                int n = snprintf(R.errors[R.nerrors], 200, "%.*s: ", (int)(fl > 2 && !strcmp(function + fl - 2, "_c") ? fl - 2 : fl), function);
+                va_list ap; va_start(ap, format);
+                vsnprintf(R.errors[R.nerrors] + n, 200 - n, format, ap);
+                va_end(ap);
+        }
+        R.nerrors++;
+}
+
+struct buffer_head *__ext4_read_dirblock(struct inode *inode, ext4_lblk_t block, dirblock_type_t type, const char *func, unsigned int line)
+{
+        R.reads++;
+        (void)inode; (void)block; (void)func; (void)line;
+        if (type != DIRENT_HTREE) R.reads += 1000;
+        if (G.read_fail) return (struct buffer_head *)G.read_fail;
+        return &G.bh;
+}
+void __brelse(struct buffer_head *bh) { (void)bh; R.brelse++; }
+
+int ext4_htree_store_dirent(struct file *dir_file, __u32 hash, __u32 minor_hash, struct ext4_dir_entry_2 *dirent, struct fscrypt_str *ent_name)
+{
+        (void)dir_file;
+        int at = R.stores++;
+        if (at < 1200) {
+                R.store[at].hash = hash; R.store[at].minor = minor_hash; R.store[at].inode = dirent->inode;
+                R.store[at].file_type = dirent->file_type; R.store[at].len = ent_name->len;
+                memcpy(R.store[at].name, ent_name->name, ent_name->len > 255 ? 255 : ent_name->len);
+        }
+        return (G.store_fail_at && R.stores == G.store_fail_at) ? -ENOMEM : 0;
+}
+
+int __fscrypt_prepare_readdir(struct inode *dir) { (void)dir; return G.prepare_ret; }
+int fscrypt_fname_alloc_buffer(u32 max, struct fscrypt_str *s)
+{
+        if (G.alloc_ret < 0) return G.alloc_ret;
+        s->name = malloc(max); s->len = max; R.allocs++;
+        return 0;
+}
+void fscrypt_fname_free_buffer(struct fscrypt_str *s) { if (s && s->name) { free(s->name); s->name = NULL; R.frees++; } }
+int fscrypt_fname_disk_to_usr(const struct inode *inode, u32 hash, u32 minor, const struct fscrypt_str *iname, struct fscrypt_str *oname)
+{
+        (void)inode; (void)hash; (void)minor;
+        G.usr_calls++;
+        if (G.usr_fail_at && G.usr_calls == G.usr_fail_at) return -EIO;
+        for (u32 i = 0; i < iname->len; i++) oname->name[i] = iname->name[i] ^ ((iname->name[i] | 32) >= 'a' && (iname->name[i] | 32) <= 'z' ? 32 : 0);
+        oname->len = iname->len;
+        return 0;
+}
+
+
+bool fscrypt_has_encryption_key(const struct inode *inode) { (void)inode; return G.haskey; }
+int generic_ci_match(const struct inode *parent, const struct qstr *name, const struct qstr *folded_name, const u8 *de_name, u32 de_name_len)
+{
+        (void)parent; (void)folded_name;
+        if (de_name_len != name->len) return 0;
+        for (u32 i = 0; i < de_name_len; i++)
+                if (((de_name[i] | 32) != (name->name[i] | 32))) return 0;
+        return 1;
+}
+
+int ext4fs_dirhash(const struct inode *dir, const char *name, int len, struct dx_hash_info *hinfo)
+{
+        (void)dir;
+        u32 hash, minor_hash = 0, in[8], buf[4] = {0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476};
+        int use_unsigned = 0;
+        const char *p;
+        if (hinfo->seed && (hinfo->seed[0] | hinfo->seed[1] | hinfo->seed[2] | hinfo->seed[3]))
+                memcpy(buf, hinfo->seed, 16);
+        switch (hinfo->hash_version) {
+        case DX_HASH_LEGACY_UNSIGNED: hash = dx_hack_hash_unsigned(name, len); break;
+        case DX_HASH_LEGACY: hash = dx_hack_hash_signed(name, len); break;
+        case DX_HASH_HALF_MD4_UNSIGNED: use_unsigned = 1; /* fall through */
+        case DX_HASH_HALF_MD4:
+                for (p = name; len > 0; len -= 32, p += 32) {
+                        if (use_unsigned) str2hashbuf_unsigned(p, len, in, 8); else str2hashbuf_signed(p, len, in, 8);
+                        half_md4_transform(buf, in);
+                }
+                minor_hash = buf[2]; hash = buf[1]; break;
+        case DX_HASH_TEA_UNSIGNED: use_unsigned = 1; /* fall through */
+        case DX_HASH_TEA:
+                for (p = name; len > 0; len -= 16, p += 16) {
+                        if (use_unsigned) str2hashbuf_unsigned(p, len, in, 4); else str2hashbuf_signed(p, len, in, 4);
+                        TEA_transform(buf, in);
+                }
+                hash = buf[0]; minor_hash = buf[1]; break;
+        default:
+                hinfo->hash = 0; hinfo->minor_hash = 0;
+                return -EINVAL;
+        }
+        hash = hash & ~1;
+        if (hash == (EXT4_HTREE_EOF_32BIT << 1)) hash = (EXT4_HTREE_EOF_32BIT - 1) << 1;
+        hinfo->hash = hash; hinfo->minor_hash = minor_hash;
+        return 0;
+}
+
+#ifdef CONFIG_X86_64
+struct cpuinfo_x86 boot_cpu_data;
+bool irq_fpu_usable(void) { return G.fpu_ok; }
+void kernel_fpu_begin_mask(unsigned int mask) { (void)mask; }
+void kernel_fpu_end(void) { }
+#endif
+
+int htree_dirblock_to_tree(struct file *dir_file, struct inode *dir, ext4_lblk_t block, struct dx_hash_info *hinfo, __u32 start_hash, __u32 start_minor_hash);
+
+static uint64_t rng = 0x9E3779B97F4A7C15ull;
+static u32 rnd(void) { rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; return (u32)(rng >> 20); }
+
+static char *rec_name(char *name, int n, int mode)
+{
+        for (int i = 0; i < n; i++) {
+                u32 r = rnd();
+                name[i] = mode == 0 ? 'a' + r % 26 : mode == 1 ? (char)(32 + r % 95) : (char)(r >> 3);
+                if (name[i] == 0) name[i] = 1;
+        }
+        return name;
+}
+
+/* A block of entries, some of them wrong. Returns nothing; the block is in the buffer. */
+static void build(unsigned char *blk, int size, int csum, int corrupt, u32 inodes)
+{
+        int pos = 0, last = -1;
+        memset(blk, 0, size + 4096);
+        int n = 1 + rnd() % (rnd() % 4 == 0 ? 300 : 40);
+        int dots = rnd() % 3 == 0;
+        int tail = csum ? 12 : 0;
+        for (int i = 0; i < n + (dots ? 2 : 0); i++) {
+                struct ext4_dir_entry_2 *de = (struct ext4_dir_entry_2 *)(blk + pos);
+                int nl;
+                if (dots && i == 0) { nl = 1; memcpy(de->name, ".", 1); }
+                else if (dots && i == 1) { nl = 2; memcpy(de->name, "..", 2); }
+                else { nl = (rnd() % 6 == 0) ? 1 + rnd() % 255 : 1 + rnd() % (rnd() % 4 == 0 ? 45 : 12); rec_name(de->name, nl, rnd() % 5 == 0 ? 2 : rnd() % 4 == 0 ? 1 : 0); }
+                int rec = ((8 + nl + 3) & ~3) + 4 * (rnd() % 3 == 0 ? rnd() % 4 : 0);
+                if (pos + rec > size - tail) break;
+                de->name_len = nl;
+                de->inode = (rnd() % 5 == 0) ? 0 : 1 + rnd() % (inodes ? inodes : 1);
+                de->file_type = rnd() % 8;
+                de->rec_len = rec;
+                last = pos;
+                pos += rec;
+        }
+        if (last >= 0) {
+                struct ext4_dir_entry_2 *de = (struct ext4_dir_entry_2 *)(blk + last);
+                int rec = size - tail - last;
+                de->rec_len = rec >= 65536 ? 0 : rec;         /* the last entry runs to the tail */
+                if (rec == size) de->rec_len = 0;
+        }
+        if (tail) {
+                struct ext4_dir_entry_2 *t = (struct ext4_dir_entry_2 *)(blk + size - 12);
+                t->inode = 0; t->rec_len = 12; t->name_len = 0; t->file_type = EXT4_FT_DIR_CSUM;
+        }
+        if (corrupt) {
+                for (int k = 0; k < corrupt; k++) {
+                        int at = 0, guard = 0;
+                        for (int walk = rnd() % 20; walk > 0 && guard < 1000; guard++) {
+                                struct ext4_dir_entry_2 *de = (struct ext4_dir_entry_2 *)(blk + at);
+                                unsigned rl = ext4_rec_len_from_disk(de->rec_len, size);
+                                if (rl < 12 || at + rl >= (unsigned)size) break;
+                                at += rl; walk--;
+                        }
+                        struct ext4_dir_entry_2 *de = (struct ext4_dir_entry_2 *)(blk + at);
+                        switch (rnd() % 8) {
+                        case 0: de->rec_len = rnd() % 40; break;
+                        case 1: de->rec_len = (rnd() % 2) ? 0xFFFF : 0; break;
+                        case 2: de->rec_len = size + 4 * (rnd() % 100); break;
+                        case 3: de->name_len = 255 - rnd() % 3; break;
+                        case 4: de->inode = 0xFFFFFFF0u; break;
+                        case 5: de->rec_len = (de->rec_len & ~3) | (rnd() % 4); break;
+                        case 6: memcpy(de->name, "..", 2); de->name_len = 1 + rnd() % 2; break;
+                        default: de->file_type = EXT4_FT_DIR_CSUM; break;
+                        }
+                }
+        }
+}
+
+static int same(const struct record *a, const struct record *b, char *why)
+{
+        if (a->count != b->count) { sprintf(why, "count %d vs %d", a->count, b->count); return 0; }
+        if (a->stores != b->stores) { sprintf(why, "stores %d vs %d", a->stores, b->stores); return 0; }
+        for (int i = 0; i < a->stores && i < 1200; i++)
+                if (a->store[i].hash != b->store[i].hash || a->store[i].minor != b->store[i].minor || a->store[i].inode != b->store[i].inode
+                    || a->store[i].len != b->store[i].len || a->store[i].file_type != b->store[i].file_type
+                    || memcmp(a->store[i].name, b->store[i].name, a->store[i].len > 255 ? 255 : a->store[i].len)) {
+                        sprintf(why, "store %d differs (hash %08x vs %08x, len %u vs %u)", i, a->store[i].hash, b->store[i].hash, a->store[i].len, b->store[i].len);
+                        return 0;
+                }
+        if (a->nerrors != b->nerrors) { sprintf(why, "%d errors vs %d (%s | %s)", a->nerrors, b->nerrors, a->nerrors ? a->errors[0] : "-", b->nerrors ? b->errors[0] : "-"); return 0; }
+        for (int i = 0; i < a->nerrors && i < 40; i++)
+                if (strcmp(a->errors[i], b->errors[i])) { sprintf(why, "error %d: [%s] vs [%s]", i, a->errors[i], b->errors[i]); return 0; }
+        if (a->brelse != b->brelse || a->reads != b->reads || a->allocs != b->allocs || a->frees != b->frees) {
+                sprintf(why, "brelse %d/%d reads %d/%d allocs %d/%d frees %d/%d", a->brelse, b->brelse, a->reads, b->reads, a->allocs, b->allocs, a->frees, b->frees);
+                return 0;
+        }
+        return 1;
+}
+
+"""
+
+KERNEL_PORTS_HTREE_TEST = r"""int main(int argc, char **argv)
+{
+        long iters = argc > 1 ? atol(argv[1]) : 20000, bad = 0, entries = 0, wide_used = 0;
+        static unsigned char *storage;
+        storage = aligned_alloc(4096, 65536 + 3 * 4096);
+        if (!storage) return 2;
+        struct super_block sb = {0};
+        struct inode dir = { .i_sb = &sb };
+        struct ext4_sb_info sbi; struct ext4_super_block es;
+        struct file file = {0};
+        sb.s_fs_info = &sbi; sbi.s_es = &es;
+#ifdef CONFIG_X86_64
+        {
+                unsigned a, b, c, d;
+                boot_cpu_data.x86_capability[X86_FEATURE_AVX2 >> 5] = 0;
+                __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(7), "c"(0));
+                if (b & (1u << 5)) boot_cpu_data.x86_capability[X86_FEATURE_AVX2 >> 5] |= 1u << (X86_FEATURE_AVX2 & 31);
+        }
+        extern bool moonwater_dirhash_simd;
+#endif
+        for (long it = 0; it < iters; it++) {
+                int sizes[] = {1024, 4096, 4096, 4096, 2048};
+                int size = sizes[rnd() % 5];
+                int csum = rnd() % 2;
+                es.s_inodes_count = 1000 + rnd() % 100000;
+                es.s_feature_ro_compat = csum ? EXT4_FEATURE_RO_COMPAT_METADATA_CSUM : 0;
+                sb.s_blocksize = size;
+                dir.i_blkbits = size == 1024 ? 10 : size == 2048 ? 11 : 12;
+                int kind = rnd() % 20;
+                dir.i_flags = kind == 0 ? S_ENCRYPTED : kind == 1 ? S_CASEFOLD : kind == 2 ? (S_ENCRYPTED | S_CASEFOLD) : 0;
+                unsigned char *blk = storage + (rnd() % 16) * 4;   /* misaligned starts are legal for the asm too: keep entries 4-aligned */
+                blk = storage;
+                build(blk, size, csum, rnd() % 4 == 0 ? 1 + rnd() % 3 : 0, es.s_inodes_count);
+                memset(&G, 0, sizeof G);
+                G.bh.b_data = (char *)blk; G.bh.b_size = size; G.bh.b_blocknr = 7 + it;
+                G.fpu_ok = rnd() % 8 != 0;
+                if (rnd() % 30 == 0) G.read_fail = -5;
+                if (rnd() % 40 == 0) G.store_fail_at = 1 + rnd() % 8;
+                if (dir.i_flags & S_ENCRYPTED) {
+                        if (rnd() % 12 == 0) G.prepare_ret = -1 - rnd() % 3;
+                        if (rnd() % 12 == 0) G.alloc_ret = -12;
+                        if (rnd() % 10 == 0) G.usr_fail_at = 1 + rnd() % 5;
+                }
+                struct dx_hash_info hi;
+                int versions[] = {DX_HASH_HALF_MD4, DX_HASH_HALF_MD4, DX_HASH_HALF_MD4_UNSIGNED, DX_HASH_HALF_MD4_UNSIGNED, DX_HASH_LEGACY, DX_HASH_TEA, DX_HASH_TEA_UNSIGNED, DX_HASH_LEGACY_UNSIGNED, 9};
+                hi.hash_version = versions[rnd() % 9];
+                u32 seed[4] = { rnd() | 1, rnd(), rnd(), rnd() };
+                int sk = rnd() % 4;
+                hi.seed = sk == 0 ? NULL : sk == 1 ? (memset(seed, 0, 16), seed) : seed;
+                u32 sh = rnd() % 3 == 0 ? rnd() : 0, sm = rnd() % 5 == 0 ? rnd() : 0;
+#ifdef CONFIG_X86_64
+                moonwater_dirhash_simd = rnd() % 8 != 0;
+#endif
+                struct record ra, rb;
+                struct dx_hash_info ha = hi, hb = hi;
+                unsigned long saved_fail = G.read_fail;
+                (void)saved_fail;
+                memset(&R, 0, sizeof R);
+                G.usr_calls = 0;
+                R.count = htree_dirblock_to_tree_c(&file, &dir, 3, &ha, sh, sm);
+                ra = R;
+                memset(&R, 0, sizeof R);
+                G.usr_calls = 0;
+                R.count = htree_dirblock_to_tree(&file, &dir, 3, &hb, sh, sm);
+                rb = R;
+                entries += ra.stores;
+                char why[1000];
+                if (!same(&ra, &rb, why)) {
+                        if (bad++ < 5)
+                                printf("case %ld differs: %s (size %d csum %d flags %x version %d)\n", it, why, size, csum, dir.i_flags, hi.hash_version);
+                }
+                (void)wide_used;
+        }
+        printf("cases %ld differ %ld stores %ld\n", iters, bad, entries);
+        return bad != 0;
+}
+"""
+
+KERNEL_PORTS_FIND_TEST = r"""
+
+int ext4_find_dest_de(struct inode *dir, struct buffer_head *bh, void *buf, int buf_size, struct ext4_filename *fname,
+                      struct ext4_dir_entry_2 **dest_de);
+
+int main(int argc, char **argv)
+{
+        long iters = argc > 1 ? atol(argv[1]) : 20000, bad = 0, found = 0;
+        unsigned char *storage = aligned_alloc(4096, 65536 + 3 * 4096);
+        struct super_block sb = {0};
+        struct inode dir = { .i_sb = &sb };
+        struct ext4_sb_info sbi; struct ext4_super_block es;
+        struct file file = {0};
+        sb.s_fs_info = &sbi; sbi.s_es = &es;
+        if (!storage) return 2;
+        for (long it = 0; it < iters; it++) {
+                int sizes[] = {1024, 4096, 4096, 4096, 2048};
+                int size = sizes[rnd() % 5];
+                int csum = rnd() % 2;
+                es.s_inodes_count = 1000 + rnd() % 100000;
+                es.s_feature_ro_compat = csum ? EXT4_FEATURE_RO_COMPAT_METADATA_CSUM : 0;
+                sb.s_blocksize = size;
+                dir.i_blkbits = size == 1024 ? 10 : size == 2048 ? 11 : 12;
+                int kind = rnd() % 20;
+                dir.i_flags = kind == 0 ? S_ENCRYPTED : kind == 1 ? S_CASEFOLD : kind == 2 ? (S_ENCRYPTED | S_CASEFOLD) : 0;
+                unsigned char *blk = storage;
+                build(blk, size, csum, rnd() % 4 == 0 ? 1 + rnd() % 3 : 0, es.s_inodes_count);
+                memset(&G, 0, sizeof G);
+                G.bh.b_data = (char *)blk; G.bh.b_size = size; G.bh.b_blocknr = 7 + it;
+                G.haskey = rnd() % 2;
+                int buf_size = rnd() % 5 == 0 ? 60 + 4 * (rnd() % ((size - 60) / 4)) : size;
+                /* the name: one that is in the block, one that is not, at several lengths */
+                static char name[300];
+                struct ext4_filename fname;
+                memset(&fname, 0, sizeof fname);
+                int nl;
+                if (rnd() % 2) {
+                        int at = 0, guard = 0;
+                        for (int walk = rnd() % 30; walk > 0 && guard < 1000; guard++) {
+                                struct ext4_dir_entry_2 *de = (struct ext4_dir_entry_2 *)(blk + at);
+                                unsigned rl = ext4_rec_len_from_disk(de->rec_len, size);
+                                if (rl < 12 || at + rl >= (unsigned)size) break;
+                                at += rl; walk--;
+                        }
+                        struct ext4_dir_entry_2 *de = (struct ext4_dir_entry_2 *)(blk + at);
+                        nl = de->name_len;
+                        memcpy(name, de->name, nl);
+                        if (rnd() % 4 == 0 && nl) name[nl - 1] ^= 1;
+                } else {
+                        nl = 1 + rnd() % (rnd() % 3 ? 20 : 255);
+                        rec_name(name, nl, rnd() % 3);
+                }
+                struct qstr usr = { (const unsigned char *)name, (u32)nl };
+                fname.usr_fname = &usr;
+                fname.disk_name.name = rnd() % 12 ? (unsigned char *)name : NULL;
+                fname.disk_name.len = nl;
+                fname.cf_name.name = (const unsigned char *)name; fname.cf_name.len = nl;
+                static struct fscrypt_nokey_name nokey;
+                for (unsigned i = 0; i < sizeof nokey; i++) ((unsigned char *)&nokey)[i] = rnd();
+                if (rnd() % 3 == 0 && nl > 149) memcpy(nokey.bytes, name, 149);
+                fname.crypto_buf.name = (unsigned char *)&nokey; fname.crypto_buf.len = sizeof nokey;
+                struct record ra, rb;
+                struct ext4_dir_entry_2 *da = (void *)1, *db = (void *)1;
+                memset(&R, 0, sizeof R);
+                R.count = ext4_find_dest_de_c(&dir, &G.bh, blk, buf_size, &fname, &da);
+                ra = R;
+                memset(&R, 0, sizeof R);
+                R.count = ext4_find_dest_de(&dir, &G.bh, blk, buf_size, &fname, &db);
+                rb = R;
+                if (ra.count == 0 || ra.count == -17) found++;
+                char why[1000];
+                int ok = same(&ra, &rb, why);
+                if (ok && da != db) { sprintf(why, "dest %p vs %p", (void *)da, (void *)db); ok = 0; }
+                if (!ok && bad++ < 5)
+                        printf("case %ld differs: %s (size %d buf_size %d csum %d flags %x name_len %d)\n", it, why, size, buf_size, csum, dir.i_flags, nl);
+        }
+        printf("cases %ld differ %ld stores %ld\n", iters, bad, found);
+        return bad != 0;
+}
+"""
+
+
+def harness_kernel_ports(argv):
+    """The kernel functions in kernel/kernel.c against Linux's own C, call for call.
+
+    Each port replaces a function of the kernel, so the oracle is that function:
+    it is cut out of the kernel source when the harness runs (linux/ if a build
+    unpacked one, KERNEL_SRC, or the pinned tarball) and never kept here, the
+    files being GPL-2.0 and these tests not. The callees are stubs that record
+    every call -- the reads of the block, the entries stored with their hashes,
+    each error __ext4_check_dir_entry reports and in what words, the brelse and
+    the buffers the fscrypt paths allocate and free -- and the structures are a
+    shim of the kernel's, whose offsets are generated from the //> tags in
+    kernel.c exactly as the kernel build generates them from asm-offsets.c, so
+    the asm reads the shim as it will read the kernel. Random directory blocks,
+    with deleted entries, "." and "..", checksum tails, encrypted and
+    casefolded directories, every hash version, seeds, a start hash, failing
+    reads, stores and fscrypt calls, and entries corrupted in eight ways, go
+    through the C function and the asm, and every recorded call has to agree.
+
+    It runs for each architecture there is a toolchain for: the machine's
+    own, and arm64 and riscv64 under qemu-user. A copy of the oracle with one
+    line changed has to disagree, or nothing here is looking. What it cannot
+    reach is the kernel itself: the real offsets, the real FPU bracket, the
+    real ext4 -- x86_64 boots on them; the others run the walk here and have
+    not been booted.
+    """
+    import tarfile
+    root = HARNESS_ROOT
+    checks = Checks()
+    version = re.search(r'\{"kernel_version", "([^"]+)"\}', (root / "src/build/build.c").read_text()).group(1)
+    tarball = root / "artifacts" / ("linux-%s.tar.xz" % version)
+
+    def kernel_file(relative):
+        for candidate in (os.environ.get("KERNEL_SRC"), str(root / "linux")):
+            if candidate and (Path(candidate) / relative).is_file():
+                return (Path(candidate) / relative).read_text()
+        if tarball.is_file():
+            with tarfile.open(tarball) as archive:
+                return archive.extractfile("linux-%s/%s" % (version, relative)).read().decode()
+        return None
+
+    sources = {name: kernel_file(name) for name in ("fs/ext4/namei.c", "fs/ext4/dir.c", "fs/ext4/hash.c", "fs/crypto/fname.c")}
+    if not all(sources.values()):
+        print("kernel ports: NOT RUN -- no kernel source (linux/, KERNEL_SRC or artifacts/linux-%s.tar.xz)" % version)
+        return 0
+
+    def cut(text, head, tail, inclusive=False):
+        start = text.index(head)
+        end = text.index(tail, start) + (len(tail) if inclusive else 0)
+        return text[start:end]
+
+    hash_code = cut(sources["fs/ext4/hash.c"], "#define DELTA 0x9E3779B9", "/*\n * Returns the hash of a filename.")
+    dir_code = (cut(sources["fs/ext4/dir.c"], "static bool is_fake_dir_entry(struct ext4_dir_entry_2 *de)", "\n}\n", True) + "\n" +
+                cut(sources["fs/ext4/dir.c"], "int __ext4_check_dir_entry(const char *function, unsigned int line,", "\n}\n", True))
+    match_code = (cut(sources["fs/crypto/fname.c"], "bool fscrypt_match_name(const struct fscrypt_name *fname,", "\n}\n", True) + "\n" +
+                  cut(sources["fs/ext4/namei.c"], "static bool ext4_match(struct inode *parent,", "\n}\n", True).replace("static bool ext4_match(", "bool ext4_match(", 1))
+
+    def oracle_of(name, header):
+        text = cut(sources["fs/ext4/namei.c"], header, "\n}\n", True)
+        return "#define %s %s_c\n%s#undef %s\n" % (name, name, text, name)
+
+    ports = {
+        "htree_dirblock_to_tree": (oracle_of("htree_dirblock_to_tree", "static int htree_dirblock_to_tree(struct file *dir_file,"),
+                                   KERNEL_PORTS_HTREE_TEST, "count++;", "count += 2;"),
+        "ext4_find_dest_de": (oracle_of("ext4_find_dest_de", "int ext4_find_dest_de(struct inode *dir, struct buffer_head *bh,"),
+                              KERNEL_PORTS_FIND_TEST, "return -EEXIST;", "return -EEXIST - 1;"),
+    }
+    kernel_c = (root / "kernel/kernel.c").read_text()
+
+    def tags(arch):
+        """The tags of the blocks that are for this architecture, as (verb, rest) pairs."""
+        found, block, limited, allowed = [], [], False, False
+        for line in kernel_c.splitlines() + [""]:
+            if line.startswith("//> "):
+                words = line[4:].split()
+                if words[0] == "arch":
+                    limited, allowed = True, allowed or arch in words[1:]
+                else:
+                    block.append((words[0], line[4:].split(None, 1)[1] if len(words) > 1 else ""))
+                continue
+            if block or limited:
+                if not limited or allowed:
+                    found += block
+                block, limited, allowed = [], False, False
+        return found
+
+    def macros(arch):
+        kind = "%function" if arch == "arm64" else "@function"
+        config = {"x86_64": "CONFIG_X86_64", "arm64": "CONFIG_ARM64", "riscv64": "CONFIG_RISCV"}[arch]
+        return ("#define %s 1\n#define CONFIG_FS_ENCRYPTION 1\n#define __stringify_1(x...) #x\n#define __stringify(x...) __stringify_1(x)\n"
+                "#define module_param_named(a, b, c, d)\n#define ASM_RET \"ret\\n\"\n"
+                '#define ASM_FUNC(name) ".globl " #name "\\n.type " #name ", %s\\n" #name ":\\n"\n'
+                '#define ASM_END(name) ".size " #name ", .-" #name "\\n"\n') % (config, kind)
+
+    library = (root / "src/lib.c").read_text()
+    head = library.index("#ifdef KERNEL_MODE\n#if X64\n__asm__(\n    ASM_SIMD_SECTION\n    ASM_FUNC(hash_half_md4_wide)")
+    wide_region = library[head:library.index("#endif // KERNEL_MODE\n", head) + len("#endif // KERNEL_MODE\n")]
+
+    def run(arch, compiler, runner, cflags, count, sabotage, port):
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            (work / "generated").mkdir()
+            (work / "shim.h").write_text(KERNEL_PORTS_SHIM)
+            lines = ['#include "shim.h"', "int main(void) {"]
+            for verb, rest in tags(arch):
+                words = rest.split(None, 2)
+                if verb == "offset":
+                    lines.append('printf("#define %s %%zu\\n", offsetof(struct %s, %s));' % (words[0], words[1], words[2]))
+                elif verb == "const":
+                    lines.append('printf("#define %s %%ld\\n", (long)(%s));' % (words[0], rest.split(None, 1)[1]))
+            lines.append("return 0; }")
+            (work / "offsets.c").write_text("\n".join(lines))
+            built = subprocess.run(["cc", "-w", "-o", str(work / "offsets"), str(work / "offsets.c")], capture_output=True, text=True)
+            if built.returncode:
+                print("  the offsets did not build for %s: %s" % (arch, built.stderr[-500:]))
+                return None
+            (work / "generated/asm-offsets.h").write_text(
+                subprocess.run([str(work / "offsets")], capture_output=True, text=True).stdout)
+            (work / "kernel.c").write_text(kernel_c)
+            (work / "port.c").write_text(macros(arch) + '#include "kernel.c"\n')
+            oracle_text, test_text, plain, broken_text = ports[port]
+            walk_text = oracle_text.replace(plain, broken_text, 1) if sabotage else oracle_text
+            defines = {"x86_64": "-DCONFIG_X86_64", "arm64": "-DCONFIG_ARM64", "riscv64": "-DCONFIG_RISCV"}[arch]
+            (work / "oracle.c").write_text(KERNEL_PORTS_SHIM + hash_code + "\n" + dir_code + "\n" + match_code + "\n" + walk_text + KERNEL_PORTS_COMMON + test_text)
+            objects = [str(work / "oracle.c"), str(work / "port.c")]
+            if arch == "x86_64":
+                (work / "wide.c").write_text(
+                    '#define KERNEL_MODE 1\n#define X64 1\n#define ASM_SIMD_SECTION ""\n#define ASM_SIMD_SECTION_END ""\n'
+                    '#define ASM_FUNC(name) ".globl " #name "\\n.type " #name ", @function\\n" #name ":\\n"\n'
+                    '#define ASM_END(name) ".size " #name ", .-" #name "\\n"\n#define ASM_RET "ret\\n"\n' + wide_region)
+                objects.append(str(work / "wide.c"))
+            built = subprocess.run(compiler + cflags + [defines, "-DCONFIG_FS_ENCRYPTION=1", "-DCONFIG_UNICODE=1", "-O2", "-w", "-I", str(work), "-o", str(work / "test")] + objects,
+                                   capture_output=True, text=True)
+            if built.returncode:
+                print("  build failed for %s:\n%s" % (arch, built.stderr[-1500:]))
+                return None
+            ran = subprocess.run(runner + [str(work / "test"), str(count)], capture_output=True, text=True, timeout=3000)
+            found = re.search(r"cases (\d+) differ (\d+) stores (\d+)", ran.stdout)
+            if not found:
+                print("  no answer from %s: %s" % (arch, (ran.stdout + ran.stderr)[-500:]))
+                return None
+            for line in ran.stdout.splitlines():
+                if line.startswith("case ") and not sabotage:
+                    print("    " + line)
+            return tuple(int(x) for x in found.groups())
+
+    machine = platform.machine().lower()
+    targets = []
+    if sys.platform.startswith("linux") and machine in ("x86_64", "amd64"):
+        targets.append(("x86_64", shlex.split(os.environ.get("CC", "cc")), [], ["-static"], 6000))
+    elif sys.platform.startswith("linux") and machine in ("aarch64", "arm64"):
+        targets.append(("arm64", shlex.split(os.environ.get("CC", "cc")), [], ["-static"], 6000))
+    if machine not in ("aarch64", "arm64") and shutil.which("aarch64-linux-gnu-gcc") and shutil.which("qemu-aarch64"):
+        targets.append(("arm64", ["aarch64-linux-gnu-gcc"], ["qemu-aarch64"], ["-static"], 1500))
+    if machine != "riscv64" and shutil.which("riscv64-linux-gnu-gcc") and shutil.which("qemu-riscv64"):
+        targets.append(("riscv64", ["riscv64-linux-gnu-gcc"], ["qemu-riscv64", "-cpu", "rv64,v=true,vlen=128"], ["-static", "-march=rv64gc"], 1500))
+    if not targets:
+        print("kernel ports: NOT RUN -- no toolchain for any architecture here")
+        return 0
+    for arch, compiler, runner, cflags, count in targets:
+        replaced = {rest.split()[1] for verb, rest in tags(arch) if verb == "replace"}
+        if not replaced:
+            print("kernel ports: %s has no port to test" % arch)
+            continue
+        for port in ports:
+            if port not in replaced:
+                continue
+            plain = run(arch, compiler, runner, cflags, count, False, port)
+            checks(plain is not None, "%s %s: built and ran" % (arch, port))
+            if plain:
+                cases, bad, stores = plain
+                checks(bad == 0 and stores > 500, "%s %s: %d cases, %d entries, %d differ from the kernel's C" % (arch, port, cases, stores, bad))
+                broken = run(arch, compiler, runner, cflags, min(count, 600), True, port)
+                checks(broken is not None and broken[1] > 0, "%s %s: an oracle with one line changed is caught" % (arch, port))
+    return checks.verdict("kernel ports: checks passed", "kernel-ports")
+
+
 HARNESS_CHECKS = {
     "https_bench": harness_https_bench,
     "compression": harness_compression,
@@ -58949,6 +59627,7 @@ HARNESS_CHECKS = {
     "pane_pages": harness_pane_pages,
     "shared_page": harness_shared_page,
     "kernel_dirhash": harness_kernel_dirhash,
+    "kernel_ports": harness_kernel_ports,
     "spark_entry": harness_spark_entry,
     "build_tools": harness_build_tools,
     "macos_read_retry": harness_macos_read_retry,

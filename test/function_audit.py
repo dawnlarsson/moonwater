@@ -262,27 +262,26 @@ def marked_assembly(root):
 
 
 def kernel_c_assembly():
-    """The routines of kernel/kernel.c, one body for each architecture its
-    //> arch tag names (all three when it names none): the kernel functions
-    rewritten in assembly, which kernel/patch/functions puts in the place of
-    their C originals."""
+    """The routines of kernel/kernel.c, one body for each ASM_FUNC, on the
+    architecture of the #ifdef it sits in: the kernel functions rewritten in
+    assembly, which kernel/patch/functions puts in the place of their C
+    originals."""
     path = ROOT / 'kernel/kernel.c'
     if not path.is_file():
         raise SystemExit('function audit: kernel/kernel.c is gone; the kernel '
                          'assembly counted there has moved')
-    bodies, arches = [], None
+    bodies, architecture = [], None
+    names = {'CONFIG_X86_64': 'x86_64', 'CONFIG_ARM64': 'arm64', 'CONFIG_RISCV': 'riscv64'}
     for line, text in enumerate(path.read_text(
             encoding='utf-8', errors='replace').splitlines(), 1):
-        match = re.match(r'//>\s+arch\s+(.*)', text)
+        match = re.match(r'#ifdef\s+(CONFIG_X86_64|CONFIG_ARM64|CONFIG_RISCV)\b', text)
         if match:
-            arches = match.group(1).split()
+            architecture = names[match.group(1)]
             continue
         match = re.match(r'\s*ASM_FUNC\(([^)]+)\)', text)
-        if match:
-            for architecture in (arches or ['x86_64', 'arm64', 'riscv64']):
-                bodies.append((path.relative_to(ROOT).as_posix(), line,
-                               match.group(1), architecture))
-            arches = None
+        if match and architecture:
+            bodies.append((path.relative_to(ROOT).as_posix(), line,
+                           match.group(1), architecture))
     return bodies
 
 
