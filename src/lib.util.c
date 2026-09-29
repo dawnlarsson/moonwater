@@ -21422,8 +21422,227 @@ static bool clock_tz_in_dst(bipolar utc)
         return utc >= start_utc || utc < stop_utc;
 }
 
+/*
+        A zone's history, from the TZif file where the machine has one
+        (/usr/share/zoneinfo/NAME, or /etc/localtime): the instants at which
+        the offset changed and what it changed to, so that a time before the
+        zone's last change is read by the rules of its day. The POSIX rule of
+        the footer is what governs after the last change and is all the
+        embedded zone table holds; a 2006 date in Edmonton, where daylight
+        saving began on the first Sunday of April, needs the file. A machine
+        without the files, or a version 1 file, has no history and answers as
+        it always did.
+*/
+static fn clock_tz_reset(void);
+
+#define CLOCK_HISTORY_MAX 1200
+#define CLOCK_HISTORY_TYPES 64
+
+static positive clock_history_count;
+static bipolar clock_history_times[CLOCK_HISTORY_MAX];
+static p8 clock_history_index[CLOCK_HISTORY_MAX];
+static bipolar clock_history_offset[CLOCK_HISTORY_TYPES];
+static p8 clock_history_dst[CLOCK_HISTORY_TYPES];
+static p8 clock_history_name[CLOCK_HISTORY_TYPES][8];
+static p8 clock_history_first;
+static bool clock_history_rules;
+static p8 clock_history_file[1 << 16];
+
+static positive clock_history_be(const p8 address_to at, positive bytes)
+{
+        positive value = 0;
+
+        for (positive i = 0; i < bytes; i++)
+                value = (value << 8) | at[i];
+        return value;
+}
+
+// Read a TZif file into the tables above; the footer's rule, when the file
+// has one and rules is asked for, is returned in footer.
+static bool clock_history_load(string_address path, p8 address_to footer, positive footer_room)
+{
+        bipolar handle = system_call_4(syscall(openat), AT_FDCWD, (positive)path,
+                                       O_RDONLY | O_CLOEXEC, 0);
+        positive used = 0;
+
+        clock_history_count = 0;
+        if (handle < 0)
+                return false;
+        for (;;)
+        {
+                bipolar got = system_call_3(syscall(read), (positive)handle,
+                                            (positive)(clock_history_file + used),
+                                            sizeof(clock_history_file) - used);
+
+                if (got == -4)
+                        continue;
+                if (got <= 0)
+                        break;
+                used += (positive)got;
+                if (used == sizeof(clock_history_file))
+                        break;
+        }
+        system_call_1(syscall(close), (positive)handle);
+
+        p8 address_to file = clock_history_file;
+
+        if (used < 44 || memory_compare(file, "TZif", 4) != 0 || file[4] < '2')
+                return false;
+
+        positive skip = 44 + clock_history_be(file + 32, 4) * 5 +
+                        clock_history_be(file + 36, 4) * 6 + clock_history_be(file + 40, 4) +
+                        clock_history_be(file + 28, 4) * 8 + clock_history_be(file + 24, 4) +
+                        clock_history_be(file + 20, 4);
+
+        if (skip + 44 > used || memory_compare(file + skip, "TZif", 4) != 0)
+                return false;
+
+        positive isut = clock_history_be(file + skip + 20, 4);
+        positive isstd = clock_history_be(file + skip + 24, 4);
+        positive leaps = clock_history_be(file + skip + 28, 4);
+        positive times = clock_history_be(file + skip + 32, 4);
+        positive types = clock_history_be(file + skip + 36, 4);
+        positive chars = clock_history_be(file + skip + 40, 4);
+        positive at = skip + 44;
+        positive whole = times * 9 + types * 6 + chars + leaps * 12 + isstd + isut;
+
+        if (!types || types > CLOCK_HISTORY_TYPES || times > CLOCK_HISTORY_MAX ||
+            at + whole > used)
+                return false;
+
+        positive table = at;
+        positive kinds = table + times * 8;
+        positive descriptions = kinds + times;
+        positive letters = descriptions + types * 6;
+
+        for (positive i = 0; i < times; i++)
+        {
+                clock_history_times[i] = (bipolar)clock_history_be(file + table + 8 * i, 8);
+                clock_history_index[i] = file[kinds + i];
+                if (clock_history_index[i] >= types)
+                        return false;
+        }
+        clock_history_first = 0;
+        for (positive i = 0; i < types; i++)
+        {
+                p8 address_to one = file + descriptions + 6 * i;
+
+                clock_history_offset[i] = (bipolar)(b32)clock_history_be(one, 4);
+                clock_history_dst[i] = one[4];
+                positive name = one[5];
+                positive length = 0;
+
+                while (name + length < chars && file[letters + name + length] && length < 7)
+                {
+                        clock_history_name[i][length] = file[letters + name + length];
+                        length++;
+                }
+                clock_history_name[i][length] = 0;
+        }
+        for (positive i = 0; i < types; i++)
+                if (!clock_history_dst[i])
+                {
+                        clock_history_first = (p8)i;
+                        break;
+                }
+        // Time type 0 is the one before the first change, by RFC 8536.
+        clock_history_first = 0;
+
+        if (footer && footer_room)
+        {
+                positive tail = letters + chars + leaps * 12 + isstd + isut;
+
+                footer[0] = 0;
+                if (tail < used && file[tail] == '\n')
+                {
+                        positive length = 0;
+
+                        for (positive i = tail + 1; i < used && file[i] != '\n' && length + 1 < footer_room; i++)
+                                footer[length++] = file[i];
+                        footer[length] = 0;
+                }
+        }
+        clock_history_count = times;
+        return true;
+}
+
+// The offset (seconds west), whether it is daylight time and the name in
+// force at an instant the history covers; false after its last change, where
+// the rule governs, and when there is no history.
+static bool clock_history_at(bipolar utc, bipolar address_to west, bool address_to dst,
+                             string_address address_to name)
+{
+        if (!clock_history_count)
+                return false;
+
+        positive type;
+
+        if (utc < clock_history_times[0])
+                type = clock_history_first;
+        else if (utc >= clock_history_times[clock_history_count - 1])
+        {
+                if (clock_history_rules)
+                        return false;
+                type = clock_history_index[clock_history_count - 1];
+        }
+        else
+        {
+                positive low = 0;
+                positive high = clock_history_count - 1;
+
+                while (high - low > 1)
+                {
+                        positive middle = (low + high) / 2;
+
+                        if (clock_history_times[middle] <= utc)
+                                low = middle;
+                        else
+                                high = middle;
+                }
+                type = clock_history_index[low];
+        }
+        address_to west = -clock_history_offset[type];
+        address_to dst = clock_history_dst[type] != 0;
+        address_to name = (string_address)clock_history_name[type];
+        return true;
+}
+
+// The history of the zone a TZ or a timezone file names, when it is an
+// IANA name the machine has a file for; rules when the footer says so.
+static fn clock_history_of(string_address zone)
+{
+        p8 path[128];
+        p8 footer[80];
+        string_address name = zone;
+        positive at = 0;
+        const char address_to base = "/usr/share/zoneinfo/";
+
+        clock_history_count = 0;
+        if (!zone || !zone[0])
+                return;
+        if (name[0] == ':')
+                name++;
+        if (!name[0] || name[0] == '/' || string_length(name) > 60)
+                return;
+        for (positive i = 0; name[i]; i++)
+                if (name[i] == '.' && name[i + 1] == '.')
+                        return;
+        for (; base[at]; at++)
+                path[at] = (p8)base[at];
+        for (positive i = 0; name[i]; i++)
+                path[at++] = (p8)name[i];
+        path[at] = 0;
+        if (!clock_history_load((string_address)path, footer, sizeof(footer)))
+                return;
+        // A zone the embedded table does not know is the file's own footer.
+        if (!clock_zone_posix(name) && footer[0] && !clock_tz_parse((string_address)footer))
+                clock_tz_reset();
+        clock_history_rules = footer[0] != 0;
+}
+
 static fn clock_tz_reset(void)
 {
+        clock_history_count = 0;
         clock_has_dst = false;
         clock_std_west = 0;
         clock_dst_west = 0;
@@ -21496,6 +21715,8 @@ static fn clock_tz_load_localtime(void)
                 return;
         if (!clock_tz_parse(text + line))
                 clock_tz_reset();
+        else if (clock_history_load(CLOCK_LOCALTIME_PATH, null, 0))
+                clock_history_rules = true;
 }
 
 static fn clock_tz_load_file(void)
@@ -21534,6 +21755,7 @@ static fn clock_tz_load_file(void)
                         posix = text;
                 if (!clock_tz_parse(posix))
                         clock_tz_reset();
+                clock_history_of(text);
         }
 }
 
@@ -21579,6 +21801,7 @@ fn tzset(void)
                         posix = value;
                 if (!clock_tz_parse(posix))
                         clock_tz_reset();
+                clock_history_of(value);
                 if (string_length(value) < sizeof(clock_tz_env_held))
                 {
                         string_copy_bounded(clock_tz_env_held, value,
@@ -21685,6 +21908,8 @@ positive clock_zone_tzif(string_address zone, p8 address_to into,
         return at;
 }
 
+static bool clock_hist_used;
+
 tm address_to localtime_r(const time_t address_to stamp, tm address_to into)
 {
         bipolar utc;
@@ -21696,8 +21921,16 @@ tm address_to localtime_r(const time_t address_to stamp, tm address_to into)
                 return null;
         clock_tz_current();
         utc = (bipolar)(address_to stamp);
-        dst = clock_tz_in_dst(utc);
-        west = dst ? clock_dst_west : clock_std_west;
+        string_address named = null;
+
+        if (clock_history_at(utc, address_of west, address_of dst, address_of named))
+                clock_hist_used = true;
+        else
+        {
+                clock_hist_used = false;
+                dst = clock_tz_in_dst(utc);
+                west = dst ? clock_dst_west : clock_std_west;
+        }
         //      The wall time of an instant at the end of the range, in a zone
         //      that is ahead of UTC, is past it: there is no such date.
         if (__builtin_sub_overflow(utc, (bipolar)west, &wall) ||
@@ -21705,7 +21938,7 @@ tm address_to localtime_r(const time_t address_to stamp, tm address_to into)
                 return null;
         into->tm_isdst = dst ? 1 : 0;
         into->tm_gmtoff = -west;
-        into->tm_zone = dst ? clock_dst_name : clock_std_name;
+        into->tm_zone = clock_hist_used ? (char address_to)named : dst ? clock_dst_name : clock_std_name;
         timezone = west;
         return into;
 }
@@ -21746,7 +21979,13 @@ tm address_to localtime(const time_t address_to stamp)
 */
 bipolar clock_local_east(b64 utc)
 {
+        bipolar west;
+        bool dst;
+        string_address named;
+
         clock_tz_current();
+        if (clock_history_at((bipolar)utc, address_of west, address_of dst, address_of named))
+                return -west;
         if (clock_has_dst && clock_tz_in_dst((bipolar)utc))
                 return -clock_dst_west;
         return -clock_std_west;
@@ -21773,6 +22012,16 @@ b64 clock_local_to_utc(b64 civil)
 bool clock_local_exists(b64 civil)
 {
         clock_tz_current();
+        if (clock_history_count)
+        {
+                //      Where an offset in force at either end of the day makes
+                //      this wall-clock time an instant that has it.
+                bipolar before = clock_local_east(civil - CLOCK_SECONDS_PER_DAY);
+                bipolar after = clock_local_east(civil + CLOCK_SECONDS_PER_DAY);
+
+                return clock_local_east(civil - before) == before ||
+                       clock_local_east(civil - after) == after;
+        }
         return !clock_has_dst ||
                !clock_tz_in_dst(clock_sum_saturated(civil, clock_std_west)) ||
                clock_tz_in_dst(clock_sum_saturated(civil, clock_dst_west));
