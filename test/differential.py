@@ -8499,6 +8499,30 @@ FILES_UTILITIES = FILES_UTILITIES + (
 FILES_UTILITIES = tuple(utility if utility.normalize else dataclasses.replace(utility, normalize=files_plain)
                   for utility in FILES_UTILITIES)
 
+
+def files_block_size_cases(tool):
+    """A block size as xstrtoumax reads one for ls, du and df: a number in C's
+    bases after blanks and a plus, a unit in the cases GNU takes, B, D or iB
+    after it, and what is refused as invalid, as a bad suffix or as too
+    large -- drawn per tool, with the spellings each form needs always in."""
+    rng = random.Random(int.from_bytes(hashlib.sha256(
+        ("blocksize:" + tool).encode()).digest()[:8], "little"))
+    numbers = ("", "1", "010", "0x10", "0X1F", "+1", " 1", "08", "0", "16", "1536", "99999999999999999999", "'1")
+    units = ("", "k", "K", "m", "M", "g", "t", "p", "e", "E", "Z", "R", "x")
+    tails = ("", "B", "D", "iB", "x", " ")
+    spellings = sorted({number + unit + tail for number in numbers for unit in units for tail in tails})
+    picked = ("k", "kB", "KiB", "kiB", "0x10", "1KiB", "KD", "R", "1R", "16E", "1D", "1B", "010", " 1") + \
+        tuple(rng.sample(spellings, 50))
+    forms = {"ls": (("-s", "--block-size={}", "a.txt"), ("-l", "--block-size={}", "b.txt")),
+             "du": (("-B", "{}", "dir"), ("--block-size={}", "a.txt")),
+             "df": (("-B", "{}", "."), ("--output=size", "--block-size={}", "."))}[tool]
+    return tuple(tuple(word.format(spelling) for word in form) for spelling in picked for form in forms)
+
+
+FILES_UTILITIES = tuple(dataclasses.replace(utility, extra=tuple(utility.extra) + files_block_size_cases(utility.name))
+                        if utility.name in ("ls", "du", "df") else utility
+                        for utility in FILES_UTILITIES)
+
 def files_column_cases():
     # Round the maximum column count upward as GNU v9.11 does.
     # Keep its strict exact-fit behavior and suppress empty horizontal output.

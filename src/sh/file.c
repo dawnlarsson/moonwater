@@ -8914,16 +8914,26 @@ static positive ls_scaled_width(p64 value, positive unit, bool human, bool si,
 }
 
 /*
-        A --block-size argument: a number, a unit letter, or both, with B for
-        powers of a thousand and iB or nothing for powers of 1024; a leading
-        apostrophe asks for digit grouping, which the C locale has none of.
-        The suffix written after each number is the unit as it was spelled.
+        A --block-size argument, read as human_options reads it through
+        xstrtoumax: a number in C's bases (010 is eight, 0x10 sixteen, after
+        blanks and a plus), a unit letter (k, m, g and t in either case, the
+        rest upper), or both. B or D after the letter makes it a power of a
+        thousand and iB leaves it 1024; a leading apostrophe asks for digit
+        grouping, which the C locale has none of. A spelling with no number
+        writes its unit after every size, GNU's way: the letter upper case,
+        k for a thousand, and B or iB when they were given.
+
+        Why a spelling was refused is kept for ls_block_size_refused: nothing
+        to read or a size of nothing ('i'), something after the unit that is
+        not one ('s'), or more than a word holds ('l').
 */
+static p8 ls_block_size_why;
+
 static bool ls_block_size_read(string_address text, positive address_to unit,
                                bool address_to human, bool address_to si,
                                p8 address_to suffix)
 {
-        static const p8 letters[] = "KMGTPEZYRQ";
+        static const p8 letters[] = "KMGTPEZY";
         string_address at = text;
         positive number = 1;
         bool numeric = false;
@@ -8931,6 +8941,7 @@ static bool ls_block_size_read(string_address text, positive address_to unit,
         address_to human = false;
         address_to si = false;
         suffix[0] = end;
+        ls_block_size_why = 'i';
 
         if (string_is(at, '\''))
                 at++;
@@ -8945,49 +8956,99 @@ static bool ls_block_size_read(string_address text, positive address_to unit,
                 return true;
         }
 
-        if (byte_is_digit(string_get(at)))
+        string_address digits = at;
+        positive base = 10;
+        //      Past a word, which is said only when nothing else is wrong:
+        //      xstrtol_fatal names a bad suffix before an overflow.
+        bool overflow = false;
+
+        while (byte_is_space(string_get(digits)))
+                digits++;
+        if (string_is(digits, '+'))
+                digits++;
+        if (string_is(digits, '0') && (string_get(digits + 1) | 0x20) == 'x' &&
+            byte_is_hexadecimal(string_get(digits + 2)))
+                base = 16, digits += 2;
+        else if (string_is(digits, '0'))
+                base = 8;
+        if (digit_known(string_get(digits), base) < base)
         {
-                if (!string_digits_checked(address_of at, 10, address_of number) || !number)
-                        return false;
+                if (!string_digits_checked(address_of digits, base, address_of number))
+                {
+                        overflow = true;
+                        while (digit_known(string_get(digits), base) < base)
+                                digits++;
+                }
                 numeric = true;
+                at = digits;
         }
 
         if (!string_get(at))
         {
-                if (!numeric)
+                if (!numeric || !number)
                         return false;
+                if (overflow)
+                {
+                        ls_block_size_why = 'l';
+                        return false;
+                }
                 address_to unit = number;
                 return true;
         }
 
-        string_address letter = string_first_of((string_address)letters, string_get(at));
+        //      k, m, g and t are the lower case letters xstrtol reads; e, p,
+        //      y and z are in its list and then refused as a suffix.
+        p8 spelled = string_get(at);
+        p8 upper = string_first_of((string_address) "kmgt", spelled)
+                       ? (p8)(spelled - 32) : spelled;
+        string_address letter = string_first_of((string_address)letters, upper);
 
-        if (!letter || string_get(at) == end)
+        if (!letter)
+        {
+                if (numeric || string_first_of((string_address) "epyz", spelled))
+                        ls_block_size_why = number ? 's' : 'i';
                 return false;
+        }
 
         positive power = (positive)(letter - (string_address)letters) + 1;
-        positive base = 1024;
+        positive thousand = false;
         positive suffix_length = 0;
 
-        suffix[suffix_length++] = string_get(at);
+        suffix[suffix_length++] = upper;
         at++;
 
-        if (string_is(at, 'B'))
-        {
-                base = 1000;
-                suffix[0] = suffix[0] == 'K' ? 'k' : suffix[0];
-                suffix[suffix_length++] = 'B';
-                at++;
-        }
-        else if (string_is(at, 'i') && string_is(at + 1, 'B'))
+        if (string_is(at, 'i') && string_is(at + 1, 'B'))
         {
                 suffix[suffix_length++] = 'i';
                 suffix[suffix_length++] = 'B';
                 at += 2;
         }
+        else if (string_is(at, 'B') || string_is(at, 'D'))
+        {
+                thousand = true;
+                if (string_is(at, 'B'))
+                {
+                        suffix[0] = upper == 'K' ? 'k' : upper;
+                        suffix[suffix_length++] = 'B';
+                }
+                at++;
+        }
 
-        if (string_get(at))
+        p64 scaled = 0;
+        if (!size_scale_power_checked(
+                number, thousand ? 1000 : 1024, (p8)power, (p64)positive_max,
+                address_of scaled))
+                overflow = true;
+        if (string_get(at) || !number)
+        {
+                ls_block_size_why = number ? 's' : 'i';
                 return false;
+        }
+        if (overflow)
+        {
+                ls_block_size_why = 'l';
+                return false;
+        }
 
         //      A spelling that begins with a count says what a block is
         //      worth and nothing more: --block-size=1K counts in kibibytes
@@ -8997,15 +9058,19 @@ static bool ls_block_size_read(string_address text, positive address_to unit,
                 suffix_length = 0;
 
         suffix[suffix_length] = end;
-
-        p64 scaled;
-        if (!size_scale_power_checked(
-                number, base, (p8)power, (p64)positive_max,
-                address_of scaled))
-                return false;
-
         address_to unit = (positive)scaled;
         return true;
+}
+
+// xstrtol_fatal's words for the spelling ls_block_size_read refused.
+static fn ls_block_size_refused(string_address program, string_address option,
+                                string_address given)
+{
+        string_format(log_error,
+                      ls_block_size_why == 'l' ? "%s: %s argument '%s' too large\n"
+                      : ls_block_size_why == 's' ? "%s: invalid suffix in %s argument '%s'\n"
+                                                 : "%s: invalid %s argument '%s'\n",
+                      program, option, given);
 }
 
 // ---- Order ---------------------------------------------------------------
@@ -11895,8 +11960,8 @@ static b32 file_ls_as(string_address program, p8 default_format, p8 default_quot
                 if (!ls_block_size_read(given, address_of ls_size_unit, address_of ls_size_human,
                                         address_of ls_size_si, ls_size_suffix))
                 {
-                        return string_report(log_error, 2, "%s: invalid --block-size argument '%s'\n",
-                                      program, given);
+                        ls_block_size_refused(program, (string_address) "--block-size", given);
+                        return 2;
                 }
 
                 ls_block_unit = ls_size_unit;
@@ -17823,11 +17888,14 @@ static bool du_block_size_seen(string_address value)
                                         address_of si, suffix))
                 return true;
 
-        return string_report(log_error, false, "du: invalid %s argument '%s'\n",
-                             du_taking && du_taking->long_written
-                                 ? (string_address) "--block-size"
-                                 : (string_address) "-B",
-                             value ? value : (string_address) "");
+        if (!value)
+                ls_block_size_why = 'i';
+        ls_block_size_refused((string_address) "du",
+                              du_taking && du_taking->long_written
+                                  ? (string_address) "--block-size"
+                                  : (string_address) "-B",
+                              value ? value : (string_address) "");
+        return false;
 }
 
 static bool du_exclude_add(string_address pattern)
@@ -18687,11 +18755,12 @@ static bool df_seen(p8 letter, string_address value)
                 if (ls_block_size_read(value, address_of unit, address_of human,
                                        address_of si, suffix))
                         return true;
-                return string_report(log_error, false, "df: invalid %s argument '%s'\n",
-                                     df_taking && df_taking->long_written
-                                         ? (string_address) "--block-size"
-                                         : (string_address) "-B",
-                                     value);
+                ls_block_size_refused((string_address) "df",
+                                      df_taking && df_taking->long_written
+                                          ? (string_address) "--block-size"
+                                          : (string_address) "-B",
+                                      value);
+                return false;
         }
         /*
                 --output builds a table of its own, so it cannot stand with
@@ -19250,24 +19319,17 @@ static b32 file_df()
                 df_si = si;
                 df_unit = unit;
 
-                // A letter makes the base 1024, unless a bare B after it
-                // makes it 1000; iB and B both ask for the B.
-                bool letter = false;
-                bool marked = false;
-                bool decimal = false;
-
-                for (string_address at = given; string_get(at); at++)
-                        if (string_is(at, 'B'))
-                        {
-                                marked = true;
-                                decimal = !(at > given && at[-1] == 'i');
-                        }
-                        else if (byte_is_alpha(string_get(at)) && !string_is(at, 'i'))
-                                letter = true;
+                // humblock's options: only a spelling with no number in it
+                // has any, and there a unit makes the base 1024 unless a
+                // bare B after it makes it 1000; iB and B both ask for the
+                // B. Such a spelling, and only it, left a suffix.
+                positive spelled = string_length(df_suffix);
+                bool marked = spelled && df_suffix[spelled - 1] == 'B';
+                bool binary = spelled && (!marked || (spelled > 1 && df_suffix[spelled - 2] == 'i'));
                 memory_copy_apart(posix_heading + positive_into_string(posix_heading, unit),
                                   "-blocks", 8);
                 if (!human)
-                        df_block_heading(block_heading, unit, letter && !decimal, marked);
+                        df_block_heading(block_heading, unit, binary, marked);
         }
         df_all = (taking.flags & FILE_FLAG('a')) != 0;
 
