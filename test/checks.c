@@ -16274,7 +16274,7 @@ static fn limbs_divide_one(p64 high, p64 low, p64 divisor)
         same("positive_divide_wide", "remainder", got.y, want.y);
 }
 
-fn check_limbs()
+static fn check_limbs_body()
 {
         p8 address_to pages = memory(4 * 4096);
         bool mapped = (bipolar)(positive)pages > 0;
@@ -16450,6 +16450,24 @@ fn check_limbs()
         }
 
         memory_free(pages, 4 * 4096);
+}
+
+fn check_limbs()
+{
+#if X64
+        //      Once with the mulx body where the machine has it, asked from
+        //      scratch, and once with the byte set to absent.
+        p8 had = cpu_has_adx;
+
+        cpu_has_adx = 0;
+        check_limbs_body();
+        same("limbs_add_multiply_word", "the byte was asked", cpu_has_adx != 0, 1);
+        cpu_has_adx = 1;
+        check_limbs_body();
+        cpu_has_adx = had;
+#else
+        check_limbs_body();
+#endif
 }
 
 fn check_copy_match()

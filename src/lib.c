@@ -80702,6 +80702,14 @@ PURE b32 limbs_compare(const p64 address_to a, const p64 address_to b, positive 
 CONST positive2 positive_divide_wide(positive high, positive low, positive divisor);
 
 #if X64
+// BMI2 with ADX, asked by limbs_add_multiply_word on its first call: 0 until
+// then, 1 for absent and 2 for present.
+extern p8 cpu_has_adx;
+__asm__(
+    ASM_BSS_OBJECT_BEGIN(cpu_has_adx, 1)
+    ".zero 1\n"
+    ASM_OBJECT_END(cpu_has_adx)
+);
 __asm__(
     ASM_SECTION
     ASM_FUNC(limbs_add)
@@ -80742,7 +80750,20 @@ __asm__(
     ASM_RET
     ASM_END(limbs_subtract)
 
+    // BMI2 and ADX, asked on the first call and remembered (0 unasked, 1
+    // absent, 2 present), take the mulx body below: two carry chains, one
+    // through the low products and one through r, run side by side, so a limb
+    // costs its mulx, its two adds and its store and no more.
     ASM_FUNC(limbs_add_multiply_word)
+    "movzbl cpu_has_adx(%rip), %eax\n   cmp $2, %eax\n   je .Llimbs_addmul_x64_adx\n"
+    "test %eax, %eax\n   jnz .Llimbs_addmul_x64_plain\n"
+    "push %rbx\n   push %rdx\n   push %rcx\n"
+    "xor %eax, %eax\n   cpuid\n   mov $1, %r8d\n   cmp $7, %eax\n   jb 5f\n"
+    "mov $7, %eax\n   xor %ecx, %ecx\n   cpuid\n"
+    "and $0x80100, %ebx\n   cmp $0x80100, %ebx\n   jne 5f\n   mov $2, %r8d\n"
+    "5:  mov %r8b, cpu_has_adx(%rip)\n   pop %rcx\n   pop %rdx\n   pop %rbx\n"
+    "cmp $2, %r8d\n   je .Llimbs_addmul_x64_adx\n"
+    ".Llimbs_addmul_x64_plain:\n"
     "mov %rdx, %r9\n   xor %r8d, %r8d\n   mov %r9d, %r10d\n   and $3, %r10d\n   jz 2f\n"
     "1:  mov (%rsi), %rax\n   mul %rcx\n   add %r8, %rax\n   adc $0, %rdx\n"
     "add %rax, (%rdi)\n   adc $0, %rdx\n   mov %rdx, %r8\n"
@@ -80760,6 +80781,39 @@ __asm__(
     "pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n"
     "4:  mov %r8, %rax\n"
     ASM_RET
+    // rdx the multiplier, r9 the count, r8 the limb carried; the odd limbs
+    // one at a time, then four a turn with both chains kept live across
+    // turns: only lea and jrcxz move the counter and the pointers.
+    ".Llimbs_addmul_x64_adx:\n"
+    "mov %rdx, %r9\n   mov %rcx, %rdx\n   xor %r8d, %r8d\n   mov %r9d, %r10d\n   and $3, %r10d\n   jz 2f\n"
+    "1:  mulx (%rsi), %rax, %r11\n   add %r8, %rax\n   adc $0, %r11\n"
+    "add %rax, (%rdi)\n   adc $0, %r11\n   mov %r11, %r8\n"
+    "lea 8(%rsi), %rsi\n   lea 8(%rdi), %rdi\n   dec %r10d\n   jnz 1b\n"
+    "2:  mov %r9, %rcx\n   shr $2, %rcx\n   jz 4b\n"
+    "push %rbx\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n"
+    "mov %ecx, %r10d\n   inc %rcx\n   shr $1, %rcx\n   xor %eax, %eax\n"
+    "test $1, %r10b\n   jz 3f\n   lea -32(%rsi), %rsi\n   lea -32(%rdi), %rdi\n   jmp 7f\n"
+    ".balign 16\n3:\n"
+    "mulx 0(%rsi), %rax, %r10\n   mulx 8(%rsi), %r11, %r12\n"
+    "mulx 16(%rsi), %r13, %r14\n   mulx 24(%rsi), %r15, %rbx\n"
+    "adcx %r8, %rax\n   adox 0(%rdi), %rax\n   mov %rax, 0(%rdi)\n"
+    "adcx %r10, %r11\n   adox 8(%rdi), %r11\n   mov %r11, 8(%rdi)\n"
+    "adcx %r12, %r13\n   adox 16(%rdi), %r13\n   mov %r13, 16(%rdi)\n"
+    "adcx %r14, %r15\n   adox 24(%rdi), %r15\n   mov %r15, 24(%rdi)\n"
+    "mov %rbx, %r8\n"
+    "7:\n"
+    "mulx 32(%rsi), %rax, %r10\n   mulx 40(%rsi), %r11, %r12\n"
+    "mulx 48(%rsi), %r13, %r14\n   mulx 56(%rsi), %r15, %rbx\n"
+    "adcx %r8, %rax\n   adox 32(%rdi), %rax\n   mov %rax, 32(%rdi)\n"
+    "adcx %r10, %r11\n   adox 40(%rdi), %r11\n   mov %r11, 40(%rdi)\n"
+    "adcx %r12, %r13\n   adox 48(%rdi), %r13\n   mov %r13, 48(%rdi)\n"
+    "adcx %r14, %r15\n   adox 56(%rdi), %r15\n   mov %r15, 56(%rdi)\n"
+    "mov %rbx, %r8\n"
+    "lea 64(%rsi), %rsi\n   lea 64(%rdi), %rdi\n   lea -1(%rcx), %rcx\n"
+    "jrcxz 6f\n   jmp 3b\n"
+    "6:  mov $0, %eax\n   adcx %rax, %r8\n   adox %rax, %r8\n"
+    "pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbx\n"
+    "jmp 4b\n"
     ASM_END(limbs_add_multiply_word)
 
     ASM_FUNC(limbs_multiply_word)
