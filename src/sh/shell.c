@@ -2234,7 +2234,31 @@ static fn run_line_inner(string_address line)
                         //      wanted something after is the token `newline'
                         //      to bash, and end of file is only what it says
                         //      when the input itself ran out.
-                        if (!tok || tok->kind == PT_END ||
+                        if (compound && lex_compound_bad)
+                        {
+                                p8 said[4] = {string_get(lex_compound_bad),
+                                              0, 0, 0};
+
+                                if (string_get(lex_compound_bad + 1) == said[0] &&
+                                    (said[0] == '&' || said[0] == '|' ||
+                                     said[0] == ';' || said[0] == '<' ||
+                                     said[0] == '>'))
+                                        said[1] = said[0];
+                                string_format(
+                                    log_error,
+                                    "syntax error near unexpected token `%s'\n",
+                                    said);
+                                if (line && string_get(line) &&
+                                    (!shell_is_interactive ||
+                                     shell_interactive_sourcing()))
+                                {
+                                        shell_syntax_where();
+                                        log_error("`", 1);
+                                        log_error(line, 0);
+                                        log_error("'\n", 2);
+                                }
+                        }
+                        else if (!tok || tok->kind == PT_END ||
                             tok->kind == PT_NEWLINE || !tok->text)
                         {
                                 string_format(

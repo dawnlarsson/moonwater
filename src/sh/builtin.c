@@ -228,11 +228,29 @@ static COLD b32 shell_letter_refused(string_address name, p8 letter,
 static COLD fn shell_unset_readonly_refused(string_address name,
                                             positive length);
 
+static COLD bool shell_reference_leads_to(string_address name, positive length,
+                                          string_address address_to led,
+                                          positive address_to led_length);
+
 static COLD fn shell_readonly_refused(string_address in_bash,
                                       string_address in_dash,
                                       string_address name, positive length)
 {
         string_address said = shell_bash_compat ? in_bash : in_dash;
+
+        //      A reference is refused by the name it leads to.
+        if (shell_bash_compat)
+        {
+                string_address led;
+                positive led_length;
+
+                if (shell_reference_leads_to(name, length, address_of led,
+                                             address_of led_length))
+                {
+                        name = led;
+                        length = led_length;
+                }
+        }
 
         shell_diagnostic_where();
 
@@ -2905,6 +2923,23 @@ static COLD PURE env_reference env_reference_span(const_string name,
                                     env_name_hash(name, length));
 }
 
+//      Where a name that is a reference ends up, when it is a different name.
+static COLD bool shell_reference_leads_to(string_address name, positive length,
+                                          string_address address_to led,
+                                          positive address_to led_length)
+{
+        env_reference resolved = env_reference_span(name, length);
+
+        if (!resolved.valid || resolved.element ||
+            (resolved.length == length &&
+             !memory_compare(resolved.name, name, length)))
+                return false;
+
+        address_to led = resolved.name;
+        address_to led_length = resolved.length;
+        return true;
+}
+
 // A subscript may assign the nameref cell that supplied its name and bytes.
 static COLD bool shell_reference_assign_destination(env_reference resolved,
     const_string value, bool append, env_variable address_to destination)
@@ -4257,8 +4292,12 @@ static bool shell_reference_valid(const_string name, positive length)
 static bool shell_declare_target_valid(const_string value)
 {
         if (!shell_reference_valid(value, string_length(env_reading(value))))
-                return string_report(log_error, false, "%s: %s: invalid variable name for name reference\n",
-                              shell_argv[0], value);
+        {
+                shell_diagnostic_where();
+                return string_report(log_error, false,
+                                     "%s: `%s': invalid variable name for name reference\n",
+                                     shell_argv[0], value);
+        }
         return true;
 }
 
@@ -8644,6 +8683,10 @@ static COLD fn shell_syntax_where()
                 line = shell_syntax_line_override;
         else if ((!shell_bash_compat && extra) || (shell_syntax_file && !extra))
                 line = shell_line_number ? shell_line_number : 1;
+        //      A syntax error is on the line the reader is on, and no command
+        //      of it has run to say where it was.
+        else if (shell_bash_compat && !extra && !shell_eval_lineno_base)
+                line = shell_line_number ? shell_line_number : 1;
         else
                 line = shell_line_now();
 
@@ -9183,6 +9226,21 @@ COLD fn shell_unset(writer write, string_address input)
                         //      variable's value is arithmetic, so evaluating
                         //      it here ran the commands inside it for a name
                         //      that names nothing, which bash does not.
+                        //      unset a[*] and a[@] empty an indexed array.
+                        if (shell_bash_compat)
+                        {
+                                p8 kind = shell_array_attributes(word, base);
+
+                                if (subscript_length == 1 &&
+                                    (subscript[0] == '*' || subscript[0] == '@') &&
+                                    (kind & SHELL_ARRAY_INDEXED))
+                                {
+                                        shell_array_clear(word, base);
+                                        index++;
+                                        continue;
+                                }
+                        }
+
                         if (shell_element_holder_absent(word, base))
                         {
                                 index++;
@@ -9275,8 +9333,25 @@ COLD fn shell_unset(writer write, string_address input)
                 }
                 else
                 {
-                        env_reference resolved =
-                            env_reference_span(word, word_length);
+                        env_reference resolved;
+
+                        //      unset a[*] and a[@] empty an indexed array; they
+                        //      are looked at before the subscript is read as
+                        //      arithmetic, which neither is.
+                        if (shell_bash_compat && word_length > 3 &&
+                            word[word_length - 3] == '[' &&
+                            (word[word_length - 2] == '*' ||
+                             word[word_length - 2] == '@') &&
+                            word[word_length - 1] == ']' &&
+                            (shell_array_attributes(word, word_length - 3) &
+                             SHELL_ARRAY_INDEXED))
+                        {
+                                shell_array_clear(word, word_length - 3);
+                                index++;
+                                continue;
+                        }
+
+                        resolved = env_reference_span(word, word_length);
 
                         if (!resolved.valid)
                         {
@@ -9321,6 +9396,22 @@ COLD fn shell_unset(writer write, string_address input)
 
                         if (resolved.element)
                         {
+                                p8 kind = shell_array_attributes(resolved.name,
+                                                                 resolved.length);
+
+                                //      unset a[*] and a[@] empty an indexed
+                                //      array; a scalar has no elements to
+                                //      take away, and bash says so.
+                                if (shell_bash_compat && resolved.subscript_length == 1 &&
+                                    (resolved.subscript[0] == '*' ||
+                                     resolved.subscript[0] == '@') &&
+                                    (kind & SHELL_ARRAY_INDEXED))
+                                {
+                                        shell_array_clear(resolved.name,
+                                                          resolved.length);
+                                        index++;
+                                        continue;
+                                }
                                 if (shell_element_holder_absent(resolved.name,
                                                                 resolved.length))
                                 {
@@ -10056,13 +10147,15 @@ static COLD bool shell_internal_written(writer write, string_address name,
         }
         else
         {
-                if (entry->kind == INTERNAL_CALLS || (!value && entry->kind !=
-                                                                    INTERNAL_ARRAY))
+                if (entry->kind == INTERNAL_CALLS ||
+                    (!value && entry->kind != INTERNAL_ARRAY &&
+                     entry->kind != INTERNAL_MADE))
                         return false;
                 write(name, length);
         }
 
-        if (entry->kind == INTERNAL_ARRAY || entry->kind == INTERNAL_VIEW)
+        if (entry->kind == INTERNAL_ARRAY || entry->kind == INTERNAL_VIEW ||
+            entry->kind == INTERNAL_MADE)
                 write("=()", 3);
         else if (value)
         {
@@ -10146,6 +10239,11 @@ static bool shell_declare_print_one(writer write, string_address name,
                         shell_declare_elements(
                             write, name, length,
                             (attributes & SHELL_ARRAY_ASSOCIATIVE) != 0);
+                else if (shell_bash_compat && shell_internal_find(name, length) &&
+                         shell_internal_find(name, length)->kind != INTERNAL_CALLS)
+                        //      bash's own arrays are never unset: DIRSTACK
+                        //      with nothing pushed is an empty list.
+                        write("=()", 3);
         }
         else if ((value = shell_listed_value(name, length, variable)))
         {
@@ -10635,6 +10733,7 @@ static inline INLINE fn shell_declare_apply(shell_declare_state address_to state
                 if ((state->attributes_set & SHELL_ARRAY_NAMEREF) &&
                     (held_attributes & SHELL_ARRAY_EITHER))
                 {
+                        shell_diagnostic_where();
                         string_format(log_error, "%s: %s: reference variable cannot be an array\n",
                                       shell_argv[0], word);
                         failed = true;
@@ -10677,6 +10776,22 @@ static inline INLINE fn shell_declare_apply(shell_declare_state address_to state
                 // indexed one as arithmetic, and the value about to be
                 // assigned is full of subscripts.
                 p8 set = state->attributes_set, clear = state->attributes_clear;
+
+                //      typeset +n name=value writes the value where the
+                //      reference still points, and only then takes the
+                //      reference off, so the target changes and name goes on
+                //      holding the old target's name.
+                if (shell_bash_compat && mark &&
+                    (clear & SHELL_ARRAY_NAMEREF) && !global_meta &&
+                    (shell_variable_attributes(word, length) &
+                     SHELL_ARRAY_NAMEREF))
+                {
+                        (void)env_assign(word, mark + 1);
+                        shell_variable_attribute_set(word, length, 0,
+                                                     SHELL_ARRAY_NAMEREF);
+                        goto next;
+                }
+
                 positive previous = env_find_span(word, length);
                 env_variable address_to previous_variable = global_meta ? global_meta
                     : previous < shell_var_count ? shell_vars + previous : null;
@@ -10695,6 +10810,7 @@ static inline INLINE fn shell_declare_apply(shell_declare_state address_to state
                 if ((set & SHELL_ARRAY_NAMEREF) && mark && !append &&
                     string_get(mark + 1) && !string_compare(mark + 1, word))
                 {
+                        shell_diagnostic_where();
                         string_format(log_error,
                                       "%s: %s: nameref variable self "
                                       "references not allowed\n",
@@ -10723,6 +10839,7 @@ static inline INLINE fn shell_declare_apply(shell_declare_state address_to state
                 {
                         if (scoped)
                         {
+                                shell_diagnostic_where();
                                 string_format(log_error, "%s: %s: reference variable cannot be an array\n",
                                               shell_argv[0], word);
                                 failed = true;
@@ -10845,9 +10962,35 @@ static inline INLINE fn shell_declare_apply(shell_declare_state address_to state
                         failed = true;
                         goto next;
                 }
+                //      A quoted "(list)" for e[10] is read as a list for e
+                //      itself, the subscript being of no use to it.
+                if (subscript && mark && string_is(mark + 1, '(') &&
+                    !exec_declaration_compound(word) &&
+                    string_length(mark + 1) >= 2 &&
+                    mark[string_length(mark) - 1] == ')')
+                {
+                        positive body = string_length(mark + 1);
+
+                        if (!shell_compound_assign(word, length, mark + 2,
+                                                   body > 2 ? body - 2 : 0,
+                                                   append))
+                                failed = true;
+                        goto next;
+                }
                 if (subscript && mark && exec_declaration_compound(word))
                 {
-                        string_format(log_error, "%s: cannot assign list to array member\n", word);
+                        p8 shown[320];
+                        positive size = length < 200 ? length : 200;
+                        positive inner = subscript_length < 100 ? subscript_length : 100;
+
+                        memory_copy(shown, word, size);
+                        shown[size++] = '[';
+                        memory_copy(shown + size, subscript, inner);
+                        size += inner;
+                        shown[size++] = ']';
+                        shown[size] = end;
+                        shell_diagnostic_where();
+                        string_format(log_error, "%s: cannot assign list to array member\n", shown);
                         address_to name_end = delimiter;
                         shell_compound_prepare_drop();
                         return expand_fatal_status(1);
@@ -11319,6 +11462,20 @@ static COLD bool shell_readonly_arrays(writer write)
                 if (!compound)
                         return false;
         }
+        //      readonly -a and readonly -A alone list the readonly arrays of
+        //      that kind, in declare's form.
+        if (index >= shell_argc && letters[2] && shell_bash_compat &&
+            !shell_posix_on())
+        {
+                b32 bit = letters[2] == 'a' ? SHELL_ARRAY_INDEXED
+                                            : SHELL_ARRAY_ASSOCIATIVE;
+
+                shell_inventory_sorted(write, DECLARE_READONLY | (bit << 8),
+                                       shell_declare_written, false, false);
+                shell_answer(0);
+                return true;
+        }
+
         if (index >= shell_argc)
                 return false;
 

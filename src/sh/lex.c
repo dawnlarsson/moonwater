@@ -1459,9 +1459,15 @@ static PURE bool lex_assignment_head(string_address text, positive length)
         assignment counted every parenthesis, so *(a|b)* would otherwise
         look like one element.
 */
+//      Where the last array list that was refused went wrong, so the error
+//      can name the token bash names.
+string_address lex_compound_bad;
+
 static bool lex_compound_body_legal(string_address open)
 {
         string_address at = open + 1;
+
+        lex_compound_bad = null;
 
         if (string_not(open, '('))
                 return true;
@@ -1510,13 +1516,19 @@ static bool lex_compound_body_legal(string_address open)
                         continue;
 
                 if (c == '(')
+                {
+                        lex_compound_bad = at;
                         return false;
+                }
 
                 //      A list of words has no place for a command's
                 //      operators: a & or a ; or a redirection in it is the
                 //      syntax error bash names at that token.
                 if (c == ';' || c == '&' || c == '|' || c == '<' || c == '>')
+                {
+                        lex_compound_bad = at;
                         return false;
+                }
 
                 at++;
         }

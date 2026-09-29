@@ -12901,7 +12901,28 @@ static b32 exec_for(b32 index, bool selecting)
                                 exec_debug_before(node);
                         exec_trace_for_header(node, false);
                 }
-                if (!env_assign(name, value))
+                //      A nameref that is the loop's variable is pointed at
+                //      each item in turn, and what it names is not written.
+                if (shell_bash_compat &&
+                    (shell_variable_attributes(name, string_length(name)) &
+                     SHELL_ARRAY_NAMEREF))
+                {
+                        positive size = string_length(name);
+
+                        shell_variable_attribute_set(name, size, 0,
+                                                     SHELL_ARRAY_NAMEREF);
+                        if (env_assign(name, value))
+                                shell_variable_attribute_set(
+                                    name, size, SHELL_ARRAY_NAMEREF, 0);
+                        else
+                        {
+                                shell_variable_attribute_set(
+                                    name, size, SHELL_ARRAY_NAMEREF, 0);
+                                status = exec_loop_assignment_error(name);
+                                break;
+                        }
+                }
+                else if (!env_assign(name, value))
                 {
                         status = exec_loop_assignment_error(name);
                         break;
