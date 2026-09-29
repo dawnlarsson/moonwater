@@ -776,6 +776,7 @@ typedef struct
         bool tagged;
         bool spread;
         b32 answer;
+        positive done; // inputs the sink has written, in order
         p8 address_to address_to blocks;
 } checksum_batch;
 
@@ -847,31 +848,49 @@ static fn checksum_batch_job(address_any context, positive index,
         }
 }
 
+/*
+        One input's answer written, its digest taken here when the pool did
+        not bring it: a job whose output could not be held stops the run
+        with the answers it made and no word of the rest, so every input
+        the answers did not cover is hashed on this thread, in order.
+*/
+static fn checksum_batch_put(checksum_batch address_to batch, positive at,
+                             checksum_answer address_to answer)
+{
+        string_address name = checksum_input_name(batch, at);
+
+        if (answer->status == CHECKSUM_DEFERRED)
+                answer->status = checksum_hash_path(batch->algorithm, batch->bytes,
+                                                    name, answer->digest, file_transfer);
+
+        if (answer->status < 0)
+        {
+                checksum_blame(name, file_reason(answer->status));
+                batch->answer = 1;
+        }
+        else
+                checksum_line_put(batch->algorithm, batch->bytes, answer->digest,
+                                  name, batch->tagged);
+        batch->done = at + 1;
+}
+
 static bool checksum_batch_sink(address_any context, positive index,
                                 address_any data, positive length)
 {
         checksum_batch address_to batch = context;
         positive first = index * batch->group;
+        positive last = min(first + batch->group, batch->inputs);
 
-        for (positive at = 0; at + sizeof(checksum_answer) <= length; at += sizeof(checksum_answer))
+        for (positive at = first; at < last; at++)
         {
                 checksum_answer answer;
-                string_address name = checksum_input_name(batch, first + at / sizeof(answer));
+                positive offset = (at - first) * sizeof(answer);
 
-                memory_copy(address_of answer, (p8 address_to)data + at, sizeof(answer));
-
-                if (answer.status == CHECKSUM_DEFERRED)
-                        answer.status = checksum_hash_path(batch->algorithm, batch->bytes,
-                                                           name, answer.digest, file_transfer);
-
-                if (answer.status < 0)
-                {
-                        checksum_blame(name, file_reason(answer.status));
-                        batch->answer = 1;
-                }
+                if (offset + sizeof(answer) <= length)
+                        memory_copy(address_of answer, (p8 address_to)data + offset, sizeof(answer));
                 else
-                        checksum_line_put(batch->algorithm, batch->bytes, answer.digest,
-                                          name, batch->tagged);
+                        answer.status = CHECKSUM_DEFERRED;
+                checksum_batch_put(batch, at, address_of answer);
         }
         return true;
 }
@@ -960,6 +979,14 @@ static b32 checksum_generate(const checksum_algorithm address_to algorithm,
                 batch.group = 1;
         parallel_ordered(checksum_batch_job, checksum_batch_sink, address_of batch,
                          (inputs + batch.group - 1) / batch.group, weight);
+
+        // Whatever a pool that could not start or carry on left unwritten.
+        while (batch.done < inputs)
+        {
+                checksum_answer answer = {.status = CHECKSUM_DEFERRED};
+
+                checksum_batch_put(address_of batch, batch.done, address_of answer);
+        }
 
         if (batch.blocks)
         {
@@ -1334,6 +1361,7 @@ typedef struct
         positive width;
         positive slots;
         positive group;
+        positive done; // records the sink has answered, in order
         p8 address_to address_to blocks;
         bool spread;
         bool quiet;
@@ -1535,13 +1563,21 @@ static bool checksum_check_sink(address_any context, positive index,
 {
         checksum_check_run address_to run = context;
         positive first = index * run->group;
+        positive last = min(first + run->group, run->count);
 
-        for (positive at = 0; at + sizeof(checksum_answer) <= length; at += sizeof(checksum_answer))
+        // A record the answers did not reach is hashed here, as in the
+        // batch sink: a stopped pool must not end the check early.
+        for (positive at = first; at < last; at++)
         {
                 checksum_answer answer;
+                positive offset = (at - first) * sizeof(answer);
 
-                memory_copy(address_of answer, (p8 address_to)data + at, sizeof(answer));
-                checksum_check_one(run, run->records + first + at / sizeof(answer), address_of answer);
+                if (offset + sizeof(answer) <= length)
+                        memory_copy(address_of answer, (p8 address_to)data + offset, sizeof(answer));
+                else
+                        answer.status = CHECKSUM_DEFERRED;
+                checksum_check_one(run, run->records + at, address_of answer);
+                run->done = at + 1;
         }
         return true;
 }
@@ -1575,9 +1611,18 @@ static fn checksum_check_records(checksum_check_run address_to run)
         if (!run->spread)
                 run->group = 1;
 
+        run->done = 0;
         parallel_ordered(checksum_check_job, checksum_check_sink, run,
                          (run->count + run->group - 1) / run->group,
                          run->spread ? weight : 0);
+
+        while (run->done < run->count)
+        {
+                checksum_answer answer = {.status = CHECKSUM_DEFERRED};
+
+                checksum_check_one(run, run->records + run->done, address_of answer);
+                run->done++;
+        }
 
         if (run->blocks)
         {

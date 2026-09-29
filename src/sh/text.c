@@ -4644,16 +4644,29 @@ static fn join_emit(p8 address_to left, positive left_length,
                                 p8 address_to line = side ? right : left;
                                 positive line_length = side ? right_length : left_length;
                                 positive fields = side ? auto_right : auto_left;
+                                join_fields walk;
+
+                                // One walk of the line, a field a step: asking
+                                // for each by number scanned from the front
+                                // every time, quadratic in a wide record.
+                                if (line)
+                                        join_fields_begin(address_of walk, line, line_length,
+                                                          separated, separator);
 
                                 for (positive field = 0; field < fields; field++)
                                 {
+                                        present = line && join_field_next(address_of walk,
+                                                                          address_of value,
+                                                                          address_of length);
+
                                         if (field == join_key[side])
                                                 continue;
 
-                                        present = line && join_field_at(
-                                            line, line_length, field, separated,
-                                            separator, address_of value,
-                                            address_of length);
+                                        if (!present)
+                                        {
+                                                value = line;
+                                                length = 0;
+                                        }
                                         join_put_field(address_of first, value, length,
                                                        present, empty,
                                                        output_separator);
@@ -6734,18 +6747,43 @@ static fn tac_unmap(tac_buffer address_to buffer)
         buffer->mapped = 0;
 }
 
+/*
+        The file read whole into anonymous memory, where it used to be mapped
+        from the file: a file that another process truncates while tac walks
+        it backwards left the mapping's pages without a file behind them and
+        the next touch was SIGBUS, which killed tac -- and the shell it may
+        be running in -- where GNU, that reads, says what it read. What is
+        read is what tac reverses; a read that fails leaves the file to the
+        streaming path, which names the reason.
+*/
 static bool tac_map(tac_buffer address_to buffer, positive handle,
                     positive size)
 {
-        bipolar mapped = system_call_6(syscall(mmap), 0, size,
-                                       FILE_PROTECT_READ, FILE_MAP_PRIVATE,
-                                       handle, 0);
+        p8 address_to bytes = (p8 address_to)memory_checked(size);
+        positive got = 0;
 
-        if (system_failed(mapped))
+        if (!bytes)
                 return false;
 
-        buffer->bytes = (p8 address_to)mapped;
-        buffer->used = size;
+        while (got < size)
+        {
+                bipolar read = system_call_4(syscall(pread64), handle,
+                                             (positive)(bytes + got), size - got, got);
+
+                if (read == CAT_INTERRUPTED)
+                        continue;
+                if (read < 0)
+                {
+                        memory_free(bytes, size);
+                        return false;
+                }
+                if (!read)
+                        break;
+                got += (positive)read;
+        }
+
+        buffer->bytes = bytes;
+        buffer->used = got;
         buffer->mapped = size;
         return true;
 }
@@ -8547,7 +8585,10 @@ static inline INLINE b32 text_head_tail(bool tail)
                 }
 
                 if (!tail_input(count, by_bytes, marked))
+                {
+                        text_close();
                         return text_done(1);
+                }
 
                 text_close();
         }
@@ -9411,7 +9452,8 @@ static b32 tail_notified(bipolar notify, bool headers)
                                         if (tail_writers_alive() && tail_sleep_ns)
                                         {
                                                 // ceil to the millisecond, as poll's delay is.
-                                                positive ms = (tail_sleep_ns + 999999) / 1000000;
+                                                positive ms = tail_sleep_ns / 1000000 +
+                                                              (tail_sleep_ns % 1000000 != 0);
 
                                                 limit.tv_sec = ms / 1000;
                                                 limit.tv_nsec = ms % 1000 * 1000000;
@@ -13950,6 +13992,11 @@ static const argument_option pr_options[] = {
         words before it are walked as getopt walks them, so an option's own
         argument that happens to be "--" is not taken for the stop.
 */
+// The walk goes on from where the last operand left it: asked for each of
+// a hundred thousand +0 operands it began again from the first every time.
+static b32 pr_walked;
+static bool pr_ended;
+
 static bool pr_after_options(b32 which)
 {
         static const string_address valued[] = {
@@ -13963,7 +14010,12 @@ static bool pr_after_options(b32 which)
             "omit-pagination", "show-nonprinting", "help", "version",
         };
 
-        for (b32 at = 1; at < which; at++)
+        if (pr_ended)
+                return true;
+        if (!pr_walked)
+                pr_walked = 1;
+
+        for (b32 at = pr_walked; at < which; at++, pr_walked = at)
         {
                 string_address word = program_argument(at);
 
@@ -13972,7 +14024,10 @@ static bool pr_after_options(b32 which)
                 if (word[1] == '-')
                 {
                         if (!word[2])
+                        {
+                                pr_ended = true;
                                 return true;
+                        }
 
                         positive name = (positive)(string_first_of_or_end(word + 2, '=') - (word + 2));
                         positive hits = 0;
@@ -14263,6 +14318,8 @@ static b32 text_pr()
         };
 
         text_begin("pr");
+        pr_walked = 0;
+        pr_ended = false;
         pr_reset();
 
         if (!text_took(address_of taking))
@@ -14638,9 +14695,102 @@ static bool ptx_word_equal(p8 address_to one, positive one_length,
                                    ptx_fold ? 1 : 0);
 }
 
-static bool ptx_list_has(byte_span address_to list, p8 address_to word,
-                         positive length)
+/*
+        A list of words -- one to a line -- asked about every word of the
+        input: a table of where each one begins, hashed as the comparison
+        sees them (folded to upper case under -f), built at the first ask.
+        Scanning the list for each word was quadratic: 20000 words against
+        a list of 20000 took 4.8 s where GNU's sorted table takes 10 ms.
+        A table that cannot be had leaves the scan.
+*/
+typedef struct
 {
+        positive address_to slots;
+        positive size; // a power of two, or 0 before the first ask
+        bool failed;
+} ptx_table;
+
+static ptx_table ptx_ignore_table, ptx_only_table;
+
+static fn ptx_table_drop(ptx_table address_to table)
+{
+        if (table->slots)
+                memory_free(table->slots, table->size * sizeof(positive));
+        *table = (ptx_table){0};
+}
+
+static positive ptx_hash(p8 address_to word, positive length)
+{
+        positive hash = 14695981039346656037ull;
+
+        for (positive at = 0; at < length; at++)
+        {
+                hash ^= ptx_fold ? byte_to_upper(word[at]) : word[at];
+                hash *= 1099511628211ull;
+        }
+        return hash ^ (hash >> 29);
+}
+
+static fn ptx_table_build(ptx_table address_to table, byte_span address_to list)
+{
+        positive words = 0;
+
+        table->failed = true;
+        for (positive at = 0; at < list->length; at++)
+                if (list->bytes[at] == '\n')
+                        words++;
+        words++;
+        if (words > ((positive)1 << 40))
+                return;
+
+        table->size = 16;
+        while (table->size < words * 2)
+                table->size *= 2;
+        table->slots = (positive address_to)memory_checked(table->size * sizeof(positive));
+        if (!table->slots)
+                return;
+
+        for (positive at = 0; at < list->length;)
+        {
+                positive from = at;
+
+                at += memory_span_without_byte(list->bytes + at, '\n', list->length - at);
+                if (at > from)
+                {
+                        positive slot = ptx_hash(list->bytes + from, at - from) & (table->size - 1);
+
+                        while (table->slots[slot])
+                                slot = (slot + 1) & (table->size - 1);
+                        table->slots[slot] = from + 1;
+                }
+                if (at < list->length)
+                        at++;
+        }
+        table->failed = false;
+}
+
+static bool ptx_list_has(byte_span address_to list, ptx_table address_to table,
+                         p8 address_to word, positive length)
+{
+        if (!table->size)
+                ptx_table_build(table, list);
+
+        if (!table->failed)
+        {
+                positive slot = ptx_hash(word, length) & (table->size - 1);
+
+                for (positive at; (at = table->slots[slot]) != 0; slot = (slot + 1) & (table->size - 1))
+                {
+                        positive from = at - 1;
+                        positive stop = from + memory_span_without_byte(list->bytes + from, '\n',
+                                                                        list->length - from);
+
+                        if (ptx_word_equal(word, length, list->bytes + from, stop - from))
+                                return true;
+                }
+                return false;
+        }
+
         positive at = 0;
 
         while (at < list->length)
@@ -14664,12 +14814,12 @@ static bool ptx_list_has(byte_span address_to list, p8 address_to word,
 
 static bool ptx_selected(p8 address_to word, positive length)
 {
-        if (ptx_ignore.length && ptx_list_has(address_of ptx_ignore,
+        if (ptx_ignore.length && ptx_list_has(address_of ptx_ignore, address_of ptx_ignore_table,
                                               word, length))
                 return false;
 
         return !ptx_only.length ||
-               ptx_list_has(address_of ptx_only, word, length);
+               ptx_list_has(address_of ptx_only, address_of ptx_only_table, word, length);
 }
 
 static bool ptx_next_word(ptx_context address_to context,
@@ -15617,6 +15767,8 @@ static b32 text_ptx()
         ptx_failed = false;
         ptx_ignore = (byte_span){null, 0};
         ptx_only = (byte_span){null, 0};
+        ptx_table_drop(address_of ptx_ignore_table);
+        ptx_table_drop(address_of ptx_only_table);
         ptx_reference_width = 0;
         ptx_maximum_word = 0;
 
@@ -16549,6 +16701,16 @@ static b32 text_column()
                 else if (!text_unsigned_option(width_option, false,
                                                address_of width))
                         return text_done(string_diagnostic(&text_diagnostic, 1, width_option, "invalid columns argument"));
+                // util-linux reads it as an unsigned 32-bit; a wider one is
+                // refused, where 2^64 - 1 columns made -S 0 print nothing
+                // (the row count wrapped to zero).
+                else if (width > 0xffffffffu)
+                {
+                        text_flush();
+                        string_format(writer_stderr, "column: invalid columns argument: '%w': Numerical result out of range\n",
+                                      writer_terminal_quoted_name, width_option);
+                        return text_done(1);
+                }
         }
 
         bool spaces = (flags & FILE_FLAG('S')) != 0;
@@ -16558,6 +16720,14 @@ static b32 text_column()
             !text_unsigned_option(file_option_value(address_of taking, 'S'),
                                   false, address_of spacing))
                 return text_done(string_diagnostic(&text_diagnostic, 1, file_option_value(address_of taking, 'S'), "invalid spaces argument"));
+
+        if (spaces && spacing > 0xffffffffu)
+        {
+                text_flush();
+                string_format(writer_stderr, "column: invalid spaces argument: '%w': Numerical result out of range\n",
+                              writer_terminal_quoted_name, file_option_value(address_of taking, 'S'));
+                return text_done(1);
+        }
 
         column_keep_empty = (flags & FILE_FLAG('L')) != 0;
         column_header_as_names = (flags & FILE_FLAG('K')) != 0;
@@ -16587,7 +16757,15 @@ static b32 text_column()
                         return text_done(string_diagnostic(&text_diagnostic, 1, name, "No such file or directory"));
 
                 column_files[file] = (byte_span){null, 0};
-                text_blob_read(name, column_files + file);
+
+                // A blob the arena could not hold whole is said "input too
+                // large" and has no bytes: walking the length it was left
+                // with read from null.
+                if (!text_blob_read(name, column_files + file) && !column_files[file].bytes)
+                {
+                        column_files[file].length = 0;
+                        text_status = 1;
+                }
         }
 
         column_row_count = 0;
@@ -21490,6 +21668,11 @@ static positive uniq_skipped(p8 address_to line, positive length,
         after the first file is a file whatever it looks like. A number too
         large skips everything.
 */
+// Where the walk for a -- has got to, so each operand asks it a step on
+// rather than from the front: uniq a a a ... was quadratic in its operands.
+static b32 uniq_walked;
+static bool uniq_ended;
+
 static fn uniq_operand(b32 which)
 {
         string_address word = program_argument(which);
@@ -21497,18 +21680,21 @@ static fn uniq_operand(b32 which)
         bool strict = version >= 200112 && version < 200809;
 
         //      After --, getopt is done and every word is a file.
-        bool ended = false;
+        if (!uniq_walked)
+                uniq_walked = 1;
 
-        for (b32 at = 1; at < which && !ended; at++)
+        while (uniq_walked < which && !uniq_ended)
         {
-                string_address before = program_argument(at);
+                string_address before = program_argument(uniq_walked);
 
-                ended = string_equals(before, "--");
+                uniq_ended = string_equals(before, "--");
                 //      A word that is an option's value is not the end.
-                if (!ended && before[0] == '-' && before[1] != '-' &&
+                if (!uniq_ended && before[0] == '-' && before[1] != '-' &&
                     (before[1] == 's' || before[1] == 'f' || before[1] == 'w') && !before[2])
-                        at++;
+                        uniq_walked++;
+                uniq_walked++;
         }
+        bool ended = uniq_ended;
 
         if (word[0] == '+' && !strict && !ended &&
             !(text_files_count && file_environment((string_address) "POSIXLY_CORRECT")))
@@ -21539,6 +21725,8 @@ static b32 text_uniq()
         };
 
         text_begin("uniq");
+        uniq_walked = 0;
+        uniq_ended = false;
         uniq_fields = 0;
         uniq_fields_new = false;
         uniq_characters = 0;
@@ -21839,6 +22027,12 @@ static b32 text_uniq()
 static p8 grep_pattern[GREP_PATTERN_MAX];
 static positive grep_pattern_length;
 static bool grep_pattern_any;
+// A pattern that ends in a backslash of its own is refused as GNU refuses
+// it -- when another pattern follows it, or when it is the only one: the
+// joined pattern would otherwise let the backslash quote the alternation
+// that follows (-e 'zzz\\' -e foo matched nothing at all).
+static bool grep_pattern_dangling, grep_pattern_dangling_bad;
+static positive grep_pattern_count;
 static bool grep_pattern_empty;
 // How many groups the patterns joined so far have opened, which is what a
 // backreference in the next one has to be counted past.
@@ -21955,6 +22149,20 @@ static fn grep_pattern_add(string_address text, positive length, bool fixed, boo
 
                 if (at == from)
                         grep_pattern_empty = true;
+
+                if (grep_pattern_dangling)
+                        grep_pattern_dangling_bad = true;
+                grep_pattern_count++;
+                grep_pattern_dangling = false;
+
+                if (!fixed)
+                {
+                        positive slashes = 0;
+
+                        while (slashes < at - from && text[at - 1 - slashes] == '\\')
+                                slashes++;
+                        grep_pattern_dangling = slashes & 1;
+                }
 
                 if (grep_pattern_any)
                 {
@@ -26314,6 +26522,8 @@ static b32 text_grep()
         grep_pattern_broken = false;
         grep_pattern_length = 0;
         grep_pattern_any = false;
+        grep_pattern_dangling = grep_pattern_dangling_bad = false;
+        grep_pattern_count = 0;
         grep_pattern_empty = false;
         grep_pattern_groups = 0;
         grep_file_globs = null;
@@ -26445,7 +26655,9 @@ static b32 text_grep()
                         continue;
                 }
 
-                if (!string_digits_exact(said, address_of number))
+                // Past the largest count is the largest, as GNU's xstrtoimax
+                // leaves it, not the count that wraps to a small one.
+                if (!text_unsigned_option(said, true, address_of number))
                         return text_done(string_diagnostic(&text_diagnostic, 2,
                                                            letter == 'm' ? null : said,
                                                            letter == 'm' ? "invalid max count"
@@ -26470,6 +26682,9 @@ static b32 text_grep()
 
         if (grep_pattern_broken)
                 return text_done(string_diagnostic(&text_diagnostic, 2, null, "pattern too long"));
+
+        if (grep_pattern_dangling_bad || (grep_pattern_dangling && grep_pattern_count == 1))
+                return text_done(string_diagnostic(&text_diagnostic, 2, null, "Trailing backslash"));
 
         if (text_status)
                 return text_done(2);
@@ -27541,7 +27756,7 @@ static bool sed_parse_address(p8 address_to type, positive address_to line,
 
 static fn sed_parse()
 {
-        b32 open_blocks[32];
+        b32 open_blocks[SED_COMMANDS_MAX];
         b32 open_count = 0;
 
         sed_at = 0;
@@ -27655,8 +27870,17 @@ static fn sed_parse()
 
                 if (kind == '{')
                 {
-                        if (open_count < 32)
-                                open_blocks[open_count++] = sed_command_count;
+                        // One more open block than there is room for would
+                        // leave a close with no place to land and a jump to
+                        // command zero for ever; nesting is bounded by the
+                        // commands there are, so the record is as long as
+                        // their table.
+                        if (open_count == sizeof(open_blocks) / sizeof(open_blocks[0]))
+                        {
+                                sed_broken = true;
+                                return;
+                        }
+                        open_blocks[open_count++] = sed_command_count;
 
                         sed_command_count++;
                         continue;
@@ -28105,10 +28329,14 @@ static bool sed_selects(sed_command address_to command)
                         if (command->second_type == SED_ADDRESS_LINE)
                                 command->stop = by;
                         else if (command->second_type == SED_ADDRESS_AHEAD)
-                                command->stop = sed_number + by;
+                                command->stop = by > positive_max - sed_number
+                                                    ? positive_max
+                                                    : sed_number + by;
                         else if (command->second_type == SED_ADDRESS_MULTIPLE)
-                                command->stop = by ? sed_number + by - sed_number % by
-                                                   : sed_number;
+                                command->stop = !by ? sed_number
+                                                : by - sed_number % by > positive_max - sed_number
+                                                      ? positive_max
+                                                      : sed_number + by - sed_number % by;
 
                         // A range whose end is a line already passed is one
                         // line long, which is the only way the end can be

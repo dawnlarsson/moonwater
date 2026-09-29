@@ -1508,6 +1508,10 @@ static p8 rx_find(rx_match *match, const regex_program *program, p8 mode, bool c
 #define RX_DFA_HASH 8192
 #define RX_DFA_RESETS_MAX 64
 #define RX_DFA_DEPTH_MAX 256
+/* Calls the NFA build may make. Nodes are capped, but a count over a body
+   that makes none -- (){32767} -- costs a call per repeat and nests: three
+   levels was 32767^3 of them before a byte of data was read. */
+#define RX_DFA_WORK_MAX (1u << 17)
 
 enum { RX_NFA_SET = 1, RX_NFA_SPLIT, RX_NFA_BEGIN, RX_NFA_END, RX_NFA_EDGE, RX_NFA_MATCH };
 enum { RX_DFA_UNKNOWN = -1, RX_DFA_HIT = -2, RX_DFA_DEAD = -3,
@@ -1532,7 +1536,7 @@ typedef struct
         p8 representative[256];
         p8 name[256];
         p16 order[RX_NODE_MAX];
-        positive nfa_count, set_count, class_count, order_top;
+        positive nfa_count, set_count, class_count, order_top, work;
         p16 start;
         p8 boundary, delimiter, delimiter_class;
         // Starts after the first position: every one, only after a byte that
@@ -1592,6 +1596,8 @@ static p16 rx_nfa_build(rx_dfa *dfa, const regex_program *program, p16 first,
                         p16 follow, b32 depth)
 {
         const rx_node *nodes = program->nodes;
+        if (++dfa->work > RX_DFA_WORK_MAX)
+                dfa->usable = false;
         if (!first || !dfa->usable)
                 return follow;
         if (depth > RX_DFA_DEPTH_MAX)
@@ -1707,6 +1713,7 @@ static bool rx_dfa_compile(rx_dfa *dfa, const regex_program *program, p8 boundar
         dfa->nfa_count = 1;
         dfa->set_count = 0;
         dfa->order_top = 0;
+        dfa->work = 0;
         dfa->boundary = boundary;
         dfa->delimiter = delimiter;
         dfa->restart = boundary == REGEX_BOUNDARY_WORD ? RX_DFA_RESTART_AFTER_OTHER
