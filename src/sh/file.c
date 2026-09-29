@@ -47276,12 +47276,175 @@ static string_address date_composite(p8 letter)
                                : (string_address) "%r";
 }
 
+/*
+        The calendars GNU's date keeps for three UTF-8 locales, in its own
+        tables and not the C library's: th_TH counts years from the Buddhist
+        era, 543 more than the Gregorian, fa_IR is the Solar Hijri calendar
+        and am_ET the Ethiopian one, each with the month names date carries.
+        The year, the month and the day change, and what is made of them
+        (%F, %D); --iso-8601, --rfc-3339 and -R stay Gregorian.
+*/
+enum { DATE_CALENDAR_NONE, DATE_CALENDAR_THAI, DATE_CALENDAR_PERSIAN, DATE_CALENDAR_ETHIOPIAN };
+
+static bool date_gregorian;
+
+static positive date_calendar_kind(void)
+{
+        string_address name = locale_named(LOCALE_TIME);
+
+        if (!name || date_gregorian)
+                return DATE_CALENDAR_NONE;
+
+        positive length = string_length(name);
+
+        if (length < 6 || name[5] != '.')
+                return DATE_CALENDAR_NONE;
+
+        p8 code[8];
+        positive have = 0;
+
+        for (positive at = 6; name[at] && name[at] != '@' && have < sizeof(code) - 1; at++)
+                if (name[at] != '-')
+                        code[have++] = byte_to_lower(name[at]);
+        code[have] = end;
+        if (!string_equals(code, "utf8"))
+                return DATE_CALENDAR_NONE;
+        if (!memory_compare(name, "th_TH", 5))
+                return DATE_CALENDAR_THAI;
+        if (!memory_compare(name, "fa_IR", 5))
+                return DATE_CALENDAR_PERSIAN;
+        if (!memory_compare(name, "am_ET", 5))
+                return DATE_CALENDAR_ETHIOPIAN;
+        return DATE_CALENDAR_NONE;
+}
+
+static const string_address date_persian_months[12] = {
+    "فروردین", "اردیبهشت", "خرداد", "تیر", "مرداد", "شهریور",
+    "مهر", "آبان", "آذر", "دی", "بهمن", "اسفند"};
+
+static const string_address date_ethiopian_months[13][2] = {
+    {"መስከረም", "መስ"}, {"ጥቅምት", "ጥን"}, {"ኅዳር", "ኅዳ"}, {"ታኅሣሥ", "ታህ"},
+    {"ጥር", "ጥር"}, {"የካቲት", "የካ"}, {"መጋቢት", "መጋ"}, {"ሚያዝያ", "ሚያ"},
+    {"ግንቦት", "ግን"}, {"ሰኔ", "ሰኔ"}, {"ሐምሌ", "ሐም"}, {"ነሐሴ", "ነሐ"},
+    {"ጳጉሜን", "ጳጉ"}};
+
+static bipolar date_floor_divide(bipolar a, bipolar b)
+{
+        bipolar q = a / b;
+
+        return (a % b != 0 && ((a < 0) != (b < 0))) ? q - 1 : q;
+}
+
+// The day number of a Gregorian date, the Julian day at noon.
+static bipolar date_day_number(bipolar year, bipolar month, bipolar day)
+{
+        bipolar a = (14 - month) / 12;
+        bipolar y = year + 4800 - a;
+        bipolar m = month + 12 * a - 3;
+
+        return day + (153 * m + 2) / 5 + 365 * y + y / 4 - y / 100 + y / 400 - 32045;
+}
+
+static bipolar date_gregorian_year_of(bipolar number)
+{
+        bipolar a = number + 32044;
+        bipolar b = (4 * a + 3) / 146097;
+        bipolar c = a - 146097 * b / 4;
+        bipolar d = (4 * c + 3) / 1461;
+        bipolar e = c - 1461 * d / 4;
+        bipolar m = (5 * e + 2) / 153;
+
+        return 100 * b + d - 4800 + m / 10;
+}
+
+// The Solar Hijri date of a day number, by the arithmetic of the 33-year
+// cycle: the day Farvardin the first falls on, and the leap years, of each
+// year the breaks below bound.
+static fn date_persian_of(bipolar number, bipolar address_to year, bipolar address_to month,
+                          bipolar address_to day)
+{
+        static const bipolar breaks[] = {-61, 9, 38, 199, 426, 686, 756, 818, 1111, 1181,
+                                         1210, 1635, 2060, 2097, 2192, 2262, 2324, 2394,
+                                         2456, 3178};
+        bipolar gregorian = date_gregorian_year_of(number);
+        bipolar jalaali = gregorian - 621;
+        bipolar gy = jalaali + 621;
+        bipolar leap_jalaali = -14;
+        bipolar previous = breaks[0];
+        bipolar jump = 0;
+
+        for (positive i = 1; i < array_count(breaks); i++)
+        {
+                jump = breaks[i] - previous;
+                if (jalaali < breaks[i])
+                        break;
+                leap_jalaali += date_floor_divide(jump, 33) * 8 +
+                                date_floor_divide(jump % 33, 4);
+                previous = breaks[i];
+        }
+
+        bipolar n = jalaali - previous;
+
+        leap_jalaali += date_floor_divide(n, 33) * 8 + date_floor_divide(n % 33 + 3, 4);
+        if (jump % 33 == 4 && jump - n == 4)
+                leap_jalaali++;
+
+        bipolar leap_gregorian = date_floor_divide(gy, 4) -
+                                 date_floor_divide((date_floor_divide(gy, 100) + 1) * 3, 4) - 150;
+        bipolar march = 20 + leap_jalaali - leap_gregorian;
+
+        if (jump - n < 6)
+                n = n - jump + date_floor_divide(jump + 4, 33) * 33;
+
+        bipolar leap = ((n + 1) % 33 - 1) % 4;
+
+        if (leap == -1)
+                leap = 4;
+
+        bipolar since = number - date_day_number(gy, 3, march);
+
+        if (since >= 0)
+        {
+                if (since <= 185)
+                {
+                        address_to year = jalaali;
+                        address_to month = 1 + since / 31;
+                        address_to day = since % 31 + 1;
+                        return;
+                }
+                since -= 186;
+        }
+        else
+        {
+                jalaali--;
+                since += 179;
+                if (leap == 1)
+                        since++;
+        }
+        address_to year = jalaali;
+        address_to month = 7 + since / 30;
+        address_to day = since % 30 + 1;
+}
+
+static fn date_ethiopian_of(bipolar number, bipolar address_to year, bipolar address_to month,
+                            bipolar address_to day)
+{
+        bipolar since = number - 1723856;
+        bipolar cycle = date_floor_divide(since, 1461);
+        bipolar r = since - cycle * 1461;
+        bipolar n = r % 365 + 365 * (r / 1460);
+
+        address_to year = 4 * cycle + r / 365 - r / 1460;
+        address_to month = n / 30 + 1;
+        address_to day = n % 30 + 1;
+}
+
 static byte_store date_named;
 
 // %a, %A, %b, %B, %h and %p as the locale spells them, put in as text.
 static string_address date_locale_names(string_address format, b64 when)
 {
-        if (!locale_open(LOCALE_TIME))
+        if (!locale_open(LOCALE_TIME) && date_calendar_kind() == DATE_CALENDAR_NONE)
                 return format;
 
         time_t stamp = (time_t)when;
@@ -47289,6 +47452,21 @@ static string_address date_locale_names(string_address format, b64 when)
 
         if (!localtime_r(address_of stamp, address_of broken))
                 return format;
+
+        positive calendar = date_calendar_kind();
+        bipolar cal_year = broken.tm_year + 1900;
+        bipolar cal_month = broken.tm_mon + 1;
+        bipolar cal_day = broken.tm_mday;
+        p8 numbers[48];
+
+        if (calendar == DATE_CALENDAR_PERSIAN)
+                date_persian_of(date_day_number(cal_year, cal_month, cal_day),
+                                address_of cal_year, address_of cal_month, address_of cal_day);
+        else if (calendar == DATE_CALENDAR_ETHIOPIAN)
+                date_ethiopian_of(date_day_number(cal_year, cal_month, cal_day),
+                                  address_of cal_year, address_of cal_month, address_of cal_day);
+        else if (calendar == DATE_CALENDAR_THAI)
+                cal_year += 543;
 
         date_named.used = 0;
         for (string_address at = format; string_get(at); at++)
@@ -47299,7 +47477,73 @@ static string_address date_locale_names(string_address format, b64 when)
                 {
                         p8 letter = at[1];
 
-                        if (letter == 'a')
+                        if (calendar != DATE_CALENDAR_NONE)
+                        {
+                                // Numbers are the calendar's: %Y is the year as it
+                                // is, %m and %d two digits, %e blank padded.
+                                if (letter == 'Y')
+                                        text = (string_address)numbers,
+                                        numbers[positive_into_string(numbers, (positive)cal_year)] = end;
+                                else if (letter == 'F' || letter == 'D')
+                                {
+                                        positive used = 0;
+
+                                        if (letter == 'F')
+                                        {
+                                                used = positive_into_string(numbers, (positive)cal_year);
+                                                numbers[used++] = '-';
+                                                numbers[used++] = (p8)('0' + cal_month / 10);
+                                                numbers[used++] = (p8)('0' + cal_month % 10);
+                                                numbers[used++] = '-';
+                                                numbers[used++] = (p8)('0' + cal_day / 10);
+                                                numbers[used++] = (p8)('0' + cal_day % 10);
+                                        }
+                                        else
+                                        {
+                                                numbers[used++] = (p8)('0' + cal_month / 10);
+                                                numbers[used++] = (p8)('0' + cal_month % 10);
+                                                numbers[used++] = '/';
+                                                numbers[used++] = (p8)('0' + cal_day / 10);
+                                                numbers[used++] = (p8)('0' + cal_day % 10);
+                                                numbers[used++] = '/';
+                                                numbers[used++] = (p8)('0' + (broken.tm_year % 100) / 10);
+                                                numbers[used++] = (p8)('0' + broken.tm_year % 10);
+                                        }
+                                        numbers[used] = end;
+                                        text = (string_address)numbers;
+                                }
+                                else if (calendar != DATE_CALENDAR_THAI && letter == 'm')
+                                {
+                                        numbers[0] = (p8)('0' + cal_month / 10);
+                                        numbers[1] = (p8)('0' + cal_month % 10);
+                                        numbers[2] = end;
+                                        text = (string_address)numbers;
+                                }
+                                else if (calendar != DATE_CALENDAR_THAI && letter == 'd')
+                                {
+                                        numbers[0] = (p8)('0' + cal_day / 10);
+                                        numbers[1] = (p8)('0' + cal_day % 10);
+                                        numbers[2] = end;
+                                        text = (string_address)numbers;
+                                }
+                                else if (calendar != DATE_CALENDAR_THAI && letter == 'e')
+                                {
+                                        numbers[0] = cal_day >= 10 ? (p8)('0' + cal_day / 10) : ' ';
+                                        numbers[1] = (p8)('0' + cal_day % 10);
+                                        numbers[2] = end;
+                                        text = (string_address)numbers;
+                                }
+                                else if (calendar == DATE_CALENDAR_PERSIAN &&
+                                         (letter == 'B' || letter == 'b' || letter == 'h'))
+                                        text = date_persian_months[cal_month - 1];
+                                else if (calendar == DATE_CALENDAR_ETHIOPIAN &&
+                                         (letter == 'B' || letter == 'b' || letter == 'h'))
+                                        text = date_ethiopian_months[cal_month - 1][letter != 'B'];
+                        }
+
+                        if (text)
+                                ;
+                        else if (letter == 'a')
                                 text = locale_string(LOCALE_TIME, LOCALE_TIME_ABDAY + (positive)broken.tm_wday);
                         else if (letter == 'A')
                                 text = locale_string(LOCALE_TIME, LOCALE_TIME_DAY + (positive)broken.tm_wday);
@@ -47461,9 +47705,13 @@ static bool date_option_seen(p8 letter, string_address value)
                 }
 
                 date_chosen_format = iso[which];
+                date_gregorian = true;
         }
         else if (letter == 'R')
+        {
                 date_chosen_format = (string_address) "%a, %d %b %Y %H:%M:%S %z";
+                date_gregorian = true;
+        }
         else if (letter == '3')
         {
                 static const string_address rfc[] = {
@@ -47481,6 +47729,7 @@ static bool date_option_seen(p8 letter, string_address value)
                         return false;
 
                 date_chosen_format = rfc[which];
+                date_gregorian = true;
         }
 
         return true;
@@ -47762,6 +48011,7 @@ static bool date_batch(string_address path, string_address format, b64 now,
 static b32 file_date()
 {
         date_chosen_format = null;
+        date_gregorian = false;
 
         positive count = (positive)program_argument_count();
         file_taking taking = {
