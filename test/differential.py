@@ -10058,7 +10058,48 @@ def files_address_cap(farm):
     return passed, total, notes
 
 
-FILES_CHECKS = (files_column_layout, files_xargs_parallel, files_zones, files_tar,
+def files_large_inputs(farm):
+    """Tools that hold their whole input, given more than the 192 MiB the
+    utility arena once was: csplit of a sparse file and of a pipe, split -C
+    from a pipe and split -n l/N from a pipe, each answering as the reference
+    does (GNU streams them). The input is made of zeros and short lines so
+    that it costs the box nothing to hold."""
+    import subprocess
+    import tempfile
+
+    size = 220 << 20
+    jobs = (("csplit", ["-s", "big", "/x/"], "file"), ("csplit", ["-sz", "-", "/END/"], "pipe"),
+            ("split", ["-C", "100M", "--filter=wc -c"], "pipe"), ("split", ["-n", "l/2", "--filter=wc -c"], "pipe"))
+    passed = total = 0
+    notes = []
+    for tool, args, kind in jobs:
+        candidate = Path(farm) / tool
+        reference = shutil.which(tool, path="/usr/bin:/bin")
+        if not candidate.exists() or not reference:
+            continue
+        total += 1
+        answers = []
+        for program in (reference, str(candidate)):
+            work = Path(tempfile.mkdtemp())
+            try:
+                (work / "big").write_bytes(b"")
+                os.truncate(work / "big", size)
+                data = (b"abcdefghij\n" * (size // 11)) + b"END\n"
+                done = subprocess.run([program, *args], cwd=work, input=None if kind == "file" else data,
+                                      capture_output=True, timeout=120)
+                names = sorted(name.name for name in work.iterdir())
+                sizes = [(work / name).stat().st_size for name in names if name.startswith("xx")]
+                answers.append((done.returncode, done.stdout, bool(done.stderr), names, sizes))
+            finally:
+                shutil.rmtree(work, ignore_errors=True)
+        if answers[0] == answers[1]:
+            passed += 1
+        else:
+            notes.append(f"{tool} {' '.join(args)} on {size >> 20} MiB: {str(answers[0])[:120]} against {str(answers[1])[:120]}")
+    return passed, total, notes
+
+
+FILES_CHECKS = (files_large_inputs, files_column_layout, files_xargs_parallel, files_zones, files_tar,
                 files_tar_formats,
                 files_find_terminal, files_zone_names, files_hostname_set, files_move_across,
                 files_address_cap)

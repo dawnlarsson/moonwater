@@ -14,7 +14,7 @@
 
 #include "../lib.util.c"
 
-#define UTILITY_ARENA_BYTES (192u << 20)
+#define UTILITY_ARENA_BYTES ((positive)4 << 30)
 static memory_arena utility_arena = {.room = UTILITY_ARENA_BYTES};
 static const diagnostic text_diagnostic;
 
