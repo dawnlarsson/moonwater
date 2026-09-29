@@ -19083,6 +19083,7 @@ INPUTS.update({
     "text_lines_two_long": b"d" * 1200000 + b"\n" + b"d" * 1200000 + b"\nx\n",
     "text_fmt_3000_words": b" ".join(b"%d" % n for n in range(1, 3001)) + b"\n",
     "text_fmt_yes": b"y\n" * 5000,
+    "text_grep_lead": b"a\nba\n*a\n+a\n?a\n{1}a\nb\n\n",
     "text_sort_z_newlines": b"a\nz\0ab\0a\n\nb\0a b\0a\tc\0b\0",
     "text_fmt_tagged": (b"> aaa bbb ccc ddd eee fff ggg hhh iii jjj\n\n>   kkk lll\n"
                         b"> mmm nnn ooo ppp qqq rrr sss\n\n"
@@ -19710,6 +19711,17 @@ _TEXT_GREP_STDIN = (
 )
 
 _TEXT_GREP_EXTRA = (
+    #       In extended syntax a repeat with nothing before it -- at the start
+    #       of the pattern, of a group or of an alternative -- repeats
+    #       nothing: *a is a, a lone + matches every line, and each says so
+    #       on standard error. Basic syntax keeps the star for itself.
+    *({"argv": argv, "stdin": "text_grep_lead"} for argv in (
+        *(("-E", "-n", "-e", pattern) for pattern in (
+            "*a", "+a", "?a", "{1}a", "a|*b", "(*a)", "(+a)", "^*a", "+", "*", "?", "{2}", "a|+", "(|+a)",
+            "**a", "*+a", "(?a)b", "a{1", "a{,}", "a|{", "{a", "x|{1,2}b", "(*)", "(*)a", "(a|*b)")),
+        ("-c", "-e", "*a"), ("-n", "-e", "*a"), ("-E", "-o", "-e", "*a"),
+        ("-E", "-w", "-e", "*a"), ("-E", "-x", "-e", "+a"), ("-E", "-v", "-e", "*a"),
+        ("-E", "-e", "*a", "-e", "+b"), ("-F", "-e", "*a"))),
     #       A backslash that ends a pattern is refused, and refused with the
     #       one after it too: joined by an alternation it once quoted the bar
     #       and matched nothing. A count past the largest is the largest, and
@@ -62443,7 +62455,6 @@ PINNED = r"""
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":0,"stdout":"a01c24ea26fcb07a7c5e91e9e0d8cb6c32f2e536694d629b21bbd5724fbc2848"},"case":{"argv":["-o","-E","-a","--file=pats","-A0","-1","-","a.txt"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"text_regex","tier":"pinned","utility":"grep"},"domain":"text","id":"ec6a847f26db80e9","kind":"bug","list":"ledger","reason":"grep's output for -o, -l and -L together, and its counting of empty matches, differ from GNU's.","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":0,"stdout":"83fd160584fee5f96af99854353bb745e6a8c203c3e91c14c8c5be5c82d91bbe"},"utility":"grep"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":2,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["--byte-offset","-q","--line-number","--color=sometimes","--file=pats","--only-matching","tree","a.txt"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"high","utility":"grep"},"domain":"text","id":"f1bfcf3e7bc00ef9","kind":"deliberate","list":"ledger","reason_id":"r254","utility":"grep"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","order":"records","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-F","-e","alphas\\?","--regexp=","-f","pats_empty","--no-ignore-case","-w","--word-regexp","--line-regexp","-z","-m100","--max-count=1","-b","--byte-offset","--line-number","--with-filename","-h","--no-filename","--label=","-q","--quiet","--silent","--binary-files=without-match","-a","--text","-I","-drecurse","-Dread","--devices=skip","-r","-R","--dereference-recursive","--include=?.txt","--exclude=three*","--exclude-from=pats_empty","--exclude-dir=inner","-l","--files-with-matches","-c","--initial-tab","--null","-B","1","-A2","--after-context=1","-C1","-2","--color=sometimes","--color","--colour=always","dir"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"many_lines","utility":"grep"},"domain":"text","id":"f2108801c0df70d9","kind":"deliberate","list":"ledger","reason_id":"r254","utility":"grep"},
-{"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":0,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-h","--line-number","--silent","-e","^*","-a","-E","wide"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"edge_65537","tier":"pinned","utility":"grep"},"domain":"text","id":"f5aa7a4c4ba0a9f7","kind":"bug","list":"ledger","reason":"grep's output for -o, -l and -L together, and its counting of empty matches, differ from GNU's.","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":0,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"grep"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-m1","-e","a\nb\nc","--devices=skip","--extended-regexp","--byte-offset","--null","nonl"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"edge_65536","tier":"pinned","utility":"grep"},"domain":"text","id":"fcab3e19e628f2ff","kind":"bug","list":"ledger","reason":"grep's output for -o, -l and -L together, and its counting of empty matches, differ from GNU's.","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":0,"stdout":"8188f6b2084c7096c53412bc519e90a66da267020351d8b3f377f088b49e2f89"},"utility":"grep"},
 {"domain":"text","kind":"deliberate","list":"ledger","option":"--perl-regexp","reason_id":"r256","utility":"grep"},
 {"domain":"text","kind":"deliberate","list":"ledger","option":"-P","reason_id":"r256","utility":"grep"},

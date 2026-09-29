@@ -42,6 +42,12 @@ enum { REGEX_DOT_NEWLINE = 1, REGEX_LINE_ANCHORS = 2, REGEX_BASIC_REPEATS = 4,
           backslash, a back reference to a group not yet closed, an
           unclosed bracket and a class name there is no class of. */
        REGEX_STRICT_INTERVALS = 32,
+       /* A repeat with nothing before it, in extended syntax at the start of
+          the pattern, of a group or of an alternative, repeats nothing and
+          so matches the empty string, as GNU grep's dfa reads it -- *a is
+          a, and a lone + matches every line -- and says so, warnings kept
+          in regex_warnings, where it once was the character itself. */
+       REGEX_LEADING_REPEATS = 64,
        REGEX_POLICY_DEFAULT = 5, REGEX_POLICY_TAC = 2 | 16,
        REGEX_POLICY_EXPR = 5 | 32 };
 enum { REGEX_FAILED_OTHER = 1, REGEX_FAILED_BRACE, REGEX_FAILED_CONTENT,
@@ -115,6 +121,18 @@ typedef struct
         p8 failure;
         p16 closed; // the groups whose close has been read, by number
 } rx_compiler;
+
+// The leading repeats the last compile skipped, as the character that began
+// each ('{' for an interval), in the order met; only the first eight kept.
+static p8 regex_warnings[8];
+static positive regex_warning_count;
+
+static void rx_warn_repeat(p8 byte)
+{
+        if (regex_warning_count < sizeof(regex_warnings))
+                regex_warnings[regex_warning_count] = byte;
+        regex_warning_count++;
+}
 
 // A refusal regcomp makes, kept when it is the first thing wrong.
 static fn rx_refuse(rx_compiler *c, p8 failure)
@@ -696,7 +714,17 @@ static bool rx_interval(rx_compiler *c, b32 *low, b32 *high)
 static rx_fragment rx_piece(rx_compiler *c)
 {
         p16 body_start = c->cursor.nodes;
+        positive began = c->at;
         rx_fragment prefix = {0}, body = rx_atom(c);
+
+        // ^ that begins an alternative, then a repeat: the repeat is at the
+        // start of an expression too, and grep says so; it still repeats
+        // the anchor, which is the same as repeating nothing.
+        if (c->extended && (c->program.policy & REGEX_LEADING_REPEATS) && !c->broken &&
+            body.first && c->pool->nodes[body.first].kind == RX_BEGIN &&
+            (!began || c->pattern[began - 1] == '(' || c->pattern[began - 1] == '|') &&
+            (rx_peek(c, 0) == '*' || rx_peek(c, 0) == '+' || rx_peek(c, 0) == '?'))
+                rx_warn_repeat(rx_peek(c, 0));
         while (!c->broken)
         {
                 p8 byte = rx_peek(c, 0);
@@ -778,6 +806,21 @@ static rx_fragment rx_piece(rx_compiler *c)
         return rx_join(c, prefix, body);
 }
 
+/* A repeat operator where there is nothing to repeat, skipped; the caller
+   said extended syntax. */
+static bool rx_leading_repeat(rx_compiler *c)
+{
+        p8 byte = rx_peek(c, 0);
+        b32 low, high;
+
+        if (byte == '*' || byte == '+' || byte == '?')
+                c->at++;
+        else if (!(byte == '{' && rx_interval(c, &low, &high)))
+                return false;
+        rx_warn_repeat(byte);
+        return true;
+}
+
 static rx_fragment rx_alternation(rx_compiler *c)
 {
         rx_fragment whole = {0};
@@ -787,6 +830,17 @@ static rx_fragment rx_alternation(rx_compiler *c)
         for (;;)
         {
                 rx_fragment branch = {0};
+                if (c->extended && (c->program.policy & REGEX_LEADING_REPEATS))
+                {
+                        bool skipped = false;
+
+                        while (rx_leading_repeat(c))
+                                skipped = true;
+                        // glibc goes on to parse what follows as a new
+                        // expression, and a ) there closes nothing.
+                        if (skipped && rx_operator(c, ')'))
+                                rx_refuse(c, REGEX_FAILED_OPEN);
+                }
                 while (!c->broken && c->at < c->length && !rx_operator(c, ')') && !rx_operator(c, '|'))
                         branch = rx_join(c, branch, rx_piece(c));
                 if (!have_alternative)
@@ -970,6 +1024,7 @@ static bool rx_compile(rx_pool *pool, regex_program *out, string_address pattern
         memory_fill(hints, 0, __builtin_offsetof(rx_hints, fixed_literal));
         c.program = (regex_program){.nodes = pool->nodes, .sets = (const p8 (*)[256])pool->sets,
                                 .hints = hints, .policy = policy, .flags = icase ? RX_IGNORE_CASE : 0};
+        regex_warning_count = 0;
         rx_fragment root = rx_alternation(address_of c);
         c.program.first = root.first;
         if (!c.broken && c.at != c.length && rx_operator(address_of c, ')'))

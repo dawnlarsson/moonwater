@@ -26688,8 +26688,23 @@ static b32 text_grep()
                 return text_done(string_diagnostic(&text_diagnostic, 2, null, "no pattern given"));
 
         if (!never && !regex_compile(grep_pattern, extended, icase, false,
-                                     text_regex_policy()))
-                return text_done(string_diagnostic(&text_diagnostic, 2, null, "invalid regular expression"));
+                                     text_regex_policy() | REGEX_LEADING_REPEATS))
+                return text_done(string_diagnostic(&text_diagnostic, 2, null,
+                                                   regex_failure == REGEX_FAILED_OTHER || !regex_failure
+                                                       ? (string_address) "invalid regular expression"
+                                                       : regex_failure_reason()));
+
+        // A repeat with nothing before it repeats nothing, and grep says so
+        // once for each.
+        for (positive k = 0; !never && k < regex_warning_count && k < sizeof(regex_warnings); k++)
+        {
+                text_flush();
+                string_format(writer_stderr, "grep: warning: %s at start of expression\n",
+                              regex_warnings[k] == '{' ? (string_address) "{...}"
+                              : regex_warnings[k] == '*' ? (string_address) "*"
+                              : regex_warnings[k] == '+' ? (string_address) "+"
+                                                         : (string_address) "?");
+        }
 
         regex_boundary = whole_line ? REGEX_BOUNDARY_LINE :
                          whole_word ? REGEX_BOUNDARY_WORD : REGEX_BOUNDARY_NONE;
