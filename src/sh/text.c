@@ -6832,8 +6832,6 @@ typedef struct
         bool inside, posix, want_words, want_longest;
 } wc_utf8;
 
-static const b8 text_set_ascii[STRING_SET_BYTES] = {[0 ... 127] = 1};
-
 static fn wc_utf8_step(wc_utf8 address_to state, bool valid, p32 code)
 {
         state->chars += valid;
@@ -6878,6 +6876,11 @@ static fn wc_utf8_step(wc_utf8 address_to state, bool valid, p32 code)
         -L, a run of ASCII is characters by its length and words by the same
         pass the single-byte count uses; only the rest is decoded.
 */
+static fn wc_bytes_longest(const p8 address_to at, positive left, bool want_lines,
+                           positive address_to lines_out, positive address_to longest_out,
+                           positive address_to column_out, p32 address_to wc_specials);
+static p32 wc_specials[4096]; // WC_SPECIALS
+
 static fn wc_utf8_block(wc_utf8 address_to state, const p8 address_to at, positive size)
 {
         positive p = 0;
@@ -6927,70 +6930,74 @@ static fn wc_utf8_block(wc_utf8 address_to state, const p8 address_to at, positi
                 */
                 if (state->want_longest)
                 {
-                        positive column = state->column;
-                        positive longest = state->longest;
-                        positive words = state->words;
-                        bool inside = state->inside;
-                        bool want_words = state->want_words;
-                        positive start = p;
+                        positive run = at[p] < 0x80 ? memory_ascii_span(at + p, size - p) : 0;
 
-                        while (p < size && at[p] < 0x80)
+                        if (run)
                         {
-                                p8 character = at[p++];
-
-                                if (character >= 0x20 && character < 0x7f)
-                                        column++;
-                                else if (character == '\n' || character == '\r' ||
-                                         character == '\f')
+                                /*
+                                        A long run is the single-byte
+                                        locale's walk: the bytes that are
+                                        not printable ask, the rest are
+                                        columns by their count. A short one,
+                                        between two characters that are not
+                                        ASCII, is cheaper a byte at a time
+                                        than a call that finds its specials.
+                                */
+                                if (run >= 32)
                                 {
-                                        if (column > longest)
-                                                longest = column;
+                                        positive lines = 0;
 
-                                        column = 0;
+                                        wc_bytes_longest(at + p, run, false, address_of lines,
+                                                         address_of state->longest,
+                                                         address_of state->column, wc_specials);
                                 }
-                                else if (character == '\t')
-                                        column += 8 - column % 8;
-
-                                if (want_words)
+                                else
                                 {
-                                        if (byte_is_space(character))
-                                                inside = false;
-                                        else if (!inside)
+                                        positive column = state->column;
+                                        positive longest = state->longest;
+
+                                        for (positive k = 0; k < run; k++)
                                         {
-                                                inside = true;
-                                                words++;
+                                                p8 character = at[p + k];
+
+                                                if (character >= 0x20 && character < 0x7f)
+                                                        column++;
+                                                else if (character == '\n' || character == '\r' ||
+                                                         character == '\f')
+                                                {
+                                                        if (column > longest)
+                                                                longest = column;
+
+                                                        column = 0;
+                                                }
+                                                else if (character == '\t')
+                                                        column += 8 - column % 8;
                                         }
+
+                                        state->column = column;
+                                        state->longest = longest;
                                 }
+
+                                state->chars += run;
+
+                                if (state->want_words)
+                                {
+                                        positive2 counted = memory_count_words(
+                                            at + p, run, state->inside);
+
+                                        state->words += counted.x;
+                                        state->inside = (bool)counted.y;
+                                }
+
+                                p += run;
+
+                                if (p == size)
+                                        break;
                         }
-
-                        state->chars += p - start;
-                        state->column = column;
-                        state->longest = longest;
-                        state->words = words;
-                        state->inside = inside;
-
-                        if (p == size)
-                                break;
-                }
-                else if (!state->want_words)
-                {
-                        /*
-                                Characters alone: the well-formed prefix is
-                                its characters in one pass, and what stops it
-                                -- a byte that begins no character, or one
-                                the read cut short -- is the decode's below.
-                        */
-                        positive2 valid = memory_utf8_valid_span(at + p, size - p);
-
-                        state->chars += valid.y;
-                        p += valid.x;
-
-                        if (p == size)
-                                break;
                 }
                 else
                 {
-                        positive run = string_span_max(at + p, size - p, text_set_ascii);
+                        positive run = at[p] < 0x80 ? memory_ascii_span(at + p, size - p) : 0;
 
                         if (run)
                         {
@@ -7059,8 +7066,6 @@ static bool wc_option_seen(p8 letter, string_address value)
         next stop of eight, and anything else not printable takes no room.
 */
 #define WC_SPECIALS 4096
-
-static p32 wc_specials[WC_SPECIALS];
 
 static fn wc_bytes_longest(const p8 address_to at, positive left, bool want_lines,
                            positive address_to lines_out, positive address_to longest_out,
@@ -8078,24 +8083,9 @@ static inline INLINE fn rev_characters(p8 address_to at, positive length)
         while (i < length)
         {
                 // A run of plain bytes reverses with the line and needs
-                // no character found in it, so step over it eight at a
-                // time. The span engine is a call, and these lines are
-                // short enough that the call is the cost.
-                while (i + 8 <= length)
-                {
-                        p64 word;
-
-                        memory_copy_apart(address_of word, at + i, 8);
-
-                        if (word & 0x8080808080808080ull)
-                                break;
-
-                        i += 8;
-                }
-
-                if (i < length)
-                        i += string_span_max(at + i, length - i,
-                                             string_set_ascii);
+                // no character found in it.
+                if (at[i] < 0x80)
+                        i += memory_ascii_span(at + i, length - i);
 
                 if (i == length)
                         break;
@@ -21388,7 +21378,7 @@ static bool cut_pieces_emit(address_any context, positive index, p8 address_to l
                    : cut_bytes_into(out, address_of made, offsets, lines, length,
                                     run->complement, run->single,
                                     run->characters &&
-                                        string_span_max(lines, length, text_set_ascii) != length);
+                                        memory_ascii_span(lines, length) != length);
 
         output->used -= length + 32 - made;
         return took == length;
@@ -22091,9 +22081,8 @@ static b32 text_cut()
                                 if (characters && text_input.fills != ascii_fills)
                                 {
                                         ascii_fills = text_input.fills;
-                                        ascii_read = string_span_max(text_input.buffer,
-                                                                     text_input.filled,
-                                                                     text_set_ascii) ==
+                                        ascii_read = memory_ascii_span(text_input.buffer,
+                                                                       text_input.filled) ==
                                                      text_input.filled;
                                 }
 
@@ -22145,8 +22134,7 @@ static b32 text_cut()
                                         nothing new about an ASCII line.
                                 */
                                 if (characters &&
-                                    memory_utf8_span(line, line_length,
-                                                     positive_max).y != line_length)
+                                    memory_ascii_span(line, line_length) != line_length)
                                 {
                                         bool wrote = false;
                                         bool ran = false;
