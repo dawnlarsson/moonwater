@@ -19955,7 +19955,7 @@ _TEXT_FAILURE_TOOLS = (
     ("head",), ("tail",), ("fmt",), ("tac",), ("sort",), ("sed", "p"), ("rev",),
     ("grep", "x"), ("tsort",), ("cksum",), ("md5sum",), ("shuf",), ("tee",),
     ("head", "-c1"), ("tail", "-c1"), ("wc", "-l"), ("sort", "-m"), ("uniq", "-c"),
-    ("tr", "a", "b"),
+    ("tr", "a", "b"), ("cmp",),
 )
 
 #       The two programs that read two inputs side by side, each shape of
@@ -19978,6 +19978,8 @@ _TEXT_FAILURE_NAMES = (
 #       that is not the seek and read its source names.
 _TEXT_FAILURE_KNOWN = {
     ("rev", "stdin-directory"), ("tac", "directory"), ("tac", "stdin-directory"),
+    # cmp - with standard input a directory compares the one file with itself.
+    ("cmp", "stdin-directory"),
 }
 
 

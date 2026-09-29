@@ -647,7 +647,7 @@ static const text_failure_words text_failure_table[] = {
     {"wc", 0, 0, 0, 0, 0, 0, "standard input", false},
     {"tee", "", "", "read error", "", TEXT_SAY_QUOTEF, TEXT_SAY_NONE},
     {"cat"}, {"cut"}, {"nl"}, {"od"}, {"paste"}, {"fold"},
-    {"expand"}, {"unexpand"}, {"ptx"}, {"sum"}, {"comm"},
+    {"expand"}, {"unexpand"}, {"ptx"}, {"sum"}, {"comm"}, {"cmp"},
     {"tr", "", "", "read error", "", TEXT_SAY_QUOTEF, TEXT_SAY_NONE},
     {"numfmt"}, {"shuf"}, {"split"}, {"csplit"},
 };
@@ -38553,7 +38553,11 @@ static b32 text_cmp()
 
                 if (reader->opened && text_directory(reader->handle))
                 {
-                        string_diagnostic(&text_diagnostic, 0, reader->name, "Is a directory");
+                        //      GNU names it as quotef does, as it does an
+                        //      input that would not open.
+                        text_flush();
+                        string_format(writer_stderr, "cmp: %w: Is a directory\n",
+                                      writer_shell_name, reader->name);
                         return cmp_ends(2);
                 }
         }
