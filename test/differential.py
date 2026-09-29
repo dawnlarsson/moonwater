@@ -40346,7 +40346,11 @@ def harness_http_response_framing(argv):
     (lifted from src/net/net.c) and holds each row to MUST_ACCEPT /
     MUST_REFUSE. Python's http.client is consulted as a second oracle: where
     it accepts what this tree refuses by policy, DELIBERATE names the
-    disagreement.
+    disagreement. curl is a third, when it is installed: the same bytes
+    served to it from loopback, and this tree may be stricter than curl but
+    never looser -- a frame curl refuses is one this client must refuse too,
+    or the two read one response two ways -- and where both accept a body
+    it is the same body.
 
         python3 test/differential.py --harness http_response_framing
     """
@@ -40794,6 +40798,55 @@ int main(void)
          b"5" + b"0" * 120 + b"\r\nhello\r\n0\r\n\r\n", None),
         ("chunk-lf-only-delim", "unchunk",
          b"5\nhello\n0\n\n", b"hello"),
+        # --- second oracle (curl): numbers, status lines, chunk spelling ---
+        ("cl-negative", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: -1\r\n\r\nhello", None),
+        ("cl-2-64", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 18446744073709551616\r\n\r\nx",
+         None),
+        ("cl-list-same", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 5, 5\r\n\r\nhello", None),
+        ("cl-list-different", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 5, 6\r\n\r\nhello!", None),
+        ("cl-hex", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 0x5\r\n\r\nhello", None),
+        ("cl-padded", "full",
+         b"HTTP/1.1 200 OK\r\nContent-Length:   5  \r\n\r\nhello", b"hello"),
+        ("cl-truncated-body", "full",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nhello", None),
+        ("status-no-reason", "full",
+         b"HTTP/1.1 200\r\nContent-Length: 2\r\n\r\nok", b"ok"),
+        ("status-lowercase", "frame",
+         b"http/1.1 200 OK\r\nContent-Length: 0\r\n\r\n", None),
+        ("status-four-digits", "frame",
+         b"HTTP/1.1 2000 OK\r\nContent-Length: 0\r\n\r\n", None),
+        ("status-two-digits", "frame",
+         b"HTTP/1.1 20 OK\r\nContent-Length: 0\r\n\r\n", None),
+        ("status-http-2-0", "frame",
+         b"HTTP/2.0 200 OK\r\nContent-Length: 0\r\n\r\n", None),
+        ("status-tab-separator", "frame",
+         b"HTTP/1.1\t200 OK\r\nContent-Length: 0\r\n\r\n", None),
+        ("field-without-colon", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nnocolon\r\n\r\n", None),
+        ("field-obs-text-value", "frame",
+         b"HTTP/1.1 200 OK\r\nX-Note: caf\xe9\r\nContent-Length: 0\r\n\r\n",
+         b""),
+        ("field-name-latin1", "frame",
+         b"HTTP/1.1 200 OK\r\nX-Caf\xe9: 1\r\nContent-Length: 0\r\n\r\n", None),
+        ("chunk-size-trailing-blank", "unchunk",
+         b"5 \r\nhello\r\n0\r\n\r\n", None),
+        ("chunk-size-negative", "unchunk",
+         b"-5\r\nhello\r\n0\r\n\r\n", None),
+        ("chunk-size-0x", "unchunk",
+         b"0x5\r\nhello\r\n0\r\n\r\n", None),
+        ("chunk-size-plus", "unchunk",
+         b"+5\r\nhello\r\n0\r\n\r\n", None),
+        ("chunk-data-not-crlf", "unchunk",
+         b"5\r\nhelloXX0\r\n\r\n", None),
+        ("chunk-uppercase-hex", "unchunk",
+         b"A\r\nabcdefghij\r\n0\r\n\r\n", b"abcdefghij"),
+        ("chunk-empty-line-first", "unchunk",
+         b"\r\n5\r\nhello\r\n0\r\n\r\n", None),
     ]
     MUST_ACCEPT = {
         "simple-length", "empty-length", "bare-lf-headers", "chunked-full",
@@ -40802,6 +40855,8 @@ int main(void)
         "close-delimited", "te-chunked-case", "te-chunked-trail-ws",
         "cl-leading-zero", "trailer-ok", "chunk-ext-quoted",
         "chunk-size-leading-zeros", "chunk-lf-only-delim",
+        "cl-padded", "status-no-reason", "field-obs-text-value",
+        "chunk-size-trailing-blank", "chunk-uppercase-hex",
     }
     #       Moonwater policy where http.client disagrees on the same bytes.
     DELIBERATE = {
@@ -40873,6 +40928,26 @@ int main(void)
             "a bare ';' is not a valid chunk-extension",
         "chunk-lf-only-delim":
             "chunk framing allows LF-only delimiters like response headers",
+        "cl-negative":
+            "Content-Length is plain DIGIT; a sign is malformed",
+        "cl-list-same":
+            "a list in Content-Length is a duplicate framing field by another spelling",
+        "cl-list-different":
+            "a list in Content-Length is a duplicate framing field by another spelling",
+        "cl-hex":
+            "Content-Length is decimal DIGIT; a 0x prefix is malformed",
+        "status-tab-separator":
+            "the status line's separators are single spaces",
+        "field-without-colon":
+            "a header line with no colon is not a field",
+        "field-name-latin1":
+            "field names are exact tokens; bytes past ASCII are not token characters",
+        "chunk-size-0x":
+            "a chunk size is hex digits and nothing else",
+        "chunk-size-plus":
+            "a chunk size is hex digits and nothing else",
+        "chunk-data-not-crlf":
+            "chunk data is followed by its own line ending, or the frame is cut",
     }
 
     def python_oracle(mode, wire):
@@ -40898,7 +40973,51 @@ int main(void)
         except Exception:
             return False, None
 
+    #       curl's verdict on the same bytes, served from loopback: (accepted,
+    #       body), or None when curl is not here. A frame it reads to the end
+    #       and exits 0 on is accepted.
+    def curl_oracle(mode, wire):
+        import socket
+        import threading
+        curl = shutil.which("curl")
+        if not curl or mode == "oversize":
+            return None
+        if mode == "unchunk":
+            wire = (b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                    + wire)
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+
+        def serve():
+            try:
+                peer, _ = listener.accept()
+                peer.settimeout(3)
+                peer.recv(4096)
+                peer.sendall(wire)
+                peer.shutdown(socket.SHUT_WR)
+                peer.recv(1)
+                peer.close()
+            except OSError:
+                pass
+
+        server = threading.Thread(target=serve, daemon=True)
+        server.start()
+        try:
+            ran = subprocess.run([curl, "-s", "--http1.1", "--max-time", "4",
+                                  "http://127.0.0.1:%d/" % port],
+                                 capture_output=True, timeout=10)
+        except subprocess.TimeoutExpired:
+            ran = None
+        listener.close()
+        server.join(timeout=5)
+        if ran is None:
+            return False, None
+        return ran.returncode == 0, ran.stdout
+
     checks = Checks()
+    curl_seen = 0
     with tempfile.TemporaryDirectory(prefix="http-response-framing-") as temporary:
         work = Path(temporary)
         source = shim + defines + headers + body + status + driver
@@ -40943,6 +41062,16 @@ int main(void)
                 checks(ours_body == want_body,
                        "%s: body %r != %r" % (name, ours_body, want_body))
 
+            curl_answer = curl_oracle(mode, wire)
+            if curl_answer is not None:
+                curl_seen += 1
+                curl_ok, curl_body = curl_answer
+                checks(not (ours_ok and not curl_ok),
+                       "%s: Moonwater accepts a frame curl refuses" % name)
+                if ours_ok and curl_ok and want_body is not None:
+                    checks(curl_body == want_body,
+                           "%s: curl body %r != %r" % (name, curl_body, want_body))
+
             py_ok, py_body = python_oracle(mode, wire)
             if name in DELIBERATE:
                 checks(True, "%s: deliberate vs http.client (%s)" % (
@@ -40964,6 +41093,8 @@ int main(void)
                        "%s: http.client body %r != %r" % (
                            name, py_body, want_body))
 
+    if not curl_seen:
+        print("http response framing: curl NOT RUN -- curl is not installed")
     return checks.verdict("http response framing", "http-response-framing")
 
 
