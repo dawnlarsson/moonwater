@@ -1146,6 +1146,12 @@ static positive tar_materialized_index_room;
 #define TAR_TRAILING_LIMIT (TAR_RECORD * 16)
 #define TAR_ADVISE_SEQUENTIAL 2
 
+/* The size from which a member's bytes go from file to archive in the kernel
+   (copy_file_range, then sendfile) rather than through the record. */
+#ifndef TAR_DIRECT_MIN
+#define TAR_DIRECT_MIN TAR_RECORD
+#endif
+
 static p8 tar_record[TAR_RECORD];
 static positive tar_have;
 static positive tar_at;
@@ -3620,7 +3626,7 @@ static bipolar tar_put_span(bipolar archive, bipolar in, p64 size)
 {
         p64 left = size;
 
-        if (size >= TAR_RECORD && !tar_packed())
+        if (size >= TAR_DIRECT_MIN && !tar_packed())
         {
                 tar_advise(in);
                 if (!tar_flush(archive) ||
@@ -3743,6 +3749,11 @@ static bool tar_name_matches(string_address name, string_address wanted)
                !memory_compare(name, wanted, keep) && name[keep] == '/';
 }
 
+/* The words that are not options, in order, wherever among the options they
+   stood: GNU's getopt takes an option after a file name. */
+static string_address address_to tar_words;
+static positive tar_word_count;
+
 /* Which named operands some member matched; the rest are said at the end. */
 static p8 address_to tar_matched;
 static positive tar_matched_count;
@@ -3757,7 +3768,7 @@ static bool tar_wanted(string_address name, positive first, positive count)
                 return true;
 
         for (at = first; at < count; at++)
-                if (tar_name_matches(name, program_argument((b32)at)))
+                if (tar_name_matches(name, tar_words[at]))
                 {
                         if (tar_matched && at - first < tar_matched_count)
                                 tar_matched[at - first] = 1;
@@ -5140,7 +5151,7 @@ static b32 tar_read_archive(struct tar_options address_to options)
         bipolar handle;
         bool seekable;
         bool listed;
-        positive count = (positive)program_argument_count();
+        positive count = tar_word_count;
 
         tar_pax_clear(address_of tar_pax_global);
         tar_pax_clear(address_of tar_pax_local);
@@ -5300,8 +5311,7 @@ static b32 tar_read_archive(struct tar_options address_to options)
                 if (!tar_matched[at - options->first])
                 {
                         string_format(log_error, "tar: %w: Not found in archive\n",
-                                      writer_terminal_name,
-                                      program_argument((b32)at));
+                                      writer_terminal_name, tar_words[at]);
                         tar_status = 2;
                 }
         (void)listed;
@@ -6384,7 +6394,7 @@ static b32 tar_write_archive(struct tar_options address_to options)
         bipolar looked;
         file_staged_name output_stage;
         bool managed_output = false;
-        positive count = (positive)program_argument_count();
+        positive count = tar_word_count;
         positive at;
 
         if (options->first >= count)
@@ -6499,7 +6509,7 @@ static b32 tar_write_archive(struct tar_options address_to options)
         }
 
         for (at = options->first; at < count && !tar_create_fatal; at++)
-                tar_add_path(handle, program_argument((b32)at),
+                tar_add_path(handle, tar_words[at],
                              options->verbose == 1);
 
         memory_fill(tar_block, 0, TAR_BLOCK);
@@ -6776,6 +6786,10 @@ static bool tar_parse(struct tar_options address_to options)
         b32 taken;
 
         memory_fill(options, 0, sizeof(*options));
+        tar_word_count = 0;
+        tar_words = memory_take((cursor.argc + 1) * sizeof(*tar_words));
+        if (!tar_words)
+                return tar_refuse("out of memory"), false;
         options->format = TAR_GNU;
         options->sparse_version = 2;
         options->blocking = 20;
@@ -6806,8 +6820,8 @@ static bool tar_parse(struct tar_options address_to options)
 
                 if (taken == ARGUMENT_OPERAND)
                 {
-                        cursor.at--;
-                        break;
+                        tar_words[tar_word_count++] = cursor.word;
+                        continue;
                 }
 
                 if (taken == ARGUMENT_UNKNOWN || taken == ARGUMENT_MISSING)
@@ -6838,7 +6852,7 @@ static bool tar_parse(struct tar_options address_to options)
                         return true;
         }
 
-        options->first = cursor.at;
+        options->first = 0;
         if (options->short_o)
         {
                 if (options->mode == TAR_CREATE && !options->format_set)

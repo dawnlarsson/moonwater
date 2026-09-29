@@ -9715,7 +9715,15 @@ def files_tar_formats(farm):
                         ("-cf", str(top / "w.tar"), "plain", "missing"),
                         ("-cf", str(top / "w.tar"), "-b", "0", "plain"),
                         ("-cf", str(top / "w.tar"), "-H", "bogus", "plain"),
-                        ("-cf", str(top / "w.tar"), "--pax-option=delete=atime", "plain")):
+                        ("-cf", str(top / "w.tar"), "--pax-option=delete=atime", "plain"),
+                        ("-cvf", str(top / "w.tar"), "plain", "modes"),
+                        ("-cvvf", str(top / "w.tar"), "plain", "u", "-H", "ustar"),
+                        ("-cvf", "-", "plain"), ("-cvvf", "-", "plain/f", "--format=posix",
+                         "--pax-option=delete=atime,delete=ctime"),
+                        ("-tvf", str(made)), ("-tvvf", str(made), "plain"),
+                        ("-xvf", str(made), "-C", str(top / "words")),
+                        ("-xvvf", str(made), "-C", str(top / "words"), "plain"),
+                        ("-dvf", str(made)), ("-dvvf", str(made), "plain/f")):
             total += 1
             answers = []
             for binary in (reference, str(candidate)):
