@@ -9398,7 +9398,7 @@ static COLD fn shell_declare_elements(writer write, string_address name,
         positive count = shell_array_length(name, length);
         shell_mark held = shell_store_mark(address_of expand_store);
         shell_array_item address_to items =
-            (shell_array_item address_to)shell_store_take(
+            (shell_array_item address_to)shell_store_take_aligned(
                 address_of expand_store,
                 (count ? count : 1) * sizeof(items[0]));
         p8 written[32];
@@ -9548,7 +9548,7 @@ static inline bool shell_inventory_sorted(
         if (!count)
                 goto done;
         if (count > positive_max / sizeof(names[0]) ||
-            !(names = (string_address address_to)shell_store_take(
+            !(names = (string_address address_to)shell_store_take_aligned(
                   address_of expand_store, count * sizeof(names[0]))))
                 goto failed;
 

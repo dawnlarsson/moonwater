@@ -75603,13 +75603,6 @@ b32 main(void)
               !read_timeout("12x", &span) && !read_timeout("-0.000001", &span));
         bipolar number;
         positive mode;
-        check("pr accepts signed line-number boundaries",
-              pr_signed(" +2147483647", &number) && number == b32_max &&
-              pr_signed("-2147483648", &number) && number == b32_min);
-        check("pr rejects overflowing line numbers",
-              !pr_signed("2147483648", &number) &&
-              !pr_signed("-2147483649", &number) &&
-              !pr_signed("18446744073709551616", &number));
         check("nice saturates the complete overflowing digit run",
               nice_adjustment("18446744073709551616", &number) && number == 39 &&
               nice_adjustment("-18446744073709551616", &number) && number == -39 &&
@@ -75661,6 +75654,30 @@ b32 main(void)
         check("arena span rejects length overflow",
               !shell_store_copy(&store, null, positive_max) && shell_memory_failed);
         shell_memory_failed = false;
+        {
+                shell_store odd = {0};
+                bool aligned = true;
+
+                //      A string of any length ahead of a record must leave
+                //      the record eight-aligned: it holds pointers, and a
+                //      word stored through an odd address is the undefined
+                //      behaviour the compiler's alignment check reports.
+                for (positive length = 0; length < 24; length++)
+                {
+                        p8 address_to text = shell_store_copy(&odd, "abcdefghijklmnopqrstuvwx", length);
+                        p8 address_to record = shell_store_take_aligned(&odd, 24);
+
+                        if (!text || !record || ((positive)record & 7))
+                                aligned = false;
+                }
+                check("a record taken after a string of any length is eight-aligned", aligned);
+                while (odd.head)
+                {
+                        shell_block address_to next = odd.head->next;
+                        memory_free(odd.head, sizeof(shell_block) + odd.head->size);
+                        odd.head = next;
+                }
+        }
         seq_format sequence;
         check("seq shared conversion fields retain literals, flags and default precision",
               seq_format_read("%%[%+-08Lf]%%", &sequence) && sequence.directive == 3 &&

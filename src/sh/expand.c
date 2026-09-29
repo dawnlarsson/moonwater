@@ -7701,7 +7701,7 @@ static fn expand_push_names(string_address prefix, positive prefix_length,
         between = form == '@' ? ' ' : string_get(expand_ifs());
 
         if (count > positive_max / sizeof(names[0]) ||
-            !(names = (string_address address_to)shell_store_take(
+            !(names = (string_address address_to)shell_store_take_aligned(
                   address_of expand_store, count * sizeof(names[0]))) ||
             env_names_prefix(prefix, prefix_length, names, count) != count)
         {
@@ -8386,7 +8386,7 @@ static COLD fn expand_array_sequence(string_address name, positive length,
         }
 
         if (count > positive_max / sizeof(items[0]) ||
-            !(items = (shell_array_item address_to)shell_store_take(
+            !(items = (shell_array_item address_to)shell_store_take_aligned(
                   address_of expand_store, count * sizeof(items[0]))))
         {
                 expand_fail_state();
@@ -8471,7 +8471,7 @@ static shell_array_item address_to expand_array_items_take(
 
         address_to held = shell_store_mark(address_of expand_store);
         if (count > positive_max / sizeof(items[0]) ||
-            !(items = (shell_array_item address_to)shell_store_take(
+            !(items = (shell_array_item address_to)shell_store_take_aligned(
                   address_of expand_store, count * sizeof(items[0]))))
         {
                 expand_fail_state();
@@ -8666,7 +8666,7 @@ static COLD bool expand_array_every_empty(string_address name,
         bool empty = true;
 
         if (count > positive_max / sizeof(items[0]) ||
-            !(items = (shell_array_item address_to)shell_store_take(
+            !(items = (shell_array_item address_to)shell_store_take_aligned(
                   address_of expand_store, count * sizeof(items[0]))))
                 return false;
         shell_array_items(name, length, items, count);
@@ -8928,7 +8928,7 @@ static COLD string_address expand_indirect_through(string_address name,
                 shell_array_item address_to items;
 
                 if (count > positive_max / sizeof(items[0]) ||
-                    !(items = (shell_array_item address_to)shell_store_take(
+                    !(items = (shell_array_item address_to)shell_store_take_aligned(
                           address_of expand_store, count * sizeof(items[0]))))
                 {
                         expand_fail_state();

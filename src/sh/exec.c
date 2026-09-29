@@ -8447,9 +8447,9 @@ static COLD fn exec_frames_publish()
 
         exec_frames_standing = true;
 
-        walked = (string_address address_to)shell_store_take(
+        walked = (string_address address_to)shell_store_take_aligned(
             address_of exec_store, count * sizeof(walked[0]));
-        lines = (bipolar address_to)shell_store_take(
+        lines = (bipolar address_to)shell_store_take_aligned(
             address_of exec_store, count * sizeof(lines[0]));
 
         if (!walked || !lines)
@@ -9357,7 +9357,7 @@ static bool exec_compound_put(string_address name, positive name_length,
                 return shell_array_set(name, name_length, key, key_length,
                                        value, (how & EXEC_HELD_APPEND) != 0);
 
-        held = (exec_compound_held address_to)shell_store_take(
+        held = (exec_compound_held address_to)shell_store_take_aligned(
             address_of exec_store, sizeof(*held));
         if (!held)
                 return false;
@@ -10240,7 +10240,7 @@ static bool exec_finish_prefixes(exec_kept_value address_to kept, b32 count)
                 if (!promote)
                         continue;
                 if (!adopted)
-                        adopted = (exec_kept_value address_to)shell_store_take(address_of exec_store,
+                        adopted = (exec_kept_value address_to)shell_store_take_aligned(address_of exec_store,
                             (positive)count * sizeof(*adopted));
                 if (!adopted || !exec_keep_value(adopted + used, kept[at].binding.name, kept[at].binding.variable.name_length, EXEC_KEEP_CELL))
                 {
@@ -11036,7 +11036,7 @@ static COLD b32 address_to exec_keyword_order(parse_node address_to node,
         if (assignments == *leading)
                 return null;
 
-        order = (b32 address_to)shell_store_take(
+        order = (b32 address_to)shell_store_take_aligned(
             address_of exec_store, (positive)node->word_count * sizeof(*order));
         if (!order)
         {
@@ -11214,7 +11214,7 @@ static b32 exec_simple(b32 index)
 
         if (leading)
         {
-                expanded_kept = (exec_kept_value address_to)shell_store_take(
+                expanded_kept = (exec_kept_value address_to)shell_store_take_aligned(
                     address_of exec_store,
                     (positive)leading * sizeof(expanded_kept[0]));
 
@@ -12693,7 +12693,7 @@ static COLD fn conditional_regex_captures(string_address text)
         shell_mark held = shell_store_mark(address_of expand_store);
         positive count = (positive)regex_group_count + 1;
         string_address address_to words =
-            (string_address address_to)shell_store_take(
+            (string_address address_to)shell_store_take_aligned(
                 address_of expand_store, count * sizeof(words[0]));
 
         if (!words)

@@ -425,6 +425,30 @@ shell_store_take(shell_store address_to store, positive room)
         return shell_store_take_block(store, room);
 }
 
+/*
+        A record or a table of pointers, which the byte the last string ended
+        on leaves at any offset: an eight-byte word stored through it is a
+        misaligned store, which x86_64 and arm64 allow and a strict machine
+        does not, and which the language does not allow anywhere. Taken from
+        the next multiple of eight instead, at most seven bytes further on.
+        A mark taken before it rewinds over the padding with everything else.
+*/
+static inline INLINE p8 address_to
+shell_store_take_aligned(shell_store address_to store, positive room)
+{
+        shell_block address_to block = store->here;
+
+        if (block && block->used <= block->size)
+        {
+                positive pad = (positive)(-block->used) & 7;
+
+                if (pad <= block->size - block->used)
+                        block->used += pad;
+        }
+
+        return shell_store_take(store, room);
+}
+
 /* Stable, terminated spans share the arena's allocation and overflow policy. */
 static p8 address_to shell_store_copy(shell_store address_to store,
                                       address_any text, positive length)

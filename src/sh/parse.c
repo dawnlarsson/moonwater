@@ -1948,7 +1948,7 @@ static bool parse_alias_replace(b32 position)
         if (!value)
                 return false;
 
-        trace = (parse_alias_trace address_to)shell_store_take(
+        trace = (parse_alias_trace address_to)shell_store_take_aligned(
             address_of parse_store, sizeof(*trace));
 
         if (!trace)
