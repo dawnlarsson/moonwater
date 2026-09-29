@@ -100902,8 +100902,8 @@ static fn floor_deflate_codes(void)
                 bool built = huffman_lengths(freq, GZIP_MAXLIT, lens, 15) &&
                              huffman_lengths(freq + GZIP_MAXLIT, 30, lens + GZIP_MAXLIT, 15);
                 lens[GZIP_MAXLIT + 30] = lens[GZIP_MAXLIT + 31] = 0;
-                built = built && gzip_huffman_cells(lit, lens, GZIP_MAXLIT, GZIP_LITLEN_ROOT, 1) == 0 &&
-                        gzip_huffman_cells(dist, lens + GZIP_MAXLIT, 30, GZIP_OFFSET_ROOT, 2) == 0;
+                built = built && gzip_huffman_cells(lit, lens, GZIP_MAXLIT, GZIP_LITLEN_ROOT, 1, null) == 0 &&
+                        gzip_huffman_cells(dist, lens + GZIP_MAXLIT, 30, GZIP_OFFSET_ROOT, 2, null) == 0;
                 positive deepest = 0;
                 for (positive i = 0; i < GZIP_MAXLIT + 30; i++) deepest = lens[i] > deepest ? lens[i] : deepest;
                 check("deflate differential codes build with subtables", built && deepest > GZIP_LITLEN_ROOT);

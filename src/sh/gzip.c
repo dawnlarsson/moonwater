@@ -226,7 +226,8 @@ static inline INLINE p32 gzip_cell_base(positive kind, positive symbol)
    that prefix. Incomplete codes are accepted and their unused codes decode
    to an invalid cell. 0, or -2 for lengths that over-subscribe the space. */
 static bipolar gzip_huffman_cells(p32 address_to table, p8 address_to length,
-                                  positive n, positive root, positive kind)
+                                  positive n, positive root, positive kind,
+                                  p8 address_to look)
 {
         p16 count[GZIP_MAXBITS + 1];
         p16 offs[GZIP_MAXBITS + 1];
@@ -248,6 +249,8 @@ static bipolar gzip_huffman_cells(p32 address_to table, p8 address_to length,
         memory_fill(widths, 0, sizeof(widths));
         for (positive at = 0; at < n; at++)
                 count[length[at]]++;
+        positive used = n - count[0];
+
         count[0] = 0;
         for (positive len = 1; len <= GZIP_MAXBITS; len++)
         {
@@ -255,6 +258,24 @@ static bipolar gzip_huffman_cells(p32 address_to table, p8 address_to length,
                 left -= count[len];
                 if (left < 0)
                         return -2;
+        }
+        /* gzip refuses a code that leaves room, but for its single one-bit
+           code, and one that uses none, but for distances: -3. */
+        if (left && !(count[1] == 1 && used == 1) && (used || kind != 2))
+                return -3;
+        if (look)
+        {
+                /* gzip's lookahead: the table's root of nine bits for lengths
+                   and literals, six for distances and seven for the precode,
+                   cut to the longest code and raised to the shortest. */
+                positive least = 1, most = GZIP_MAXBITS;
+                positive wanted = kind == 1 ? 9 : kind == 2 ? 6 : 7;
+
+                while (least <= GZIP_MAXBITS && !count[least])
+                        least++;
+                while (most && !count[most])
+                        most--;
+                *look = !used ? 0 : (p8)(wanted > most ? most : wanted < least ? least : wanted);
         }
         offs[1] = 0;
         for (positive len = 1; len < GZIP_MAXBITS; len++)
@@ -395,10 +416,12 @@ typedef struct
         string_address why;
         string_address why2;
         p8 why_text[96];
-        p32 litlen[GZIP_LITLEN_CELLS];
-        p32 offset[GZIP_OFFSET_CELLS];
-        p32 precode[1 << GZIP_PRECODE_ROOT];
-} gzip_inflater;
+        /* The tables the span kernel reads at random, each on a line of
+           its own. */
+        p32 litlen[GZIP_LITLEN_CELLS] __attribute__((aligned(64)));
+        p32 offset[GZIP_OFFSET_CELLS] __attribute__((aligned(64)));
+        p32 precode[1 << GZIP_PRECODE_ROOT] __attribute__((aligned(64)));
+} __attribute__((aligned(64))) gzip_inflater;
 
 /* The state, then the input window, the history and the slab with slack. */
 #define GZIP_INFLATER_SIZE (sizeof(gzip_inflater) + GZIP_DECODE_IN + \
@@ -588,47 +611,13 @@ static bool gzip_inflate_align(gzip_inflater address_to z)
 
 static bool gzip_inflate_table(gzip_inflater address_to z, p32 address_to table,
                                p8 address_to length, positive n, positive root,
-                               positive kind)
+                               positive kind, p8 address_to look)
 {
-        positive space = 0, longest = 0, used = 0;
-        bipolar built;
+        bipolar built = gzip_huffman_cells(table, length, n, root, kind, look);
 
-        /* gzip refuses a code that leaves room, unless its one code is a
-           single bit; and one that uses none, but for distances. */
-        for (positive at = 0; at < n; at++)
-                if (length[at] && length[at] <= GZIP_MAXBITS)
-                {
-                        space += (positive)1 << (GZIP_MAXBITS - length[at]);
-                        longest = max(longest, (positive)length[at]);
-                        used++;
-                }
-        if (space < ((positive)1 << GZIP_MAXBITS) && longest != 1 && (used || kind != 2))
-                return gzip_inflate_fail(z, GZIP_WHY_FORMAT);
-        built = gzip_huffman_cells(table, length, n, root, kind);
-
-        if (built == -1)
-                return gzip_inflate_fail(z, GZIP_WHY_FORMAT);
         if (built < 0)
                 return gzip_inflate_fail(z, GZIP_WHY_FORMAT);
         return true;
-}
-
-/* gzip's lookahead for a code: its table's root width of nine bits for
-   lengths and literals and six for distances, cut to the longest code and
-   raised to the shortest. */
-static p8 gzip_look(p8 address_to length, positive n, positive root)
-{
-        positive least = 16, most = 0;
-
-        for (positive at = 0; at < n; at++)
-                if (length[at])
-                {
-                        least = min(least, (positive)length[at]);
-                        most = max(most, (positive)length[at]);
-                }
-        if (!most)
-                return 0;
-        return (p8)(root > most ? most : root < least ? least : root);
 }
 
 static bool gzip_inflate_dynamic(gzip_inflater address_to z)
@@ -657,9 +646,11 @@ static bool gzip_inflate_dynamic(gzip_inflater address_to z)
                 clen[gzip_clen_order[k]] = (p8)len;
         }
         z->fixed_loaded = false;
-        if (!gzip_inflate_table(z, z->precode, clen, 19, GZIP_PRECODE_ROOT, 0))
+        p8 look_pre = 0;
+
+        if (!gzip_inflate_table(z, z->precode, clen, 19, GZIP_PRECODE_ROOT, 0,
+                                address_of look_pre))
                 return false;
-        p8 look_pre = gzip_look(clen, 19, 7);
 
         /* The code lengths decode on a local bit buffer, refilled a word at a
            time while the window has eight bytes ahead; bits above count are
@@ -739,10 +730,10 @@ static bool gzip_inflate_dynamic(gzip_inflater address_to z)
 
         if (!lengths[256])
                 return gzip_inflate_fail(z, GZIP_WHY_FORMAT);
-        z->look_lit = gzip_look(lengths, nlit, 9);
-        z->look_dist = gzip_look(lengths + nlit, ndist, 6);
-        return gzip_inflate_table(z, z->litlen, lengths, nlit, GZIP_LITLEN_ROOT, 1) &&
-               gzip_inflate_table(z, z->offset, lengths + nlit, ndist, GZIP_OFFSET_ROOT, 2);
+        return gzip_inflate_table(z, z->litlen, lengths, nlit, GZIP_LITLEN_ROOT, 1,
+                                  address_of z->look_lit) &&
+               gzip_inflate_table(z, z->offset, lengths + nlit, ndist, GZIP_OFFSET_ROOT, 2,
+                                  address_of z->look_dist);
 }
 
 static bool gzip_inflate_fixed(gzip_inflater address_to z)
@@ -758,9 +749,9 @@ static bool gzip_inflate_fixed(gzip_inflater address_to z)
         memory_fill(lengths + 256, 7, 24);
         memory_fill(lengths + 280, 8, 8);
         memory_fill(lengths + GZIP_MAXLIT, 5, GZIP_MAXDIST);
-        if (!gzip_inflate_table(z, z->litlen, lengths, GZIP_MAXLIT, GZIP_LITLEN_ROOT, 1) ||
+        if (!gzip_inflate_table(z, z->litlen, lengths, GZIP_MAXLIT, GZIP_LITLEN_ROOT, 1, null) ||
             !gzip_inflate_table(z, z->offset, lengths + GZIP_MAXLIT, GZIP_MAXDIST,
-                                GZIP_OFFSET_ROOT, 2))
+                                GZIP_OFFSET_ROOT, 2, null))
                 return false;
         z->fixed_loaded = true;
         return true;
