@@ -336,12 +336,7 @@ static fn edit_line_close(positive at)
 
         memory_give(edit_lines[at].text);
 
-        if (at + 1 < edit_line_count)
-                memory_copy(edit_lines + at, edit_lines + at + 1,
-                            (edit_line_count - at - 1) *
-                                sizeof(struct edit_line));
-
-        edit_line_count--;
+        array_remove(edit_lines, edit_line_count, at);
 }
 
 //      Somewhere inside the file, whatever was asked for. Everything that

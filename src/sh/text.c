@@ -10233,9 +10233,7 @@ static bool tail_writers_alive()
                 if (system_call_2(syscall(kill), (positive)tail_pids[i], 0) ==
                     -ERROR_NO_PROCESS)
                 {
-                        tail_pids_count--;
-                        memory_copy(tail_pids + i, tail_pids + i + 1,
-                                    (tail_pids_count - i) * sizeof(tail_pids[0]));
+                        array_remove(tail_pids, tail_pids_count, i);
                 }
                 else
                         i++;

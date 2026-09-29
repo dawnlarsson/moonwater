@@ -1920,12 +1920,7 @@ static PURE string_address array_element_value(array_element address_to element)
 static COLD fn array_element_forget(array_table address_to table, positive at)
 {
         env_cell_drop(table->element[at].text);
-
-        if (left)
-                memory_copy(table->element + at, table->element + at + 1,
-                            left * sizeof(table->element[0]));
-
-        table->count--;
+        array_remove(table->element, table->count, at);
 }
 
 /*
@@ -15814,10 +15809,7 @@ static string_address trap_detach(positive number, positive address_to room)
         if (room)
                 *room = trap_table[index].action_room;
 
-        memory_copy(trap_table + index, trap_table + index + 1,
-                    (trap_count - index - 1) * sizeof(trap_table[0]));
-
-        trap_count--;
+        array_remove(trap_table, trap_count, index);
         return action;
 }
 
@@ -16653,9 +16645,7 @@ COLD fn shell_unalias(writer write, string_address input)
                                     alias_table[at].name_room);
                         memory_free(alias_table[at].value,
                                     alias_table[at].value_room);
-                        memory_copy(alias_table + at, alias_table + at + 1,
-                                    (alias_count - at - 1) *
-                                        sizeof(alias_table[0]));
+                        array_remove(alias_table, alias_count, at);
                 }
 
                 index++;
@@ -20996,11 +20986,7 @@ static COLD fn comp_drop(positive at)
 {
         comp_forget(comp_specs + at);
 
-        if (at + 1 < comp_count)
-                memory_copy(comp_specs + at, comp_specs + at + 1,
-                            (comp_count - at - 1) * sizeof(comp_specs[0]));
-
-        comp_count--;
+        array_remove(comp_specs, comp_count, at);
 }
 
 static COLD p32 comp_chain(string_address name)
@@ -22358,11 +22344,7 @@ static COLD fn bind_drop_user(positive at)
         comp_release(bind_users[at].keys);
         comp_release(bind_users[at].text);
 
-        if (at + 1 < bind_user_count)
-                memory_copy(bind_users + at, bind_users + at + 1,
-                            (bind_user_count - at - 1) * sizeof(bind_users[0]));
-
-        bind_user_count--;
+        array_remove(bind_users, bind_user_count, at);
 }
 
 //      Takes the sequence away wherever it is bound in this keymap.
@@ -23392,12 +23374,9 @@ static bool hash_drop(string_address name)
         if (at >= hash_count)
                 return false;
 
-        memory_copy(hash_name + at, hash_name + at + 1,
-                    (hash_count - at - 1) * sizeof(hash_name[0]));
-        memory_copy(hash_path + at, hash_path + at + 1,
-                    (hash_count - at - 1) * sizeof(hash_path[0]));
-        memory_copy(hash_hits + at, hash_hits + at + 1,
-                    (hash_count - at - 1) * sizeof(hash_hits[0]));
+        array_close_gap(hash_name, hash_count, at);
+        array_close_gap(hash_path, hash_count, at);
+        array_close_gap(hash_hits, hash_count, at);
         hash_count--;
 
         return true;

@@ -385,6 +385,31 @@ static inline INLINE positive pointer_vector_count(
 /* Compile-time array shape, never a separately maintained count. */
 #define array_count(array) (sizeof(array) / sizeof((array)[0]))
 
+/* The gap an element leaves in a counted array, closed: the elements after
+   index at move down one place, memory_copy being memmove. The count is the
+   caller's to lower, so that arrays kept in step can share it. */
+#define array_close_gap(array, count, at)                                    \
+        do                                                                   \
+        {                                                                    \
+                positive _gap_at = (at), _gap_count = (count);               \
+                                                                             \
+                if (_gap_at + 1 < _gap_count)                                \
+                        memory_copy((array) + _gap_at, (array) + _gap_at + 1,\
+                                    (_gap_count - _gap_at - 1) *             \
+                                        sizeof((array)[0]));                 \
+        } while (0)
+
+/* An element taken out of a counted array, whatever it owned given back
+   already. */
+#define array_remove(array, count, at)                                       \
+        do                                                                   \
+        {                                                                    \
+                positive _remove_at = (at);                                  \
+                                                                             \
+                array_close_gap(array, count, _remove_at);                   \
+                (count)--;                                                   \
+        } while (0)
+
 /* Exact byte spans may contain NUL. Reuse the bounded architecture scan and
    return the bound on a miss, including an empty span at a null address. */
 static inline INLINE PURE positive memory_span_without_byte(
@@ -16206,14 +16231,10 @@ b32 unsetenv(string_address name)
 
                         //      Everything above the entry moves down one
                         //      place, the null that ends the vector included,
-                        //      which is why the count is the distance to the
-                        //      end and not one less. memory_copy is memmove
-                        //      -- lib.c aliases both names onto it -- so
-                        //      the overlap is the routine's business.
-                        memory_copy(stdlib_environment_vector + index,
-                                    stdlib_environment_vector + index + 1,
-                                    (stdlib_environment_count - index) *
-                                            sizeof(string_address));
+                        //      which is why the gap is closed in a count one
+                        //      past the entries.
+                        array_close_gap(stdlib_environment_vector,
+                                        stdlib_environment_count + 1, index);
 
                         stdlib_environment_count--;
                         continue;

@@ -1097,11 +1097,7 @@ static fn job_drop_at(positive at)
         if (job_table[at].text)
                 memory_free(job_table[at].text, job_table[at].text_room);
 
-        job_count--;
-
-        if (at < job_count)
-                memory_copy(job_table + at, job_table + at + 1,
-                            (job_count - at) * sizeof(job_table[0]));
+        array_remove(job_table, job_count, at);
 
         job_marks_settle();
 
