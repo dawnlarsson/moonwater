@@ -177,11 +177,6 @@ struct device_context
 #include "spark.c"
 
 
-// The assembly in this directory. Each .asm is its own object -- assembly
-// cannot be included into this translation unit the way canvas.c is
-// -- so the compiler is told its shape here, in the file that calls it.
-//
-
 int path_mount(const char *dev_name, struct path *path,
                const char *type_page, unsigned long flags, void *data_page);
 
@@ -190,26 +185,20 @@ int path_mount(const char *dev_name, struct path *path,
 int init_mkdir(const char *pathname, umode_t mode);
 
 
-/* Caller-triggered failures are rate limited; boot and teardown are not. */
-
-typedef struct
-{
-        string_address filesystem;
-        string_address path;
-        positive mount_flags;
-
-} MountPoints;
-
 /*
         devtmpfs is what populates /dev. The kernel will not mount it itself
         when booting from an initramfs, so without this /dev holds only the
         handful of nodes the initramfs was built with -- no /dev/dri, and so
         nothing for the compositor to open.
 */
-static const MountPoints mounts[] = {
-    {"proc", "/proc", 0},
-    {"sysfs", "/sys", 0},
-    {"devtmpfs", "/dev", 0},
+static const struct
+{
+        string_address filesystem;
+        string_address path;
+} mounts[] = {
+    {"proc", "/proc"},
+    {"sysfs", "/sys"},
+    {"devtmpfs", "/dev"},
 
     /*
             Not devpts. It registers itself with module_init, which for
@@ -218,7 +207,6 @@ static const MountPoints mounts[] = {
             init mounts it, which is where a system does it anyway, and it
             needs no pty before then.
     */
-    {null, null},
 };
 
 /*
@@ -363,26 +351,19 @@ static struct miscdevice device = {
 // calls it, so internal linkage is the answer rather than a prefix.
 static fn init_mount()
 {
-        const MountPoints address_to mount = mounts;
-
-        while (mount->filesystem)
+        for (positive i = 0; i < array_count(mounts); i++)
         {
                 struct path path;
+                int ret = kern_path(mounts[i].path, LOOKUP_FOLLOW, &path);
 
-                int ret = kern_path(mount->path, LOOKUP_FOLLOW, &path);
+                if (ret == -ENOENT && !init_mkdir(mounts[i].path, 0755))
+                        ret = kern_path(mounts[i].path, LOOKUP_FOLLOW, &path);
 
-                if (ret == -ENOENT && !init_mkdir(mount->path, 0755))
-                        ret = kern_path(mount->path, LOOKUP_FOLLOW, &path);
-
-                if (ret)
+                if (!ret)
                 {
-                        pr_alert("[moonwater] " "Mounting %s to %s failed with error: %d\n", mount->filesystem, mount->path, ret);
-                        mount++;
-                        continue;
+                        ret = path_mount(mounts[i].filesystem, &path, mounts[i].filesystem, 0, null);
+                        path_put(&path);
                 }
-
-                ret = path_mount(mount->filesystem, &path, mount->filesystem, mount->mount_flags, null);
-                path_put(&path);
 
                 //      Only the failures. Three lines saying a mount that
                 //      was always going to work did work is three console
@@ -391,26 +372,11 @@ static fn init_mount()
                 //      nothing reads them -- the evidence that /proc mounted
                 //      is /proc.
                 if (ret)
-                        pr_alert("[moonwater] " "Mounting %s on %s failed with error: %d\n", mount->filesystem, mount->path, ret);
-
-                mount++;
+                        pr_alert("[moonwater] " "Mounting %s on %s failed with error: %d\n", mounts[i].filesystem, mounts[i].path, ret);
         }
 }
 
-/*
-        Proves the assembly runs.
-
-        A .asm that assembles and links is not a .asm that works: until
-        something calls it, the only thing the build has shown is that the
-        file is syntactically valid for this architecture. This reads the
-        counter twice with a barrier between, which catches the two ways a
-        wrong block fails -- a counter that never advances, and one that goes
-        backwards because the halves were put together the wrong way round.
-
-        Two reads and no delay. The delta is printed rather than the value,
-        because a raw counter says nothing and a delta says it is counting.
-*/
-// Likewise: an initcall does not need external linkage.
+// static, for the same reason: an initcall does not need external linkage.
 static b32 __init start()
 {
         int ret;
@@ -467,6 +433,7 @@ static b32 __init start()
         {
                 pr_alert("[moonwater] " "could not register /dev/spark: %d\n", ret);
                 unregister_binfmt(&format);
+                kfree(xchg(&settings_current, NULL));
                 return ret;
         }
 
