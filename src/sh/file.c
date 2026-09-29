@@ -18550,7 +18550,7 @@ static bool du_files_from(string_address list)
         positive number = 0;
         bool done = false;
 
-        while (!done && !du_seen_broken && !du_depth_broken)
+        while (!done && !du_seen_broken && !du_depth_broken && !log_failed())
         {
                 held.used = have;
                 if (!byte_store_reserve(address_of held, have + 65536, 65536))
@@ -18612,7 +18612,8 @@ static bool du_files_from(string_address list)
 
                         held.bytes[stop] = keep;
                         start = at + 1;
-                        if (du_seen_broken || du_depth_broken)
+                        // A refused write ends the list, as GNU's does.
+                        if (du_seen_broken || du_depth_broken || log_failed())
                                 break;
                 }
 
@@ -18625,6 +18626,8 @@ static bool du_files_from(string_address list)
                 system_close((positive)handle);
         return true;
 }
+
+static bool file_output_told(string_address program);
 
 static b32 file_du()
 {
@@ -18844,7 +18847,7 @@ static b32 file_du()
 
         log_flush();
 
-        return du_status;
+        return file_output_told((string_address) "du") ? du_status : 1;
 }
 
 // df ------------------------------------------------------------
@@ -46471,6 +46474,154 @@ static b32 file_cal()
 /* date and strftime used to carry separate calendar-format state machines.
    Keep one engine: the stack covers ordinary command lines and an exceptional
    width grows through the shared byte store until the bounded formatter fits. */
+/*
+        A directive padded to a width no buffer holds, date +%9223372036854775807c,
+        is written as GNU's date writes it: the width is taken at most as far
+        as an int goes, and the padding goes out in blocks as it is made, so
+        that it ends where the output does -- a full device -- and not where
+        memory does. What is before the directive and after it is formatted as
+        it always was.
+*/
+#define DATE_WIDE ((positive)1 << 20)
+static byte_store date_wide_text;
+static byte_store date_wide_probe;
+
+static fn date_wide_capture(byte_store address_to into, address_any text, positive length)
+{
+        if (byte_store_reserve(into, into->used + length + 1, 256))
+        {
+                memory_copy(into->bytes + into->used, text, length);
+                into->used += length;
+                into->bytes[into->used] = end;
+        }
+}
+
+static fn date_wide_text_write(address_any text, positive length)
+{
+        date_wide_capture(address_of date_wide_text, text, length);
+}
+
+static fn date_wide_probe_write(address_any text, positive length)
+{
+        date_wide_capture(address_of date_wide_probe, text, length);
+}
+
+static bool date_shape(writer write, b64 when, positive nanoseconds,
+                       string_address format);
+
+// 0 or 1 when a directive of that width was written, and the answer of the
+// rest; 2 when the format holds none.
+static positive date_shape_wide(writer write, b64 when, positive nanoseconds,
+                                string_address format)
+{
+        for (string_address at = format; string_get(at); at++)
+        {
+                if (!string_is(at, '%'))
+                        continue;
+
+                string_address scan = at + 1;
+
+                if (string_is(scan, '%'))
+                {
+                        at++;
+                        continue;
+                }
+
+                string_address flags = scan;
+
+                while (string_get(scan) && string_first_of("_-0^#+", string_get(scan)))
+                        scan++;
+
+                string_address digits = scan;
+                positive width = 0;
+
+                while (byte_is_digit(string_get(scan)))
+                {
+                        width = width * 10 + (positive)(string_get(scan) - '0');
+                        if (width > 0x7fffffff)
+                                width = 0x7fffffff;
+                        scan++;
+                }
+
+                if (scan == digits || width <= DATE_WIDE)
+                {
+                        at = scan > at + 1 ? scan - 1 : at;
+                        continue;
+                }
+
+                p8 modifier = string_get(scan) == 'E' || string_get(scan) == 'O' ? string_get(scan) : 0;
+                p8 letter = string_get(scan + (modifier ? 1 : 0));
+                positive flag_length = (positive)(digits - flags);
+                p8 directive[32];
+                p8 probe[40];
+
+                if (!letter || flag_length + 4 > sizeof(directive))
+                        return 2;
+
+                directive[0] = '%';
+                memory_copy(directive + 1, flags, flag_length);
+                positive size = 1 + flag_length;
+                positive probe_at = size;
+
+                memory_copy(probe, directive, size);
+                probe[probe_at++] = '6';
+                probe[probe_at++] = '4';
+                if (modifier)
+                {
+                        directive[size++] = modifier;
+                        probe[probe_at++] = modifier;
+                }
+                directive[size++] = letter;
+                probe[probe_at++] = letter;
+                directive[size] = end;
+                probe[probe_at] = end;
+
+                // What is before it.
+                byte_store before = {0};
+
+                if (!byte_store_reserve(address_of before, (positive)(at - format) + 1, 256))
+                        return 0;
+                memory_copy(before.bytes, format, (positive)(at - format));
+                before.bytes[at - format] = end;
+                bool ok = date_shape(write, when, nanoseconds, (string_address)before.bytes);
+                byte_store_release(address_of before);
+                if (!ok)
+                        return 0;
+
+                // What it comes to without the width, and with a small one to
+                // see what it pads with.
+                date_wide_text.used = 0;
+                date_wide_probe.used = 0;
+                if (!date_shape(date_wide_text_write, when, nanoseconds, (string_address)directive) ||
+                    !date_shape(date_wide_probe_write, when, nanoseconds, (string_address)probe))
+                        return 0;
+
+                bool none = false;
+                for (string_address f = flags; f < digits; f++)
+                        none |= string_is(f, '-');
+
+                positive pad = width > date_wide_text.used ? width - date_wide_text.used : 0;
+                p8 fill = date_wide_probe.used > date_wide_text.used && date_wide_probe.bytes
+                              ? date_wide_probe.bytes[0] : ' ';
+                p8 block[4096];
+
+                memory_fill(block, fill, sizeof(block));
+                while (!none && pad && !log_failed())
+                {
+                        positive part = min(pad, (positive)sizeof(block));
+
+                        write(block, part);
+                        pad -= part;
+                }
+                if (date_wide_text.used)
+                        write(date_wide_text.bytes, date_wide_text.used);
+
+                // What is after it may hold another.
+                return date_shape(write, when, nanoseconds, scan + (modifier ? 2 : 1)) ? 1 : 0;
+        }
+        return 2;
+}
+
 static bool date_shape(writer write, b64 when, positive nanoseconds,
                        string_address format)
 {
@@ -46481,6 +46632,13 @@ static bool date_shape(writer write, b64 when, positive nanoseconds,
 
         if (!localtime_r(address_of stamp, address_of broken))
                 return false;
+
+        {
+                positive wide = date_shape_wide(write, when, nanoseconds, format);
+
+                if (wide != 2)
+                        return wide == 1;
+        }
 
         length = clock_format_extended(fixed, sizeof(fixed), format,
                                        address_of broken, nanoseconds);
@@ -46953,6 +47111,10 @@ static bool date_batch(string_address path, string_address format, b64 now,
                 else if (!date_emit(format, when, ns))
                         ok = false;
                 lines.bytes[length] = saved;
+
+                // A refused write ends the run there, as GNU's does.
+                if (log_failed())
+                        break;
 
                 positive used = stop ? length + 1 : length;
 

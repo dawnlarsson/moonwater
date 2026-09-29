@@ -945,6 +945,16 @@ static bool text_spill_room(p8 address_to address_to storage, positive used,
    address itself; it is null after any spill that moved nothing. */
 static p8 address_to text_spill_moved;
 
+/*
+        A tool that can take a record in parts sets text_spill_partial: a
+        record that would outgrow the fixed store is then handed over as far
+        as the store goes, cut after the last blank among the bytes just
+        read, and text_spill_more says the record goes on. What is left of it
+        is what the next call reads.
+*/
+static bool text_spill_partial;
+static bool text_spill_more;
+
 static bool text_reader_spill(text_reader address_to reader, p8 delimiter,
                                p8 address_to storage,
                                byte_store address_to own,
@@ -960,6 +970,7 @@ static bool text_reader_spill(text_reader address_to reader, p8 delimiter,
                                 : TEXT_LINE_MAX;
 
         text_spill_moved = null;
+        text_spill_more = false;
         if (!text_reader_fill(reader))
                 return used != 0;
 
@@ -969,6 +980,25 @@ static bool text_reader_spill(text_reader address_to reader, p8 delimiter,
                 positive left = reader->filled - reader->position;
                 p8 address_to found = memory_first_of(at, delimiter, left);
                 positive take = found ? (positive)(found - at) : left;
+
+                if (unlikely(text_spill_partial && used + take > TEXT_LINE_MAX &&
+                             capacity >= TEXT_LINE_MAX && !own))
+                {
+                        positive room = TEXT_LINE_MAX - used;
+                        positive cut = room;
+
+                        while (cut && at[cut - 1] != ' ' && at[cut - 1] != '\t')
+                                cut--;
+                        if (cut)
+                                room = cut;
+
+                        memory_copy(storage + used, at, room);
+                        used += room;
+                        reader->position += room;
+                        address_to length = used;
+                        text_spill_more = true;
+                        return true;
+                }
 
                 if (unlikely(used + take > capacity))
                 {
@@ -1290,6 +1320,13 @@ static bool text_files_from_strict;
 static positive text_files_from_names;
 static bool text_files_from_ahead;
 static bool text_files_from(string_address path);
+// wc's list of names, when it is read as it goes (see text_files_from).
+static text_reader text_files_reader;
+static bool text_files_lazy;
+static bool text_files_lazy_stdin;
+static byte_store text_files_name;
+static string_address text_files_lazy_path;
+static bool text_files_next(string_address address_to name);
 
 static fn text_begin(string_address name)
 {
@@ -1318,6 +1355,7 @@ static fn text_begin(string_address name)
         text_line_stream_ok = false;
         text_line_stream_now = false;
         text_file_list = null;
+        text_files_lazy = false;
         text_delimiter = '\n';
 }
 
@@ -4414,6 +4452,37 @@ static fn paste_delimiter(p16 address_to delimiters, positive count,
                 text_put_character((p8)value);
 }
 
+/*
+        One record of a reader written as it comes. GNU's paste copies each
+        file's line a byte at a time and holds none of it, so a line of any
+        length is as good as a short one; a record gathered whole first was
+        "line too long" when memory ran out.
+*/
+static bool paste_record(text_reader address_to reader)
+{
+        if (!text_reader_fill(reader))
+                return false;
+
+        for (;;)
+        {
+                p8 address_to at = reader->buffer + reader->position;
+                positive left = reader->filled - reader->position;
+                p8 address_to found = memory_first_of(at, text_delimiter, left);
+                positive take = found ? (positive)(found - at) : left;
+
+                text_put(at, take);
+                reader->position += take;
+
+                if (found)
+                {
+                        reader->position++;
+                        return true;
+                }
+                if (!text_reader_fill(reader))
+                        return true;
+        }
+}
+
 static b32 text_paste()
 {
         file_taking taking = {
@@ -4555,14 +4624,13 @@ static b32 text_paste()
                                 continue;
                         }
 
-                        while (text_record_next(cursor, text_delimiter,
-                                                null, 0, null))
+                        while (text_reader_fill(address_of cursor->reader))
                         {
                                 if (field)
                                         paste_delimiter(delimiters,
                                                         delimiter_count,
                                                         field - 1);
-                                text_put(cursor->record, cursor->length);
+                                paste_record(address_of cursor->reader);
                                 field++;
                         }
 
@@ -4584,8 +4652,7 @@ static b32 text_paste()
                                 cursor = cursors + cursor->source;
 
                                 if (cursor->reader.failed ||
-                                    !text_record_next(cursor, text_delimiter,
-                                                      null, 0, null))
+                                    !text_reader_fill(address_of cursor->reader))
                                         continue;
 
                                 while (next_separator < input)
@@ -4593,7 +4660,7 @@ static b32 text_paste()
                                                         delimiter_count,
                                                         next_separator++);
 
-                                text_put(cursor->record, cursor->length);
+                                paste_record(address_of cursor->reader);
                                 any = true;
                         }
 
@@ -7186,9 +7253,20 @@ static b32 text_wc()
                         width = positive_digits(known);
         }
 
-        for (b32 i = 0; i < inputs; i++)
+        for (b32 i = 0;; i++)
         {
-                string_address name = text_file_name(i);
+                string_address name;
+
+                if (text_files_lazy)
+                {
+                        if (!text_files_next(address_of name))
+                                break;
+                }
+                else if (i >= inputs)
+                        break;
+                else
+                        name = text_file_name(i);
+
                 positive lines = 0, words = 0, bytes = 0;
                 positive longest = 0, column = 0;
                 bool inside = false;
@@ -7380,6 +7458,10 @@ static b32 text_wc()
                 if (total_mode != WC_TOTAL_ONLY)
                         wc_row(lines, words, chars, bytes, longest, width, name);
         }
+
+        if (text_files_lazy)
+                text_close_handle(address_of text_files_reader.opened,
+                                  text_files_reader.handle);
 
         //      A list of names counts every name it held toward a total,
         //      the refused ones too: `printf '\\0\\0' | wc --files0-from=-`
@@ -8259,6 +8341,106 @@ static byte_store text_files_from_store;
 static string_address address_to text_files_from_list;
 static positive text_files_from_room;
 
+/*
+        wc reads a list it could not read ahead -- a pipe, or a file past ten
+        megabytes -- as GNU's does, one name at a time and counting each file
+        before it asks for the next, so a list that never ends is never held.
+        The list keeps a reader of its own beside the one the files use.
+*/
+static bool text_files_take(string_address address_to name)
+{
+        for (;;)
+        {
+                bool ended = false;
+                bool taken = false;
+
+                text_files_name.used = 0;
+
+                while (text_reader_fill(address_of text_files_reader))
+                {
+                        text_reader address_to reader = address_of text_files_reader;
+                        p8 address_to at = reader->buffer + reader->position;
+                        positive left = reader->filled - reader->position;
+                        p8 address_to found = memory_first_of(at, 0, left);
+                        positive take = found ? (positive)(found - at) : left;
+
+                        if (!byte_store_reserve(address_of text_files_name,
+                                                text_files_name.used + take + 1, 1 << 12))
+                        {
+                                string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
+                                text_status = 1;
+                                return false;
+                        }
+
+                        memory_copy(text_files_name.bytes + text_files_name.used, at, take);
+                        text_files_name.used += take;
+                        reader->position += take;
+                        taken = true;
+
+                        if (found)
+                        {
+                                reader->position++;
+                                ended = true;
+                                break;
+                        }
+                }
+
+                if (!ended && (!taken || !text_files_name.used))
+                {
+                        if (text_files_reader.failed)
+                        {
+                                text_flush();
+                                string_format(writer_stderr, "wc: %w: read error: %s\n",
+                                              writer_shell_name, text_files_lazy_path,
+                                              file_reason(text_files_reader.error
+                                                              ? text_files_reader.error : -5));
+                                text_status = 1;
+                        }
+                        return false;
+                }
+
+                if (!byte_store_reserve(address_of text_files_name, text_files_name.used + 1, 1 << 12))
+                        return false;
+
+                text_files_name.bytes[text_files_name.used] = '\0';
+                text_files_from_names++;
+
+                if (!text_files_name.used)
+                {
+                        text_flush();
+                        string_format(writer_stderr, "%s: %w:%p: invalid zero-length file name\n",
+                                      text_name, writer_shell_name, text_files_lazy_path,
+                                      text_files_from_names);
+                        text_files_from_bad++;
+                        text_status = 1;
+                        continue;
+                }
+
+                if (text_files_lazy_stdin && text_files_name.used == 1 &&
+                    text_files_name.bytes[0] == '-')
+                {
+                        string_diagnostic(&text_diagnostic, 0, null, "when reading file names from standard input, no file name of '-' allowed");
+                        text_files_from_bad++;
+                        text_status = 1;
+                        continue;
+                }
+
+                address_to name = (string_address)text_files_name.bytes;
+                return true;
+        }
+}
+
+static bool text_files_next(string_address address_to name)
+{
+        // A list that cannot be read is worded by wc alone.
+        text_quiet_read = true;
+
+        bool have = text_files_take(name);
+
+        text_quiet_read = false;
+        return have;
+}
+
 static bool text_files_from(string_address path)
 {
         bool from_stdin = string_equals(path, "-");
@@ -8299,6 +8481,22 @@ static bool text_files_from(string_address path)
 
         text_files_from_ahead = text_regular_size(text_input.handle, address_of size) &&
                                 size <= (10 << 20);
+
+        if (worded && !text_files_from_ahead)
+        {
+                // The list goes on being read as the names are asked for.
+                memory_copy(address_of text_files_reader, address_of text_input,
+                            sizeof(text_files_reader));
+                text_input.opened = false;
+                text_input.finished = true;
+                text_quiet_read = false;
+                text_files_lazy = true;
+                text_files_lazy_stdin = from_stdin;
+                text_files_lazy_path = path;
+                text_file_list = text_files_from_list;
+                text_files_count = 0;
+                return true;
+        }
 
         while (text_fill())
         {
@@ -12289,6 +12487,17 @@ typedef struct
         positive content;
 } fmt_line;
 
+// The line the last chunk read belongs to, when that line was too long to be
+// read whole: the next chunk is more of it, and is read as such.
+static bool fmt_continued;
+// A word that the end of a chunk cut in two, and where it was.
+static bool fmt_word_open;
+static positive fmt_open_start;
+static positive fmt_open_column;
+static bool fmt_continued_suitable;
+static positive fmt_continued_prefix_indent;
+static positive fmt_continued_indent;
+
 static fmt_word address_to fmt_words;
 static positive fmt_word_count;
 static positive fmt_character_count;
@@ -12444,7 +12653,19 @@ static p8 address_to fmt_hold;
 
 static bool fmt_read_line(fmt_line address_to line)
 {
-        if (!text_line_next(fmt_hold, 0))
+        bool continued = fmt_continued;
+
+        // A line past the store is read in chunks, as GNU holds none of it
+        // beyond a paragraph buffer: one word cut in two is two words, and
+        // the line's blanks at the seam are one.
+        // Crown and tagged paragraphs look at each line's own indent, which a
+        // chunk has none of, so they keep a long line whole.
+        text_spill_partial = !fmt_crown && !fmt_tagged;
+        bool have = text_line_next(fmt_hold, 0);
+        text_spill_partial = false;
+        fmt_continued = have && text_spill_more;
+
+        if (!have)
                 return false;
 
         //      A line past the store moved it: read from where it went.
@@ -12458,7 +12679,31 @@ static bool fmt_read_line(fmt_line address_to line)
         line->prefix_indent = 0;
         line->indent = 0;
         line->content = 0;
-        fmt_analyze_line(line);
+
+        if (continued)
+        {
+                line->suitable = fmt_continued_suitable;
+                line->prefix_indent = fmt_continued_suitable ? fmt_continued_prefix_indent : 0;
+                line->indent = fmt_continued_suitable ? fmt_continued_indent : 0;
+
+                // What the last chunk left of a run of blanks belongs to no word.
+                if (!fmt_word_open && line->suitable)
+                {
+                        positive skipped = 0;
+
+                        fmt_blanks(line->at, line->length, address_of skipped, 0);
+                        line->content = skipped;
+                }
+        }
+        else
+                fmt_analyze_line(line);
+
+        if (fmt_continued)
+        {
+                fmt_continued_suitable = line->suitable;
+                fmt_continued_prefix_indent = line->prefix_indent;
+                fmt_continued_indent = line->indent;
+        }
         return true;
 }
 
@@ -12536,12 +12781,13 @@ static fn fmt_flush()
         and where the spacing after it ends, which is what GNU's in_column
         holds at those two moments.
 */
-static fn fmt_add_word(p8 address_to at, positive length, positive space,
-                         bool end_line, positive column_before,
-                         positive column_after)
+static fn fmt_word_begin()
 {
         fmt_words[fmt_word_count].text = relation_spill + fmt_character_count;
+}
 
+static fn fmt_word_copy(p8 address_to at, positive length, positive column_before)
+{
         for (positive copied = 0; copied < length;)
         {
                 if (fmt_character_count == FMT_CHAR_MAX)
@@ -12556,7 +12802,10 @@ static fn fmt_add_word(p8 address_to at, positive length, positive space,
                 fmt_character_count += take;
                 copied += take;
         }
+}
 
+static fn fmt_word_end(positive space, bool end_line, positive column_after)
+{
         fmt_word address_to word = fmt_words + fmt_word_count;
 
         word->length = (positive)(relation_spill + fmt_character_count - word->text);
@@ -12588,31 +12837,58 @@ static fn fmt_add_line(fmt_line address_to line)
         positive at = line->content;
         positive column = line->indent;
 
-        while (at < line->length)
+        while (at < line->length || fmt_word_open)
         {
                 positive begin = at;
+                positive start = column;
 
-                at += string_span_max(line->at + at, line->length - at,
-                                      fmt_word_bytes);
+                if (fmt_word_open)
+                {
+                        // The rest of the word the last chunk ended in.
+                        start = fmt_open_start;
+                        column = fmt_open_column;
+                        at += string_span_max(line->at + at, line->length - at,
+                                              fmt_word_bytes);
+                }
+                else
+                {
+                        at += string_span_max(line->at + at, line->length - at,
+                                              fmt_word_bytes);
 
-                /* A non-space separator outside the ordinary blank pair is
-                   retained with the following word, matching fmt's byte-C
-                   behavior instead of silently deleting input controls. */
-                if (begin == at)
-                        at++;
+                        /* A non-space separator outside the ordinary blank pair is
+                           retained with the following word, matching fmt's byte-C
+                           behavior instead of silently deleting input controls. */
+                        if (begin == at)
+                                at++;
+
+                        fmt_word_begin();
+                        fmt_open_start = start;
+                }
 
                 positive length = at - begin;
-                positive start = column;
+
                 column += length;
+                fmt_word_copy(line->at + begin, length, start);
+
+                // The end of a chunk that is not the end of the line may be
+                // in the middle of a word.
+                if (at == line->length && fmt_continued)
+                {
+                        fmt_word_open = true;
+                        fmt_open_column = column;
+                        return;
+                }
+
+                fmt_word_open = false;
+
                 positive before = column;
 
                 column = fmt_blanks(line->at, line->length, address_of at,
                                     column);
                 positive space = column - before;
-                bool end_line = at == line->length;
+                bool end_line = at == line->length && !fmt_continued;
 
-                fmt_add_word(line->at + begin, length, space, end_line,
-                             start, column);
+                fmt_word_end(space, end_line, column);
         }
 }
 
@@ -12806,12 +13082,24 @@ static fn fmt_copy_line(fmt_line address_to line)
                 text_put_character('\n');
 }
 
+// A line that was read in chunks is all added before the next is read, so
+// that its seams are seen by no paragraph rule.
+static fn fmt_add_logical(fmt_line address_to line)
+{
+        fmt_add_line(line);
+
+        while (fmt_continued && fmt_read_line(line))
+                fmt_add_line(line);
+}
+
 static fn fmt_file()
 {
         fmt_line line;
 
         fmt_tabs = false;
         fmt_other_indent = 0;
+        fmt_continued = false;
+        fmt_word_open = false;
         bool have = fmt_read_line(address_of line);
 
         while (have)
@@ -12829,7 +13117,7 @@ static fn fmt_file()
                 fmt_prefix_indent = line.prefix_indent;
                 fmt_first_indent = line.indent;
 
-                fmt_add_line(address_of line);
+                fmt_add_logical(address_of line);
                 have = fmt_read_line(address_of line);
                 bool same = have && fmt_same(address_of line);
 
@@ -12842,7 +13130,7 @@ static fn fmt_file()
                         {
                                 do
                                 {
-                                        fmt_add_line(address_of line);
+                                        fmt_add_logical(address_of line);
                                         have = fmt_read_line(address_of line);
                                 }
                                 while (have && fmt_same(address_of line) &&
@@ -12852,7 +13140,7 @@ static fn fmt_file()
                         {
                                 while (same && line.indent == fmt_other_indent)
                                 {
-                                        fmt_add_line(address_of line);
+                                        fmt_add_logical(address_of line);
                                         have = fmt_read_line(address_of line);
                                         same = have && fmt_same(address_of line);
                                 }
@@ -19519,9 +19807,77 @@ static bool fold_option_seen(p8 letter, string_address value)
         in UTF-8 a byte past ASCII begins a character that is decoded whole.
 */
 static const b8 fold_special_bytes_utf8[256] = {[128 ... 255] = 1};
-static const b8 fold_special_columns[256] = {['\b'] = 1, ['\t'] = 1, ['\r'] = 1};
-static const b8 fold_special_columns_utf8[256] = {['\b'] = 1, ['\t'] = 1, ['\r'] = 1,
+static const b8 fold_special_columns[256] = {[0] = 1, ['\b'] = 1, ['\t'] = 1, ['\r'] = 1};
+static const b8 fold_special_columns_utf8[256] = {[0] = 1, ['\b'] = 1, ['\t'] = 1, ['\r'] = 1,
                                                   [128 ... 255] = 1};
+
+/*
+        A line the reader does not hold whole -- one past a read, and an
+        endless one as /dev/zero is -- is folded as it streams, in windows:
+        what is left of the output line being built, which is under a width,
+        and the next read after it. A window is folded as a line with more to
+        come, so the last output line in it is not written until what follows
+        it is known, which is all -s and the column count of a tab or a wide
+        character need. GNU's fold keeps one output line in the same way,
+        where holding the whole input line was "line too long" under a limit
+        on memory.
+*/
+static byte_store fold_window;
+static positive text_fold_held;
+#define FOLD_FLUSH (1 << 18)
+
+// The next read appended to the window, up to the end of the line if it is
+// there. False when memory ran out; more says the line goes on, and ended
+// that it ended at a delimiter and not at the end of input.
+static bool fold_gather(bool utf8, bool address_to more, bool address_to ended)
+{
+        address_to more = false;
+        address_to ended = false;
+
+        if (!text_fill())
+                return true;
+
+        p8 address_to at = text_input.buffer + text_input.position;
+        positive left = text_input.filled - text_input.position;
+        p8 address_to found = memory_first_of(at, text_delimiter, left);
+        positive take = found ? (positive)(found - at) : left;
+
+        if (!byte_store_reserve(address_of fold_window, fold_window.used + take, 1 << 16))
+                return false;
+
+        memory_copy(fold_window.bytes + fold_window.used, at, take);
+        fold_window.used += take;
+        text_input.position += take;
+
+        if (found)
+        {
+                text_input.position++;
+                address_to ended = true;
+                return true;
+        }
+
+        address_to more = true;
+
+        // A character cut by the end of the read is finished by the next.
+        if (utf8)
+        {
+                positive back = 0;
+
+                while (back < 3 && back < fold_window.used &&
+                       (fold_window.bytes[fold_window.used - 1 - back] & 0xc0) == 0x80)
+                        back++;
+
+                if (back < fold_window.used && back < 3)
+                {
+                        p8 lead = fold_window.bytes[fold_window.used - 1 - back];
+                        positive want = lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : lead >= 0xc0 ? 2 : 1;
+
+                        if (want > back + 1)
+                                text_fold_held = back + 1;
+                }
+        }
+        return true;
+}
 
 static b32 text_fold()
 {
@@ -19566,6 +19922,11 @@ static b32 text_fold()
                                             : (utf8 ? fold_special_columns_utf8
                                                     : fold_special_columns);
 
+        // A backspace takes back the width of the character before it, as
+        // GNU's does, and not always one: none after a NUL, two after a wide
+        // character. The width is kept from line to line as it is there.
+        positive last_width = 0;
+
         for (b32 i = 0; i < inputs; i++)
         {
                 if (!text_open(text_file_name(i)))
@@ -19575,13 +19936,60 @@ static b32 text_fold()
                 positive scan_fills = 0;
                 p8 address_to line;
                 positive length;
+                bool windowed = false;
+                bool more = false;
+                positive carried_column = 0;
+                positive pending_column = 0;
+                positive carried_last = 0;
+                positive pending_last = 0;
 
                 // Each line where it lies in the reader, with the bytes that
                 // ask for more than a column found for the whole read at
-                // once; a line too long for a read has its own pass.
-                while (text_line_view(address_of line, address_of length, null, 0, null))
+                // once; a line too long for a read goes through in windows.
+                text_line_stream_ok = true;
+                text_line_stream_now = false;
+                for (;;)
                 {
+                        if (!windowed)
+                        {
+                                if (!text_line_view(address_of line, address_of length, null, 0, null))
+                                {
+                                        if (!text_line_stream_now)
+                                                break;
+
+                                        text_line_stream_now = false;
+                                        windowed = true;
+                                        fold_window.used = 0;
+                                        carried_last = last_width;
+                                }
+                        }
+
+                        if (windowed)
+                        {
+                                bool ended;
+
+                                text_fold_held = 0;
+                                if (!fold_gather(utf8, address_of more, address_of ended))
+                                {
+                                        text_close();
+                                        return text_done(string_diagnostic(&text_diagnostic, 1, null,
+                                                                           "memory exhausted"));
+                                }
+
+                                line = fold_window.bytes;
+                                length = fold_window.used - text_fold_held;
+                                text_line_ended = ended;
+                        }
+
                         positive from = 0;
+
+                        if (windowed)
+                        {
+                                last_width = carried_last;
+                                pending_column = 0;
+                                pending_last = last_width;
+                        }
+
                         bool in_read = line >= text_input.buffer &&
                                        line < text_input.buffer + text_input.filled;
                         p8 address_to scan_stop = in_read ? text_input.buffer + text_input.filled
@@ -19596,9 +20004,13 @@ static b32 text_fold()
 
                         while (from < length)
                         {
-                                positive column = 0;
+                                positive column = carried_column;
+                                positive start_column = column;
                                 positive at = from;
                                 positive gap = 0;
+                                positive line_last = last_width;
+
+                                carried_column = 0;
 
                                 // Columns, not bytes, unless -b: a tab moves
                                 // to the next stop of eight and a backspace
@@ -19645,6 +20057,7 @@ static b32 text_fold()
 
                                                 column += run;
                                                 at += run;
+                                                last_width = 1;
                                                 continue;
                                         }
 
@@ -19653,14 +20066,24 @@ static b32 text_fold()
                                         positive after = column + 1;
                                         bool blank = byte_is_blank(character);
 
+                                        bool normal = true;
+
                                         if (!bytes)
                                         {
                                                 if (character == '\t')
-                                                        after = (column / 8 + 1) * 8;
+                                                        after = (column / 8 + 1) * 8, normal = false;
                                                 else if (character == '\b')
-                                                        after = column ? column - 1 : 0;
+                                                {
+                                                        after = column > last_width ? column - last_width : 0;
+                                                        normal = false;
+                                                }
                                                 else if (character == '\r')
-                                                        after = 0;
+                                                        after = 0, normal = false;
+                                                // The one byte no locale gives a
+                                                // column, unless characters are
+                                                // what is counted.
+                                                else if (!character && !counting)
+                                                        after = column;
                                         }
 
                                         if (utf8 && character >= 0x80)
@@ -19703,7 +20126,29 @@ static b32 text_fold()
                                         }
 
                                         if (after > width && at > from)
+                                        {
+                                                // The character that did not fit was
+                                                // measured before it was refused, and
+                                                // what is rescanned after the break
+                                                // begins with its width.
+                                                if (normal)
+                                                        last_width = counting ? 1 : after - column;
                                                 break;
+                                        }
+
+                                        // An output line that reaches the size of GNU's buffer
+                                        // is written as it stands, and the column goes on.
+                                        if (at - from + size >= FOLD_FLUSH)
+                                        {
+                                                text_put(line + from, at - from);
+                                                from = at;
+                                                gap = 0;
+                                                start_column = column;
+                                                line_last = last_width;
+                                        }
+
+                                        if (normal)
+                                                last_width = counting ? 1 : after - column;
 
                                         column = after;
                                         at += size;
@@ -19714,6 +20159,15 @@ static b32 text_fold()
 
                                 if (at >= length)
                                 {
+                                        // What is left waits for the rest of
+                                        // the line to be known.
+                                        if (more)
+                                        {
+                                                pending_column = start_column;
+                                                pending_last = line_last;
+                                                break;
+                                        }
+
                                         text_put(line + from, length - from);
 
                                         if (text_line_ended)
@@ -19733,6 +20187,26 @@ static b32 text_fold()
                                 text_put(line + from, at - from);
                                 text_put_character('\n');
                                 from = at;
+                        }
+
+                        if (windowed)
+                        {
+                                if (more)
+                                {
+                                        // Keep the output line under way and
+                                        // the bytes of a cut character; the
+                                        // column and the width a backspace
+                                        // takes back go on from where it began.
+                                        carried_column = pending_column;
+                                        carried_last = pending_last;
+                                        memory_copy(fold_window.bytes, fold_window.bytes + from,
+                                                    fold_window.used - from);
+                                        fold_window.used -= from;
+                                        continue;
+                                }
+
+                                windowed = false;
+                                more = false;
                         }
 
                         if (!length && text_line_ended)
