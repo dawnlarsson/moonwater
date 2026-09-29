@@ -106,7 +106,7 @@ static positive shell_run_complete_lines(p8 address_to text, positive length,
 
                         // What a person typed, and only that: an eval or a
                         // sourced file is a line this shell wrote for itself.
-                        if (shell_is_interactive)
+                        if (shell_history_recording())
                         {
                                 history_action = history_expand_line(
                                     ready, address_of ready);
@@ -1216,7 +1216,7 @@ b32 main()
 
                 shell_buffer[held] = end;
 
-                if (shell_is_interactive)
+                if (shell_history_recording())
                 {
                         history_action = history_expand_line(
                             shell_buffer, address_of ready);

@@ -327,6 +327,13 @@ positive shell_substitution_generation;
 //      bash joins an unquoted $@ there with blanks, as it joins "$@".
 static bool expand_assigning;
 
+//      Set while the word of a ${name-word} is expanded in bash: inside
+//      double quotes a backslash in front of the } hides it and goes, and
+//      a double quote met there opens a run in which a backslash goes in
+//      front of anything, since those quotes toggle the outer ones.
+static bool expand_brace_word;
+static bool expand_double_bare;
+
 /*
         Whether an unquoted list comes out as fields, which is how it is
         joined with blanks, or joined by IFS. An assigned $@ and ${a[@]} is
@@ -2673,7 +2680,13 @@ static fn expand_word_into(string_address word, bool quoted)
         if (!quoted && string_is(word, '~'))
                 word = expand_tilde(word, shell_bash_compat);
 
-        expand_into(word, quoted, MARK_FIELD, false);
+        {
+                bool held = expand_brace_word;
+
+                expand_brace_word = shell_bash_compat && !shell_posix_on();
+                expand_into(word, quoted, MARK_FIELD, false);
+                expand_brace_word = held;
+        }
 }
 
 static string_address expand_capture(string_address text, bool quoted, b32 mode)
@@ -2694,7 +2707,15 @@ static string_address expand_capture(string_address text, bool quoted, b32 mode)
                  shell_bash_compat && string_is(text, '~'))
                 text = expand_tilde(text, false);
 
-        expand_into(text, quoted, MARK_PLAIN, false);
+        {
+                bool held_word = expand_brace_word;
+
+                if (mode == EXPAND_CAPTURE_WORD)
+                        expand_brace_word = shell_bash_compat &&
+                                            !shell_posix_on();
+                expand_into(text, quoted, MARK_PLAIN, false);
+                expand_brace_word = held_word;
+        }
 
         if (!(into = expand_lift(at, mode)))
                 expand_fail_state();
@@ -5423,6 +5444,17 @@ static fn shell_substitutions_forget()
         expand_substitutions_count = 0;
 }
 
+//      Whether a process is one a <( ) or >( ) started, which wait $! may
+//      be asked about.
+bool shell_substitution_child(bipolar pid)
+{
+        for (positive at = 0; at < expand_substitutions_count; at++)
+                if (expand_substitutions[at].child == pid)
+                        return true;
+
+        return false;
+}
+
 static bool expand_substitution_remember(b32 descriptor, bipolar child)
 {
         if (!shell_array_room(expand_substitutions, expand_substitutions_room,
@@ -5625,6 +5657,10 @@ static string_address expand_process(string_address step, p8 mark)
                 expand_fatal_status(2);
                 return stop + 1;
         }
+
+        //      bash counts it as the last thing started asynchronously.
+        if (shell_bash_compat)
+                shell_background_last = child;
 
         expand_push_run((string_address) "/dev/fd/", 8, mark);
         written = bipolar_into_string(path, (bipolar)ours);
@@ -7409,21 +7445,32 @@ static const p16 shell_attribute_bits[256] = {
     ['a'] = SHELL_ARRAY_INDEXED, ['A'] = SHELL_ARRAY_ASSOCIATIVE,
     ['i'] = SHELL_ARRAY_INTEGER, ['n'] = SHELL_ARRAY_NAMEREF,
     ['r'] = SHELL_ARRAY_READONLY, ['x'] = SHELL_ATTRIBUTE_EXPORTED,
-    ['l'] = SHELL_ARRAY_LOWER, ['u'] = SHELL_ARRAY_UPPER
+    ['l'] = SHELL_ARRAY_LOWER, ['u'] = SHELL_ARRAY_UPPER,
+    // Lower and upper at once cannot be asked for, so both bits stand for
+    // -c, which folds to lower and then raises the first letter.
+    ['c'] = SHELL_ARRAY_LOWER | SHELL_ARRAY_UPPER
 };
 
 static COLD positive shell_attribute_letters(p8 address_to into, p8 attributes,
                                              bool readonly, bool exported)
 {
-        static const p8 letters[] = "aAinrxlu";
+        static const p8 letters[] = "aAcinrxlu";
         positive flags = (attributes & ~(SHELL_ARRAY_ASSIGNED | SHELL_ARRAY_READONLY)) |
                          (readonly ? SHELL_ARRAY_READONLY : 0) |
                          (exported ? SHELL_ATTRIBUTE_EXPORTED : 0);
         positive count = 0;
+        bool capital = (attributes & (SHELL_ARRAY_LOWER | SHELL_ARRAY_UPPER)) ==
+                       (SHELL_ARRAY_LOWER | SHELL_ARRAY_UPPER);
 
         for (positive at = 0; at < sizeof(letters) - 1; at++)
+        {
+                //      Both bits mean capitalize and are written as c alone.
+                if (capital ? (letters[at] == 'l' || letters[at] == 'u')
+                            : letters[at] == 'c')
+                        continue;
                 if (flags & shell_attribute_bits[letters[at]])
                         into[count++] = letters[at];
+        }
         return count;
 }
 
@@ -10094,6 +10141,13 @@ static string_address expand_double(string_address step)
                 {
                         p8 next = string_get(step + 1);
 
+                        if (expand_double_bare && next)
+                        {
+                                expand_push(next, MARK_QUOTED);
+                                step += 2;
+                                continue;
+                        }
+
                         // Only these four are hidden by a backslash in double
                         // quotes. In front of anything else it is a backslash.
                         if (next == '"' || next == '\\' || next == '$' || next == '`')
@@ -10226,7 +10280,8 @@ static fn expand_into(string_address text, bool quoted, p8 plain,
                         if (quoted)
                         {
                                 if (next == '"' || next == '\\' ||
-                                    next == '$' || next == '`')
+                                    next == '$' || next == '`' ||
+                                    (next == '}' && expand_brace_word))
                                 {
                                         expand_push(next, MARK_QUOTED);
                                         step += 2;
@@ -10270,7 +10325,11 @@ static fn expand_into(string_address text, bool quoted, p8 plain,
 
                 if (seen == '"')
                 {
+                        bool held_bare = expand_double_bare;
+
+                        expand_double_bare = quoted && expand_brace_word;
                         step = expand_double(step);
+                        expand_double_bare = held_bare;
                         continue;
                 }
 

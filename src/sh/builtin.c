@@ -441,7 +441,8 @@ COLD bool shell_reference_element(
 static bool exec_source_stop(b32 address_to startup_status);
 static bool exec_source_tested_hold();
 static fn exec_source_tested_restore(bool kept);
-static string_address exec_bash_command_value(positive address_to value_length);
+string_address exec_bash_command_now(positive address_to value_length);
+fn history_enabled();
 static fn exec_source_return_trap();
 bool shell_builtin(string_address arguments, positive2 named);
 string_address shell_arguments();
@@ -3273,7 +3274,24 @@ static COLD string_address env_attribute_value(p8 attributes,
         if (!made)
                 return null;
 
-        if (attributes & SHELL_ARRAY_UPPER)
+        if ((attributes & (SHELL_ARRAY_LOWER | SHELL_ARRAY_UPPER)) ==
+            (SHELL_ARRAY_LOWER | SHELL_ARRAY_UPPER))
+        {
+                //      declare -c: lower the whole, then raise the first
+                //      character, which may be several bytes long.
+                string_address past = made;
+
+                expand_case_buffer(made, length, false);
+                if (length)
+                {
+                        (void)expand_set_character(made, made + length, true,
+                                                   address_of past);
+                        expand_case_buffer(made,
+                                           past > made ? (positive)(past - made) : 1,
+                                           true);
+                }
+        }
+        else if (attributes & SHELL_ARRAY_UPPER)
                 expand_case_buffer(made, length, true);
         else
                 expand_case_buffer(made, length, false);
@@ -5221,7 +5239,7 @@ static COLD string_address shell_dynamic_compute(const_string name, positive len
         case 12:
                 if (shell_bash_compat &&
                     !memory_compare((address_any)text, "BASH_COMMAND", 12))
-                        return exec_bash_command_value(value_length);
+                        return exec_bash_command_now(value_length);
 
                 if (shell_bash_compat &&
                     !memory_compare((address_any)text, "BASH_TRAPSIG", 12))
@@ -5328,6 +5346,17 @@ COLD bool shell_dynamic_assign(const_string name, positive length,
                 shell_random_seed = good ? (positive)(p32)asked : 0;
                 shell_random_last = 0;
 
+                return true;
+        }
+
+        //      BASH_ARGV0 is $0: writing it renames the shell for what follows.
+        if (shell_bash_compat &&
+            memory_is_word((address_any)text, length, "BASH_ARGV0"))
+        {
+                static p8 renamed[4096];
+
+                string_copy_max_end(renamed, said, sizeof(renamed) - 1);
+                shell_script_name = renamed;
                 return true;
         }
 
@@ -7682,6 +7711,11 @@ static bool shell_extra_told(string_address word, bool on)
         if (index == SHELL_EXTRA_HISTEXPAND)
                 shell_histexpand_told = true;
 
+        //      Turning history on in a script reads the history file, once,
+        //      as bash does before the first line it will remember.
+        if (index == SHELL_EXTRA_HISTORY && on)
+                history_enabled();
+
         if (on)
                 shell_extra_state |= (positive)1 << index;
         else
@@ -7690,10 +7724,18 @@ static bool shell_extra_told(string_address word, bool on)
         return true;
 }
 
+//      Whether the lines the reader hands over are remembered: a person's
+//      at a terminal, and a script's once it has said set -o history.
+PURE bool shell_history_recording()
+{
+        return shell_bash_compat ? shell_extra_on(SHELL_EXTRA_HISTORY)
+                                 : shell_is_interactive;
+}
+
 PURE bool shell_histexpand_on()
 {
-        return shell_bash_compat && shell_is_interactive &&
-               shell_extra_on(SHELL_EXTRA_HISTEXPAND);
+        return shell_bash_compat && shell_extra_on(SHELL_EXTRA_HISTEXPAND) &&
+               (shell_is_interactive || shell_extra_on(SHELL_EXTRA_HISTORY));
 }
 
 static bool shell_extra_letter(p8 letter, bool on)
@@ -11477,34 +11519,25 @@ static COLD fn shell_marked(writer write, p8 mark)
                 // deliberately does not create a missing variable.
                 string_address assigned = value ? value + 1 : null;
 
+                //      An appended value goes through the assignment an ordinary
+                //      x+=v is, so an integer variable adds and the rest join.
                 if (append)
-                {
-                        string_address old = env_get(word);
-                        positive before = old ? string_length(old) : 0;
-                        positive after = string_length(value + 1);
-                        p8 address_to joined = shell_store_take(
-                            address_of expand_store, before + after + 1);
-
-                        if (!joined)
-                        {
-                                address_to cut = '+';
-                                return shell_answered(2, "%s: no room\n",
-                                                      command);
-                        }
-                        if (before)
-                                memory_copy(joined, old, before);
-                        memory_copy_end(joined + before, value + 1, after);
-                        assigned = joined;
-                }
+                        kept = shell_scalar_assign_destination(
+                            word, length, env_name_hash(word, length),
+                            value + 1, true, false, null, true);
+                else
+                        kept = true;
 
                 if (mark == DECLARE_EXPORT && unmark)
                 {
-                        kept = !value || env_assign(word, assigned);
+                        kept = kept && (!value || append ||
+                                        env_assign(word, assigned));
                         if (kept)
                                 kept = env_export_unmark(word);
                 }
                 else
-                        kept = (!value || env_assign(word, assigned)) &&
+                        kept = kept &&
+                               (!value || append || env_assign(word, assigned)) &&
                                (mark == DECLARE_EXPORT
                                     ? env_export_mark(word)
                                     : readonly_add_mode(word, length, false));
@@ -19682,6 +19715,7 @@ fn trap_entered(bool inside)
         decided unless the trap itself calls exit.
 */
 fn history_leaving();
+fn history_enabled();
 
 fn shell_trap_exit()
 {
@@ -20368,6 +20402,8 @@ static b32 job_wait_interrupted()
         return signal > 0 ? 128 + (b32)signal : 129;
 }
 
+bool shell_substitution_child(bipolar pid);
+
 static bipolar shell_wait_call(bipolar pid, positive address_to status)
 {
         bipolar got;
@@ -20406,6 +20442,20 @@ static b32 shell_wait_one(bipolar job, bool address_to interrupted, bool forget,
 
         if (first >= shell_wait_count)
         {
+                if (shell_bash_compat && shell_substitution_child(job))
+                {
+                        positive raw;
+                        bipolar got = shell_wait_call(job, address_of raw);
+
+                        if (got == -4)
+                        {
+                                address_to interrupted = true;
+                                return job_wait_interrupted();
+                        }
+                        if (got == job)
+                                return wait_status_code(raw);
+                }
+
                 shell_wait_not_child(job);
                 return 127;
         }

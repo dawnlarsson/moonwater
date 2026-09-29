@@ -460,6 +460,19 @@ static COLD string_address exec_bash_command_value(positive address_to value_len
         return exec_bash_command;
 }
 
+//      What $BASH_COMMAND says when no DEBUG trap has been keeping it: the
+//      simple command that is being expanded, written back from its node.
+static COLD fn exec_bash_command_from(parse_node address_to node);
+
+COLD string_address exec_bash_command_now(positive address_to value_length)
+{
+        if (!trap_debug_here && exec_wait_node &&
+            parse_nodes[exec_wait_node].kind == NODE_SIMPLE)
+                exec_bash_command_from(parse_nodes + exec_wait_node);
+
+        return exec_bash_command_value(value_length);
+}
+
 static positive exec_bash_command_add(positive used, string_address text,
                                       positive length)
 {
@@ -4441,6 +4454,11 @@ static PURE bool history_bang_inhibited(string_address line, string_address at)
 
 /* Expand one interactive physical line.  The caller remembers the returned
    text, so `history` and `fc` see exactly what was executed. */
+//      history -p expands what it is handed whether or not set -H is on, and
+//      the result goes to its caller, not to the terminal as a typed line's
+//      does.
+static bool history_forced;
+
 b32 history_expand_line(string_address line,
                         string_address address_to expanded)
 {
@@ -4452,7 +4470,7 @@ b32 history_expand_line(string_address line,
         bool print_only = false;
 
         address_to expanded = line;
-        if (!shell_histexpand_on() || parse_here_open())
+        if ((!history_forced && !shell_histexpand_on()) || parse_here_open())
                 return HISTORY_EXPAND_RUN;
 
         history_expanded.used = 0;
@@ -4490,9 +4508,12 @@ b32 history_expand_line(string_address line,
                         goto bad_event;
 
                 address_to expanded = history_expanded.bytes;
-                string_format(log_error, "%s\n",
-                              history_expanded.bytes);
-                log_flush();
+                if (!history_forced)
+                {
+                        string_format(log_error, "%s\n",
+                                      history_expanded.bytes);
+                        log_flush();
+                }
                 return HISTORY_EXPAND_RUN;
         }
 
@@ -4703,8 +4724,11 @@ b32 history_expand_line(string_address line,
                 goto no_room;
 
         address_to expanded = history_expanded.bytes;
-        string_format(log_error, "%s\n", history_expanded.bytes);
-        log_flush();
+        if (!history_forced)
+        {
+                string_format(log_error, "%s\n", history_expanded.bytes);
+                log_flush();
+        }
         return print_only ? HISTORY_EXPAND_PRINT : HISTORY_EXPAND_RUN;
 
 bad_event:
@@ -4804,9 +4828,17 @@ static bool history_wanted(string_address text, positive length)
         and a trap action are lines this shell wrote for itself, and a history
         of them is a history of the shell rather than of the person.
 */
+static bool history_open_entry;
+//      Whether the line being run is the newest entry, which fc must leave
+//      alone.
+static bool history_current_recorded;
+bool shell_reading_more();
+
 fn history_remember(string_address line)
 {
         positive length;
+
+        history_current_recorded = false;
 
         if (!line)
                 return;
@@ -4818,6 +4850,108 @@ fn history_remember(string_address line)
 
         if (string_span_max(line, length, string_set_blanks) == length)
                 return;
+
+        //      With cmdhist a command that took several lines is one entry:
+        //      each line after the first is joined to the last, by a
+        //      semicolon unless the line before ends in a word or a mark that
+        //      already leads on to the next one.
+        {
+                bool joined = history_open_entry && shell_bash_compat &&
+                              history_used && shell_reading_more() &&
+                              shell_shopt_on(CMDHIST);
+
+                history_open_entry = false;
+
+                if (joined)
+                {
+                        string_address before = history_text[history_used - 1];
+                        positive kept = string_length(before);
+                        positive end_at = kept;
+                        positive start_at;
+                        bool leads = false;
+                        bool newline = false;
+                        static const string_address words[] = {
+                            "do", "then", "else", "elif", "if", "while",
+                            "until", "in", "{", "(", "&&", "||", "|", ";",
+                            "&", "!", ";;"};
+                        p8 address_to made;
+
+                        while (end_at && (before[end_at - 1] == ' ' ||
+                                          before[end_at - 1] == '\t'))
+                                end_at--;
+                        start_at = end_at;
+                        while (start_at && before[start_at - 1] != ' ' &&
+                               before[start_at - 1] != '\t')
+                                start_at--;
+
+                        if (end_at)
+                                for (positive each = 0;
+                                     each < array_count(words); each++)
+                                        if (end_at - start_at ==
+                                                string_length(words[each]) &&
+                                            !memory_compare(before + start_at,
+                                                            words[each],
+                                                            end_at - start_at))
+                                                leads = true;
+                        if (end_at &&
+                            (before[end_at - 1] == ';' ||
+                             before[end_at - 1] == '&' ||
+                             before[end_at - 1] == '|'))
+                                leads = true;
+
+                        //      A here-document's lines and the lines of a quoted
+                        //      string keep their newlines.
+                        {
+                                bool quoted = false;
+                                p8 mark = 0;
+
+                                for (positive each = 0; each < kept; each++)
+                                {
+                                        p8 byte = before[each];
+
+                                        if (mark)
+                                        {
+                                                if (byte == '\\' && mark == '"')
+                                                        each++;
+                                                else if (byte == mark)
+                                                        mark = 0;
+                                        }
+                                        else if (byte == '\\')
+                                                each++;
+                                        else if (byte == '\'' || byte == '"')
+                                                mark = byte;
+                                }
+                                quoted = mark != 0;
+                                if (quoted || parse_here_open())
+                                        newline = true;
+                        }
+
+                        made = (p8 address_to)shell_map(kept + length + 3);
+                        if (made)
+                        {
+                                memory_copy(made, before, kept);
+                                positive used = kept;
+
+                                if (newline)
+                                        made[used++] = '\n';
+                                else
+                                {
+                                        if (!leads)
+                                                made[used++] = ';';
+                                        made[used++] = ' ';
+                                }
+                                memory_copy(made + used, line, length);
+                                used += length;
+                                made[used] = end;
+                                history_drop(history_used - 1, 1);
+                                history_hold(made, used);
+                                memory_free(made, kept + length + 3);
+                                history_open_entry = true;
+                                history_current_recorded = true;
+                                return;
+                        }
+                }
+        }
 
         {
                 static p8 address_to held;
@@ -4833,6 +4967,8 @@ fn history_remember(string_address line)
                         return;
 
                 history_hold(held, length);
+                history_open_entry = true;
+                history_current_recorded = true;
         }
 
         history_trim((string_address) "HISTSIZE");
@@ -5067,6 +5203,8 @@ static bool history_write(string_address path, positive from, bool append)
         return true;
 }
 
+static bool history_loaded;
+
 // What was there before this session, at a terminal and nowhere else: a
 // script's history is a history nobody will ever read back.
 fn history_start()
@@ -5107,6 +5245,25 @@ fn history_start()
                 }
         }
 
+        history_loaded = true;
+        path = history_file();
+
+        if (path)
+                history_read(path, 0);
+
+        history_saved = history_used;
+}
+
+//      The history file is read when history is first turned on in a shell
+//      that started with it off, which is what a script's set -o history is.
+fn history_enabled()
+{
+        string_address path;
+
+        if (history_loaded || !shell_bash_compat || shell_is_interactive)
+                return;
+
+        history_loaded = true;
         path = history_file();
 
         if (path)
@@ -5168,6 +5325,16 @@ static fn history_listed_fc(writer write, positive at, bool numbered)
                       history_text[at]);
 }
 
+//      A number as bash reads one here: decimal, octal or hex.
+static bool history_number_word(string_address word, bipolar address_to value)
+{
+        bool good;
+
+        address_to value = shell_signed(word, address_of good);
+
+        return good;
+}
+
 fn shell_history(writer write, string_address input)
 {
         positive show = history_used;
@@ -5175,6 +5342,31 @@ fn shell_history(writer write, string_address input)
         string_address path = history_file();
 
         (void)input;
+
+        //      -a, -n, -r and -w each name one thing to do with the file,
+        //      and bash will not do two of them at once.
+        {
+                positive told = 0;
+
+                for (positive look = 1; look < shell_argc &&
+                                        string_get(shell_argv[look]) == '-' &&
+                                        string_get(shell_argv[look] + 1);
+                     look++)
+                {
+                        if (word_is(shell_argv[look], "--"))
+                                break;
+                        if (string_first_of("dps", string_get(shell_argv[look] + 1)))
+                                break;
+                        for (string_address each = shell_argv[look] + 1;
+                             string_get(each); each++)
+                                if (string_first_of("anrw", string_get(each)))
+                                        told++;
+                }
+
+                if (told > 1)
+                        return shell_refuse(1,
+                            "history: cannot use more than one of -anrw\n");
+        }
 
         while (at < shell_argc && string_get(shell_argv[at]) == '-' &&
                string_get(shell_argv[at] + 1))
@@ -5203,27 +5395,72 @@ fn shell_history(writer write, string_address input)
                 case 'd':
                 {
                         bipolar offset;
+                        bipolar last;
+                        string_address dash;
+                        positive kept_first = history_first;
+                        positive count;
 
                         if (!named)
                                 return shell_answered(2, "history: -d wants an offset\n");
 
-                        if (!exec_control_integer(named, address_of offset))
+                        //      start-end takes a range, either end counted
+                        //      from the back when it is negative.
+                        dash = string_get(named) ? string_first_of(named + 1, '-')
+                                                 : null;
+                        if (dash)
                         {
-                                return shell_refuse(1,
-                                    "history: %s: invalid number\n", named);
+                                p8 head[24];
+                                positive width = (positive)(dash - named);
+
+                                if (width >= sizeof(head))
+                                        width = sizeof(head) - 1;
+                                memory_copy_end(head, named, width);
+                                if (!history_number_word(head, address_of offset) ||
+                                    !history_number_word(dash + 1, address_of last))
+                                        return shell_refuse(1,
+                                            "history: %s: invalid number\n",
+                                            named);
+                        }
+                        else
+                        {
+                                if (!history_number_word(named, address_of offset))
+                                        return shell_refuse(1,
+                                            "history: %s: invalid number\n",
+                                            named);
+                                last = offset;
                         }
 
                         if (offset < 0)
                                 offset += (bipolar)(history_first +
                                                     history_used);
+                        if (last < 0)
+                                last += (bipolar)(history_first + history_used);
                         offset -= (bipolar)history_first;
+                        last -= (bipolar)history_first;
 
                         if (offset < 0 || (positive)offset >= history_used)
-                                return shell_answered(1, "history: %s: not in the"
-                                           " history\n",
-                                           named);
+                        {
+                                p8 start[32];
+                                positive width = dash ? (positive)(dash - named)
+                                                      : string_length(named);
 
-                        history_drop((positive)offset, 1);
+                                if (width >= sizeof(start))
+                                        width = sizeof(start) - 1;
+                                memory_copy_end(start, named, width);
+                                return shell_refuse(1,
+                                    "history: %s: history position out of range\n",
+                                    start);
+                        }
+                        if (last < offset || (positive)last >= history_used)
+                                return shell_refuse(1,
+                                    "history: %s: history position out of range\n",
+                                    dash ? dash + 1 : named);
+
+                        count = (positive)(last - offset) + 1;
+                        history_drop((positive)offset, count);
+                        //      Deleting renumbers from the base; only the
+                        //      oldest lines falling off the end move it.
+                        history_first = kept_first;
 
                         return shell_answer(0);
                 }
@@ -5265,6 +5502,35 @@ fn shell_history(writer write, string_address input)
                         history_read(where, history_saved);
 
                         return shell_answer(0);
+                }
+
+                case 'p':
+                {
+                        bool failed = false;
+
+                        //      Each word is expanded as a line of its own and
+                        //      written, and nothing is remembered.
+                        for (positive word = at + 1; word < shell_argc; word++)
+                        {
+                                string_address text = shell_argv[word];
+                                b32 answer;
+
+                                history_forced = true;
+                                answer = history_expand_line(text, address_of text);
+                                history_forced = false;
+
+                                if (answer < HISTORY_EXPAND_RUN)
+                                {
+                                        failed = true;
+                                        break;
+                                }
+                                string_format(write, "%s\n",
+                                              history_expanded.used
+                                                  ? (string_address)history_expanded.bytes
+                                                  : shell_argv[word]);
+                        }
+
+                        return shell_answer(failed ? 1 : 0);
                 }
 
                 case 's':
@@ -5323,11 +5589,11 @@ fn shell_history(writer write, string_address input)
 */
 static PURE positive history_range_count()
 {
-        //      The line asking is itself in the history when somebody typed
-        //      it, and fc never operates on itself. A script's fc was never
-        //      entered, so nothing is set aside there and "fc -s" reaches
-        //      the last line remembered rather than the one before it.
-        if (!shell_is_interactive)
+        //      The line asking is itself in the history when it was
+        //      remembered, and fc never operates on itself. One that
+        //      HISTIGNORE or HISTCONTROL kept out, or that no reader
+        //      recorded, has nothing to set aside.
+        if (!history_current_recorded)
                 return history_used;
 
         return history_used ? history_used - 1 : 0;
@@ -5408,6 +5674,18 @@ static fn history_run_text(writer write, string_address text)
         (void)write;
         string_format(log_error, "%s\n", text);
         log_flush();
+
+        //      The command that ran stands in the history where the fc that
+        //      asked for it was.
+        if (history_current_recorded && history_used)
+        {
+                positive kept = history_first;
+
+                history_drop(history_used - 1, 1);
+                history_first = kept;
+                history_hold(text, string_length(text));
+        }
+
         exec_run_nested(text, true, 0);
 }
 
@@ -5680,13 +5958,16 @@ fn shell_fc(writer write, string_address input)
         bool again = false;
         string_address editor = null;
         string_address replace = null;
+        positive replaced = 0;
+        positive replace_from = 0;
         positive first;
         positive last;
 
         (void)input;
 
         while (at < shell_argc && string_get(shell_argv[at]) == '-' &&
-               string_get(shell_argv[at] + 1))
+               string_get(shell_argv[at] + 1) &&
+               !byte_is_digit(string_get(shell_argv[at] + 1)))
         {
                 p8 letter = string_get(shell_argv[at] + 1);
 
@@ -5741,8 +6022,18 @@ fn shell_fc(writer write, string_address input)
                 at++;
         }
 
+        //      Every leading pat=rep is a substitution, made in the order
+        //      given and everywhere it matches.
         if (again && at < shell_argc && string_first_of(shell_argv[at], '='))
-                replace = shell_argv[at++];
+        {
+                replace = shell_argv[at];
+                while (at < shell_argc && string_first_of(shell_argv[at], '='))
+                {
+                        at++;
+                        replaced++;
+                }
+                replace_from = at - replaced;
+        }
 
         //      -s runs the line again, and running it is not listing it:
         //      Bash lets the re-execution win over an -l given beside it.
@@ -5771,8 +6062,7 @@ fn shell_fc(writer write, string_address input)
                                   : listing ? (count > 16 ? count - 16 : 0)
                                             : count - 1,
                             address_of first))
-                return shell_answered(1, "fc: %s: no such command\n",
-                           shell_argv[at]);
+                return shell_refuse(1, "fc: no command found\n");
 
         if (at < shell_argc)
                 at++;
@@ -5780,8 +6070,7 @@ fn shell_fc(writer write, string_address input)
         if (!history_locate(at < shell_argc ? shell_argv[at] : null,
                             again ? first : listing ? count - 1 : first,
                             address_of last))
-                return shell_answered(1, "fc: %s: no such command\n",
-                           shell_argv[at]);
+                return shell_refuse(1, "fc: no command found\n");
 
         if (last < first)
         {
@@ -5806,8 +6095,6 @@ fn shell_fc(writer write, string_address input)
 
         if (again)
         {
-                static p8 address_to built;
-                static positive built_room;
                 string_address text = history_text[first];
 
                 if (!replace)
@@ -5817,39 +6104,51 @@ fn shell_fc(writer write, string_address input)
                 }
 
                 {
-                        string_address split = string_first_of(replace, '=');
-                        positive old_length = (positive)(split - replace);
-                        string_address new_text = split + 1;
-                        string_address where;
-                        positive prefix;
+                        static p8 address_to built[2];
+                        static positive built_room[2];
+                        string_address current = text;
+                        positive turn = 0;
 
-                        /* What is being replaced is the front of the operand,
-                           which is not a string of its own -- its equals sign
-                           is still attached. Comparing that many bytes at
-                           each position finds it without the operand having
-                           to be cut up first. */
-                        for (where = text; string_get(where); where++)
-                                if (!string_compare_max(where, replace,
-                                                        old_length))
-                                        break;
-
-                        if (!old_length || !string_get(where))
+                        for (positive each = 0; each < replaced; each++)
                         {
-                                history_run_text(write, text);
-                                return;
+                                string_address pair = shell_argv[replace_from + each];
+                                string_address split = string_first_of(pair, '=');
+                                positive old_length = (positive)(split - pair);
+                                string_address new_text = split + 1;
+                                positive new_length = string_length(new_text);
+                                positive have = string_length(current);
+                                positive used = 0;
+                                positive room;
+
+                                if (!old_length)
+                                        continue;
+
+                                //      Room for every match to be replaced.
+                                if (new_length > (positive_max / 4) ||
+                                    have > (positive_max / 4) / (new_length + 1))
+                                        return shell_answer(1);
+                                room = have + (have / old_length + 1) * new_length + 1;
+
+                                if (!shell_array_room(built[turn], built_room[turn], room))
+                                        return shell_answer(1);
+
+                                for (string_address where = current; string_get(where);)
+                                {
+                                        if (!string_compare_max(where, pair, old_length))
+                                        {
+                                                memory_copy(built[turn] + used, new_text, new_length);
+                                                used += new_length;
+                                                where += old_length;
+                                        }
+                                        else
+                                                built[turn][used++] = *where++;
+                                }
+                                built[turn][used] = end;
+                                current = built[turn];
+                                turn ^= 1;
                         }
 
-                        prefix = (positive)(where - text);
-
-                        if (!shell_array_room(built, built_room,
-                                              string_length(text) + string_length(new_text) + 1))
-                                return shell_answer(1);
-
-                        memory_copy_apart(built, text, prefix);
-                        string_copy(built + prefix, new_text);
-                        string_copy(built + prefix + string_length(new_text),
-                                    where + old_length);
-                        history_run_text(write, built);
+                        history_run_text(write, current);
                 }
 
                 return;
@@ -14116,6 +14415,70 @@ static COLD fn exec_pretty_word(exec_function_text address_to made,
                                 close++;
                         exec_function_text_add(made, at, (positive)(close - at));
                         at = close;
+                }
+                else if (value == '$' && at + 2 < stop && string_is(at + 1, '(') &&
+                         string_not(at + 2, '('))
+                {
+                        //      bash writes the body of $( ) back from what it
+                        //      parsed: no blank after the opening or before
+                        //      the closing, one between words, and a lone
+                        //      subshell with its own blanks inside.
+                        string_address after = lex_nesting(at + 1);
+                        string_address body = at + 2;
+                        string_address end_of = after == at + 1 ? null : after - 1;
+                        bool plain = end_of != null && end_of < stop;
+
+                        for (string_address look = body; plain && look < end_of; look++)
+                                if (string_is(look, '\n') || string_is(look, '\'') ||
+                                    string_is(look, '"') || string_is(look, '\\') ||
+                                    string_is(look, '`') || string_is(look, '#') ||
+                                    string_is(look, '<'))
+                                        plain = false;
+
+                        if (!plain)
+                        {
+                                exec_function_text_add(made, at, 1);
+                                at++;
+                                continue;
+                        }
+
+                        while (body < end_of && (string_is(body, ' ') || string_is(body, '\t')))
+                                body++;
+                        while (end_of > body && (string_is(end_of - 1, ' ') ||
+                                                 string_is(end_of - 1, '\t')))
+                                end_of--;
+
+                        exec_function_text_literal(made, "$(");
+                        if (body < end_of && string_is(body, '(') &&
+                            string_is(end_of - 1, ')'))
+                                exec_function_text_literal(made, " ( ");
+                        for (string_address run = body; run < end_of; run++)
+                        {
+                                if ((string_is(run, ' ') || string_is(run, '\t')))
+                                {
+                                        while (run + 1 < end_of &&
+                                               (string_is(run + 1, ' ') ||
+                                                string_is(run + 1, '\t')))
+                                                run++;
+                                        exec_function_text_literal(made, " ");
+                                }
+                                else if (run == body &&
+                                         body < end_of && string_is(body, '(') &&
+                                         string_is(end_of - 1, ')'))
+                                {
+                                        run++;
+                                        while (run < end_of && string_is(run, ' '))
+                                                run++;
+                                        run--;
+                                }
+                                else if (run == end_of - 1 && string_is(run, ')') &&
+                                         string_is(body, '('))
+                                        exec_function_text_literal(made, " )");
+                                else
+                                        exec_function_text_add(made, run, 1);
+                        }
+                        exec_function_text_literal(made, ")");
+                        at = after;
                 }
                 else if (value == '$' && at + 1 < stop && string_is(at + 1, '\''))
                         at = exec_pretty_ansi(made, at + 2);
