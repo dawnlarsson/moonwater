@@ -31665,17 +31665,28 @@ static bool file_backup_control(string_address program, string_address context,
 /* Numbered backups use one more than the greatest existing suffix; gaps do
    not reset the sequence, and --backup=existing selects numbered mode when
    any numbered sibling exists.  Walk once to answer both questions. */
+/*
+        The next number for a numbered backup of destination: one past the
+        greatest N of every name destination.~N~ in the directory, where N is
+        digits with no leading zero, of any length -- gnulib compares them as
+        digit strings, so b.~99999999999999999999~ makes b.~100000000000000000000~
+        and b.~01~ is not a numbered backup at all. next is FILE_NAME_MAX + 2
+        bytes and gets the digits of the next number ("1" when there is none);
+        any says whether any numbered backup was there.
+*/
 static bipolar file_backup_number_at(
     bipolar directory, string_address destination,
-    positive address_to next, bool address_to any)
+    p8 address_to next, bool address_to any)
 {
         positive prefix = string_length(destination);
         bipolar handle = system_open_at(
             directory, (string_address)".",
             FILE_READ | O_DIRECTORY | O_CLOEXEC);
+        positive best = 0;
 
-        address_to next = 1;
         address_to any = false;
+        next[0] = '0';
+        next[1] = end;
         if (handle < 0)
                 return handle;
 
@@ -31691,27 +31702,44 @@ static bipolar file_backup_number_at(
                     name[prefix] != '.' || name[prefix + 1] != '~')
                         continue;
 
-                string_address at = name + prefix + 2;
-                positive number;
-                if (!string_digits_checked(address_of at, 10,
-                                           address_of number) ||
-                    !number || at[0] != '~' || at[1])
+                string_address digits = name + prefix + 2;
+                positive width = string_span(digits, string_set_digits);
+
+                if (!width || digits[0] == '0' || digits[width] != '~' ||
+                    digits[width + 1] || width > FILE_NAME_MAX)
                         continue;
 
                 address_to any = true;
-                if (number >= address_to next)
+                if (width > best ||
+                    (width == best && memory_compare(digits, next, width) > 0))
                 {
-                        if (number == positive_max)
-                        {
-                                walk.error = -ERROR_OUT_OF_RANGE;
-                                break;
-                        }
-                        address_to next = number + 1;
+                        memory_copy_apart(next, digits, width);
+                        best = width;
                 }
         }
 
         bipolar result = walk.error;
         file_walk_close(address_of walk);
+
+        //      One past it, in decimal, carrying as far as the digits go.
+        positive at = best;
+
+        while (at && next[at - 1] == '9')
+                next[--at] = '0';
+        if (at)
+                next[at - 1]++;
+        else if (best)
+        {
+                memory_copy_apart(next + 1, next, best);
+                next[0] = '1';
+                best++;
+        }
+        else
+        {
+                next[0] = '1';
+                best = 1;
+        }
+        next[best] = end;
         return result;
 }
 
@@ -31722,7 +31750,7 @@ static bool file_backup_name_at(bipolar directory, string_address destination,
 {
         p8 name[FILE_PATH_MAX];
         positive length = string_length(in);
-        positive next_number = 1;
+        p8 next_number[FILE_NAME_MAX + 2];
         bool any_numbered = false;
         p8 kind = file_backup_kind;
 
@@ -31731,20 +31759,23 @@ static bool file_backup_name_at(bipolar directory, string_address destination,
                 return false;
         memory_copy_apart_end(name, in, length);
         if ((kind == 'e' || kind == 'n') &&
-            file_backup_number_at(directory, name, address_of next_number,
+            file_backup_number_at(directory, name, next_number,
                                   address_of any_numbered) < 0)
                 return false;
         if (kind == 'e')
                 kind = any_numbered ? 'n' : 's';
         positive suffix = string_length(file_backup_suffix);
-        if (length + (kind == 'n' ? 3 + sizeof(positive) * 3 : suffix) >= FILE_PATH_MAX)
+        if (length + (kind == 'n' ? 3 + FILE_NAME_MAX : suffix) >= FILE_PATH_MAX)
                 return false;
         memory_copy_apart(into, name, length);
         if (kind == 'n')
         {
                 into[length++] = '.';
                 into[length++] = '~';
-                length += positive_into_string(into + length, next_number);
+                positive digits = string_length(next_number);
+
+                memory_copy_apart(into + length, next_number, digits);
+                length += digits;
                 into[length++] = '~';
                 into[length] = end;
         }
@@ -31826,12 +31857,12 @@ static bool file_backup_made_at(string_address program, bipolar directory,
         }
 
         p8 kind = file_backup_kind;
-        positive next_number = 1;
+        p8 next_number[FILE_NAME_MAX + 2];
         bool any_numbered = false;
         bipolar numbered = 0;
         if (kind == 'e' || kind == 'n')
                 numbered = file_backup_number_at(
-                    directory, destination, address_of next_number,
+                    directory, destination, next_number,
                     address_of any_numbered);
         if (numbered < 0)
         {
@@ -31845,7 +31876,7 @@ static bool file_backup_made_at(string_address program, bipolar directory,
                 kind = any_numbered ? 'n' : 's';
 
         positive extra = kind == 'n'
-                             ? 3 + sizeof(positive) * 3
+                             ? 3 + FILE_NAME_MAX
                              : string_length(file_backup_suffix);
         if (length + extra >= FILE_PATH_MAX)
         {
@@ -31857,13 +31888,14 @@ static bool file_backup_made_at(string_address program, bipolar directory,
 
         if (kind == 'n')
         {
-                positive at = next_number;
                 positive used = length;
+                positive digits = string_length(next_number);
 
                 memory_copy_apart(kept, destination, length);
                 kept[used++] = '.';
                 kept[used++] = '~';
-                used += positive_into_string(kept + used, at);
+                memory_copy_apart(kept + used, next_number, digits);
+                used += digits;
                 kept[used++] = '~';
                 kept[used] = end;
         }

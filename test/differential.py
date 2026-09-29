@@ -6742,6 +6742,36 @@ _FILES_OUTLINK_CSPLIT = tuple({"argv": argv, "fixture": "files_outlink"} for arg
     ("-f", "v", "in", "2"), ("-f", "f", "in", "2"), ("-k", "-f", "f", "in", "2")))
 
 
+#       Numbered backups already there: gnulib reads the N of dest.~N~ as
+#       digits with no leading zero and of any length, and the next is one
+#       past the greatest -- so ~01~ and ~007~ are not backups, and past 2^64
+#       the numbers carry on.
+FIXTURES["files_backup_numbers"] = {
+    "a": files_file(b"A\n", 1000000000),
+    "b": files_file(b"B\n", 1100000000),
+    "b.~01~": files_file(b"zero one\n", 1110000000),
+    "b.~2~": files_file(b"two\n", 1120000000),
+    "c": files_file(b"C\n", 1200000000),
+    "c.~99999999999999999999~": files_file(b"big\n", 1210000000),
+    "c.~5~": files_file(b"five\n", 1220000000),
+    "d": files_file(b"D\n", 1300000000),
+    "d.~18446744073709551615~": files_file(b"max\n", 1310000000),
+    "e": files_file(b"E\n", 1400000000),
+    "e.~007~": files_file(b"seven\n", 1410000000),
+    "e.~0~": files_file(b"nought\n", 1420000000),
+    "e.~x~": files_file(b"letter\n", 1430000000),
+    "e.~9~": files_file(b"nine\n", 1440000000),
+    "f": files_file(b"F\n", 1500000000),
+    "f.~999~": files_file(b"999\n", 1510000000),
+}
+
+
+def files_backup_number_cases(words):
+    controls = (("--backup=numbered",), ("--backup=existing",), ("-b",), ("--backup=simple",))
+    return tuple({"fixture": "files_backup_numbers", "argv": tuple(words) + control + ("a", target)}
+                 for control in controls for target in ("b", "c", "d", "e", "f"))
+
+
 def files_backup_cases(tool, words):
     """Every way a suffix reaches the backup name, crossed with every control
     word and each way the tool is told to make one, drawn per tool so a
@@ -7713,7 +7743,7 @@ FILES_UTILITIES = (
             + files_slash_destinations(
                 "ln", ("-s", "-f", "-n", "-v", "-T", "-b", "-r", "-L", "-P", "--backup=numbered"),
                 ("a.txt", "dir", "link", "dangling"))
-            + files_backup_cases("ln", ("-s",)) + files_backup_cases("ln", ("-f",))
+            + files_backup_cases("ln", ("-s",)) + files_backup_cases("ln", ("-f",)) + files_backup_number_cases(("-sf",))
             + files_made_cases("ln", ("-f", "-s", "-sf", "-b", "--backup=numbered", "-fb", "-v", "-fv", "-L"))
             + files_self_cases("ln", ("-s", "-f", "-i", "-b", "-n", "-v", "-T", "-L", "-P", "-r",
                                       "--backup=numbered"))),
@@ -8068,7 +8098,7 @@ FILES_UTILITIES = (
                        "--remove-destination", "--strip-trailing-slashes", "--update=none-fail"),
                 ("a.txt", "dir", "link", "dirlink", "empty"))
                 if not ("dir" in case and ("-s" in case or "dirlink/" in case or "dir/new/" in case)))
-            + files_backup_cases("cp", ()) + files_backup_cases("cp", ("-a",))
+            + files_backup_cases("cp", ()) + files_backup_cases("cp", ("-a",)) + files_backup_number_cases(())
             + files_self_cases("cp", ("-a", "-d", "-f", "-l", "-s", "-b", "--remove-destination", "-L", "-P",
                                       "-H", "-r", "-i", "-n", "-u", "--attributes-only", "-v",
                                       "--backup=numbered", "-df"),
@@ -8126,7 +8156,7 @@ FILES_UTILITIES = (
             + files_slash_destinations(
                 "install", ("-D", "-v", "-T", "-b", "-C", "-p", "--mode=0600", "--backup=numbered"),
                 ("a.txt", "link", "empty"))
-            + files_backup_cases("install", ())),
+            + files_backup_cases("install", ()) + files_backup_number_cases(())),
     Utility("mv", options=(Option("-b"), Option("-f"), Option("-i"), Option("-n"), Option("-u"), Option("-v"), Option("-T"),
                            Option("--backup"), Option("--backup", ("numbered", "simple", "none", "existing", "bogus"), True),
                            Option("--force"), Option("--interactive"), Option("--no-clobber"), Option("--update"),
@@ -8159,7 +8189,7 @@ FILES_UTILITIES = (
                 "mv", ("-f", "-n", "-u", "-v", "-b", "-T", "--update=none-fail", "--no-copy", "--debug"),
                 ("a.txt", "dir", "link", "dirlink", "dangling"))
                 if "dangling/" not in case)
-            + files_backup_cases("mv", ()) + files_skip_cases("mv")
+            + files_backup_cases("mv", ()) + files_backup_number_cases(()) + files_skip_cases("mv")
             + files_made_cases("mv", ("-f", "-b", "--backup=numbered", "-v", "-n", "-u"))),
     Utility("rm", options=(Option("-f"), Option("-i"), Option("-I"), Option("-r"), Option("-R"), Option("-d"), Option("-v"),
                            Option("--force"), Option("--interactive"), Option("--interactive", ("always", "once", "never", "bogus"), True),
