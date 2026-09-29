@@ -2266,6 +2266,27 @@ typedef struct
         p32 dist;
 } xz_found;
 
+/* What the match finders read and write, apart from the encoder around
+   them: the block's bytes, the position, the hash and tree tables and the
+   matches of the last find. The parser and the finder may sit on different
+   threads, and then the finder's copy is the only one the finder touches. */
+typedef struct
+{
+        xz_preset preset;
+        p8 address_to input;
+        p32 input_n;
+        p32 read_pos;
+        p32 offset;
+        p32 address_to hash;
+        p32 hash_mask;
+        p32 address_to son;
+        p32 cyclic_pos;
+        p32 cyclic_size;
+        p32 nice;
+        p32 depth;
+        xz_found address_to matches;
+} xz_finder;
+
 typedef struct
 {
         p8 state;
@@ -2292,6 +2313,11 @@ typedef struct
         positive nfilt;
         p8 address_to fbuf;
         positive fbuf_room;
+        xz_finder fin;
+        address_any pipe;
+        address_any pipe_area;
+        positive pipe_room;
+        bool pipe_ok;
 
         /* The block: input_n bytes at input, zero-based read position,
            how many of those the parser has looked at but not coded, and the
@@ -2423,6 +2449,7 @@ static fn xz_encoder_close(xz_encoder address_to e)
         memory_free(e->son, e->son_room);
         memory_free(e->out, e->out_room);
         memory_free(e->fbuf, e->fbuf_room);
+        memory_free(e->pipe_area, e->pipe_room);
         memory_free(e, sizeof(xz_encoder));
 }
 
@@ -2834,7 +2861,7 @@ static inline INLINE bool xz_differ16(p8 address_to a, p8 address_to b)
         return memory_load_unaligned(p16, a) != memory_load_unaligned(p16, b);
 }
 
-static inline INLINE fn xz_move(xz_encoder address_to e)
+static inline INLINE fn xz_move(xz_finder address_to e)
 {
         if (++e->cyclic_pos == e->cyclic_size)
                 e->cyclic_pos = 0;
@@ -2849,7 +2876,7 @@ static inline INLINE p32 xz_hash_head(p8 address_to cur)
         return hash_crc32_tab[cur[0]] ^ cur[1];
 }
 
-static xz_found address_to xz_chain(xz_encoder address_to e, p32 len_limit, p32 pos,
+static xz_found address_to xz_chain(xz_finder address_to e, p32 len_limit, p32 pos,
                                     p8 address_to cur, p32 cur_match,
                                     xz_found address_to matches, p32 len_best)
 {
@@ -3026,7 +3053,7 @@ static fn xz_tree_skip(p32 address_to son, p8 address_to cur, p32 pos, p32 cur_m
 }
 
 /* One find at read_pos: the matches in increasing length, their count. */
-static p32 xz_finder_find(xz_encoder address_to e)
+static p32 xz_finder_find(xz_finder address_to e)
 {
         const xz_preset address_to p = address_of e->preset;
         p32 avail = e->input_n - e->read_pos;
@@ -3137,7 +3164,7 @@ static p32 xz_finder_find(xz_encoder address_to e)
         return count;
 }
 
-static fn xz_finder_skip(xz_encoder address_to e, p32 amount)
+static fn xz_finder_skip(xz_finder address_to e, p32 amount)
 {
         const xz_preset address_to p = address_of e->preset;
         p32 len_min = p->finder == XZ_FINDER_HC3 ? 3 : 4;
@@ -3187,9 +3214,231 @@ static fn xz_finder_skip(xz_encoder address_to e, p32 amount)
         }
 }
 
+/*
+        The match finder beside the parser. The find at each position is a
+        chain of cache misses down a tree the parser never looks at, and it
+        is more than half of what a block costs from -4 up; the parser's
+        pricing is the rest. When a stream is one block and the process has
+        a second CPU, the finder runs on the pool's beside thread over its
+        own copy of the finder state and hands what each position found to
+        the parser through a ring of words: the count, then a length and a
+        distance for each match. The parser reads the same sequence it would
+        have made itself, a find or a skip of the tables being the same
+        insertion, so the bytes are the same with and without the thread.
+        Both sides publish and wait on two counters, sleeping only when the
+        ring is empty or full.
+*/
+#if X64
+#define XZ_PIPE_PAUSE() __asm__ volatile("pause" ::: "memory")
+#elif ARM64
+#define XZ_PIPE_PAUSE() __asm__ volatile("yield" ::: "memory")
+#else
+#define XZ_PIPE_PAUSE() __asm__ volatile("" ::: "memory")
+#endif
+/* Loads of the other side's counter before a thread goes to sleep on it:
+   a futex round trip costs more than a batch of finds, and the side that
+   waits is the faster one, which has nothing better to do. */
+#define XZ_PIPE_SPIN 0
+#define XZ_PIPE_WORDS ((positive)1 << 15)
+#define XZ_PIPE_BATCH 128
+#define XZ_PIPE_GIVE 2048
+
+typedef struct
+{
+        xz_finder fin;
+        xz_found matches[XZ_MATCH_MAX + 1];
+        p32 count;
+        b32 head;
+        b32 tail;
+        b32 consumer_asleep;
+        b32 producer_asleep;
+        b32 quit;
+        b32 skip_to;
+        b32 tail_local;
+        b32 head_seen;
+        b32 tail_given;
+        p32 words[XZ_PIPE_WORDS];
+} xz_pipe;
+
+static fn xz_pipe_job(address_any context, positive index)
+{
+        xz_pipe address_to q = (xz_pipe address_to)context;
+        xz_finder address_to f = address_of q->fin;
+        b32 head = 0;
+        b32 tail_seen = 0;
+        positive batch = 0;
+
+        (void)index;
+        for (p32 at = 0; at < q->count; at++)
+        {
+                p32 count = 0;
+
+                //      A position the parser has said it will skip is inserted
+                //      and no more: the tables come out the same, and the
+                //      answer is a count of none nobody reads.
+                if ((b32)at < atomic_load(address_of q->skip_to))
+                        xz_finder_skip(f, 1);
+                else
+                        count = xz_finder_find(f);
+
+                b32 need = (b32)(1 + 2 * count);
+
+                while ((positive)(head - tail_seen) + (positive)need > XZ_PIPE_WORDS)
+                {
+                        tail_seen = atomic_load(address_of q->tail);
+                        if ((positive)(head - tail_seen) + (positive)need <= XZ_PIPE_WORDS)
+                                break;
+                        __atomic_store_n(address_of q->head, head, __ATOMIC_SEQ_CST);
+                        if (atomic_load(address_of q->consumer_asleep))
+                                thread_wake(address_of q->head, 1);
+                        if (atomic_load(address_of q->quit))
+                                return;
+                        for (positive spin = 0; spin < XZ_PIPE_SPIN; spin++)
+                        {
+                                XZ_PIPE_PAUSE();
+                                tail_seen = atomic_load(address_of q->tail);
+                                if ((positive)(head - tail_seen) + (positive)need <= XZ_PIPE_WORDS)
+                                        break;
+                        }
+                        if ((positive)(head - tail_seen) + (positive)need <= XZ_PIPE_WORDS)
+                                break;
+                        __atomic_store_n(address_of q->producer_asleep, 1, __ATOMIC_SEQ_CST);
+                        tail_seen = atomic_load(address_of q->tail);
+                        if ((positive)(head - tail_seen) + (positive)need > XZ_PIPE_WORDS &&
+                            !atomic_load(address_of q->quit))
+                                thread_wait(address_of q->tail, tail_seen);
+                        __atomic_store_n(address_of q->producer_asleep, 0, __ATOMIC_SEQ_CST);
+                }
+                q->words[(positive)head & (XZ_PIPE_WORDS - 1)] = count;
+                for (p32 i = 0; i < count; i++)
+                {
+                        q->words[(positive)(head + 1 + 2 * i) & (XZ_PIPE_WORDS - 1)] = f->matches[i].len;
+                        q->words[(positive)(head + 2 + 2 * i) & (XZ_PIPE_WORDS - 1)] = f->matches[i].dist;
+                }
+                head += need;
+                if (++batch == XZ_PIPE_BATCH)
+                {
+                        batch = 0;
+                        __atomic_store_n(address_of q->head, head, __ATOMIC_SEQ_CST);
+                        if (atomic_load(address_of q->consumer_asleep))
+                                thread_wake(address_of q->head, 1);
+                        if (atomic_load(address_of q->quit))
+                                return;
+                }
+        }
+        __atomic_store_n(address_of q->head, head, __ATOMIC_SEQ_CST);
+        if (atomic_load(address_of q->consumer_asleep))
+                thread_wake(address_of q->head, 1);
+}
+
+/* The next position's find, as the finder would have answered it: the
+   matches go to e->matches and the count comes back. */
+static p32 xz_pipe_pop(xz_encoder address_to e)
+{
+        xz_pipe address_to q = (xz_pipe address_to)e->pipe;
+
+        while (q->tail_local == q->head_seen)
+        {
+                q->head_seen = atomic_load(address_of q->head);
+                if (q->tail_local != q->head_seen)
+                        break;
+                if (q->tail_local != q->tail_given)
+                {
+                        q->tail_given = q->tail_local;
+                        __atomic_store_n(address_of q->tail, q->tail_local, __ATOMIC_SEQ_CST);
+                        if (atomic_load(address_of q->producer_asleep))
+                                thread_wake(address_of q->tail, 1);
+                }
+                for (positive spin = 0; spin < XZ_PIPE_SPIN; spin++)
+                {
+                        XZ_PIPE_PAUSE();
+                        q->head_seen = atomic_load(address_of q->head);
+                        if (q->tail_local != q->head_seen)
+                                break;
+                }
+                if (q->tail_local != q->head_seen)
+                        break;
+                __atomic_store_n(address_of q->consumer_asleep, 1, __ATOMIC_SEQ_CST);
+                q->head_seen = atomic_load(address_of q->head);
+                if (q->tail_local == q->head_seen)
+                        thread_wait(address_of q->head, q->head_seen);
+                __atomic_store_n(address_of q->consumer_asleep, 0, __ATOMIC_SEQ_CST);
+                q->head_seen = atomic_load(address_of q->head);
+        }
+
+        positive at = (positive)q->tail_local;
+        p32 count = q->words[at & (XZ_PIPE_WORDS - 1)];
+
+        for (p32 i = 0; i < count; i++)
+        {
+                e->matches[i].len = q->words[(at + 1 + 2 * i) & (XZ_PIPE_WORDS - 1)];
+                e->matches[i].dist = q->words[(at + 2 + 2 * i) & (XZ_PIPE_WORDS - 1)];
+        }
+        q->tail_local += (b32)(1 + 2 * count);
+        e->read_pos++;
+        if ((positive)(q->tail_local - q->tail_given) >= XZ_PIPE_GIVE)
+        {
+                q->tail_given = q->tail_local;
+                __atomic_store_n(address_of q->tail, q->tail_local, __ATOMIC_SEQ_CST);
+                if (atomic_load(address_of q->producer_asleep))
+                        thread_wake(address_of q->tail, 1);
+        }
+        return count;
+}
+
+/* Start the finder beside the caller on the block the encoder holds, or
+   leave it to the parser. */
+static fn xz_pipe_start(xz_encoder address_to e)
+{
+        e->pipe = null;
+        //      The fast modes skip most of what a match covers with one hash
+        //      insert; finding at every one of those on another thread costs
+        //      more than the parser saves.
+        if (!e->pipe_ok || !e->preset.normal || e->input_n < ((p32)1 << 16))
+                return;
+        if (!e->pipe_area)
+        {
+                e->pipe_area = memory_checked(sizeof(xz_pipe));
+                if (!e->pipe_area)
+                        return;
+                e->pipe_room = sizeof(xz_pipe);
+        }
+
+        xz_pipe address_to q = (xz_pipe address_to)e->pipe_area;
+
+        memory_fill(q, 0, __builtin_offsetof(xz_pipe, words));
+        q->fin = e->fin;
+        q->fin.matches = q->matches;
+        q->count = e->input_n;
+        if (!parallel_beside(xz_pipe_job, q))
+                return;
+        e->pipe = q;
+}
+
+/* The block is done, or given up: the finder is told to stop, and joined. */
+static fn xz_pipe_stop(xz_encoder address_to e)
+{
+        xz_pipe address_to q = (xz_pipe address_to)e->pipe;
+
+        if (!q)
+                return;
+        __atomic_store_n(address_of q->quit, 1, __ATOMIC_SEQ_CST);
+        thread_wake(address_of q->tail, 1);
+        parallel_beside_wait();
+        e->pipe = null;
+}
+
 static p32 xz_find(xz_encoder address_to e, p32 address_to count_out)
 {
-        p32 count = xz_finder_find(e);
+        p32 count;
+
+        if (e->pipe)
+                count = xz_pipe_pop(e);
+        else
+        {
+                count = xz_finder_find(address_of e->fin);
+                e->read_pos = e->fin.read_pos;
+        }
         p32 len_best = 0;
 
         if (count)
@@ -3215,7 +3464,20 @@ static fn xz_skip(xz_encoder address_to e, p32 amount)
 {
         if (amount)
         {
-                xz_finder_skip(e, amount);
+                if (e->pipe)
+                {
+                        xz_pipe address_to q = (xz_pipe address_to)e->pipe;
+
+                        __atomic_store_n(address_of q->skip_to, (b32)(e->read_pos + amount),
+                                         __ATOMIC_SEQ_CST);
+                        for (p32 i = 0; i < amount; i++)
+                                xz_pipe_pop(e);
+                }
+                else
+                {
+                        xz_finder_skip(address_of e->fin, amount);
+                        e->read_pos = e->fin.read_pos;
+                }
                 e->read_ahead += amount;
         }
 }
@@ -3966,6 +4228,8 @@ static bool xz_block_prepare(xz_encoder address_to e, p32 n)
         //      and priced at nothing they were never chosen.
         e->dist_table_size = 2 * (xz_top_bit(dict - 1) + 1);
         e->len_table_size = e->nice + 1 - 2;
+        e->fin = (xz_finder){e->preset, e->input, e->input_n, 0, e->offset, e->hash, e->hash_mask,
+                             e->son, 0, e->cyclic_size, e->nice, e->depth, e->matches};
         return true;
 }
 
@@ -3996,6 +4260,7 @@ static bool xz_block_encode(xz_encoder address_to e, p8 address_to input, p32 n)
         if (!n || !xz_block_prepare(e, n))
                 return false;
         xz_lzma_reset(e);
+        xz_pipe_start(e);
 
         p8 address_to out = e->out + XZ_BLOCK_HEADER_MAX;
         positive at = 0;
@@ -4049,7 +4314,10 @@ static bool xz_block_encode(xz_encoder address_to e, p8 address_to input, p32 n)
                 for (p32 i = 0; i < 5; i++)
                         lzma_range_shift(address_of e->rc);
                 if (e->rc.full)
+                {
+                        xz_pipe_stop(e);
                         return false;
+                }
 
                 positive packed = (positive)(e->rc.next - e->chunk);
                 positive plain = e->read_pos - e->read_ahead - start;
@@ -4091,6 +4359,7 @@ static bool xz_block_encode(xz_encoder address_to e, p8 address_to input, p32 n)
                 props = dict_reset = state_reset = false;
         }
         out[at++] = 0;
+        xz_pipe_stop(e);
 
         p8 header[XZ_BLOCK_HEADER_MAX];
         positive h = 2;
@@ -4318,6 +4587,35 @@ static bool xz_writer_batch(void)
 
         if (!count)
                 return !w->failed;
+        if (count == 1 && !xz_serial && parallel_width() > 1)
+        {
+                //      One block, and CPUs to spare: run it here, not as a
+                //      pool job, so that its match finder can have the pool's
+                //      beside thread. What is written is the same.
+                xz_encoder address_to e = w->slots[0];
+
+                if (!e)
+                {
+                        e = xz_encoder_open_with(address_of w->options);
+                        if (!e)
+                                return xz_fail("xz cannot map an encoder");
+                        w->slots[0] = e;
+                }
+                e->check = w->check;
+                e->pipe_ok = true;
+
+                bool ok = xz_block_encode(e, w->input, (p32)xz_batch_bytes(w, 0));
+
+                e->pipe_ok = false;
+                if (!ok)
+                        return xz_fail("xz cannot encode a block");
+                w->unpadded[0] = e->unpadded;
+                if (!xz_writer_emit(e->out + e->out_at, e->out_n) ||
+                    !xz_writer_record(w->unpadded[0], xz_batch_bytes(w, 0)))
+                        return false;
+                w->input_n = 0;
+                return !w->failed;
+        }
         if (!parallel_ordered(xz_batch_job, xz_batch_sink, w, count,
                               xz_serial ? 0 : PARALLEL_SPREAD))
                 return w->failed || xz_why ? false : xz_fail("xz cannot encode a block");
