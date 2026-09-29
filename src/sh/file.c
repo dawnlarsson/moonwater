@@ -12396,8 +12396,59 @@ static bool file_decimal_read(string_address address_to text, bool saturate,
         return true;
 }
 
+/*
+        The front of a number as xstrtoumax reads it in base 0: blanks, a sign,
+        then digits in C's bases (0x for sixteen, a leading 0 for eight), read
+        up to the first byte that is not one. Answers whether there were any,
+        with where it stopped, whether it was negative and its size, which
+        stays at the largest a word holds when it overflowed and says so.
+        What follows the number is the caller's: a unit letter, or nothing.
+*/
+static bool file_number_c(string_address text, string_address address_to stop,
+                          bool address_to negative, p64 address_to magnitude,
+                          bool address_to overflow)
+{
+        string_address at = text;
+        positive base = 10;
+        bool digits = false;
+
+        address_to negative = false;
+        address_to magnitude = 0;
+        address_to overflow = false;
+        while (byte_is_space(string_get(at)))
+                at++;
+        if (string_is(at, '-') || string_is(at, '+'))
+                address_to negative = string_get(at++) == '-';
+        if (string_is(at, '0') && (at[1] == 'x' || at[1] == 'X') &&
+            byte_is_hexadecimal(string_get(at + 2)))
+        {
+                base = 16;
+                at += 2;
+        }
+        else if (string_is(at, '0'))
+                base = 8;
+
+        for (;; at++)
+        {
+                positive digit = digit_known(string_get(at), base);
+
+                if (digit >= base)
+                        break;
+                digits = true;
+                if (address_to magnitude > (p64)(positive_max - digit) / base)
+                        address_to overflow = true;
+                else
+                        address_to magnitude = address_to magnitude * base + digit;
+        }
+        address_to stop = at;
+        return digits;
+}
+
 static bool file_signed_decimal(string_address text, bipolar address_to value)
 {
+        while (byte_is_space(string_get(text)))
+                text++;
+
         bool negative = string_is(text, '-');
 
         if (negative || string_is(text, '+'))
@@ -17281,7 +17332,10 @@ static fn du_report(p64 bytes, du_moment stamp, string_address path)
 // A line for a name the walk reached, which --threshold may hold back.
 static fn du_listed(p64 bytes, du_moment stamp, string_address path)
 {
-        if (du_threshold < 0 ? (b64)bytes <= -du_threshold || bytes > (p64)bipolar_max
+        //      GNU negates a negative threshold in a signed word, which wraps
+        //      for the least one and leaves nothing excluded.
+        if (du_threshold < 0 ? du_threshold == b64_min ||
+                                   (b64)bytes <= -du_threshold || bytes > (p64)bipolar_max
                              : bytes >= (p64)du_threshold)
                 du_report(bytes, stamp, path);
 }
@@ -17981,42 +18035,12 @@ static bool du_threshold_read(string_address value)
         string_address option = du_taking && du_taking->long_written
                                     ? (string_address) "--threshold"
                                     : (string_address) "-t";
-        string_address at = value;
-        bool negative = false;
-        positive base = 10;
-        p64 magnitude = 0;
-        bool overflow = false;
-        bool digits = false;
-
-        while (byte_is_space(string_get(at)))
-                at++;
-        if (string_is(at, '-') || string_is(at, '+'))
-                negative = string_get(at++) == '-';
-        if (string_is(at, '0') && (at[1] == 'x' || at[1] == 'X') &&
-            byte_is_hexadecimal(string_get(at + 2)))
-        {
-                base = 16;
-                at += 2;
-        }
-        else if (string_is(at, '0'))
-                base = 8;
-
-        for (;; at++)
-        {
-                p8 byte = string_get(at);
-                positive digit = byte_is_digit(byte) ? (positive)(byte - '0')
-                                 : base == 16 && byte_is_hexadecimal(byte)
-                                     ? (positive)((byte | 0x20) - 'a' + 10)
-                                     : 99;
-
-                if (digit >= base)
-                        break;
-                digits = true;
-                if (magnitude > (p64)(positive_max - digit) / base)
-                        overflow = true;
-                else
-                        magnitude = magnitude * base + digit;
-        }
+        string_address at;
+        bool negative;
+        p64 magnitude;
+        bool overflow;
+        bool digits = file_number_c(value, address_of at, address_of negative,
+                                    address_of magnitude, address_of overflow);
 
         static const p8 letters[] = "kKmMGgTtPEZYRQ";
         static const p8 powers[] = {1, 1, 2, 2, 3, 3, 4, 4, 5, 6, 7, 8, 9, 10};
@@ -18118,13 +18142,18 @@ static bool du_exclude_seen(p8 letter, string_address value)
 
         if (letter == 'd')
         {
-                string_address written = value ? value : (string_address) "";
-                bool negative = string_is(written, '-');
-                positive maximum;
+                string_address stop;
+                bool negative = false;
+                p64 maximum = 0;
+                bool overflow = false;
 
-                if (negative || string_is(written, '+'))
-                        written++;
-                if (!value || !string_digits_exact(written, address_of maximum))
+                //      xstrtoimax in base 0, and the size of a size_t at most;
+                //      a negative one is the same as none below the operand.
+                if (!value ||
+                    !file_number_c(value, address_of stop, address_of negative,
+                                   address_of maximum, address_of overflow) ||
+                    string_get(stop) || overflow ||
+                    maximum > (p64)bipolar_max + negative)
                 {
                         string_format(log_error, "du: invalid maximum depth '%w'\n",
                                       writer_terminal_quoted_name, value ? value : (string_address) "");
@@ -18132,8 +18161,8 @@ static bool du_exclude_seen(p8 letter, string_address value)
                 }
                 else
                 {
-                        du_maximum = negative ? 0 : maximum;
-                        du_depth_said = negative ? -(b64)maximum : (b64)maximum;
+                        du_maximum = negative ? 0 : (positive)maximum;
+                        du_depth_said = negative ? (b64)((p64)0 - maximum) : (b64)maximum;
                 }
                 return true;
         }
@@ -18471,8 +18500,10 @@ static b32 file_du()
         else if (du_summary && (flags & FILE_FLAG('d')))
         {
                 string_format(log_error,
-                              "du: warning: summarizing conflicts with --max-depth=%b\n",
-                              (b32)du_depth_said);
+                              "du: warning: summarizing conflicts with --max-depth=%s%p\n",
+                              du_depth_said < 0 ? (string_address) "-" : (string_address) "",
+                              du_depth_said < 0 ? (positive)0 - (positive)du_depth_said
+                                                : (positive)du_depth_said);
                 return string_report(log_error, 1, "Try 'du --help' for more information.\n");
         }
 
