@@ -193,6 +193,8 @@ CONFIG_EFI=y
 CONFIG_EFI_STUB=y
 CONFIG_EFI_MIXED=y
 CONFIG_EFI_PARTITION=y
+# The EFI variables as files: moonwater bios reboot sets OsIndications in one.
+CONFIG_EFIVAR_FS=y
 
 #
 # FS
