@@ -1752,6 +1752,172 @@ static inline bool byte_store_append_exact(byte_store address_to store,
         return byte_store_append_span(store, data, length);
 }
 
+/*
+        The read side of byte_store: a window on bytes somebody else wrote,
+        and the only way a parser of them touches them.
+
+        A parser of hostile bytes goes wrong in one shape: it keeps an offset
+        and a length beside the buffer, and some path adds to the one without
+        asking the other. Here they are one value that cannot be pulled
+        apart. Every read asks what is left first; the first read that asks
+        for more than is there leaves the reader failed and empty, and it
+        stays so, so a record is read whole and asked about once at the end
+        rather than after each field. What a failed reader returns is zero,
+        or a null pointer, or an empty and failed window -- never a byte from
+        outside the one it was opened on -- so a decision taken on such a
+        value is only ever a wrong decision, and the caller's final
+        byte_reader_end refuses it. A window is a reader on the next n bytes
+        of another, which advances past them: a length-prefixed vector is
+        one call, and what is read inside it cannot reach what follows.
+
+        A parser written on this holds no index into its input and does no
+        arithmetic on a pointer to it; test/differential.py's
+        security_hygiene holds the parsers it names to that.
+*/
+typedef struct
+{
+        const p8 address_to bytes;
+        positive left;
+        bool failed;
+} byte_reader;
+
+static inline byte_reader byte_reader_open(const p8 address_to bytes,
+                                           positive length)
+{
+        byte_reader reader = {bytes, length, false};
+
+        return reader;
+}
+
+/* The reader nothing was read from: failed, and empty. */
+static inline byte_reader byte_reader_dead(void)
+{
+        byte_reader reader = {null, 0, true};
+
+        return reader;
+}
+
+static inline bool byte_reader_ok(const byte_reader address_to reader)
+{
+        return !reader->failed;
+}
+
+static inline positive byte_reader_left(const byte_reader address_to reader)
+{
+        return reader->left;
+}
+
+/* Nothing failed and nothing is left: the bytes were exactly what was read. */
+static inline bool byte_reader_end(const byte_reader address_to reader)
+{
+        return !reader->failed && !reader->left;
+}
+
+/* The next count bytes, which are then read, or null with the reader failed. */
+static inline const p8 address_to byte_reader_take(byte_reader address_to reader,
+                                                   positive count)
+{
+        const p8 address_to taken = reader->bytes;
+
+        if (reader->failed || count > reader->left)
+        {
+                reader->failed = true;
+                reader->left = 0;
+                return null;
+        }
+        reader->bytes += count;
+        reader->left -= count;
+        return taken;
+}
+
+static inline bool byte_reader_skip(byte_reader address_to reader,
+                                    positive count)
+{
+        return byte_reader_take(reader, count) != null;
+}
+
+/* The unread bytes, for handing to code that copies or hashes them whole. */
+static inline const p8 address_to byte_reader_here(
+    const byte_reader address_to reader)
+{
+        return reader->failed ? null : reader->bytes;
+}
+
+static inline p8 byte_reader_u8(byte_reader address_to reader)
+{
+        const p8 address_to at = byte_reader_take(reader, 1);
+
+        return at ? at[0] : 0;
+}
+
+/* Big endian, as the wire protocols here write numbers. */
+static inline p16 byte_reader_u16(byte_reader address_to reader)
+{
+        const p8 address_to at = byte_reader_take(reader, 2);
+
+        return at ? (p16)((p16)at[0] << 8 | at[1]) : 0;
+}
+
+static inline p32 byte_reader_u24(byte_reader address_to reader)
+{
+        const p8 address_to at = byte_reader_take(reader, 3);
+
+        return at ? (p32)at[0] << 16 | (p32)at[1] << 8 | at[2] : 0;
+}
+
+static inline p32 byte_reader_u32(byte_reader address_to reader)
+{
+        const p8 address_to at = byte_reader_take(reader, 4);
+
+        return at ? (p32)at[0] << 24 | (p32)at[1] << 16 | (p32)at[2] << 8 |
+                        at[3]
+                  : 0;
+}
+
+/* Little endian, as netlink and 802.11 write theirs -- and every machine this
+   runs on, which is why netlink's host order is the same thing. */
+static inline p16 byte_reader_u16le(byte_reader address_to reader)
+{
+        const p8 address_to at = byte_reader_take(reader, 2);
+
+        return at ? (p16)((p16)at[1] << 8 | at[0]) : 0;
+}
+
+static inline p32 byte_reader_u32le(byte_reader address_to reader)
+{
+        const p8 address_to at = byte_reader_take(reader, 4);
+
+        return at ? (p32)at[3] << 24 | (p32)at[2] << 16 | (p32)at[1] << 8 |
+                        at[0]
+                  : 0;
+}
+
+/* A reader on the next count bytes, past which this one then reads on. One
+   that is not there fails this reader and hands back a failed, empty one. */
+static inline byte_reader byte_reader_window(byte_reader address_to reader,
+                                             positive count)
+{
+        const p8 address_to at = byte_reader_take(reader, count);
+
+        return at ? byte_reader_open(at, count) : byte_reader_dead();
+}
+
+/* A vector: its length in one, two or three bytes, then that many bytes. */
+static inline byte_reader byte_reader_vector8(byte_reader address_to reader)
+{
+        return byte_reader_window(reader, byte_reader_u8(reader));
+}
+
+static inline byte_reader byte_reader_vector16(byte_reader address_to reader)
+{
+        return byte_reader_window(reader, byte_reader_u16(reader));
+}
+
+static inline byte_reader byte_reader_vector24(byte_reader address_to reader)
+{
+        return byte_reader_window(reader, byte_reader_u24(reader));
+}
+
 /* Stable storage owns its mapping outside these mechanisms. Unlike a moving
    byte_store, every successful take preserves all earlier addresses. The
    owner chooses alignment and which marks may be rewound. */

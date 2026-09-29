@@ -37237,6 +37237,7 @@ def dhcp_lift():
 #include <stdint.h>
 #include <stdbool.h>
 typedef uint8_t p8;
+typedef uint16_t p16;
 typedef uint32_t p32;
 typedef uint64_t p64;
 typedef unsigned long positive;
@@ -37248,7 +37249,9 @@ typedef int b32;
 #define address_to *
 #define address_of &
 #define array_count(a) (sizeof(a) / sizeof((a)[0]))
+#define min(a, b) ((a) < (b) ? (a) : (b))
 #define memory_compare memcmp
+#define memory_copy memmove
 #define memory_zero(at, size) memset(at, 0, size)
 #define null 0
 static positive memory_span_byte(const void *block, p8 byte, positive size) {
@@ -37265,7 +37268,7 @@ static bool network_transaction_secure(void *into, positive size) { (void)into; 
 static bipolar system_random_fill(void *into, positive size, positive flags) {
         (void)into; (void)size; (void)flags; return 0;
 }
-'''
+''' + byte_reader_source()
     return shim, head, walk
 
 
@@ -42594,6 +42597,31 @@ def tls_fuzz_write_seeds(corpus, directory):
     return sorted(directory.iterdir())
 
 
+def byte_reader_source():
+    """lib.util.c's byte_reader, the bounded read cursor the wire parsers
+    are written on, lifted whole for a hosted fuzz build: from its typedef to
+    the block that follows it. Every lift of a parser that reads through it
+    carries this ahead of the parser, so the fuzzer runs the production
+    cursor and not a stand-in."""
+    text = (HARNESS_ROOT / "src/lib.util.c").read_text()
+    return tls_fuzz_sec(
+        text, "typedef struct\n{\n        const p8 address_to bytes;\n"
+              "        positive left;",
+        "/* Stable storage owns its mapping outside these mechanisms.")
+
+
+def byte_store_source():
+    """lib.util.c's byte_store and its two appends, for a hosted lift of a
+    parser that lays what it read out into a store of a fixed size: the
+    bounded sink beside byte_reader's bounded source. Needs the shim's
+    min, memory_copy_apart and the p8/positive types."""
+    text = (HARNESS_ROOT / "src/lib.util.c").read_text()
+    return tls_fuzz_sec(
+        text, "typedef struct\n{\n        p8 address_to bytes;\n        positive room;\n"
+              "        positive used;\n} byte_store;",
+        "/*\n        The read side of byte_store")
+
+
 def tls_fuzz_run(label, corpus, source, max_len, extra=()):
     """Build source as a libFuzzer target and run it over corpus's seeds.
 
@@ -42802,6 +42830,7 @@ static bipolar string_to_host(string_address host)
         return -1;
 }
 """
+    shim += byte_reader_source()
     return oids, parsers, policy, framing, shim
 
 
@@ -43435,39 +43464,31 @@ static void fuzz_certificate_list(p8 *body, positive body_length,
                                   string_address host)
 {
         tls_cert certs[8];
-        positive at;
-        positive list_end;
+        byte_reader list;
         positive count = 0;
         positive i;
 
-        if (!tls_certificate_body_open(body, body_length,
-                                       address_of at, address_of list_end))
+        if (!tls_certificate_body_open(body, body_length, address_of list))
                 return;
 
-        while (at + 3 <= list_end && count < 8)
+        while (byte_reader_left(&list) && count < 8)
         {
-                positive cert_length = tls_load_24(body + at);
-                positive ext_length;
+                byte_reader entry = byte_reader_vector24(&list);
 
-                at += 3;
-                if (at + cert_length + 2 > list_end)
+                (void)byte_reader_vector16(&list);
+                if (!byte_reader_ok(&list))
                         return;
                 memory_fill(address_of certs[count], 0, sizeof(certs[0]));
-                (void)tls_parse_cert(body + at, cert_length,
+                (void)tls_parse_cert((p8 *)byte_reader_here(&entry),
+                                     byte_reader_left(&entry),
                                      address_of certs[count],
                                      count ? null : host);
-                at += cert_length;
-                ext_length = network_load_16(body + at);
-                at += 2;
-                if (at + ext_length > list_end)
-                        return;
-                at += ext_length;
                 count++;
         }
 
         /* Same post-loop refuse as tls_verify_chain: empty list, or bytes
            past the last framed entry (including a 9th entry past certs[8]). */
-        if (!count || at != list_end)
+        if (!count || byte_reader_left(&list))
                 return;
 
         (void)tls_leaf_authorized(address_of certs[0], FUZZ_TLS_NOW);
@@ -44311,8 +44332,9 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 """
 
     return tls_fuzz_run("tls hs", "tls_hs",
-                        shim + defines + connection + stubs + record + "\n" +
-                        load24 + "\n" + protocol + "\n" + driver,
+                        shim + "#define memory_copy_apart memmove\n" + byte_store_source() +
+                        byte_reader_source() + defines + connection + stubs +
+                        record + "\n" + load24 + "\n" + protocol + "\n" + driver,
                         81920)
 
 
@@ -45433,6 +45455,7 @@ typedef void (*writer)(address_any data, positive length);
 #define end ((p8)0)
 #define positive_max (~(positive)0)
 #define array_count(a) (sizeof(a) / sizeof((a)[0]))
+#define min(a, b) ((a) < (b) ? (a) : (b))
 #define memory_compare memcmp
 #define memory_copy memcpy
 #define memory_copy_apart memcpy
@@ -46005,7 +46028,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         return 0;
 }
 """
-    return tls_fuzz_run("dns", "dns", NET_ZONE_FUZZ_SHIM + wait + dns + driver, 8192)
+    return tls_fuzz_run("dns", "dns", NET_ZONE_FUZZ_SHIM + byte_reader_source() + wait + dns + driver, 8192)
 
 
 def netlink_fuzz_seeds():
@@ -46263,7 +46286,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 }
 """
     return tls_fuzz_run("netlink", "netlink",
-                        NET_ZONE_FUZZ_SHIM + wait + netlink + driver, 16384)
+                        NET_ZONE_FUZZ_SHIM + byte_reader_source() + wait + netlink + driver, 16384)
 
 
 #       The NIST curves as integers, for the vectors crypto_vectors has to
@@ -48412,7 +48435,7 @@ static p32 network_load_32(const p8 *bytes)
         return ((p32)bytes[0] << 24) | ((p32)bytes[1] << 16) |
                ((p32)bytes[2] << 8) | (p32)bytes[3];
 }
-"""
+""" + byte_store_source() + byte_reader_source()
 
     # --- 1a. Generic wire-header pad prove (original). ---
     pad_source = r"""
@@ -49411,6 +49434,45 @@ def harness_security_hygiene(argv):
                    % (table_name, ", ".join(loose[:8])))
     checks("listed deliberate but http.client now agrees" in framing,
            "http_response_framing: DELIBERATE must still assert http.client disagrees")
+
+    #   By construction: a parser of hostile bytes holds no index into its
+    #   input. These read the wire only through lib.util.c's byte_reader, so
+    #   none of them subscripts or adds to the pointer it was handed; the
+    #   day one does, this is the row that says which. Add a parser here in
+    #   the commit that moves it onto the reader.
+    reader_only = (
+        ("tls_server_hello_keys", ("hello",)),
+        ("tls_encrypted_extensions_valid", ("body",)),
+        ("tls_new_session_ticket_valid", ("body",)),
+        ("tls_certificate_body_open", ("body",)),
+        ("tls12_certificate", ("body",)),
+        ("tls12_key_exchange", ("body",)),
+        ("tls12_certificate_request", ("body",)),
+        ("tls_check_cert_verify", ("msg",)),
+        ("dhcp_walk", ("region",)),
+        ("netlink_find_span", ("bytes",)),
+    )
+    wire_source = net
+    try:
+        byte_reader_source()
+    except ValueError as error:
+        checks(False, "byte_reader_source: " + str(error))
+    for name, wire in reader_only:
+        found = re.search(r"^static[^\n]*\b%s\(.*?^\}$" % name, wire_source, re.M | re.S)
+        checks(found is not None, "reader-only: cannot find %s in net.c" % name)
+        if not found:
+            continue
+        body = re.sub(r"//[^\n]*", "", re.sub(r"/\*.*?\*/", "", found.group(0), flags=re.S))
+        checks("byte_reader_open(" in body,
+               "reader-only: %s no longer reads through byte_reader" % name)
+        for word in wire:
+            #   A local array is declared with its size in brackets; that is
+            #   not a read of it.
+            plain = re.sub(r"\bp8\s+%s\s*\[[^\]]*\]" % word, "", body)
+            bad = re.findall(r"\b%s\s*(?:\[|\+|-(?![>=]))" % word, plain)
+            checks(not bad,
+                   "reader-only: %s indexes or steps its input '%s' (%d times); read "
+                   "it through byte_reader" % (name, word, len(bad)))
 
     downgrade = inspect.getsource(harness_https_downgrade)
     shapes = sum(needle in downgrade for needle in ("http://", "HTTP://", "//", "user@",

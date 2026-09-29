@@ -56953,7 +56953,7 @@ static fn tls_server_hello_validation(void)
         p8 peer[32] = {0};
         positive share = 0;
         positive group = 0;
-        p8 address_to cookie = null;
+        const p8 address_to cookie = null;
         positive cookie_length = 0;
         p8 changed[91];
 
@@ -57128,7 +57128,7 @@ static fn tls_hello_retry_rows(void)
                 p8 peer[97];
                 positive share = 0;
                 positive group = 99;
-                p8 address_to cookie = null;
+                const p8 address_to cookie = null;
                 positive cookie_length = 0;
                 positive length = 44 + rows[row].length;
                 bipolar got;
@@ -57728,6 +57728,171 @@ static fn tls_hkdf_expand_ceiling(void)
                                   sizeof tls_hkdf_long));
 }
 
+/*
+        byte_reader against a model of it, on bytes whose last byte is the last
+        byte of a live page with a dead page after it, so that a read past the
+        window is a fault and not a wrong answer. Every length from 0 to 40 runs
+        four hundred drawn sequences of a dozen reads -- one, two, three and
+        four byte numbers, skip, take, a window, and the three vector widths --
+        and the model, which is offsets and a failed flag written out the
+        long way, has to agree on each value, on the bytes left, and on
+        whether the reader failed. A failed reader stays failed and empty; a
+        window is exactly the bytes it names and reads nothing past them.
+*/
+static fn byte_reader_rows(void)
+{
+        p8 address_to base = (p8 address_to)memory(2 * 4096);
+        p64 random = 0x9e3779b97f4a7c15ull;
+        bool values = true;
+        bool remains = true;
+        bool windows = true;
+        bool sticky = true;
+
+        system_call_3(syscall(mprotect), (positive)(address_any)(base + 4096),
+                      4096, FILE_PROTECT_NONE);
+        for (positive length = 0; length <= 40; length++)
+                for (positive round = 0; round < 400; round++)
+                {
+                        p8 address_to bytes = base + 4096 - length;
+                        byte_reader reader;
+                        positive at = 0;
+                        bool dead = false;
+
+                        for (positive i = 0; i < length; i++)
+                        {
+                                random ^= random << 13;
+                                random ^= random >> 7;
+                                random ^= random << 17;
+                                bytes[i] = (p8)random;
+                        }
+                        reader = byte_reader_open(bytes, length);
+
+                        for (positive step = 0; step < 12; step++)
+                        {
+                                positive operation;
+                                positive count;
+                                positive width;
+                                p64 want = 0;
+                                p64 got = 0;
+                                bool fits;
+
+                                random ^= random << 13;
+                                random ^= random >> 7;
+                                random ^= random << 17;
+                                operation = random % 10;
+                                count = random >> 8 & 15;
+                                //      Operations 0-3 read a number of that
+                                //      many bytes; 7-9 a vector with a prefix
+                                //      of one, two or three.
+                                width = operation < 4 ? operation + 1
+                                        : operation >= 7 ? operation - 6 : count;
+                                if (operation >= 7)
+                                {
+                                        positive prefix = width;
+                                        positive size = 0;
+
+                                        fits = !dead && prefix <= length - at;
+                                        for (positive i = 0; fits && i < prefix; i++)
+                                                size = size << 8 | bytes[at + i];
+                                        fits = fits && size <= length - at - prefix;
+                                        {
+                                                byte_reader window =
+                                                    operation == 7
+                                                        ? byte_reader_vector8(&reader)
+                                                    : operation == 8
+                                                        ? byte_reader_vector16(&reader)
+                                                        : byte_reader_vector24(&reader);
+
+                                                windows &= byte_reader_ok(&window) == fits &&
+                                                           byte_reader_left(&window) ==
+                                                               (fits ? size : 0) &&
+                                                           (!fits || byte_reader_here(&window) ==
+                                                                         bytes + at + prefix);
+                                                if (fits)
+                                                {
+                                                        //      Nothing past the window is reachable through it.
+                                                        windows &= byte_reader_take(&window, size + 1) == null &&
+                                                                   !byte_reader_ok(&window) &&
+                                                                   byte_reader_left(&window) == 0;
+                                                        at += prefix + size;
+                                                }
+                                                else
+                                                        dead = true;
+                                        }
+                                        remains &= byte_reader_left(&reader) ==
+                                                       (dead ? 0 : length - at) &&
+                                                   byte_reader_ok(&reader) == !dead;
+                                        continue;
+                                }
+                                if (operation < 4)
+                                {
+                                        fits = !dead && width <= length - at;
+                                        for (positive i = 0; fits && i < width; i++)
+                                                want = want << 8 | bytes[at + i];
+                                        got = operation == 0 ? byte_reader_u8(&reader)
+                                              : operation == 1 ? byte_reader_u16(&reader)
+                                              : operation == 2 ? byte_reader_u24(&reader)
+                                                               : byte_reader_u32(&reader);
+                                        values &= got == want;
+                                        if (fits)
+                                                at += width;
+                                        else
+                                                dead = true;
+                                }
+                                else
+                                {
+                                        const p8 address_to found;
+
+                                        fits = !dead && count <= length - at;
+                                        if (operation == 4)
+                                                values &= byte_reader_skip(&reader, count) == fits;
+                                        else if (operation == 5)
+                                        {
+                                                found = byte_reader_take(&reader, count);
+                                                values &= fits ? found == bytes + at : found == null;
+                                        }
+                                        else
+                                        {
+                                                byte_reader window = byte_reader_window(&reader, count);
+
+                                                windows &= byte_reader_ok(&window) == fits &&
+                                                           byte_reader_left(&window) == (fits ? count : 0) &&
+                                                           (!fits || byte_reader_here(&window) == bytes + at);
+                                        }
+                                        if (fits)
+                                                at += count;
+                                        else
+                                                dead = true;
+                                }
+                                remains &= byte_reader_left(&reader) == (dead ? 0 : length - at) &&
+                                           byte_reader_ok(&reader) == !dead;
+                        }
+                        //      Once failed, nothing reads again.
+                        if (dead)
+                        {
+                                byte_reader nothing;
+
+                                sticky &= byte_reader_u8(&reader) == 0 &&
+                                          byte_reader_take(&reader, 0) == null &&
+                                          byte_reader_here(&reader) == null &&
+                                          !byte_reader_end(&reader);
+                                nothing = byte_reader_window(&reader, 0);
+                                sticky &= !byte_reader_ok(&nothing) &&
+                                          byte_reader_left(&nothing) == 0;
+                        }
+                }
+
+        check("byte_reader numbers, skips and takes agree with the model on "
+              "every length to 40",
+              values);
+        check("byte_reader leaves exactly what the model leaves, and fails when it does",
+              remains);
+        check("byte_reader windows and vectors are exactly the bytes they name, "
+              "and nothing past them is reachable",
+              windows);
+        check("a failed byte_reader stays failed and empty", sticky);
+}
+
 static fn tls_certificate_framing(void)
 {
         {
@@ -57772,22 +57937,23 @@ static fn tls_certificate_framing(void)
                 static p8 empty[] = {0, 0, 0, 0};
                 static p8 context[] = {1, 'x', 0, 0, 0};
                 static p8 trailing[] = {0, 0, 0, 0, 0};
-                positive at = 99;
-                positive stop = 99;
+                static p8 one[] = {0, 0, 0, 5, 0, 0, 1, 7, 0};
+                byte_reader list;
 
                 check("TLS server Certificate has an exact empty list vector",
                       tls_certificate_body_open(empty, sizeof empty,
-                                                address_of at,
-                                                address_of stop) &&
-                          at == sizeof empty && stop == sizeof empty);
+                                                address_of list) &&
+                          byte_reader_end(&list));
                 check("TLS server Certificate request context must be empty",
                       !tls_certificate_body_open(context, sizeof context,
-                                                 address_of at,
-                                                 address_of stop));
+                                                 address_of list));
                 check("TLS server Certificate list consumes its whole body",
                       !tls_certificate_body_open(trailing, sizeof trailing,
-                                                 address_of at,
-                                                 address_of stop));
+                                                 address_of list));
+                check("TLS server Certificate list is what its length says",
+                      tls_certificate_body_open(one, sizeof one,
+                                                address_of list) &&
+                          byte_reader_left(&list) == 5);
         }
 
         {
@@ -60917,7 +61083,7 @@ static fn tls12_pieces(void)
                 p8 peer[97];
                 positive share = 0;
                 positive group = 0;
-                p8 address_to cookie = null;
+                const p8 address_to cookie = null;
                 positive cookie_length = 0;
                 positive at = 38;
                 bool accepted;
@@ -63130,6 +63296,7 @@ b32 main(void)
         tls_key_update_rounds();
         tls_hkdf_expand_ceiling();
         tls_certificate_framing();
+        byte_reader_rows();
         crypto_floor();
         crypto_floor_ghash();
         crypto_floor_field();

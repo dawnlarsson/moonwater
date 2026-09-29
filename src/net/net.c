@@ -646,23 +646,31 @@ static bipolar netlink_walk(b32 handle, netlink_buffer address_to request,
 static COLD address_any netlink_find_span(p8 address_to bytes, positive length,
                                      p16 type, positive address_to size)
 {
-        positive at = 0;
-        netlink_attribute address_to attribute;
+        byte_reader reader = byte_reader_open(bytes, length);
 
-        while (at + sizeof(netlink_attribute) <= length)
+        while (byte_reader_left(&reader) >= sizeof(netlink_attribute))
         {
-                attribute = (netlink_attribute address_to)(bytes + at);
-                if (attribute->length < sizeof(netlink_attribute) ||
-                    at + attribute->length > length)
+                positive whole = byte_reader_u16le(&reader);
+                p16 kind = byte_reader_u16le(&reader);
+                byte_reader value;
+
+                if (whole < sizeof(netlink_attribute))
                         return null;
-                if ((attribute->type & NLA_TYPE_MASK) == type)
+                value = byte_reader_window(&reader,
+                                           whole - sizeof(netlink_attribute));
+                if (!byte_reader_ok(&reader))
+                        return null;
+                if ((kind & NLA_TYPE_MASK) == type)
                 {
                         if (size)
-                                address_to size = attribute->length -
-                                                  sizeof(netlink_attribute);
-                        return bytes + at + sizeof(netlink_attribute);
+                                address_to size = byte_reader_left(&value);
+                        return (address_any)byte_reader_here(&value);
                 }
-                at += netlink_align(attribute->length);
+                //      The next starts on a four byte boundary, which the
+                //      last one need not reach.
+                (void)byte_reader_skip(&reader,
+                                       min(netlink_align(whole) - whole,
+                                           byte_reader_left(&reader)));
         }
 
         return null;
@@ -6650,26 +6658,17 @@ static PURE positive tls_load_24(p8 address_to at)
 
 static COLD bool tls_certificate_body_open(p8 address_to body,
                                       positive body_length,
-                                      positive address_to entries_at,
-                                      positive address_to list_end)
+                                      byte_reader address_to list)
 {
-        positive at = 1;
-        positive list_length;
+        byte_reader reader = byte_reader_open(body, body_length);
 
         /* The server Certificate in this initial handshake has an empty
            request_context.  Its three-byte list vector must consume the rest
            of the handshake body exactly. */
-        if (body_length < 4 || body[0] != 0 || at + 3 > body_length)
+        if (byte_reader_u8(&reader) != 0)
                 return false;
-
-        list_length = tls_load_24(body + at);
-        at += 3;
-        if (list_length != body_length - at)
-                return false;
-
-        *entries_at = at;
-        *list_end = at + list_length;
-        return true;
+        address_to list = byte_reader_vector24(&reader);
+        return byte_reader_end(&reader);
 }
 
 /* The issuer certificate a caIssuers URL names, fetched into room over the
@@ -6709,43 +6708,37 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
         positive path[9] = {0};
         p8 fetched[TLS_AIA_MAX];
         positive count = 0;
-        positive at;
-        positive list_end;
+        byte_reader list;
         positive unusable = 0;
         positive child = 0;
         positive depth = 0;
         p64 now = 0;
         bool asked = false;
 
-        if (!tls_certificate_body_open(body, body_length,
-                                       address_of at, address_of list_end))
+        if (!tls_certificate_body_open(body, body_length, address_of list))
                 return false;
 
-        while (at + 3 <= list_end && count < 8)
+        //      Each entry is a certificate and its extensions, which nothing
+        //      here reads.
+        while (byte_reader_left(&list) && count < 8)
         {
-                positive cert_length = tls_load_24(body + at);
-                positive ext_length;
+                byte_reader entry = byte_reader_vector24(&list);
 
-                at += 3;
-                if (cert_length + 2 > list_end - at)
+                (void)byte_reader_vector16(&list);
+                if (!byte_reader_ok(&list))
                         return false;
-                if (tls_parse_cert(body + at, cert_length, certs + count,
+                if (tls_parse_cert((p8 address_to)byte_reader_here(&entry),
+                                   byte_reader_left(&entry), certs + count,
                                    count ? null : host))
                 {
                         if (!count)
                                 return false;
                         unusable |= (positive)1 << count;
                 }
-                at += cert_length;
-                ext_length = network_load_16(body + at);
-                at += 2;
-                if (ext_length > list_end - at)
-                        return false;
-                at += ext_length;
                 count++;
         }
 
-        if (!count || at != list_end)
+        if (!count || byte_reader_left(&list))
                 return false;
 
         tls_keep_leaf(tls, certs);
@@ -7025,51 +7018,54 @@ static COLD bipolar tls_server_hello_keys(p8 address_to hello, positive length,
                                      p8 address_to peer, positive room,
                                      positive address_to share_length,
                                      positive address_to group,
-                                     p8 address_to address_to cookie,
+                                     const p8 address_to address_to cookie,
                                      positive address_to cookie_length)
 {
         static const p8 kinds[] = {0x2b, 0x33, 0x2c, 0x17, 0x0b, 0x00};
-        positive at;
+        byte_reader message = byte_reader_open(hello, length);
+        byte_reader body;
+        byte_reader extensions = byte_reader_open(null, 0);
+        const p8 address_to hello_random;
         positive session;
         positive suite;
         positive seen = 0;
         bool retry;
 
-        if (length < 44 || hello[0] != TLS_HS_SERVER_HELLO ||
-            tls_load_24(hello + 1) != length - 4 || hello[4] != 0x03 ||
-            hello[5] != 0x03)
+        if (length < 44 || byte_reader_u8(&message) != TLS_HS_SERVER_HELLO)
+                return TLS_FAIL;
+        body = byte_reader_window(&message, byte_reader_u24(&message));
+        if (!byte_reader_end(&message) || byte_reader_u16(&body) != 0x0303)
+                return TLS_FAIL;
+        hello_random = byte_reader_take(&body, 32);
+        if (!hello_random)
                 return TLS_FAIL;
 
-        retry = !memory_compare(hello + 6, tls_retry_random, 32);
-        memory_copy(tls->server_random, hello + 6, 32);
+        retry = !memory_compare(hello_random, tls_retry_random, 32);
+        memory_copy(tls->server_random, hello_random, 32);
         address_to group = 0;
         address_to cookie = null;
         address_to cookie_length = 0;
-        at = 4 + 2 + 32;
-        session = hello[at++];
-        if (session > 32 || length - at < session + 3)
+        session = byte_reader_u8(&body);
+        if (session > 32 || !byte_reader_skip(&body, session))
                 return TLS_FAIL;
-        at += session;
-        suite = network_load_16(hello + at);
-        at += 2;
-        if (hello[at++] != 0 ||
-            (at < length && (length - at < 2 ||
-                             network_load_16(hello + at) != length - at - 2)))
+        suite = byte_reader_u16(&body);
+        if (byte_reader_u8(&body) != 0 || !byte_reader_ok(&body))
                 return TLS_FAIL;
-        at += at < length ? 2 : 0;
-
-        while (at < length)
+        //      The extensions, when there are any, fill what is left.
+        if (byte_reader_left(&body))
         {
-                positive id;
-                positive elen;
+                extensions = byte_reader_vector16(&body);
+                if (!byte_reader_end(&body))
+                        return TLS_FAIL;
+        }
+
+        while (byte_reader_left(&extensions))
+        {
+                positive id = byte_reader_u16(&extensions);
+                byte_reader data = byte_reader_vector16(&extensions);
                 positive bit = 7;
 
-                if (length - at < 4)
-                        return TLS_FAIL;
-                id = network_load_16(hello + at);
-                elen = network_load_16(hello + at + 2);
-                at += 4;
-                if (elen > length - at)
+                if (!byte_reader_ok(&extensions))
                         return TLS_FAIL;
                 /* One bit a kind this client offered, in kinds' order and
                    renegotiation_info last; any other kind, or one twice,
@@ -7085,57 +7081,63 @@ static COLD bipolar tls_server_hello_keys(p8 address_to hello, positive length,
 
                 if (id == 0x002b)
                 {
-                        if (elen != 2 || hello[at] != 0x03 ||
-                            hello[at + 1] != 0x04)
+                        if (byte_reader_u16(&data) != 0x0304 ||
+                            !byte_reader_end(&data))
                                 return TLS_FAIL;
                 }
                 else if (id == 0x0033)
                 {
-                        positive named;
-                        positive klen;
+                        positive named = byte_reader_u16(&data);
+                        positive klen = tls_share_length(named);
+                        const p8 address_to share;
 
-                        if (elen < 2)
-                                return TLS_FAIL;
-                        named = network_load_16(hello + at);
-                        klen = tls_share_length(named);
                         /* A retry names an offered group not yet shared; a
                            hello answers the share, at its one length. */
-                        if (!klen || (named == tls->group) == retry ||
-                            (retry ? elen != 2
-                                   : elen != 4 + klen || klen > room ||
-                                         network_load_16(hello + at + 2) !=
-                                             klen))
+                        if (!byte_reader_ok(&data) || !klen ||
+                            (named == tls->group) == retry)
                                 return TLS_FAIL;
                         if (retry)
                                 klen = 0;
-                        memory_copy(peer, hello + at + 4, klen);
+                        else if (klen > room ||
+                                 byte_reader_u16(&data) != klen)
+                                return TLS_FAIL;
+                        share = byte_reader_take(&data, klen);
+                        if (!share || !byte_reader_end(&data))
+                                return TLS_FAIL;
+                        memory_copy(peer, share, klen);
                         address_to share_length = klen;
                         address_to group = named;
                 }
                 else if (id == 0x002c)
                 {
-                        if (!retry || elen < 3 ||
-                            network_load_16(hello + at) != elen - 2)
+                        byte_reader whole = data;
+                        positive inner;
+
+                        if (!retry || byte_reader_left(&whole) < 3)
                                 return TLS_FAIL;
-                        address_to cookie = hello + at;
-                        address_to cookie_length = elen;
+                        inner = byte_reader_u16(&data);
+                        if (inner != byte_reader_left(&data))
+                                return TLS_FAIL;
+                        address_to cookie = byte_reader_here(&whole);
+                        address_to cookie_length = byte_reader_left(&whole);
                 }
                 else if (id == 0x000b)
                 {
                         /* The formats list has to hold uncompressed. */
                         bool uncompressed = false;
+                        byte_reader formats = byte_reader_vector8(&data);
 
-                        for (positive i = 1; i < elen; i++)
-                                uncompressed |= !hello[at + i];
-                        if (!uncompressed || hello[at] != elen - 1)
+                        while (byte_reader_left(&formats))
+                                uncompressed |= !byte_reader_u8(&formats);
+                        if (!uncompressed || !byte_reader_end(&data))
                                 return TLS_FAIL;
                 }
-                else if ((id == 0x0000 && (elen || !tls->named)) ||
-                         (id == 0x0017 && elen) ||
-                         (id == 0xff01 && (elen != 1 || hello[at])))
+                else if ((id == 0x0000 &&
+                          (byte_reader_left(&data) || !tls->named)) ||
+                         (id == 0x0017 && byte_reader_left(&data)) ||
+                         (id == 0xff01 &&
+                          (byte_reader_u8(&data) || !byte_reader_end(&data))))
                         return TLS_FAIL;
-
-                at += elen;
         }
 
         if (seen & 1)
@@ -7150,8 +7152,8 @@ static COLD bipolar tls_server_hello_keys(p8 address_to hello, positive length,
         }
         if (retry || (suite != 0xc02b && suite != 0xc02f) || seen & 6 ||
             (seen & 0x48) != 0x48 ||
-            (!memory_compare(hello + 6 + 24, "DOWNGRD", 7) &&
-             hello[6 + 31] <= 1))
+            (!memory_compare(hello_random + 24, "DOWNGRD", 7) &&
+             hello_random[31] <= 1))
                 return TLS_FAIL;
         tls->tls12 = true;
         tls->suite = (p16)suite;
@@ -7427,14 +7429,23 @@ static COLD bipolar tls_check_cert_verify(tls_conn address_to tls, p8 address_to
         static const p8 context[] = "TLS 1.3, server CertificateVerify";
         p8 signed_bytes[64 + sizeof context + 32];
         crypto_sha256 copy = tls->transcript;
+        byte_reader reader = byte_reader_open(msg, length);
+        positive scheme;
+        byte_reader signature;
 
-        if (length < 8 || network_load_16(msg + 6) != length - 8)
+        //      The message's own four-byte header, the scheme, the signature.
+        (void)byte_reader_skip(&reader, 4);
+        scheme = byte_reader_u16(&reader);
+        signature = byte_reader_vector16(&reader);
+        if (!byte_reader_end(&reader))
                 return TLS_FAIL;
         memory_fill(signed_bytes, 0x20, 64);
         memory_copy(signed_bytes + 64, context, sizeof context);
         crypto_sha256_close(address_of copy, signed_bytes + 64 + sizeof context);
-        return tls_signature_valid(tls, network_load_16(msg + 4), signed_bytes,
-                                   sizeof signed_bytes, msg + 8, length - 8)
+        return tls_signature_valid(tls, scheme, signed_bytes,
+                                   sizeof signed_bytes,
+                                   (p8 address_to)byte_reader_here(&signature),
+                                   byte_reader_left(&signature))
                    ? TLS_OK
                    : TLS_FAIL;
 }
@@ -7506,25 +7517,20 @@ static COLD bool tls_encrypted_extensions_valid(p8 address_to body,
                                            positive length, positive allowed)
 {
         p8 seen[8192];
-        positive at = 2;
+        byte_reader reader = byte_reader_open(body, length);
+        byte_reader list = byte_reader_vector16(&reader);
 
-        if (length < 2 || network_load_16(body) != length - 2)
+        if (!byte_reader_end(&reader))
                 return false;
 
         memory_fill(seen, 0, sizeof seen);
 
-        while (at < length)
+        while (byte_reader_left(&list))
         {
-                p16 kind;
-                p16 size;
+                p16 kind = byte_reader_u16(&list);
 
-                if (length - at < 4)
-                        return false;
-
-                kind = network_load_16(body + at);
-                size = network_load_16(body + at + 2);
-
-                if ((positive)size > length - at - 4)
+                (void)byte_reader_vector16(&list);
+                if (!byte_reader_ok(&list))
                         return false;
 
                 if ((allowed != positive_max &&
@@ -7532,38 +7538,27 @@ static COLD bool tls_encrypted_extensions_valid(p8 address_to body,
                     seen[kind >> 3] & (p8)(1u << (kind & 7)))
                         return false;
                 seen[kind >> 3] |= (p8)(1u << (kind & 7));
-
-                at += 4 + size;
         }
 
-        return at == length;
+        return true;
 }
 
 static COLD bool tls_new_session_ticket_valid(p8 address_to body,
                                          positive length)
 {
-        positive at = 8;
-        positive nonce_length;
-        positive ticket_length;
+        byte_reader reader = byte_reader_open(body, length);
+        byte_reader ticket;
 
-        if (length < 13)
+        //      The lifetime and the age's addend, the nonce, the ticket.
+        (void)byte_reader_skip(&reader, 8);
+        (void)byte_reader_vector8(&reader);
+        ticket = byte_reader_vector16(&reader);
+        if (!byte_reader_ok(&reader) || !byte_reader_left(&ticket))
                 return false;
 
-        nonce_length = body[at++];
-        if (nonce_length > length - at)
-                return false;
-        at += nonce_length;
-
-        if (length - at < 2)
-                return false;
-        ticket_length = network_load_16(body + at);
-        at += 2;
-        if (!ticket_length || ticket_length > length - at)
-                return false;
-        at += ticket_length;
-
-        return tls_encrypted_extensions_valid(body + at, length - at,
-                                              positive_max);
+        return tls_encrypted_extensions_valid(
+            (p8 address_to)byte_reader_here(&reader),
+            byte_reader_left(&reader), positive_max);
 }
 
 /* KeyUpdate (RFC 8446 4.6.3, 7.2): the next traffic secret replaces the
@@ -7668,31 +7663,33 @@ static COLD bipolar tls_post_handshake_append(tls_conn address_to tls,
 static COLD bool tls12_certificate(tls_conn address_to tls, p8 address_to body,
                                    positive length, p8 address_to into)
 {
-        positive at = 3;
-        positive out = 4;
+        byte_reader reader = byte_reader_open(body, length);
+        byte_reader list = byte_reader_vector24(&reader);
+        byte_store out = {into, 5 + TLS_PLAINTEXT_MAX, 4};
 
-        if (length < 3 || tls_load_24(body) != length - 3)
+        if (!byte_reader_end(&reader))
                 return false;
         into[0] = 0;
-        while (at < length)
+        while (byte_reader_left(&list))
         {
-                positive size;
+                byte_reader cert = byte_reader_vector24(&list);
+                positive size = byte_reader_left(&cert);
+                p8 head[3] = {(p8)(size >> 16), (p8)(size >> 8), (p8)size};
+                p8 zero[2] = {0, 0};
 
-                if (length - at < 3)
+                //      Each entry as TLS 1.3 sends it: its length, the
+                //      certificate, and no extensions.
+                if (!byte_reader_ok(&list) ||
+                    !byte_store_append_exact(address_of out, head, 3) ||
+                    !byte_store_append_exact(address_of out,
+                                             (p8 address_to)byte_reader_here(
+                                                 &cert), size) ||
+                    !byte_store_append_exact(address_of out, zero, 2))
                         return false;
-                size = tls_load_24(body + at);
-                if (size > length - at - 3 ||
-                    size + 5 > 5 + TLS_PLAINTEXT_MAX - out)
-                        return false;
-                memory_copy(into + out, body + at, 3 + size);
-                into[out + 3 + size] = 0;
-                into[out + 4 + size] = 0;
-                out += 5 + size;
-                at += 3 + size;
         }
-        into[1] = (p8)((out - 4) >> 16);
-        network_store_16(into + 2, (p16)(out - 4));
-        return tls_verify_chain(into, out, tls->host, tls) &&
+        into[1] = (p8)((out.used - 4) >> 16);
+        network_store_16(into + 2, (p16)(out.used - 4));
+        return tls_verify_chain(into, out.used, tls->host, tls) &&
                (tls->leaf_curve == 3) == (tls->suite == 0xc02f);
 }
 
@@ -7705,26 +7702,37 @@ static COLD bool tls12_key_exchange(tls_conn address_to tls, p8 address_to body,
                                     positive length)
 {
         p8 signed_bytes[64 + 4 + 97];
-        positive point;
+        byte_reader reader = byte_reader_open(body, length);
+        byte_reader parameters = reader;
         positive params;
+        positive group;
+        byte_reader point;
+        positive scheme;
+        byte_reader signature;
         bool agreed;
 
-        if (length < 4 || body[0] != 3)
+        if (byte_reader_u8(&reader) != 3)
                 return false;
-        point = tls_share_length(network_load_16(body + 1));
-        params = 4 + point;
-        if (!point || body[3] != point || length - 4 < params ||
-            network_load_16(body + params + 2) != length - params - 4)
+        group = byte_reader_u16(&reader);
+        point = byte_reader_vector8(&reader);
+        params = byte_reader_left(&parameters) - byte_reader_left(&reader);
+        scheme = byte_reader_u16(&reader);
+        signature = byte_reader_vector16(&reader);
+        if (!byte_reader_end(&reader) ||
+            byte_reader_left(&point) != tls_share_length(group) ||
+            !byte_reader_left(&point))
                 return false;
         memory_copy(signed_bytes, tls->client_random, 32);
         memory_copy(signed_bytes + 32, tls->server_random, 32);
-        memory_copy(signed_bytes + 64, body, params);
-        if (!tls_signature_valid(tls, network_load_16(body + params),
-                                 signed_bytes, 64 + params, body + params + 4,
-                                 length - params - 4))
+        memory_copy(signed_bytes + 64, (p8 address_to)byte_reader_here(&parameters),
+                    params);
+        if (!tls_signature_valid(tls, scheme, signed_bytes, 64 + params,
+                                 (p8 address_to)byte_reader_here(&signature),
+                                 byte_reader_left(&signature)))
                 return false;
-        agreed = tls_share_scalar(tls, network_load_16(body + 1)) &&
-                 tls_share_use(tls, body + 4, tls->master) &&
+        agreed = tls_share_scalar(tls, group) &&
+                 tls_share_use(tls, (p8 address_to)byte_reader_here(&point),
+                               tls->master) &&
                  tls_share_use(tls, null, tls->share);
         crypto_forget(tls->scalar, sizeof tls->scalar);
         return agreed;
@@ -7734,19 +7742,12 @@ static COLD bool tls12_key_exchange(tls_conn address_to tls, p8 address_to body,
    signature algorithms, then authorities, each vector whole. */
 static COLD bool tls12_certificate_request(p8 address_to body, positive length)
 {
-        positive at;
+        byte_reader reader = byte_reader_open(body, length);
+        byte_reader types = byte_reader_vector8(&reader);
 
-        if (!length || !body[0] || body[0] > length - 1)
-                return false;
-        at = 1 + body[0];
-        for (positive vector = 0; vector < 2; vector++)
-        {
-                if (length - at < 2 ||
-                    network_load_16(body + at) > length - at - 2)
-                        return false;
-                at += 2 + network_load_16(body + at);
-        }
-        return at == length;
+        (void)byte_reader_vector16(&reader);
+        (void)byte_reader_vector16(&reader);
+        return byte_reader_left(&types) && byte_reader_end(&reader);
 }
 
 /* One message of the server's flight, framed by tls_handshake_next and
@@ -7765,17 +7766,22 @@ static COLD bipolar tls_flight_message(tls_conn address_to tls,
 {
         p8 address_to body = msg + 4;
         positive body_length = length - 4;
+        byte_reader request = byte_reader_open(body, body_length);
         bool valid;
 
         if (msg[0] == TLS_HS_ENCRYPTED_EXTS)
                 valid = tls_encrypted_extensions_valid(
                     body, body_length, (positive)1 << 0x000a | tls->named);
         else if (msg[0] == TLS_HS_CERT_REQUEST)
+                //      TLS 1.3's has an empty context, then extensions.
                 valid = tls->cert_requested =
                     tls->tls12 ? tls12_certificate_request(body, body_length)
-                               : body_length >= 3 && !body[0] &&
+                               : !byte_reader_u8(&request) &&
+                                     byte_reader_ok(&request) &&
                                      tls_encrypted_extensions_valid(
-                                         body + 1, body_length - 1,
+                                         (p8 address_to)byte_reader_here(
+                                             &request),
+                                         byte_reader_left(&request),
                                          positive_max);
         else if (msg[0] == TLS_HS_CERTIFICATE)
         {
@@ -7924,7 +7930,7 @@ static COLD bipolar tls_handshake(
         bipolar hello_kind;
         positive share_length = 0;
         positive group = 0;
-        p8 address_to cookie = null;
+        const p8 address_to cookie = null;
         positive cookie_length = 0;
 
         crypto_sha256_open(address_of tls->transcript);
@@ -10215,12 +10221,14 @@ static COLD bipolar dhcp_walk(p8 address_to region, positive size,
                               dhcp_gathered address_to gathered,
                               p8 address_to overload)
 {
-        positive at = 0;
+        byte_reader reader = byte_reader_open(region, size);
 
-        while (at < size)
+        while (byte_reader_left(&reader))
         {
-                p8 option = region[at];
-                p8 length;
+                p8 option = byte_reader_u8(&reader);
+                byte_reader value;
+                positive before;
+                positive taken;
 
                 if (option == DHCP_OPTION_END)
                 {
@@ -10228,51 +10236,47 @@ static COLD bipolar dhcp_walk(p8 address_to region, positive size,
                            option stream. Require canonical PAD bytes so this
                            parser cannot disagree with a middlebox or another
                            client which keeps scanning after option 255. */
-                        at++;
-                        return memory_span_byte(region + at, DHCP_OPTION_PAD,
-                                                size - at) == size - at
-                                   ? 0
-                                   : -1;
+                        while (byte_reader_left(&reader))
+                                if (byte_reader_u8(&reader) != DHCP_OPTION_PAD)
+                                        return -1;
+                        return 0;
                 }
 
                 if (option == DHCP_OPTION_PAD)
-                {
-                        at++;
                         continue;
-                }
 
-                if (at + 1 >= size)
-                        return -1;
-
-                length = region[at + 1];
-
-                if (at + 2 + length > size)
+                value = byte_reader_vector8(&reader);
+                if (!byte_reader_ok(&reader))
                         return -1;
 
                 if (option == DHCP_OPTION_OVERLOAD)
                 {
-                        p8 value;
+                        byte_reader once = value;
+                        p8 code;
 
                         /* Option overload is legal exactly once, only in the
                            primary options area, with its one-byte value in
                            the RFC-defined 1..3 domain. Accepting malformed or
                            repeated controls makes file/sname interpretation
                            depend on which occurrence a parser chooses. */
-                        if (!overload || address_to overload || length != 1)
+                        if (!overload || address_to overload ||
+                            byte_reader_left(&value) != 1)
                                 return -1;
-                        value = region[at + 2];
-                        if (!value || value > 3)
+                        code = byte_reader_u8(&once);
+                        if (!code || code > 3)
                                 return -1;
-                        address_to overload = value;
+                        address_to overload = code;
                 }
 
-                for (positive taken = 0; taken < length &&
-                                         gathered[option].length + taken < 4; taken++)
-                        gathered[option].first[gathered[option].length + taken] =
-                                region[at + 2 + taken];
-                gathered[option].length += length;
-
-                at += 2 + length;
+                //      The first four bytes of the option, over every piece
+                //      of it, and the length of all of them.
+                before = gathered[option].length;
+                gathered[option].length += byte_reader_left(&value);
+                taken = before < 4 ? min(byte_reader_left(&value), 4 - before)
+                                   : 0;
+                if (taken)
+                        memory_copy(gathered[option].first + before,
+                                    byte_reader_take(&value, taken), taken);
         }
 
         /* RFC 2132 terminates every option stream with option 255. Reaching
