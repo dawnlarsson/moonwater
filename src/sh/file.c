@@ -69,6 +69,20 @@ full:
         return null;
 }
 
+/* One more word in a list that grows with what the command line holds,
+   where a table of a fixed size ended -I, -t and -x at some number GNU has
+   no such limit on. False when it could not grow. */
+static bool file_words_append(string_address address_to address_to list,
+                              positive address_to room, positive address_to count,
+                              string_address word)
+{
+        if (!array_store_reserve(address_to list, address_to room, address_to count,
+                                 address_to count + 1, 16))
+                return false;
+        (address_to list)[(address_to count)++] = word;
+        return true;
+}
+
 /*
         Buffers a few tools need, mapped by the first use in a process rather
         than carried in the bss of every one. The multicall image had 59.6 MB
@@ -8010,10 +8024,8 @@ static bool file_source_destination(string_address program, positive first,
         space and nothing else: 176 bytes an entry across the tables sized by
         this, and 64 bytes a name on average in the arena.
 */
-#define LS_MAX_ENTRIES (1 << 17)
-#define LS_ARENA (1 << 23)
-#define LS_PATTERNS 64
-#define LS_LISTED 4096
+#define LS_MAX_ENTRIES (1 << 24)
+#define LS_ARENA (1 << 30)
 
 // The four-byte fields together, so an entry is 128 bytes and not 144.
 typedef struct
@@ -8167,9 +8179,11 @@ static bool ls_block_human;
 static bool ls_block_si;
 static p8 ls_block_suffix[8];
 
-static string_address ls_ignore_patterns[LS_PATTERNS];
+static string_address address_to ls_ignore_patterns;
+static positive ls_ignore_room;
 static positive ls_ignore_count;
-static string_address ls_hide_patterns[LS_PATTERNS];
+static string_address address_to ls_hide_patterns;
+static positive ls_hide_room;
 static positive ls_hide_count;
 
 static bool ls_some_quoted;
@@ -8188,7 +8202,8 @@ static positive ls_out_bytes;
 static positive (address_to ls_dired_marks_held)[2 * LS_MAX_ENTRIES];
 #define ls_dired_marks (*ls_dired_marks_held)
 static positive ls_dired_count;
-static positive ls_subdired_marks[2 * LS_LISTED];
+static positive address_to ls_subdired_marks;
+static positive ls_subdired_room;
 static positive ls_subdired_count;
 
 // The directories -R has listed, by identity, so a link back into one is
@@ -11228,7 +11243,9 @@ static fn ls_directory(string_address path, bool heading, positive depth,
                 ls_quote(ls_out, path);
                 ls_quote_heading = false;
 
-                if (ls_dired && ls_subdired_count + 2 <= array_count(ls_subdired_marks))
+                if (ls_dired &&
+                    array_store_reserve(ls_subdired_marks, ls_subdired_room,
+                                        ls_subdired_count, ls_subdired_count + 2, 64))
                 {
                         ls_subdired_marks[ls_subdired_count++] = begin;
                         ls_subdired_marks[ls_subdired_count++] = ls_out_bytes;
@@ -11557,16 +11574,12 @@ static bool ls_option_seen(p8 letter, string_address value)
         if ((letter != 'I' && letter != 'W') || !value)
                 return true;
 
-        string_address address_to table = letter == 'I' ? ls_ignore_patterns : ls_hide_patterns;
-        positive address_to have = letter == 'I' ? address_of ls_ignore_count
-                                                 : address_of ls_hide_count;
-
-        if (address_to have >= LS_PATTERNS)
-        {
-                return string_report(log_error, false, "%s: too many patterns to ignore\n", ls_program);
-        }
-
-        table[(address_to have)++] = value;
+        if (!(letter == 'I'
+                  ? file_words_append(address_of ls_ignore_patterns, address_of ls_ignore_room,
+                                      address_of ls_ignore_count, value)
+                  : file_words_append(address_of ls_hide_patterns, address_of ls_hide_room,
+                                      address_of ls_hide_count, value)))
+                return string_report(log_error, false, "%s: memory exhausted\n", ls_program);
         return true;
 }
 
@@ -18721,9 +18734,11 @@ static positive df_order_file_room;
         -x drops the types it names.
 */
 static bool df_local;
-static string_address df_selected[16];
+static string_address address_to df_selected;
+static positive df_selected_room;
 static positive df_selected_count;
-static string_address df_excluded[16];
+static string_address address_to df_excluded;
+static positive df_excluded_room;
 static positive df_excluded_count;
 
 static bool df_type_listed(string_address type, string_address address_to list,
@@ -18933,14 +18948,12 @@ static bool df_seen(p8 letter, string_address value)
         if (letter != 't' && letter != 'x')
                 return true;
 
-        string_address address_to list = letter == 't' ? df_selected : df_excluded;
-        positive address_to count = letter == 't' ? address_of df_selected_count
-                                                  : address_of df_excluded_count;
-
-        if (address_to count == array_count(df_selected))
-                return string_report(log_error, false, "df: too many file system types\n");
-        list[address_to count] = value;
-        address_to count += 1;
+        if (!(letter == 't'
+                  ? file_words_append(address_of df_selected, address_of df_selected_room,
+                                      address_of df_selected_count, value)
+                  : file_words_append(address_of df_excluded, address_of df_excluded_room,
+                                      address_of df_excluded_count, value)))
+                return string_report(log_error, false, "df: memory exhausted\n");
         return true;
 }
 

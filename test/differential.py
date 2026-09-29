@@ -7412,7 +7412,9 @@ FILES_UTILITIES = (
     Utility("ls", options=files_LS_OPTIONS, operands=files_LS_OPERANDS, stdin=("empty",), fixture="files",
             stderr="exact", normalize=files_listing, env=(("LS_COLORS", files_LS_COLORS),), max_flags=5,
             valid=files_ls_valid,
-            extra=(("-la",), ("-lart",), ("-lisa",), ("-lhS", "dir"), ("-1R", "deep"), ("-dl", "dir", "dirlink", "link"),
+            extra=(tuple(word for n in range(70) for word in ("-I", "x%d" % n)) + (".",),
+                   tuple(word for n in range(70) for word in ("--hide=h%d*" % n,)) + ("-a", "."),
+                   ("-la",), ("-lart",), ("-lisa",), ("-lhS", "dir"), ("-1R", "deep"), ("-dl", "dir", "dirlink", "link"),
                    ("-lL", "dirlink"), ("-lH", "dirlink"), ("--color=always", "-1"), ("--color=always", "-l"),
                    ("-l", "--time-style=full-iso"), ("-lu", "--time-style=+%s"), ("-lc",),
                    ("-C", "-w", "40"), ("-x", "-w", "40"), ("-m", "-w", "30"), ("-Q", "-1"), ("-b", "-1"), ("-N", "-1"),
@@ -7568,7 +7570,9 @@ FILES_UTILITIES = (
             stdin=("empty",), fixture="files", stderr="exact", normalize=files_normal(files_hide_digits),
             #   -h, -k and -m: the last one given counts, -P spells -m's unit
             #   in bytes in either order, and -i leaves inodes as counts.
-            extra=(("-m", "/"), ("-m", "-h", "/"), ("-h", "-m", "/"), ("-mh", "/"), ("-hm", "/"),
+            extra=(tuple(word for n in range(40) for word in ("-t", "type%d" % n)) + ("-t", "ext4", "."),
+                   tuple(word for n in range(40) for word in ("-x", "type%d" % n)) + ("-a", "."),
+                   ("-m", "/"), ("-m", "-h", "/"), ("-h", "-m", "/"), ("-mh", "/"), ("-hm", "/"),
                    ("-k", "-m", "/"), ("-m", "-k", "/"), ("-P", "-m", "/"), ("-m", "-P", "."),
                    ("-Pm", "/", "."), ("-i", "-m", "/"), ("-m", "-i", "/"), ("-Tm", "/"),
                    ("-m", "--human-readable", "/"), ("--portability", "-m", "/"), ("-am",), ("-m",),
