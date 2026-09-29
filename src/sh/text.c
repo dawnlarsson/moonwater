@@ -7089,14 +7089,20 @@ static inline INLINE fn rev_characters(p8 address_to at, positive length)
         memory_reverse(at, length);
 }
 
-#if MOONWATER_STRICT == STRICT_REFERENCE
-// Whether every byte of a line begins or continues a character, which is
-// what util-linux asks before rev prints any of the file.
-static bool rev_text_whole(p8 address_to at, positive length)
+
+/*
+        Whether bytes are all characters in UTF-8, which is what GNU's grep
+        asks of a line in a UTF-8 locale before printing it and util-linux's
+        rev of a line before printing any of the file: a byte that begins no
+        character, a sequence cut short, an overlong form or a surrogate
+        fails it. A run of plain bytes needs no character found in it, so it
+        is stepped over eight at a time; the span engine is a call, and
+        these lines are short enough that the call is the cost.
+*/
+static PURE bool text_utf8_whole(string_address bytes, positive length)
 {
-        return memory_utf8_valid_span(at, length).x == length;
+        return memory_utf8_valid_span(bytes, length).x == length;
 }
-#endif
 
 static b32 text_rev()
 {
@@ -7137,7 +7143,7 @@ static b32 text_rev()
                                       null, 0, null))
                 {
 #if MOONWATER_STRICT == STRICT_REFERENCE
-                        if (utf8 && !rev_text_whole(line, length))
+                        if (utf8 && !text_utf8_whole((string_address)line, length))
                         {
                                 string_diagnostic(&text_diagnostic, 0, null,
                                                   "fgetwc() failed: Invalid or incomplete multibyte or wide character");
@@ -15866,14 +15872,25 @@ static bool column_keep_empty;
 static bool column_header_as_names;
 static bool column_header_taken;
 static bool column_custom_separator;
-static string_address column_input_separator;
+/*
+        The separator bytes, and every other byte, as the two tables a field
+        and the run between fields are spanned by: blank, or the -s set. A
+        NUL is a separator under -s, as string_first_of found the set's
+        terminator for it when this was a lookup a byte.
+*/
+static b8 column_separators[STRING_SET_BYTES];
+static b8 column_field_bytes[STRING_SET_BYTES];
 
-static bool column_is_separator(p8 character)
+static fn column_separators_set(string_address set)
 {
-        if (!column_custom_separator)
-                return byte_is_blank(character);
-
-        return string_first_of(column_input_separator, character) != null;
+        memory_fill(column_separators, 0, sizeof(column_separators));
+        if (!set)
+                memory_copy_apart(column_separators, string_set_blanks, sizeof(column_separators));
+        else
+                for (column_separators[0] = 1; string_get(set); set++)
+                        column_separators[string_get(set)] = 1;
+        for (positive at = 0; at < STRING_SET_BYTES; at++)
+                column_field_bytes[at] = !column_separators[at];
 }
 
 /* Split one table record exactly where util-linux's non-greedy -s tokenizer
@@ -15895,7 +15912,7 @@ static positive column_fields(p8 address_to bytes, positive length,
         {
                 if (!column_custom_separator)
                 {
-                        while (at < length && column_is_separator(bytes[at]))
+                        while (at < length && byte_is_blank(bytes[at]))
                                 at++;
                         if (at == length)
                                 break;
@@ -15906,8 +15923,13 @@ static positive column_fields(p8 address_to bytes, positive length,
                 if (column_limit && made + 1 == column_limit)
                         at = length;
 
-                while (at < length && !column_is_separator(bytes[at]))
-                        at++;
+                // Fields of a few bytes cost more in a span call than in the
+                // loop; the -s set is what the table is for.
+                if (column_custom_separator)
+                        at += string_span_max(bytes + at, length - at, column_field_bytes);
+                else
+                        while (at < length && !byte_is_blank(bytes[at]))
+                                at++;
 
                 if (into && made < room)
                         into[made] =
@@ -15926,11 +15948,7 @@ static positive column_fields(p8 address_to bytes, positive length,
 
 static bool column_blank(p8 address_to bytes, positive length)
 {
-        for (positive at = 0; at < length; at++)
-                if (!byte_is_space(bytes[at]))
-                        return false;
-
-        return true;
+        return string_span_max(bytes, length, string_set_space) == length;
 }
 
 static fn column_accept_record(p8 address_to bytes, positive length,
@@ -16544,9 +16562,9 @@ static b32 text_column()
         column_keep_empty = (flags & FILE_FLAG('L')) != 0;
         column_header_as_names = (flags & FILE_FLAG('K')) != 0;
         column_custom_separator = (flags & FILE_FLAG('s')) != 0;
-        column_input_separator = column_custom_separator
-                                     ? file_option_value(address_of taking, 's')
-                                     : (string_address)" \t";
+        column_separators_set(column_custom_separator
+                                  ? file_option_value(address_of taking, 's')
+                                  : null);
 
         if ((flags & FILE_FLAG('J')) && !(flags & FILE_FLAG('N')) &&
             !column_header_as_names)
@@ -17310,6 +17328,48 @@ static fn terminal_colrm_byte(terminal_state address_to state, p8 character)
                 state->remove_phase = 2;
 }
 
+/*
+        What colrm does a byte at a time, a run at a time where the state
+        cannot change inside it: with nothing to remove, or past the removed
+        columns (once any padding is written), every byte up to the newline
+        goes out as it is; printable bytes before the removed columns go out
+        one column each, and inside them are dropped, up to the byte whose
+        column changes the phase, which the byte path takes. Answers the
+        bytes taken.
+*/
+static positive terminal_colrm_run(terminal_state address_to state,
+                                   p8 address_to bytes, positive length)
+{
+        if (!state->remove_first ||
+            (state->remove_phase == 2 &&
+             (state->remove_padded || state->remove_last >= state->remove_column)))
+        {
+                p8 address_to newline = memory_first_of(bytes, '\n', length);
+                positive run = newline ? (positive)(newline - bytes) : length;
+
+                text_put(bytes, run);
+                return run;
+        }
+        if (state->remove_phase == 2)
+                return 0;
+
+        positive run = string_span_max(bytes, length, string_set_printable);
+        positive room = state->remove_phase == 0
+                            ? (state->remove_first - 1 > state->remove_column
+                                   ? state->remove_first - 1 - state->remove_column
+                                   : 0)
+                        : !state->remove_last ? run
+                        : state->remove_last - 1 > state->remove_column
+                            ? state->remove_last - 1 - state->remove_column
+                            : 0;
+
+        run = min(run, room);
+        if (!state->remove_phase)
+                text_put(bytes, run);
+        state->remove_column += run;
+        return run;
+}
+
 /* The sole scanner for the family./* The sole scanner for the family.  ESC consumes its command byte here, so a
    refill boundary cannot make any renderer interpret it twice. */
 static fn terminal_scan(byte_span address_to blob,
@@ -17346,6 +17406,7 @@ static fn terminal_scan(byte_span address_to blob,
                 if (state->mode == TERMINAL_COLRM)
                 {
                         terminal_colrm_byte(state, character);
+                        at += terminal_colrm_run(state, blob->bytes + at, blob->length - at);
                         continue;
                 }
 
@@ -18653,7 +18714,8 @@ static inline INLINE bool text_list_begins_at(positive which)
         return text_list_begins_far(which);
 }
 
-static COLD bool text_list_begins_far(positive which)
+// The first merged range whose first, or last, is not before WHICH.
+static COLD positive text_list_seek(positive which, bool by_last)
 {
         positive low = 0;
         positive high = text_list_ranges_count;
@@ -18662,12 +18724,20 @@ static COLD bool text_list_begins_far(positive which)
         {
                 positive middle = low + (high - low) / 2;
 
-                if (text_list_ranges[middle].first < which)
+                if ((by_last ? text_list_ranges[middle].last
+                             : text_list_ranges[middle].first) < which)
                         low = middle + 1;
                 else
                         high = middle;
         }
-        return low < text_list_ranges_count && text_list_ranges[low].first == which;
+        return low;
+}
+
+static COLD bool text_list_begins_far(positive which)
+{
+        positive at = text_list_seek(which, false);
+
+        return at < text_list_ranges_count && text_list_ranges[at].first == which;
 }
 
 /*
@@ -18991,19 +19061,9 @@ static inline INLINE bool text_list_has(positive which)
 
 static COLD bool text_list_has_far(positive which)
 {
-        positive low = 0;
-        positive high = text_list_ranges_count;
+        positive at = text_list_seek(which, true);
 
-        while (low < high)
-        {
-                positive middle = low + (high - low) / 2;
-
-                if (text_list_ranges[middle].last < which)
-                        low = middle + 1;
-                else
-                        high = middle;
-        }
-        return low < text_list_ranges_count && text_list_ranges[low].first <= which;
+        return at < text_list_ranges_count && text_list_ranges[at].first <= which;
 }
 
 /*
@@ -23551,17 +23611,6 @@ static bool grep_literal_bounded(const grep_plan address_to plan,
         }
 }
 
-/*
-        Whether bytes are all characters in UTF-8, which is what GNU asks of a
-        line in a UTF-8 locale before printing it: a byte that begins no
-        character, a sequence cut short, an overlong form or a surrogate keeps
-        the line from the output.
-*/
-static PURE bool grep_text_valid(string_address bytes, positive length)
-{
-        return memory_utf8_valid_span(bytes, length).x == length;
-}
-
 static bool grep_line_matches(const grep_plan address_to plan,
                               grep_state address_to state,
                               string_address line, positive length)
@@ -23768,7 +23817,7 @@ static fn grep_line_selected(const grep_plan address_to plan,
                 state->counted = line;
         }
 
-        if (plan->check_encoding && !grep_text_valid(line, length))
+        if (plan->check_encoding && !text_utf8_whole(line, length))
         {
                 state->unprintable = true;
                 return;
@@ -24288,11 +24337,11 @@ static bool grep_hold_valid(positive slot)
         positive head = GREP_HOLD_BYTES - at;
 
         if (head >= length)
-                return grep_text_valid((string_address)(grep_hold_pool + at), length);
+                return text_utf8_whole((string_address)(grep_hold_pool + at), length);
 
         memory_copy(grep_hold_color, grep_hold_pool + at, head);
         memory_copy(grep_hold_color + head, grep_hold_pool, length - head);
-        return grep_text_valid((string_address)grep_hold_color, length);
+        return text_utf8_whole((string_address)grep_hold_color, length);
 }
 
 /*
@@ -24962,7 +25011,7 @@ static bool grep_one(grep_run address_to run, string_address name)
                                                number);
 
                                 if (check_encoding &&
-                                    !grep_text_valid(line, text_line_length))
+                                    !text_utf8_whole(line, text_line_length))
                                         unprintable = true;
                                 else
                                 {
@@ -25069,7 +25118,7 @@ static bool grep_one(grep_run address_to run, string_address name)
                                 }
 
                                 if (!invert && check_encoding &&
-                                    !grep_text_valid(line + begin, stop - begin))
+                                    !text_utf8_whole(line + begin, stop - begin))
                                         unprintable = true;
                                 else if (!invert)
                                 {
@@ -25102,7 +25151,7 @@ static bool grep_one(grep_run address_to run, string_address name)
                                        shown, number);
 
                         if (check_encoding &&
-                            !grep_text_valid(line, text_line_length))
+                            !text_utf8_whole(line, text_line_length))
                                 unprintable = true;
                         else
                         {
