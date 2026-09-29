@@ -170,6 +170,8 @@ fn shell_stop(writer write, positive command);
 #endif
 static b32 host_machine_run(void);
 static b32 host_radio(string_address address_to arguments, positive count);
+static b32 host_tune(string_address address_to arguments, positive count);
+static fn tune_restore(void);
 static fn radio_restore(void);
 static fn radio_recover(void);
 static b32 host_locale(string_address address_to arguments, positive count);
@@ -1296,6 +1298,7 @@ static b32 host_take(host_install address_to install, bool update)
         log_flush();
         radio_restore();
         locale_restore();
+        tune_restore();
         return 0;
 }
 
@@ -7663,6 +7666,48 @@ static b32 radio_bluetooth_add(string_address identity)
         return 0;
 }
 
+/* Forget a remembered device: its line goes and the others stay as they were. */
+static b32 radio_bluetooth_remove(string_address identity)
+{
+        p8 text[4096];
+        p8 kept[4096];
+        bipolar got = file_slurp_once_at(AT_FDCWD, NET_BLUETOOTH_LIST, text, sizeof(text));
+        positive at = 0;
+        positive used = 0;
+        bool found = false;
+        positive want_length = string_length(identity);
+
+        if (!want_length || want_length > 128)
+                return host_refuse("that bluetooth name is empty or too long%s\n", "");
+        if (got <= 0 || !radio_line_has(text, (positive)got, identity))
+                return host_refuse("no remembered bluetooth device is called %s\n", identity);
+
+        while (at < (positive)got)
+        {
+                positive start = at;
+                positive end_of_line;
+
+                at += memory_span_without_byte(text + at, '\n', (positive)got - at);
+                end_of_line = at;
+                if (at < (positive)got)
+                        at++;
+                if (end_of_line - start == want_length &&
+                    !memory_compare(text + start, identity, want_length))
+                {
+                        found = true;
+                        continue;
+                }
+                memory_copy(kept + used, text + start, at - start);
+                used += at - start;
+        }
+
+        if (!found || host_write_file(NET_BLUETOOTH_LIST, kept, used, 0644, true) < 0)
+                return host_fail("bluetooth", -1);
+        string_format(log, host_label "bluetooth forgot %s\n", identity);
+        log_flush();
+        return 0;
+}
+
 static b32 radio_bluetooth_status(void)
 {
         p8 text[4096];
@@ -7944,7 +7989,710 @@ static b32 host_radio(string_address address_to arguments, positive count)
                 return radio_bluetooth_power(false, true);
         if (string_equals(word, "add") && count == 4)
                 return radio_bluetooth_add(arguments[3]);
+        if (string_equals(word, "remove") && count == 4)
+                return radio_bluetooth_remove(arguments[3]);
         return host_usage();
+}
+
+/* ---- tune: the switches the kernel keeps in sysfs. ---- */
+
+/*
+        Airplane mode, the screen's brightness, the power profile, the CPU's
+        boost and SMT, the battery's charge limit and sleep: each is a file
+        the kernel already offers, so each is a verb here and not a tool to
+        install. A verb with no value says where the switch stands, to anybody;
+        one with a value needs root. A machine without the hardware gets one
+        line that says so.
+
+        What should outlast a boot -- the profile, the CPU switches, the
+        charge limit -- is kept on /root/tune, one "key value" line each, and
+        put back by tune_restore when the machine starts. Brightness is not
+        kept: the screen is the thing being looked at, and the last level is
+        what the firmware brings it back at.
+*/
+#define TUNE_KEPT "/root/tune"
+#define TUNE_SYS_BACKLIGHT "/sys/class/backlight"
+#define TUNE_SYS_CPU "/sys/devices/system/cpu"
+#define TUNE_SYS_BATTERY "/sys/class/power_supply"
+#define TUNE_SYS_PROFILE "/sys/firmware/acpi/platform_profile"
+#define TUNE_SYS_POWER "/sys/power"
+
+/* The nth entry of a directory that is not . or .., and whether there is one. */
+static bool tune_entry(string_address directory, positive want, p8 address_to name,
+                       positive room)
+{
+        bipolar handle = system_open_at(AT_FDCWD, directory,
+                                        FILE_READ | O_DIRECTORY | O_CLOEXEC);
+        p8 records[2048];
+        positive have = 0;
+        positive at = 0;
+        positive seen = 0;
+        bipolar error = 0;
+        struct linux_dirent64 address_to record;
+
+        if (handle < 0)
+                return false;
+        while ((record = file_directory_next(handle, records, sizeof(records),
+                                             address_of have, address_of at,
+                                             address_of error)))
+        {
+                string_address entry = (string_address)record->d_name;
+
+                if (file_is_dot(entry))
+                        continue;
+                if (seen++ == want)
+                {
+                        bool fits = string_copy_bounded(name, entry, room) < room;
+
+                        system_close((positive)handle);
+                        return fits;
+                }
+        }
+        system_close((positive)handle);
+        return false;
+}
+
+static bool tune_path(p8 address_to into, positive room, string_address first,
+                      string_address second, string_address third)
+{
+        return string_copy_bounded(into, first, room) < room &&
+               string_append_bounded(into, second, room) < room &&
+               string_append_bounded(into, third, room) < room;
+}
+
+/* One decimal number from a kernel file; false when it is not there or not one. */
+static bool tune_number(string_address path, positive address_to value)
+{
+        p8 text[32];
+        positive digits = 0;
+
+        if (host_read_text(path, text, sizeof(text)) <= 0)
+                return false;
+        *value = 0;
+        while (byte_is_digit(text[digits]) && digits < 18)
+                *value = *value * 10 + (text[digits++] - '0');
+        return digits > 0 && !text[digits];
+}
+
+static bool tune_word(string_address path, p8 address_to into, positive room)
+{
+        return host_read_text(path, into, room) > 0;
+}
+
+/* Write a value to a sysfs attribute. The name is never followed if it is a link. */
+static bipolar tune_write(string_address path, string_address text)
+{
+        bipolar handle = system_open_at(AT_FDCWD, path,
+                                        O_WRONLY | FILE_TRUNCATE | O_CLOEXEC | O_NOFOLLOW);
+        positive length = string_length(text);
+
+        if (handle < 0)
+                return handle;
+        if (system_write_all((positive)handle, (const address_any)text, length) != length)
+        {
+                system_close((positive)handle);
+                return -EIO;
+        }
+        system_close((positive)handle);
+        return 0;
+}
+
+static bipolar tune_write_number(string_address path, positive value)
+{
+        p8 number[24];
+
+        positive_into_string(number, value);
+        return tune_write(path, (string_address)number);
+}
+
+/* Whether a word is in a file's blank-separated list. */
+static bool tune_lists(string_address path, string_address word)
+{
+        p8 text[256];
+        positive at = 0;
+        positive length = string_length(word);
+
+        if (!tune_word(path, text, sizeof(text)))
+                return false;
+        while (text[at])
+        {
+                positive start = at;
+
+                while (text[at] && text[at] != ' ')
+                        at++;
+                if (at - start == length && !memory_compare(text + start, word, length))
+                        return true;
+                while (text[at] == ' ')
+                        at++;
+        }
+        return false;
+}
+
+/* The kept value for a key, or false. */
+static bool tune_kept(string_address key, p8 address_to into, positive room)
+{
+        p8 text[512];
+        bipolar got = file_slurp_once_at(AT_FDCWD, TUNE_KEPT, text, sizeof(text) - 1);
+        positive at = 0;
+        positive length = string_length(key);
+
+        if (got <= 0)
+                return false;
+        text[got] = end;
+        while (at < (positive)got)
+        {
+                positive start = at;
+                positive stop = start + memory_span_without_byte(text + start, '\n',
+                                                                 (positive)got - start);
+
+                at = stop < (positive)got ? stop + 1 : stop;
+                if (stop - start > length && !memory_compare(text + start, key, length) &&
+                    text[start + length] == ' ')
+                {
+                        text[stop] = end;
+                        return string_copy_bounded(into, (string_address)text + start + length + 1,
+                                                   room) < room;
+                }
+        }
+        return false;
+}
+
+/* Keep a value for a key: the other lines stay, and an empty value drops the key. */
+static bool tune_keep(string_address key, string_address value)
+{
+        p8 text[512];
+        p8 out[640];
+        bipolar got = file_slurp_once_at(AT_FDCWD, TUNE_KEPT, text, sizeof(text) - 1);
+        positive at = 0;
+        positive used = 0;
+        positive length = string_length(key);
+
+        if (got < 0)
+                got = 0;
+        while (at < (positive)got)
+        {
+                positive start = at;
+                positive stop = start + memory_span_without_byte(text + start, '\n',
+                                                                 (positive)got - start);
+
+                at = stop < (positive)got ? stop + 1 : stop;
+                if (stop - start > length && !memory_compare(text + start, key, length) &&
+                    text[start + length] == ' ')
+                        continue;
+                if (used + (at - start) + 1 >= sizeof(out))
+                        return false;
+                memory_copy(out + used, text + start, stop - start);
+                used += stop - start;
+                out[used++] = '\n';
+        }
+        if (value[0])
+        {
+                if (used + length + string_length(value) + 2 >= sizeof(out))
+                        return false;
+                memory_copy(out + used, key, length);
+                used += length;
+                out[used++] = ' ';
+                memory_copy(out + used, value, string_length(value));
+                used += string_length(value);
+                out[used++] = '\n';
+        }
+        host_state_ready();
+        return host_write_file(TUNE_KEPT, out, used, 0644, true) >= 0;
+}
+
+/* A whole percent, "N", "N%", "+N" or "-N": the sign says relative. */
+static bool tune_percent(string_address text, bool address_to relative, bool address_to lower,
+                         positive address_to value)
+{
+        positive at = 0;
+        positive number = 0;
+
+        *relative = *lower = false;
+        if (text[at] == '+' || text[at] == '-')
+        {
+                *relative = true;
+                *lower = text[at] == '-';
+                at++;
+        }
+        if (!byte_is_digit(text[at]))
+                return false;
+        while (byte_is_digit(text[at]))
+        {
+                number = number * 10 + (text[at++] - '0');
+                if (number > 100000)
+                        return false;
+        }
+        if (text[at] == '%')
+                at++;
+        *value = number;
+        return !text[at];
+}
+
+/* moonwater airplane [on|off]: every radio, at once. */
+static b32 tune_airplane(string_address address_to arguments, positive count)
+{
+        bool wifi_off = radio_word_is(NET_WIFI_POWER, "off");
+        bool bluetooth_off = radio_word_is(NET_BLUETOOTH_POWER, "off");
+
+        if (count == 2)
+        {
+                string_format(log, host_label "airplane %s\n",
+                              wifi_off && bluetooth_off ? "on" : "off");
+                log_flush();
+                return 0;
+        }
+        if (count != 3 || (!string_equals(arguments[2], "on") && !string_equals(arguments[2], "off")))
+                return host_usage();
+        if (!bowl_is_root())
+                return host_refuse("%s needs root\n", "moonwater airplane");
+
+        if (string_equals(arguments[2], "on"))
+        {
+                (void)radio_wifi_off(false);
+                (void)radio_bluetooth_power(false, false);
+                //      Type zero is every radio, the modem included.
+                (void)radio_rfkill(0, true);
+        }
+        else
+        {
+                (void)radio_rfkill(0, false);
+                (void)radio_wifi_on(false);
+                (void)radio_bluetooth_power(true, false);
+        }
+        string_format(log, host_label "airplane %s\n", arguments[2]);
+        log_flush();
+        return 0;
+}
+
+/* moonwater brightness [N|N%|+N|-N]: the first backlight, in percent. */
+static b32 tune_brightness(string_address address_to arguments, positive count)
+{
+        p8 name[64];
+        p8 maximum_path[160];
+        p8 current_path[160];
+        positive maximum = 0;
+        positive current = 0;
+        positive percent;
+        bool relative;
+        bool lower;
+
+        if (count > 3)
+                return host_usage();
+        if (!tune_entry(TUNE_SYS_BACKLIGHT, 0, name, sizeof(name)) ||
+            !tune_path(maximum_path, sizeof(maximum_path), TUNE_SYS_BACKLIGHT "/", (string_address)name,
+                       "/max_brightness") ||
+            !tune_path(current_path, sizeof(current_path), TUNE_SYS_BACKLIGHT "/", (string_address)name,
+                       "/brightness") ||
+            !tune_number(maximum_path, address_of maximum) || !maximum ||
+            !tune_number(current_path, address_of current))
+                return host_refuse("this machine has no backlight to set%s\n", "");
+
+        if (count == 2)
+        {
+                string_format(log, host_label "brightness %p%% (%p of %p)\n",
+                              (current * 100 + maximum / 2) / maximum, current, maximum);
+                log_flush();
+                return 0;
+        }
+        if (!tune_percent(arguments[2], address_of relative, address_of lower,
+                          address_of percent))
+                return host_usage();
+        if (!bowl_is_root())
+                return host_refuse("%s needs root\n", "moonwater brightness");
+
+        {
+                positive now = (current * 100 + maximum / 2) / maximum;
+                positive target = percent;
+                positive value;
+                bipolar failed;
+
+                if (relative)
+                        target = lower ? (percent > now ? 0 : now - percent) : now + percent;
+                if (target > 100)
+                        target = 100;
+                //      A percent above nought is never rounded down to a dark screen.
+                value = (maximum * target + 99) / 100;
+                if (target && !value)
+                        value = 1;
+                failed = tune_write_number(current_path, value);
+                if (failed < 0)
+                        return host_fail("brightness", failed);
+                string_format(log, host_label "brightness %p%%\n", target);
+                log_flush();
+        }
+        return 0;
+}
+
+/* The first battery, by name. */
+static bool tune_battery(p8 address_to name, positive room)
+{
+        for (positive at = 0; tune_entry(TUNE_SYS_BATTERY, at, name, room); at++)
+        {
+                p8 path[160];
+                p8 type[16];
+
+                if (tune_path(path, sizeof(path), TUNE_SYS_BATTERY "/", (string_address)name, "/type") &&
+                    tune_word(path, type, sizeof(type)) && string_equals((string_address)type, "Battery"))
+                        return true;
+        }
+        return false;
+}
+
+static bipolar tune_charge_apply(string_address percent_text)
+{
+        p8 name[64];
+        p8 path[160];
+        bipolar failed = -ENODEV;
+
+        if (!tune_battery(name, sizeof(name)))
+                return failed;
+        if (!tune_path(path, sizeof(path), TUNE_SYS_BATTERY "/", (string_address)name,
+                       "/charge_control_end_threshold"))
+                return -ERROR_INVALID;
+        return tune_write(path, percent_text);
+}
+
+/* moonwater charge [limit N|off]: where the battery stops charging. */
+static b32 tune_charge(string_address address_to arguments, positive count)
+{
+        p8 name[64];
+        p8 path[160];
+        positive capacity = 0;
+        positive limit = 0;
+        p8 status[24];
+        bool have_limit;
+
+        if (!tune_battery(name, sizeof(name)))
+                return host_refuse("this machine has no battery%s\n", "");
+
+        if (count == 2)
+        {
+                have_limit = tune_path(path, sizeof(path), TUNE_SYS_BATTERY "/", (string_address)name,
+                                       "/charge_control_end_threshold") &&
+                             tune_number(path, address_of limit);
+                if (tune_path(path, sizeof(path), TUNE_SYS_BATTERY "/", (string_address)name, "/capacity"))
+                        (void)tune_number(path, address_of capacity);
+                status[0] = end;
+                if (tune_path(path, sizeof(path), TUNE_SYS_BATTERY "/", (string_address)name, "/status"))
+                        (void)tune_word(path, status, sizeof(status));
+                string_format(log, host_label "battery %p%%, %s", capacity, (string_address)status);
+                if (have_limit)
+                        string_format(log, "; charging stops at %p%%\n", limit);
+                else
+                        string_format(log, "; this battery has no charge limit\n");
+                log_flush();
+                return 0;
+        }
+
+        if (count == 4 && string_equals(arguments[2], "limit") &&
+            (string_equals(arguments[3], "off") || byte_is_digit(arguments[3][0])))
+        {
+                positive number = 100;
+                bipolar failed;
+
+                if (!bowl_is_root())
+                        return host_refuse("%s needs root\n", "moonwater charge");
+                if (!string_equals(arguments[3], "off"))
+                {
+                        positive at = 0;
+
+                        number = 0;
+                        while (byte_is_digit(arguments[3][at]) && at < 4)
+                                number = number * 10 + (arguments[3][at++] - '0');
+                        if (arguments[3][at] || number < 20 || number > 100)
+                                return host_refuse("a charge limit is 20 to 100 percent%s\n", "");
+                }
+                {
+                        p8 text[8];
+
+                        positive_into_string(text, number);
+                        failed = tune_charge_apply((string_address)text);
+                        if (failed < 0)
+                                return failed == -ENODEV
+                                           ? host_refuse("this machine has no battery%s\n", "")
+                                           : failed == -ENOENT
+                                                 ? host_refuse("this battery has no charge limit%s\n", "")
+                                                 : host_fail("charge", failed);
+                        //      A limit of a full charge is the default: nothing to bring back.
+                        (void)tune_keep("charge.limit", number == 100 ? (string_address)"" : (string_address)text);
+                }
+                string_format(log, host_label "charging stops at %p%%\n", number);
+                log_flush();
+                return 0;
+        }
+        return host_usage();
+}
+
+/* The governor and preference a profile means, where the machine has them. */
+static fn tune_profile_cpus(string_address governor, string_address preference)
+{
+        p8 name[32];
+
+        for (positive at = 0; tune_entry(TUNE_SYS_CPU, at, name, sizeof(name)); at++)
+        {
+                p8 path[160];
+                p8 policy[160];
+
+                if (name[0] != 'c' || name[1] != 'p' || name[2] != 'u' || !byte_is_digit(name[3]))
+                        continue;
+                if (!tune_path(policy, sizeof(policy), TUNE_SYS_CPU "/", (string_address)name, "/cpufreq/"))
+                        continue;
+                if (governor && tune_path(path, sizeof(path), (string_address)policy,
+                                          "scaling_available_governors", "") &&
+                    tune_lists(path, governor) &&
+                    tune_path(path, sizeof(path), (string_address)policy, "scaling_governor", ""))
+                        (void)tune_write(path, governor);
+                if (preference && tune_path(path, sizeof(path), (string_address)policy,
+                                            "energy_performance_available_preferences", "") &&
+                    tune_lists(path, preference) &&
+                    tune_path(path, sizeof(path), (string_address)policy,
+                              "energy_performance_preference", ""))
+                        (void)tune_write(path, preference);
+        }
+}
+
+/* Apply one of performance, balanced and powersave; false when the machine has no way to. */
+static bool tune_power_apply(string_address profile)
+{
+        bool performance = string_equals(profile, "performance");
+        bool balanced = string_equals(profile, "balanced");
+        string_address platform = performance ? (string_address)"performance"
+                                  : balanced ? (string_address)"balanced" : (string_address)"low-power";
+        bool any = false;
+
+        if (!performance && !balanced && !string_equals(profile, "powersave"))
+                return false;
+        if (!tune_lists(TUNE_SYS_PROFILE "_choices", platform) && !performance && !balanced)
+                //      Firmware that names its lowest profile quiet or cool.
+                platform = tune_lists(TUNE_SYS_PROFILE "_choices", "quiet") ? (string_address)"quiet"
+                           : tune_lists(TUNE_SYS_PROFILE "_choices", "cool") ? (string_address)"cool"
+                                                                              : platform;
+        if (tune_lists(TUNE_SYS_PROFILE "_choices", platform))
+                any = tune_write(TUNE_SYS_PROFILE, platform) >= 0;
+
+        tune_profile_cpus(performance ? (string_address)"performance"
+                          : balanced ? (string_address)"schedutil" : (string_address)"powersave",
+                          performance ? (string_address)"performance"
+                          : balanced ? (string_address)"balance_performance" : (string_address)"power");
+        {
+                p8 path[160];
+                p8 word[32];
+
+                //      A governor the machine has counts as a way to, too.
+                any |= tune_path(path, sizeof(path), TUNE_SYS_CPU, "/cpu0/cpufreq/scaling_governor", "") &&
+                       tune_word(path, word, sizeof(word));
+        }
+        return any;
+}
+
+/* moonwater power [performance|balanced|powersave] */
+static b32 tune_power(string_address address_to arguments, positive count)
+{
+        if (count == 2)
+        {
+                p8 profile[32];
+                p8 governor[32];
+                p8 preference[40];
+                p8 kept[24];
+
+                profile[0] = governor[0] = preference[0] = end;
+                (void)tune_word(TUNE_SYS_PROFILE, profile, sizeof(profile));
+                (void)tune_word(TUNE_SYS_CPU "/cpu0/cpufreq/scaling_governor", governor, sizeof(governor));
+                (void)tune_word(TUNE_SYS_CPU "/cpu0/cpufreq/energy_performance_preference", preference,
+                                sizeof(preference));
+                if (!profile[0] && !governor[0])
+                        return host_refuse("this machine has no power profile to set%s\n", "");
+                kept[0] = end;
+                (void)tune_kept("power", kept, sizeof(kept));
+                string_format(log, host_label "power %s", kept[0] ? (string_address)kept : (string_address)"(not set here)");
+                if (profile[0])
+                        string_format(log, "; platform profile %s", (string_address)profile);
+                if (governor[0])
+                        string_format(log, "; governor %s", (string_address)governor);
+                if (preference[0])
+                        string_format(log, "; preference %s", (string_address)preference);
+                string_format(log, "\n");
+                log_flush();
+                return 0;
+        }
+        if (count != 3 || (!string_equals(arguments[2], "performance") &&
+                           !string_equals(arguments[2], "balanced") &&
+                           !string_equals(arguments[2], "powersave")))
+                return host_usage();
+        if (!bowl_is_root())
+                return host_refuse("%s needs root\n", "moonwater power");
+        if (!tune_power_apply(arguments[2]))
+                return host_refuse("this machine has no power profile to set%s\n", "");
+        (void)tune_keep("power", arguments[2]);
+        string_format(log, host_label "power %s\n", arguments[2]);
+        log_flush();
+        return 0;
+}
+
+/* Whether a file can be opened to be read, closing it. */
+static bool tune_exists(string_address path)
+{
+        bipolar handle = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC);
+
+        if (handle < 0)
+                return false;
+        system_close((positive)handle);
+        return true;
+}
+
+static bool tune_cpu_boost(bool on)
+{
+        if (tune_exists(TUNE_SYS_CPU "/cpufreq/boost"))
+                return tune_write(TUNE_SYS_CPU "/cpufreq/boost", on ? "1" : "0") >= 0;
+        if (tune_exists(TUNE_SYS_CPU "/intel_pstate/no_turbo"))
+                return tune_write(TUNE_SYS_CPU "/intel_pstate/no_turbo", on ? "0" : "1") >= 0;
+        return false;
+}
+
+static bool tune_cpu_smt(bool on)
+{
+        return tune_exists(TUNE_SYS_CPU "/smt/control") &&
+               tune_write(TUNE_SYS_CPU "/smt/control", on ? "on" : "off") >= 0;
+}
+
+/* moonwater cpu [boost|smt on|off] [online|offline N] */
+static b32 tune_cpu(string_address address_to arguments, positive count)
+{
+        if (count == 2)
+        {
+                p8 smt[24];
+                p8 boost[8];
+                positive online = 0;
+                positive at = 0;
+                p8 name[32];
+
+                boost[0] = smt[0] = end;
+                if (tune_exists(TUNE_SYS_CPU "/cpufreq/boost"))
+                        (void)tune_word(TUNE_SYS_CPU "/cpufreq/boost", boost, sizeof(boost));
+                else if (tune_exists(TUNE_SYS_CPU "/intel_pstate/no_turbo"))
+                {
+                        (void)tune_word(TUNE_SYS_CPU "/intel_pstate/no_turbo", boost, sizeof(boost));
+                        boost[0] = boost[0] == '0' ? '1' : '0';
+                }
+                (void)tune_word(TUNE_SYS_CPU "/smt/control", smt, sizeof(smt));
+                while (tune_entry(TUNE_SYS_CPU, at++, name, sizeof(name)))
+                        if (name[0] == 'c' && name[1] == 'p' && name[2] == 'u' && byte_is_digit(name[3]))
+                        {
+                                p8 path[160];
+                                p8 word[4];
+
+                                online += !tune_path(path, sizeof(path), TUNE_SYS_CPU "/", (string_address)name,
+                                                     "/online") ||
+                                          !tune_word(path, word, sizeof(word)) || word[0] == '1';
+                        }
+                string_format(log, host_label "cpu: %p online", online);
+                if (boost[0])
+                        string_format(log, "; boost %s", boost[0] == '1' ? "on" : "off");
+                if (smt[0])
+                        string_format(log, "; smt %s", (string_address)smt);
+                string_format(log, "\n");
+                log_flush();
+                return 0;
+        }
+        if (count == 4 && (string_equals(arguments[2], "boost") || string_equals(arguments[2], "smt")) &&
+            (string_equals(arguments[3], "on") || string_equals(arguments[3], "off")))
+        {
+                bool on = string_equals(arguments[3], "on");
+                bool boost = string_equals(arguments[2], "boost");
+
+                if (!bowl_is_root())
+                        return host_refuse("%s needs root\n", "moonwater cpu");
+                if (!(boost ? tune_cpu_boost(on) : tune_cpu_smt(on)))
+                        return host_refuse(boost ? "this machine has no boost switch%s\n"
+                                                 : "this machine has no SMT switch%s\n", "");
+                //      Both default to on: nothing to bring back then.
+                (void)tune_keep(boost ? "cpu.boost" : "cpu.smt", on ? "" : "off");
+                string_format(log, host_label "cpu %s %s\n", arguments[2], arguments[3]);
+                log_flush();
+                return 0;
+        }
+        if (count == 4 && (string_equals(arguments[2], "online") || string_equals(arguments[2], "offline")) &&
+            byte_is_digit(arguments[3][0]))
+        {
+                p8 path[160];
+                positive number = 0;
+                positive at = 0;
+                p8 text[8];
+
+                if (!bowl_is_root())
+                        return host_refuse("%s needs root\n", "moonwater cpu");
+                while (byte_is_digit(arguments[3][at]) && at < 5)
+                        number = number * 10 + (arguments[3][at++] - '0');
+                if (arguments[3][at] || number == 0)
+                        return host_refuse("cpu 0 stays, and a cpu is a number%s\n", "");
+                positive_into_string(text, number);
+                if (!tune_path(path, sizeof(path), TUNE_SYS_CPU "/cpu", (string_address)text, "/online") ||
+                    tune_write(path, string_equals(arguments[2], "online") ? "1" : "0") < 0)
+                        return host_refuse("that cpu cannot be switched%s\n", "");
+                string_format(log, host_label "cpu %s %p\n", arguments[2], number);
+                log_flush();
+                return 0;
+        }
+        return host_usage();
+}
+
+/* moonwater sleep and moonwater hibernate: the kernel's own suspend and hibernate. */
+static b32 tune_suspend(string_address verb, string_address state)
+{
+        if (!tune_lists(TUNE_SYS_POWER "/state", state))
+                return host_refuse(string_equals(state, "mem")
+                                       ? "this kernel does not offer sleep%s\n"
+                                       : "this kernel does not offer hibernate%s\n", "");
+        if (!bowl_is_root())
+                return host_refuse("%s needs root\n", string_equals(state, "mem") ? "moonwater sleep"
+                                                                                 : "moonwater hibernate");
+        system_call(syscall(sync));
+        {
+                bipolar failed = tune_write(TUNE_SYS_POWER "/state", state);
+
+                if (failed < 0)
+                        return host_fail(verb, failed);
+        }
+        //      Reached again once the machine has woken.
+        string_format(log, host_label "awake again\n");
+        log_flush();
+        return 0;
+}
+
+/* What was kept, put back at boot. */
+static fn tune_restore(void)
+{
+        p8 value[24];
+
+        if (tune_kept("power", value, sizeof(value)))
+                (void)tune_power_apply((string_address)value);
+        if (tune_kept("cpu.boost", value, sizeof(value)) && string_equals((string_address)value, "off"))
+                (void)tune_cpu_boost(false);
+        if (tune_kept("cpu.smt", value, sizeof(value)) && string_equals((string_address)value, "off"))
+                (void)tune_cpu_smt(false);
+        if (tune_kept("charge.limit", value, sizeof(value)))
+                (void)tune_charge_apply((string_address)value);
+}
+
+static b32 host_tune(string_address address_to arguments, positive count)
+{
+        string_address verb = arguments[1];
+
+        if (string_equals(verb, "airplane"))
+                return tune_airplane(arguments, count);
+        if (string_equals(verb, "brightness"))
+                return tune_brightness(arguments, count);
+        if (string_equals(verb, "charge"))
+                return tune_charge(arguments, count);
+        if (string_equals(verb, "power"))
+                return tune_power(arguments, count);
+        if (string_equals(verb, "cpu"))
+                return tune_cpu(arguments, count);
+        if (count != 2)
+                return host_usage();
+        if (string_equals(verb, "sleep"))
+                return tune_suspend(verb, "mem");
+        return tune_suspend(verb, "disk");
 }
 
 /* ---- locale: the timezone and the clock, and the SNTP that sets it. ---- */
@@ -11551,6 +12299,18 @@ static fn host_usage_write(writer out)
                       "             " TERM_DIM "the desktop" TERM_RESET "\n"
                       TERM_BOLD "  canvas log|terminal" TERM_RESET
                       "         " TERM_DIM "open the kernel log or a terminal" TERM_RESET "\n"
+                      TERM_BOLD "  airplane [on|off]" TERM_RESET
+                      "          " TERM_DIM "every radio at once" TERM_RESET "\n"
+                      TERM_BOLD "  brightness [N%|+N|-N]" TERM_RESET
+                      "      " TERM_DIM "the screen backlight" TERM_RESET "\n"
+                      TERM_BOLD "  power [performance|balanced|powersave]" TERM_RESET
+                      " " TERM_DIM "profile and CPU governor" TERM_RESET "\n"
+                      TERM_BOLD "  cpu [boost|smt on|off] [online|offline N]" TERM_RESET
+                      " " TERM_DIM "turbo, SMT and hotplug" TERM_RESET "\n"
+                      TERM_BOLD "  charge [limit N|off]" TERM_RESET
+                      "       " TERM_DIM "where the battery stops charging" TERM_RESET "\n"
+                      TERM_BOLD "  sleep" TERM_RESET " | " TERM_BOLD "hibernate" TERM_RESET
+                      "           " TERM_DIM "suspend to RAM or to disk" TERM_RESET "\n"
                       TERM_BOLD "  bios [reboot]" TERM_RESET
                       "               " TERM_DIM "restart into the firmware's setup screen" TERM_RESET "\n"
                       TERM_BOLD "  wired [on|off]" TERM_RESET
@@ -11566,6 +12326,8 @@ static fn host_usage_write(writer out)
                       "          " TERM_DIM "the bluetooth radio" TERM_RESET "\n"
                       TERM_BOLD "  bluetooth add NAME" TERM_RESET
                       "          " TERM_DIM "remember a bluetooth device" TERM_RESET "\n"
+                      TERM_BOLD "  bluetooth remove NAME" TERM_RESET
+                      "       " TERM_DIM "forget a bluetooth device" TERM_RESET "\n"
                       TERM_BOLD "  priority internet [wired|wifi]" TERM_RESET
                       " " TERM_DIM "which link when both are up [wired]" TERM_RESET "\n"
                       TERM_BOLD "  time [sync]" TERM_RESET
@@ -11827,6 +12589,12 @@ static b32 host_main()
 
         if (string_equals(verb, "bios"))
                 return host_bios(arguments, count);
+
+        if (string_equals(verb, "airplane") || string_equals(verb, "brightness") ||
+            string_equals(verb, "charge") || string_equals(verb, "power") ||
+            string_equals(verb, "cpu") || string_equals(verb, "sleep") ||
+            string_equals(verb, "hibernate"))
+                return host_tune(arguments, count);
 
         if (string_equals(verb, "wifi") || string_equals(verb, "bluetooth") ||
             string_equals(verb, "priority") || string_equals(verb, "wired"))

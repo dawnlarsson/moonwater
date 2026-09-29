@@ -36,6 +36,12 @@ moonwater bind exit remove ID|"command"
 moonwater canvas [on|off]              the desktop, and on which screens [on]
 moonwater canvas log|terminal          open the kernel log window, or a terminal
 moonwater bios [reboot]                whether firmware setup is on offer; reboot restarts into it (UEFI)
+moonwater airplane [on|off]            every radio at once
+moonwater brightness [N%|+N|-N]        the screen backlight
+moonwater power [performance|balanced|powersave]  platform profile and CPU governor; kept across boots
+moonwater cpu [boost|smt on|off]       turbo and SMT, kept across boots; cpu online|offline N for hotplug
+moonwater charge [limit N|off]         where the battery stops charging (20 to 100); kept across boots
+moonwater sleep | hibernate            suspend to RAM or to disk
 moonwater keyboard [LAYOUT]            us uk de se no dk fi fr es it [us]
 
 moonwater wired [on|off]                the wired links, and which have carrier; off keeps them down across a reboot
@@ -45,6 +51,7 @@ moonwater wifi add SSID [PASSWORD|-]   remember and join a network; asks at a te
 moonwater wifi remove SSID             forget a saved network; leaves it if it is the joined one
 moonwater bluetooth [on|off]           the bluetooth radio and remembered devices
 moonwater bluetooth add NAME           remember a bluetooth device
+moonwater bluetooth remove NAME        forget a remembered bluetooth device
 moonwater priority internet [wired|wifi]  which link wins when both are up [wired]
 
 moonwater time [sync]                  local time, UTC and NTP state; sync asks now

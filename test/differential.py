@@ -39558,7 +39558,7 @@ def harness_moonwater_cli(argv):
 
     checks = Checks()
 
-    def check(ok, what, detail):
+    def check(ok, what, detail=""):
         checks(ok, what + ("" if ok else " -- " + str(detail)[:400]))
     #       Both seasons of 2027 and one far instant, and nothing before
     #       November 2026: the command carries each zone's current rule and
@@ -39642,7 +39642,10 @@ def harness_moonwater_cli(argv):
                 "canvas bogus", "bind", "bind init", "bind exit", "bind bogus", "wifi",
                 "wifi off", "wifi on", "wifi add", "wifi remove", "wifi remove nobody",
                 "wifi remove a b", 'wifi remove ""', "wired", "wired on", "wired off",
-                "wired on extra", "wired sideways", "bios", "bios extra", "bios bogus",
+                "wired on extra", "wired sideways", "airplane", "airplane extra", "airplane on extra",
+                "brightness", "brightness 50 extra", "power", "power extra", "cpu", "cpu bogus",
+                "cpu boost", "charge", "charge limit", "charge bogus", "sleep extra",
+                "hibernate extra", "bluetooth remove", "bluetooth remove nobody", "bios", "bios extra", "bios bogus",
                 "bios reboot extra", "bluetooth", "bluetooth off",
                 "bluetooth on", "priority internet", "priority internet wired",
                 "priority internet wifi", "priority internet cable", "wipe extra",
@@ -39666,11 +39669,14 @@ def harness_moonwater_cli(argv):
                  "UTC+14", "UTC-14", "<+0530>-5:30", "Europe/", "../../etc/passwd", "x" * 300,
                  "\x1b[31m", "tab\there", "sv", "SE", "\u00e5\u00e4\u00f6", "0", "18446744073709551616",
                  "power", "canvas on", "--", "-h", "status"]
+        #       No "airplane" either: on writes to /dev/rfkill, which the sandbox
+        #       shares with the machine, and would block its radios.
         #       Neither "reboot" nor "bios" carries a reboot into these words: bios
         #       reboot sets a bit in the firmware, and a run as real root would
         #       leave it set on the machine that ran the lane.
         verbs = ["", "status", "timezone", "time", "ntp", "keyboard", "canvas", "bind",
-                 "wifi", "wired", "bluetooth", "priority", "-h"]
+                 "wifi", "wired", "bluetooth", "priority", "brightness", "power", "cpu",
+                 "charge", "-h"]
         fuzzed = []
         for number in range(300):
             argv = [rng.choice(verbs)] + [rng.choice(words) for _ in range(rng.randint(0, 4))]
@@ -39738,6 +39744,117 @@ def harness_moonwater_cli(argv):
               "bare wired reports off", repr(seen["wired"]))
         check(seen["wired on"]["status"] == 0 and block("on-word") == ["on"],
               "wired on writes its word", repr(seen["wired on"]))
+
+        # The switches the kernel keeps in sysfs, against a /sys of plain
+        # files the sandbox owns: what a verb writes is read back from them.
+        fake = sandbox / "sys"
+
+        def sys_file(path, text):
+            target = fake / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text)
+
+        def sys_read(path):
+            return (fake / path).read_text().strip()
+
+        def sys_reset():
+            shutil.rmtree(fake, ignore_errors=True)
+            sys_file("class/backlight/fake0/brightness", "50\n")
+            sys_file("class/backlight/fake0/max_brightness", "200\n")
+            sys_file("class/power_supply/AC/type", "Mains\n")
+            sys_file("class/power_supply/BAT0/type", "Battery\n")
+            sys_file("class/power_supply/BAT0/capacity", "73\n")
+            sys_file("class/power_supply/BAT0/status", "Discharging\n")
+            sys_file("class/power_supply/BAT0/charge_control_end_threshold", "100\n")
+            sys_file("firmware/acpi/platform_profile", "balanced\n")
+            sys_file("firmware/acpi/platform_profile_choices", "low-power balanced performance\n")
+            sys_file("devices/system/cpu/cpufreq/boost", "1\n")
+            sys_file("devices/system/cpu/smt/control", "on\n")
+            cpu0 = "devices/system/cpu/cpu0/cpufreq/"
+            sys_file(cpu0 + "scaling_governor", "schedutil\n")
+            sys_file(cpu0 + "scaling_available_governors", "performance schedutil powersave\n")
+            sys_file(cpu0 + "energy_performance_preference", "balance_performance\n")
+            sys_file(cpu0 + "energy_performance_available_preferences",
+                     "default performance balance_performance balance_power power\n")
+            sys_file("devices/system/cpu/cpu1/online", "1\n")
+            sys_file("devices/system/cpu/cpu2/online", "1\n")
+            sys_file("power/state", "freeze mem disk\n")
+
+        def tuned(script):
+            sys_reset()
+            got, done = session("rm -f /root/tune\n" + script)
+            check(done, "a tune session finished", script[:60])
+            return got
+
+        tuned(say("brightness 75"))
+        check(sys_read("class/backlight/fake0/brightness") == "150", "brightness 75 is three quarters of the maximum",
+              sys_read("class/backlight/fake0/brightness"))
+        tuned(say("brightness +10%"))
+        check(sys_read("class/backlight/fake0/brightness") == "70", "brightness +10 lifts it ten points",
+              sys_read("class/backlight/fake0/brightness"))
+        tuned(say("brightness -50"))
+        check(sys_read("class/backlight/fake0/brightness") == "0", "brightness -50 from 25 stops at nought",
+              sys_read("class/backlight/fake0/brightness"))
+        tuned(say("brightness 1"))
+        check(sys_read("class/backlight/fake0/brightness") == "2", "one percent is never rounded to a dark screen",
+              sys_read("class/backlight/fake0/brightness"))
+        tuned(say("brightness 300"))
+        check(sys_read("class/backlight/fake0/brightness") == "200", "brightness above a hundred stops at the maximum",
+              sys_read("class/backlight/fake0/brightness"))
+        got = answers(tuned(say("brightness") + say("brightness bogus")))
+        check(any("25% (50 of 200)" in line for line in got["brightness"]["out"]),
+              "bare brightness says where it stands", repr(got["brightness"]))
+
+        tuned(say("charge limit 80"))
+        check(sys_read("class/power_supply/BAT0/charge_control_end_threshold") == "80",
+              "charge limit 80 reaches the battery")
+        got = answers(tuned(say("charge limit 80") + say("charge limit 5") + say("charge limit 101") +
+                            "echo '@@ kept'; cat /root/tune; echo '@@end'\n"))
+        check(got["charge limit 5"]["status"] == 1 and got["charge limit 101"]["status"] == 1,
+              "a limit outside 20 to 100 is refused")
+        tuned(say("charge limit 60") + say("charge limit off"))
+        check(sys_read("class/power_supply/BAT0/charge_control_end_threshold") == "100",
+              "charge limit off puts the battery back to full")
+        got = tuned(say("charge limit 60") + "echo '@@ kept'; cat /root/tune; echo '@@end'\n")
+        check("charge.limit 60" in got, "a limit is kept for the next boot", repr(got[-6:]))
+
+        tuned(say("power powersave"))
+        check(sys_read("firmware/acpi/platform_profile") == "low-power" and
+              sys_read("devices/system/cpu/cpu0/cpufreq/scaling_governor") == "powersave" and
+              sys_read("devices/system/cpu/cpu0/cpufreq/energy_performance_preference") == "power",
+              "power powersave sets the platform profile, the governor and the preference")
+        tuned(say("power performance"))
+        check(sys_read("firmware/acpi/platform_profile") == "performance" and
+              sys_read("devices/system/cpu/cpu0/cpufreq/scaling_governor") == "performance",
+              "power performance sets both")
+        got = answers(tuned(say("power turbo")))
+        check(got["power turbo"]["status"] is not None, "an unknown profile answers")
+
+        tuned(say("cpu boost off") + say("cpu smt off") + say("cpu offline 2"))
+        check(sys_read("devices/system/cpu/cpufreq/boost") == "0" and
+              sys_read("devices/system/cpu/smt/control") == "off" and
+              sys_read("devices/system/cpu/cpu2/online") == "0",
+              "cpu boost, smt and offline reach their files")
+        got = answers(tuned(say("cpu offline 0") + say("cpu boost sideways")))
+        check(got["cpu offline 0"]["status"] == 1, "cpu 0 is never switched off")
+
+        tuned(say("sleep"))
+        check(sys_read("power/state") == "mem", "sleep writes mem to the kernel", sys_read("power/state"))
+        tuned(say("hibernate"))
+        check(sys_read("power/state") == "disk", "hibernate writes disk to the kernel", sys_read("power/state"))
+
+        got = tuned("rm -f /root/wifi.power /root/bluetooth.power\n" + say("airplane on") +
+                    "echo '@@ words'; cat /root/wifi.power /root/bluetooth.power; echo '@@end'\n" +
+                    say("airplane off") + "echo '@@ words2'; cat /root/wifi.power /root/bluetooth.power; echo '@@end'\n")
+        joined = "\n".join(got)
+        check("@@ words\noff\noff" in joined, "airplane on turns the wifi and bluetooth words off", joined[-200:])
+        check("@@ words2\non\non" in joined, "airplane off turns them back on", joined[-200:])
+
+        got = tuned(say("bluetooth add kbd1") + say("bluetooth add mouse2") + say("bluetooth remove kbd1") +
+                    "echo '@@ left'; cat /root/bluetooth; echo '@@end'\n" + say("bluetooth remove kbd1"))
+        left = "\n".join(got).split("@@ left\n", 1)[1].split("@@end", 1)[0].split()
+        check(left == ["mouse2"], "bluetooth remove takes one device out and leaves the other", repr(left))
+        check(answers(got)["bluetooth remove kbd1"]["status"] == 1, "a forgotten device is refused a second time")
 
         # Every zone, code and offset: set it, then read what it wrote with
         # the host's glibc and hold it to the host's tzdata.

@@ -2459,6 +2459,7 @@ static b32 host_machine_run(void)
         if (!host_starts((string_address)verdict, "ask "))
                 radio_restore();
         locale_restore();
+        tune_restore();
 
         host_machine_hold(slot, true);
 
