@@ -26285,17 +26285,11 @@ static bool split_lines_chunk(p8 address_to input, positive length,
                                         chunk_no++;
                                         break;
                                 }
-                                /* Every chunk is made: with fewer bytes than
-                                   chunks a boundary no longer moves, and
-                                   split -n l/3 over "a\n" went on making
-                                   empty files for ever, where GNU's own loop
-                                   does as well. The rest are empty. */
-                                if (chunk_no >= n)
-                                {
-                                        chunk_no = n + 1;
-                                        next = false;
-                                        break;
-                                }
+                                /* With fewer bytes than chunks a boundary
+                                   no longer moves, and GNU's own loop goes
+                                   on making empty files until the suffixes
+                                   are exhausted: split -n l/10 over "a\nb\n"
+                                   makes 676 and says so. So does this. */
                                 if (k && k == chunk_no)
                                         return true;
                                 chunk_end += chunk_size + (positive)(chunk_no < rem);
