@@ -32679,6 +32679,103 @@ def harness_compression(argv):
                                           (ref.returncode != 0 or got.stdout == ref.stdout),
                                           'gzip %d, ours %d %s' % (ref.returncode, got.returncode,
                                                                    got.stderr.decode(errors='replace')))
+                    if codec == 'gzip':
+                        # gzip -d's words and its salvage, byte for byte: what
+                        # a stream that breaks leaves on stdout (a truncation
+                        # everything it decoded, a checksum error all of it,
+                        # a broken block the part before its last 32 KiB
+                        # step), the message with the input's name and its
+                        # blank line, both the checksum and the length said,
+                        # and what follows a member: zeros are padding, other
+                        # bytes a warning and status 2, half a header a
+                        # truncation. Alone and only against gzip -dc.
+                        import struct
+                        import zlib
+                        drawn = random.Random(0x1951)
+                        text = bytes(drawn.choice(b'abcdefgh ') for _ in range(150000))
+                        member = call(command(refs['gzip'], 'gzip', level='6', reference=True), text).stdout
+                        small = call(command(refs['gzip'], 'gzip', level='6', reference=True), text[:1000]).stdout
+                        head = b'\x1f\x8b\x08\0\0\0\0\0\0\3'
+                        packer = zlib.compressobj(6, zlib.DEFLATED, -15)
+                        synced = packer.compress(text[:100000]) + packer.flush(zlib.Z_SYNC_FLUSH)
+
+                        def writer():
+                            class Bits:
+                                value = 0
+                                count = 0
+                            return Bits()
+
+                        def crafted(lit, dist):
+                            # One dynamic block whose code lengths are given
+                            # (all 2 bits), its precode {0, 2, 17, 18}.
+                            bits = writer()
+
+                            def put(v, n):
+                                bits.value |= v << bits.count
+                                bits.count += n
+
+                            def huff(code, n):
+                                for i in range(n - 1, -1, -1):
+                                    put((code >> i) & 1, 1)
+                            put(1, 1)
+                            put(2, 2)
+                            nd = max(dist) + 1 if dist else 1
+                            put(0, 5)
+                            put(nd - 1, 5)
+                            put(12, 4)
+                            order = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]
+                            for i in range(16):
+                                put(2 if order[i] in (0, 2, 17, 18) else 0, 3)
+                            lens = [2 if i in lit else 0 for i in range(257)] + [2 if i in dist else 0 for i in range(nd)]
+                            i = 0
+                            while i < len(lens):
+                                j = i
+                                while j < len(lens) and lens[j] == 0 and j - i < 138:
+                                    j += 1
+                                if j - i >= 11:
+                                    huff(3, 2)
+                                    put(j - i - 11, 7)
+                                    i = j
+                                else:
+                                    huff(1 if lens[i] else 0, 2)
+                                    i += 1
+                            huff(0, 2)
+                            huff(3, 2)
+                            return bits.value.to_bytes((bits.count + 7) // 8, 'little')
+                        tail8 = struct.pack('<II', zlib.crc32(b'a'), 1)
+                        words = [('trunc-trailer', member[:-4]), ('trunc-half', member[:len(member) // 2]),
+                                 ('trunc-header', member[:6]), ('empty', b''), ('one-byte', b'\x1f'),
+                                 ('zero-byte', b'\0'), ('two-bytes', b'xy'), ('not-gzip', b'hello there'),
+                                 ('crc', member[:-8] + bytes([member[-8] ^ 1]) + member[-7:]),
+                                 ('length', member[:-1] + bytes([member[-1] ^ 1])),
+                                 ('garbage', member + b'abcd'), ('zeros', member + b'\0' * 9),
+                                 ('zeros-then-byte', member + b'\0\0\0x'), ('zeros-then-member', member + b'\0\0' + small),
+                                 ('two', member + small), ('second-magic', small + b'\x1f\x8c' + b'\0' * 20),
+                                 ('second-method', small + b'\x1f\x8b\x07' + b'\0' * 20),
+                                 ('second-half-header', small + b'\x1f'), ('second-cut-header', small + small[:5]),
+                                 ('method', b'\x1f\x8b\x07' + b'\0' * 20), ('encrypted', b'\x1f\x8b\x08\x20' + b'\0' * 30),
+                                 ('flags', b'\x1f\x8b\x08\x40' + b'\0' * 30),
+                                 ('block-type-after-100000', head + synced + b'\x07' + b'\0' * 8),
+                                 ('block-type-after-30000', head + zlib.compressobj(6, zlib.DEFLATED, -15).compress(b'') +
+                                  (lambda c: c.compress(text[:30000]) + c.flush(zlib.Z_SYNC_FLUSH))(zlib.compressobj(6, zlib.DEFLATED, -15)) +
+                                  b'\x07' + b'\0' * 8),
+                                 ('stored-length', head + synced + b'\x01\x05\x00\x00\x00abcde'),
+                                 ('incomplete-literals', head + crafted({97, 256}, {0}) + tail8),
+                                 ('incomplete-distances', head + crafted({97, 98, 99, 256}, {0}) + tail8),
+                                 ('complete-codes', head + crafted({97, 98, 99, 256}, {0, 1, 2, 3}) + tail8)]
+                        for cut in (1, 2, 3, 5, 9, 17, 100, 5000, 40000, len(member) - 40, len(member) - 9, len(member) - 5):
+                            words.append(('cut-%d' % cut, member[:cut]))
+                        for offset in (20, 400, len(member) // 3, len(member) * 2 // 3):
+                            flipped = bytearray(member)
+                            flipped[offset] ^= 0x10
+                            words.append(('flip-%d' % offset, bytes(flipped)))
+                        for word, blob in words:
+                            ref = call([refs['gzip'], '-dc'], blob)
+                            got = call(decode, blob)
+                            check('%s/gzip/words-%s' % (label, word),
+                                  (got.returncode, got.stdout, got.stderr) == (ref.returncode, ref.stdout, ref.stderr),
+                                  'gzip %d %d %r, ours %d %d %r' % (ref.returncode, len(ref.stdout), ref.stderr[:70],
+                                                                   got.returncode, len(got.stdout), got.stderr[:70]))
                     if codec == 'xz':
                         # Blocks written with both sizes take the parallel
                         # decoder: every check type, -T1 on the same bytes, a

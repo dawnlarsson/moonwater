@@ -373,7 +373,23 @@ typedef struct
         bool head_done;
         bool finished;
         bool fixed_loaded;
+        /* The bytes a CLI decode has kept back so far, sitting before out:
+           gzip's window goes out in steps of 32 KiB, so a stream that fails
+           inside a block loses the part of it past the last step. */
+        positive carry;
+        bool garbage;
+        /* How many bits of lookahead gzip's decoder wants before it will
+           decode a code: the table's root width, cut to the longest code
+           and raised to the shortest. Near the end of input a token whose
+           code is shorter still cannot be read, as there. */
+        p8 look_lit;
+        p8 look_dist;
+        /* A failure's text, its first character telling how to say it (see
+           gzip_note); a second one when the length is wrong as well as the
+           checksum. why_text holds the ones that carry a number. */
         string_address why;
+        string_address why2;
+        p8 why_text[96];
         p32 litlen[GZIP_LITLEN_CELLS];
         p32 offset[GZIP_OFFSET_CELLS];
         p32 precode[1 << GZIP_PRECODE_ROOT];
@@ -410,14 +426,83 @@ static gzip_inflater address_to gzip_inflater_new(void)
         z->head_done = false;
         z->finished = false;
         z->fixed_loaded = false;
+        z->carry = 0;
+        z->garbage = false;
+        z->look_lit = 0;
+        z->look_dist = 0;
         z->why = null;
+        z->why2 = null;
         return z;
 }
+
+/*
+        What gzip -d says, which the first character of a failure's text
+        chooses the shape of: a newline is "\ngzip: NAME: text\n", a colon
+        "gzip: NAME: text\n", a blank "gzip: NAME" and the text and a
+        newline. tar and the checks read the text after that character.
+*/
+#define GZIP_WHY_EOF "\nunexpected end of file"
+#define GZIP_WHY_FORMAT "\ninvalid compressed data--format violated"
+#define GZIP_WHY_CRC "\ninvalid compressed data--crc error"
+#define GZIP_WHY_LENGTH "\ninvalid compressed data--length error"
+#define GZIP_WHY_NOT_GZIP "\nnot in gzip format"
+#define GZIP_WHY_GARBAGE "\ndecompression OK, trailing garbage ignored"
+#define GZIP_WHY_ENCRYPTED " is encrypted -- not supported"
+#define GZIP_WHY_READ ":read error"
 
 static bool gzip_inflate_fail(gzip_inflater address_to z, string_address why)
 {
         if (!z->why)
                 z->why = why;
+        return false;
+}
+
+/* A failure's text built in pieces: the shape character, then strings and
+   numbers, then gzip_why_end. Nothing is built once a failure is held. */
+static bool gzip_why_begin(gzip_inflater address_to z, p8 shape)
+{
+        if (z->why)
+                return false;
+        z->why_text[0] = shape;
+        z->why_text[1] = 0;
+        return true;
+}
+
+static fn gzip_why_str(gzip_inflater address_to z, string_address text)
+{
+        positive at = 0;
+
+        while (z->why_text[at])
+                at++;
+        while (*text && at < sizeof(z->why_text) - 1)
+                z->why_text[at++] = (p8)*text++;
+        z->why_text[at] = 0;
+}
+
+static fn gzip_why_num(gzip_inflater address_to z, positive value, positive base, positive width)
+{
+        p8 digits[24];
+        positive n = 0, at = 0;
+
+        do
+        {
+                p8 digit = (p8)(value % base);
+
+                digits[n++] = (p8)(digit < 10 ? '0' + digit : 'a' + digit - 10);
+                value /= base;
+        } while (value && n < sizeof(digits));
+        while (n < width && n < sizeof(digits))
+                digits[n++] = '0';
+        while (z->why_text[at])
+                at++;
+        while (n && at < sizeof(z->why_text) - 1)
+                z->why_text[at++] = digits[--n];
+        z->why_text[at] = 0;
+}
+
+static bool gzip_why_end(gzip_inflater address_to z)
+{
+        z->why = (string_address)z->why_text;
         return false;
 }
 
@@ -429,7 +514,7 @@ static bool gzip_inflate_more(gzip_inflater address_to z, positive want)
         z->count &= 7;
         z->bits &= ((p64)1 << z->count) - 1;
         if (byte_input_need(address_of z->input, want) < 0)
-                return gzip_inflate_fail(z, "gzip read failed");
+                return gzip_inflate_fail(z, GZIP_WHY_READ);
         return true;
 }
 
@@ -459,7 +544,7 @@ static bipolar gzip_inflate_get(gzip_inflater address_to z, positive n)
         if (!gzip_inflate_bits(z, n))
                 return -1;
         if (z->count < n)
-                return gzip_inflate_fail(z, "gzip truncated bitstream"), -1;
+                return gzip_inflate_fail(z, GZIP_WHY_EOF), -1;
         value = (p32)z->bits & (((p32)1 << n) - 1);
         z->bits >>= n;
         z->count -= n;
@@ -479,7 +564,7 @@ static bool gzip_inflate_align(gzip_inflater address_to z)
         positive rewind = z->count >> 3;
 
         if (rewind > z->input.at)
-                return gzip_inflate_fail(z, "gzip bit rewind");
+                return gzip_inflate_fail(z, GZIP_WHY_FORMAT);
         z->input.at -= rewind;
         z->bits = 0;
         z->count = 0;
@@ -490,13 +575,45 @@ static bool gzip_inflate_table(gzip_inflater address_to z, p32 address_to table,
                                p8 address_to length, positive n, positive root,
                                positive kind)
 {
-        bipolar built = gzip_huffman_cells(table, length, n, root, kind);
+        positive space = 0, longest = 0, used = 0;
+        bipolar built;
+
+        /* gzip refuses a code that leaves room, unless its one code is a
+           single bit; and one that uses none, but for distances. */
+        for (positive at = 0; at < n; at++)
+                if (length[at] && length[at] <= GZIP_MAXBITS)
+                {
+                        space += (positive)1 << (GZIP_MAXBITS - length[at]);
+                        longest = max(longest, (positive)length[at]);
+                        used++;
+                }
+        if (space < ((positive)1 << GZIP_MAXBITS) && longest != 1 && (used || kind != 2))
+                return gzip_inflate_fail(z, GZIP_WHY_FORMAT);
+        built = gzip_huffman_cells(table, length, n, root, kind);
 
         if (built == -1)
-                return gzip_inflate_fail(z, "gzip Huffman length");
+                return gzip_inflate_fail(z, GZIP_WHY_FORMAT);
         if (built < 0)
-                return gzip_inflate_fail(z, "gzip Huffman over-subscribed");
+                return gzip_inflate_fail(z, GZIP_WHY_FORMAT);
         return true;
+}
+
+/* gzip's lookahead for a code: its table's root width of nine bits for
+   lengths and literals and six for distances, cut to the longest code and
+   raised to the shortest. */
+static p8 gzip_look(p8 address_to length, positive n, positive root)
+{
+        positive least = 16, most = 0;
+
+        for (positive at = 0; at < n; at++)
+                if (length[at])
+                {
+                        least = min(least, (positive)length[at]);
+                        most = max(most, (positive)length[at]);
+                }
+        if (!most)
+                return 0;
+        return (p8)(root > most ? most : root < least ? least : root);
 }
 
 static bool gzip_inflate_dynamic(gzip_inflater address_to z)
@@ -527,6 +644,7 @@ static bool gzip_inflate_dynamic(gzip_inflater address_to z)
         z->fixed_loaded = false;
         if (!gzip_inflate_table(z, z->precode, clen, 19, GZIP_PRECODE_ROOT, 0))
                 return false;
+        p8 look_pre = gzip_look(clen, 19, 7);
 
         /* The code lengths decode on a local bit buffer, refilled a word at a
            time while the window has eight bytes ahead; bits above count are
@@ -561,11 +679,13 @@ static bool gzip_inflate_dynamic(gzip_inflater address_to z)
                                 count = z->count;
                         }
                 }
+                if (count < look_pre)
+                        return gzip_inflate_fail(z, GZIP_WHY_EOF);
                 cell = z->precode[bits & 127];
                 take = cell & 255;
                 if ((cell & GZIP_CELL_EXCEPTIONAL) || take > count)
-                        return gzip_inflate_fail(z, count < 7 ? "gzip truncated bitstream"
-                                                              : "gzip bad Huffman code");
+                        return gzip_inflate_fail(z, count < 7 ? GZIP_WHY_EOF
+                                                              : GZIP_WHY_FORMAT);
                 bits >>= take;
                 count -= take;
                 symbol = cell >> 16;
@@ -577,14 +697,14 @@ static bool gzip_inflate_dynamic(gzip_inflater address_to z)
                 }
                 width = symbol == 16 ? 2 : symbol == 17 ? 3 : 7;
                 if (count < width)
-                        return gzip_inflate_fail(z, "gzip truncated bitstream");
+                        return gzip_inflate_fail(z, GZIP_WHY_EOF);
                 repeat = (positive)(bits & (((p64)1 << width) - 1));
                 bits >>= width;
                 count -= width;
                 if (symbol == 16)
                 {
                         if (!at)
-                                return gzip_inflate_fail(z, "gzip repeat with no length");
+                                return gzip_inflate_fail(z, GZIP_WHY_FORMAT);
                         repeat += 3;
                         fill = last;
                 }
@@ -594,7 +714,7 @@ static bool gzip_inflate_dynamic(gzip_inflater address_to z)
                         fill = 0;
                 }
                 if (at + repeat > nlit + ndist)
-                        return gzip_inflate_fail(z, "gzip length overflow");
+                        return gzip_inflate_fail(z, GZIP_WHY_FORMAT);
                 memory_fill(lengths + at, fill, repeat);
                 at += repeat;
                 last = fill;
@@ -603,7 +723,9 @@ static bool gzip_inflate_dynamic(gzip_inflater address_to z)
         z->count = count;
 
         if (!lengths[256])
-                return gzip_inflate_fail(z, "gzip missing end-of-block");
+                return gzip_inflate_fail(z, GZIP_WHY_FORMAT);
+        z->look_lit = gzip_look(lengths, nlit, 9);
+        z->look_dist = gzip_look(lengths + nlit, ndist, 6);
         return gzip_inflate_table(z, z->litlen, lengths, nlit, GZIP_LITLEN_ROOT, 1) &&
                gzip_inflate_table(z, z->offset, lengths + nlit, ndist, GZIP_OFFSET_ROOT, 2);
 }
@@ -612,6 +734,8 @@ static bool gzip_inflate_fixed(gzip_inflater address_to z)
 {
         p8 lengths[GZIP_MAXLIT + GZIP_MAXDIST];
 
+        z->look_lit = 7;
+        z->look_dist = 5;
         if (z->fixed_loaded)
                 return true;
         memory_fill(lengths, 8, 144);
@@ -660,12 +784,14 @@ static bipolar gzip_inflate_token(gzip_inflater address_to z)
 
         if (!gzip_inflate_bits(z, 48))
                 return -1;
+        if (z->count < z->look_lit)
+                return gzip_inflate_fail(z, GZIP_WHY_EOF), -1;
         cell = gzip_inflate_cell(z->litlen, z->bits, GZIP_LITLEN_ROOT, address_of root);
         take = root + (cell & 255);
         if (cell & GZIP_CELL_LITERAL)
         {
                 if (take > z->count)
-                        return gzip_inflate_fail(z, "gzip truncated bitstream"), -1;
+                        return gzip_inflate_fail(z, GZIP_WHY_EOF), -1;
                 z->bits >>= take;
                 z->count -= take;
                 z->out[z->fill++] = (p8)(cell >> 8);
@@ -673,11 +799,11 @@ static bipolar gzip_inflate_token(gzip_inflater address_to z)
         }
         if ((cell & (GZIP_CELL_EXCEPTIONAL | GZIP_CELL_END)) == GZIP_CELL_EXCEPTIONAL)
                 return gzip_inflate_fail(z, (cell & GZIP_CELL_SYMBOL) && take <= z->count
-                                                ? "gzip length symbol"
-                                        : z->count < GZIP_MAXBITS ? "gzip truncated bitstream"
-                                                                 : "gzip bad Huffman code"), -1;
+                                                ? GZIP_WHY_FORMAT
+                                        : z->count < GZIP_MAXBITS ? GZIP_WHY_EOF
+                                                                 : GZIP_WHY_FORMAT), -1;
         if (take > z->count)
-                return gzip_inflate_fail(z, "gzip truncated bitstream"), -1;
+                return gzip_inflate_fail(z, GZIP_WHY_EOF), -1;
         if (cell & GZIP_CELL_END)
         {
                 z->bits >>= take;
@@ -688,30 +814,32 @@ static bipolar gzip_inflate_token(gzip_inflater address_to z)
         z->bits >>= take;
         z->count -= take;
 
+        if (z->count < z->look_dist)
+                return gzip_inflate_fail(z, GZIP_WHY_EOF), -1;
         cell = gzip_inflate_cell(z->offset, z->bits, GZIP_OFFSET_ROOT, address_of root);
         take = root + (cell & 255);
         if (cell & GZIP_CELL_EXCEPTIONAL)
                 return gzip_inflate_fail(z, (cell & GZIP_CELL_SYMBOL) && take <= z->count
-                                                ? "gzip distance symbol"
-                                        : z->count < GZIP_MAXBITS ? "gzip truncated bitstream"
-                                                                 : "gzip bad Huffman code"), -1;
+                                                ? GZIP_WHY_FORMAT
+                                        : z->count < GZIP_MAXBITS ? GZIP_WHY_EOF
+                                                                 : GZIP_WHY_FORMAT), -1;
         if (take > z->count)
-                return gzip_inflate_fail(z, "gzip truncated bitstream"), -1;
+                return gzip_inflate_fail(z, GZIP_WHY_EOF), -1;
         code = root + ((cell >> 8) & 255);
         distance = (cell >> 16) + ((z->bits >> code) & (((positive)1 << (take - code)) - 1));
         z->bits >>= take;
         z->count -= take;
         made = z->flushed + z->fill - z->member_start;
         if (distance > made)
-                return gzip_inflate_fail(z, "gzip distance"), -1;
+                return gzip_inflate_fail(z, GZIP_WHY_FORMAT), -1;
         memory_copy_match(z->out + z->fill, distance, length);
         z->fill += length;
         return 0;
 }
 
 static const string_address gzip_span_why[5] = {
-        null, null, (string_address)"gzip bad Huffman code",
-        (string_address)"gzip bad distance code", (string_address)"gzip distance"};
+        null, null, (string_address)GZIP_WHY_FORMAT,
+        (string_address)GZIP_WHY_FORMAT, (string_address)GZIP_WHY_FORMAT};
 
 /* Codes to the end of the block: -1 failed, 0 slab full, 1 end of block. */
 static bipolar gzip_inflate_codes(gzip_inflater address_to z)
@@ -772,7 +900,7 @@ static bipolar gzip_inflate_stored(gzip_inflater address_to z)
                 if (len < 0 || nlen < 0)
                         return -1;
                 if ((p16)len != (p16)(~(p16)nlen))
-                        return gzip_inflate_fail(z, "gzip stored length"), -1;
+                        return gzip_inflate_fail(z, GZIP_WHY_FORMAT), -1;
                 z->stored_left = (positive)len;
                 z->stored_open = true;
         }
@@ -785,7 +913,7 @@ static bipolar gzip_inflate_stored(gzip_inflater address_to z)
                         return 0;
                 if (z->input.at >= z->input.have &&
                     (!gzip_inflate_more(z, 1) || z->input.at >= z->input.have))
-                        return gzip_inflate_fail(z, "gzip truncated stored block"), -1;
+                        return gzip_inflate_fail(z, GZIP_WHY_EOF), -1;
                 take = z->input.have - z->input.at;
                 if (take > z->stored_left)
                         take = z->stored_left;
@@ -832,7 +960,7 @@ static bipolar gzip_inflate_blocks(gzip_inflater address_to z)
                                 z->block_kind = 1;
                         }
                         else
-                                return gzip_inflate_fail(z, "gzip reserved block type"), -1;
+                                return gzip_inflate_fail(z, GZIP_WHY_FORMAT), -1;
                         z->have_block = true;
                 }
                 done = z->block_kind ? gzip_inflate_codes(z) : gzip_inflate_stored(z);
@@ -869,7 +997,7 @@ static bool gzip_inflate_skip_string(gzip_inflater address_to z, p32 address_to 
         {
                 byte = gzip_head_byte(z, sum);
                 if (byte < 0)
-                        return gzip_inflate_fail(z, "gzip truncated header string");
+                        return gzip_inflate_fail(z, GZIP_WHY_EOF);
         } while (byte);
         return true;
 }
@@ -901,20 +1029,40 @@ static bipolar gzip_inflate_member(gzip_inflater address_to z)
                 bipolar flags;
                 p32 sum = 0xffffffffu;
 
-                if (gzip_head_byte(z, address_of sum) != GZIP_MAGIC0 ||
-                    gzip_head_byte(z, address_of sum) != GZIP_MAGIC1)
-                        return gzip_inflate_fail(z, "gzip bad magic"), -1;
+                bipolar magic0 = gzip_head_byte(z, address_of sum);
+                bipolar magic1 = magic0 < 0 ? -1 : gzip_head_byte(z, address_of sum);
+
+                if (magic0 < 0 || magic1 < 0)
+                        return gzip_inflate_fail(z, magic0 ? GZIP_WHY_EOF : GZIP_WHY_NOT_GZIP), -1;
+                if (magic0 != GZIP_MAGIC0 || magic1 != GZIP_MAGIC1)
+                        return gzip_inflate_fail(z, GZIP_WHY_NOT_GZIP), -1;
                 method = gzip_head_byte(z, address_of sum);
-                flags = gzip_head_byte(z, address_of sum);
+                if (method < 0)
+                        return gzip_inflate_fail(z, GZIP_WHY_EOF), -1;
                 if (method != GZIP_METHOD)
-                        return gzip_inflate_fail(z, "gzip method is not deflate"), -1;
+                {
+                        gzip_why_begin(z, ':');
+                        gzip_why_str(z, "unknown method ");
+                        gzip_why_num(z, (positive)method, 10, 0);
+                        gzip_why_str(z, " -- not supported");
+                        return gzip_why_end(z), -1;
+                }
+                flags = gzip_head_byte(z, address_of sum);
                 if (flags < 0)
-                        return gzip_inflate_fail(z, "gzip truncated header"), -1;
-                if ((p8)flags & 0xe0)
-                        return gzip_inflate_fail(z, "gzip reserved header flags"), -1;
+                        return gzip_inflate_fail(z, GZIP_WHY_EOF), -1;
+                if ((p8)flags & 0x20)
+                        return gzip_inflate_fail(z, GZIP_WHY_ENCRYPTED), -1;
+                if ((p8)flags & 0xc0)
+                {
+                        gzip_why_begin(z, ' ');
+                        gzip_why_str(z, "has flags 0x");
+                        gzip_why_num(z, (positive)(p8)flags, 16, 0);
+                        gzip_why_str(z, " -- not supported");
+                        return gzip_why_end(z), -1;
+                }
                 for (positive at = 0; at < 6; at++)
                         if (gzip_head_byte(z, address_of sum) < 0)
-                                return gzip_inflate_fail(z, "gzip truncated header"), -1;
+                                return gzip_inflate_fail(z, GZIP_WHY_EOF), -1;
                 if ((p8)flags & GZIP_FEXTRA)
                 {
                         bipolar xlen = gzip_head_byte(z, address_of sum);
@@ -922,11 +1070,11 @@ static bipolar gzip_inflate_member(gzip_inflater address_to z)
                         bipolar extra;
 
                         if (xlen < 0 || xlen_hi < 0)
-                                return gzip_inflate_fail(z, "gzip truncated extra"), -1;
+                                return gzip_inflate_fail(z, GZIP_WHY_EOF), -1;
                         extra = xlen + (xlen_hi << 8);
                         while (extra--)
                                 if (gzip_head_byte(z, address_of sum) < 0)
-                                        return gzip_inflate_fail(z, "gzip truncated extra"), -1;
+                                        return gzip_inflate_fail(z, GZIP_WHY_EOF), -1;
                 }
                 if (((p8)flags & GZIP_FNAME) &&
                     !gzip_inflate_skip_string(z, address_of sum))
@@ -938,11 +1086,19 @@ static bipolar gzip_inflate_member(gzip_inflater address_to z)
                 {
                         bipolar low = gzip_inflate_byte(z);
                         bipolar high = gzip_inflate_byte(z);
+                        p32 want = (sum ^ 0xffffffffu) & 0xffff;
 
                         if (low < 0 || high < 0)
-                                return gzip_inflate_fail(z, "gzip truncated header crc"), -1;
-                        if ((p32)(low | high << 8) != ((sum ^ 0xffffffffu) & 0xffff))
-                                return gzip_inflate_fail(z, "gzip header crc mismatch"), -1;
+                                return gzip_inflate_fail(z, GZIP_WHY_EOF), -1;
+                        if ((p32)(low | high << 8) != want)
+                        {
+                                gzip_why_begin(z, ':');
+                                gzip_why_str(z, "header checksum 0x");
+                                gzip_why_num(z, (p32)(low | high << 8), 16, 4);
+                                gzip_why_str(z, " != computed checksum 0x");
+                                gzip_why_num(z, want, 16, 4);
+                                return gzip_why_end(z), -1;
+                        }
                 }
                 z->member_start = z->flushed + z->fill;
                 z->crc = 0xffffffffu;
@@ -963,13 +1119,62 @@ static bipolar gzip_inflate_member(gzip_inflater address_to z)
         z->crc_at = z->fill;
         if (!gzip_inflate_word(z, address_of got_crc) ||
             !gzip_inflate_word(z, address_of got_size))
-                return gzip_inflate_fail(z, "gzip truncated trailer"), -1;
+                return gzip_inflate_fail(z, GZIP_WHY_EOF), -1;
+        /* Both are checked and both said, as gzip does. */
         if (got_crc != ~z->crc)
-                return gzip_inflate_fail(z, "gzip crc mismatch"), -1;
+                gzip_inflate_fail(z, GZIP_WHY_CRC);
         if (got_size != (p32)(z->flushed + z->fill - z->member_start))
-                return gzip_inflate_fail(z, "gzip length mismatch"), -1;
+        {
+                if (z->why)
+                        z->why2 = GZIP_WHY_LENGTH;
+                else
+                        gzip_inflate_fail(z, GZIP_WHY_LENGTH);
+        }
+        if (z->why)
+                return -1;
         z->head_done = false;
         z->members++;
+        return 1;
+}
+
+/* Whether another member follows: 0 yes, 1 no (the input ended, or held
+   only what gzip ignores after a member), -1 failed. After a member gzip
+   takes zeros to the end of input as padding, and anything else that is
+   not a header as garbage to warn of and stop at, but a first byte of a
+   header with nothing after it is a truncation. */
+static bipolar gzip_inflate_next(gzip_inflater address_to z)
+{
+        positive have;
+
+        if (!gzip_inflate_more(z, 2))
+                return -1;
+        have = z->input.have - z->input.at;
+        if (!have)
+                return z->members ? 1 : (gzip_inflate_fail(z, GZIP_WHY_EOF), -1);
+        if (!z->members)
+                return 0;
+        if (z->input.buf[z->input.at] == GZIP_MAGIC0)
+        {
+                if (have < 2)
+                        return gzip_inflate_fail(z, GZIP_WHY_EOF), -1;
+                if (z->input.buf[z->input.at + 1] == GZIP_MAGIC1)
+                        return 0;
+        }
+        else if (!z->input.buf[z->input.at])
+        {
+                for (;;)
+                {
+                        while (z->input.at < z->input.have && !z->input.buf[z->input.at])
+                                z->input.at++;
+                        if (z->input.at < z->input.have)
+                                break;
+                        if (!gzip_inflate_more(z, 1))
+                                return -1;
+                        if (z->input.at >= z->input.have)
+                                return 1;
+                }
+        }
+        z->garbage = true;
         return 1;
 }
 
@@ -982,12 +1187,12 @@ static bool gzip_inflate_run(gzip_inflater address_to z)
         {
                 if (!z->head_done)
                 {
-                        if (z->input.at >= z->input.have && !gzip_inflate_more(z, 1))
+                        bipolar next = gzip_inflate_next(z);
+
+                        if (next < 0)
                                 return false;
-                        if (z->input.at >= z->input.have)
+                        if (next)
                         {
-                                if (!z->members)
-                                        return gzip_inflate_fail(z, "gzip empty input");
                                 z->finished = true;
                                 break;
                         }
@@ -1067,30 +1272,83 @@ static bool gzip_pull_close(address_any state)
         return ok;
 }
 
+/* How a failure's text is said, and what a decode said: the first and
+   second messages, copied out of the decoder before it is freed. */
+static p8 gzip_note_text[96];
+static string_address gzip_note;
+static string_address gzip_note_more;
+static bool gzip_warned;
+static bool gzip_garbage;
+
+static p8 gzip_note_shape(string_address why)
+{
+        return why[0] == '\n' || why[0] == ':' || why[0] == ' ' ? (p8)why[0] : 0;
+}
+
+/* The bytes of the slab a decode may write now: all when it has ended or
+   failed for want of input or a checksum, and up to the last 32 KiB step of
+   the member's output while a block is open, as gzip's window goes out --
+   a stream that breaks inside a block loses that block's tail there. */
+static positive gzip_hold(gzip_inflater address_to z, bool ok)
+{
+        p64 made;
+
+        if (!z->head_done || (ok && z->finished))
+                return 0;
+        if (!ok && !string_equals(z->why, GZIP_WHY_FORMAT))
+                return 0;
+        made = z->flushed + z->fill - z->member_start;
+        return (positive)(made & (GZIP_WINDOW - 1));
+}
+
 /* The whole stream from in to out (out < 0 tests without writing). */
 static bool gzip_stream_decode(bipolar in, bipolar out)
 {
         gzip_inflater address_to z = (gzip_inflater address_to)gzip_pull_open(in, null, 0);
         bool ok;
 
+        gzip_note = null;
+        gzip_note_more = null;
+        gzip_garbage = false;
         if (!z)
                 return gzip_fail("gzip cannot map the decoder");
         for (;;)
         {
+                positive hold;
+                positive length;
+
                 ok = gzip_inflate_run(z);
-                if (!ok)
-                        break;
-                if (out >= 0 && z->fill &&
-                    system_write_all((positive)out, z->out, z->fill) != z->fill)
+                hold = gzip_hold(z, ok);
+                length = z->carry + z->fill - hold;
+                if (out >= 0 && length &&
+                    system_write_all((positive)out, z->out - z->carry, length) != (bipolar)length)
                 {
+                        z->why = null;
                         ok = gzip_inflate_fail(z, "gzip write failed");
                         break;
                 }
-                if (z->finished)
+                if (!ok || z->finished)
                         break;
+                z->carry = hold;
                 gzip_inflate_slide(z);
         }
-        gzip_why = z->why;
+        if (z->why)
+        {
+                positive at = 0;
+
+                while (z->why[at] && at < sizeof(gzip_note_text) - 1)
+                {
+                        gzip_note_text[at] = (p8)z->why[at];
+                        at++;
+                }
+                gzip_note_text[at] = 0;
+                gzip_note = (string_address)gzip_note_text;
+                gzip_why = gzip_note_text + (gzip_note_shape(gzip_note) ? 1 : 0);
+        }
+        else
+                gzip_why = null;
+        gzip_note_more = z->why2;
+        gzip_garbage = ok && z->garbage;
         memory_free(z, GZIP_INFLATER_SIZE);
         return ok;
 }
@@ -3343,6 +3601,19 @@ static bool gzip_decode_end(void)
 
 #ifndef GZIP_CORE_ONLY
 
+/* One of gzip's messages, by its shape (see GZIP_WHY_EOF). */
+static fn gzip_say(string_address why)
+{
+        p8 shape = gzip_note_shape(why);
+
+        if (shape == '\n')
+                string_format(log_error, "\ngzip: %s: %s\n", file_codec_display, why + 1);
+        else if (shape == ':')
+                string_format(log_error, "gzip: %s: %s\n", file_codec_display, why + 1);
+        else
+                string_format(log_error, "gzip: %s %s\n", file_codec_display, why + 1);
+}
+
 static b32 gzip_stream(bipolar in, bipolar out, bool decode, p8 level)
 {
         bool ok;
@@ -3358,17 +3629,28 @@ static b32 gzip_stream(bipolar in, bipolar out, bool decode, p8 level)
         if (!ok)
         {
                 //      The reason is spelled for tar, codec first; the command
-                //      has named itself already.
-                if (gzip_why)
+                //      has named itself already. A decode's own words are
+                //      gzip's, with the name of the input in them.
+                if (decode && gzip_note)
+                {
+                        gzip_say(gzip_note);
+                        if (gzip_note_more)
+                                gzip_say(gzip_note_more);
+                }
+                else if (gzip_why)
                         string_format(log_error, "gzip: %s\n",
                                       gzip_why + (!string_compare_max(gzip_why, "gzip ", 5)
                                                           ? 5 : 0));
                 gzip_status = 1;
                 return 1;
         }
+        if (decode && gzip_garbage)
+        {
+                gzip_say(GZIP_WHY_GARBAGE);
+                gzip_warned = true;
+        }
         return 0;
 }
-
 
 static const file_codec_suffix gzip_suffixes[] = {
     {".gz", ""}, {".Z", ""}, {".tgz", ".tar"}};
@@ -3397,7 +3679,11 @@ static b32 file_gzip(void)
                         FILE_CODEC_NO_NAME | FILE_CODEC_SHORT_VERSION,
             .remove_source = true, .level = 6,
             .run = gzip_stream, .option = gzip_option};
-        return file_codec_main(address_of codec);
+        gzip_warned = false;
+        b32 status = file_codec_main(address_of codec);
+
+        /* A warning ends the run with 2 unless something failed. */
+        return status ? status : gzip_warned ? 2 : 0;
 }
 
 #endif /* GZIP_CORE_ONLY */

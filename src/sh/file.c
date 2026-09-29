@@ -1403,6 +1403,10 @@ static bipolar file_staged_name_finish(file_staged_name address_to stage,
 #define FILE_CODEC_LEVEL_ZERO 128
 #define FILE_CODEC_THREADS 256
 
+/* The name a codec's messages call its input: the operand as written, or
+   stdin for none or "-", as gzip says it. Set before every run. */
+static string_address file_codec_display;
+
 /* -T N / --threads=N as xz spells them: 0 is every CPU the process may run
    on, 1 keeps the codec on the calling thread. Only whether work may spread
    is taken from it; the bytes never depend on it. */
@@ -1849,6 +1853,7 @@ static b32 file_codec_paths(file_codec_cli address_to codec, positive first,
                 }
 
                 bool had_input = input.handle >= 0;
+                file_codec_display = path && !string_equals(path, "-") ? (string_address)path : (string_address)"stdin";
                 codec->run(in, out, codec->decompress, codec->level);
                 bipolar finished;
                 string_address finish_display = path;
@@ -1907,8 +1912,11 @@ static b32 file_codec_main(file_codec_cli address_to codec)
         if (!file_codec_parse(codec, address_of first, address_of result))
                 return result;
         if (first >= (positive)program_argument_count())
+        {
+                file_codec_display = "stdin";
                 return codec->run(0, codec->test ? -1 : 1,
                                   codec->decompress, codec->level);
+        }
         return file_codec_paths(codec, first,
                                 (positive)program_argument_count());
 }
