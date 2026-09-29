@@ -35759,7 +35759,9 @@ def harness_pane_restride(argv):
         start = text.index(first)
         return text[start:text.index(following, start)]
 
-    body = cut("// Every page from first up to, not including, last.", "static void pane_mapping_free")
+    body = (cut("#define pane_say(", "/*\n        How much of the machine every window may hold")
+            if "#define pane_say(" in text else "")
+    body += cut("// Every page from first up to, not including, last.", "static void pane_mapping_free")
     body += cut("static unsigned int console_stride(", "static void pane_ring(")
     body += cut("static long pane_restride(", "static long window_ioctl_stride(")
     shim = r'''
@@ -35778,7 +35780,13 @@ def harness_pane_restride(argv):
 #define round_up(x, y) ((((x) + (y) - 1) / (y)) * (y))
 #define smp_load_acquire(p) (*(p))
 #define WRITE_ONCE(x, v) ((x) = (v))
-#define pr_info(...) ((void)0)
+/* What a program's window says goes through the rate limit or nowhere: the
+   kernel's default is ten and then nothing until the interval is out, and no
+   time passes here. */
+static unsigned plain_logs, ratelimited_calls, ratelimited_shown;
+#define pr_info(...) (plain_logs++)
+#define pr_info_ratelimited(...) \
+        (ratelimited_calls++, ratelimited_shown < 10 ? (void)ratelimited_shown++ : (void)0)
 #define ENOMEM 12
 #define true 1
 #define false 0
@@ -35896,6 +35904,9 @@ int main(int argc, char **argv) {
                 }
                 free(pane.mapping); free(pane.pages); free(pane.lengths); free(wanted);
         }
+        check(plain_logs == 0, "a program's recut is said through the rate limit or not at all", 0);
+        check(ratelimited_calls > 100 && ratelimited_shown <= 10,
+              "and ten of thousands of recuts write ten lines of the log", 0);
         printf("%u %u %u %u\n", checks - failures, checks, moves, raced_moves);
         return failures != 0;
 }
@@ -35924,6 +35935,170 @@ int main(int argc, char **argv) {
         print("  FAIL no ring was raced between the two passes")
         passed = -1
     write_tally("pane-restride", max(passed, 0), total)
+    return 0 if passed == total and ran.returncode == 0 else 1
+
+
+def harness_pane_pages(argv):
+    """A program's window is paid for by the program, and says little.
+
+    A window's ring is held a page at a time as it is written, and any
+    process that can open /dev/spark makes windows and touches their pages.
+    The pages are charged to whoever touched them, or a control group's limit
+    never sees them: from inside one, a loop of first touches is kernel memory
+    up to the quarter of the machine the desktop allows every window between
+    them. And a window says a line when it goes, rate limited, or the same loop
+    writes the kernel log full of itself. pane_page_hold, pane_mapping_reserve
+    and pane_mapping_free are cut out of canvas.c over an allocator that
+    remembers the flags every allocation was made with.
+    """
+    import subprocess
+    import tempfile
+    text = (HARNESS_ROOT / "src/canvas/canvas.c").read_text()
+
+    def cut(first, following):
+        start = text.index(first)
+        return text[start:text.index(following, start)]
+
+    body = (cut("#define pane_say(", "/*\n        How much of the machine every window may hold")
+            if "#define pane_say(" in text else "")
+    body += cut("static struct page *pane_page_hold(", "// Every page from first up to, not including, last.")
+    body += cut("// Every page from first up to, not including, last.", "/*\n        Whether a line of a ring has memory")
+    body += cut("static void pane_mapping_free(", "/*\n        A pane going away, and everything that was still pointing")
+    shim = r"""
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#define PAGE_SHIFT 12
+#define PAGE_SIZE 4096ul
+#define PAGE_ALIGN(x) (((x) + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1))
+#define GFP_KERNEL 0x400u
+#define __GFP_ZERO 0x100u
+#define __GFP_ACCOUNT 0x400000u
+#define GFP_KERNEL_ACCOUNT (GFP_KERNEL | __GFP_ACCOUNT)
+#define VM_MAP 4
+#define smp_store_release(p, v) (*(p) = (v))
+#define smp_load_acquire(p) (*(p))
+#define true 1
+#define false 0
+#define _Bool int
+#define mutex_init(m) ((void)(m))
+struct mutex { int held; };
+struct page { int unused; };
+struct vm_struct { void *addr; };
+struct pane {
+        struct vm_struct *area;
+        struct page **pages;
+        unsigned long page_count;
+        struct mutex pages_lock;
+        void *mapping;
+};
+static unsigned plain_logs, ratelimited_calls, ratelimited_shown;
+#define pr_info(...) (plain_logs++)
+#define pr_info_ratelimited(...) \
+        (ratelimited_calls++, ratelimited_shown < 10 ? (void)ratelimited_shown++ : (void)0)
+static unsigned failures, checks, page_calls, page_uncharged, array_calls, array_uncharged;
+static void check(int good, const char *what) {
+        checks++;
+        if (!good && ++failures < 8) printf("  FAIL %s\n", what);
+}
+static struct page *alloc_page(unsigned gfp) {
+        page_calls++;
+        if (!(gfp & __GFP_ACCOUNT)) page_uncharged++;
+        return calloc(1, sizeof(struct page));
+}
+static void __free_page(struct page *page) { free(page); }
+static void *kvcalloc(unsigned long n, unsigned long size, unsigned gfp) {
+        array_calls++;
+        if (!(gfp & __GFP_ACCOUNT)) array_uncharged++;
+        return calloc(n, size);
+}
+static void kvfree(void *p) { free(p); }
+static void vfree(void *p) { free(p); }
+static struct vm_struct *get_vm_area(unsigned long bytes, unsigned flags) {
+        struct vm_struct *area = calloc(1, sizeof(*area));
+        (void)flags;
+        area->addr = calloc(1, bytes);
+        return area;
+}
+static void free_vm_area(struct vm_struct *area) { free(area->addr); free(area); }
+static struct mm { int unused; } init_mm;
+static int pane_pte_set(void *pte, unsigned long address, void *data) { (void)pte;(void)address;(void)data; return 0; }
+static int apply_to_page_range(struct mm *mm, unsigned long address, unsigned long size,
+                               int (*fn)(void *, unsigned long, void *), void *data) {
+        (void)mm;(void)address;(void)size;(void)fn;(void)data; return 0;
+}
+static void flush_cache_vmap(unsigned long from, unsigned long to) { (void)from;(void)to; }
+"""
+    driver = r"""
+int main(void) {
+        for (unsigned round = 0; round < 1000; round++) {
+                struct pane pane = {0};
+                unsigned long bytes = 16 * PAGE_SIZE;
+                /* the two pages a program's window has from the start, the
+                   ring's own pages as they are touched, then the window goes */
+                pane.page_count = bytes >> PAGE_SHIFT;
+                pane.pages = kvcalloc(pane.page_count, sizeof(*pane.pages), GFP_KERNEL_ACCOUNT);
+                pane.area = get_vm_area(bytes, VM_MAP);
+                pane.mapping = pane.area->addr;
+                for (unsigned long page = 0; page < pane.page_count; page += 1 + round % 4)
+                        pane_page_hold(&pane, page);
+                pane_mapping_free(&pane);
+        }
+        check(page_calls > 1000, "windows held pages");
+        check(!page_uncharged, "every page a program's window holds is charged to whoever touched it");
+        /* pane_mapping_reserve's own array is made by the real function too */
+        check(plain_logs == 0, "a window that goes says its line through the rate limit or not at all");
+        check(ratelimited_calls >= 1000 && ratelimited_shown <= 10,
+              "and a thousand windows going write ten lines of the log");
+        printf("%u %u\n", checks - failures, checks);
+        return failures != 0;
+}
+"""
+    array_probe = ""
+    if "static void *pane_mapping_reserve(" in text:
+        # The reservation allocates the pages array itself: the real one, cut
+        # above with the free before it, over the same allocator.
+        driver = driver.replace(
+            "        check(page_calls > 1000, \"windows held pages\");",
+            """        for (unsigned round = 0; round < 50; round++) {
+                struct pane pane = {0};
+                unsigned long bytes = 16 * PAGE_SIZE;
+                check(pane_mapping_reserve(&pane, bytes, PAGE_SIZE, 15 * PAGE_SIZE) != NULL,
+                      "a reservation is made");
+                pane_mapping_free(&pane);
+        }
+        check(array_calls >= 50 && !array_uncharged,
+              "the array of a window's pages is charged to it as well");
+        check(page_calls > 1000, "windows held pages");""")
+    with tempfile.TemporaryDirectory(prefix="pane-pages-") as temporary:
+        top = Path(temporary)
+        (top / "pages.c").write_text(shim + body + driver)
+        built = subprocess.run(["cc", "-O2", "-w", "-o", str(top / "pages"), str(top / "pages.c")],
+                               capture_output=True, text=True)
+        if built.returncode:
+            print("  FAIL the pane pages did not build:\n" + built.stderr[-3000:])
+            return 1
+        ran = subprocess.run([str(top / "pages")], capture_output=True, text=True, timeout=120)
+    lines = ran.stdout.rstrip().splitlines()
+    for line in lines[:-1]:
+        print(line)
+    try:
+        passed, total = (int(word) for word in lines[-1].split())
+    except (IndexError, ValueError):
+        print("  FAIL the pane pages said nothing it could be read by: %r" % ran.stdout[-500:])
+        return 1
+    #   The line a window of cells says when it is made is in pane_create,
+    #   which is far too large to cut out; that it goes through pane_say is
+    #   read from the source, and the plain call that says the compositor's own
+    #   console once is left where it is.
+    total += 2
+    for expected in ('pane_say("window grid ', 'pr_info("[moonwater canvas] " "kernel log grid '):
+        if expected in text:
+            passed += 1
+        else:
+            print("  FAIL pane_create no longer says %r" % expected)
+    print("pane pages: %d of %d checks" % (passed, total))
+    write_tally("pane-pages", passed, total)
     return 0 if passed == total and ran.returncode == 0 else 1
 
 
@@ -55667,6 +55842,7 @@ HARNESS_CHECKS = {
     "compression": harness_compression,
     "engines": harness_engines_main,
     "core_state": harness_core_state,
+    "pane_pages": harness_pane_pages,
     "spark_entry": harness_spark_entry,
     "build_tools": harness_build_tools,
     "macos_read_retry": harness_macos_read_retry,

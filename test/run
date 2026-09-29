@@ -10713,6 +10713,7 @@ python3 test/differential.py --harness terminfo_install || kit_failed=1
 python3 test/differential.py --harness host_writes || kit_failed=1
 python3 test/differential.py --harness console_queue || kit_failed=1
 python3 test/differential.py --harness pane_restride || kit_failed=1
+python3 test/differential.py --harness pane_pages || kit_failed=1
 python3 test/differential.py --harness sort_spill_names || kit_failed=1
 python3 test/differential.py --harness dhcp_packets || kit_failed=1
 python3 test/differential.py --harness inventory_mutations || kit_failed=1

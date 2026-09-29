@@ -1490,6 +1490,20 @@ static PURE int pane_by_z(void *unused, const struct list_head *a, const struct 
 }
 
 /*
+        What a program's window says, when it is made and when it goes.
+
+        Anyone who can open /dev/spark can make a window and close it as fast
+        as the calls go, so a line said for each is a way for a program with
+        no privilege to write the kernel log: the ring holds a few hundred
+        of them at a hundred bytes, and everything logged before the loop
+        started -- a floodlight change, a warning, an oops's first lines --
+        is gone from it by the time anybody reads. Rate limited, then, the
+        way the loader's own refusals are. The compositor's own console
+        window is made once, by the kernel, and says its line plainly.
+*/
+#define pane_say(...) pr_info_ratelimited("[moonwater canvas] " __VA_ARGS__)
+
+/*
         How much of the machine every window may hold between them.
 
         There is no cap on how many windows there are and there must not be,
@@ -1550,7 +1564,15 @@ static struct page *pane_page_hold(struct pane *pane, unsigned long index)
         if (page)
                 return page;
 
-        page = alloc_page(GFP_KERNEL | __GFP_ZERO);
+        /*
+                Charged to whoever touched the page. /dev/spark is open to
+                everyone and a window's ring is memory a program pays for a
+                page at a time by writing to it: from a control group with
+                a limit, a loop of first touches was kernel memory that no
+                limit saw, up to the quarter of the machine the desktop
+                allows all windows between them.
+        */
+        page = alloc_page(GFP_KERNEL_ACCOUNT | __GFP_ZERO);
         if (!page)
                 return NULL;
 
@@ -1620,8 +1642,8 @@ static void pane_mapping_free(struct pane *pane)
         // What a window of cells cost by the end, against what it reserved:
         // the canvas lane reads this back for the terminal it closes.
         if (pane->area)
-                pr_info("[moonwater canvas] " "window closed, ring held %lu of %lu KiB\n",
-                        (held << PAGE_SHIFT) >> 10, (pane->page_count << PAGE_SHIFT) >> 10);
+                pane_say("window closed, ring held %lu of %lu KiB\n",
+                         (held << PAGE_SHIFT) >> 10, (pane->page_count << PAGE_SHIFT) >> 10);
 
         // Unmapped before the pages go back, as vfree does.
         if (pane->area)
@@ -1643,7 +1665,8 @@ static void *pane_mapping_reserve(struct pane *pane, unsigned long bytes,
                                   unsigned long head_end, unsigned long tail_start)
 {
         pane->page_count = bytes >> PAGE_SHIFT;
-        pane->pages = kvcalloc(pane->page_count, sizeof(*pane->pages), GFP_KERNEL);
+        pane->pages = kvcalloc(pane->page_count, sizeof(*pane->pages),
+                               GFP_KERNEL_ACCOUNT);
         if (!pane->pages)
                 return NULL;
 
@@ -2126,7 +2149,7 @@ static COLD struct pane *pane_create(unsigned int width, unsigned int height,
         if (canvas_pane_bytes + bytes > canvas_pane_budget())
                 return NULL;
 
-        pane = kzalloc(sizeof(*pane), GFP_KERNEL);
+        pane = kzalloc(sizeof(*pane), GFP_KERNEL_ACCOUNT);
         if (!pane)
                 return NULL;
 
@@ -2195,7 +2218,7 @@ static COLD struct pane *pane_create(unsigned int width, unsigned int height,
                 if (owned)
                         pr_info("[moonwater canvas] " "kernel log grid %ux%u, ring cut to %ux%u (%lu KiB), recut as it grows\n", columns, rows, stride, history, bytes >> 10);
                 else
-                        pr_info("[moonwater canvas] " "window grid %ux%u, ring holds %ux%u (%lu KiB), lines %u apart\n", columns, rows, stride, history, bytes >> 10, cut);
+                        pane_say("window grid %ux%u, ring holds %ux%u (%lu KiB), lines %u apart\n", columns, rows, stride, history, bytes >> 10, cut);
 
                 page->max_columns = max_columns;
                 page->max_rows = max_rows;
@@ -3089,7 +3112,7 @@ static long pane_restride(struct pane *pane, unsigned int columns)
 
         pane->stride = stride;
         WRITE_ONCE(pane->shared->stride, stride);
-        pr_info("[moonwater canvas] " "window ring recut to %ux%u\n", stride, pane->history);
+        pane_say("window ring recut to %ux%u\n", stride, pane->history);
         return stride;
 }
 
