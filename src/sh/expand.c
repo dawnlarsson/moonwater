@@ -9012,8 +9012,38 @@ static PURE bool expand_length_form(string_address at, string_address close)
         return at == close;
 }
 
+/*
+        How many braced expansions are being read, and which one this is.
+
+        A nameref to an element holds the subscript as text, and reading the
+        name evaluates it -- commands and all. One ${r} reads the name more
+        than once (to tell what is set, then to write it), and Bash evaluates
+        the subscript once for the whole expansion, so a subscript with a
+        $( ) in it ran its command twice here. The evaluation is kept for
+        the expansion that made it: shell_reference_element_value asks
+        whether one is in progress, and which, and reuses the answer for
+        the same text within it.
+*/
+static positive expand_braced_active;
+static positive expand_braced_generation;
+
+static string_address expand_braced_body_run(string_address step,
+                                             string_address close, bool quoted);
+
 static string_address expand_braced_body(string_address step,
                                         string_address close, bool quoted)
+{
+        string_address after;
+
+        expand_braced_generation++;
+        expand_braced_active++;
+        after = expand_braced_body_run(step, close, quoted);
+        expand_braced_active--;
+        return after;
+}
+
+static string_address expand_braced_body_run(string_address step,
+                                             string_address close, bool quoted)
 {
         string_address whole = step;
         string_address name_start;

@@ -18871,9 +18871,164 @@ def shell_glob_extended_bounded(farm):
     return passed, total, notes
 
 
+def shell_subscript_side_effects(farm):
+    """Commands hidden in a subscript, run through every place a name is read.
+
+    A subscript is arithmetic, and arithmetic expands what is in it, so a
+    value or a name a script was handed that reads a[$(cmd)] is code wherever
+    the shell evaluates it as one. Bash evaluates in most of these places and
+    not in others, and the difference is what matters: a place where this
+    shell runs the command and bash does not, or runs it a second time, is a
+    way to make a script run what its data said. Each context below carries a
+    payload that appends a line to M when its command runs; the number of
+    lines is compared with bash's.
+    """
+    import shutil
+    reference = shutil.which("bash")
+    target = Path(farm).resolve() / "bash"
+    if not reference or not target.exists():
+        return 0, 1, ["subscript side effects need bash and the candidate's bash"]
+    inj = "$(echo x>>M)"
+    backtick = "`echo x>>M`"
+    payloads = [
+        "a[%s]" % inj,
+        "a[%s]" % backtick,
+        "a[x=%s]" % inj,
+        "a[1+%s]" % inj,
+        "a[${y:-%s}]" % inj,
+        "a[$((%s))]" % inj,
+        "a[i=$(echo 1>>M)]",
+    ]
+    CTX = [
+        "unset '{P}'",
+        "unset -v '{P}'",
+        "[[ -v '{P}' ]]",
+        "test -v '{P}'",
+        "[ -v '{P}' ]",
+        "printf -v '{P}' %s hi",
+        "echo hi | read '{P}'",
+        "read '{P}' <<< hi",
+        "read -a '{P}' <<< 'a b'",
+        "mapfile '{P}' <<< hi",
+        "mapfile -t '{P}' <<< hi",
+        "readarray '{P}' <<< hi",
+        "getopts 'a:' '{P}' -a foo",
+        "getopts 'a:' opt -a '{P}'",
+        "wait -p '{P}' 2>/dev/null",
+        "declare '{P}'=1",
+        "declare '{P}'",
+        "declare -a '{P}'",
+        "declare -n r='{P}'; echo $r",
+        "declare -n r='{P}'; r=1",
+        "declare -n r='{P}'; unset r",
+        "declare -n r='{P}'; : ${{r}}",
+        "typeset -i '{P}'=3",
+        "local '{P}'=1",
+        "f() {{ local '{P}'=1; }}; f",
+        "export '{P}'=1",
+        "export '{P}'",
+        "readonly '{P}'=1",
+        "readonly '{P}'",
+        "r='{P}'; echo ${{!r}}",
+        "r='{P}'; : ${{!r:-x}}",
+        "for '{P}' in 1 2; do :; done",
+        "for {P} in 1 2; do :; done",
+        "x='{P}'; (( x ))",
+        "x='{P}'; echo $(( x ))",
+        "x='{P}'; let x",
+        "x='{P}'; let 'x+1'",
+        "x='{P}'; [[ $x -eq 1 ]]",
+        "x='{P}'; [[ x -eq 1 ]]",
+        "x='{P}'; [ \"$x\" -eq 1 ]",
+        "x='{P}'; declare -i y; y=x",
+        "x='{P}'; declare -i y=x",
+        "x='{P}'; a[x]=1",
+        "x='{P}'; echo ${{a[x]}}",
+        "x='{P}'; echo ${{y:x}}",
+        "x='{P}'; y=abc; echo ${{y:0:x}}",
+        "x='{P}'; set -- 1 2 3; shift x",
+        "x='{P}'; echo ${{a[$x]}}",
+        "echo ${{{P}}}",
+        "echo ${{{P}:-d}}",
+        "echo $(( {P} ))",
+        "(( {P} = 1 ))",
+        "(( {P}++ ))",
+        "[[ -v {P} ]]",
+        "[[ {P} -eq 1 ]]",
+        "[[ -n ${{{P}}} ]]",
+        "{P}=1",
+        "{P}+=1",
+        "a=( [$(echo x>>M)]=1 )",
+        "declare -A b; b['{P}']=1",
+        "declare -A b; b['{P}']=1; unset 'b[{P}]'",
+        "declare -A b=( ['{P}']=1 )",
+        "declare -A b; echo ${{b['{P}']}}",
+        "declare -A b; [[ -v b['{P}'] ]]",
+        "trap '{P}=1' EXIT",
+        "PS4='{P}'; set -x; :",
+        "case x in '{P}') ;; esac",
+        "select v in a; do break; done <<< 1; unset '{P}'",
+        "coproc '{P}' { :; }",
+        "compgen -v '{P}'",
+        "printf '%s\\n' \"${{!a[@]}}\" > /dev/null; unset -v '{P}' 2>/dev/null",
+        "printf '%(%s)T' '{P}' >/dev/null",
+        "kill -0 '{P}' 2>/dev/null",
+        "history -d '{P}' 2>/dev/null",
+        "ulimit -n '{P}' 2>/dev/null",
+        "shift '{P}' 2>/dev/null",
+        "exit '{P}'",
+        "return '{P}' 2>/dev/null",
+        "break '{P}' 2>/dev/null",
+        "umask '{P}' 2>/dev/null",
+        "read -t '{P}' <<< x",
+        "read -n '{P}' <<< x",
+        "read -u '{P}' 2>/dev/null",
+        "mapfile -n '{P}' <<< x",
+        "mapfile -O '{P}' a <<< x",
+        "echo x | { read -r '{P}'; }",
+        "set -- '{P}'; echo $(( $1 ))",
+        "set -- '{P}'; (( $1 ))",
+        "set -- '{P}'; unset \"$1\"",
+        "set -- '{P}'; [[ -v $1 ]]",
+        "set -- '{P}'; declare -n r=$1; r=1",
+        "set -- '{P}'; printf -v \"$1\" x",
+        "set -- '{P}'; read \"$1\" <<< x",
+        "set -- '{P}'; local \"$1\" 2>/dev/null",
+        "set -- '{P}'; export \"$1\"",
+        "set -- '{P}'; let \"$1\"",
+    ]
+    def count(shell, context):
+        with tempfile.TemporaryDirectory(prefix="subscript-") as work:
+            try:
+                ran = subprocess.run([shell, "-c", context], cwd=work, stdin=subprocess.DEVNULL,
+                                     capture_output=True, timeout=10,
+                                     env={"PATH": "/usr/bin:/bin", "HOME": work})
+            except subprocess.TimeoutExpired:
+                return "timeout"
+            try:
+                lines = len(Path(work, "M").read_text().split())
+            except FileNotFoundError:
+                lines = 0
+            return lines, ran.returncode if ran.returncode < 0 else 0
+
+    passed, total, notes = 0, 0, []
+    for template in CTX:
+        for payload in payloads:
+            context = (template.replace("{{", "\0").replace("}}", "\1").replace("{P}", payload)
+                       .replace("\0", "{").replace("\1", "}"))
+            total += 1
+            want, got = count(reference, context), count(str(target), context)
+            if want[0] == got[0] and got != "timeout" and got[1] == 0:
+                passed += 1
+            elif len(notes) < 6:
+                notes.append("%r: bash ran it %s time(s), ours %s" % (context, want[0], got))
+    return passed, total, notes
+
+
 SHELL_CHECKS = (
     shell_restricted_function_import,
     shell_glob_extended_bounded,
+    shell_subscript_side_effects,
     shell_hostile_environment,
     shell_nesting_limits,
     shell_signal_dispositions,

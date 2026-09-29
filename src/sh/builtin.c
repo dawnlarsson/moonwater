@@ -3618,9 +3618,33 @@ COLD string_address shell_reference_element_value(
                 address_of subscript, address_of subscript_length))
                 return null;
 
-        key = shell_expand_subscript(
-            (string_address)base, base_length, (string_address)subscript,
-            subscript_length, address_of key_length);
+        //      Inside one braced expansion the text is evaluated once, as
+        //      Bash does; anywhere else each read is its own.
+        static const_string kept_subscript;
+        static positive kept_generation;
+        static positive kept_length;
+        static string_address kept_key;
+
+        if (expand_braced_active && kept_key && subscript == kept_subscript &&
+            kept_generation == expand_braced_generation)
+        {
+                key = kept_key;
+                key_length = kept_length;
+        }
+        else
+        {
+                key = shell_expand_subscript(
+                    (string_address)base, base_length, (string_address)subscript,
+                    subscript_length, address_of key_length);
+
+                if (expand_braced_active && key)
+                {
+                        kept_subscript = subscript;
+                        kept_generation = expand_braced_generation;
+                        kept_length = key_length;
+                        kept_key = key;
+                }
+        }
 
         return key ? shell_array_get(base, base_length, key, key_length,
                                      value_length)
@@ -8609,6 +8633,16 @@ static COLD b32 shell_special_refused(b32 bash_status)
         return shell_bash_compat ? bash_status : 2;
 }
 
+// Whether nothing by this name is there to hold an element, so that there is
+// no element to forget and no subscript to read.
+static COLD bool shell_element_holder_absent(const_string name, positive length)
+{
+        env_reference held = env_reference_span(name, length);
+
+        return held.index >= shell_var_count && !held.destination &&
+               !(shell_array_attributes(name, length) & SHELL_ARRAY_EITHER);
+}
+
 COLD fn shell_unset(writer write, string_address input)
 {
         shell_option_walk walk = {1};
@@ -8736,6 +8770,18 @@ COLD fn shell_unset(writer write, string_address input)
                                 exec_special_error_note();
                                 shell_answer(shell_bash_compat ? 1 : 2);
                                 return;
+                        }
+
+                        //      bash looks the variable up before it reads the
+                        //      subscript, and an element of what is not there
+                        //      is forgotten already: a subscript held in a
+                        //      variable's value is arithmetic, so evaluating
+                        //      it here ran the commands inside it for a name
+                        //      that names nothing, which bash does not.
+                        if (shell_element_holder_absent(word, base))
+                        {
+                                index++;
+                                continue;
                         }
 
                         //      bash names a subscript it cannot use by the
@@ -8870,6 +8916,13 @@ COLD fn shell_unset(writer write, string_address input)
 
                         if (resolved.element)
                         {
+                                if (shell_element_holder_absent(resolved.name,
+                                                                resolved.length))
+                                {
+                                        index++;
+                                        continue;
+                                }
+
                                 if (!shell_reference_element_forget(resolved))
                                 {
                                         shell_answer(1);
