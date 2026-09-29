@@ -255,35 +255,24 @@ static inline INLINE fn text_put_string(string_address value)
         Into a caller's array rather than straight out, because cmp needs the
         two bytes it is comparing side by side in a line it has not finished
         building. Terminated as well as measured, since cmp prints the result
-        as a string. Four bytes is the widest answer -- M-^? -- so five is
-        room enough for any of them.
+        as a string. Four bytes is the widest answer -- M-^? -- and the table's
+        entry is stored whole, seven bytes, so eight is the room it takes.
 */
-#define TEXT_VISIBLE_MAX 5
+#define TEXT_VISIBLE_MAX 8
 
 static positive text_visible(p8 address_to into, p8 value)
 {
-        positive have = 0;
+        static p64 address_to table;
 
-        if (value >= 128)
-        {
-                into[have++] = 'M';
-                into[have++] = '-';
-                value -= 128;
-        }
+        if (unlikely(!table))
+                table = spelling_caret(SPELL_SHOW | SPELL_ALL);
 
-        if (value == 127)
-        {
-                into[have++] = '^';
-                into[have++] = '?';
-        }
-        else if (value < 32)
-        {
-                into[have++] = '^';
-                into[have++] = (p8)(value + 64);
-        }
-        else
-                into[have++] = value;
+        p64 entry = table[value];
+        positive have = (positive)(entry & 255);
 
+        // Seven spelling bytes at once, the widest being four, and the room
+        // for them is the caller's.
+        memory_store_unaligned(p64, into, entry >> 8);
         into[have] = end;
         return have;
 }

@@ -33447,7 +33447,7 @@ static fn spelled_capacities(p8 address_to in, positive size,
 
 static fn spelled_caret_check(void)
 {
-        for (positive flags = 0; flags < 8; flags++)
+        for (positive flags = 0; flags < 16; flags++)
         {
                 p64 address_to table = spelling_caret(flags);
                 bool right = table == spelling_caret(flags);
@@ -33456,14 +33456,12 @@ static fn spelled_caret_check(void)
                         p8 text[8];
                         positive length = 0, value = byte;
                         bool show = flags & SPELL_SHOW;
-                        if (byte == 9)
-                                length = (flags & SPELL_TABS) ? (text[0] = '^', text[1] = 'I', 2)
-                                                             : (text[0] = 9, 1);
-                        else if (byte == 10)
-                                length = (flags & SPELL_ENDS) ? (text[0] = '$', text[1] = 10, 2)
-                                                             : (text[0] = 10, 1);
-                        else if (!show)
-                                text[length++] = (p8)byte;
+                        if (byte == 9 && (flags & SPELL_TABS))
+                                text[0] = '^', text[1] = 'I', length = 2;
+                        else if (byte == 10 && (flags & SPELL_ENDS))
+                                text[0] = '$', text[1] = 10, length = 2;
+                        else if (((byte == 9 || byte == 10) && !(flags & SPELL_ALL)) || !show)
+                                text[0] = (p8)byte, length = 1;
                         else
                         {
                                 if (value > 127)
@@ -33526,6 +33524,37 @@ static fn spelled_fuzz(positive rounds)
 //      writer_c_escape, sed l): every byte under every extra set.
 static fn spelled_c_check(void)
 {
+        for (positive high = 0; high < 2; high++)
+        {
+                p64 address_to table = spelling_ansi(high);
+                bool right = table == spelling_ansi(high);
+                for (positive byte = 0; byte < 256; byte++)
+                {
+                        static const p8 names[256] = {
+                            [7] = 'a', [8] = 'b', [27] = 'E', [12] = 'f',
+                            ['\n'] = 'n', ['\r'] = 'r', ['\t'] = 't', [11] = 'v',
+                            ['\\'] = '\\', ['\''] = '\''};
+                        p8 text[4] = {'\\'};
+                        positive length = 1;
+                        if (names[byte])
+                                text[1] = names[byte], length = 2;
+                        else if (escape_categories[byte] & (HEX_CONTROL | HEX_TAB) ||
+                                 (high && byte >= 128))
+                        {
+                                text[1] = (p8)('0' + (byte >> 6));
+                                text[2] = (p8)('0' + ((byte >> 3) & 7));
+                                text[3] = (p8)('0' + (byte & 7));
+                                length = 4;
+                        }
+                        else
+                                text[0] = (p8)byte;
+                        p64 entry = table[byte];
+                        right = right && (entry & 255) == length;
+                        for (positive at = 0; at < length; at++)
+                                right = right && (p8)(entry >> (8 * (at + 1))) == text[at];
+                }
+                check("spelling_ansi: every byte as shell_ansi_byte spells it", right);
+        }
         for (positive high = 0; high < 2; high++)
         {
                 p64 address_to table = spelling_hidden(high);

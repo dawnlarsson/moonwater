@@ -9267,22 +9267,7 @@ static bool shell_declare_options(shell_declare_state address_to state)
 static fn shell_ansi_quoted(writer write, string_address text, bool high)
 {
         write("$'", 2);
-
-        while (string_get(text))
-        {
-                positive run = string_span(text, shell_quote_ansi);
-                p8 escaped[4];
-
-                if (run)
-                {
-                        write(text, run);
-                        text += run;
-                }
-                if (!string_get(text))
-                        break;
-                write(escaped, shell_ansi_byte(escaped, string_get(text++), high));
-        }
-
+        writer_spelled(write, text, string_length(text), spelling_ansi(high));
         write("'", 1);
 }
 
@@ -9294,26 +9279,31 @@ static fn shell_ansi_quoted(writer write, string_address text, bool high)
 static fn shell_ansi_quoted_shown(writer write, string_address text,
                                   positive length)
 {
+        p64 address_to table = spelling_ansi(true);
+
         write("$'", 2);
         for (positive at = 0; at < length;)
         {
-                p8 escaped[4];
-                p8 value = (p8)text[at];
-                positive shown = value >= 0x80
-                    ? shell_shown_character((const p8 address_to)text + at,
-                                            length - at)
-                    : 0;
+                // Everything up to the next byte past ASCII is spelled by the
+                // table; that byte is a character or an octal escape.
+                positive plain = memory_escape_index(text + at, length - at, HEX_HIGH);
+                positive shown;
 
+                if (plain)
+                {
+                        writer_spelled(write, text + at, plain, table);
+                        at += plain;
+                        continue;
+                }
+                shown = shell_shown_character((const p8 address_to)text + at,
+                                              length - at);
                 if (shown)
                 {
                         write(text + at, shown);
                         at += shown;
                         continue;
                 }
-                if (shell_quote_ansi[value])
-                        write(address_of value, 1);
-                else
-                        write(escaped, shell_ansi_byte(escaped, value, true));
+                writer_spelled(write, text + at, 1, table);
                 at++;
         }
         write("'", 1);

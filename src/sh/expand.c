@@ -7054,22 +7054,8 @@ static COLD fn shell_single_quote_write(writer write, string_address value,
 static COLD fn shell_ansi_run(writer write, string_address value,
                               positive length, bool high)
 {
-        positive at = 0;
-
         write("$'", 2);
-        while (at < length)
-        {
-                positive run = string_span_max(value + at, length - at,
-                                               shell_quote_ansi);
-                p8 written[4];
-
-                if (run)
-                        write(value + at, run);
-                at += run;
-                if (at < length)
-                        write(written,
-                              shell_ansi_byte(written, value[at++], high));
-        }
+        writer_spelled(write, value, length, spelling_ansi(high));
         write("'", 1);
 }
 

@@ -2661,19 +2661,20 @@ static inline INLINE p64 spelling_entry(const p8 address_to text, positive lengt
         return entry;
 }
 
-enum { SPELL_SHOW = 1, SPELL_TABS = 2, SPELL_ENDS = 4 };
+enum { SPELL_SHOW = 1, SPELL_TABS = 2, SPELL_ENDS = 4, SPELL_ALL = 8 };
 
 /* cat's -v, -T and -E, and cmp -b's column: under SPELL_SHOW the high half
    as M- and the same rule again on what is left, 127 as ^?, a control as ^
    and the letter sixty four above it; TAB and LF themselves are left alone
    unless SPELL_TABS makes TAB ^I and SPELL_ENDS makes LF $ and LF. M-TAB is
-   M-^I whatever -T says, as cat has it. */
+   M-^I whatever -T says, as cat has it. SPELL_ALL spells TAB and LF as ^I
+   and ^J too, which is cmp -b's column. */
 static p64 address_to spelling_caret(positive flags)
 {
-        static spelling_table tables[8];
-        static p8 built[8];
+        static spelling_table tables[16];
+        static p8 built[16];
 
-        flags &= 7;
+        flags &= 15;
         p64 address_to table = tables[flags];
         if (__atomic_load_n(&built[flags], __ATOMIC_ACQUIRE))
                 return table;
@@ -2687,7 +2688,8 @@ static p64 address_to spelling_caret(positive flags)
                         text[length++] = '^', text[length++] = 'I';
                 else if (value == '\n' && (flags & SPELL_ENDS))
                         text[length++] = '$', text[length++] = '\n';
-                else if (value == '\t' || value == '\n' || !(flags & SPELL_SHOW))
+                else if (((value == '\t' || value == '\n') && !(flags & SPELL_ALL)) ||
+                         !(flags & SPELL_SHOW))
                         text[length++] = value;
                 else
                 {
@@ -2758,6 +2760,52 @@ static p64 address_to spelling_c(positive extra)
                 table[byte] = spelling_entry(text, length);
         }
         __atomic_store_n(&built[extra], 1, __ATOMIC_RELEASE);
+        return table;
+}
+
+/* $'...' the way bash and ksh write a byte inside one: a letter for the bell,
+   backspace, escape, form feed, newline, return, tab and vertical tab, the
+   backslash and the apostrophe doubled up with a backslash, three octal
+   digits for any other control or DEL, and a byte past ASCII as itself
+   unless high says it too is spelled (declaration listings do). */
+static p64 address_to spelling_ansi(bool high)
+{
+        static spelling_table tables[2];
+        static p8 built[2];
+
+        p64 address_to table = tables[high];
+        if (__atomic_load_n(&built[high], __ATOMIC_ACQUIRE))
+                return table;
+        for (positive byte = 0; byte < 256; byte++)
+        {
+                p8 text[4] = {'\\'};
+                positive length = 2;
+
+                switch (byte)
+                {
+                case 7: text[1] = 'a'; break;
+                case 8: text[1] = 'b'; break;
+                case 27: text[1] = 'E'; break;
+                case 12: text[1] = 'f'; break;
+                case '\n': text[1] = 'n'; break;
+                case '\r': text[1] = 'r'; break;
+                case '\t': text[1] = 't'; break;
+                case 11: text[1] = 'v'; break;
+                case '\\': case '\'': text[1] = (p8)byte; break;
+                default:
+                        if (byte < 32 || byte == 127 || (high && byte >= 128))
+                        {
+                                text[1] = (p8)('0' + (byte >> 6));
+                                text[2] = (p8)('0' + ((byte >> 3) & 7));
+                                text[3] = (p8)('0' + (byte & 7));
+                                length = 4;
+                        }
+                        else
+                                text[0] = (p8)byte, length = 1;
+                }
+                table[byte] = spelling_entry(text, length);
+        }
+        __atomic_store_n(&built[high], 1, __ATOMIC_RELEASE);
         return table;
 }
 
