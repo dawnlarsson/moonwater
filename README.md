@@ -302,6 +302,26 @@ the rest of the default list:
 sh build.sh debug_none limbo desktop wifi serial sec_hardened
 ```
 
+What `sec_hardened` (`STRICT_TIGHT`) refuses where the default does what GNU
+coreutils does:
+
+| Tool | Default (GNU) | `sec_hardened` |
+| --- | --- | --- |
+| `mkdir`, `mkfifo`, `mknod`, `install`, `cp` | make an entry in a world-writable directory without the sticky bit | refuse it (`Permission denied`) |
+| `cp` | writes through a destination that is a link; under `POSIXLY_CORRECT` makes the file a dangling link names | replaces the link itself, never touching what it points at, and always refuses a dangling one |
+| `split`, `csplit`, and any output opened for writing (`tar -f`, `wget -O`) | write through an output name that is a link | replace the link with the new file |
+| `chown -R -L`, `chgrp -R -L` | follow the links met in the tree | follow none below the operand |
+| `cp -r` | makes the new directory where it goes and fills it | builds it in a private stage and publishes it whole |
+
+Every row has a check in `floodlight_hardened` (`test/run`), run against a shell
+built from `kernel/profile/sec_hardened`'s configuration; the default half is
+the differential engine's, against GNU.
+
+Two differences are not tier choices. `kill` is util-linux's, not
+coreutils' (`kill -l` takes several names, `-s0` is a signal), because
+coreutils 9.11 does not build `kill` by default. `install` invoked as
+`ginstall` reports itself as `install`.
+
 To take a single tool or builtin out, add a line to a profile of your own, or
 use menuconfig:
 
