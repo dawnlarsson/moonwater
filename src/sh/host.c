@@ -4392,27 +4392,34 @@ static COLD bipolar wifi_gtk_take(p8 address_to kek, p8 address_to data, positiv
         p8 plain[WIFI_WRAP_MOST];
         positive size = 0;
         bipolar found = 0;
+        byte_reader reader;
 
         if (!wifi_kw_unwrap(kek, data, length, plain, address_of size))
                 return -1;
-        for (positive at = 0; at + 2 <= size;)
+        reader = byte_reader_open(plain, size);
+        while (byte_reader_left(&reader))
         {
-                p8 room = plain[at + 1];
+                p8 kind = byte_reader_u8(&reader);
+                byte_reader element = byte_reader_vector8(&reader);
 
-                if (room > size - at - 2)
+                if (!byte_reader_ok(&reader))
                         break;
                 //      The GTK KDE: 00-0F-AC:1, the key id, a reserved
                 //      byte, then a CCMP key of sixteen bytes.
-                if (plain[at] == 0xdd && room == 6 + 16 && plain[at + 2] == 0 &&
-                    plain[at + 3] == 0x0f && plain[at + 4] == 0xac &&
-                    plain[at + 5] == 1 && (plain[at + 6] & 3))
+                if (kind == 0xdd && byte_reader_left(&element) == 4 + 2 + 16 &&
+                    byte_reader_u32(&element) == 0x000fac01)
                 {
-                        address_to idx = (p8)(plain[at + 6] & 3);
-                        memory_copy(gtk, plain + at + 8, 16);
-                        found = 1;
-                        break;
+                        p8 key_id = byte_reader_u8(&element);
+
+                        (void)byte_reader_u8(&element);
+                        if (key_id & 3)
+                        {
+                                address_to idx = (p8)(key_id & 3);
+                                memory_copy(gtk, byte_reader_take(&element, 16), 16);
+                                found = 1;
+                                break;
+                        }
                 }
-                at += 2 + room;
         }
         crypto_forget(plain, sizeof(plain));
         return found;
@@ -6042,23 +6049,25 @@ typedef struct
 /* What an RSN element's key management suites ask of a station. */
 static p8 radio_rsn_security(p8 address_to element, positive length)
 {
-        positive at = 2 + 4;
+        byte_reader reader = byte_reader_open(element, length);
         positive count;
         bool psk = false, sae = false, eap = false, owe = false;
 
-        if (length < at + 2)
+        //      The version and the group cipher, then the pairwise ciphers
+        //      and the key management suites, each a count and that many
+        //      four byte suites. What is cut short says WPA2.
+        (void)byte_reader_skip(&reader, 2 + 4);
+        count = byte_reader_u16le(&reader);
+        (void)byte_reader_skip(&reader, 4 * count);
+        count = byte_reader_u16le(&reader);
+        if (!byte_reader_ok(&reader))
                 return RADIO_WPA2;
-        count = element[at] | (element[at + 1] << 8);
-        at += 2 + 4 * count;
-        if (length < at + 2)
-                return RADIO_WPA2;
-        count = element[at] | (element[at + 1] << 8);
-        at += 2;
-        for (positive which = 0; which < count && at + 4 <= length; which++, at += 4)
+        for (positive which = 0; which < count && byte_reader_left(&reader) >= 4; which++)
         {
-                p8 suite = element[at + 3];
+                p32 oui = byte_reader_u24(&reader);
+                p8 suite = byte_reader_u8(&reader);
 
-                if (element[at] != 0x00 || element[at + 1] != 0x0f || element[at + 2] != 0xac)
+                if (oui != 0x000fac)
                         continue;
                 if (suite == 2 || suite == 4 || suite == 6)
                         psk = true;
@@ -6086,6 +6095,7 @@ static bool radio_bss_read(netlink_header address_to header, radio_heard address
         p8 address_to bss;
         p8 address_to elements;
         p8 address_to value;
+        byte_reader ies;
         bool rsn = false, wpa = false;
         p16 capability = 0;
 
@@ -6133,28 +6143,29 @@ static bool radio_bss_read(netlink_header address_to header, radio_heard address
                 elements = (p8 address_to)netlink_find_span(bss, length,
                                                             NL80211_BSS_BEACON_IES,
                                                             address_of size);
-        for (positive at = 0; elements && at + 2 <= size;)
+        ies = byte_reader_open(elements, elements ? size : 0);
+        while (byte_reader_left(&ies))
         {
-                p8 id = elements[at];
-                p8 span = elements[at + 1];
-                p8 address_to data = elements + at + 2;
+                p8 id = byte_reader_u8(&ies);
+                byte_reader data = byte_reader_vector8(&ies);
+                positive span = byte_reader_left(&data);
 
-                if (at + 2 + span > size)
+                if (!byte_reader_ok(&ies))
                         break;
                 if (id == 0 && span <= RADIO_SSID_MOST && !one->ssid_length)
                 {
-                        memory_copy(one->ssid, data, span);
-                        one->ssid_length = span;
+                        memory_copy(one->ssid, byte_reader_here(&data), span);
+                        one->ssid_length = (p8)span;
                 }
                 else if (id == 48 && !rsn)
                 {
                         rsn = true;
-                        one->security = radio_rsn_security(data, span);
+                        one->security = radio_rsn_security(
+                            (p8 address_to)byte_reader_here(&data), span);
                 }
-                else if (id == 221 && span >= 4 && data[0] == 0x00 && data[1] == 0x50 &&
-                         data[2] == 0xf2 && data[3] == 1)
+                else if (id == 221 && span >= 4 &&
+                         byte_reader_u32(&data) == 0x0050f201)
                         wpa = true;
-                at += 2 + span;
         }
         if (!rsn)
                 one->security = wpa ? RADIO_WPA : (capability & 0x10) ? RADIO_WEP : RADIO_OPEN;

@@ -48126,6 +48126,7 @@ def harness_tls_fuzz(argv):
              for corpus in ("tls_der", "tls_hs", "waterlink", "dhcp", "sntp", "dns", "netlink", "crypto", "http")}
     seeds["waterlink_pre"] = len(waterlink_pre_seeds())
     seeds["wifi_eapol"] = len(wifi_eapol_fuzz_seeds())
+    seeds["wifi_scan"] = len(wifi_scan_fuzz_seeds())
     targets = []
     for name, corpus, harness in (
             ("tls_der_fuzz", "tls_der", harness_tls_der_fuzz),
@@ -48136,6 +48137,7 @@ def harness_tls_fuzz(argv):
             ("dhcp_fuzz", "dhcp", harness_dhcp_fuzz),
             ("sntp_fuzz", "sntp", harness_sntp_fuzz),
             ("wifi_eapol_fuzz", "wifi_eapol", harness_wifi_eapol_fuzz),
+            ("wifi_scan_fuzz", "wifi_scan", harness_wifi_scan_fuzz),
             ("dns_fuzz", "dns", harness_dns_fuzz),
             ("netlink_fuzz", "netlink", harness_netlink_fuzz),
             ("crypto_fuzz", "crypto", harness_crypto_fuzz),
@@ -49298,6 +49300,7 @@ int main(void)
         dhcp = harness_dhcp_fuzz([])
         sntp = harness_sntp_fuzz([])
         wifi = harness_wifi_eapol_fuzz([])
+        scan = harness_wifi_scan_fuzz([])
         dns = harness_dns_fuzz([])
         netlink = harness_netlink_fuzz([])
         crypto = harness_crypto_fuzz([])
@@ -49318,6 +49321,7 @@ int main(void)
     checks(dhcp == 0, "dhcp_fuzz clean under MSan")
     checks(sntp == 0, "sntp_fuzz clean under MSan")
     checks(wifi == 0, "wifi_eapol_fuzz clean under MSan")
+    checks(scan == 0, "wifi_scan_fuzz clean under MSan")
     checks(dns == 0, "dns_fuzz clean under MSan")
     checks(netlink == 0, "netlink_fuzz clean under MSan")
     checks(crypto in (0, 2), "crypto_fuzz clean under MSan")
@@ -49350,7 +49354,7 @@ def harness_security_hygiene(argv):
     security = ("tls_chains", "https_downgrade", "http_response_framing",
                 "tls_der_fuzz", "tls_hs_fuzz", "tls_fuzz", "msan_net", "pathname_race",
                 "dhcp_fuzz", "sntp_fuzz", "dns_fuzz", "netlink_fuzz", "tls_peer",
-                "http_fuzz", "http_urls", "wifi_eapol_fuzz")
+                "http_fuzz", "http_urls", "wifi_eapol_fuzz", "wifi_scan_fuzz")
     for name in security + ("tls_verify_fuzz",):
         checks(name in HARNESS_CHECKS, "differential.py: %s is not registered" % name)
     table = re.search(r"^HARNESS_CHECKS = \{$(.*?)^\}$", source, re.M | re.S)
@@ -49361,7 +49365,8 @@ def harness_security_hygiene(argv):
     for name in security:
         checks("--harness " + name in run, "test/run: no lane asks for --harness " + name)
     for name in ("tls_der_fuzz", "tls_hs_fuzz", "pathname_race", "dhcp_fuzz",
-                 "sntp_fuzz", "dns_fuzz", "netlink_fuzz", "http_fuzz", "wifi_eapol_fuzz"):
+                 "sntp_fuzz", "dns_fuzz", "netlink_fuzz", "http_fuzz", "wifi_eapol_fuzz",
+                 "wifi_scan_fuzz"):
         checks(name + ": skipped (soft)" in run, "test/run: no soft skip for " + name)
 
     names = set()
@@ -49451,15 +49456,18 @@ def harness_security_hygiene(argv):
         ("tls_check_cert_verify", ("msg",)),
         ("dhcp_walk", ("region",)),
         ("netlink_find_span", ("bytes",)),
+        ("wifi_gtk_take", ("plain",)),
+        ("radio_rsn_security", ("element",)),
+        ("radio_bss_read", ("elements",)),
     )
-    wire_source = net
+    wire_source = net + (HARNESS_ROOT / "src/sh/host.c").read_text()
     try:
         byte_reader_source()
     except ValueError as error:
         checks(False, "byte_reader_source: " + str(error))
     for name, wire in reader_only:
         found = re.search(r"^static[^\n]*\b%s\(.*?^\}$" % name, wire_source, re.M | re.S)
-        checks(found is not None, "reader-only: cannot find %s in net.c" % name)
+        checks(found is not None, "reader-only: cannot find %s in net.c or host.c" % name)
         if not found:
             continue
         body = re.sub(r"//[^\n]*", "", re.sub(r"/\*.*?\*/", "", found.group(0), flags=re.S))
@@ -52274,6 +52282,320 @@ def harness_wifi_eapol_fuzz(argv):
         write_tally("wifi-eapol-fuzz", 0, 1)
         return 1
     return tls_fuzz_run("wifi eapol", wifi_eapol_fuzz_seeds(), source, 2048)
+
+
+def wifi_scan_fuzz_seeds():
+    """What a scan dump's access point can carry, in the driver's modes: 0 the
+    BSS nest's own bytes, 1 fixed BSS fields and then information elements
+    (the second byte picks INFORMATION_ELEMENTS or BEACON_IES), 2 a bare
+    generic netlink body, 3 an RSN element on its own. Elements are the
+    ones a beacon holds: an SSID, an RSN element for each key management
+    a network asks for, the WPA vendor element, and those cut short, doubled,
+    over-long and counted past their end."""
+    def element(kind, body):
+        return bytes((kind, len(body))) + body
+
+    def attribute(kind, body):
+        raw = struct.pack("<HH", 4 + len(body), kind) + body
+        return raw + b"\0" * (-len(raw) % 4)
+
+    def rsn(*suites, pairwise=(b"\x00\x0f\xac\x04",), group=b"\x00\x0f\xac\x04"):
+        return (b"\x01\x00" + group + struct.pack("<H", len(pairwise)) +
+                b"".join(pairwise) + struct.pack("<H", len(suites)) +
+                b"".join(b"\x00\x0f\xac" + bytes((suite,)) for suite in suites))
+
+    ssid = element(0, b"moonwater")
+    wpa = element(221, b"\x00\x50\xf2\x01\x01\x00")
+    seeds = {"empty.bin": b""}
+    for name, suites in (("psk", (2,)), ("sae", (8,)), ("both", (2, 8)), ("owe", (18,)),
+                         ("eap", (1,)), ("ft", (4, 9, 24, 25)), ("none", ())):
+        seeds["rsn_%s.bin" % name] = b"\x03" + rsn(*suites)
+        seeds["ies_%s.bin" % name] = b"\x01\x00\x00\x00" + ssid + element(48, rsn(*suites))
+    seeds["ies_wpa.bin"] = b"\x01\x00\x10\x00" + ssid + wpa
+    seeds["ies_wep.bin"] = b"\x01\x00\x10\x00" + ssid
+    seeds["ies_beacon.bin"] = b"\x01\x01\x00\x00" + ssid + element(48, rsn(2))
+    seeds["ies_two_ssids.bin"] = b"\x01\x00\x00\x00" + element(0, b"") + ssid + element(0, b"other")
+    seeds["ies_long_ssid.bin"] = b"\x01\x00\x00\x00" + element(0, b"x" * 33) + element(0, b"y" * 32)
+    seeds["ies_cut.bin"] = b"\x01\x00\x00\x00" + ssid + b"\x30\x40" + rsn(2)[:9]
+    seeds["ies_counts.bin"] = b"\x01\x00\x00\x00" + element(48, b"\x01\x00" + bytes(4) + b"\xff\xff" + bytes(8))
+    seeds["ies_lone_length.bin"] = b"\x01\x00\x00\x00" + ssid + b"\x30"
+    seeds["rsn_pairwise_overrun.bin"] = b"\x03" + b"\x01\x00" + bytes(4) + b"\xff\xff"
+    seeds["rsn_short.bin"] = b"\x03" + rsn(2)[:7]
+    bss = (attribute(1, bytes(range(1, 7))) + attribute(2, struct.pack("<I", 2412)) +
+           attribute(5, struct.pack("<H", 0x11)) + attribute(7, struct.pack("<i", -4200)) +
+           attribute(9, struct.pack("<I", 1)) + attribute(10, struct.pack("<I", 40)) +
+           attribute(6, ssid + element(48, rsn(2))))
+    seeds["nest.bin"] = b"\x00" + bss
+    seeds["nest_short_field.bin"] = b"\x00" + attribute(1, b"\x01\x02") + attribute(7, b"\x01") + attribute(6, ssid)
+    seeds["nest_overlong.bin"] = b"\x00" + struct.pack("<HH", 0x7000, 6) + ssid
+    seeds["body.bin"] = b"\x02" + attribute(47 | 0x8000, bss)
+    seeds["body_two.bin"] = b"\x02" + attribute(47 | 0x8000, bss) + attribute(47 | 0x8000, bss)
+    return seeds
+
+
+WIFI_SCAN_FUZZ_PRELUDE = r"""
+#define GENL_HEADER 4
+#define RADIO_SSID_MOST 32
+static positive memory_span_byte(const void *block, p8 byte, positive size)
+{
+        const p8 *at = block;
+        positive i = 0;
+        while (i < size && at[i] == byte)
+                i++;
+        return i;
+}
+"""
+
+WIFI_SCAN_FUZZ_DRIVER = r"""
+/* The parser as it stood before it read through byte_reader, kept as the
+   model: an RSN element's key management, counted the long way. */
+static p8 rsn_model(const p8 *element, positive length)
+{
+        positive at = 2 + 4;
+        positive count;
+        bool psk = false, sae = false, eap = false, owe = false;
+
+        if (length < at + 2)
+                return RADIO_WPA2;
+        count = element[at] | (element[at + 1] << 8);
+        at += 2 + 4 * count;
+        if (length < at + 2)
+                return RADIO_WPA2;
+        count = element[at] | (element[at + 1] << 8);
+        at += 2;
+        for (positive which = 0; which < count && at + 4 <= length; which++, at += 4)
+        {
+                p8 suite = element[at + 3];
+                if (element[at] != 0x00 || element[at + 1] != 0x0f || element[at + 2] != 0xac)
+                        continue;
+                if (suite == 2 || suite == 4 || suite == 6)
+                        psk = true;
+                else if (suite == 8 || suite == 9 || suite == 24 || suite == 25)
+                        sae = true;
+                else if (suite == 18)
+                        owe = true;
+                else
+                        eap = true;
+        }
+        return psk && sae ? RADIO_WPA23 : sae ? RADIO_WPA3 : psk ? RADIO_WPA2
+               : owe ? RADIO_OWE : eap ? RADIO_EAP : RADIO_WPA2;
+}
+
+/* What a beacon's elements say, counted the long way: the first name of at
+   most 32 bytes while there is none, the first RSN element, a WPA vendor
+   element, and what the capability bit says when there is neither. */
+static void elements_model(const p8 *ies, positive size, p16 capability,
+                           p8 *ssid, p8 *ssid_length, p8 *security)
+{
+        bool rsn = false, wpa = false;
+        *ssid_length = 0;
+        *security = RADIO_OPEN;
+        for (positive at = 0; at + 2 <= size;)
+        {
+                p8 id = ies[at];
+                p8 span = ies[at + 1];
+                const p8 *data = ies + at + 2;
+                if (at + 2 + span > size)
+                        break;
+                if (id == 0 && span <= RADIO_SSID_MOST && !*ssid_length)
+                {
+                        memcpy(ssid, data, span);
+                        *ssid_length = span;
+                }
+                else if (id == 48 && !rsn)
+                {
+                        rsn = true;
+                        *security = rsn_model(data, span);
+                }
+                else if (id == 221 && span >= 4 && data[0] == 0x00 && data[1] == 0x50 &&
+                         data[2] == 0xf2 && data[3] == 1)
+                        wpa = true;
+                at += 2 + span;
+        }
+        if (!rsn)
+                *security = wpa ? RADIO_WPA : (capability & 0x10) ? RADIO_WEP : RADIO_OPEN;
+}
+
+static p8 *put_attribute(p8 *at, p16 kind, const p8 *body, positive length)
+{
+        p16 header[2] = {(p16)(4 + length), kind};
+        memcpy(at, header, 4);
+        if (length)
+                memcpy(at + 4, body, length);
+        memset(at + 4 + length, 0, (4 - length % 4) % 4);
+        return at + 4 + length + (4 - length % 4) % 4;
+}
+
+/* One netlink message around a generic netlink body, in a heap block exactly
+   its size, so a read past it is the sanitizer's to see. */
+static p8 *wrap_message(const p8 *body, positive length, positive *whole, p8 command)
+{
+        p8 *message = malloc(16 + 4 + length);
+        p32 head[4] = {(p32)(16 + 4 + length), 0x1c | (1u << 16), 7, 1};
+        memcpy(message, head, 16);
+        message[16] = command;
+        message[17] = 1;
+        message[18] = message[19] = 0;
+        if (length)
+                memcpy(message + 20, body, length);
+        *whole = 16 + 4 + length;
+        return message;
+}
+
+static void check_one(netlink_header *header)
+{
+        radio_heard one;
+        radio_air air;
+
+        if (radio_bss_read(header, &one) &&
+            (one.ssid_length > RADIO_SSID_MOST || one.security > RADIO_EAP))
+        {
+                fprintf(stderr, "a scan row out of range\n");
+                abort();
+        }
+        memset(&air, 0, sizeof air);
+        for (int again = 0; again < 3; again++)
+                (void)radio_air_seen(header, &air);
+        if (air.count > RADIO_AIR_MOST)
+        {
+                fprintf(stderr, "the air holds more than it may\n");
+                abort();
+        }
+}
+
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+{
+        p8 mode;
+        positive whole;
+        p8 *message;
+
+        if (!size)
+                return 0;
+        mode = data[0] % 4;
+        data++;
+        size--;
+        if (mode == 3)
+        {
+                /* An RSN element alone, against the model. */
+                p8 *copy = malloc(size ? size : 1);
+                memcpy(copy, data, size);
+                if (radio_rsn_security(copy, size) != rsn_model(copy, size))
+                {
+                        fprintf(stderr, "radio_rsn_security disagrees with the model\n");
+                        abort();
+                }
+                free(copy);
+                return 0;
+        }
+        if (mode == 2)
+        {
+                /* The generic netlink body as it comes: any attributes. */
+                message = wrap_message(data, size, &whole, 34);
+                check_one((netlink_header *)message);
+                free(message);
+                return 0;
+        }
+        {
+                /* mode 0: the BSS nest's own bytes. mode 1: fixed BSS fields,
+                   then the elements the input holds. */
+                p8 *nest = malloc(size + 96);
+                p8 *at = nest;
+                const p8 *ies = data;
+                positive ies_size = size;
+                p16 capability = 0;
+                p8 key = 0, sstr[RADIO_SSID_MOST + 1], sl = 0, sec = 0;
+
+                if (mode == 0)
+                {
+                        memcpy(at, data, size);
+                        at += size;
+                }
+                else
+                {
+                        p8 mac[6] = {1, 2, 3, 4, 5, 6};
+                        p32 frequency = 2412, status = 0, seen = 9;
+                        b32 signal = -4000;
+
+                        key = size ? data[0] : 0;
+                        capability = (p16)(size > 2 ? (data[2] << 8 | data[1]) : 0);
+                        ies = data + (size > 3 ? 3 : size);
+                        ies_size = size - (size > 3 ? 3 : size);
+                        at = put_attribute(at, NL80211_BSS_BSSID, mac, 6);
+                        at = put_attribute(at, NL80211_BSS_FREQUENCY, (p8 *)&frequency, 4);
+                        at = put_attribute(at, NL80211_BSS_CAPABILITY, (p8 *)&capability, 2);
+                        at = put_attribute(at, NL80211_BSS_SIGNAL_MBM, (p8 *)&signal, 4);
+                        at = put_attribute(at, NL80211_BSS_STATUS, (p8 *)&status, 4);
+                        at = put_attribute(at, NL80211_BSS_SEEN_MS_AGO, (p8 *)&seen, 4);
+                        at = put_attribute(at, key & 1 ? NL80211_BSS_BEACON_IES
+                                                       : NL80211_BSS_INFORMATION_ELEMENTS,
+                                           ies, ies_size);
+                }
+                {
+                        positive nest_size = (positive)(at - nest);
+                        p8 *body = malloc(nest_size + 8);
+                        p8 *stop = put_attribute(body, NL80211_ATTR_BSS | 0x8000, nest, nest_size);
+                        netlink_header *header;
+                        radio_heard one;
+
+                        message = wrap_message(body, (positive)(stop - body), &whole, 34);
+                        header = (netlink_header *)message;
+                        check_one(header);
+                        if (mode == 1 && radio_bss_read(header, &one))
+                        {
+                                elements_model(ies, ies_size, capability, sstr, &sl, &sec);
+                                if (one.ssid_length != sl || memcmp(one.ssid, sstr, sl) ||
+                                    one.security != sec || one.frequency != 2412 || one.seen != 9)
+                                {
+                                        fprintf(stderr, "a scan row is not what its elements say\n");
+                                        abort();
+                                }
+                        }
+                        free(message);
+                        free(body);
+                }
+                free(nest);
+        }
+        return 0;
+}
+"""
+
+
+def harness_wifi_scan_fuzz(argv):
+    """Coverage-guided libFuzzer over the scan dump's access-point reader: the
+    beacon's information elements and the BSS nest around them are the bytes
+    of whatever radio is in range.
+
+    Lifts src/net/net.c's netlink section and src/sh/host.c's
+    radio_rsn_security, radio_bss_read and radio_air_seen over
+    NET_ZONE_FUZZ_SHIM. The input is a mode byte and then the BSS nest's own
+    bytes, or fixed BSS fields and elements, or a bare generic netlink body,
+    or an RSN element on its own; every message sits in a heap block exactly
+    its size. What ASan cannot see is asserted: a row's name and security
+    stay in range, the air never holds more than it may, and a beacon that
+    is well formed reads as the model built from its elements the long way
+    says -- the name, the key management, the capability's privacy bit.
+    Seeds from wifi_scan_fuzz_seeds(). Exit 2 (NOT RUN) without
+    clang/libFuzzer.
+
+        python3 test/differential.py --harness wifi_scan_fuzz
+    """
+    del argv
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    host = (HARNESS_ROOT / "src/sh/host.c").read_text()
+    try:
+        netlink = net_zone_fuzz_slice(net, "#define NETLINK_HEADER 16",
+                                      "#endif // STANDARD_MODERN_C_NET_NETLINK")
+        wait = net_zone_fuzz_wait()
+        scan = net_zone_fuzz_slice(host, "#define NL80211_CMD_NEW_SCAN_RESULTS 34",
+                                   "/* Whether the station the machine is associated through is authorized")
+    except ValueError as error:
+        print("  FAIL wifi scan fuzz lift: " + str(error))
+        write_tally("wifi-scan-fuzz", 0, 1)
+        return 1
+    return tls_fuzz_run("wifi scan", wifi_scan_fuzz_seeds(),
+                        NET_ZONE_FUZZ_SHIM + byte_reader_source() + wait + netlink +
+                        WIFI_SCAN_FUZZ_PRELUDE + scan + WIFI_SCAN_FUZZ_DRIVER, 4096)
+
 
 
 def harness_wifi_air(argv):
@@ -56610,6 +56932,7 @@ HARNESS_CHECKS = {
     "tls_verify_fuzz": harness_tls_verify_fuzz,
     "sntp_fuzz": harness_sntp_fuzz,
     "wifi_eapol_fuzz": harness_wifi_eapol_fuzz,
+    "wifi_scan_fuzz": harness_wifi_scan_fuzz,
     "dns_fuzz": harness_dns_fuzz,
     "netlink_fuzz": harness_netlink_fuzz,
     "crypto_vectors": harness_crypto_vectors,
