@@ -12185,7 +12185,10 @@ static positive text_tab_width(const p8 address_to bytes, positive run)
                     wc_utf8_decode(bytes + at, run - at, address_of code,
                                    address_of got) == WC_VALID)
                 {
-                        width += unicode_width(code, UNICODE_WIDTH_WCWIDTH);
+                        // A character with no width in wcwidth's sense, a C1
+                        // control, is a column, as GNU gives it.
+                        width += code >= 0x80 && code < 0xa0 ? 1
+                                                             : unicode_width(code, UNICODE_WIDTH_WCWIDTH);
                         at += got;
                 }
                 else
@@ -12416,7 +12419,9 @@ static fn text_tab_transform(bool unexpand, bool initial_only)
                                                                       data + at - 1, left - (at - 1),
                                                                       address_of code,
                                                                       address_of got) == WC_VALID
-                                                                      ? unicode_width(code, UNICODE_WIDTH_WCWIDTH)
+                                                                      ? (code >= 0x80 && code < 0xa0
+                                                                             ? 1
+                                                                             : unicode_width(code, UNICODE_WIDTH_WCWIDTH))
                                                                       : 1;
                                                 }
                                         }
