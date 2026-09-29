@@ -6022,6 +6022,133 @@ static bool zstd_jobs_round(bool final)
         return true;
 }
 
+/*
+        A regular file needs no rounds: every job reads its own bytes (and
+        the overlap before them) from the file at its own offset into a
+        buffer its pool slot owns, so the workers never wait on a reader nor
+        on each other at a round's end, and the input's checksum is taken in
+        order by the sink, which reads each job's bytes a second time from
+        the cache while the workers compress the next.  The cuts, the
+        overlaps and so the bytes are the rounds'.  0 done, 1 read failed, -1
+        anything else (zstd_why says), -2 when this input is not one for it.
+*/
+typedef struct
+{
+        bipolar in;
+        p64 base;
+        positive size;
+        positive count;
+        positive kept;
+        p8 address_to slots;
+        positive slot_room;
+        p8 address_to check;
+        p8 address_to failed;
+} zstd_file_run;
+
+static bool zstd_file_read(bipolar in, p8 address_to into, positive n, p64 at)
+{
+        positive got = 0;
+
+        while (got < n)
+        {
+                bipolar const r = system_call_4(syscall(pread64), (positive)in,
+                                                (positive)(into + got), n - got,
+                                                (positive)(at + got));
+
+                if (r == -4)
+                        continue;
+                if (r <= 0)
+                        return false;
+                got += (positive)r;
+        }
+        return true;
+}
+
+static fn zstd_file_job(address_any context, positive index,
+                        parallel_output address_to output)
+{
+        zstd_file_run address_to const f = context;
+        positive const offset = index * zstd_jobs.job;
+        positive const size = index + 1 < f->count ? zstd_jobs.job : f->size - offset;
+        positive const prefix = !index ? f->kept
+                                       : offset < zstd_jobs.overlap ? offset : zstd_jobs.overlap;
+        p8 address_to const buffer = f->slots + parallel_slot() * f->slot_room;
+        bool ok = true;
+
+        if (!index)
+        {
+                if (prefix)
+                        memory_copy(buffer, zstd_dict_content + zstd_dict_size - prefix, prefix);
+        }
+        else if (prefix)
+                ok = zstd_file_read(f->in, buffer, prefix, f->base + offset - prefix);
+        ok = ok && zstd_file_read(f->in, buffer + prefix, size, f->base + offset);
+        f->failed[index] = !ok ? 2
+                               : !zstd_encoder_job(zstd_jobs.slots + parallel_slot(),
+                                                   address_of zstd_jobs.p, buffer, prefix, size,
+                                                   output, !index, index + 1 == f->count);
+}
+
+static bool zstd_file_sink(address_any context, positive index, address_any data,
+                           positive length)
+{
+        zstd_file_run address_to const f = context;
+
+        if (f->failed[index])
+                return f->failed[index] == 2 ? zstd_fail("zstd read failed")
+                                             : zstd_fail("zstd cannot map a job's tables");
+        if (zstd_enc_checksum)
+        {
+                positive const offset = index * zstd_jobs.job;
+                positive const size = index + 1 < f->count ? zstd_jobs.job : f->size - offset;
+
+                if (!zstd_file_read(f->in, f->check, size, f->base + offset))
+                        return zstd_fail("zstd read failed");
+                hash_xxh64_add(address_of zstd_enc_hash, f->check, size);
+        }
+        return zstd_enc_out(data, length);
+}
+
+static b32 zstd_jobs_file(bipolar in, p64 size)
+{
+        zstd_file_run f = {0};
+        bipolar const at = system_call_3(syscall(lseek), (positive)in, 0, 1);
+        positive const slots = parallel_slots();
+        bool ok;
+
+        if (at < 0 || (p64)at >= size || size - (p64)at <= zstd_jobs.job ||
+            (zstd_job_limit && zstd_job_limit < parallel_width()))
+                return -2;
+        f.in = in;
+        f.base = (p64)at;
+        f.size = (positive)(size - (p64)at);
+        f.count = (f.size + zstd_jobs.job - 1) / zstd_jobs.job;
+        f.kept = zstd_dictionary_kept(zstd_jobs.p.window_log);
+        f.slot_room = (f.kept > zstd_jobs.overlap ? f.kept : zstd_jobs.overlap) + zstd_jobs.job + 64;
+        if (slots * f.slot_room > ((positive)3 << 30) || f.count > ((positive)1 << 24))
+                return -2;
+        f.slots = memory_checked(slots * f.slot_room);
+        f.failed = memory_checked(f.count);
+        f.check = zstd_enc_checksum ? memory_checked(zstd_jobs.job) : null;
+        if (!f.slots || !f.failed || (zstd_enc_checksum && !f.check))
+        {
+                if (f.slots)
+                        memory_free(f.slots, slots * f.slot_room);
+                if (f.failed)
+                        memory_free(f.failed, f.count);
+                return -2;
+        }
+        ok = parallel_ordered(zstd_file_job, zstd_file_sink, address_of f, f.count, f.size);
+        memory_free(f.slots, slots * f.slot_room);
+        memory_free(f.failed, f.count);
+        if (f.check)
+                memory_free(f.check, zstd_jobs.job);
+        if (!ok)
+                return zstd_why ? -1 : (zstd_fail("zstd jobs stopped"), -1);
+        zstd_jobs.ran = true;
+        return 0;
+}
+
 /* Reading ahead: the next round's bytes, into its buffer behind the
    overlap, and into the checksum in order. */
 typedef struct
@@ -6146,6 +6273,13 @@ static b32 zstd_jobs_fd(bipolar in)
 {
         (void)in;
         return -1;
+}
+
+static b32 zstd_jobs_file(bipolar in, p64 size)
+{
+        (void)in;
+        (void)size;
+        return -2;
 }
 #endif
 
@@ -6529,7 +6663,10 @@ static b32 zstd_encode_fd(bipolar in, bipolar out, p8 level)
                 goto refused;
         if (zstd_jobs.active)
         {
-                b32 const ran = zstd_jobs_fd(in);
+                b32 ran = size ? zstd_jobs_file(in, size) : -2;
+
+                if (ran == -2)
+                        ran = zstd_jobs_fd(in);
 
                 if (ran > 0)
                 {
