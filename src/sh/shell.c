@@ -2230,10 +2230,26 @@ static fn run_line_inner(string_address line)
                 shell_syntax_where();
                 if (shell_bash_compat)
                 {
+                        //      The end of a line that a construct still
+                        //      wanted something after is the token `newline'
+                        //      to bash, and end of file is only what it says
+                        //      when the input itself ran out.
                         if (!tok || tok->kind == PT_END ||
                             tok->kind == PT_NEWLINE || !tok->text)
-                                log_error(str(
-                                    "syntax error: unexpected end of file\n"));
+                        {
+                                string_format(
+                                    log_error,
+                                    "syntax error near unexpected token `newline'\n");
+                                if (line && string_get(line) &&
+                                    (!shell_is_interactive ||
+                                     shell_interactive_sourcing()))
+                                {
+                                        shell_syntax_where();
+                                        log_error("`", 1);
+                                        log_error(line, 0);
+                                        log_error("'\n", 2);
+                                }
+                        }
                         else
                         {
                                 string_format(
@@ -2560,6 +2576,13 @@ fn shell_input_end()
                                               "unexpected EOF while looking "
                                               "for matching `%s'\n",
                                               match);
+                        else if (parse_want_opener_now() && parse_want_line_now())
+                                string_format(
+                                    log_error,
+                                    "syntax error: unexpected end of file from "
+                                    "`%s' command on line %p\n",
+                                    parse_want_opener_now(),
+                                    parse_want_line_now());
                         else
                                 log_error(str(
                                     "syntax error: unexpected end of file\n"));

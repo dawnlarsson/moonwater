@@ -5001,7 +5001,11 @@ static p8 address_to history_slurp(string_address path,
         return held.bytes;
 }
 
-static positive history_read(string_address path, positive skip)
+//      How many lines of the history file this session has read or written,
+//      which is where history -n picks up.
+static positive history_file_seen;
+
+static bipolar history_read(string_address path, positive skip)
 {
         positive length = 0;
         p8 address_to text = history_slurp(path, address_of length);
@@ -5009,7 +5013,7 @@ static positive history_read(string_address path, positive skip)
         positive seen = 0;
 
         if (!text)
-                return 0;
+                return -1;
 
         while (at < length)
         {
@@ -5023,8 +5027,9 @@ static positive history_read(string_address path, positive skip)
         }
 
         history_trim((string_address) "HISTSIZE");
+        history_file_seen = seen;
 
-        return seen;
+        return (bipolar)seen;
 }
 
 static bipolar history_write_lines(bipolar handle, positive from)
@@ -5211,6 +5216,10 @@ static bool history_write(string_address path, positive from, bool append)
                                      writer_terminal_name, path,
                                      file_reason(result));
 
+        //      What was appended is more lines of the file; a rewrite makes
+        //      the file exactly what the history holds.
+        history_file_seen = append ? history_file_seen + (history_used - from)
+                                   : history_used - from;
         history_saved = history_used;
 
         return true;
@@ -5283,6 +5292,56 @@ fn history_enabled()
                 history_read(path, 0);
 
         history_saved = history_used;
+}
+
+//      HISTSIZE was written: the oldest lines beyond it go at once.
+fn history_size_changed()
+{
+        history_trim((string_address) "HISTSIZE");
+}
+
+//      HISTFILESIZE was written: the history file is cut to its last lines.
+fn history_file_size_changed()
+{
+        string_address path = history_file();
+        string_address setting = env_get((const_string) "HISTFILESIZE");
+        positive limit;
+        positive length = 0;
+        p8 address_to text;
+        positive lines = 0;
+        positive at;
+
+        if (!path || !setting || !string_digits_exact(setting, address_of limit))
+                return;
+
+        text = history_slurp(path, address_of length);
+        if (!text || !length)
+                return;
+
+        for (at = 0; at < length; at++)
+                if (text[at] == '\n')
+                        lines++;
+        if (lines <= limit)
+                return;
+
+        at = 0;
+        for (positive drop = lines - limit; drop; drop--)
+                at += memory_span_without_byte(text + at, '\n', length - at) + 1;
+
+        {
+                bipolar handle = system_open_at_mode(AT_FDCWD, path,
+                                                     (FILE_WRITE & ~FILE_CREATE) |
+                                                         O_TRUNC | O_NOFOLLOW |
+                                                         O_CLOEXEC,
+                                                     0600);
+
+                if (handle >= 0)
+                {
+                        (void)system_write_all((positive)handle, text + at,
+                                               length - at);
+                        system_close(handle);
+                }
+        }
 }
 
 fn history_leaving()
@@ -5507,14 +5566,11 @@ fn shell_history(writer write, string_address input)
                                     history_write(where, 0, false) ? 0 : 1);
 
                         if (letter == 'r')
-                        {
-                                history_read(where, 0);
-                                return shell_answer(0);
-                        }
+                                return shell_answer(history_read(where, 0) < 0
+                                                        ? 1 : 0);
 
-                        history_read(where, history_saved);
-
-                        return shell_answer(0);
+                        return shell_answer(
+                            history_read(where, history_file_seen) < 0 ? 1 : 0);
                 }
 
                 case 'p':
@@ -5573,7 +5629,6 @@ fn shell_history(writer write, string_address input)
 
                 if (!string_digits_exact(shell_argv[at], address_of wanted))
                 {
-                        shell_diagnostic_where();
 
                         //      Two, the status a usage error carries, and
                         //      not the one a failed listing would.
@@ -5581,6 +5636,9 @@ fn shell_history(writer write, string_address input)
                             "history: %s: numeric argument required\n",
                             shell_argv[at]);
                 }
+
+                if (at + 1 < shell_argc)
+                        return shell_refuse(2, "history: too many arguments\n");
 
                 if (wanted < show)
                         show = wanted;
@@ -9423,6 +9481,64 @@ bipolar shell_funsub_run(string_address text, bool value_form,
 
         (void)system_seek(handle, 0, FILE_SEEK_SET);
         return handle;
+}
+
+/*
+        PROMPT_COMMAND: run before each prompt an interactive bash writes, the
+        command it names, or each element of the array it is when it is one.
+        What it leaves in $? is not what the next command sees.
+*/
+fn shell_prompt_command()
+{
+        string_address text = env_get("PROMPT_COMMAND");
+        positive count = shell_array_length("PROMPT_COMMAND", 14);
+        b32 held = shell_status;
+
+        if (count > 1 || (shell_array_attributes("PROMPT_COMMAND", 14) &
+                          SHELL_ARRAY_INDEXED))
+        {
+                shell_mark mark = shell_store_mark(address_of expand_store);
+                shell_array_item address_to items =
+                    (shell_array_item address_to)shell_store_take(
+                        address_of expand_store,
+                        (count ? count : 1) * sizeof(items[0]));
+
+                if (items)
+                {
+                        shell_array_items("PROMPT_COMMAND", 14, items, count);
+                        for (positive at = 0; at < count; at++)
+                                if (items[at].value && string_get(items[at].value))
+                                {
+                                        positive size = string_length(items[at].value);
+                                        p8 address_to copy = (p8 address_to)shell_map(size + 2);
+
+                                        if (!copy)
+                                                continue;
+                                        memory_copy_end(copy, items[at].value, size);
+                                        copy[size] = '\n';
+                                        copy[size + 1] = end;
+                                        exec_run_nested(copy, true, 0);
+                                        memory_free(copy, size + 2);
+                                }
+                }
+                shell_store_rewind(address_of expand_store, mark);
+        }
+        else if (text && string_get(text))
+        {
+                positive size = string_length(text);
+                p8 address_to copy = (p8 address_to)shell_map(size + 2);
+
+                if (copy)
+                {
+                        memory_copy_end(copy, text, size);
+                        copy[size] = '\n';
+                        copy[size + 1] = end;
+                        exec_run_nested(copy, true, 0);
+                        memory_free(copy, size + 2);
+                }
+        }
+
+        shell_status = held;
 }
 
 positive shell_function_slot(string_address name)

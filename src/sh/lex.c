@@ -1242,7 +1242,11 @@ b32 lex_unfinished(string_address line)
 
                 if (lex_operator[c])
                 {
-                        command_head = true;
+                        //      An operator that follows a word without a
+                        //      blank -- the | and ( of an extended pattern --
+                        //      does not begin a command.
+                        if (fresh || c == ';' || c == '&')
+                                command_head = true;
                         /*
                                 An arithmetic command, on exactly the terms
                                 lex_line_floor takes it: two parentheses, and

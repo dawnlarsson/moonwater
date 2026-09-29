@@ -334,18 +334,60 @@ static positive parse_pending_line;
 
 #define PARSE_WANT_ROOM 16
 static string_address parse_want[PARSE_WANT_ROOM];
+static string_address parse_want_opener[PARSE_WANT_ROOM];
+static positive parse_want_line[PARSE_WANT_ROOM];
 static positive parse_want_used;
 
 static fn parse_want_push(string_address word)
 {
         if (parse_want_used < PARSE_WANT_ROOM)
+        {
+                parse_want_opener[parse_want_used] = null;
                 parse_want[parse_want_used++] = word;
+        }
+}
+
+//      The same, with the command that is waiting and the line it began on,
+//      which is what bash names when the input ends before it is closed.
+static fn parse_want_push_for(string_address word, b32 index)
+{
+        string_address opener = null;
+
+        switch (parse_nodes[index].kind)
+        {
+        case NODE_IF: opener = "if"; break;
+        case NODE_WHILE: opener = "while"; break;
+        case NODE_UNTIL: opener = "until"; break;
+        case NODE_FOR: case NODE_CFOR: opener = "for"; break;
+        case NODE_SELECT: opener = "select"; break;
+        case NODE_CASE: opener = "case"; break;
+        case NODE_GROUP: opener = "{"; break;
+        default: break;
+        }
+
+        if (parse_want_used < PARSE_WANT_ROOM)
+        {
+                parse_want_opener[parse_want_used] = opener;
+                parse_want_line[parse_want_used] = parse_nodes[index].line;
+                parse_want[parse_want_used++] = word;
+        }
 }
 
 static fn parse_want_pop()
 {
         if (parse_want_used)
                 parse_want_used--;
+}
+
+//      The command the innermost unfinished construct began with, or null.
+PURE string_address parse_want_opener_now()
+{
+        return parse_want_used ? parse_want_opener[parse_want_used - 1] : null;
+}
+
+PURE positive parse_want_line_now()
+{
+        return parse_want_used ? parse_want_line[parse_want_used - 1] : 0;
 }
 
 static PURE string_address parse_want_now()
@@ -2288,7 +2330,13 @@ static bool parse_take_redirect(b32 index)
             (op == OP_HERESTRING &&
              parse_redirect_prefix(parse_position) >= 0))
         {
-                parse_fail();
+                //      A redirection with nothing after it on the line is not
+                //      waiting for the next line, as a pipe or && is: the
+                //      newline is the unexpected token.
+                if (parse_look(0)->kind == PT_END)
+                        parse_state = PARSE_SYNTAX;
+                else
+                        parse_fail();
                 return false;
         }
 
@@ -2508,14 +2556,14 @@ static b32 parse_if_tail()
         if (parse_state)
                 return 0;
 
-        parse_want_push("then");
+        parse_want_push_for("then", index);
         parse_nodes[index].left = parse_list_required();
 
         if (parse_state || !parse_expect_word("then"))
                 return 0;
         parse_want_pop();
 
-        parse_want_push("fi");
+        parse_want_push_for("fi", index);
         parse_nodes[index].right = parse_list_required();
 
         if (parse_state)
@@ -2549,12 +2597,12 @@ static b32 parse_if_tail()
 
 static b32 parse_do_body(b32 index)
 {
-        parse_want_push("do");
+        parse_want_push_for("do", index);
         if (parse_state || !parse_expect_word("do"))
                 return 0;
         parse_want_pop();
 
-        parse_want_push("done");
+        parse_want_push_for("done", index);
         parse_nodes[index].right = parse_list_required();
 
         if (parse_state || !parse_expect_word("done"))
@@ -2706,12 +2754,12 @@ static b32 parse_case()
 
         parse_skip_newlines();
 
-        parse_want_push("esac");
+        parse_want_push_for("esac", index);
         while (!parse_word_is(0, "esac"))
         {
                 b32 item;
 
-                parse_want_push(")");
+                parse_want_push_for(")", index);
                 if (parse_look(0)->kind == PT_END)
                 {
                         parse_state = PARSE_INCOMPLETE;
@@ -2796,7 +2844,7 @@ static b32 parse_enclosed(b32 kind)
 
         parse_position++;
 
-        parse_want_push(kind == NODE_SUBSHELL ? ")" : "}");
+        parse_want_push_for(kind == NODE_SUBSHELL ? ")" : "}", index);
         parse_nodes[index].left = parse_list_required();
 
         if (parse_state)

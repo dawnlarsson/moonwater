@@ -225,6 +225,12 @@ static bool shell_shopt_asked_apply(string_address self)
         return true;
 }
 
+//      Which file an interactive bash reads before its first prompt: the one
+//      --rcfile or --init-file named, none under --norc, and ~/.bashrc
+//      otherwise.
+static string_address shell_rcfile;
+static bool shell_norc;
+
 static const shell_long_option shell_long_options[] = {
     {"debug", false}, {"debugger", false}, {"dump-po-strings", false},
     {"dump-strings", false}, {"help", false}, {"init-file", true},
@@ -380,6 +386,10 @@ static positive shell_start_long_options(string_address address_to arguments,
                 }
                 else if (word_is(name, "login"))
                         shell_shopt_state |= SHELL_SHOPT(LOGIN_SHELL);
+                else if (word_is(name, "rcfile") || word_is(name, "init-file"))
+                        shell_rcfile = arguments[at + 1];
+                else if (word_is(name, "norc"))
+                        shell_norc = true;
                 else if (word_is(name, "version"))
                 {
                         /*
@@ -589,11 +599,37 @@ static bool shell_startup_file()
         bipolar handle, got;
 
         bool posix_startup = !shell_bash_compat || shell_posix_on();
+        bool rc = false;
 
-        if (shell_startup_privileged ||
-            (posix_startup ? !shell_is_interactive : shell_is_interactive))
+        if (shell_startup_privileged)
                 return true;
-        value = env_get(posix_startup ? "ENV" : "BASH_ENV");
+
+        //      An interactive bash that is not posix reads its rc file, the
+        //      one named or ~/.bashrc, and neither BASH_ENV nor ENV.
+        if (shell_bash_compat && !posix_startup && shell_is_interactive)
+        {
+                if (shell_norc)
+                        return true;
+                rc = true;
+                value = shell_rcfile;
+                if (!value)
+                {
+                        string_address home = env_get("HOME");
+                        static p8 made[4096];
+
+                        if (!home || !*home ||
+                            string_length(home) + 10 >= sizeof(made))
+                                return true;
+                        string_copy(made, home);
+                        string_copy(made + string_length(home),
+                                    (string_address) "/.bashrc");
+                        value = made;
+                }
+        }
+        else if (posix_startup ? !shell_is_interactive : shell_is_interactive)
+                return true;
+        else
+                value = env_get(posix_startup ? "ENV" : "BASH_ENV");
         if (!value || !*value)
                 return true;
 
@@ -608,14 +644,25 @@ static bool shell_startup_file()
 
         token_used = 0;
         token_overflow = false;
-        shell_substitution_status = shell_status;
-        if (!shell_expand_document(token_push_bytes, value,
-                                   string_length(value), true))
-                return false;
-        shell_status = shell_substitution_status;
-        token_push(end);
-        if (token_overflow)
-                return false;
+        if (rc)
+        {
+                //      A name given on the command line is used as it stands.
+                token_push_bytes(value, string_length(value));
+                token_push(end);
+                if (token_overflow)
+                        return false;
+        }
+        else
+        {
+                shell_substitution_status = shell_status;
+                if (!shell_expand_document(token_push_bytes, value,
+                                           string_length(value), true))
+                        return false;
+                shell_status = shell_substitution_status;
+                token_push(end);
+                if (token_overflow)
+                        return false;
+        }
         path = token_storage;
 
         if (!*path)
@@ -1112,6 +1159,13 @@ b32 main()
                 bipolar got;
                 positive total, at;
 
+                //      Before a fresh prompt, not a continuation's: bash's
+                //      PROMPT_COMMAND, with the status of the last command
+                //      still in $? and put back after it.
+                if (interactive && shell_bash_compat && !shell_reading_more() &&
+                    !held)
+                        shell_prompt_command();
+
                 if (interactive && terminal_input)
                 {
                         log_direct(str(TERM_MAIN_BUFFER TERM_RESET
@@ -1121,7 +1175,7 @@ b32 main()
                 //      -i with no terminal on standard input: the prompt
                 //      goes to standard error, as both references write it,
                 //      and nothing here is for a screen to draw.
-                else if (interactive)
+                else if (interactive && !held)
                 {
                         bool more = shell_reading_more();
                         string_address text = env_get(more ? "PS2" : "PS1");

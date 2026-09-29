@@ -135,9 +135,14 @@ bool word_is(string_address word, string_address text);
          string_report(log_error, (status), __VA_ARGS__))
 #define shell_refuse(status, ...) \
         shell_answer(shell_reported((status), __VA_ARGS__))
-// The same refusal without a line in front of it: neither reference shell
-// names one for these, so neither does this.
+// The same refusal as shell_refuse, for the places that were written
+// without a line in front of it: bash names the script and the line ahead
+// of every builtin's complaint, and dash keeps the plain form it always had.
 #define shell_answered(status, ...) \
+        shell_answer((shell_bash_compat ? (shell_diagnostic_where(), 0) : 0, \
+                      string_report(log_error, (status), __VA_ARGS__)))
+// A usage line, which neither shell puts a line in front of.
+#define shell_usage_answered(status, ...) \
         shell_answer(string_report(log_error, (status), __VA_ARGS__))
 
 /*
@@ -443,6 +448,8 @@ static bool exec_source_tested_hold();
 static fn exec_source_tested_restore(bool kept);
 string_address exec_bash_command_now(positive address_to value_length);
 fn history_enabled();
+fn history_size_changed();
+fn history_file_size_changed();
 static fn exec_source_return_trap();
 bool shell_builtin(string_address arguments, positive2 named);
 string_address shell_arguments();
@@ -3208,6 +3215,10 @@ static bool env_write_noted(const_string name, positive length, bool written)
                 shell_getopts_index_changed();
         else if (memory_is_word((address_any)name, length, "FUNCNEST"))
                 shell_funcnest_seen = true;
+        else if (memory_is_word((address_any)name, length, "HISTSIZE"))
+                history_size_changed();
+        else if (memory_is_word((address_any)name, length, "HISTFILESIZE"))
+                history_file_size_changed();
         return written;
 }
 
@@ -6279,8 +6290,6 @@ COLD fn shell_dirs(writer write, string_address input)
                 if (!shell_dirstack_index(shell_argv[index], count,
                                           address_of wanted))
                 {
-                        shell_diagnostic_where();
-
                         //      With nothing pushed there is no stack to
                         //      index into, and that is what bash says; past
                         //      that it names the number, without the sign it
@@ -6489,8 +6498,6 @@ COLD fn shell_pushd(writer write, string_address input)
         }
         else
         {
-                shell_diagnostic_where();
-
                 //      With nothing pushed there is no stack to index into,
                 //      and bash says that rather than naming the number.
                 if (count < 2)
@@ -7908,6 +7915,11 @@ fn shell_options_started(bool interactive, b32 monitor)
                 shell_extra_state |= (positive)1 << SHELL_EXTRA_HISTEXPAND;
         if (shell_bash_compat && interactive && !shell_alias_startup_told)
                 shell_shopt_state |= SHELL_SHOPT(EXPAND_ALIASES);
+        //      An interactive bash writes its prompt with what its build says;
+        //      the reference's is user@host and directory.
+        if (shell_bash_compat && interactive && !env_get("PS1"))
+                env_borrow_plain("PS1=[\\u@\\h \\W]\\$ ");
+
         //      An interactive bash keeps history and edits the emacs way,
         //      unless it was started with vi.
         if (shell_bash_compat && interactive)
@@ -15230,11 +15242,12 @@ COLD fn shell_umask(writer write, string_address input)
                 else if ((shell_bash_compat && umask_clause_empty(word)) ||
                          !umask_symbolic(word, address_of mask))
                 {
-                        shell_diagnostic_where();
-
                         if (!shell_bash_compat)
+                        {
+                                shell_diagnostic_where();
                                 return shell_answered(refused,
                                     "umask: Illegal mode: %s\n", word);
+                        }
 
                         {
                                 //      Two bytes: the formatter has no %c.
@@ -20663,7 +20676,7 @@ static bool shell_completion_refused(string_address command,
                             "%s: -%s: option requires an argument\n",
                             command,
                             shell_option_spelled(room, option));
-                        shell_answered(2, "%s: usage: %s\n", command, usage);
+                        shell_usage_answered(2, "%s: usage: %s\n", command, usage);
                         return true;
                 }
         }
@@ -21229,7 +21242,7 @@ static COLD fn shell_complete(writer write, string_address input)
         //      Something to set and nobody to set it for.
         if (!names_given && !want.special)
         {
-                shell_answered(2, "complete: usage: complete "
+                shell_usage_answered(2, "complete: usage: complete "
                                   "[-abcdefgjksuv] [-pr] [-DEI] [-o option] "
                                   "[-A action] [-G globpat] [-W wordlist] "
                                   "[-F function] [-C command] [-X filterpat] "
@@ -24356,11 +24369,11 @@ fn shell_command_builtin(writer write, string_address input)
                                 memory_free(found, found_room);
 
                         {
-                                shell_diagnostic_where();
-
                                 //      The line a missing command gets, and
                                 //      command does not put its own name in
                                 //      front of it.
+                                if (!shell_bash_compat)
+                                        shell_diagnostic_where();
                                 return shell_answered(127,
                                     shell_bash_compat
                                         ? "%s: command not found\n"
