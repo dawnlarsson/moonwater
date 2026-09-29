@@ -90,6 +90,11 @@ CONFIG_WQ_POWER_EFFICIENT_DEFAULT=y
 # CONFIG_PM, which any turns on.
 CONFIG_SUSPEND=y
 CONFIG_PM_SLEEP=y
+# What a sleep that never woke leaves to read: pm_debug_messages and
+# pm_print_times name each device as it suspends and resumes, so the last
+# line in the log is the one that hung. moonwater sleep turns them on.
+CONFIG_PM_DEBUG=y
+CONFIG_PM_SLEEP_DEBUG=y
 
 #
 # Frequency.

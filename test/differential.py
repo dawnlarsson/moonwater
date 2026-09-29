@@ -39851,6 +39851,24 @@ def harness_moonwater_cli(argv):
         tuned(say("hibernate"))
         check(sys_read("power/state") == "disk", "hibernate writes disk to the kernel", sys_read("power/state"))
 
+        # A sleeping machine wakes for what is armed: a keyboard on USB (class
+        # 03) and every PS/2 port, and not a radio or a camera.
+        sys_reset()
+        sys_file("power/mem_sleep", "[s2idle] deep\n")
+        sys_file("power/pm_debug_messages", "0\n")
+        sys_file("bus/serio/devices/serio0/power/wakeup", "disabled\n")
+        sys_file("bus/usb/devices/1-2/power/wakeup", "disabled\n")
+        sys_file("bus/usb/devices/1-2:1.0/bInterfaceClass", "03\n")
+        sys_file("bus/usb/devices/1-3/power/wakeup", "disabled\n")
+        sys_file("bus/usb/devices/1-3:1.0/bInterfaceClass", "e0\n")
+        got, done = session("rm -f /root/tune\n" + say("sleep"))
+        check(done and sys_read("power/state") == "mem", "sleep with wake sources still writes mem", sys_read("power/state"))
+        check(sys_read("bus/serio/devices/serio0/power/wakeup") == "enabled", "sleep arms the PS/2 keyboard's wakeup")
+        check(sys_read("bus/usb/devices/1-2/power/wakeup") == "enabled", "sleep arms a USB keyboard's wakeup")
+        check(sys_read("bus/usb/devices/1-3/power/wakeup") == "disabled", "sleep leaves a USB radio's wakeup alone")
+        check(sys_read("power/pm_debug_messages") == "1", "sleep asks the kernel to log each device it suspends")
+        check("mem_sleep [s2idle] deep" in "\n".join(got), "sleep says which kind of sleep it is", "\n".join(got)[-200:])
+
         got = tuned("rm -f /root/wifi.power /root/bluetooth.power\n" + say("airplane on") +
                     "echo '@@ words'; cat /root/wifi.power /root/bluetooth.power; echo '@@end'\n" +
                     say("airplane off") + "echo '@@ words2'; cat /root/wifi.power /root/bluetooth.power; echo '@@end'\n")

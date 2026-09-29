@@ -8644,6 +8644,61 @@ static b32 tune_cpu(string_address address_to arguments, positive count)
         return host_usage();
 }
 
+/*
+        A machine asleep in s2idle wakes only for what is armed to wake it, and
+        the kernel leaves a keyboard's wakeup off until somebody turns it on:
+        nothing but the power button then brings it back, which from the chair
+        is a machine that never woke. A USB device with a human interface
+        (class 03) and every PS/2 port are armed before sleeping, and left
+        armed, since an armed keyboard is what anyone wants of a sleeping
+        machine. A radio or a camera is not armed: those wake it for their own
+        reasons.
+*/
+static fn tune_wake_arm(string_address bus, bool human)
+{
+        p8 name[64];
+
+        for (positive at = 0; tune_entry(bus, at, name, sizeof(name)); at++)
+        {
+                p8 path[192];
+                p8 word[16];
+
+                if (human)
+                {
+                        p8 tail[80];
+
+                        //      An interface's own name, 1-2:1.0, has no wakeup file.
+                        if (string_first_of((string_address)name, ':') ||
+                            !tune_path(tail, sizeof(tail), "/", (string_address)name, ":1.0/bInterfaceClass") ||
+                            !tune_path(path, sizeof(path), bus, (string_address)tail, "") ||
+                            !tune_word(path, word, sizeof(word)) || !string_equals((string_address)word, "03"))
+                                continue;
+                }
+                if (!tune_path(path, sizeof(path), bus, "/", (string_address)name) ||
+                    string_append_bounded(path, "/power/wakeup", sizeof(path)) >= sizeof(path))
+                        continue;
+                if (tune_word(path, word, sizeof(word)) && string_equals((string_address)word, "disabled"))
+                        (void)tune_write(path, "enabled");
+        }
+}
+
+/* What the kernel says went wrong, when it says anything: the device, the step and the error. */
+static fn tune_suspend_failure(void)
+{
+        p8 device[64];
+        p8 step[32];
+        positive errno_value = 0;
+
+        if (!tune_word(TUNE_SYS_POWER "/suspend_stats/last_failed_dev", device, sizeof(device)) || !device[0])
+                return;
+        if (!tune_word(TUNE_SYS_POWER "/suspend_stats/last_failed_step", step, sizeof(step)))
+                step[0] = 0;
+        (void)tune_number(TUNE_SYS_POWER "/suspend_stats/last_failed_errno", address_of errno_value);
+        string_format(log, host_label "the kernel stopped at %s (%s), last error %d\n",
+                      (string_address)device, (string_address)step, (b32)errno_value);
+        log_flush();
+}
+
 /* moonwater sleep and moonwater hibernate: the kernel's own suspend and hibernate. */
 static b32 tune_suspend(string_address verb, string_address state)
 {
@@ -8654,12 +8709,31 @@ static b32 tune_suspend(string_address verb, string_address state)
         if (!bowl_is_root())
                 return host_refuse("%s needs root\n", string_equals(state, "mem") ? "moonwater sleep"
                                                                                  : "moonwater hibernate");
+        //      So a sleep that never wakes leaves the device it stopped at in the log.
+        (void)tune_write(TUNE_SYS_POWER "/pm_debug_messages", "1");
+        (void)tune_write(TUNE_SYS_POWER "/pm_print_times", "1");
+        tune_wake_arm("/sys/bus/usb/devices", true);
+        tune_wake_arm("/sys/bus/serio/devices", false);
+        if (string_equals(state, "mem"))
+        {
+                p8 mode[64];
+
+                //      Which kind of sleep, as the kernel spells it: [s2idle] deep.
+                if (tune_word(TUNE_SYS_POWER "/mem_sleep", mode, sizeof(mode)))
+                {
+                        string_format(log, host_label "sleeping, mem_sleep %s\n", (string_address)mode);
+                        log_flush();
+                }
+        }
         system_call(syscall(sync));
         {
                 bipolar failed = tune_write(TUNE_SYS_POWER "/state", state);
 
                 if (failed < 0)
+                {
+                        tune_suspend_failure();
                         return host_fail(verb, failed);
+                }
         }
         //      Reached again once the machine has woken.
         string_format(log, host_label "awake again\n");

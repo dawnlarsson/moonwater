@@ -27,6 +27,7 @@
 #include <linux/rtmutex.h>
 #include <uapi/linux/sched/types.h>
 #include <linux/pm_qos.h>
+#include <linux/suspend.h>
 #include <linux/input.h>
 #include <linux/math64.h>
 #include <linux/minmax.h>
@@ -403,6 +404,20 @@ static struct desktop
         _Bool suspended;
 
         /*
+                The machine is going to sleep, or has not finished waking.
+
+                Not the same as suspended: no program holds the card, the card
+                is about to have its power taken. Anything Canvas sent it from
+                here on -- a frame, a modeset commit, a dirtyfb -- reached a
+                device that was off or half back, and a driver that waits on
+                its own hardware for such a call never returned. So it counts
+                as the card being taken (desktop_taken), the frame timer is off,
+                and the flusher hands nothing to a driver. Written under the
+                lock, read without it by the flusher.
+        */
+        _Bool asleep;
+
+        /*
                 How many device pixels one drawn pixel is.
 
                 A cell is eight by sixteen and a titlebar is twenty, and those
@@ -476,6 +491,8 @@ static struct desktop
         spinlock_t flush_lock;
         struct list_head flush_queue;
         wait_queue_head_t flush_idle;
+        // Outputs with a flush in the driver's hands, for the wait before sleep.
+        atomic_t flushes_in_flight;
 } desktop = {
     .lock = __RT_MUTEX_INITIALIZER(desktop.lock),
     .input_lock = __SPIN_LOCK_UNLOCKED(desktop.input_lock),
@@ -5672,7 +5689,9 @@ static struct output *output_flush_take(struct drm_rect *rect, _Bool *whole)
 
         spin_lock(&desktop.flush_lock);
 
-        if (!list_empty(&desktop.flush_queue))
+        // What is queued waits for the card to come back; the redraw that
+        // follows the wake queues its own.
+        if (!READ_ONCE(desktop.asleep) && !list_empty(&desktop.flush_queue))
         {
                 output = list_first_entry(&desktop.flush_queue, struct output,
                                           flush_link);
@@ -5682,6 +5701,7 @@ static struct output *output_flush_take(struct drm_rect *rect, _Bool *whole)
                 output->flush_queued = false;
                 output->flush_whole = false;
                 output->flushing = true;
+                atomic_fetch_add(1, &desktop.flushes_in_flight);
         }
 
         spin_unlock(&desktop.flush_lock);
@@ -5701,6 +5721,7 @@ static void output_flush_done(struct output *output)
         spin_lock(&desktop.flush_lock);
         output->flushing = false;
         retired = output->retired;
+        atomic_fetch_sub(1, &desktop.flushes_in_flight);
         spin_unlock(&desktop.flush_lock);
 
         if (retired)
@@ -7992,6 +8013,10 @@ static _Bool desktop_taken(void)
         struct drm_device *checked = NULL;
         struct output *output;
         _Bool taken = false;
+
+        // The card's power is going, or has not come back: as good as taken.
+        if (desktop.asleep)
+                return true;
 
         list_for_each_entry(output, &desktop.outputs, link)
         {
@@ -10604,6 +10629,87 @@ static struct input_handler pointer_handler = {
     .id_table = pointer_ids,
 };
 
+/*
+        The machine's own sleep, which nothing above knew about.
+
+        Suspend takes the card's power in the middle of whatever Canvas is
+        doing, and Canvas's threads are not freezable: the frame timer kept
+        waking the loop, the loop kept committing modes, and the flusher kept
+        sending dirtyfb to a device that was off or coming back. On a driver
+        that waits for its hardware that is a hang, in either direction, with
+        the fans still going. So before the tasks are frozen and the devices
+        suspended the frame timer stops, the desktop counts as taken, and any
+        flush in the driver's hands is waited for; after the devices are back
+        and the tasks thawed, the desktop is drawn again from scratch, as it is
+        when a program lets go of the card.
+*/
+#define CANVAS_PM_FLUSH_WAIT_MS 2000
+
+static void canvas_input_drop(void);
+
+static void canvas_pm_sleep(_Bool sleeping)
+{
+        rt_mutex_lock(&desktop.lock);
+
+        if (sleeping)
+        {
+                WRITE_ONCE(desktop.asleep, true);
+                desktop.suspended = true;
+                if (desktop.awake)
+                        desktop_set_awake(false);
+        }
+        else
+        {
+                WRITE_ONCE(desktop.asleep, false);
+
+                // The other program that took the card while this slept is
+                // still there: the loop draws when it lets go.
+                if (desktop.suspended && !desktop_taken())
+                        desktop_resume();
+        }
+
+        rt_mutex_unlock(&desktop.lock);
+
+        if (sleeping)
+        {
+                hrtimer_cancel(&desktop.frame);
+                canvas_input_drop();
+                wait_event_timeout(desktop.flush_idle, !atomic_read(&desktop.flushes_in_flight),
+                                   msecs_to_jiffies(CANVAS_PM_FLUSH_WAIT_MS));
+        }
+        else
+        {
+                canvas_flush_wake();
+                canvas_thread_wake();
+        }
+}
+
+static int canvas_pm_event(struct notifier_block *block, unsigned long event,
+                           void *unused)
+{
+        switch (event)
+        {
+        case PM_HIBERNATION_PREPARE:
+        case PM_SUSPEND_PREPARE:
+        case PM_RESTORE_PREPARE:
+                canvas_pm_sleep(true);
+                break;
+        case PM_POST_HIBERNATION:
+        case PM_POST_SUSPEND:
+        case PM_POST_RESTORE:
+                canvas_pm_sleep(false);
+                break;
+        }
+
+        return NOTIFY_DONE;
+}
+
+static struct notifier_block canvas_pm_notifier = {
+    .notifier_call = canvas_pm_event,
+};
+
+static _Bool canvas_pm_registered;
+
 static void canvas_thread_stop(void)
 {
         struct task_struct *thread = rcu_dereference_protected(
@@ -10612,6 +10718,13 @@ static void canvas_thread_stop(void)
         if (!thread)
                 return;
         RCU_INIT_POINTER(canvas_thread, NULL);
+
+        if (canvas_pm_registered)
+        {
+                unregister_pm_notifier(&canvas_pm_notifier);
+                canvas_pm_registered = false;
+        }
+        WRITE_ONCE(desktop.asleep, false);
 
         /* Registration can be interrupted before the input core initializes
            the handler's lists.  Only hand a handler back after the matching
@@ -10794,7 +10907,8 @@ static int canvas_loop(void *unused)
                     !atomic_read(&desktop.minimize) &&
                     !atomic_read(&desktop.spawn) &&
                     atomic_read(&desktop.key_head) == atomic_read(&desktop.key_tail))
-                        schedule_timeout(READ_ONCE(desktop.suspended)
+                        schedule_timeout(READ_ONCE(desktop.suspended) &&
+                                                 !READ_ONCE(desktop.asleep)
                                              ? msecs_to_jiffies(CANVAS_SUSPENDED_POLL_MS)
                                              : MAX_SCHEDULE_TIMEOUT);
 
@@ -10949,6 +11063,9 @@ static void canvas_thread_start(void)
 
         // 0 microseconds: no idle state whose exit can be measured.
         cpu_latency_qos_add_request(&pointer_qos, 0);
+
+        if (!register_pm_notifier(&canvas_pm_notifier))
+                canvas_pm_registered = true;
 
         // Before the handler, so no key is ever delivered to both.
         canvas_keyboard_take();
