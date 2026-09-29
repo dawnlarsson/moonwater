@@ -35093,6 +35093,25 @@ def harness_compression(argv):
                       0 < trained_dictionary.stat().st_size <= 8192 and
                       trained_dictionary.read_bytes()[:4] == b'\x37\xa4\x30\xec',
                       made_ours.stderr.decode(errors='replace'))
+                # Training that has little to work with or a size that is
+                # too small for anything must end in a dictionary libzstd
+                # reads or a refusal, never a crash.
+                odd_inputs = {'empty': b'', 'one': b'a', 'same': b'hello\n' * 5000,
+                              'random': bytes(dictionary_random.randrange(256) for _ in range(3000))}
+                for name, data in odd_inputs.items():
+                    (dict_root / ('odd-' + name)).write_bytes(data)
+                for maxdict in ('100', '255', '256', '300', '600', '4096', '99999999999999999999'):
+                    made = call(ours_zstd + ['-q', '--train', str(dict_root / 'odd-same'),
+                                             str(dict_root / 'odd-random'), str(dict_root / 'odd-one'),
+                                             str(dict_root / 'odd-empty'), '-o', str(dict_root / 'odd.dict'),
+                                             '--maxdict=' + maxdict])
+                    usable = True
+                    if made.returncode == 0:
+                        packed = call([refs['zstd'], '-D', str(dict_root / 'odd.dict'), '-c'], b'hello\n' * 40)
+                        usable = call([refs['zstd'], '-D', str(dict_root / 'odd.dict'), '-dc'],
+                                      packed.stdout).stdout == b'hello\n' * 40
+                    check('%s/zstd/dictionary/--train --maxdict=%s ends well' % (label, maxdict),
+                          made.returncode in (0, 1) and usable, made.stderr.decode(errors='replace'))
                 for kind, dictionary in (('reference', reference_dictionary),
                                          ('ours', trained_dictionary), ('raw', raw_dictionary)):
                     if not dictionary.exists():

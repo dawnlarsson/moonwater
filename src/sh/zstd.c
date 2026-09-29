@@ -7018,7 +7018,12 @@ static b32 zstd_cli_train(void)
                 return 1;
         }
         if (maxdict < 256)
-                maxdict = 256;
+        {
+                string_format(log_error, "zstd: error 25 : dictionary size %p is too small \n", maxdict);
+                return 1;
+        }
+        if (maxdict > ((positive)1 << 30))
+                maxdict = (positive)1 << 30;
         if (!zstd_train_load(paths, nfiles, address_of set))
                 return 1;
         if (!quiet && maxdict / 10 > set.total)
@@ -7046,7 +7051,7 @@ static b32 zstd_cli_train(void)
 
                 if (!dict || !content)
                         return 1;
-                content_size = zstd_train_content(address_of set, k, maxdict - 384, content);
+                content_size = zstd_train_content(address_of set, k, maxdict > 768 ? maxdict - 384 : maxdict / 2, content);
                 if (!content_size)
                         continue;
                 memory_fill(stats, 0, sizeof(zstd_train_stats));
