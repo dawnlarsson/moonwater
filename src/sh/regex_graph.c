@@ -947,11 +947,11 @@ static bool rx_fixed(const rx_node *nodes, p16 first, rx_hints *hints, positive 
         return true;
 }
 
-/* Compile above the current mark. Neither a failed compile nor its scratch
-   metadata changes a published descriptor or the pool's ownership cursor. */
 // Why the last compile refused its pattern, when it did.
 static p8 regex_failure;
 
+/* Compile above the current mark. Neither a failed compile nor its scratch
+   metadata changes a published descriptor or the pool's ownership cursor. */
 static bool rx_compile(rx_pool *pool, regex_program *out, string_address pattern,
                        bool extended, bool icase, bool escapes, p8 policy)
 {
@@ -2013,7 +2013,7 @@ static rx_choice (address_to regex_choices_held)[REGEX_SCRATCH_MAX];
 #define regex_choices UTILITY_HELD(regex_choices)
 static rx_undo (address_to regex_undo_held)[REGEX_SCRATCH_MAX];
 #define regex_undo UTILITY_HELD(regex_undo)
-//      Its scratch is mapped by rx_run the first time a match backtracks.
+//      Its scratch is held, with the pool, at the first use of either.
 static rx_match regex_match = {
     .frame_capacity = REGEX_SCRATCH_MAX, .choice_capacity = REGEX_SCRATCH_MAX,
     .undo_capacity = REGEX_SCRATCH_MAX,

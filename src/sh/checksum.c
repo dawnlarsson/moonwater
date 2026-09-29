@@ -138,12 +138,12 @@ static positive checksum_base64_length(positive bytes)
         return (bytes + 2) / 3 * 4;
 }
 
-/* A base64 digest of exactly bytes bytes, padding and all, into expected. */
 /* A base64 digest whose last character carries bits past the digest is
    still a digest to coreutils, which compares spellings: it is read, and it
    can never match. */
 static bool checksum_base64_loose;
 
+/* A base64 digest of exactly bytes bytes, padding and all, into expected. */
 static bool checksum_base64_decode(string_address text, positive length,
                                    positive bytes, p8 address_to expected)
 {
@@ -733,6 +733,26 @@ static bool checksum_parallel_readable(string_address name)
                (facts.mode & MODE_FORMAT) == MODE_DIRECTORY;
 }
 
+/*
+        One input's answer as a pool job makes it: hashed here, or deferred
+        to the sink when the name is not a file it can read from a thread
+        that has no descriptor of its own to spare (a pipe, a device), or
+        an error when the thread had no block.
+*/
+static fn checksum_answer_make(checksum_answer address_to answer,
+                               const checksum_algorithm address_to algorithm,
+                               positive bytes, string_address name, bool spread,
+                               p8 address_to block)
+{
+        if (spread && !checksum_parallel_readable(name))
+                answer->status = CHECKSUM_DEFERRED;
+        else if (!block)
+                answer->status = -ERROR_NO_MEMORY;
+        else
+                answer->status = checksum_hash_path(algorithm, bytes, name,
+                                                    answer->digest, block);
+}
+
 static fn checksum_batch_job(address_any context, positive index,
                              parallel_output address_to output)
 {
@@ -745,15 +765,9 @@ static fn checksum_batch_job(address_any context, positive index,
         for (positive at = first; at < last; at++)
         {
                 checksum_answer answer;
-                string_address name = checksum_input_name(batch, at);
 
-                if (batch->spread && !checksum_parallel_readable(name))
-                        answer.status = CHECKSUM_DEFERRED;
-                else if (!block)
-                        answer.status = -ERROR_NO_MEMORY;
-                else
-                        answer.status = checksum_hash_path(batch->algorithm, batch->bytes,
-                                                           name, answer.digest, block);
+                checksum_answer_make(address_of answer, batch->algorithm, batch->bytes,
+                                     checksum_input_name(batch, at), batch->spread, block);
 
                 if (!parallel_write(output, address_of answer, sizeof(answer)))
                         return;
@@ -1400,17 +1414,8 @@ static fn checksum_check_job(address_any context, positive index,
                 if (!record->algorithm)
                         answer.status = CHECKSUM_DEFERRED;
                 else
-                {
-                        string_address name = checksum_record_name(run, record);
-
-                        if (run->spread && !checksum_parallel_readable(name))
-                                answer.status = CHECKSUM_DEFERRED;
-                        else if (!block)
-                                answer.status = -ERROR_NO_MEMORY;
-                        else
-                                answer.status = checksum_hash_path(record->algorithm, record->width,
-                                                                   name, answer.digest, block);
-                }
+                        checksum_answer_make(address_of answer, record->algorithm, record->width,
+                                             checksum_record_name(run, record), run->spread, block);
 
                 if (!parallel_write(output, address_of answer, sizeof(answer)))
                         return;
