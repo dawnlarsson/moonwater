@@ -20551,7 +20551,14 @@ _TEXT_SED_EXTRA = (
         ("-n", "-E", "-e", "/^.{6}$/p", "utf8_dot.txt"),
         ("-n", "-e", "/^h[^x]llo$/p", "utf8_dot.txt"), ("-e", "s/./X/g", "utf8_dot.txt"),
         ("-e", "s/[^l]/X/g", "utf8_dot.txt"),
-        ("-n", "-E", "-e", "/^.{3}$/p", "utf8_words.txt"))),
+        ("-n", "-E", "-e", "/^.{3}$/p", "utf8_words.txt"),
+        #   y over characters, where a UTF-8 locale takes the first of two the same
+        #   and a byte locale the last: a longer and a shorter one, a character for
+        #   an ASCII byte and the other way, and a duplicate.
+        ("-e", "y/\u00e9\u00ef/ei/", "utf8_words.txt"), ("-e", "y/\u65e5\u672c\u8a9e/\u6708\u706b\u6c34/", "utf8_words.txt"),
+        ("-e", "y/ae/\u00e9\u00ef/", "utf8_words.txt"), ("-e", "y/\u00e9a/a\u00e9/", "utf8_words.txt"),
+        ("-e", "y/\u00e9\u00e9/xy/", "utf8_words.txt"), ("-e", "y/aa/bc/", "utf8_words.txt"),
+        ("-e", "y/\u00e9v/E\u2003/", "utf8_words.txt"), ("-e", "y/\U0001f600 /\U0001f601_/", "utf8_words.txt"))),
     ("s/a/A/", "a.txt"), ("-n", "$p", "a.txt", "b.txt"), ("p",), ("-s", "-n", "$p", "a.txt", "b.txt"),
     ("-s", "-n", "=", "a.txt", "b.txt"), ("-s", "-n", "N;$p", "a.txt", "b.txt"),
     ("-s", "-n", "n;$p", "a.txt", "b.txt"), ("-n", "N;$p", "a.txt", "b.txt"),

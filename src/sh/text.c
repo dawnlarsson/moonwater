@@ -29327,6 +29327,13 @@ static regex_program sed_programs[SED_PROGRAMS_MAX];
 static b32 sed_program_count;
 static p8 sed_maps[SED_MAPS_MAX][256];
 static b32 sed_map_count;
+// In a UTF-8 locale a y whose strings hold a character of more than one byte
+// maps characters, and keeps the two strings as written.
+static bool sed_map_wide[SED_MAPS_MAX];
+static p8 sed_wide_from[SED_MAPS_MAX][512];
+static p8 sed_wide_to[SED_MAPS_MAX][512];
+static positive sed_wide_from_length[SED_MAPS_MAX];
+static positive sed_wide_to_length[SED_MAPS_MAX];
 static p8 sed_text[SED_TEXT_MAX];
 static positive sed_text_used;
 static p8 sed_script[SED_SCRIPT_MAX];
@@ -30378,8 +30385,15 @@ static fn sed_parse()
                             to, sed_take_until(delimiter, to, sizeof(to)));
 
                         // Both halves must be there, and be the same length:
-                        // y has no character to turn the odd one into.
-                        if (sed_broken || one != two ||
+                        // y has no character to turn the odd one into. The
+                        // length is in characters where the locale says so.
+                        bool wide = !sed_broken && text_locale_utf8() &&
+                                    (memory_ascii_span(from, one) != one ||
+                                     memory_ascii_span(to, two) != two);
+                        positive length_one = wide ? memory_utf8_span(from, one, positive_max).y : one;
+                        positive length_two = wide ? memory_utf8_span(to, two, positive_max).y : two;
+
+                        if (sed_broken || length_one != length_two ||
                             sed_map_count >= SED_MAPS_MAX)
                         {
                                 sed_broken = true;
@@ -30388,11 +30402,32 @@ static fn sed_parse()
 
                         b32 map = sed_map_count++;
 
-                        for (b32 c = 0; c < 256; c++)
-                                sed_maps[map][c] = (p8)c;
+                        sed_map_wide[map] = wide;
 
-                        for (positive c = 0; c < one && c < two; c++)
-                                sed_maps[map][from[c]] = to[c];
+                        if (wide)
+                        {
+                                memory_copy(sed_wide_from[map], from, one);
+                                memory_copy(sed_wide_to[map], to, two);
+                                sed_wide_from_length[map] = one;
+                                sed_wide_to_length[map] = two;
+                        }
+                        else
+                        {
+                                for (b32 c = 0; c < 256; c++)
+                                        sed_maps[map][c] = (p8)c;
+
+                                // Among two of the same in the first string a
+                                // byte locale takes the last, as it always has,
+                                // and a multibyte one the first.
+                                if (text_locale_utf8())
+                                {
+                                        for (positive c = one < two ? one : two; c--;)
+                                                sed_maps[map][from[c]] = to[c];
+                                }
+                                else
+                                        for (positive c = 0; c < one && c < two; c++)
+                                                sed_maps[map][from[c]] = to[c];
+                        }
 
                         command->map = map;
                         sed_command_count++;
@@ -30891,6 +30926,70 @@ static fn sed_put_file(string_address name)
         system_close(handle);
 }
 
+/*
+        y over characters: each character of the pattern space that is one
+        of the first string's is written as the character in the same place in
+        the second, the first of two the same winning, which is the multibyte
+        locale's rule where a byte locale's is the last.
+*/
+static bool sed_translate_wide(b32 map)
+{
+        positive have = 0;
+        positive at = 0;
+
+        while (at < sed_pattern.length)
+        {
+                positive size = memory_utf8_span(sed_pattern.bytes + at,
+                                                 sed_pattern.length - at, 1).x;
+                positive from = 0;
+                positive to = 0;
+                positive found = TEXT_UNSET;
+                positive found_size = 0;
+
+                while (from < sed_wide_from_length[map])
+                {
+                        positive one = memory_utf8_span(sed_wide_from[map] + from,
+                                                        sed_wide_from_length[map] - from, 1).x;
+                        positive two = memory_utf8_span(sed_wide_to[map] + to,
+                                                        sed_wide_to_length[map] - to, 1).x;
+
+                        if (one == size && found == TEXT_UNSET &&
+                            !memory_compare(sed_wide_from[map] + from,
+                                            sed_pattern.bytes + at, size))
+                        {
+                                found = to;
+                                found_size = two;
+                        }
+
+                        from += one;
+                        to += two;
+                }
+
+                if (!sed_space_fits(&sed_serial, have, found == TEXT_UNSET ? size : found_size))
+                        return false;
+
+                if (found == TEXT_UNSET)
+                {
+                        memory_copy(sed_work_store->bytes + have, sed_pattern.bytes + at, size);
+                        have += size;
+                }
+                else
+                {
+                        memory_copy(sed_work_store->bytes + have, sed_wide_to[map] + found, found_size);
+                        have += found_size;
+                }
+
+                at += size;
+        }
+
+        byte_store address_to previous = sed_pattern.store;
+        sed_pattern.store = sed_work_store;
+        sed_pattern.bytes = sed_work_store->bytes;
+        sed_work_store = previous;
+        sed_pattern.length = have;
+        return true;
+}
+
 // Where the machine looks for the program `which`: the serial one's own copy,
 // loaded by the caller and saying what it gives up on, or the context's slot.
 static inline INLINE bool sed_find(sed_context address_to ctx, b32 which, p8 mode,
@@ -31155,6 +31254,10 @@ static bool sed_pieces_script(void)
                                 return false;
                         break;
                 case 'y':
+                        // Over characters it works in the serial pattern space.
+                        if (sed_map_wide[command->map])
+                                return false;
+                        break;
                 case 'p':
                 case 'd':
                 case '{':
@@ -31941,6 +32044,12 @@ static b32 text_sed()
                                                 sed_replaced = false;
                                         break;
                                 case 'y':
+                                        if (sed_map_wide[command->map])
+                                        {
+                                                sed_translate_wide(command->map);
+                                                break;
+                                        }
+
                                         memory_translate(sed_pattern.bytes, sed_pattern.length,
                                                          sed_maps[command->map]);
                                         break;
