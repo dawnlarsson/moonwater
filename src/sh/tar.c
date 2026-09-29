@@ -3768,10 +3768,105 @@ static p8 address_to tar_matched;
 static positive tar_matched_count;
 static bool tar_fatal_exit;
 
+/*
+        --exclude and -X: a name is left out when a pattern matches it, or a
+        directory that leads to it, as GNU's exclude does with wildcards on
+        and slashes matched by * -- so --exclude=foo leaves out a/foo and
+        everything under it. Unless --anchored, a pattern may begin after any
+        slash of the name.
+*/
+#define TAR_EXCLUDE_MAX 4096
+static string_address tar_exclude[TAR_EXCLUDE_MAX];
+static positive tar_exclude_count;
+static bool tar_exclude_anchored;
+static bool tar_files_null;
+
+static bool tar_excluded(string_address name)
+{
+        if (!tar_exclude_count)
+                return false;
+
+        positive length = string_length(name);
+        p8 part[TAR_PATH];
+
+        for (positive start = 0; start <= length;)
+        {
+                for (positive stop = start; stop <= length; stop++)
+                {
+                        if (stop != length && name[stop] != '/')
+                                continue;
+                        if (stop == start || stop - start >= sizeof(part))
+                                continue;
+
+                        memory_copy(part, name + start, stop - start);
+                        part[stop - start] = end;
+                        for (positive at = 0; at < tar_exclude_count; at++)
+                                if (file_fnmatch(tar_exclude[at], (string_address)part))
+                                        return true;
+                }
+                if (tar_exclude_anchored)
+                        break;
+
+                string_address slash = string_first_of(name + start, '/');
+
+                if (!slash)
+                        break;
+                start = (positive)(slash - name) + 1;
+        }
+        return false;
+}
+
+// A whole file read in, for a list of patterns or of names: false when it
+// cannot be read, said the way GNU says it.
+static bool tar_read_list(string_address path, byte_store address_to into)
+{
+        bool standard = string_equals(path, "-");
+        bipolar handle = standard ? 0 : system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC);
+
+        if (handle < 0)
+        {
+                tar_fail(path, handle);
+                tar_fatal_exit = true;
+                return false;
+        }
+
+        into->used = 0;
+        for (;;)
+        {
+                if (!byte_store_reserve(into, into->used + 4097, 4096))
+                {
+                        tar_refuse("out of memory");
+                        return false;
+                }
+
+                bipolar got = system_read_retry((positive)handle, into->bytes + into->used, 4096);
+
+                if (got < 0)
+                {
+                        tar_fail(path, got);
+                        tar_fatal_exit = true;
+                        if (!standard)
+                                system_close((positive)handle);
+                        return false;
+                }
+                if (!got)
+                        break;
+                into->used += (positive)got;
+        }
+        into->bytes[into->used] = end;
+        if (!standard)
+                system_close((positive)handle);
+        return true;
+}
+
+
 static bool tar_wanted(string_address name, positive first, positive count)
 {
         positive at;
         bool found = false;
+
+        if (tar_excluded(name))
+                return false;
 
         if (first >= count)
                 return true;
@@ -6216,6 +6311,9 @@ static b32 tar_add_named(bipolar archive, bipolar directory,
         string_address prior;
         p8 type;
 
+        if (tar_excluded(member))
+                return tar_status;
+
         if (kind == DT_REG)
         {
                 handle = system_open_at(
@@ -6592,6 +6690,10 @@ enum
         TAR_NO_SELINUX,
         TAR_XATTRS_INCLUDE,
         TAR_XATTRS_EXCLUDE,
+        TAR_EXCLUDE,
+        TAR_NULL,
+        TAR_ANCHORED,
+        TAR_NO_ANCHORED,
 };
 
 static const argument_option tar_option_rules[] = {
@@ -6623,6 +6725,12 @@ static const argument_option tar_option_rules[] = {
     {"xattrs-include", TAR_XATTRS_INCLUDE, ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
     {"xattrs-exclude", TAR_XATTRS_EXCLUDE, ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
     {"sparse-version", TAR_SPARSE_VERSION, ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
+    {"exclude", TAR_EXCLUDE, ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
+    {"exclude-from", 'X', ARGUMENT_REQUIRED},
+    {"files-from", 'T', ARGUMENT_REQUIRED},
+    {"null", TAR_NULL, ARGUMENT_LONG_ONLY},
+    {"anchored", TAR_ANCHORED, ARGUMENT_LONG_ONLY},
+    {"no-anchored", TAR_NO_ANCHORED, ARGUMENT_LONG_ONLY},
     {"posix", TAR_POSIX_OPTION, ARGUMENT_LONG_ONLY},
     {"pax-option", TAR_PAX_OPTION, ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
     {"blocking-factor", 'b', ARGUMENT_REQUIRED},
@@ -6752,6 +6860,49 @@ static bool tar_take(struct tar_options address_to options, p8 letter,
                         return tar_usage_hint();
                 }
                 break;
+        case TAR_EXCLUDE:
+                if (tar_exclude_count < TAR_EXCLUDE_MAX)
+                        tar_exclude[tar_exclude_count++] = value;
+                break;
+        case TAR_ANCHORED: tar_exclude_anchored = true; break;
+        case TAR_NO_ANCHORED: tar_exclude_anchored = false; break;
+        case TAR_NULL: tar_files_null = true; break;
+        case 'X':
+        {
+                static byte_store patterns;
+
+                if (!tar_read_list(value, address_of patterns))
+                        return false;
+                for (positive at = 0; at < patterns.used;)
+                {
+                        string_address line = (string_address)patterns.bytes + at;
+                        string_address stop = string_first_of(line, '\n');
+                        positive length = stop ? (positive)(stop - line) : string_length(line);
+                        p8 address_to copy = memory_checked(length + 1);
+
+                        if (!copy)
+                                return tar_refuse("out of memory"), false;
+                        memory_copy(copy, line, length);
+                        copy[length] = end;
+                        if (length && tar_exclude_count < TAR_EXCLUDE_MAX)
+                                tar_exclude[tar_exclude_count++] = (string_address)copy;
+                        at += length + 1;
+                }
+                break;
+        }
+        case 'T':
+        {
+                // Read where the option stood, so that its names come in
+                // order among the operands: a marked word the parse expands.
+                p8 address_to marked = memory_checked(string_length(value) + 2);
+
+                if (!marked)
+                        return tar_refuse("out of memory"), false;
+                marked[0] = 1;
+                memory_copy(marked + 1, value, string_length(value) + 1);
+                tar_words[tar_word_count++] = (string_address)marked;
+                break;
+        }
         case TAR_SAME_OWNER: options->owner = 1; break;
         case TAR_NUMERIC_OWNER: options->numeric = true; break;
         case 'z': options->pack = TAR_PACK_GZIP; break;
@@ -6805,6 +6956,9 @@ static bool tar_parse(struct tar_options address_to options)
         tar_xattr_include_count = 0;
         tar_xattr_exclude_count = 0;
         tar_pax_deleted_count = 0;
+        tar_exclude_count = 0;
+        tar_exclude_anchored = false;
+        tar_files_null = false;
         cursor.at += *keys != end;
 
         for (;;)
@@ -6859,6 +7013,72 @@ static bool tar_parse(struct tar_options address_to options)
 
                 if (options->mode == 'h')
                         return true;
+        }
+
+        {
+                /* -T's names, in place among the operands. */
+                bool any = false;
+
+                for (positive at = 0; at < tar_word_count; at++)
+                        any |= tar_words[at][0] == 1;
+
+                if (any)
+                {
+                        static byte_store list;
+                        positive room = tar_word_count + 1;
+                        string_address address_to grown = memory_take(room * sizeof(*grown));
+                        positive have = 0;
+
+                        for (positive at = 0; grown && at < tar_word_count; at++)
+                        {
+                                if (tar_words[at][0] != 1)
+                                {
+                                        if (have + 1 >= room)
+                                                break;
+                                        grown[have++] = tar_words[at];
+                                        continue;
+                                }
+                                if (!tar_read_list(tar_words[at] + 1, address_of list))
+                                        return false;
+
+                                p8 separator = tar_files_null ? 0 : '\n';
+
+                                for (positive from = 0; from < list.used;)
+                                {
+                                        string_address name = (string_address)list.bytes + from;
+                                        positive stop = 0;
+
+                                        while (from + stop < list.used && list.bytes[from + stop] != separator)
+                                                stop++;
+                                        from += stop + 1;
+                                        if (!stop)
+                                                continue;
+
+                                        p8 address_to copy = memory_checked(stop + 1);
+
+                                        if (!copy)
+                                                return tar_refuse("out of memory"), false;
+                                        memory_copy(copy, name, stop);
+                                        copy[stop] = end;
+                                        if (have + 2 >= room)
+                                        {
+                                                positive more = room * 2;
+                                                string_address address_to bigger = memory_take(more * sizeof(*bigger));
+
+                                                if (!bigger)
+                                                        return tar_refuse("out of memory"), false;
+                                                memory_copy(bigger, grown, have * sizeof(*grown));
+                                                grown = bigger;
+                                                room = more;
+                                        }
+                                        grown[have++] = (string_address)copy;
+                                }
+                        }
+                        if (!grown)
+                                return tar_refuse("out of memory"), false;
+                        tar_words = grown;
+                        tar_word_count = have;
+                }
         }
 
         options->first = 0;

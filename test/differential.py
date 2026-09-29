@@ -9419,7 +9419,11 @@ def files_tar(farm):
     #   at all, where every member is a missing file.
     commands = (("tf",), ("tvf",), ("xf",), ("xf", "--strip-components=1"), ("xf", "-C", "sub"),
                 ("df",), ("dvvf",), ("df", "--strip-components=1"), ("df", "extracted"),
-                ("dvf", "extracted"))
+                ("dvf", "extracted"),
+                #   --exclude leaves out a name, a name that leads to it and, unless
+                #   anchored, one that follows a slash.
+                ("tf", "--exclude=*a*"), ("tf", "--exclude=a?"), ("xf", "--exclude=b*"),
+                ("tf", "--anchored", "--exclude=a*"), ("tvf", "--exclude=[a-c]*"))
 
     def run(binary, name, data, command):
         with tempfile.TemporaryDirectory(prefix="tar-check-") as temporary:
