@@ -4372,7 +4372,6 @@ static const argument_option paste_options[] = {
 };
 
 /* 256 is the empty delimiter.  A NUL delimiter is still the byte zero. */
-#define PASTE_EMPTY 256
 
 /*
         GNU's escapes, and only these: \0 is an empty delimiter whatever
@@ -4381,15 +4380,44 @@ static const argument_option paste_options[] = {
         an empty delimiter, then 1, then 0. A backslash that ends the list is
         refused.
 */
-static bool paste_delimiters(string_address said, p16 address_to made,
+enum
+{
+        WC_INVALID,
+        WC_VALID,
+        WC_SHORT,
+};
+
+static p8 wc_utf8_decode(const p8 address_to at, positive size, p32 address_to code,
+                         positive address_to length);
+static positive text_charset();
+static positive text_mb_length(positive charset, const p8 address_to at, positive size);
+
+/*
+        A delimiter is a character: the bytes of one, and how many, packed as
+        the length above the bytes. In a UTF-8 locale a character of two to
+        four bytes is one delimiter, as it is to GNU's paste; zero is the
+        empty one.
+*/
+static bool paste_delimiters(string_address said, p64 address_to made,
                              positive room, positive address_to count)
 {
         positive at = 0;
         positive have = 0;
+        positive charset = text_charset();
 
         while (said[at])
         {
                 positive value = (p8)said[at++];
+                positive size = 1;
+
+                if (value >= 0x80)
+                {
+                        size = text_mb_length(charset, (const p8 address_to)said + at - 1,
+                                              string_length(said + at - 1));
+                        for (positive i = 1; i < size; i++)
+                                value |= (positive)(p8)said[at - 1 + i] << (8 * i);
+                        at += size - 1;
+                }
 
                 if (value == '\\')
                 {
@@ -4398,7 +4426,22 @@ static bool paste_delimiters(string_address said, p16 address_to made,
                         if (!escaped)
                                 return false;
 
-                        value = escaped == '0' ? PASTE_EMPTY
+                        // Any other character after a backslash is itself.
+                        if (escaped >= 0x80)
+                        {
+                                size = text_mb_length(charset, (const p8 address_to)said + at - 1,
+                                                      string_length(said + at - 1));
+                                value = escaped;
+                                for (positive i = 1; i < size; i++)
+                                        value |= (positive)(p8)said[at - 1 + i] << (8 * i);
+                                at += size - 1;
+                                if (have >= room)
+                                        return false;
+                                made[have++] = ((p64)size << 32) | value;
+                                continue;
+                        }
+
+                        value = escaped == '0' ? 0
                                 : escaped == 'b' ? '\b'
                                 : escaped == 'f' ? '\f'
                                 : escaped == 'n' ? '\n'
@@ -4411,11 +4454,11 @@ static bool paste_delimiters(string_address said, p16 address_to made,
                 if (have >= room)
                         return false;
 
-                made[have++] = (p16)value;
+                made[have++] = value ? ((p64)size << 32) | value : 0;
         }
 
         if (!have)
-                made[have++] = PASTE_EMPTY;
+                made[have++] = 0;
 
         address_to count = have;
         return true;
@@ -4443,13 +4486,13 @@ static fn text_c_maybe_colon(writer output, string_address value)
                 output(value, length);
 }
 
-static fn paste_delimiter(p16 address_to delimiters, positive count,
+static fn paste_delimiter(p64 address_to delimiters, positive count,
                           positive which)
 {
-        positive value = delimiters[which % count];
+        p64 value = delimiters[which % count];
 
-        if (value != PASTE_EMPTY)
-                text_put_character((p8)value);
+        for (positive i = 0; value && i < (value >> 32); i++)
+                text_put_character((p8)(value >> (8 * i)));
 }
 
 /*
@@ -4507,11 +4550,11 @@ static b32 text_paste()
 
         if (!delimiter_room)
                 delimiter_room = 1;
-        if (delimiter_room > positive_max / sizeof(p16))
+        if (delimiter_room > positive_max / sizeof(p64))
                 return text_done(string_diagnostic(&text_diagnostic, 1, said, "invalid delimiter list"));
 
-        p16 address_to delimiters = (p16 address_to)utility_arena_take(
-            delimiter_room * sizeof(p16));
+        p64 address_to delimiters = (p64 address_to)utility_arena_take(
+            delimiter_room * sizeof(p64));
 
         if (!delimiters)
                 return text_done(1);
@@ -4594,7 +4637,7 @@ static b32 text_paste()
                                 back until the next read shows it was not the
                                 last. No line is looked for at all.
                         */
-                        if (delimiter_count == 1 && delimiters[0] != PASTE_EMPTY)
+                        if (delimiter_count == 1 && (delimiters[0] >> 32) == 1)
                         {
                                 p8 table[256];
                                 bool held = false;
@@ -6598,6 +6641,80 @@ static bool text_locale_utf8()
 }
 
 /*
+        The multibyte encoding of the locale where a character is not a
+        byte, by the codeset its name carries: UTF-8, GB18030 and EUC-JP are
+        the ones told apart. Only their shape is known -- how many bytes a
+        character takes -- which is all a delimiter or a width of one column
+        needs; a byte that begins nothing valid is a character by itself.
+*/
+enum { TEXT_CHARSET_BYTES, TEXT_CHARSET_UTF8, TEXT_CHARSET_GB18030, TEXT_CHARSET_EUCJP };
+
+static positive text_charset()
+{
+        if (text_locale_utf8())
+                return TEXT_CHARSET_UTF8;
+
+        string_address locale = file_environment((string_address) "LC_ALL");
+
+        if (!locale || !locale[0])
+                locale = file_environment((string_address) "LC_CTYPE");
+        if (!locale || !locale[0])
+                locale = file_environment((string_address) "LANG");
+
+        string_address code = locale ? string_first_of(locale, '.') : null;
+
+        if (!code)
+                return TEXT_CHARSET_BYTES;
+        code++;
+
+        p8 lower[16];
+        positive have = 0;
+
+        for (; code[have] && code[have] != '@' && have < sizeof(lower) - 1; have++)
+                lower[have] = byte_to_lower(code[have]);
+        lower[have] = end;
+
+        return string_equals(lower, "gb18030")                                ? TEXT_CHARSET_GB18030
+               : string_equals(lower, "euc-jp") || string_equals(lower, "eucjp") ? TEXT_CHARSET_EUCJP
+                                                                              : TEXT_CHARSET_BYTES;
+}
+
+// How many bytes the character at the front of these is.
+static positive text_mb_length(positive charset, const p8 address_to at, positive size)
+{
+        if (!size || at[0] < 0x80)
+                return 1;
+
+        if (charset == TEXT_CHARSET_UTF8)
+        {
+                p32 code;
+                positive got;
+
+                return wc_utf8_decode(at, size, address_of code, address_of got) == WC_VALID ? got : 1;
+        }
+
+        if (charset == TEXT_CHARSET_GB18030 && at[0] >= 0x81 && at[0] <= 0xfe && size >= 2)
+        {
+                if (at[1] >= 0x30 && at[1] <= 0x39)
+                        return size >= 4 && at[2] >= 0x81 && at[2] <= 0xfe &&
+                                       at[3] >= 0x30 && at[3] <= 0x39
+                                   ? 4 : 1;
+                return (at[1] >= 0x40 && at[1] != 0x7f && at[1] <= 0xfe) ? 2 : 1;
+        }
+
+        if (charset == TEXT_CHARSET_EUCJP)
+        {
+                if (at[0] == 0x8e && size >= 2 && at[1] >= 0xa1 && at[1] <= 0xdf)
+                        return 2;
+                if (at[0] == 0x8f && size >= 3 && at[1] >= 0xa1 && at[2] >= 0xa1)
+                        return 3;
+                if (at[0] >= 0xa1 && at[0] <= 0xfe && size >= 2 && at[1] >= 0xa1 && at[1] <= 0xfe)
+                        return 2;
+        }
+        return 1;
+}
+
+/*
         The policy a pattern is read under: a dot and a bracket stand for
         one character where LC_CTYPE says a character is more than a byte,
         and for one byte where it does not. The reference reads a pattern
@@ -6634,13 +6751,6 @@ static bool wc_wide_space(p32 code, bool posix)
 
         return (code >= 0x2000 && code <= 0x2006) || (code >= 0x2008 && code <= 0x200a);
 }
-
-enum
-{
-        WC_INVALID,
-        WC_VALID,
-        WC_SHORT,
-};
 
 /*
         One UTF-8 sequence, strictly: no overlong forms, no surrogates, nothing
@@ -11484,7 +11594,7 @@ static b32 text_nl()
         b32 patterns[3] = {-1, -1, -1};
         b32 pattern_count = 0;
         b32 section = 1;
-        p8 delimiter_pair[3] = {'\\', ':', 0};
+        p8 delimiter_pair[8] = {'\\', ':', 0};
         string_address delimiter = (string_address)delimiter_pair;
         string_address separator = "\t";
         p8 justify = 'r';
@@ -11525,8 +11635,14 @@ static b32 text_nl()
                 // One character given leaves the second as it was, so nl -d @
                 // looks for @: and not for @@; any other length is the whole
                 // delimiter, nothing at all included.
-                if (said[0] && !said[1])
-                        delimiter_pair[0] = said[0];
+                positive first = text_mb_length(text_charset(), (const p8 address_to)said, string_length(said));
+
+                if (said[0] && string_length(said) == first)
+                {
+                        memory_copy(delimiter_pair, said, first);
+                        delimiter_pair[first] = ':';
+                        delimiter_pair[first + 1] = end;
+                }
                 else
                         delimiter = said;
         }
@@ -12041,6 +12157,48 @@ static p32 text_tab_specials[TEXT_TAB_SPECIALS];
 
 // What expand writes for a backspace, a tab or a newline at a column, and
 // the column after it.
+// Whether a column is a character's display width and not a byte, and what
+// a run of bytes comes to in columns: a wide character is two, a combining
+// one none, and a byte that is no character is one.
+static bool text_tab_utf8;
+
+static positive text_tab_width(const p8 address_to bytes, positive run)
+{
+        if (!text_tab_utf8)
+                return run;
+
+        positive width = 0;
+        positive at = 0;
+
+        // A run may begin with the rest of a character whose first byte was
+        // taken alone.
+        while (at < run && (bytes[at] & 0xc0) == 0x80)
+                at++;
+
+        if (at == 0 && memory_utf8_span(bytes, run, positive_max).y == run)
+                return run;
+
+        for (; at < run;)
+        {
+                p32 code;
+                positive got;
+
+                if (bytes[at] >= 0x80 &&
+                    wc_utf8_decode(bytes + at, run - at, address_of code,
+                                   address_of got) == WC_VALID)
+                {
+                        width += unicode_width(code, UNICODE_WIDTH_WCWIDTH);
+                        at += got;
+                }
+                else
+                {
+                        width++;
+                        at++;
+                }
+        }
+        return width;
+}
+
 static positive text_tab_expand_one(p8 character, positive column)
 {
         /*
@@ -12163,9 +12321,10 @@ static fn text_tab_transform(bool unexpand, bool initial_only)
                                         if (run)
                                         {
                                                 text_put(data + at, run);
-                                                column = column > positive_max - run
+                                                positive width = text_tab_width(data + at, run);
+                                                column = column > positive_max - width
                                                              ? positive_max
-                                                             : column + run;
+                                                             : column + width;
                                                 previous_blank = false;
                                                 at += run;
                                                 continue;
@@ -12246,6 +12405,23 @@ static fn text_tab_transform(bool unexpand, bool initial_only)
                                         }
                                         else if (character == '\b')
                                                 column = column ? column - 1 : 0;
+                                        else if (text_tab_utf8 && character >= 0x80)
+                                        {
+                                                // A lead byte brings the width of its
+                                                // character, the bytes after it none.
+                                                if (character >= 0xc0)
+                                                {
+                                                        p32 code;
+                                                        positive got;
+
+                                                        column += wc_utf8_decode(
+                                                                      data + at - 1, left - (at - 1),
+                                                                      address_of code,
+                                                                      address_of got) == WC_VALID
+                                                                      ? unicode_width(code, UNICODE_WIDTH_WCWIDTH)
+                                                                      : 1;
+                                                }
+                                        }
                                         else
                                         {
                                                 if (column != positive_max)
@@ -12326,9 +12502,10 @@ static fn text_tab_transform(bool unexpand, bool initial_only)
                                                 positive run = special - done;
 
                                                 text_put(data + done, run);
-                                                column = column > positive_max - run
+                                                positive width = text_tab_width(data + done, run);
+                                                column = column > positive_max - width
                                                              ? positive_max
-                                                             : column + run;
+                                                             : column + width;
                                                 done = special + 1;
                                                 column = text_tab_expand_one(data[special], column);
                                         }
@@ -12338,9 +12515,10 @@ static fn text_tab_transform(bool unexpand, bool initial_only)
                                                 positive run = left - done;
 
                                                 text_put(data + done, run);
-                                                column = column > positive_max - run
+                                                positive width = text_tab_width(data + done, run);
+                                                column = column > positive_max - width
                                                              ? positive_max
-                                                             : column + run;
+                                                             : column + width;
                                                 done = left;
                                         }
 
@@ -12355,9 +12533,10 @@ static fn text_tab_transform(bool unexpand, bool initial_only)
                                 if (run)
                                 {
                                         text_put(data + at, run);
-                                        column = column > positive_max - run
+                                        positive width = text_tab_width(data + at, run);
+                                        column = column > positive_max - width
                                                      ? positive_max
-                                                     : column + run;
+                                                     : column + width;
                                         at += run;
                                         continue;
                                 }
@@ -12408,6 +12587,7 @@ static inline INLINE b32 text_tabs(bool unexpand)
 
         text_begin(taking.program);
         text_tab_reset();
+        text_tab_utf8 = text_locale_utf8();
 
         if (!text_took(address_of taking))
                 return text_done(1);
@@ -21439,7 +21619,9 @@ static bool cut_option_seen(p8 letter, string_address value)
                 return true;
         }
 
-        if (letter == 'd' && value[0] && value[1])
+        if (letter == 'd' && value[0] && value[1] &&
+            text_mb_length(text_charset(), (const p8 address_to)value, string_length(value)) !=
+                string_length(value))
                 return !text_operand_trouble("the delimiter must be a single character",
                                              null, null);
 
@@ -21535,6 +21717,100 @@ static fn cut_blank_line(p8 address_to line, positive line_length, bool compleme
                 text_put(separator, separator_length);
 
         text_put_character(text_delimiter);
+}
+
+/*
+        cut where a character is more than a byte: fields parted by a
+        delimiter of several bytes, and -b with -n, which takes a character
+        whole or not at all. A character is wanted by its last byte, as GNU's
+        is: -b1 -n over "\xc3\xa9x" is nothing and -b2 -n is the letter.
+        A line is taken whole and walked, since neither is what the block
+        passes above are for.
+*/
+static bool cut_multibyte_line(p8 address_to line, positive length, bool by_field,
+                               string_address delimiter, positive delimiter_size,
+                               bool complement, bool only_delimited,
+                               string_address separator, positive separator_length,
+                               bool no_partial, positive charset)
+{
+        if (by_field)
+        {
+                bool found = false;
+
+                for (positive at = 0; at + delimiter_size <= length;)
+                {
+                        if (!memory_compare(line + at, delimiter, delimiter_size))
+                        {
+                                found = true;
+                                break;
+                        }
+                        at += text_mb_length(charset, line + at, length - at);
+                }
+
+                if (!found)
+                {
+                        if (only_delimited)
+                                return false;
+                        text_put(line, length);
+                        return true;
+                }
+
+                positive field = 1;
+                positive start = 0;
+                bool wrote = false;
+
+                for (positive at = 0;;)
+                {
+                        bool ended = at + delimiter_size > length;
+
+                        if (!ended && memory_compare(line + at, delimiter, delimiter_size))
+                        {
+                                at += text_mb_length(charset, line + at, length - at);
+                                continue;
+                        }
+
+                        positive stop = ended ? length : at;
+
+                        if (text_list_has(field) != complement)
+                        {
+                                if (wrote)
+                                        text_put(separator ? separator : delimiter,
+                                                 separator ? separator_length : delimiter_size);
+                                text_put(line + start, stop - start);
+                                wrote = true;
+                        }
+
+                        if (ended)
+                                break;
+                        at += delimiter_size;
+                        start = at;
+                        field++;
+                }
+                return true;
+        }
+
+        bool wrote = false;
+        bool ran = false;
+
+        for (positive at = 0; at < length;)
+        {
+                positive size = no_partial || charset != TEXT_CHARSET_BYTES
+                                    ? text_mb_length(charset, line + at, length - at) : 1;
+                positive position = at + size;
+                bool keep = text_list_has(position) != complement;
+
+                if (keep)
+                {
+                        if (separator && wrote &&
+                            (!ran || (!complement && text_list_begins_at(position))))
+                                text_put(separator, separator_length);
+                        text_put(line + at, size);
+                        wrote = true;
+                }
+                ran = keep;
+                at += size;
+        }
+        return true;
 }
 
 static b32 text_cut()
@@ -21646,6 +21922,42 @@ static b32 text_cut()
                 every other one parts two fields. `printf 'a\nb\n' | cut
                 -d $'\n' -f1- --output-delimiter=:` is a:b.
         */
+        {
+                positive charset = text_charset();
+                bool mb_delimiter = by_field && !whitespace && !by_blanks && have_delimiter &&
+                                    (string_length(file_option_value(address_of taking, 'd')) > 1 ||
+                                     (charset != TEXT_CHARSET_BYTES &&
+                                      (p8)file_option_value(address_of taking, 'd')[0] >= 0x80));
+                bool no_partial = (flags & FILE_FLAG('n')) && (flags & FILE_FLAG('b')) &&
+                                  charset != TEXT_CHARSET_BYTES;
+
+                if (mb_delimiter || no_partial)
+                {
+                        string_address delimiter_text = have_delimiter
+                                                            ? file_option_value(address_of taking, 'd')
+                                                            : (string_address) "\t";
+                        positive delimiter_size = string_length(delimiter_text);
+                        b32 count = text_input_count();
+
+                        for (b32 i = 0; i < count; i++)
+                        {
+                                if (!text_open(text_file_name(i)))
+                                        continue;
+
+                                while (text_line_next(text_line, 0))
+                                {
+                                        if (cut_multibyte_line(text_line, text_line_length, by_field,
+                                                               delimiter_text, delimiter_size,
+                                                               complement, only_delimited, separator,
+                                                               separator_length, no_partial, charset))
+                                                text_put_character(text_delimiter);
+                                }
+                                text_close();
+                        }
+                        return text_done(text_status);
+                }
+        }
+
         bool whole_record = by_field && !whitespace && delimiter == text_delimiter;
 
         b32 inputs = text_input_count();
@@ -23389,12 +23701,28 @@ static bool uniq_option_seen(p8 letter, string_address value)
         it, which is why it is here and not written out twice inside the
         loop.
 */
+static positive uniq_charset;
+
+// The bytes the first COUNT characters of a line take, where a character is
+// more than a byte.
+static positive uniq_bytes_of(p8 address_to line, positive length, positive count)
+{
+        if (uniq_charset == TEXT_CHARSET_BYTES)
+                return min(count, length);
+
+        positive at = 0;
+
+        while (count-- && at < length)
+                at += text_mb_length(uniq_charset, line + at, length - at);
+        return min(at, length);
+}
+
 static positive uniq_skipped(p8 address_to line, positive length,
                              positive fields, positive characters)
 {
         positive skip = text_blank_skip(line, length, 0, fields, '\t');
 
-        return skip + min(characters, length - skip);
+        return skip + uniq_bytes_of(line + skip, length - skip, characters);
 }
 
 /*
@@ -23450,6 +23778,8 @@ static fn uniq_operand(b32 which)
 
 static b32 text_uniq()
 {
+        uniq_charset = text_charset();
+
         file_taking taking = {
             .program = (string_address) "uniq",
             .options = uniq_options,
@@ -23574,11 +23904,8 @@ static b32 text_uniq()
 
                         if (bounded)
                         {
-                                if (one > compare_width)
-                                        one = compare_width;
-
-                                if (two > compare_width)
-                                        two = compare_width;
+                                one = uniq_bytes_of(line + skip, one, compare_width);
+                                two = uniq_bytes_of(previous + previous_skip, two, compare_width);
                         }
 
                         bool same = have_previous && one == two;
