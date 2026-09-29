@@ -32876,38 +32876,45 @@ static bipolar file_move_remove_tree(
                         break;
                 }
 
+                //      One pass removes every name the directory lists, and
+                //      another follows until a pass finds nothing: reading
+                //      from the start after each removal, as this once did,
+                //      made a directory of n names cost n reads of it.
                 file_walk walk = {
                     .handle = inside, .error = 0, .have = 0, .at = 0};
                 struct linux_dirent64 address_to entry;
-                while ((entry = file_walk_next(address_of walk)) &&
-                       file_is_dot(entry->d_name))
-                        ;
+                bool any = false;
 
-                if (!entry)
+                while (result >= 0 && (entry = file_walk_next(address_of walk)))
                 {
+                        if (file_is_dot(entry->d_name))
+                                continue;
+                        any = true;
+
+                        file_facts child;
+                        bipolar looked = file_look_code(
+                            inside, entry->d_name, AT_SYMLINK_NOFOLLOW,
+                            address_of child);
+                        if (looked == -ERROR_NO_ENTRY)
+                                continue;
+                        if (looked < 0)
+                        {
+                                result = looked;
+                                break;
+                        }
+
+                        p8 below[FILE_PATH_MAX];
+                        bool named = shown && file_path_join(below, shown, entry->d_name);
+                        result = file_move_remove_tree(
+                            inside, entry->d_name, address_of child, depth - 1,
+                            named ? below : null);
+                        if (result == -ERROR_NO_ENTRY)
+                                result = 0;
+                }
+                if (result >= 0 && !any)
                         result = walk.error;
+                if (!any || result < 0)
                         break;
-                }
-
-                file_facts child;
-                bipolar looked = file_look_code(
-                    inside, entry->d_name, AT_SYMLINK_NOFOLLOW,
-                    address_of child);
-                if (looked == -ERROR_NO_ENTRY)
-                        continue;
-                if (looked < 0)
-                {
-                        result = looked;
-                        break;
-                }
-
-                p8 below[FILE_PATH_MAX];
-                bool named = shown && file_path_join(below, shown, entry->d_name);
-                result = file_move_remove_tree(
-                    inside, entry->d_name, address_of child, depth - 1,
-                    named ? below : null);
-                if (result == -ERROR_NO_ENTRY)
-                        result = 0;
         }
 
         if (result >= 0)
