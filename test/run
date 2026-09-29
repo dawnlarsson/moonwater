@@ -5150,18 +5150,21 @@ text_parallel_checks()
                 fi
         }
 
-        for parallel_name in plain noeol long; do
-                parallel_inplace_case "$parallel_dir/$parallel_name" '-i@s/ab/AB/g'
-                parallel_inplace_case "$parallel_dir/$parallel_name" '-i.bak@/^a/d'
-                parallel_inplace_case "$parallel_dir/$parallel_name" '-i@-n@/a/p'
-                parallel_inplace_case "$parallel_dir/$parallel_name" '-i@y/abc/xyz/'
+        #       Not parallel_name: the two functions below set that one to the
+        #       tool they run, and a function's variables are the caller's, so a
+        #       loop on it lost its file after the first case.
+        for parallel_shape in plain noeol long; do
+                parallel_inplace_case "$parallel_dir/$parallel_shape" '-i@s/ab/AB/g'
+                parallel_inplace_case "$parallel_dir/$parallel_shape" '-i.bak@/^a/d'
+                parallel_inplace_case "$parallel_dir/$parallel_shape" '-i@-n@/a/p'
+                parallel_inplace_case "$parallel_dir/$parallel_shape" '-i@y/abc/xyz/'
         done
 
-        for parallel_name in plain noeol long; do
-                parallel_offset_case "$parallel_dir/$parallel_name" wc '-l@-w@-c'
-                parallel_offset_case "$parallel_dir/$parallel_name" grep '-n@ab'
-                parallel_offset_case "$parallel_dir/$parallel_name" cut '-d,@-f2'
-                parallel_offset_case "$parallel_dir/$parallel_name" sed 's/ab/AB/g'
+        for parallel_shape in plain noeol long; do
+                parallel_offset_case "$parallel_dir/$parallel_shape" wc '-l@-w@-c'
+                parallel_offset_case "$parallel_dir/$parallel_shape" grep '-n@ab'
+                parallel_offset_case "$parallel_dir/$parallel_shape" cut '-d,@-f2'
+                parallel_offset_case "$parallel_dir/$parallel_shape" sed 's/ab/AB/g'
         done
 
         parallel_all='plain mixed nul long noeol oneline'
