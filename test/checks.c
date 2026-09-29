@@ -33522,8 +33522,49 @@ static fn spelled_fuzz(positive rounds)
         }
 }
 
+//      spelling_c against the per-byte rules it replaced (tar_quoted,
+//      writer_c_escape, sed l): every byte under every extra set.
+static fn spelled_c_check(void)
+{
+        for (positive extra = 0; extra < 16; extra++)
+        {
+                p64 address_to table = spelling_c(extra);
+                bool right = table == spelling_c(extra);
+                for (positive byte = 0; byte < 256; byte++)
+                {
+                        p8 text[4];
+                        positive length;
+                        bool slashed = byte == '\\' ||
+                                       (byte == '\'' && (extra & SPELL_C_APOSTROPHE)) ||
+                                       (byte == '"' && (extra & SPELL_C_QUOTE)) ||
+                                       (byte == ' ' && (extra & SPELL_C_SPACE)) ||
+                                       (byte == ':' && (extra & SPELL_C_COLON));
+                        if (byte >= 7 && byte <= 13)
+                                text[0] = '\\', text[1] = "abtnvfr"[byte - 7], length = 2;
+                        else if (byte < ' ' || byte >= 127)
+                        {
+                                text[0] = '\\';
+                                text[1] = (p8)('0' + (byte >> 6));
+                                text[2] = (p8)('0' + ((byte >> 3) & 7));
+                                text[3] = (p8)('0' + (byte & 7));
+                                length = 4;
+                        }
+                        else if (slashed)
+                                text[0] = '\\', text[1] = (p8)byte, length = 2;
+                        else
+                                text[0] = (p8)byte, length = 1;
+                        p64 entry = table[byte];
+                        right = right && (entry & 255) == length;
+                        for (positive at = 0; at < length; at++)
+                                right = right && (p8)(entry >> (8 * (at + 1))) == text[at];
+                }
+                check("spelling_c: every byte under every extra set", right);
+        }
+}
+
 static fn spelled_suite(void)
 {
+        spelled_c_check();
         static const positive longer[] = {400, 500, 511, 512, 513, 515, 543, 600,
                                           777, 1024, 1100, 2047, 4096, SPELLED_MOST};
         spelled_caret_check();

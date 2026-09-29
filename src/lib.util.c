@@ -2647,103 +2647,6 @@ static inline INLINE fn writer_hex_escaped(writer output, address_any data,
 }
 
 #ifndef KERNEL_MODE // pathname diagnostics are for utilities
-/* A pathname supplied by an archive or a directory entry may contain bytes
-   that a terminal interprets as cursor movement, erased output, or a forged
-   line.  Ordinary names retain their byte-for-byte output.  Once a control
-   byte is present, backslashes are escaped as well so the visible \xNN form
-   cannot be confused with literal input. */
-static fn writer_terminal_name_span(writer output, string_address value,
-                                    positive length)
-{
-        p8 unsafe = HEX_CONTROL | HEX_TAB | HEX_HIGH;
-
-        if (memory_escape_index(value, length, unsafe) == length)
-        {
-                output(value, length);
-                return;
-        }
-
-        writer_hex_escaped(output, value, length, unsafe | HEX_SLASH);
-}
-
-static fn writer_terminal_name(writer output, string_address value)
-{
-        writer_terminal_name_span(output, value, string_length(value));
-}
-
-/* One byte of a name as a C string spells it: the seven letters, the
-   backslash and the quote doubled up with a backslash, and three octal digits
-   for every other byte. This is how coreutils' quote() and findutils write a
-   name in the C locale, and the octal is what keeps a byte outside ASCII from
-   being read back as part of the letter after it, which \x would not. */
-static positive writer_c_escape(p8 byte, p8 address_to into)
-{
-        static const p8 letters[14] = {
-            [7] = 'a', [8] = 'b', [9] = 't', [10] = 'n',
-            [11] = 'v', [12] = 'f', [13] = 'r',
-        };
-
-        into[0] = '\\';
-        if (byte < sizeof(letters) && letters[byte])
-        {
-                into[1] = letters[byte];
-                return 2;
-        }
-        if (byte == '\\' || byte == '\'')
-        {
-                into[1] = byte;
-                return 2;
-        }
-        into[1] = (p8)('0' + (byte >> 6));
-        into[2] = (p8)('0' + ((byte >> 3) & 7));
-        into[3] = (p8)('0' + (byte & 7));
-        return 4;
-}
-
-/* The body of a pathname already delimited by single quotes in a diagnostic,
-   spelled the way coreutils' quote() spells it in the C locale -- 'new\nline',
-   'e\033x', 'q\'x' -- which is what mkdir, find, env, nice, timeout and xargs
-   write, and what a message that names a file with quoteaf starts from.
-   Ordinary spans cross the writer whole; only the bytes a terminal would act
-   on, the backslash and the delimiter are spelled out. */
-static fn writer_terminal_quoted_name_span(writer output,
-                                           string_address value,
-                                           positive length)
-{
-        p8 policy = HEX_CONTROL | HEX_TAB | HEX_HIGH | HEX_SLASH;
-        p8 address_to quote = length ? memory_first_of(value, '\'', length)
-                                     : 0;
-
-        while (length)
-        {
-                positive span = quote ? (positive)(quote - (p8 address_to)value)
-                                      : length;
-                positive plain = span ? memory_escape_index(value, span, policy)
-                                      : 0;
-                p8 spelled[4];
-
-                if (plain)
-                {
-                        output(value, plain);
-                        value += plain;
-                        length -= plain;
-                        continue;
-                }
-                output(spelled, writer_c_escape(*(p8 address_to)value, spelled));
-                if (!span)
-                        quote = length > 1
-                                    ? memory_first_of(value + 1, '\'', length - 1)
-                                    : 0;
-                value++;
-                length--;
-        }
-}
-
-static fn writer_terminal_quoted_name(writer output, string_address value)
-{
-        writer_terminal_quoted_name_span(output, value, string_length(value));
-}
-
 /* Spelling tables for memory_into_spelled: entry b is the length of b's
    spelling in its low byte and the spelling above it, so {1, b} is b as it
    is. Built once a style, on first use, and published after the whole
@@ -2805,6 +2708,108 @@ static p64 address_to spelling_caret(positive flags)
         __atomic_store_n(&built[flags], 1, __ATOMIC_RELEASE);
         return table;
 }
+
+enum { SPELL_C_APOSTROPHE = 1, SPELL_C_QUOTE = 2, SPELL_C_SPACE = 4, SPELL_C_COLON = 8 };
+
+/* A C string's spelling, as coreutils' quotearg, GNU tar and sed's l write
+   it in the C locale: the seven letters from \a to \r, the backslash
+   doubled, three octal digits for any other control, DEL or byte past
+   ASCII, and the rest as it is; extra escapes the apostrophe, the double
+   quote, the space and the colon with a backslash as well. */
+static p64 address_to spelling_c(positive extra)
+{
+        static spelling_table tables[16];
+        static p8 built[16];
+
+        extra &= 15;
+        p64 address_to table = tables[extra];
+        if (__atomic_load_n(&built[extra], __ATOMIC_ACQUIRE))
+                return table;
+        for (positive byte = 0; byte < 256; byte++)
+        {
+                p8 text[4] = {'\\', (p8)byte};
+                positive length = 2;
+
+                if (byte >= 7 && byte <= 13)
+                        text[1] = "abtnvfr"[byte - 7];
+                else if (byte < 32 || byte >= 127)
+                {
+                        text[1] = (p8)('0' + (byte >> 6));
+                        text[2] = (p8)('0' + ((byte >> 3) & 7));
+                        text[3] = (p8)('0' + (byte & 7));
+                        length = 4;
+                }
+                else if (!(byte == '\\' ||
+                           (byte == '\'' && (extra & SPELL_C_APOSTROPHE)) ||
+                           (byte == '"' && (extra & SPELL_C_QUOTE)) ||
+                           (byte == ' ' && (extra & SPELL_C_SPACE)) ||
+                           (byte == ':' && (extra & SPELL_C_COLON))))
+                        text[0] = (p8)byte, length = 1;
+                table[byte] = spelling_entry(text, length);
+        }
+        __atomic_store_n(&built[extra], 1, __ATOMIC_RELEASE);
+        return table;
+}
+
+/* Bytes spelled through a table and handed to a writer a buffer at a time;
+   never a zero length, which log reads as "measure the string". */
+static fn writer_spelled(writer output, address_any data, positive length,
+                         p64 address_to table)
+{
+        p8 address_to bytes = data;
+        while (length)
+        {
+                p8 spelled[256];
+                positive2 done = memory_into_spelled(spelled, bytes, length,
+                                                     sizeof(spelled), table);
+                output(spelled, done.y);
+                bytes += done.x;
+                length -= done.x;
+        }
+}
+/* A pathname supplied by an archive or a directory entry may contain bytes
+   that a terminal interprets as cursor movement, erased output, or a forged
+   line.  Ordinary names retain their byte-for-byte output.  Once a control
+   byte is present, backslashes are escaped as well so the visible \xNN form
+   cannot be confused with literal input. */
+static fn writer_terminal_name_span(writer output, string_address value,
+                                    positive length)
+{
+        p8 unsafe = HEX_CONTROL | HEX_TAB | HEX_HIGH;
+
+        if (memory_escape_index(value, length, unsafe) == length)
+        {
+                output(value, length);
+                return;
+        }
+
+        writer_hex_escaped(output, value, length, unsafe | HEX_SLASH);
+}
+
+static fn writer_terminal_name(writer output, string_address value)
+{
+        writer_terminal_name_span(output, value, string_length(value));
+}
+
+/* The body of a pathname already delimited by single quotes in a diagnostic,
+   spelled the way coreutils' quote() spells it in the C locale -- 'new\nline',
+   'e\033x', 'q\'x' -- which is what mkdir, find, env, nice, timeout and xargs
+   write, and what a message that names a file with quoteaf starts from: the
+   bytes a terminal would act on, the backslash and the delimiter spelled as
+   a C string spells them, with octal keeping a byte outside ASCII from being
+   read back as part of the letter after it, which \x would not. */
+static fn writer_terminal_quoted_name_span(writer output,
+                                           string_address value,
+                                           positive length)
+{
+        writer_spelled(output, value, length, spelling_c(SPELL_C_APOSTROPHE));
+}
+
+static fn writer_terminal_quoted_name(writer output, string_address value)
+{
+        writer_terminal_quoted_name_span(output, value, string_length(value));
+}
+
 #endif // KERNEL_MODE
 
 typedef struct { p8 address_to bytes; positive length; } byte_span;
