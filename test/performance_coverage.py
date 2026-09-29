@@ -425,6 +425,10 @@ cover('direct_benchmark', 'test/checks.c#BENCH_cksum_crc', 'hash_crc32c',
       "ext4's CRC-32C calls (group bitmaps, numbers and descriptors; inode "
       'seeds and bodies) at every feature tier, against the loop storage.c '
       'carried, copied into the section')
+cover('direct_benchmark', 'test/checks.c#BENCH_cksum_digests', 'keccak_blocks sm3_blocks',
+      "cksum's SHA-3 (136 and 72 byte blocks) and SM3 cores at every feature "
+      'tier, a read block and a single block a call, against the C '
+      'src/sh/checksum.c carried, copied into the section')
 cover('direct_benchmark', 'test/checks.c#BENCH_unicode_width', 'unicode_width',
       'both variants over mixed, Latin, box-drawing, wide, emoji and mark '
       'streams against the C term.c and text.c ran '
@@ -472,7 +476,7 @@ cover('correctness_only', 'test/checks.c#CHECK_compression_floor', 'deflate_deco
       anchors={'deflate_decode_span': 'floor_deflate'})
 
 cover('correctness_only', 'test/checks.c#CHECK_checksum_crc', '''
-md5_blocks sha1_blocks sha256_blocks sha512_blocks blake2b_blocks cpu_hash_detect
+md5_blocks sha1_blocks sha256_blocks sha512_blocks sha512_blocks_avx2 blake2b_blocks cpu_hash_detect
 ''', 'differential against the textbook rounds over every run length to 40 '
       'blocks under every feature-byte subset the machine has, protected-page '
       'tails, blake2b counter carries, and streaming known answers; the lazy '

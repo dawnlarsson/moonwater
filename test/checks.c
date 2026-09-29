@@ -81620,6 +81620,387 @@ static fn crc32c_check_all(p8 address_to bytes)
               hash_crc32c(0x12345678u, null, 0) == 0x12345678u);
 }
 
+/*
+        keccak_blocks against the textbook permutation: every rate from 8 to
+        168 bytes, every run to 12 blocks and a few longer ones, runs that end
+        on the protected page and runs one to seven bytes short of it, with
+        the state and the bytes around the data checked, under every body
+        this machine has (x86_64's AVX-512 and arm64's SHA3 bodies written
+        down to the floor and back). Then SHA-3 through cksum's sponge:
+        FIPS 202's empty and "abc" answers at all four lengths, a million
+        "a", and one SHA-256 over the digests of every prefix of 0 to 300
+        bytes of the pattern, each also written in three pieces.
+*/
+static fn keccak_reference(p64 address_to a)
+{
+        static const p64 round[24] = {
+            0x0000000000000001ull, 0x0000000000008082ull, 0x800000000000808aull,
+            0x8000000080008000ull, 0x000000000000808bull, 0x0000000080000001ull,
+            0x8000000080008081ull, 0x8000000000008009ull, 0x000000000000008aull,
+            0x0000000000000088ull, 0x0000000080008009ull, 0x000000008000000aull,
+            0x000000008000808bull, 0x800000000000008bull, 0x8000000000008089ull,
+            0x8000000000008003ull, 0x8000000000008002ull, 0x8000000000000080ull,
+            0x000000000000800aull, 0x800000008000000aull, 0x8000000080008081ull,
+            0x8000000000008080ull, 0x0000000080000001ull, 0x8000000080008008ull,
+        };
+        static const p8 rho[25] = {0, 1, 62, 28, 27, 36, 44, 6, 55, 20, 3, 10, 43,
+                                   25, 39, 41, 45, 15, 21, 8, 18, 2, 61, 56, 14};
+
+        for (positive r = 0; r < 24; r++)
+        {
+                p64 c[5], b[25];
+
+                for (positive x = 0; x < 5; x++)
+                        c[x] = a[x] ^ a[x + 5] ^ a[x + 10] ^ a[x + 15] ^ a[x + 20];
+                for (positive x = 0; x < 25; x++)
+                        a[x] ^= c[(x + 4) % 5] ^ hash_reference_ror(c[(x + 1) % 5], 63);
+                for (positive x = 0; x < 5; x++)
+                        for (positive y = 0; y < 5; y++)
+                                b[y + 5 * ((2 * x + 3 * y) % 5)] =
+                                    hash_reference_ror(a[x + 5 * y], (64 - rho[x + 5 * y]) % 64);
+                for (positive y = 0; y < 25; y += 5)
+                        for (positive x = 0; x < 5; x++)
+                                a[y + x] = b[y + x] ^ (~b[y + (x + 1) % 5] & b[y + (x + 2) % 5]);
+                a[0] ^= round[r];
+        }
+}
+
+static positive keccak_check_run(p8 address_to limit, positive rate, positive blocks,
+                                 positive short_by)
+{
+        p8 address_to data = limit - rate * blocks - short_by;
+        p8 before = data[-1];
+        p64 want[26], got[26];
+
+        for (positive at = 0; at < rate * blocks; at++)
+                data[at] = hash_check_byte();
+        for (positive i = 0; i < 26; i++)
+                want[i] = got[i] = (p64)hash_check_byte() << 56 ^ hash_check_seed;
+        for (positive block = 0; block < blocks; block++)
+        {
+                for (positive lane = 0; lane < rate / 8; lane++)
+                        want[lane] ^= (p64)hash_reference_le32(data + block * rate + 8 * lane) |
+                                      (p64)hash_reference_le32(data + block * rate + 8 * lane + 4) << 32;
+                keccak_reference(want);
+        }
+        keccak_blocks(got, data, blocks, rate);
+        return (memory_compare(want, got, sizeof want) != 0) + (data[-1] != before);
+}
+
+static positive keccak_check_cores(p8 address_to limit)
+{
+        positive wrong = 0;
+
+        for (positive rate = 8; rate <= 168; rate += 8)
+        {
+                for (positive blocks = 0; blocks <= 12; blocks++)
+                        for (positive short_by = 0; short_by < 8; short_by += blocks < 4 ? 1 : 3)
+                                wrong += keccak_check_run(limit, rate, blocks, short_by);
+                wrong += keccak_check_run(limit, rate, 8000 / rate - 2, 5);
+        }
+        return wrong;
+}
+
+typedef struct
+{
+        p8 size;
+        string_address empty;
+        string_address abc;
+        string_address prefixes;
+} keccak_known;
+
+static const keccak_known keccak_known_answers[] = {
+    {28, "6b4e03423667dbb73b6e15454f0eb1abd4597f9a1b078e3f5b5a6bc7",
+     "e642824c3f8cf24ad09234ee7d3c766fc9a3a5168d0c94ad73b46fdf",
+     "02791b212c03278422657b73e01a4420453f6dc808c72a3486bd5269980e79cf"},
+    {32, "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
+     "3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532",
+     "f4c7631b6d13bc7d820ddd14c0622ac9e50540c903397a7423934489a532603b"},
+    {48, "0c63a75b845e4f7d01107d852e4c2485c51a50aaaa94fc61995e71bbee983a2ac3713831264adb47fb6bd1e058d5f004",
+     "ec01498288516fc926459f58e2c6ad8df9b473cb0fc08c2596da7cf0e49be4b298d88cea927ac7f539f1edf228376d25",
+     "375a692cdf08c0f84ecedcba26d3b45eaf9c50b7bfd5753caece5ba670166103"},
+    {64, "a69f73cca23a9ac5c8b567dc185a756e97c982164fe25859e0d1dcc1475c80a615b2123af1f5f94c11e3e9402c3ac558f500199d95b6d3e301758586281dcd26",
+     "b751850b1a57168a5693cd924b6b096e08f621827444f70d884f5d0240d2712e10e116e9192af3c91a7ec57647e3934057340b4cf408d5a56592f8274eec53f0",
+     "39d0ead02d07b005272304772b97452d6ad4ce508e01a00add1da42f807f38e8"},
+};
+
+static positive keccak_check_sponge(p8 address_to pattern)
+{
+        positive wrong = 0;
+        p8 thousand[1000];
+
+        //      The cores' runs wrote over the pattern; put it back.
+        for (positive at = 0; at < 8192; at++)
+                pattern[at] = (p8)((at * 73) ^ (at >> 3));
+
+        memory_fill(thousand, 'a', sizeof thousand);
+        for (positive which = 0; which < array_count(keccak_known_answers); which++)
+        {
+                const keccak_known address_to known = keccak_known_answers + which;
+                checksum_sponge sponge;
+                digest_state outer;
+                p8 out[64], again[64];
+
+                checksum_sponge_open(address_of sponge, false, known->size);
+                checksum_sponge_close(address_of sponge, out);
+                wrong += !hash_check_hex(out, known->size, known->empty);
+
+                checksum_sponge_open(address_of sponge, false, known->size);
+                checksum_sponge_write(address_of sponge, "abc", 3);
+                checksum_sponge_close(address_of sponge, out);
+                wrong += !hash_check_hex(out, known->size, known->abc);
+
+                digest_open(address_of outer, DIGEST_SHA256, 32);
+                for (positive length = 0; length <= 300; length++)
+                {
+                        checksum_sponge_open(address_of sponge, false, known->size);
+                        checksum_sponge_write(address_of sponge, pattern, length);
+                        checksum_sponge_close(address_of sponge, out);
+                        digest_write(address_of outer, out, known->size);
+
+                        positive first = hash_check_byte() % (length + 1);
+                        positive second = hash_check_byte() % (length - first + 1);
+
+                        checksum_sponge_open(address_of sponge, false, known->size);
+                        checksum_sponge_write(address_of sponge, pattern, first);
+                        checksum_sponge_write(address_of sponge, pattern + first, second);
+                        checksum_sponge_write(address_of sponge, pattern + first + second,
+                                              length - first - second);
+                        checksum_sponge_close(address_of sponge, again);
+                        wrong += memory_compare(out, again, known->size) != 0;
+                }
+                digest_close(address_of outer, out);
+                wrong += !hash_check_hex(out, 32, known->prefixes);
+        }
+
+        checksum_sponge sponge;
+        p8 out[32];
+
+        checksum_sponge_open(address_of sponge, false, 32);
+        for (positive i = 0; i < 1000; i++)
+                checksum_sponge_write(address_of sponge, thousand, sizeof thousand);
+        checksum_sponge_close(address_of sponge, out);
+        wrong += !hash_check_hex(out, 32,
+                                 "5c8875ae474a3634ba4fd55ec85bffd661f32aca75c6d699d0cdcb6c115891c1");
+        return wrong;
+}
+
+static fn sm3_reference(p32 address_to st, const p8 address_to d, positive n)
+{
+        for (; n; n--, d += 64)
+        {
+                p32 w[68];
+
+                for (positive j = 0; j < 16; j++)
+                        w[j] = hash_reference_be32(d + 4 * j);
+                for (positive j = 16; j < 68; j++)
+                {
+                        p32 x = w[j - 16] ^ w[j - 9] ^ hash_reference_rol(w[j - 3], 15);
+
+                        w[j] = (x ^ hash_reference_rol(x, 15) ^ hash_reference_rol(x, 23)) ^
+                               hash_reference_rol(w[j - 13], 7) ^ w[j - 6];
+                }
+                p32 v[8];
+                for (positive i = 0; i < 8; i++)
+                        v[i] = st[i];
+                for (positive j = 0; j < 64; j++)
+                {
+                        p32 t = j < 16 ? 0x79cc4519u : 0x7a879d8au;
+                        p32 a12 = hash_reference_rol(v[0], 12);
+                        p32 ss1 = hash_reference_rol(a12 + v[4] + hash_reference_rol(t, j % 32), 7);
+                        p32 ss2 = ss1 ^ a12;
+                        p32 ff = j < 16 ? v[0] ^ v[1] ^ v[2] : (v[0] & v[1]) | (v[0] & v[2]) | (v[1] & v[2]);
+                        p32 gg = j < 16 ? v[4] ^ v[5] ^ v[6] : (v[4] & v[5]) | (~v[4] & v[6]);
+                        p32 tt1 = ff + v[3] + ss2 + (w[j] ^ w[j + 4]);
+                        p32 tt2 = gg + v[7] + ss1 + w[j];
+
+                        v[3] = v[2];
+                        v[2] = hash_reference_rol(v[1], 9);
+                        v[1] = v[0];
+                        v[0] = tt1;
+                        v[7] = v[6];
+                        v[6] = hash_reference_rol(v[5], 19);
+                        v[5] = v[4];
+                        v[4] = tt2 ^ hash_reference_rol(tt2, 9) ^ hash_reference_rol(tt2, 17);
+                }
+                for (positive i = 0; i < 8; i++)
+                        st[i] ^= v[i];
+        }
+}
+
+static positive sm3_check_cores(p8 address_to limit)
+{
+        positive wrong = 0;
+
+        for (positive blocks = 0; blocks <= 20; blocks++)
+                for (positive short_by = 0; short_by < 8; short_by++)
+                {
+                        p8 address_to data = limit - 64 * blocks - short_by;
+                        p8 before = data[-1];
+                        p32 want[9], got[9];
+
+                        for (positive at = 0; at < 64 * blocks; at++)
+                                data[at] = hash_check_byte();
+                        for (positive i = 0; i < 9; i++)
+                                want[i] = got[i] = (p32)hash_check_byte() << 24 ^ (p32)hash_check_seed;
+                        sm3_reference(want, data, blocks);
+                        sm3_blocks(got, data, blocks);
+                        wrong += memory_compare(want, got, sizeof want) != 0;
+                        wrong += data[-1] != before;
+                }
+        return wrong;
+}
+
+static positive sm3_check_sponge(p8 address_to pattern)
+{
+        static const char address_to abc =
+            "66c7f0f462eeedd9d1f2d46bdc10e4e24167c4875cf2f7a2297da02b8f4ba8e0";
+        static const char address_to empty =
+            "1ab21d8355cfa17f8e61194831e81a8f22bec8c728fefb747ed035eb5082aa2b";
+        static const char address_to prefixes =
+            "738abfcfd4080662e63aac398e44924cf8dc8589d057edd1d2c9ea5e31c713f1";
+        static const char address_to million =
+            "c8aaf89429554029e231941a2acc0ad61ff2a5acd8fadd25847a3a732b3b02c3";
+        positive wrong = 0;
+        p8 thousand[1000];
+        checksum_sponge sponge;
+        digest_state outer;
+        p8 out[64], again[64];
+
+        for (positive at = 0; at < 8192; at++)
+                pattern[at] = (p8)((at * 73) ^ (at >> 3));
+        memory_fill(thousand, 'a', sizeof thousand);
+
+        checksum_sponge_open(address_of sponge, true, 32);
+        checksum_sponge_close(address_of sponge, out);
+        wrong += !hash_check_hex(out, 32, empty);
+        checksum_sponge_open(address_of sponge, true, 32);
+        checksum_sponge_write(address_of sponge, "abc", 3);
+        checksum_sponge_close(address_of sponge, out);
+        wrong += !hash_check_hex(out, 32, abc);
+        checksum_sponge_open(address_of sponge, true, 32);
+        for (positive i = 0; i < 1000; i++)
+                checksum_sponge_write(address_of sponge, thousand, sizeof thousand);
+        checksum_sponge_close(address_of sponge, out);
+        wrong += !hash_check_hex(out, 32, million);
+
+        digest_open(address_of outer, DIGEST_SHA256, 32);
+        for (positive length = 0; length <= 300; length++)
+        {
+                checksum_sponge_open(address_of sponge, true, 32);
+                checksum_sponge_write(address_of sponge, pattern, length);
+                checksum_sponge_close(address_of sponge, out);
+                digest_write(address_of outer, out, 32);
+
+                positive first = hash_check_byte() % (length + 1);
+                positive second = hash_check_byte() % (length - first + 1);
+
+                checksum_sponge_open(address_of sponge, true, 32);
+                checksum_sponge_write(address_of sponge, pattern, first);
+                checksum_sponge_write(address_of sponge, pattern + first, second);
+                checksum_sponge_write(address_of sponge, pattern + first + second,
+                                      length - first - second);
+                checksum_sponge_close(address_of sponge, again);
+                wrong += memory_compare(out, again, 32) != 0;
+        }
+        digest_close(address_of outer, out);
+        wrong += !hash_check_hex(out, 32, prefixes);
+        return wrong;
+}
+
+/*
+        sha512_blocks (and its sha512_blocks_avx2 body) at every alignment, which the feature walk in
+        hash_check_all does not reach (it always hands the core a run that
+        ends on the page): the AVX2 body with BMI2 and the floor, 0 to 9
+        blocks at each of 16 byte offsets, against the textbook rounds.
+*/
+static positive sha512_check_aligned(p8 address_to limit)
+{
+        positive wrong = 0;
+
+        for (positive blocks = 0; blocks <= 9; blocks++)
+                for (positive offset = 0; offset < 16; offset++)
+                {
+                        p8 address_to data = limit - 128 * blocks - offset;
+                        p64 want[9], got[9];
+
+                        for (positive at = 0; at < 128 * blocks; at++)
+                                data[at] = hash_check_byte();
+                        for (positive i = 0; i < 9; i++)
+                                want[i] = got[i] = (p64)hash_check_byte() << 56 ^ hash_check_seed;
+                        hash_reference_sha512(want, data, blocks);
+                        sha512_blocks(got, data, blocks);
+                        wrong += memory_compare(want, got, sizeof want) != 0;
+                }
+        return wrong;
+}
+
+static fn keccak_check_all(p8 address_to limit)
+{
+        positive cores = 0;
+        positive sponges = 0;
+        positive bodies = 1;
+        p64 scratch[25] = {0};
+
+        keccak_blocks(scratch, limit - 8, 1, 8);
+#if X64
+        p8 wide = cpu_has_avx512;
+#elif ARM64
+        p8 wide = cpu_has_sha3;
+#else
+        p8 wide = 0;
+#endif
+        if (wide)
+        {
+#if X64
+                cpu_has_avx512 = 0;
+#elif ARM64
+                cpu_has_sha3 = 0;
+#endif
+                bodies++;
+                cores += keccak_check_cores(limit);
+                sponges += keccak_check_sponge(limit - 8192);
+#if X64
+                cpu_has_avx512 = wide;
+#elif ARM64
+                cpu_has_sha3 = wide;
+#endif
+        }
+        cores += keccak_check_cores(limit);
+        sponges += keccak_check_sponge(limit - 8192);
+
+        check("keccak_blocks ran under every body this machine has", bodies == 1 + (wide != 0));
+        check("keccak_blocks agrees with the textbook permutation at every rate", cores == 0);
+        check("SHA-3 gives FIPS 202's answers at every length and split", sponges == 0);
+
+        positive sm3 = 0;
+        p32 sm3_scratch[8] = {0};
+
+        sm3_blocks(sm3_scratch, limit - 64, 1);
+#if ARM64
+        p8 extension = cpu_has_sm3;
+
+        if (extension)
+        {
+                cpu_has_sm3 = 0;
+                sm3 += sm3_check_cores(limit) + sm3_check_sponge(limit - 8192);
+                cpu_has_sm3 = extension;
+        }
+#endif
+        sm3 += sm3_check_cores(limit) + sm3_check_sponge(limit - 8192);
+        check("sm3_blocks agrees with the textbook rounds, and SM3 gives GB/T 32905's answers", sm3 == 0);
+
+        positive aligned = sha512_check_aligned(limit);
+#if X64
+        p8 vector = cpu_has_avx2;
+
+        cpu_has_avx2 = 0;
+        aligned += sha512_check_aligned(limit);
+        cpu_has_avx2 = vector;
+#endif
+        check("sha512_blocks agrees with the textbook rounds at every 16 byte offset", aligned == 0);
+}
+
 b32 main(void)
 {
         positive page = system_page_size();
@@ -81634,9 +82015,324 @@ b32 main(void)
         hash_check_all(bytes + 8192);
         crc_check_all(bytes);
         crc32c_check_all(bytes);
+        keccak_check_all(bytes + 8192);
         return test_report(null);
 }
 #endif /* CHECK_checksum_crc */
+
+#ifdef BENCH_cksum_digests
+/*
+        cksum's SHA-3 and SM3 cores against the C src/sh/checksum.c carried
+        until keccak_blocks and sm3_blocks, copied here under former_ and
+        called a block at a time as the sponge called them. Tier 1 is each
+        core's floor and tier 2 its extension body (AVX-512 on x86_64, SHA3
+        on arm64); a tier this machine lacks runs the floor.
+
+        With no arguments it prints best-of-seven ticks a byte over 64 MiB,
+        SHA3-256's 136-byte blocks and SHA3-512's 72, handed over 963 blocks
+        a call (a 128 KiB read) and one a call. `former|assembly <tier>
+        <rate> <blocks> [<MiB>]` runs one body once and prints a lane, so
+        perf stat sees one body a process. `former|assembly <tier> sm3 <blocks>
+        [<MiB>]` does the same for SM3, whose tier 2 is arm64's SM3 extension.
+*/
+#include "../src/lib.util.c"
+#define SHARED_bench_measure
+#include "checks.c"
+#undef SHARED_bench_measure
+
+#define former_rotl64(x, n) (((x) << (n)) | ((x) >> ((64 - (n)) & 63)))
+
+static fn former_keccak(p64 address_to a)
+{
+        static const p64 round[24] = {
+            0x0000000000000001ull, 0x0000000000008082ull, 0x800000000000808aull,
+            0x8000000080008000ull, 0x000000000000808bull, 0x0000000080000001ull,
+            0x8000000080008081ull, 0x8000000000008009ull, 0x000000000000008aull,
+            0x0000000000000088ull, 0x0000000080008009ull, 0x000000008000000aull,
+            0x000000008000808bull, 0x800000000000008bull, 0x8000000000008089ull,
+            0x8000000000008003ull, 0x8000000000008002ull, 0x8000000000000080ull,
+            0x000000000000800aull, 0x800000008000000aull, 0x8000000080008081ull,
+            0x8000000000008080ull, 0x0000000080000001ull, 0x8000000080008008ull,
+        };
+        static const p8 rho[25] = {
+            0, 1, 62, 28, 27, 36, 44, 6, 55, 20, 3, 10, 43,
+            25, 39, 41, 45, 15, 21, 8, 18, 2, 61, 56, 14,
+        };
+
+        for (positive r = 0; r < 24; r++)
+        {
+                p64 c[5], b[25];
+
+                for (positive x = 0; x < 5; x++)
+                        c[x] = a[x] ^ a[x + 5] ^ a[x + 10] ^ a[x + 15] ^ a[x + 20];
+                for (positive x = 0; x < 5; x++)
+                {
+                        p64 d = c[(x + 4) % 5] ^ former_rotl64(c[(x + 1) % 5], 1);
+
+                        for (positive y = 0; y < 25; y += 5)
+                                a[y + x] ^= d;
+                }
+                for (positive x = 0; x < 5; x++)
+                        for (positive y = 0; y < 5; y++)
+                                b[y + 5 * ((2 * x + 3 * y) % 5)] =
+                                    former_rotl64(a[x + 5 * y], rho[x + 5 * y]);
+                for (positive y = 0; y < 25; y += 5)
+                        for (positive x = 0; x < 5; x++)
+                                a[y + x] = b[y + x] ^
+                                           (~b[y + (x + 1) % 5] & b[y + (x + 2) % 5]);
+                a[0] ^= round[r];
+        }
+}
+
+static __attribute__((noinline)) fn former_keccak_block(p64 address_to lanes,
+                                                        const p8 address_to data,
+                                                        positive rate)
+{
+        for (positive lane = 0; lane < rate / 8; lane++)
+        {
+                p64 value = 0;
+
+                for (positive at = 0; at < 8; at++)
+                        value |= (p64)data[lane * 8 + at] << (8 * at);
+                lanes[lane] ^= value;
+        }
+        former_keccak(lanes);
+}
+
+#define former_rotl32(x, n) (((x) << (n)) | ((x) >> ((32 - (n)) & 31)))
+
+static __attribute__((noinline)) fn former_sm3_block(p32 address_to v, const p8 address_to data)
+{
+        p32 w[68];
+
+        for (positive j = 0; j < 16; j++)
+                w[j] = (p32)data[4 * j] << 24 | (p32)data[4 * j + 1] << 16 |
+                       (p32)data[4 * j + 2] << 8 | data[4 * j + 3];
+        for (positive j = 16; j < 68; j++)
+        {
+                p32 x = w[j - 16] ^ w[j - 9] ^ former_rotl32(w[j - 3], 15);
+
+                w[j] = (x ^ former_rotl32(x, 15) ^ former_rotl32(x, 23)) ^
+                       former_rotl32(w[j - 13], 7) ^ w[j - 6];
+        }
+
+        p32 a = v[0], b = v[1], c = v[2], d = v[3];
+        p32 e = v[4], f = v[5], g = v[6], h = v[7];
+
+        for (positive j = 0; j < 64; j++)
+        {
+                p32 t = j < 16 ? 0x79cc4519u : 0x7a879d8au;
+                p32 a12 = former_rotl32(a, 12);
+                p32 ss1 = former_rotl32(a12 + e + former_rotl32(t, j % 32), 7);
+                p32 ss2 = ss1 ^ a12;
+                p32 ff = j < 16 ? a ^ b ^ c : (a & b) | (a & c) | (b & c);
+                p32 gg = j < 16 ? e ^ f ^ g : (e & f) | (~e & g);
+                p32 tt1 = ff + d + ss2 + (w[j] ^ w[j + 4]);
+                p32 tt2 = gg + h + ss1 + w[j];
+
+                d = c;
+                c = former_rotl32(b, 9);
+                b = a;
+                a = tt1;
+                h = g;
+                g = former_rotl32(f, 19);
+                f = e;
+                e = tt2 ^ former_rotl32(tt2, 9) ^ former_rotl32(tt2, 17);
+        }
+
+        v[0] ^= a; v[1] ^= b; v[2] ^= c; v[3] ^= d;
+        v[4] ^= e; v[5] ^= f; v[6] ^= g; v[7] ^= h;
+}
+
+#define DIGESTS_BENCH_BLOCKS 963
+
+static p8 digests_bench_data[DIGESTS_BENCH_BLOCKS * 168] __attribute__((aligned(64)));
+static p64 digests_bench_lanes[25];
+static positive digests_bench_rate = 136;
+static positive digests_bench_per = DIGESTS_BENCH_BLOCKS;
+static positive digests_bench_total = 64u << 20;
+static fn (*volatile digests_bench_keccak)(p64 address_to, const p8 address_to,
+                                           positive, positive) = keccak_blocks;
+static p8 digests_bench_wide;
+static p8 digests_bench_sm3_extension;
+
+static fn digests_bench_former_keccak(void)
+{
+        positive block_bytes = digests_bench_rate * digests_bench_per;
+
+        for (positive done = 0; done < digests_bench_total; done += block_bytes)
+                for (positive block = 0; block < digests_bench_per; block++)
+                        former_keccak_block(digests_bench_lanes,
+                                            digests_bench_data + block * digests_bench_rate,
+                                            digests_bench_rate);
+}
+
+static fn digests_bench_assembly_keccak(void)
+{
+        positive block_bytes = digests_bench_rate * digests_bench_per;
+
+        for (positive done = 0; done < digests_bench_total; done += block_bytes)
+                digests_bench_keccak(digests_bench_lanes, digests_bench_data,
+                                     digests_bench_per, digests_bench_rate);
+}
+
+static fn digests_bench_tier(positive tier)
+{
+#if X64
+        cpu_has_avx512 = tier >= 2 ? digests_bench_wide : 0;
+#elif ARM64
+        cpu_has_sha3 = tier >= 2 ? digests_bench_wide : 0;
+        cpu_has_sm3 = tier >= 2 ? digests_bench_sm3_extension : 0;
+#else
+        (void)tier;
+#endif
+}
+
+static p32 digests_bench_words[8];
+static fn (*volatile digests_bench_sm3)(p32 address_to, const p8 address_to,
+                                        positive) = sm3_blocks;
+
+static fn digests_bench_former_sm3(void)
+{
+        for (positive done = 0; done < digests_bench_total; done += 64 * digests_bench_per)
+                for (positive block = 0; block < digests_bench_per; block++)
+                        former_sm3_block(digests_bench_words, digests_bench_data + block * 64);
+}
+
+static fn digests_bench_assembly_sm3(void)
+{
+        for (positive done = 0; done < digests_bench_total; done += 64 * digests_bench_per)
+                digests_bench_sm3(digests_bench_words, digests_bench_data, digests_bench_per);
+}
+
+static positive digests_bench_number(string_address text, positive otherwise)
+{
+        positive value = 0;
+
+        if (!text)
+                return otherwise;
+        while (*text >= '0' && *text <= '9')
+                value = value * 10 + (positive)(*text++ - '0');
+        return value;
+}
+
+b32 main(void)
+{
+        p32 random = 0x7433291u;
+
+        for (positive at = 0; at < sizeof(digests_bench_data); at++)
+        {
+                random ^= random << 13;
+                random ^= random >> 17;
+                random ^= random << 5;
+                digests_bench_data[at] = (p8)random;
+        }
+        keccak_blocks(digests_bench_lanes, digests_bench_data, 1, 136);
+#if X64
+        digests_bench_wide = cpu_has_avx512;
+#elif ARM64
+        digests_bench_wide = cpu_has_sha3;
+        digests_bench_sm3_extension = cpu_has_sm3;
+#endif
+
+        string_address body = program_argument(1);
+
+        if (body)
+        {
+                digests_bench_tier(digests_bench_number(program_argument(2), 2));
+                if (program_argument(3) && string_equals(program_argument(3), "sm3"))
+                {
+                        digests_bench_per = digests_bench_number(program_argument(4), DIGESTS_BENCH_BLOCKS);
+                        digests_bench_total = digests_bench_number(program_argument(5), 64) << 20;
+                        if (!digests_bench_per || digests_bench_per > DIGESTS_BENCH_BLOCKS)
+                                return 2;
+                        if (string_equals(body, "former"))
+                                digests_bench_former_sm3();
+                        else if (string_equals(body, "assembly"))
+                                digests_bench_assembly_sm3();
+                        else
+                                return 2;
+                        string_format(log, "%p\n", (positive)digests_bench_words[0]);
+                        return 0;
+                }
+                digests_bench_rate = digests_bench_number(program_argument(3), 136);
+                digests_bench_per = digests_bench_number(program_argument(4), DIGESTS_BENCH_BLOCKS);
+                digests_bench_total = digests_bench_number(program_argument(5), 64) << 20;
+                if (!digests_bench_rate || digests_bench_rate > 168 || digests_bench_rate % 8 ||
+                    !digests_bench_per || digests_bench_per > DIGESTS_BENCH_BLOCKS)
+                        return 2;
+                if (string_equals(body, "none"))
+                        return 0;
+                if (string_equals(body, "former"))
+                        digests_bench_former_keccak();
+                else if (string_equals(body, "assembly"))
+                        digests_bench_assembly_keccak();
+                else
+                        return 2;
+                string_format(log, "%p\n", (positive)digests_bench_lanes[0]);
+                return 0;
+        }
+
+        static const positive rates[] = {136, 72};
+        static const positive pers[] = {DIGESTS_BENCH_BLOCKS, 1};
+        bool agree = true;
+
+        for (positive which = 0; which < array_count(rates); which++)
+                for (positive per = 0; per < array_count(pers); per++)
+                {
+                        digests_bench_rate = rates[which];
+                        digests_bench_per = pers[per];
+                        string_format(log, "  keccak, %p-byte blocks, %p a call:\n",
+                                      digests_bench_rate, digests_bench_per);
+                        memory_fill(digests_bench_lanes, 0, sizeof digests_bench_lanes);
+                        bench_report("former C", digests_bench_former_keccak, 7,
+                                     digests_bench_total, "byte");
+                        for (positive tier = 1; tier <= 2; tier++)
+                        {
+                                p64 kept[25];
+
+                                memory_copy(kept, digests_bench_lanes, sizeof kept);
+                                digests_bench_tier(tier);
+                                bench_report(tier == 1 ? "tier 1 keccak_blocks"
+                                                       : "tier 2 keccak_blocks",
+                                             digests_bench_assembly_keccak, 7,
+                                             digests_bench_total, "byte");
+                                memory_copy(digests_bench_lanes, kept, sizeof kept);
+                                digests_bench_former_keccak();
+                                p64 former = digests_bench_lanes[0];
+                                memory_copy(digests_bench_lanes, kept, sizeof kept);
+                                digests_bench_assembly_keccak();
+                                agree = agree && former == digests_bench_lanes[0];
+                        }
+                }
+        for (positive per = 0; per < 2; per++)
+        {
+                digests_bench_per = per ? 1 : DIGESTS_BENCH_BLOCKS;
+                string_format(log, "  sm3, %p a call:\n", digests_bench_per);
+                memory_fill(digests_bench_words, 0, sizeof digests_bench_words);
+                bench_report("former C", digests_bench_former_sm3, 7, digests_bench_total, "byte");
+                for (positive tier = 1; tier <= 2; tier++)
+                {
+                        p32 kept[8];
+
+                        memory_copy(kept, digests_bench_words, sizeof kept);
+                        digests_bench_tier(tier);
+                        bench_report(tier == 1 ? "tier 1 sm3_blocks" : "tier 2 sm3_blocks",
+                                     digests_bench_assembly_sm3, 7, digests_bench_total, "byte");
+                        memory_copy(digests_bench_words, kept, sizeof kept);
+                        digests_bench_former_sm3();
+                        p32 former = digests_bench_words[0];
+                        memory_copy(digests_bench_words, kept, sizeof kept);
+                        digests_bench_assembly_sm3();
+                        agree = agree && former == digests_bench_words[0];
+                }
+        }
+        digests_bench_tier(2);
+        if (!agree)
+                string_format(log, "  the former C and the assembly disagree\n");
+        return agree ? 0 : 1;
+}
+#endif /* BENCH_cksum_digests */
 
 #ifdef BENCH_cksum_crc
 /*

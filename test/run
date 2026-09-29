@@ -15553,7 +15553,7 @@ counted
 #       absolute number that is not. A Linux host target runs directly.
 #
 
-benchmarks="floor baseline numbers bases hex escape codec fixed table padded input-bases fields human human-nearest hash-33 span-byte utf8-valid net-parsers cells-ascii fill-u32 fill-u64 paths reverse writer-field writer-text text-hot prefix-known translate delete squeeze offsets record-scans ascii-case ascii-case-fold line-break bounded-fold ascii-convert ascii-search grep-search grep-count last-of words clock scan-literal random allocator lock pool ordered tree reserve storage-read compare-max string-copy stream-get stream-write format-bounds startup montgomery shell tools awk find boot-time engines compression compression-floor cksum-crc unicode-width link"
+benchmarks="floor baseline numbers bases hex escape codec fixed table padded input-bases fields human human-nearest hash-33 span-byte utf8-valid net-parsers cells-ascii fill-u32 fill-u64 paths reverse writer-field writer-text text-hot prefix-known translate delete squeeze offsets record-scans ascii-case ascii-case-fold line-break bounded-fold ascii-convert ascii-search grep-search grep-count last-of words clock scan-literal random allocator lock pool ordered tree reserve storage-read compare-max string-copy stream-get stream-write format-bounds startup montgomery shell tools awk find boot-time engines compression compression-floor cksum-crc cksum-digests unicode-width link"
 
 #       One benchmark's section and one line about it. A name with no section
 #       is one of the drivers below, which time a whole binary against the
@@ -15690,6 +15690,8 @@ bench_about()
                            bench_line="codec kernels, scalar references and the copy traffic proxy" ;;
         cksum-crc) bench_section=BENCH_cksum_crc
                  bench_line="cksum's CRC over 4 KiB and 128 KiB blocks, tier for tier against the C it replaced" ;;
+        cksum-digests) bench_section=BENCH_cksum_digests
+                 bench_line="cksum's SHA-3 and SM3 cores, floor and extension, against the C they replaced" ;;
         unicode-width) bench_section=BENCH_unicode_width
                  bench_line="display widths, variant by variant: term.c's and wc's C against unicode_width" ;;
         link)    bench_section=BENCH_link

@@ -409,6 +409,9 @@ cover('folds_already', 'size', 'hash_crc32c',
       "storage.c hands literal 4, 32 and 256-byte spans, but only while it "
       'formats a partition, once per group or inode; the body already takes '
       'them one crc32 per word after a single dispatch compare')
+cover('nothing_to_fold', None, 'keccak_blocks sm3_blocks',
+      'a pointer to the chaining state and a block run the caller owns; the '
+      'rate is a run-time SHA-3 length and nothing shortens either body')
 cover('folds_already', 'size', 'hash_crc32_msb',
       "cksum's read blocks, build.c's path and the one to eight length bytes "
       'are all counted at run time; no call site hands a literal')
@@ -669,7 +672,7 @@ _start moonwater_cpu_detect program_initial_identity get_cpu_time signal_return_
 working_directory_set program_argument_count program_argument_list program_arguments_own
 program_environment_list log_failed log_failure_reset log_flush sleep buffered_flush
 string_hash_33_length hash_xxh64_finish sha256_compress ghash_blocks ghash_key ghash_integer aes128_ctr_blocks
-md5_blocks sha1_blocks sha256_blocks sha512_blocks blake2b_blocks cpu_hash_detect
+md5_blocks sha1_blocks sha256_blocks sha512_blocks sha512_blocks_avx2 blake2b_blocks cpu_hash_detect
 p256_multiply p256_square p256_add p256_subtract p384_multiply p384_square p384_add p384_subtract memory_get64 zstd_bits_reload zstd_sequences_run
 ''', 'no argument, or an argument that is a pointer into memory the caller '
      'owns; nothing the compiler could know shortens the body')

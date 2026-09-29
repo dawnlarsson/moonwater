@@ -381,100 +381,12 @@ static bipolar checksum_open(string_address path, bool address_to standard)
 /* One file's digest: read into block, a FILE_TRANSFER_SIZE buffer the
    calling thread owns, and hashed where it lies. */
 /*
-        SHA-3 and SM3, which only cksum -a asks for and nothing else in the
-        system hashes with, so they stay here rather than beside the library's
-        cores: Keccak-f[1600] under the SHA-3 padding (rate 200 bytes less
-        twice the digest), and SM3's Merkle-Damgard rounds over SHA-256's
-        padding. Plain C; neither has a floor to hold.
+        SHA-3 and SM3, which only cksum -a asks for: the SHA-3 padding over
+        keccak_blocks (rate 200 bytes less twice the digest), and SM3 over
+        sm3_blocks with SHA-256's padding. The cores are the library's; the
+        padding and the squeeze stay here. A run of whole blocks goes to the
+        core in one call.
 */
-#define checksum_rotl32(x, n) (((x) << (n)) | ((x) >> ((32 - (n)) & 31)))
-#define checksum_rotl64(x, n) (((x) << (n)) | ((x) >> ((64 - (n)) & 63)))
-
-static fn checksum_keccak(p64 address_to a)
-{
-        static const p64 round[24] = {
-            0x0000000000000001ull, 0x0000000000008082ull, 0x800000000000808aull,
-            0x8000000080008000ull, 0x000000000000808bull, 0x0000000080000001ull,
-            0x8000000080008081ull, 0x8000000000008009ull, 0x000000000000008aull,
-            0x0000000000000088ull, 0x0000000080008009ull, 0x000000008000000aull,
-            0x000000008000808bull, 0x800000000000008bull, 0x8000000000008089ull,
-            0x8000000000008003ull, 0x8000000000008002ull, 0x8000000000000080ull,
-            0x000000000000800aull, 0x800000008000000aull, 0x8000000080008081ull,
-            0x8000000000008080ull, 0x0000000080000001ull, 0x8000000080008008ull,
-        };
-        static const p8 rho[25] = {
-            0, 1, 62, 28, 27, 36, 44, 6, 55, 20, 3, 10, 43,
-            25, 39, 41, 45, 15, 21, 8, 18, 2, 61, 56, 14,
-        };
-
-        for (positive r = 0; r < 24; r++)
-        {
-                p64 c[5], b[25];
-
-                for (positive x = 0; x < 5; x++)
-                        c[x] = a[x] ^ a[x + 5] ^ a[x + 10] ^ a[x + 15] ^ a[x + 20];
-                for (positive x = 0; x < 5; x++)
-                {
-                        p64 d = c[(x + 4) % 5] ^ checksum_rotl64(c[(x + 1) % 5], 1);
-
-                        for (positive y = 0; y < 25; y += 5)
-                                a[y + x] ^= d;
-                }
-                // rho and pi: lane (x, y) moves to (y, 2x + 3y).
-                for (positive x = 0; x < 5; x++)
-                        for (positive y = 0; y < 5; y++)
-                                b[y + 5 * ((2 * x + 3 * y) % 5)] =
-                                    checksum_rotl64(a[x + 5 * y], rho[x + 5 * y]);
-                for (positive y = 0; y < 25; y += 5)
-                        for (positive x = 0; x < 5; x++)
-                                a[y + x] = b[y + x] ^
-                                           (~b[y + (x + 1) % 5] & b[y + (x + 2) % 5]);
-                a[0] ^= round[r];
-        }
-}
-
-static fn checksum_sm3_block(p32 address_to v, const p8 address_to data)
-{
-        p32 w[68];
-
-        for (positive j = 0; j < 16; j++)
-                w[j] = (p32)data[4 * j] << 24 | (p32)data[4 * j + 1] << 16 |
-                       (p32)data[4 * j + 2] << 8 | data[4 * j + 3];
-        for (positive j = 16; j < 68; j++)
-        {
-                p32 x = w[j - 16] ^ w[j - 9] ^ checksum_rotl32(w[j - 3], 15);
-
-                w[j] = (x ^ checksum_rotl32(x, 15) ^ checksum_rotl32(x, 23)) ^
-                       checksum_rotl32(w[j - 13], 7) ^ w[j - 6];
-        }
-
-        p32 a = v[0], b = v[1], c = v[2], d = v[3];
-        p32 e = v[4], f = v[5], g = v[6], h = v[7];
-
-        for (positive j = 0; j < 64; j++)
-        {
-                p32 t = j < 16 ? 0x79cc4519u : 0x7a879d8au;
-                p32 a12 = checksum_rotl32(a, 12);
-                p32 ss1 = checksum_rotl32(a12 + e + checksum_rotl32(t, j % 32), 7);
-                p32 ss2 = ss1 ^ a12;
-                p32 ff = j < 16 ? a ^ b ^ c : (a & b) | (a & c) | (b & c);
-                p32 gg = j < 16 ? e ^ f ^ g : (e & f) | (~e & g);
-                p32 tt1 = ff + d + ss2 + (w[j] ^ w[j + 4]);
-                p32 tt2 = gg + h + ss1 + w[j];
-
-                d = c;
-                c = checksum_rotl32(b, 9);
-                b = a;
-                a = tt1;
-                h = g;
-                g = checksum_rotl32(f, 19);
-                f = e;
-                e = tt2 ^ checksum_rotl32(tt2, 9) ^ checksum_rotl32(tt2, 17);
-        }
-
-        v[0] ^= a; v[1] ^= b; v[2] ^= c; v[3] ^= d;
-        v[4] ^= e; v[5] ^= f; v[6] ^= g; v[7] ^= h;
-}
 
 typedef struct
 {
@@ -486,22 +398,20 @@ typedef struct
         bool sm3;
 } checksum_sponge;
 
-static fn checksum_sponge_block(checksum_sponge address_to s, const p8 address_to data)
+static fn checksum_sponge_blocks(checksum_sponge address_to s,
+                                 const p8 address_to data, positive blocks)
 {
-        if (s->sm3)
+        if (!s->sm3)
         {
-                checksum_sm3_block(s->words, data);
+                keccak_blocks(s->lanes, data, blocks, s->rate);
                 return;
         }
-        for (positive lane = 0; lane < s->rate / 8; lane++)
-        {
-                p64 value = 0;
+        sm3_blocks(s->words, data, blocks);
+}
 
-                for (positive at = 0; at < 8; at++)
-                        value |= (p64)data[lane * 8 + at] << (8 * at);
-                s->lanes[lane] ^= value;
-        }
-        checksum_keccak(s->lanes);
+static fn checksum_sponge_block(checksum_sponge address_to s, const p8 address_to data)
+{
+        checksum_sponge_blocks(s, data, 1);
 }
 
 static fn checksum_sponge_open(checksum_sponge address_to s, bool sm3,
@@ -527,9 +437,11 @@ static fn checksum_sponge_write(checksum_sponge address_to s,
         {
                 if (!s->used && length >= s->rate)
                 {
-                        checksum_sponge_block(s, data);
-                        data += s->rate;
-                        length -= s->rate;
+                        positive whole = length / s->rate * s->rate;
+
+                        checksum_sponge_blocks(s, data, whole / s->rate);
+                        data += whole;
+                        length -= whole;
                         continue;
                 }
 
