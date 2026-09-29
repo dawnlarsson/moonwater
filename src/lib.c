@@ -54257,6 +54257,17 @@ __asm__(
         MAP_SHARED page between processes must use lock_take_shared in
         standard.c, which never elides and keys its futex by page.
 
+        Where the machine orders memory loosely, arm64 and riscv64, a taking
+        is an acquire and a release is a release: ldaxr and lr.w.aq on the
+        way in, stlxr and amoswap.w.rl on the way out, and the exchange that
+        marks a waiter is an acquire too, since it can be the one that takes
+        the lock. Without them the lock excluded but ordered nothing -- what
+        one holder wrote could reach the next after its own release -- and
+        eight real threads on an Apple core lost 65 of 320000 increments
+        (CHECK_lock, natively; qemu-user on an x86 host, which is stronger
+        than either machine, never showed it). x86's locked instructions are
+        barriers already.
+
         thread_wait and thread_wake are the bare private futex word. wait
         sleeps only while the word still holds expected and may return early
         for any reason at all, so every caller reads the word again; wake
@@ -54346,7 +54357,7 @@ __asm__(
     ".Llock_take_arm64_shared:\n"
     "mov w1, #1\n"
     ".Llock_take_arm64_claim:\n"
-    "ldxr w2, [x0]\n   cbnz w2, .Llock_take_arm64_lost\n"
+    "ldaxr w2, [x0]\n   cbnz w2, .Llock_take_arm64_lost\n"
     "stxr w3, w1, [x0]\n   cbnz w3, .Llock_take_arm64_claim\n"
     ASM_RET
     ".Llock_take_arm64_lost:\n"
@@ -54354,7 +54365,7 @@ __asm__(
     ".Llock_take_arm64_contended:\n"
     "mov w1, #2\n"
     ".Llock_take_arm64_exchange:\n"
-    "ldxr w2, [x0]\n   stxr w3, w1, [x0]\n"
+    "ldaxr w2, [x0]\n   stxr w3, w1, [x0]\n"
     "cbnz w3, .Llock_take_arm64_exchange\n"
     "cbz w2, .Llock_take_arm64_done\n"
     "mov x4, x0\n   mov x1, #128\n   mov x2, #2\n   mov x3, xzr\n"
@@ -54371,7 +54382,7 @@ __asm__(
     "str wzr, [x0]\n"
     ASM_RET
     ".Llock_release_arm64_shared:\n"
-    "ldxr w2, [x0]\n   stxr w3, wzr, [x0]\n"
+    "ldxr w2, [x0]\n   stlxr w3, wzr, [x0]\n"
     "cbnz w3, .Llock_release_arm64_shared\n"
     "cmp w2, #1\n   b.ne .Llock_release_arm64_wake\n"
     ASM_RET
@@ -54394,7 +54405,7 @@ __asm__(
     ".Llock_try_arm64_shared:\n"
     "mov w1, #1\n"
     ".Llock_try_arm64_claim:\n"
-    "ldxr w2, [x0]\n   cbnz w2, .Llock_try_arm64_lost\n"
+    "ldaxr w2, [x0]\n   cbnz w2, .Llock_try_arm64_lost\n"
     "stxr w3, w1, [x0]\n   cbnz w3, .Llock_try_arm64_claim\n"
     "mov w0, #1\n"
     ASM_RET
@@ -54430,11 +54441,11 @@ __asm__(
     ".Llock_take_riscv64_shared:\n"
     "li t1, 1\n"
     ".Llock_take_riscv64_claim:\n"
-    "lr.w t2, (a0)\n   bnez t2, .Llock_take_riscv64_contended\n"
+    "lr.w.aq t2, (a0)\n   bnez t2, .Llock_take_riscv64_contended\n"
     "sc.w t3, t1, (a0)\n   bnez t3, .Llock_take_riscv64_claim\n"
     ASM_RET
     ".Llock_take_riscv64_contended:\n"
-    "li t1, 2\n   amoswap.w t2, t1, (a0)\n"
+    "li t1, 2\n   amoswap.w.aq t2, t1, (a0)\n"
     "beqz t2, .Llock_take_riscv64_done\n"
     "mv t4, a0\n   li a1, 128\n   li a2, 2\n   li a3, 0\n"
     "li a7, " LINUX_RUNTIME_TEXT(syscall(futex)) "\n   ecall\n"
@@ -54449,7 +54460,7 @@ __asm__(
     "sw zero, 0(a0)\n"
     ASM_RET
     ".Llock_release_riscv64_shared:\n"
-    "amoswap.w t2, zero, (a0)\n   li t1, 1\n"
+    "amoswap.w.rl t2, zero, (a0)\n   li t1, 1\n"
     "bne t2, t1, .Llock_release_riscv64_wake\n"
     ASM_RET
     ".Llock_release_riscv64_wake:\n"
@@ -54470,7 +54481,7 @@ __asm__(
     ".Llock_try_riscv64_shared:\n"
     "li t1, 1\n"
     ".Llock_try_riscv64_claim:\n"
-    "lr.w t2, (a0)\n   bnez t2, .Llock_try_riscv64_busy\n"
+    "lr.w.aq t2, (a0)\n   bnez t2, .Llock_try_riscv64_busy\n"
     "sc.w t3, t1, (a0)\n   bnez t3, .Llock_try_riscv64_claim\n"
     "li a0, 1\n"
     ASM_RET
