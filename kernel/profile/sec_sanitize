@@ -1,0 +1,46 @@
+#
+# Sanitizers for hunting ring-0 bugs in a KVM guest, never for shipping:
+# KASAN (generic, inline, with stack and vmalloc), UBSAN bounds and shift,
+# lockdep, atomic-sleep, preempt and list checks, the hung-task and
+# soft-lockup detectors, magic sysrq on, and the failslab and fail_page_alloc
+# fault injectors, which /sys/kernel/debug/failslab and fail_page_alloc arm
+# per task through /proc/PID/make-it-fail. Name it last, after the default
+# line:
+#
+#   sh build.sh arch/x64 debug_none limbo desktop wifi sec_default serial sec_sanitize
+#
+# The image is about 33 MB and boots several times slower than a plain one.
+# KASAN and KCSAN exclude each other; sec_kcsan is the same list with KCSAN.
+#
+CONFIG_KASAN=y
+CONFIG_KASAN_GENERIC=y
+CONFIG_KASAN_INLINE=y
+CONFIG_KASAN_VMALLOC=y
+CONFIG_KASAN_STACK=y
+CONFIG_UBSAN=y
+CONFIG_UBSAN_BOUNDS=y
+CONFIG_UBSAN_SHIFT=y
+CONFIG_DEBUG_ATOMIC_SLEEP=y
+CONFIG_PROVE_LOCKING=y
+CONFIG_DEBUG_LOCK_ALLOC=y
+CONFIG_DEBUG_SPINLOCK=y
+CONFIG_DEBUG_MUTEXES=y
+CONFIG_DEBUG_RT_MUTEXES=y
+CONFIG_DEBUG_LIST=y
+CONFIG_STACKTRACE=y
+CONFIG_SLUB_DEBUG=y
+CONFIG_PRINTK_TIME=y
+CONFIG_CONSOLE_LOGLEVEL_DEFAULT=7
+CONFIG_MAGIC_SYSRQ=y
+CONFIG_MAGIC_SYSRQ_DEFAULT_ENABLE=0x1
+CONFIG_DETECT_HUNG_TASK=y
+CONFIG_DEFAULT_HUNG_TASK_TIMEOUT=20
+CONFIG_SOFTLOCKUP_DETECTOR=y
+CONFIG_WQ_WATCHDOG=y
+CONFIG_DEBUG_PREEMPT=y
+CONFIG_DEBUG_FS=y
+CONFIG_FAULT_INJECTION=y
+CONFIG_FAULT_INJECTION_DEBUG_FS=y
+CONFIG_FAILSLAB=y
+CONFIG_FAIL_PAGE_ALLOC=y
+CONFIG_PANIC_ON_OOPS=n

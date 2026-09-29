@@ -86,8 +86,10 @@ export TEST_TALLY
 
 #       Lanes run only when named, because they need something a plain run
 #       does not have: wifi wants an image built with kernel/profile/hwsim,
-#       fuzz an hour a target, msan a clang with MemorySanitizer.
-asked_lanes="wifi fuzz msan"
+#       fuzz an hour a target, msan a clang with MemorySanitizer, ring0 an
+#       image and a machine that boots it, best one built with
+#       kernel/profile/sec_sanitize.
+asked_lanes="wifi fuzz msan ring0"
 
 lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex slurp wait writer native probe stack checksum storage_io storage_format machine sensors cli differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas"
 
@@ -167,6 +169,7 @@ describe()
         wifi)     echo "networks in the air of a machine with simulated radios, joined and listed" ;;
         fuzz)     echo "every network libFuzzer target for an hour each, or a release report" ;;
         msan)     echo "the net wire parsers under MemorySanitizer" ;;
+        ring0)    echo "a hostile program's windows, ioctls, images and log lines against a booted kernel, and what its sanitizers say" ;;
         esac
 }
 
@@ -12124,6 +12127,173 @@ counted
 )
 
 #
+#       Ring 0, against a program that means it harm.
+#
+#           MOONWATER_IMAGE=dist/bootx64.efi sh test/run ring0
+#
+#       Every path into the kernel module that a local user has is /dev/spark,
+#       which is mode 0666, and the shared page of a window, which the
+#       program that made it writes as it pleases while the compositor reads
+#       it. ring0_hostile (test/checks.c, CHECK_ring0_hostile, static) is that
+#       program: it makes windows and writes every field and cell of them from
+#       many threads, sends every request number with shaped and random
+#       arguments, executes spark images with hostile headers, and, as root,
+#       turns the compositor off and on under live windows and writes escape
+#       sequences into the kernel log the terminal reads. The machine boots
+#       with it on a stick and runs each mode for MOONWATER_RING0_SECONDS
+#       (20), one after the other; the lane passes when every mode ended and
+#       the kernel said nothing about it.
+#
+#       What the kernel can say depends on how it was built, and the lane
+#       cannot tell you which you had. On a plain image it catches a panic, a
+#       BUG, an oops and a warning; on one built with kernel/profile/sec_sanitize
+#
+#           sh build.sh arch/x64 debug_none limbo desktop wifi sec_default serial sec_sanitize
+#
+#       it catches what KASAN, UBSAN, lockdep, the atomic-sleep check and the
+#       hung-task detector see, which is the point (and 30 times slower).
+#       With kernel/profile/sec_kcsan instead, a data race reported in the
+#       module's own functions fails it; races in the rest of the kernel,
+#       which there are, are not this lane's to judge.
+#
+#       MOONWATER_RING0_FAIL=N, on an image with either profile, makes N
+#       percent of the allocations the program's tasks cause in the kernel
+#       fail (failslab and fail_page_alloc, per task), which runs the error
+#       paths nothing else does. The program then may take a SIGBUS in its own
+#       window the kernel could not back, or be aborted by glibc when a
+#       munmap is refused, and is not held to ending clean; the machine is.
+#       MOONWATER_GUEST_SEED and MOONWATER_RING0_TRANSCRIPT are as for wifi.
+#
+lane_ring0()
+(
+image=${MOONWATER_IMAGE:-dist/bootx64.efi}
+seconds=${MOONWATER_RING0_SECONDS:-20}
+seed=${MOONWATER_GUEST_SEED:-1}
+injecting=${MOONWATER_RING0_FAIL:-}
+
+for need in qemu-system-x86_64 timeout cc; do
+        if ! command -v "$need" > /dev/null 2>&1; then
+                echo "  ring0        NOT RUN -- no $need"
+                exit 2
+        fi
+done
+if [ ! -f "$image" ]; then
+        echo "  ring0        NOT RUN -- no image at $image"
+        exit 2
+fi
+case $seconds$seed$injecting in
+*[!0-9]*) echo "  ring0        NOT RUN -- the seconds, seed and failure rate are counts"; exit 2 ;;
+esac
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT INT TERM
+counting ring0 8 32
+
+mkdir -p "$work/stick"
+if ! cc -static -O2 -pthread -DCHECK_ring0_hostile -o "$work/stick/ring0_hostile" test/checks.c \
+        > "$work/cc.log" 2>&1; then
+        lost 'ring0_hostile' "$(tail -3 "$work/cc.log" | tr '\n' ' ')"
+        counted
+        exit 1
+fi
+
+#       The script rides the stick, so nothing in it is echoed back by the
+#       console as if the machine had said it.
+{
+        echo 'cp /mnt/stick/ring0_hostile /tmp/ring0_hostile'
+        echo 'chmod 755 /tmp/ring0_hostile'
+        echo 'echo ring0-start'
+        if [ -n "$injecting" ] && [ "$injecting" != 0 ]; then
+                echo 'mount -t debugfs none /sys/kernel/debug'
+                echo 'for f in failslab fail_page_alloc; do'
+                echo '  echo N > /sys/kernel/debug/$f/ignore-gfp-wait'
+                echo '  echo Y > /sys/kernel/debug/$f/task-filter'
+                echo '  echo 0 > /sys/kernel/debug/$f/verbose'
+                echo '  echo 1 > /sys/kernel/debug/$f/interval'
+                echo '  echo -1 > /sys/kernel/debug/$f/times'
+                echo 'done'
+                echo "echo $injecting > /sys/kernel/debug/failslab/probability"
+                echo "export FAILPCT=$injecting"
+                echo 'echo ring0-injecting'
+        fi
+        for mode in "win 65534" "ioctl 65534" "exec 65534" "admin 0" "kmsg 0"; do
+                set -- $mode
+                echo "/tmp/ring0_hostile $1 $seed $seconds $2 > /tmp/ring0.$1 2>&1 < /dev/null"
+                echo "echo ring0-ended $1 \$?"
+        done
+        echo 'cat /tmp/ring0.win /tmp/ring0.ioctl /tmp/ring0.exec /tmp/ring0.admin /tmp/ring0.kmsg'
+        echo 'dmesg'
+        echo 'echo ring0-finished'
+        # the console is slow behind the log flood; poweroff must not cut it
+        echo 'sleep 5'
+} > "$work/stick/ring0.sh"
+{
+        echo "the console eats the front of the first line"
+        echo 'for i in $(seq 80); do [ -b /dev/sda1 ] && break; sleep 0.25; done'
+        echo 'mkdir -p /mnt/stick && mount -r -t vfat /dev/sda1 /mnt/stick'
+        echo 'sh /mnt/stick/ring0.sh'
+        echo 'poweroff'
+} > "$work/commands"
+
+set -- -cpu Nehalem
+[ -w /dev/kvm ] && set -- -enable-kvm -cpu host
+timeout $((seconds * 30 + 900)) qemu-system-x86_64 -m 3G -smp 4 "$@" -kernel "$image" \
+        -no-reboot -display none -device VGA,xres=1600,yres=1200 -serial stdio -nic none \
+        -device qemu-xhci \
+        -drive "if=none,id=stick,format=raw,file=fat:ro:$work/stick,readonly=on" \
+        -device usb-storage,drive=stick,removable=on \
+        -append "console=ttyS0 drm_client_lib.active= mac80211_hwsim.radios=0 panic=-1" \
+        < "$work/commands" > "$work/transcript" 2>&1 || true
+[ -n "${MOONWATER_RING0_TRANSCRIPT:-}" ] && cp "$work/transcript" "$MOONWATER_RING0_TRANSCRIPT"
+
+#       Colour codes and carriage returns out, so a line is what was said.
+tr -d '\r' < "$work/transcript" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g' > "$work/said"
+mv "$work/said" "$work/transcript"
+
+says transcript 'the program started' 'ring0-start'
+#       Under injected failures the program may not get to its end and say
+#       so: glibc aborts when the kernel refuses a munmap, and a thread that
+#       could not be made is not joined. That it was over, and the machine
+#       with it, is what is asked then.
+for mode in win ioctl exec admin kmsg; do
+        if [ -n "$injecting" ] && [ "$injecting" != 0 ]; then
+                says transcript "$mode ended" "ring0-ended $mode "
+        else
+                says transcript "$mode ran to its end" "FUZZ-DONE $mode "
+        fi
+done
+says transcript 'the machine came back' 'ring0-finished'
+[ -n "$injecting" ] && [ "$injecting" != 0 ] && says transcript 'allocations were failing' 'ring0-injecting'
+
+#       Said by the kernel, by the sanitizers it may have been built with,
+#       and by the program about itself. A program that dies of its own
+#       fault outside an operation says FATAL-MAIN; under injected failures a
+#       page the kernel could not back is a SIGBUS it may take, and the
+#       warnings the display drivers give for a failed allocation of their own
+#       are theirs, so those two are not held then.
+for said in 'BUG: KASAN' 'UBSAN:' 'kernel BUG at' 'Oops:' 'general protection fault' \
+            'blocked for more than' 'Kernel panic' 'SNAPSHOT-BAD' 'sleeping function called'; do
+        never transcript "the kernel said nothing: $said" "$said"
+done
+if [ -z "$injecting" ] || [ "$injecting" = 0 ]; then
+        for said in 'cut here' 'WARNING: possible' 'WARNING: suspicious' \
+                    'held when returning to user space' 'FATAL-MAIN'; do
+                never transcript "the kernel said nothing: $said" "$said"
+        done
+fi
+#       A race the detector reports between two accesses of the module's own
+#       is a bug in it; the rest of the kernel has plenty and is not judged.
+if grep -a -E 'BUG: KCSAN: .*(canvas_|pane_|spark_|moonwater_|floodlight_|compose_|desktop_|device_ioctl|do_spawn|execute_spark|report_snapshot|report_machine|report_bind|settings_get|settings_set)' \
+        "$work/transcript" > "$work/races"; then
+        lost 'no data race in the module' "$(head -3 "$work/races" | tr '\n' ' ')"
+else
+        won
+fi
+
+counted
+)
+
+#
 #       The whole thing, started.
 #
 #           sh test/run boot          (MOONWATER_IMAGE names the image)
@@ -17303,7 +17473,7 @@ case $jobs in
 '' | *[!0-9]* | 0) echo "run: -j wants a count" >&2; exit 2 ;;
 esac
 
-alone_lanes="text files misc util_linux shell builtins awk term edit differential_oracle boot install canvas wifi"
+alone_lanes="text files misc util_linux shell builtins awk term edit differential_oracle boot install canvas wifi ring0"
 
 if [ "$#" -gt 0 ]; then
         requested=$*

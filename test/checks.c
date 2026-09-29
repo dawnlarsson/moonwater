@@ -106268,6 +106268,891 @@ int main(int count, char **words)
 }
 #endif /* CHECK_hwsim_radio */
 
+#ifdef CHECK_ring0_hostile
+/*
+        A hostile program for /dev/spark and everything behind it, built to run
+        in a guest whose kernel is the one under test: the lane that boots it
+        is `sh test/run ring0` (asked for by name; MOONWATER_IMAGE names the
+        image). Ring 0 is one translation unit that anything on the machine
+        may open -- the device is mode 0666 -- so this is what such a program
+        does with it, from as many threads as it can start:
+
+            ring0_hostile MODE SEED SECONDS [UID [OPMASK [THREADS]]]
+
+            win    windows: create, map, write every field and cell of the
+                   shared page from many threads while the compositor reads
+                   it, commit, restride, poll, epoll, fork with the child still
+                   writing, madvise the page away, close
+            ioctl  every request number with shaped and random arguments, and
+                   well formed snapshots into real buffers from many threads
+            exec   spark images with hostile headers, by execve
+            admin  win, with canvas off and on and the machine, script and
+                   bind requests made as root while the windows are live
+            kmsg   root writes escape sequences into the kernel log, which
+                   the terminal reads as attacker input, and processes named
+                   with them segfault
+
+        Everything after the setup runs as UID (default 65534, nobody) except
+        admin and kmsg, which need root. A fault the program takes in its own
+        window is caught and the operation abandoned, since a program that
+        writes its own page hostilely may fault itself; one taken outside any
+        operation says FATAL and ends the run. The run ends, after SECONDS,
+        with one FUZZ-DONE line, and a kernel that is a sanitizer build says
+        the rest: KASAN, UBSAN, lockdep, sleeping in atomic context, hung
+        tasks. FAILPCT in the environment makes every allocation the
+        program's tasks cause in the kernel fail, after the caller has set
+        the probability of /sys/kernel/debug/failslab and fail_page_alloc,
+        so the error paths of everything it reaches run as well.
+*/
+#define _GNU_SOURCE
+#include <errno.h>
+#include <fcntl.h>
+#include <grp.h>
+#include <pthread.h>
+#include <poll.h>
+#include <sched.h>
+#include <setjmp.h>
+#include <signal.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/epoll.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <sys/prctl.h>
+#include <sys/resource.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <ucontext.h>
+#include <unistd.h>
+
+/* The module's own headers, so a struct that changes changes this program:
+   spark.c's settings code wants the CRC the kernel and the shell supply. */
+static unsigned int hash_crc32(unsigned int crc, void *bytes, unsigned long length)
+{
+        (void)bytes;
+        (void)length;
+        return crc;
+}
+#include "../src/canvas/window.c"
+#include "../src/moonwater/spark.c"
+#include "../src/moonwater/moonwater.c"
+
+static unsigned long long rng_state = 88172645463325252ull;
+static __thread unsigned long long rs;
+static unsigned long long rnd(void)
+{
+        unsigned long long x = rs ? rs : (rs = rng_state ^ (unsigned long long)(uintptr_t)&rs);
+        x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+        return rs = x;
+}
+static unsigned below(unsigned n) { return n ? (unsigned)(rnd() % n) : 0; }
+
+static volatile int stop_now;
+static time_t deadline;
+static int time_up(void) { return stop_now || time(NULL) >= deadline; }
+
+static const unsigned dict[] = {
+        0, 0, 0, 1, 1, 2, 3, 4, 7, 8, 15, 16, 31, 32, 63, 64, 95, 96, 100, 127, 128, 255, 256,
+        511, 512, 1000, 1024, 2047, 2048, 4095, 4096, 4097, 65535, 65536, 0x7fff, 0x8000,
+        0xffffff, 0x1000000, 0x1000001, 0x7fffffff, 0x80000000u, 0x80000001u, 0xfffffffeu,
+        0xffffffffu, 0xfffff000u, 3840, 2160, 1920, 1080, 480, 135, 270, 8192, 16384,
+};
+static unsigned dictv(void) { return dict[below(sizeof(dict) / sizeof(dict[0]))]; }
+static unsigned value(void)
+{
+        switch (below(6)) {
+        case 0: case 1: case 2: return dictv();
+        case 3: return dictv() + (below(3) - 1);
+        case 4: return (unsigned)rnd();
+        default: return below(300);
+        }
+}
+
+// ---- crash containment: a hostile program can fault itself ----
+static __thread sigjmp_buf *guard;
+static pid_t main_pid;
+static void hexout(const char *label, unsigned long v)
+{
+        char b[64];
+        int n = 0, i;
+
+        while (*label) b[n++] = *label++;
+        for (i = 60; i >= 0; i -= 4) b[n++] = "0123456789abcdef"[(v >> i) & 15];
+        b[n++] = '\n';
+        if (write(2, b, (size_t)n) < 0) return;
+}
+static void on_fault(int sig, siginfo_t *si, void *uc)
+{
+        if (guard)
+                siglongjmp(*guard, 1);
+        // outside any guarded operation: the fuzzer itself, or the kernel
+        // refusing a page it should have given, ends the run; say which
+        hexout(getpid() == main_pid ? "FATAL-MAIN-SIG " : "FATAL-CHILD-SIG ", (unsigned long)sig);
+        hexout("FATAL-RIP ", (unsigned long)((ucontext_t *)uc)->uc_mcontext.gregs[REG_RIP]);
+        hexout("FATAL-ADDR ", (unsigned long)si->si_addr);
+        hexout("FATAL-CODE ", (unsigned long)si->si_code);
+        _exit(90);
+}
+
+// ---- windows ----
+#define MAXW 24
+struct win {
+        int fd;
+        unsigned char *map;
+        size_t bytes;
+        unsigned lines, history, stride, max_columns, max_rows;
+        int text;
+};
+static struct win W[MAXW];
+static pthread_mutex_t wlock = PTHREAD_MUTEX_INITIALIZER;
+static unsigned long ops_done, ioctl_ok, ioctl_fail, creates, scribbles;
+static unsigned long opmask = ~0ul;   // which of win_op's operations may run
+
+static int spark_open(void)
+{
+        return open("/dev/spark", O_RDWR | O_CLOEXEC);
+}
+
+static void win_make(int slot)
+{
+        struct win *w = &W[slot];
+        struct window_request rq = {0};
+        int fd = spark_open();
+        long bytes;
+        void *map;
+
+        if (fd < 0)
+                return;
+        switch (below(4)) {
+        case 0: rq.width = 64 + below(800); rq.height = 48 + below(600); break;
+        case 1: rq.columns = 1 + below(200); rq.rows = 1 + below(60); break;
+        case 2: rq.columns = value(); rq.rows = value(); break;
+        default: rq.width = value(); rq.height = value(); rq.columns = below(2) ? value() : 0; rq.rows = value(); break;
+        }
+        bytes = ioctl(fd, WINDOW_IOCTL_CREATE, &rq);
+        if (bytes <= 0) {
+                close(fd);
+                return;
+        }
+        creates++;
+        map = mmap(NULL, (size_t)bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        if (map == MAP_FAILED) {
+                close(fd);
+                return;
+        }
+        struct window *sh = map;
+        w->fd = fd;
+        w->map = map;
+        w->bytes = (size_t)bytes;
+        w->text = rq.columns != 0;
+        w->lines = sh->lines;
+        w->history = sh->history;
+        w->stride = sh->stride;
+        w->max_columns = sh->max_columns;
+        w->max_rows = sh->max_rows;
+        // a plausible program: a title, a size, a position
+        snprintf(sh->title, sizeof(sh->title), "fuzz %d", slot);
+        sh->x = 40 + below(400);
+        sh->y = 40 + below(300);
+        sh->sequence++;
+}
+
+static void win_drop(int slot)
+{
+        struct win *w = &W[slot];
+        if (w->map)
+                munmap(w->map, w->bytes);
+        if (w->fd > 0)
+                close(w->fd);
+        memset(w, 0, sizeof(*w));
+}
+
+static const size_t header_fields[] = {
+        offsetof(struct window, x), offsetof(struct window, y), offsetof(struct window, z),
+        offsetof(struct window, width), offsetof(struct window, height),
+        offsetof(struct window, region), offsetof(struct window, display),
+        offsetof(struct window, style), offsetof(struct window, edge),
+        offsetof(struct window, sequence), offsetof(struct window, stride),
+        offsetof(struct window, history), offsetof(struct window, head),
+        offsetof(struct window, lines), offsetof(struct window, key_head),
+        offsetof(struct window, key_tail), offsetof(struct window, columns),
+        offsetof(struct window, rows), offsetof(struct window, damage_row),
+        offsetof(struct window, damage_rows), offsetof(struct window, grid_columns),
+        offsetof(struct window, grid_rows), offsetof(struct window, want),
+        offsetof(struct window, pitch), offsetof(struct window, max_width),
+        offsetof(struct window, max_height), offsetof(struct window, state),
+        offsetof(struct window, mapping), offsetof(struct window, max_columns),
+        offsetof(struct window, max_rows), offsetof(struct window, awake),
+        offsetof(struct window, display_width), offsetof(struct window, display_height),
+};
+
+static void scribble(struct win *w)
+{
+        size_t off;
+        unsigned v = value();
+        volatile unsigned char *b;
+
+        if (!w->map)
+                return;
+        switch (below(9)) {
+        case 0: case 1: case 2:
+                off = header_fields[below(sizeof(header_fields) / sizeof(header_fields[0]))];
+                break;
+        case 3:
+                off = offsetof(struct window, title) + below(WINDOW_TITLE_MAX);
+                break;
+        case 4:
+                off = offsetof(struct window, keys) + below(sizeof(((struct window *)0)->keys));
+                break;
+        case 5:
+                if (w->lines && w->history) {
+                        off = w->lines + 4 * (size_t)below(w->history + 2);
+                        break;
+                }
+                off = WINDOW_PIXELS;
+                // fall through
+        case 6:
+                off = WINDOW_PIXELS + 8 * (size_t)below(2000);
+                break;
+        case 7:
+                // cells at the ends of lines: the places wide characters and
+                // stride arithmetic go wrong
+                if (w->history && w->stride) {
+                        size_t line = below(w->history);
+                        size_t col = (below(2) ? w->stride - 1 - below(3) : below(w->stride));
+                        off = WINDOW_PIXELS + (line * w->stride + col) * 8 + 4 * below(2);
+                        break;
+                }
+                // fall through
+        default:
+                off = below((unsigned)w->bytes);
+                break;
+        }
+        off &= ~3ul;
+        if (off + 4 > w->bytes)
+                return;
+        b = w->map + off;
+        if (below(4) == 0 && off + 8 <= w->bytes) {
+                *(volatile unsigned long long *)b = ((unsigned long long)value() << 32) | v;
+        } else if (below(8) == 0) {
+                *b = (unsigned char)v;
+        } else {
+                *(volatile unsigned *)b = v;
+        }
+        scribbles++;
+}
+
+static void fill_cells(struct win *w)
+{
+        // A program that draws text: lengths and cells for the newest lines,
+        // then head moves on and the sequence is bumped.
+        struct window *sh = (struct window *)w->map;
+        if (!w->history || !w->stride || !w->lines)
+                return;
+        unsigned count = 1 + below(40);
+        for (unsigned i = 0; i < count; i++) {
+                unsigned head = sh->head;
+                unsigned slot = head % w->history;
+                unsigned len = below(3) ? below(w->stride + 1) : value();
+                struct window_cell *cells = (struct window_cell *)(w->map + WINDOW_PIXELS) + (size_t)slot * w->stride;
+                unsigned n = len < w->stride ? len : w->stride;
+                for (unsigned c = 0; c < n; c++) {
+                        cells[c].character = below(6) ? 32 + below(95) : (below(2) ? value() : 0x3000 + below(0x100));
+                        cells[c].ink = (unsigned char)value();
+                        cells[c].paper = (unsigned char)value();
+                        cells[c].flags = (unsigned short)(below(4) ? below(128) : value());
+                }
+                ((unsigned *)(w->map + w->lines))[slot] = len;
+                __atomic_store_n(&sh->head, head + 1, __ATOMIC_RELEASE);
+        }
+        sh->damage_row = below(w->max_rows + 2);
+        sh->damage_rows = below(w->max_rows + 2);
+        sh->want = below(2);
+        __atomic_store_n(&sh->sequence, sh->sequence + 1, __ATOMIC_RELEASE);
+}
+
+static void fill_pixels(struct win *w)
+{
+        struct window *sh = (struct window *)w->map;
+        unsigned *p = (unsigned *)(w->map + WINDOW_PIXELS);
+        size_t n = (w->bytes - WINDOW_PIXELS) / 4;
+        for (unsigned i = 0; i < 2000 && n; i++)
+                p[below((unsigned)n)] = (unsigned)rnd();
+        __atomic_store_n(&sh->sequence, sh->sequence + 1, __ATOMIC_RELEASE);
+}
+
+static void geometry(struct win *w)
+{
+        struct window *sh = (struct window *)w->map;
+        if (below(3)) {
+                sh->width = below(3) ? 96 + below(1500) : value();
+                sh->height = below(3) ? 48 + below(900) : value();
+        }
+        if (below(3)) {
+                sh->x = below(2) ? (int)below(1600) - 300 : (int)value();
+                sh->y = below(2) ? (int)below(1200) - 300 : (int)value();
+        }
+        if (below(4) == 0) sh->z = (int)value();
+        if (below(4) == 0) sh->region = below(3);
+        if (below(4) == 0) sh->style = below(20);
+        if (below(4) == 0) sh->edge = value();
+        if (below(4) == 0) sh->display = below(3);
+        if (below(6) == 0) {
+                size_t i;
+                for (i = 0; i < sizeof(sh->title); i++)
+                        sh->title[i] = (char)(below(3) ? 32 + below(95) : below(256));
+                if (below(2)) sh->title[sizeof(sh->title) - 1] = 0;
+        }
+        if (w->text && below(2)) {
+                sh->grid_columns = below(3) ? sh->columns : value();
+                sh->grid_rows = below(3) ? sh->rows : value();
+        }
+        __atomic_store_n(&sh->sequence, sh->sequence + 1, __ATOMIC_RELEASE);
+}
+
+static void win_op(void)
+{
+        int slot = below(MAXW);
+        struct win *w = &W[slot];
+        sigjmp_buf jb;
+
+        pthread_mutex_lock(&wlock);
+        if (!w->map) {
+                // the first touch of the page can be refused (SIGBUS) when the
+                // kernel is made to fail an allocation
+                guard = &jb;
+                if (sigsetjmp(jb, 1)) {
+                        guard = NULL;
+                        pthread_mutex_unlock(&wlock);
+                        return;
+                }
+                win_make(slot);
+                guard = NULL;
+                pthread_mutex_unlock(&wlock);
+                return;
+        }
+        // Others use this window unlocked; only the one that drops it holds
+        // the lock for the whole life of the mapping.
+        pthread_mutex_unlock(&wlock);
+
+        guard = &jb;
+        if (sigsetjmp(jb, 1)) {
+                guard = NULL;
+                return;
+        }
+        unsigned op = below(24);
+        if (!(opmask >> op & 1)) { guard = NULL; sched_yield(); return; }
+        switch (op) {
+        case 0: case 1: case 2: case 3: case 4: case 5: case 6:
+                for (int i = 0; i < 1 + (int)below(30); i++) scribble(w);
+                break;
+        case 7: case 8: geometry(w); break;
+        case 9: case 10: if (w->text) fill_cells(w); else fill_pixels(w); break;
+        case 11: case 12:
+                if (ioctl(w->fd, WINDOW_IOCTL_COMMIT) >= 0) ioctl_ok++; else ioctl_fail++;
+                break;
+        case 13:
+                if (ioctl(w->fd, WINDOW_IOCTL_STRIDE, (unsigned long)value()) >= 0) ioctl_ok++; else ioctl_fail++;
+                break;
+        case 14: { struct pollfd p = {w->fd, POLLIN, 0}; poll(&p, 1, 0); break; }
+        case 15: {
+                // more mappings of the same window: sizes, private, offsets
+                size_t len = below(2) ? w->bytes : (size_t)value() * 4096 % (w->bytes + 4096);
+                int flags = below(4) ? MAP_SHARED : MAP_PRIVATE;
+                off_t off = below(8) ? 0 : (off_t)below(3) * 4096;
+                void *m = mmap(NULL, len ? len : 4096, PROT_READ | (below(3) ? PROT_WRITE : 0), flags, w->fd, off);
+                if (m != MAP_FAILED) {
+                        if (below(2)) *(volatile unsigned *)m = 1;
+                        if (below(4) == 0) madvise(m, len ? len : 4096, MADV_DONTNEED);
+                        if (below(6) == 0) (void)mremap(m, len ? len : 4096, 2 * (len ? len : 4096), MREMAP_MAYMOVE);
+                        munmap(m, len ? len : 4096);
+                }
+                break;
+        }
+        case 16: {
+                struct window_request rq = {value(), value(), value(), value()};
+                if (ioctl(w->fd, WINDOW_IOCTL_CREATE, &rq) >= 0) ioctl_ok++; else ioctl_fail++;
+                break;
+        }
+        case 17: {
+                // a fork whose child keeps scribbling on the shared window
+                pid_t p = fork();
+                if (p == 0) {
+                        // the fork copies this thread's guard, which points at the
+                        // parent's jump buffer: a fault must end the child, not
+                        // return it into the fuzzer with wlock held by a thread
+                        // that does not exist here
+                        guard = NULL;
+                        for (int i = 0; i < 200; i++) scribble(w);
+                        _exit(0);
+                }
+                if (p > 0) waitpid(p, NULL, 0);
+                break;
+        }
+        case 18: madvise(w->map + 4096 * below((unsigned)(w->bytes / 4096)), 4096, below(2) ? MADV_DONTNEED : MADV_REMOVE); break;
+        case 19: // touch pages in random order (first-touch faults of the lazy ring)
+                for (int i = 0; i < 40; i++) {
+                        size_t page = below((unsigned)(w->bytes / 4096));
+                        (void)*(volatile unsigned char *)(w->map + page * 4096 + below(4096));
+                }
+                break;
+        case 20: geometry(w); if (w->text) fill_cells(w); break;
+        case 21: {
+                // close it, but only if nobody is in the middle of it
+                pthread_mutex_lock(&wlock);
+                guard = NULL;
+                if (W[slot].map == w->map)
+                        win_drop(slot);
+                pthread_mutex_unlock(&wlock);
+                return;
+        }
+        case 22: {
+                // epoll on the window's file, then the file goes while epoll lives
+                int e = epoll_create1(EPOLL_CLOEXEC);
+                struct epoll_event ev = {.events = EPOLLIN | EPOLLET, .data.u32 = 7}, out[2];
+                if (e >= 0) {
+                        int d = below(2) ? dup(w->fd) : -1;
+                        epoll_ctl(e, EPOLL_CTL_ADD, w->fd, &ev);
+                        epoll_wait(e, out, 2, 0);
+                        if (d >= 0) close(d);
+                        if (below(2)) epoll_wait(e, out, 2, 1);
+                        close(e);
+                }
+                break;
+        }
+        default: sched_yield(); break;
+        }
+        guard = NULL;
+        ops_done++;
+}
+
+static void *win_thread(void *arg)
+{
+        (void)arg;
+        rs = 0;
+        while (!time_up())
+                win_op();
+        return NULL;
+}
+
+// ---- ioctl fuzz ----
+static const unsigned cmds[] = {
+        SPARK_IOCTL_SPAWN, SPARK_IOCTL_STATS, SPARK_IOCTL_INPUT_STATS,
+        SPARK_IOCTL_CURSOR_STATS, SPARK_IOCTL_INPUT_DEVICES, SPARK_IOCTL_SNAPSHOT,
+        SPARK_IOCTL_CANVAS, SPARK_IOCTL_BIND, SPARK_IOCTL_SETTINGS_GET,
+        SPARK_IOCTL_SETTINGS_SET, MOONWATER_IOCTL_MACHINE, MOONWATER_IOCTL_SCRIPT,
+        WINDOW_IOCTL_CREATE, WINDOW_IOCTL_COMMIT, WINDOW_IOCTL_STRIDE,
+};
+
+static void shaped(unsigned char *b, size_t n)
+{
+        size_t i;
+        for (i = 0; i + 4 <= n; i += 4) {
+                unsigned v = below(3) ? 0 : value();
+                memcpy(b + i, &v, 4);
+        }
+        // pointer-looking words
+        for (i = 0; i + 8 <= n; i += 8) {
+                if (below(5) == 0) {
+                        unsigned long long p = below(3) == 0 ? 0 : below(2) ? (unsigned long long)(uintptr_t)b : 0xffff888000000000ull + below(4096);
+                        memcpy(b + i, &p, 8);
+                }
+        }
+}
+
+static void ioctl_op(int fd, unsigned char *buf, size_t bufn, unsigned char *aux, size_t auxn)
+{
+        if (below(5) == 0) {
+                // a well formed snapshot into a real buffer, from many threads
+                static const unsigned caps[] = {112, 4096, 5000, 65536, 1u << 20};
+                static __thread unsigned char big[1u << 20];
+                struct snapshot_request q = {.buffer = (unsigned long)big, .capacity = caps[below(5)],
+                                             .flags = below(8), .version = SPARK_SNAPSHOT_VERSION};
+                long got = ioctl(fd, SPARK_IOCTL_SNAPSHOT, &q);
+                if (got == 0 || (got < 0 && errno == ENOSPC)) {
+                        struct snapshot_header *h = (void *)big;
+                        if (q.used >= sizeof(*h) && (h->bytes != q.used || h->version != SPARK_SNAPSHOT_VERSION)) {
+                                fprintf(stderr, "SNAPSHOT-BAD used=%u bytes=%u version=%u\n", q.used, h->bytes, h->version);
+                                stop_now = 1;
+                        }
+                        ioctl_ok++;
+                } else
+                        ioctl_fail++;
+                ops_done++;
+                return;
+        }
+        unsigned cmd = below(10) ? cmds[below(sizeof(cmds) / sizeof(cmds[0]))]
+                                 : (below(2) ? (0x7300u | below(32)) | (below(4) << 30) | (below(0x400) << 16) : (unsigned)rnd());
+        unsigned long arg;
+        long r;
+        switch (below(8)) {
+        case 0: arg = 0; break;
+        case 1: arg = 0xffff888000000000ul + below(65536); break;
+        case 2: arg = (unsigned long)value(); break;
+        default: shaped(buf, bufn); arg = (unsigned long)buf; break;
+        }
+        // Point inner user pointers at a second shaped buffer half the time.
+        if (arg == (unsigned long)buf && below(2)) {
+                shaped(aux, auxn);
+                unsigned long inner = (unsigned long)aux;
+                memcpy(buf, &inner, 8);
+                if (below(2)) { unsigned x = value(); memcpy(buf + 8, &x, 4); }
+        }
+        // spawn: a sane-ish request some of the time
+        if (cmd == SPARK_IOCTL_SPAWN && arg == (unsigned long)buf && below(2)) {
+                static const char path[] = "/bin/true";
+                static char argv[] = "true\0-x\0";
+                static char envp[] = "A=1\0B=2\0";
+                struct spawn s = {
+                        .path = (unsigned long)path,
+                        .argv = (unsigned long)argv,
+                        .argv_bytes = below(3) ? sizeof(argv) : value(),
+                        .argv_count = below(3) ? 2 : value(),
+                        .envp = (unsigned long)envp,
+                        .envp_bytes = below(3) ? sizeof(envp) : value(),
+                        .envp_count = below(3) ? 2 : value(),
+                        .envp_generation = below(4),
+                        .flags = value() & 0xff,
+                        .stdio = {-1, -1, -1},
+                };
+                memcpy(buf, &s, sizeof(s));
+        }
+        r = ioctl(fd, cmd, arg);
+        if (r >= 0) {
+                ioctl_ok++;
+                (void)r;
+        } else
+                ioctl_fail++;
+        ops_done++;
+}
+
+static void *ioctl_thread(void *arg)
+{
+        int fd = spark_open();
+        unsigned char *buf = calloc(1, 8192), *aux = calloc(1, 8192);
+        sigjmp_buf jb;
+        (void)arg;
+        rs = 0;
+        while (!time_up()) {
+                guard = &jb;
+                if (sigsetjmp(jb, 1) == 0)
+                        ioctl_op(fd, buf, 8192, aux, 8192);
+                guard = NULL;
+                if (below(200) == 0) {
+                        close(fd);
+                        fd = spark_open();
+                }
+        }
+        return NULL;
+}
+
+// ---- exec fuzz: spark images with hostile headers ----
+static void write_image(const char *path, const struct header *h, size_t file_bytes)
+{
+        int fd = open(path, O_CREAT | O_TRUNC | O_WRONLY, 0755);
+        unsigned char *page = calloc(1, 4096);
+        size_t left = file_bytes;
+        if (fd < 0)
+                return;
+        memcpy(page, h, sizeof(*h));
+        // x86-64: ud2 at the entry, so a loaded image dies at once
+        page[64] = 0x0f; page[65] = 0x0b;
+        while (left) {
+                size_t n = left < 4096 ? left : 4096;
+                if (write(fd, page, n) < 0)
+                        break;
+                memset(page, 0, 4096);
+                left -= n;
+        }
+        close(fd);
+        free(page);
+}
+
+static unsigned long pick_addr(void)
+{
+        static const unsigned long a[] = {
+                0, 0x1000, 0x10000, 0x400000, 0x10000000, 0x7fffffff000ul, 0x7ffffffff000ul,
+                0x7ffffffde000ul, 0x800000000000ul, 0xfffffffffffff000ul, 0xffffffff00000000ul,
+                0x100000000ul, 0xfffff000ul, 0xffffe000ul, 0x7fff00000000ul, 0x7ffc00000000ul,
+        };
+        switch (below(3)) {
+        case 0: return a[below(sizeof(a) / sizeof(a[0]))];
+        case 1: return a[below(sizeof(a) / sizeof(a[0]))] + (below(8) - 4) * 4096ul;
+        default: return (unsigned long)(rnd() & ~0xffful);
+        }
+}
+static unsigned long pick_size(void)
+{
+        static const unsigned long s[] = {0, 4096, 8192, 65536, 1ul << 20, 16ul << 20, 256ul << 20,
+                                          (256ul << 20) + 4096, 0xfffffffffffff000ul, 0x100000000ul, 1ul << 63};
+        switch (below(3)) {
+        case 0: return s[below(sizeof(s) / sizeof(s[0]))];
+        case 1: return 4096ul * below(64);
+        default: return (unsigned long)rnd() & (below(2) ? ~0xffful : ~0ul);
+        }
+}
+
+static void exec_op(unsigned n)
+{
+        char path[64];
+        struct header h = {SPARK_MAGIC, SPARK_VERSION, 0, 0x400000, 0x400040, 4096, 0, 0, {0, 0}};
+        size_t file_bytes = 4096 * (1 + below(4));
+        pid_t p;
+        snprintf(path, sizeof(path), "/tmp/img%u", n);
+        if (below(4)) h.base = pick_addr();
+        if (below(4)) h.entry = below(2) ? h.base + below(8192) : pick_addr();
+        if (below(4)) h.text_size = pick_size();
+        if (below(3) == 0) h.data_size = pick_size();
+        if (below(3) == 0) h.bss_size = pick_size();
+        if (below(12) == 0) h.magic ^= 1u << below(32);
+        if (below(12) == 0) h.version = (unsigned short)value();
+        if (below(12) == 0) h.flags = (unsigned short)value();
+        if (below(6) == 0) file_bytes = below(200);
+        write_image(path, &h, file_bytes);
+        p = fork();
+        if (p == 0) {
+                char *av[] = {path, NULL};
+                if (below(2)) {
+                        // make the stack of the caller look unusual first
+                        struct rlimit rl = {below(2) ? 8u << 20 : 64u << 10, RLIM_INFINITY};
+                        setrlimit(RLIMIT_STACK, &rl);
+                }
+                execv(path, av);
+                _exit(91);
+        }
+        if (p > 0) {
+                int st, waited = 0;
+
+                // SIGCHLD is ignored, so a child that has ended is reaped and
+                // waitpid says ECHILD; one still going after a second is
+                // killed, since a program that starts must not run away
+                while (waitpid(p, &st, WNOHANG) == 0 && waited++ < 100)
+                        usleep(10000);
+                if (waited > 100) {
+                        kill(p, SIGKILL);
+                        waitpid(p, &st, 0);
+                }
+        }
+        unlink(path);
+        ops_done++;
+}
+
+static void *exec_thread(void *arg)
+{
+        unsigned n = (unsigned)(uintptr_t)arg * 1000000u;
+        rs = 0;
+        while (!time_up())
+                exec_op(n++);
+        return NULL;
+}
+
+// ---- printk: escape sequences into the kernel log window ----
+static size_t esc_line(unsigned char *o, size_t room)
+{
+        static const char finals[] = "ABCDEFGHIJKLMPSTXZ`abcdefghlmnpqrstu@";
+        size_t n = 0;
+        while (n + 40 < room && n < 900) {
+                switch (below(16)) {
+                case 0: case 1: o[n++] = 0x1b; o[n++] = '[';
+                        for (unsigned i = 0, c = below(6); i < c; i++) {
+                                n += (size_t)sprintf((char *)o + n, "%u", below(3) ? below(300) : (unsigned)value());
+                                o[n++] = below(5) ? ';' : ':';
+                        }
+                        if (below(4) == 0) o[n++] = "?<=>"[below(4)];
+                        if (below(6) == 0) o[n++] = " !$\""[below(4)];
+                        o[n++] = (unsigned char)finals[below(sizeof(finals) - 1)];
+                        break;
+                case 2: o[n++] = 0x1b; o[n++] = ']';
+                        n += (size_t)sprintf((char *)o + n, "%u;", below(3) ? below(20) : below(2000));
+                        for (unsigned i = 0, c = below(200); i < c; i++) o[n++] = below(8) ? 'a' + below(26) : (unsigned char)below(256);
+                        if (below(2)) o[n++] = 7; else { o[n++] = 0x1b; o[n++] = '\\'; }
+                        break;
+                case 3: o[n++] = 0x1b; o[n++] = "PX^_()#78DEMHc=>*+"[below(18)]; if (below(2)) o[n++] = "0B8"[below(3)]; break;
+                case 4: o[n++] = (unsigned char)below(32); break;
+                case 5: { static const unsigned cp[] = {0xe9, 0x300, 0x301, 0x200d, 0xfe0f, 0x1f600, 0x3042, 0x4e2d, 0xff21, 0x10ffff, 0xd7ff, 0xffff, 0xfffd};
+                        unsigned c = cp[below(sizeof(cp) / sizeof(cp[0]))];
+                        if (c < 0x800) { o[n++] = 0xc0 | (c >> 6); o[n++] = 0x80 | (c & 63); }
+                        else if (c < 0x10000) { o[n++] = 0xe0 | (c >> 12); o[n++] = 0x80 | ((c >> 6) & 63); o[n++] = 0x80 | (c & 63); }
+                        else { o[n++] = 0xf0 | (c >> 18); o[n++] = 0x80 | ((c >> 12) & 63); o[n++] = 0x80 | ((c >> 6) & 63); o[n++] = 0x80 | (c & 63); }
+                        break; }
+                case 6: o[n++] = 0x80 + below(128); break;
+                case 7: for (unsigned i = 0, c = below(20); i < c; i++) o[n++] = 'x'; break;
+                default: o[n++] = 32 + below(95); break;
+                }
+        }
+        return n;
+}
+
+static void kmsg_flood(void)
+{
+        int fd = open("/dev/kmsg", O_WRONLY);
+        unsigned char line[1100];
+        if (fd < 0) { perror("kmsg"); return; }
+        rs = 0;
+        while (!time_up()) {
+                size_t n;
+                line[0] = '<'; line[1] = '1'; line[2] = '>';
+                n = 3 + esc_line(line + 3, sizeof(line) - 3);
+                if (write(fd, line, n) < 0 && errno != EINVAL)
+                        break;
+                ops_done++;
+        }
+        close(fd);
+}
+
+static void segv_named(void)
+{
+        // printk of an attacker-chosen comm: "name[pid]: segfault at ..."
+        rs = 0;
+        while (!time_up()) {
+                pid_t p = fork();
+                if (p == 0) {
+                        unsigned char name[16] = {0};
+                        size_t n = esc_line(name, 16);
+                        (void)n;
+                        name[15] = 0;
+                        prctl(PR_SET_NAME, name);
+                        signal(SIGSEGV, SIG_DFL);
+                        *(volatile int *)0 = 1;
+                        _exit(0);
+                }
+                if (p > 0) waitpid(p, NULL, 0);
+                ops_done++;
+                usleep(200000);
+        }
+}
+
+// ---- admin: privileged operations while windows are live ----
+static void *admin_thread(void *arg)
+{
+        int fd = spark_open();
+        unsigned char *buf = calloc(1, 8192);
+        (void)arg;
+        rs = 0;
+        while (!time_up()) {
+                struct canvas_control c = {0};
+                switch (below(6)) {
+                case 0: c.request = SPARK_CANVAS_OFF; ioctl(fd, SPARK_IOCTL_CANVAS, &c); break;
+                case 1: c.request = SPARK_CANVAS_ON; ioctl(fd, SPARK_IOCTL_CANVAS, &c); break;
+                case 2: c.request = below(6); ioctl(fd, SPARK_IOCTL_CANVAS, &c); break;
+                case 3: {
+                        struct machine_control m = {0};
+                        m.op = below(5);
+                        m.reserved[0] = m.op == MOONWATER_WAIT ? 1 : 0;
+                        ioctl(fd, MOONWATER_IOCTL_MACHINE, &m);
+                        break;
+                }
+                case 4: {
+                        struct bind_control b = {0};
+                        b.op = below(2); b.event = 1 + below(23);
+                        snprintf(b.command, sizeof(b.command), "%s", below(2) ? "true" : "");
+                        ioctl(fd, SPARK_IOCTL_BIND, &b);
+                        break;
+                }
+                default: {
+                        struct machine_script s = {0};
+                        s.op = below(2); s.address = (unsigned long)buf; s.length = below(3) ? 8192 : value() & 0xffff;
+                        if (s.op) { memset(buf, 'a' + below(20), 8192); if (below(2)) memcpy(buf, "function moonwater_poweroff() { true; }\n", 41); }
+                        ioctl(fd, MOONWATER_IOCTL_SCRIPT, &s);
+                        break;
+                }
+                }
+                usleep(below(50) * 1000);
+                ops_done++;
+        }
+        return NULL;
+}
+
+/* A thread that could not be made (an injected allocation failure, say) is
+   not one to join: joining what pthread_create never filled in waits for
+   ever. */
+static void start(pthread_t *th, int *nth, void *(*fn)(void *), void *arg)
+{
+        if (pthread_create(&th[*nth], NULL, fn, arg) == 0)
+                (*nth)++;
+}
+
+static void drop(unsigned uid)
+{
+        if (uid) {
+                setgroups(0, NULL);
+                if (setresgid(uid, uid, uid) || setresuid(uid, uid, uid))
+                        perror("drop");
+        }
+}
+
+int main(int argc, char **argv)
+{
+        const char *mode = argc > 1 ? argv[1] : "win";
+        unsigned long long seed = argc > 2 ? strtoull(argv[2], NULL, 0) : 1;
+        unsigned seconds = argc > 3 ? (unsigned)atoi(argv[3]) : 30;
+        unsigned uid = argc > 4 ? (unsigned)atoi(argv[4]) : 65534;
+        if (argc > 5) opmask = strtoul(argv[5], NULL, 0);
+        unsigned threads = argc > 6 ? (unsigned)atoi(argv[6]) : 6;
+        pthread_t th[16];
+        int nth = 0;
+        struct sigaction sa = {0};
+
+        main_pid = getpid();
+        rng_state = seed * 0x9e3779b97f4a7c15ull + 1;
+        rs = rng_state;
+        deadline = time(NULL) + seconds;
+        sa.sa_sigaction = on_fault;
+        sa.sa_flags = SA_NODEFER | SA_SIGINFO;
+        sigaction(SIGSEGV, &sa, NULL);
+        sigaction(SIGBUS, &sa, NULL);
+        sigaction(SIGALRM, &(struct sigaction){.sa_handler = SIG_DFL}, NULL);
+        signal(SIGPIPE, SIG_IGN);
+        signal(SIGCHLD, SIG_IGN);
+
+        // FAILPCT set: every allocation this process's tasks make in the kernel
+        // may fail (the caller has set the probability, with task-filter on),
+        // so the error paths of everything the fuzzer reaches run too. Opened
+        // here, before the drop, and written once uid is what the mode wants.
+        int failfd = getenv("FAILPCT") ? open("/proc/self/make-it-fail", O_WRONLY) : -1;
+
+        if (!strcmp(mode, "kmsg")) {
+                pid_t p = fork();
+                if (p == 0) { segv_named(); _exit(0); }
+                kmsg_flood();
+                if (p > 0) kill(p, SIGKILL);   // never kill(-1, ...): fork can fail
+                printf("FUZZ-DONE kmsg ops=%lu\n", ops_done);
+                return 0;
+        }
+        if (!strcmp(mode, "admin")) {
+                if (failfd >= 0 && write(failfd, "1", 1) != 1)
+                        perror("make-it-fail");
+                for (int i = 0; i < 2; i++) start(th, &nth, admin_thread, NULL);
+                for (int i = 0; i < 4; i++) start(th, &nth, win_thread, NULL);
+        } else {
+                drop(uid);
+                if (failfd >= 0 && write(failfd, "1", 1) != 1)
+                        perror("make-it-fail");
+                if (!strcmp(mode, "win")) {
+                        for (unsigned i = 0; i < threads; i++) start(th, &nth, win_thread, NULL);
+                        if (opmask == ~0ul) start(th, &nth, ioctl_thread, NULL);
+                } else if (!strcmp(mode, "ioctl")) {
+                        for (int i = 0; i < 4; i++) start(th, &nth, ioctl_thread, NULL);
+                } else if (!strcmp(mode, "exec")) {
+                        for (int i = 0; i < 3; i++) start(th, &nth, exec_thread, (void *)(uintptr_t)(i + 1));
+                } else {
+                        fprintf(stderr, "unknown mode %s\n", mode);
+                        return 2;
+                }
+        }
+        for (int i = 0; i < nth; i++)
+                pthread_join(th[i], NULL);
+        printf("FUZZ-DONE %s seed=%llu ops=%lu creates=%lu scribbles=%lu ioctl_ok=%lu ioctl_fail=%lu\n",
+               mode, seed, ops_done, creates, scribbles, ioctl_ok, ioctl_fail);
+        return 0;
+}
+#endif /* CHECK_ring0_hostile */
+
 #ifdef COVERAGE_hook
 /*
         The other half of `sh test/run coverage`: built on its own, without
