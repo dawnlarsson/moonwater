@@ -21472,7 +21472,17 @@ TEXT_UTILITIES = (
                                    #   spelling of it, however long it is.
                                    *((spec, "x") for spec in (
                                        "[:a'b:]", "[:a\\nb:]", "[:a\\\\b:]", "[:\\001:]", "[a*'3]", "[a*1\\n]",
-                                       "[:" + "x" * 300 + ":]", "[a*" + "9" * 300 + "x]")))),
+                                       "[:" + "x" * 300 + ":]", "[a*" + "9" * 300 + "x]")),
+                                   #   A set of more than a few hundred items, which
+                                   #   is more than the list that holds them was
+                                   #   sized for: tr a "$(printf 'b%.0s' $(seq 1000))"
+                                   #   wrote past the end of it and died of a
+                                   #   segmentation fault where GNU translates.
+                                   *(operands for size in (70, 400, 3000)
+                                     for operands in (("a" * size, "b"), ("a", "b" * size), ("-d", "ab" * size),
+                                                      ("-s", "ab" * size), ("ab" * size, "cd" * size),
+                                                      ("-c", "a" * size, "b"), ("[a*3]" * size, "x"),
+                                                      ("a-c" * size, "x"), ("-t", "ab" * size, "c"))))),
     Utility("ul",
             options=(Option("-t", ("dumb", "xterm", "vt100", "bogus", "", "ansi"), None), Option("-T", ("xterm",), None),
                      Option("--terminal", ("dumb", "xterm"), True), Option("-i"), Option("--indicated")),

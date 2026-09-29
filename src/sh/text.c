@@ -20449,7 +20449,12 @@ static positive tr_text_room;
 
 static bool tr_add(tr_list address_to list, tr_item item)
 {
-        if (!array_store_reserve(list->items, list->room, list->used, 1, 64))
+        //      The room asked for is the whole length the list is to have, and
+        //      a 1 there was satisfied by the first block of 64 for good: the
+        //      65th item was written past it, and a set of a few hundred bytes
+        //      ran off the end of the mapping.
+        if (list->used == positive_max ||
+            !array_store_reserve(list->items, list->room, list->used, list->used + 1, 64))
                 return string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
 
         list->items[list->used++] = item;
