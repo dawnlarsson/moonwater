@@ -29619,7 +29619,7 @@ struct output {
     unsigned cursor_w,cursor_h,cursor_recovery; bool cursor_shown; int x,y;
     struct list_head flush_link; bool flush_queued, flush_whole, flushing, retired;
 };
-static struct { struct list_head outputs; int lock; int flush_lock; struct list_head flush_queue; int flush_idle; } desktop;
+static struct { struct list_head outputs; int lock; int flush_lock; struct list_head flush_queue; int flush_idle; int flushes_in_flight; } desktop;
 static struct list_head canvas_list;
 static int canvas_list_lock, cursor_plane_failures;
 static bool cursor_plane_recovery;

@@ -2,19 +2,39 @@
 # AMD graphics
 #
 # Separate from the gpu profile because amdgpu does not work without binary
-# firmware, which this repository does not carry. The driver selects
-# FW_LOADER and will refuse to initialise the card if the blobs are absent --
-# it does not fall back to an unaccelerated mode the way i915 does.
+# firmware, and it does not fall back to an unaccelerated mode the way i915
+# does: it refuses to initialise the card if the blobs are absent, and
+# nothing then drives the panel but the firmware's framebuffer (simpledrm).
+# That framebuffer cannot switch the panel off or bring it back, so on an
+# AMD machine that profile means a sleep that leaves the backlight lit and
+# wakes to a blank screen, and an APU whose graphics are never power
+# managed. Compose this profile on an AMD machine.
 #
-# To use it, the matching files from linux-firmware have to end up in the
-# image under /lib/firmware, or be built into the kernel with
-# CONFIG_EXTRA_FIRMWARE. Which files depends on the card generation, and they
-# are large: a Polaris card wants roughly 4 MB, a recent one considerably
-# more.
+# No blob is in git. The lines below name each file with its SHA-256 at the
+# linux-firmware commit kernel/firmware/apply pins, and the build fetches
+# them (see the wifi profile for how they reach the initramfs). They are the
+# eleven files the Van Gogh APU (the Steam Deck's) loads, 636 KB compressed;
+# amdgpu itself adds 2.6 MB to the image and holds 9.4 MB of kernel memory
+# outside MemTotal. Another card generation wants its own files, which
+# are large -- a Polaris card roughly 4 MB, a recent one considerably more --
+# named the same way with the digests of the pinned commit.
+#
+#> firmware amdgpu/vangogh_asd.bin fc2917b8fad9908c4b613051ae0d3f95a15989a1571dbace63a283b732e6d90e
+#> firmware amdgpu/vangogh_ce.bin de39ff5c1f45a4a3d2b7e0760a2ff64a593e5f3e03e82600c62e18bc72f48e01
+#> firmware amdgpu/vangogh_dmcub.bin 7e777abdfc513021963c1db6861979f331fbad9c8a0ab53090d29c595e7b4801
+#> firmware amdgpu/vangogh_me.bin 922444d873abfe592af8f3ea0faa61a053ce94269ad3dd19dbd72cb5a96eceeb
+#> firmware amdgpu/vangogh_mec.bin 48ac7448a86f75dac168c19c0f4e10734cc2c5fa9fc7cb28aacfad5c59527170
+#> firmware amdgpu/vangogh_mec2.bin 48ac7448a86f75dac168c19c0f4e10734cc2c5fa9fc7cb28aacfad5c59527170
+#> firmware amdgpu/vangogh_pfp.bin 425359a89c32fa4b9ae7ce487f23a76e51c9003882185c30d7b167bbeefdc6ba
+#> firmware amdgpu/vangogh_rlc.bin a3512355132203d8aca122e246b3fa8dcf5aa13c064011e8ffedf5674656b58b
+#> firmware amdgpu/vangogh_sdma.bin 7e81b24cb357e3373bf0d7b94bff53c8b0225fd87d07d6940d98241d9ec572fd
+#> firmware amdgpu/vangogh_toc.bin 2ca90c91f7e1756d5c1bd5443007768c692fbe14a228eb5a87e47953c62f5d75
+#> firmware amdgpu/vangogh_vcn.bin eafebdb4043b825b12826198a7d76d8acc4e251fb102329dc1c78cf7bdcc15e2
+#> firmware_licence LICENSE.amdgpu 572872598565dc3513470de971a32bf9db301f47afeef3636345eadae33b2eee
 #
 # Compose it explicitly when you know the machine has an AMD card:
 #
-#       sudo sh build.sh arch/x64 debug_none gpu gpu.amd
+#       sudo sh build.sh arch/x64 debug_none limbo desktop wifi serial gpu.amd
 #
 CONFIG_DRM_AMDGPU=y
 
