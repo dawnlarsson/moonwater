@@ -46541,7 +46541,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         return 0;
 }
 """
-    return tls_fuzz_run("dns", "dns", NET_ZONE_FUZZ_SHIM + byte_reader_source() + wait + dns + driver, 8192)
+    return tls_fuzz_run("dns", "dns", NET_ZONE_FUZZ_SHIM + byte_store_source() + byte_reader_source() + wait + dns + driver, 8192)
 
 
 def netlink_fuzz_seeds():
@@ -46799,7 +46799,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 }
 """
     return tls_fuzz_run("netlink", "netlink",
-                        NET_ZONE_FUZZ_SHIM + byte_reader_source() + wait + netlink + driver, 16384)
+                        NET_ZONE_FUZZ_SHIM + byte_store_source() + byte_reader_source() + wait + netlink + driver, 16384)
 
 
 #       The NIST curves as integers, for the vectors crypto_vectors has to
@@ -50090,6 +50090,12 @@ def harness_security_hygiene(argv):
         ("tls_check_cert_verify", ("msg",)),
         ("dhcp_walk", ("region",)),
         ("netlink_find_span", ("bytes",)),
+        ("dns_copy_name", ("message",)),
+        ("dns_message_at", ("message",)),
+        ("dns_answer_address", ("message",)),
+        ("dns_records_end", ("message",)),
+        ("dns_reply_identity", ("reply",)),
+        ("dns_reply_result", ("reply",)),
         ("wifi_gtk_take", ("plain",)),
         ("radio_rsn_security", ("element",)),
         ("radio_bss_read", ("elements",)),
@@ -50105,7 +50111,7 @@ def harness_security_hygiene(argv):
         if not found:
             continue
         body = re.sub(r"//[^\n]*", "", re.sub(r"/\*.*?\*/", "", found.group(0), flags=re.S))
-        checks("byte_reader_open(" in body,
+        checks("byte_reader_open(" in body or "dns_message_at(" in body,
                "reader-only: %s no longer reads through byte_reader" % name)
         for word in wire:
             #   A local array is declared with its size in brackets; that is
@@ -55442,7 +55448,7 @@ int main(int argc, char **argv)
             head, region, tail])
 
     mdns_source = "\n".join([
-        SHIM, wl,
+        SHIM, waterlink_lift_cursors(), wl,
         sec(net, "//      A wire name is at most 255 bytes", "\n#define DNS_OK 0"),
         sec(net, "static COLD bipolar dns_copy_name(",
             "//      Where a name ends, for a caller"),
@@ -55452,7 +55458,7 @@ int main(int argc, char **argv)
         DRIVER_MDNS])
 
     gate_source = "\n".join([
-        SHIM, wl,
+        SHIM, waterlink_lift_cursors(), wl,
         sec(hs, "#define WATERLINK_PROTOCOL", "static fn waterlink_mix_hash("),
         sec(hs, "static p8 waterlink_base[32] = {9};",
             "// A datagram's head, with the rest"),
@@ -56081,7 +56087,7 @@ static fn link_peers_unlock(bipolar handle) { (void)handle; }
 '''
 
     parts = [
-        SHIM, wl,
+        SHIM, waterlink_lift_cursors(), wl,
         sec(link, "// The largest frame that can share", "fn waterlink_link_reset("),
         sec(link, "typedef bool (address_to waterlink_sink)",
             "// Hand one frame to the application"),
@@ -56884,6 +56890,15 @@ def waterlink_pre_seeds():
         b"\x00\x01",
         "empty.bin": b"",
     }
+
+
+#       What net.c's name walker reads through, for the waterlink lifts that
+#       carry it: the bounded source and sink from lib.util.c, over the
+#       words those shims already have.
+def waterlink_lift_cursors():
+    return ("#ifndef min\n#define min(a, b) ((a) < (b) ? (a) : (b))\n#endif\n"
+            "#ifndef memory_copy_apart\n#define memory_copy_apart memcpy\n#endif\n" +
+            byte_store_source() + byte_reader_source())
 
 
 def harness_waterlink_pre_fuzz(argv):

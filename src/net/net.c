@@ -1310,56 +1310,60 @@ static COLD bipolar dns_copy_name(p8 address_to message, positive size,
                              positive at, p8 address_to into, positive room,
                              positive address_to ended)
 {
+        byte_reader reader = byte_reader_open(message, size);
+        byte_store name = {into, min(room, (positive)DNS_NAME_MAX), 0};
         positive ceiling = size;
-        positive used = 0;
         positive jumps = 0;
 
         address_to ended = 0;
-        if (room > DNS_NAME_MAX)
-                room = DNS_NAME_MAX;
+        //      A name past the end fails at its first byte, below.
+        (void)byte_reader_skip(&reader, at);
 
         for (;;)
         {
-                p8 length;
+                positive here = ceiling - byte_reader_left(&reader);
+                p8 length = byte_reader_u8(&reader);
+                const p8 address_to label;
 
-                if (at >= ceiling)
+                if (!byte_reader_ok(&reader))
                         return DNS_MALFORMED;
-
-                length = message[at];
 
                 if ((length & 0xc0) == 0xc0)
                 {
-                        positive target;
+                        positive target = (positive)(length & 0x3f) << 8 |
+                                          byte_reader_u8(&reader);
 
-                        if (at + 1 >= ceiling)
+                        if (!byte_reader_ok(&reader))
                                 return DNS_MALFORMED;
 
                         if (!address_to ended)
-                                address_to ended = at + 2;
+                                address_to ended = here + 2;
 
-                        target = network_load_16(message + at) & 0x3fff;
-
-                        if (target >= at || ++jumps > DNS_POINTER_HOPS)
+                        if (target >= here || ++jumps > DNS_POINTER_HOPS)
                                 return DNS_MALFORMED;
 
-                        ceiling = at;
-                        at = target;
+                        //      The name goes on at the target, which may
+                        //      read nothing at or past the pointer.
+                        ceiling = here;
+                        reader = byte_reader_open(message, ceiling);
+                        (void)byte_reader_skip(&reader, target);
                         continue;
                 }
 
-                if (length & 0xc0 || length > ceiling - at - 1 ||
-                    room - used < (positive)length + 1)
+                label = byte_reader_take(&reader, length);
+                if (length & 0xc0 || !label ||
+                    !byte_store_append_exact(address_of name, address_of length,
+                                             1) ||
+                    !byte_store_append_exact(address_of name, (p8 address_to)label,
+                                             length))
                         return DNS_MALFORMED;
-
-                memory_copy_apart(into + used, message + at, length + 1);
-                used += length + 1;
-                at += length + 1;
 
                 if (!length)
                 {
                         if (!address_to ended)
-                                address_to ended = at;
-                        return (bipolar)used;
+                                address_to ended = ceiling -
+                                                   byte_reader_left(&reader);
+                        return (bipolar)name.used;
                 }
         }
 }
@@ -1373,6 +1377,17 @@ static COLD bipolar dns_skip_name(p8 address_to message, positive size, positive
         return dns_copy_name(message, size, at, name, sizeof name,
                              address_of ended) < 0
                    ? DNS_MALFORMED : (bipolar)ended;
+}
+
+//      A reader on the message, at a name or a record that a name's end
+//      pointed to: failed and empty when that is past the message.
+static COLD byte_reader dns_message_at(const p8 address_to message,
+                                       positive size, positive at)
+{
+        byte_reader reader = byte_reader_open(message, size);
+
+        (void)byte_reader_skip(&reader, at);
+        return reader;
 }
 
 /* Find an address only along the name that was asked for and the CNAME chain
@@ -1415,21 +1430,23 @@ static COLD bipolar dns_answer_address(p8 address_to message, positive size,
                         //      at moves on to where the owner name ended.
                         bipolar owner_length = dns_copy_name(
                             message, size, at, owner, sizeof owner, address_of at);
+                        byte_reader tail = dns_message_at(message, size, at);
+                        byte_reader data;
+                        positive data_length;
                         p16 kind;
                         p16 class;
-                        p16 data_length;
                         bool is_wanted;
 
-                        if (owner_length < 0 || size - at < 10)
+                        //      The type and class, the time to live, and the
+                        //      data behind its length.
+                        kind = byte_reader_u16(&tail);
+                        class = byte_reader_u16(&tail);
+                        (void)byte_reader_skip(&tail, 4);
+                        data = byte_reader_vector16(&tail);
+                        if (owner_length < 0 || !byte_reader_ok(&tail))
                                 return DNS_MALFORMED;
-
-                        kind = network_load_16(message + at);
-                        class = network_load_16(message + at + 2);
-                        data_length = network_load_16(message + at + 8);
-                        at += 10;
-
-                        if (data_length > size - at)
-                                return DNS_MALFORMED;
+                        data_length = byte_reader_left(&data);
+                        at = size - byte_reader_left(&tail) - data_length;
 
                         is_wanted = owner_length == wanted_length &&
                                     !memory_compare_ascii_case(
@@ -1438,10 +1455,12 @@ static COLD bipolar dns_answer_address(p8 address_to message, positive size,
                         if (class == DNS_CLASS_IN && is_wanted &&
                             kind == DNS_TYPE_A)
                         {
+                                byte_reader value = data;
+
                                 if (data_length != 4)
                                         return DNS_MALFORMED;
                                 if (!has_address)
-                                        address = network_load_32(message + at);
+                                        address = byte_reader_u32(&value);
                                 has_address = true;
                         }
                         else if (class == DNS_CLASS_IN && is_wanted &&
@@ -1500,11 +1519,18 @@ static COLD bool dns_reply_identity(
     p8 address_to reply, positive size, p16 id,
     p8 address_to request, positive question_length)
 {
-        return size >= DNS_HEADER && network_load_16(reply) == id &&
-               network_load_16(reply + 4) == 1 &&
-               size >= DNS_HEADER + question_length &&
-               !memory_compare(reply + DNS_HEADER,
-                               request + DNS_HEADER, question_length);
+        byte_reader reader = byte_reader_open(reply, size);
+        p16 asked = byte_reader_u16(&reader);
+        p16 questions;
+        const p8 address_to question;
+
+        (void)byte_reader_skip(&reader, 2);
+        questions = byte_reader_u16(&reader);
+        (void)byte_reader_skip(&reader, 6);
+        question = byte_reader_take(&reader, question_length);
+        return byte_reader_ok(&reader) && asked == id && questions == 1 &&
+               !memory_compare(question, request + DNS_HEADER,
+                               question_length);
 }
 
 /* Walk every declared resource record, including sections this IPv4 resolver
@@ -1516,18 +1542,18 @@ static COLD bipolar dns_records_end(p8 address_to message, positive size,
         for (positive record = 0; record < count; record++)
         {
                 bipolar ended = dns_skip_name(message, size, at);
-                p16 data_length;
+                byte_reader tail;
 
                 if (ended < 0)
                         return DNS_MALFORMED;
-                at = (positive)ended;
-                if (at > size || size - at < 10)
+                //      The type, class and time to live, then the data
+                //      behind its length.
+                tail = dns_message_at(message, size, (positive)ended);
+                (void)byte_reader_skip(&tail, 8);
+                (void)byte_reader_vector16(&tail);
+                if (!byte_reader_ok(&tail))
                         return DNS_MALFORMED;
-                data_length = network_load_16(message + at + 8);
-                at += 10;
-                if (data_length > size - at)
-                        return DNS_MALFORMED;
-                at += data_length;
+                at = size - byte_reader_left(&tail);
         }
         return (bipolar)at;
 }
@@ -1552,7 +1578,16 @@ static COLD bipolar dns_reply_result(
                                 question_length))
                 return DNS_MALFORMED;
 
-        flags = network_load_16(reply + 2);
+        {
+                byte_reader header = byte_reader_open(reply, available);
+
+                (void)byte_reader_skip(&header, 2);
+                flags = byte_reader_u16(&header);
+                (void)byte_reader_skip(&header, 2);
+                answers = byte_reader_u16(&header);
+                authorities = byte_reader_u16(&header);
+                additional = byte_reader_u16(&header);
+        }
         /* This resolver sends only standard QUERY requests.  A response with
            another opcode is not an answer to the transaction merely because
            its id and echoed question happen to match.  The one reserved DNS
@@ -1569,9 +1604,6 @@ static COLD bipolar dns_reply_result(
         if (size > DNS_MAX_MESSAGE)
                 return DNS_MALFORMED;
 
-        answers = network_load_16(reply + 6);
-        authorities = network_load_16(reply + 8);
-        additional = network_load_16(reply + 10);
         at = DNS_HEADER + question_length;
         {
                 bipolar records_end = dns_records_end(reply, size, at, answers);
