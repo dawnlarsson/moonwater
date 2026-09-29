@@ -3722,7 +3722,7 @@ static positive zstd_opt_matches(zstd_encoder address_to e, p8 address_to ip,
         if (cur < e->next)
                 return 0;
         for (p32 at = e->next < low ? low : e->next; at < cur;)
-                at += zstd_bt_insert(e, base + at, iend, low, mls);
+                at += zstd_bt_insert(e, base + at, iend, low, mls < 4 ? 4 : mls);
         e->next = cur;
 
         for (positive code = ll0; code < 3 + (positive)ll0; code++)
@@ -3772,7 +3772,10 @@ static positive zstd_opt_matches(zstd_encoder address_to e, p8 address_to ip,
                         }
                 }
         }
-        h = zstd_hash_bytes(ip, e->p.hash_log, mls);
+        /* The tree is keyed on four bytes when the minimum match is three:
+           libzstd's hash of length three is the hash of length four, the
+           three-byte matches being the hash3 table's. */
+        h = zstd_hash_bytes(ip, e->p.hash_log, mls < 4 ? 4 : mls);
         candidate = e->hash[h];
         e->hash[h] = cur;
         smaller = bt + 2 * (cur & mask);
