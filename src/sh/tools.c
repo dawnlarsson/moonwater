@@ -4628,6 +4628,10 @@ typedef struct
         bipolar padding;
         positive header;
         p8 field_delimiter;
+        //      A delimiter of more than one byte is one character of a
+        //      multibyte locale; field_delimiter alone is a single byte.
+        string_address delimiter_text;
+        positive delimiter_length;
         bool delimiter_given;
         bool grouping;
         bool debug;
@@ -4915,17 +4919,250 @@ static bool numfmt_format_read(string_address text,
         return true;
 }
 
+/*
+        numfmt reads the locale as GNU's does: the decimal point and the
+        thousands separator are strings, the separator is skipped inside a
+        number's digits where a digit follows it, the point is written in what
+        it prints, and a grouping asked for is the locale's rule. Blanks are
+        the characters iswblank calls blank and widths are columns, so a
+        separator of three bytes takes one.
+*/
+static string_address numfmt_point = ".";
+static string_address numfmt_thousands = "";
+static string_address numfmt_rule = "";
+static bool numfmt_multibyte;
+
+static fn numfmt_locale()
+{
+        string_address point = locale_string(LOCALE_NUMERIC, LOCALE_NUMERIC_DECIMAL);
+        string_address thousands = locale_string(LOCALE_NUMERIC, LOCALE_NUMERIC_THOUSANDS);
+        string_address rule = locale_string(LOCALE_NUMERIC, LOCALE_NUMERIC_GROUPING);
+
+        numfmt_point = point && point[0] ? point : (string_address) ".";
+        numfmt_thousands = thousands ? thousands : (string_address) "";
+        numfmt_rule = rule ? rule : (string_address) "";
+        numfmt_multibyte = text_locale_utf8();
+}
+
+// The bytes of the blank character at AT, or none. Newline counts where the
+// reference's newline_or_blank has it.
+static positive numfmt_blank_at(const p8 address_to bytes, positive length,
+                                positive at, bool newline)
+{
+        if (at >= length)
+                return 0;
+        if (bytes[at] == ' ' || bytes[at] == '\t' || (newline && bytes[at] == '\n'))
+                return 1;
+        if (!numfmt_multibyte || bytes[at] < 0x80)
+                return 0;
+
+        p32 code;
+        positive step;
+
+        if (wc_utf8_decode(bytes + at, length - at, address_of code, address_of step) != 1)
+                return 0;
+        if (code == 0x1680 || (code >= 0x2000 && code <= 0x2006) ||
+            (code >= 0x2008 && code <= 0x200a) || code == 0x205f || code == 0x3000)
+                return step;
+
+        return 0;
+}
+
+// The four no-break spaces the reference takes for the one gap between a
+// number and its suffix: U+00A0, U+2007, U+202F and U+2060.
+static positive numfmt_nbspace_at(const p8 address_to bytes, positive length,
+                                  positive at)
+{
+        if (!numfmt_multibyte || at >= length || bytes[at] < 0x80)
+                return 0;
+
+        p32 code;
+        positive step;
+
+        if (wc_utf8_decode(bytes + at, length - at, address_of code, address_of step) != 1)
+                return 0;
+
+        return code == 0xa0 || code == 0x2007 || code == 0x202f || code == 0x2060 ? step : 0;
+}
+
+// A run of blanks (or of what is not blank), one character at a time.
+static positive numfmt_skip(const p8 address_to bytes, positive length,
+                            positive at, bool blank)
+{
+        while (at < length)
+        {
+                positive step = numfmt_blank_at(bytes, length, at, true);
+
+                if ((step != 0) != blank)
+                        break;
+                if (!step)
+                {
+                        p32 code;
+
+                        step = numfmt_multibyte && bytes[at] >= 0x80 &&
+                                       wc_utf8_decode(bytes + at, length - at, address_of code,
+                                                      address_of step) == 1
+                                   ? step
+                                   : 1;
+                }
+                at += step;
+        }
+
+        return at;
+}
+
+// What mbswidth says of a text, or -1 for one it would refuse.
+static bipolar numfmt_columns(const p8 address_to bytes, positive length)
+{
+        positive columns = 0;
+
+        if (!numfmt_multibyte)
+        {
+                for (positive at = 0; at < length; at++)
+                        if (bytes[at] < 0x20 || bytes[at] == 0x7f)
+                                return -1;
+                return (bipolar)length;
+        }
+
+        for (positive at = 0; at < length;)
+        {
+                if (bytes[at] < 0x80)
+                {
+                        if (bytes[at] < 0x20 || bytes[at] == 0x7f)
+                                return -1;
+                        columns++;
+                        at++;
+                        continue;
+                }
+
+                p32 code;
+                positive step;
+
+                if (wc_utf8_decode(bytes + at, length - at, address_of code, address_of step) != 1 ||
+                    code < 0xa0)
+                        return -1;
+                columns += unicode_width(code, UNICODE_WIDTH_WCWIDTH);
+                at += step;
+        }
+
+        return (bipolar)columns;
+}
+
+static positive numfmt_columns_or_bytes(const p8 address_to bytes, positive length)
+{
+        bipolar columns = numfmt_columns(bytes, length);
+
+        return columns < 0 ? length : (positive)columns;
+}
+
+// The number as printf's conversion writes it under the locale: its point,
+// and with grouping asked for the separator every group the rule names.
+static positive numfmt_localize(const p8 address_to number, positive length,
+                                bool group, p8 address_to into, positive room)
+{
+        positive digits_end = 0;
+        positive start = length && number[0] == '-';
+
+        while (start + digits_end < length && byte_is_digit(number[start + digits_end]))
+                digits_end++;
+
+        positive integer_end = start + digits_end;
+        positive made = 0;
+        positive point_length = string_length(numfmt_point);
+        positive separator_length = string_length(numfmt_thousands);
+
+        if (room < length * 4 + 8)
+                return 0;
+        if (start)
+                into[made++] = '-';
+
+        //      Group sizes from the right: the rule's bytes in turn, the
+        //      last one repeating, and a byte of CHAR_MAX or more, or none,
+        //      ending the grouping.
+        positive rule_at = 0;
+        positive size = numfmt_rule[0] ? (p8)numfmt_rule[0] : 0;
+        positive cuts[64];
+        positive cut_count = 0;
+
+        if (group && separator_length && size && size < 127)
+        {
+                for (positive taken = 0; taken + size < digits_end && cut_count < 64;)
+                {
+                        taken += size;
+                        cuts[cut_count++] = taken;
+                        if (numfmt_rule[rule_at + 1])
+                        {
+                                rule_at++;
+                                size = (p8)numfmt_rule[rule_at];
+                                if (!size || size >= 127)
+                                        break;
+                        }
+                }
+        }
+
+        for (positive i = 0; i < digits_end; i++)
+        {
+                positive remaining = digits_end - i;
+                bool cut = false;
+
+                for (positive k = 0; k < cut_count; k++)
+                        if (cuts[k] == remaining)
+                                cut = true;
+                if (cut)
+                {
+                        memory_copy(into + made, numfmt_thousands, separator_length);
+                        made += separator_length;
+                }
+                into[made++] = number[start + i];
+        }
+
+        for (positive at = integer_end; at < length; at++)
+        {
+                if (number[at] == '.')
+                {
+                        memory_copy(into + made, numfmt_point, point_length);
+                        made += point_length;
+                }
+                else
+                        into[made++] = number[at];
+        }
+
+        into[made] = end;
+        return made;
+}
+
 static fn numfmt_body_out(p8 address_to number, positive number_length,
                           p8 address_to unit, positive unit_length,
                           positive automatic_width)
 {
+        p8 localized[512];
+        positive localized_length = numfmt_localize(
+            number, number_length,
+            numfmt.grouping || (numfmt.have_format && numfmt.format.grouping),
+            localized, sizeof(localized));
+
+        if (localized_length)
+        {
+                number = localized;
+                number_length = localized_length;
+        }
+
+        positive number_columns = numfmt_columns_or_bytes(number, number_length);
         positive separator_length = unit_length && numfmt.unit_separator
                                         ? string_length(numfmt.unit_separator)
                                         : 0;
         positive suffix_length = numfmt.suffix
                                      ? string_length(numfmt.suffix) : 0;
-        positive body = number_length + separator_length + unit_length +
-                        suffix_length;
+        positive separator_columns = separator_length
+                                         ? numfmt_columns_or_bytes((p8 address_to)numfmt.unit_separator,
+                                                                   separator_length)
+                                         : 0;
+        positive suffix_columns = suffix_length
+                                      ? numfmt_columns_or_bytes((p8 address_to)numfmt.suffix,
+                                                                suffix_length)
+                                      : 0;
+        positive body = number_columns + separator_columns + unit_length +
+                        suffix_columns;
         positive width = automatic_width;
         bool left = false;
         positive zero_padding = 0;
@@ -4936,9 +5173,9 @@ static fn numfmt_body_out(p8 address_to number, positive number_length,
 
                 if (numfmt.format.zero && !numfmt.format.left)
                 {
-                        if (numfmt.format.width > number_length)
+                        if (numfmt.format.width > number_columns)
                                 zero_padding = numfmt.format.width -
-                                               number_length;
+                                               number_columns;
 
                         /* Zero width belongs to the number conversion and
                            can coexist with an outer --padding. */
@@ -5369,7 +5606,7 @@ static bool numfmt_convert(p8 address_to bytes, positive length,
 {
         p8 address_to original = bytes;
         positive original_length = length;
-        positive blanks = string_span_max(bytes, length, string_set_blanks);
+        positive blanks = numfmt_skip(bytes, length, 0, true);
         bytes += blanks;
         length -= blanks;
         positive stop = length;
@@ -5390,38 +5627,75 @@ static bool numfmt_convert(p8 address_to bytes, positive length,
         positive base = 1;
         positive suffix_bytes = 0;
         p8 refused = 0;
-        positive at = stop && bytes[0] == '-';
+        p8 canon[160];
+        positive canon_length = 0;
+        positive at = 0;
         positive count = 0;
         bool found = false;
+        positive point_length = string_length(numfmt_point);
+        positive thousands_length = string_length(numfmt_thousands);
+        positive fraction_from = 0;
+        positive fraction_bytes = 0;
 
-        for (; at < stop && byte_is_digit(bytes[at]); at++)
+        if (stop && bytes[0] == '-')
         {
-                found = true;
-                if (count || bytes[at] != '0')
-                        count++;
+                canon[canon_length++] = '-';
+                at = 1;
         }
-        if (count > 33)
-                refused = 'O';
-        else if (!found && !(at < stop && bytes[at] == '.'))
-                refused = 'N';
-        else if (at < stop && bytes[at] == '.')
+
+        /*
+                The digits as simple_strtod_int reads them: the locale's
+                thousands separator is skipped where a digit follows it, in
+                the fraction as in the whole part, and the locale's point
+                starts the fraction.
+        */
+        for (positive part = 0; part < 2 && !refused; part++)
         {
-                at++;
-                if (at < stop && bytes[at] == '-')
-                        refused = 'N';
                 found = false;
                 count = 0;
-                for (; !refused && at < stop && byte_is_digit(bytes[at]); at++)
+                for (; at < stop && byte_is_digit(bytes[at]);)
                 {
                         found = true;
                         if (count || bytes[at] != '0')
                                 count++;
+                        if (count > 33)
+                        {
+                                refused = 'O';
+                                break;
+                        }
+                        canon[canon_length++] = bytes[at++];
+                        if (thousands_length && at + thousands_length < stop &&
+                            !memory_compare(bytes + at, numfmt_thousands, thousands_length) &&
+                            byte_is_digit(bytes[at + thousands_length]))
+                                at += thousands_length;
                 }
-                if (!refused && count > 33)
-                        refused = 'O';
-                else if (!refused && !found && !(at < stop && bytes[at] == '.'))
+                if (refused)
+                        break;
+
+                bool at_point = point_length <= stop - at &&
+                                !memory_compare(bytes + at, numfmt_point, point_length);
+
+                if (!found && !at_point)
+                {
                         refused = 'N';
+                        break;
+                }
+                if (part || !at_point)
+                        break;
+
+                at += point_length;
+                canon[canon_length++] = '.';
+                fraction_from = at;
+                if (at < stop && bytes[at] == '-')
+                {
+                        refused = 'N';
+                        break;
+                }
         }
+        //      GNU divides the fraction by ten to the number of bytes it took,
+        //      a thousands separator inside it counted.
+        fraction_bytes = fraction_from && at > fraction_from ? at - fraction_from : 0;
+        canon[canon_length] = end;
         numeric_length = at;
 
         positive separator_length = numfmt.unit_separator
@@ -5429,16 +5703,20 @@ static bool numfmt_convert(p8 address_to bytes, positive length,
 
         while (!refused && at < stop)
         {
-                if (numfmt.unit_separator)
+                bool matched = numfmt.unit_separator && separator_length <= stop - at &&
+                               !memory_compare(bytes + at, numfmt.unit_separator, separator_length);
+
+                if (matched)
+                        at += separator_length;
+                else
                 {
-                        if (separator_length <= stop - at &&
-                            !memory_compare(bytes + at, numfmt.unit_separator, separator_length))
-                                at += separator_length;
-                        else if (bytes[at] == ' ' || bytes[at] == '\t')
-                                at++;
+                        //      One blank or no-break space, and no more.
+                        positive gap = numfmt_blank_at(bytes, stop, at, false);
+
+                        if (!gap)
+                                gap = numfmt_nbspace_at(bytes, stop, at);
+                        at += gap;
                 }
-                else if (bytes[at] == ' ' || bytes[at] == '\t')
-                        at++;
                 if (at == stop)
                         break;
 
@@ -5446,9 +5724,7 @@ static bool numfmt_convert(p8 address_to bytes, positive length,
 
                 if (!numfmt_power_letter(bytes[at], address_of candidate))
                 {
-                        while (at < stop && (bytes[at] == ' ' || bytes[at] == '\t' ||
-                                             bytes[at] == '\n'))
-                                at++;
+                        at = numfmt_skip(bytes, stop, at, true);
                         if (at < stop)
                                 refused = 'S';
                         break;
@@ -5482,9 +5758,7 @@ static bool numfmt_convert(p8 address_to bytes, positive length,
                                 break;
                         }
                 }
-                while (at < stop && (bytes[at] == ' ' || bytes[at] == '\t' ||
-                                     bytes[at] == '\n'))
-                        at++;
+                at = numfmt_skip(bytes, stop, at, true);
                 break;
         }
         if (!refused && at < stop)
@@ -5501,17 +5775,17 @@ static bool numfmt_convert(p8 address_to bytes, positive length,
         // A whole number the long double would carry exactly takes the
         // integer path; any other goes on below.
         {
-                bool minus = numeric_length && bytes[0] == '-';
+                bool minus = canon_length && canon[0] == '-';
                 positive digits_at = minus;
                 positive whole = 0;
 
-                while (digits_at < numeric_length && byte_is_digit(bytes[digits_at]) &&
+                while (digits_at < canon_length && byte_is_digit(canon[digits_at]) &&
                        whole < 100000000000000000ull)
-                        whole = whole * 10 + (positive)(bytes[digits_at++] - '0');
+                        whole = whole * 10 + (positive)(canon[digits_at++] - '0');
                 for (positive k = 0; k < power; k++)
                         whole = whole < 100000000000000000ull / base ? whole * base
                                                                      : 100000000000000000ull;
-                if (digits_at == numeric_length && whole < 100000000000000000ull &&
+                if (digits_at == canon_length && whole < 100000000000000000ull &&
                     !numfmt.debug && numfmt_exact(whole, minus, automatic_width))
                         return true;
         }
@@ -5525,38 +5799,39 @@ static bool numfmt_convert(p8 address_to bytes, positive length,
                 eighty bits on x86_64 and binary128 elsewhere, so what GNU
                 rounds away on this machine is rounded away here too.
         */
-        bool minus = numeric_length && bytes[0] == '-';
+        bool minus = canon_length && canon[0] == '-';
         positive digit_at = minus;
         positive whole_digits = 0, fraction_digits = 0, precision = 0;
         seq_wide ten = seq_wide_from(10);
         seq_wide value = {0, 0, SEQ_WIDE_ZERO, false};
         bool loss = false;
 
-        for (; digit_at < numeric_length && byte_is_digit(bytes[digit_at]); digit_at++)
+        for (; digit_at < canon_length && byte_is_digit(canon[digit_at]); digit_at++)
         {
-                if (value.kind != SEQ_WIDE_ZERO || bytes[digit_at] != '0')
+                if (value.kind != SEQ_WIDE_ZERO || canon[digit_at] != '0')
                         whole_digits++;
                 value = seq_wide_add(seq_wide_multiply(value, ten),
-                                     seq_wide_from((p64)(bytes[digit_at] - '0')));
+                                     seq_wide_from((p64)(canon[digit_at] - '0')));
         }
         loss |= whole_digits > 18;
         if (minus)
                 value.negative = !value.negative;
 
-        if (digit_at < numeric_length && bytes[digit_at] == '.')
+        if (digit_at < canon_length && canon[digit_at] == '.')
         {
                 seq_wide part = {0, 0, SEQ_WIDE_ZERO, false};
                 positive from = ++digit_at;
 
-                for (; digit_at < numeric_length && byte_is_digit(bytes[digit_at]); digit_at++)
+                for (; digit_at < canon_length && byte_is_digit(canon[digit_at]); digit_at++)
                 {
-                        if (part.kind != SEQ_WIDE_ZERO || bytes[digit_at] != '0')
+                        if (part.kind != SEQ_WIDE_ZERO || canon[digit_at] != '0')
                                 fraction_digits++;
                         part = seq_wide_add(seq_wide_multiply(part, ten),
-                                            seq_wide_from((p64)(bytes[digit_at] - '0')));
+                                            seq_wide_from((p64)(canon[digit_at] - '0')));
                 }
                 loss |= fraction_digits > 18;
-                precision = digit_at - from;
+                (void)from;
+                precision = fraction_bytes;
                 part = numfmt_wide_divide(part, numfmt_wide_power(ten, precision));
                 if (minus)
                         part.negative = !part.negative;
@@ -5691,13 +5966,26 @@ static fn numfmt_record(p8 address_to bytes, positive length)
 {
         if (numfmt.delimiter_given)
         {
+                positive step = numfmt.delimiter_length > 1 ? numfmt.delimiter_length : 1;
+
                 for (positive start = 0, field = 1;; field++)
                 {
-                        p8 address_to mark = start < length
-                                                 ? memory_first_of(bytes + start,
-                                                                   numfmt.field_delimiter,
-                                                                   length - start)
-                                                 : null;
+                        p8 address_to mark = null;
+
+                        if (start < length && numfmt.delimiter_length <= 1)
+                                mark = memory_first_of(bytes + start, numfmt.field_delimiter,
+                                                       length - start);
+                        else if (start < length)
+                                //      A character at a time, so the tail of
+                                //      one is never taken for the head of
+                                //      the delimiter.
+                                for (positive look = start; look + step <= length;
+                                     look += text_mb_length(text_charset(), bytes + look, length - look))
+                                        if (!memory_compare(bytes + look, numfmt.delimiter_text, step))
+                                        {
+                                                mark = bytes + look;
+                                                break;
+                                        }
                         positive at = mark ? (positive)(mark - bytes) : length;
 
                         if (text_list_has(field))
@@ -5708,56 +5996,44 @@ static fn numfmt_record(p8 address_to bytes, positive length)
                         if (numfmt.stop || !mark)
                                 return;
 
-                        text_put_character(numfmt.field_delimiter);
-                        start = at + 1;
+                        if (numfmt.delimiter_length > 1)
+                                text_put((p8 address_to)numfmt.delimiter_text, step);
+                        else
+                                text_put_character(numfmt.field_delimiter);
+                        start = at + step;
                 }
         }
 
         positive at = 0;
         positive field = 0;
 
-        if (!length && text_list_has(1))
+        //      GNU's process_line: each field is what is left after one
+        //      separator, its leading blanks with it, and a last field that
+        //      is empty or all blanks is still a field.
+        for (;;)
         {
-                numfmt_convert(bytes, 0, 0);
-                return;
-        }
-
-        while (at < length)
-        {
-                positive prefix = at;
-                at += string_span_max(bytes + at, length - at, string_set_blanks);
-                positive start = at;
-
-                if (at == length)
-                {
-                        if (!field && text_list_has(1))
-                                numfmt_convert(bytes + prefix, length - prefix, 0);
-                        else
-                                text_put(bytes + prefix, length - prefix);
-                        break;
-                }
-
-                at += string_span_max(bytes + at, length - at, text_set_inside);
-
                 field++;
 
-                if (text_list_has(field))
-                        numfmt_convert(bytes + prefix, at - prefix,
-                                       start && !numfmt.padding
-                                           ? at - prefix : 0);
-                else
-                        text_put(bytes + prefix, at - prefix);
+                positive prefix = at;
+                positive first = numfmt_skip(bytes, length, at, true);
+                positive field_end = numfmt_skip(bytes, length, first, false);
+                bool last = field_end >= length;
+                positive stop_at = last ? length : field_end;
 
-                if (numfmt.stop)
+                if (text_list_has(field))
+                        numfmt_convert(bytes + prefix, stop_at - prefix,
+                                       (first > prefix || field > 1) && !numfmt.padding
+                                           ? numfmt_columns_or_bytes(bytes + prefix,
+                                                                     stop_at - prefix)
+                                           : 0);
+                else
+                        text_put(bytes + prefix, stop_at - prefix);
+
+                if (numfmt.stop || last)
                         return;
 
-                // One field separator is normalized; additional whitespace
-                // belongs to the next field and its automatic width.
-                if (at < length)
-                {
-                        text_put_character(' ');
-                        at++;
-                }
+                text_put_character(' ');
+                at = field_end + (numfmt_blank_at(bytes, length, field_end, true) ?: 1);
         }
 }
 
@@ -5922,9 +6198,16 @@ static bool numfmt_option_seen(p8 letter, string_address value)
 
         if (letter == 'd' && value && string_length(value) > 1)
         {
-                text_flush();
-                writer_stderr("numfmt: the delimiter must be a single character\n", 0);
-                return false;
+                //      One character of a multibyte locale is a delimiter
+                //      whatever its length in bytes.
+                positive size = string_length(value);
+
+                if (text_mb_length(text_charset(), (const p8 address_to)value, size) != size)
+                {
+                        text_flush();
+                        writer_stderr("numfmt: the delimiter must be a single character\n", 0);
+                        return false;
+                }
         }
         if (letter == 'h' && value)
         {
@@ -6079,6 +6362,8 @@ static b32 tools_numfmt()
         if (!file_take(address_of taking) || file_operand_failed)
                 return text_done(1);
 
+        numfmt_locale();
+
         positive flags = taking.flags;
         numfmt.debug = (flags & FILE_FLAG('D')) != 0;
         numfmt.grouping = (flags & FILE_FLAG('g')) != 0;
@@ -6145,6 +6430,8 @@ static b32 tools_numfmt()
 
                 numfmt.delimiter_given = true;
                 numfmt.field_delimiter = length ? value[0] : '\0';
+                numfmt.delimiter_text = value;
+                numfmt.delimiter_length = length;
         }
 
         if (!numfmt.fields_given)
@@ -6192,7 +6479,7 @@ static b32 tools_numfmt()
         }
 
         /* Grouping is the locale's separator, and the C locale has none. */
-        if (numfmt.debug &&
+        if (numfmt.debug && !numfmt_thousands[0] &&
             (numfmt.grouping || (numfmt.have_format && numfmt.format.grouping)))
         {
                 text_flush();
