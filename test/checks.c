@@ -33526,7 +33526,18 @@ static fn spelled_fuzz(positive rounds)
 //      writer_c_escape, sed l): every byte under every extra set.
 static fn spelled_c_check(void)
 {
-        for (positive extra = 0; extra < 64; extra++)
+        for (positive high = 0; high < 2; high++)
+        {
+                p64 address_to table = spelling_hidden(high);
+                bool right = table == spelling_hidden(high);
+                for (positive byte = 0; byte < 256; byte++)
+                {
+                        bool hide = byte < 32 || byte == 127 || (high && byte >= 128);
+                        right = right && table[byte] == ((p64)(hide ? '?' : byte) << 8 | 1);
+                }
+                check("spelling_hidden: every byte, with and without the high half", right);
+        }
+        for (positive extra = 0; extra < 128; extra++)
         {
                 p64 address_to table = spelling_c(extra);
                 bool right = table == spelling_c(extra);
@@ -33534,7 +33545,7 @@ static fn spelled_c_check(void)
                 {
                         p8 text[4];
                         positive length;
-                        bool slashed = byte == '\\' ||
+                        bool slashed = (byte == '\\' && !(extra & SPELL_C_BACKSLASH_BARE)) ||
                                        (byte == '\'' && (extra & SPELL_C_APOSTROPHE)) ||
                                        (byte == '"' && (extra & SPELL_C_QUOTE)) ||
                                        (byte == ' ' && (extra & SPELL_C_SPACE)) ||

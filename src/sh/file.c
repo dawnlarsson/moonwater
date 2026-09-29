@@ -8548,37 +8548,7 @@ static bool ls_shell_needs_quotes(string_address name, positive length, bool esc
         return false;
 }
 
-/*
-        One byte of a name spelled as an escape, the way -b writes it and the
-        way a quoted name on a terminal writes it. The two differ only in
-        that -b's C spelling has a letter for the bell and for the backslash
-        itself; the quoted form never meets a backslash and writes the bell
-        in octal. Everything else is the same table.
-*/
-static positive ls_escape_byte(p8 byte, p8 address_to into, bool c_style)
-{
-        into[0] = '\\';
-        into[1] = byte == '\n'                ? 'n'
-                  : byte == '\t'              ? 't'
-                  : byte == '\r'              ? 'r'
-                  : byte == '\b'              ? 'b'
-                  : byte == '\f'              ? 'f'
-                  : byte == '\v'              ? 'v'
-                  : c_style && byte == 7      ? 'a'
-                  : c_style && byte == '\\'   ? '\\'
-                                              : 0;
-
-        if (into[1])
-                return 2;
-
-        into[1] = (p8)('0' + ((byte >> 6) & 7));
-        into[2] = (p8)('0' + ((byte >> 3) & 7));
-        into[3] = (p8)('0' + (byte & 7));
-
-        return 4;
-}
-
-// The byte a C escape letter names, the inverse of ls_escape_byte's letters,
+// The byte a C escape letter names, the inverse of spelling_c's letters,
 // or 0xff for a letter that names none.
 static CONST p8 byte_from_escape_letter(p8 letter)
 {
@@ -8674,6 +8644,8 @@ static fn ls_quote_shell(writer write, string_address name, positive length, boo
 
                         //      A run of what is not printable, each of its bytes
                         //      spelled, up to the next character that is.
+                        positive start = at;
+
                         while (at < length)
                         {
                                 bool here = true;
@@ -8681,14 +8653,9 @@ static fn ls_quote_shell(writer write, string_address name, positive length, boo
 
                                 if (here)
                                         break;
-                                for (positive i = 0; i < width; i++)
-                                {
-                                        p8 spelled[4];
-
-                                        write(spelled, ls_escape_byte(string_get(name + at + i), spelled, true));
-                                }
                                 at += width;
                         }
+                        writer_spelled(write, name + start, at - start, spelling_c(0));
                         at--;
                         write("'", 1);
                         open = false;
@@ -8700,8 +8667,16 @@ static fn ls_quote_shell(writer write, string_address name, positive length, boo
                         write("'", 1);
                         open = true;
                 }
-                write(name + at, step);
-                at += step - 1;
+                // Bare bytes up to the next quote or the next byte that is
+                // not plain ASCII go out in one write.
+                positive run = at + step;
+
+                if (step == 1 && printable)
+                        while (run < length && string_get(name + run) >= ' ' &&
+                               string_get(name + run) < 127 && string_get(name + run) != '\'')
+                                run++;
+                write(name + at, run - at);
+                at = run - 1;
         }
 
         if (open)
@@ -8788,44 +8763,47 @@ static fn ls_quote_c(writer write, string_address name, positive length, p8 styl
 
         write(left, string_length(left));
 
-        for (positive at = 0; at < length; at++)
-        {
-                p8 byte = string_get(name + at);
-                p8 spelled[4];
+        // The ASCII of a name is the table's: the closing quote when it is
+        // one byte, the space when the style is escape and no heading is
+        // being written, the colon when one is, and the backslash left bare
+        // in the one style with neither quote nor escape. Past ASCII, a
+        // closing quote of several bytes is met whole, then each character
+        // as the locale shows it: itself where printable, else an octal
+        // escape a byte.
+        //      c-maybe only quotes for a colon; the quoting it then does
+        //      knows nothing of the heading's colon.
+        positive extra = (quote_length == 1 ? (right[0] == '"' ? SPELL_C_QUOTE : SPELL_C_APOSTROPHE) : 0) |
+                         (style == 'b' && !ls_quote_heading ? SPELL_C_SPACE : 0) |
+                         (ls_quote_heading && style != 'm' ? SPELL_C_COLON : 0) |
+                         (quote_length || style == 'b' ? 0 : SPELL_C_BACKSLASH_BARE);
+        p64 address_to table = spelling_c(extra);
 
-                if (byte == '\\' && (quote_length || style == 'b'))
-                        write("\\\\", 2);
-                else if (byte == '\\')
-                        write(name + at, 1);
-                else if (quote_length && at + quote_length <= length &&
-                         !string_compare_max(name + at, right, quote_length))
+        for (positive at = 0; at < length;)
+        {
+                positive plain = memory_escape_index(name + at, length - at, HEX_HIGH);
+                bool printable = false;
+                positive step;
+
+                if (plain)
+                {
+                        writer_spelled(write, name + at, plain, table);
+                        at += plain;
+                        continue;
+                }
+                if (quote_length > 1 && at + quote_length <= length &&
+                    !string_compare_max(name + at, right, quote_length))
                 {
                         write("\\", 1);
                         write(name + at, quote_length);
-                        at += quote_length - 1;
+                        at += quote_length;
+                        continue;
                 }
-                else if (style == 'b' && byte == ' ' && !ls_quote_heading)
-                        write("\\ ", 2);
-                //      c-maybe only quotes for a colon; the quoting it
-                //      then does knows nothing of the heading's colon.
-                else if (byte == ':' && ls_quote_heading && style != 'm')
-                        write("\\:", 2);
-                else if (ls_byte_unprintable(byte))
-                {
-                        bool printable = false;
-                        positive step = byte >= 0x80
-                                            ? ls_char_at(name, length, at, address_of printable) : 1;
-
-                        if (printable)
-                        {
-                                write(name + at, step);
-                                at += step - 1;
-                        }
-                        else
-                                write(spelled, ls_escape_byte(byte, spelled, true));
-                }
+                step = ls_char_at(name, length, at, address_of printable);
+                if (printable)
+                        write(name + at, step);
                 else
-                        write(name + at, 1);
+                        writer_spelled(write, name + at, step, table);
+                at += step;
         }
 
         write(right, quote_length);
@@ -8849,6 +8827,34 @@ static fn file_shell_name_reason(writer output, string_address before,
         string_format(output, "%s\n", file_reason(reason));
 }
 
+/* A name with what the locale cannot show as ?: ASCII a run at a time through
+   the table, and each character past ASCII as itself where it is printable
+   and as one ? where it is not. */
+static fn ls_write_shown(writer write, string_address name, positive length)
+{
+        p64 address_to table = spelling_hidden(false);
+
+        for (positive at = 0; at < length;)
+        {
+                positive plain = memory_escape_index(name + at, length - at, HEX_HIGH);
+                bool printable;
+                positive step;
+
+                if (plain)
+                {
+                        writer_spelled(write, name + at, plain, table);
+                        at += plain;
+                        continue;
+                }
+                step = ls_char_at(name, length, at, address_of printable);
+                if (printable)
+                        write(name + at, step);
+                else
+                        write("?", 1);
+                at += step;
+        }
+}
+
 static fn ls_quote_literal(writer write, string_address name, positive length)
 {
         if (!ls_hide_controls)
@@ -8857,17 +8863,7 @@ static fn ls_quote_literal(writer write, string_address name, positive length)
                 return;
         }
 
-        for (positive at = 0; at < length;)
-        {
-                bool printable;
-                positive step = ls_char_at(name, length, at, address_of printable);
-
-                if (printable)
-                        write(name + at, step);
-                else
-                        write("?", 1);
-                at += step;
-        }
+        ls_write_shown(write, name, length);
 }
 
 /*
@@ -8883,17 +8879,7 @@ static fn ls_write_hidden(address_any text, positive length)
 
         if (!length)
                 length = string_length(at);
-        for (positive done = 0; done < length;)
-        {
-                bool printable;
-                positive step = ls_char_at(at, length, done, address_of printable);
-
-                if (printable)
-                        ls_hidden_writer(at + done, step);
-                else
-                        ls_hidden_writer("?", 1);
-                done += step;
-        }
+        ls_write_shown(ls_hidden_writer, at, length);
 }
 
 static fn ls_quote(writer write, string_address name)
@@ -12479,44 +12465,8 @@ static string_address file_exec_refusal(bipolar answer)
 static fn file_quoted_name(string_address name)
 {
         log_error("'", 1);
-
-        for (string_address at = name; at[0]; at++)
-        {
-                p8 byte = (p8)at[0];
-                string_address escape = null;
-
-                switch (byte)
-                {
-                case '\\': escape = "\\\\"; break;
-                case '\'': escape = "\\'"; break;
-                case '\a': escape = "\\a"; break;
-                case '\b': escape = "\\b"; break;
-                case '\f': escape = "\\f"; break;
-                case '\n': escape = "\\n"; break;
-                case '\r': escape = "\\r"; break;
-                case '\t': escape = "\\t"; break;
-                case '\v': escape = "\\v"; break;
-                }
-
-                if (escape)
-                {
-                        log_error(escape, 2);
-                        continue;
-                }
-
-                if (byte < ' ' || byte == 127)
-                {
-                        p8 octal[4] = {'\\', (p8)('0' + ((byte >> 6) & 7)),
-                                       (p8)('0' + ((byte >> 3) & 7)),
-                                       (p8)('0' + (byte & 7))};
-
-                        log_error(octal, 4);
-                        continue;
-                }
-
-                log_error(at, 1);
-        }
-
+        writer_spelled(log_error, name, string_length(name),
+                       spelling_c(SPELL_C_APOSTROPHE | SPELL_C_HIGH_BARE));
         log_error("'", 1);
 }
 
@@ -19480,22 +19430,9 @@ static fn file_write_controls_hidden(writer output, string_address text,
                                      positive width)
 {
         positive length = string_length(text);
-        positive plain = 0;
 
-        for (positive at = 0; at < length; at++)
-        {
-                p8 byte = (p8)text[at];
-
-                if (byte >= 32 && byte != 127)
-                        continue;
-                // A writer takes a length of 0 as "to the end".
-                if (at > plain)
-                        output(text + plain, at - plain);
-                output("?", 1);
-                plain = at + 1;
-        }
-        if (length > plain)
-                output(text + plain, length - plain);
+        if (length)
+                writer_spelled(output, text, length, spelling_hidden(false));
         writer_fill(output, width > length ? width - length : 0, ' ');
 }
 

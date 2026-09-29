@@ -2711,7 +2711,7 @@ static p64 address_to spelling_caret(positive flags)
 
 enum {
         SPELL_C_APOSTROPHE = 1, SPELL_C_QUOTE = 2, SPELL_C_SPACE = 4, SPELL_C_COLON = 8,
-        SPELL_C_HIGH_BARE = 16, SPELL_C_NT_ONLY = 32,
+        SPELL_C_HIGH_BARE = 16, SPELL_C_NT_ONLY = 32, SPELL_C_BACKSLASH_BARE = 64,
 };
 
 /* A C string's spelling, as coreutils' quotearg, GNU tar and sed's l write
@@ -2720,13 +2720,15 @@ enum {
    ASCII, and the rest as it is; extra escapes the apostrophe, the double
    quote, the space and the colon with a backslash as well, leaves bytes past
    ASCII as they are (SPELL_C_HIGH_BARE), or keeps letters for newline and
-   tab only (SPELL_C_NT_ONLY), as diff's C-quoted names do. */
+   tab only (SPELL_C_NT_ONLY), as diff's C-quoted names do, or leaves the
+   backslash alone (SPELL_C_BACKSLASH_BARE), as ls's c-maybe does when it
+   ends up with no quotes. */
 static p64 address_to spelling_c(positive extra)
 {
-        static spelling_table tables[64];
-        static p8 built[64];
+        static spelling_table tables[128];
+        static p8 built[128];
 
-        extra &= 63;
+        extra &= 127;
         p64 address_to table = tables[extra];
         if (__atomic_load_n(&built[extra], __ATOMIC_ACQUIRE))
                 return table;
@@ -2747,7 +2749,7 @@ static p64 address_to spelling_c(positive extra)
                         text[3] = (p8)('0' + (byte & 7));
                         length = 4;
                 }
-                else if (!(byte == '\\' ||
+                else if (!((byte == '\\' && !(extra & SPELL_C_BACKSLASH_BARE)) ||
                            (byte == '\'' && (extra & SPELL_C_APOSTROPHE)) ||
                            (byte == '"' && (extra & SPELL_C_QUOTE)) ||
                            (byte == ' ' && (extra & SPELL_C_SPACE)) ||
@@ -2756,6 +2758,24 @@ static p64 address_to spelling_c(positive extra)
                 table[byte] = spelling_entry(text, length);
         }
         __atomic_store_n(&built[extra], 1, __ATOMIC_RELEASE);
+        return table;
+}
+
+/* Printable ASCII as it is and a control byte or DEL as '?', as GNU's ls -q
+   and df write a name a user chose; bytes past ASCII too when high says the
+   locale shows none. */
+static p64 address_to spelling_hidden(bool high)
+{
+        static spelling_table tables[2];
+        static p8 built[2];
+
+        p64 address_to table = tables[high];
+        if (__atomic_load_n(&built[high], __ATOMIC_ACQUIRE))
+                return table;
+        for (positive byte = 0; byte < 256; byte++)
+                table[byte] = (p64)(byte < 32 || byte == 127 || (high && byte >= 128)
+                                        ? '?' : byte) << 8 | 1;
+        __atomic_store_n(&built[high], 1, __ATOMIC_RELEASE);
         return table;
 }
 
