@@ -7207,6 +7207,22 @@ def files_cplinks_cases():
     return tuple({"fixture": "files_cplinks", "argv": argv} for argv in argvs)
 
 
+FIXTURES["files_inlinks"] = {
+    "a": files_file(b"one\n", 1000000000),
+    "b": ("hard", "a"),
+    "l": files_link("a", 1010000000),
+    "d/a": ("hard", "a"),
+    "d": files_dir(1020000000),
+}
+
+
+def files_inlinks_cases():
+    argvs = (("a", "b"), ("b", "a"), ("a", "d/a"), ("a", "d"), ("a", "l"), ("l", "a"), ("-b", "a", "b"), ("-C", "a", "b"),
+             ("-p", "a", "b"), ("-m", "600", "a", "b"), ("-D", "a", "b"), ("-v", "a", "b"), ("a", "a"), ("a", "./a"),
+             ("-t", "d", "a", "b"), ("-T", "a", "b"), ("-b", "a", "a"), ("-S", ".k", "-b", "a", "b"))
+    return tuple({"fixture": "files_inlinks", "argv": argv} for argv in argvs)
+
+
 def files_cpmerge_cases():
     controls = (("-b",), ("--backup=numbered",), ("--backup=existing",), ("-b", "-S", ".k"), ("--backup=none",))
     copies = (("-r",), ("-a",), ("-rf",), ("-r", "--remove-destination"), ("-ru",))
@@ -8085,7 +8101,7 @@ FILES_UTILITIES = (
                       ("a.txt", "b.txt"), ("a.txt", "hollow"), ("a.txt", "dirlink"), ("dir", "dir2"), ("a.txt", "dir/sub/deep"),
                       ("binary", "made"), ("a.txt", "-dash")),
             stdin=("empty",), fixture="files", stderr="exact",
-            extra=(("-d", "new/deep/made"), ("-d", "-m", "0710", "new/deep/made"), ("-d", "dir"), ("-d", "a.txt"), ("-D", "a.txt", "new/deep/made"),
+            extra=files_inlinks_cases() + (("-d", "new/deep/made"), ("-d", "-m", "0710", "new/deep/made"), ("-d", "dir"), ("-d", "a.txt"), ("-D", "a.txt", "new/deep/made"),
                    ("-D", "-t", "new/deep", "a.txt"), ("-p", "a.txt", "made"), ("-v", "a.txt", "made"), ("-m", "0640", "a.txt", "made"),
                    ("-m", "u=rw,go=r", "a.txt", "made"), ("-C", "a.txt", "made"), ("-C", "a.txt", "b.txt"), ("-b", "a.txt", "b.txt"),
                    ("-s", "a.txt", "made"), ("-s", "--strip-program=true", "a.txt", "made"), ("-T", "a.txt", "made"), ("-T", "a.txt", "dir"),
@@ -8441,6 +8457,11 @@ FILES_SCENES = {
                   "env setfattr -n user.mid -v \"$(env printf '%01500d' 0)\" sb/x/y || exit 9\n", "",
                   "for n in cb cb/x cb/x/y cb/n; do [ -e $n ] || continue; echo \"== $n $(env stat -c %a $n)\"; "
                   "env getfattr -d --absolute-names $n 2>&1 | env grep -v '^#' | env md5sum; done\n"),
+    # a directory with a default access list, and what a file put into it by
+    # install carries: GNU sets the ACL from the mode, so it carries none.
+    "aclinherit": ("env mkdir dd && env touch sf && env setfacl -d -m u:nobody:rwx dd || exit 9\n", "",
+                   "for n in dd/sf dd/x dd/f; do [ -e $n ] || continue; echo \"== $n $(env stat -c %a $n)\"; "
+                   "env getfacl -cp $n 2>/dev/null; done\n"),
     # a tree made under umask 000: every directory writable by all, no
     # sticky bit, and what is left of it looked at afterwards.
     "wide": ("(umask 000; env mkdir -p w/x/y && env touch w/x/f w/g) || exit 9\n", "",
@@ -8465,6 +8486,8 @@ FILES_SCENE_CASES = (
     ("xattr", "cp", "--preserve=all", "sf", "c"), ("xattr", "cp", "-a", "--no-preserve=xattr", "sf", "c"),
     ("xattr", "cp", "-a", "sd", "cd"), ("xattr", "cp", "-rp", "sd", "cd"), ("xattr", "mv", "sf", "m"),
     ("xattr", "cp", "-a", "sd", "cd"), ("xattr", "install", "-p", "sf", "c"),
+    ("aclinherit", "install", "sf", "dd/x"), ("aclinherit", "install", "-m", "600", "sf", "dd/f"),
+    ("aclinherit", "install", "-t", "dd", "sf"), ("aclinherit", "install", "-p", "sf", "dd/x"),
     ("xattr_big", "cp", "-a", "sb", "cb"), ("xattr_big", "cp", "-r", "--preserve=xattr", "sb", "cb"),
     ("xattr_big", "cp", "-rp", "sb", "cb"), ("xattr_big", "cp", "-r", "sb", "cb"), ("xattr_big", "mv", "sb", "cb"),
     ("wide", "rm", "-rf", "w"), ("wide", "rm", "-r", "w"), ("wide", "rm", "-rv", "w"),

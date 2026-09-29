@@ -35517,6 +35517,12 @@ static bool install_attributes_handle(bipolar destination_handle,
                               writer_shell_quoted_name, destination, file_reason(owned));
         }
 
+        /* GNU sets the file's ACL from the mode, which takes away the
+           entries a directory's default list gave it; a file with none has
+           nothing to remove, and a filesystem with no ACLs says so. */
+        (void)system_call_2(syscall(fremovexattr), (positive)destination_handle,
+                            (positive) "system.posix_acl_access");
+
         if (file_change_mode_handle(destination_handle, install_mode) < 0)
         {
                 return string_report(log_error, false, "install: cannot change mode of %w\n",
@@ -35869,8 +35875,20 @@ static fn install_pair(string_address source, string_address destination)
                 install_status = 1;
                 return;
         }
+        /* install unlinks the destination before it writes, as --remove-
+           destination does, so a destination that is another name of the
+           source's file (with more names than the one) is replaced and
+           the source keeps its own: GNU's same_file_ok lets it through and
+           refuses only one and the same directory entry. */
+        file_facts source_entry;
+
         if (destination_exists &&
-            file_same_identity(address_of from, address_of to))
+            file_same_identity(address_of from, address_of to) &&
+            !(to.hard_links > 1 && (to.mode & MODE_FORMAT) != MODE_LINK &&
+              file_look(AT_FDCWD, source, AT_SYMLINK_NOFOLLOW,
+                        address_of source_entry) &&
+              (source_entry.mode & MODE_FORMAT) != MODE_LINK &&
+              !file_same_spelled(source, destination)))
         {
                 string_format(log_error, "install: %w and %w are the same file\n",
                               writer_shell_quoted_name, source, writer_shell_quoted_name,
