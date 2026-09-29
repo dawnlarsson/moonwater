@@ -4796,48 +4796,49 @@ static fn tls_transcript_add(tls_conn address_to tls, p8 address_to msg,
 static COLD bipolar tls_asn1_length(p8 address_to bytes, positive size,
                                positive address_to at, positive address_to length)
 {
-        positive i = address_to at;
+        byte_reader reader = byte_reader_open(bytes, size);
+        byte_reader lead;
         p8 first;
         positive count;
-        positive value;
+        positive value = 0;
 
-        if (i >= size)
+        (void)byte_reader_skip(&reader, address_to at);
+        first = byte_reader_u8(&reader);
+        if (!byte_reader_ok(&reader))
                 return TLS_FAIL;
 
-        first = bytes[i++];
         if (first < 0x80)
         {
                 address_to length = first;
-                address_to at = i;
+                address_to at = size - byte_reader_left(&reader);
                 return TLS_OK;
         }
 
+        //      Long form: one to three length bytes, the first not zero, and
+        //      a value the short form could not have said.
         count = first & 0x7f;
-        value = 0;
-        if (!count || count > 3 || count > size - i || !bytes[i])
+        lead = reader;
+        if (!count || count > 3 || !byte_reader_u8(&lead))
                 return TLS_FAIL;
-        while (count)
-        {
-                value = (value << 8) | bytes[i++];
-                count--;
-        }
-        if (value < 0x80)
+        for (positive taken = 0; taken < count; taken++)
+                value = (value << 8) | byte_reader_u8(&reader);
+        if (!byte_reader_ok(&reader) || value < 0x80)
                 return TLS_FAIL;
         address_to length = value;
-        address_to at = i;
+        address_to at = size - byte_reader_left(&reader);
         return TLS_OK;
 }
 
 static COLD bipolar tls_asn1_enter(p8 address_to bytes, positive size, p8 tag,
                               positive address_to at, positive address_to stop)
 {
-        positive i = address_to at;
+        byte_reader reader = byte_reader_open(bytes, size);
         positive length = 0;
 
-        if (i >= size || bytes[i] != tag)
+        (void)byte_reader_skip(&reader, address_to at);
+        if (byte_reader_u8(&reader) != tag || !byte_reader_ok(&reader))
                 return TLS_FAIL;
-        i++;
-        address_to at = i;
+        address_to at = size - byte_reader_left(&reader);
         if (tls_asn1_length(bytes, size, at, address_of length) ||
             length > size - address_to at)
                 return TLS_FAIL;
@@ -4849,11 +4850,13 @@ static COLD bipolar tls_asn1_enter(p8 address_to bytes, positive size, p8 tag,
    end for the next value's start is the whole of skipping it. */
 static COLD bipolar tls_asn1_skip(p8 address_to bytes, positive size, positive address_to at)
 {
+        byte_reader reader = byte_reader_open(bytes, size);
         positive stop = 0;
 
-        if (address_to at >= size ||
-            tls_asn1_enter(bytes, size, bytes[address_to at], at,
-                           address_of stop))
+        (void)byte_reader_skip(&reader, address_to at);
+        if (tls_asn1_enter(bytes, size, byte_reader_u8(&reader), at,
+                           address_of stop) ||
+            !byte_reader_ok(&reader))
                 return TLS_FAIL;
 
         address_to at = stop;
@@ -4866,12 +4869,15 @@ static COLD bipolar tls_asn1_take(p8 address_to bytes, positive size, p8 tag,
                                   p8 address_to address_to value,
                                   positive address_to length)
 {
+        byte_reader reader = byte_reader_open(bytes, size);
         positive start = address_to at;
         positive stop = 0;
 
-        if (tls_asn1_enter(bytes, size, tag, at, address_of stop))
+        (void)byte_reader_skip(&reader, start);
+        if (tls_asn1_enter(bytes, size, tag, at, address_of stop) ||
+            !byte_reader_ok(&reader))
                 return TLS_FAIL;
-        address_to value = bytes + start;
+        address_to value = (p8 address_to)byte_reader_here(&reader);
         address_to length = stop - start;
         address_to at = stop;
         return TLS_OK;
