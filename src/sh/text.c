@@ -2408,6 +2408,9 @@ static bipolar big_compare(const p64 address_to a, positive an,
 #ifndef BIG_NTT
 #define BIG_NTT 3000
 #endif
+#ifndef BIG_NTTV
+#define BIG_NTTV 500
+#endif
 
 typedef struct
 {
@@ -2551,6 +2554,8 @@ static bool big_multiply_ntt(p64 address_to r, const p64 address_to a, positive 
 {
         positive length = 1;
 
+        if (an + bn > ((positive)1 << 30))
+                return false;
         while (length < an + bn)
                 length <<= 1;
 
@@ -2603,6 +2608,440 @@ static bool big_multiply_ntt(p64 address_to r, const p64 address_to a, positive 
 }
 
 /*
+        The transform on AVX-512, with primes of 31 bits (2013265921,
+        1811939329 and 2113929217, each c 2^25 + 1 or better) so that a
+        multiply is vpmuludq, eight lanes of 32 by 32 to 64. A limb is two
+        pieces of 32 bits, a coefficient of the product is below 2^64 times
+        the pieces of the shorter number, and the primes' product is above
+        2^92, which holds it to a length of 2^25. Montgomery's R is 2^32 and
+        every residue is kept below its prime. The last four layers pair
+        lanes of one register, so they are done in registers, two vectors
+        at a time, and their shuffle is the layout the transform leaves its
+        output in: the same for both operands, undone by the inverse, and
+        never seen by the pointwise product.
+*/
+#if X64
+#pragma GCC push_options
+#pragma GCC target("avx512f")
+
+typedef p64 big_v8 __attribute__((vector_size(64)));
+typedef long long big_v8i __attribute__((vector_size(64)));
+typedef int big_v16 __attribute__((vector_size(64)));
+typedef int big_v8s __attribute__((vector_size(32)));
+typedef p64 big_v8u __attribute__((vector_size(64), aligned(8), may_alias));
+typedef int big_v8su __attribute__((vector_size(32), aligned(4), may_alias));
+
+typedef struct
+{
+        p64 prime, inverse, square, root; // p, 1 / p mod 2^32, R^2 mod p, a 2^25th root of one times R
+} big_nttv_prime;
+
+static const big_nttv_prime big_nttv_primes[3] = {
+    {2013265921ull, 0x88000001ull, 0x45dddde3ull, 0x0dd9b26full},
+    {1811939329ull, 0x94000001ull, 0x392f6852ull, 0x5d587770ull},
+    {2113929217ull, 0x82000001ull, 0x7ddf7dfdull, 0x5b4abd1bull},
+};
+
+#define BIG_V8(...) ((big_v8){__VA_ARGS__})
+#define BIG_V8_ALL(x) BIG_V8(x, x, x, x, x, x, x, x)
+
+static inline big_v8 big_v8_multiply32(big_v8 a, big_v8 b)
+{
+        return (big_v8)__builtin_ia32_pmuludq512_mask((big_v16)a, (big_v16)b,
+                                                     (big_v8i){0, 0, 0, 0, 0, 0, 0, 0},
+                                                     (unsigned char)255);
+}
+
+static inline big_v8 big_v8_minimum(big_v8 x, big_v8 y)
+{
+        big_v8 keep = (big_v8)(x < y);
+
+        return (x & keep) | (y & ~keep);
+}
+
+// a * b / 2^32 below the prime, for a * b below prime * 2^32.
+static inline big_v8 big_v8_montgomery(big_v8 a, big_v8 b, big_v8 prime, big_v8 inverse)
+{
+        big_v8 t = big_v8_multiply32(a, b);
+        big_v8 m = big_v8_multiply32(t, inverse);
+        big_v8 u = big_v8_multiply32(m, prime);
+        big_v8 r = (t >> 32) - (u >> 32);
+
+        return big_v8_minimum(r, r + prime);
+}
+
+static inline big_v8 big_v8_add(big_v8 x, big_v8 y, big_v8 prime)
+{
+        big_v8 s = x + y;
+
+        return big_v8_minimum(s, s - prime);
+}
+
+static inline big_v8 big_v8_subtract(big_v8 x, big_v8 y, big_v8 prime)
+{
+        big_v8 d = x - y;
+
+        return big_v8_minimum(d, d + prime);
+}
+
+static inline big_v8 big_v8_load(const p64 address_to at)
+{
+        return *(const big_v8u address_to)at;
+}
+
+static inline void big_v8_store(p64 address_to at, big_v8 value)
+{
+        *(big_v8u address_to)at = value;
+}
+
+// a's and b's lanes as vpermt2q takes them: 0 to 7 from a and 8 to 15 from b.
+static inline big_v8 big_v8_permute(big_v8 a, big_v8 b, big_v8 index)
+{
+        return (big_v8)__builtin_ia32_vpermt2varq512_mask((big_v8i)index, (big_v8i)a, (big_v8i)b,
+                                                         (unsigned char)255);
+}
+
+// Eight pieces of 32 bits of a limb array, from the piece at, as lanes.
+static inline big_v8 big_v8_pieces(const p64 address_to limbs, positive at)
+{
+        return (big_v8)__builtin_ia32_pmovzxdq512_mask(*(const big_v8su address_to)((const p32 address_to)limbs + at),
+                                                      (big_v8i){0, 0, 0, 0, 0, 0, 0, 0}, (unsigned char)255);
+}
+
+typedef struct
+{
+        big_v8 prime, inverse;
+        big_v8 w8, w4, i8, i4; // the level 8 and 4 twiddles as the small layers' lanes take them
+} big_nttv_context;
+
+static inline void big_nttv_small_forward(big_v8 address_to first, big_v8 address_to second,
+                                         const big_nttv_context address_to c)
+{
+        // first and second are the two 8-blocks under the top layer of a 16.
+        big_v8 x = big_v8_permute(*first, *second, BIG_V8(0, 1, 2, 3, 8, 9, 10, 11));
+        big_v8 y = big_v8_permute(*first, *second, BIG_V8(4, 5, 6, 7, 12, 13, 14, 15));
+        big_v8 x1 = big_v8_add(x, y, c->prime);
+        big_v8 y1 = big_v8_montgomery(big_v8_subtract(x, y, c->prime), c->w8, c->prime, c->inverse);
+        big_v8 p = big_v8_permute(x1, y1, BIG_V8(0, 1, 8, 9, 4, 5, 12, 13));
+        big_v8 q = big_v8_permute(x1, y1, BIG_V8(2, 3, 10, 11, 6, 7, 14, 15));
+        big_v8 p1 = big_v8_add(p, q, c->prime);
+        big_v8 q1 = big_v8_montgomery(big_v8_subtract(p, q, c->prime), c->w4, c->prime, c->inverse);
+        big_v8 e = big_v8_permute(p1, q1, BIG_V8(0, 2, 4, 6, 8, 10, 12, 14));
+        big_v8 o = big_v8_permute(p1, q1, BIG_V8(1, 3, 5, 7, 9, 11, 13, 15));
+
+        *first = big_v8_add(e, o, c->prime);
+        *second = big_v8_subtract(e, o, c->prime);
+}
+
+static inline void big_nttv_small_inverse(big_v8 address_to first, big_v8 address_to second,
+                                         const big_nttv_context address_to c)
+{
+        big_v8 x = big_v8_add(*first, *second, c->prime);
+        big_v8 y = big_v8_subtract(*first, *second, c->prime);
+        big_v8 p1 = big_v8_permute(x, y, BIG_V8(0, 8, 1, 9, 2, 10, 3, 11));
+        big_v8 q1 = big_v8_permute(x, y, BIG_V8(4, 12, 5, 13, 6, 14, 7, 15));
+        big_v8 t = big_v8_montgomery(q1, c->i4, c->prime, c->inverse);
+        big_v8 p = big_v8_add(p1, t, c->prime);
+        big_v8 q = big_v8_subtract(p1, t, c->prime);
+        big_v8 x1 = big_v8_permute(p, q, BIG_V8(0, 1, 8, 9, 4, 5, 12, 13));
+        big_v8 y1 = big_v8_permute(p, q, BIG_V8(2, 3, 10, 11, 6, 7, 14, 15));
+
+        t = big_v8_montgomery(y1, c->i8, c->prime, c->inverse);
+
+        big_v8 xn = big_v8_add(x1, t, c->prime);
+        big_v8 yn = big_v8_subtract(x1, t, c->prime);
+
+        *first = big_v8_permute(xn, yn, BIG_V8(0, 1, 2, 3, 8, 9, 10, 11));
+        *second = big_v8_permute(xn, yn, BIG_V8(4, 5, 6, 7, 12, 13, 14, 15));
+}
+
+static void big_nttv_forward(p64 address_to a, positive length, const p64 address_to twiddle,
+                            const big_nttv_context address_to c)
+{
+        while (length > 16)
+        {
+                positive half = length / 2;
+                const p64 address_to w = twiddle + half;
+
+                for (positive j = 0; j < half; j += 8)
+                {
+                        big_v8 x = big_v8_load(a + j);
+                        big_v8 y = big_v8_load(a + j + half);
+
+                        big_v8_store(a + j, big_v8_add(x, y, c->prime));
+                        big_v8_store(a + j + half,
+                                     big_v8_montgomery(x + c->prime - y, big_v8_load(w + j), c->prime,
+                                                       c->inverse));
+                }
+                big_nttv_forward(a, half, twiddle, c);
+                a += half;
+                length = half;
+        }
+
+        big_v8 x = big_v8_load(a);
+        big_v8 y = big_v8_load(a + 8);
+        big_v8 first = big_v8_add(x, y, c->prime);
+        big_v8 second = big_v8_montgomery(big_v8_subtract(x, y, c->prime), big_v8_load(twiddle + 8),
+                                          c->prime, c->inverse);
+
+        big_nttv_small_forward(address_of first, address_of second, c);
+        big_v8_store(a, first);
+        big_v8_store(a + 8, second);
+}
+
+static void big_nttv_inverse(p64 address_to a, positive length, const p64 address_to inverse_twiddle,
+                            const big_nttv_context address_to c)
+{
+        if (length == 16)
+        {
+                big_v8 first = big_v8_load(a);
+                big_v8 second = big_v8_load(a + 8);
+
+                big_nttv_small_inverse(address_of first, address_of second, c);
+
+                big_v8 t = big_v8_montgomery(second, big_v8_load(inverse_twiddle + 8), c->prime, c->inverse);
+
+                big_v8_store(a, big_v8_add(first, t, c->prime));
+                big_v8_store(a + 8, big_v8_subtract(first, t, c->prime));
+                return;
+        }
+
+        positive half = length / 2;
+        const p64 address_to w = inverse_twiddle + half;
+
+        big_nttv_inverse(a, half, inverse_twiddle, c);
+        big_nttv_inverse(a + half, half, inverse_twiddle, c);
+        for (positive j = 0; j < half; j += 8)
+        {
+                big_v8 x = big_v8_load(a + j);
+                big_v8 t = big_v8_montgomery(big_v8_load(a + j + half), big_v8_load(w + j), c->prime,
+                                             c->inverse);
+
+                big_v8_store(a + j, big_v8_add(x, t, c->prime));
+                big_v8_store(a + j + half, big_v8_subtract(x, t, c->prime));
+        }
+}
+
+// Scalar Montgomery arithmetic for the tables and the constants.
+static inline p64 big_nttv_multiply32(p64 a, p64 b, p64 prime, p64 inverse)
+{
+        p64 t = a * b;
+        p64 m = ((t & 0xffffffffull) * inverse) & 0xffffffffull;
+        p64 r = (t >> 32) - ((m * prime) >> 32);
+
+        return r + ((p64)((long long)r >> 63) & prime);
+}
+
+/*
+        The twiddles of length N for a root of order N: level m = 2 half
+        at [half, 2 half) holds w^j, j below half. The top level is made
+        eight at a time, the levels under it by taking every second entry
+        of the one above.
+*/
+static void big_nttv_table(p64 address_to table, positive length, p64 root, const big_nttv_prime address_to p)
+{
+        p64 prime = p->prime, inverse = p->inverse;
+        p64 one = (((p64)1 << 32) % prime);
+        p64 power[16];
+
+        power[0] = one;
+        for (positive j = 1; j < 16; j++)
+                power[j] = big_nttv_multiply32(power[j - 1], root, prime, inverse);
+
+        big_v8 v = big_v8_load(power);
+        big_v8 step = BIG_V8_ALL(power[8]);
+        big_v8 pv = BIG_V8_ALL(prime), iv = BIG_V8_ALL(inverse);
+
+        for (positive j = 0; j < length / 2; j += 8)
+        {
+                big_v8_store(table + length / 2 + j, v);
+                v = big_v8_montgomery(v, step, pv, iv);
+        }
+        for (positive half = length / 4; half; half >>= 1)
+                for (positive j = 0; j < half; j++)
+                        table[half + j] = table[2 * half + 2 * j];
+}
+
+static p64 big_nttv_power32(p64 base, positive exponent, const big_nttv_prime address_to p)
+{
+        p64 result = ((p64)1 << 32) % p->prime;
+
+        while (exponent)
+        {
+                if (exponent & 1)
+                        result = big_nttv_multiply32(result, base, p->prime, p->inverse);
+                base = big_nttv_multiply32(base, base, p->prime, p->inverse);
+                exponent >>= 1;
+        }
+        return result;
+}
+
+static p64 address_to big_nttv_tables[3][2]; // forward and inverse, for each prime
+static positive big_nttv_tables_length;
+
+// The tables for at least length; false when memory ran out.
+static bool big_nttv_tables_for(positive length)
+{
+        if (length <= big_nttv_tables_length)
+                return true;
+
+        p64 address_to fresh[3][2];
+
+        for (positive k = 0; k < 6; k++)
+                if (!(fresh[k / 2][k % 2] = (p64 address_to)memory_take(length * sizeof(p64))))
+                {
+                        for (positive j = 0; j < k; j++)
+                                memory_give(fresh[j / 2][j % 2]);
+                        return false;
+                }
+        for (positive k = 0; k < 3; k++)
+        {
+                const big_nttv_prime address_to p = big_nttv_primes + k;
+                p64 root = p->root;
+
+                for (positive size = (positive)1 << 25; size > length; size >>= 1)
+                        root = big_nttv_multiply32(root, root, p->prime, p->inverse);
+                big_nttv_table(fresh[k][0], length, root, p);
+                big_nttv_table(fresh[k][1], length, big_nttv_power32(root, length - 1, p), p);
+        }
+        for (positive k = 0; k < 6; k++)
+        {
+                if (big_nttv_tables[k / 2][k % 2])
+                        memory_give(big_nttv_tables[k / 2][k % 2]);
+                big_nttv_tables[k / 2][k % 2] = fresh[k / 2][k % 2];
+        }
+        big_nttv_tables_length = length;
+        return true;
+}
+
+// One prime's residues of a * b in out (length words, plain), a and b as pieces of 32 bits.
+static void big_nttv_residues(p64 address_to out, p64 address_to spare, const p64 address_to a,
+                             positive an, const p64 address_to b, positive bn, positive length,
+                             positive which)
+{
+        const big_nttv_prime address_to p = big_nttv_primes + which;
+        const p64 address_to forward = big_nttv_tables[which][0];
+        const p64 address_to backward = big_nttv_tables[which][1];
+        big_nttv_context c;
+
+        c.prime = BIG_V8_ALL(p->prime);
+        c.inverse = BIG_V8_ALL(p->inverse);
+        c.w8 = BIG_V8(forward[4], forward[5], forward[6], forward[7], forward[4], forward[5], forward[6], forward[7]);
+        c.w4 = BIG_V8(forward[2], forward[3], forward[2], forward[3], forward[2], forward[3], forward[2], forward[3]);
+        c.i8 = BIG_V8(backward[4], backward[5], backward[6], backward[7], backward[4], backward[5], backward[6], backward[7]);
+        c.i4 = BIG_V8(backward[2], backward[3], backward[2], backward[3], backward[2], backward[3], backward[2], backward[3]);
+
+        big_v8 square = BIG_V8_ALL(p->square);
+        p64 scale = 1; // 1 / N, plain: the multiply out of Montgomery form takes it as its factor
+        positive pieces_a = 2 * an, pieces_b = 2 * bn;
+
+        for (positive size = 1; size < length; size <<= 1)
+                scale = (scale & 1 ? scale + p->prime : scale) >> 1;
+
+        positive at = 0;
+
+        for (; at + 8 <= pieces_a; at += 8)
+                big_v8_store(out + at, big_v8_montgomery(big_v8_pieces(a, at), square, c.prime, c.inverse));
+        for (; at < pieces_a; at++)
+                out[at] = big_nttv_multiply32(((const p32 address_to)a)[at], p->square, p->prime, p->inverse);
+        memory_fill(out + pieces_a, 0, (length - pieces_a) * sizeof(p64));
+        for (at = 0; at + 8 <= pieces_b; at += 8)
+                big_v8_store(spare + at, big_v8_montgomery(big_v8_pieces(b, at), square, c.prime, c.inverse));
+        for (; at < pieces_b; at++)
+                spare[at] = big_nttv_multiply32(((const p32 address_to)b)[at], p->square, p->prime, p->inverse);
+        memory_fill(spare + pieces_b, 0, (length - pieces_b) * sizeof(p64));
+        big_nttv_forward(out, length, forward, &c);
+        big_nttv_forward(spare, length, forward, &c);
+
+        big_v8 factor = BIG_V8_ALL(scale);
+
+        for (at = 0; at < length; at += 8)
+                big_v8_store(out + at, big_v8_montgomery(big_v8_load(out + at), big_v8_load(spare + at),
+                                                         c.prime, c.inverse));
+        big_nttv_inverse(out, length, backward, &c);
+        for (at = 0; at < length; at += 8)
+                big_v8_store(out + at, big_v8_montgomery(big_v8_load(out + at), factor, c.prime, c.inverse));
+}
+
+/*
+        r = a * b, an + bn limbs. False when memory ran out or the product
+        is longer than the primes reach.
+*/
+static bool big_multiply_nttv(p64 address_to r, const p64 address_to a, positive an,
+                             const p64 address_to b, positive bn)
+{
+        positive length = 16;
+
+        while (length < 2 * (an + bn))
+                length <<= 1;
+        if (length > ((positive)1 << 25) || !big_nttv_tables_for(length))
+                return false;
+
+        p64 address_to store = (p64 address_to)memory_take(4 * length * sizeof(p64));
+
+        if (!store)
+                return false;
+
+        p64 address_to r1 = store;
+        p64 address_to r2 = store + length;
+        p64 address_to r3 = store + 2 * length;
+        p64 address_to spare = store + 3 * length;
+
+        big_nttv_residues(r1, spare, a, an, b, bn, length, 0);
+        big_nttv_residues(r2, spare, a, an, b, bn, length, 1);
+        big_nttv_residues(r3, spare, a, an, b, bn, length, 2);
+
+        const big_v8 p1 = BIG_V8_ALL(big_nttv_primes[0].prime);
+        const big_v8 p2 = BIG_V8_ALL(big_nttv_primes[1].prime), n2 = BIG_V8_ALL(big_nttv_primes[1].inverse);
+        const big_v8 p3 = BIG_V8_ALL(big_nttv_primes[2].prime), n3 = BIG_V8_ALL(big_nttv_primes[2].inverse);
+        const big_v8 inverse_of_p1 = BIG_V8_ALL(0x48000016ull);      // 1 / p1 mod p2, times R
+        const big_v8 inverse_of_p12 = BIG_V8_ALL(0x53fffed6ull);     // R / (p1 p2) mod p3
+        const big_v8 inverse_of_p12_square = BIG_V8_ALL(0x6b5557b5ull); // R^2 / (p1 p2) mod p3
+        const big_v8 p12_low = BIG_V8_ALL(0xe4000001ull), p12_high = BIG_V8_ALL(0x32a00000ull);
+        p128 carry = 0;
+        p64 held = 0;
+
+        for (positive j = 0; j < length; j += 8)
+        {
+                big_v8 v1 = big_v8_load(r1 + j);
+                big_v8 d = big_v8_subtract(big_v8_load(r2 + j), big_v8_minimum(v1, v1 - p2), p2);
+                big_v8 t2 = big_v8_montgomery(d, inverse_of_p1, p2, n2);
+                big_v8 x12 = v1 + big_v8_multiply32(t2, p1);
+                big_v8 m = big_v8_multiply32(x12, n3);
+                big_v8 y = (x12 >> 32) - (big_v8_multiply32(m, p3) >> 32);
+
+                y = big_v8_minimum(y, y + p3);
+
+                big_v8 t3 = big_v8_subtract(big_v8_montgomery(big_v8_load(r3 + j), inverse_of_p12, p3, n3),
+                                            big_v8_montgomery(y, inverse_of_p12_square, p3, n3), p3);
+                p64 low[8], high[8];
+
+                big_v8_store(low, x12 + big_v8_multiply32(t3, p12_low));
+                big_v8_store(high, big_v8_multiply32(t3, p12_high));
+                for (positive k = 0; k < 8; k++)
+                {
+                        positive piece = j + k;
+
+                        if (piece >= 2 * (an + bn))
+                                break;
+                        carry += (p128)low[k] + ((p128)high[k] << 32);
+                        if (piece & 1)
+                        {
+                                r[piece / 2] = held | (p64)(carry & 0xffffffffull) << 32;
+                        }
+                        else
+                                held = (p64)(carry & 0xffffffffull);
+                        carry >>= 32;
+                }
+        }
+        memory_give(store);
+        return true;
+}
+
+#pragma GCC pop_options
+#endif // X64
+
+/*
         r = a * b, an + bn limbs, r apart from both. The scratch is
         8 max(an, bn) + 2048 limbs, which the Karatsuba step's three
         (h + 1)-limb pieces and the recursion under them stay inside.
@@ -2626,6 +3065,10 @@ static fn big_multiply_into(p64 address_to r, const p64 address_to a, positive a
                 memory_fill(r, 0, an * sizeof(p64));
                 return;
         }
+#if X64
+        if (bn >= BIG_NTTV && cpu_has_avx512 && big_multiply_nttv(r, a, an, b, bn))
+                return;
+#endif
         if (bn >= BIG_NTT && big_multiply_ntt(r, a, an, b, bn))
                 return;
         if (bn < BIG_KARATSUBA)
