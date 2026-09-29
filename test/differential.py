@@ -8402,6 +8402,15 @@ FILES_SCENES = {
               "for n in c cd cd/sf m; do [ -e $n ] || continue; echo \"== $n\"; "
               "env getfattr -d --absolute-names $n 2>&1 | env grep -v '^#'; "
               "env getfacl -cp $n 2>/dev/null; done\n"),
+    # a tree whose directories carry attributes past the kilobyte a pool
+    # job copies with: a value of 2000 bytes, and 40 names; what the copy
+    # carries and its modes looked at afterwards.
+    "xattr_big": ("env mkdir -p sb/x/y sb/n && echo q > sb/x/f && "
+                  "env setfattr -n user.big -v \"$(env printf '%02000d' 0)\" sb/x && "
+                  "for n in $(env seq 40); do env setfattr -n user.name_long_enough_$n -v $n sb/n || exit 9; done && "
+                  "env setfattr -n user.mid -v \"$(env printf '%01500d' 0)\" sb/x/y || exit 9\n", "",
+                  "for n in cb cb/x cb/x/y cb/n; do [ -e $n ] || continue; echo \"== $n $(env stat -c %a $n)\"; "
+                  "env getfattr -d --absolute-names $n 2>&1 | env grep -v '^#' | env md5sum; done\n"),
     # a tree made under umask 000: every directory writable by all, no
     # sticky bit, and what is left of it looked at afterwards.
     "wide": ("(umask 000; env mkdir -p w/x/y && env touch w/x/f w/g) || exit 9\n", "",
@@ -8426,6 +8435,8 @@ FILES_SCENE_CASES = (
     ("xattr", "cp", "--preserve=all", "sf", "c"), ("xattr", "cp", "-a", "--no-preserve=xattr", "sf", "c"),
     ("xattr", "cp", "-a", "sd", "cd"), ("xattr", "cp", "-rp", "sd", "cd"), ("xattr", "mv", "sf", "m"),
     ("xattr", "cp", "-a", "sd", "cd"), ("xattr", "install", "-p", "sf", "c"),
+    ("xattr_big", "cp", "-a", "sb", "cb"), ("xattr_big", "cp", "-r", "--preserve=xattr", "sb", "cb"),
+    ("xattr_big", "cp", "-rp", "sb", "cb"), ("xattr_big", "cp", "-r", "sb", "cb"), ("xattr_big", "mv", "sb", "cb"),
     ("wide", "rm", "-rf", "w"), ("wide", "rm", "-r", "w"), ("wide", "rm", "-rv", "w"),
     ("wide", "rm", "-ri", "w"), ("wide", "rm", "-rI", "w"), ("wide", "rm", "-r", "---presume-input-tty", "w"),
     ("wide", "rm", "-r", "--one-file-system", "w"), ("wide", "rm", "-d", "w/x/y"), ("wide", "rmdir", "w/x/y"),
@@ -8498,6 +8509,30 @@ FILES_UTILITIES = FILES_UTILITIES + (
 # has a normaliser of its own.
 FILES_UTILITIES = tuple(utility if utility.normalize else dataclasses.replace(utility, normalize=files_plain)
                   for utility in FILES_UTILITIES)
+
+
+def files_block_size_cases(tool):
+    """A block size as xstrtoumax reads one for ls, du and df: a number in C's
+    bases after blanks and a plus, a unit in the cases GNU takes, B, D or iB
+    after it, and what is refused as invalid, as a bad suffix or as too
+    large -- drawn per tool, with the spellings each form needs always in."""
+    rng = random.Random(int.from_bytes(hashlib.sha256(
+        ("blocksize:" + tool).encode()).digest()[:8], "little"))
+    numbers = ("", "1", "010", "0x10", "0X1F", "+1", " 1", "08", "0", "16", "1536", "99999999999999999999", "'1")
+    units = ("", "k", "K", "m", "M", "g", "t", "p", "e", "E", "Z", "R", "x")
+    tails = ("", "B", "D", "iB", "x", " ")
+    spellings = sorted({number + unit + tail for number in numbers for unit in units for tail in tails})
+    picked = ("k", "kB", "KiB", "kiB", "0x10", "1KiB", "KD", "R", "1R", "16E", "1D", "1B", "010", " 1") + \
+        tuple(rng.sample(spellings, 50))
+    forms = {"ls": (("-s", "--block-size={}", "a.txt"), ("-l", "--block-size={}", "b.txt")),
+             "du": (("-B", "{}", "dir"), ("--block-size={}", "a.txt")),
+             "df": (("-B", "{}", "."), ("--output=size", "--block-size={}", "."))}[tool]
+    return tuple(tuple(word.format(spelling) for word in form) for spelling in picked for form in forms)
+
+
+FILES_UTILITIES = tuple(dataclasses.replace(utility, extra=tuple(utility.extra) + files_block_size_cases(utility.name))
+                        if utility.name in ("ls", "du", "df") else utility
+                        for utility in FILES_UTILITIES)
 
 def files_column_cases():
     # Round the maximum column count upward as GNU v9.11 does.
@@ -9182,7 +9217,12 @@ def files_tar(farm):
                     budget -= len(piece)
         return end, digest.hexdigest()[:12]
 
-    commands = (("tf",), ("tvf",), ("xf",), ("xf", "--strip-components=1"), ("xf", "-C", "sub"))
+    #   -d against the tree GNU extracted from the same archive, after a
+    #   touch of every regular file (so times differ) and against nothing
+    #   at all, where every member is a missing file.
+    commands = (("tf",), ("tvf",), ("xf",), ("xf", "--strip-components=1"), ("xf", "-C", "sub"),
+                ("df",), ("dvvf",), ("df", "--strip-components=1"), ("df", "extracted"),
+                ("dvf", "extracted"))
 
     def run(binary, name, data, command):
         with tempfile.TemporaryDirectory(prefix="tar-check-") as temporary:
@@ -9193,6 +9233,14 @@ def files_tar(farm):
             (work / "sub").mkdir(parents=True)
             (top / "a.tar").write_bytes(data)
             before = snapshot(top / "outside")
+            if command[-1] == "extracted":
+                command = command[:-1]
+                subprocess.run([reference, "xf", str(top / "a.tar")], cwd=work,
+                               env={"PATH": os.defpath, "LC_ALL": "C", "TZ": "UTC0"},
+                               stdin=subprocess.DEVNULL, capture_output=True, timeout=20)
+                for path in sorted(work.rglob("*")):
+                    if path.is_file() and not path.is_symlink():
+                        os.utime(path, (1, 1))
             try:
                 ran = subprocess.run([binary, command[0], str(top / "a.tar"), *command[1:]],
                                      cwd=work, env={"PATH": os.defpath, "LC_ALL": "C", "TZ": "UTC0"},
@@ -9202,7 +9250,10 @@ def files_tar(farm):
             outside = snapshot(top / "outside")
             stray = sorted(p.name for p in top.iterdir()
                            if p.name not in ("outside", "work", "a.tar"))
-            return (ran.returncode == 0, ran.stdout, snapshot(work)), \
+            #   -d's answer is its status, 1 for a difference and 2 for
+            #   trouble, so that is compared whole.
+            status = ran.returncode if command[0].startswith("d") else ran.returncode == 0
+            return (status, ran.stdout, snapshot(work)), \
                 (outside if outside != before else None, stray)
 
     rng = random.Random(0x7a52)
