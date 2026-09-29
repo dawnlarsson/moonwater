@@ -2550,6 +2550,31 @@ static positive zstd_pack_literals(zstd_encoder address_to e,
         address_to fresh = false;
         if (n < 64)
                 return 0;
+        /* Literals that look like noise are sent raw without a full count,
+           as libzstd judges them: when the block is mostly literals, the
+           commonest byte of its first and last 4 KiB must beat 1/128 of
+           them, and then of the whole. */
+        if (e && n >= 40960 && (!e->nseq || n / e->nseq >= 20))
+        {
+                positive largest = 0;
+
+                for (positive part = 0; part < 2; part++)
+                {
+                        p8 address_to const from = part ? src + n - 4096 : src;
+                        positive most = 0;
+
+                        memory_fill(freq, 0, sizeof(freq));
+                        for (at = 0; at < 4096; at++)
+                                freq[from[at]]++;
+                        for (at = 0; at < 256; at++)
+                                if (freq[at] > most)
+                                        most = freq[at];
+                        largest += most;
+                }
+                if (largest <= (8192 >> 7) + 4)
+                        return 0;
+                memory_fill(freq, 0, sizeof(freq));
+        }
         for (at = 0; at + 4 <= n; at += 4)
         {
                 freq[src[at]]++; f1[src[at + 1]]++;
@@ -2557,9 +2582,19 @@ static positive zstd_pack_literals(zstd_encoder address_to e,
         }
         for (; at < n; at++) freq[src[at]]++;
         for (at = 0; at < 256; at++) freq[at] += f1[at] + f2[at] + f3[at];
-        for (at = 0; at < 256; at++)
-                if (freq[at])
-                        symbols++, max_sym = at;
+        {
+                positive largest = 0;
+
+                for (at = 0; at < 256; at++)
+                        if (freq[at])
+                        {
+                                symbols++, max_sym = at;
+                                if (freq[at] > largest)
+                                        largest = freq[at];
+                        }
+                if (largest <= (n >> 7) + 4)
+                        return 0;
+        }
         if (symbols < 2)
                 return 0;
         if (e && e->huf_valid)
@@ -3445,7 +3480,7 @@ zstd_row_update(zstd_encoder address_to e, p32 target, p32 low, p8 row_log, p8 m
 
 static __attribute__((always_inline)) inline positive
 zstd_row_find(zstd_encoder address_to e, p8 address_to ip, p8 address_to iend,
-              p32 low, positive address_to distance)
+              p32 low, positive address_to distance, bool skipping)
 {
         p8 const row_log = zstd_row_log(address_of e->p);
         p8 const mls = e->p.min_match < 4 ? 4 : e->p.min_match > 6 ? 6 : e->p.min_match;
@@ -3460,7 +3495,15 @@ zstd_row_find(zstd_encoder address_to e, p8 address_to ip, p8 address_to iend,
         positive head;
         p64 mask;
 
-        zstd_row_update(e, cur, low, row_log, mls);
+        /* Skipping over what looks like noise, only the positions
+           searched go in, as libzstd's lazy skipping does. */
+        if (skipping)
+        {
+                zstd_row_insert(e, cur, row_log, mls);
+                e->next = cur + 1;
+        }
+        else
+                zstd_row_update(e, cur, low, row_log, mls);
         h = zstd_hash_bytes(ip, (p8)(e->p.hash_log - row_log + 8), mls);
         row = h >> 8;
         /* The row a search eight bytes on will read is fetched now, as
@@ -4453,6 +4496,7 @@ static p8 address_to zstd_parse_lazy(zstd_encoder address_to e, p32 from,
         p8 address_to const ilimit = iend - 8;
         p8 address_to ip = base + from;
         p8 address_to anchor = ip;
+        bool skipping = false;
 
         ip += ip == lowest;
         while (ip < ilimit)
@@ -4475,7 +4519,7 @@ static p8 address_to zstd_parse_lazy(zstd_encoder address_to e, p32 from,
                                 goto store;
                 }
                 found = tree ? zstd_bt_best(e, ip, iend, address_of found_distance)
-                             : zstd_row_find(e, ip, iend, low, address_of found_distance);
+                             : zstd_row_find(e, ip, iend, low, address_of found_distance, skipping);
                 if (found > match)
                 {
                         match = found;
@@ -4484,7 +4528,10 @@ static p8 address_to zstd_parse_lazy(zstd_encoder address_to e, p32 from,
                 }
                 if (match < 4)
                 {
-                        ip += ((positive)(ip - anchor) >> 8) + 1;
+                        positive const step = ((positive)(ip - anchor) >> 8) + 1;
+
+                        ip += step;
+                        skipping = step > 8;
                         continue;
                 }
                 while (depth && ip < ilimit)
@@ -4508,7 +4555,7 @@ static p8 address_to zstd_parse_lazy(zstd_encoder address_to e, p32 from,
                                 }
                         }
                         found = tree ? zstd_bt_best(e, ip, iend, address_of found_distance)
-                             : zstd_row_find(e, ip, iend, low, address_of found_distance);
+                             : zstd_row_find(e, ip, iend, low, address_of found_distance, skipping);
                         if (found >= 4 &&
                             (bipolar)found * 4 - (bipolar)zstd_highbit32((p32)found_distance + 3) >
                                 (bipolar)match * 4 - zstd_offset_cost(e, distance) + 4)
@@ -4537,7 +4584,7 @@ static p8 address_to zstd_parse_lazy(zstd_encoder address_to e, p32 from,
                                         }
                                 }
                                 found = tree ? zstd_bt_best(e, ip, iend, address_of found_distance)
-                             : zstd_row_find(e, ip, iend, low, address_of found_distance);
+                             : zstd_row_find(e, ip, iend, low, address_of found_distance, skipping);
                                 if (found >= 4 &&
                                     (bipolar)found * 4 - (bipolar)zstd_highbit32((p32)found_distance + 3) >
                                         (bipolar)match * 4 - zstd_offset_cost(e, distance) + 7)
@@ -4555,6 +4602,7 @@ static p8 address_to zstd_parse_lazy(zstd_encoder address_to e, p32 from,
                         start--, match++;
         store:
                 zstd_store(e, anchor, (positive)(start - anchor), distance, match);
+                skipping = false;
                 ip = zstd_repeat_run(e, start + match, ilimit, iend, low, null, 0, 0);
                 anchor = ip;
         }
