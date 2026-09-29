@@ -27187,6 +27187,10 @@ typedef struct
         positive output_mode;
         file_facts input_facts;
         p8 name[FILE_PATH_MAX];
+        //      The next output file, made before it is known what goes in
+        //      it, as GNU's create_output_file is.
+        bool pending;
+        file_staged_name pending_stage;
 } csplit_state;
 
 static file_facts address_to csplit_outputs;
@@ -27455,17 +27459,17 @@ static bool csplit_name(csplit_state address_to state, positive number)
         return true;
 }
 
-static bool csplit_section(csplit_state address_to state, positive from,
-                           positive to, bool emit)
+/*
+        GNU makes each output file where its section begins, before it looks
+        for the end of it, so a name that cannot be made is what fails first,
+        an empty section under --elide-empty-files has still been made and
+        taken away, and a section that is never found has a file to close.
+        The file waits here, staged, until its section is written or given
+        up.
+*/
+static bool csplit_prepare(csplit_state address_to state)
 {
-        if (!emit)
-                return true;
-        if (to < from)
-                return false;
-
-        positive length = to - from;
-
-        if (!length && state->elide)
+        if (state->pending)
                 return true;
         if (!csplit_name(state, state->made))
                 return false;
@@ -27483,9 +27487,8 @@ static bool csplit_section(csplit_state address_to state, positive from,
                                      "csplit: out of memory while tracking outputs\n");
         }
 
-        file_staged_name stage;
         bipolar out = file_staged_name_open(
-            address_of stage, state->name, state->output_mode,
+            address_of state->pending_stage, state->name, state->output_mode,
             FILE_STAGED_STREAM_SPECIAL);
         if (out < 0)
         {
@@ -27493,23 +27496,56 @@ static bool csplit_section(csplit_state address_to state, positive from,
                               writer_terminal_name, state->name, file_reason(out));
         }
 
+        state->pending = true;
+        return true;
+}
+
+static fn csplit_release(csplit_state address_to state)
+{
+        if (!state->pending)
+                return;
+        file_staged_name_abort(address_of state->pending_stage);
+        state->pending = false;
+}
+
+static bool csplit_section(csplit_state address_to state, positive from,
+                           positive to, bool emit)
+{
+        if (!emit)
+                return true;
+        if (to < from)
+                return false;
+
+        positive length = to - from;
+
+        if (!csplit_prepare(state))
+                return false;
+        if (!length && state->elide)
+        {
+                csplit_release(state);
+                return true;
+        }
+
+        file_staged_name address_to stage = address_of state->pending_stage;
+
+        state->pending = false;
         file_facts made;
         bool identified = file_look(
-            stage.handle, (string_address)"", AT_EMPTY_PATH,
+            stage->handle, (string_address)"", AT_EMPTY_PATH,
             address_of made);
         system_write_result wrote = {0, 0};
 
         if (length)
-                wrote = system_write_all_checked((positive)stage.handle,
+                wrote = system_write_all_checked((positive)stage->handle,
                                                  state->input + from, length);
         bool written = !length || wrote.bytes == length;
         bipolar closed;
         if (identified && written)
                 closed = file_staged_name_finish(
-                    address_of stage, true, 0);
+                    stage, true, 0);
         else
         {
-                file_staged_name_abort(address_of stage);
+                file_staged_name_abort(stage);
                 closed = -ERROR_INPUT_OUTPUT;
         }
 
@@ -27667,6 +27703,8 @@ static b32 csplit_execute_line(csplit_state address_to state,
 {
         positive target = pattern->line_target;
 
+        if (!csplit_prepare(state))
+                return CSPLIT_FAILED;
         if (repeated)
         {
                 if (target > positive_max - pattern->line_step)
@@ -27764,6 +27802,8 @@ static b32 csplit_execute_regex(csplit_state address_to state,
         positive matched_at;
         positive matched_after;
 
+        if (!pattern->discard && !csplit_prepare(state))
+                return CSPLIT_FAILED;
         if (!csplit_find_regex(state, pattern, address_of matched_line,
                                address_of matched_at,
                                address_of matched_after))
@@ -28056,6 +28096,38 @@ static b32 file_csplit()
                         system_close(in);
                 string_format(log_error, "csplit: read error: %s\n",
                               file_reason(-ERROR_IS_DIRECTORY));
+
+                //      The first section's file is made before anything is
+                //      read, so it is there to be closed: counted, and left
+                //      when -k is given.
+                string_address first = file_operand_at(1);
+
+                if (!string_is(first, '%'))
+                {
+                        csplit_state early = {
+                            .prefix = file_option_value(address_of taking, 'f'),
+                            .digits = digits,
+                            .suffix = suffix,
+                            .output_mode = 0666 & ~file_umask(),
+                        };
+                        bool keep = (taking.flags & FILE_FLAG('k')) != 0;
+                        bool quiet = (taking.flags & (FILE_FLAG('s') | FILE_FLAG('q'))) != 0;
+                        bool elide = (taking.flags & FILE_FLAG('z')) != 0;
+
+                        if (!early.prefix)
+                                early.prefix = (string_address)"xx";
+                        early.prefix_length = string_length(early.prefix);
+                        if (csplit_prepare(address_of early))
+                        {
+                                if (keep && !elide)
+                                        (void)file_staged_name_finish(
+                                            address_of early.pending_stage, true, 0);
+                                else
+                                        csplit_release(address_of early);
+                                if (!quiet && !elide)
+                                        log("0\n", 2);
+                        }
+                }
                 return 1;
         }
 
@@ -28337,6 +28409,7 @@ static b32 file_csplit()
             !csplit_section(address_of state, state.cursor, length, true))
                 failed = true;
 
+        csplit_release(address_of state);
         if (failed)
                 csplit_cleanup(address_of state);
 
