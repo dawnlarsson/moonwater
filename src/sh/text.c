@@ -21961,6 +21961,89 @@ static b32 text_cut()
                 }
         }
 
+        /*
+                A delimiter that is the record terminator makes the whole input one
+                record of lines, and is read as it comes: a line at a time, the first
+                held until a second says the input has a delimiter in it at all.
+        */
+        if (by_field && !whitespace && delimiter == text_delimiter)
+        {
+                b32 count = text_input_count();
+                static byte_store first_line;
+
+                for (b32 i = 0; i < count; i++)
+                {
+                        if (!text_open(text_file_name(i)))
+                                continue;
+
+                        positive fields = 0;
+                        bool wrote = false;
+                        bool first_ended = false;
+
+                        while (text_line_next(text_line, 0))
+                        {
+                                positive length = text_line_length;
+
+                                fields++;
+                                if (fields == 1)
+                                {
+                                        if (!byte_store_reserve(address_of first_line, length + 1, 4096))
+                                        {
+                                                text_close();
+                                                return text_done(string_diagnostic(&text_diagnostic, 1, null,
+                                                                                   "memory exhausted"));
+                                        }
+                                        memory_copy(first_line.bytes, text_line, length);
+                                        first_line.used = length;
+                                        first_ended = text_line_ended;
+                                        continue;
+                                }
+                                if (fields == 2)
+                                {
+                                        if (text_list_has(1) != complement)
+                                        {
+                                                text_put(first_line.bytes, first_line.used);
+                                                wrote = true;
+                                        }
+                                }
+                                if (text_list_has(fields) != complement)
+                                {
+                                        if (wrote)
+                                                text_put(separator ? separator : (string_address)&delimiter,
+                                                         separator ? separator_length : 1);
+                                        text_put(text_line, length);
+                                        wrote = true;
+                                }
+                        }
+                        if (fields == 1 && !first_ended)
+                        {
+                                // No delimiter in it: the line whole, unless -s.
+                                if (!only_delimited)
+                                {
+                                        text_put(first_line.bytes, first_line.used);
+                                        text_put_character(text_delimiter);
+                                }
+                        }
+                        else if (fields == 1)
+                        {
+                                // One line, ended by the delimiter: its one field
+                                // if that is wanted, else nothing -- an empty line
+                                // unless -s.
+                                if (text_list_has(1) != complement)
+                                {
+                                        text_put(first_line.bytes, first_line.used);
+                                        text_put_character(text_delimiter);
+                                }
+                                else if (!only_delimited)
+                                        text_put_character(text_delimiter);
+                        }
+                        else if (fields > 1)
+                                text_put_character(text_delimiter);
+                        text_close();
+                }
+                return text_done(text_status);
+        }
+
         bool whole_record = by_field && !whitespace && delimiter == text_delimiter;
 
         b32 inputs = text_input_count();
@@ -24284,14 +24367,18 @@ static fn grep_pattern_add(string_address text, positive length, bool fixed, boo
         byte pool is different: evicting then would print less context than
         was requested, so that bounded case is refused aloud.
 */
-#define GREP_HOLD_BYTES (1u << 20)
-#define GREP_HOLD_LINES 8192
+#define GREP_HOLD_BYTES_FIRST (1u << 20)
+#define GREP_HOLD_SLOTS_FIRST 1024
 
 static p8 address_to grep_hold_pool;
 static positive address_to grep_hold_at;
 static positive address_to grep_hold_size;
 static positive address_to grep_hold_number;
+// The context asked for, in lines; what the ring holds room for now, in lines
+// and in bytes, which grow as the lines held need them.
 static positive grep_hold_slots;
+static positive grep_hold_cap;
+static positive grep_hold_room;
 static positive grep_hold_first;
 static positive grep_hold_count;
 static positive grep_hold_used;
@@ -24307,31 +24394,95 @@ static string_address grep_colors;
 static fn grep_color_line(string_address line, positive length, bool context,
                           bool highlight);
 
+static fn grep_hold_release()
+{
+        memory_give(grep_hold_pool);
+        memory_give(grep_hold_at);
+        memory_give(grep_hold_size);
+        memory_give(grep_hold_number);
+        memory_give(grep_hold_color);
+        grep_hold_pool = null;
+        grep_hold_at = grep_hold_size = grep_hold_number = null;
+        grep_hold_color = null;
+}
+
 static bool grep_hold_make(positive lines)
 {
         /*
-                GNU's context is bounded by memory alone. The ring here is a
-                megabyte of lines and a fixed count of slots, and a context
-                asking for more of them than that gets what there is: no
-                input this reads can fill more than the pool holds anyway.
+                GNU's context is bounded by memory alone, and so is this: the
+                ring starts a megabyte and a thousand lines and grows to what
+                the lines it holds ask for, up to the -B given.
         */
-        if (lines > GREP_HOLD_LINES)
-                lines = GREP_HOLD_LINES;
-
+        grep_hold_release();
         grep_hold_slots = lines;
-        grep_hold_pool = (p8 address_to)utility_arena_take(GREP_HOLD_BYTES);
-        grep_hold_at = (positive address_to)utility_arena_take(lines * sizeof(positive));
-        grep_hold_size = (positive address_to)utility_arena_take(lines * sizeof(positive));
-        grep_hold_number = (positive address_to)utility_arena_take(lines * sizeof(positive));
+        grep_hold_cap = lines < GREP_HOLD_SLOTS_FIRST ? lines : GREP_HOLD_SLOTS_FIRST;
+        grep_hold_room = GREP_HOLD_BYTES_FIRST;
+        grep_hold_pool = (p8 address_to)memory_take(grep_hold_room);
+        grep_hold_at = (positive address_to)memory_take(grep_hold_cap * sizeof(positive));
+        grep_hold_size = (positive address_to)memory_take(grep_hold_cap * sizeof(positive));
+        grep_hold_number = (positive address_to)memory_take(grep_hold_cap * sizeof(positive));
         // Colour paints a held line whole, and a UTF-8 locale asks whether it
         // is characters whole: either joins it across the ring's wrap here.
         grep_hold_color = grep_coloring || grep_utf8
-                              ? (p8 address_to)utility_arena_take(GREP_HOLD_BYTES)
+                              ? (p8 address_to)memory_take(grep_hold_room)
                               : null;
 
         return grep_hold_pool && grep_hold_at && grep_hold_size &&
                grep_hold_number &&
                (!(grep_coloring || grep_utf8) || grep_hold_color);
+}
+
+// More slots or more bytes for the ring, the held lines kept in order and
+// laid out again from the start of the new store.
+static bool grep_hold_grow(positive cap, positive room)
+{
+        positive address_to at = (positive address_to)memory_take(cap * sizeof(positive));
+        positive address_to size = (positive address_to)memory_take(cap * sizeof(positive));
+        positive address_to number = (positive address_to)memory_take(cap * sizeof(positive));
+        p8 address_to pool = (p8 address_to)memory_take(room);
+        p8 address_to color = grep_hold_color ? (p8 address_to)memory_take(room) : null;
+
+        if (!at || !size || !number || !pool || (grep_hold_color && !color))
+        {
+                memory_give(at);
+                memory_give(size);
+                memory_give(number);
+                memory_give(pool);
+                memory_give(color);
+                return false;
+        }
+
+        positive write = 0;
+
+        for (positive k = 0; k < grep_hold_count; k++)
+        {
+                positive slot = (grep_hold_first + k) % grep_hold_cap;
+                positive from = grep_hold_at[slot];
+                positive length = grep_hold_size[slot];
+                positive head = grep_hold_room - from;
+
+                if (head > length)
+                        head = length;
+                memory_copy(pool + write, grep_hold_pool + from, head);
+                if (length > head)
+                        memory_copy(pool + write + head, grep_hold_pool, length - head);
+                at[k] = write;
+                size[k] = length;
+                number[k] = grep_hold_number[slot];
+                write += length;
+        }
+
+        grep_hold_release();
+        grep_hold_pool = pool;
+        grep_hold_at = at;
+        grep_hold_size = size;
+        grep_hold_number = number;
+        grep_hold_color = color;
+        grep_hold_cap = cap;
+        grep_hold_room = room;
+        grep_hold_first = 0;
+        grep_hold_write = write % room;
+        return true;
 }
 
 /*
@@ -24425,22 +24576,34 @@ static bool grep_hold_put(string_address line, positive length, positive number)
         if (!grep_hold_slots)
                 return true;
 
-        if (length > GREP_HOLD_BYTES)
-                return string_diagnostic(&text_diagnostic, 0, null, "context lines too large");
-
         while (grep_hold_count == grep_hold_slots)
         {
                 grep_hold_used -= grep_hold_size[grep_hold_first];
-                grep_hold_first = (grep_hold_first + 1) % grep_hold_slots;
+                grep_hold_first = (grep_hold_first + 1) % grep_hold_cap;
                 grep_hold_count--;
         }
 
-        if (grep_hold_used + length > GREP_HOLD_BYTES)
-                return string_diagnostic(&text_diagnostic, 0, null, "context lines too large");
+        if (grep_hold_count == grep_hold_cap)
+        {
+                positive cap = grep_hold_cap * 2 < grep_hold_slots ? grep_hold_cap * 2 : grep_hold_slots;
 
-        positive slot = (grep_hold_first + grep_hold_count) % grep_hold_slots;
+                if (!grep_hold_grow(cap, grep_hold_room))
+                        return string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
+        }
+
+        if (grep_hold_used + length > grep_hold_room)
+        {
+                positive room = grep_hold_room;
+
+                while (room < grep_hold_used + length)
+                        room *= 2;
+                if (!grep_hold_grow(grep_hold_cap, room))
+                        return string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
+        }
+
+        positive slot = (grep_hold_first + grep_hold_count) % grep_hold_cap;
         positive at = grep_hold_write;
-        positive head = GREP_HOLD_BYTES - at;
+        positive head = grep_hold_room - at;
 
         if (head > length)
                 head = length;
@@ -24453,7 +24616,7 @@ static bool grep_hold_put(string_address line, positive length, positive number)
         grep_hold_at[slot] = at;
         grep_hold_size[slot] = length;
         grep_hold_number[slot] = number;
-        grep_hold_write = (at + length) % GREP_HOLD_BYTES;
+        grep_hold_write = (at + length) % grep_hold_room;
         grep_hold_used += length;
         grep_hold_count++;
         return true;
@@ -24463,7 +24626,7 @@ static fn grep_hold_say(positive slot, bool highlight)
 {
         positive at = grep_hold_at[slot];
         positive length = grep_hold_size[slot];
-        positive head = GREP_HOLD_BYTES - at;
+        positive head = grep_hold_room - at;
 
         if (head > length)
                 head = length;
@@ -24978,7 +25141,7 @@ enum
 // cannot -- a mount arranged to be its own child. GNU has no such bound and
 // finds a file 300 directories down, so the bound sits where a frame of this
 // recursion per level still fits a default stack many times over.
-#define GREP_DEPTH_MAX 1024
+#define GREP_DEPTH_MAX 8192
 
 static positive grep_seen_device[GREP_DEPTH_MAX + 1];
 static positive grep_seen_node[GREP_DEPTH_MAX + 1];
@@ -26504,7 +26667,10 @@ static bool grep_binary_line(grep_binary address_to binary, positive next,
                 p8 address_to found = memory_first_of(at, text_delimiter, left);
                 positive take = found ? (positive)(found - at) : left;
 
-                if (take > TEXT_LINE_MAX - used)
+                p8 address_to grown = text_line;
+
+                if (used + take + 1 > TEXT_LINE_MAX &&
+                    !text_spill_room(address_of grown, used, used + take + 1, null))
                 {
                         text_input.position = text_input.filled;
                         text_input.finished = true;
@@ -26606,7 +26772,7 @@ static bool grep_hold_valid(positive slot)
 {
         positive at = grep_hold_at[slot];
         positive length = grep_hold_size[slot];
-        positive head = GREP_HOLD_BYTES - at;
+        positive head = grep_hold_room - at;
 
         if (head >= length)
                 return text_utf8_whole((string_address)(grep_hold_pool + at), length);
@@ -27398,7 +27564,7 @@ static bool grep_one(grep_run address_to run, string_address name)
 
                         for (positive k = 0; k < grep_hold_count; k++)
                         {
-                                positive slot = (grep_hold_first + k) % grep_hold_slots;
+                                positive slot = (grep_hold_first + k) % grep_hold_cap;
                                 positive n = grep_hold_number[slot];
 
                                 if (n < want || (shown && n <= shown))
@@ -28854,7 +29020,7 @@ static b32 text_grep()
         grep_color_ne = false;
         grep_color_reverse = false;
         grep_colors = null;
-        grep_hold_color = null;
+        grep_hold_release();
         utility_arena.used = 0;
         grep_option_status = 2;
 
