@@ -12977,8 +12977,10 @@ static bool find_type_mask(string_address value, string_address word,
 
 static bool find_empty(file_facts address_to facts)
 {
+        //      Only a regular file or a directory can be empty: a fifo, a
+        //      socket and a device are all of size nought.
         if ((facts->mode & MODE_FORMAT) != MODE_DIRECTORY)
-                return facts->size == 0;
+                return (facts->mode & MODE_FORMAT) == MODE_FILE && facts->size == 0;
 
         return file_directory_empty_same(find_parent, find_entry, facts,
                                          find_facts_follow ? 0 : O_NOFOLLOW) > 0;
@@ -15468,6 +15470,7 @@ enum
         FIND_TREE_ENTRY,
         FIND_TREE_FAILED,
         FIND_TREE_CYCLE,
+        FIND_TREE_UNDELETED,
 };
 
 typedef struct
@@ -15484,6 +15487,9 @@ typedef struct
 
 static bool find_tree_pure;
 static bool find_tree_wants_facts;
+// -delete is in the expression: a name that is not a directory is removed by
+// the job that reads it, and a directory by the sink once all it held is gone.
+static bool find_tree_delete;
 static find_tree_node address_to find_tree_top;
 static file_facts find_tree_facts;
 
@@ -15500,17 +15506,19 @@ static bool find_tree_usable(void)
 {
         find_tree_pure = true;
         find_tree_wants_facts = false;
+        find_tree_delete = false;
 
         for (positive i = 0; i < find_used; i++)
         {
                 find_node address_to node = address_of find_nodes[i];
                 p8 kind = node->kind;
 
-                if (kind == 'r' || kind == 'q' || kind == 'D')
+                if (kind == 'r' || kind == 'q')
                         return false;
+                find_tree_delete |= kind == 'D';
                 if (kind == 'x' && (node->mode == 'd' || node->mode == 'O' || node->mode == 'o'))
                         return false;
-                if (!find_tree_kind_in((string_address)"&|,!vfnNpPtd0", kind))
+                if (!find_tree_kind_in((string_address)"&|,!vfnNpPtd0D", kind))
                         find_tree_pure = false;
                 if (find_tree_kind_in((string_address)"LIzymugUGkiTwWSYBl", kind))
                         find_tree_wants_facts = true;
@@ -15584,15 +15592,22 @@ static bool find_tree_print(parallel_output address_to output, positive address_
 // The pool evaluator, split the same way and for the same reason: the
 // operators are the part that recurses, and a worker's stack is the smaller
 // of the two this expression can be walked on.
+static bool find_tree_note(parallel_output address_to output, positive address_to open_at,
+                           p8 kind, bipolar code, string_address path, positive length,
+                           positive name_at, positive depth, p8 type,
+                           file_facts address_to facts);
+
 static __attribute__((noinline)) bool find_tree_test(
     find_node address_to node, string_address path, positive length,
     string_address name, positive mode, parallel_output address_to output,
-    positive address_to open_at, bool address_to failed);
+    positive address_to open_at, bool address_to failed,
+    bipolar directory);
 
 static bool find_tree_holds(b32 which, string_address path, positive length,
                             string_address name, positive mode,
                             parallel_output address_to output,
-                            positive address_to open_at, bool address_to failed)
+                            positive address_to open_at, bool address_to failed,
+                            bipolar directory)
 {
         if (which < 0)
                 return true;
@@ -15602,25 +15617,26 @@ static bool find_tree_holds(b32 which, string_address path, positive length,
         switch (node->kind)
         {
         case '&':
-                return find_tree_holds(node->left, path, length, name, mode, output, open_at, failed) &&
-                       find_tree_holds(node->right, path, length, name, mode, output, open_at, failed);
+                return find_tree_holds(node->left, path, length, name, mode, output, open_at, failed, directory) &&
+                       find_tree_holds(node->right, path, length, name, mode, output, open_at, failed, directory);
         case '|':
-                return find_tree_holds(node->left, path, length, name, mode, output, open_at, failed) ||
-                       find_tree_holds(node->right, path, length, name, mode, output, open_at, failed);
+                return find_tree_holds(node->left, path, length, name, mode, output, open_at, failed, directory) ||
+                       find_tree_holds(node->right, path, length, name, mode, output, open_at, failed, directory);
         case ',':
-                find_tree_holds(node->left, path, length, name, mode, output, open_at, failed);
-                return find_tree_holds(node->right, path, length, name, mode, output, open_at, failed);
+                find_tree_holds(node->left, path, length, name, mode, output, open_at, failed, directory);
+                return find_tree_holds(node->right, path, length, name, mode, output, open_at, failed, directory);
         case '!':
-                return !find_tree_holds(node->left, path, length, name, mode, output, open_at, failed);
+                return !find_tree_holds(node->left, path, length, name, mode, output, open_at, failed, directory);
         }
 
-        return find_tree_test(node, path, length, name, mode, output, open_at, failed);
+        return find_tree_test(node, path, length, name, mode, output, open_at, failed, directory);
 }
 
 static __attribute__((noinline)) bool find_tree_test(
     find_node address_to node, string_address path, positive length,
     string_address name, positive mode, parallel_output address_to output,
-    positive address_to open_at, bool address_to failed)
+    positive address_to open_at, bool address_to failed,
+    bipolar directory)
 {
         p8 lowered[FILE_PATH_MAX];
 
@@ -15652,6 +15668,21 @@ static __attribute__((noinline)) bool find_tree_test(
                                      node->kind == 'd' ? '\n' : 0))
                         address_to failed = true;
                 return true;
+        case 'D':
+        {
+                //      What is not a directory is removed by the directory that
+                //      holds it and its own name, as rm removes it; the answer
+                //      is the removal's, and a failure is said by the sink in
+                //      its place in the output.
+                bipolar gone = system_remove_at(directory, name, 0);
+
+                if (gone >= 0)
+                        return true;
+                if (!find_tree_note(output, open_at, FIND_TREE_UNDELETED, gone, path, length,
+                                    (positive)(name - path), 0, 0, null))
+                        address_to failed = true;
+                return false;
+        }
         }
         return false;
 }
@@ -15689,16 +15720,19 @@ static bool find_tree_note(parallel_output address_to output, positive address_t
 static bool find_tree_decide(parallel_output address_to output, positive address_to open_at,
                              string_address path, positive length, positive name_at,
                              positive depth, p8 type, positive mode,
-                             file_facts address_to facts)
+                             file_facts address_to facts, bipolar directory)
 {
         bool failed = false;
 
-        if (!find_tree_pure)
+        //      With -delete a directory is the sink's, which decides it after
+        //      what it held is gone, in the order the walk met it.
+        if (!find_tree_pure ||
+            (find_tree_delete && (mode & MODE_FORMAT) == MODE_DIRECTORY))
                 return find_tree_note(output, open_at, FIND_TREE_ENTRY, 0, path, length,
                                       name_at, depth, type, facts);
 
         (void)find_tree_holds(find_root, path, length, path + name_at, mode, output,
-                              open_at, address_of failed);
+                              open_at, address_of failed, directory);
         return !failed;
 }
 
@@ -15839,7 +15873,7 @@ static fn find_tree_enter(address_any context, address_any node_address,
                         said = find_tree_decide(output, address_of open_at,
                                                 (string_address)path, length,
                                                 length - name_length, depth, type, mode,
-                                                looked ? address_of facts : null);
+                                                looked ? address_of facts : null, directory);
 
                 if (said && descend)
                 {
@@ -15900,7 +15934,8 @@ static fn find_tree_leave(address_any context, address_any node_address,
 
         if (!find_tree_decide(output, address_of open_at, (string_address)node->path,
                               node->length, node->name_at, node->depth, node->type,
-                              node->facts.mode, node->looked ? address_of node->facts : null))
+                              node->facts.mode, node->looked ? address_of node->facts : null,
+                              directory))
                 parallel_stop();
 }
 
@@ -15936,6 +15971,12 @@ static bool find_tree_sink(address_any context, address_any node_address,
                 case FIND_TREE_FAILED:
                         string_format(log_error, "find: '%w': %s\n", writer_terminal_quoted_name,
                                       payload, file_reason(record.code));
+                        find_status = 1;
+                        break;
+                case FIND_TREE_UNDELETED:
+                        string_format(log_error, "find: cannot delete '%w': %s\n",
+                                      writer_terminal_quoted_name, payload,
+                                      file_reason(record.code));
                         find_status = 1;
                         break;
                 case FIND_TREE_CYCLE:

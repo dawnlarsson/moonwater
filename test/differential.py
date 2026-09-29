@@ -6396,7 +6396,15 @@ files_FIND_WALKED = (
     (".", "-perm", "-u+x"), (".", "-empty"), (".", "-size", "+0"), (".", "-links", "+1"),
     (".", "-name", "*.txt", "-print0"), (".", "-name", "a.txt", "-printf", "%p %s %m\\n"), (".", "-ls"),
     (".", "-type", "f", "-exec", "echo", "{}", ";"), (".", "-type", "f", "-exec", "printf", "%s\\n", "{}", "+"),
-    ("dir", "-delete"), ("dir", "-name", "inside", "-delete"), (".", "-name", "a.txt", "-ok", "rm", "{}", ";"),
+    ("dir", "-delete"), ("dir", "-name", "inside", "-delete"),
+    # -delete on the pool: names that are not directories by the job that reads
+    # them, directories after all they held; what stays says what failed.
+    ("dir", "-type", "f", "-delete", "-print"), ("dir", "-type", "f", "-delete"), ("dir", "-mindepth", "1", "-delete"),
+    ("dir", "-depth", "-delete"), ("dir", "-name", "*.txt", "-delete", "-print"), ("dir", "(", "-name", "inside", "-o", "-name", "deep*", ")", "-delete"),
+    ("dir", "-delete", "-o", "-print"), ("dir", "-maxdepth", "1", "-delete"), ("dir", "-print", "-delete", "-print"),
+    ("dir", "-not", "-name", "sub", "-delete"), (".", "-empty", "-delete"), (".", "-empty", "-print"), ("dir", "-type", "l", "-delete"),
+    (".", "-type", "p", "-delete"), (".", "-name", "*.txt", "-type", "f", "-delete"), ("shut", "-delete"), ("dirlink", "-delete"),
+    ("-L", "dir", "-type", "f", "-delete"), ("dir", "-xdev", "-delete"), ("hollow", "dupdir", "-delete"), (".", "-name", "a.txt", "-ok", "rm", "{}", ";"),
     ("dir/sub/back", "-name", "a.txt"), ("dirlink", "-type", "f"), ("link", "-type", "f"), ("dangling",),
     ("missing",), ("shut",), ("loop",), (), (".", "-name", "a.txt", "-quit"), (".", "-regex", ".*\\.txt"),
     (".", "-mtime", "+100"), (".", "-newermt", "2003-01-01"), (".", "-iname", "*.TXT", "-fprint", "out"),
