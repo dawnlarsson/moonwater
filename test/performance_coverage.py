@@ -513,6 +513,14 @@ cover('direct_benchmark', 'test/checks.c#BENCH_montgomery', 'x25519',
       'ran (SHARED_x25519_reference, the x25519-c row); held to OpenSSL by '
       'CHECK_crypto_vectors on every body and by crypto_fuzz, which links '
       'the x86_64 bodies themselves')
+cover('direct_benchmark', 'test/checks.c#BENCH_limbs', '''
+limbs_add limbs_subtract limbs_add_multiply_word limbs_multiply_word limbs_compare
+positive_divide_wide
+''', 'each row against the C its callers ran (text.c base58, the bit-serial '
+      'divide of numfmt and factor) at 4, 8, 16, 31 and 64 limbs, and the '
+      'n-by-n basecase product base58 makes of them; differential over every '
+      'length to 67 limbs against guard pages in CHECK_verify on all three '
+      'machines')
 cover('correctness_only', 'test/checks.c#CHECK_net', 'ghash_blocks ghash_key ghash_integer aes128_ctr_blocks',
       'bit-serial differential over every body each machine has (feature '
       'bytes toggled); ghash_blocks timed against the carry-less multiply '

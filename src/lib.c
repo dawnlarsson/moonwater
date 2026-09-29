@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        370 routines (351 public, 19 local), 363 of them on all three and 7 local to one.
+        376 routines (357 public, 19 local), 369 of them on all three and 7 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -176,6 +176,11 @@
           library_close                  public  yes     yes     yes
           library_get                    public  yes     yes     yes
           library_open                   public  yes     yes     yes
+          limbs_add                      public  yes     yes     yes
+          limbs_add_multiply_word        public  yes     yes     yes
+          limbs_compare                  public  yes     yes     yes
+          limbs_multiply_word            public  yes     yes     yes
+          limbs_subtract                 public  yes     yes     yes
           lock_release                   public  yes     yes     yes
           lock_take                      public  yes     yes     yes
           lock_try                       public  yes     yes     yes
@@ -294,6 +299,7 @@
           path_tail_copy                 public  yes     yes     yes
           positive_digits                public  yes     yes     yes
           positive_digits_core           local   yes     yes     yes
+          positive_divide_wide           public  yes     yes     yes
           positive_into                  public  yes     yes     yes
           positive_into_base             public  yes     yes     yes
           positive_into_core             local   yes     yes     yes
@@ -80639,6 +80645,407 @@ __asm__(
 );
 
 #endif // LINUX && !KERNEL_MODE && !STANDARD_NO_PLATFORM
+
+/*
+        THE LIMB FAMILY: MULTIPLE-PRECISION ADD, SUBTRACT, MULTIPLY BY A WORD,
+        COMPARE, AND THE 128/64 DIVIDE
+
+        A number here is an array of 64-bit limbs, least significant first,
+        as base58's divide and conquer, factor's Montgomery rings and the
+        decimal reader's big scale each kept it, each with its own C loops
+        for the same five steps. These are GMP's add_n/sub_n (with the carry
+        or borrow walked on into the longer operand, and stopped as soon as
+        it is spent), addmul_1, mul_1 and cmp, and udiv_qrnnd.
+
+        None of them is constant time: the carry walk stops when the carry
+        does, and the compare at the first limb that differs. The crypto in
+        net.c keeps its own three-operand, always-walking loops for that
+        reason, and because its n is four or six.
+
+        x86_64: the add and subtract are one adc/sbb chain four limbs a turn,
+        the count and pointers moved by dec and lea so the carry lives in the
+        flag across turns. mul writes the flags, so the multiplies make four
+        products first and then add them in one chain -- low halves plus the
+        high halves one place down -- and, for addmul, a second chain adds
+        the limbs of r. Each chain's carry ends in the top high half, which
+        cannot overflow: a group's whole sum is below 2^320. The divide is
+        one div.
+
+        arm64: the same shapes with adcs/sbcs, ldp/stp, and mul/umulh, which
+        leave the flags alone. arm64 and riscv64 have no 128/64 divide, so
+        positive_divide_wide there normalizes the divisor with a clz (a
+        shift-pair clz on riscv64, whose floor has no Zbb) and divides in
+        two 64/32 steps, Knuth's algorithm D with 32-bit digits as Hacker's
+        Delight writes it (divlu): each estimate is at most two too big and
+        is corrected by the divisor's low half before its product is taken
+        off. The shift of the low word up into the high one is written
+        (low >> 1) >> (63 - s), since a register shift by 64 - s is a shift by
+        nothing when s is zero.
+
+        riscv64: no carry flag, so every carry is an sltu, two limbs a turn.
+*/
+#ifndef KERNEL_MODE
+
+// a[0..n) += b[0..m), m <= n; the carry out of a's top limb. a == b allowed.
+p64 limbs_add(p64 address_to a, positive n, const p64 address_to b, positive m);
+// a[0..n) -= b[0..m), m <= n; the borrow out of a's top limb. a == b allowed.
+p64 limbs_subtract(p64 address_to a, positive n, const p64 address_to b, positive m);
+// r[0..n) += a[0..n) * w; the high limb out. r and a apart.
+p64 limbs_add_multiply_word(p64 address_to r, const p64 address_to a, positive n, p64 w);
+// r[0..n) = a[0..n) * w + carry; the high limb out. r == a allowed.
+p64 limbs_multiply_word(p64 address_to r, const p64 address_to a, positive n,
+                        p64 w, p64 carry);
+// -1, 0 or 1 as a[0..n) is below, equal to or above b[0..n), from the top limb.
+PURE b32 limbs_compare(const p64 address_to a, const p64 address_to b, positive n);
+// (high:low) / divisor as {quotient, remainder}, with high < divisor: a
+// divisor of zero or at most high is the caller's bug (x86_64 would fault).
+CONST positive2 positive_divide_wide(positive high, positive low, positive divisor);
+
+#if X64
+__asm__(
+    ASM_SECTION
+    ASM_FUNC(limbs_add)
+    "sub %rcx, %rsi\n   mov %rcx, %r9\n   shr $2, %rcx\n   and $3, %r9d\n   jz 2f\n"
+    "1:  mov (%rdi), %rax\n   adc (%rdx), %rax\n   mov %rax, (%rdi)\n"
+    "lea 8(%rdi), %rdi\n   lea 8(%rdx), %rdx\n   dec %r9d\n   jnz 1b\n"
+    "2:  jrcxz 4f\n"
+    "3:  mov (%rdi), %rax\n   mov 8(%rdi), %r8\n   mov 16(%rdi), %r10\n   mov 24(%rdi), %r11\n"
+    "adc (%rdx), %rax\n   adc 8(%rdx), %r8\n   adc 16(%rdx), %r10\n   adc 24(%rdx), %r11\n"
+    "mov %rax, (%rdi)\n   mov %r8, 8(%rdi)\n   mov %r10, 16(%rdi)\n   mov %r11, 24(%rdi)\n"
+    "lea 32(%rdi), %rdi\n   lea 32(%rdx), %rdx\n   dec %rcx\n   jnz 3b\n"
+    "4:  jc 5f\n   xor %eax, %eax\n"
+    ASM_RET
+    "5:  mov $1, %eax\n"
+    "6:  test %rsi, %rsi\n   jz 7f\n"
+    "addq $1, (%rdi)\n   lea 8(%rdi), %rdi\n   dec %rsi\n   jc 6b\n"
+    "xor %eax, %eax\n"
+    "7:\n"
+    ASM_RET
+    ASM_END(limbs_add)
+
+    ASM_FUNC(limbs_subtract)
+    "sub %rcx, %rsi\n   mov %rcx, %r9\n   shr $2, %rcx\n   and $3, %r9d\n   jz 2f\n"
+    "1:  mov (%rdi), %rax\n   sbb (%rdx), %rax\n   mov %rax, (%rdi)\n"
+    "lea 8(%rdi), %rdi\n   lea 8(%rdx), %rdx\n   dec %r9d\n   jnz 1b\n"
+    "2:  jrcxz 4f\n"
+    "3:  mov (%rdi), %rax\n   mov 8(%rdi), %r8\n   mov 16(%rdi), %r10\n   mov 24(%rdi), %r11\n"
+    "sbb (%rdx), %rax\n   sbb 8(%rdx), %r8\n   sbb 16(%rdx), %r10\n   sbb 24(%rdx), %r11\n"
+    "mov %rax, (%rdi)\n   mov %r8, 8(%rdi)\n   mov %r10, 16(%rdi)\n   mov %r11, 24(%rdi)\n"
+    "lea 32(%rdi), %rdi\n   lea 32(%rdx), %rdx\n   dec %rcx\n   jnz 3b\n"
+    "4:  jc 5f\n   xor %eax, %eax\n"
+    ASM_RET
+    "5:  mov $1, %eax\n"
+    "6:  test %rsi, %rsi\n   jz 7f\n"
+    "subq $1, (%rdi)\n   lea 8(%rdi), %rdi\n   dec %rsi\n   jc 6b\n"
+    "xor %eax, %eax\n"
+    "7:\n"
+    ASM_RET
+    ASM_END(limbs_subtract)
+
+    ASM_FUNC(limbs_add_multiply_word)
+    "mov %rdx, %r9\n   xor %r8d, %r8d\n   mov %r9d, %r10d\n   and $3, %r10d\n   jz 2f\n"
+    "1:  mov (%rsi), %rax\n   mul %rcx\n   add %r8, %rax\n   adc $0, %rdx\n"
+    "add %rax, (%rdi)\n   adc $0, %rdx\n   mov %rdx, %r8\n"
+    "lea 8(%rsi), %rsi\n   lea 8(%rdi), %rdi\n   dec %r10d\n   jnz 1b\n"
+    "2:  shr $2, %r9\n   jz 4f\n"
+    "push %rbx\n   push %rbp\n   push %r12\n   push %r13\n"
+    "3:  mov (%rsi), %rax\n   mul %rcx\n   mov %rax, %r10\n   mov %rdx, %r11\n"
+    "mov 8(%rsi), %rax\n   mul %rcx\n   mov %rax, %rbx\n   mov %rdx, %rbp\n"
+    "mov 16(%rsi), %rax\n   mul %rcx\n   mov %rax, %r12\n   mov %rdx, %r13\n"
+    "mov 24(%rsi), %rax\n   mul %rcx\n"
+    "add %r8, %r10\n   adc %r11, %rbx\n   adc %rbp, %r12\n   adc %r13, %rax\n   adc $0, %rdx\n"
+    "add (%rdi), %r10\n   adc 8(%rdi), %rbx\n   adc 16(%rdi), %r12\n   adc 24(%rdi), %rax\n   adc $0, %rdx\n"
+    "mov %r10, (%rdi)\n   mov %rbx, 8(%rdi)\n   mov %r12, 16(%rdi)\n   mov %rax, 24(%rdi)\n"
+    "mov %rdx, %r8\n   lea 32(%rsi), %rsi\n   lea 32(%rdi), %rdi\n   dec %r9\n   jnz 3b\n"
+    "pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n"
+    "4:  mov %r8, %rax\n"
+    ASM_RET
+    ASM_END(limbs_add_multiply_word)
+
+    ASM_FUNC(limbs_multiply_word)
+    "mov %rdx, %r9\n   mov %r9d, %r10d\n   and $3, %r10d\n   jz 2f\n"
+    "1:  mov (%rsi), %rax\n   mul %rcx\n   add %r8, %rax\n   adc $0, %rdx\n"
+    "mov %rax, (%rdi)\n   mov %rdx, %r8\n"
+    "lea 8(%rsi), %rsi\n   lea 8(%rdi), %rdi\n   dec %r10d\n   jnz 1b\n"
+    "2:  shr $2, %r9\n   jz 4f\n"
+    "push %rbx\n   push %rbp\n   push %r12\n   push %r13\n"
+    "3:  mov (%rsi), %rax\n   mul %rcx\n   mov %rax, %r10\n   mov %rdx, %r11\n"
+    "mov 8(%rsi), %rax\n   mul %rcx\n   mov %rax, %rbx\n   mov %rdx, %rbp\n"
+    "mov 16(%rsi), %rax\n   mul %rcx\n   mov %rax, %r12\n   mov %rdx, %r13\n"
+    "mov 24(%rsi), %rax\n   mul %rcx\n"
+    "add %r8, %r10\n   adc %r11, %rbx\n   adc %rbp, %r12\n   adc %r13, %rax\n   adc $0, %rdx\n"
+    "mov %r10, (%rdi)\n   mov %rbx, 8(%rdi)\n   mov %r12, 16(%rdi)\n   mov %rax, 24(%rdi)\n"
+    "mov %rdx, %r8\n   lea 32(%rsi), %rsi\n   lea 32(%rdi), %rdi\n   dec %r9\n   jnz 3b\n"
+    "pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n"
+    "4:  mov %r8, %rax\n"
+    ASM_RET
+    ASM_END(limbs_multiply_word)
+
+    ASM_FUNC(limbs_compare)
+    "test %rdx, %rdx\n   jz 2f\n"
+    "1:  mov -8(%rdi,%rdx,8), %rax\n   cmp -8(%rsi,%rdx,8), %rax\n   jne 3f\n"
+    "dec %rdx\n   jnz 1b\n"
+    "2:  xor %eax, %eax\n"
+    ASM_RET
+    "3:  sbb %eax, %eax\n   or $1, %eax\n"
+    ASM_RET
+    ASM_END(limbs_compare)
+
+    ASM_FUNC(positive_divide_wide)
+    "mov %rdx, %rcx\n   mov %rsi, %rax\n   mov %rdi, %rdx\n   div %rcx\n"
+    ASM_RET
+    ASM_END(positive_divide_wide)
+);
+
+#elif ARM64
+__asm__(
+    ASM_SECTION
+    // See the x86_64 bodies: cmn sets C clear to start the chain, and the
+    // odd limb and the odd pair go first so the loop is whole quads.
+    ASM_FUNC(limbs_add)
+    "sub x1, x1, x3\n   cmn xzr, xzr\n   tbz x3, #0, 1f\n"
+    "ldr x4, [x0]\n   ldr x5, [x2], #8\n   adcs x4, x4, x5\n   str x4, [x0], #8\n"
+    "1:  tbz x3, #1, 2f\n"
+    "ldp x4, x5, [x0]\n   ldp x6, x7, [x2], #16\n   adcs x4, x4, x6\n   adcs x5, x5, x7\n"
+    "stp x4, x5, [x0], #16\n"
+    "2:  lsr x3, x3, #2\n   cbz x3, 4f\n"
+    "3:  ldp x4, x5, [x0]\n   ldp x8, x9, [x0, #16]\n   ldp x6, x7, [x2]\n   ldp x10, x11, [x2, #16]\n"
+    "add x2, x2, #32\n"
+    "adcs x4, x4, x6\n   adcs x5, x5, x7\n   adcs x8, x8, x10\n   adcs x9, x9, x11\n"
+    "stp x4, x5, [x0]\n   stp x8, x9, [x0, #16]\n   add x0, x0, #32\n"
+    "sub x3, x3, #1\n   cbnz x3, 3b\n"
+    "4:  b.cs 5f\n   mov x0, xzr\n"
+    ASM_RET
+    "5:  cbz x1, 6f\n   ldr x4, [x0]\n   adds x4, x4, #1\n   str x4, [x0], #8\n"
+    "sub x1, x1, #1\n   b.cs 5b\n   mov x0, xzr\n"
+    ASM_RET
+    "6:  mov x0, #1\n"
+    ASM_RET
+    ASM_END(limbs_add)
+
+    // C set is no borrow on arm64, so the chain starts from cmp.
+    ASM_FUNC(limbs_subtract)
+    "sub x1, x1, x3\n   cmp xzr, xzr\n   tbz x3, #0, 1f\n"
+    "ldr x4, [x0]\n   ldr x5, [x2], #8\n   sbcs x4, x4, x5\n   str x4, [x0], #8\n"
+    "1:  tbz x3, #1, 2f\n"
+    "ldp x4, x5, [x0]\n   ldp x6, x7, [x2], #16\n   sbcs x4, x4, x6\n   sbcs x5, x5, x7\n"
+    "stp x4, x5, [x0], #16\n"
+    "2:  lsr x3, x3, #2\n   cbz x3, 4f\n"
+    "3:  ldp x4, x5, [x0]\n   ldp x8, x9, [x0, #16]\n   ldp x6, x7, [x2]\n   ldp x10, x11, [x2, #16]\n"
+    "add x2, x2, #32\n"
+    "sbcs x4, x4, x6\n   sbcs x5, x5, x7\n   sbcs x8, x8, x10\n   sbcs x9, x9, x11\n"
+    "stp x4, x5, [x0]\n   stp x8, x9, [x0, #16]\n   add x0, x0, #32\n"
+    "sub x3, x3, #1\n   cbnz x3, 3b\n"
+    "4:  b.cc 5f\n   mov x0, xzr\n"
+    ASM_RET
+    "5:  cbz x1, 6f\n   ldr x4, [x0]\n   subs x4, x4, #1\n   str x4, [x0], #8\n"
+    "sub x1, x1, #1\n   b.cc 5b\n   mov x0, xzr\n"
+    ASM_RET
+    "6:  mov x0, #1\n"
+    ASM_RET
+    ASM_END(limbs_subtract)
+
+    ASM_FUNC(limbs_add_multiply_word)
+    "mov x4, xzr\n   tbz x2, #0, 1f\n"
+    "ldr x5, [x1], #8\n   mul x6, x5, x3\n   umulh x7, x5, x3\n   ldr x8, [x0]\n"
+    "adds x6, x6, x4\n   adc x7, x7, xzr\n   adds x6, x6, x8\n   adc x4, x7, xzr\n"
+    "str x6, [x0], #8\n"
+    "1:  tbz x2, #1, 2f\n"
+    "ldp x5, x8, [x1], #16\n   mul x6, x5, x3\n   umulh x7, x5, x3\n"
+    "mul x9, x8, x3\n   umulh x10, x8, x3\n   ldp x11, x12, [x0]\n"
+    "adds x6, x6, x4\n   adcs x9, x9, x7\n   adc x4, x10, xzr\n"
+    "adds x6, x6, x11\n   adcs x9, x9, x12\n   adc x4, x4, xzr\n"
+    "stp x6, x9, [x0], #16\n"
+    "2:  lsr x2, x2, #2\n   cbz x2, 4f\n"
+    "3:  ldp x5, x8, [x1]\n   ldp x11, x14, [x1, #16]\n   add x1, x1, #32\n"
+    "mul x6, x5, x3\n   umulh x7, x5, x3\n   mul x9, x8, x3\n   umulh x10, x8, x3\n"
+    "mul x12, x11, x3\n   umulh x13, x11, x3\n   mul x15, x14, x3\n   umulh x16, x14, x3\n"
+    "adds x6, x6, x4\n   adcs x9, x9, x7\n   adcs x12, x12, x10\n   adcs x15, x15, x13\n"
+    "adc x4, x16, xzr\n"
+    "ldp x5, x8, [x0]\n   ldp x11, x14, [x0, #16]\n"
+    "adds x6, x6, x5\n   adcs x9, x9, x8\n   adcs x12, x12, x11\n   adcs x15, x15, x14\n"
+    "adc x4, x4, xzr\n"
+    "stp x6, x9, [x0]\n   stp x12, x15, [x0, #16]\n   add x0, x0, #32\n"
+    "sub x2, x2, #1\n   cbnz x2, 3b\n"
+    "4:  mov x0, x4\n"
+    ASM_RET
+    ASM_END(limbs_add_multiply_word)
+
+    ASM_FUNC(limbs_multiply_word)
+    "tbz x2, #0, 1f\n"
+    "ldr x5, [x1], #8\n   mul x6, x5, x3\n   umulh x7, x5, x3\n"
+    "adds x6, x6, x4\n   adc x4, x7, xzr\n   str x6, [x0], #8\n"
+    "1:  tbz x2, #1, 2f\n"
+    "ldp x5, x8, [x1], #16\n   mul x6, x5, x3\n   umulh x7, x5, x3\n"
+    "mul x9, x8, x3\n   umulh x10, x8, x3\n"
+    "adds x6, x6, x4\n   adcs x9, x9, x7\n   adc x4, x10, xzr\n   stp x6, x9, [x0], #16\n"
+    "2:  lsr x2, x2, #2\n   cbz x2, 4f\n"
+    "3:  ldp x5, x8, [x1]\n   ldp x11, x14, [x1, #16]\n   add x1, x1, #32\n"
+    "mul x6, x5, x3\n   umulh x7, x5, x3\n   mul x9, x8, x3\n   umulh x10, x8, x3\n"
+    "mul x12, x11, x3\n   umulh x13, x11, x3\n   mul x15, x14, x3\n   umulh x16, x14, x3\n"
+    "adds x6, x6, x4\n   adcs x9, x9, x7\n   adcs x12, x12, x10\n   adcs x15, x15, x13\n"
+    "adc x4, x16, xzr\n"
+    "stp x6, x9, [x0]\n   stp x12, x15, [x0, #16]\n   add x0, x0, #32\n"
+    "sub x2, x2, #1\n   cbnz x2, 3b\n"
+    "4:  mov x0, x4\n"
+    ASM_RET
+    ASM_END(limbs_multiply_word)
+
+    ASM_FUNC(limbs_compare)
+    "add x0, x0, x2, lsl #3\n   add x1, x1, x2, lsl #3\n   cbz x2, 2f\n"
+    "1:  ldr x3, [x0, #-8]!\n   ldr x4, [x1, #-8]!\n   cmp x3, x4\n   b.ne 3f\n"
+    "sub x2, x2, #1\n   cbnz x2, 1b\n"
+    "2:  mov w0, wzr\n"
+    ASM_RET
+    "3:  cset w0, hi\n   csinv w0, w0, wzr, hs\n"
+    ASM_RET
+    ASM_END(limbs_compare)
+
+    // x3 the shift, x2 the divisor normalized, x6/x7 its halves; x4 the
+    // high 64 bits of the shifted numerator and x8/x9 the low halves;
+    // x10 and x14 the two quotient digits, x11 the running remainder.
+    ASM_FUNC(positive_divide_wide)
+    "clz x3, x2\n   lsl x2, x2, x3\n   lsl x4, x0, x3\n"
+    "lsr x5, x1, #1\n   mvn w6, w3\n   lsr x5, x5, x6\n   orr x4, x4, x5\n"
+    "lsl x5, x1, x3\n   lsr x6, x2, #32\n   mov w7, w2\n"
+    "lsr x8, x5, #32\n   mov w9, w5\n"
+    "udiv x10, x4, x6\n   msub x11, x10, x6, x4\n"
+    "1:  lsr x12, x10, #32\n   cbnz x12, 2f\n"
+    "mul x12, x10, x7\n   orr x13, x8, x11, lsl #32\n   cmp x12, x13\n   b.ls 3f\n"
+    "2:  sub x10, x10, #1\n   add x11, x11, x6\n   lsr x12, x11, #32\n   cbz x12, 1b\n"
+    "3:  orr x13, x8, x4, lsl #32\n   msub x13, x10, x2, x13\n"
+    "udiv x14, x13, x6\n   msub x11, x14, x6, x13\n"
+    "4:  lsr x12, x14, #32\n   cbnz x12, 5f\n"
+    "mul x12, x14, x7\n   orr x15, x9, x11, lsl #32\n   cmp x12, x15\n   b.ls 6f\n"
+    "5:  sub x14, x14, #1\n   add x11, x11, x6\n   lsr x12, x11, #32\n   cbz x12, 4b\n"
+    "6:  orr x15, x9, x13, lsl #32\n   msub x15, x14, x2, x15\n"
+    "lsr x1, x15, x3\n   orr x0, x14, x10, lsl #32\n"
+    ASM_RET
+    ASM_END(positive_divide_wide)
+);
+
+#elif RISCV64
+__asm__(
+    ASM_SECTION
+    // See the x86_64 bodies. t0 is the carry: a sum's carry out is the
+    // sltu of it against either addend, and the two adds a limb takes can
+    // carry at most once between them.
+    ASM_FUNC(limbs_add)
+    "sub a1, a1, a3\n   li t0, 0\n   andi t6, a3, 1\n   beqz t6, 1f\n"
+    "ld t1, 0(a0)\n   ld t2, 0(a2)\n   add t1, t1, t2\n   sltu t0, t1, t2\n   sd t1, 0(a0)\n"
+    "addi a0, a0, 8\n   addi a2, a2, 8\n   addi a3, a3, -1\n"
+    "1:  beqz a3, 3f\n"
+    "2:  ld t1, 0(a0)\n   ld t2, 0(a2)\n   ld t3, 8(a0)\n   ld t4, 8(a2)\n"
+    "add t1, t1, t2\n   sltu t5, t1, t2\n   add t1, t1, t0\n   sltu t0, t1, t0\n   or t0, t0, t5\n"
+    "add t3, t3, t4\n   sltu t5, t3, t4\n   add t3, t3, t0\n   sltu t0, t3, t0\n   or t0, t0, t5\n"
+    "sd t1, 0(a0)\n   sd t3, 8(a0)\n   addi a0, a0, 16\n   addi a2, a2, 16\n"
+    "addi a3, a3, -2\n   bnez a3, 2b\n"
+    "3:  beqz t0, 5f\n"
+    "4:  beqz a1, 6f\n   ld t1, 0(a0)\n   addi t1, t1, 1\n   sd t1, 0(a0)\n"
+    "addi a0, a0, 8\n   addi a1, a1, -1\n   beqz t1, 4b\n"
+    "5:  li a0, 0\n"
+    ASM_RET
+    "6:  li a0, 1\n"
+    ASM_RET
+    ASM_END(limbs_add)
+
+    ASM_FUNC(limbs_subtract)
+    "sub a1, a1, a3\n   li t0, 0\n   andi t6, a3, 1\n   beqz t6, 1f\n"
+    "ld t1, 0(a0)\n   ld t2, 0(a2)\n   sltu t0, t1, t2\n   sub t1, t1, t2\n   sd t1, 0(a0)\n"
+    "addi a0, a0, 8\n   addi a2, a2, 8\n   addi a3, a3, -1\n"
+    "1:  beqz a3, 3f\n"
+    "2:  ld t1, 0(a0)\n   ld t2, 0(a2)\n   ld t3, 8(a0)\n   ld t4, 8(a2)\n"
+    "sltu t5, t1, t2\n   sub t1, t1, t2\n   sltu t6, t1, t0\n   sub t1, t1, t0\n   or t0, t5, t6\n"
+    "sltu t5, t3, t4\n   sub t3, t3, t4\n   sltu t6, t3, t0\n   sub t3, t3, t0\n   or t0, t5, t6\n"
+    "sd t1, 0(a0)\n   sd t3, 8(a0)\n   addi a0, a0, 16\n   addi a2, a2, 16\n"
+    "addi a3, a3, -2\n   bnez a3, 2b\n"
+    "3:  beqz t0, 5f\n"
+    "4:  beqz a1, 6f\n   ld t1, 0(a0)\n   addi t2, t1, -1\n   sd t2, 0(a0)\n"
+    "addi a0, a0, 8\n   addi a1, a1, -1\n   beqz t1, 4b\n"
+    "5:  li a0, 0\n"
+    ASM_RET
+    "6:  li a0, 1\n"
+    ASM_RET
+    ASM_END(limbs_subtract)
+
+    // a4 the carry limb between limbs.
+    ASM_FUNC(limbs_add_multiply_word)
+    "li a4, 0\n   andi t6, a2, 1\n   beqz t6, 1f\n"
+    "ld t1, 0(a1)\n   mul t2, t1, a3\n   mulhu t3, t1, a3\n   ld t5, 0(a0)\n"
+    "add t2, t2, t5\n   sltu t4, t2, t5\n   add a4, t3, t4\n   sd t2, 0(a0)\n"
+    "addi a0, a0, 8\n   addi a1, a1, 8\n   addi a2, a2, -1\n"
+    "1:  beqz a2, 3f\n"
+    "2:  ld t1, 0(a1)\n   ld a5, 8(a1)\n   ld t5, 0(a0)\n   ld a6, 8(a0)\n"
+    "mul t2, t1, a3\n   mulhu t3, t1, a3\n   mul a7, a5, a3\n   mulhu t6, a5, a3\n"
+    "add t2, t2, a4\n   sltu t4, t2, a4\n   add t3, t3, t4\n"
+    "add t2, t2, t5\n   sltu t4, t2, t5\n   add t3, t3, t4\n"
+    "add a7, a7, t3\n   sltu t4, a7, t3\n   add t6, t6, t4\n"
+    "add a7, a7, a6\n   sltu t4, a7, a6\n   add a4, t6, t4\n"
+    "sd t2, 0(a0)\n   sd a7, 8(a0)\n   addi a0, a0, 16\n   addi a1, a1, 16\n"
+    "addi a2, a2, -2\n   bnez a2, 2b\n"
+    "3:  mv a0, a4\n"
+    ASM_RET
+    ASM_END(limbs_add_multiply_word)
+
+    ASM_FUNC(limbs_multiply_word)
+    "andi t6, a2, 1\n   beqz t6, 1f\n"
+    "ld t1, 0(a1)\n   mul t2, t1, a3\n   mulhu t3, t1, a3\n"
+    "add t2, t2, a4\n   sltu t4, t2, a4\n   add a4, t3, t4\n   sd t2, 0(a0)\n"
+    "addi a0, a0, 8\n   addi a1, a1, 8\n   addi a2, a2, -1\n"
+    "1:  beqz a2, 3f\n"
+    "2:  ld t1, 0(a1)\n   ld a5, 8(a1)\n"
+    "mul t2, t1, a3\n   mulhu t3, t1, a3\n   mul a7, a5, a3\n   mulhu t6, a5, a3\n"
+    "add t2, t2, a4\n   sltu t4, t2, a4\n   add t3, t3, t4\n"
+    "add a7, a7, t3\n   sltu t4, a7, t3\n   add a4, t6, t4\n"
+    "sd t2, 0(a0)\n   sd a7, 8(a0)\n   addi a0, a0, 16\n   addi a1, a1, 16\n"
+    "addi a2, a2, -2\n   bnez a2, 2b\n"
+    "3:  mv a0, a4\n"
+    ASM_RET
+    ASM_END(limbs_multiply_word)
+
+    ASM_FUNC(limbs_compare)
+    "slli t0, a2, 3\n   add a0, a0, t0\n   add a1, a1, t0\n   beqz a2, 2f\n"
+    "1:  ld t1, -8(a0)\n   ld t2, -8(a1)\n   bne t1, t2, 3f\n"
+    "addi a0, a0, -8\n   addi a1, a1, -8\n   addi a2, a2, -1\n   bnez a2, 1b\n"
+    "2:  li a0, 0\n"
+    ASM_RET
+    "3:  sltu a0, t2, t1\n   sltu t3, t1, t2\n   sub a0, a0, t3\n"
+    ASM_RET
+    ASM_END(limbs_compare)
+
+    // As the arm64 body, with the clz a shift pair a step: t0 the divisor
+    // normalized and t1 the shift; a3/a4 the divisor's halves, a5/a6 the
+    // numerator's low halves, a7 and t5 the quotient digits, t3 the
+    // running remainder.
+    ASM_FUNC(positive_divide_wide)
+    "mv t0, a2\n   li t1, 0\n"
+    "srli t2, t0, 32\n   seqz t2, t2\n   slli t2, t2, 5\n   sll t0, t0, t2\n   add t1, t1, t2\n"
+    "srli t2, t0, 48\n   seqz t2, t2\n   slli t2, t2, 4\n   sll t0, t0, t2\n   add t1, t1, t2\n"
+    "srli t2, t0, 56\n   seqz t2, t2\n   slli t2, t2, 3\n   sll t0, t0, t2\n   add t1, t1, t2\n"
+    "srli t2, t0, 60\n   seqz t2, t2\n   slli t2, t2, 2\n   sll t0, t0, t2\n   add t1, t1, t2\n"
+    "srli t2, t0, 62\n   seqz t2, t2\n   slli t2, t2, 1\n   sll t0, t0, t2\n   add t1, t1, t2\n"
+    "srli t2, t0, 63\n   seqz t2, t2\n   sll t0, t0, t2\n   add t1, t1, t2\n"
+    "sll a0, a0, t1\n   srli t2, a1, 1\n   li t3, 63\n   sub t3, t3, t1\n   srl t2, t2, t3\n"
+    "or a0, a0, t2\n   sll a1, a1, t1\n"
+    "srli a3, t0, 32\n   slli a4, t0, 32\n   srli a4, a4, 32\n"
+    "srli a5, a1, 32\n   slli a6, a1, 32\n   srli a6, a6, 32\n"
+    "divu a7, a0, a3\n   mul t2, a7, a3\n   sub t3, a0, t2\n"
+    "1:  srli t2, a7, 32\n   bnez t2, 2f\n"
+    "mul t2, a7, a4\n   slli t4, t3, 32\n   or t4, t4, a5\n   bleu t2, t4, 3f\n"
+    "2:  addi a7, a7, -1\n   add t3, t3, a3\n   srli t2, t3, 32\n   beqz t2, 1b\n"
+    "3:  slli t4, a0, 32\n   or t4, t4, a5\n   mul t2, a7, t0\n   sub t4, t4, t2\n"
+    "divu t5, t4, a3\n   mul t2, t5, a3\n   sub t3, t4, t2\n"
+    "4:  srli t2, t5, 32\n   bnez t2, 5f\n"
+    "mul t2, t5, a4\n   slli t6, t3, 32\n   or t6, t6, a6\n   bleu t2, t6, 6f\n"
+    "5:  addi t5, t5, -1\n   add t3, t3, a3\n   srli t2, t3, 32\n   beqz t2, 4b\n"
+    "6:  slli t6, t4, 32\n   or t6, t6, a6\n   mul t2, t5, t0\n   sub t6, t6, t2\n"
+    "srl a1, t6, t1\n   slli a0, a7, 32\n   or a0, a0, t5\n"
+    ASM_RET
+    ASM_END(positive_divide_wide)
+);
+
+#endif
+#endif // !KERNEL_MODE
 
 /*
         THE TEXT FAMILY, FROM src/standard/text.c

@@ -13967,7 +13967,7 @@ fn check_span_byte()
         X(string_to_number_unsigned_checked) X(program_argument)              \
         X(program_environment) X(jump_to_mark) X(signal_jump_mark)            \
         X(signal_jump_to_mark) X(memchr) X(memrchr) X(memccpy) X(memset)      \
-        X(strchr) X(strrchr) X(strchrnul) X(strnchr) X(memory_utf8_valid_span)
+        X(strchr) X(strrchr) X(strchrnul) X(strnchr) X(memory_utf8_valid_span) X(limbs_compare)
 
 #ifdef VERIFY_NARROW_KERNEL
 #define DIRTY_ROUTINE(name) kernel_##name
@@ -15284,6 +15284,20 @@ static fn dirty_words_32(void)
                 if (turn < 4096 && DIRTY_HAS(absolute_whole))
                         AGREE(absolute_whole, (p32)DIRTY_ROUTINE(absolute_whole)(CS32(bits)),
                               (p32)DIRTY(1, absolute_whole)(D32(bits)), (p32)bits);
+                //      No narrow argument, but a b32 answer: -1 as the
+                //      convention hands it back, read at its width.
+                if (turn < 4096 && DIRTY_HAS(limbs_compare))
+                {
+                        static p64 limbs_left[4], limbs_right[4];
+
+                        limbs_left[turn & 3] = (p64)dirty_random();
+                        limbs_right[turn & 3] = turn & 4 ? limbs_left[turn & 3]
+                                                         : (p64)dirty_random();
+                        AGREE(limbs_compare,
+                              (p32)DIRTY_ROUTINE(limbs_compare)(limbs_left, limbs_right, 4),
+                              (p32)DIRTY(3, limbs_compare)(P(limbs_left), P(limbs_right), 4),
+                              turn);
+                }
                 if (turn < 4096 && DIRTY_HAS(wait_status_code_base))
                 {
                         static const b32 signal_bases[] = {0, 128, 256, 384, 0x10080};
@@ -16148,6 +16162,294 @@ fn check_checksums()
                 same("memory_get64", "offset-1 little-endian", shifted,
                      0x0807060504030201ull);
         }
+}
+
+/*
+        The limb family against the C it replaced: text.c's big_add,
+        big_subtract and big_compare and the basecase row of its
+        big_multiply_into, and tools.c's bit-serial wide divide. Every count
+        from nothing to sixty seven limbs, so the single limbs, the pair and
+        every remainder of the four-limb loop meet each routine; the second
+        operand at every shorter length; the operands flush against a
+        protected page on the side each routine walks toward, so a read one
+        limb too far faults; the limbs around what is written compared
+        whole. Values are random, all ones (every carry taken and walked
+        through the longer operand) and zero (every borrow), each against
+        each, and the multiplier is 0, 1, all ones and random.
+*/
+static p64 reference_limbs_add(p64 address_to a, positive n, const p64 address_to b,
+                               positive m)
+{
+        p64 carry = 0;
+        positive at = 0;
+
+        for (; at < m; at++)
+        {
+                p64 sum = a[at] + carry;
+
+                carry = sum < carry;
+                sum += b[at];
+                carry += sum < b[at];
+                a[at] = sum;
+        }
+        for (; carry && at < n; at++)
+                carry = !++a[at];
+        return carry;
+}
+
+static p64 reference_limbs_subtract(p64 address_to a, positive n,
+                                    const p64 address_to b, positive m)
+{
+        p64 borrow = 0;
+        positive at = 0;
+
+        for (; at < m; at++)
+        {
+                p64 x = a[at];
+                p64 y = b[at];
+
+                a[at] = x - y - borrow;
+                borrow = (x < y) | ((x == y) & borrow);
+        }
+        for (; borrow && at < n; at++)
+                borrow = !a[at]--;
+        return borrow;
+}
+
+static p64 reference_limbs_multiply(p64 address_to r, const p64 address_to a,
+                                    positive n, p64 w, p64 carry, bool add)
+{
+        for (positive j = 0; j < n; j++)
+        {
+                unsigned __int128 t = (unsigned __int128)a[j] * w + carry +
+                                      (add ? r[j] : 0);
+
+                r[j] = (p64)t;
+                carry = (p64)(t >> 64);
+        }
+        return carry;
+}
+
+static b32 reference_limbs_compare(const p64 address_to a, const p64 address_to b,
+                                   positive n)
+{
+        while (n--)
+                if (a[n] != b[n])
+                        return a[n] < b[n] ? -1 : 1;
+        return 0;
+}
+
+// The divide the numfmt and factor loops did: a bit a step.
+static positive2 reference_divide_wide(p64 high, p64 low, p64 divisor)
+{
+        unsigned __int128 rest = 0;
+        unsigned __int128 number = (unsigned __int128)high << 64 | low;
+        p64 quotient = 0;
+
+        for (b32 bit = 127; bit >= 0; bit--)
+        {
+                rest = rest << 1 | (p64)(number >> bit & 1);
+                if (rest >= divisor)
+                {
+                        rest -= divisor;
+                        if (bit < 64)
+                                quotient |= (p64)1 << bit;
+                }
+        }
+        return (positive2){{quotient, (p64)rest}};
+}
+
+static p64 limbs_value(positive shape)
+{
+        return shape == 0 ? next() : shape == 1 ? ~(p64)0 : shape == 2 ? 0
+               : (next() & 1) ? ~(p64)0 : next() & 3;
+}
+
+static fn limbs_divide_one(p64 high, p64 low, p64 divisor)
+{
+        positive2 got = positive_divide_wide(high, low, divisor);
+        positive2 want = reference_divide_wide(high, low, divisor);
+
+        same("positive_divide_wide", "quotient", got.x, want.x);
+        same("positive_divide_wide", "remainder", got.y, want.y);
+}
+
+fn check_limbs()
+{
+        p8 address_to pages = memory(4 * 4096);
+        bool mapped = (bipolar)(positive)pages > 0;
+
+        same("limbs", "guard mapping", mapped, 1);
+        if (!mapped)
+                return;
+        bool protected =
+            system_call_3(syscall(mprotect), (positive)pages, 4096, 0) == 0 &&
+            system_call_3(syscall(mprotect), (positive)(pages + 3 * 4096), 4096, 0) == 0;
+        same("limbs", "guard pages protected", protected, 1);
+        if (!protected)
+        {
+                memory_free(pages, 4 * 4096);
+                return;
+        }
+
+        // Two pages of room: the one written below the other, which is read.
+        p64 address_to low_page = (p64 address_to)(pages + 4096);
+        p64 address_to high_page = (p64 address_to)(pages + 2 * 4096);
+        p64 address_to top = high_page + 512;
+        static p64 want[80], operand[80];
+
+        for (positive n = 0; n < 68; n++)
+                for (positive shape = 0; shape < 16; shape++)
+                        for (positive m = 0; m <= n; m++)
+                        {
+                                // a in the low page after a guard limb,
+                                // b flush against the protected page.
+                                p64 address_to a = top - 512 - n - 1;
+                                p64 address_to b = top - m;
+                                p64 address_to ra = top - n;
+
+                                for (positive i = 0; i < n; i++)
+                                        a[i] = limbs_value(shape & 3);
+                                for (positive i = 0; i < m; i++)
+                                        b[i] = limbs_value(shape >> 2);
+                                a[n] = 0x5a5a5a5a5a5a5a5aull;
+                                a[-1] = 0xa5a5a5a5a5a5a5a5ull;
+                                memory_copy(want, a - 1, (n + 2) * sizeof(p64));
+                                same("limbs_add", "carry",
+                                     limbs_add(a, n, b, m),
+                                     reference_limbs_add(want + 1, n, b, m));
+                                same_bytes("limbs_add", "sum and guards", (b8 address_to)(a - 1),
+                                           (b8 address_to)want, (n + 2) * sizeof(p64));
+                                memory_copy(want, a - 1, (n + 2) * sizeof(p64));
+                                same("limbs_subtract", "borrow",
+                                     limbs_subtract(a, n, b, m),
+                                     reference_limbs_subtract(want + 1, n, b, m));
+                                same_bytes("limbs_subtract", "difference and guards",
+                                           (b8 address_to)(a - 1), (b8 address_to)want,
+                                           (n + 2) * sizeof(p64));
+
+                                // The whole of a, flush at its page's end,
+                                // added to and taken from itself.
+                                if (m == n && n < 64)
+                                {
+                                        for (positive i = 0; i < n; i++)
+                                                ra[i] = limbs_value(shape & 3);
+                                        memory_copy(want, ra, n * sizeof(p64));
+                                        same("limbs_add", "a == b",
+                                             limbs_add(ra, n, ra, n),
+                                             reference_limbs_add(want, n, want, n));
+                                        same_bytes("limbs_add", "a == b sum", (b8 address_to)ra,
+                                                   (b8 address_to)want, n * sizeof(p64));
+                                        same("limbs_subtract", "a == b",
+                                             limbs_subtract(ra, n, ra, n), 0);
+                                        memory_fill(want, 0, n * sizeof(p64));
+                                        same_bytes("limbs_subtract", "a == b is zero",
+                                                   (b8 address_to)ra, (b8 address_to)want,
+                                                   n * sizeof(p64));
+                                }
+                        }
+
+        for (positive n = 0; n < 68; n++)
+                for (positive shape = 0; shape < 64; shape++)
+                {
+                        p64 w = shape % 4 == 0 ? next() : shape % 4 == 1 ? ~(p64)0
+                                : shape % 4 == 2 ? (p64)(shape & 4) >> 2 : next() >> (next() & 63);
+                        p64 carry = (shape & 16) ? ~(p64)0 : next();
+                        // r in the low page flush below the high one, a
+                        // flush against the protected page.
+                        p64 address_to r = high_page - n - 1;
+                        p64 address_to a = top - n;
+
+                        for (positive i = 0; i < n; i++)
+                        {
+                                a[i] = limbs_value((shape >> 3) & 3);
+                                r[i] = limbs_value((shape >> 5) ? 1 : 0);
+                        }
+                        r[-1] = 0xa5a5a5a5a5a5a5a5ull;
+                        r[n] = 0x5a5a5a5a5a5a5a5aull;
+                        memory_copy(want, r - 1, (n + 2) * sizeof(p64));
+                        same("limbs_add_multiply_word", "high limb",
+                             limbs_add_multiply_word(r, a, n, w),
+                             reference_limbs_multiply(want + 1, a, n, w, 0, true));
+                        same_bytes("limbs_add_multiply_word", "sum and guards",
+                                   (b8 address_to)(r - 1), (b8 address_to)want,
+                                   (n + 2) * sizeof(p64));
+                        memory_copy(want, r - 1, (n + 2) * sizeof(p64));
+                        same("limbs_multiply_word", "high limb",
+                             limbs_multiply_word(r, a, n, w, carry),
+                             reference_limbs_multiply(want + 1, a, n, w, carry, false));
+                        same_bytes("limbs_multiply_word", "product and guards",
+                                   (b8 address_to)(r - 1), (b8 address_to)want,
+                                   (n + 2) * sizeof(p64));
+
+                        // In place, a the page's last limbs.
+                        memory_copy(operand, a, n * sizeof(p64));
+                        same("limbs_multiply_word", "r == a",
+                             limbs_multiply_word(a, a, n, w, carry),
+                             reference_limbs_multiply(operand, operand, n, w, carry, false));
+                        same_bytes("limbs_multiply_word", "r == a product", (b8 address_to)a,
+                                   (b8 address_to)operand, n * sizeof(p64));
+                }
+
+        // Compare walks down, so both operands start at a page's first limb
+        // with the protected page below.
+        for (positive n = 0; n < 68; n++)
+                for (positive differ = 0; differ <= n; differ++)
+                        for (positive turn = 0; turn < 6; turn++)
+                        {
+                                p64 address_to a = low_page;
+                                p64 address_to b = low_page + 256;
+
+                                for (positive i = 0; i < n; i++)
+                                        a[i] = b[i] = limbs_value(turn % 3);
+                                if (differ < n)
+                                {
+                                        p64 delta = turn < 3 ? 1 : next() | 1;
+
+                                        if (turn & 1)
+                                                b[differ] += delta;
+                                        else
+                                                b[differ] -= delta;
+                                }
+                                same("limbs_compare", "lengths, places and directions",
+                                     (positive)(bipolar)limbs_compare(a, b, n),
+                                     (positive)(bipolar)reference_limbs_compare(a, b, n));
+                                same("limbs_compare", "swapped",
+                                     (positive)(bipolar)limbs_compare(b, a, n),
+                                     (positive)(bipolar)reference_limbs_compare(b, a, n));
+                        }
+
+        // The divide at every divisor width and shift, the edges of the
+        // corrections, and random pairs.
+        for (b32 bits = 1; bits <= 64; bits++)
+                for (positive turn = 0; turn < 200; turn++)
+                {
+                        p64 divisor = bits == 64 ? next() | (p64)1 << 63
+                                                 : (next() & (((p64)1 << bits) - 1)) |
+                                                       (p64)1 << (bits - 1);
+                        p64 high = turn == 0 ? divisor - 1 : turn == 1 ? 0 : next() % divisor;
+                        p64 low = turn < 3 ? ~(p64)0 : turn == 3 ? 0 : next();
+
+                        limbs_divide_one(high, low, divisor);
+                }
+        limbs_divide_one(0, 0, 1);
+        limbs_divide_one(0, ~(p64)0, 1);
+        limbs_divide_one(~(p64)1, ~(p64)0, ~(p64)0);
+        limbs_divide_one((p64)1 << 62, 0, (p64)1 << 63);
+        limbs_divide_one(0x7fffffffffffffffull, ~(p64)0, 0x8000000000000000ull);
+        limbs_divide_one(0xffffffff, 0xffffffffffffffffull, 0x100000000ull);
+        limbs_divide_one(0x80000000, 0, 0x80000001ull);
+        limbs_divide_one(0xfffffffe, 0xffffffff00000000ull, 0xffffffffull);
+        for (positive turn = 0; turn < 200000; turn++)
+        {
+                p64 divisor = next() >> (next() & 63);
+
+                if (!divisor)
+                        continue;
+                limbs_divide_one(next() % divisor, next(), divisor);
+        }
+
+        memory_free(pages, 4 * 4096);
 }
 
 fn check_copy_match()
@@ -25387,6 +25689,7 @@ b32 main()
         check_record_scans();
         check_record_guards();
         check_checksums();
+        check_limbs();
         check_copy_match();
         check_move();
         check_copy_fast_end();
@@ -98269,6 +98572,381 @@ b32 main(void)
         return 0;
 }
 #endif /* BENCH_montgomery */
+
+#ifdef BENCH_limbs
+/*
+        The limb family against the C its callers ran, at the sizes they
+        run it: a basecase product of n by n limbs (base58's
+        big_multiply_into below BIG_KARATSUBA, 32, one row a limb of b) with
+        text.c's C rows against the rows as limbs_multiply_word and
+        limbs_add_multiply_word calls, one row alone, the add, subtract and
+        compare over n limbs, and the 128/64 divide against the bit-serial
+        loop numfmt and factor ran.
+
+            sh test/run bench limbs
+            sh test/run bench limbs -- basecase-c 16 100000
+
+        A row named on the command line runs alone for that many rounds and
+        prints nothing, for perf stat -e instructions:u,cycles:u: basecase,
+        addmul, multiply, add, subtract and compare each with -c for the C,
+        taking a limb count, and divide and divide-c taking only the rounds.
+*/
+#include "../src/lib.util.c"
+#define SHARED_bench_measure
+#include "checks.c"
+#undef SHARED_bench_measure
+
+#define LIMBS_BENCH_TRIES 7
+
+static p64 limbs_bench_a[128], limbs_bench_b[128], limbs_bench_r[256];
+static positive limbs_bench_n = 4;
+static positive limbs_bench_rounds = 1;
+static volatile p64 limbs_bench_sink;
+
+// text.c's basecase before the fold, rows and all.
+static __attribute__((noinline)) fn limbs_bench_basecase_c(p64 address_to r, const p64 address_to a,
+                                          positive an, const p64 address_to b,
+                                          positive bn)
+{
+        memory_fill(r, 0, (an + bn) * sizeof(p64));
+        for (positive i = 0; i < bn; i++)
+        {
+                p64 carry = 0;
+
+                for (positive j = 0; j < an; j++)
+                {
+                        unsigned __int128 t = (unsigned __int128)a[j] * b[i] +
+                                              r[i + j] + carry;
+
+                        r[i + j] = (p64)t;
+                        carry = (p64)(t >> 64);
+                }
+                r[i + an] = carry;
+        }
+}
+
+static __attribute__((noinline)) fn limbs_bench_basecase(p64 address_to r, const p64 address_to a,
+                                        positive an, const p64 address_to b,
+                                        positive bn)
+{
+        r[an] = limbs_multiply_word(r, a, an, b[0], 0);
+        for (positive i = 1; i < bn; i++)
+                r[i + an] = limbs_add_multiply_word(r + i, a, an, b[i]);
+}
+
+static __attribute__((noinline)) p64 limbs_bench_addmul_c(p64 address_to r, const p64 address_to a,
+                                         positive n, p64 w)
+{
+        p64 carry = 0;
+
+        for (positive j = 0; j < n; j++)
+        {
+                unsigned __int128 t = (unsigned __int128)a[j] * w + r[j] + carry;
+
+                r[j] = (p64)t;
+                carry = (p64)(t >> 64);
+        }
+        return carry;
+}
+
+static __attribute__((noinline)) p64 limbs_bench_multiply_c(p64 address_to r, const p64 address_to a,
+                                           positive n, p64 w, p64 carry)
+{
+        for (positive j = 0; j < n; j++)
+        {
+                unsigned __int128 t = (unsigned __int128)a[j] * w + carry;
+
+                r[j] = (p64)t;
+                carry = (p64)(t >> 64);
+        }
+        return carry;
+}
+
+static __attribute__((noinline)) p64 limbs_bench_add_c(p64 address_to a, positive n,
+                                      const p64 address_to b, positive m)
+{
+        p64 carry = 0;
+        positive at = 0;
+
+        for (; at < m; at++)
+        {
+                p64 sum = a[at] + carry;
+
+                carry = sum < carry;
+                sum += b[at];
+                carry += sum < b[at];
+                a[at] = sum;
+        }
+        for (; carry && at < n; at++)
+                carry = !++a[at];
+        return carry;
+}
+
+static __attribute__((noinline)) p64 limbs_bench_subtract_c(p64 address_to a, positive n,
+                                           const p64 address_to b, positive m)
+{
+        p64 borrow = 0;
+        positive at = 0;
+
+        for (; at < m; at++)
+        {
+                p64 x = a[at];
+                p64 y = b[at];
+
+                a[at] = x - y - borrow;
+                borrow = (x < y) | ((x == y) & borrow);
+        }
+        for (; borrow && at < n; at++)
+                borrow = !a[at]--;
+        return borrow;
+}
+
+static __attribute__((noinline)) bipolar limbs_bench_compare_c(const p64 address_to a,
+                                              const p64 address_to b, positive n)
+{
+        while (n--)
+                if (a[n] != b[n])
+                        return a[n] < b[n] ? -1 : 1;
+        return 0;
+}
+
+// numfmt_wide_divide's loop, cut to the 128/64 shape.
+static __attribute__((noinline)) positive2 limbs_bench_divide_c(p64 high, p64 low, p64 divisor)
+{
+        unsigned __int128 rest = (unsigned __int128)high << 64 | low;
+        unsigned __int128 d = (unsigned __int128)divisor << 64;
+        p64 quotient = 0;
+
+        for (b32 bit = 0; bit < 64; bit++)
+        {
+                rest <<= 1;
+                quotient <<= 1;
+                if (rest >= d)
+                {
+                        rest -= d;
+                        quotient |= 1;
+                }
+        }
+        return (positive2){{quotient, (p64)(rest >> 64)}};
+}
+
+static fn limbs_bench_basecase_c_row(void)
+{
+        for (positive i = 0; i < limbs_bench_rounds; i++)
+        {
+                limbs_bench_basecase_c(limbs_bench_r, limbs_bench_a, limbs_bench_n,
+                                       limbs_bench_b, limbs_bench_n);
+                limbs_bench_sink += limbs_bench_r[limbs_bench_n];
+        }
+}
+
+static fn limbs_bench_basecase_row(void)
+{
+        for (positive i = 0; i < limbs_bench_rounds; i++)
+        {
+                limbs_bench_basecase(limbs_bench_r, limbs_bench_a, limbs_bench_n,
+                                     limbs_bench_b, limbs_bench_n);
+                limbs_bench_sink += limbs_bench_r[limbs_bench_n];
+        }
+}
+
+static fn limbs_bench_addmul_c_row(void)
+{
+        for (positive i = 0; i < limbs_bench_rounds; i++)
+                limbs_bench_sink += limbs_bench_addmul_c(limbs_bench_r, limbs_bench_a,
+                                                         limbs_bench_n, limbs_bench_b[i & 63]);
+}
+
+static fn limbs_bench_addmul_row(void)
+{
+        for (positive i = 0; i < limbs_bench_rounds; i++)
+                limbs_bench_sink += limbs_add_multiply_word(limbs_bench_r, limbs_bench_a,
+                                                            limbs_bench_n, limbs_bench_b[i & 63]);
+}
+
+static fn limbs_bench_multiply_c_row(void)
+{
+        for (positive i = 0; i < limbs_bench_rounds; i++)
+                limbs_bench_sink += limbs_bench_multiply_c(limbs_bench_r, limbs_bench_a,
+                                                           limbs_bench_n, limbs_bench_b[i & 63], i);
+}
+
+static fn limbs_bench_multiply_row(void)
+{
+        for (positive i = 0; i < limbs_bench_rounds; i++)
+                limbs_bench_sink += limbs_multiply_word(limbs_bench_r, limbs_bench_a,
+                                                        limbs_bench_n, limbs_bench_b[i & 63], i);
+}
+
+static fn limbs_bench_add_c_row(void)
+{
+        for (positive i = 0; i < limbs_bench_rounds; i++)
+                limbs_bench_sink += limbs_bench_add_c(limbs_bench_r, limbs_bench_n,
+                                                      limbs_bench_a, limbs_bench_n);
+}
+
+static fn limbs_bench_add_row(void)
+{
+        for (positive i = 0; i < limbs_bench_rounds; i++)
+                limbs_bench_sink += limbs_add(limbs_bench_r, limbs_bench_n, limbs_bench_a,
+                                              limbs_bench_n);
+}
+
+static fn limbs_bench_subtract_c_row(void)
+{
+        for (positive i = 0; i < limbs_bench_rounds; i++)
+                limbs_bench_sink += limbs_bench_subtract_c(limbs_bench_r, limbs_bench_n,
+                                                           limbs_bench_a, limbs_bench_n);
+}
+
+static fn limbs_bench_subtract_row(void)
+{
+        for (positive i = 0; i < limbs_bench_rounds; i++)
+                limbs_bench_sink += limbs_subtract(limbs_bench_r, limbs_bench_n,
+                                                   limbs_bench_a, limbs_bench_n);
+}
+
+static fn limbs_bench_compare_c_row(void)
+{
+        for (positive i = 0; i < limbs_bench_rounds; i++)
+                limbs_bench_sink += (p64)limbs_bench_compare_c(limbs_bench_a, limbs_bench_b,
+                                                               limbs_bench_n);
+}
+
+static fn limbs_bench_compare_row(void)
+{
+        for (positive i = 0; i < limbs_bench_rounds; i++)
+                limbs_bench_sink += (p64)limbs_compare(limbs_bench_a, limbs_bench_b,
+                                                       limbs_bench_n);
+}
+
+// Normalized divisors, as numfmt's significands are, and random ones.
+static fn limbs_bench_divide_c_row(void)
+{
+        for (positive i = 0; i < limbs_bench_rounds; i++)
+        {
+                p64 d = limbs_bench_a[i & 127] >> (limbs_bench_n & 63) | 1;
+
+                limbs_bench_sink += limbs_bench_divide_c(limbs_bench_b[i & 127] % d,
+                                                         limbs_bench_r[i & 255], d).x;
+        }
+}
+
+static fn limbs_bench_divide_row(void)
+{
+        for (positive i = 0; i < limbs_bench_rounds; i++)
+        {
+                p64 d = limbs_bench_a[i & 127] >> (limbs_bench_n & 63) | 1;
+
+                limbs_bench_sink += positive_divide_wide(limbs_bench_b[i & 127] % d,
+                                                         limbs_bench_r[i & 255], d).x;
+        }
+}
+
+static fn limbs_bench_operands(positive n)
+{
+        p64 state = 0x9e3779b97f4a7c15ull ^ n;
+
+        for (positive i = 0; i < 256; i++)
+        {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                if (i < 128)
+                {
+                        limbs_bench_a[i] = state | (p64)1 << 63;
+                        limbs_bench_b[i] = state * 0x9e3779b97f4a7c15ull;
+                }
+                limbs_bench_r[i] = state ^ (state >> 29);
+        }
+        // compare: equal but for the lowest limb, so the whole of n is walked
+        memory_copy(limbs_bench_b, limbs_bench_a, n * sizeof(p64));
+        limbs_bench_b[0] ^= 1;
+        limbs_bench_n = n;
+}
+
+static positive limbs_bench_number(string_address text)
+{
+        positive value = 0;
+
+        while (address_to text >= '0' && address_to text <= '9')
+                value = value * 10 + (positive)(address_to text++ - '0');
+        return value;
+}
+
+static const struct
+{
+        string_address name;
+        bench_work work;
+} limbs_bench_rows[] = {
+    {"basecase-c", limbs_bench_basecase_c_row}, {"basecase", limbs_bench_basecase_row},
+    {"addmul-c", limbs_bench_addmul_c_row},     {"addmul", limbs_bench_addmul_row},
+    {"multiply-c", limbs_bench_multiply_c_row}, {"multiply", limbs_bench_multiply_row},
+    {"add-c", limbs_bench_add_c_row},           {"add", limbs_bench_add_row},
+    {"subtract-c", limbs_bench_subtract_c_row}, {"subtract", limbs_bench_subtract_row},
+    {"compare-c", limbs_bench_compare_c_row},   {"compare", limbs_bench_compare_row},
+    {"divide-c", limbs_bench_divide_c_row},     {"divide", limbs_bench_divide_row},
+};
+
+b32 main(void)
+{
+        static const positive limbs[] = {4, 8, 16, 31, 64};
+        positive arguments = program_argument_count();
+        positive rows = sizeof limbs_bench_rows / sizeof limbs_bench_rows[0];
+
+        if (arguments > 1)
+        {
+                string_address row = program_argument(1);
+                positive first = arguments > 2 ? limbs_bench_number(program_argument(2)) : 0;
+                positive second = arguments > 3 ? limbs_bench_number(program_argument(3)) : 0;
+
+                for (positive at = 0; at < rows; at++)
+                        if (string_compare(row, limbs_bench_rows[at].name) == 0)
+                        {
+                                if (at >= 12)
+                                {
+                                        limbs_bench_operands(0);
+                                        limbs_bench_rounds = first ? first : 1;
+                                }
+                                else
+                                {
+                                        if (!first || first > 64)
+                                                return 2;
+                                        limbs_bench_operands(first);
+                                        limbs_bench_rounds = second ? second : 1;
+                                }
+                                limbs_bench_rows[at].work();
+                                return 0;
+                        }
+                return 2;
+        }
+
+        string_format(log, "Limb arithmetic, best of %p\n", (positive)LIMBS_BENCH_TRIES);
+        for (positive at = 0; at < sizeof limbs / sizeof limbs[0]; at++)
+        {
+                positive n = limbs[at];
+
+                limbs_bench_operands(n);
+                string_format(log, " %p limbs\n", n);
+                for (positive row = 0; row < 12; row++)
+                {
+                        limbs_bench_rounds = row < 2 ? (1u << 20) / (n * n) : (1u << 20) / n;
+                        bench_report(limbs_bench_rows[row].name, limbs_bench_rows[row].work,
+                                     LIMBS_BENCH_TRIES, limbs_bench_rounds,
+                                     (string_address)"call");
+                }
+        }
+        limbs_bench_operands(0);
+        limbs_bench_rounds = 1u << 18;
+        string_format(log, " 128/64 divide\n");
+        bench_report("divide-c", limbs_bench_divide_c_row, LIMBS_BENCH_TRIES,
+                     limbs_bench_rounds, (string_address)"call");
+        bench_report("divide", limbs_bench_divide_row, LIMBS_BENCH_TRIES,
+                     limbs_bench_rounds, (string_address)"call");
+        log_flush();
+        return 0;
+}
+#endif /* BENCH_limbs */
 
 #ifdef BENCH_allocator
 /* malloc/free class fast path against its call and free-list traffic floors.

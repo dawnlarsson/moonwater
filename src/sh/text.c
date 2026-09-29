@@ -2381,45 +2381,6 @@ static positive big_trim(const p64 address_to a, positive n)
         return n;
 }
 
-// a += b over a's n limbs, b's m no more than n; the carry out.
-static p64 big_add(p64 address_to a, positive n, const p64 address_to b, positive m)
-{
-        p64 carry = 0;
-        positive at = 0;
-
-        for (; at < m; at++)
-        {
-                p64 sum = a[at] + carry;
-
-                carry = sum < carry;
-                sum += b[at];
-                carry += sum < b[at];
-                a[at] = sum;
-        }
-        for (; carry && at < n; at++)
-                carry = !++a[at];
-        return carry;
-}
-
-// a -= b the same way; the borrow out.
-static p64 big_subtract(p64 address_to a, positive n, const p64 address_to b, positive m)
-{
-        p64 borrow = 0;
-        positive at = 0;
-
-        for (; at < m; at++)
-        {
-                p64 x = a[at];
-                p64 y = b[at];
-
-                a[at] = x - y - borrow;
-                borrow = (x < y) | ((x == y) & borrow);
-        }
-        for (; borrow && at < n; at++)
-                borrow = !a[at]--;
-        return borrow;
-}
-
 static bipolar big_compare(const p64 address_to a, positive an,
                            const p64 address_to b, positive bn)
 {
@@ -2427,10 +2388,7 @@ static bipolar big_compare(const p64 address_to a, positive an,
         bn = big_trim(b, bn);
         if (an != bn)
                 return an < bn ? -1 : 1;
-        while (an--)
-                if (a[an] != b[an])
-                        return a[an] < b[an] ? -1 : 1;
-        return 0;
+        return limbs_compare(a, b, an);
 }
 
 /*
@@ -2452,23 +2410,16 @@ static fn big_multiply_into(p64 address_to r, const p64 address_to a, positive a
                 bn = length;
         }
 
+        if (!bn)
+        {
+                memory_fill(r, 0, an * sizeof(p64));
+                return;
+        }
         if (bn < BIG_KARATSUBA)
         {
-                memory_fill(r, 0, (an + bn) * sizeof(p64));
-                for (positive i = 0; i < bn; i++)
-                {
-                        p64 carry = 0;
-
-                        for (positive j = 0; j < an; j++)
-                        {
-                                unsigned __int128 t = (unsigned __int128)a[j] * b[i] +
-                                                      r[i + j] + carry;
-
-                                r[i + j] = (p64)t;
-                                carry = (p64)(t >> 64);
-                        }
-                        r[i + an] = carry;
-                }
+                r[an] = limbs_multiply_word(r, a, an, b[0], 0);
+                for (positive i = 1; i < bn; i++)
+                        r[i + an] = limbs_add_multiply_word(r + i, a, an, b[i]);
                 return;
         }
 
@@ -2483,7 +2434,7 @@ static fn big_multiply_into(p64 address_to r, const p64 address_to a, positive a
                         positive take = min(bn, an - at);
 
                         big_multiply_into(scratch, a + at, take, b, bn, scratch + take + bn);
-                        big_add(r + at, an + bn - at, scratch, take + bn);
+                        limbs_add(r + at, an + bn - at, scratch, take + bn);
                 }
                 return;
         }
@@ -2498,13 +2449,13 @@ static fn big_multiply_into(p64 address_to r, const p64 address_to a, positive a
         big_multiply_into(r, a, h, b, h, scratch);
         big_multiply_into(r + 2 * h, a + h, an - h, b + h, bn - h, scratch);
         memory_copy_apart(sa, a, h * sizeof(p64));
-        sa[h] = big_add(sa, h, a + h, an - h);
+        sa[h] = limbs_add(sa, h, a + h, an - h);
         memory_copy_apart(sb, b, h * sizeof(p64));
-        sb[h] = big_add(sb, h, b + h, bn - h);
+        sb[h] = limbs_add(sb, h, b + h, bn - h);
         big_multiply_into(middle, sa, h + 1, sb, h + 1, scratch + 4 * h + 4);
-        big_subtract(middle, 2 * h + 2, r, 2 * h);
-        big_subtract(middle, 2 * h + 2, r + 2 * h, high);
-        big_add(r + h, an + bn - h, middle, min(2 * h + 2, an + bn - h));
+        limbs_subtract(middle, 2 * h + 2, r, 2 * h);
+        limbs_subtract(middle, 2 * h + 2, r + 2 * h, high);
+        limbs_add(r + h, an + bn - h, middle, min(2 * h + 2, an + bn - h));
 }
 
 static bool big_multiply(p64 address_to r, const p64 address_to a, positive an,
@@ -2579,7 +2530,7 @@ static bool base58_level_next(base58_level address_to level, bool inverse)
 
         for (positive at = 0; at < scale; at++)
                 error[at] = ~error[at];
-        big_add(error, scale, &one, 1);
+        limbs_add(error, scale, &one, 1);
 
         positive en = big_trim(error, scale);
 
@@ -2591,7 +2542,7 @@ static bool base58_level_next(base58_level address_to level, bool inverse)
         if (rn2 + en > scale)
         {
                 next->inverse[rn2] = 0;
-                big_add(next->inverse, rn2 + 1, step + scale, rn2 + en - scale);
+                limbs_add(next->inverse, rn2 + 1, step + scale, rn2 + en - scale);
                 next->inverse_used = big_trim(next->inverse, rn2 + 1);
         }
         memory_give(error);
@@ -2664,7 +2615,7 @@ static bipolar base58_split(p64 address_to x, positive address_to x_used,
                         memory_give(work);
                         return -1;
                 }
-                big_subtract(x, xn, work, big_trim(work, qn + dn));
+                limbs_subtract(x, xn, work, big_trim(work, qn + dn));
                 xn = big_trim(x, xn);
         }
         memory_give(work);
@@ -2673,10 +2624,10 @@ static bipolar base58_split(p64 address_to x, positive address_to x_used,
         {
                 p64 one = 1;
 
-                big_subtract(x, xn, level->power, dn);
+                limbs_subtract(x, xn, level->power, dn);
                 xn = big_trim(x, xn);
                 q[qn] = 0;
-                big_add(q, qn + 1, &one, 1);
+                limbs_add(q, qn + 1, &one, 1);
                 qn = big_trim(q, qn + 1);
         }
 
@@ -2771,14 +2722,7 @@ static p64 address_to base58_value(const p8 address_to digits, positive count,
                                 scale *= 58;
                         }
                         at += take;
-                        for (positive k = 0; k < made; k++)
-                        {
-                                unsigned __int128 wide =
-                                    (unsigned __int128)limb[k] * scale + carry;
-
-                                limb[k] = (p64)wide;
-                                carry = (p64)(wide >> 64);
-                        }
+                        carry = limbs_multiply_word(limb, limb, made, scale, carry);
                         if (carry)
                                 limb[made++] = carry;
                 }
@@ -2805,7 +2749,7 @@ static p64 address_to base58_value(const p8 address_to digits, positive count,
         if (value && big_multiply(value, high, high_used, level->power, level->power_used))
         {
                 value[room - 1] = 0;
-                big_add(value, room, low, low_used);
+                limbs_add(value, room, low, low_used);
                 address_to used = big_trim(value, room);
         }
         else if (value)

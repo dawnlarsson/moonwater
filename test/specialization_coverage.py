@@ -682,6 +682,14 @@ cover('nothing_to_fold', None, 'jump_mark jump_to_mark',
 cover('nothing_to_fold', None, 'signal_jump_mark signal_jump_to_mark',
      'a caller-owned jump_state and a flag or value the stub only tests '
      'once before a system call or a tail jump')
+cover('nothing_to_fold', None, '''
+limbs_add limbs_subtract limbs_add_multiply_word limbs_multiply_word limbs_compare
+''', 'pointers to limbs the caller owns and counts that are the numbers\' '
+     'lengths at run time; the multiplier is a limb of another number')
+cover('folds_already', 'divisor', 'positive_divide_wide',
+      'a literal divisor is a reciprocal multiply, which base58_divide already '
+      'writes inline for 58^10; the callers that take this one divide by '
+      'significands, moduli and trial divisors known only at run time')
 cover('nothing_to_fold', None, 'montgomery_multiply',
      'the modulus, its inverse and the limb count come from a crypto_field or '
      'an RSA key at run time; no call site holds a literal')

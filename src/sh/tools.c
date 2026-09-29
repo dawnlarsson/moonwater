@@ -4901,6 +4901,18 @@ static seq_wide numfmt_wide_divide(seq_wide left, seq_wide right)
         if (right.kind == SEQ_WIDE_ZERO)
                 return (seq_wide){0, 0, SEQ_WIDE_INFINITE, negative};
 
+#if SEQ_WIDE_BITS == 64
+        /*
+                Both significands have bit 63 set, so the quotient of
+                left 2^66 by right has 67 bits: two 128/64 divides of the
+                three-limb left 2^66, and the last remainder is the sticky
+                bit the loop below keeps.
+        */
+        p64 top = (p64)left.significand;
+        positive2 upper = positive_divide_wide(top >> 62, top << 2, (p64)right.significand);
+        positive2 lower = positive_divide_wide(upper.y, 0, (p64)right.significand);
+        p128 quotient = ((p128)upper.x << 64 | lower.x) << 1 | (lower.y != 0);
+#else
         p128 rest = left.significand, quotient = 0;
 
         for (positive at = 0; at < SEQ_WIDE_BITS + 3; at++)
@@ -4914,6 +4926,7 @@ static seq_wide numfmt_wide_divide(seq_wide left, seq_wide right)
                 rest <<= 1;
         }
         quotient = quotient << 1 | (rest != 0);
+#endif
         return seq_wide_round(quotient, left.exponent - right.exponent - SEQ_WIDE_BITS - 3,
                               negative);
 }
