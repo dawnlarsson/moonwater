@@ -341,22 +341,25 @@ bool waterlink_mdns_read(const p8 address_to packet, positive length,
         p8 name[WATERLINK_NAME_BYTES];
         positive name_length;
         positive at = 12;
+        byte_reader header = byte_reader_open(packet, length);
+        p16 flags;
         p32 questions, records;
 
         memory_zero(found, sizeof(address_to found));
         if (length < 12 || length > WATERLINK_MDNS_MAX)
                 return false;
 
-        found->id = network_load_16(packet);
-        found->response = (packet[2] & 0x80) != 0;
+        found->id = byte_reader_u16(&header);
+        flags = byte_reader_u16(&header);
+        found->response = (flags & 0x8000) != 0;
         //      Opcode, and rcode in a response, must be zero.
-        if ((packet[2] & 0x78) || (found->response && (packet[3] & 0x0f)))
+        if ((flags & 0x7800) || (found->response && (flags & 0x000f)))
                 return false;
 
-        questions = network_load_16(packet + 4);
-        records = network_load_16(packet + 6) +
-                  network_load_16(packet + 8) +
-                  network_load_16(packet + 10);
+        questions = byte_reader_u16(&header);
+        records = byte_reader_u16(&header);
+        records += byte_reader_u16(&header);
+        records += byte_reader_u16(&header);
 
         //      Each question is at least five bytes and each record eleven:
         //      a count the packet cannot hold is refused before any is read.
@@ -368,61 +371,69 @@ bool waterlink_mdns_read(const p8 address_to packet, positive length,
                 positive start = at;
                 positive next = waterlink_dns_name(packet, length, at, name,
                                                    address_of name_length);
+                byte_reader tail = dns_message_at(packet, length, next);
                 p32 type;
 
-                if (!next || next + 4 > length)
+                //      The type and the class, after a name that was one.
+                type = byte_reader_u16(&tail);
+                (void)byte_reader_skip(&tail, 2);
+                if (!next || !byte_reader_ok(&tail))
                         return false;
-                type = network_load_16(packet + next);
                 if (!found->response && waterlink_is_service(name, name_length) &&
                     (type == 12 || type == 255))
                 {
+                        byte_reader echo = dns_message_at(packet, length, start);
+                        const p8 address_to whole;
+
                         found->asked = true;
                         //      The question, kept whole and uncompressed, for
                         //      a reply that has to echo it.
                         if (next - start == name_length &&
-                            name_length + 4 <= sizeof(found->question))
+                            name_length + 4 <= sizeof(found->question) &&
+                            (whole = byte_reader_take(&echo, name_length + 4)))
                         {
-                                memory_copy(found->question, packet + start,
+                                memory_copy(found->question, whole,
                                             name_length + 4);
                                 found->question_length = name_length + 4;
                         }
                 }
-                at = next + 4;
+                at = length - byte_reader_left(&tail);
         }
 
         for (p32 r = 0; r < records; r++)
         {
                 positive next = waterlink_dns_name(packet, length, at, name,
                                                    address_of name_length);
+                byte_reader tail = dns_message_at(packet, length, next);
+                byte_reader data;
                 p32 type;
-                positive rdlength;
-                positive rdata;
                 p8 label[63];
                 positive label_length;
                 struct waterlink_found_instance address_to instance;
 
-                if (!next || next + 10 > length)
+                //      The type, class and time to live, then the data
+                //      behind its length.
+                type = byte_reader_u16(&tail);
+                (void)byte_reader_skip(&tail, 6);
+                data = byte_reader_vector16(&tail);
+                if (!next || !byte_reader_ok(&tail))
                         return false;
-                type = network_load_16(packet + next);
-                rdlength = network_load_16(packet + next + 8);
-                rdata = next + 10;
-                if (rdata + rdlength > length)
-                        return false;
-                at = rdata + rdlength;
+                at = length - byte_reader_left(&tail);
 
                 if (!found->response ||
                     !waterlink_instance_of(name, name_length, label,
                                            address_of label_length))
                         continue;
 
-                if (type == 33 && rdlength >= 7)
+                if (type == 33 && byte_reader_left(&data) >= 7)
                 {
+                        //      Priority and weight, then the port.
+                        (void)byte_reader_skip(&data, 4);
                         instance = waterlink_found_at(found, label,
                                                       label_length);
                         if (instance)
                         {
-                                instance->port =
-                                        network_load_16(packet + rdata + 4);
+                                instance->port = byte_reader_u16(&data);
                                 instance->has_port = true;
                         }
                 }

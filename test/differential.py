@@ -50096,18 +50096,21 @@ def harness_security_hygiene(argv):
         ("dns_records_end", ("message",)),
         ("dns_reply_identity", ("reply",)),
         ("dns_reply_result", ("reply",)),
+        ("waterlink_mdns_read", ("packet",)),
         ("wifi_gtk_take", ("plain",)),
         ("radio_rsn_security", ("element",)),
         ("radio_bss_read", ("elements",)),
     )
-    wire_source = net + (HARNESS_ROOT / "src/sh/host.c").read_text()
+    wire_source = (net + (HARNESS_ROOT / "src/sh/host.c").read_text() +
+                   (HARNESS_ROOT / "src/waterlink/discover.c").read_text())
     try:
         byte_reader_source()
     except ValueError as error:
         checks(False, "byte_reader_source: " + str(error))
     for name, wire in reader_only:
-        found = re.search(r"^static[^\n]*\b%s\(.*?^\}$" % name, wire_source, re.M | re.S)
-        checks(found is not None, "reader-only: cannot find %s in net.c or host.c" % name)
+        found = re.search(r"^[a-z][^\n(;]*\b%s\([^;{]*?\)\s*\n\{.*?^\}$" % name,
+                          wire_source, re.M | re.S)
+        checks(found is not None, "reader-only: cannot find %s in net.c, host.c or discover.c" % name)
         if not found:
             continue
         body = re.sub(r"//[^\n]*", "", re.sub(r"/\*.*?\*/", "", found.group(0), flags=re.S))
@@ -56896,9 +56899,12 @@ def waterlink_pre_seeds():
 #       carry it: the bounded source and sink from lib.util.c, over the
 #       words those shims already have.
 def waterlink_lift_cursors():
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
     return ("#ifndef min\n#define min(a, b) ((a) < (b) ? (a) : (b))\n#endif\n"
             "#ifndef memory_copy_apart\n#define memory_copy_apart memcpy\n#endif\n" +
-            byte_store_source() + byte_reader_source())
+            byte_store_source() + byte_reader_source() +
+            tls_fuzz_sec(net, "//      A reader on the message, at a name or a record",
+                         "/* Find an address only along the name that was asked for"))
 
 
 def harness_waterlink_pre_fuzz(argv):
