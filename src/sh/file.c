@@ -8444,6 +8444,42 @@ static bool text_locale_utf8();
         colon: string_span_max then finds the first byte that matters in one
         call, where a set search a byte had string_first_of to itself.
 */
+/*
+        A name is read a character at a time where the locale is UTF-8: a
+        valid sequence for a printable character is written as it is by every
+        quoting style, as GNU's isprint says, and only a byte that starts no
+        sequence, a control (C1 included) or a sequence cut off by the name's
+        end is spelled or hidden -- so café and 日本語 stay themselves under
+        -Q, -b, -q and shell-escape, where each of their bytes was once an
+        octal escape. ls_char_at answers how many bytes the character at
+        name[at] takes and whether it is printable.
+*/
+static positive file_terminal_step(const p8 address_to at, positive left,
+                                   bool utf8, bool address_to printable);
+
+static bool ls_locale_utf8(void)
+{
+        static p8 known;
+
+        if (!known)
+                known = text_locale_utf8() ? 1 : 2;
+        return known == 1;
+}
+
+static positive ls_char_at(string_address name, positive length, positive at,
+                           bool address_to printable)
+{
+        p8 lead = string_get(name + at);
+
+        if (lead < 0x80)
+        {
+                address_to printable = lead >= 32 && lead < 127;
+                return 1;
+        }
+        return file_terminal_step((const p8 address_to)name + at, length - at,
+                                  ls_locale_utf8(), printable);
+}
+
 static b8 ls_plain_shell[2][STRING_SET_BYTES];
 static b8 ls_plain_c[2][STRING_SET_BYTES];
 
@@ -8492,6 +8528,18 @@ static bool ls_shell_needs_quotes(string_address name, positive length, bool esc
                 //      tab still does, as gnulib's quotearg has it; with
                 //      them every unprintable byte is a $'...' run. What
                 //      else stops the span is a byte the shell reads.
+                if (byte >= 0x80)
+                {
+                        bool printable;
+                        positive step = ls_char_at(name, length, at, address_of printable);
+
+                        //      A printable character needs nothing.
+                        if (printable)
+                        {
+                                at += step - 1;
+                                continue;
+                        }
+                }
                 if ((byte >= 32 && byte < 127) || escaping ||
                     byte == '\n' || byte == '\r' || byte == '\t')
                         return true;
@@ -8575,7 +8623,16 @@ static fn ls_quote_shell(writer write, string_address name, positive length, boo
                 if (byte == '"' || byte == '$' || byte == '`' || byte == '\\' || byte == '!')
                         double_unsafe = true;
                 if (ls_byte_unprintable(byte))
-                        unprintable = true;
+                {
+                        bool printable = false;
+                        positive step = byte >= 0x80
+                                            ? ls_char_at(name, length, at, address_of printable) : 1;
+
+                        if (printable)
+                                at += step - 1;
+                        else
+                                unprintable = true;
+                }
         }
 
         if (quote_inside && !double_unsafe && !(escaping && unprintable))
@@ -8604,18 +8661,33 @@ static fn ls_quote_shell(writer write, string_address name, positive length, boo
                         continue;
                 }
 
-                if (escaping && ls_byte_unprintable(byte))
+                bool printable = !ls_byte_unprintable(byte);
+                positive step = 1;
+
+                if (!printable && byte >= 0x80)
+                        step = ls_char_at(name, length, at, address_of printable);
+                if (escaping && !printable)
                 {
                         if (open)
                                 write("'", 1);
                         write("$'", 2);
 
-                        while (at < length && ls_byte_unprintable(string_get(name + at)))
+                        //      A run of what is not printable, each of its bytes
+                        //      spelled, up to the next character that is.
+                        while (at < length)
                         {
-                                p8 spelled[4];
+                                bool here = true;
+                                positive width = ls_char_at(name, length, at, address_of here);
 
-                                write(spelled, ls_escape_byte(string_get(name + at), spelled, true));
-                                at++;
+                                if (here)
+                                        break;
+                                for (positive i = 0; i < width; i++)
+                                {
+                                        p8 spelled[4];
+
+                                        write(spelled, ls_escape_byte(string_get(name + at + i), spelled, true));
+                                }
+                                at += width;
                         }
                         at--;
                         write("'", 1);
@@ -8628,7 +8700,8 @@ static fn ls_quote_shell(writer write, string_address name, positive length, boo
                         write("'", 1);
                         open = true;
                 }
-                write(name + at, 1);
+                write(name + at, step);
+                at += step - 1;
         }
 
         if (open)
@@ -8679,7 +8752,18 @@ static fn writer_shell_name(writer output, string_address value)
 static bool ls_c_needs_escape(string_address name, positive length)
 {
         ls_plain_ready();
-        return string_span_max(name, length, ls_plain_c[ls_quote_heading]) < length;
+        for (positive at = 0;
+             (at += string_span_max(name + at, length - at, ls_plain_c[ls_quote_heading])) < length;)
+        {
+                bool printable = false;
+                positive step = string_get(name + at) >= 0x80
+                                    ? ls_char_at(name, length, at, address_of printable) : 1;
+
+                if (!printable)
+                        return true;
+                at += step;
+        }
+        return false;
 }
 
 /*
@@ -8727,7 +8811,19 @@ static fn ls_quote_c(writer write, string_address name, positive length, p8 styl
                 else if (byte == ':' && ls_quote_heading && style != 'm')
                         write("\\:", 2);
                 else if (ls_byte_unprintable(byte))
-                        write(spelled, ls_escape_byte(byte, spelled, true));
+                {
+                        bool printable = false;
+                        positive step = byte >= 0x80
+                                            ? ls_char_at(name, length, at, address_of printable) : 1;
+
+                        if (printable)
+                        {
+                                write(name + at, step);
+                                at += step - 1;
+                        }
+                        else
+                                write(spelled, ls_escape_byte(byte, spelled, true));
+                }
                 else
                         write(name + at, 1);
         }
@@ -8761,14 +8857,16 @@ static fn ls_quote_literal(writer write, string_address name, positive length)
                 return;
         }
 
-        for (positive at = 0; at < length; at++)
+        for (positive at = 0; at < length;)
         {
-                p8 byte = string_get(name + at);
+                bool printable;
+                positive step = ls_char_at(name, length, at, address_of printable);
 
-                if (ls_byte_unprintable(byte))
-                        write("?", 1);
+                if (printable)
+                        write(name + at, step);
                 else
-                        write(name + at, 1);
+                        write("?", 1);
+                at += step;
         }
 }
 
@@ -8787,15 +8885,14 @@ static fn ls_write_hidden(address_any text, positive length)
                 length = string_length(at);
         for (positive done = 0; done < length;)
         {
-                positive plain = done;
+                bool printable;
+                positive step = ls_char_at(at, length, done, address_of printable);
 
-                while (plain < length && !ls_byte_unprintable(string_get(at + plain)))
-                        plain++;
-                if (plain > done)
-                        ls_hidden_writer(at + done, plain - done);
-                if (plain < length)
+                if (printable)
+                        ls_hidden_writer(at + done, step);
+                else
                         ls_hidden_writer("?", 1);
-                done = plain + 1;
+                done += step;
         }
 }
 
@@ -8856,6 +8953,11 @@ static bool ls_aligns_quotes()
         takes one -- the curly quotes of the locale styles among them.
 */
 static bool ls_width_utf8;
+// Set when what is counted holds a byte no terminal column can be told of.
+static bool ls_width_unprintable;
+
+static p8 wc_utf8_decode(const p8 address_to at, positive size, p32 address_to code,
+                         positive address_to length);
 
 static fn ls_count_columns(address_any text, positive length)
 {
@@ -8863,12 +8965,40 @@ static fn ls_count_columns(address_any text, positive length)
 
         if (!length)
                 length = string_length(at);
-        for (positive i = 0; i < length; i++)
+        for (positive i = 0; i < length;)
         {
                 p8 byte = string_get(at + i);
 
-                ls_counted += (byte >= 32 && byte < 127) ||
-                              (ls_width_utf8 && byte >= 0xc2 && byte <= 0xf4);
+                //      As gnulib's mbsnwidth counts with the flags ls gives it:
+                //      a printable character its wcwidth (nought for a
+                //      combining mark, two for a wide one), a byte that starts
+                //      no character one, a control none.
+                if (byte < 0x80 || !ls_width_utf8)
+                {
+                        ls_counted += byte >= 32 && byte < 127;
+                        //      Only where characters are more than bytes: the
+                        //      C locale counts a control as none, as it counts
+                        //      what is above 127.
+                        if ((byte < 32 || byte == 127) && ls_width_utf8)
+                                ls_width_unprintable = true;
+                        i++;
+                        continue;
+                }
+
+                p32 code;
+                positive step;
+
+                if (wc_utf8_decode((const p8 address_to)at + i, length - i,
+                                   address_of code, address_of step) == 1)
+                {
+                        if (code < 0xa0)
+                                ls_width_unprintable = true;
+                        else
+                                ls_counted += unicode_width(code, UNICODE_WIDTH_WCWIDTH);
+                }
+                else
+                        ls_width_unprintable = true;
+                i += step;
         }
 }
 
@@ -8876,7 +9006,16 @@ static positive ls_quoted_width(ls_entry address_to entry)
 {
         ls_counted = 0;
         ls_width_utf8 = text_locale_utf8();
+        ls_width_unprintable = false;
         ls_quote(ls_count_columns, ls_arena + entry->name);
+
+        //      gnulib's mbsnwidth, without the flags that accept them, answers
+        //      -1 for a name holding a control or a byte that starts no
+        //      character, and ls keeps that in a size_t: the name is as wide
+        //      as a word can say, and every sum it is in wraps as GNU's does
+        //      (which is why ls -m never wraps before such a name).
+        if (ls_width_unprintable)
+                ls_counted = positive_max;
 
         if (ls_aligns_quotes() && ls_some_quoted && !entry->quoted)
                 ls_counted++;

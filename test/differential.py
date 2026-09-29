@@ -7236,6 +7236,44 @@ FIXTURES["files_cplinks"] = {
 }
 
 
+#       Names that are not ASCII, under the locales that read them: café and
+#       日本語 are themselves under every quoting style in a UTF-8 locale and
+#       octal in the C one, -q hides a character with one ?, and a column
+#       counts what the terminal shows (two for a wide character, none for a
+#       combining mark).
+FIXTURES["files_utf8"] = {
+    "café": files_file(b"a\n", 1000000000),
+    "naïve file": files_file(b"b\n", 1010000000),
+    "日本語": files_file(b"c\n", 1020000000),
+    "emoji\U0001F600": files_file(b"d\n", 1030000000),
+    "e\u0301": files_file(b"e\n", 1040000000),
+    "quote's é": files_file(b"f\n", 1050000000),
+    "tab\té": files_file(b"g\n", 1060000000),
+    "zw\u200bx": files_file(b"h\n", 1070000000),
+    "c1\u0085y": files_file(b"i\n", 1080000000),
+    "nbsp\u00a0x": files_file(b"j\n", 1090000000),
+    "plain": files_file(b"k\n", 1100000000),
+    "\uff21\uff22": files_file(b"l\n", 1110000000),
+}
+
+
+def files_utf8_cases():
+    styles = ("", "--quoting-style=shell-escape", "--quoting-style=shell", "--quoting-style=shell-always",
+              "--quoting-style=shell-escape-always", "-Q", "-b", "-q", "--quoting-style=c", "--quoting-style=c-maybe",
+              "--quoting-style=escape", "--quoting-style=locale", "--quoting-style=clocale", "-N", "--show-control-chars")
+    shapes = ("-1", "-x", "-C", "-m", "-l", "-F")
+    cases = []
+    for locale in ("en_US.UTF-8", "C.UTF-8", "C"):
+        for style in styles:
+            cases.append({"argv": tuple(word for word in (style, "-1t") if word), "env": (("LC_ALL", locale),),
+                          "fixture": "files_utf8"})
+        for shape in shapes:
+            for width in ("10", "16", "30", "80"):
+                cases.append({"argv": (shape, "-t", "-w", width), "env": (("LC_ALL", locale),), "fixture": "files_utf8"})
+        cases.append({"argv": ("-R", "-Qt", "."), "env": (("LC_ALL", locale),), "fixture": "files_utf8"})
+    return tuple(cases)
+
+
 def files_cptree_link_cases():
     """cp -l over trees: every plain file becomes one more name for its source,
     directories are made, and links and specials take the ordinary road."""
@@ -7461,7 +7499,7 @@ FILES_UTILITIES = (
     Utility("ls", options=files_LS_OPTIONS, operands=files_LS_OPERANDS, stdin=("empty",), fixture="files",
             stderr="exact", normalize=files_listing, env=(("LS_COLORS", files_LS_COLORS),), max_flags=5,
             valid=files_ls_valid,
-            extra=(tuple(word for n in range(70) for word in ("-I", "x%d" % n)) + (".",),
+            extra=files_utf8_cases() + (tuple(word for n in range(70) for word in ("-I", "x%d" % n)) + (".",),
                    tuple(word for n in range(70) for word in ("--hide=h%d*" % n,)) + ("-a", "."),
                    ("-la",), ("-lart",), ("-lisa",), ("-lhS", "dir"), ("-1R", "deep"), ("-dl", "dir", "dirlink", "link"),
                    ("-lL", "dirlink"), ("-lH", "dirlink"), ("--color=always", "-1"), ("--color=always", "-l"),
