@@ -3193,8 +3193,12 @@ static fn pd_padded(writer write, b64 value, positive width)
 
 static fn pd_signed(writer write, b64 value)
 {
-        write(value < 0 ? "-" : "+", 1);
-        pd_padded(write, value < 0 ? -value : value, 1);
+        //      pd_padded writes the sign of a negative value itself, which
+        //      is also what it does with the least one, whose negation is
+        //      itself.
+        if (value >= 0)
+                write("+", 1);
+        pd_padded(write, value, 1);
 }
 
 static fn pd_days_text(pd_parser address_to pc, writer write)
@@ -39060,7 +39064,12 @@ static bool sleep_read_other(string_address text, positive address_to total)
                         continue;
                 }
                 any = true;
-                if (mantissa >> 100)
+                //      Seventy-six bits keep more than a duration can tell
+                //      apart, and leave the product with a billion and a
+                //      day of seconds below the 128 the sum is held in: at
+                //      a hundred, 0x80000000000000000000000000p-103 -- one
+                //      second -- wrapped and slept twelve milliseconds.
+                if (mantissa >> 76)
                         exponent += point ? 0 : 4;
                 else
                 {
@@ -46362,7 +46371,20 @@ static string_address date_localize(string_address format)
                 {
                         p8 letter = at[1];
 
-                        if (letter == 'E' || letter == 'O')
+                        //      A flag, a width or an O in front of c, x or X
+                        //      is date_flagged_expand's, and %E is not there
+                        //      at all: the whole word goes over as written.
+                        if (string_first_of("_-0^#123456789O", letter))
+                        {
+                                if (!byte_store_reserve(address_of date_localized,
+                                                        date_localized.used + 2, 64))
+                                        return format;
+                                date_localized.bytes[date_localized.used++] = '%';
+                                date_localized.bytes[date_localized.used++] = letter;
+                                at++;
+                                continue;
+                        }
+                        if (letter == 'E')
                         {
                                 letter = at[2];
                                 skip = 2;
@@ -46489,6 +46511,129 @@ static fn date_operand(b32 index)
 //      The format as given, which --debug names before each date.
 static string_address date_given_format;
 
+/*
+        %c, %x and %X with a flag or a width in front, and %O before any of the
+        three. In en_US they are the recursion nstrftime makes into another
+        format, whose whole result then takes the flags: a width pads it with
+        spaces (zeros under 0, nothing under -), ^ writes it in capitals, and
+        # says nothing more. %O has no such alternative digits and stands as
+        it was written, in every locale. The C locale's are the library's own
+        and are left to it apart from that.
+*/
+static byte_store date_piece;
+static byte_store date_flagged;
+
+static fn date_piece_write(address_any text, positive length)
+{
+        if (!length)
+                length = string_length(text);
+        if (byte_store_reserve(address_of date_piece, date_piece.used + length + 1, 256))
+        {
+                memory_copy(date_piece.bytes + date_piece.used, text, length);
+                date_piece.used += length;
+        }
+}
+
+static bool date_flagged_put(string_address text, positive length, bool literal)
+{
+        for (positive at = 0; at < length; at++)
+        {
+                p8 byte = string_get(text + at);
+
+                if (!byte_store_reserve(address_of date_flagged, date_flagged.used + 3, 256))
+                        return false;
+                if (literal && byte == '%')
+                        date_flagged.bytes[date_flagged.used++] = '%';
+                date_flagged.bytes[date_flagged.used++] = byte;
+        }
+        return true;
+}
+
+static string_address date_flagged_expand(string_address format, b64 when, positive nanoseconds)
+{
+        bool en_us = date_locale_en_us();
+
+        if (!string_first_of(format, '%'))
+                return format;
+        date_flagged.used = 0;
+        for (string_address at = format; string_get(at); at++)
+        {
+                if (!string_is(at, '%'))
+                {
+                        if (!date_flagged_put(at, 1, false))
+                                return format;
+                        continue;
+                }
+
+                string_address scan = at + 1;
+                bool zero = false, none = false, upper = false;
+                positive width = 0;
+                bool flagged = false;
+
+                while (string_first_of("_-0^#", string_get(scan)))
+                {
+                        p8 flag = string_get(scan++);
+
+                        zero = flag == '0' ? true : flag == '_' || flag == '-' ? false : zero;
+                        none = flag == '-' ? true : flag == '_' || flag == '0' ? false : none;
+                        upper |= flag == '^';
+                        flagged = true;
+                }
+                while (byte_is_digit(string_get(scan)))
+                {
+                        if (width < 100000000)
+                                width = width * 10 + (positive)(string_get(scan) - '0');
+                        scan++;
+                        flagged = true;
+                }
+
+                p8 modifier = string_get(scan) == 'E' || string_get(scan) == 'O' ? string_get(scan) : 0;
+                p8 letter = string_get(scan + (modifier ? 1 : 0));
+
+                if ((letter == 'c' || letter == 'x' || letter == 'X') &&
+                    (modifier == 'O' || (en_us && (flagged || modifier))))
+                {
+                        positive whole = (positive)(scan - at) + (modifier ? 2 : 1);
+
+                        //      What the directive comes to: an O one is its own
+                        //      text, which the width and the capitals then take
+                        //      as they take any other answer.
+                        date_piece.used = 0;
+                        if (modifier == 'O')
+                                date_piece_write((address_any)at, whole);
+                        else if (!date_shape(date_piece_write, when, nanoseconds,
+                                             letter == 'c'   ? (string_address) "%a %d %b %Y %r %Z"
+                                             : letter == 'x' ? (string_address) "%m/%d/%Y"
+                                                             : (string_address) "%r"))
+                                return format;
+                        if (upper)
+                                for (positive i = 0; i < date_piece.used; i++)
+                                        date_piece.bytes[i] = byte_to_upper(date_piece.bytes[i]);
+                        if (!none && width > date_piece.used)
+                        {
+                                for (positive i = date_piece.used; i < width; i++)
+                                        if (!date_flagged_put(zero ? "0" : " ", 1, false))
+                                                return format;
+                        }
+                        if (!date_flagged_put((string_address)date_piece.bytes, date_piece.used, true))
+                                return format;
+                        at += whole - 1;
+                        continue;
+                }
+
+                //      A %% is one directive, whatever follows it.
+                positive step = string_is(at + 1, '%') ? 2 : 1;
+
+                if (!date_flagged_put(at, step, false))
+                        return format;
+                at += step - 1;
+        }
+        if (!byte_store_reserve(address_of date_flagged, date_flagged.used + 1, 256))
+                return format;
+        date_flagged.bytes[date_flagged.used] = end;
+        return date_flagged.bytes;
+}
+
 static bool date_emit(string_address format, b64 when, positive nanoseconds)
 {
         time_t stamp = (time_t)when;
@@ -46512,7 +46657,8 @@ static bool date_emit(string_address format, b64 when, positive nanoseconds)
                 return false;
         }
 
-        if (!date_shape(log, when, nanoseconds, format))
+        if (!date_shape(log, when, nanoseconds,
+                        date_flagged_expand(format, when, nanoseconds)))
                 return string_report(log_error, false,
                                      "date: formatted value is too large\n");
 

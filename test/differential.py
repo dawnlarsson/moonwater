@@ -8371,7 +8371,12 @@ FILES_UTILITIES = (
                   tuple({"argv": argv, "env": (("LC_ALL", locale), ("TZ", "Europe/Berlin"))}
                         for locale in ("en_US.UTF-8", "en_US.utf8", "en_US", "C", "de_DE.UTF-8")
                         for argv in (("-d", "2025-10-11T13:00"), ("-d", "2025-10-11T01:00"),
-                                     ("-d", "@1000000000", "+%c|%x|%X|%r|%Ec|%EX|%%c|%p"), ("-u", "-d", "@0"))) +
+                                     ("-d", "@1000000000", "+%c|%x|%X|%r|%Ec|%EX|%%c|%p"), ("-u", "-d", "@0"),
+                                     # Flags and widths before c, x and X are the recursion's, and O
+                                     # before them stands as written, padded like any answer.
+                                     ("-d", "@1700000000", "+%20X|%-c|%^c|%020x|%_20x|%#c|%20Ex|%^Ec|%0c"),
+                                     ("-d", "@1700000000", "+%Oc|%10Oc|%010Ox|%-10OX|%^10Oc|%^Ox|%%20c"),
+                                     ("-d", "@1700000000", "+%10c|%-10x|%_10X|%^5x|%#12X|%0X"))) +
                   # nstrftime's %F: a bare one signs a year past 9999, a flag
                   # or width goes to the year alone.
                   tuple(("-u", "-d", "@%d" % moment, "+%F|%+F|%+12F|%12F|%-12F|%012F|%_12F|%^F|%3F|%120F|%_110F")
@@ -8397,7 +8402,8 @@ FILES_UTILITIES = (
                       ("-d", "25:00"), ("-d", "foo bar"), ("-d", "discard", "-d", "Apr 11 22:59:00 2011", "+%T"),
                       ("-d", "@1.5"), ("-d", "20130101"), ("-d", "2013-10-30 00:00:00 UTC -8 days", "+%F"),
                       ("-d", "9/11/2001 +1 hour 5 minutes", "+%F %T"), ("-d", "1(unfinished"), ("-d", "1 2 3"),
-                      ("-d", "last fri", "+%F"), ("-d", "2001-02-29"), ("-d", "2001-09-09 12:00 +0130"))) +
+                      ("-d", "last fri", "+%F"), ("-d", "2001-02-29"), ("-d", "2001-09-09 12:00 +0130"),
+                      ("-d", "-9223372036854775808 years"))) +
                   tuple({"argv": ("--debug", "-d", when, "+%F %T"), "env": (("TZ", zone),)}
                         for zone, when in (("America/New_York", "2016-06-01 EDT + 6 months"),
                                            ("Europe/Helsinki", "2011-12-11 EET"), ("Europe/Helsinki", "2011-06-11 EEST"),
@@ -8469,6 +8475,8 @@ FILES_SCENES = {
     "deeptree": ("python3 -c 'import os\nos.mkdir(\"top\")\nhere = os.open(\".\", os.O_RDONLY)\nos.chdir(\"top\")\n"
                  "for i in range(30):\n    os.mkdir(\"d\" * 200)\n    os.chdir(\"d\" * 200)\n"
                  "open(\"leaf\", \"w\").close()\nos.fchdir(here)' || exit 9\n", "", "cd /\n"),
+    # what the clock says of the run: whether it lasted most of a second.
+    "timed": ("s=$(env date +%s%N)\n", "", "e=$(env date +%s%N); if [ $((e - s)) -ge 800000000 ]; then echo slept; else echo short; fi\n"),
     # a strip program that puts another file at the name (as a strip that
     # renames its result there does): the new file is given the mode.
     "stripswap": ("printf '#!/bin/sh\\nrm -f \"$1\" && cat sf > \"$1\"\\n' > sw && env chmod +x sw && "
@@ -8560,6 +8568,11 @@ FILES_SCENE_CASES = (
     ("tmax", "ls", "-lgo", "--time-style=+%Y", "f"),
     ("noco", "ls", "--color=always", "-d", "dir", "a.txt", "exe", "link", "dangling", "/dev/null", "loop"),
     ("dumbterm", "ls", "--color=always", "-d", "dir", "exe"), ("colorterm", "ls", "--color=always", "-d", "dir", "exe"),
+    # A hex float whose mantissa outgrows the sum it is held in still sleeps
+    # what it says: a second is at least most of one, by the clock.
+    ("timed", "sleep", "0x80000000000000000000000000p-103"), ("timed", "sleep", "0xFFFFFFFFFFFFFFFFFFFFFFFFFFp-104"),
+    ("timed", "sleep", "0x8000000000000000000000000000000000p-137"), ("timed", "sleep", "0x.8p1"),
+    ("timed", "sleep", "0x1p-40"), ("timed", "sleep", "0x.0000000000000000000000000001p0"),
     # Output nobody could be given by split and csplit is said in GNU's words.
     ("full_out", "split", "-n", "2/3", "a.txt"), ("full_out", "split", "-n", "l/2/3", "a.txt"), ("full_out", "split", "-n", "r/2/3", "a.txt"),
     ("full_out", "split", "--verbose", "-b", "10", "a.txt"), ("full_out", "split", "-n", "1/2", "b.txt"),
