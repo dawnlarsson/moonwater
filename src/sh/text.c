@@ -6787,13 +6787,9 @@ static fn wc_row(positive lines, positive words, positive chars, positive bytes,
 */
 static bool text_locale_utf8()
 {
-        string_address locale = file_environment((string_address) "LC_ALL");
+        string_address locale = locale_environment((string_address) "LC_CTYPE");
 
-        if (!locale || !locale[0])
-                locale = file_environment((string_address) "LC_CTYPE");
-        if (!locale || !locale[0])
-                locale = file_environment((string_address) "LANG");
-        if (!locale || !locale[0])
+        if (!locale)
                 return false;
 
         string_address code = string_first_of(locale, '.');
@@ -6821,13 +6817,7 @@ static positive text_charset()
         if (text_locale_utf8())
                 return TEXT_CHARSET_UTF8;
 
-        string_address locale = file_environment((string_address) "LC_ALL");
-
-        if (!locale || !locale[0])
-                locale = file_environment((string_address) "LC_CTYPE");
-        if (!locale || !locale[0])
-                locale = file_environment((string_address) "LANG");
-
+        string_address locale = locale_environment((string_address) "LC_CTYPE");
         string_address code = locale ? string_first_of(locale, '.') : null;
 
         if (!code)

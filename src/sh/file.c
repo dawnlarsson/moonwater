@@ -5967,17 +5967,25 @@ static locale_category locale_categories[LOCALE_CATEGORIES];
 static string_address locale_category_names[LOCALE_CATEGORIES] = {
     "LC_CTYPE", "LC_NUMERIC", "LC_TIME", "LC_COLLATE"};
 
-// The name the environment gives a category: LC_ALL, then its own variable,
-// then LANG; null for C, POSIX or nothing.
-static string_address locale_named(positive category)
+// The name the environment gives a category: LC_ALL, then the category's own
+// variable, then LANG, the first that is set and not empty; null when none is.
+static string_address locale_environment(string_address category)
 {
         string_address name = file_environment((string_address) "LC_ALL");
 
         if (!name || !name[0])
-                name = file_environment(locale_category_names[category]);
+                name = file_environment(category);
         if (!name || !name[0])
                 name = file_environment((string_address) "LANG");
-        if (!name || !name[0] || string_equals(name, "C") || string_equals(name, "POSIX"))
+        return name && name[0] ? name : null;
+}
+
+// That name, null for C and POSIX as well.
+static string_address locale_named(positive category)
+{
+        string_address name = locale_environment(locale_category_names[category]);
+
+        if (!name || string_equals(name, "C") || string_equals(name, "POSIX"))
                 return null;
         return name;
 }
@@ -48098,12 +48106,8 @@ static bool date_locale_en_us()
         if (locale_open(LOCALE_TIME))
                 return true;
 
-        string_address name = file_environment((string_address) "LC_ALL");
+        string_address name = locale_environment((string_address) "LC_TIME");
 
-        if (!name || !name[0])
-                name = file_environment((string_address) "LC_TIME");
-        if (!name || !name[0])
-                name = file_environment((string_address) "LANG");
         if (!name || memory_compare(name, "en_US.", 6))
                 return false;
         name += 6;
