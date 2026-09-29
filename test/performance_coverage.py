@@ -311,9 +311,14 @@ cover('benchmark_context', 'test/checks.c#BENCH_writer_field', 'writer_field_cor
 cover('benchmark_context', 'test/checks.c#BENCH_writer_text', 'buffered_write_core',
       'private core reached by both directly timed buffer-policy wrappers',
       {'buffered_write_core': 'buffered_write'})
+cover('direct_benchmark', 'test/checks.c#BENCH_utf8_valid', 'memory_ascii_span',
+      'paired against the word loop and string_span_max that rev and wc asked for the ASCII run')
 cover('direct_benchmark', 'test/checks.c#BENCH_utf8_valid', 'memory_utf8_valid_span',
       'paired against grep_text_valid\'s former C over ASCII and mixed lines '
       'of grep\'s sizes, with and without the AVX2 body')
+cover('benchmark_context', 'test/checks.c#BENCH_utf8_valid', 'cpu_vector_detect',
+      'the RISC-V V probe, asked once by the first long span; no timing claim',
+      {'cpu_vector_detect': 'memory_utf8_span'})
 cover('benchmark_context', 'test/checks.c#BENCH_utf8_valid', 'memory_utf8_span_wide',
       'the x86_64 AVX2 block body of memory_utf8_span, timed in that routine\'s '
       'unbounded-count row against the walk it had alone',

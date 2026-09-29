@@ -2596,7 +2596,28 @@ lane_link()
         need_shell || return 1
         python3 test/differential.py --harness waterlink_link --shell "$shell_binary"
 }
-lane_utf8()      { freestanding_checks_lane utf8 utf8; }
+#       qemu's default riscv64 cpu is its richest one, with V at a vector
+#       length of 128 bits, so the lane above runs the vector bodies at that
+#       length only. It asks again with the cpu that has no V, which is the
+#       scalar floor, and with V at 256 and 512 bits: a block is VLENB bytes,
+#       and the tail it leaves the walk is not the same length.
+lane_utf8()
+{
+        freestanding_checks_lane utf8 utf8 || return
+
+        target_tools riscv64 || return $?
+        failed=0
+
+        for cpu in rv64 rv64,v=true,vlen=256 rv64,v=true,vlen=512; do
+                target=riscv64
+                target_runner="qemu-riscv64 -cpu $cpu"
+                target_label=riscv64-$(printf '%s' "$cpu" | sed 's/rv64,v=true,vlen=/v/')
+                freestanding_checks_one utf8 utf8 || failed=1
+        done
+
+        target_label=
+        [ "$failed" = 0 ]
+}
 lane_hex()       { freestanding_checks_lane hex hex; }
 lane_codec()     { freestanding_checks_lane codec codec; }
 lane_fixed()     { freestanding_checks_lane fixed fixed; }
@@ -3573,7 +3594,7 @@ freestanding_checks_one()
         checks=${line% *}
         bad=${line#* }
 
-        tally "$suite-$name" "$((checks - bad))" "$checks"
+        tally "$suite-${target_label:-$name}" "$((checks - bad))" "$checks"
 
         [ "$status" = 0 ] && [ "$bad" = 0 ]
 }

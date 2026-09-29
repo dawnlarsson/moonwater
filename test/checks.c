@@ -13968,7 +13968,7 @@ fn check_span_byte()
         X(string_to_number_unsigned_checked) X(program_argument)              \
         X(program_environment) X(jump_to_mark) X(signal_jump_mark)            \
         X(signal_jump_to_mark) X(memchr) X(memrchr) X(memccpy) X(memset)      \
-        X(strchr) X(strrchr) X(strchrnul) X(strnchr) X(memory_utf8_valid_span) X(limbs_compare)
+        X(strchr) X(strrchr) X(strchrnul) X(strnchr) X(memory_utf8_valid_span) X(limbs_compare) X(memory_ascii_span)
 
 #ifdef VERIFY_NARROW_KERNEL
 #define DIRTY_ROUTINE(name) kernel_##name
@@ -14738,6 +14738,25 @@ static fn dirty_utf8_valid_one(positive size, positive residue, positive turn)
 }
 
 static fn dirty_utf8_valid(void) { dirty_plane(dirty_utf8_valid_one, 4000); }
+
+//      The ASCII prefix: a pointer and a size, with a byte past ASCII at a
+//      random place on odd turns.
+static fn dirty_ascii_one(positive size, positive residue, positive turn)
+{
+        p8 address_to at = dirty_in + 64 + residue;
+
+        for (positive i = 0; i < size + 8; i++)
+                at[i] = (p8)dirty_random() & 0x7f;
+        if ((turn & 1) && size)
+                at[dirty_random() % size] = (p8)dirty_random() | 0x80;
+        if (!DIRTY_HAS(memory_ascii_span))
+                return;
+        positive clean = DIRTY_ROUTINE(memory_ascii_span)(at, size);
+        positive answer = DIRTY(2, memory_ascii_span)(P(at), size);
+        AGREE(memory_ascii_span, clean, answer, size << 16 | residue << 8);
+}
+
+static fn dirty_ascii(void) { dirty_plane(dirty_ascii_one, 4000); }
 
 /*
         Records holding a needle, split at a delimiter that is a newline,
@@ -15629,6 +15648,7 @@ fn check_dirty_arguments(void)
         dirty_tiers(dirty_prepare);
         dirty_tiers(dirty_strings);
         dirty_tiers(dirty_utf8_valid);
+        dirty_tiers(dirty_ascii);
         dirty_writers();
         dirty_into();
         dirty_buffered();
@@ -32759,21 +32779,179 @@ static fn utf8_span_long_checks(p8 address_to guarded, positive quantum)
                 }
 }
 
+/*
+        memory_ascii_span: the ASCII prefix of a run of bytes with a byte
+        of every kind past ASCII planted at every place, at alignments that
+        put the 64, 16 and 8 byte steps and the overlapping tail in turn on
+        the boundary, and against both guard pages.
+*/
+static positive ascii_wrong;
+
+static fn ascii_span_check(p8 address_to bytes, positive size)
+{
+        positive at = 0;
+        while (at < size && bytes[at] < 0x80)
+                at++;
+        positive got = memory_ascii_span(bytes, size);
+        checks++;
+        if (got != at)
+        {
+                failures++;
+                if (ascii_wrong++ < 8)
+                        string_format(log, "  FAIL memory_ascii_span size %p: %p where %p\n",
+                                      size, got, at);
+        }
+}
+
+static fn ascii_span_checks(p8 address_to guarded, positive quantum)
+{
+        static p8 bytes[64 + 400 + 64];
+        static const p8 high[] = {0x80, 0xc3, 0xff, 0xa0, 0xf0};
+        positive random = 0x3c6ef372;
+        for (positive align = 0; align < 64; align += align < 20 ? 1 : 7)
+                for (positive size = 0; size <= 300; size++)
+                {
+                        p8 address_to at = bytes + align;
+                        for (positive i = 0; i < size + 8; i++)
+                        {
+                                random = random * 1664525 + 1013904223;
+                                at[i] = (i & 7) ? (random >> 16) & 0x7f : (p8)(random >> 16) % 3 ? 'a' : 0;
+                        }
+                        ascii_span_check(at, size);
+                        for (positive place = 0; place < size; place += size > 140 ? 5 : 1)
+                        {
+                                p8 keep = at[place];
+                                at[place] = high[(place + size) % array_count(high)];
+                                ascii_span_check(at, size);
+                                if (place + 1 < size)
+                                {
+                                        //  A second past ASCII after it changes nothing.
+                                        at[place + 1] = 0xff;
+                                        ascii_span_check(at, size);
+                                        at[place + 1] = 'b';
+                                }
+                                at[place] = keep;
+                        }
+                }
+        ascii_span_check(null, 0);
+        if (!guarded)
+                return;
+        for (positive size = 0; size <= 200; size++)
+        {
+                p8 address_to tail = guarded + quantum * 2 - size;
+                p8 address_to head = guarded + quantum;
+                memory_fill(tail, 'x', size);
+                memory_fill(head, 'x', size);
+                ascii_span_check(tail, size);
+                ascii_span_check(head, size);
+                for (positive place = 0; place < size; place += 3)
+                {
+                        tail[place] = 0x80;
+                        head[place] = 0xff;
+                        ascii_span_check(tail, size);
+                        ascii_span_check(head, size);
+                        tail[place] = head[place] = 'x';
+                }
+        }
+}
+
+/*
+        Mutation fuzz against the oracle: buffers built from well-formed
+        pieces and from every malformed class the strict rules draw (the
+        overlong forms, surrogates, past U+10FFFF, stray continuations, leads
+        that no sequence follows, sequences cut off at the end), then a few
+        bytes replaced by the values that sit on a boundary or by anything,
+        and the size chosen so that a sequence begins, ends or is cut in the
+        last bytes of a 16, 32 or 64 byte block. Each buffer asks
+        memory_utf8_valid_span, memory_ascii_span and memory_utf8_span at
+        counts that fall before, inside and after the blocks. Every arm of the
+        block bodies and the walk under them meets errors at every offset.
+*/
+static positive utf8_fuzz_next(positive address_to state)
+{
+        address_to state = address_to state * 1664525 + 1013904223;
+        return address_to state >> 8;
+}
+
+static fn utf8_fuzz(positive rounds, positive seed)
+{
+        static p8 bytes[64 + 1536 + 64];
+        static const p8 edge[] = {0x00, 0x7f, 0x80, 0x8f, 0x90, 0x9f, 0xa0, 0xbf,
+                                  0xc0, 0xc1, 0xc2, 0xdf, 0xe0, 0xe1, 0xec, 0xed,
+                                  0xef, 0xf0, 0xf1, 0xf3, 0xf4, 0xf5, 0xf7, 0xf8, 0xff};
+        static const p8 piece[][5] = {
+                {1, 'a'}, {1, ' '}, {2, 0xc2, 0x80}, {2, 0xc3, 0xa9}, {2, 0xdf, 0xbf},
+                {3, 0xe0, 0xa0, 0x80}, {3, 0xe6, 0xbc, 0xa2}, {3, 0xed, 0x9f, 0xbf},
+                {3, 0xef, 0xbf, 0xbf}, {4, 0xf0, 0x90, 0x80, 0x80},
+                {4, 0xf0, 0x9f, 0x99, 0x82}, {4, 0xf4, 0x8f, 0xbf, 0xbf},
+                {2, 0xc0, 0x80}, {2, 0xc1, 0xbf}, {3, 0xe0, 0x80, 0x80},
+                {3, 0xe0, 0x9f, 0xbf}, {3, 0xed, 0xa0, 0x80}, {3, 0xed, 0xbf, 0xbf},
+                {4, 0xf0, 0x80, 0x80, 0x80}, {4, 0xf0, 0x8f, 0xbf, 0xbf},
+                {4, 0xf4, 0x90, 0x80, 0x80}, {4, 0xf7, 0xbf, 0xbf, 0xbf},
+                {1, 0x80}, {1, 0xbf}, {1, 0xf8}, {1, 0xff}, {1, 0xc3}, {2, 0xe6, 0xbc},
+                {3, 0xf0, 0x9f, 0x99}, {2, 0xc3, 'x'}, {2, 0xe2, 0x82},
+        };
+        positive random = seed;
+
+        for (positive round = 0; round < rounds; round++)
+        {
+                positive align = utf8_fuzz_next(address_of random) % 64;
+                positive shape = utf8_fuzz_next(address_of random) % 8;
+                positive size = utf8_fuzz_next(address_of random) % 4 == 0 ? utf8_fuzz_next(address_of random) % 40
+                                                     : 16 * (utf8_fuzz_next(address_of random) % 20) + utf8_fuzz_next(address_of random) % 3 - 1 + (utf8_fuzz_next(address_of random) % 4 ? 0 : 16);
+                p8 address_to at = bytes + align;
+                positive fill = 0;
+
+                //  Now and then long, for the blocks of sixty four.
+                if (size > 500)
+                        size = utf8_fuzz_next(address_of random) % 8 ? 500 : 500 + utf8_fuzz_next(address_of random) % 1000;
+                //  Mostly well formed, so an error is found late as often as early.
+                positive bad = shape < 3 ? 1 + utf8_fuzz_next(address_of random) % 40 : 0;
+                while (fill < size + 8)
+                {
+                        positive pick = bad && utf8_fuzz_next(address_of random) % bad == 0
+                                            ? 12 + utf8_fuzz_next(address_of random) % (array_count(piece) - 12)
+                                        : shape == 7 ? utf8_fuzz_next(address_of random) % 2
+                                                     : utf8_fuzz_next(address_of random) % 12;
+                        for (positive k = 0; k < piece[pick][0] && fill < size + 8; k++)
+                                at[fill++] = piece[pick][1 + k];
+                }
+                //  Then a few bytes made what a boundary is made of, or anything.
+                for (positive m = utf8_fuzz_next(address_of random) % 4 == 0 ? utf8_fuzz_next(address_of random) % 4 : 0; m; m--)
+                        at[utf8_fuzz_next(address_of random) % (size + 1)] = utf8_fuzz_next(address_of random) % 2 ? edge[utf8_fuzz_next(address_of random) % array_count(edge)]
+                                                                        : (p8)utf8_fuzz_next(address_of random);
+                //  A sequence cut by size: the last piece stops short.
+                if (size && utf8_fuzz_next(address_of random) % 6 == 0)
+                        at[size - 1] = 0xe0 + utf8_fuzz_next(address_of random) % 32;
+
+                utf8_valid_check(at, size);
+                ascii_span_check(at, size);
+                positive counts[] = {1, 2, 31, 32, 33, 47, 48, 64, utf8_fuzz_next(address_of random) % (size + 2),
+                                     size, size + 1, positive_max};
+                for (positive c = 0; c < array_count(counts); c++)
+                        utf8_span_check(at, size, counts[c]);
+        }
+}
+
 //      Once per body: on x86_64 the AVX2 validator and the walk under it.
 static fn utf8_valid_tiers(p8 address_to guarded, positive quantum)
 {
 #if X64
-        p8 avx2 = cpu_has_avx2;
-        for (positive tier = 0; tier < 2; tier++)
+        p8 avx2 = cpu_has_avx2, avx512 = cpu_has_avx512;
+        for (positive tier = 0; tier < 3; tier++)
         {
-                cpu_has_avx2 = tier ? 0 : avx2;
+                cpu_has_avx512 = tier == 0 ? avx512 : 0;
+                cpu_has_avx2 = tier == 2 ? 0 : avx2;
                 utf8_valid_checks(guarded, quantum);
                 utf8_span_long_checks(guarded, quantum);
+                utf8_fuzz(60000, 0x9e3779b9 + tier);
         }
         cpu_has_avx2 = avx2;
+        cpu_has_avx512 = avx512;
 #else
         utf8_valid_checks(guarded, quantum);
         utf8_span_long_checks(guarded, quantum);
+        utf8_fuzz(100000, 0x9e3779b9);
 #endif
 }
 
@@ -32942,10 +33120,14 @@ b32 main()
                 utf8_span_check(guarded, 0, 8);
                 utf8_span_check(guarded, 8, 0);
                 utf8_valid_tiers(guarded, quantum);
+                ascii_span_checks(guarded, quantum);
                 memory_free(guarded, quantum * 3);
         }
         else
+        {
                 utf8_valid_tiers(null, 0);
+                ascii_span_checks(null, 0);
+        }
         return test_report(null);
 }
 #endif /* CHECK_utf8 */
@@ -93042,9 +93224,67 @@ static fn span_row(positive n, bool mixed)
 }
 #endif
 
+//      What rev and wc asked for the ASCII run: eight bytes a copy and test,
+//      then string_span_max over the ASCII set.
+NOT_INLINED static positive former_ascii(address_any bytes, positive length)
+{
+        const p8 address_to at = bytes;
+        positive i = 0;
+
+        while (i + 8 <= length)
+        {
+                p64 word;
+
+                memory_copy_apart(address_of word, at + i, 8);
+                if (word & 0x8080808080808080ull)
+                        break;
+                i += 8;
+        }
+        if (i < length)
+                i += string_span_max(at + i, length - i, string_set_ascii);
+        return i;
+}
+
+NOT_INLINED static positive library_ascii(address_any bytes, positive length)
+{
+        return memory_ascii_span(bytes, length);
+}
+
+static p64 ascii_run(bool assembly, positive n, positive rounds)
+{
+        p64 start = get_cpu_time();
+        if (assembly)
+                while (rounds--) sink += library_ascii(block, n);
+        else
+                while (rounds--) sink += former_ascii(block, n);
+        return get_cpu_time() - start;
+}
+
+static fn ascii_row(positive n, bool late)
+{
+        positive raw[TRIES], rounds = rounds_for(n);
+        memory_fill(block, 'a', n);
+        if (late && n)
+                block[n - 1] = 0xc3;
+        for (positive trial = 0; trial < TRIES; trial++)
+        {
+                p64 wide, former;
+                BENCH_BOTH_ORDERS(trial, wide, former, n, rounds);
+                raw[trial] = wide * 10000 / max(former, (p64)1);
+        }
+        order(raw, TRIES);
+        string_format(log, "  %s %p bytes  asm/C %p.%p%%\n", late ? "late" : "all", n,
+                      raw[TRIES / 2] / 100, raw[TRIES / 2] % 100);
+}
+
 b32 main(void)
 {
         static const positive sizes[] = {8, 16, 24, 31, 40, 64, 118, 256, 1024, 65536};
+        string_format(log, "memory_ascii_span against the word loop and string_span_max, paired median of %p\n",
+                      (positive)TRIES);
+        for (positive i = 0; i < array_count(sizes); i++)
+                for (positive late = 0; late < 2; late++)
+                        ascii_row(sizes[i], late);
 #if X64
         if (cpu_has_avx2)
         {
@@ -93056,12 +93296,16 @@ b32 main(void)
         }
 #endif
 #if X64
-        p8 avx2 = cpu_has_avx2;
-        for (positive tier = 0; tier < 2; tier++)
+        p8 avx2 = cpu_has_avx2, avx512 = cpu_has_avx512;
+        for (positive tier = 0; tier < 3; tier++)
         {
-                cpu_has_avx2 = tier ? 0 : avx2;
+                cpu_has_avx512 = tier == 0 ? avx512 : 0;
+                cpu_has_avx2 = tier == 2 ? 0 : avx2;
+                if (tier == 0 && !avx512)
+                        continue;
                 string_format(log, "memory_utf8_valid_span, %s, paired median of %p\n",
-                              cpu_has_avx2 ? "AVX2" : "without AVX2", (positive)TRIES);
+                              cpu_has_avx512 ? "AVX-512" : cpu_has_avx2 ? "AVX2" : "without AVX2",
+                              (positive)TRIES);
 #else
         {
                 string_format(log, "memory_utf8_valid_span, paired median of %p\n",

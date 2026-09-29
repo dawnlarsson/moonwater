@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        377 routines (358 public, 19 local), 370 of them on all three and 7 local to one.
+        379 routines (359 public, 20 local), 372 of them on all three and 7 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -126,6 +126,7 @@
           cells_from_ascii               public  yes     yes     yes
           cells_from_ascii_wide          public  yes     yes     yes
           cpu_hash_detect                local   yes     yes     yes
+          cpu_vector_detect              local   --      --      yes
           decimal_ceiling                public  yes     yes     yes
           decimal_difference             public  yes     yes     yes
           decimal_floor                  public  yes     yes     yes
@@ -196,6 +197,7 @@
           lzma_range_shift               public  yes     yes     yes
           md5_blocks                     public  yes     yes     yes
           memory                         public  yes     yes     yes
+          memory_ascii_span              public  yes     yes     yes
           memory_checksum_bsd16          public  yes     yes     yes
           memory_common_prefix           public  yes     yes     yes
           memory_compare                 public  yes     yes     yes
@@ -267,7 +269,7 @@
           memory_to_upper_ascii          public  yes     yes     yes
           memory_translate               public  yes     yes     yes
           memory_utf8_span               public  yes     yes     yes
-          memory_utf8_span_wide          local   yes     --      --
+          memory_utf8_span_wide          local   yes     yes     yes
           memory_utf8_valid_span         public  yes     yes     yes
           memory_zero                    public  yes     yes     yes
           montgomery_multiply            public  yes     yes     yes
@@ -448,12 +450,12 @@
           zstd_sequences_run             public  yes     yes     yes
 
         Private to one machine, by choice:
+          cpu_vector_detect -- local to riscv64
           memory_offsets_fields_arm64 -- local to arm64
           memory_offsets_fields_rv -- local to riscv64
           memory_offsets_fields_x64 -- local to x86_64
           memory_offsets_range_x64 -- local to x86_64
           memory_span_byte_wide -- local to x86_64
-          memory_utf8_span_wide -- local to x86_64
           sha512_blocks_avx2 -- local to x86_64
 */
 
@@ -11797,7 +11799,7 @@ __asm__(
     ASM_FUNC(memory_utf8_span)
     "xor %r8d, %r8d\n   xor %r9d, %r9d\n"
     "movabs $0x8080808080808080, %r10\n"
-#if !defined(KERNEL_MODE) && defined(__ELF__)
+#if !defined(KERNEL_MODE) && defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
     //  Long spans with a long count: blocks of 32 through the validator
     //  (memory_utf8_valid_span's section), which comes back here to finish.
     "cmp $32, %rsi\n   jb 1f\n   cmp $32, %rdx\n   jb 1f\n"
@@ -25736,6 +25738,14 @@ __asm__(
     // memory_utf8_span: the x86_64 body carries the shared contract.
     ASM_FUNC(memory_utf8_span)
     "mov x3, #0\n   mov x4, #0\n   mov x5, #0x8080808080808080\n"
+#if !defined(KERNEL_MODE) && defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    //  Long spans with a long count: blocks of 16 through the validator
+    //  (memory_utf8_valid_span's section), which comes back here to finish.
+    "cmp x1, #32\n   b.lo .Lmemory_utf8_span_arm64_walk\n"
+    "cmp x2, #32\n   b.lo .Lmemory_utf8_span_arm64_walk\n"
+    "b memory_utf8_span_wide\n"
+#endif
+    ".Lmemory_utf8_span_arm64_walk:\n"
     "1:  cbz x1, 9f\n   cbz x2, 9f\n"
     "cmp x1, #8\n   b.lo 2f\n   cmp x2, #8\n   b.lo 2f\n"
     "ldr x7, [x0]\n   tst x7, x5\n   b.ne 2f\n"
@@ -39669,7 +39679,20 @@ __asm__(
 
     // memory_utf8_span: bounded, scalar, with naturally aligned word loads.
     ASM_FUNC(memory_utf8_span)
+#if !defined(KERNEL_MODE) && defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    //  Long spans with a long count and V: blocks through the validator
+    //  (memory_utf8_valid_span's section), which comes back here to finish.
+    "li t3, 32\n   bltu a1, t3, .Lmemory_utf8_span_rv_scalar\n"
+    "bltu a2, t3, .Lmemory_utf8_span_rv_scalar\n"
+    "lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   li t4, 2\n"
+    "beq t3, t4, .Lmemory_utf8_span_rv_vector\n   bnez t3, .Lmemory_utf8_span_rv_scalar\n"
+    "addi sp, sp, -16\n   sd ra, 8(sp)\n   call cpu_vector_detect\n"
+    "ld ra, 8(sp)\n   addi sp, sp, 16\n   j memory_utf8_span\n"
+    ".Lmemory_utf8_span_rv_vector:\n   tail memory_utf8_span_wide\n"
+    ".Lmemory_utf8_span_rv_scalar:\n"
+#endif
     "li t0, 0\n   li t1, 0\n   li t2, 0x8080808080808080\n"
+    ".Lmemory_utf8_span_rv_walk:\n"
     "1:  beqz a1, 9f\n   beqz a2, 9f\n"
     "li t6, 8\n   bltu a1, t6, 2f\n   bltu a2, t6, 2f\n"
     "andi t6, a0, 7\n   bnez t6, 2f\n"
@@ -52983,6 +53006,10 @@ extern p8 cpu_has_sse42;
 extern p8 cpu_has_sha3;
 extern p8 cpu_has_sm3;
 extern p8 cpu_has_crc32;
+// RISC-V's V, asked lazily the same way (0 unasked, 1 absent, 2 present) by
+// the routines that have a vector body, from riscv_hwprobe; x86_64 and arm64
+// never read it.
+extern p8 cpu_has_vector;
 
 __asm__(
     ASM_BSS_OBJECT_BEGIN(cpu_has_pclmul, 1)
@@ -53036,6 +53063,9 @@ __asm__(
     ASM_BSS_OBJECT_BEGIN(cpu_has_crc32, 1)
     ".zero 1\n"
     ASM_OBJECT_END(cpu_has_crc32)
+    ASM_BSS_OBJECT_BEGIN(cpu_has_vector, 1)
+    ".zero 1\n"
+    ASM_OBJECT_END(cpu_has_vector)
 );
 #endif
 fn moonwater_cpu_detect(void);
@@ -62934,6 +62964,22 @@ PURE READS(1, 2) positive2 memory_utf8_valid_span(address_any block, positive si
     "vpor %ymm6, %ymm5, %ymm5\n   vpand %ymm15, %ymm5, %ymm5\n"               \
     "vpxor %ymm5, %ymm4, %ymm4\n   vptest %ymm4, %ymm4\n   jnz " fail "\n"
 
+//      The same check on sixty four bytes with AVX-512BW: v in zmm0, the
+//      bytes before it in zmm1 to zmm3, the tables and constants in zmm8 to
+//      zmm15 as above. The three lookups' AND and the error's exclusive-or
+//      are two vpternlogd rather than four instructions, and the one mask
+//      the whole check writes is vptestmb's. Any error jumps to fail.
+#define UTF8_VALID_X64_ZCHECK(fail)                                           \
+    "vpsrlw $4, %zmm1, %zmm4\n   vpandq %zmm11, %zmm4, %zmm4\n"               \
+    "vpshufb %zmm4, %zmm8, %zmm4\n"                                           \
+    "vpandq %zmm11, %zmm1, %zmm5\n   vpshufb %zmm5, %zmm9, %zmm5\n"           \
+    "vpsrlw $4, %zmm0, %zmm6\n   vpandq %zmm11, %zmm6, %zmm6\n"               \
+    "vpshufb %zmm6, %zmm10, %zmm6\n"                                          \
+    "vpternlogd $0x80, %zmm5, %zmm6, %zmm4\n"                                 \
+    "vpsubusb %zmm13, %zmm2, %zmm5\n   vpsubusb %zmm14, %zmm3, %zmm6\n"       \
+    "vporq %zmm6, %zmm5, %zmm5\n   vpternlogd $0x78, %zmm15, %zmm5, %zmm4\n"  \
+    "vptestmb %zmm4, %zmm4, %k2\n   kortestq %k2, %k2\n   jnz " fail "\n"
+
 __asm__(
     ASM_SECTION
     ASM_FUNC(memory_utf8_valid_span)
@@ -63024,12 +63070,26 @@ __asm__(
     //  32 or more: blocks through the validator when there is AVX2.
     ".Lutf8_valid_x64_long:\n"
     "cmpb $0, cpu_has_avx2(%rip)\n   je .Lutf8_valid_x64_scalar\n"
+    //  From 128 bytes and with AVX-512BW, sixty four at a time: ASCII blocks
+    //  here, and the rest once the first block that is not has been checked.
+    "xor %r11d, %r11d\n   cmp $128, %rsi\n   jb .Lutf8_valid_x64_ascii\n"
+    "cmpb $0, cpu_has_avx512(%rip)\n   je .Lutf8_valid_x64_ascii\n"
+    "mov $1, %r11d\n"
+    ".Lutf8_valid_x64_zascii:\n"
+    "lea 64(%rax), %rcx\n   cmp %rsi, %rcx\n   ja .Lutf8_valid_x64_zdone\n"
+    "vmovdqu64 (%rdi,%rax), %zmm0\n   vpmovb2m %zmm0, %k1\n   kortestq %k1, %k1\n"
+    "jnz .Lutf8_valid_x64_ascii\n"
+    "add $64, %rax\n   jmp .Lutf8_valid_x64_zascii\n"
+    ".Lutf8_valid_x64_zdone:\n"
+    "lea 32(%rax), %rcx\n   cmp %rsi, %rcx\n   jbe .Lutf8_valid_x64_ascii\n"
+    "jmp .Lutf8_valid_x64_asciitail\n"
     //  ASCII blocks: one movemask each, and characters are bytes.
     ".Lutf8_valid_x64_ascii:\n"
     "vmovdqu (%rdi,%rax), %ymm0\n   vpmovmskb %ymm0, %ecx\n"
     "test %ecx, %ecx\n   jnz .Lutf8_valid_x64_enter\n"
     "add $32, %rax\n   lea 32(%rax), %rcx\n   cmp %rsi, %rcx\n"
     "jbe .Lutf8_valid_x64_ascii\n"
+    ".Lutf8_valid_x64_asciitail:\n"
     "mov %rax, %rdx\n   cmp %rsi, %rax\n   je .Lutf8_valid_x64_return\n"
     "vmovdqu -32(%rdi,%rsi), %ymm0\n   vpmovmskb %ymm0, %ecx\n"
     "test %ecx, %ecx\n   jnz .Lutf8_valid_x64_enter\n"
@@ -63071,6 +63131,7 @@ __asm__(
     "vpcmpgtb %ymm12, %ymm0, %ymm5\n   vpmovmskb %ymm5, %r9d\n"
     "popcnt %r9d, %r9d\n   add %r9, %rdx\n"
     "mov %ecx, %r8d\n   and $0xe0000000, %r8d\n   add $32, %rax\n"
+    "test %r11d, %r11d\n   jnz .Lutf8_valid_x64_zmm\n"
     "lea 32(%rax), %r9\n   cmp %rsi, %r9\n   jbe .Lutf8_valid_x64_block\n"
     //  Fewer than 32 left. One block ending at size proves them, when there
     //  are three bytes before it to load; its first 32 - left are proven.
@@ -63091,6 +63152,35 @@ __asm__(
     "movzbl -3(%rdi,%rsi), %ecx\n   cmp $0xf0, %ecx\n   jae .Lutf8_valid_x64_backup\n"
     "add %r9, %rdx\n   mov %rsi, %rax\n   vzeroupper\n"
     ASM_RET
+    //  Sixty four bytes a block, from where the first block that was not
+    //  ASCII left off: r8 is nonzero while a sequence may be open across the
+    //  edge, and what is left under a block goes back to the thirty two
+    //  byte loop and its overlapping tail.
+    ".Lutf8_valid_x64_zmm:\n   xor %r11d, %r11d\n"
+    "vbroadcasti32x4 .Lutf8_valid_x64_tables(%rip), %zmm8\n"
+    "vbroadcasti32x4 .Lutf8_valid_x64_tables+16(%rip), %zmm9\n"
+    "vbroadcasti32x4 .Lutf8_valid_x64_tables+32(%rip), %zmm10\n"
+    "vpbroadcastb .Lutf8_valid_x64_tables+48(%rip), %zmm11\n"
+    "vpbroadcastb .Lutf8_valid_x64_tables+49(%rip), %zmm12\n"
+    "vpbroadcastb .Lutf8_valid_x64_tables+50(%rip), %zmm13\n"
+    "vpbroadcastb .Lutf8_valid_x64_tables+51(%rip), %zmm14\n"
+    "vpbroadcastb .Lutf8_valid_x64_tables+52(%rip), %zmm15\n"
+    ".balign 16\n"
+    ".Lutf8_valid_x64_zloop:\n"
+    "lea 64(%rax), %r9\n   cmp %rsi, %r9\n   ja .Lutf8_valid_x64_zexit\n"
+    "vmovdqu64 (%rdi,%rax), %zmm0\n   vpmovb2m %zmm0, %k1\n   kmovq %k1, %rcx\n"
+    "or %rcx, %r8\n   jnz .Lutf8_valid_x64_zslow\n"
+    "add $64, %rax\n   add $64, %rdx\n   jmp .Lutf8_valid_x64_zloop\n"
+    ".Lutf8_valid_x64_zslow:\n"
+    "vmovdqu64 -1(%rdi,%rax), %zmm1\n   vmovdqu64 -2(%rdi,%rax), %zmm2\n"
+    "vmovdqu64 -3(%rdi,%rax), %zmm3\n"
+    UTF8_VALID_X64_ZCHECK(".Lutf8_valid_x64_backup")
+    "vpcmpgtb %zmm12, %zmm0, %k3\n   kmovq %k3, %r9\n   popcnt %r9, %r9\n"
+    "add %r9, %rdx\n   mov %rcx, %r8\n   shr $61, %r8\n   add $64, %rax\n"
+    "jmp .Lutf8_valid_x64_zloop\n"
+    ".Lutf8_valid_x64_zexit:\n"
+    "lea 32(%rax), %r9\n   cmp %rsi, %r9\n   jbe .Lutf8_valid_x64_block\n"
+    "jmp .Lutf8_valid_x64_tail\n"
     //  Everything before rax is proven but a sequence that may be open at
     //  it: step back to that sequence's lead, uncount it, and walk.
     ".Lutf8_valid_x64_backup:\n   vzeroupper\n"
@@ -63189,6 +63279,7 @@ __asm__(
 #endif
 );
 #undef UTF8_VALID_X64_CHECK
+#undef UTF8_VALID_X64_ZCHECK
 #elif ARM64
 //      The same check a quad at a time: v in v0, the bytes before in v1 to
 //      v3; tables in v28 to v30, and 0x0f, 0x60, 0x70 and 0x80 in v27, v25,
@@ -63322,15 +63413,129 @@ __asm__(
     UTF8_VALID_TABLES
 #endif
     ASM_END(memory_utf8_valid_span)
+
+#if !defined(KERNEL_MODE) && defined(__ELF__)
+    /*
+        memory_utf8_span's long spans on NEON: x0 block, x1 size, x2 the
+        count, as memory_utf8_span was entered, with size and count both 32
+        or more. A block of 16 holds at most 16 characters, so while 16 or
+        more are still wanted a whole block goes through the same check as
+        memory_utf8_valid_span's, its leads are counted and the count is
+        spent. What is left -- a count under 16, a tail under a block, or a
+        block with an error -- goes back into memory_utf8_span's walk from
+        the start of the character the vector stopped inside, its lead
+        uncounted. The walk wants x0 and x1 at the rest, x2 the count left,
+        x3 and x4 the bytes and characters so far and x5 its ASCII mask.
+        The tables are this body's own: a branch to a label in another
+        section reaches ten megabytes, an adr only one.
+    */
+    ASM_LOCAL_FUNC(memory_utf8_span_wide)
+    "mov x6, #0\n   mov x4, #0\n   mov w11, #0\n"
+    "adr x9, .Lutf8_span_arm64_tables\n"
+    "ldp q28, q29, [x9]\n   ldr q30, [x9, #32]\n"
+    "movi v27.16b, #0x0f\n   movi v26.16b, #0xbf\n   movi v25.16b, #0x60\n"
+    "movi v24.16b, #0x70\n   movi v23.16b, #0x80\n   movi v22.16b, #0\n"
+    ".p2align 4\n"
+    ".Lutf8_span_arm64_block:\n"
+    "add x7, x6, #16\n   cmp x7, x1\n   b.hi .Lutf8_span_arm64_out\n"
+    "cmp x2, #16\n   b.lo .Lutf8_span_arm64_out\n"
+    "ldr q0, [x0, x6]\n   umaxv b4, v0.16b\n   fmov w9, s4\n"
+    "and w9, w9, #0x80\n   orr w9, w9, w11\n   cbnz w9, .Lutf8_span_arm64_check\n"
+    "mov x6, x7\n   add x4, x4, #16\n   sub x2, x2, #16\n   b .Lutf8_span_arm64_block\n"
+    ".Lutf8_span_arm64_check:\n"
+    "cbnz x6, .Lutf8_span_arm64_before\n"
+    "ext v1.16b, v22.16b, v0.16b, #15\n   ext v2.16b, v22.16b, v0.16b, #14\n"
+    "ext v3.16b, v22.16b, v0.16b, #13\n"
+    "b .Lutf8_span_arm64_test\n"
+    ".Lutf8_span_arm64_before:\n"
+    "add x10, x0, x6\n   ldur q1, [x10, #-1]\n   ldur q2, [x10, #-2]\n"
+    "ldur q3, [x10, #-3]\n"
+    ".Lutf8_span_arm64_test:\n"
+    UTF8_VALID_ARM64_CHECK(".Lutf8_span_arm64_out")
+    "cmgt v5.16b, v0.16b, v26.16b\n   ushr v5.16b, v5.16b, #7\n"
+    "addv b5, v5.16b\n   fmov w9, s5\n   add x4, x4, x9\n   sub x2, x2, x9\n"
+    "umov w11, v0.s[3]\n   lsr w11, w11, #8\n   and w11, w11, #0x80808080\n"
+    "mov x6, x7\n   b .Lutf8_span_arm64_block\n"
+    //  Everything before x6 is proven but a sequence that may be open at
+    //  it: step back to that sequence's lead and uncount it.
+    ".Lutf8_span_arm64_out:\n"
+    "cbz x6, .Lutf8_span_arm64_walk\n"
+    "add x10, x0, x6\n   mov x12, #1\n"
+    ".Lutf8_span_arm64_back:\n"
+    "sub x9, x10, x12\n   ldrb w9, [x9]\n"
+    "cmp w9, #0xc0\n   b.hs .Lutf8_span_arm64_lead\n"
+    "cmp w9, #0x80\n   b.lo .Lutf8_span_arm64_walk\n"
+    "cmp x12, #3\n   b.hs .Lutf8_span_arm64_walk\n"
+    "add x12, x12, #1\n   cmp x12, x6\n   b.ls .Lutf8_span_arm64_back\n"
+    "b .Lutf8_span_arm64_walk\n"
+    ".Lutf8_span_arm64_lead:\n"
+    "sub x6, x6, x12\n   sub x4, x4, #1\n   add x2, x2, #1\n"
+    ".Lutf8_span_arm64_walk:\n"
+    "add x0, x0, x6\n   sub x1, x1, x6\n   mov x3, x6\n"
+    "mov x5, #0x8080808080808080\n"
+    "b .Lmemory_utf8_span_arm64_walk\n"
+    ".p2align 4\n"
+    ".Lutf8_span_arm64_tables:\n"
+    UTF8_VALID_TABLES
+    ASM_LOCAL_END(memory_utf8_span_wide)
+#endif
 );
 #undef UTF8_VALID_ARM64_CHECK
 #elif RISCV64
+
+//      RISC-V's block check, the same three lookups: the tables in v1 to v3
+//      (the first sixteen elements of each, the only ones indexed), one
+//      VLENB block in v0 with the bytes one, two and three before it in v9
+//      to v11, and 0x60, 0x70, 0x80 and -65 in a4 to a7. a3 is the block's
+//      address and t0 its index; any error jumps to fail.
+#define UTF8_VALID_RV_SETUP(tables)                                           \
+    "vsetivli zero, 16, e8, m1, ta, ma\n   lla t3, " tables "\n"              \
+    "vle8.v v1, (t3)\n   addi t3, t3, 16\n   vle8.v v2, (t3)\n"               \
+    "addi t3, t3, 16\n   vle8.v v3, (t3)\n"                                    \
+    "vsetvli t2, zero, e8, m1, ta, ma\n"                                       \
+    "li a4, 0x60\n   li a5, 0x70\n   li a6, 0x80\n   li a7, -65\n"
+#define UTF8_VALID_RV_CHECK(fail)                                             \
+    "beqz t0, 8f\n"                                                            \
+    "addi t3, a3, -1\n   vle8.v v9, (t3)\n   addi t3, a3, -2\n"               \
+    "vle8.v v10, (t3)\n   addi t3, a3, -3\n   vle8.v v11, (t3)\n   j 9f\n"    \
+    "8:  vmv.v.i v9, 0\n   vslideup.vi v9, v0, 1\n   vmv.v.i v10, 0\n"         \
+    "vslideup.vi v10, v0, 2\n   vmv.v.i v11, 0\n   vslideup.vi v11, v0, 3\n"  \
+    "9:  vsrl.vi v12, v9, 4\n   vrgather.vv v13, v1, v12\n"                    \
+    "vand.vi v12, v9, 15\n   vrgather.vv v14, v2, v12\n"                       \
+    "vsrl.vi v12, v0, 4\n   vrgather.vv v15, v3, v12\n"                        \
+    "vand.vv v13, v13, v14\n   vand.vv v13, v13, v15\n"                        \
+    "vssubu.vx v14, v10, a4\n   vssubu.vx v15, v11, a5\n"                      \
+    "vor.vv v14, v14, v15\n   vand.vx v14, v14, a6\n   vxor.vv v13, v13, v14\n" \
+    "vmsne.vi v8, v13, 0\n   vfirst.m t4, v8\n   bgez t4, " fail "\n"
+//      Whether the block's last three bytes hold a byte past ASCII, in t5.
+#define UTF8_VALID_RV_PENDING                                                 \
+    "add t3, a3, t2\n   lbu t4, -1(t3)\n   lbu t6, -2(t3)\n   or t4, t4, t6\n" \
+    "lbu t6, -3(t3)\n   or t4, t4, t6\n   andi t5, t4, 0x80\n"
+//      Back to the lead of a sequence that may be open at t0, then to walk.
+#define UTF8_VALID_RV_BACKUP(walk, uncount)                                   \
+    "beqz t0, " walk "\n   add t3, a0, t0\n"                                   \
+    "lbu t4, -1(t3)\n   li t6, 0xc0\n   bgeu t4, t6, 3f\n"                    \
+    "li t6, 0x80\n   bltu t4, t6, " walk "\n"                                  \
+    "li t6, 2\n   bltu t0, t6, " walk "\n   lbu t4, -2(t3)\n   li t6, 0xc0\n" \
+    "bgeu t4, t6, 2f\n   li t6, 0x80\n   bltu t4, t6, " walk "\n"              \
+    "li t6, 3\n   bltu t0, t6, " walk "\n   lbu t4, -3(t3)\n   li t6, 0xc0\n" \
+    "bltu t4, t6, " walk "\n   addi t0, t0, -1\n"                              \
+    "2:  addi t0, t0, -1\n"                                                    \
+    "3:  addi t0, t0, -1\n   " uncount
 __asm__(
     ASM_SECTION
     ASM_FUNC(memory_utf8_valid_span)
     //   a0 = block, a1 = size; t0 = bytes proven, t1 = characters. No V is
     //   assumed and there is no Zbb, so ASCII runs go eight bytes a test
     //   from a naturally aligned word, and everything else a byte.
+#ifndef KERNEL_MODE
+    "li t3, 32\n   bltu a1, t3, .Lutf8_valid_rv_scalar\n"
+    "lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   li t4, 2\n"
+    "beq t3, t4, .Lutf8_valid_rv_vector\n   bnez t3, .Lutf8_valid_rv_scalar\n"
+    "addi sp, sp, -16\n   sd ra, 8(sp)\n   call cpu_vector_detect\n"
+    "ld ra, 8(sp)\n   addi sp, sp, 16\n   j memory_utf8_valid_span\n"
+    ".Lutf8_valid_rv_scalar:\n"
+#endif
     "li t0, 0\n   li t1, 0\n   li t2, 0x8080808080808080\n"
     ".Lutf8_valid_rv_word:\n"
     "sub t3, a1, t0\n   li t6, 8\n   bltu t3, t6, .Lutf8_valid_rv_byte\n"
@@ -63363,10 +63568,274 @@ __asm__(
     "6:  add t0, t0, t5\n   addi t1, t1, 1\n   j .Lutf8_valid_rv_word\n"
     ".Lutf8_valid_rv_done:\n   mv a0, t0\n   mv a1, t1\n"
     ASM_RET
+#ifndef KERNEL_MODE
+    //  With V: blocks of VLENB bytes through the check, the ASCII ones by a
+    //  single mask, and the rest (or whatever is under a block) by the walk
+    //  above from the start of the character a block stopped inside.
+    ".Lutf8_valid_rv_vector:\n"
+    ".option push\n   .option arch, +v\n"
+    UTF8_VALID_RV_SETUP(".Lutf8_valid_rv_tables")
+    "li t0, 0\n   li t1, 0\n   li t5, 0\n"
+    ".Lutf8_valid_rv_block:\n"
+    "add t3, t0, t2\n   bgtu t3, a1, .Lutf8_valid_rv_out\n"
+    "add a3, a0, t0\n   vle8.v v0, (a3)\n"
+    "vmsle.vi v8, v0, -1\n   vfirst.m t4, v8\n"
+    "bgez t4, .Lutf8_valid_rv_slow\n   bnez t5, .Lutf8_valid_rv_slow\n"
+    "add t0, t0, t2\n   add t1, t1, t2\n   j .Lutf8_valid_rv_block\n"
+    ".Lutf8_valid_rv_slow:\n"
+    UTF8_VALID_RV_CHECK(".Lutf8_valid_rv_out")
+    "vmsgt.vx v8, v0, a7\n   vcpop.m t4, v8\n   add t1, t1, t4\n"
+    UTF8_VALID_RV_PENDING
+    "add t0, t0, t2\n   j .Lutf8_valid_rv_block\n"
+    //  Everything before t0 is proven but a sequence that may be open at it:
+    //  step back to that sequence's lead, uncount it, and walk.
+    ".Lutf8_valid_rv_out:\n"
+    UTF8_VALID_RV_BACKUP(".Lutf8_valid_rv_walk", "addi t1, t1, -1\n")
+    ".Lutf8_valid_rv_walk:\n"
+    ".option pop\n"
+    "li t2, 0x8080808080808080\n   j .Lutf8_valid_rv_word\n"
+    ".balign 16\n"
+    ".Lutf8_valid_rv_tables:\n"
+    UTF8_VALID_TABLES
+#endif
     ASM_END(memory_utf8_valid_span)
+
+#if !defined(KERNEL_MODE) && defined(__ELF__)
+    /*
+        memory_utf8_span's long spans with V: a0 block, a1 size, a2 the
+        count, as memory_utf8_span was entered. A block of VLENB bytes holds
+        at most that many characters, so while that many are still wanted it
+        goes through the check, its leads are counted and the count spent;
+        the rest returns to memory_utf8_span's walk from the start of the
+        character the vector stopped inside, its lead uncounted.
+    */
+    ASM_LOCAL_FUNC(memory_utf8_span_wide)
+    ".option push\n   .option arch, +v\n"
+    UTF8_VALID_RV_SETUP(".Lutf8_span_rv_tables")
+    "li t0, 0\n   li t1, 0\n   li t5, 0\n"
+    ".Lutf8_span_rv_block:\n"
+    "add t3, t0, t2\n   bgtu t3, a1, .Lutf8_span_rv_out\n"
+    "bltu a2, t2, .Lutf8_span_rv_out\n"
+    "add a3, a0, t0\n   vle8.v v0, (a3)\n"
+    "vmsle.vi v8, v0, -1\n   vfirst.m t4, v8\n"
+    "bgez t4, .Lutf8_span_rv_slow\n   bnez t5, .Lutf8_span_rv_slow\n"
+    "add t0, t0, t2\n   add t1, t1, t2\n   sub a2, a2, t2\n   j .Lutf8_span_rv_block\n"
+    ".Lutf8_span_rv_slow:\n"
+    UTF8_VALID_RV_CHECK(".Lutf8_span_rv_out")
+    "vmsgt.vx v8, v0, a7\n   vcpop.m t4, v8\n   add t1, t1, t4\n   sub a2, a2, t4\n"
+    UTF8_VALID_RV_PENDING
+    "add t0, t0, t2\n   j .Lutf8_span_rv_block\n"
+    ".Lutf8_span_rv_out:\n"
+    UTF8_VALID_RV_BACKUP(".Lutf8_span_rv_walk", "addi t1, t1, -1\n   addi a2, a2, 1\n")
+    ".Lutf8_span_rv_walk:\n"
+    ".option pop\n"
+    "add a0, a0, t0\n   sub a1, a1, t0\n   li t2, 0x8080808080808080\n"
+    "jump .Lmemory_utf8_span_rv_walk, t6\n"
+    ".balign 16\n"
+    ".Lutf8_span_rv_tables:\n"
+    UTF8_VALID_TABLES
+    ASM_LOCAL_END(memory_utf8_span_wide)
+
+    // cpu_vector_detect: riscv_hwprobe, syscall 258, one pair with key 4
+    // (IMA_EXT_0), whose bit 2 is V; 1 stored for absent (ENOSYS and a key
+    // handed back as -1 included), 2 for present. Preserves a0-a4, a7 and
+    // s0-s11; clobbers t0-t2. Callers spill ra around the call.
+    ASM_LOCAL_FUNC(cpu_vector_detect)
+    "addi sp, sp, -64\n   sd a0, 16(sp)\n   sd a1, 24(sp)\n   sd a2, 32(sp)\n"
+    "sd a3, 40(sp)\n   sd a4, 48(sp)\n   sd a7, 56(sp)\n   li t0, 4\n"
+    "sd t0, 0(sp)\n   sd zero, 8(sp)\n   mv a0, sp\n   li a1, 1\n"
+    "li a2, 0\n   li a3, 0\n   li a4, 0\n   li a7, 258\n"
+    "ecall\n   li t1, 1\n   bnez a0, .Lcpu_vector_detect_rv_store\n   ld t0, 0(sp)\n"
+    "li t2, 4\n   bne t0, t2, .Lcpu_vector_detect_rv_store\n   ld t0, 8(sp)\n"
+    "srli t1, t0, 2\n   andi t1, t1, 1\n   addi t1, t1, 1\n"
+    ".Lcpu_vector_detect_rv_store:\n"
+    "lla t0, cpu_has_vector\n   sb t1, 0(t0)\n   ld a0, 16(sp)\n"
+    "ld a1, 24(sp)\n   ld a2, 32(sp)\n   ld a3, 40(sp)\n   ld a4, 48(sp)\n"
+    "ld a7, 56(sp)\n   addi sp, sp, 64\n"
+    ASM_RET
+    ASM_LOCAL_END(cpu_vector_detect)
+#endif
 );
+#undef UTF8_VALID_RV_SETUP
+#undef UTF8_VALID_RV_CHECK
+#undef UTF8_VALID_RV_PENDING
+#undef UTF8_VALID_RV_BACKUP
 #endif
 #undef UTF8_VALID_TABLES
+
+/*
+        memory_ascii_span: how many bytes from the start of a block have bit
+        seven clear, which is the length of the ASCII prefix. Nothing before
+        the block or past size is read, and zero size reads nothing.
+
+        Every caller that asks for "the ASCII run" of a UTF-8 text -- wc, rev,
+        cut's test of a line -- asked string_span_max over the set of the 128
+        ASCII bytes, a table lookup a byte at 1.2 cycles a byte; this is one
+        mask a block. x86_64 tests sixty four bytes a turn with SSE2 (which
+        the baseline has), then sixteen, then the last few in one overlapping
+        load ending at size, whose already proven bytes cannot be the ones
+        that answer. arm64 does the same with NEON's umaxv, and riscv64,
+        which has no vector it may assume, takes eight bytes a test from a
+        naturally aligned word.
+*/
+PURE READS(1, 2) positive memory_ascii_span(address_any block, positive size);
+
+#if X64
+__asm__(
+    ASM_SECTION
+    ASM_FUNC(memory_ascii_span)
+    //   rdi = block, rsi = size; rax = the run
+    "xor %eax, %eax\n"
+    "cmp $16, %rsi\n   jb .Lascii_span_x64_small\n"
+    "lea 64(%rax), %rcx\n   cmp %rsi, %rcx\n   ja .Lascii_span_x64_16\n"
+    ".balign 16\n"
+    ".Lascii_span_x64_64:\n"
+    "movdqu (%rdi,%rax), %xmm0\n   movdqu 16(%rdi,%rax), %xmm1\n"
+    "movdqu 32(%rdi,%rax), %xmm2\n   movdqu 48(%rdi,%rax), %xmm3\n"
+    "por %xmm1, %xmm0\n   por %xmm3, %xmm2\n   por %xmm2, %xmm0\n"
+    "pmovmskb %xmm0, %ecx\n   test %ecx, %ecx\n   jnz .Lascii_span_x64_16\n"
+    "add $64, %rax\n   lea 64(%rax), %rcx\n   cmp %rsi, %rcx\n"
+    "jbe .Lascii_span_x64_64\n"
+    ".Lascii_span_x64_16:\n"
+    "lea 16(%rax), %rcx\n   cmp %rsi, %rcx\n   ja .Lascii_span_x64_tail\n"
+    "movdqu (%rdi,%rax), %xmm0\n   pmovmskb %xmm0, %ecx\n"
+    "test %ecx, %ecx\n   jnz .Lascii_span_x64_found\n"
+    "add $16, %rax\n   jmp .Lascii_span_x64_16\n"
+    ".Lascii_span_x64_tail:\n"
+    "cmp %rsi, %rax\n   je .Lascii_span_x64_all\n"
+    "movdqu -16(%rdi,%rsi), %xmm0\n   pmovmskb %xmm0, %ecx\n"
+    "test %ecx, %ecx\n   jz .Lascii_span_x64_all\n"
+    "bsf %ecx, %ecx\n   lea -16(%rsi,%rcx), %rax\n"
+    ASM_RET
+    ".Lascii_span_x64_found:\n   bsf %ecx, %ecx\n   add %rcx, %rax\n"
+    ASM_RET
+    ".Lascii_span_x64_all:\n   mov %rsi, %rax\n"
+    ASM_RET
+    //  Under sixteen: a word, then the word that ends at size, then bytes.
+    ".Lascii_span_x64_small:\n"
+    "cmp $8, %rsi\n   jb .Lascii_span_x64_bytes\n"
+    "movabs $0x8080808080808080, %rdx\n"
+    "mov (%rdi), %rcx\n   and %rdx, %rcx\n   jnz .Lascii_span_x64_word\n"
+    "mov -8(%rdi,%rsi), %rcx\n   and %rdx, %rcx\n   jz .Lascii_span_x64_all\n"
+    "bsf %rcx, %rcx\n   shr $3, %ecx\n   lea -8(%rsi,%rcx), %rax\n"
+    ASM_RET
+    ".Lascii_span_x64_word:\n   bsf %rcx, %rcx\n   shr $3, %ecx\n   mov %rcx, %rax\n"
+    ASM_RET
+    ".Lascii_span_x64_bytes:\n"
+    "test %rsi, %rsi\n   jz .Lascii_span_x64_done\n"
+    "1:  cmpb $0, (%rdi,%rax)\n   js .Lascii_span_x64_done\n"
+    "inc %rax\n   cmp %rsi, %rax\n   jb 1b\n"
+    ".Lascii_span_x64_done:\n"
+    ASM_RET
+    ASM_END(memory_ascii_span)
+);
+#elif ARM64
+__asm__(
+    ASM_SECTION
+    ASM_FUNC(memory_ascii_span)
+    //   x0 = block, x1 = size; x0 = the run
+    "mov x2, #0\n"
+    "cmp x1, #16\n   b.lo .Lascii_span_arm64_small\n"
+    "cmp x1, #64\n   b.hs .Lascii_span_arm64_neon\n"
+    //  Sixteen to sixty three: two words a step in the integer registers,
+    //  which have no move between register files to wait for, and the two
+    //  words that end at size for the tail.
+    "mov x9, #0x8080808080808080\n"
+    ".Lascii_span_arm64_mid:\n"
+    "add x3, x2, #16\n   cmp x3, x1\n   b.hi .Lascii_span_arm64_midtail\n"
+    "add x4, x0, x2\n   ldp x5, x6, [x4]\n   orr x7, x5, x6\n   tst x7, x9\n"
+    "b.ne .Lascii_span_arm64_midhit\n   add x2, x2, #16\n   b .Lascii_span_arm64_mid\n"
+    ".Lascii_span_arm64_midhit:\n"
+    "and x5, x5, x9\n   cbnz x5, .Lascii_span_arm64_midfirst\n"
+    "and x6, x6, x9\n   rbit x6, x6\n   clz x6, x6\n   add x0, x2, #8\n"
+    "add x0, x0, x6, lsr #3\n"
+    ASM_RET
+    ".Lascii_span_arm64_midfirst:\n   rbit x5, x5\n   clz x5, x5\n"
+    "add x0, x2, x5, lsr #3\n"
+    ASM_RET
+    ".Lascii_span_arm64_midtail:\n"
+    "cmp x2, x1\n   b.eq .Lascii_span_arm64_all\n"
+    "add x4, x0, x1\n   ldp x5, x6, [x4, #-16]\n   orr x7, x5, x6\n   tst x7, x9\n"
+    "b.eq .Lascii_span_arm64_all\n"
+    "and x5, x5, x9\n   cbnz x5, .Lascii_span_arm64_tailfirst\n"
+    "and x6, x6, x9\n   rbit x6, x6\n   clz x6, x6\n   sub x0, x1, #8\n"
+    "add x0, x0, x6, lsr #3\n"
+    ASM_RET
+    ".Lascii_span_arm64_tailfirst:\n   rbit x5, x5\n   clz x5, x5\n   sub x0, x1, #16\n"
+    "add x0, x0, x5, lsr #3\n"
+    ASM_RET
+    //  Sixty four or more: NEON, sixty four bytes a test.
+    ".Lascii_span_arm64_neon:\n"
+    "add x3, x2, #64\n   cmp x3, x1\n   b.hi .Lascii_span_arm64_16\n"
+    ".p2align 4\n"
+    ".Lascii_span_arm64_64:\n"
+    "add x3, x0, x2\n   ldp q0, q1, [x3]\n   ldp q2, q3, [x3, #32]\n"
+    "orr v0.16b, v0.16b, v1.16b\n   orr v2.16b, v2.16b, v3.16b\n"
+    "orr v0.16b, v0.16b, v2.16b\n   umaxv b0, v0.16b\n   fmov w4, s0\n"
+    "tbnz w4, #7, .Lascii_span_arm64_16\n"
+    "add x2, x2, #64\n   add x3, x2, #64\n   cmp x3, x1\n"
+    "b.ls .Lascii_span_arm64_64\n"
+    ".Lascii_span_arm64_16:\n"
+    "add x3, x2, #16\n   cmp x3, x1\n   b.hi .Lascii_span_arm64_tail\n"
+    "ldr q0, [x0, x2]\n   umaxv b1, v0.16b\n   fmov w4, s1\n"
+    "tbnz w4, #7, .Lascii_span_arm64_found\n"
+    "add x2, x2, #16\n   b .Lascii_span_arm64_16\n"
+    ".Lascii_span_arm64_tail:\n"
+    "cmp x2, x1\n   b.eq .Lascii_span_arm64_all\n"
+    "add x3, x0, x1\n   ldur q0, [x3, #-16]\n   umaxv b1, v0.16b\n   fmov w4, s1\n"
+    "tbz w4, #7, .Lascii_span_arm64_all\n"
+    "sub x2, x1, #16\n"
+    ".Lascii_span_arm64_found:\n"
+    //  The first byte with bit seven set: a nibble a byte, then rbit and clz.
+    "cmlt v1.16b, v0.16b, #0\n   shrn v1.8b, v1.8h, #4\n   fmov x4, d1\n"
+    "rbit x4, x4\n   clz x4, x4\n   add x0, x2, x4, lsr #2\n"
+    ASM_RET
+    ".Lascii_span_arm64_all:\n   mov x0, x1\n"
+    ASM_RET
+    ".Lascii_span_arm64_small:\n"
+    "cmp x1, #8\n   b.lo .Lascii_span_arm64_bytes\n"
+    "ldr x3, [x0]\n   and x3, x3, #0x8080808080808080\n   cbnz x3, .Lascii_span_arm64_word\n"
+    "add x5, x0, x1\n   ldur x3, [x5, #-8]\n   and x3, x3, #0x8080808080808080\n"
+    "cbz x3, .Lascii_span_arm64_all\n"
+    "rbit x3, x3\n   clz x3, x3\n   sub x2, x1, #8\n   add x0, x2, x3, lsr #3\n"
+    ASM_RET
+    ".Lascii_span_arm64_word:\n   rbit x3, x3\n   clz x3, x3\n   lsr x0, x3, #3\n"
+    ASM_RET
+    ".Lascii_span_arm64_bytes:\n"
+    "cbz x1, .Lascii_span_arm64_done\n"
+    "1:  ldrb w3, [x0, x2]\n   tbnz w3, #7, .Lascii_span_arm64_done\n"
+    "add x2, x2, #1\n   cmp x2, x1\n   b.lo 1b\n"
+    ".Lascii_span_arm64_done:\n   mov x0, x2\n"
+    ASM_RET
+    ASM_END(memory_ascii_span)
+);
+#elif RISCV64
+__asm__(
+    ASM_SECTION
+    ASM_FUNC(memory_ascii_span)
+    //   a0 = block, a1 = size; t0 = the run. Up to alignment a byte at a
+    //   time, then eight bytes a test from naturally aligned words, and a
+    //   word that has a byte with bit seven set is read again a byte at a
+    //   time to say which.
+    "li t0, 0\n   li t2, 0x8080808080808080\n"
+    ".Lascii_span_rv_align:\n"
+    "bgeu t0, a1, .Lascii_span_rv_done\n"
+    "add t4, a0, t0\n   andi t3, t4, 7\n   beqz t3, .Lascii_span_rv_word\n"
+    "lbu t3, 0(t4)\n   andi t3, t3, 0x80\n   bnez t3, .Lascii_span_rv_done\n"
+    "addi t0, t0, 1\n   j .Lascii_span_rv_align\n"
+    ".Lascii_span_rv_word:\n"
+    "add t4, a0, t0\n   sub t5, a1, t0\n   li t6, 8\n   bltu t5, t6, .Lascii_span_rv_bytes\n"
+    "ld t3, 0(t4)\n   and t3, t3, t2\n   bnez t3, .Lascii_span_rv_bytes\n"
+    "addi t0, t0, 8\n   j .Lascii_span_rv_word\n"
+    ".Lascii_span_rv_bytes:\n"
+    "bgeu t0, a1, .Lascii_span_rv_done\n"
+    "add t4, a0, t0\n   lbu t3, 0(t4)\n   andi t3, t3, 0x80\n   bnez t3, .Lascii_span_rv_done\n"
+    "addi t0, t0, 1\n   j .Lascii_span_rv_bytes\n"
+    ".Lascii_span_rv_done:\n   mv a0, t0\n"
+    ASM_RET
+    ASM_END(memory_ascii_span)
+);
+#endif
 
 /*
         The short decimal, read without the frame a hard one needs.
