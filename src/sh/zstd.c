@@ -3704,17 +3704,194 @@ static positive zstd_opt_matches(zstd_encoder address_to e, p8 address_to ip,
         return count;
 }
 
-/* btlazy2's search: the tree's longest match, repeats left to the parse. */
+/*
+        btlazy2's search, libzstd's DUBT: a position goes into its hash's
+        chain unsorted (its second link marks it so), and is sorted into
+        the tree only when a search meets it, at most 2^search_log a
+        search, newest last.  Then the search walks the tree for ip and puts
+        it in.  A longer match takes over only when its extra length pays
+        for its extra offset bits, from a first offset worth 29 bits.
+*/
+#define ZSTD_DUBT_UNSORTED 1u
+
+static fn zstd_dubt_sort(zstd_encoder address_to e, p32 cur, p8 address_to iend,
+                         positive compares, p32 bt_low, p32 low)
+{
+        p8 address_to const base = e->base;
+        p32 address_to const bt = e->chain;
+        p32 const mask = ((p32)1 << (e->p.chain_log - 1)) - 1;
+        p8 address_to const ip = base + cur;
+        positive const room = (positive)(iend - ip);
+        p32 address_to smaller = bt + 2 * (cur & mask);
+        p32 address_to larger = smaller + 1;
+        p32 candidate = address_to smaller;
+        p32 dummy;
+        positive common_smaller = 0;
+        positive common_larger = 0;
+
+        for (; compares && candidate > low; compares--)
+        {
+                p32 address_to const next = bt + 2 * (candidate & mask);
+                p8 address_to const match = base + candidate;
+                positive length = common_smaller < common_larger ? common_smaller
+                                                                 : common_larger;
+
+                length += memory_common_prefix(ip + length, match + length, room - length);
+                if (length == room)
+                        break;
+                if (match[length] < ip[length])
+                {
+                        address_to smaller = candidate;
+                        common_smaller = length;
+                        if (candidate <= bt_low)
+                        {
+                                smaller = address_of dummy;
+                                break;
+                        }
+                        smaller = next + 1;
+                        candidate = next[1];
+                }
+                else
+                {
+                        address_to larger = candidate;
+                        common_larger = length;
+                        if (candidate <= bt_low)
+                        {
+                                larger = address_of dummy;
+                                break;
+                        }
+                        larger = next;
+                        candidate = next[0];
+                }
+        }
+        address_to smaller = 0;
+        address_to larger = 0;
+}
+
 static positive zstd_bt_best(zstd_encoder address_to e, p8 address_to ip,
                              p8 address_to iend, positive address_to distance)
 {
-        static const p32 none[3] = {0, 0, 0};
-        positive const count = zstd_opt_matches(e, ip, iend, none, false, e->matches);
+        p8 address_to const base = e->base;
+        p8 const mls = e->p.min_match < 4 ? 4 : e->p.min_match > 6 ? 6 : e->p.min_match;
+        p8 const hlog = e->p.hash_log;
+        p32 address_to const hash = e->hash;
+        p32 address_to const bt = e->chain;
+        p32 const mask = ((p32)1 << (e->p.chain_log - 1)) - 1;
+        p32 const cur = (p32)(ip - base);
+        p32 const window = (p32)1 << e->p.window_log;
+        p32 const low = cur - e->start > window ? cur - window : e->start;
+        p32 const bt_low = mask >= cur ? 0 : cur - mask;
+        p32 const unsort_limit = bt_low > low ? bt_low : low;
+        positive const room = (positive)(iend - ip);
+        positive compares = (positive)1 << e->p.search_log;
+        positive candidates = compares;
+        p32 previous = 0;
+        p32 candidate;
+        p32 address_to smaller;
+        p32 address_to larger;
+        p32 match_end = cur + 9;
+        p32 dummy;
+        p32 off_base = 999999999;
+        positive best = 0;
+        positive common_smaller = 0;
+        positive common_larger = 0;
+        positive h;
 
-        if (!count)
+        if (cur < e->next)
                 return 0;
-        address_to distance = e->matches[count - 1].off - 3;
-        return e->matches[count - 1].len;
+        for (p32 at = e->next < e->start ? e->start : e->next; at < cur; at++)
+        {
+                positive const k = zstd_hash_bytes(base + at, hlog, mls);
+                p32 address_to const node = bt + 2 * (at & mask);
+
+                node[0] = hash[k];
+                node[1] = ZSTD_DUBT_UNSORTED;
+                hash[k] = at;
+        }
+        e->next = cur;
+
+        h = zstd_hash_bytes(ip, hlog, mls);
+        candidate = hash[h];
+        /* The unsorted run from the head, its marks turned into a chain
+           back up; a last one still unsorted is dropped. */
+        while (candidate > unsort_limit && bt[2 * (candidate & mask) + 1] == ZSTD_DUBT_UNSORTED &&
+               candidates > 1)
+        {
+                p32 address_to const node = bt + 2 * (candidate & mask);
+
+                node[1] = previous;
+                previous = candidate;
+                candidate = node[0];
+                candidates--;
+        }
+        if (candidate > unsort_limit && bt[2 * (candidate & mask) + 1] == ZSTD_DUBT_UNSORTED)
+                bt[2 * (candidate & mask)] = bt[2 * (candidate & mask) + 1] = 0;
+        for (candidate = previous; candidate;)
+        {
+                p32 const up = bt[2 * (candidate & mask) + 1];
+
+                zstd_dubt_sort(e, candidate, iend, candidates, unsort_limit, low);
+                candidate = up;
+                candidates++;
+        }
+
+        candidate = hash[h];
+        hash[h] = cur;
+        smaller = bt + 2 * (cur & mask);
+        larger = smaller + 1;
+        for (; compares && candidate > low; compares--)
+        {
+                p32 address_to const next = bt + 2 * (candidate & mask);
+                p8 address_to const match = base + candidate;
+                positive length = common_smaller < common_larger ? common_smaller
+                                                                 : common_larger;
+
+                length += memory_common_prefix(ip + length, match + length, room - length);
+                if (length > best)
+                {
+                        if (length > match_end - candidate)
+                                match_end = candidate + (p32)length;
+                        if (4 * (b32)(length - best) >
+                            (b32)zstd_highbit32(cur - candidate + 1) - (b32)zstd_highbit32(off_base))
+                        {
+                                best = length;
+                                off_base = cur - candidate + 3;
+                        }
+                        if (length == room)
+                                break;
+                }
+                if (match[length] < ip[length])
+                {
+                        address_to smaller = candidate;
+                        common_smaller = length;
+                        if (candidate <= bt_low)
+                        {
+                                smaller = address_of dummy;
+                                break;
+                        }
+                        smaller = next + 1;
+                        candidate = next[1];
+                }
+                else
+                {
+                        address_to larger = candidate;
+                        common_larger = length;
+                        if (candidate <= bt_low)
+                        {
+                                larger = address_of dummy;
+                                break;
+                        }
+                        larger = next;
+                        candidate = next[0];
+                }
+        }
+        address_to smaller = 0;
+        address_to larger = 0;
+        e->next = match_end - 8;
+        if (best < 4)
+                return 0;
+        address_to distance = off_base - 3;
+        return best;
 }
 
 static __attribute__((always_inline)) inline p32 zstd_weight(p32 stat, bool fractional)
@@ -4465,7 +4642,11 @@ static fn zstd_encoder_reduce(zstd_encoder address_to e)
                 e->hash[i] = e->hash[i] > shift ? e->hash[i] - shift : 0;
         if (e->p.strategy < ZSTD_GREEDY || e->p.strategy > ZSTD_LAZY2)
                 for (positive i = 0; i < e->chain_bytes / 4; i++)
-                        e->chain[i] = e->chain[i] > shift ? e->chain[i] - shift : 0;
+                        e->chain[i] = e->chain[i] > shift ? e->chain[i] - shift
+                                      : e->p.strategy == ZSTD_BTLAZY2 &&
+                                                e->chain[i] == ZSTD_DUBT_UNSORTED
+                                          ? ZSTD_DUBT_UNSORTED
+                                          : 0;
         for (positive i = 0; i < e->hash3_bytes / 4; i++)
                 e->hash3[i] = e->hash3[i] > shift ? e->hash3[i] - shift : 0;
         e->start = e->start > shift ? e->start - shift : 1;
