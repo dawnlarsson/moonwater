@@ -8237,7 +8237,9 @@ FILES_UTILITIES = (
                               Option("-p"), Option("--interactive")),
             operands=((), ("echo",), ("./exe",), ("printf", "%s\\n"), ("sh", "-c", "echo $#"), ("true",), ("false",), ("nosuchcommand",),
                       ("./unreadable",), ("ls", "-d"), ("rm",), ("sh", "-c", "exit 255"), ("sh", "-c", "kill -TERM $$"), ("echo", "-n"),
-                      ("sh", "-c", "printf %s\\\\n \"$@\"", "sh"), ("dir",), ("printf", "[%s]"), ("sh", "-c", "echo $SLOT"), ("--", "echo")),
+                      ("sh", "-c", "printf %s\\\\n \"$@\"", "sh"), ("dir",), ("printf", "[%s]"), ("sh", "-c", "echo $SLOT"), ("--", "echo"),
+                      # A command that reads its standard input is given none of xargs'.
+                      ("cat",), ("sh", "-c", "cat; echo ended"), ("sh", "-c", "wc -c; echo $#")),
             stdin=("files_words", "files_nul_words", "files_paths", "text", "empty", "many_lines", "edge_65537", "spaces", "nonl",
                    "files_eof_words", "blanks", "nul"),
             fixture="files", stderr="exact", valid=files_xargs_valid, max_flags=3),

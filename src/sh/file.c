@@ -46732,6 +46732,8 @@ static positive xargs_line_count;
 static positive xargs_mark;
 
 static bool xargs_ask;
+// -o: the command reads the terminal, not xargs' input.
+static bool xargs_open_tty;
 
 /*
         A successful exec has copied argv and the environment into the new
@@ -47220,7 +47222,35 @@ static bipolar xargs_execute(string_address address_to words,
         if (child == 0)
         {
                 system_close(ends[0]);
-                bipolar answer = xargs_exec_with_slot(words, slot);
+
+                /* The command reads no standard input of xargs': GNU points
+                   it at /dev/null (at the terminal under -o), so a command
+                   that reads its input -- sh -c 'cat >/dev/null' -- cannot
+                   swallow the items still to come; with -a the items do not
+                   come from it, and the command keeps it. */
+                bipolar quiet = xargs_input != 0 && !xargs_open_tty
+                                    ? -1
+                                    : system_open_at(
+                                          AT_FDCWD,
+                                          xargs_open_tty ? (string_address) "/dev/tty"
+                                                         : (string_address) "/dev/null",
+                                          FILE_READ);
+
+                if (quiet < 0 && xargs_open_tty)
+                        string_format(log_error,
+                                      "xargs: failed to open /dev/tty for reading: %s\n",
+                                      file_reason(quiet));
+                if (quiet >= 0)
+                {
+                        if (quiet != 0)
+                        {
+                                (void)system_duplicate(quiet, 0, 0);
+                                system_close(quiet);
+                        }
+                }
+                bipolar answer = quiet < 0 && xargs_open_tty
+                                     ? (bipolar)XARGS_EXEC_SYSTEM
+                                     : xargs_exec_with_slot(words, slot);
 
                 /* This write is at most PIPE_BUF and the parent keeps the
                    reader open, so EINTR is the only recoverable short report.
@@ -47654,6 +47684,7 @@ static const argument_option xargs_options[] = {
     {"max-procs", 'P', ARGUMENT_REQUIRED},
     {"no-run-if-empty", 'r'},
     {"null", '0'},
+    {"open-tty", 'o'},
     {"process-slot-var", 'V', ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
     {"replace", 'I', ARGUMENT_REQUIRED | ARGUMENT_LONG_OPTIONAL},
     {"show-limits", 'M', ARGUMENT_LONG_ONLY},
@@ -47872,6 +47903,7 @@ static b32 file_xargs()
         positive index = taking.first;
 
         xargs_ask = (taking.flags & FILE_FLAG('p')) != 0;
+        xargs_open_tty = (taking.flags & FILE_FLAG('o')) != 0;
         xargs_terminal = -2;
         xargs_trace = (taking.flags & FILE_FLAG('t')) != 0;
         xargs_needs_input = (taking.flags & FILE_FLAG('r')) != 0;
