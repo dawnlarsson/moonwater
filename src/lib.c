@@ -50298,10 +50298,10 @@ extern positive program_entry_identity;
 // SPARK_ENTRY_* bits the loader handed over, zero unless it spoke version 3.
 extern p8 program_entry_facts;
 /* The vDSO's clock, as lib.util.c's clock_gettime finds it: 0 while nothing
-   says there is an auxiliary vector to look in -- a Spark stack has none,
-   and past its environment's null lie the strings, not auxv -- 1 once the
-   ELF path of _start has said there is, then 2 when the lookup found no
-   clock, or the entry's address. */
+   says there is an auxiliary vector to look in -- past an older Spark
+   loader's environment null lie the strings, not auxv -- 1 once _start has
+   said there is (every ELF, and a Spark loader that set SPARK_ENTRY_AUXV),
+   then 2 when the lookup found no clock, or the entry's address. */
 extern positive program_vdso_clock;
 
 __asm__(
@@ -53840,6 +53840,8 @@ __asm__(
     "movabs $" LINUX_RUNTIME_TEXT(SPARK_START_MAGIC) ", %rax\n"
     "xor %r12, %rax\n   cmp $1, %rax\n   ja .Lstart_x64_detect\n"
     "neg %rax\n   and %r15, %rax\n   mov %al, program_entry_facts(%rip)\n"
+    /* SPARK_ENTRY_AUXV: this loader wrote an auxiliary vector too. */
+    "shr $1, %eax\n   and $1, %eax\n   mov %rax, program_vdso_clock(%rip)\n"
     "mov %r14, program_entry_identity(%rip)\n"
     /* The private feature word carries one already-normalised Boolean byte
        for each public runtime flag.  Publishing those bytes directly is the
@@ -53991,6 +53993,9 @@ __asm__(
     "eor x1, x19, x1\n   cmp x1, #1\n   b.hi .Lstart_arm64_detect\n"
     "neg x1, x1\n   and x1, x1, x22\n"
     "adrp x2, program_entry_facts\n   strb w1, [x2, :lo12:program_entry_facts]\n"
+    /* SPARK_ENTRY_AUXV: this loader wrote an auxiliary vector too. */
+    "ubfx x1, x1, #1, #1\n"
+    "adrp x2, program_vdso_clock\n   str x1, [x2, :lo12:program_vdso_clock]\n"
     "adrp x1, program_entry_identity\n"
     "str x21, [x1, :lo12:program_entry_identity]\n"
     /* The Spark feature word: the carry-less multiply in the low byte, AES
@@ -54136,6 +54141,9 @@ __asm__(
     "xor t1, s2, t1\n   li t2, 1\n   bgtu t1, t2, .Lstart_riscv64_detect\n"
     "neg t1, t1\n   and t1, t1, s5\n"
     "lla t0, program_entry_facts\n   sb t1, 0(t0)\n"
+    /* SPARK_ENTRY_AUXV: this loader wrote an auxiliary vector too. */
+    "srli t1, t1, 1\n   andi t1, t1, 1\n"
+    "lla t0, program_vdso_clock\n   sd t1, 0(t0)\n"
     "lla t0, program_entry_identity\n   sd s4, 0(t0)\n"
     /* The Spark feature word: Zbc in the low byte, Zvkned with usable V in
        the next, published as they come. */

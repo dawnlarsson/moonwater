@@ -9235,12 +9235,9 @@ static fn locale_zone_title(string_address zone, p8 address_to into,
 //      The wall clock now, in the zone in force, with its abbreviation.
 static fn locale_zone_moment(p8 address_to into, positive room)
 {
-        p64 now[2] = {0, 0};
-        time_t stamp;
+        time_t stamp = time(null);
         tm broken;
 
-        system_call_2(syscall(clock_gettime), CLOCK_REALTIME, (positive)now);
-        stamp = (time_t)now[0];
         tzset();
         if (!localtime_r(address_of stamp, address_of broken) ||
             !strftime(into, room, "%Y-%m-%d %H:%M:%S %Z", address_of broken))
@@ -9341,12 +9338,9 @@ static bool locale_zone_kernel_first_spent;
 
 static bipolar locale_zone_east_now(void)
 {
-        p64 now[2] = {0, 0};
-        time_t stamp;
+        time_t stamp = time(null);
         tm broken;
 
-        system_call_2(syscall(clock_gettime), CLOCK_REALTIME, (positive)now);
-        stamp = (time_t)now[0];
         if (!localtime_r(address_of stamp, address_of broken))
                 return 0;
         return (bipolar)broken.tm_gmtoff;
@@ -9979,14 +9973,12 @@ static fn locale_auto_keep(void)
 */
 static b32 locale_time_status(void)
 {
-        p64 now[2] = {0, 0};
         time_t stamp;
         tm broken;
         p8 when[40];
 
         locale_zone_status();
-        system_call_2(syscall(clock_gettime), CLOCK_REALTIME, (positive)now);
-        stamp = (time_t)now[0];
+        stamp = time(null);
         gmtime_r(address_of stamp, address_of broken);
         strftime(when, sizeof(when), "%Y-%m-%d %H:%M:%S", address_of broken);
         string_format(log, "  utc   %s\n", when);

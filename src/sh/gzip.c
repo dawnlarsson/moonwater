@@ -1211,9 +1211,9 @@ typedef struct
         {
                 struct
                 {
-                        b16 head4[1u << GZIP_HASH4_BITS];
-                        b16 head3[1u << GZIP_HASH3_BITS];
-                        b16 prev[GZIP_WINDOW];
+                        p16 head4[1u << GZIP_HASH4_BITS];
+                        p16 head3[1u << GZIP_HASH3_BITS];
+                        p16 prev[GZIP_WINDOW];
                 };
                 /* The fast finder's buckets: absolute positions plus one,
                    zero for none, two a hash. */
@@ -1229,6 +1229,7 @@ typedef struct
         p32 dist_freq[GZIP_MAXDIST];
         p32 seen[10];
         p32 fresh[10];
+        p32 lit_seen[256];
         positive seen_n;
         positive fresh_n;
         p8 address_to out;
@@ -1310,15 +1311,10 @@ static inline INLINE positive gzip_dist_code(positive dist)
                            : deflate_symbol_tab[512 + ((dist - 1) >> 7)];
 }
 
-static inline INLINE fn gzip_note_literal(gzip_encoder address_to e, p8 c)
-{
-        e->lit_freq[c]++;
-        e->fresh[((c >> 5) & 6) | (c & 1)]++;
-        e->fresh_n++;
-}
-
-/* The fast level's literal and pair: counted, never observed, as its
-   blocks end at a fixed length. */
+/* A literal and a pair, counted. The split test reads the literals'
+   kinds from what lit_freq gained since it last looked; the chain parse
+   counts pairs' kinds itself, and the fast level's blocks end at a fixed
+   length and are never tested. */
 static inline INLINE fn gzip_note_literal_fast(gzip_encoder address_to e, p8 c)
 {
         e->lit_freq[c]++;
@@ -1336,20 +1332,6 @@ static inline INLINE fn gzip_note_match_fast(gzip_encoder address_to e, positive
         e->dist_freq[gzip_dist_code(dist)]++;
 }
 
-static inline INLINE fn gzip_note_match(gzip_encoder address_to e, positive at,
-                                        positive length, positive dist)
-{
-        positive k = e->pairs++;
-
-        e->mpos[k] = (p32)at;
-        e->mlen[k] = (p16)length;
-        e->mdist[k] = (p16)dist;
-        e->lit_freq[257 + deflate_symbol_tab[length - 3]]++;
-        e->dist_freq[gzip_dist_code(dist)]++;
-        e->fresh[8 + (length >= 9)]++;
-        e->fresh_n++;
-}
-
 static fn gzip_block_open(gzip_encoder address_to e)
 {
         e->pairs = 0;
@@ -1357,6 +1339,7 @@ static fn gzip_block_open(gzip_encoder address_to e)
         memory_fill(e->dist_freq, 0, sizeof(e->dist_freq));
         memory_fill(e->seen, 0, sizeof(e->seen));
         memory_fill(e->fresh, 0, sizeof(e->fresh));
+        memory_fill(e->lit_seen, 0, sizeof(e->lit_seen));
         e->seen_n = 0;
         e->fresh_n = 0;
 }
@@ -1368,6 +1351,11 @@ static bool gzip_split_test(gzip_encoder address_to e, positive length, positive
 {
         if (length < GZIP_SPLIT_LEAST || left < GZIP_SPLIT_LEAST)
                 return false;
+        for (positive c = 0; c < 256; c++)
+        {
+                e->fresh[((c >> 5) & 6) | (c & 1)] += e->lit_freq[c] - e->lit_seen[c];
+                e->lit_seen[c] = e->lit_freq[c];
+        }
         if (e->seen_n)
         {
                 p64 delta = 0;
@@ -1396,15 +1384,6 @@ static bool gzip_split_test(gzip_encoder address_to e, positive length, positive
         return false;
 }
 
-/* Whether the open block ends before the token at pos. */
-static inline INLINE bool gzip_block_full(gzip_encoder address_to e, positive start,
-                                          positive pos)
-{
-        if (e->pairs >= GZIP_PAIRS - 2 || pos - start >= GZIP_SPLIT_MOST)
-                return true;
-        return e->fresh_n >= GZIP_SPLIT_CHECK &&
-               gzip_split_test(e, pos - start, e->total - pos);
-}
 
 static bool gzip_lengths_ok(p8 address_to length, positive n, p8 limit)
 {
@@ -1713,24 +1692,22 @@ static fn gzip_block_emit(gzip_encoder address_to e, p8 address_to src, positive
         gzip_block_open(e);
 }
 
-/* Every table position down 32 KiB, and -32768 for any that falls out. */
+/* Every table position down 32 KiB, and zero for any that falls out: one
+   saturating subtract a lane. */
 static fn gzip_slide(gzip_encoder address_to e)
 {
-        b16 address_to t = e->head4;
-        positive n = (sizeof(e->head4) + sizeof(e->head3) + sizeof(e->prev)) / sizeof(b16);
+        p16 address_to t = e->head4;
+        positive n = (sizeof(e->head4) + sizeof(e->head3) + sizeof(e->prev)) / sizeof(p16);
 
         for (positive i = 0; i < n; i++)
-                t[i] = (b16)((t[i] & ~(t[i] >> 15)) | (b16)0x8000);
+                t[i] = (p16)(t[i] > GZIP_WINDOW ? t[i] - GZIP_WINDOW : 0);
         e->slid += GZIP_WINDOW;
 }
 
 static fn gzip_finder_open(gzip_encoder address_to e)
 {
-        b16 address_to t = e->head4;
-        positive n = (sizeof(e->head4) + sizeof(e->head3) + sizeof(e->prev)) / sizeof(b16);
-
-        for (positive i = 0; i < n; i++)
-                t[i] = (b16)0x8000;
+        memory_fill(e->head4, 0,
+                    sizeof(e->head4) + sizeof(e->head3) + sizeof(e->prev));
         e->slid = 0;
         e->hash3 = 0;
         e->hash4 = 0;
@@ -1776,17 +1753,20 @@ static inline INLINE positive gzip_chain_find(gzip_encoder address_to e, positiv
                 nice = most;
 
         b32 rel = gzip_relative(e, pos);
-        b32 floor = rel - (b32)GZIP_WINDOW;
-        p8 address_to window = e->base + e->slid;
+        /* Held positions are relative plus 32 KiB: a node is in the window
+           when it is above rel, and zero is none. */
+        b32 floor = rel;
+        p32 cur = (p32)rel + GZIP_WINDOW;
+        p8 address_to window = e->base + e->slid - GZIP_WINDOW;
         p8 address_to here = e->base + pos;
         p32 seq = memory_load_unaligned(p32, here);
         b32 node3 = e->head3[address_to h3];
         b32 node = e->head4[address_to h4];
         p8 address_to match;
 
-        e->head3[address_to h3] = (b16)rel;
-        e->head4[address_to h4] = (b16)rel;
-        e->prev[rel] = (b16)node;
+        e->head3[address_to h3] = (p16)cur;
+        e->head4[address_to h4] = (p16)cur;
+        e->prev[rel] = (p16)node;
         gzip_chain_ahead(e, h3, h4, here + 1);
         if (best < 4)
         {
@@ -1796,7 +1776,7 @@ static inline INLINE positive gzip_chain_find(gzip_encoder address_to e, positiv
                     ((memory_load_unaligned(p32, window + node3) ^ seq) & 0xffffff) == 0)
                 {
                         best = 3;
-                        address_to dist = (positive)(rel - node3);
+                        address_to dist = (positive)(cur - (p32)node3);
                 }
                 for (;;)
                 {
@@ -1868,9 +1848,9 @@ static inline INLINE fn gzip_chain_skip(gzip_encoder address_to e, positive pos,
                 b32 rel = gzip_relative(e, pos);
                 p32 seq = memory_load_unaligned(p32, e->base + pos + 1);
 
-                e->head3[a] = (b16)rel;
+                e->head3[a] = (p16)(rel + GZIP_WINDOW);
                 e->prev[rel] = e->head4[b];
-                e->head4[b] = (b16)rel;
+                e->head4[b] = (p16)(rel + GZIP_WINDOW);
                 a = gzip_hash(seq << 8, GZIP_HASH3_BITS);
                 b = gzip_hash(seq, GZIP_HASH4_BITS);
         }
@@ -1910,8 +1890,9 @@ static inline INLINE fn gzip_fast_skip(gzip_encoder address_to e, positive pos,
 #define GZIP_FAST_BLOCK 65535
 #define GZIP_FAST_PAIRS 8192
 
-static positive gzip_parse_fast(gzip_encoder address_to e, positive start, positive pos,
-                                positive limit, positive nice)
+static __attribute__((noinline)) positive gzip_parse_fast(gzip_encoder address_to e,
+                                                          positive start, positive pos,
+                                                          positive limit, positive nice)
 {
         p8 address_to base = e->base;
         p32 address_to fast = e->fast;
@@ -2046,16 +2027,26 @@ static inline INLINE positive gzip_parse_chain(gzip_encoder address_to e, positi
 {
         p8 address_to base = e->base;
         positive total = e->total;
-        positive least = gzip_min_match_ahead(base + pos, min(limit, start + GZIP_SPLIT_MOST) - pos,
-                                              depth);
+        positive cap = min(limit, start + GZIP_SPLIT_MOST);
+        positive least = gzip_min_match_ahead(base + pos, cap - pos, depth);
         positive recount = pos + min(total - pos, (positive)10000);
+        positive far = parse >= GZIP_PARSE_LAZY ? 8192 : 4096;
+        positive tokens = e->fresh_n;
+        positive pairs = e->pairs;
         p32 h3 = e->hash3, h4 = e->hash4;
 
-        while (pos < limit && !gzip_block_full(e, start, pos))
+        while (pos < cap)
         {
                 positive most = total - pos;
                 positive dist = 0, length;
 
+                if (tokens >= GZIP_SPLIT_CHECK)
+                {
+                        e->fresh_n = tokens;
+                        if (gzip_split_test(e, pos - start, total - pos))
+                                break;
+                        tokens = e->fresh_n;
+                }
                 if (parse >= GZIP_PARSE_LAZY && pos >= recount)
                 {
                         least = gzip_min_match_seen(e, depth);
@@ -2065,10 +2056,10 @@ static inline INLINE positive gzip_parse_chain(gzip_encoder address_to e, positi
                         most = GZIP_MAX_MATCH;
                 length = gzip_chain_find(e, pos, least - 1, most, nice, depth,
                                          address_of h3, address_of h4, address_of dist);
-                if (length < least ||
-                    (length == 3 && dist > (parse >= GZIP_PARSE_LAZY ? 8192u : 4096u)))
+                if (length < least || (length == 3 && dist > far))
                 {
-                        gzip_note_literal(e, base[pos]);
+                        e->lit_freq[base[pos]]++;
+                        tokens++;
                         pos++;
                         continue;
                 }
@@ -2091,7 +2082,8 @@ static inline INLINE positive gzip_parse_chain(gzip_encoder address_to e, positi
                                 if (next_length >= length &&
                                     gzip_lazy_gain(length, dist, next_length, next_dist) > 2)
                                 {
-                                        gzip_note_literal(e, base[pos]);
+                                        e->lit_freq[base[pos]]++;
+                                        tokens++;
                                         pos++;
                                         length = next_length;
                                         dist = next_dist;
@@ -2112,8 +2104,9 @@ static inline INLINE positive gzip_parse_chain(gzip_encoder address_to e, positi
                                 if (next_length >= length &&
                                     gzip_lazy_gain(length, dist, next_length, next_dist) > 6)
                                 {
-                                        gzip_note_literal(e, base[pos]);
-                                        gzip_note_literal(e, base[pos + 1]);
+                                        e->lit_freq[base[pos]]++;
+                                        e->lit_freq[base[pos + 1]]++;
+                                        tokens += 2;
                                         pos += 2;
                                         length = next_length;
                                         dist = next_dist;
@@ -2122,15 +2115,51 @@ static inline INLINE positive gzip_parse_chain(gzip_encoder address_to e, positi
                                 }
                                 break;
                         }
-                gzip_note_match(e, pos - start, length, dist);
+                e->mpos[pairs] = (p32)(pos - start);
+                e->mlen[pairs] = (p16)length;
+                e->mdist[pairs] = (p16)dist;
+                pairs++;
+                tokens++;
+                e->lit_freq[257 + deflate_symbol_tab[length - 3]]++;
+                e->dist_freq[gzip_dist_code(dist)]++;
+                e->fresh[8 + (length >= 9)]++;
                 if (length > taken)
                         gzip_chain_skip(e, pos + taken, length - taken, address_of h3,
                                         address_of h4);
                 pos += length;
+                if (pairs >= GZIP_PAIRS - 2)
+                        break;
         }
+        e->pairs = pairs;
+        e->fresh_n = tokens;
         e->hash3 = h3;
         e->hash4 = h4;
         return pos;
+}
+
+/* Each parse its own function, so each gets the registers to itself. */
+static __attribute__((noinline)) positive gzip_parse_greedy(gzip_encoder address_to e,
+                                                            positive start, positive pos,
+                                                            positive limit, positive depth,
+                                                            positive nice)
+{
+        return gzip_parse_chain(e, start, pos, limit, GZIP_PARSE_GREEDY, depth, nice);
+}
+
+static __attribute__((noinline)) positive gzip_parse_lazy(gzip_encoder address_to e,
+                                                          positive start, positive pos,
+                                                          positive limit, positive depth,
+                                                          positive nice)
+{
+        return gzip_parse_chain(e, start, pos, limit, GZIP_PARSE_LAZY, depth, nice);
+}
+
+static __attribute__((noinline)) positive gzip_parse_lazy2(gzip_encoder address_to e,
+                                                           positive start, positive pos,
+                                                           positive limit, positive depth,
+                                                           positive nice)
+{
+        return gzip_parse_chain(e, start, pos, limit, GZIP_PARSE_LAZY2, depth, nice);
 }
 
 /* The open input from pos to its end in deflate blocks, then the empty
@@ -2145,14 +2174,11 @@ static fn gzip_block_run(gzip_encoder address_to e, positive pos)
                 if (shape.parse == GZIP_PARSE_FAST)
                         pos = gzip_parse_fast(e, start, pos, e->total, shape.nice);
                 else if (shape.parse == GZIP_PARSE_GREEDY)
-                        pos = gzip_parse_chain(e, start, pos, e->total, GZIP_PARSE_GREEDY,
-                                               shape.depth, shape.nice);
+                        pos = gzip_parse_greedy(e, start, pos, e->total, shape.depth, shape.nice);
                 else if (shape.parse == GZIP_PARSE_LAZY)
-                        pos = gzip_parse_chain(e, start, pos, e->total, GZIP_PARSE_LAZY,
-                                               shape.depth, shape.nice);
+                        pos = gzip_parse_lazy(e, start, pos, e->total, shape.depth, shape.nice);
                 else
-                        pos = gzip_parse_chain(e, start, pos, e->total, GZIP_PARSE_LAZY2,
-                                               shape.depth, shape.nice);
+                        pos = gzip_parse_lazy2(e, start, pos, e->total, shape.depth, shape.nice);
                 gzip_block_emit(e, e->base + start, pos - start, false);
                 start = pos;
         }

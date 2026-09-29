@@ -692,7 +692,7 @@ struct tar_options
         string_address archive;
         string_address directory;
         positive strip;
-        bool verbose;
+        positive verbose;
         bool absolute;
         bipolar permissions;
         bipolar owner;
@@ -910,6 +910,10 @@ static fn tar_name_line(writer output, string_address name)
 static positive tar_listing_width = 19;
 static positive tar_listing_date_width = 16;
 
+/* Where member names and long lines go: standard output, as GNU's stdlis,
+   except while the archive itself is being written there. */
+static writer tar_listing;
+
 /*      The owner and group are names the archive chose, so a control byte in
         one is spelled \xNN rather than written to the terminal, where
         g\nh forged a line of the listing; the column is as wide as what is
@@ -989,10 +993,10 @@ static fn tar_long_line(p8 address_to block, p8 type, p64 mode, p64 size,
                           address_of month, address_of day, address_of hour,
                           address_of minute, address_of second);
 
-        string_format(log, "%s %s/%s ", (string_address)letters,
+        string_format(tar_listing, "%s %s/%s ", (string_address)letters,
                       (string_address)owner, (string_address)grouped);
         for (positive pad = widths; pad < tar_listing_width; pad++)
-                log(" ", 1);
+                tar_listing(" ", 1);
         {
                 /*      The year with its sign, and room for every digit a
                         stamp can make it. A pax mtime may be negative and
@@ -1028,15 +1032,15 @@ static fn tar_long_line(p8 address_to block, p8 type, p64 mode, p64 size,
                 memory_fill(when + at, ' ', tar_listing_date_width - at);
                 at = tar_listing_date_width;
                 when[at] = end;
-                string_format(log, "%s %s ", (string_address)amount, (string_address)when);
+                string_format(tar_listing, "%s %s ", (string_address)amount, (string_address)when);
         }
-        tar_quoted(log, name);
+        tar_quoted(tar_listing, name);
         if (type == '1' || type == '2')
         {
-                log(type == '1' ? " link to " : " -> ", type == '1' ? 9 : 4);
-                tar_quoted(log, link);
+                tar_listing(type == '1' ? " link to " : " -> ", type == '1' ? 9 : 4);
+                tar_quoted(tar_listing, link);
         }
-        log("\n", 1);
+        tar_listing("\n", 1);
 }
 
 static fn tar_fail(string_address what, bipolar failed)
@@ -2815,6 +2819,7 @@ static bool tar_wanted(string_address name, positive first, positive count)
    that name still identifies the object observed before staging began.  A
    missing name remains a no-clobber decision, and a non-directory member
    never removes a directory tree. */
+
 static fn tar_directory_forget(string_address path);
 
 static bipolar tar_extract_destination(
@@ -3324,146 +3329,518 @@ static fn tar_extract_member(bipolar archive, p8 type, string_address path,
         tar_skip(archive, tar_padded(size), seekable);
 }
 
-static b32 tar_read_archive(struct tar_options address_to options)
+/*
+        tar -d, --diff, --compare: each member against the file of its name,
+        as GNU's compare.c does it.  A difference is a line on standard output,
+        the name and what differs, and the status becomes 1; a name that is
+        not there is a warning and the same 1; any other failure to look is
+        an error and 2.  The name is GNU's for this: leading slashes and
+        everything up to a last ".." component taken off (and said once per
+        prefix), a trailing slash taken off, then --strip-components.  What
+        is compared follows the member's type: a file's kind, mode, owner,
+        group, time, size and then bytes; a directory's kind and mode; where
+        a symlink points; whether a hard link is the same inode as its
+        target; a device's kind, number and mode.
+*/
+#define TAR_DIFF 'd'
+
+typedef struct
 {
+        p8 prefix[TAR_PATH];
+        bool said;
+} tar_prefix_said;
+
+static tar_prefix_said tar_diff_prefixes[8];
+static positive tar_diff_prefix_count;
+
+static fn tar_diff_prefix_once(string_address prefix, positive length,
+                               bool link)
+{
+        for (positive at = 0; at < tar_diff_prefix_count; at++)
+                if (tar_diff_prefixes[at].said == link &&
+                    !memory_compare(tar_diff_prefixes[at].prefix, prefix, length) &&
+                    !tar_diff_prefixes[at].prefix[length])
+                        return;
+        if (tar_diff_prefix_count < array_count(tar_diff_prefixes) &&
+            length < TAR_PATH)
+        {
+                tar_prefix_said address_to kept =
+                    tar_diff_prefixes + tar_diff_prefix_count++;
+
+                memory_copy(kept->prefix, prefix, length);
+                kept->prefix[length] = end;
+                kept->said = link;
+        }
+        p8 shown[TAR_PATH];
+        positive take = length < TAR_PATH ? length : TAR_PATH - 1;
+
+        memory_copy(shown, prefix, take);
+        shown[take] = end;
+        string_format(log_error, link ? "tar: Removing leading `%s' from hard link targets\n"
+                                      : "tar: Removing leading `%s' from member names\n",
+                      (string_address)shown);
+}
+
+/* GNU's safer_name_suffix, then its trailing slash and component strip. */
+static bool tar_diff_name(string_address name, positive strip, bool absolute,
+                          bool link, p8 address_to into, bool address_to trailing)
+{
+        string_address at = name;
+        positive length;
+
+        if (!absolute)
+        {
+                positive prefix = 0;
+                string_address walk = name;
+
+                while (*walk)
+                {
+                        if (walk[0] == '.' && walk[1] == '.' &&
+                            (walk[2] == '/' || !walk[2]))
+                                prefix = (positive)(walk - name) + 2;
+                        do
+                        {
+                                p8 byte = *walk++;
+                                if (byte == '/')
+                                        break;
+                        } while (*walk);
+                }
+                while (name[prefix] == '/')
+                        prefix++;
+                if (prefix)
+                        tar_diff_prefix_once(name, prefix, link);
+                at = name + prefix;
+        }
+        if (!*at)
+                at = (string_address)".";
+
+        length = string_length(at);
+        if (length >= TAR_PATH)
+                return false;
+        memory_copy(into, at, length + 1);
+        if (trailing)
+                address_to trailing = false;
+        while (length > 1 && into[length - 1] == '/')
+        {
+                into[--length] = end;
+                if (trailing)
+                        address_to trailing = true;
+        }
+
+        /* --strip-components: whole components off the front, a run of
+           slashes counting as one separator. */
+        at = into;
+        while (strip && *at)
+        {
+                while (*at && *at != '/')
+                        at++;
+                while (*at == '/')
+                        at++;
+                strip--;
+        }
+        if (strip)
+                at = into + length;
+        if (at != into)
+                memory_copy(into, at, string_length(at) + 1);
+        return true;
+}
+
+/* "name: " on standard output, the difference's line begun. */
+static fn tar_diff_begin(string_address name)
+{
+        tar_quoted(log, name);
+        log(": ", 2);
+        if (tar_status < 1)
+                tar_status = 1;
+}
+
+static fn tar_diff_report(string_address name, string_address what)
+{
+        tar_diff_begin(name);
+        string_format(log, "%s\n", what);
+}
+
+/* A file that is not there is GNU's warning and a difference; anything
+   else that stops the look is its error. */
+static bool tar_diff_stat(string_address name, file_facts address_to facts)
+{
+        bipolar looked = system_stat_at(AT_FDCWD, name, AT_SYMLINK_NOFOLLOW,
+                                        STATX_BASIC, facts);
+
+        if (looked >= 0)
+                return true;
+        if (looked == -ERROR_NO_ENTRY)
+        {
+                string_format(log_error, "tar: %w: Warning: Cannot stat: %s\n",
+                              writer_terminal_name, name, file_reason(looked));
+                if (tar_status < 1)
+                        tar_status = 1;
+        }
+        else
+        {
+                string_format(log_error, "tar: %w: Cannot stat: %s\n",
+                              writer_terminal_name, name, file_reason(looked));
+                tar_status = 2;
+        }
+        return false;
+}
+
+static bool tar_diff_mode_same(p64 mode, file_facts address_to facts)
+{
+        return (mode & 07777) == (facts->mode & 07777);
+}
+
+/* The archive's bytes against the file's, read beside each other; the
+   first that differ are said and the rest of the member passed over. */
+static bool tar_diff_bytes(bipolar archive, bipolar file, p64 offset,
+                           p64 size, bool seekable, string_address name,
+                           bool address_to said)
+{
+        p8 mine[TAR_RECORD];
+
+        while (size)
+        {
+                if (tar_at >= tar_have && tar_fill(archive) <= 0)
+                {
+                        tar_refuse("unexpected EOF in archive");
+                        return false;
+                }
+                positive take = tar_have - tar_at;
+                if (take > size)
+                        take = (positive)size;
+                if (!address_to said)
+                {
+                        positive got = 0;
+
+                        while (got < take)
+                        {
+                                bipolar more = system_call_4(
+                                    syscall(pread64), (positive)file,
+                                    (positive)(mine + got), take - got,
+                                    (positive)(offset + got));
+                                if (more == -EINTR)
+                                        continue;
+                                if (more <= 0)
+                                {
+                                        if (more < 0)
+                                        {
+                                                string_format(log_error,
+                                                    "tar: %w: Cannot read: %s\n",
+                                                    writer_terminal_name, name,
+                                                    file_reason(more));
+                                                tar_status = 2;
+                                        }
+                                        else
+                                        {
+                                                tar_diff_begin(name);
+                                                string_format(log,
+                                                    take == 1 ? "Could only read %p of %p byte\n"
+                                                              : "Could only read %p of %p bytes\n",
+                                                    got, take);
+                                        }
+                                        if (tar_status < 1)
+                                                tar_status = 1;
+                                        address_to said = true;
+                                        break;
+                                }
+                                got += (positive)more;
+                        }
+                        if (!address_to said &&
+                            memory_compare(mine, tar_record + tar_at, take))
+                        {
+                                tar_diff_report(name, "Contents differ");
+                                address_to said = true;
+                        }
+                }
+                tar_at += take;
+                offset += take;
+                size -= take;
+        }
+        (void)seekable;
+        return true;
+}
+
+/* A sparse member: its spans against the file at their offsets, and what
+   lies between them must read as zeros. */
+static bool tar_diff_holes(bipolar file, p64 from, p64 to,
+                           string_address name, bool address_to said)
+{
+        p8 zeros[TAR_BLOCK * 8];
+
+        while (!address_to said && from < to)
+        {
+                positive ask = to - from > sizeof(zeros) ? sizeof(zeros)
+                                                        : (positive)(to - from);
+                bipolar got = system_call_4(syscall(pread64), (positive)file,
+                                            (positive)zeros, ask,
+                                            (positive)from);
+                if (got == -EINTR)
+                        continue;
+                if (got <= 0 || !tar_bytes_zero(zeros, (positive)got))
+                {
+                        tar_diff_report(name, "Contents differ");
+                        address_to said = true;
+                        break;
+                }
+                from += (p64)got;
+        }
+        return true;
+}
+
+static fn tar_diff_file(bipolar archive, p8 address_to block, p8 type,
+                        string_address name, p64 size, p64 mode, p64 user,
+                        p64 group, b64 seconds, p32 nanoseconds,
+                        bool precise, bool numeric, bool seekable)
+{
+        file_facts facts;
+        p64 real = tar_sparse_active ? tar_sparse_real : size;
+
+        if (!tar_diff_stat(name, address_of facts))
+        {
+                tar_skip(archive, tar_padded(size), seekable);
+                return;
+        }
+        if ((facts.mode & MODE_FORMAT) != MODE_FILE)
+        {
+                tar_diff_report(name, "File type differs");
+                tar_skip(archive, tar_padded(size), seekable);
+                return;
+        }
+        if (!tar_diff_mode_same(mode, address_of facts))
+                tar_diff_report(name, "Mode differs");
+
+        p8 word[33];
+        p64 want_user = user;
+        p64 want_group = group;
+        if (!numeric)
+        {
+                tar_field_text(block + 265, 32, word, sizeof(word));
+                bipolar named = word[0] ? file_user_id(word) : -1;
+                if (named >= 0)
+                        want_user = (p64)named;
+                tar_field_text(block + 297, 32, word, sizeof(word));
+                named = word[0] ? file_group_id(word) : -1;
+                if (named >= 0)
+                        want_group = (p64)named;
+        }
+        if (facts.owner != want_user)
+                tar_diff_report(name, "Uid differs");
+        if (facts.group != want_group)
+                tar_diff_report(name, "Gid differs");
+        if (facts.modified.seconds != seconds ||
+            (precise && facts.modified.nanoseconds != nanoseconds))
+                tar_diff_report(name, "Mod time differs");
+        if (type != 'S' && facts.size != real)
+        {
+                tar_diff_report(name, "Size differs");
+                tar_skip(archive, tar_padded(size), seekable);
+                return;
+        }
+
+        bipolar file = system_open_at(AT_FDCWD, name,
+                                      FILE_READ | O_CLOEXEC | O_NOCTTY |
+                                          O_NONBLOCK);
+        if (file < 0)
+        {
+                string_format(log_error, "tar: %w: Cannot open: %s\n",
+                              writer_terminal_name, name, file_reason(file));
+                tar_status = 2;
+                tar_skip(archive, tar_padded(size), seekable);
+                return;
+        }
+
+        bool said = false;
+        if (tar_sparse_active)
+        {
+                p64 cursor = 0;
+
+                if (facts.size != real)
+                {
+                        tar_diff_report(name, "Size differs");
+                        said = true;
+                }
+                for (positive at = 0; at < tar_sparse_used; at++)
+                {
+                        tar_diff_holes(file, cursor, tar_sparse[at].offset,
+                                       name, address_of said);
+                        if (!tar_diff_bytes(archive, file, tar_sparse[at].offset,
+                                            tar_sparse[at].bytes, seekable, name,
+                                            address_of said))
+                        {
+                                system_close(file);
+                                return;
+                        }
+                        cursor = tar_sparse[at].offset + tar_sparse[at].bytes;
+                }
+                tar_diff_holes(file, cursor, real, name, address_of said);
+        }
+        else if (!tar_diff_bytes(archive, file, 0, size, seekable, name,
+                                 address_of said))
+        {
+                system_close(file);
+                return;
+        }
+        system_close(file);
+        tar_skip(archive, tar_padded(size) - size, seekable);
+}
+
+static fn tar_diff_member(bipolar archive, p8 address_to block, p8 type,
+                          string_address raw, string_address raw_link,
+                          p64 size, p64 mode, p64 user, p64 group,
+                          p64 major, p64 minor, b64 seconds,
+                          p32 nanoseconds, bool precise,
+                          struct tar_options address_to options, bool seekable)
+{
+        p8 name[TAR_PATH];
+        p8 target[TAR_PATH];
+        bool trailing = false;
+        file_facts facts;
+
+        if (!tar_diff_name(raw, options->strip, options->absolute, false, name,
+                           address_of trailing))
+        {
+                tar_refuse("member name is too long");
+                tar_skip(archive, tar_padded(size), seekable);
+                return;
+        }
+
+        switch (type)
+        {
+        case '1':
+        {
+                file_facts linked;
+
+                if (!tar_diff_name(raw_link, options->strip, options->absolute,
+                                   true, target, null))
+                        break;
+                if (tar_diff_stat(name, address_of facts) &&
+                    tar_diff_stat(target, address_of linked) &&
+                    !file_same_identity(address_of facts, address_of linked))
+                {
+                        tar_diff_begin(name);
+                        log("Not linked to ", 14);
+                        tar_quoted(log, target);
+                        log("\n", 1);
+                }
+                break;
+        }
+        case '2':
+        {
+                positive length = string_length(raw_link);
+                p8 found[TAR_PATH + 1];
+                bipolar got = system_read_link_at(AT_FDCWD, name, found,
+                                                  length + 1 < sizeof(found)
+                                                      ? length + 1
+                                                      : sizeof(found));
+
+                if (got < 0)
+                {
+                        if (got == -ERROR_NO_ENTRY)
+                        {
+                                string_format(log_error,
+                                              "tar: %w: Warning: Cannot readlink: %s\n",
+                                              writer_terminal_name, name,
+                                              file_reason(got));
+                                if (tar_status < 1)
+                                        tar_status = 1;
+                        }
+                        else
+                        {
+                                string_format(log_error,
+                                              "tar: %w: Cannot readlink: %s\n",
+                                              writer_terminal_name, name,
+                                              file_reason(got));
+                                tar_status = 2;
+                        }
+                }
+                else if ((positive)got != length ||
+                         memory_compare(found, raw_link, length))
+                        tar_diff_report(name, "Symlink differs");
+                break;
+        }
+        case '3':
+        case '4':
+        case '6':
+                if (!tar_diff_stat(name, address_of facts))
+                        break;
+                if ((facts.mode & MODE_FORMAT) !=
+                    (type == '3' ? MODE_CHARACTER : type == '4' ? MODE_BLOCK
+                                                                 : MODE_PIPE))
+                {
+                        tar_diff_report(name, "File type differs");
+                        break;
+                }
+                if (type != '6' && (facts.rdev_major != major ||
+                                    facts.rdev_minor != minor))
+                {
+                        tar_diff_report(name, "Device number differs");
+                        break;
+                }
+                if (!tar_diff_mode_same(mode, address_of facts))
+                        tar_diff_report(name, "Mode differs");
+                break;
+        case '5':
+                if (!tar_diff_stat(name, address_of facts))
+                        break;
+                if ((facts.mode & MODE_FORMAT) != MODE_DIRECTORY)
+                        tar_diff_report(name, "File type differs");
+                else if (!tar_diff_mode_same(mode, address_of facts))
+                        tar_diff_report(name, "Mode differs");
+                break;
+        default:
+                if (type && type != '0' && type != '7' && type != 'S')
+                {
+                        p8 shown[2] = {type, end};
+
+                        string_format(log_error,
+                                      "tar: %w: Unknown file type '%s', diffed as normal file\n",
+                                      writer_terminal_name, name, shown);
+                        tar_status = 2;
+                }
+                if (trailing)
+                {
+                        if (!tar_diff_stat(name, address_of facts))
+                                break;
+                        if ((facts.mode & MODE_FORMAT) != MODE_DIRECTORY)
+                                tar_diff_report(name, "File type differs");
+                        else if (!tar_diff_mode_same(mode, address_of facts))
+                                tar_diff_report(name, "Mode differs");
+                        break;
+                }
+                tar_diff_file(archive, block, type, name, size, mode, user,
+                              group, seconds, nanoseconds, precise,
+                              options->numeric, seekable);
+                return;
+        }
+        tar_skip(archive, tar_padded(size), seekable);
+}
+
+/* The members of an archive whose first block is ready, listed or
+   extracted as options say, from whichever thread reads the archive. */
+typedef struct
+{
+        struct tar_options address_to options;
         bipolar handle;
-        p8 address_to block;
         bool seekable;
+        bool listed;
+        positive count;
+} tar_members;
+
+static fn tar_read_members(tar_members address_to run)
+{
+        struct tar_options address_to const options = run->options;
+        bipolar const handle = run->handle;
+        bool const seekable = run->seekable;
+        positive const count = run->count;
+        p8 address_to block;
         bool listed = false;
         p8 long_name[TAR_PATH];
         p8 long_link[TAR_PATH];
         bool have_long_name = false;
         bool have_long_link = false;
-        positive count = (positive)program_argument_count();
 
-        tar_pax_clear(address_of tar_pax_global);
-        tar_pax_clear(address_of tar_pax_local);
-        tar_sparse_clear();
-        tar_reset();
         long_name[0] = end;
         long_link[0] = end;
-        tar_pack = options->pack;
-
-        if (!options->archive || string_equals(options->archive, "-"))
-                handle = 0;
-        else
-        {
-                handle = system_open_at(AT_FDCWD, options->archive,
-                                        FILE_READ | O_CLOEXEC);
-                if (handle < 0)
-                {
-                        tar_fail(options->archive, handle);
-                        return tar_status;
-                }
-        }
-
-        seekable = system_seek(handle, 0, FILE_SEEK_CUR) >= 0;
-        tar_archive_sized = false;
-        tar_archive_size = 0;
-        if (seekable)
-        {
-                file_facts opened;
-
-                tar_archive_sized =
-                    file_look_code(handle, (string_address)"", AT_EMPTY_PATH,
-                                   address_of opened) >= 0 &&
-                    (opened.mode & MODE_FORMAT) == MODE_FILE;
-                if (tar_archive_sized)
-                        tar_archive_size = opened.size;
-        }
-        tar_advise(handle);
-        {
-                p8 magic[6];
-                bipolar got = 0;
-
-                /* The sniff needs all six bytes a slow writer may split. */
-                while ((positive)got < sizeof(magic))
-                {
-                        bipolar more = system_read_retry(
-                            (positive)handle, magic + got,
-                            sizeof(magic) - (positive)got);
-
-                        if (more <= 0)
-                        {
-                                if (more < 0)
-                                        got = more;
-                                break;
-                        }
-                        got += more;
-                }
-
-                if (got < 0)
-                {
-                        tar_refuse("cannot read archive");
-                        if (handle > 0)
-                                system_close(handle);
-                        return tar_status;
-                }
-                if (tar_pack == TAR_PACK_NONE || tar_pack == TAR_PACK_AUTO)
-                {
-                        p8 sniffed = tar_pack_from_magic(magic, (positive)got);
-
-                        tar_pack = sniffed;
-                }
-                if (tar_refuse_pack(tar_pack))
-                {
-                        if (handle > 0)
-                                system_close(handle);
-                        return tar_status;
-                }
-                if (tar_packed())
-                {
-                        seekable = false;
-                        if (!tar_codec_begin_read(handle, magic, (positive)got))
-                        {
-                                if (handle > 0)
-                                        system_close(handle);
-                                return tar_status;
-                        }
-                }
-                else if (got > 0 && (positive)got <= sizeof(magic))
-                {
-                        memory_copy(tar_record, magic, (positive)got);
-                        tar_have = (positive)got;
-                        tar_at = 0;
-                }
-        }
-        /* GNU: -p / root restores MODE_ALL; otherwise only 0777 & ~umask. */
-        tar_user = (p32)system_call(syscall(geteuid));
-        tar_preserve = options->permissions < 0
-                           ? false
-                           : (options->permissions > 0 || tar_user == 0);
-
-        if (options->directory)
-        {
-                bipolar moved = tar_change_directory(options->directory);
-
-                if (moved < 0)
-                {
-                        tar_fail(options->directory, moved);
-                        tar_codec_end_read(handle);
-                        if (handle > 0)
-                                system_close(handle);
-
-                        return tar_status;
-                }
-        }
-
-        if (options->mode == TAR_EXTRACT)
-        {
-                bipolar mask = system_call_1(syscall(umask), 0);
-
-                tar_session_mask = mask < 0 ? 0 : (positive)mask & 0777;
-                tar_touch = options->touch;
-                /* GNU restores owners for root unless told otherwise, and
-                   always by number here: a bootstrap's ids are the ones its
-                   own passwd names, not what the host calls those names. */
-                tar_restore_owner = options->owner > 0 ||
-                                    (!options->owner && tar_user == 0);
-                tar_stack_used = 0;
-                tar_stack_matched = 0;
-                tar_stack_root = -1;
-        }
 
         while ((block = tar_next_block(handle, true)))
         {
@@ -3646,8 +4023,57 @@ static b32 tar_read_archive(struct tar_options address_to options)
                                                                      : stamp,
                                               tar_name, target, options->numeric);
                         else
-                                tar_name_line(log, tar_name);
+                                tar_name_line(tar_listing, tar_name);
                         tar_skip(handle, tar_padded(size), seekable);
+                        tar_pax_clear(address_of tar_pax_local);
+                        continue;
+                }
+
+                /*      A comparison names each member as a listing does
+                        when asked to (-v, and -vv the long line), then
+                        looks at the file GNU's name for it names. */
+                if (options->mode == TAR_DIFF)
+                {
+                        tar_pax_state address_to said =
+                            tar_pax_local.has_time ? address_of tar_pax_local
+                                                   : address_of tar_pax_global;
+
+                        string_address target = tar_link;
+
+                        if (type == '1')
+                                for (;;)
+                                {
+                                        if (string_is(target, '/'))
+                                                target++;
+                                        else if (!string_compare_max(target, (string_address) "../", 3))
+                                                target += 3;
+                                        else
+                                                break;
+                                }
+                        listed = true;
+                        if (options->verbose > 1)
+                                tar_long_line(block, type, mode,
+                                              tar_sparse_active ? tar_sparse_real : size,
+                                              tar_pax_local.has_user ? tar_pax_local.user : user,
+                                              tar_pax_local.has_group ? tar_pax_local.group : group,
+                                              major, minor,
+                                              said->has_time ? said->seconds : stamp,
+                                              tar_name, target, options->numeric);
+                        else if (options->verbose)
+                                tar_name_line(tar_listing, tar_name);
+                        tar_diff_member(handle, block, type, tar_name, tar_link,
+                                        size, mode,
+                                        tar_pax_local.has_user ? tar_pax_local.user
+                                        : tar_pax_global.has_user ? tar_pax_global.user
+                                                                  : user,
+                                        tar_pax_local.has_group ? tar_pax_local.group
+                                        : tar_pax_global.has_group ? tar_pax_global.group
+                                                                   : group,
+                                        major, minor,
+                                        said->has_time ? said->seconds : stamp,
+                                        said->has_time ? said->nanoseconds : 0,
+                                        tar_pax_local.has_time,
+                                        options, seekable);
                         tar_pax_clear(address_of tar_pax_local);
                         continue;
                 }
@@ -3724,14 +4150,165 @@ static b32 tar_read_archive(struct tar_options address_to options)
                         meta.nanoseconds = said->has_time ? said->nanoseconds
                                                           : 0;
                         meta.timed = said->has_time || stamped;
-                        if (options->verbose)
-                                tar_name_line(log_error, shown);
+                        if (options->verbose > 1)
+                                tar_long_line(block, type, mode,
+                                              tar_sparse_active ? tar_sparse_real : size,
+                                              meta.user, meta.group, major, minor,
+                                              meta.seconds, shown, kept_link,
+                                              options->numeric);
+                        else if (options->verbose)
+                                tar_name_line(tar_listing, shown);
                         tar_extract_member(handle, type, kept, kept_link, size,
                                            mode, major, minor, seekable,
                                            address_of meta);
                 }
 
                 tar_pax_clear(address_of tar_pax_local);
+        }
+
+        run->listed = listed;
+}
+
+static b32 tar_read_archive(struct tar_options address_to options)
+{
+        bipolar handle;
+        bool seekable;
+        bool listed;
+        positive count = (positive)program_argument_count();
+
+        tar_pax_clear(address_of tar_pax_global);
+        tar_pax_clear(address_of tar_pax_local);
+        tar_sparse_clear();
+        tar_reset();
+        tar_listing = log;
+        tar_pack = options->pack;
+
+        if (!options->archive || string_equals(options->archive, "-"))
+                handle = 0;
+        else
+        {
+                handle = system_open_at(AT_FDCWD, options->archive,
+                                        FILE_READ | O_CLOEXEC);
+                if (handle < 0)
+                {
+                        tar_fail(options->archive, handle);
+                        return tar_status;
+                }
+        }
+
+        seekable = system_seek(handle, 0, FILE_SEEK_CUR) >= 0;
+        tar_archive_sized = false;
+        tar_archive_size = 0;
+        if (seekable)
+        {
+                file_facts opened;
+
+                tar_archive_sized =
+                    file_look_code(handle, (string_address)"", AT_EMPTY_PATH,
+                                   address_of opened) >= 0 &&
+                    (opened.mode & MODE_FORMAT) == MODE_FILE;
+                if (tar_archive_sized)
+                        tar_archive_size = opened.size;
+        }
+        tar_advise(handle);
+        {
+                p8 magic[6];
+                bipolar got = 0;
+
+                /* The sniff needs all six bytes a slow writer may split. */
+                while ((positive)got < sizeof(magic))
+                {
+                        bipolar more = system_read_retry(
+                            (positive)handle, magic + got,
+                            sizeof(magic) - (positive)got);
+
+                        if (more <= 0)
+                        {
+                                if (more < 0)
+                                        got = more;
+                                break;
+                        }
+                        got += more;
+                }
+
+                if (got < 0)
+                {
+                        tar_refuse("cannot read archive");
+                        if (handle > 0)
+                                system_close(handle);
+                        return tar_status;
+                }
+                if (tar_pack == TAR_PACK_NONE || tar_pack == TAR_PACK_AUTO)
+                {
+                        p8 sniffed = tar_pack_from_magic(magic, (positive)got);
+
+                        tar_pack = sniffed;
+                }
+                if (tar_refuse_pack(tar_pack))
+                {
+                        if (handle > 0)
+                                system_close(handle);
+                        return tar_status;
+                }
+                if (tar_packed())
+                {
+                        seekable = false;
+                        if (!tar_codec_begin_read(handle, magic, (positive)got))
+                        {
+                                if (handle > 0)
+                                        system_close(handle);
+                                return tar_status;
+                        }
+                }
+                else if (got > 0 && (positive)got <= sizeof(magic))
+                {
+                        memory_copy(tar_record, magic, (positive)got);
+                        tar_have = (positive)got;
+                        tar_at = 0;
+                }
+        }
+        /* GNU: -p / root restores MODE_ALL; otherwise only 0777 & ~umask. */
+        tar_user = (p32)system_call(syscall(geteuid));
+        tar_preserve = options->permissions < 0
+                           ? false
+                           : (options->permissions > 0 || tar_user == 0);
+
+        if (options->directory)
+        {
+                bipolar moved = tar_change_directory(options->directory);
+
+                if (moved < 0)
+                {
+                        tar_fail(options->directory, moved);
+                        tar_codec_end_read(handle);
+                        if (handle > 0)
+                                system_close(handle);
+
+                        return tar_status;
+                }
+        }
+
+        if (options->mode == TAR_EXTRACT)
+        {
+                bipolar mask = system_call_1(syscall(umask), 0);
+
+                tar_session_mask = mask < 0 ? 0 : (positive)mask & 0777;
+                tar_touch = options->touch;
+                /* GNU restores owners for root unless told otherwise, and
+                   always by number here: a bootstrap's ids are the ones its
+                   own passwd names, not what the host calls those names. */
+                tar_restore_owner = options->owner > 0 ||
+                                    (!options->owner && tar_user == 0);
+                tar_stack_used = 0;
+                tar_stack_matched = 0;
+                tar_stack_root = -1;
+        }
+
+        {
+                tar_members run = {options, handle, seekable, false, count};
+
+                tar_read_members(address_of run);
+                listed = run.listed;
         }
 
         tar_codec_end_read(handle);
@@ -3854,11 +4431,15 @@ static bool tar_put_long(bipolar handle, p8 type, string_address text)
                tar_write_padding(handle, length);
 }
 
+/* -cvv: each member's long line once its header is made, as -tv shows it. */
+static positive tar_create_verbose;
+
 static bool tar_put_header(bipolar handle, string_address name, p8 type,
                            p64 size, p64 mode, p64 mtime, string_address link,
                            p32 user, p32 group)
 {
         p8 kept[TAR_NAME];
+        string_address whole = name;
 
         if (link && string_length(link) >= TAR_NAME &&
             !tar_put_long(handle, 'K', link))
@@ -3879,6 +4460,9 @@ static bool tar_put_header(bipolar handle, string_address name, p8 type,
         if (tar_status == 2)
                 return false;
 
+        if (tar_create_verbose > 1)
+                tar_long_line(tar_record + tar_at, type, mode, size, user, group,
+                              0, 0, (b64)mtime, whole, link, false);
         tar_at += TAR_BLOCK;
         return true;
 }
@@ -4056,7 +4640,7 @@ static b32 tar_add_named(bipolar archive, bipolar directory,
         {
                 p8 spelled[TAR_PATH];
 
-                tar_name_line(log_error,
+                tar_name_line(tar_listing,
                               (facts.mode & MODE_FORMAT) == MODE_DIRECTORY &&
                                       tar_spell_directory(member, spelled,
                                                           sizeof(spelled))
@@ -4141,6 +4725,12 @@ static b32 tar_add_named(bipolar archive, bipolar directory,
                         tar_field_put_octal(header + 337, 8, facts.rdev_minor);
                         tar_header_put_checksum(header);
                 }
+                if (tar_create_verbose > 1)
+                        tar_long_line(header, type, facts.mode & 07777, 0,
+                                      facts.owner, facts.group,
+                                      facts.rdev_major, facts.rdev_minor,
+                                      (b64)facts.modified.seconds, member,
+                                      null, false);
 
                 tar_at += TAR_BLOCK;
                 return tar_status;
@@ -4201,12 +4791,15 @@ static b32 tar_write_archive(struct tar_options address_to options)
                 return tar_status;
 
         tar_reset();
+        tar_create_verbose = options->verbose;
+        tar_listing = log_error;
         output_stage.directory = -1;
         output_stage.handle = -1;
         if (!options->archive || string_equals(options->archive, "-"))
                 handle = 1;
         else
         {
+                tar_listing = log;
                 handle = file_staged_name_open(
                     address_of output_stage, options->archive,
                     0666 & ~file_umask(), FILE_STAGED_STREAM_SPECIAL);
@@ -4288,7 +4881,7 @@ static b32 tar_write_archive(struct tar_options address_to options)
 
         for (at = options->first; at < count && tar_status != 2; at++)
                 tar_add_path(handle, program_argument((b32)at),
-                             options->verbose);
+                             options->verbose == 1);
 
         memory_fill(tar_block, 0, TAR_BLOCK);
         if (tar_status != 2)
@@ -4339,6 +4932,8 @@ static const argument_option tar_option_rules[] = {
     {"extract", 'x'},
     {"list", 't'},
     {"create", 'c'},
+    {"diff", 'd'},
+    {"compare", 'd'},
     {"file", 'f', ARGUMENT_REQUIRED},
     {"directory", 'C', ARGUMENT_REQUIRED},
     {"strip-components", TAR_STRIP_COMPONENTS, ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
@@ -4391,10 +4986,10 @@ static bool tar_take(struct tar_options address_to options, p8 letter,
 
         switch (letter)
         {
-        case 'x': case 't': case 'c': options->mode = letter; break;
+        case 'x': case 't': case 'c': case 'd': options->mode = letter; break;
         case 'f': options->archive = value; break;
         case 'C': options->directory = value; break;
-        case 'v': options->verbose = true; break;
+        case 'v': options->verbose++; break;
         case 'P': options->absolute = true; break;
         case 'p': options->permissions = 1; break;
         case TAR_NO_SAME_PERMISSIONS: options->permissions = -1; break;
