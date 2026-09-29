@@ -34790,10 +34790,21 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                 return false;
         }
 
-        bool staged = !fresh && (moving || !destination_exists);
+        /*      A directory cp makes is made where it goes, as GNU's mkdir
+                does, and filled there: it can be seen and entered, owner
+                only, while it is copied, and is given its mode and owner
+                when it is done. STRICT_TIGHT builds it in a private stage
+                and publishes it whole. */
+#if MOONWATER_STRICT < STRICT_TIGHT
+        bool in_place = !fresh && !moving && !destination_exists &&
+                        !destination_entry_exists;
+#else
+        bool in_place = false;
+#endif
+        bool staged = !fresh && !in_place && (moving || !destination_exists);
         system_path_stage protected;
         system_path_stage_reset(address_of protected);
-        bipolar destination_handle = fresh
+        bipolar destination_handle = fresh || in_place
             ? file_copy_directory_fresh(destination_directory, destination)
             : file_copy_directory_open(
                   address_of protected, destination_directory, destination,
@@ -34840,7 +34851,7 @@ static bool file_copy_one(bipolar source_directory, string_address source,
 
         /*      A directory cp made in its own stage is filled in batches; the
                 ones below it, and every other kind of copy, name by name. */
-        if (staged && !moving && !cp_symbolic && !cp_attributes_only &&
+        if ((staged || in_place) && !moving && !cp_symbolic && !cp_attributes_only &&
             !file_debug)
         {
                 complete = cp_tree_parallel(walk.handle, source_shown,
@@ -34862,7 +34873,7 @@ static bool file_copy_one(bipolar source_directory, string_address source,
         if (moving)
                 listed = file_listing_by_inode(address_of walk,
                                                address_of listed_count);
-        while (!(staged && !moving && !cp_hard && !cp_symbolic && !cp_attributes_only &&
+        while (!((staged || in_place) && !moving && !cp_hard && !cp_symbolic && !cp_attributes_only &&
                  !file_debug) &&
                (child = listed ? (listed_at < listed_count ? listed[listed_at++] : null)
                                : file_walk_next(address_of walk)))
@@ -34919,7 +34930,7 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                                    depth - 1, false, moving, false,
                                    held >= 0 ? address_of child_facts : null,
                                    held,
-                                   (staged || fresh ? FILE_COPY_FRESH : 0) |
+                                   (staged || fresh || in_place ? FILE_COPY_FRESH : 0) |
                                        (held >= 0 ? FILE_COPY_FACTS_HELD : 0)))
                         complete = false;
 
@@ -34962,8 +34973,8 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                                        destination_handle,
                                        staged ? protected.directory : -1,
                                        staged ? SYSTEM_PATH_STAGE_LEAF : null,
-                                       address_of facts, staged || fresh)
-                                 : staged || fresh
+                                       address_of facts, staged || fresh || in_place)
+                                 : staged || fresh || in_place
                                        ? file_change_mode_handle(
                                              destination_handle,
                                              file_copy_creation_mode(
