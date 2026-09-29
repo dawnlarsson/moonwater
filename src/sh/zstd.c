@@ -2098,6 +2098,10 @@ typedef struct
         p8 address_to storage;
         positive storage_room;
         p32 storage_index;
+        /* Bytes emitted, and what the frame (or job) has saved so far:
+           the block splitter only cuts once blocks are paying. */
+        p64 emitted;
+        bipolar savings;
         p8 address_to base;
         p32 start;      /* the frame's first index */
         p32 block;      /* the first index not yet compressed */
@@ -2477,6 +2481,7 @@ static fn zstd_block_header(p8 address_to into, bool last, p8 type, positive siz
 /* A block's bytes: a job's go to its output, which the pool orders. */
 static bool zstd_enc_emit(zstd_encoder address_to e, p8 address_to p, positive n)
 {
+        e->emitted += n;
 #if defined(LIBRARY_THREAD_RUNTIME)
         if (e->output)
                 return parallel_write(e->output, p, n);
@@ -4690,6 +4695,7 @@ static bool zstd_encoder_open(zstd_encoder address_to e,
         e->rep[0] = 1;
         e->rep[1] = 4;
         e->rep[2] = 8;
+        e->savings = 0;
         e->nseq = 0;
         e->nlit = 0;
         e->huf_valid = false;
@@ -4756,17 +4762,146 @@ static fn zstd_encoder_reduce(zstd_encoder address_to e)
         e->base = e->storage - e->storage_index;
 }
 
-/* Where the block being filled takes its next bytes, and how many. */
+/* Where the next input bytes go, and how many: two blocks wait before
+   the first is compressed, so the splitter sees a whole block ahead. */
 static p8 address_to zstd_encode_room(zstd_encoder address_to e,
                                       positive address_to room)
 {
         if (e->filled > 0xC0000000u)
                 zstd_encoder_reduce(e);
-        if ((positive)(e->block - e->storage_index) + ZSTD_BLOCK_MAX + 64 >
+        if ((positive)(e->block - e->storage_index) + 2 * ZSTD_BLOCK_MAX + 64 >
             e->storage_room)
                 zstd_encoder_slide(e);
-        address_to room = ZSTD_BLOCK_MAX - (e->filled - e->block);
+        address_to room = 2 * ZSTD_BLOCK_MAX - (e->filled - e->block);
         return e->base + e->filled;
+}
+
+/*
+        libzstd 1.5.7's pre-block splitter.  A full 128 KiB block about to be
+        compressed is cut where its bytes change character, found from
+        fingerprints: counts of a hash of each two bytes, sampled every 43,
+        11, 5 or 1 positions over 8 KiB chunks (dfast to btultra2), a chunk
+        cut off from the ones before it when its counts stray far enough; or
+        for fast, the first, middle and last 512 bytes decide 32, 64 or 96
+        KiB.  A block only splits once the frame has saved three bytes.
+*/
+#define ZSTD_SPLIT_CHUNK ((positive)8 << 10)
+
+typedef struct
+{
+        p32 events[1024];
+        positive count;
+} zstd_print;
+
+static __attribute__((always_inline)) inline positive
+zstd_print_hash(p8 address_to p, p8 log)
+{
+        return log == 8 ? p[0]
+                        : (positive)(((p32)memory_load_unaligned(p16, p) * 0x9e3779b9u) >>
+                                     (32 - log));
+}
+
+static fn zstd_print_record(zstd_print address_to f, p8 address_to src, positive rate, p8 log)
+{
+        positive const limit = ZSTD_SPLIT_CHUNK - 1;
+
+        memory_fill(f->events, 0, sizeof(p32) << log);
+        for (positive at = 0; at < limit; at += rate)
+                f->events[zstd_print_hash(src + at, log)]++;
+        f->count = limit / rate;
+}
+
+static p64 zstd_print_distance(const zstd_print address_to a, const zstd_print address_to b,
+                               p8 log)
+{
+        p64 distance = 0;
+
+        for (positive at = 0; at < ((positive)1 << log); at++)
+        {
+                bipolar const d = (bipolar)a->events[at] * (bipolar)b->count -
+                                  (bipolar)b->events[at] * (bipolar)a->count;
+
+                distance += (p64)(d < 0 ? -d : d);
+        }
+        return distance;
+}
+
+static bool zstd_print_differ(const zstd_print address_to past, const zstd_print address_to next,
+                              positive penalty, p8 log)
+{
+        p64 const p50 = (p64)past->count * (p64)next->count;
+
+        return zstd_print_distance(past, next, log) >= p50 * (14 + penalty) / 16;
+}
+
+static positive zstd_split_block(p8 address_to src, p8 strategy)
+{
+        static const p8 levels[10] = {0, 0, 1, 2, 2, 3, 3, 4, 4, 4};
+        static const p8 rates[4] = {43, 11, 5, 1};
+        static const p8 logs[4] = {8, 9, 10, 10};
+        p8 const level = levels[strategy];
+        zstd_print past;
+        zstd_print next;
+
+        if (!level)
+        {
+                zstd_print middle;
+                p64 from_begin;
+                p64 from_end;
+                bipolar gap;
+
+                memory_fill(address_of past, 0, sizeof(past));
+                memory_fill(address_of next, 0, sizeof(next));
+                memory_fill(address_of middle, 0, sizeof(middle));
+                for (positive at = 0; at < 512; at++)
+                {
+                        past.events[src[at]]++;
+                        next.events[src[ZSTD_BLOCK_MAX - 512 + at]]++;
+                        middle.events[src[ZSTD_BLOCK_MAX / 2 - 256 + at]]++;
+                }
+                past.count = next.count = middle.count = 512;
+                if (!zstd_print_differ(address_of past, address_of next, 0, 8))
+                        return ZSTD_BLOCK_MAX;
+                from_begin = zstd_print_distance(address_of past, address_of middle, 8);
+                from_end = zstd_print_distance(address_of next, address_of middle, 8);
+                gap = (bipolar)from_begin - (bipolar)from_end;
+                if ((gap < 0 ? -gap : gap) < 512 * 512 / 3)
+                        return 64 << 10;
+                return from_begin > from_end ? 32 << 10 : 96 << 10;
+        }
+        {
+                positive const rate = rates[level - 1];
+                p8 const log = logs[level - 1];
+                positive penalty = 3;
+
+                memory_fill(address_of past, 0, sizeof(past));
+                memory_fill(address_of next, 0, sizeof(next));
+                zstd_print_record(address_of past, src, rate, log);
+                for (positive at = ZSTD_SPLIT_CHUNK; at <= ZSTD_BLOCK_MAX - ZSTD_SPLIT_CHUNK;
+                     at += ZSTD_SPLIT_CHUNK)
+                {
+                        zstd_print_record(address_of next, src + at, rate, log);
+                        if (zstd_print_differ(address_of past, address_of next, penalty, log))
+                                return at;
+                        for (positive k = 0; k < ((positive)1 << log); k++)
+                                past.events[k] += next.events[k];
+                        past.count += next.count;
+                        if (penalty)
+                                penalty--;
+                }
+        }
+        return ZSTD_BLOCK_MAX;
+}
+
+/* The next block's size when `left` bytes wait: a full block's worth may
+   be cut short by the splitter. */
+static positive zstd_block_size(zstd_encoder address_to e, positive left)
+{
+        if (left < ZSTD_BLOCK_MAX)
+                return left;
+        if (e->savings < 3)
+                return ZSTD_BLOCK_MAX;
+        return zstd_split_block(e->base + e->block, e->p.strategy);
 }
 
 /* The next n bytes as a block: RLE when they are one byte, raw under 12,
@@ -4775,6 +4910,7 @@ static bool zstd_encode_block(zstd_encoder address_to e, positive n, bool last)
 {
         p32 const from = e->block;
         p8 address_to const src = e->base + from;
+        p64 const before = e->emitted;
         bool ok;
 
         if (n && memory_span_byte(src, src[0], n) == n)
@@ -4857,6 +4993,7 @@ static bool zstd_encode_block(zstd_encoder address_to e, positive n, bool last)
                 }
         }
         e->block += (p32)n;
+        e->savings += (bipolar)n - (bipolar)(e->emitted - before);
         return ok;
 }
 
@@ -5005,6 +5142,7 @@ static bool zstd_encoder_job(zstd_encoder address_to e, const zstd_params addres
         e->filled = (p32)(1 + prefix + size);
         e->next = 1;
         e->next3 = 1;
+        e->savings = 0;
         e->rep[0] = first ? 1 : 0;
         e->rep[1] = first ? 4 : 0;
         e->rep[2] = first ? 8 : 0;
@@ -5033,7 +5171,7 @@ static bool zstd_encoder_job(zstd_encoder address_to e, const zstd_params addres
         do
         {
                 positive const left = e->filled - e->block;
-                positive const n = left < ZSTD_BLOCK_MAX ? left : ZSTD_BLOCK_MAX;
+                positive const n = zstd_block_size(e, left);
 
                 if (!zstd_encode_block(e, n, last && n == left))
                         return false;
@@ -5182,8 +5320,9 @@ static bool zstd_encode_taken(positive n)
                 return true;
         }
         zstd_enc.filled += (p32)n;
-        return zstd_enc.filled - zstd_enc.block < ZSTD_BLOCK_MAX ||
-               zstd_encode_block(address_of zstd_enc, ZSTD_BLOCK_MAX, false);
+        return zstd_enc.filled - zstd_enc.block < 2 * ZSTD_BLOCK_MAX ||
+               zstd_encode_block(address_of zstd_enc,
+                                 zstd_block_size(address_of zstd_enc, ZSTD_BLOCK_MAX), false);
 }
 
 static bool zstd_encode_start(const zstd_params address_to p, bool checksum)
@@ -5255,8 +5394,15 @@ static bool zstd_encode_end(void)
                 if (!zstd_jobs_round(true))
                         return false;
         }
-        else if (!zstd_encode_block(address_of zstd_enc, zstd_enc.filled - zstd_enc.block, true))
-                return false;
+        else
+                do
+                {
+                        positive const left = zstd_enc.filled - zstd_enc.block;
+                        positive const n = zstd_block_size(address_of zstd_enc, left);
+
+                        if (!zstd_encode_block(address_of zstd_enc, n, n == left))
+                                return false;
+                } while (zstd_enc.block < zstd_enc.filled);
         if (!zstd_enc_checksum)
                 return true;
         memory_store_unaligned(p32, tail,
