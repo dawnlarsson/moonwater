@@ -42452,6 +42452,167 @@ def http_fuzz_seeds():
     return seeds
 
 
+def harness_wget_mutation(argv):
+    """The built shell's wget and fetch against hostile HTTP servers, black box.
+
+    http_fuzz runs the HTTP section over a hosted lift; this runs the whole
+    program a person types, file staging and exit paths included, over real
+    loopback sockets. The bases are http_fuzz's own exchanges -- every
+    http_response_framing row, redirect chains across hops, chunked bodies --
+    and each run mutates one or more of a chain's responses (a flipped bit, a
+    control byte, an inserted or deleted or doubled run, a cut, a header
+    dropped in, a huge length) and serves it, in pieces, to wget or to fetch.
+    A run that ends by a signal, or is still going after eight seconds, fails;
+    any exit status the program chooses for itself is an answer. Seeded, so a
+    failure names its base and reruns; a build with UBSan in trap mode turns
+    undefined behaviour into a signal, which is how this catches it.
+
+        python3 test/differential.py --harness wget_mutation [--shell PATH]
+                                     [--runs N]
+    """
+    import collections
+    import shutil
+    import socket
+    import tempfile
+    import threading
+    parser = argparse.ArgumentParser(prog="differential.py --harness wget_mutation")
+    parser.add_argument("--cc", default=os.environ.get("CC", "gcc"))
+    parser.add_argument("--shell", help="a built shell to use instead of building one")
+    parser.add_argument("--runs", type=int,
+                        default=int(os.environ.get("MOONWATER_WGET_MUTATIONS", "240")))
+    args = parser.parse_args(argv)
+    if platform.system() != "Linux":
+        print("wget mutation: NOT RUN -- needs Linux")
+        return 2
+    rng = random.Random(0x77e7)
+    bases = []
+    for name, data in sorted(http_fuzz_seeds().items()):
+        if len(data) > 2 and name.startswith(("run", "hop")):
+            wire = data[2:]
+            bases.append((name, wire.split(b"\xffHOP") if b"\xffHOP" in wire else [wire]))
+    inserts = [b"\r\n", b"\n", b"0\r\n\r\n", b"Content-Length: 99999999999999999999\r\n",
+               b"Transfer-Encoding: chunked\r\n", b"Location: http://127.0.0.1:1/\r\n"]
+
+    def mutate(wire):
+        wire = bytearray(wire)
+        for _ in range(rng.randint(1, 4)):
+            if not wire:
+                wire = bytearray(b"HTTP/1.1 200 OK\r\n\r\n")
+            kind = rng.randrange(8)
+            at = rng.randrange(len(wire))
+            if kind == 0:
+                wire[at] ^= 1 << rng.randrange(8)
+            elif kind == 1:
+                wire[at] = rng.choice([0, 255, 13, 10, 58, 32, 59, 48, 57, 102])
+            elif kind == 2:
+                wire[at:at] = bytes(rng.randrange(256) for _ in range(rng.randint(1, 8)))
+            elif kind == 3:
+                del wire[at:at + rng.randint(1, 12)]
+            elif kind == 4:
+                wire[at:at] = wire[at:min(len(wire), at + rng.randint(1, 30))]
+            elif kind == 5:
+                wire = wire[:at]
+            elif kind == 6:
+                wire[at:at] = rng.choice(inserts)
+            else:
+                wire[at] = (wire[at] + rng.randint(1, 255)) & 255
+        return bytes(wire)
+
+    def run_one(farm, parts, tool):
+        listener = socket.socket()
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(4)
+        listener.settimeout(0.2)
+        port = listener.getsockname()[1]
+        finished = threading.Event()
+
+        def serve():
+            for part in parts + [b""]:
+                peer = None
+                while not finished.is_set():
+                    try:
+                        peer, _ = listener.accept()
+                        break
+                    except socket.timeout:
+                        continue
+                    except OSError:
+                        return
+                if peer is None:
+                    return
+                try:
+                    peer.settimeout(2)
+                    try:
+                        peer.recv(4096)
+                    except OSError:
+                        pass
+                    for at in range(0, len(part), 1500):
+                        peer.sendall(part[at:at + 1500])
+                    peer.shutdown(socket.SHUT_WR)
+                    try:
+                        peer.recv(1)
+                    except OSError:
+                        pass
+                except OSError:
+                    pass
+                finally:
+                    peer.close()
+
+        server = threading.Thread(target=serve, daemon=True)
+        server.start()
+        command = [str(farm / tool)] + (["-q", "-O", "/dev/null"] if tool == "wget" else []) + [
+            "http://127.0.0.1:%d/x" % port]
+        try:
+            code = subprocess.run(command, capture_output=True, timeout=8,
+                                  cwd=str(farm), env={"PATH": "/usr/bin:/bin"}).returncode
+        except subprocess.TimeoutExpired:
+            code = "timeout"
+        finished.set()
+        server.join(timeout=3)
+        listener.close()
+        return code
+
+    checks = Checks()
+    with tempfile.TemporaryDirectory(prefix="wget-mutation-") as temporary:
+        work = Path(temporary)
+        shell = Path(args.shell) if args.shell else work / "shell"
+        if not args.shell:
+            host = platform.machine().lower()
+            arch_flags = {"x86_64": ["-march=x86-64"], "amd64": ["-march=x86-64"],
+                          "aarch64": ["-mno-outline-atomics"],
+                          "arm64": ["-mno-outline-atomics"],
+                          "riscv64": ["-march=rv64imafd_zicsr_zicntr", "-mabi=lp64d"]}
+            built = subprocess.run(
+                [args.cc, "-O2", "-static", "-nostdlib", "-nostartfiles",
+                 "-fno-stack-protector", "-fno-builtin", *arch_flags.get(host, []), "-w",
+                 "-T", "src/build/spark.ld", "-Wl,-e,_start", "-Wl,--build-id=none",
+                 "-Wl,--no-warn-rwx-segments", "-o", str(shell), "programs/shell.c"],
+                cwd=HARNESS_ROOT, capture_output=True, text=True)
+            if built.returncode:
+                print(built.stderr[-3000:])
+                return 1
+        for tool in ("wget", "fetch"):
+            (work / tool).symlink_to(shell)
+        exits = collections.Counter()
+        deaths = []
+        for number in range(args.runs):
+            name, parts = rng.choice(bases)
+            tool = rng.choice(("wget", "wget", "fetch"))
+            mutated = [mutate(part) if rng.random() < 0.8 else part for part in parts]
+            code = run_one(work, mutated, tool)
+            exits[code if isinstance(code, str) or code < 0 or code > 8 else "exit %d" % code] += 1
+            if code == "timeout" or code < 0 or code >= 128:
+                deaths.append((name, tool, code, mutated))
+        for name, tool, code, mutated in deaths[:8]:
+            checks(False, "%s on a mutation of %s ended with %s (first response %r)" % (
+                tool, name, code, mutated[0][:120]))
+        checks(not deaths, "no wget or fetch run of %d ended by a signal or hung" % args.runs)
+        print("wget mutation: %d runs, exits %s" % (args.runs, dict(sorted(
+            exits.items(), key=str))))
+    return checks.verdict("wget mutation", "wget-mutation")
+
+
+
 def harness_http_urls(argv):
     """http_split_into and http_absolutize against Python's urllib.parse.
 
@@ -50184,7 +50345,8 @@ def harness_security_hygiene(argv):
     security = ("tls_chains", "https_downgrade", "http_response_framing",
                 "tls_der_fuzz", "tls_hs_fuzz", "tls_fuzz", "msan_net", "pathname_race",
                 "dhcp_fuzz", "sntp_fuzz", "dns_fuzz", "netlink_fuzz", "tls_peer",
-                "http_fuzz", "http_urls", "wifi_eapol_fuzz", "wifi_scan_fuzz")
+                "http_fuzz", "http_urls", "wifi_eapol_fuzz", "wifi_scan_fuzz",
+                "wget_mutation")
     for name in security + ("tls_verify_fuzz",):
         checks(name in HARNESS_CHECKS, "differential.py: %s is not registered" % name)
     table = re.search(r"^HARNESS_CHECKS = \{$(.*?)^\}$", source, re.M | re.S)
@@ -57788,6 +57950,7 @@ HARNESS_CHECKS = {
     "sntp_fuzz": harness_sntp_fuzz,
     "wifi_eapol_fuzz": harness_wifi_eapol_fuzz,
     "wifi_scan_fuzz": harness_wifi_scan_fuzz,
+    "wget_mutation": harness_wget_mutation,
     "dns_fuzz": harness_dns_fuzz,
     "netlink_fuzz": harness_netlink_fuzz,
     "crypto_vectors": harness_crypto_vectors,
