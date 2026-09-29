@@ -985,12 +985,41 @@ static PURE string_address glob_group_end(string_address at)
         return null;
 }
 
+/*
+        How much recursion an extended pattern gets before it is matched a
+        different way.
+
+        glob_bounded tries every split of the text for every group and every
+        star, and the same question about the same suffix is asked again by
+        every arrangement of the ones in front: +(a|aa)+(a|aa)b against fifty
+        a's took two minutes here and in Bash, and each character more doubles
+        it. The pattern and the string are a script's own data often enough
+        (a case arm over an argument, a [[ ]] over a name) that a match which
+        does not end is a way to stop a shell, so a match is given this many
+        questions, which is more than any ordinary one asks by three orders of
+        magnitude, and past them is answered by glob_reach instead, which
+        cannot take more than a polynomial number of steps in the pattern and
+        the text. Every match that ends inside the budget is what it always
+        was.
+*/
+#ifndef GLOB_BUDGET
+#define GLOB_BUDGET ((positive)1 << 16)
+#endif
+
+typedef struct
+{
+        positive steps;
+        bool blown;
+} glob_budget;
+
 static bool glob_bounded(string_address pattern, string_address pattern_end,
-                         string_address text, string_address text_end, bool fold);
+                         string_address text, string_address text_end, bool fold,
+                         glob_budget address_to budget);
 
 // Whether any one of the alternatives in a group matches the whole run.
 static bool glob_alternatives(string_address body, string_address body_end,
-                              string_address text, string_address text_end, bool fold)
+                              string_address text, string_address text_end, bool fold,
+                              glob_budget address_to budget)
 {
         string_address start = body;
         string_address at = body;
@@ -1011,7 +1040,7 @@ static bool glob_alternatives(string_address body, string_address body_end,
                         depth--;
                 else if (!depth && string_is(at, '|'))
                 {
-                        if (glob_bounded(start, at, text, text_end, fold))
+                        if (glob_bounded(start, at, text, text_end, fold, budget))
                                 return true;
 
                         start = at + 1;
@@ -1020,7 +1049,7 @@ static bool glob_alternatives(string_address body, string_address body_end,
                 at++;
         }
 
-        return glob_bounded(start, body_end, text, text_end, fold);
+        return glob_bounded(start, body_end, text, text_end, fold, budget);
 }
 
 /*
@@ -1037,7 +1066,8 @@ static bool glob_alternatives(string_address body, string_address body_end,
 */
 static bool glob_extended(p8 head, string_address body, string_address body_end,
                           string_address rest, string_address pattern_end,
-                          string_address text, string_address text_end, bool fold)
+                          string_address text, string_address text_end, bool fold,
+                          glob_budget address_to budget)
 {
         string_address at;
         bool utf8 = shell_utf8_on();
@@ -1046,8 +1076,8 @@ static bool glob_extended(p8 head, string_address body, string_address body_end,
         {
                 for (at = text; ;)
                 {
-                        if (glob_bounded(rest, pattern_end, at, text_end, fold) &&
-                            !glob_alternatives(body, body_end, text, at, fold))
+                        if (glob_bounded(rest, pattern_end, at, text_end, fold, budget) &&
+                            !glob_alternatives(body, body_end, text, at, fold, budget))
                                 return true;
                         if (at == text_end)
                                 break;
@@ -1059,7 +1089,7 @@ static bool glob_extended(p8 head, string_address body, string_address body_end,
 
         // None at all, which only these two will take.
         if ((head == '?' || head == '*') &&
-            glob_bounded(rest, pattern_end, text, text_end, fold))
+            glob_bounded(rest, pattern_end, text, text_end, fold, budget))
                 return true;
 
         //      Longest first, which is what a glob answers with, and never an
@@ -1068,19 +1098,19 @@ static bool glob_extended(p8 head, string_address body, string_address body_end,
         for (at = text_end; at > text;
              at = utf8 ? text + expand_character_previous(text, at - text) : at - 1)
         {
-                if (!glob_alternatives(body, body_end, text, at, fold))
+                if (!glob_alternatives(body, body_end, text, at, fold, budget))
                         continue;
 
                 if (head == '@' || head == '?')
                 {
-                        if (glob_bounded(rest, pattern_end, at, text_end, fold))
+                        if (glob_bounded(rest, pattern_end, at, text_end, fold, budget))
                                 return true;
 
                         continue;
                 }
 
                 if (glob_extended('*', body, body_end, rest, pattern_end, at,
-                                  text_end, fold))
+                                  text_end, fold, budget))
                         return true;
         }
 
@@ -1088,8 +1118,8 @@ static bool glob_extended(p8 head, string_address body, string_address body_end,
         // after ordinary matches so nonempty successful groups pay nothing
         // for this edge; never recurse on a zero-width occurrence.
         return (head == '@' || head == '+') &&
-               glob_alternatives(body, body_end, text, text, fold) &&
-               glob_bounded(rest, pattern_end, text, text_end, fold);
+               glob_alternatives(body, body_end, text, text, fold, budget) &&
+               glob_bounded(rest, pattern_end, text, text_end, fold, budget);
 }
 
 /*
@@ -1102,8 +1132,9 @@ static bool glob_extended(p8 head, string_address body, string_address body_end,
         is why this is a second matcher rather than another branch in the
         first. Nothing without a group in it comes through here.
 */
-static bool glob_bounded(string_address pattern, string_address pattern_end,
-                         string_address text, string_address text_end, bool fold)
+static bool glob_bounded_run(string_address pattern, string_address pattern_end,
+                             string_address text, string_address text_end, bool fold,
+                             glob_budget address_to budget)
 {
         while (pattern < pattern_end)
         {
@@ -1118,7 +1149,7 @@ static bool glob_bounded(string_address pattern, string_address pattern_end,
                                 return glob_extended(want, pattern + 2,
                                                      close - 1, close,
                                                      pattern_end, text,
-                                                     text_end, fold);
+                                                     text_end, fold, budget);
                 }
 
                 if (want == '*')
@@ -1133,7 +1164,7 @@ static bool glob_bounded(string_address pattern, string_address pattern_end,
                         while (1)
                         {
                                 if (glob_bounded(pattern, pattern_end, at,
-                                                 text_end, fold))
+                                                 text_end, fold, budget))
                                         return true;
 
                                 if (at == text)
@@ -1190,6 +1221,404 @@ static bool glob_bounded(string_address pattern, string_address pattern_end,
         return text == text_end;
 }
 
+static bool glob_bounded(string_address pattern, string_address pattern_end,
+                         string_address text, string_address text_end, bool fold,
+                         glob_budget address_to budget)
+{
+        if (budget->blown)
+                return false;
+
+        if (budget->steps++ >= GLOB_BUDGET)
+        {
+                budget->blown = true;
+                return false;
+        }
+
+        return glob_bounded_run(pattern, pattern_end, text, text_end, fold,
+                                budget);
+}
+
+/*
+        The same match as sets of positions.
+
+        glob_bounded asks, for each way a group or a star could end, whether
+        the rest matches from there, and the ways multiply. This carries the
+        one thing that matters instead: the set of offsets in the text the
+        pattern read so far can have got to, as a bit for each of the length
+        plus one. A byte moves every offset it fits on by one, a star fills
+        from the first offset to the end, a group is the union over its
+        alternatives run from the same set, and a repeat runs them again from
+        what they added until they add nothing -- each offset joins once, so
+        that ends after at most length rounds. !( ) is every offset from a
+        start on that the alternatives do not end at, start by start. The
+        text matches when its own end is in the set the whole pattern
+        reaches, which is exactly what glob_bounded means by matching, in
+        work that grows as the pattern times the text squared and not as the
+        ways there are of splitting the text.
+
+        It is reached only by a match that has spent its budget, so the
+        allocation for each set costs nothing anyone ordinary sees, and a
+        match that cannot get one, or a pattern nested past GLOB_REACH_DEPTH
+        groups, is answered as not matching.
+*/
+#define GLOB_REACH_DEPTH 64
+
+typedef p64 address_to glob_bits;
+
+typedef struct
+{
+        string_address text;
+        positive length;
+        positive words;
+        bool fold;
+        bool utf8;
+        bool failed;
+} glob_reach;
+
+static glob_bits glob_bits_new(glob_reach address_to walk)
+{
+        glob_bits bits = memory_take_zeroed(walk->words, sizeof(p64));
+
+        if (!bits)
+                walk->failed = true;
+
+        return bits;
+}
+
+static inline INLINE bool glob_bits_get(const glob_bits bits, positive at)
+{
+        return (bits[at >> 6] >> (at & 63)) & 1;
+}
+
+static inline INLINE fn glob_bits_put(glob_bits bits, positive at)
+{
+        bits[at >> 6] |= (p64)1 << (at & 63);
+}
+
+static bool glob_bits_any(glob_reach address_to walk, const glob_bits bits)
+{
+        for (positive at = 0; at < walk->words; at++)
+                if (bits[at])
+                        return true;
+
+        return false;
+}
+
+static fn glob_bits_union(glob_reach address_to walk, glob_bits into,
+                          const glob_bits from)
+{
+        for (positive at = 0; at < walk->words; at++)
+                into[at] |= from[at];
+}
+
+// One character on from an offset short of the end: a byte, or in a UTF-8
+// locale the whole sequence a non-ASCII byte begins.
+static inline INLINE positive glob_reach_width(glob_reach address_to walk,
+                                              positive at)
+{
+        return walk->utf8 && walk->text[at] >= 0x80
+                   ? expand_character_width(walk->text + at, walk->length - at)
+                   : 1;
+}
+
+static bool glob_reach_sequence(glob_reach address_to walk, string_address pattern,
+                               string_address pattern_end, glob_bits cur,
+                               positive depth);
+
+// The offsets any one of the alternatives in a group reaches from a set.
+static bool glob_reach_alternatives(glob_reach address_to walk,
+                                   string_address body, string_address body_end,
+                                   const glob_bits from, glob_bits reached,
+                                   positive depth)
+{
+        glob_bits work = glob_bits_new(walk);
+        string_address start = body;
+        string_address at = body;
+        string_address past;
+        positive nesting = 0;
+        bool alive = work != null;
+
+        while (alive)
+        {
+                bool ends = at >= body_end;
+
+                if (!ends)
+                {
+                        if ((past = glob_unit_end(at, body_end)))
+                        {
+                                at = past;
+                                continue;
+                        }
+
+                        if (string_is(at, '('))
+                                nesting++;
+                        else if (string_is(at, ')') && nesting)
+                                nesting--;
+                        else if (!nesting && string_is(at, '|'))
+                                ends = true;
+                }
+
+                if (ends)
+                {
+                        memory_copy(work, from, walk->words * sizeof(p64));
+                        alive = glob_reach_sequence(walk, start, at, work, depth);
+
+                        if (alive)
+                                glob_bits_union(walk, reached, work);
+
+                        if (at >= body_end)
+                                break;
+
+                        start = at + 1;
+                }
+
+                at++;
+        }
+
+        if (work)
+                memory_give(work);
+
+        return alive;
+}
+
+static bool glob_reach_group(glob_reach address_to walk, p8 head,
+                            string_address body, string_address body_end,
+                            glob_bits cur, positive depth)
+{
+        glob_bits added = glob_bits_new(walk);
+        glob_bits frontier = glob_bits_new(walk);
+        glob_bits next = glob_bits_new(walk);
+        bool alive = added && frontier && next && depth < GLOB_REACH_DEPTH;
+
+        if (alive && head == '!')
+        {
+                glob_bits one = glob_bits_new(walk);
+                glob_bits ends = glob_bits_new(walk);
+
+                alive = one && ends;
+
+                for (positive from = 0; alive && from <= walk->length; from++)
+                {
+                        if (!glob_bits_get(cur, from))
+                                continue;
+
+                        memory_zero(one, walk->words * sizeof(p64));
+                        memory_zero(ends, walk->words * sizeof(p64));
+                        glob_bits_put(one, from);
+                        alive = glob_reach_alternatives(walk, body, body_end,
+                                                       one, ends, depth + 1);
+
+                        for (positive at = from; alive; )
+                        {
+                                if (!glob_bits_get(ends, at))
+                                        glob_bits_put(added, at);
+                                if (at >= walk->length)
+                                        break;
+                                at += glob_reach_width(walk, at);
+                        }
+                }
+
+                if (one)
+                        memory_give(one);
+                if (ends)
+                        memory_give(ends);
+        }
+        else if (alive)
+        {
+                alive = glob_reach_alternatives(walk, body, body_end, cur, added,
+                                               depth + 1);
+
+                if (alive && (head == '+' || head == '*'))
+                {
+                        memory_copy(frontier, added, walk->words * sizeof(p64));
+
+                        while (alive && glob_bits_any(walk, frontier))
+                        {
+                                memory_zero(next, walk->words * sizeof(p64));
+                                alive = glob_reach_alternatives(walk, body,
+                                                               body_end, frontier,
+                                                               next, depth + 1);
+
+                                for (positive at = 0; alive && at < walk->words;
+                                     at++)
+                                {
+                                        frontier[at] = next[at] & ~added[at];
+                                        added[at] |= next[at];
+                                }
+                        }
+                }
+
+                if (alive && (head == '?' || head == '*'))
+                        glob_bits_union(walk, added, cur);
+        }
+
+        if (alive)
+                memory_copy(cur, added, walk->words * sizeof(p64));
+        else
+                walk->failed = true;
+
+        if (added)
+                memory_give(added);
+        if (frontier)
+                memory_give(frontier);
+        if (next)
+                memory_give(next);
+
+        return alive;
+}
+
+static bool glob_reach_sequence(glob_reach address_to walk, string_address pattern,
+                               string_address pattern_end, glob_bits cur,
+                               positive depth)
+{
+        glob_bits moved = null;
+
+        while (pattern < pattern_end && glob_bits_any(walk, cur))
+        {
+                p8 want = string_get(pattern);
+                string_address stop;
+
+                if (lex_extended_head(want) && string_is(pattern + 1, '('))
+                {
+                        string_address close = glob_group_end(pattern + 1);
+
+                        if (close && close <= pattern_end)
+                        {
+                                if (!glob_reach_group(walk, want, pattern + 2,
+                                                     close - 1, cur, depth))
+                                        break;
+
+                                pattern = close;
+                                continue;
+                        }
+                }
+
+                if (want == '*')
+                {
+                        positive first = 0;
+
+                        while (!glob_bits_get(cur, first))
+                                first++;
+
+                        for (positive at = first; ; )
+                        {
+                                glob_bits_put(cur, at);
+                                if (at >= walk->length)
+                                        break;
+                                at += glob_reach_width(walk, at);
+                        }
+
+                        pattern++;
+                        continue;
+                }
+
+                if (!moved && !(moved = glob_bits_new(walk)))
+                        break;
+
+                memory_zero(moved, walk->words * sizeof(p64));
+                stop = want == '[' ? expand_set_end(pattern) : null;
+
+                if (stop && stop < pattern_end)
+                {
+                        for (positive at = 0; at < walk->length; at++)
+                        {
+                                positive width;
+
+                                if (!glob_bits_get(cur, at))
+                                        continue;
+
+                                width = expand_set_match(pattern, stop,
+                                                         walk->text + at,
+                                                         walk->text + walk->length,
+                                                         walk->fold);
+                                if (width)
+                                        glob_bits_put(moved, at + width);
+                        }
+
+                        pattern = stop + 1;
+                }
+                else
+                {
+                        bool any = want == '?';
+
+                        if (want == '\\' && pattern + 1 < pattern_end)
+                        {
+                                want = string_get(++pattern);
+                                any = false;
+                        }
+
+                        for (positive at = 0; at < walk->length; at++)
+                        {
+                                p8 have;
+
+                                if (!glob_bits_get(cur, at))
+                                        continue;
+
+                                have = walk->text[at];
+
+                                if (any)
+                                        glob_bits_put(moved, at + glob_reach_width(walk, at));
+                                else if (want == have ||
+                                         (walk->fold && byte_to_lower(want) ==
+                                                            byte_to_lower(have)))
+                                        glob_bits_put(moved, at + 1);
+                        }
+
+                        pattern++;
+                }
+
+                memory_copy(cur, moved, walk->words * sizeof(p64));
+        }
+
+        if (moved)
+                memory_give(moved);
+
+        return !walk->failed;
+}
+
+static bool glob_reach_match(string_address pattern, string_address pattern_end,
+                            string_address text, string_address text_end,
+                            bool fold)
+{
+        glob_reach walk = {text, (positive)(text_end - text), 0, fold,
+                          shell_utf8_on(), false};
+        glob_bits cur;
+        bool matched = false;
+
+        walk.words = (walk.length >> 6) + 1;
+
+        if (!(cur = glob_bits_new(&walk)))
+                return false;
+
+        glob_bits_put(cur, 0);
+
+        if (glob_reach_sequence(&walk, pattern, pattern_end, cur, 0))
+                matched = glob_bits_get(cur, walk.length);
+
+        memory_give(cur);
+
+        return matched;
+}
+
+// An extended pattern against a whole string: the recursive matcher, which
+// answers everything ordinary at once, and the position sets for a match that
+// has asked it too much.
+static bool glob_extended_match(string_address pattern, string_address text,
+                                bool fold)
+{
+        glob_budget budget = {0, false};
+        string_address pattern_end = pattern + string_length(pattern);
+        string_address text_end = text + string_length(text);
+        bool matched = glob_bounded(pattern, pattern_end, text, text_end, fold,
+                                    &budget);
+
+        if (budget.blown)
+                matched = glob_reach_match(pattern, pattern_end, text, text_end,
+                                          fold);
+
+        return matched;
+}
+
 /*
         A glob against a string, whole.
 
@@ -1212,8 +1641,7 @@ static inline INLINE bool shell_match_core(string_address pattern,
         //      it says the groups are being read at all. Every match in the
         //      shell comes through here.
         if (shell_extglob_on && glob_extended_anywhere(pattern))
-                return glob_bounded(pattern, pattern + string_length(pattern),
-                                    text, text + string_length(text), fold);
+                return glob_extended_match(pattern, text, fold);
 
         while (string_get(text))
         {
@@ -1336,8 +1764,7 @@ PURE bool shell_match_extended(string_address pattern, string_address text,
                                 bool fold)
 {
         if (!shell_extglob_on && glob_extended_anywhere(pattern))
-                return glob_bounded(pattern, pattern + string_length(pattern),
-                                    text, text + string_length(text), fold);
+                return glob_extended_match(pattern, text, fold);
 
         return shell_match_folded(pattern, text, fold);
 }

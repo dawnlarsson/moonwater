@@ -18808,8 +18808,72 @@ def shell_argv_zero(farm):
     return shell_reference_walk(farm, cases)
 
 
+def shell_glob_extended_bounded(farm):
+    """Extended patterns that a script's own data can make endless.
+
+    glob_bounded tries every split of the text for every group and every
+    star, so +(a|aa)+(a|aa)b against fifty a's ran two minutes -- here and
+    in bash -- and each character more doubled it: a case arm, a [[ ]] or a
+    ${x#pattern} over a value a script was handed stopped the shell. A match
+    now gets a budget of questions and is answered as sets of positions when
+    it spends it. Below the point where bash gives up the answers are bash's;
+    past it they are what the pattern means (every string of a's is refused
+    by a pattern that ends in b, and taken by one that can end on an a).
+    """
+    import shutil
+    reference = shutil.which("bash")
+    target = Path(farm).resolve() / "bash"
+    if not reference or not target.exists():
+        return 0, 1, ["extended glob bounds need bash and the candidate's bash"]
+    patterns = (
+        ("+(a|aa)+(a|aa)b", False),
+        ("*(*(*(a)))b", False),
+        ("@(a|aa)*@(a|aa)*@(a|aa)*b", False),
+        ("+(+(a))b", False),
+        ("*(a|b)*(a|b)*(a|b)c", False),
+        ("*(a|aa)*(a|aa)*(a|aa)*(a|aa)a", True),
+        ("+(a|aa)+(a|aa)", True),
+        ("?(a)?(a)?(a)?(a)*(a|aa)b", False),
+        ("!(b*)+(a|aa)!(b)", True),
+    )
+    forms = {
+        "cond": '[[ $x == $p ]]; echo "rc=$?"',
+        "case": 'case $x in $p) echo "rc=0";; *) echo "rc=1";; esac',
+        "trim": '[ "${x##$p}" = "" ]; echo "rc=$?"',
+        "replace": '[ "${x/$p/}" = "" ]; echo "rc=$?"',
+    }
+    passed, total, notes = 0, 0, []
+    env = {"PATH": "/usr/bin:/bin", "LC_ALL": "C"}
+    for text_size in (14, 400):
+        for pattern, matches in patterns:
+            for name, body in forms.items():
+                total += 1
+                script = "shopt -s extglob\nx=$(printf '%%*s' %d '' | tr ' ' a); p='%s'\n%s\n" % (
+                    text_size, pattern.replace("'", "'\\''"), body)
+                try:
+                    got = subprocess.run([str(target), "-c", script], capture_output=True,
+                                         timeout=5, env=env)
+                except subprocess.TimeoutExpired:
+                    if len(notes) < 6:
+                        notes.append("%s %r at %d: still running after 5 s" % (name, pattern, text_size))
+                    continue
+                want = b"rc=0\n" if matches else b"rc=1\n"
+                good = got.stdout == want
+                if text_size == 14:
+                    ref = subprocess.run([reference, "-c", script], capture_output=True,
+                                         timeout=60, env=env)
+                    good = good and ref.stdout == got.stdout
+                if good:
+                    passed += 1
+                elif len(notes) < 6:
+                    notes.append("%s %r at %d: %r, want %r" % (name, pattern, text_size,
+                                                                got.stdout[-30:], want))
+    return passed, total, notes
+
+
 SHELL_CHECKS = (
     shell_restricted_function_import,
+    shell_glob_extended_bounded,
     shell_hostile_environment,
     shell_nesting_limits,
     shell_signal_dispositions,
