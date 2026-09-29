@@ -9098,27 +9098,20 @@ static COLD bool exec_not_found_handled()
 extern p8 address_to program_stack_base;
 static positive exec_stack_floor;
 
-static COLD bool exec_stack_spent()
+static COLD fn exec_stack_measure()
 {
         positive here;
         positive limits[2];
+        positive top = program_stack_base ? (positive)program_stack_base
+                                          : (positive)address_of here;
+        positive room = 8u << 20;
 
-        if (!exec_stack_floor)
-        {
-                positive top = program_stack_base ? (positive)program_stack_base
-                                                  : (positive)address_of here;
-                positive room = 8u << 20;
-
-                if (!system_call_4(syscall(prlimit64), 0, 3, 0,
-                                   (positive)limits) && limits[0])
-                        room = limits[0] == ~(positive)0 ? (256u << 20)
-                                                          : limits[0];
-                exec_stack_floor = top - room + (room / 8 > (256u << 10)
-                                                     ? room / 8
-                                                     : (256u << 10));
-        }
-
-        return (positive)address_of here < exec_stack_floor;
+        if (!system_call_4(syscall(prlimit64), 0, 3, 0, (positive)limits) &&
+            limits[0])
+                room = limits[0] == ~(positive)0 ? (256u << 20) : limits[0];
+        exec_stack_floor = top - room + (room / 8 > (256u << 10)
+                                             ? room / 8
+                                             : (256u << 10));
 }
 
 static b32 exec_call(positive slot)
@@ -9166,7 +9159,10 @@ static b32 exec_call(positive slot)
                 }
         }
 
-        if (exec_stack_spent())
+        if (unlikely(!exec_stack_floor))
+                exec_stack_measure();
+
+        if (unlikely((positive)address_of held_function_line < exec_stack_floor))
         {
                 shell_diagnostic_where();
                 string_format(log_error,
