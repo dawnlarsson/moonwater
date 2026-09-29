@@ -19959,6 +19959,10 @@ _TEXT_STREAM_SOURCES = {
     "shared": "{{ run {words}; run {words}; echo \"status $?\"; }} < six",
     "sharedpipe": "env cat six | {{ run {words}; echo \"status $?\"; env cat; }}",
     "big": "env seq 1 1000000 | {{ run {words}; echo \"status $?\"; }} | env md5sum",
+    #   A regular file past tr's threaded size, under an address-space cap
+    #   the pool's buffers do not fit: every byte still comes out.
+    "capped": ("env seq 1 1500000 | env head -c 8388608 > many\n"
+               "{{ ulimit -v 100000; run {words} < many; echo \"status $?\"; }} | env md5sum"),
     "full": ("export TMPDIR=$PWD/m\n"
              "env seq 1 1000000 | {{ run {words}; echo \"status $?\"; }} | env md5sum"),
     #   The writer pauses after its first line until the reader has had
@@ -19986,8 +19990,9 @@ _TEXT_STREAM_CASES = (
     ("cat", "pipe", "-n"), ("cat", "big", "-v"), ("cat", "offset", "-n"),
     ("head", "shared", "-c", "3"), ("head", "shared", "-n", "1"),
     ("wc", "offset"), ("wc", "offset", "-c"), ("nl", "pipe"),
+    ("tr", "capped", "0-9", "a-j"), ("tr", "capped", "-d", "5"), ("tr", "file", "0-9", "a-j"),
 )
-_TEXT_STREAM_TOOLS = ("tac", "tail", "cat", "od", "head", "wc", "nl")
+_TEXT_STREAM_TOOLS = ("tac", "tail", "cat", "od", "head", "wc", "nl", "tr")
 
 
 def _text_stream_valid(argv):

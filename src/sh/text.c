@@ -21008,6 +21008,7 @@ typedef struct
         p8 address_to table;
         positive address_to kept;
         p8 address_to failed;
+        positive written; // chunks the sink has put out
 } tr_parallel_run;
 
 static fn tr_parallel_job(address_any context, positive index,
@@ -21067,6 +21068,7 @@ static bool tr_parallel_sink(address_any context, positive index,
                 return false;
         }
 
+        run->written = index + 1;
         return !text_out_failed;
 }
 
@@ -21104,10 +21106,24 @@ static bool text_tr_parallel(bool remove, p8 address_to table)
         run.kept = (positive address_to)(address_any)held;
         run.failed = held + count * sizeof(positive);
 
-        parallel_ordered(tr_parallel_job, tr_parallel_sink, address_of run,
-                         count, run.size);
+        bool whole = parallel_ordered(tr_parallel_job, tr_parallel_sink, address_of run,
+                                      count, run.size);
 
         memory_free(held, ledger);
+
+        /*
+                A pool that could not start, or a chunk whose output could
+                not be held, stops the run with no sink told: the rest of
+                the input went unwritten and tr answered 0. What the chunks
+                written did not cover is left to the serial loop, which
+                needs no memory past its buffers.
+        */
+        if (!whole && !text_status && !text_out_failed)
+        {
+                system_seek(text_input.handle, run.start + run.written * TR_CHUNK,
+                            FILE_SEEK_SET);
+                return false;
+        }
 
         // The descriptor ends where reading through would have left it.
         system_seek(text_input.handle, run.start + run.size, FILE_SEEK_SET);
