@@ -15655,6 +15655,74 @@ static positive record_fields_reference(p32 address_to out, const p8 address_to 
         return count;
 }
 
+/*
+        The record scans against a block whose neighbours are unmapped: a
+        short part is read from the aligned sixty four bytes that hold it, and
+        that must never reach a page the block does not. Every size to 200 is
+        put against the start of a mapped page and against its end, with
+        PROT_NONE on both sides, on every body the machine has. A read past
+        either edge is a fault, which ends the run and so fails the lane.
+*/
+fn check_record_guards()
+{
+        static p32 got[2 * 256];
+        static b8 table[256];
+        p8 address_to pages = memory(3 * 4096);
+        bool mapped = (bipolar)(positive)pages > 0;
+
+        same("record scans", "guard mappings", mapped, 1);
+        if (!mapped)
+                return;
+        bool protected =
+            system_call_3(syscall(mprotect), (positive)pages, 4096, 0) == 0 &&
+            system_call_3(syscall(mprotect), (positive)(pages + 8192), 4096, 0) == 0;
+        same("record scans", "guard pages protected", protected, 1);
+        if (!protected)
+        {
+                memory_free(pages, 3 * 4096);
+                return;
+        }
+        for (positive i = 0; i < 256; i++)
+                table[i] = i == ' ' || i == '\t';
+#if X64
+        p8 avx512 = cpu_has_avx512, vbmi = cpu_has_avx512_vbmi;
+        positive tiers = 3;
+#else
+        positive tiers = 1;
+#endif
+        p8 address_to middle = pages + 4096;
+        positive sink = 0;
+
+        for (positive tier = 0; tier < tiers; tier++)
+        {
+#if X64
+                cpu_has_avx512 = tier < 2 ? avx512 : 0;
+                cpu_has_avx512_vbmi = tier == 0 ? vbmi : 0;
+#endif
+                for (positive size = 0; size <= 200; size++)
+                        for (positive edge = 0; edge < 2; edge++)
+                        {
+                                p8 address_to at = edge ? middle + 4096 - size : middle;
+
+                                for (positive i = 0; i < size; i++)
+                                        at[i] = (p8)(next() & 3 ? 'a' + i % 7 : next() & 1 ? ' ' : '\t');
+                                sink += (memory_offsets_fields)(got, at, size, table, 256);
+                                sink += (memory_offsets_fields_blank)(got, at, size, '\n', 256);
+                                sink += (memory_offsets_fields_blank)(got, at, size, 'a', 3);
+                                sink += (memory_nth_of)(at, ' ', size, 1 + size % 5).x;
+                                sink += (memory_nth_last_of)(at, ' ', size, 1 + size % 5).x;
+                                sink += (positive)(memory_last_of_either)(at, ' ', '\t', size);
+                        }
+        }
+#if X64
+        cpu_has_avx512 = avx512;
+        cpu_has_avx512_vbmi = vbmi;
+#endif
+        // Reached: nothing faulted.
+        same("record scans", "reads stay inside the block", sink >= 0, 1);
+        memory_free(pages, 3 * 4096);
+}
+
 fn check_record_scans()
 {
         static const positive sizes[] = {255, 256, 257, 511, 1000, 4095, 4096};
@@ -25317,6 +25385,7 @@ b32 main()
         check_dirty_arguments();
         check_offsets_range();
         check_record_scans();
+        check_record_guards();
         check_checksums();
         check_copy_match();
         check_move();

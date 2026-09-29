@@ -26916,17 +26916,11 @@ static bool csplit_line_offset(csplit_state address_to state,
         positive at = state->cursor;
         positive line = state->cursor_line;
 
-        while (line < wanted)
-        {
-                p8 address_to found = memory_first_of(
-                    state->input + at, '\n', state->length - at);
-
-                if (found)
-                        at = (positive)(found - state->input) + 1;
-                else
-                        at = state->length;
-                line++;
-        }
+        // The lines between are one pass to the wanted-th newline, or to the
+        // end when there are fewer.
+        if (line < wanted)
+                at += memory_nth_of(state->input + at, '\n', state->length - at,
+                                    wanted - line).x;
 
         if (at == state->length && !allow_end)
                 return false;

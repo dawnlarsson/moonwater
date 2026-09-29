@@ -4419,6 +4419,34 @@ __asm__(
 );
 #endif
 
+/*
+        Where count blank-separated fields, counted from scan, end: the tail of
+        text_blank_field's loop of one call a field, asked in one pass of
+        memory_offsets_fields_blank for up to thirty two at a time. A line with
+        fewer fields ends at its length. Its edges are on this stack, since
+        kept off the shared statics for threads.
+*/
+static positive text_blank_skip(const p8 address_to bytes, positive length,
+                                positive scan, positive count, p8 extra)
+{
+        p32 edges[64];
+
+        while (count && scan < length)
+        {
+                positive want = min(count, (positive)32);
+                positive found = memory_offsets_fields_blank(edges, bytes + scan,
+                                                             length - scan, extra, want);
+
+                if (found < want)
+                        return length;
+
+                scan += edges[2 * found - 1];
+                count -= found;
+        }
+
+        return scan;
+}
+
 static bool join_field_next(join_fields address_to fields,
                             p8 address_to address_to value,
                             positive address_to length)
@@ -7493,23 +7521,11 @@ static positive text_tail_start(positive handle, positive size, positive count,
                         continue;
                 }
 
-                positive need = count - found;
-                positive limit = usable;
+                positive2 hit = memory_nth_last_of(window, (b8)text_delimiter,
+                                                   usable, count - found);
 
-                while (need)
-                {
-                        p8 address_to hit =
-                            memory_last_of(window, (b8)text_delimiter, limit);
-
-                        if (!hit)
-                                break;
-
-                        limit = (positive)(hit - window);
-                        need--;
-
-                        if (!need)
-                                return at + limit + 1;
-                }
+                if (hit.y == count - found)
+                        return at + hit.x + 1;
         }
 
         return floor;
@@ -7587,19 +7603,8 @@ static positive text_window_start(p8 address_to data, positive used,
                         continue;
                 }
 
-                positive need = count - found;
-                positive limit = take;
-
-                for (;;)
-                {
-                        p8 address_to hit = (p8 address_to)memory_last_of(
-                            data + from, (b8)text_delimiter, limit);
-
-                        limit = (positive)(hit - (data + from));
-
-                        if (!--need)
-                                return from + limit + 1;
-                }
+                return from + memory_nth_last_of(data + from, (b8)text_delimiter,
+                                                 take, count - found).x + 1;
         }
 
         return 0;
@@ -7851,14 +7856,8 @@ static fn text_stream_skip(positive skip, bool by_bytes)
                         continue;
                 }
 
-                p8 address_to past = at;
-
-                for (; skip; skip--)
-                        past = (p8 address_to)memory_first_of(
-                                   past, (b8)text_delimiter,
-                                   (positive)(at + left - past)) + 1;
-
-                text_input.position += (positive)(past - at);
+                text_input.position += memory_nth_of(at, (b8)text_delimiter, left, skip).x;
+                skip = 0;
         }
 }
 
@@ -7881,14 +7880,8 @@ static fn text_head_records(positive count)
 
                 if (have >= count)
                 {
-                        p8 address_to past = at;
-
-                        for (; count; count--)
-                                past = (p8 address_to)memory_first_of(
-                                           past, (b8)text_delimiter,
-                                           (positive)(at + left - past)) + 1;
-
-                        take = (positive)(past - at);
+                        take = memory_nth_of(at, (b8)text_delimiter, left, count).x;
+                        count = 0;
                 }
                 else
                         count -= have;
@@ -21653,10 +21646,7 @@ static bool uniq_option_seen(p8 letter, string_address value)
 static positive uniq_skipped(p8 address_to line, positive length,
                              positive fields, positive characters)
 {
-        positive skip = 0;
-
-        for (positive f = 0; f < fields && skip < length; f++)
-                skip = text_blank_field(line, length, skip, '\t').y;
+        positive skip = text_blank_skip(line, length, 0, fields, '\t');
 
         return skip + min(characters, length - skip);
 }
