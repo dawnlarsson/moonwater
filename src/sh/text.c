@@ -2392,6 +2392,217 @@ static bipolar big_compare(const p64 address_to a, positive an,
 }
 
 /*
+        Above BIG_NTT limbs a product is a number-theoretic convolution over
+        three 63-bit primes p = c 2^32 + 1, joined by Garner's steps: a
+        coefficient of the product, a sum of at most min(an, bn) products of
+        two limbs, is below 2^128 min(an, bn), and the three primes' product
+        is above 2^186. Arithmetic is Montgomery's with R = 2^64 and every
+        residue below its prime, which is above 2^62, so a sum of two fits a
+        word and one subtraction reduces it. The transform is the decimation
+        in frequency of a length N, a power of two above an + bn, taken depth
+        first so that a half that fits the cache is finished there; the
+        twiddles are laid one level after another, level m at offset m / 2,
+        and the inverse transform's are the forward's turned round, w^-j =
+        -w^(m/2-j).
+*/
+#ifndef BIG_NTT
+#define BIG_NTT 3000
+#endif
+
+typedef struct
+{
+        p64 prime, inverse, square, root; // p, 1/p mod 2^64, R^2 mod p, a 2^32nd root of one times R
+} big_ntt_prime;
+
+static const big_ntt_prime big_ntt_primes[3] = {
+    {0x7ffffff900000001ull, 0x8000000700000001ull, 0x00000a7ffffffe7cull, 0x7e4bb815d90074f8ull},
+    {0x7fffffe900000001ull, 0x8000001700000001ull, 0x0017b7fffffef7cull, 0x364602484598e8ceull},
+    {0x7fffffdb00000001ull, 0x8000002500000001ull, 0x0062dbfffffd53cull, 0x08ec2b4dd2ace02cull},
+};
+
+static inline p64 big_ntt_reduce(p128 product, p64 prime, p64 inverse)
+{
+        p64 high = (p64)(product >> 64);
+        p64 take = (p64)((p128)((p64)product * inverse) * prime >> 64);
+
+        return high >= take ? high - take : high + prime - take;
+}
+
+static inline p64 big_ntt_multiply(p64 a, p64 b, p64 prime, p64 inverse)
+{
+        return big_ntt_reduce((p128)a * b, prime, inverse);
+}
+
+static inline p64 big_ntt_add(p64 a, p64 b, p64 prime)
+{
+        p64 sum = a + b;
+
+        return sum >= prime ? sum - prime : sum;
+}
+
+static inline p64 big_ntt_subtract(p64 a, p64 b, p64 prime)
+{
+        return a >= b ? a - b : a + prime - b;
+}
+
+static void big_ntt_forward(p64 address_to a, positive length, const p64 address_to twiddle,
+                            p64 prime, p64 inverse)
+{
+        while (length > 1)
+        {
+                positive half = length / 2;
+                const p64 address_to w = twiddle + half;
+
+                for (positive j = 0; j < half; j++)
+                {
+                        p64 x = a[j];
+                        p64 y = a[j + half];
+
+                        a[j] = big_ntt_add(x, y, prime);
+                        a[j + half] = big_ntt_multiply(big_ntt_subtract(x, y, prime), w[j], prime,
+                                                       inverse);
+                }
+                big_ntt_forward(a, half, twiddle, prime, inverse);
+                a += half;
+                length = half;
+        }
+}
+
+static void big_ntt_inverse(p64 address_to a, positive length, const p64 address_to twiddle,
+                            p64 prime, p64 inverse)
+{
+        if (length == 1)
+                return;
+
+        positive half = length / 2;
+        const p64 address_to w = twiddle + half;
+
+        big_ntt_inverse(a, half, twiddle, prime, inverse);
+        big_ntt_inverse(a + half, half, twiddle, prime, inverse);
+        for (positive j = 0; j < half; j++)
+        {
+                // a[j + half] times w^-j, and w^-j is -w^(half-j) but for j = 0.
+                p64 x = a[j];
+                p64 y = j ? big_ntt_multiply(a[j + half], w[half - j], prime, inverse) : a[half];
+
+                a[j] = j ? big_ntt_subtract(x, y, prime) : big_ntt_add(x, y, prime);
+                a[j + half] = j ? big_ntt_add(x, y, prime) : big_ntt_subtract(x, y, prime);
+        }
+}
+
+// The twiddles of length N: level m = 2 half at [half, 2 half), w^j for j below half.
+static void big_ntt_twiddles(p64 address_to twiddle, positive length, const big_ntt_prime address_to p)
+{
+        p64 root = p->root;
+        p64 one = (p64)0 - p->prime;
+        p64 w = root;
+
+        while (one >= p->prime)
+                one -= p->prime;
+        for (positive size = (positive)1 << 32; size > length; size >>= 1)
+                root = big_ntt_multiply(root, root, p->prime, p->inverse);
+        w = one;
+        for (positive j = 0; j < length / 2; j++)
+        {
+                twiddle[length / 2 + j] = w;
+                w = big_ntt_multiply(w, root, p->prime, p->inverse);
+        }
+        for (positive half = length / 4; half; half >>= 1)
+                for (positive j = 0; j < half; j++)
+                        twiddle[half + j] = twiddle[2 * half + 2 * j];
+}
+
+// One prime's residues of a * b at length N, in out (N words, plain).
+static void big_ntt_residues(p64 address_to out, p64 address_to spare, p64 address_to twiddle,
+                             const p64 address_to a, positive an, const p64 address_to b,
+                             positive bn, positive length, const big_ntt_prime address_to p)
+{
+        p64 prime = p->prime, inverse = p->inverse;
+        p64 scale = (p64)0 - prime;
+
+        while (scale >= prime)
+                scale -= prime;
+        for (positive size = 1; size < length; size <<= 1)
+                scale = (scale & 1 ? scale + prime : scale) >> 1;
+        // scale is R / N: the Montgomery form of 1 / N.
+
+        big_ntt_twiddles(twiddle, length, p);
+        for (positive i = 0; i < an; i++)
+                out[i] = big_ntt_multiply(a[i], p->square, prime, inverse);
+        memory_fill(out + an, 0, (length - an) * sizeof(p64));
+        for (positive i = 0; i < bn; i++)
+                spare[i] = big_ntt_multiply(b[i], p->square, prime, inverse);
+        memory_fill(spare + bn, 0, (length - bn) * sizeof(p64));
+        big_ntt_forward(out, length, twiddle, prime, inverse);
+        big_ntt_forward(spare, length, twiddle, prime, inverse);
+        for (positive i = 0; i < length; i++)
+                out[i] = big_ntt_multiply(big_ntt_multiply(out[i], spare[i], prime, inverse), scale,
+                                          prime, inverse);
+        big_ntt_inverse(out, length, twiddle, prime, inverse);
+        for (positive i = 0; i < length; i++)
+                out[i] = big_ntt_reduce(out[i], prime, inverse);
+}
+
+/*
+        r = a * b, an + bn limbs. False when memory ran out.
+*/
+static bool big_multiply_ntt(p64 address_to r, const p64 address_to a, positive an,
+                             const p64 address_to b, positive bn)
+{
+        positive length = 1;
+
+        while (length < an + bn)
+                length <<= 1;
+
+        p64 address_to store = (p64 address_to)memory_take(5 * length * sizeof(p64));
+
+        if (!store)
+                return false;
+
+        p64 address_to r1 = store;
+        p64 address_to r2 = store + length;
+        p64 address_to r3 = store + 2 * length;
+        p64 address_to spare = store + 3 * length;
+        p64 address_to twiddle = store + 4 * length;
+
+        big_ntt_residues(r1, spare, twiddle, a, an, b, bn, length, big_ntt_primes + 0);
+        big_ntt_residues(r2, spare, twiddle, a, an, b, bn, length, big_ntt_primes + 1);
+        big_ntt_residues(r3, spare, twiddle, a, an, b, bn, length, big_ntt_primes + 2);
+
+        const p64 p1 = big_ntt_primes[0].prime;
+        const p64 p2 = big_ntt_primes[1].prime, n2 = big_ntt_primes[1].inverse;
+        const p64 p3 = big_ntt_primes[2].prime, n3 = big_ntt_primes[2].inverse;
+        const p64 inverse_of_p1 = 0x10000000ull;              // 1 / p1 mod p2, times R
+        const p64 inverse_of_p12 = 0x5d8fd8e284444445ull;      // R / (p1 p2) mod p3
+        const p64 inverse_of_p12_square = 0x5999997fe04e04e1ull; // R^2 / (p1 p2) mod p3
+        const p128 p12 = (p128)p1 * p2;
+        p64 c0 = 0, c1 = 0;
+
+        for (positive j = 0; j + 1 < an + bn; j++)
+        {
+                p64 v1 = r1[j];
+                p64 d = big_ntt_subtract(r2[j], v1 >= p2 ? v1 - p2 : v1, p2);
+                p64 t2 = big_ntt_multiply(d, inverse_of_p1, p2, n2);
+                p128 x12 = (p128)v1 + (p128)p1 * t2;
+                p64 y = big_ntt_reduce(x12, p3, n3);
+                p64 t3 = big_ntt_subtract(big_ntt_multiply(r3[j], inverse_of_p12, p3, n3),
+                                          big_ntt_multiply(y, inverse_of_p12_square, p3, n3), p3);
+                p128 low = (p128)(p64)p12 * t3;
+                p128 mid = (p128)(p64)(p12 >> 64) * t3 + (p64)(low >> 64);
+                p128 s0 = (p128)(p64)x12 + (p64)low + c0;
+                p128 s1 = (p128)(p64)(x12 >> 64) + (p64)mid + c1 + (p64)(s0 >> 64);
+                p64 s2 = (p64)(mid >> 64) + (p64)(s1 >> 64);
+
+                r[j] = (p64)s0;
+                c0 = (p64)s1;
+                c1 = s2;
+        }
+        r[an + bn - 1] = c0;
+        memory_give(store);
+        return true;
+}
+
+/*
         r = a * b, an + bn limbs, r apart from both. The scratch is
         8 max(an, bn) + 2048 limbs, which the Karatsuba step's three
         (h + 1)-limb pieces and the recursion under them stay inside.
@@ -2415,6 +2626,8 @@ static fn big_multiply_into(p64 address_to r, const p64 address_to a, positive a
                 memory_fill(r, 0, an * sizeof(p64));
                 return;
         }
+        if (bn >= BIG_NTT && big_multiply_ntt(r, a, an, b, bn))
+                return;
         if (bn < BIG_KARATSUBA)
         {
                 r[an] = limbs_multiply_word(r, a, an, b[0], 0);

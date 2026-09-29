@@ -20309,14 +20309,15 @@ _TEXT_ENCODING_OPERANDS = ((), ("a.txt",), ("-",), ("missing",), ("empty",), ("b
 #       to a few hundred digits and split by powers of 58 past that: sizes
 #       either side of each limb and of the split, all-ones runs that sit
 #       just below a power, and digits spelling 58^k - 1 and 58^k exactly.
-_TEXT_BASE58_SIZES = (7, 8, 9, 64, 257, 300, 2049, 9000, 40000)
-_TEXT_BASE58_POWERS = (10, 319, 321, 1281, 5121, 20481)
+_TEXT_BASE58_SIZES = (7, 8, 9, 64, 257, 300, 2049, 9000, 40000, 120000)
+_TEXT_BASE58_POWERS = (10, 319, 321, 1281, 5121, 20481, 81921)
 INPUTS.update({
     **{f"text_base58_bytes_{size}_{shape}":
        (b"\0\0" if shape == "lead" else b"") +
        (b"\xff" * size if shape == "ff" else
+        b"\xff\x00" * (size // 2) + b"\x01" * (size % 2) if shape == "alt" else
         hashlib.shake_256(b"base58 %d" % size).digest(size))
-       for size in _TEXT_BASE58_SIZES for shape in ("mixed", "ff", "lead")},
+       for size in _TEXT_BASE58_SIZES for shape in ("mixed", "ff", "lead", "alt")},
     **{f"text_base58_digits_{count}_{shape}":
        b"z" * count if shape == "top" else b"2" + b"1" * count
        for count in _TEXT_BASE58_POWERS for shape in ("top", "power")},
@@ -20808,7 +20809,7 @@ TEXT_UTILITIES = (
                      for stdin in ("text_base58", "text_base58_garbage", "nul", "empty")
                      for argv in (("--base58",), ("--base58", "-d"), ("--base58", "-di"))),
                    *({"argv": ("--base58",) + wrap, "stdin": f"text_base58_bytes_{size}_{shape}", "fixture": "text"}
-                     for size in _TEXT_BASE58_SIZES for shape in ("mixed", "ff", "lead")
+                     for size in _TEXT_BASE58_SIZES for shape in ("mixed", "ff", "lead", "alt")
                      for wrap in ((), ("-w", "0"))),
                    *({"argv": ("--base58", "-d"), "stdin": f"text_base58_digits_{count}_{shape}", "fixture": "text"}
                      for count in _TEXT_BASE58_POWERS for shape in ("top", "power")),
