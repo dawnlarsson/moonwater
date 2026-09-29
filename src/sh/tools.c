@@ -3912,6 +3912,122 @@ static bool login_fullname(string_address name, p8 address_to into,
         return false;
 }
 
+/*
+        pinky -l USER: GNU's print_long_entry. The account's own fields are
+        read from the passwd text, the name is cut at the first comma with an
+        ampersand standing for the login name capitalised, and the project and
+        plan files of the home directory are copied out as they are.
+*/
+static bool login_pinky_field(string_address name, positive field,
+                              p8 address_to into, positive room)
+{
+        p8 address_to accounts = file_account_text(FILE_ACCOUNT_USER);
+        positive at = 0;
+        positive wanted = string_length(name);
+        file_account_record record;
+
+        while (file_account_next(accounts, address_of at, field, address_of record))
+        {
+                if (record.name_length != wanted ||
+                    memory_compare(record.name, name, wanted) ||
+                    !record.has_value)
+                        continue;
+
+                positive made = record.value_length < room - 1 ? record.value_length
+                                                               : room - 1;
+
+                memory_copy(into, record.value, made);
+                into[made] = end;
+                return true;
+        }
+
+        return false;
+}
+
+static fn login_pinky_cat(string_address header, string_address home,
+                          string_address file)
+{
+        p8 path[FILE_PATH_MAX];
+        positive length = string_length(home);
+
+        if (length + string_length(file) + 2 >= sizeof(path))
+                return;
+        memory_copy(path, home, length);
+        if (length && path[length - 1] != '/')
+                path[length++] = '/';
+        string_copy_max_end(path + length, file, sizeof(path) - length - 1);
+
+        bipolar handle = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC);
+
+        if (handle < 0)
+                return;
+
+        //      GNU writes these to the descriptor itself while its own
+        //      lines wait in stdio's buffer: on a terminal the buffer has
+        //      been emptied at each newline, on a pipe it has not, and the
+        //      file comes out ahead of what was printed before it.
+        if (stream_is_terminal(1))
+                text_flush();
+        system_write_all(1, header, string_length(header));
+
+        p8 block[4096];
+        bipolar got;
+
+        while ((got = system_read_once((positive)handle, (string_address)block,
+                                       sizeof(block))) > 0)
+                system_write_all(1, (string_address)block, (positive)got);
+        system_close(handle);
+}
+
+static fn login_pinky_long(string_address name, bool home_and_shell,
+                           bool project, bool plan)
+{
+        p8 directory[FILE_PATH_MAX];
+        p8 shell[FILE_PATH_MAX];
+        p8 fullname[256];
+
+        text_put_string("Login name: ");
+        login_put_width(name, string_length(name), 28, false);
+        text_put_string("In real life: ");
+
+        bool known = login_pinky_field(name, 2, directory, 2) &&
+                     login_fullname(name, fullname, sizeof(fullname));
+
+        if (!known)
+        {
+                text_put_string(" ???\n");
+                return;
+        }
+
+        text_put_character(' ');
+        text_put_string(fullname);
+        text_put_character('\n');
+
+        login_pinky_field(name, 5, directory, sizeof(directory));
+        login_pinky_field(name, 6, shell, sizeof(shell));
+
+        if (home_and_shell)
+        {
+                text_put_string("Directory: ");
+                login_put_width(directory, string_length(directory), 29, false);
+                text_put_string("Shell: ");
+                text_put_character(' ');
+                text_put_string(shell);
+                text_put_character('\n');
+        }
+
+#if MOONWATER_STRICT < STRICT_TIGHT
+        if (project)
+                login_pinky_cat("Project: ", directory, ".project");
+        if (plan)
+                login_pinky_cat("Plan:\n", directory, ".plan");
+#else
+        (void)project;
+        (void)plan;
+#endif
+        text_put_character('\n');
+}
+
 static fn login_pinky_heading()
 {
         login_put_width("Login", 5, 8, false);
@@ -4027,10 +4143,24 @@ static b32 tools_pinky()
         if (!file_take(address_of taking) || file_operand_failed)
                 return text_done(1);
 
-        if (output_mode == 'l')
-                return text_done(string_diagnostic(&text_diagnostic, 1, null, "long format is not supported"));
-
         positive flags = taking.flags;
+
+        if (output_mode == 'l')
+        {
+                if (!file_operand_count)
+                {
+                        return text_done(text_operand_trouble(
+                            "no username specified; at least one must be specified when using -l",
+                            null, null));
+                }
+                for (positive i = 0; i < file_operand_count; i++)
+                        login_pinky_long(file_operand_at(i),
+                                         !(flags & FILE_FLAG('b')),
+                                         !(flags & FILE_FLAG('h')),
+                                         !(flags & FILE_FLAG('p')));
+                return text_done(0);
+        }
+
         login_pinky.heading = !(flags & FILE_FLAG('f'));
         login_pinky.fullname =
             !(flags & (FILE_FLAG('w') | FILE_FLAG('i') | FILE_FLAG('q')));

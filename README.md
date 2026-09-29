@@ -322,6 +322,8 @@ coreutils does:
 | `split`, `csplit`, and any output opened for writing (`tar -f`, `wget -O`) | write through an output name that is a link | replace the link with the new file |
 | `chown -R -L`, `chgrp -R -L` | follow the links met in the tree | follow none below the operand |
 | `cp -r` | makes the new directory where it goes and fills it | builds it in a private stage and publishes it whole |
+| `install` | leaves the copy in place, mode 0600, when the owner asked for is refused | takes the copy away and says it was not published |
+| `pinky -l` | copies each user's `~/.project` and `~/.plan` to the terminal as they are | leaves them out |
 
 Every row has a check in `floodlight_hardened` (`test/run`), run against a shell
 built from `kernel/profile/sec_hardened`'s configuration; the default half is
