@@ -36141,6 +36141,73 @@ int main(int argc, char **argv) {
     return 0 if passed == total and ran.returncode == 0 else 1
 
 
+def harness_shared_page(argv):
+    """Every word the compositor takes from a program's page is taken once.
+
+    struct window is a page the program has mapped and can write at any
+    instant from any thread, so a word read twice can answer twice: a bound
+    checked against the first answer and a use made with the second is no
+    bound at all, and the two double fetches that were found in the compositor
+    (the cell word canvas_cells took per scanline, the line length
+    pane_restride read in two passes) were exactly that. The rule that closes
+    the class is that a field of the shared page is read through READ_ONCE or
+    an acquire and written through WRITE_ONCE or a release, into a local that
+    is what the checks and the uses share; the names it is not applied to are
+    listed here, each with why. This reads canvas.c, without its comments, for
+    every use of `shared->` that is not inside one of those, and fails on any
+    that is not on the list -- and is then run over a copy with one read made
+    plain and one write, which it has to find, or it is not looking.
+    """
+    import re
+    text = (HARNESS_ROOT / "src/canvas/canvas.c").read_text()
+    wrappers = re.compile(r"(READ_ONCE|WRITE_ONCE|smp_load_acquire|smp_store_release|atomic_\w+|"
+                          r"__atomic_\w+|test_bit)\s*\(")
+    #   The compositor's own stores into the ring of keys, which the program
+    #   reads and only the compositor writes the slots of: the index is a local
+    #   taken once, and the slot is written before the head that publishes it.
+    #   And the title, which is copied whole and terminated in the copy.
+    allowed = {"title": 1, "keys": 3}
+
+    def plain_uses(source):
+        source = re.sub(r"/\*.*?\*/", lambda m: "\n" * m.group(0).count("\n"), source, flags=re.S)
+        source = re.sub(r"//[^\n]*", "", source)
+        found = []
+        for match in re.finditer(r"\bshared->(\w+)", source):
+            start = max(source.rfind(";", 0, match.start()), source.rfind("{", 0, match.start()),
+                        source.rfind("}", 0, match.start()))
+            if wrappers.search(source[start + 1:match.start()]):
+                continue
+            found.append((source.count("\n", 0, match.start()) + 1, match.group(1)))
+        return found
+
+    checks = failures = 0
+
+    def check(good, what):
+        nonlocal checks, failures
+        checks += 1
+        if not good:
+            failures += 1
+            print("  FAIL " + what)
+
+    seen = {}
+    for line, field in plain_uses(text):
+        seen[field] = seen.get(field, 0) + 1
+        check(field in allowed and seen[field] <= allowed[field],
+              "canvas.c line %d uses shared->%s outside READ_ONCE, WRITE_ONCE or an acquire and release"
+              % (line, field))
+    check(seen == allowed, "the words allowed to be plain are the ones used: %r" % seen)
+    #   The gate is alive: a read and a write made plain are both found.
+    read = text.replace("width = READ_ONCE(shared->width);", "width = shared->width;", 1)
+    write = text.replace("WRITE_ONCE(shared->damage_rows, 0);", "shared->damage_rows = 0;", 1)
+    check(read != text and ("width" in {f for _, f in plain_uses(read)}),
+          "a plain read of shared->width is found by the scan")
+    check(write != text and ("damage_rows" in {f for _, f in plain_uses(write)}),
+          "a plain store to shared->damage_rows is found by the scan")
+    print("shared page: %d of %d checks" % (checks - failures, checks))
+    write_tally("shared-page", checks - failures, checks)
+    return 1 if failures else 0
+
+
 def harness_pane_pages(argv):
     """A program's window is paid for by the program, and says little.
 
@@ -56046,6 +56113,7 @@ HARNESS_CHECKS = {
     "engines": harness_engines_main,
     "core_state": harness_core_state,
     "pane_pages": harness_pane_pages,
+    "shared_page": harness_shared_page,
     "spark_entry": harness_spark_entry,
     "build_tools": harness_build_tools,
     "macos_read_retry": harness_macos_read_retry,
