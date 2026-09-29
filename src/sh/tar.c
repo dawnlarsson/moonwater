@@ -378,6 +378,45 @@ static p64 tar_psp_offset;
 static p8 tar_psp_kind;
 static bool tar_psp_bad;
 
+/* Extended attributes and ACLs a pax header carried, kept as records of
+   kind, name length, value length, name and value until the member they
+   belong to is made: 1 an attribute, 2 the access ACL, 3 the default one. */
+static p8 address_to tar_pax_attr;
+static positive tar_pax_attr_room;
+static positive tar_pax_attr_used;
+
+#ifndef TAR_PARSE_ONLY
+static bool tar_pax_attr_add(p8 kind, string_address name, positive name_length,
+                             string_address value, positive value_length)
+{
+        positive need = 9 + name_length + value_length;
+        p32 name_size = (p32)name_length;
+        p32 value_size = (p32)value_length;
+
+        if (tar_pax_attr_used + need > (positive)1 << 22)
+                return false;
+        if (!shell_array_room(tar_pax_attr, tar_pax_attr_room,
+                              tar_pax_attr_used + need))
+                return false;
+        p8 address_to at = tar_pax_attr + tar_pax_attr_used;
+
+        at[0] = kind;
+        memory_copy(at + 1, address_of name_size, 4);
+        memory_copy(at + 5, address_of value_size, 4);
+        memory_copy(at + 9, name, name_length);
+        memory_copy(at + 9 + name_length, value, value_length);
+        tar_pax_attr_used += need;
+        return true;
+}
+#else
+static bool tar_pax_attr_add(p8 kind, string_address name, positive name_length,
+                             string_address value, positive value_length)
+{
+        (void)kind; (void)name; (void)name_length; (void)value; (void)value_length;
+        return true;
+}
+#endif
+
 static fn tar_psp_add(p64 offset, p64 bytes)
 {
         if (tar_psp_used >= TAR_SPARSE_MAX)
@@ -399,6 +438,7 @@ static fn tar_pax_clear(tar_pax_state address_to state)
                 tar_psp_real = 0;
                 tar_psp_kind = 0;
                 tar_psp_bad = false;
+                tar_pax_attr_used = 0;
         }
         state->has_path = false;
         state->has_link = false;
@@ -577,6 +617,21 @@ static bool tar_pax_apply(tar_pax_state address_to state,
                         }
                 }
 
+                else if (key > 13 && !memory_compare(mark + 1, "SCHILY.xattr.", 13))
+                {
+                        if (!tar_pax_attr_add(1, mark + 14, key - 13, equal + 1, value))
+                                return false;
+                }
+                else if (key == 17 && !memory_compare(mark + 1, "SCHILY.acl.access", 17))
+                {
+                        if (!tar_pax_attr_add(2, "", 0, equal + 1, value))
+                                return false;
+                }
+                else if (key == 18 && !memory_compare(mark + 1, "SCHILY.acl.default", 18))
+                {
+                        if (!tar_pax_attr_add(3, "", 0, equal + 1, value))
+                                return false;
+                }
                 else if (key > 11 && !memory_compare(mark + 1, "GNU.sparse.", 11))
                 {
                         p64 number = 0;
@@ -823,6 +878,9 @@ struct tar_options
         bool numeric;
         bool short_o;
         bool sparse;
+        bool xattrs;
+        bool acls;
+        bool selinux;
         p8 sparse_version;
         string_address pax_option;
         p8 format;
@@ -884,6 +942,8 @@ typedef struct
         b64 seconds;
         p32 nanoseconds;
         bool timed;
+        positive attr_at;
+        positive attr_length;
 } tar_member_meta;
 
 typedef struct
@@ -1181,6 +1241,7 @@ static fn tar_fail(string_address what, bipolar failed)
 
 /* State of an archive being written. */
 static p64 tar_out_bytes;
+static bool tar_numeric_owner;
 static bool tar_create_fatal;
 static positive tar_create_verbose;
 static positive tar_dumped;
@@ -1797,6 +1858,370 @@ static bipolar tar_member_settle(bipolar handle, positive mode,
         return settled;
 }
 
+
+/*
+        Extended attributes and ACLs, GNU's --xattrs and --acls, carried in
+        pax records: SCHILY.xattr.NAME=value for each attribute (all of them,
+        the raw POSIX ACL ones included), SCHILY.acl.access and
+        SCHILY.acl.default as the long text form.  A file with either ACL
+        gets both, the access one from its mode when it has none of its own.
+        --xattrs-include and --xattrs-exclude pick attributes by pattern.
+        Extraction sets them after the member's mode, since an ACL's mask
+        is the mode's group bits; what cannot be set is said and is not an
+        error, as GNU has it.
+*/
+static bool tar_opt_xattrs;
+static bool tar_opt_acls;
+static string_address tar_xattr_include[8];
+static positive tar_xattr_include_count;
+static string_address tar_xattr_exclude[8];
+static positive tar_xattr_exclude_count;
+static p8 address_to tar_attr_store;
+static positive tar_attr_store_room;
+static positive tar_attr_store_used;
+
+#define TAR_ATTR_ROOM 65536
+static p8 tar_attr_names[TAR_ATTR_ROOM];
+static p8 tar_attr_value[TAR_ATTR_ROOM];
+
+static bool tar_xattr_wanted(string_address name)
+{
+        positive at;
+
+        for (at = 0; at < tar_xattr_exclude_count; at++)
+                if (file_fnmatch(tar_xattr_exclude[at], name))
+                        return false;
+        if (!tar_xattr_include_count)
+                return true;
+        for (at = 0; at < tar_xattr_include_count; at++)
+                if (file_fnmatch(tar_xattr_include[at], name))
+                        return true;
+        return false;
+}
+
+/* What the pax header of the member being made carried, kept for after
+   the member is. */
+static fn tar_attrs_keep(tar_member_meta address_to meta)
+{
+        meta->attr_at = 0;
+        meta->attr_length = 0;
+        if (!(tar_opt_xattrs || tar_opt_acls) || !tar_pax_attr_used ||
+            !shell_array_room(tar_attr_store, tar_attr_store_room,
+                              tar_attr_store_used + tar_pax_attr_used))
+                return;
+        memory_copy(tar_attr_store + tar_attr_store_used, tar_pax_attr,
+                    tar_pax_attr_used);
+        meta->attr_at = tar_attr_store_used;
+        meta->attr_length = tar_pax_attr_used;
+        tar_attr_store_used += tar_pax_attr_used;
+}
+
+#define TAR_ACL_USER_OBJ 1
+#define TAR_ACL_USER 2
+#define TAR_ACL_GROUP_OBJ 4
+#define TAR_ACL_GROUP 8
+#define TAR_ACL_MASK 0x10
+#define TAR_ACL_OTHER 0x20
+
+typedef struct
+{
+        p16 tag;
+        p16 perm;
+        p32 id;
+} tar_acl_entry;
+
+/* The kernel's ACL attribute as libacl's long text form. */
+static bool tar_acl_text(p8 address_to binary, positive length,
+                         p8 address_to into, positive room, positive address_to used)
+{
+        positive at = 0;
+        positive have = 0;
+
+        if (length < 4 || (length - 4) % 8 || binary[0] != 2 || binary[1] || binary[2] ||
+            binary[3])
+                return false;
+        for (positive entry = 4; entry < length; entry += 8)
+        {
+                tar_acl_entry item;
+                string_address tag = null;
+                p8 who[FILE_NAME_MAX];
+                p8 word[24];
+                positive part;
+
+                memory_copy(address_of item, binary + entry, 8);
+                switch (item.tag)
+                {
+                case TAR_ACL_USER_OBJ: tag = "user:"; break;
+                case TAR_ACL_USER: tag = "user:"; break;
+                case TAR_ACL_GROUP_OBJ: tag = "group:"; break;
+                case TAR_ACL_GROUP: tag = "group:"; break;
+                case TAR_ACL_MASK: tag = "mask:"; break;
+                case TAR_ACL_OTHER: tag = "other:"; break;
+                default: return false;
+                }
+                part = string_length(tag);
+                who[0] = end;
+                if (item.tag == TAR_ACL_USER || item.tag == TAR_ACL_GROUP)
+                {
+                        bool named = !tar_numeric_owner &&
+                                     (item.tag == TAR_ACL_USER
+                                          ? file_user_name(item.id, who, sizeof(who))
+                                          : file_group_name(item.id, who, sizeof(who)));
+
+                        if (!named)
+                                who[positive_into(who, item.id)] = end;
+                }
+                positive need = part + string_length((string_address)who) + 5;
+
+                if (have + need > room)
+                        return false;
+                memory_copy(into + have, tag, part);
+                have += part;
+                memory_copy(into + have, who, string_length((string_address)who));
+                have += string_length((string_address)who);
+                into[have++] = ':';
+                word[0] = item.perm & 4 ? 'r' : '-';
+                word[1] = item.perm & 2 ? 'w' : '-';
+                word[2] = item.perm & 1 ? 'x' : '-';
+                memory_copy(into + have, word, 3);
+                have += 3;
+                into[have++] = '\n';
+                at++;
+        }
+        /* The numeric form libacl writes has no newline after the last entry. */
+        if (tar_numeric_owner && have)
+                have--;
+        address_to used = have;
+        return at != 0;
+}
+
+/* The access ACL a mode alone gives. */
+static positive tar_acl_from_mode(positive mode, p8 address_to into)
+{
+        static const p8 names[3][8] = {"user::", "group::", "other::"};
+        positive have = 0;
+
+        for (positive at = 0; at < 3; at++)
+        {
+                positive bits = (mode >> (6 - 3 * at)) & 7;
+                positive length = string_length((string_address)names[at]);
+
+                memory_copy(into + have, names[at], length);
+                have += length;
+                into[have++] = bits & 4 ? 'r' : '-';
+                into[have++] = bits & 2 ? 'w' : '-';
+                into[have++] = bits & 1 ? 'x' : '-';
+                into[have++] = '\n';
+        }
+        return tar_numeric_owner ? have - 1 : have;
+}
+
+/* Text back to the kernel's attribute; false for anything libacl would
+   refuse to read. */
+static bool tar_acl_binary(string_address text, positive length,
+                           p8 address_to into, positive room, positive address_to used)
+{
+        tar_acl_entry items[64];
+        positive count = 0;
+        positive at = 0;
+
+        while (at < length)
+        {
+                positive stop = at;
+                string_address line = text + at;
+                string_address part[3] = {null, null, null};
+                positive size[3] = {0, 0, 0};
+                positive fields = 0;
+                positive end_of = 0;
+
+                while (stop < length && text[stop] != '\n' && text[stop] != ',')
+                        stop++;
+                end_of = stop - at;
+                for (positive walk = 0; walk < end_of; walk++)
+                        if (line[walk] == '#')
+                        {
+                                end_of = walk;
+                                break;
+                        }
+                positive first = 0;
+
+                while (first < end_of && (line[first] == ' ' || line[first] == '\t'))
+                        first++;
+                while (end_of > first && (line[end_of - 1] == ' ' || line[end_of - 1] == '\t'))
+                        end_of--;
+                at = stop + 1;
+                if (first == end_of)
+                        continue;
+                {
+                        positive from = first;
+
+                        for (positive walk = first; walk <= end_of; walk++)
+                                if (walk == end_of || line[walk] == ':')
+                                {
+                                        if (fields < 3)
+                                        {
+                                                part[fields] = line + from;
+                                                size[fields] = walk - from;
+                                        }
+                                        fields++;
+                                        from = walk + 1;
+                                }
+                }
+                if (fields < 3 || count >= array_count(items))
+                        return false;
+                tar_acl_entry item;
+                bool user = size[0] && (part[0][0] == 'u');
+                bool group = size[0] && (part[0][0] == 'g');
+                bool mask = size[0] && (part[0][0] == 'm');
+                bool other = size[0] && (part[0][0] == 'o');
+
+                item.id = (p32)-1;
+                item.perm = 0;
+                if (!(user || group || mask || other))
+                        return false;
+                if (size[1])
+                {
+                        p8 word[FILE_NAME_MAX];
+                        positive digits;
+                        positive number = 0;
+
+                        if (mask || other || size[1] >= sizeof(word))
+                                return false;
+                        memory_copy(word, part[1], size[1]);
+                        word[size[1]] = end;
+                        number = string_digits_max((string_address)word, positive_max,
+                                                   address_of digits);
+                        if (digits == size[1])
+                                item.id = (p32)number;
+                        else
+                        {
+                                bipolar found = user ? file_user_id((string_address)word)
+                                                     : file_group_id((string_address)word);
+
+                                if (found < 0)
+                                        return false;
+                                item.id = (p32)found;
+                        }
+                        item.tag = user ? TAR_ACL_USER : TAR_ACL_GROUP;
+                }
+                else
+                        item.tag = user ? TAR_ACL_USER_OBJ
+                                        : group ? TAR_ACL_GROUP_OBJ
+                                                : mask ? TAR_ACL_MASK : TAR_ACL_OTHER;
+                if (size[2] == 1 && part[2][0] >= '0' && part[2][0] <= '7')
+                        item.perm = (p16)(part[2][0] - '0');
+                else
+                {
+                        if (size[2] > 3)
+                                return false;
+                        for (positive walk = 0; walk < size[2]; walk++)
+                                switch (part[2][walk])
+                                {
+                                case 'r': item.perm |= 4; break;
+                                case 'w': item.perm |= 2; break;
+                                case 'x': item.perm |= 1; break;
+                                case '-': break;
+                                default: return false;
+                                }
+                }
+                items[count++] = item;
+        }
+        if (4 + count * 8 > room)
+                return false;
+        for (positive one = 1; one < count; one++)
+        {
+                tar_acl_entry keep = items[one];
+                positive back = one;
+
+                while (back && (items[back - 1].tag > keep.tag ||
+                                (items[back - 1].tag == keep.tag &&
+                                 items[back - 1].id > keep.id)))
+                {
+                        items[back] = items[back - 1];
+                        back--;
+                }
+                items[back] = keep;
+        }
+        into[0] = 2;
+        into[1] = into[2] = into[3] = 0;
+        memory_copy(into + 4, items, count * 8);
+        address_to used = 4 + count * 8;
+        return count != 0;
+}
+
+/* Set what a member carried on the object fd names. */
+static fn tar_attrs_apply(bipolar fd, string_address path, positive at,
+                          positive length)
+{
+        p8 address_to record = tar_attr_store + at;
+        p8 address_to stop = record + length;
+
+        while (record + 9 <= stop)
+        {
+                positive name_length;
+                positive value_length;
+                p8 kind = record[0];
+                p8 address_to name;
+                p8 address_to value;
+                bipolar failed = 0;
+                p8 text[64];
+                string_address doing = null;
+
+                p32 name_size;
+                p32 value_size;
+
+                memory_copy(address_of name_size, record + 1, 4);
+                memory_copy(address_of value_size, record + 5, 4);
+                name_length = name_size;
+                value_length = value_size;
+                name = record + 9;
+                value = name + name_length;
+                record = value + value_length;
+                if (record > stop)
+                        return;
+                if (kind == 1)
+                {
+                        if (!tar_opt_xattrs || name_length >= sizeof(text))
+                                continue;
+                        memory_copy(text, name, name_length);
+                        text[name_length] = end;
+                        /* An ACL comes back from its text, under --acls. */
+                        if (!tar_xattr_wanted((string_address)text) ||
+                            !string_compare_max((string_address)text,
+                                                "system.posix_acl_", 17))
+                                continue;
+                        failed = system_call_5(syscall(fsetxattr), (positive)fd,
+                                               (positive)text, (positive)value,
+                                               value_length, 0);
+                        doing = "setxattrat";
+                        if (failed < 0 && failed != -EPERM && failed != -EOPNOTSUPP)
+                                string_format(log_error,
+                                              "tar: %s: Cannot set '%s' extended attribute for file '%s': %s\n",
+                                              doing, (string_address)text, path,
+                                              file_reason(failed));
+                }
+                else if (tar_opt_acls)
+                {
+                        p8 binary[4 + 64 * 8];
+                        positive have = 0;
+
+                        if (!tar_acl_binary((string_address)value, value_length, binary,
+                                            sizeof(binary), address_of have))
+                                failed = -ERROR_INVALID;
+                        else
+                                failed = system_call_5(
+                                    syscall(fsetxattr), (positive)fd,
+                                    (positive)(kind == 2 ? "system.posix_acl_access"
+                                                         : "system.posix_acl_default"),
+                                    (positive)binary, have, 0);
+                        if (failed < 0 && failed != -EPERM && failed != -EOPNOTSUPP)
+                                string_format(log_error,
+                                              "tar: tar_acl_set_file_at: Cannot set POSIX ACLs for file '%s': %s\n",
+                                              path, file_reason(failed));
+                }
+        }
+}
+
 static bipolar tar_member_settle_at(bipolar directory, string_address name,
                                     positive mode,
                                     tar_member_meta address_to meta,
@@ -1926,6 +2351,10 @@ static fn tar_directories_finish(void)
                     : tar_member_settle(opened, kept->mode,
                                         address_of kept->meta, true);
 
+                if (changed >= 0 && kept->meta.attr_length)
+                        tar_attrs_apply(opened, path, kept->meta.attr_at,
+                                        kept->meta.attr_length);
+
                 if (opened >= 0)
                         system_close(opened);
                 if (changed < 0)
@@ -1952,6 +2381,7 @@ static fn tar_reset(void)
         tar_materialized_count = 0;
         tar_materialized_paths_used = 0;
         tar_materialized_index_slots = 0;
+        tar_attr_store_used = 0;
 }
 
 /*
@@ -3216,6 +3646,8 @@ static bool tar_extract_regular_staged(bipolar archive, bipolar directory,
         }
 
         bipolar changed = tar_member_settle(made, mode, meta, true);
+        if (changed >= 0 && meta->attr_length)
+                tar_attrs_apply(made, path, meta->attr_at, meta->attr_length);
         bipolar published_handle = -1;
         bipolar published = file_stage_publish_protected_keep_at(
             address_of protected, directory, leaf, made, changed, false,
@@ -3285,6 +3717,8 @@ static bool tar_extract_regular(bipolar archive, bipolar directory,
         bool pending = tar_parent_private;
         tar_identity_key parent = tar_parent_identity;
         bipolar settled = tar_member_settle(made, mode, meta, false);
+        if (settled >= 0 && meta->attr_length)
+                tar_attrs_apply(made, path, meta->attr_at, meta->attr_length);
         if (settled >= 0 && pending)
         {
                 memory_fill(address_of materialized, 0, sizeof(materialized));
@@ -4462,6 +4896,7 @@ static fn tar_read_members(tar_members address_to run)
                         meta.nanoseconds = said->has_time ? said->nanoseconds
                                                           : 0;
                         meta.timed = said->has_time || stamped;
+                        tar_attrs_keep(address_of meta);
                         if (options->verbose > 1)
                                 tar_long_line(block, type, mode,
                                               tar_sparse_active ? tar_sparse_real : size,
@@ -4677,7 +5112,6 @@ static b32 tar_read_archive(struct tar_options address_to options)
 
 static p8 tar_format = TAR_GNU;
 static positive tar_blocking = 20;
-static bool tar_numeric_owner;
 static string_address tar_pax_deleted[8];
 static positive tar_pax_deleted_count;
 
@@ -5042,6 +5476,76 @@ static bool tar_map_text(void)
         return true;
 }
 
+/* The attributes and ACLs of the object fd names, into the extended
+   header being built. */
+static bipolar tar_attr_fd = -1;
+
+static bool tar_x_attributes(bipolar fd, bool directory, positive mode)
+{
+        p8 text[16384];
+        bipolar names;
+        positive have = 0;
+
+        if (fd < 0 || (!tar_opt_xattrs && !tar_opt_acls))
+                return true;
+        if (tar_opt_acls)
+        {
+                bipolar access = system_call_4(syscall(fgetxattr), (positive)fd,
+                                               (positive)"system.posix_acl_access",
+                                               (positive)tar_attr_value,
+                                               sizeof(tar_attr_value));
+                bipolar fallback = directory
+                    ? system_call_4(syscall(fgetxattr), (positive)fd,
+                                    (positive)"system.posix_acl_default",
+                                    (positive)(tar_attr_value + 8192), 8192)
+                    : -1;
+
+                if (access > 8192)
+                        access = -1;
+                if (access > 0 || fallback > 0)
+                {
+                        if (access > 0)
+                        {
+                                if (tar_acl_text(tar_attr_value, (positive)access, text,
+                                                 sizeof(text), address_of have))
+                                        tar_x_add("SCHILY.acl.access", (string_address)text, have);
+                        }
+                        else
+                                tar_x_add("SCHILY.acl.access", (string_address)text,
+                                          tar_acl_from_mode(mode, text));
+                        if (fallback > 0 &&
+                            tar_acl_text(tar_attr_value + 8192, (positive)fallback, text,
+                                         sizeof(text), address_of have))
+                                tar_x_add("SCHILY.acl.default", (string_address)text, have);
+                }
+        }
+        if (!tar_opt_xattrs)
+                return true;
+        names = system_call_3(syscall(flistxattr), (positive)fd, (positive)tar_attr_names,
+                              sizeof(tar_attr_names));
+        for (positive at = 0; names > 0 && at < (positive)names;
+             at += string_length((string_address)(tar_attr_names + at)) + 1)
+        {
+                string_address name = (string_address)(tar_attr_names + at);
+                p8 key[320];
+                positive length = string_length(name);
+                bipolar got;
+
+                if (length > 300 || !tar_xattr_wanted(name))
+                        continue;
+                got = system_call_4(syscall(fgetxattr), (positive)fd, (positive)name,
+                                    (positive)tar_attr_value, sizeof(tar_attr_value));
+                if (got < 0)
+                        continue;
+                memory_copy(key, "SCHILY.xattr.", 13);
+                memory_copy(key + 13, name, length + 1);
+                if (!tar_x_add((string_address)key, (string_address)tar_attr_value,
+                               (positive)got))
+                        return false;
+        }
+        return true;
+}
+
 /* The member's header, and whatever the format sends ahead of it. */
 static bipolar tar_put_facts(bipolar handle, string_address name, p8 type,
                           p64 size, string_address link,
@@ -5257,6 +5761,8 @@ static bipolar tar_put_facts(bipolar handle, string_address name, p8 type,
                            facts->accessed.nanoseconds);
                 tar_x_time("ctime", (b64)facts->changed.seconds,
                            facts->changed.nanoseconds);
+                tar_x_attributes(tar_attr_fd, (facts->mode & MODE_FORMAT) == MODE_DIRECTORY,
+                                 facts->mode & 0777);
         }
         tar_header_put_checksum(block);
 
@@ -5368,11 +5874,15 @@ static b32 tar_add_directory(bipolar archive, bipolar directory,
 
         p8 spelled[TAR_PATH];
 
-        bipolar put = tar_put_facts(archive,
-                                    tar_spell_directory(member, spelled,
-                                                        sizeof(spelled))
-                                        ? (string_address)spelled : member,
-                                    '5', 0, null, facts);
+        bipolar put;
+
+        tar_attr_fd = walk.handle;
+        put = tar_put_facts(archive,
+                            tar_spell_directory(member, spelled,
+                                                sizeof(spelled))
+                                ? (string_address)spelled : member,
+                            '5', 0, null, facts);
+        tar_attr_fd = -1;
 
         if (put <= 0)
         {
@@ -5574,8 +6084,10 @@ static b32 tar_add_named(bipolar archive, bipolar directory,
         bipolar put;
 
         tar_sparse_use = sparse;
+        tar_attr_fd = handle;
         put = tar_put_facts(archive, member, '0', (p64)facts.size, null,
                             address_of facts);
+        tar_attr_fd = -1;
         tar_sparse_use = false;
 
         if (put <= 0)
@@ -5754,10 +6266,12 @@ static b32 tar_write_archive(struct tar_options address_to options)
                 /* What could be archived is kept, as the reference keeps it;
                    an archive of nothing, because every operand failed, does
                    not replace what the name held. */
+                bool keep = !tar_create_fatal &&
+                            (tar_status != 2 || tar_dumped || !tar_output_target_known);
                 bipolar finished = file_staged_name_finish(
                     address_of output_stage,
-                    !tar_create_fatal && (tar_status != 2 || tar_dumped), 0);
-                if (finished < 0 && !tar_create_fatal)
+                    keep, 0);
+                if (finished < 0 && keep)
                         tar_fail(options->archive, finished);
         }
         else if (handle > 2)
@@ -5790,6 +6304,14 @@ enum
         TAR_PAX_OPTION,
         TAR_NO_SAME_OWNER,
         TAR_SPARSE_VERSION,
+        TAR_XATTRS,
+        TAR_NO_XATTRS,
+        TAR_ACLS,
+        TAR_NO_ACLS,
+        TAR_SELINUX,
+        TAR_NO_SELINUX,
+        TAR_XATTRS_INCLUDE,
+        TAR_XATTRS_EXCLUDE,
 };
 
 static const argument_option tar_option_rules[] = {
@@ -5812,6 +6334,14 @@ static const argument_option tar_option_rules[] = {
     {"portability", 'o'},
     {"format", 'H', ARGUMENT_REQUIRED},
     {"sparse", 'S'},
+    {"xattrs", TAR_XATTRS, ARGUMENT_LONG_ONLY},
+    {"no-xattrs", TAR_NO_XATTRS, ARGUMENT_LONG_ONLY},
+    {"acls", TAR_ACLS, ARGUMENT_LONG_ONLY},
+    {"no-acls", TAR_NO_ACLS, ARGUMENT_LONG_ONLY},
+    {"selinux", TAR_SELINUX, ARGUMENT_LONG_ONLY},
+    {"no-selinux", TAR_NO_SELINUX, ARGUMENT_LONG_ONLY},
+    {"xattrs-include", TAR_XATTRS_INCLUDE, ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
+    {"xattrs-exclude", TAR_XATTRS_EXCLUDE, ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
     {"sparse-version", TAR_SPARSE_VERSION, ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
     {"posix", TAR_POSIX_OPTION, ARGUMENT_LONG_ONLY},
     {"pax-option", TAR_PAX_OPTION, ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
@@ -5904,6 +6434,22 @@ static bool tar_take(struct tar_options address_to options, p8 letter,
                 options->pax_option = value;
                 break;
         case 'S': options->sparse = true; break;
+        case TAR_XATTRS: options->xattrs = true; break;
+        case TAR_NO_XATTRS: options->xattrs = false; break;
+        case TAR_ACLS: options->acls = true; break;
+        case TAR_NO_ACLS: options->acls = false; break;
+        case TAR_SELINUX: options->selinux = true; break;
+        case TAR_NO_SELINUX: options->selinux = false; break;
+        case TAR_XATTRS_INCLUDE:
+                options->xattrs = true;
+                if (tar_xattr_include_count < array_count(tar_xattr_include))
+                        tar_xattr_include[tar_xattr_include_count++] = value;
+                break;
+        case TAR_XATTRS_EXCLUDE:
+                options->xattrs = true;
+                if (tar_xattr_exclude_count < array_count(tar_xattr_exclude))
+                        tar_xattr_exclude[tar_xattr_exclude_count++] = value;
+                break;
         case TAR_SPARSE_VERSION:
                 options->sparse = true;
                 if (string_equals(value, "0.0"))
@@ -5920,7 +6466,11 @@ static bool tar_take(struct tar_options address_to options, p8 letter,
                                                       address_of used);
                 if (!used || value[used] || !options->blocking ||
                     options->blocking > (positive)1 << 20)
-                        return tar_refuse("Invalid blocking factor"), false;
+                {
+                        string_format(log_error, "tar: %s: Invalid blocking factor\n", value);
+                        tar_status = 2;
+                        return tar_usage_hint();
+                }
                 break;
         case TAR_SAME_OWNER: options->owner = 1; break;
         case TAR_NUMERIC_OWNER: options->numeric = true; break;
@@ -5968,6 +6518,8 @@ static bool tar_parse(struct tar_options address_to options)
         options->format = TAR_GNU;
         options->sparse_version = 2;
         options->blocking = 20;
+        tar_xattr_include_count = 0;
+        tar_xattr_exclude_count = 0;
         tar_pax_deleted_count = 0;
         cursor.at += *keys != end;
 
@@ -6033,12 +6585,30 @@ static bool tar_parse(struct tar_options address_to options)
                 else
                         options->owner = -1;
         }
+        tar_opt_xattrs = options->xattrs;
+        tar_opt_acls = options->acls;
+        if (options->selinux)
+                string_format(log_error, "tar: SELinux support is not available\n");
+        if (options->mode == TAR_CREATE && (options->xattrs || options->acls || options->selinux))
+        {
+                if (!options->format_set)
+                        options->format = TAR_POSIX;
+                else if (options->format != TAR_POSIX)
+                {
+                        string_format(log_error, "tar: %s can be used only on POSIX archives\n",
+                                      options->acls ? "--acls"
+                                      : options->selinux ? "--selinux" : "--xattrs");
+                        return tar_usage_hint();
+                }
+        }
         if (options->sparse && options->mode == TAR_CREATE &&
             (options->format == TAR_USTAR || options->format == TAR_V7))
         {
                 tar_refuse("GNU features wanted on incompatible archive format");
                 return tar_usage_hint();
         }
+        if (options->pax_option && !options->format_set)
+                options->format = TAR_POSIX;
         if (options->pax_option)
         {
                 if (options->format != TAR_POSIX)

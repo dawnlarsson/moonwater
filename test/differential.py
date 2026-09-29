@@ -9526,6 +9526,129 @@ def files_tar_formats(farm):
                     " ".join(variant), want[0], got[0], len(want[1]), len(got[1]),
                     want[2][:120], got[2][:120]))
 
+        #   Extended attributes and ACLs, when the filesystem holds them:
+        #   what --xattrs, --acls and the include and exclude patterns
+        #   write is GNU's bytes, and what each tar restores from the
+        #   other's archive is the same set of attributes.
+        import struct
+
+        def acl(entries):
+            return struct.pack("<I", 2) + b"".join(
+                struct.pack("<HHI", tag, perm, who) for tag, perm, who in entries)
+
+        attrs = top / "attrs"
+        (attrs / "d").mkdir(parents=True)
+        (attrs / "f").write_bytes(b"attributes\n")
+        try:
+            os.setxattr(attrs / "f", "user.foo", b"bar")
+            os.setxattr(attrs / "f", "user.bin", b"\x00\x01\xff")
+            os.setxattr(attrs / "f", "user.empty", b"")
+            os.setxattr(attrs / "f", "system.posix_acl_access",
+                        acl([(1, 6, 0xffffffff), (2, 4, 0), (4, 4, 0xffffffff),
+                             (8, 6, 0), (0x10, 7, 0xffffffff), (0x20, 4, 0xffffffff)]))
+            os.setxattr(attrs / "d", "system.posix_acl_default",
+                        acl([(1, 7, 0xffffffff), (4, 5, 0xffffffff), (0x20, 0, 0xffffffff)]))
+            attrs_ok = True
+        except OSError:
+            attrs_ok = False
+        for name in ("f", "d"):
+            os.utime(attrs / name, (1600000000, 1600000000))
+        (attrs / "plain").write_bytes(b"no attributes\n")
+        os.utime(attrs / "plain", (1600000000, 1600000000))
+
+        if attrs_ok:
+            pax_off = "--pax-option=delete=atime,delete=ctime"
+            for variant in (("--xattrs",), ("--acls",), ("--xattrs", "--acls"),
+                            ("--xattrs", "--xattrs-exclude=user.foo"),
+                            ("--xattrs-include=user.b*",), ("--acls", "--numeric-owner"),
+                            ("--xattrs", "--acls", "--format=gnu")):
+                total += 1
+                results = []
+                for binary in (reference, str(candidate)):
+                    out = top / "attrs.tar"
+                    if out.exists():
+                        out.unlink()
+                    ran = subprocess.run([binary, "-cf", str(out), *variant,
+                                          *(() if "--format=gnu" in variant else (pax_off,)),
+                                          "f", "d", "plain"],
+                                         cwd=attrs, env=env, stdin=subprocess.DEVNULL,
+                                         capture_output=True, timeout=60)
+                    results.append((ran.returncode, out.read_bytes() if out.exists() else b"",
+                                    re.sub(rb"(?:/[^: ']*/)?tar([: '])", rb"tar\1", ran.stderr)))
+                if results[0] == results[1]:
+                    passed += 1
+                elif len(notes) < 20:
+                    notes.append("tar -c %s attrs: status %s/%s bytes %d/%d stderr %r/%r" % (
+                        " ".join(variant), results[0][0], results[1][0], len(results[0][1]),
+                        len(results[1][1]), results[0][2][:120], results[1][2][:120]))
+
+            def attribute_set(path):
+                found = {}
+                for name in os.listxattr(path, follow_symlinks=False):
+                    found[name] = os.getxattr(path, name, follow_symlinks=False)
+                return found
+
+            for writer, reader in ((reference, str(candidate)), (str(candidate), reference),
+                                   (str(candidate), str(candidate))):
+                for variant in (("--xattrs", "--acls"), ("--xattrs",), ("--acls",), ()):
+                    total += 1
+                    archive = top / "attrs-cross.tar"
+                    place = top / "attrs-cross"
+                    if place.exists():
+                        shutil.rmtree(place)
+                    place.mkdir()
+                    made = subprocess.run([writer, "-cf", str(archive), "--xattrs", "--acls",
+                                           "f", "d", "plain"], cwd=attrs, env=env,
+                                          capture_output=True, timeout=60)
+                    read = subprocess.run([reader, "-xf", str(archive), *variant, "-C", str(place)],
+                                          env=env, capture_output=True, timeout=60)
+                    (top / "attrs-want").mkdir(exist_ok=True)
+                    other = subprocess.run([reference, "-xf", str(archive), *variant, "-C",
+                                            str(top / "attrs-want")],
+                                           env=env, capture_output=True, timeout=60)
+                    want = {name: attribute_set(top / "attrs-want" / name) for name in ("f", "d", "plain")}
+                    got = {name: attribute_set(place / name) for name in ("f", "d", "plain")}
+                    shutil.rmtree(top / "attrs-want")
+                    if made.returncode == read.returncode == other.returncode == 0 and want == got:
+                        passed += 1
+                    elif len(notes) < 20:
+                        apart = {name: sorted(set(want[name].items()) ^ set(got[name].items()))
+                                 for name in want if want[name] != got[name]}
+                        notes.append("attrs %s written by %s read by %s: %d %d %r differing %r" % (
+                            " ".join(variant), "reference" if writer == reference else "ours",
+                            "reference" if reader == reference else "ours",
+                            made.returncode, read.returncode, read.stderr[:120],
+                            {name: [key for key, _ in pairs] for name, pairs in apart.items()}))
+
+        #   What each says when the archive or a named member is not there,
+        #   and when an operand cannot be read: GNU's words and its status.
+        made = top / "words.tar"
+        subprocess.run([reference, "-cf", str(made), "plain", "modes"], cwd=tree, env=env,
+                       capture_output=True, timeout=60)
+        for command in (("-df", "nothere.tar"), ("-tf", "nothere.tar"), ("-xf", "nothere.tar"),
+                        ("-tf", str(made), "nothere"), ("-xf", str(made), "nothere", "plain"),
+                        ("-df", str(made), "nothere"), ("-tvvf", str(made), "plain/f", "nothere"),
+                        ("-cf", str(top / "w.tar"), "missing"),
+                        ("-cf", str(top / "w.tar"), "plain", "missing"),
+                        ("-cf", str(top / "w.tar"), "-b", "0", "plain"),
+                        ("-cf", str(top / "w.tar"), "-H", "bogus", "plain"),
+                        ("-cf", str(top / "w.tar"), "--pax-option=delete=atime", "plain")):
+            total += 1
+            answers = []
+            for binary in (reference, str(candidate)):
+                place = top / "words"
+                if place.exists():
+                    shutil.rmtree(place)
+                place.mkdir()
+                ran = subprocess.run([binary, *command], cwd=tree, env=env,
+                                     stdin=subprocess.DEVNULL, capture_output=True, timeout=60)
+                answers.append((ran.returncode, ran.stdout,
+                                re.sub(rb"(?:/[^: ']*/)?tar([: '])", rb"tar\1", ran.stderr)))
+            if answers[0] == answers[1]:
+                passed += 1
+            elif len(notes) < 20:
+                notes.append("tar %s: GNU %r ours %r" % (" ".join(command[:3]), answers[0], answers[1]))
+
         def held(path):
             found = []
             with open(path, "rb") as handle:
