@@ -9424,6 +9424,31 @@ def files_tar_formats(farm):
         for name in ("modes/empty",):
             os.chmod(tree / name, 0o644)
 
+        #   Sparse files, in a tree of their own: a hole in the middle, a
+        #   hole and nothing else, data at the far end, a trailing hole,
+        #   thirty islands (past the four spans of a header and the twenty
+        #   one of an extension block), and one the last block of which is
+        #   short.
+        sparse_tree = top / "sparse"
+        sparse_tree.mkdir()
+
+        def sparse(name, pieces, size=None):
+            handle = os.open(sparse_tree / name, os.O_CREAT | os.O_WRONLY, 0o644)
+            for offset, data in pieces:
+                os.pwrite(handle, data, offset)
+            if size is not None:
+                os.ftruncate(handle, size)
+            os.close(handle)
+            os.utime(sparse_tree / name, (1600000000, 1600000000))
+
+        sparse("mid", [(0, b"A" * 4096), (1 << 20, b"B" * 4096)])
+        sparse("hole", [], 10 << 20)
+        sparse("far", [(1 << 20, b"C" * 4096)])
+        sparse("tail", [(0, b"D" * 4096)], 1 << 20)
+        sparse("islands", [(at * 8192, bytes([65 + at % 26]) * 4096) for at in range(30)])
+        sparse("short", [(4096 * 3, b"I" * 5000)])
+        sparse("plain", [(0, b"small")])
+
         env = {"PATH": os.defpath, "LC_ALL": "C", "TZ": "UTC0"}
         variants = []
         for fmt in ("gnu", "oldgnu", "ustar", "posix", "v7"):
@@ -9443,7 +9468,7 @@ def files_tar_formats(farm):
                                  env=env, stdin=subprocess.DEVNULL, capture_output=True,
                                  timeout=60)
             data = out.read_bytes() if out.exists() else b""
-            words = re.sub(rb"^(?:/[^:\s]*/)?tar:", b"tar:", ran.stderr, flags=re.M)
+            words = re.sub(rb"(?:/[^: ']*/)?tar([: '])", rb"tar\1", ran.stderr)
             return ran.returncode, data, words, ran.stdout
 
         passed, total, notes = 0, 0, []
@@ -9461,6 +9486,74 @@ def files_tar_formats(farm):
                     notes.append("tar -c %s %s: status %s/%s bytes %d/%d first difference %s stderr %r/%r" % (
                         " ".join(variant), names[:2], want[0], got[0], len(want[1]),
                         len(got[1]), where, want[2][:200], got[2][:200]))
+
+        #   -S: the same bytes as GNU's where the name carries no process id
+        #   (gnu, oldgnu, and pax 0.0), and for the pax forms that do, each
+        #   tar extracting what the other wrote and the tree coming out as
+        #   the source, holes and all.
+        def sparse_bytes(binary, variant):
+            out = top / "sparse.tar"
+            if out.exists():
+                out.unlink()
+            ran = subprocess.run([binary, "-cf", str(out), *variant, "."], cwd=sparse_tree,
+                                 env=env, stdin=subprocess.DEVNULL, capture_output=True,
+                                 timeout=60)
+            words = re.sub(rb"(?:/[^: ']*/)?tar([: '])", rb"tar\1", ran.stderr)
+            return ran.returncode, out.read_bytes() if out.exists() else b"", words
+
+        pax = "--pax-option=delete=atime,delete=ctime"
+        for variant in (("--format=gnu", "-S"), ("--format=oldgnu", "-S"),
+                        ("--format=posix", pax, "-S", "--sparse-version=0.0"),
+                        ("--format=ustar", "-S"), ("--format=v7", "-S")):
+            total += 1
+            want = sparse_bytes(reference, variant)
+            got = sparse_bytes(str(candidate), variant)
+            if want == got:
+                passed += 1
+            elif len(notes) < 20:
+                notes.append("tar -c %s sparse: status %s/%s bytes %d/%d stderr %r/%r" % (
+                    " ".join(variant), want[0], got[0], len(want[1]), len(got[1]),
+                    want[2][:120], got[2][:120]))
+
+        def held(path):
+            found = []
+            with open(path, "rb") as handle:
+                end = os.fstat(handle.fileno()).st_size
+                at = 0
+                while at < end:
+                    try:
+                        at = os.lseek(handle.fileno(), at, os.SEEK_DATA)
+                    except OSError:
+                        break
+                    stop = os.lseek(handle.fileno(), at, os.SEEK_HOLE)
+                    handle.seek(at)
+                    found.append((at, hashlib.sha256(handle.read(stop - at)).hexdigest()[:8]))
+                    at = stop
+            return end, found
+
+        for version in ("0.0", "0.1", "1.0"):
+            for writer, reader in ((reference, str(candidate)), (str(candidate), reference),
+                                   (str(candidate), str(candidate))):
+                total += 1
+                archive = top / "cross.tar"
+                place = top / "cross"
+                if place.exists():
+                    shutil.rmtree(place)
+                place.mkdir()
+                made = subprocess.run([writer, "-cf", str(archive), "--format=posix", "-S",
+                                       "--sparse-version=" + version, "."], cwd=sparse_tree,
+                                      env=env, capture_output=True, timeout=60)
+                read = subprocess.run([reader, "-xf", str(archive), "-C", str(place)],
+                                      env=env, capture_output=True, timeout=60)
+                same = made.returncode == read.returncode == 0 and all(
+                    held(place / name) == held(sparse_tree / name)
+                    for name in os.listdir(sparse_tree))
+                if same:
+                    passed += 1
+                elif len(notes) < 20:
+                    notes.append("sparse %s written by %s read by %s: %d %d %r" % (
+                        version, os.path.basename(writer), os.path.basename(reader),
+                        made.returncode, read.returncode, read.stderr[:120]))
     return passed, total, notes
 
 

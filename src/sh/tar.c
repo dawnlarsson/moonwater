@@ -13,6 +13,7 @@
 */
 
 #define TAR_BLOCK 512
+#define TAR_SPARSE_MAX 4096
 #define TAR_PATH 4096
 #define TAR_NAME 100
 #define TAR_PREFIX 155
@@ -344,8 +345,61 @@ typedef struct
 static tar_pax_state tar_pax_global;
 static tar_pax_state tar_pax_local;
 
+/* A plain decimal that fits a signed 64 bit size. */
+static bool tar_pax_wide(p8 address_to text, positive length, p64 address_to into)
+{
+        p64 number = 0;
+
+        if (!length)
+                return false;
+        for (positive at = 0; at < length; at++)
+        {
+                if (text[at] < '0' || text[at] > '9' ||
+                    number > ((p64)bipolar_max - (p64)(text[at] - '0')) / 10)
+                        return false;
+                number = number * 10 + (p64)(text[at] - '0');
+        }
+        address_to into = number;
+        return true;
+}
+
+/* What a pax header said of a sparse member: 1 the map is in its records
+   (versions 0.0 and 0.1), 2 the map is text at the front of the data (1.0). */
+typedef struct
+{
+        p64 offset;
+        p64 bytes;
+} tar_psp_span;
+
+static tar_psp_span tar_psp[TAR_SPARSE_MAX];
+static positive tar_psp_used;
+static p64 tar_psp_real;
+static p64 tar_psp_offset;
+static p8 tar_psp_kind;
+static bool tar_psp_bad;
+
+static fn tar_psp_add(p64 offset, p64 bytes)
+{
+        if (tar_psp_used >= TAR_SPARSE_MAX)
+        {
+                tar_psp_bad = true;
+                return;
+        }
+        tar_psp[tar_psp_used].offset = offset;
+        tar_psp[tar_psp_used++].bytes = bytes;
+        if (!tar_psp_kind)
+                tar_psp_kind = 1;
+}
+
 static fn tar_pax_clear(tar_pax_state address_to state)
 {
+        if (state == address_of tar_pax_local)
+        {
+                tar_psp_used = 0;
+                tar_psp_real = 0;
+                tar_psp_kind = 0;
+                tar_psp_bad = false;
+        }
         state->has_path = false;
         state->has_link = false;
         state->has_size = false;
@@ -520,6 +574,75 @@ static bool tar_pax_apply(tar_pax_state address_to state,
                         {
                                 state->group = (p32)number;
                                 state->has_group = good;
+                        }
+                }
+
+                else if (key > 11 && !memory_compare(mark + 1, "GNU.sparse.", 11))
+                {
+                        p64 number = 0;
+                        string_address name = mark + 12;
+                        positive name_length = key - 11;
+                        bool numeric = tar_pax_wide(equal + 1, value,
+                                                      address_of number);
+
+                        if (name_length == 4 && !memory_compare(name, "name", 4))
+                        {
+                                if (value >= TAR_PATH)
+                                        return false;
+                                memory_copy(state->path, equal + 1, value);
+                                state->path[value] = end;
+                                state->has_path = true;
+                        }
+                        else if ((name_length == 8 && !memory_compare(name, "realsize", 8)) ||
+                                 (name_length == 4 && !memory_compare(name, "size", 4)))
+                        {
+                                if (numeric)
+                                        tar_psp_real = number;
+                                else
+                                        tar_psp_bad = true;
+                        }
+                        else if (name_length == 5 && !memory_compare(name, "major", 5))
+                                tar_psp_kind = numeric && number == 1 ? 2 : tar_psp_kind;
+                        else if (name_length == 6 && !memory_compare(name, "offset", 6))
+                        {
+                                tar_psp_offset = number;
+                                tar_psp_bad |= !numeric;
+                        }
+                        else if (name_length == 8 && !memory_compare(name, "numbytes", 8))
+                        {
+                                if (numeric)
+                                        tar_psp_add(tar_psp_offset, number);
+                                else
+                                        tar_psp_bad = true;
+                        }
+                        else if (name_length == 3 && !memory_compare(name, "map", 3))
+                        {
+                                positive walk = 0;
+                                p64 first = 0;
+                                bool have = false;
+
+                                while (walk <= value)
+                                {
+                                        positive stop = walk;
+                                        p64 got = 0;
+
+                                        while (stop < value && equal[1 + stop] != ',')
+                                                stop++;
+                                        if (!tar_pax_wide(equal + 1 + walk, stop - walk,
+                                                            address_of got))
+                                        {
+                                                tar_psp_bad = true;
+                                                break;
+                                        }
+                                        if (have)
+                                                tar_psp_add(first, got);
+                                        else
+                                                first = got;
+                                        have = !have;
+                                        walk = stop + 1;
+                                }
+                                if (have)
+                                        tar_psp_bad = true;
                         }
                 }
 
@@ -699,6 +822,8 @@ struct tar_options
         bool touch;
         bool numeric;
         bool short_o;
+        bool sparse;
+        p8 sparse_version;
         string_address pax_option;
         p8 format;
         p8 format_set;
@@ -1069,6 +1194,15 @@ static fn tar_say(string_address name, string_address message)
         log_error("tar: ", 5);
         tar_quoted(log_error, name);
         string_format(log_error, ": %s\n", message);
+}
+
+static bool tar_usage_hint(void)
+{
+        string_address program = program_argument(0);
+
+        string_format(log_error, "Try '%s --help' or '%s --usage' for more information.\n",
+                      program, program);
+        return false;
 }
 
 /* GNU's create-side diagnostics name what failed: "Cannot stat: ...". */
@@ -2504,7 +2638,6 @@ static bool tar_write_zeros(bipolar out, p64 size)
 
 #define TAR_SPARSE_HEADER 4
 #define TAR_SPARSE_EXTRA 21
-#define TAR_SPARSE_MAX 256
 
 typedef struct
 {
@@ -2600,6 +2733,93 @@ static bool tar_sparse_load(bipolar archive, p8 address_to header)
                     tar_sparse_real)
                         return false;
 
+        tar_sparse_active = true;
+        return true;
+}
+
+/*
+        A sparse member the pax header described: its map from the records
+        (0.0, 0.1) or from the text ahead of the data (1.0), which is read
+        here a block at a time and taken out of the member's size.
+*/
+static bool tar_pax_sparse_take(bipolar archive, p64 address_to size)
+{
+        positive at;
+
+        if (tar_psp_bad)
+                return false;
+        tar_sparse_clear();
+        tar_sparse_real = tar_psp_real;
+        if (tar_psp_kind == 1)
+        {
+                for (at = 0; at < tar_psp_used; at++)
+                        if (!tar_sparse_add(tar_psp[at].offset, tar_psp[at].bytes))
+                                return false;
+        }
+        else
+        {
+                p8 text[TAR_BLOCK * 8];
+                positive have = 0;
+                p64 wanted = 0;
+                p64 seen = 0;
+                positive consumed = 0;
+                p64 pending = 0;
+                bool first = true;
+                bool half = false;
+                positive start = 0;
+
+                for (;;)
+                {
+                        p8 address_to block;
+
+                        if (consumed >= (p64)*size || have + TAR_BLOCK > sizeof(text))
+                                return false;
+                        block = tar_next_block(archive, false);
+                        if (!block)
+                                return false;
+                        memory_copy(text + have, block, TAR_BLOCK);
+                        have += TAR_BLOCK;
+                        consumed += TAR_BLOCK;
+                        for (at = start; at < have; at++)
+                        {
+                                p64 number;
+
+                                if (text[at] != '\n')
+                                        continue;
+                                if (!tar_pax_wide(text + start, at - start, address_of number))
+                                        return false;
+                                start = at + 1;
+                                if (first)
+                                {
+                                        wanted = number;
+                                        if (wanted > TAR_SPARSE_MAX)
+                                                return false;
+                                        first = false;
+                                }
+                                else if (!half)
+                                {
+                                        pending = number;
+                                        half = true;
+                                }
+                                else
+                                {
+                                        if (!tar_sparse_add(pending, number))
+                                                return false;
+                                        half = false;
+                                        seen++;
+                                }
+                                if (!first && seen == wanted)
+                                        goto mapped;
+                        }
+                        if (start == 0 && have == sizeof(text))
+                                return false;
+                }
+mapped:
+                address_to size -= (p64)consumed;
+        }
+        for (at = 0; at < tar_sparse_used; at++)
+                if (tar_sparse[at].offset + tar_sparse[at].bytes > tar_sparse_real)
+                        return false;
         tar_sparse_active = true;
         return true;
 }
@@ -2746,7 +2966,10 @@ static bool tar_write_padding(bipolar handle, p64 size)
         return true;
 }
 
-static bool tar_put_file(bipolar archive, bipolar in, p64 size)
+/* The file's next size bytes into the archive, unpadded.  What could not be
+   read because the file ended early is answered, and -1 is a write that
+   failed. */
+static bipolar tar_put_span(bipolar archive, bipolar in, p64 size)
 {
         p64 left = size;
 
@@ -2755,10 +2978,10 @@ static bool tar_put_file(bipolar archive, bipolar in, p64 size)
                 tar_advise(in);
                 if (!tar_flush(archive) ||
                     !tar_copy_out(in, archive, size, null))
-                        return false;
+                        return -1;
 
                 tar_out_bytes += size;
-                return tar_write_padding(archive, size);
+                return 0;
         }
 
         while (left)
@@ -2767,18 +2990,56 @@ static bool tar_put_file(bipolar archive, bipolar in, p64 size)
                 bipolar got;
 
                 if (tar_at == TAR_RECORD && !tar_flush(archive))
-                        return false;
+                        return -1;
 
                 room = TAR_RECORD - tar_at;
                 got = system_read_retry((positive)in, tar_record + tar_at,
                                         left > room ? room : (positive)left);
-                if (got <= 0)
-                        return false;
+                if (got < 0)
+                        return -1;
+                if (!got)
+                        break;
 
                 tar_at += (positive)got;
                 left -= (positive)got;
         }
 
+        return (bipolar)left;
+}
+
+/* A file that ended before the size its header gave is padded with zeros
+   and said, as GNU says it. */
+static bool tar_put_shortfall(bipolar archive, string_address name, p64 left)
+{
+        p8 shown[24];
+
+        shown[positive_into(shown, (positive)left)] = end;
+        string_format(log_error, "tar: %w: File shrank by %s bytes; padding with zeros\n",
+                      writer_terminal_name, name, (string_address)shown);
+        tar_status = 2;
+        while (left)
+        {
+                positive room;
+
+                if (tar_at == TAR_RECORD && !tar_flush(archive))
+                        return false;
+                room = TAR_RECORD - tar_at;
+                if (room > left)
+                        room = (positive)left;
+                memory_fill(tar_record + tar_at, 0, room);
+                tar_at += room;
+                left -= room;
+        }
+        return true;
+}
+
+static bool tar_put_file(bipolar archive, bipolar in, p64 size,
+                         string_address name)
+{
+        bipolar rest = tar_put_span(archive, in, size);
+
+        if (rest < 0 || (rest > 0 && !tar_put_shortfall(archive, name, (p64)rest)))
+                return false;
         return tar_write_padding(archive, size);
 }
 
@@ -3953,6 +4214,13 @@ static fn tar_read_members(tar_members address_to run)
                         tar_refuse("invalid sparse archive");
                         break;
                 }
+                if (!tar_sparse_active && tar_psp_kind &&
+                    (type == '0' || !type) &&
+                    !tar_pax_sparse_take(handle, address_of size))
+                {
+                        tar_refuse("invalid sparse archive");
+                        break;
+                }
                 if (tar_sparse_active && tar_sparse_payload() != size)
                 {
                         tar_refuse("invalid sparse archive");
@@ -4615,7 +4883,8 @@ static bool tar_ustar_split(string_address name, positive address_to cut)
 
 /* An extended header's own name: the member's directory, PaxHeaders, the
    member's last component, kept to what a name field holds. */
-static fn tar_x_name(string_address name, p8 address_to into)
+static fn tar_x_name(string_address name, string_address middle,
+                     p8 address_to into)
 {
         positive length = string_length(name);
         positive stop = length;
@@ -4641,8 +4910,10 @@ static fn tar_x_name(string_address name, p8 address_to into)
                 memory_copy(full, name, dir);
                 used = dir;
         }
-        memory_copy(full + used, "/PaxHeaders/", 12);
-        used += 12;
+        positive middle_length = string_length(middle);
+
+        memory_copy(full + used, middle, middle_length);
+        used += middle_length;
         positive base = stop - start;
 
         if (base > sizeof(full) - used - 1)
@@ -4652,6 +4923,123 @@ static fn tar_x_name(string_address name, p8 address_to into)
         full[used] = end;
         memory_fill(into, 0, TAR_NAME + 1);
         memory_copy(into, full, used < TAR_NAME ? used : TAR_NAME);
+}
+
+/*
+        Sparse members, as GNU's -S writes them.  A file with fewer blocks
+        than its size needs is read for its data with SEEK_DATA and SEEK_HOLE,
+        and only the data goes in.  gnu and oldgnu keep the map in the header,
+        four spans and then 21 to an extension block, as type S; posix keeps
+        it in extended header records or, by default, as text at the front of
+        the data (version 1.0), the member named dir/GNUSparseFile.PID/base.
+        The map always ends in an empty span at the file's size.
+*/
+typedef struct
+{
+        p64 offset;
+        p64 length;
+} tar_extent;
+
+static tar_extent address_to tar_ext;
+static positive tar_ext_room;
+static positive tar_ext_count;
+static p64 tar_ext_data;
+static bool tar_sparse_on;
+static bool tar_sparse_use;
+static p8 tar_sparse_version = 2;
+static p8 address_to tar_map;
+static positive tar_map_room;
+static positive tar_map_used;
+
+static bool tar_ext_add(p64 offset, p64 length)
+{
+        if (!shell_array_room(tar_ext, tar_ext_room, tar_ext_count + 1))
+                return false;
+        tar_ext[tar_ext_count].offset = offset;
+        tar_ext[tar_ext_count++].length = length;
+        tar_ext_data += length;
+        return true;
+}
+
+/* True when the file has holes to leave out; tar_ext then holds its map. */
+static bool tar_sparse_scan(bipolar handle, file_facts address_to facts)
+{
+        p64 size = facts->size;
+        p64 at = 0;
+        bool whole;
+
+        tar_ext_count = 0;
+        tar_ext_data = 0;
+        if (!size || facts->blocks >= (size + 511) / 512)
+                return false;
+        while (at < size)
+        {
+                bipolar data = system_seek(handle, (bipolar)at, 3);
+                bipolar hole;
+
+                if (data < 0)
+                        break;
+                if ((p64)data >= size)
+                        break;
+                hole = system_seek(handle, data, 4);
+                if (hole < 0 || (p64)hole > size)
+                        hole = (bipolar)size;
+                if (!tar_ext_add((p64)data, (p64)hole - (p64)data))
+                        return false;
+                at = (p64)hole;
+        }
+        (void)system_seek(handle, 0, FILE_SEEK_SET);
+        whole = tar_ext_count == 1 && tar_ext[0].offset == 0 &&
+                tar_ext[0].length == size;
+        return !whole && tar_ext_add(size, 0);
+}
+
+/* The data of each span, and the padding after the last. */
+static bool tar_put_extents(bipolar archive, bipolar in, string_address name)
+{
+        for (positive at = 0; at < tar_ext_count; at++)
+        {
+                bipolar rest;
+
+                if (!tar_ext[at].length)
+                        continue;
+                if (system_seek(in, (bipolar)tar_ext[at].offset, FILE_SEEK_SET) < 0)
+                        return false;
+                rest = tar_put_span(archive, in, tar_ext[at].length);
+                if (rest < 0 ||
+                    (rest > 0 && !tar_put_shortfall(archive, name, (p64)rest)))
+                        return false;
+        }
+        return tar_write_padding(archive, tar_ext_data);
+}
+
+/* The 1.0 map: the count, then offset and length, a line each. */
+static bool tar_map_text(void)
+{
+        p8 text[24];
+        positive at;
+
+        tar_map_used = 0;
+        for (at = 0; at <= tar_ext_count; at++)
+        {
+                p64 numbers[2];
+                positive each = at ? 2 : 1;
+
+                numbers[0] = at ? tar_ext[at - 1].offset : tar_ext_count;
+                numbers[1] = at ? tar_ext[at - 1].length : 0;
+                for (positive one = 0; one < each; one++)
+                {
+                        positive length = positive_into(text, (positive)numbers[one]);
+
+                        if (!shell_array_room(tar_map, tar_map_room,
+                                              tar_map_used + length + 1))
+                                return false;
+                        memory_copy(tar_map + tar_map_used, text, length);
+                        tar_map_used += length;
+                        tar_map[tar_map_used++] = '\n';
+                }
+        }
+        return true;
 }
 
 /* The member's header, and whatever the format sends ahead of it. */
@@ -4675,6 +5063,11 @@ static bipolar tar_put_facts(bipolar handle, string_address name, p8 type,
         p64 mode = tar_format == TAR_OLDGNU ? (p64)facts->mode
                                             : (p64)(facts->mode & 07777);
         p8 owner[FILE_NAME_MAX];
+        bool sparse = tar_sparse_use && type == '0';
+        p64 field_size = size;
+        p8 sparse_name[TAR_PATH];
+        positive map_padded = 0;
+        string_address real_name = name;
 
         if (tar_format == TAR_V7 && (type == '3' || type == '4' || type == '6'))
         {
@@ -4684,6 +5077,77 @@ static bipolar tar_put_facts(bipolar handle, string_address name, p8 type,
         }
 
         tar_x_used = 0;
+        if (sparse)
+        {
+                if (!posix)
+                {
+                        type = 'S';
+                        field_size = (p64)tar_ext_data;
+                }
+                else if (tar_sparse_version == 2)
+                {
+                        if (!tar_map_text())
+                                return -1;
+                        map_padded = tar_padded(tar_map_used);
+                        tar_x_add("GNU.sparse.major", "1", 1);
+                        tar_x_add("GNU.sparse.minor", "0", 1);
+                        tar_x_add("GNU.sparse.name", name, name_length);
+                        tar_x_number("GNU.sparse.realsize", (b64)size);
+                        field_size = (p64)(map_padded + tar_ext_data);
+                }
+                else
+                {
+                        tar_x_number("GNU.sparse.size", (b64)size);
+                        tar_x_number("GNU.sparse.numblocks", (b64)tar_ext_count);
+                        if (tar_sparse_version == 1)
+                        {
+                                p8 text[24];
+                                positive at;
+
+                                tar_x_add("GNU.sparse.name", name, name_length);
+                                tar_map_used = 0;
+                                for (at = 0; at < tar_ext_count; at++)
+                                        for (positive one = 0; one < 2; one++)
+                                        {
+                                                positive length = positive_into(
+                                                    text, (positive)(one ? tar_ext[at].length
+                                                                         : tar_ext[at].offset));
+
+                                                if (!shell_array_room(tar_map, tar_map_room,
+                                                                      tar_map_used + length + 1))
+                                                        return -1;
+                                                if (tar_map_used)
+                                                        tar_map[tar_map_used++] = ',';
+                                                memory_copy(tar_map + tar_map_used, text, length);
+                                                tar_map_used += length;
+                                        }
+                                tar_x_add("GNU.sparse.map", (string_address)tar_map,
+                                          tar_map_used);
+                        }
+                        else
+                                for (positive at = 0; at < tar_ext_count; at++)
+                                {
+                                        tar_x_number("GNU.sparse.offset", (b64)tar_ext[at].offset);
+                                        tar_x_number("GNU.sparse.numbytes", (b64)tar_ext[at].length);
+                                }
+                        field_size = (p64)tar_ext_data;
+                }
+                if (posix && tar_sparse_version != 0)
+                {
+                        p8 middle[48];
+                        positive at = 0;
+
+                        memory_copy(middle, "/GNUSparseFile.", 15);
+                        at = 15 + positive_into(middle + 15,
+                                                (positive)system_call(syscall(getpid)));
+                        middle[at++] = '/';
+                        middle[at] = end;
+                        tar_x_name(real_name, (string_address)middle, sparse_name);
+                        name = (string_address)sparse_name;
+                        leaf = name;
+                        name_length = string_length(name);
+                }
+        }
         if ((type == '1' || type == '2') && link_length > limit)
         {
                 if (posix)
@@ -4731,7 +5195,7 @@ static bipolar tar_put_facts(bipolar handle, string_address name, p8 type,
         tar_field_put_octal(block + 100, 8, mode);
         if (!tar_number(block + 108, 8, (b64)facts->owner, "uid", "uid_t") ||
             !tar_number(block + 116, 8, (b64)facts->group, "gid", "gid_t") ||
-            !tar_number(block + 124, 12, (b64)size, "size", "off_t"))
+            !tar_number(block + 124, 12, (b64)field_size, "size", "off_t"))
                 return 0;
         if (posix)
         {
@@ -4773,6 +5237,20 @@ static bipolar tar_put_facts(bipolar handle, string_address name, p8 type,
                                         "minor_t"))
                                 return 0;
         }
+        if (type == 'S')
+        {
+                positive at;
+
+                for (at = 0; at < 4 && at < tar_ext_count; at++)
+                        if (!tar_number(block + 386 + at * 24, 12,
+                                        (b64)tar_ext[at].offset, null, "off_t") ||
+                            !tar_number(block + 398 + at * 24, 12,
+                                        (b64)tar_ext[at].length, null, "off_t"))
+                                return 0;
+                block[482] = tar_ext_count > 4;
+                if (!tar_number(block + 483, 12, (b64)size, null, "off_t"))
+                        return 0;
+        }
         if (posix)
         {
                 tar_x_time("atime", (b64)facts->accessed.seconds,
@@ -4790,7 +5268,7 @@ static bipolar tar_put_facts(bipolar handle, string_address name, p8 type,
         {
                 p8 header[TAR_BLOCK];
 
-                tar_x_name(name, kept);
+                tar_x_name(real_name, "/PaxHeaders/", kept);
                 tar_private_header(header, (string_address)kept, tar_x_used,
                                    'x', mtime);
                 if (!tar_write_block(handle, header) ||
@@ -4803,7 +5281,35 @@ static bipolar tar_put_facts(bipolar handle, string_address name, p8 type,
                               facts->group, facts->rdev_major, facts->rdev_minor,
                               mtime, name, link, false);
         tar_dumped++;
-        return tar_write_block(handle, block) ? 1 : -1;
+        if (!tar_write_block(handle, block))
+                return -1;
+        if (type == 'S')
+        {
+                positive at;
+
+                for (at = 4; at < tar_ext_count; at += 21)
+                {
+                        p8 more[TAR_BLOCK];
+
+                        memory_fill(more, 0, TAR_BLOCK);
+                        for (positive one = 0; one < 21 && at + one < tar_ext_count; one++)
+                                if (!tar_number(more + one * 24, 12,
+                                                (b64)tar_ext[at + one].offset, null, "off_t") ||
+                                    !tar_number(more + one * 24 + 12, 12,
+                                                (b64)tar_ext[at + one].length, null, "off_t"))
+                                        return -1;
+                        more[504] = at + 21 < tar_ext_count;
+                        if (!tar_write_block(handle, more))
+                                return -1;
+                }
+        }
+        else if (map_padded)
+        {
+                if (!tar_put(handle, tar_map, tar_map_used) ||
+                    !tar_write_padding(handle, tar_map_used))
+                        return -1;
+        }
+        return 1;
 }
 
 static p64 tar_identity(file_facts address_to facts)
@@ -5064,8 +5570,13 @@ static b32 tar_add_named(bipolar archive, bipolar directory,
                 return tar_status;
         }
 
-        bipolar put = tar_put_facts(archive, member, '0', (p64)facts.size, null,
-                                    address_of facts);
+        bool sparse = tar_sparse_on && tar_sparse_scan(handle, address_of facts);
+        bipolar put;
+
+        tar_sparse_use = sparse;
+        put = tar_put_facts(archive, member, '0', (p64)facts.size, null,
+                            address_of facts);
+        tar_sparse_use = false;
 
         if (put <= 0)
         {
@@ -5075,7 +5586,8 @@ static b32 tar_add_named(bipolar archive, bipolar directory,
                 return tar_status;
         }
 
-        if (!tar_put_file(archive, handle, (p64)facts.size))
+        if (!(sparse ? tar_put_extents(archive, handle, member)
+                     : tar_put_file(archive, handle, (p64)facts.size, member)))
         {
                 tar_fail(member, -ERROR_INPUT_OUTPUT);
                 tar_create_fatal = true;
@@ -5123,6 +5635,9 @@ static b32 tar_write_archive(struct tar_options address_to options)
         tar_numeric_owner = options->numeric;
         tar_format = options->format;
         tar_blocking = options->blocking;
+        tar_sparse_on = options->sparse;
+        tar_sparse_use = false;
+        tar_sparse_version = options->sparse_version;
         output_stage.directory = -1;
         output_stage.handle = -1;
         if (!options->archive || string_equals(options->archive, "-"))
@@ -5274,6 +5789,7 @@ enum
         TAR_POSIX_OPTION,
         TAR_PAX_OPTION,
         TAR_NO_SAME_OWNER,
+        TAR_SPARSE_VERSION,
 };
 
 static const argument_option tar_option_rules[] = {
@@ -5295,6 +5811,8 @@ static const argument_option tar_option_rules[] = {
     {"old-archive", 'o'},
     {"portability", 'o'},
     {"format", 'H', ARGUMENT_REQUIRED},
+    {"sparse", 'S'},
+    {"sparse-version", TAR_SPARSE_VERSION, ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
     {"posix", TAR_POSIX_OPTION, ARGUMENT_LONG_ONLY},
     {"pax-option", TAR_PAX_OPTION, ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
     {"blocking-factor", 'b', ARGUMENT_REQUIRED},
@@ -5376,8 +5894,7 @@ static bool tar_take(struct tar_options address_to options, p8 letter,
                 {
                         string_format(log_error, "tar: %w: Invalid archive format\n",
                                       writer_terminal_name, value);
-                        string_format(log_error,
-                                      "Try 'tar --help' or 'tar --usage' for more information.\n");
+                        tar_usage_hint();
                         tar_status = 2;
                         return false;
                 }
@@ -5385,6 +5902,18 @@ static bool tar_take(struct tar_options address_to options, p8 letter,
         }
         case TAR_PAX_OPTION:
                 options->pax_option = value;
+                break;
+        case 'S': options->sparse = true; break;
+        case TAR_SPARSE_VERSION:
+                options->sparse = true;
+                if (string_equals(value, "0.0"))
+                        options->sparse_version = 0;
+                else if (string_equals(value, "0.1"))
+                        options->sparse_version = 1;
+                else if (string_equals(value, "1.0"))
+                        options->sparse_version = 2;
+                else
+                        return tar_refuse("Unknown sparse version"), false;
                 break;
         case 'b':
                 options->blocking = string_digits_max(value, positive_max,
@@ -5437,6 +5966,7 @@ static bool tar_parse(struct tar_options address_to options)
 
         memory_fill(options, 0, sizeof(*options));
         options->format = TAR_GNU;
+        options->sparse_version = 2;
         options->blocking = 20;
         tar_pax_deleted_count = 0;
         cursor.at += *keys != end;
@@ -5503,13 +6033,18 @@ static bool tar_parse(struct tar_options address_to options)
                 else
                         options->owner = -1;
         }
+        if (options->sparse && options->mode == TAR_CREATE &&
+            (options->format == TAR_USTAR || options->format == TAR_V7))
+        {
+                tar_refuse("GNU features wanted on incompatible archive format");
+                return tar_usage_hint();
+        }
         if (options->pax_option)
         {
                 if (options->format != TAR_POSIX)
                 {
                         tar_refuse("--pax-option can be used only on POSIX archives");
-                        return string_report(log_error, false,
-                                             "Try 'tar --help' or 'tar --usage' for more information.\n");
+                        return tar_usage_hint();
                 }
                 tar_pax_deleted_count = 0;
                 for (string_address at = options->pax_option; *at;)
