@@ -21216,7 +21216,29 @@ static bipolar clock_tz_local_seconds(bipolar year, p8 which)
         }
         else
                 days = clock_days_from_civil(year, 1, 1) + clock_dst_day[which];
-        return days * CLOCK_SECONDS_PER_DAY + clock_dst_at[which];
+
+        //      A year in the hundreds of billions, which a time near the end
+        //      of the range is in, has more seconds than a signed word holds.
+        //      The answer is only ever compared with a time as far out as the
+        //      year, so it stops at the end of the range rather than wrapping.
+        bipolar seconds;
+
+        if (__builtin_mul_overflow(days, (bipolar)CLOCK_SECONDS_PER_DAY, &seconds))
+                return days < 0 ? bipolar_min : bipolar_max;
+        if (__builtin_add_overflow(seconds, (bipolar)clock_dst_at[which], &seconds))
+                return clock_dst_at[which] < 0 ? bipolar_min : bipolar_max;
+        return seconds;
+}
+
+//      The sum of two offsets that may be at the end of the range, stopping
+//      there rather than wrapping.
+static bipolar clock_sum_saturated(bipolar one, bipolar two)
+{
+        bipolar sum;
+
+        return __builtin_add_overflow(one, two, &sum)
+                   ? (two < 0 ? bipolar_min : bipolar_max)
+                   : sum;
 }
 
 static bool clock_tz_in_dst(bipolar utc)
@@ -21232,13 +21254,16 @@ static bool clock_tz_in_dst(bipolar utc)
 
         if (!clock_has_dst)
                 return false;
-        wall = utc - clock_std_west;
+        //      A time at the end of the range is not in the zone's calendar
+        //      once its offset is taken off, so it is not in daylight time.
+        if (__builtin_sub_overflow(utc, (bipolar)clock_std_west, &wall))
+                return false;
         clock_civil_from_days(clock_floor_divide(wall, CLOCK_SECONDS_PER_DAY),
                               address_of year, address_of month, address_of day);
         start = clock_tz_local_seconds(year, 0);
         stop = clock_tz_local_seconds(year, 1);
-        start_utc = start + clock_std_west;
-        stop_utc = stop + clock_dst_west;
+        start_utc = clock_sum_saturated(start, clock_std_west);
+        stop_utc = clock_sum_saturated(stop, clock_dst_west);
         if (start_utc < stop_utc)
                 return utc >= start_utc && utc < stop_utc;
         return utc >= start_utc || utc < stop_utc;
@@ -21511,6 +21536,7 @@ tm address_to localtime_r(const time_t address_to stamp, tm address_to into)
 {
         bipolar utc;
         bipolar west;
+        bipolar wall;
         bool dst;
 
         if (is_null(stamp) || is_null(into))
@@ -21519,7 +21545,10 @@ tm address_to localtime_r(const time_t address_to stamp, tm address_to into)
         utc = (bipolar)(address_to stamp);
         dst = clock_tz_in_dst(utc);
         west = dst ? clock_dst_west : clock_std_west;
-        if (!clock_break_down(utc - west, into))
+        //      The wall time of an instant at the end of the range, in a zone
+        //      that is ahead of UTC, is past it: there is no such date.
+        if (__builtin_sub_overflow(utc, (bipolar)west, &wall) ||
+            !clock_break_down(wall, into))
                 return null;
         into->tm_isdst = dst ? 1 : 0;
         into->tm_gmtoff = -west;
@@ -21577,13 +21606,13 @@ b64 clock_local_to_utc(b64 civil)
         clock_tz_current();
         for (positive step = 0; step < 4; step++)
         {
-                b64 next = civil - clock_local_east(at);
+                b64 next = clock_sum_saturated(civil, -clock_local_east(at));
 
                 if (next == at)
                         return at;
                 at = next;
         }
-        return civil + clock_std_west;
+        return clock_sum_saturated(civil, clock_std_west);
 }
 
 //      Whether a wall-clock time happens at all here: false only inside the
@@ -21592,8 +21621,8 @@ bool clock_local_exists(b64 civil)
 {
         clock_tz_current();
         return !clock_has_dst ||
-               !clock_tz_in_dst((bipolar)(civil + clock_std_west)) ||
-               clock_tz_in_dst((bipolar)(civil + clock_dst_west));
+               !clock_tz_in_dst(clock_sum_saturated(civil, clock_std_west)) ||
+               clock_tz_in_dst(clock_sum_saturated(civil, clock_dst_west));
 }
 
 time_t mktime(tm address_to broken)

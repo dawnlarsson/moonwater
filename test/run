@@ -402,6 +402,24 @@ freestanding()
         riscv64) set -- "$@" -march=rv64imafd_zicsr_zicntr -mabi=lp64d ;;
         esac
 
+        #       MW_UBSAN=1 builds every program and check with the compiler's
+        #       undefined-behaviour checks and traps at the first one, which
+        #       is a ud2 on x86_64 and so a signal the lane reports as a
+        #       program that died, with no runtime library to link: signed
+        #       overflow, a shift past the width, an index past an array, a
+        #       null or dangling use the optimizer is allowed to build on.
+        #       Alignment is left out: the shell's byte stores hand out typed
+        #       records at any offset, which x86_64 does not mind.
+        #
+        #           MW_UBSAN=1 sh test/run clock
+        #
+        #       A lane that builds with the checks has to be run on its own:
+        #       the binaries are the same names as the plain ones.
+        if [ -n "${MW_UBSAN:-}" ]; then
+                set -- "$@" -fsanitize=undefined -fno-sanitize=alignment \
+                        -fsanitize-undefined-trap-on-error
+        fi
+
         coverage_build "$architecture" "$output" || return 1
 
         # shellcheck disable=SC2086

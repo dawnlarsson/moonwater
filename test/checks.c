@@ -41948,6 +41948,35 @@ static fn check_live(void)
                              localtime(address_of epoch)->tm_hour == 1 &&
                                  localtime(address_of epoch)->tm_gmtoff == 3600);
                 }
+
+                //      The ends of the range, where taking a zone's offset off
+                //      a time went past the word: the wall time of the last
+                //      second east of UTC and of the first one west of it is
+                //      not a date, and the answer is none rather than a date
+                //      a wrapped subtraction made up.
+                {
+                        time_t last = (time_t)0x7fffffffffffffffll;
+                        time_t first = (time_t)(-0x7fffffffffffffffll - 1);
+                        time_t zero = 0;
+
+                        good((string_address) "the last second has no local time east of UTC",
+                             is_null(localtime(address_of last)));
+                        setenv((string_address) "TZ",
+                               (string_address) "EST5EDT,M3.2.0,M11.1.0", 1);
+                        tzset();
+                        good((string_address) "the first second has no local time west of UTC",
+                             is_null(localtime(address_of first)));
+                        good((string_address) "a zone with daylight time answers at both ends",
+                             localtime(address_of zero) != null);
+                        setenv((string_address) "TZ",
+                               (string_address) "NZST-12NZDT,M9.5.0,M4.1.0/3", 1);
+                        tzset();
+                        good((string_address) "the last second is not in daylight time when its offset overflows",
+                             !clock_tz_in_dst(0x7fffffffffffffffll) &&
+                                 !clock_tz_in_dst(0x7ffffffffffffffell));
+                        setenv((string_address) "TZ", (string_address) "CET-1", 1);
+                        tzset();
+                }
                 good((string_address) "Stockholm maps to CET",
                      clock_zone_posix((string_address) "Europe/Stockholm") &&
                          clock_zone_posix((string_address) "Europe/Stockholm")[0] == 'C');
