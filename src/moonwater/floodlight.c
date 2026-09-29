@@ -699,6 +699,52 @@ static char *word(char **at)
 }
 
 /*
+ * The rest of a row once its subject is out of the line: the setting, the flag
+ * a flag row names, allow or deny, and nothing after it, every name short and
+ * plain. One reader for the configured text and for a line written to the
+ * device, so that what boot takes for a row and what a write takes for one
+ * cannot drift apart.
+ */
+struct row_text {
+	const char *detail;
+	unsigned int setting;
+	bool allow;
+};
+
+static bool row_take(char *at, const char *subject, struct row_text *row)
+{
+	char *setting = word(&at), *state = word(&at);
+	unsigned int i;
+
+	row->detail = "";
+	if (!setting || !state)
+		return false;
+
+	for (i = 0; i < SETTINGS && strcmp(setting, setting_name[i]); i++)
+		;
+	if (i == SETTINGS)
+		return false;
+
+	if (i == FLAG) {
+		row->detail = state;
+		state = word(&at);
+		if (!state)
+			return false;
+	}
+
+	if (word(&at) || (strcmp(state, "allow") && strcmp(state, "deny")))
+		return false;
+	if (strlen(subject) >= SUBJECT || strlen(row->detail) >= DETAIL)
+		return false;
+	if (!plain(subject) || (i == FLAG && !plain(row->detail)))
+		return false;
+
+	row->setting = i;
+	row->allow = !strcmp(state, "allow");
+	return true;
+}
+
+/*
  * The configured text, read into rows at boot.
  *
  * Each row is copied into the one parse buffer and taken apart by the same
@@ -712,7 +758,8 @@ static bool __init configure(const char *text)
 	unsigned int count = 0;
 
 	while (*text) {
-		char *at = parse.line, *subject, *setting, *state, *detail = "";
+		char *at = parse.line, *subject;
+		struct row_text row;
 		unsigned int length = 0, i, j;
 
 		while (text[length] && text[length] != ';' && text[length] != '\n')
@@ -728,35 +775,14 @@ static bool __init configure(const char *text)
 		if (!subject)
 			continue; /* nothing between two semicolons */
 
-		setting = word(&at);
-		state = word(&at);
-		if (!setting || !state)
-			return false;
-
-		for (i = 0; i < SETTINGS && strcmp(setting, setting_name[i]); i++)
-			;
-		if (i == SETTINGS)
-			return false;
-
-		if (i == FLAG) {
-			detail = state;
-			state = word(&at);
-			if (!state)
-				return false;
-		}
-
-		if (word(&at) || (strcmp(state, "allow") && strcmp(state, "deny")))
-			return false;
-		if (strlen(subject) >= SUBJECT || strlen(detail) >= DETAIL)
-			return false;
-		if (!strcmp(subject, "seal") || !plain(subject) ||
-		    (i == FLAG && !plain(detail)))
+		/* Sealing at boot is its own switch. */
+		if (!strcmp(subject, "seal") || !row_take(at, subject, &row))
 			return false;
 
 		for (j = 0; j < count; j++)
-			if (configured[j].setting == i &&
+			if (configured[j].setting == row.setting &&
 			    !strcmp(configured[j].subject, subject) &&
-			    !strcmp(configured[j].detail, detail))
+			    !strcmp(configured[j].detail, row.detail))
 				break;
 		if (j < count)
 			continue; /* named before, and the first says it */
@@ -765,9 +791,9 @@ static bool __init configure(const char *text)
 			return false;
 
 		strscpy(configured[count].subject, subject, SUBJECT);
-		strscpy(configured[count].detail, detail, DETAIL);
-		configured[count].setting = i;
-		configured[count].allowed = !strcmp(state, "allow");
+		strscpy(configured[count].detail, row.detail, DETAIL);
+		configured[count].setting = row.setting;
+		configured[count].allowed = row.allow;
 		count++;
 	}
 
@@ -778,7 +804,9 @@ static bool __init configure(const char *text)
 static ssize_t floodlight_write(struct file *file, const char __user *from,
 				size_t count, loff_t *offset)
 {
-	char *line, *at, *subject, *setting, *state, *detail = "";
+	char *line, *at, *subject;
+	const char *detail;
+	struct row_text text;
 	struct light *row;
 	int rule;
 	unsigned int i;
@@ -868,42 +896,17 @@ static ssize_t floodlight_write(struct file *file, const char __user *from,
 		goto out;
 	}
 
-	setting = word(&at);
-	state = word(&at);
-	if (!setting || !state) {
+	/* Words after the state are refused, as after seal: a line that says
+	 * more than a row is not the row it starts as. Nothing is let through
+	 * that could rewrite the report it is about to appear in, either. */
+	if (!row_take(at, subject, &text)) {
 		answer = -EINVAL;
 		goto out;
 	}
 
-	for (i = 0; i < SETTINGS && strcmp(setting, setting_name[i]); i++)
-		;
-	if (i == SETTINGS) {
-		answer = -EINVAL;
-		goto out;
-	}
-
-	if (i == FLAG) {
-		detail = state;
-		state = word(&at);
-		if (!state) {
-			answer = -EINVAL;
-			goto out;
-		}
-	}
-
-	answer = -EINVAL;
-	if (strcmp(state, "allow") && strcmp(state, "deny"))
-		goto out;
-	allow = !strcmp(state, "allow");
-	if (strlen(subject) >= SUBJECT || strlen(detail) >= DETAIL)
-		goto out;
-
-	/* Nothing that could rewrite the report it is about to appear in. */
-	if (!plain(subject))
-		goto out;
-	if (i == FLAG && !plain(detail))
-		goto out;
-
+	i = text.setting;
+	detail = text.detail;
+	allow = text.allow;
 	answer = count;
 	if (sealed) {
 		answer = -EPERM;

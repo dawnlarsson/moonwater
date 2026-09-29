@@ -31161,10 +31161,8 @@ def harness_floodlight(argv):
     for guard, what in (
             (r'if \(!capable\(CAP_SYS_ADMIN\)\)\s*\n\s*return -EPERM;',
              'the write path refuses anyone but root, before it copies anything'),
-            (r'if \(!plain\(subject\)\)\s*\n\s*goto out;',
-             'the write path refuses a subject that is not plain'),
-            (r'if \(i == FLAG && !plain\(detail\)\)\s*\n\s*goto out;',
-             'the write path refuses a flag that is not plain'),
+            (r'if \(!row_take\(at, subject, &text\)\) \{\s*\n\s*answer = -EINVAL;\s*\n\s*goto out;',
+             'the write path refuses a row row_take does not read'),
             (r'if \(!intact\(\)\) \{\s*\n\s*answer = -EPERM;',
              'the write path refuses everything once anything has been tampered with'),
             (r'if \(!guard_intact\(\)\) \{',
@@ -31172,6 +31170,19 @@ def harness_floodlight(argv):
             (r'if \(sealed\) \{\s*\n\s*answer = -EPERM;',
              'the write path refuses every change once sealed'),):
         check(bool(re.search(guard, write)), what)
+
+    #   row_take is what both the write path and the boot-time reader take a
+    #   row through, so the name guards live there, exactly as written, and
+    #   the boot reader has to go through it too.
+    take = text[text.index('static bool row_take('):]
+    take = take[:take.index('\n}\n')]
+
+    check(bool(re.search(r'if \(!plain\(subject\) \|\| \(i == FLAG && !plain\(row->detail\)\)\)\s*\n\s*return false;', take)),
+          'row_take refuses a subject or a flag that is not plain')
+    check(bool(re.search(r'if \(word\(&at\) \|\| \(strcmp\(state, "allow"\) && strcmp\(state, "deny"\)\)\)\s*\n\s*return false;', take)),
+          'row_take refuses a word after the state and a state that is not allow or deny')
+    check(bool(re.search(r'row_take\(at, subject, &row\)', text[text.index('static bool __init configure('):])),
+          'the configured text is read through row_take')
 
     #   The read path has to refuse just as hard, and the seals have to be
     #   folded with the boot secret or they are arithmetic anybody who has read
