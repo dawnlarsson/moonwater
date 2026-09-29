@@ -1184,6 +1184,7 @@ static bool lex_line_closed(string_address line)
 }
 
 static PURE bool lex_assignment_head(string_address text, positive length);
+static bool lex_subscript_unclosed(string_address at);
 
 b32 lex_unfinished(string_address line)
 {
@@ -1197,6 +1198,7 @@ b32 lex_unfinished(string_address line)
         bool newline = lex_scan_newline;
 
         string_address word = null;
+        bool command_head = true;
 
         lex_prepare();
         lex_unmatched = 0;
@@ -1231,6 +1233,8 @@ b32 lex_unfinished(string_address line)
                 //      answers before the look-ahead the operators need.
                 if (string_set_blanks[c])
                 {
+                        if (!fresh)
+                                command_head = false;
                         fresh = true;
                         step++;
                         continue;
@@ -1238,6 +1242,7 @@ b32 lex_unfinished(string_address line)
 
                 if (lex_operator[c])
                 {
+                        command_head = true;
                         /*
                                 An arithmetic command, on exactly the terms
                                 lex_line_floor takes it: two parentheses, and
@@ -1315,6 +1320,12 @@ b32 lex_unfinished(string_address line)
                 if (fresh)
                         word = step;
                 fresh = false;
+
+                if (c == '[' && command_head && shell_bash_compat && word &&
+                    step > word &&
+                    lex_assignment_head(word, (positive)(step - word)) &&
+                    lex_subscript_unclosed(step + 1))
+                        return lex_open_match(LEX_OPEN_WORD, ']');
 
                 // A # past the first byte of a run is a byte of the word, so
                 // the run may swallow it and the test above still sees the one
@@ -1548,6 +1559,34 @@ static string_address lex_assignment_subscript_end(string_address at)
         }
 
         return null;
+}
+
+//      Whether the [ just read at the head of a command, after a name, is
+//      never closed on this line. Bash reads on for the ] however much
+//      blank, operator and semicolon is in the way, so a command that
+//      begins a[ or a[5 + is unfinished, and at the end of input it is a
+//      syntax error.
+static bool lex_subscript_unclosed(string_address at)
+{
+        string_address step = at;
+        positive depth = 1;
+
+        while (string_get(step) && string_not(step, '\n'))
+        {
+                b32 skipped = lex_skip_held(address_of step);
+
+                if (skipped)
+                        continue;
+
+                if (string_is(step, '['))
+                        depth++;
+                else if (string_is(step, ']') && !--depth)
+                        return false;
+
+                step++;
+        }
+
+        return true;
 }
 
 static KEEP b32 lex_word(string_address address_to at)

@@ -21365,11 +21365,1152 @@ static COLD fn shell_compopt(writer write, string_address input)
         shell_answer(status);
 }
 
+/*
+        bind: the key bindings and readline variables a script can read back.
+
+        The line editor here is its own, so nothing said to bind changes what
+        a key does; what a script can still ask is what readline answers to
+        bind -p, -P, -q, -v, -V, -X and the like, and those answers are the
+        same however the terminal is edited. The defaults are readline's for
+        the emacs keymap and its variables as bash 5.3 starts them, kept as
+        data; a binding, a removal or a variable set on top of them is kept
+        beside, and the listings are made from the two.
+*/
+static const string_address bind_functions[] = {
+    "abort", "accept-line", "alias-expand-line", "arrow-key-prefix",
+    "backward-byte", "backward-char", "backward-delete-char",
+    "backward-kill-line", "backward-kill-word", "backward-word",
+    "bash-vi-complete", "beginning-of-history", "beginning-of-line",
+    "bracketed-paste-begin", "call-last-kbd-macro", "capitalize-word",
+    "character-search", "character-search-backward", "clear-display",
+    "clear-screen", "complete", "complete-command", "complete-filename",
+    "complete-hostname", "complete-into-braces", "complete-username",
+    "complete-variable", "copy-backward-word", "copy-forward-word",
+    "copy-region-as-kill", "dabbrev-expand", "delete-char",
+    "delete-char-or-list", "delete-horizontal-space", "digit-argument",
+    "display-shell-version", "do-lowercase-version", "downcase-word",
+    "dump-functions", "dump-macros", "dump-variables",
+    "dynamic-complete-history", "edit-and-execute-command",
+    "emacs-editing-mode", "end-kbd-macro", "end-of-history", "end-of-line",
+    "exchange-point-and-mark", "execute-named-command",
+    "export-completions", "fetch-history", "forward-backward-delete-char",
+    "forward-byte", "forward-char", "forward-search-history",
+    "forward-word", "glob-complete-word", "glob-expand-word",
+    "glob-list-expansions", "history-and-alias-expand-line",
+    "history-expand-line", "history-search-backward",
+    "history-search-forward", "history-substring-search-backward",
+    "history-substring-search-forward", "insert-comment",
+    "insert-completions", "insert-last-argument", "kill-line",
+    "kill-region", "kill-whole-line", "kill-word", "magic-space",
+    "menu-complete", "menu-complete-backward", "next-history",
+    "next-screen-line", "non-incremental-forward-search-history",
+    "non-incremental-forward-search-history-again",
+    "non-incremental-reverse-search-history",
+    "non-incremental-reverse-search-history-again", "old-menu-complete",
+    "operate-and-get-next", "overwrite-mode",
+    "possible-command-completions", "possible-completions",
+    "possible-filename-completions", "possible-hostname-completions",
+    "possible-username-completions", "possible-variable-completions",
+    "previous-history", "previous-screen-line", "print-last-kbd-macro",
+    "quoted-insert", "re-read-init-file", "redraw-current-line",
+    "reverse-search-history", "revert-line", "self-insert", "set-mark",
+    "shell-backward-kill-word", "shell-backward-word", "shell-expand-line",
+    "shell-forward-word", "shell-kill-word", "shell-transpose-words",
+    "skip-csi-sequence", "spell-correct-word", "start-kbd-macro",
+    "tab-insert", "tilde-expand", "transpose-chars", "transpose-words",
+    "tty-status", "undo", "universal-argument", "unix-filename-rubout",
+    "unix-line-discard", "unix-word-rubout", "upcase-word", "vi-append-eol",
+    "vi-append-mode", "vi-arg-digit", "vi-bWord", "vi-back-to-indent",
+    "vi-backward-bigword", "vi-backward-word", "vi-bword", "vi-change-case",
+    "vi-change-char", "vi-change-to", "vi-char-search", "vi-column",
+    "vi-complete", "vi-delete", "vi-delete-to", "vi-eWord",
+    "vi-edit-and-execute-command", "vi-editing-mode", "vi-end-bigword",
+    "vi-end-word", "vi-eof-maybe", "vi-eword", "vi-fWord",
+    "vi-fetch-history", "vi-first-print", "vi-forward-bigword",
+    "vi-forward-word", "vi-fword", "vi-goto-mark", "vi-insert-beg",
+    "vi-insertion-mode", "vi-match", "vi-movement-mode", "vi-next-word",
+    "vi-overstrike", "vi-overstrike-delete", "vi-prev-word", "vi-put",
+    "vi-redo", "vi-replace", "vi-rubout", "vi-search", "vi-search-again",
+    "vi-set-mark", "vi-subst", "vi-tilde-expand", "vi-undo",
+    "vi-unix-word-rubout", "vi-yank-arg", "vi-yank-pop", "vi-yank-to",
+    "yank", "yank-last-arg", "yank-nth-arg", "yank-pop",
+};
+#define BIND_FUNCTIONS array_count(bind_functions)
+static const struct { string_address keys; string_address function; } bind_defaults[] = {
+    {"\\C-g", "abort"},
+    {"\\C-x\\C-g", "abort"},
+    {"\\e\\C-g", "abort"},
+    {"\\C-j", "accept-line"},
+    {"\\C-m", "accept-line"},
+    {"\\C-b", "backward-char"},
+    {"\\eOD", "backward-char"},
+    {"\\e[D", "backward-char"},
+    {"\\C-h", "backward-delete-char"},
+    {"\\C-?", "backward-delete-char"},
+    {"\\C-x\\C-?", "backward-kill-line"},
+    {"\\e\\C-h", "backward-kill-word"},
+    {"\\e\\C-?", "backward-kill-word"},
+    {"\\e\\e[D", "backward-word"},
+    {"\\e[1;3D", "backward-word"},
+    {"\\e[1;5D", "backward-word"},
+    {"\\e[5D", "backward-word"},
+    {"\\eb", "backward-word"},
+    {"\\e<", "beginning-of-history"},
+    {"\\e[5~", "beginning-of-history"},
+    {"\\C-a", "beginning-of-line"},
+    {"\\eOH", "beginning-of-line"},
+    {"\\e[1~", "beginning-of-line"},
+    {"\\e[7~", "beginning-of-line"},
+    {"\\e[H", "beginning-of-line"},
+    {"\\e[200~", "bracketed-paste-begin"},
+    {"\\C-xe", "call-last-kbd-macro"},
+    {"\\ec", "capitalize-word"},
+    {"\\C-]", "character-search"},
+    {"\\e\\C-]", "character-search-backward"},
+    {"\\e\\C-l", "clear-display"},
+    {"\\C-l", "clear-screen"},
+    {"\\C-i", "complete"},
+    {"\\e\\e", "complete"},
+    {"\\e!", "complete-command"},
+    {"\\e/", "complete-filename"},
+    {"\\e@", "complete-hostname"},
+    {"\\e{", "complete-into-braces"},
+    {"\\e~", "complete-username"},
+    {"\\e$", "complete-variable"},
+    {"\\C-d", "delete-char"},
+    {"\\e[3~", "delete-char"},
+    {"\\e\\\\", "delete-horizontal-space"},
+    {"\\e-", "digit-argument"},
+    {"\\e0", "digit-argument"},
+    {"\\e1", "digit-argument"},
+    {"\\e2", "digit-argument"},
+    {"\\e3", "digit-argument"},
+    {"\\e4", "digit-argument"},
+    {"\\e5", "digit-argument"},
+    {"\\e6", "digit-argument"},
+    {"\\e7", "digit-argument"},
+    {"\\e8", "digit-argument"},
+    {"\\e9", "digit-argument"},
+    {"\\C-x\\C-v", "display-shell-version"},
+    {"\\C-xA", "do-lowercase-version"},
+    {"\\C-xB", "do-lowercase-version"},
+    {"\\C-xC", "do-lowercase-version"},
+    {"\\C-xD", "do-lowercase-version"},
+    {"\\C-xE", "do-lowercase-version"},
+    {"\\C-xF", "do-lowercase-version"},
+    {"\\C-xG", "do-lowercase-version"},
+    {"\\C-xH", "do-lowercase-version"},
+    {"\\C-xI", "do-lowercase-version"},
+    {"\\C-xJ", "do-lowercase-version"},
+    {"\\C-xK", "do-lowercase-version"},
+    {"\\C-xL", "do-lowercase-version"},
+    {"\\C-xM", "do-lowercase-version"},
+    {"\\C-xN", "do-lowercase-version"},
+    {"\\C-xO", "do-lowercase-version"},
+    {"\\C-xP", "do-lowercase-version"},
+    {"\\C-xQ", "do-lowercase-version"},
+    {"\\C-xR", "do-lowercase-version"},
+    {"\\C-xS", "do-lowercase-version"},
+    {"\\C-xT", "do-lowercase-version"},
+    {"\\C-xU", "do-lowercase-version"},
+    {"\\C-xV", "do-lowercase-version"},
+    {"\\C-xW", "do-lowercase-version"},
+    {"\\C-xX", "do-lowercase-version"},
+    {"\\C-xY", "do-lowercase-version"},
+    {"\\C-xZ", "do-lowercase-version"},
+    {"\\eA", "do-lowercase-version"},
+    {"\\eB", "do-lowercase-version"},
+    {"\\eC", "do-lowercase-version"},
+    {"\\eD", "do-lowercase-version"},
+    {"\\eE", "do-lowercase-version"},
+    {"\\eF", "do-lowercase-version"},
+    {"\\eG", "do-lowercase-version"},
+    {"\\eH", "do-lowercase-version"},
+    {"\\eI", "do-lowercase-version"},
+    {"\\eJ", "do-lowercase-version"},
+    {"\\eK", "do-lowercase-version"},
+    {"\\eL", "do-lowercase-version"},
+    {"\\eM", "do-lowercase-version"},
+    {"\\eN", "do-lowercase-version"},
+    {"\\eP", "do-lowercase-version"},
+    {"\\eQ", "do-lowercase-version"},
+    {"\\eR", "do-lowercase-version"},
+    {"\\eS", "do-lowercase-version"},
+    {"\\eT", "do-lowercase-version"},
+    {"\\eU", "do-lowercase-version"},
+    {"\\eV", "do-lowercase-version"},
+    {"\\eW", "do-lowercase-version"},
+    {"\\eX", "do-lowercase-version"},
+    {"\\eY", "do-lowercase-version"},
+    {"\\eZ", "do-lowercase-version"},
+    {"\\el", "downcase-word"},
+    {"\\e\\C-i", "dynamic-complete-history"},
+    {"\\C-x\\C-e", "edit-and-execute-command"},
+    {"\\C-x)", "end-kbd-macro"},
+    {"\\e>", "end-of-history"},
+    {"\\e[6~", "end-of-history"},
+    {"\\C-e", "end-of-line"},
+    {"\\eOF", "end-of-line"},
+    {"\\e[4~", "end-of-line"},
+    {"\\e[8~", "end-of-line"},
+    {"\\e[F", "end-of-line"},
+    {"\\C-x\\C-x", "exchange-point-and-mark"},
+    {"\\ex", "execute-named-command"},
+    {"\\C-f", "forward-char"},
+    {"\\eOC", "forward-char"},
+    {"\\e[C", "forward-char"},
+    {"\\C-s", "forward-search-history"},
+    {"\\e\\e[C", "forward-word"},
+    {"\\e[1;3C", "forward-word"},
+    {"\\e[1;5C", "forward-word"},
+    {"\\e[5C", "forward-word"},
+    {"\\ef", "forward-word"},
+    {"\\eg", "glob-complete-word"},
+    {"\\C-x*", "glob-expand-word"},
+    {"\\C-xg", "glob-list-expansions"},
+    {"\\e^", "history-expand-line"},
+    {"\\e#", "insert-comment"},
+    {"\\e*", "insert-completions"},
+    {"\\e.", "insert-last-argument"},
+    {"\\e_", "insert-last-argument"},
+    {"\\C-k", "kill-line"},
+    {"\\e[3;5~", "kill-word"},
+    {"\\ed", "kill-word"},
+    {"\\C-n", "next-history"},
+    {"\\eOB", "next-history"},
+    {"\\e[B", "next-history"},
+    {"\\en", "non-incremental-forward-search-history"},
+    {"\\ep", "non-incremental-reverse-search-history"},
+    {"\\C-o", "operate-and-get-next"},
+    {"\\C-x!", "possible-command-completions"},
+    {"\\e=", "possible-completions"},
+    {"\\e?", "possible-completions"},
+    {"\\C-x/", "possible-filename-completions"},
+    {"\\C-x@", "possible-hostname-completions"},
+    {"\\C-x~", "possible-username-completions"},
+    {"\\C-x$", "possible-variable-completions"},
+    {"\\C-p", "previous-history"},
+    {"\\eOA", "previous-history"},
+    {"\\e[A", "previous-history"},
+    {"\\C-q", "quoted-insert"},
+    {"\\C-v", "quoted-insert"},
+    {"\\e[2~", "quoted-insert"},
+    {"\\C-x\\C-r", "re-read-init-file"},
+    {"\\C-r", "reverse-search-history"},
+    {"\\e\\C-r", "revert-line"},
+    {"\\er", "revert-line"},
+    {" ", "self-insert"},
+    {"!", "self-insert"},
+    {"\\\"", "self-insert"},
+    {"#", "self-insert"},
+    {"$", "self-insert"},
+    {"%", "self-insert"},
+    {"&", "self-insert"},
+    {"'", "self-insert"},
+    {"(", "self-insert"},
+    {")", "self-insert"},
+    {"*", "self-insert"},
+    {"+", "self-insert"},
+    {",", "self-insert"},
+    {"-", "self-insert"},
+    {".", "self-insert"},
+    {"/", "self-insert"},
+    {"0", "self-insert"},
+    {"1", "self-insert"},
+    {"2", "self-insert"},
+    {"3", "self-insert"},
+    {"4", "self-insert"},
+    {"5", "self-insert"},
+    {"6", "self-insert"},
+    {"7", "self-insert"},
+    {"8", "self-insert"},
+    {"9", "self-insert"},
+    {":", "self-insert"},
+    {";", "self-insert"},
+    {"<", "self-insert"},
+    {"=", "self-insert"},
+    {">", "self-insert"},
+    {"?", "self-insert"},
+    {"@", "self-insert"},
+    {"A", "self-insert"},
+    {"B", "self-insert"},
+    {"C", "self-insert"},
+    {"D", "self-insert"},
+    {"E", "self-insert"},
+    {"F", "self-insert"},
+    {"G", "self-insert"},
+    {"H", "self-insert"},
+    {"I", "self-insert"},
+    {"J", "self-insert"},
+    {"K", "self-insert"},
+    {"L", "self-insert"},
+    {"M", "self-insert"},
+    {"N", "self-insert"},
+    {"O", "self-insert"},
+    {"P", "self-insert"},
+    {"Q", "self-insert"},
+    {"R", "self-insert"},
+    {"S", "self-insert"},
+    {"T", "self-insert"},
+    {"U", "self-insert"},
+    {"V", "self-insert"},
+    {"W", "self-insert"},
+    {"X", "self-insert"},
+    {"Y", "self-insert"},
+    {"Z", "self-insert"},
+    {"[", "self-insert"},
+    {"\\\\", "self-insert"},
+    {"]", "self-insert"},
+    {"^", "self-insert"},
+    {"_", "self-insert"},
+    {"`", "self-insert"},
+    {"a", "self-insert"},
+    {"b", "self-insert"},
+    {"c", "self-insert"},
+    {"d", "self-insert"},
+    {"e", "self-insert"},
+    {"f", "self-insert"},
+    {"g", "self-insert"},
+    {"h", "self-insert"},
+    {"i", "self-insert"},
+    {"j", "self-insert"},
+    {"k", "self-insert"},
+    {"l", "self-insert"},
+    {"m", "self-insert"},
+    {"n", "self-insert"},
+    {"o", "self-insert"},
+    {"p", "self-insert"},
+    {"q", "self-insert"},
+    {"r", "self-insert"},
+    {"s", "self-insert"},
+    {"t", "self-insert"},
+    {"u", "self-insert"},
+    {"v", "self-insert"},
+    {"w", "self-insert"},
+    {"x", "self-insert"},
+    {"y", "self-insert"},
+    {"z", "self-insert"},
+    {"{", "self-insert"},
+    {"|", "self-insert"},
+    {"}", "self-insert"},
+    {"~", "self-insert"},
+    {"\\200", "self-insert"},
+    {"\\201", "self-insert"},
+    {"\\202", "self-insert"},
+    {"\\203", "self-insert"},
+    {"\\204", "self-insert"},
+    {"\\205", "self-insert"},
+    {"\\206", "self-insert"},
+    {"\\207", "self-insert"},
+    {"\\210", "self-insert"},
+    {"\\211", "self-insert"},
+    {"\\212", "self-insert"},
+    {"\\213", "self-insert"},
+    {"\\214", "self-insert"},
+    {"\\215", "self-insert"},
+    {"\\216", "self-insert"},
+    {"\\217", "self-insert"},
+    {"\\220", "self-insert"},
+    {"\\221", "self-insert"},
+    {"\\222", "self-insert"},
+    {"\\223", "self-insert"},
+    {"\\224", "self-insert"},
+    {"\\225", "self-insert"},
+    {"\\226", "self-insert"},
+    {"\\227", "self-insert"},
+    {"\\230", "self-insert"},
+    {"\\231", "self-insert"},
+    {"\\232", "self-insert"},
+    {"\\233", "self-insert"},
+    {"\\234", "self-insert"},
+    {"\\235", "self-insert"},
+    {"\\236", "self-insert"},
+    {"\\237", "self-insert"},
+    {"\\240", "self-insert"},
+    {"\\241", "self-insert"},
+    {"\\242", "self-insert"},
+    {"\\243", "self-insert"},
+    {"\\244", "self-insert"},
+    {"\\245", "self-insert"},
+    {"\\246", "self-insert"},
+    {"\\247", "self-insert"},
+    {"\\250", "self-insert"},
+    {"\\251", "self-insert"},
+    {"\\252", "self-insert"},
+    {"\\253", "self-insert"},
+    {"\\254", "self-insert"},
+    {"\\255", "self-insert"},
+    {"\\256", "self-insert"},
+    {"\\257", "self-insert"},
+    {"\\260", "self-insert"},
+    {"\\261", "self-insert"},
+    {"\\262", "self-insert"},
+    {"\\263", "self-insert"},
+    {"\\264", "self-insert"},
+    {"\\265", "self-insert"},
+    {"\\266", "self-insert"},
+    {"\\267", "self-insert"},
+    {"\\270", "self-insert"},
+    {"\\271", "self-insert"},
+    {"\\272", "self-insert"},
+    {"\\273", "self-insert"},
+    {"\\274", "self-insert"},
+    {"\\275", "self-insert"},
+    {"\\276", "self-insert"},
+    {"\\277", "self-insert"},
+    {"\\300", "self-insert"},
+    {"\\301", "self-insert"},
+    {"\\302", "self-insert"},
+    {"\\303", "self-insert"},
+    {"\\304", "self-insert"},
+    {"\\305", "self-insert"},
+    {"\\306", "self-insert"},
+    {"\\307", "self-insert"},
+    {"\\310", "self-insert"},
+    {"\\311", "self-insert"},
+    {"\\312", "self-insert"},
+    {"\\313", "self-insert"},
+    {"\\314", "self-insert"},
+    {"\\315", "self-insert"},
+    {"\\316", "self-insert"},
+    {"\\317", "self-insert"},
+    {"\\320", "self-insert"},
+    {"\\321", "self-insert"},
+    {"\\322", "self-insert"},
+    {"\\323", "self-insert"},
+    {"\\324", "self-insert"},
+    {"\\325", "self-insert"},
+    {"\\326", "self-insert"},
+    {"\\327", "self-insert"},
+    {"\\330", "self-insert"},
+    {"\\331", "self-insert"},
+    {"\\332", "self-insert"},
+    {"\\333", "self-insert"},
+    {"\\334", "self-insert"},
+    {"\\335", "self-insert"},
+    {"\\336", "self-insert"},
+    {"\\337", "self-insert"},
+    {"\\340", "self-insert"},
+    {"\\341", "self-insert"},
+    {"\\342", "self-insert"},
+    {"\\343", "self-insert"},
+    {"\\344", "self-insert"},
+    {"\\345", "self-insert"},
+    {"\\346", "self-insert"},
+    {"\\347", "self-insert"},
+    {"\\350", "self-insert"},
+    {"\\351", "self-insert"},
+    {"\\352", "self-insert"},
+    {"\\353", "self-insert"},
+    {"\\354", "self-insert"},
+    {"\\355", "self-insert"},
+    {"\\356", "self-insert"},
+    {"\\357", "self-insert"},
+    {"\\360", "self-insert"},
+    {"\\361", "self-insert"},
+    {"\\362", "self-insert"},
+    {"\\363", "self-insert"},
+    {"\\364", "self-insert"},
+    {"\\365", "self-insert"},
+    {"\\366", "self-insert"},
+    {"\\367", "self-insert"},
+    {"\\370", "self-insert"},
+    {"\\371", "self-insert"},
+    {"\\372", "self-insert"},
+    {"\\373", "self-insert"},
+    {"\\374", "self-insert"},
+    {"\\375", "self-insert"},
+    {"\\376", "self-insert"},
+    {"\\377", "self-insert"},
+    {"\\C-@", "set-mark"},
+    {"\\e ", "set-mark"},
+    {"\\e\\C-b", "shell-backward-word"},
+    {"\\e\\C-e", "shell-expand-line"},
+    {"\\e\\C-f", "shell-forward-word"},
+    {"\\e\\C-d", "shell-kill-word"},
+    {"\\e\\C-t", "shell-transpose-words"},
+    {"\\C-xs", "spell-correct-word"},
+    {"\\C-x(", "start-kbd-macro"},
+    {"\\e&", "tilde-expand"},
+    {"\\C-t", "transpose-chars"},
+    {"\\et", "transpose-words"},
+    {"\\C-x\\C-u", "undo"},
+    {"\\C-_", "undo"},
+    {"\\C-u", "unix-line-discard"},
+    {"\\C-w", "unix-word-rubout"},
+    {"\\eu", "upcase-word"},
+    {"\\C-y", "yank"},
+    {"\\e.", "yank-last-arg"},
+    {"\\e_", "yank-last-arg"},
+    {"\\e\\C-y", "yank-nth-arg"},
+    {"\\ey", "yank-pop"},
+};
+#define BIND_DEFAULTS array_count(bind_defaults)
+
+static const struct { string_address name; string_address value; } bind_variable_defaults[] = {
+    {"bind-tty-special-chars", "on"},
+    {"blink-matching-paren", "off"},
+    {"byte-oriented", "off"},
+    {"colored-completion-prefix", "off"},
+    {"colored-stats", "off"},
+    {"completion-ignore-case", "off"},
+    {"completion-map-case", "off"},
+    {"convert-meta", "off"},
+    {"disable-completion", "off"},
+    {"echo-control-characters", "on"},
+    {"enable-active-region", "off"},
+    {"enable-bracketed-paste", "off"},
+    {"enable-keypad", "off"},
+    {"enable-meta-key", "on"},
+    {"expand-tilde", "off"},
+    {"force-meta-prefix", "off"},
+    {"history-preserve-point", "off"},
+    {"horizontal-scroll-mode", "off"},
+    {"input-meta", "on"},
+    {"mark-directories", "on"},
+    {"mark-modified-lines", "off"},
+    {"mark-symlinked-directories", "off"},
+    {"match-hidden-files", "on"},
+    {"menu-complete-display-prefix", "off"},
+    {"meta-flag", "on"},
+    {"output-meta", "on"},
+    {"page-completions", "on"},
+    {"prefer-visible-bell", "on"},
+    {"print-completions-horizontally", "off"},
+    {"revert-all-at-newline", "off"},
+    {"search-ignore-case", "off"},
+    {"show-all-if-ambiguous", "off"},
+    {"show-all-if-unmodified", "off"},
+    {"show-mode-in-prompt", "off"},
+    {"skip-completed-text", "off"},
+    {"visible-stats", "off"},
+    {"bell-style", "audible"},
+    {"comment-begin", "#"},
+    {"completion-display-width", "-1"},
+    {"completion-prefix-display-length", "0"},
+    {"completion-query-items", "100"},
+    {"editing-mode", "emacs"},
+    {"emacs-mode-string", "@"},
+    {"history-size", "-1"},
+    {"keymap", "emacs"},
+    {"keyseq-timeout", "500"},
+    {"vi-cmd-mode-string", "(cmd)"},
+    {"vi-ins-mode-string", "(ins)"},
+};
+#define BIND_VARIABLES array_count(bind_variable_defaults)
+
+//      What the person has bound beside the defaults, per keymap: 0 is
+//      emacs, 1 vi-command and 2 vi-insert.
+typedef struct
+{
+        string_address keys;
+        string_address text;
+        p8 kind;
+        p8 keymap;
+} bind_user;
+
+static bind_user address_to bind_users;
+static positive bind_user_room;
+static positive bind_user_count;
+static p32 bind_default_gone[(BIND_DEFAULTS + 31) / 32];
+static string_address bind_variable_value[BIND_VARIABLES];
+
+static const string_address bind_keymap_names[] = {
+    "emacs", "emacs-standard", "emacs-meta", "emacs-ctlx", "vi", "vi-move",
+    "vi-command", "vi-insert"};
+
+// The keymap a name stands for, or -1.
+static COLD bipolar bind_keymap_named(string_address name)
+{
+        for (positive at = 0; at < array_count(bind_keymap_names); at++)
+                if (!string_compare(name, bind_keymap_names[at]))
+                        return at < 4 ? 0 : at == 7 ? 2 : 1;
+
+        return -1;
+}
+
+static COLD bool bind_function_known(string_address name)
+{
+        for (positive at = 0; at < BIND_FUNCTIONS; at++)
+                if (!string_compare(name, bind_functions[at]))
+                        return true;
+
+        return false;
+}
+
+/*
+        A key sequence as readline reads it: \C-x, \M-x, \e, \\, \", \a \b
+        \d \f \n \r \t \v, three octal digits, \x and two hex, and every other
+        byte as itself. The bytes are what two spellings are compared by.
+*/
+static COLD positive bind_keys_bytes(string_address spelling, p8 address_to out,
+                                     positive room)
+{
+        positive used = 0;
+
+        while (string_get(spelling) && used + 2 < room)
+        {
+                p8 value = string_get(spelling++);
+
+                if (value != '\\')
+                {
+                        out[used++] = value;
+                        continue;
+                }
+
+                value = string_get(spelling);
+                if (!value)
+                {
+                        out[used++] = '\\';
+                        break;
+                }
+                spelling++;
+
+                if ((value == 'C' || value == 'M') && string_is(spelling, '-') &&
+                    string_get(spelling + 1))
+                {
+                        p8 letter;
+                        bool meta = value == 'M';
+
+                        spelling++;
+                        letter = string_get(spelling++);
+                        if (letter == '\\' && string_get(spelling))
+                                letter = string_get(spelling++);
+                        if (meta)
+                                out[used++] = (p8)(letter | 0x80);
+                        else
+                                out[used++] = letter == '?' ? 127 : letter & 0x1f;
+                        continue;
+                }
+
+                switch (value)
+                {
+                case 'e': case 'E': out[used++] = 27; break;
+                case 'a': out[used++] = 7; break;
+                case 'b': out[used++] = 8; break;
+                case 'd': out[used++] = 127; break;
+                case 'f': out[used++] = 12; break;
+                case 'n': out[used++] = 10; break;
+                case 'r': out[used++] = 13; break;
+                case 't': out[used++] = 9; break;
+                case 'v': out[used++] = 11; break;
+                case '0': case '1': case '2': case '3': case '4': case '5':
+                case '6': case '7':
+                {
+                        p32 number = (p32)(value - '0');
+
+                        for (positive digits = 0;
+                             digits < 2 && string_get(spelling) >= '0' &&
+                             string_get(spelling) <= '7';
+                             digits++)
+                                number = number * 8 + (p32)(string_get(spelling++) - '0');
+                        out[used++] = (p8)number;
+                        break;
+                }
+                case 'x':
+                {
+                        p32 number = 0;
+
+                        for (positive digits = 0; digits < 2; digits++)
+                        {
+                                p8 digit = string_get(spelling);
+
+                                if (digit >= '0' && digit <= '9')
+                                        number = number * 16 + (p32)(digit - '0');
+                                else if (digit >= 'a' && digit <= 'f')
+                                        number = number * 16 + (p32)(digit - 'a' + 10);
+                                else if (digit >= 'A' && digit <= 'F')
+                                        number = number * 16 + (p32)(digit - 'A' + 10);
+                                else
+                                        break;
+                                spelling++;
+                        }
+                        out[used++] = (p8)number;
+                        break;
+                }
+                default:
+                        out[used++] = value;
+                        break;
+                }
+        }
+
+        return used;
+}
+
+//      The spelling readline writes back for those bytes.
+static COLD positive bind_keys_spelled(const p8 address_to bytes, positive count,
+                                       p8 address_to out, positive room)
+{
+        positive used = 0;
+
+        for (positive at = 0; at < count && used + 8 < room; at++)
+        {
+                p8 value = bytes[at];
+
+                if (value == 27)
+                {
+                        out[used++] = '\\';
+                        out[used++] = 'e';
+                }
+                else if (value == 127)
+                {
+                        memory_copy(out + used, "\\C-?", 4);
+                        used += 4;
+                }
+                else if (value == 0)
+                {
+                        memory_copy(out + used, "\\C-@", 4);
+                        used += 4;
+                }
+                else if (value < 32)
+                {
+                        //      Control-a to control-z come back as the letter,
+                        //      lower case; the four after them as their marks,
+                        //      and the backslash among them written escaped.
+                        memory_copy(out + used, "\\C-", 3);
+                        used += 3;
+                        if (value >= 1 && value <= 26)
+                                out[used++] = (p8)('a' + value - 1);
+                        else if (value == 28)
+                        {
+                                out[used++] = '\\';
+                                out[used++] = '\\';
+                        }
+                        else
+                                out[used++] = (p8)(value + 64);
+                }
+                else if (value == '\\' || value == '"')
+                {
+                        out[used++] = '\\';
+                        out[used++] = value;
+                }
+                else if (value >= 128)
+                {
+                        out[used++] = '\\';
+                        out[used++] = (p8)('0' + (value >> 6));
+                        out[used++] = (p8)('0' + ((value >> 3) & 7));
+                        out[used++] = (p8)('0' + (value & 7));
+                }
+                else
+                        out[used++] = value;
+        }
+
+        out[used] = end;
+        return used;
+}
+
+typedef struct
+{
+        p8 bytes[48];
+        positive length;
+        string_address keys;
+        string_address function;
+} bind_entry;
+
+#define BIND_ENTRIES (BIND_DEFAULTS + 128)
+
+static COLD bool bind_entry_before(const bind_entry address_to left,
+                                   const bind_entry address_to right)
+{
+        positive shortest = left->length < right->length ? left->length
+                                                         : right->length;
+        bipolar order = shortest ? memory_compare(left->bytes, right->bytes,
+                                                  shortest)
+                                 : 0;
+
+        return order ? order < 0 : left->length < right->length;
+}
+
+//      Everything the emacs keymap says, defaults with what was taken
+//      away left out and what was bound put in, in the order bytes sort.
+static COLD positive bind_effective(bind_entry address_to entries, bool keymapped)
+{
+        positive count = 0;
+
+        if (keymapped)
+                for (positive at = 0; at < BIND_DEFAULTS; at++)
+                {
+                        if (bind_default_gone[at / 32] >> (at % 32) & 1)
+                                continue;
+
+                        entries[count].keys = bind_defaults[at].keys;
+                        entries[count].function = bind_defaults[at].function;
+                        entries[count].length = bind_keys_bytes(
+                            bind_defaults[at].keys, entries[count].bytes,
+                            sizeof(entries[count].bytes));
+                        count++;
+                }
+
+        for (positive at = 0; at < bind_user_count && count < BIND_ENTRIES; at++)
+        {
+                bind_entry address_to entry = entries + count;
+
+                if (bind_users[at].kind != 'f' || bind_users[at].keymap != 0 ||
+                    !keymapped)
+                        continue;
+
+                entry->keys = bind_users[at].keys;
+                entry->function = bind_users[at].text;
+                entry->length = bind_keys_bytes(bind_users[at].keys,
+                                                entry->bytes,
+                                                sizeof(entry->bytes));
+                count++;
+        }
+
+        for (positive at = 1; at < count; at++)
+        {
+                bind_entry held = entries[at];
+                positive to = at;
+
+                while (to && bind_entry_before(&held, entries + to - 1))
+                {
+                        entries[to] = entries[to - 1];
+                        to--;
+                }
+                entries[to] = held;
+        }
+
+        return count;
+}
+
+// Every key the function is on, in order, written as readline writes them.
+static COLD positive bind_keys_of(string_address function,
+                                  bind_entry address_to entries,
+                                  positive count,
+                                  string_address address_to keys)
+{
+        positive found = 0;
+
+        for (positive at = 0; at < count; at++)
+                if (!string_compare(entries[at].function, function))
+                        keys[found++] = entries[at].keys;
+
+        return found;
+}
+
+static COLD fn bind_drop_user(positive at)
+{
+        comp_release(bind_users[at].keys);
+        comp_release(bind_users[at].text);
+
+        if (at + 1 < bind_user_count)
+                memory_copy(bind_users + at, bind_users + at + 1,
+                            (bind_user_count - at - 1) * sizeof(bind_users[0]));
+
+        bind_user_count--;
+}
+
+//      Takes the sequence away wherever it is bound in this keymap.
+static COLD fn bind_remove(string_address spelling, positive keymap)
+{
+        p8 wanted[48];
+        positive length = bind_keys_bytes(spelling, wanted, sizeof(wanted));
+
+        for (positive at = 0; at < bind_user_count;)
+        {
+                p8 held[48];
+                positive size = bind_keys_bytes(bind_users[at].keys, held,
+                                                sizeof(held));
+
+                if (bind_users[at].keymap == keymap && size == length &&
+                    !memory_compare(held, wanted, length))
+                        bind_drop_user(at);
+                else
+                        at++;
+        }
+
+        if (keymap != 0)
+                return;
+
+        for (positive at = 0; at < BIND_DEFAULTS; at++)
+        {
+                p8 held[48];
+                positive size = bind_keys_bytes(bind_defaults[at].keys, held,
+                                                sizeof(held));
+
+                if (size == length && !memory_compare(held, wanted, length))
+                        bind_default_gone[at / 32] |= 1u << (at % 32);
+        }
+}
+
+static COLD bool bind_add(string_address spelling, string_address text,
+                          p8 kind, positive keymap)
+{
+        p8 canonical[192];
+        p8 bytes[48];
+        positive length = bind_keys_bytes(spelling, bytes, sizeof(bytes));
+
+        bind_keys_spelled(bytes, length, canonical, sizeof(canonical));
+        bind_remove(spelling, keymap);
+
+        if (!shell_array_room(bind_users, bind_user_room, bind_user_count + 1))
+                return false;
+
+        bind_users[bind_user_count].keys = comp_keep(canonical);
+        bind_users[bind_user_count].text = comp_keep(text);
+        bind_users[bind_user_count].kind = kind;
+        bind_users[bind_user_count].keymap = (p8)keymap;
+        bind_user_count++;
+
+        return true;
+}
+
+static COLD positive bind_variable_index(string_address name)
+{
+        for (positive at = 0; at < BIND_VARIABLES; at++)
+                if (!string_compare(name, bind_variable_defaults[at].name))
+                        return at;
+
+        return BIND_VARIABLES;
+}
+
+static COLD string_address bind_variable_now(positive at)
+{
+        return bind_variable_value[at] ? bind_variable_value[at]
+                                       : bind_variable_defaults[at].value;
+}
+
+/*
+        One line of what readline reads from an inputrc, or from bind's own
+        argument: set NAME VALUE, or "keys": function, "keys": "macro".
+        The complaints are readline's own, with no name of the shell in
+        front of them.
+*/
+static COLD bool bind_line(string_address line, positive keymap)
+{
+        while (string_is(line, ' ') || string_is(line, '\t'))
+                line++;
+
+        if (!string_get(line) || string_is(line, '#'))
+                return true;
+
+        if (!memory_compare(line, "set", 3) &&
+            (string_is(line + 3, ' ') || string_is(line + 3, '\t')))
+        {
+                string_address name = line + 3;
+                string_address stop;
+                p8 made[96];
+                positive at;
+                positive size;
+
+                while (string_is(name, ' ') || string_is(name, '\t'))
+                        name++;
+                stop = name;
+                while (string_get(stop) && string_not(stop, ' ') &&
+                       string_not(stop, '\t'))
+                        stop++;
+                size = (positive)(stop - name);
+                if (size >= sizeof(made))
+                        size = sizeof(made) - 1;
+                memory_copy_end(made, name, size);
+                at = bind_variable_index(made);
+
+                if (at >= BIND_VARIABLES)
+                {
+                        shell_told("readline: %s: unknown variable name\n", made);
+                        return true;
+                }
+
+                while (string_is(stop, ' ') || string_is(stop, '\t'))
+                        stop++;
+                comp_release(bind_variable_value[at]);
+                bind_variable_value[at] = comp_keep(stop);
+                return true;
+        }
+
+        //      A key sequence in quotes, a colon, then the function or a
+        //      quoted macro.
+        if (string_is(line, '"'))
+        {
+                string_address at = line + 1;
+                p8 spelled[128];
+                positive size = 0;
+                string_address target;
+
+                while (string_get(at) && string_not(at, '"'))
+                {
+                        if (string_is(at, '\\') && string_get(at + 1) &&
+                            size + 2 < sizeof(spelled))
+                        {
+                                spelled[size++] = string_get(at++);
+                        }
+                        if (size + 1 < sizeof(spelled))
+                                spelled[size++] = string_get(at);
+                        at++;
+                }
+                spelled[size] = end;
+                if (string_is(at, '"'))
+                        at++;
+                while (string_is(at, ' ') || string_is(at, '\t'))
+                        at++;
+                if (!string_is(at, ':'))
+                {
+                        shell_told("readline: %s: no key sequence terminator\n",
+                                   line);
+                        return true;
+                }
+                at++;
+                while (string_is(at, ' ') || string_is(at, '\t'))
+                        at++;
+                target = at;
+
+                if (string_is(target, '"'))
+                {
+                        p8 macro[256];
+                        positive used = 0;
+
+                        target++;
+                        while (string_get(target) && string_not(target, '"') &&
+                               used + 1 < sizeof(macro))
+                        {
+                                if (string_is(target, '\\') && string_get(target + 1))
+                                        target++;
+                                macro[used++] = string_get(target++);
+                        }
+                        macro[used] = end;
+                        bind_add(spelled, macro, 'm', keymap);
+                }
+                else
+                {
+                        p8 name[96];
+                        positive used = 0;
+
+                        while (string_get(target) && string_not(target, ' ') &&
+                               string_not(target, '\t') && used + 1 < sizeof(name))
+                                name[used++] = string_get(target++);
+                        name[used] = end;
+                        if (bind_function_known(name))
+                                bind_add(spelled, name, 'f', keymap);
+                }
+                return true;
+        }
+
+        //      Not a line readline can read: it says which one and goes on.
+        shell_told("readline: %s: no key sequence terminator\n", line);
+        return true;
+}
+
+static COLD fn bind_list_functions(writer write, positive keymap)
+{
+        bind_entry entries[BIND_ENTRIES];
+        positive count = bind_effective(entries, keymap == 0);
+
+        write("\n", string_length("\n"));
+
+        for (positive at = 0; at < BIND_FUNCTIONS; at++)
+        {
+                string_address keys[BIND_ENTRIES];
+                positive found = bind_keys_of(bind_functions[at], entries, count,
+                                              keys);
+
+                if (!found)
+                {
+                        write("# ", string_length("# "));
+                        write(bind_functions[at], string_length(bind_functions[at]));
+                        write(" (not bound)\n", string_length(" (not bound)\n"));
+                        continue;
+                }
+
+                for (positive each = 0; each < found; each++)
+                {
+                        write("\"", 1);
+                        write(keys[each], string_length(keys[each]));
+                        write("\": ", string_length("\": "));
+                        write(bind_functions[at], string_length(bind_functions[at]));
+                        write("\n", string_length("\n"));
+                }
+        }
+}
+
+static COLD fn bind_list_where(writer write, positive keymap)
+{
+        bind_entry entries[BIND_ENTRIES];
+        positive count = bind_effective(entries, keymap == 0);
+
+        write("\n", string_length("\n"));
+
+        for (positive at = 0; at < BIND_FUNCTIONS; at++)
+        {
+                string_address keys[BIND_ENTRIES];
+                positive found = bind_keys_of(bind_functions[at], entries, count,
+                                              keys);
+
+                write(bind_functions[at], string_length(bind_functions[at]));
+                if (!found)
+                {
+                        write(" is not bound to any keys\n", string_length(" is not bound to any keys\n"));
+                        continue;
+                }
+                write(" can be found on ", string_length(" can be found on "));
+                for (positive each = 0; each < found && each < 5; each++)
+                {
+                        if (each)
+                                write(", ", string_length(", "));
+                        write("\"", 1);
+                        write(keys[each], string_length(keys[each]));
+                        write("\"", 1);
+                }
+                //      Only the first five, and a mark that there are more.
+                if (found > 5)
+                        write(", ...\n", string_length(", ...\n"));
+                else
+                        write(".\n", string_length(".\n"));
+        }
+}
+
+static COLD fn bind_list_kind(writer write, positive keymap, p8 kind, bool spoken)
+{
+        for (positive at = 0; at < bind_user_count; at++)
+        {
+                if (bind_users[at].kind != kind || bind_users[at].keymap != keymap)
+                        continue;
+
+                if (kind == 'x')
+                {
+                        write("\"", 1);
+                        write(bind_users[at].keys, string_length(bind_users[at].keys));
+                        write("\" \"", string_length("\" \""));
+                        //      The command is written with its quotes and
+                        //      backslashes escaped.
+                        for (string_address each = bind_users[at].text;
+                             string_get(each); each++)
+                        {
+                                if (string_is(each, '"') || string_is(each, '\\'))
+                                        write("\\", 1);
+                                write(each, 1);
+                        }
+                        write("\"\n", string_length("\"\n"));
+                }
+                else if (spoken)
+                {
+                        write(bind_users[at].keys, string_length(bind_users[at].keys));
+                        write(" outputs ", string_length(" outputs "));
+                        write(bind_users[at].text, string_length(bind_users[at].text));
+                        write("\n", string_length("\n"));
+                }
+                else
+                {
+                        write("\"", 1);
+                        write(bind_users[at].keys, string_length(bind_users[at].keys));
+                        write("\": \"", string_length("\": \""));
+                        write(bind_users[at].text, string_length(bind_users[at].text));
+                        write("\"\n", string_length("\"\n"));
+                }
+        }
+}
+
 static COLD fn shell_bind(writer write, string_address input)
 {
         positive first = 1;
+        shell_option_walk walk;
+        p8 which;
+        positive keymap = 0;
+        b32 status = 0;
+        static const string_address usage =
+            "bind [-lpsvPSVX] [-m keymap] [-f filename] [-q name] "
+            "[-u name] [-r keyseq] [-x keyseq:shell-command] "
+            "[keyseq:readline-function or readline-command]";
 
-        (void)write;
         (void)input;
 
         //      Bash says this once per call before it does anything else,
@@ -21377,15 +22518,233 @@ static COLD fn shell_bind(writer write, string_address input)
         shell_diagnostic_where();
         log_error("bind: warning: line editing not enabled\n", 0);
 
-        if (shell_completion_refused(
-                "bind",
-                "bind [-lpsvPSVX] [-m keymap] [-f filename] [-q name] "
-                "[-u name] [-r keyseq] [-x keyseq:shell-command] "
-                "[keyseq:readline-function or readline-command]",
-                "lpsvPSVXmfqurx", "mfqurx", address_of first))
+        if (shell_completion_refused("bind", usage, "lpsvPSVXmfqurx",
+                                     "mfqurx", address_of first))
                 return;
 
-        shell_answer(0);
+        //      The keymap a -m names is the one everything else in the call
+        //      is about, wherever it stands among the words.
+        for (positive at = 1; at + 1 < shell_argc; at++)
+                if (word_is(shell_argv[at], "-m"))
+                {
+                        bipolar named = bind_keymap_named(shell_argv[at + 1]);
+
+                        if (named < 0)
+                                return shell_refuse(1,
+                                    "bind: `%s': invalid keymap name\n",
+                                    shell_argv[at + 1]);
+                        keymap = (positive)named;
+                }
+
+        walk = (shell_option_walk){1};
+
+        while (shell_option_letter(address_of walk, address_of which))
+        {
+                string_address value = null;
+
+                if (string_first_of("mfqurx", which))
+                {
+                        value = shell_option_argument(address_of walk);
+                        if (!value)
+                                return shell_answer(2);
+                }
+
+                switch (which)
+                {
+                case 'm':
+                        break;
+                case 'l':
+                        for (positive at = 0; at < BIND_FUNCTIONS; at++)
+                        {
+                                write(bind_functions[at],
+                                      string_length(bind_functions[at]));
+                                write("\n", string_length("\n"));
+                        }
+                        break;
+                case 'p':
+                        bind_list_functions(write, keymap);
+                        break;
+                case 'P':
+                        bind_list_where(write, keymap);
+                        break;
+                case 's':
+                        bind_list_kind(write, keymap, 'm', false);
+                        break;
+                case 'S':
+                        bind_list_kind(write, keymap, 'm', true);
+                        break;
+                case 'X':
+                        bind_list_kind(write, keymap, 'x', false);
+                        break;
+                case 'v':
+                        for (positive at = 0; at < BIND_VARIABLES; at++)
+                        {
+                                write("set ", string_length("set "));
+                                write(bind_variable_defaults[at].name,
+                                      string_length(bind_variable_defaults[at].name));
+                                write(" ", string_length(" "));
+                                write(bind_variable_now(at),
+                                      string_length(bind_variable_now(at)));
+                                write("\n", string_length("\n"));
+                        }
+                        break;
+                case 'V':
+                        for (positive at = 0; at < BIND_VARIABLES; at++)
+                        {
+                                write(bind_variable_defaults[at].name,
+                                      string_length(bind_variable_defaults[at].name));
+                                write(" is set to `", string_length(" is set to `"));
+                                write(bind_variable_now(at),
+                                      string_length(bind_variable_now(at)));
+                                write("'\n", string_length("'\n"));
+                        }
+                        break;
+                case 'q':
+                {
+                        bind_entry entries[BIND_ENTRIES];
+                        string_address keys[BIND_ENTRIES];
+                        positive count;
+                        positive found;
+
+                        if (!bind_function_known(value))
+                        {
+                                shell_told("bind: `%s': unknown function name\n",
+                                           value);
+                                status = 1;
+                                break;
+                        }
+
+                        count = bind_effective(entries, keymap == 0);
+                        found = bind_keys_of(value, entries, count, keys);
+                        write(value, string_length(value));
+                        if (!found)
+                        {
+                                write(" is not bound to any keys.\n", string_length(" is not bound to any keys.\n"));
+                                status = 1;
+                                break;
+                        }
+                        write(" can be invoked via ", string_length(" can be invoked via "));
+                        for (positive each = 0; each < found && each < 5; each++)
+                        {
+                                if (each)
+                                        write(", ", string_length(", "));
+                                write("\"", 1);
+                                write(keys[each], string_length(keys[each]));
+                                write("\"", 1);
+                        }
+                        if (found > 5)
+                                write(", ...\n", string_length(", ...\n"));
+                        else
+                                write(".\n", string_length(".\n"));
+                        break;
+                }
+                case 'u':
+                {
+                        bind_entry entries[BIND_ENTRIES];
+                        string_address keys[BIND_ENTRIES];
+                        positive count;
+                        positive found;
+
+                        if (!bind_function_known(value))
+                        {
+                                shell_told("bind: `%s': unknown function name\n",
+                                           value);
+                                status = 1;
+                                break;
+                        }
+
+                        count = bind_effective(entries, keymap == 0);
+                        found = bind_keys_of(value, entries, count, keys);
+                        for (positive each = 0; each < found; each++)
+                                bind_remove(keys[each], keymap);
+                        break;
+                }
+                case 'r':
+                        bind_remove(value, keymap);
+                        break;
+                case 'f':
+                {
+                        static byte_store held;
+
+                        held.used = 0;
+                        if (!file_store_slurp(value, address_of held))
+                        {
+                                shell_told("bind: %s: cannot read: %s\n", value,
+                                           file_reason(-ERROR_NO_ENTRY));
+                                status = 1;
+                                break;
+                        }
+                        if (byte_store_reserve(address_of held, held.used + 1, 64))
+                        {
+                                string_address at;
+
+                                held.bytes[held.used] = end;
+                                at = (string_address)held.bytes;
+                                while (string_get(at))
+                                {
+                                        string_address stop =
+                                            string_first_of_or_end(at, '\n');
+                                        p8 keep = string_get(stop);
+
+                                        *(p8 address_to)stop = end;
+                                        bind_line(at, keymap);
+                                        *(p8 address_to)stop = keep;
+                                        at = keep ? stop + 1 : stop;
+                                }
+                        }
+                        break;
+                }
+                case 'x':
+                {
+                        string_address at = value;
+                        p8 spelled[128];
+                        positive size = 0;
+
+                        while (string_is(at, ' ') || string_is(at, '\t'))
+                                at++;
+                        if (!string_is(at, '"'))
+                        {
+                                shell_told("bind: %s: first non-whitespace "
+                                           "character is not `\"'\n", value);
+                                status = 1;
+                                break;
+                        }
+                        at++;
+                        while (string_get(at) && string_not(at, '"') &&
+                               size + 2 < sizeof(spelled))
+                        {
+                                if (string_is(at, '\\') && string_get(at + 1))
+                                        spelled[size++] = string_get(at++);
+                                spelled[size++] = string_get(at++);
+                        }
+                        spelled[size] = end;
+                        if (string_is(at, '"'))
+                                at++;
+                        while (string_is(at, ' ') || string_is(at, '\t'))
+                                at++;
+                        if (!string_is(at, ':'))
+                        {
+                                shell_told("bind: %s: missing colon separator\n",
+                                           value);
+                                status = 1;
+                                break;
+                        }
+                        at++;
+                        while (string_is(at, ' ') || string_is(at, '\t'))
+                                at++;
+                        bind_add(spelled, at, 'x', keymap);
+                        break;
+                }
+                default:
+                        break;
+                }
+        }
+
+        //      What is left are lines of readline's own language.
+        for (positive at = walk.index; at < shell_argc; at++)
+                bind_line(shell_argv[at], keymap);
+
+        shell_answer(status);
 }
 
 /*
