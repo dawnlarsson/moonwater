@@ -6460,27 +6460,14 @@ static b32 factor_big_order(const factor_big address_to left,
 {
         if (left->size != right->size)
                 return left->size < right->size ? -1 : 1;
-        for (positive at = left->size; at-- > 0;)
-                if (left->limb[at] != right->limb[at])
-                        return left->limb[at] < right->limb[at] ? -1 : 1;
-        return 0;
+        return limbs_compare(left->limb, right->limb, left->size);
 }
 
 // left -= right, where left is not the smaller.
 static fn factor_big_subtract(factor_big address_to left,
                               const factor_big address_to right)
 {
-        p64 borrow = 0;
-
-        for (positive at = 0; at < left->size; at++)
-        {
-                p64 take = at < right->size ? right->limb[at] : 0;
-                p64 before = left->limb[at];
-                p64 after = before - take - borrow;
-
-                borrow = (before < take) | ((before - take) < borrow);
-                left->limb[at] = after;
-        }
+        limbs_subtract(left->limb, left->size, right->limb, min(left->size, right->size));
         factor_big_trim(left);
 }
 
@@ -6511,15 +6498,8 @@ static fn factor_big_double(factor_big address_to value, p64 bit)
 
 static bool factor_big_multiply_add(factor_big address_to value, p64 times, p64 add)
 {
-        p64 carry = add;
+        p64 carry = limbs_multiply_word(value->limb, value->limb, value->size, times, add);
 
-        for (positive at = 0; at < value->size; at++)
-        {
-                p128 product = (p128)value->limb[at] * times + carry;
-
-                value->limb[at] = (p64)product;
-                carry = (p64)(product >> 64);
-        }
         if (carry)
         {
                 if (value->size == FACTOR_LIMBS)
@@ -6660,72 +6640,40 @@ typedef struct
         p64 square[FACTOR_LIMBS];
 } factor_ring;
 
+/*
+        Up to montgomery_multiply's 64 limbs, lib.c's; past them, CIOS in
+        rows of limbs_add_multiply_word -- a times right_i, then q times the
+        modulus, which zeroes the window's bottom limb -- into a window that
+        slides up a limb a row, so nothing is shifted. Both leave the
+        product below the modulus.
+*/
 static fn factor_ring_multiply(const factor_ring address_to ring, const p64 address_to left,
                                const p64 address_to right, p64 address_to out)
 {
         positive width = ring->width;
-        p64 sum[FACTOR_LIMBS + 2];
         const p64 address_to modulus = ring->modulus.limb;
 
-        memory_fill(sum, 0, (width + 2) * sizeof(p64));
+        if (width <= 64)
+        {
+                montgomery_multiply(out, left, right, modulus, ring->inverse, width);
+                return;
+        }
 
+        p64 sum[2 * FACTOR_LIMBS + 1];
+
+        memory_fill(sum, 0, (2 * width + 1) * sizeof(p64));
         for (positive i = 0; i < width; i++)
         {
-                p64 carry = 0;
-                p128 step;
+                p64 address_to row = sum + i;
+                p64 carry = limbs_add_multiply_word(row, left, width, right[i]);
 
-                for (positive j = 0; j < width; j++)
-                {
-                        step = (p128)left[j] * right[i] + sum[j] + carry;
-                        sum[j] = (p64)step;
-                        carry = (p64)(step >> 64);
-                }
-                step = (p128)sum[width] + carry;
-                sum[width] = (p64)step;
-                sum[width + 1] = (p64)(step >> 64);
-
-                p64 factor = sum[0] * ring->inverse;
-
-                step = (p128)factor * modulus[0] + sum[0];
-                carry = (p64)(step >> 64);
-                for (positive j = 1; j < width; j++)
-                {
-                        step = (p128)factor * modulus[j] + sum[j] + carry;
-                        sum[j - 1] = (p64)step;
-                        carry = (p64)(step >> 64);
-                }
-                step = (p128)sum[width] + carry;
-                sum[width - 1] = (p64)step;
-                sum[width] = sum[width + 1] + (p64)(step >> 64);
+                limbs_add(row + width, width + 1 - i, address_of carry, 1);
+                carry = limbs_add_multiply_word(row, modulus, width, row[0] * ring->inverse);
+                limbs_add(row + width, width + 1 - i, address_of carry, 1);
         }
-
-        bool subtract = sum[width] != 0;
-
-        if (!subtract)
-        {
-                subtract = true;
-                for (positive at = width; at-- > 0;)
-                        if (sum[at] != modulus[at])
-                        {
-                                subtract = sum[at] > modulus[at];
-                                break;
-                        }
-        }
-
-        if (subtract)
-        {
-                p64 borrow = 0;
-
-                for (positive at = 0; at < width; at++)
-                {
-                        p64 before = sum[at];
-
-                        sum[at] = before - modulus[at] - borrow;
-                        borrow = (before < modulus[at]) | ((before - modulus[at]) < borrow);
-                }
-        }
-
-        memory_copy(out, sum, width * sizeof(p64));
+        if (sum[2 * width] || limbs_compare(sum + width, modulus, width) >= 0)
+                limbs_subtract(sum + width, width, modulus, width);
+        memory_copy(out, sum + width, width * sizeof(p64));
 }
 
 // (left + right) mod the modulus, both reduced.
@@ -6733,41 +6681,20 @@ static fn factor_ring_add(const factor_ring address_to ring, p64 address_to left
                           const p64 address_to right)
 {
         positive width = ring->width;
-        p64 carry = 0;
 
-        for (positive at = 0; at < width; at++)
-        {
-                p128 step = (p128)left[at] + right[at] + carry;
+        if (limbs_add(left, width, right, width) ||
+            limbs_compare(left, ring->modulus.limb, width) >= 0)
+                limbs_subtract(left, width, ring->modulus.limb, width);
+}
 
-                left[at] = (p64)step;
-                carry = (p64)(step >> 64);
-        }
+// |x - y| over width limbs.
+static fn factor_ring_distance(positive width, const p64 address_to x,
+                               const p64 address_to y, p64 address_to out)
+{
+        bool below = limbs_compare(x, y, width) < 0;
 
-        bool subtract = carry != 0;
-
-        if (!subtract)
-        {
-                subtract = true;
-                for (positive at = width; at-- > 0;)
-                        if (left[at] != ring->modulus.limb[at])
-                        {
-                                subtract = left[at] > ring->modulus.limb[at];
-                                break;
-                        }
-        }
-        if (subtract)
-        {
-                p64 borrow = 0;
-
-                for (positive at = 0; at < width; at++)
-                {
-                        p64 before = left[at];
-                        p64 take = ring->modulus.limb[at];
-
-                        left[at] = before - take - borrow;
-                        borrow = (before < take) | ((before - take) < borrow);
-                }
-        }
+        memory_copy(out, below ? y : x, width * sizeof(p64));
+        limbs_subtract(out, width, below ? x : y, width);
 }
 
 static fn factor_ring_begin(factor_ring address_to ring, const factor_big address_to modulus)
@@ -6924,23 +6851,7 @@ static bool factor_big_rho(const factor_big address_to number, factor_big addres
                                 {
                                         factor_ring_multiply(address_of ring, y, y, y);
                                         factor_ring_add(address_of ring, y, constant);
-
-                                        factor_big a, b;
-
-                                        a.size = b.size = width;
-                                        memory_copy(a.limb, x, width * sizeof(p64));
-                                        memory_copy(b.limb, y, width * sizeof(p64));
-                                        factor_big_trim(address_of a);
-                                        factor_big_trim(address_of b);
-                                        if (factor_big_order(address_of a, address_of b) >= 0)
-                                                factor_big_subtract(address_of a, address_of b);
-                                        else
-                                        {
-                                                factor_big_subtract(address_of b, address_of a);
-                                                a = b;
-                                        }
-                                        memory_fill(difference, 0, width * sizeof(p64));
-                                        memory_copy(difference, a.limb, a.size * sizeof(p64));
+                                        factor_ring_distance(width, x, y, difference);
                                         factor_ring_multiply(address_of ring, product, difference, product);
                                 }
                                 done += block;
@@ -6968,22 +6879,9 @@ static bool factor_big_rho(const factor_big address_to number, factor_big addres
                         {
                                 factor_ring_multiply(address_of ring, y, y, y);
                                 factor_ring_add(address_of ring, y, constant);
-
-                                factor_big a, b;
-
-                                a.size = b.size = width;
-                                memory_copy(a.limb, x, width * sizeof(p64));
-                                memory_copy(b.limb, y, width * sizeof(p64));
-                                factor_big_trim(address_of a);
-                                factor_big_trim(address_of b);
-                                if (factor_big_order(address_of a, address_of b) >= 0)
-                                        factor_big_subtract(address_of a, address_of b);
-                                else
-                                {
-                                        factor_big_subtract(address_of b, address_of a);
-                                        a = b;
-                                }
-                                gathered = a;
+                                factor_ring_distance(width, x, y, gathered.limb);
+                                gathered.size = width;
+                                factor_big_trim(address_of gathered);
                                 copy = address_to number;
                                 factor_big_gcd(address_of gathered, address_of copy);
                         } while (gathered.size == 1 && gathered.limb[0] == 1);

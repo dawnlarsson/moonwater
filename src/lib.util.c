@@ -14903,16 +14903,8 @@ static const p64 numbers_integer_tens[20] = {
 //      big * factor + addend, limb by limb with the high half as the carry.
 static fn numbers_big_scale(numbers_big address_to big, p64 factor, p64 addend)
 {
-        p64 carry = addend;
-        b32 index;
-
-        for (index = 0; index < big->used; index++)
-        {
-                p128 product = (p128)big->limb[index] * (p128)factor + (p128)carry;
-
-                big->limb[index] = (p64)product;
-                carry = (p64)(product >> 64);
-        }
+        p64 carry = limbs_multiply_word(big->limb, big->limb, (positive)big->used,
+                                        factor, addend);
 
         if (carry == 0)
                 return;
@@ -14992,18 +14984,10 @@ static fn numbers_big_shift(numbers_big address_to big, b32 places)
 static b32 numbers_big_order(const numbers_big address_to left,
                              const numbers_big address_to right)
 {
-        b32 index;
-
         if (left->used != right->used)
                 return left->used < right->used ? -1 : 1;
 
-        for (index = left->used - 1; index >= 0; index--)
-        {
-                if (left->limb[index] != right->limb[index])
-                        return left->limb[index] < right->limb[index] ? -1 : 1;
-        }
-
-        return 0;
+        return limbs_compare(left->limb, right->limb, (positive)left->used);
 }
 
 //      The register's digits as one integer, and the power of ten it stands
