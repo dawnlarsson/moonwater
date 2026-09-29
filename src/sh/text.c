@@ -22493,7 +22493,9 @@ static b32 text_cut()
                 UTF-8 locale a line where they differ is walked a character
                 at a time below; -b never is, at any locale.
         */
-        bool characters = (flags & FILE_FLAG('c')) && text_locale_utf8();
+        //      GB18030 and EUC-JP have characters of more than a byte too.
+        positive mb_charset = text_charset();
+        bool characters = (flags & FILE_FLAG('c')) && mb_charset != TEXT_CHARSET_BYTES;
         // Fields by one byte with nothing else asked go a read at a time.
         bool whole_lines = by_field && !whitespace && !separator && !trimmed &&
                            delimiter != text_delimiter;
@@ -22619,8 +22621,11 @@ static b32 text_cut()
                                                      text_input.filled;
                                 }
 
-                                took = cut_bytes(at, left, complement, bytes_single,
-                                                 characters && !ascii_read);
+                                //      Another multibyte charset has no fast
+                                //      walk: what is not ASCII goes line by line.
+                                if (!(characters && mb_charset != TEXT_CHARSET_UTF8 && !ascii_read))
+                                        took = cut_bytes(at, left, complement, bytes_single,
+                                                         characters && !ascii_read);
 
                                 text_input.position += took;
 
@@ -22666,6 +22671,40 @@ static b32 text_cut()
                                         eight ASCII bytes at a time, and says
                                         nothing new about an ASCII line.
                                 */
+                                if (characters && mb_charset != TEXT_CHARSET_UTF8 &&
+                                    memory_ascii_span(line, line_length) != line_length)
+                                {
+                                        //      A character at a time by its shape.
+                                        bool wrote = false;
+                                        bool ran = false;
+                                        positive at = 0;
+                                        positive which = 1;
+
+                                        while (at < line_length)
+                                        {
+                                                positive size = text_mb_length(mb_charset, line + at,
+                                                                               line_length - at);
+                                                bool take = text_list_has(which) != complement;
+
+                                                if (take)
+                                                {
+                                                        if (separator && wrote &&
+                                                            (!ran ||
+                                                             (!complement &&
+                                                              text_list_begins_at(which))))
+                                                                text_put(separator, separator_length);
+                                                        text_put(line + at, size);
+                                                        wrote = true;
+                                                }
+                                                ran = take;
+                                                at += size;
+                                                which++;
+                                        }
+
+                                        text_put_character(text_delimiter);
+                                        continue;
+                                }
+
                                 if (characters &&
                                     memory_ascii_span(line, line_length) != line_length)
                                 {

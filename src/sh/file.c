@@ -34997,6 +34997,21 @@ static bool cp_ancestor_holds(file_facts address_to facts)
         return false;
 }
 
+/*
+        A process told how much address space it may have -- ulimit -v -- is
+        told so to be bounded in memory (the upstream link-heap test measures
+        cp -al under a limit four megabytes past the bare minimum), and the
+        pool's thread stacks are what that limit does not leave room for, so
+        the walk goes name by name.
+*/
+static bool cp_memory_bounded()
+{
+        positive limit[2];
+
+        return system_call_4(syscall(prlimit64), 0, 9, 0, (positive)limit) >= 0 &&
+               limit[0] != positive_max;
+}
+
 static bool file_copy_one(bipolar source_directory, string_address source,
                           string_address source_shown,
                           bipolar destination_directory,
@@ -35811,7 +35826,7 @@ static bool file_copy_one(bipolar source_directory, string_address source,
         /*      A directory cp made in its own stage is filled in batches; the
                 ones below it, and every other kind of copy, name by name. */
         if ((staged || in_place) && !moving && !cp_symbolic && !cp_attributes_only &&
-            !file_debug && cp_reflink_policy != 'A')
+            !file_debug && cp_reflink_policy != 'A' && !cp_memory_bounded())
         {
                 complete = cp_tree_parallel(walk.handle, source_shown,
                                             destination_handle, destination_shown,
@@ -35833,7 +35848,7 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                 listed = file_listing_by_inode(address_of walk,
                                                address_of listed_count);
         while (!((staged || in_place) && !moving && !cp_hard && !cp_symbolic && !cp_attributes_only &&
-                 !file_debug && cp_reflink_policy != 'A') &&
+                 !file_debug && cp_reflink_policy != 'A' && !cp_memory_bounded()) &&
                (child = listed ? (listed_at < listed_count ? listed[listed_at++] : null)
                                : file_walk_next(address_of walk)))
         {
