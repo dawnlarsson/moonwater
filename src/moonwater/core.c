@@ -210,6 +210,49 @@ static const MountPoints mounts[] = {
     {null, null},
 };
 
+/*
+        Every request number is the encoding of the struct it carries.
+
+        A handler copies sizeof(its struct) from the caller, and the caller
+        sized its buffer from the number it sent. The two agree only while
+        nobody edits one without the other, and the day they do not, the
+        kernel reads or writes past what the caller allocated -- a struct
+        that grew by a field, behind a number that still says the old size,
+        is a copy_to_user of stack the caller never asked for. So the number
+        is not typed in and trusted: it is rebuilt here from the direction,
+        the request number and sizeof, and the build stops on a mismatch.
+        The size is what _IOC_SIZE reads and what these are; the type is the
+        letter 's', and no number is used twice.
+*/
+#define IOCTL_IS(command, direction, request, size)                            \
+        _Static_assert((command) == (((unsigned int)(direction) << 30) |        \
+                                     ((unsigned int)(size) << 16) |             \
+                                     ((unsigned int)'s' << 8) |                 \
+                                     (unsigned int)(request)),                  \
+                       #command " does not encode the struct it carries")
+#define IOCTL_NONE 0
+#define IOCTL_WRITE 1
+#define IOCTL_READ 2
+#define IOCTL_BOTH 3
+
+IOCTL_IS(SPARK_IOCTL_SPAWN, IOCTL_WRITE, 1, sizeof(struct spawn));
+IOCTL_IS(SPARK_IOCTL_STATS, IOCTL_READ, 2, sizeof(struct stats));
+IOCTL_IS(SPARK_IOCTL_INPUT_STATS, IOCTL_READ, 3, sizeof(struct input_stats));
+IOCTL_IS(SPARK_IOCTL_CURSOR_STATS, IOCTL_READ, 6, sizeof(struct cursor_stats));
+IOCTL_IS(SPARK_IOCTL_INPUT_DEVICES, IOCTL_READ, 7, sizeof(struct input_devices));
+IOCTL_IS(SPARK_IOCTL_SNAPSHOT, IOCTL_BOTH, 9, sizeof(struct snapshot_request));
+IOCTL_IS(SPARK_IOCTL_CANVAS, IOCTL_BOTH, 10, sizeof(struct canvas_control));
+IOCTL_IS(SPARK_IOCTL_BIND, IOCTL_BOTH, 11, sizeof(struct bind_control));
+IOCTL_IS(SPARK_IOCTL_SETTINGS_GET, IOCTL_READ, 12, sizeof(struct spark_settings_request));
+IOCTL_IS(SPARK_IOCTL_SETTINGS_SET, IOCTL_WRITE, 13, sizeof(struct spark_settings_request));
+IOCTL_IS(MOONWATER_IOCTL_MACHINE, IOCTL_BOTH, 14, sizeof(struct machine_control));
+IOCTL_IS(MOONWATER_IOCTL_SCRIPT, IOCTL_BOTH, 15, sizeof(struct machine_script));
+#ifdef CONFIG_MOONWATER_CANVAS
+IOCTL_IS(WINDOW_IOCTL_CREATE, IOCTL_WRITE, 4, sizeof(struct window_request));
+IOCTL_IS(WINDOW_IOCTL_COMMIT, IOCTL_NONE, 5, 0);
+IOCTL_IS(WINDOW_IOCTL_STRIDE, IOCTL_NONE, 16, 0);
+#endif
+
 static long device_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
         switch (cmd)

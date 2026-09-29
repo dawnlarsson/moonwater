@@ -25887,6 +25887,35 @@ line_add_padded() { line_add "$@"; }
         binary, _ = build_c(Path(work) / "core-state.c", source,
                             ("-std=c11", "-O2", "-Wall", "-Wextra"), sanitize=False)
         subprocess.run([str(binary)], check=True)
+        #   Every request number is the encoding of the struct it carries: the
+        #   block core.c builds them from is compiled here over the real
+        #   structs, and then over the same block with one number changed,
+        #   which has to stop it, or the block is not looking.
+        numbers = section(core, "#define IOCTL_IS", "static long device_ioctl")
+        shapes = ("#include <stddef.h>\n"
+                  "#define CONFIG_MOONWATER_CANVAS 1\n"
+                  "static unsigned int hash_crc32(unsigned int c, void *d, unsigned long n)"
+                  " { (void)d; (void)n; return c; }\n"
+                  + spark.replace('#include "../platform/spark.inc"',
+                                  (root / "src/platform/spark.inc").read_text())
+                  + moonwater[:moonwater.index("#if defined(STANDARD_MODERN_C_KERNEL)")]
+                  + "#endif\n"
+                  + section((root / "src/canvas/window.c").read_text(),
+                            "// _IOW('s', 4, struct window_request)",
+                            "/*\n        A cell, for a window made of text."))
+        for label, block, expected in (
+                ("real", numbers, 0),
+                ("changed", numbers.replace("IOCTL_BOTH, 11,", "IOCTL_BOTH, 12,"), 1),
+                ("resized", numbers.replace("sizeof(struct bind_control)",
+                                            "sizeof(struct bind_control) + 8"), 1)):
+            (Path(work) / f"ioctl-{label}.c").write_text(shapes + block)
+            checked = subprocess.run(["cc", "-std=gnu11", "-fsyntax-only", "-w",
+                                      str(Path(work) / f"ioctl-{label}.c")],
+                                     capture_output=True, text=True)
+            assert (checked.returncode != 0) == bool(expected), (label, checked.stderr[-800:])
+            assert not expected or "does not encode" in checked.stderr, checked.stderr[-800:]
+        print("  ioctl-numbers 3 of 3", flush=True)
+        write_tally("ioctl-numbers", 3, 3)
         # The existing kit lane now also checks real pixel stores without a GPU,
         # DRM device, module load, or writable prepared kernel tree.
         if os.uname().sysname == "Linux":
