@@ -6830,6 +6830,12 @@ typedef struct
         p8 carry[4];
         positive carried;
         bool inside, posix, want_words, want_longest;
+        // The offsets of the bytes a run of ASCII is not printable at, which
+        // wc_bytes_longest writes and reads back. Each state owns its own: a
+        // table the states shared let the pieces of a threaded count overwrite
+        // one another's offsets, and wc -L in a UTF-8 locale then answered
+        // 18446744073709551615 from two processors up.
+        p32 address_to specials;
 } wc_utf8;
 
 static fn wc_utf8_step(wc_utf8 address_to state, bool valid, p32 code)
@@ -6949,7 +6955,8 @@ static fn wc_utf8_block(wc_utf8 address_to state, const p8 address_to at, positi
 
                                         wc_bytes_longest(at + p, run, false, address_of lines,
                                                          address_of state->longest,
-                                                         address_of state->column, wc_specials);
+                                                         address_of state->column,
+                                                         state->specials);
                                 }
                                 else
                                 {
@@ -7173,8 +7180,9 @@ static bool wc_pieces_kernel(address_any context, positive index, p8 address_to 
 
         if (run->utf8)
         {
+                p32 specials[WC_SPECIALS];
                 wc_utf8 wide = {.posix = run->posix, .want_words = run->want_words,
-                                .want_longest = run->want_longest};
+                                .want_longest = run->want_longest, .specials = specials};
 
                 if (run->want_lines)
                         counted = memory_count(lines, length, '\n');
@@ -7386,7 +7394,7 @@ static b32 text_wc()
                 positive longest = 0, column = 0;
                 bool inside = false;
                 wc_utf8 wide = {.posix = posix, .want_words = want_words,
-                                .want_longest = want_longest};
+                                .want_longest = want_longest, .specials = wc_specials};
 
                 if (!text_open(name))
                         continue;
