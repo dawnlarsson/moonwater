@@ -3483,14 +3483,26 @@ zstd_row_update(zstd_encoder address_to e, p32 target, p32 low, p8 row_log, p8 m
                 e->next = target;
 }
 
+/*
+        One search of the row finder, libzstd's shape: the row of ip's hash
+        is read once, the candidates whose tag matches are gathered (each
+        one's bytes fetched as it goes), ip itself goes into the row's
+        newest slot from what is already in hand, so the next update has one
+        position less to hash, and then the candidates are compared newest
+        first, each by the four bytes that end at the best length so far.
+        row_log and mls arrive as constants for the levels that have them
+        (mls is 5 at every row level), so the row's width is a shift and the
+        mask an unrolled compare.
+*/
 static __attribute__((always_inline)) inline positive
 zstd_row_find(zstd_encoder address_to e, p8 address_to ip, p8 address_to iend,
-              p32 low, positive address_to distance, bool skipping)
+              p32 low, positive address_to distance, bool skipping,
+              const p8 row_log, const p8 mls)
 {
-        p8 const row_log = zstd_row_log(address_of e->p);
-        p8 const mls = e->p.min_match < 4 ? 4 : e->p.min_match > 6 ? 6 : e->p.min_match;
         positive const entries = (positive)1 << row_log;
         p8 address_to const base = e->base;
+        p8 address_to const chain = (p8 address_to)e->chain;
+        p32 address_to const table = e->hash;
         p32 const cur = (p32)(ip - base);
         positive const room = (positive)(iend - ip);
         positive attempts = (positive)1 << (e->p.search_log < row_log ? e->p.search_log : row_log);
@@ -3498,15 +3510,14 @@ zstd_row_find(zstd_encoder address_to e, p8 address_to ip, p8 address_to iend,
         positive h;
         positive row;
         positive head;
+        positive gathered = 0;
+        positive found[64];
+        p8 address_to cell;
+        p32 address_to slots;
         p64 mask;
 
-        /* Skipping over what looks like noise, only the positions
-           searched go in, as libzstd's lazy skipping does. */
         if (skipping)
-        {
-                zstd_row_insert(e, cur, row_log, mls);
-                e->next = cur + 1;
-        }
+                e->next = cur;
         else
                 zstd_row_update(e, cur, low, row_log, mls);
         h = zstd_hash_bytes(ip, (p8)(e->p.hash_log - row_log + 8), mls);
@@ -3516,42 +3527,56 @@ zstd_row_find(zstd_encoder address_to e, p8 address_to ip, p8 address_to iend,
         if (ip + 16 <= iend)
         {
                 positive const next = zstd_hash_bytes(ip + 8, (p8)(e->p.hash_log - row_log + 8), mls) >> 8;
-                p8 address_to const ahead = (p8 address_to)e->chain + (next << row_log) + next;
+                p8 address_to const ahead = chain + (next << row_log) + next;
 
                 __builtin_prefetch(ahead);
                 __builtin_prefetch(ahead + entries);
-                __builtin_prefetch(e->hash + (next << row_log));
+                __builtin_prefetch(table + (next << row_log));
                 if (row_log > 4)
-                        __builtin_prefetch(e->hash + (next << row_log) + 16);
+                        __builtin_prefetch(table + (next << row_log) + 16);
         }
-        /* A row is its head byte and then its tags, so the head is read
-           from the line the tags are, as libzstd keeps it in tagRow[0]. */
-        head = ((p8 address_to)e->chain + (row << row_log) + row)[0];
-        mask = zstd_row_mask((p8 address_to)e->chain + (row << row_log) + row + 1, (p8)h, entries);
+        cell = chain + (row << row_log) + row;
+        slots = table + (row << row_log);
+        head = cell[0];
+        mask = zstd_row_mask(cell + 1, (p8)h, entries);
         if (head)
                 mask = (mask >> head) | (mask << (entries - head));
         if (entries < 64)
                 mask &= ((p64)1 << entries) - 1;
-        while (mask && attempts--)
+        while (mask && attempts)
         {
-                p32 const candidate =
-                    e->hash[(row << row_log) + ((zstd_lowbit64(mask) + head) & (entries - 1))];
-                p8 address_to there;
+                p32 const candidate = slots[(zstd_lowbit64(mask) + head) & (entries - 1)];
 
                 mask &= mask - 1;
                 if (candidate < low)
                         break;
                 if (candidate >= cur)
                         continue;
-                there = base + candidate;
-                if (there[best] == ip[best])
+                __builtin_prefetch(base + candidate);
+                found[gathered++] = candidate;
+                attempts--;
+        }
+        {
+                positive const at = (head - 1) & (entries - 1);
+
+                cell[0] = (p8)at;
+                cell[1 + at] = (p8)h;
+                slots[at] = cur;
+                e->next = cur + 1;
+        }
+        for (positive n = 0; n < gathered; n++)
+        {
+                p8 address_to const there = base + found[n];
+
+                if (memory_load_unaligned(p32, there + best - 3) ==
+                    memory_load_unaligned(p32, ip + best - 3))
                 {
                         positive const length = memory_common_prefix(ip, there, room);
 
                         if (length > best)
                         {
                                 best = length;
-                                address_to distance = cur - candidate;
+                                address_to distance = cur - found[n];
                                 if (length == room)
                                         break;
                         }
@@ -4492,8 +4517,10 @@ zstd_offset_cost(zstd_encoder address_to e, positive distance)
         beats the match in hand.  A match found at an offset extends back
         into the literals before it.
 */
-static p8 address_to zstd_parse_lazy(zstd_encoder address_to e, p32 from,
-                                     p32 to, p32 low, positive depth, bool tree)
+static __attribute__((always_inline)) inline p8 address_to
+zstd_parse_lazy_body(zstd_encoder address_to e, p32 from, p32 to, p32 low,
+                     const positive depth, const bool tree, const p8 row_log,
+                     const p8 mls)
 {
         p8 address_to const base = e->base;
         p8 address_to const lowest = base + low;
@@ -4524,7 +4551,8 @@ static p8 address_to zstd_parse_lazy(zstd_encoder address_to e, p32 from,
                                 goto store;
                 }
                 found = tree ? zstd_bt_best(e, ip, iend, address_of found_distance)
-                             : zstd_row_find(e, ip, iend, low, address_of found_distance, skipping);
+                             : zstd_row_find(e, ip, iend, low, address_of found_distance, skipping,
+                                                           row_log, mls);
                 if (found > match)
                 {
                         match = found;
@@ -4560,7 +4588,8 @@ static p8 address_to zstd_parse_lazy(zstd_encoder address_to e, p32 from,
                                 }
                         }
                         found = tree ? zstd_bt_best(e, ip, iend, address_of found_distance)
-                             : zstd_row_find(e, ip, iend, low, address_of found_distance, skipping);
+                             : zstd_row_find(e, ip, iend, low, address_of found_distance, skipping,
+                                                           row_log, mls);
                         if (found >= 4 &&
                             (bipolar)found * 4 - (bipolar)zstd_highbit32((p32)found_distance + 3) >
                                 (bipolar)match * 4 - zstd_offset_cost(e, distance) + 4)
@@ -4589,7 +4618,8 @@ static p8 address_to zstd_parse_lazy(zstd_encoder address_to e, p32 from,
                                         }
                                 }
                                 found = tree ? zstd_bt_best(e, ip, iend, address_of found_distance)
-                             : zstd_row_find(e, ip, iend, low, address_of found_distance, skipping);
+                             : zstd_row_find(e, ip, iend, low, address_of found_distance, skipping,
+                                                           row_log, mls);
                                 if (found >= 4 &&
                                     (bipolar)found * 4 - (bipolar)zstd_highbit32((p32)found_distance + 3) >
                                         (bipolar)match * 4 - zstd_offset_cost(e, distance) + 7)
@@ -4613,6 +4643,42 @@ static p8 address_to zstd_parse_lazy(zstd_encoder address_to e, p32 from,
         }
         return anchor;
 }
+
+/* The row levels all have min_match 5 and a row of 16, 32 or 64 slots, and
+   the depth is fixed by the strategy: each combination is its own copy of
+   the parse with those as constants.  The tree parse and any other shape
+   take the general copy. */
+#define ZSTD_LAZY_ROWS(depth)                                                         \
+        switch (zstd_row_log(address_of e->p))                                        \
+        {                                                                             \
+        case 4:                                                                       \
+                return zstd_parse_lazy_body(e, from, to, low, depth, false, 4, 5);   \
+        case 5:                                                                       \
+                return zstd_parse_lazy_body(e, from, to, low, depth, false, 5, 5);   \
+        default:                                                                      \
+                return zstd_parse_lazy_body(e, from, to, low, depth, false, 6, 5);   \
+        }
+
+static p8 address_to zstd_parse_lazy(zstd_encoder address_to e, p32 from,
+                                     p32 to, p32 low, positive depth, bool tree)
+{
+        if (tree)
+                return zstd_parse_lazy_body(e, from, to, low, 2, true, 4, 5);
+        if (e->p.min_match != 5)
+                return zstd_parse_lazy_body(e, from, to, low, depth, false,
+                                            zstd_row_log(address_of e->p),
+                                            e->p.min_match < 4 ? 4 : e->p.min_match > 6 ? 6 : e->p.min_match);
+        if (depth == 0)
+        {
+                ZSTD_LAZY_ROWS(0)
+        }
+        if (depth == 1)
+        {
+                ZSTD_LAZY_ROWS(1)
+        }
+        ZSTD_LAZY_ROWS(2)
+}
+#undef ZSTD_LAZY_ROWS
 
 static fn zstd_encoder_close(zstd_encoder address_to e)
 {
