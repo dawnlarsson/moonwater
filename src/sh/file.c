@@ -17280,6 +17280,9 @@ static du_moment du_newest(du_moment left, du_moment right)
         of range and written as the count of seconds it is, as the
         reference writes it.
 */
+// Whether a terminal will show the names du writes.
+static bool du_terminal;
+
 static fn du_report(p64 bytes, du_moment stamp, string_address path)
 {
         if (du_human && du_si)
@@ -17333,7 +17336,15 @@ static fn du_report(p64 bytes, du_moment stamp, string_address path)
                 }
         }
 
-        string_format(log, "\t%w", writer_terminal_name, path);
+        //      A name is written as it is unless a terminal will show it:
+        //      du's output is read back by programs (du -a | sort, du -0 |
+        //      xargs -0), and escaping a byte of a name makes it another
+        //      name, where GNU's is byte for byte.
+        log("\t", 1);
+        if (du_null || !du_terminal)
+                log((address_any)path, string_length(path));
+        else
+                writer_terminal_name(log, path);
         log(du_null ? (string_address) "" : (string_address) "\n", 1);
 }
 
@@ -18396,6 +18407,7 @@ static b32 file_du()
         du_deref_args = du_deref == 'D' || du_deref == 'H';
         du_inodes = (flags & FILE_FLAG('i')) != 0;
         du_null = (flags & FILE_FLAG('0')) != 0;
+        du_terminal = stream_is_terminal(1);
 
         string_address files_from = (flags & FILE_FLAG('F'))
                                         ? file_option_value(address_of taking, 'F')
