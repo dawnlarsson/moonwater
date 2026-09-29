@@ -10162,6 +10162,9 @@ static fn shell_set_written(writer write, string_address name,
                             positive length, b32 mark);
 static COLD positive shell_internal_count();
 static COLD string_address shell_internal_name(positive at);
+static COLD fn compgen_variable(writer write, string_address name,
+                                positive length, b32 mark);
+positive shell_job_count();
 
 static inline bool shell_inventory_sorted(
     writer write, b32 mark, shell_name_writer written, bool functions, bool bodies)
@@ -10175,7 +10178,8 @@ static inline bool shell_inventory_sorted(
         //      when they are read, so their names are counted and sorted in.
         positive extra = !functions && (written == shell_set_written ||
                                         written == shell_declare_listed ||
-                                        written == shell_declare_written)
+                                        written == shell_declare_written ||
+                                        written == compgen_variable)
                              ? shell_internal_count()
                              : 0;
 
@@ -20668,18 +20672,428 @@ static bool shell_completion_refused(string_address command,
         return false;
 }
 
+/*
+        complete and compopt: what a command's completion is to be.
+
+        Nothing here completes a word -- this shell's line editor asks for no
+        such thing -- but a script reads the table it keeps: complete -p
+        writes back what was set, compopt changes an option of it, and compgen
+        below makes the candidates one specification names. So the table is
+        kept as bash keeps it, and listed in the order bash lists it: 512
+        chains, a name's chosen by FNV-1, the newest name first in its chain.
+*/
+#define COMP_ACTIONS 24
+static const struct
+{
+        string_address name;
+        p8 letter;
+} comp_action_table[COMP_ACTIONS] = {
+    {"alias", 'a'},    {"arrayvar", 0},  {"binding", 0},   {"builtin", 'b'},
+    {"command", 'c'},  {"directory", 'd'}, {"disabled", 0}, {"enabled", 0},
+    {"export", 'e'},   {"file", 'f'},    {"function", 0},  {"group", 'g'},
+    {"helptopic", 0},  {"hostname", 0},  {"job", 'j'},     {"keyword", 'k'},
+    {"running", 0},    {"service", 's'}, {"setopt", 0},    {"shopt", 0},
+    {"signal", 0},     {"stopped", 0},   {"user", 'u'},    {"variable", 'v'}};
+#define COMP_ACTION_ARRAYVAR 1
+#define COMP_ACTION_BINDING 2
+#define COMP_ACTION_BUILTIN 3
+#define COMP_ACTION_COMMAND 4
+#define COMP_ACTION_DIRECTORY 5
+#define COMP_ACTION_DISABLED 6
+#define COMP_ACTION_ENABLED 7
+#define COMP_ACTION_EXPORT 8
+#define COMP_ACTION_FILE 9
+#define COMP_ACTION_FUNCTION 10
+#define COMP_ACTION_GROUP 11
+#define COMP_ACTION_HELPTOPIC 12
+#define COMP_ACTION_HOSTNAME 13
+#define COMP_ACTION_JOB 14
+#define COMP_ACTION_KEYWORD 15
+#define COMP_ACTION_RUNNING 16
+#define COMP_ACTION_SERVICE 17
+#define COMP_ACTION_SETOPT 18
+#define COMP_ACTION_SHOPT 19
+#define COMP_ACTION_SIGNAL 20
+#define COMP_ACTION_STOPPED 21
+#define COMP_ACTION_USER 22
+#define COMP_ACTION_VARIABLE 23
+
+#define COMP_OPTIONS 8
+static const string_address comp_option_names[COMP_OPTIONS] = {
+    "bashdefault", "default", "dirnames", "filenames", "noquote", "nosort",
+    "nospace", "plusdirs"};
+#define COMP_OPTION_DEFAULT (1u << 1)
+#define COMP_OPTION_DIRNAMES (1u << 2)
+#define COMP_OPTION_PLUSDIRS (1u << 7)
+
+typedef struct
+{
+        string_address name;
+        p32 actions;
+        p32 options;
+        string_address glob;
+        string_address words;
+        string_address function;
+        string_address command;
+        string_address filter;
+        string_address prefix;
+        string_address suffix;
+        positive sequence;
+} comp_spec;
+
+static comp_spec address_to comp_specs;
+static positive comp_room;
+static positive comp_count;
+static positive comp_sequence;
+
+//      The three that are not a command's: -D, -E and -I are kept under the
+//      names bash gives them.
+#define COMP_DEFAULT "_DefaultCmD_"
+#define COMP_EMPTY "_EmptycmD_"
+#define COMP_INITIAL "_InitialWorD_"
+
+// What a specification is asked for on the command line, as complete,
+// compopt and compgen all read it.
+typedef struct
+{
+        p32 actions;
+        p32 options_on;
+        p32 options_off;
+        string_address glob;
+        string_address words;
+        string_address function;
+        string_address command;
+        string_address filter;
+        string_address prefix;
+        string_address suffix;
+        string_address variable;
+        bool print;
+        bool remove;
+        bool wanted;
+        string_address special;
+        positive first;
+} comp_request;
+
+static COLD string_address comp_keep(string_address text)
+{
+        positive length;
+        p8 address_to made;
+
+        if (!text)
+                return null;
+
+        length = string_length(text);
+        made = shell_map(length + 1);
+
+        if (made)
+                memory_copy(made, text, length + 1);
+
+        return made;
+}
+
+static COLD fn comp_release(string_address text)
+{
+        if (text)
+                memory_free((p8 address_to)text, string_length(text) + 1);
+}
+
+static COLD fn comp_forget(comp_spec address_to spec)
+{
+        comp_release(spec->name);
+        comp_release(spec->glob);
+        comp_release(spec->words);
+        comp_release(spec->function);
+        comp_release(spec->command);
+        comp_release(spec->filter);
+        comp_release(spec->prefix);
+        comp_release(spec->suffix);
+        memory_fill(spec, 0, sizeof(*spec));
+}
+
+static COLD positive comp_find(string_address name)
+{
+        for (positive at = 0; at < comp_count; at++)
+                if (!string_compare(comp_specs[at].name, name))
+                        return at;
+
+        return comp_count;
+}
+
+static COLD fn comp_drop(positive at)
+{
+        comp_forget(comp_specs + at);
+
+        if (at + 1 < comp_count)
+                memory_copy(comp_specs + at, comp_specs + at + 1,
+                            (comp_count - at - 1) * sizeof(comp_specs[0]));
+
+        comp_count--;
+}
+
+static COLD p32 comp_chain(string_address name)
+{
+        p32 hash = 2166136261u;
+
+        for (; string_get(name); name++)
+        {
+                hash *= 16777619u;
+                hash ^= (p32)(bipolar)(signed char)string_get(name);
+        }
+
+        return hash & 511;
+}
+
+static COLD fn comp_quoted(writer write, string_address text)
+{
+        write("'", 1);
+
+        while (string_get(text))
+        {
+                positive run = string_span_without_set(text, "'");
+
+                if (run)
+                        write(text, run);
+                text += run;
+
+                if (string_is(text, '\''))
+                {
+                        write("'\\''", 4);
+                        text++;
+                }
+        }
+
+        write("'", 1);
+}
+
+static COLD fn comp_printed(writer write, comp_spec address_to spec)
+{
+        write("complete", 8);
+
+        for (positive at = 0; at < COMP_OPTIONS; at++)
+                if (spec->options & (1u << at))
+                {
+                        write(" -o ", 4);
+                        write(comp_option_names[at],
+                              string_length(comp_option_names[at]));
+                }
+
+        for (positive at = 0; at < COMP_ACTIONS; at++)
+                if ((spec->actions & (1u << at)) && comp_action_table[at].letter)
+                {
+                        p8 flag[3] = {' ', '-', comp_action_table[at].letter};
+
+                        write(flag, 3);
+                }
+
+        for (positive at = 0; at < COMP_ACTIONS; at++)
+                if ((spec->actions & (1u << at)) && !comp_action_table[at].letter)
+                {
+                        write(" -A ", 4);
+                        write(comp_action_table[at].name,
+                              string_length(comp_action_table[at].name));
+                }
+
+        if (spec->glob)
+        {
+                write(" -G ", 4);
+                comp_quoted(write, spec->glob);
+        }
+        if (spec->words)
+        {
+                write(" -W ", 4);
+                comp_quoted(write, spec->words);
+        }
+        if (spec->prefix)
+        {
+                write(" -P ", 4);
+                comp_quoted(write, spec->prefix);
+        }
+        if (spec->suffix)
+        {
+                write(" -S ", 4);
+                comp_quoted(write, spec->suffix);
+        }
+        if (spec->filter)
+        {
+                write(" -X ", 4);
+                comp_quoted(write, spec->filter);
+        }
+        if (spec->command)
+        {
+                write(" -C ", 4);
+                comp_quoted(write, spec->command);
+        }
+        if (spec->function)
+        {
+                write(" -F ", 4);
+                write(spec->function, string_length(spec->function));
+        }
+
+        if (!string_compare(spec->name, COMP_DEFAULT))
+                write(" -D", 3);
+        else if (!string_compare(spec->name, COMP_EMPTY))
+                write(" -E", 3);
+        else if (!string_compare(spec->name, COMP_INITIAL))
+                write(" -I", 3);
+        else
+        {
+                write(" ", 1);
+                write(spec->name, string_length(spec->name));
+        }
+
+        write("\n", 1);
+}
+
+// Every specification in bash's order: by chain, and the newest first within
+// one.
+static COLD fn comp_listed(writer write)
+{
+        for (positive chain = 0; chain < 512; chain++)
+        {
+                positive newest = comp_count;
+
+                for (;;)
+                {
+                        positive best = comp_count;
+
+                        for (positive at = 0; at < comp_count; at++)
+                                if (comp_chain(comp_specs[at].name) == chain &&
+                                    (newest == comp_count ||
+                                     comp_specs[at].sequence <
+                                         comp_specs[newest].sequence) &&
+                                    (best == comp_count ||
+                                     comp_specs[at].sequence >
+                                         comp_specs[best].sequence))
+                                        best = at;
+
+                        if (best == comp_count)
+                                break;
+
+                        comp_printed(write, comp_specs + best);
+                        newest = best;
+                }
+        }
+}
+
+static COLD bool comp_option_index(string_address name, positive address_to at)
+{
+        for (positive index = 0; index < COMP_OPTIONS; index++)
+                if (word_is(name, comp_option_names[index]))
+                {
+                        address_to at = index;
+                        return true;
+                }
+
+        return false;
+}
+
+static COLD bool comp_action_index(string_address name, positive address_to at)
+{
+        for (positive index = 0; index < COMP_ACTIONS; index++)
+                if (word_is(name, comp_action_table[index].name))
+                {
+                        address_to at = index;
+                        return true;
+                }
+
+        return false;
+}
+
+/*
+        The words a completion builtin was given, read once for all three.
+
+        letters is what the builtin takes. -o and -A name their argument from
+        the closed lists above and a name off either is refused by the caller
+        before it gets here; the rest of the options are stored as written.
+*/
+static COLD bool comp_read(string_address command, comp_request address_to want,
+                           bool compopt)
+{
+        shell_option_walk walk = {1, null, 0, compopt};
+        p8 which;
+
+        memory_fill(want, 0, sizeof(*want));
+
+        while (shell_option_letter(address_of walk, address_of which))
+        {
+                string_address value = null;
+                positive at;
+
+                if (string_first_of("oAGWFCXPSV", which))
+                {
+                        value = shell_option_argument(address_of walk);
+                        if (!value)
+                                return false;
+                }
+
+                if (which == 'o')
+                {
+                        if (comp_option_index(value, address_of at))
+                        {
+                                if (walk.direction == '+')
+                                        want->options_off |= 1u << at;
+                                else
+                                        want->options_on |= 1u << at;
+                        }
+                }
+                else if (which == 'A')
+                {
+                        if (comp_action_index(value, address_of at))
+                                want->actions |= 1u << at;
+                }
+                else if (which == 'G')
+                        want->glob = value;
+                else if (which == 'W')
+                        want->words = value;
+                else if (which == 'F')
+                        want->function = value;
+                else if (which == 'C')
+                        want->command = value;
+                else if (which == 'X')
+                        want->filter = value;
+                else if (which == 'P')
+                        want->prefix = value;
+                else if (which == 'S')
+                        want->suffix = value;
+                else if (which == 'V')
+                        want->variable = value;
+                else if (which == 'p')
+                        want->print = true;
+                else if (which == 'r')
+                        want->remove = true;
+                else if (which == 'D')
+                        want->special = COMP_DEFAULT;
+                else if (which == 'E')
+                        want->special = COMP_EMPTY;
+                else if (which == 'I')
+                        want->special = COMP_INITIAL;
+                else
+                {
+                        for (at = 0; at < COMP_ACTIONS; at++)
+                                if (comp_action_table[at].letter == which)
+                                        want->actions |= 1u << at;
+                }
+        }
+
+        want->first = walk.index;
+        (void)command;
+        return true;
+}
+
 static COLD fn shell_complete(writer write, string_address input)
 {
         positive first = 1;
+        comp_request want;
+        bool names_given;
 
-        (void)write;
         (void)input;
 
         if (shell_completion_refused(
                 "complete",
-                "complete [-abcdefgjksuv] [-pr] [-DEI] [-o option] [-A action] "
-                "[-G globpat] [-W wordlist] [-F function] [-C command] "
-                "[-X filterpat] [-P prefix] [-S suffix] [name ...]",
+                "complete [-abcdefgjksuv] [-pr] [-DEI] [-o option] "
+                "[-A action] [-G globpat] [-W wordlist] [-F function] "
+                "[-C command] [-X filterpat] [-P prefix] [-S suffix] "
+                "[name ...]",
                 "abcdefgjksuvprDEIoAGWFCXPS", "oAGWFCXPS", address_of first))
                 return;
 
@@ -20689,20 +21103,187 @@ static COLD fn shell_complete(writer write, string_address input)
                 if (word_is(shell_argv[at], "-o") ||
                     word_is(shell_argv[at], "+o"))
                 {
-                        string_address named = shell_argv[at + 1];
+                        positive index;
 
-                        if (!word_is(named, "bashdefault") &&
-                            !word_is(named, "default") &&
-                            !word_is(named, "dirnames") &&
-                            !word_is(named, "filenames") &&
-                            !word_is(named, "noquote") &&
-                            !word_is(named, "nosort") &&
-                            !word_is(named, "nospace") &&
-                            !word_is(named, "plusdirs"))
-                                return shell_answered(2,
+                        if (!comp_option_index(shell_argv[at + 1],
+                                               address_of index))
+                                return shell_refuse(2,
                                     "complete: %s: invalid option name\n",
-                                    named);
+                                    shell_argv[at + 1]);
                 }
+
+        for (positive at = 1; at + 1 < shell_argc; at++)
+                if (word_is(shell_argv[at], "-A"))
+                {
+                        positive index;
+
+                        if (!comp_action_index(shell_argv[at + 1],
+                                               address_of index))
+                                return shell_refuse(2,
+                                    "complete: %s: invalid action name\n",
+                                    shell_argv[at + 1]);
+                }
+
+        if (!comp_read("complete", address_of want, false))
+                return shell_answer(2);
+
+        names_given = want.first < shell_argc;
+
+        //      -r takes names away, or all of them; the one it cannot find
+        //      it says so of and goes on. Asked beside something to set it
+        //      is not asked at all.
+        if (want.remove && !(want.actions || want.options_on || want.glob ||
+                             want.words || want.function || want.command ||
+                             want.filter || want.prefix || want.suffix))
+        {
+                b32 status = 0;
+
+                if (!names_given && !want.special)
+                {
+                        while (comp_count)
+                                comp_drop(comp_count - 1);
+                        return shell_answer(0);
+                }
+
+                if (want.special)
+                {
+                        positive at = comp_find(want.special);
+
+                        if (at < comp_count)
+                                comp_drop(at);
+                        else
+                                status = 1;
+                }
+
+                for (positive index = want.first; index < shell_argc; index++)
+                {
+                        positive at = comp_find(shell_argv[index]);
+
+                        if (at < comp_count)
+                                comp_drop(at);
+                        else
+                        {
+                                shell_told("complete: %s: no completion "
+                                           "specification\n",
+                                           shell_argv[index]);
+                                status = 1;
+                        }
+                }
+
+                return shell_answer(status);
+        }
+
+        //      Naming nothing and asking for nothing is the listing, which
+        //      -p asks for by name.
+        if (want.print || (!names_given && !want.special &&
+                           !want.actions && !want.options_on &&
+                           !want.glob && !want.words && !want.function &&
+                           !want.command && !want.filter && !want.prefix &&
+                           !want.suffix))
+        {
+                b32 status = 0;
+
+                if (!names_given && !want.special)
+                {
+                        comp_listed(write);
+                        return shell_answer(0);
+                }
+
+                if (want.special)
+                {
+                        positive at = comp_find(want.special);
+
+                        if (at < comp_count)
+                                comp_printed(write, comp_specs + at);
+                        else
+                        {
+                                shell_told("complete: %s: no completion "
+                                           "specification\n",
+                                           want.special == (string_address)COMP_DEFAULT
+                                               ? "-D"
+                                               : want.special ==
+                                                         (string_address)COMP_EMPTY
+                                                     ? "-E" : "-I");
+                                status = 1;
+                        }
+                }
+
+                for (positive index = want.first; index < shell_argc; index++)
+                {
+                        positive at = comp_find(shell_argv[index]);
+
+                        if (at < comp_count)
+                                comp_printed(write, comp_specs + at);
+                        else
+                        {
+                                shell_told("complete: %s: no completion "
+                                           "specification\n",
+                                           shell_argv[index]);
+                                status = 1;
+                        }
+                }
+
+                return shell_answer(status);
+        }
+
+        //      Something to set and nobody to set it for.
+        if (!names_given && !want.special)
+        {
+                shell_answered(2, "complete: usage: complete "
+                                  "[-abcdefgjksuv] [-pr] [-DEI] [-o option] "
+                                  "[-A action] [-G globpat] [-W wordlist] "
+                                  "[-F function] [-C command] [-X filterpat] "
+                                  "[-P prefix] [-S suffix] [name ...]\n");
+                return;
+        }
+
+        {
+                positive count = names_given ? shell_argc - want.first : 0;
+
+                for (positive index = 0; index <= count; index++)
+                {
+                        string_address name;
+                        positive at;
+                        comp_spec made;
+
+                        if (index == count)
+                        {
+                                if (!want.special)
+                                        break;
+                                name = want.special;
+                        }
+                        else
+                                name = shell_argv[want.first + index];
+
+                        made = (comp_spec){0};
+                        made.actions = want.actions;
+                        made.options = want.options_on;
+                        made.name = comp_keep(name);
+                        made.glob = comp_keep(want.glob);
+                        made.words = comp_keep(want.words);
+                        made.function = comp_keep(want.function);
+                        made.command = comp_keep(want.command);
+                        made.filter = comp_keep(want.filter);
+                        made.prefix = comp_keep(want.prefix);
+                        made.suffix = comp_keep(want.suffix);
+                        made.sequence = ++comp_sequence;
+                        at = comp_find(name);
+
+                        if (at < comp_count)
+                        {
+                                comp_forget(comp_specs + at);
+                                comp_specs[at] = made;
+                        }
+                        else if (shell_array_room(comp_specs, comp_room,
+                                                  comp_count + 1))
+                                comp_specs[comp_count++] = made;
+                        else
+                        {
+                                comp_forget(address_of made);
+                                return shell_answered(2, "complete: no room\n");
+                        }
+                }
+        }
 
         shell_answer(0);
 }
@@ -20710,6 +21291,8 @@ static COLD fn shell_complete(writer write, string_address input)
 static COLD fn shell_compopt(writer write, string_address input)
 {
         positive first = 1;
+        comp_request want;
+        b32 status = 0;
 
         (void)write;
         (void)input;
@@ -20719,23 +21302,67 @@ static COLD fn shell_compopt(writer write, string_address input)
                                      "oDEI", "o", address_of first))
                 return;
 
-        //      No completion is being executed and no name has a
-        //      specification, which is the pair of things Bash says here.
-        if (first < shell_argc)
-        {
-                //      One line per name: bash walks them all and answers
-                //      one at the end.
-                while (first < shell_argc)
+        for (positive at = 1; at + 1 < shell_argc; at++)
+                if (word_is(shell_argv[at], "-o") ||
+                    word_is(shell_argv[at], "+o"))
                 {
-                        shell_told("compopt: %s: no completion specification\n",
-                            shell_argv[first++]);
+                        positive index;
+
+                        if (!comp_option_index(shell_argv[at + 1],
+                                               address_of index))
+                                return shell_refuse(2,
+                                    "compopt: %s: invalid option name\n",
+                                    shell_argv[at + 1]);
                 }
 
-                return shell_answer(1);
+        if (!comp_read("compopt", address_of want, true))
+                return shell_answer(2);
+
+        //      No completion is being executed and no name has a
+        //      specification, which is the pair of things Bash says here.
+        if (want.first >= shell_argc && !want.special)
+                return shell_answered(1,
+                    "compopt: not currently executing completion function\n");
+
+        if (want.special)
+        {
+                positive at = comp_find(want.special);
+
+                if (at < comp_count)
+                        comp_specs[at].options =
+                            (comp_specs[at].options | want.options_on) &
+                            ~want.options_off;
+                else
+                {
+                        shell_told("compopt: %s: no completion specification\n",
+                                   want.special == (string_address)COMP_DEFAULT
+                                       ? "-D"
+                                       : want.special ==
+                                                 (string_address)COMP_EMPTY
+                                             ? "-E" : "-I");
+                        status = 1;
+                }
         }
 
-        shell_answered(1,
-            "compopt: not currently executing completion function\n");
+        for (positive index = want.first; index < shell_argc; index++)
+        {
+                positive at = comp_find(shell_argv[index]);
+
+                if (at < comp_count)
+                        comp_specs[at].options =
+                            (comp_specs[at].options | want.options_on) &
+                            ~want.options_off;
+                else
+                {
+                        //      One line per name: bash walks them all and
+                        //      answers one at the end.
+                        shell_told("compopt: %s: no completion specification\n",
+                                   shell_argv[index]);
+                        status = 1;
+                }
+        }
+
+        shell_answer(status);
 }
 
 static COLD fn shell_bind(writer write, string_address input)
@@ -23057,12 +23684,18 @@ fn shell_enable(writer write, string_address input)
 }
 
 /*
-        compgen: the names a completion would offer.
+        compgen: the candidates one specification names.
 
-        Without a terminal there is nothing to complete, but a script that
-        asks what functions or variables exist is asking a question the shell
-        can answer, and it is the one use of compgen that works in a pipe.
+        Where a script asks what functions or variables exist, or which
+        files begin with a prefix, this is the part of completion that works
+        without a terminal. A specification is read the way complete reads
+        one, and the candidates come in the order bash makes them: each
+        action in turn, then -G, -W, -F and -C, kept when they begin with the
+        word and when -X lets them through, and put between -P and -S.
+        Everything is collected before any of it is written, so a list that
+        cannot be expanded gives nothing at all.
 */
+static byte_store compgen_out;
 static string_address compgen_prefix;
 static positive compgen_prefix_length;
 static positive compgen_shown;
@@ -23072,12 +23705,25 @@ static positive compgen_shown;
 static string_address compgen_reject;
 static string_address compgen_before;
 static string_address compgen_after;
+//      What -F and -C wrote is the caller's own business and is not cut by
+//      the word.
+static bool compgen_cut;
 
-static COLD fn compgen_offer(writer write, string_address name)
+static COLD fn compgen_add(string_address bytes, positive length)
+{
+        if (byte_store_reserve(address_of compgen_out,
+                               compgen_out.used + length + 1, 256))
+        {
+                memory_copy(compgen_out.bytes + compgen_out.used, bytes, length);
+                compgen_out.used += length;
+        }
+}
+
+static COLD fn compgen_offer(string_address name)
 {
         positive length = string_length(name);
 
-        if (compgen_prefix_length &&
+        if (compgen_cut && compgen_prefix_length &&
             (length < compgen_prefix_length ||
              memory_compare(name, compgen_prefix, compgen_prefix_length)))
                 return;
@@ -23092,253 +23738,878 @@ static COLD fn compgen_offer(writer write, string_address name)
         }
 
         if (compgen_before)
-                write(compgen_before, string_length(compgen_before));
-        write(name, length);
+                compgen_add(compgen_before, string_length(compgen_before));
+        compgen_add(name, length);
         if (compgen_after)
-                write(compgen_after, string_length(compgen_after));
-        write("\n", 1);
+                compgen_add(compgen_after, string_length(compgen_after));
+        compgen_add("\n", 1);
         compgen_shown++;
 }
 
-static COLD fn compgen_variable(writer write, string_address name, positive length,
-                           b32 mark)
-{
-        p8 held[256];
-
-        (void)mark;
-
-        if (length >= sizeof(held))
-                return;
-
-        memory_copy_apart(held, name, length);
-        held[length] = end;
-        compgen_offer(write, held);
-}
-
-static COLD fn compgen_function(writer write, string_address name,
+static COLD fn compgen_variable(writer write, string_address name,
                                 positive length, b32 mark)
 {
+        (void)write;
         (void)length;
         (void)mark;
-        compgen_offer(write, name);
+        compgen_offer(name);
 }
 
-fn shell_compgen(writer write, string_address input)
+static COLD fn compgen_exported(writer write, string_address name,
+                                positive length, b32 mark)
 {
-        bool functions = false;
-        bool variables = false;
-        bool builtins = false;
-        bool aliases = false;
-        bool commands = false;
-        bool files = false;
-        bool directories = false;
-        bool keywords = false;
-        //      Bash answers zero for a compgen given no option at all and
-        //      one for an option that generated nothing, so the two have to
-        //      be told apart.
-        bool optioned = false;
-        string_address words = null;
+        positive found = env_find_span(name, length);
 
-        compgen_prefix = null;
-        compgen_prefix_length = 0;
-        compgen_shown = 0;
-        compgen_reject = null;
-        compgen_before = null;
-        compgen_after = null;
+        (void)write;
+        (void)mark;
 
-        shell_option_walk walk = {1};
-        p8 which;
+        if (found < shell_var_count && shell_vars[found].permanent &&
+            env_variable_has_value(shell_vars + found))
+                compgen_offer(name);
+}
 
-        while (shell_option_letter(address_of walk, address_of which))
+static COLD fn compgen_arrays(writer write, string_address name,
+                              positive length, b32 mark)
+{
+        positive found = env_find_span(name, length);
+
+        (void)write;
+        (void)mark;
+
+        if (found < shell_var_count &&
+            (shell_vars[found].attributes & SHELL_ARRAY_EITHER) &&
+            (shell_vars[found].attributes & SHELL_ARRAY_ASSIGNED))
+                compgen_offer(name);
+}
+
+static const string_address comp_helptopics[] = {
+    "!", "%", "(( ... ))", ".", ":", "[", "[[ ... ]]", "alias", "bg",
+    "bind", "break", "builtin", "caller", "case", "cd", "command",
+    "compgen", "complete", "compopt", "continue", "coproc", "declare",
+    "dirs", "disown", "echo", "enable", "eval", "exec", "exit", "export",
+    "false", "fc", "fg", "for", "for ((", "function", "getopts", "hash",
+    "help", "history", "if", "jobs", "kill", "let", "local", "logout",
+    "mapfile", "popd", "printf", "pushd", "pwd", "read", "readarray",
+    "readonly", "return", "select", "set", "shift", "shopt", "source",
+    "suspend", "test", "time", "times", "trap", "true", "type", "typeset",
+    "ulimit", "umask", "unalias", "unset", "until", "variables", "wait",
+    "while", "{ ... }",
+    null};
+static const string_address comp_bindings[] = {
+    "abort", "accept-line", "arrow-key-prefix", "backward-byte",
+    "backward-char", "backward-delete-char", "backward-kill-line",
+    "backward-kill-word", "backward-word", "beginning-of-history",
+    "beginning-of-line", "bracketed-paste-begin", "call-last-kbd-macro",
+    "capitalize-word", "character-search", "character-search-backward",
+    "clear-display", "clear-screen", "complete", "copy-backward-word",
+    "copy-forward-word", "copy-region-as-kill", "delete-char",
+    "delete-char-or-list", "delete-horizontal-space", "digit-argument",
+    "do-lowercase-version", "downcase-word", "dump-functions",
+    "dump-macros", "dump-variables", "emacs-editing-mode", "end-kbd-macro",
+    "end-of-history", "end-of-line", "exchange-point-and-mark",
+    "execute-named-command", "export-completions", "fetch-history",
+    "forward-backward-delete-char", "forward-byte", "forward-char",
+    "forward-search-history", "forward-word", "history-search-backward",
+    "history-search-forward", "history-substring-search-backward",
+    "history-substring-search-forward", "insert-comment",
+    "insert-completions", "kill-line", "kill-region", "kill-whole-line",
+    "kill-word", "menu-complete", "menu-complete-backward", "next-history",
+    "next-screen-line", "non-incremental-forward-search-history",
+    "non-incremental-forward-search-history-again",
+    "non-incremental-reverse-search-history",
+    "non-incremental-reverse-search-history-again", "old-menu-complete",
+    "operate-and-get-next", "overwrite-mode", "possible-completions",
+    "previous-history", "previous-screen-line", "print-last-kbd-macro",
+    "quoted-insert", "re-read-init-file", "redraw-current-line",
+    "reverse-search-history", "revert-line", "self-insert", "set-mark",
+    "skip-csi-sequence", "start-kbd-macro", "tab-insert", "tilde-expand",
+    "transpose-chars", "transpose-words", "tty-status", "undo",
+    "universal-argument", "unix-filename-rubout", "unix-line-discard",
+    "unix-word-rubout", "upcase-word", "vi-append-eol", "vi-append-mode",
+    "vi-arg-digit", "vi-bWord", "vi-back-to-indent", "vi-backward-bigword",
+    "vi-backward-word", "vi-bword", "vi-change-case", "vi-change-char",
+    "vi-change-to", "vi-char-search", "vi-column", "vi-complete",
+    "vi-delete", "vi-delete-to", "vi-eWord", "vi-editing-mode",
+    "vi-end-bigword", "vi-end-word", "vi-eof-maybe", "vi-eword", "vi-fWord",
+    "vi-fetch-history", "vi-first-print", "vi-forward-bigword",
+    "vi-forward-word", "vi-fword", "vi-goto-mark", "vi-insert-beg",
+    "vi-insertion-mode", "vi-match", "vi-movement-mode", "vi-next-word",
+    "vi-overstrike", "vi-overstrike-delete", "vi-prev-word", "vi-put",
+    "vi-redo", "vi-replace", "vi-rubout", "vi-search", "vi-search-again",
+    "vi-set-mark", "vi-subst", "vi-tilde-expand", "vi-undo",
+    "vi-unix-word-rubout", "vi-yank-arg", "vi-yank-pop", "vi-yank-to",
+    "yank", "yank-last-arg", "yank-nth-arg", "yank-pop",
+    null};
+static const string_address comp_signals[] = {
+    "EXIT", "SIGHUP", "SIGINT", "SIGQUIT", "SIGILL", "SIGTRAP", "SIGABRT",
+    "SIGBUS", "SIGFPE", "SIGKILL", "SIGUSR1", "SIGSEGV", "SIGUSR2",
+    "SIGPIPE", "SIGALRM", "SIGTERM", "SIGSTKFLT", "SIGCHLD", "SIGCONT",
+    "SIGSTOP", "SIGTSTP", "SIGTTIN", "SIGTTOU", "SIGURG", "SIGXCPU",
+    "SIGXFSZ", "SIGVTALRM", "SIGPROF", "SIGWINCH", "SIGIO", "SIGPWR",
+    "SIGSYS", "SIGJUNK(32)", "SIGJUNK(33)", "SIGRTMIN", "SIGRTMIN+1",
+    "SIGRTMIN+2", "SIGRTMIN+3", "SIGRTMIN+4", "SIGRTMIN+5", "SIGRTMIN+6",
+    "SIGRTMIN+7", "SIGRTMIN+8", "SIGRTMIN+9", "SIGRTMIN+10", "SIGRTMIN+11",
+    "SIGRTMIN+12", "SIGRTMIN+13", "SIGRTMIN+14", "SIGRTMIN+15",
+    "SIGRTMAX-14", "SIGRTMAX-13", "SIGRTMAX-12", "SIGRTMAX-11",
+    "SIGRTMAX-10", "SIGRTMAX-9", "SIGRTMAX-8", "SIGRTMAX-7", "SIGRTMAX-6",
+    "SIGRTMAX-5", "SIGRTMAX-4", "SIGRTMAX-3", "SIGRTMAX-2", "SIGRTMAX-1",
+    "SIGRTMAX", "DEBUG", "ERR", "RETURN",
+    null};
+static const string_address comp_shopts[] = {
+    "array_expand_once", "assoc_expand_once", "autocd",
+    "bash_source_fullpath", "cdable_vars", "cdspell", "checkhash",
+    "checkjobs", "checkwinsize", "cmdhist", "compat31", "compat32",
+    "compat40", "compat41", "compat42", "compat43", "compat44",
+    "complete_fullquote", "direxpand", "dirspell", "dotglob", "execfail",
+    "expand_aliases", "extdebug", "extglob", "extquote", "failglob",
+    "force_fignore", "globasciiranges", "globskipdots", "globstar",
+    "gnu_errfmt", "histappend", "histreedit", "histverify", "hostcomplete",
+    "huponexit", "inherit_errexit", "interactive_comments", "lastpipe",
+    "lithist", "localvar_inherit", "localvar_unset", "login_shell",
+    "mailwarn", "no_empty_cmd_completion", "nocaseglob", "nocasematch",
+    "noexpand_translation", "nullglob", "patsub_replacement", "progcomp",
+    "progcomp_alias", "promptvars", "restricted_shell", "shift_verbose",
+    "sourcepath", "varredir_close", "xpg_echo",
+    null};
+
+//      Bash's builtins, which is what -A builtin writes whatever this shell
+//      keeps besides; enabled and disabled ask the table for the state.
+static const string_address comp_builtins[] = {
+    ".", ":", "[", "alias", "bg", "bind", "break", "builtin", "caller", "cd",
+    "command", "compgen", "complete", "compopt", "continue", "declare", "dirs",
+    "disown", "echo", "enable", "eval", "exec", "exit", "export", "false",
+    "fc", "fg", "getopts", "hash", "help", "history", "jobs", "kill", "let",
+    "local", "logout", "mapfile", "popd", "printf", "pushd", "pwd", "read",
+    "readarray", "readonly", "return", "set", "shift", "shopt", "source",
+    "suspend", "test", "times", "trap", "true", "type", "typeset", "ulimit",
+    "umask", "unalias", "unset", "wait", null};
+
+static COLD fn compgen_names(const string_address address_to list)
+{
+        for (positive at = 0; list[at]; at++)
+                compgen_offer(list[at]);
+}
+
+static COLD fn compgen_builtins(int which)
+{
+        // 0 all, 1 enabled, 2 disabled
+        for (positive at = 0; comp_builtins[at]; at++)
         {
-                string_address value = null;
+                bool off = false;
 
-                optioned = true;
-
-                if (string_first_of("AWPSXFCG", which))
-                {
-                        value = shell_option_argument(address_of walk);
-                        if (!value)
-                                return shell_answer(2);
-                }
-
-                if (which == 'A')
-                {
-                        //      Bash's closed list of actions. One that is
-                        //      not on it is a usage error before anything
-                        //      is generated.
-                        static const string_address actions[] = {
-                            "alias", "arrayvar", "binding", "builtin",
-                            "command", "directory", "disabled", "enabled",
-                            "export", "file", "function", "group",
-                            "helptopic", "hostname", "job", "keyword",
-                            "running", "service", "setopt", "shopt",
-                            "signal", "stopped", "user", "variable"};
-                        bool known = false;
-
-                        for (positive at = 0; at < array_count(actions); at++)
-                                if (word_is(value, actions[at]))
-                                        known = true;
-
-                        if (!known)
-                                return shell_answered(2,
-                                    "compgen: %s: invalid action name\n",
-                                    value);
-
-                        if (word_is(value, "keyword"))
-                                keywords = true;
-                        else if (word_is(value, "function"))
-                                functions = true;
-                        else if (word_is(value, "variable"))
-                                variables = true;
-                        else if (word_is(value, "builtin"))
-                                builtins = true;
-                        else if (word_is(value, "alias"))
-                                aliases = true;
-                        else if (word_is(value, "command"))
-                                commands = true;
-                        else if (word_is(value, "file"))
-                                files = true;
-                        else if (word_is(value, "directory"))
-                                directories = true;
-                }
-                else if (which == 'W')
-                        words = value;
-                else if (which == 'P')
-                        compgen_before = value;
-                else if (which == 'S')
-                        compgen_after = value;
-                else if (which == 'X')
-                        compgen_reject = value;
-                else if (which == 'v')
-                        variables = true;
-                else if (which == 'b')
-                        builtins = true;
-                else if (which == 'a')
-                        aliases = true;
-                else if (which == 'c')
-                        commands = true;
-                else if (which == 'f')
-                        files = true;
-                else if (which == 'd')
-                        directories = true;
-                else if (!string_first_of("AWPSXFCGoVegjksu", which))
-                        return shell_letter_refuse("compgen", which,
-                            "compgen [-V varname] [-abcdefgjksuv] "
-                            "[-o option] [-A action] [-G globpat] "
-                            "[-W wordlist] [-F function] [-C command] "
-                            "[-X filterpat] [-P prefix] [-S suffix] [word]");
-        }
-
-        positive index = walk.index;
-
-        if (index < shell_argc)
-        {
-                compgen_prefix = shell_argv[index];
-                compgen_prefix_length = string_length(compgen_prefix);
-        }
-
-        if (functions || commands)
-        {
-                if (!shell_inventory_sorted(write, 0, compgen_function, true,
-                                            false))
-                        return shell_answered(2, "%s: no room\n", "compgen");
-        }
-
-        if (keywords)
-                for (positive at = 0; shell_keywords_listed[at]; at++)
-                        compgen_offer(write, shell_keywords_listed[at]);
-
-        if (aliases || commands)
-                for (positive at = 0; at < alias_count; at++)
-                        compgen_offer(write, alias_table[at].name);
-
-        if (builtins || commands)
-        {
-                //      Bash offers them in order. The registry is in the
-                //      order the builtins were written down, which is not
-                //      an order anybody reading a completion list expects.
-                string_address sorted[SHELL_COMMAND_COUNT];
-                positive count = 0;
-
-                for (shell_command address_to command = shell_commands;
-                     command->name; command++)
-                {
-                        positive at = count++;
-
-                        while (at && string_compare(sorted[at - 1],
-                                                    command->name) > 0)
+                for (positive index = 0; shell_commands[index].name; index++)
+                        if (!string_compare(shell_commands[index].name,
+                                            comp_builtins[at]))
                         {
-                                sorted[at] = sorted[at - 1];
-                                at--;
+                                off = shell_disabled[index] != 0;
+                                break;
                         }
 
-                        sorted[at] = command->name;
+                if ((which == 1 && off) || (which == 2 && !off))
+                        continue;
+                compgen_offer(comp_builtins[at]);
+        }
+}
+
+static COLD fn compgen_aliases()
+{
+        string_address address_to names = null;
+        positive room = 0;
+
+        if (!alias_count)
+                return;
+
+        if (!shell_array_room(names, room, alias_count))
+                return;
+
+        for (positive at = 0; at < alias_count; at++)
+                names[at] = alias_table[at].name;
+        if (expand_sort_names(names, alias_count))
+                for (positive at = 0; at < alias_count; at++)
+                        compgen_offer(names[at]);
+        memory_free(names, room * sizeof(names[0]));
+}
+
+//      The first word of each line of a system file that has one per
+//      record, or every word of it.
+static COLD fn compgen_file_names(string_address path, bool every_word,
+                                  bool skip_first)
+{
+        static byte_store held;
+        string_address at;
+
+        held.used = 0;
+        if (!file_store_slurp(path, address_of held) || !held.used)
+                return;
+
+        if (!byte_store_reserve(address_of held, held.used + 1, 64))
+                return;
+        held.bytes[held.used] = end;
+        at = (string_address)held.bytes;
+
+        while (string_get(at))
+        {
+                string_address stop = string_first_of_or_end(at, '\n');
+                string_address word = at;
+                bool first = true;
+
+                if (string_not(at, '#'))
+                {
+                        while (word < stop)
+                        {
+                                string_address done = word;
+                                p8 keep;
+
+                                while (done < stop &&
+                                       (skip_first || (string_not(done, ':') &&
+                                                       string_not(done, '/'))) &&
+                                       string_not(done, ' ') &&
+                                       string_not(done, '\t') &&
+                                       string_not(done, '#'))
+                                        done++;
+                                if (done > word && (first || every_word) &&
+                                    !(skip_first && first))
+                                {
+                                        keep = string_get(done);
+                                        *(p8 address_to)done = end;
+                                        compgen_offer(word);
+                                        *(p8 address_to)done = keep;
+                                }
+                                if (!every_word || (done < stop && string_is(done, '#')))
+                                        break;
+                                first = false;
+                                while (done < stop && (string_is(done, ':') ||
+                                                       string_is(done, ' ') ||
+                                                       string_is(done, '\t') ||
+                                                       string_is(done, '/')))
+                                        done++;
+                                if (done == word)
+                                        done++;
+                                word = done;
+                        }
                 }
 
-                for (positive at = 0; at < count; at++)
-                        compgen_offer(write, sorted[at]);
+                at = string_get(stop) ? stop + 1 : stop;
+        }
+}
+
+//      Directory entries beginning as the word's last piece does, offered
+//      with the word's own directory in front of them. . and .. are offered
+//      only to a word that begins with a dot, as readline does.
+static COLD fn compgen_entries(string_address word, bool directories,
+                               bool executables)
+{
+        p8 path[FILE_PATH_MAX];
+        p8 candidate[FILE_PATH_MAX];
+        p8 block[2048];
+        positive length = string_length(word);
+        string_address slash = length ? string_last_of(word, '/') : null;
+        positive head = slash ? (positive)(slash - word) + 1 : 0;
+        string_address stem = word + head;
+        positive stem_length = length - head;
+        positive have = 0, at = 0;
+        bipolar error = 0;
+        bipolar directory;
+        struct linux_dirent64 address_to entry;
+
+        if (length + 2 >= sizeof(path))
+                return;
+
+        if (head)
+        {
+                memory_copy(path, word, head);
+                path[head] = end;
+        }
+        else
+                string_copy(path, (string_address) ".");
+
+        directory = system_open_at(AT_FDCWD, path, FILE_READ | O_DIRECTORY);
+
+        while (directory >= 0 &&
+               (entry = file_directory_next(directory, block, sizeof(block),
+                                            address_of have, address_of at,
+                                            address_of error)))
+        {
+                string_address name = (string_address)entry->d_name;
+                positive name_length = string_length(name);
+                file_facts facts;
+                p8 full[FILE_PATH_MAX];
+
+                if (string_is(name, '.') &&
+                    (!string_get(name + 1) ||
+                     (string_is(name + 1, '.') && !string_get(name + 2))) &&
+                    !string_is(stem, '.'))
+                        continue;
+
+                if (name_length < stem_length ||
+                    memory_compare(name, stem, stem_length))
+                        continue;
+
+                if (head + name_length + 1 >= sizeof(candidate) ||
+                    length + name_length + 4 >= sizeof(full))
+                        continue;
+
+                memory_copy(candidate, word, head);
+                memory_copy_end(candidate + head, name, name_length);
+
+                if (directories || executables)
+                {
+                        memory_copy(full, path, string_length(path));
+                        full[string_length(path)] = '/';
+                        memory_copy_end(full + string_length(path) + 1, name,
+                                        name_length);
+
+                        if (!test_facts(full, address_of facts, true))
+                                continue;
+                        if (directories &&
+                            (facts.mode & MODE_FORMAT) != MODE_DIRECTORY)
+                                continue;
+                        if (executables &&
+                            ((facts.mode & MODE_FORMAT) == MODE_DIRECTORY ||
+                             system_access_at(AT_FDCWD, full, ACCESS_EXECUTE)))
+                                continue;
+                }
+
+                compgen_offer(candidate);
         }
 
-        if (variables)
-                shell_inventory_sorted(write, 0, compgen_variable, false, false);
+        if (directory >= 0)
+                system_close(directory);
+}
 
-        if (files || directories)
+//      Names of programs a completion of a first word offers: every
+//      executable of every directory of PATH, once each.
+static COLD fn compgen_programs(string_address word)
+{
+        string_address value = env_get("PATH");
+        p8 search[4096];
+        path_walk walk;
+        positive length = string_length(word);
+
+        if (string_first_of(word, '/') || !value)
+                return compgen_entries(word, false, true);
+
+        string_copy_max_end(search, value, sizeof(search) - 1);
+        walk = (path_walk){search, null, 0, false};
+
+        while (path_walk_next(address_of walk))
         {
+                p8 room[FILE_PATH_MAX];
                 p8 block[2048];
-                bipolar directory = system_open_at(AT_FDCWD,
-                                                   (string_address) ".",
-                                                   FILE_READ | O_DIRECTORY);
-
                 positive have = 0, at = 0;
                 bipolar error = 0;
+                bipolar directory;
                 struct linux_dirent64 address_to entry;
+
+                if (walk.length + 2 >= sizeof(room))
+                        continue;
+                if (walk.length)
+                        memory_copy_end(room, walk.segment, walk.length);
+                else
+                        string_copy(room, (string_address) ".");
+
+                directory = system_open_at(AT_FDCWD, room,
+                                           FILE_READ | O_DIRECTORY);
+
                 while (directory >= 0 &&
-                       (entry = file_directory_next(
-                            directory, block, sizeof(block), address_of have,
-                            address_of at, address_of error)))
+                       (entry = file_directory_next(directory, block,
+                                                    sizeof(block),
+                                                    address_of have,
+                                                    address_of at,
+                                                    address_of error)))
                 {
-                        if (entry->d_name[0] == '.')
+                        string_address name = (string_address)entry->d_name;
+                        positive name_length = string_length(name);
+                        positive base = string_length(room);
+                        p8 full[FILE_PATH_MAX];
+                        file_facts facts;
+
+                        if (name_length < length ||
+                            memory_compare(name, word, length))
                                 continue;
-                        if (directories && !files && entry->d_type != 4)
+                        if (base + name_length + 2 >= sizeof(full))
                                 continue;
-                        compgen_offer(write, (string_address)entry->d_name);
+
+                        memory_copy(full, room, base);
+                        full[base] = '/';
+                        memory_copy_end(full + base + 1, name, name_length);
+
+                        if (!test_facts(full, address_of facts, true) ||
+                            (facts.mode & MODE_FORMAT) == MODE_DIRECTORY ||
+                            system_access_at(AT_FDCWD, full, ACCESS_EXECUTE))
+                                continue;
+
+                        compgen_offer(name);
                 }
 
                 if (directory >= 0)
                         system_close(directory);
         }
+}
 
-        //      The word list is generated after every other source, which
-        //      is the order Bash writes them in when both were asked for.
-        if (words)
+//      The words of -W: the list cut at the characters of IFS that are not
+//      quoted or inside an expansion, each piece expanded on its own with
+//      no pathname expansion. An error in any of them gives no list at all.
+static COLD bool compgen_wordlist(string_address list)
+{
+        string_address ifs = env_get("IFS");
+        string_address at = list;
+        positive held_options = shell_options;
+        bool held_soft = expand_errors_soft;
+        bool failed = false;
+        positive length = string_length(list);
+        p8 address_to piece = (p8 address_to)shell_map(length + 1);
+
+        if (!piece)
+                return false;
+
+        if (!ifs)
+                ifs = (string_address) " \t\n";
+
+        expand_errors_soft = true;
+        shell_options |= SHELL_FLAG('f');
+        expand_failed = false;
+
+        while (!failed && string_get(at))
         {
-                p8 held[1024];
-                positive at = 0;
+                positive used = 0;
+                positive nesting = 0;
+                p8 quote = 0;
 
-                while (string_get(words))
+                //      Blanks of IFS are skipped before a word; any other
+                //      character of it ends one.
+                while (string_get(at) && string_first_of(ifs, string_get(at)) &&
+                       (string_is(at, ' ') || string_is(at, '\t') ||
+                        string_is(at, '\n')))
+                        at++;
+
+                if (!string_get(at))
+                        break;
+
+                while (string_get(at))
                 {
-                        if (string_is(words, ' ') || string_is(words, '\t'))
+                        p8 value = string_get(at);
+
+                        if (value == '\\' && quote != '\'' && string_get(at + 1))
                         {
-                                words++;
+                                piece[used++] = value;
+                                piece[used++] = string_get(at + 1);
+                                at += 2;
                                 continue;
                         }
+                        if (quote)
+                        {
+                                if (value == quote)
+                                        quote = 0;
+                        }
+                        else if (value == '\'' || value == '"')
+                                quote = value;
+                        else if ((value == '(' || value == '{') && used &&
+                                 (piece[used - 1] == '$' || nesting))
+                                nesting++;
+                        else if (nesting && (value == ')' || value == '}'))
+                                nesting--;
+                        else if (!nesting && string_first_of(ifs, value))
+                                break;
 
-                        at = 0;
+                        piece[used++] = value;
+                        at++;
+                }
 
-                        while (string_get(words) && string_not(words, ' ') &&
-                               string_not(words, '\t') && at + 1 < sizeof(held))
-                                held[at++] = string_get(words++);
+                piece[used] = end;
 
-                        held[at] = end;
-                        compgen_offer(write, held);
+                if (used)
+                {
+                        string_address address_to table = null;
+                        positive room = 0;
+                        shell_words fields;
+                        positive count;
+
+                        shell_words_bind(address_of fields, address_of table,
+                                         address_of room);
+                        count = shell_expand_fields(piece, address_of fields);
+
+                        if (expand_failed)
+                                failed = true;
+                        else
+                                for (positive each = 0; each < count; each++)
+                                        compgen_offer(table[each]);
+                }
+
+                if (string_get(at))
+                        at++;
+        }
+
+        expand_errors_soft = held_soft;
+        shell_options = held_options;
+        expand_failed = false;
+        memory_free(piece, length + 1);
+
+        return !failed;
+}
+
+positive shell_function_slot(string_address name);
+b32 shell_call_slot(positive slot, string_address name,
+                    string_address address_to arguments, positive count);
+bool shell_job_command(positive at, string_address address_to text,
+                       bool address_to stopped);
+
+//      Runs -F's function with what a completion would hand it and offers
+//      what it left in COMPREPLY.
+static COLD fn compgen_function_reply(string_address name, string_address word)
+{
+        positive slot = shell_function_slot(name);
+        string_address arguments[2];
+        shell_array_item address_to items;
+        shell_mark held = shell_store_mark(address_of expand_store);
+        positive count;
+
+        if (slot == positive_max)
+                return;
+
+        arguments[0] = word;
+        arguments[1] = (string_address) "";
+        env_unset("COMPREPLY");
+        shell_call_slot(slot, "compgen", arguments, 2);
+
+        count = shell_array_length("COMPREPLY", 9);
+        items = (shell_array_item address_to)shell_store_take(
+            address_of expand_store, (count ? count : 1) * sizeof(items[0]));
+        if (items)
+        {
+                shell_array_items("COMPREPLY", 9, items, count);
+                for (positive at = 0; at < count; at++)
+                        if (items[at].value)
+                                compgen_offer(items[at].value);
+        }
+        shell_store_rewind(address_of expand_store, held);
+        env_unset("COMPREPLY");
+}
+
+static COLD fn compgen_generate(comp_request address_to want,
+                                string_address word)
+{
+        for (positive action = 0; action < COMP_ACTIONS; action++)
+        {
+                if (!(want->actions & (1u << action)))
+                        continue;
+
+                switch (action)
+                {
+                case 0:
+                        compgen_aliases();
+                        break;
+                case COMP_ACTION_ARRAYVAR:
+                        shell_inventory_sorted(null, 0, compgen_arrays, false, false);
+                        break;
+                case COMP_ACTION_BINDING:
+                        compgen_names(comp_bindings);
+                        break;
+                case COMP_ACTION_BUILTIN:
+                        compgen_builtins(0);
+                        break;
+                case COMP_ACTION_COMMAND:
+                        compgen_aliases();
+                        for (positive at = 0; shell_keywords_listed[at]; at++)
+                                compgen_offer(shell_keywords_listed[at]);
+                        shell_inventory_sorted(null, 0, compgen_variable, true, false);
+                        compgen_builtins(0);
+                        compgen_programs(word);
+                        break;
+                case COMP_ACTION_DIRECTORY:
+                        compgen_entries(word, true, false);
+                        break;
+                case COMP_ACTION_DISABLED:
+                        compgen_builtins(2);
+                        break;
+                case COMP_ACTION_ENABLED:
+                        compgen_builtins(1);
+                        break;
+                case COMP_ACTION_EXPORT:
+                        shell_inventory_sorted(null, 0, compgen_exported, false, false);
+                        break;
+                case COMP_ACTION_FILE:
+                        compgen_entries(word, false, false);
+                        break;
+                case COMP_ACTION_FUNCTION:
+                        shell_inventory_sorted(null, 0, compgen_variable, true, false);
+                        break;
+                case COMP_ACTION_GROUP:
+                        compgen_file_names("/etc/group", false, false);
+                        break;
+                case COMP_ACTION_HELPTOPIC:
+                        compgen_names(comp_helptopics);
+                        break;
+                case COMP_ACTION_HOSTNAME:
+                {
+                        string_address file = env_get("HOSTFILE");
+
+                        compgen_file_names(file && string_get(file)
+                                               ? file
+                                               : (string_address) "/etc/hosts",
+                                           true, true);
+                        break;
+                }
+                case COMP_ACTION_JOB:
+                case COMP_ACTION_RUNNING:
+                case COMP_ACTION_STOPPED:
+                        for (positive at = 0; at < shell_job_count(); at++)
+                        {
+                                bool stopped = false;
+                                string_address text = null;
+                                p8 first[256];
+                                positive used = 0;
+
+                                if (!shell_job_command(at, address_of text,
+                                                       address_of stopped) ||
+                                    !text ||
+                                    (action == COMP_ACTION_RUNNING && stopped) ||
+                                    (action == COMP_ACTION_STOPPED && !stopped))
+                                        continue;
+                                while (string_get(text + used) &&
+                                       string_not(text + used, ' ') &&
+                                       used + 1 < sizeof(first))
+                                {
+                                        first[used] = string_get(text + used);
+                                        used++;
+                                }
+                                first[used] = end;
+                                compgen_offer(first);
+                        }
+                        break;
+                case COMP_ACTION_KEYWORD:
+                        for (positive at = 0; shell_keywords_listed[at]; at++)
+                                compgen_offer(shell_keywords_listed[at]);
+                        break;
+                case COMP_ACTION_SERVICE:
+                        compgen_file_names("/etc/services", true, false);
+                        break;
+                case COMP_ACTION_SETOPT:
+                        for (positive at = 0; at < array_count(shell_setopt_names); at++)
+                                compgen_offer(shell_setopt_names[at]);
+                        break;
+                case COMP_ACTION_SHOPT:
+                        compgen_names(comp_shopts);
+                        break;
+                case COMP_ACTION_SIGNAL:
+                        compgen_names(comp_signals);
+                        break;
+                case COMP_ACTION_USER:
+                        compgen_file_names("/etc/passwd", false, false);
+                        break;
+                case COMP_ACTION_VARIABLE:
+                        shell_inventory_sorted(null, 0, compgen_variable, false, false);
+                        break;
+                default:
+                        break;
+                }
+        }
+}
+
+COLD fn shell_compgen(writer write, string_address input)
+{
+        comp_request want;
+        string_address word = null;
+        bool ok = true;
+        positive first = 1;
+        static const string_address usage =
+            "compgen [-V varname] [-abcdefgjksuv] [-o option] [-A action] "
+            "[-G globpat] [-W wordlist] [-F function] [-C command] "
+            "[-X filterpat] [-P prefix] [-S suffix] [word]";
+
+        (void)input;
+
+        if (shell_completion_refused("compgen", usage,
+                                     "abcdefgjksuvoAGWFCXPSV",
+                                     "oAGWFCXPSV", address_of first))
+                return;
+
+        for (positive at = 1; at + 1 < shell_argc; at++)
+        {
+                positive index;
+
+                if (word_is(shell_argv[at], "-o") &&
+                    !comp_option_index(shell_argv[at + 1], address_of index))
+                        return shell_refuse(2,
+                            "compgen: %s: invalid option name\n",
+                            shell_argv[at + 1]);
+                if (word_is(shell_argv[at], "-A") &&
+                    !comp_action_index(shell_argv[at + 1], address_of index))
+                        return shell_refuse(2,
+                            "compgen: %s: invalid action name\n",
+                            shell_argv[at + 1]);
+        }
+
+        if (!comp_read("compgen", address_of want, false))
+                return shell_answer(2);
+
+        //      -D, -E and -I belong to complete.
+        if (want.special)
+        {
+                p8 said[3] = {'-', want.special == (string_address)COMP_DEFAULT
+                                       ? 'D'
+                                       : want.special == (string_address)COMP_EMPTY
+                                             ? 'E' : 'I', end};
+
+                shell_option_refuse("compgen", said, usage);
+                return;
+        }
+
+        if (want.variable &&
+            !shell_valid_name(want.variable, string_length(want.variable)))
+                return shell_refuse(1, "compgen: `%s': not a valid identifier\n",
+                                    want.variable);
+
+        if (want.first < shell_argc)
+                word = shell_argv[want.first];
+
+        compgen_out.used = 0;
+        compgen_prefix = word;
+        compgen_prefix_length = word ? string_length(word) : 0;
+        compgen_shown = 0;
+        compgen_reject = want.filter;
+        compgen_before = want.prefix;
+        compgen_after = want.suffix;
+        compgen_cut = true;
+
+        compgen_generate(address_of want, word ? word : (string_address) "");
+
+        if (want.glob)
+        {
+                string_address address_to table = null;
+                positive room = 0;
+                shell_words fields;
+                positive count;
+
+                shell_words_bind(address_of fields, address_of table,
+                                 address_of room);
+                count = shell_expand_fields(want.glob, address_of fields);
+                for (positive at = 0; at < count; at++)
+                        if (!(count == 1 && !string_compare(table[at], want.glob) &&
+                              string_first_of(want.glob, '*')))
+                                compgen_offer(table[at]);
+        }
+
+        if (want.words)
+                ok = compgen_wordlist(want.words);
+
+        if (ok && want.function)
+        {
+                shell_told("compgen: warning: -F option may not work as you "
+                           "expect\n");
+                compgen_cut = false;
+                compgen_function_reply(want.function, word ? word : (string_address) "");
+                compgen_cut = true;
+        }
+
+        if (ok && want.command)
+        {
+                positive length = string_length(want.command);
+                positive tail = word ? string_length(word) : 0;
+                positive room = length + tail * 4 + 32;
+                p8 address_to made = (p8 address_to)shell_map(room);
+
+                shell_told("compgen: warning: -C option may not work as you "
+                           "expect\n");
+                if (made)
+                {
+                        string_address output;
+                        bool held = expand_errors_soft;
+                        positive used = 3;
+
+                        //      The command is handed its own name, the word
+                        //      and the word before it, as arguments after
+                        //      whatever it ends in.
+                        made[0] = '"';
+                        made[1] = '$';
+                        made[2] = '(';
+                        memory_copy(made + used, want.command, length);
+                        used += length;
+                        memory_copy(made + used, " compgen '", 10);
+                        used += 10;
+                        for (positive each = 0; each < tail; each++)
+                        {
+                                if (word[each] == '\'')
+                                {
+                                        memory_copy(made + used, "'\\''", 4);
+                                        used += 4;
+                                }
+                                else
+                                        made[used++] = word[each];
+                        }
+                        memory_copy(made + used, "' '')\"", 6);
+                        used += 6;
+                        made[used] = end;
+
+                        expand_errors_soft = true;
+                        output = shell_expand_word(made);
+                        expand_errors_soft = held;
+                        compgen_cut = false;
+                        while (string_get(output))
+                        {
+                                string_address stop =
+                                    string_first_of_or_end(output, '\n');
+                                p8 keep = string_get(stop);
+
+                                *(p8 address_to)stop = end;
+                                compgen_offer(output);
+                                *(p8 address_to)stop = keep;
+                                output = keep ? stop + 1 : stop;
+                        }
+                        compgen_cut = true;
+                        memory_free(made, room);
                 }
         }
 
-        //      Nothing was asked for, so nothing missing: Bash answers
-        //      one for an action that matched nothing and zero for a compgen
-        //      that named no action at all.
-        shell_answer(compgen_shown || !optioned ? 0 : 1);
+        //      What -o adds: directories after the rest, or the directories
+        //      alone when nothing else came.
+        if (ok && (want.options_on & COMP_OPTION_PLUSDIRS))
+                compgen_entries(word ? word : (string_address) "", true, false);
+        if (ok && !compgen_shown && (want.options_on & COMP_OPTION_DIRNAMES))
+                compgen_entries(word ? word : (string_address) "", true, false);
+
+        if (!ok)
+                return shell_answer(1);
+
+        if (want.variable)
+        {
+                string_address address_to table = null;
+                positive room = 0;
+                positive count = 0;
+                p8 address_to text = compgen_out.bytes;
+                positive at = 0;
+
+                while (at < compgen_out.used)
+                {
+                        positive stop = at;
+
+                        while (stop < compgen_out.used && text[stop] != '\n')
+                                stop++;
+                        text[stop] = end;
+                        if (!shell_array_room(table, room, count + 1))
+                                break;
+                        table[count++] = (string_address)text + at;
+                        at = stop + 1;
+                }
+                shell_array_words(want.variable, string_length(want.variable),
+                                  table, count);
+                if (table)
+                        memory_free(table, room * sizeof(table[0]));
+        }
+        else if (compgen_out.used)
+                write(compgen_out.bytes, compgen_out.used);
+
+        //      Bash answers zero for a compgen given no option at all and one
+        //      for any option that generated nothing.
+        {
+                bool optioned = false;
+
+                for (positive at = 1; at < want.first; at++)
+                        if (!word_is(shell_argv[at], "--"))
+                                optioned = true;
+
+                shell_answer(compgen_shown ? 0 : optioned ? 1 : 0);
+        }
 }
 
 /*

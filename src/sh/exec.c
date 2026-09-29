@@ -1018,6 +1018,19 @@ positive shell_job_count()
         return job_count;
 }
 
+//      One job's command text and whether it is stopped, for compgen -A job.
+bool shell_job_command(positive at, string_address address_to text,
+                       bool address_to stopped)
+{
+        if (at >= job_count)
+                return false;
+
+        address_to text = job_table[at].text ? (string_address)job_table[at].text
+                                             : null;
+        address_to stopped = job_table[at].state == JOB_STOPPED;
+        return true;
+}
+
 static positive job_find(positive value, bool process)
 {
         for (positive at = 0; at < job_count; at++)
