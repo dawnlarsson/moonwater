@@ -9330,6 +9330,110 @@ def files_tar(farm):
     return passed, total, notes
 
 
+def files_tar_formats(farm):
+    """tar -c against GNU tar, byte for byte, in every format it writes.
+
+    A tree of what the formats treat differently -- names on either side of
+    the ustar limits and of a prefix split, symlink targets around a hundred
+    bytes, a name that is not ASCII, modes with set-id bits, times before
+    1970, past what octal holds and with a fraction, hard links, a fifo --
+    is written by both under --format gnu, oldgnu, ustar, posix (with the
+    access and change times, which no two runs share, deleted) and v7, and
+    with the short spellings -o, --posix and -H, the blocking factor, and
+    the same tree named on the command line in another order. The archives
+    must be the same bytes, stderr the same words and the status the same.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    reference = shutil.which("tar", path=os.defpath)
+    candidate = Path(farm) / "tar"
+    if not reference or not candidate.exists():
+        return 0, 1, ["tar formats need tar on both sides"]
+
+    with tempfile.TemporaryDirectory(prefix="tar-formats-") as work:
+        top = Path(work)
+        tree = top / "tree"
+        tree.mkdir()
+
+        def make(path, data=b"x", mtime=1600000000):
+            path = tree / path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+            os.utime(path, (mtime, mtime))
+            return path
+
+        for length in (99, 100, 101, 150, 200):
+            make(("n%d_" % length) + "a" * (length - len("n%d_" % length)))
+        make("p/" + "d" * 60 + "/" + "f" * 50)
+        make("q/" + "d" * 100 + "/" + "f" * 40)
+        make("r/" + "d" * 150 + "/f")
+        make("s/" + "d" * 156 + "/f")
+        make("t/" + "e" * 101)
+        for length in (93, 94, 120):
+            (tree / "dirs" / ("D" * length)).mkdir(parents=True)
+        make("u/\u00e5\u00e4\u00f6-utf8")
+        make("u/nl\nname")
+        make("u/" + "\u00e5" * 60)
+        for length in (98, 99, 100, 101, 300):
+            os.symlink("t" * length, tree / ("links_%d" % length))
+        os.symlink("f", tree / "sl")
+        make("plain/f", b"hello\n")
+        os.link(tree / "plain/f", tree / "plain/hard")
+        os.mkfifo(tree / "plain/fifo")
+        for name, mode in (("suid", 0o4755), ("sgid", 0o2755), ("plain", 0o644),
+                           ("exec", 0o755), ("empty", 0)):
+            os.chmod(make("modes/" + name), mode)
+        for name, when in (("neg", -100), ("zero", 0), ("octmax", 8589934591),
+                           ("octover", 8589934592), ("big", 68719476741),
+                           ("far", 253402300799)):
+            make("times/" + name, mtime=when)
+        fraction = make("times/frac")
+        os.utime(fraction, ns=(5 * 10 ** 9, 1600000000123456789))
+        for name in ("modes/empty",):
+            os.chmod(tree / name, 0o644)
+
+        env = {"PATH": os.defpath, "LC_ALL": "C", "TZ": "UTC0"}
+        variants = []
+        for fmt in ("gnu", "oldgnu", "ustar", "posix", "v7"):
+            more = ["--pax-option=delete=atime,delete=ctime"] if fmt == "posix" else []
+            variants.append(("--format=" + fmt, *more))
+            variants.append(("-H", fmt, *more))
+        variants += [("-o",), ("--posix", "--pax-option=delete=atime,delete=ctime"),
+                     ("-b", "1"), ("-b", "7", "--format=ustar"), ("--numeric-owner",),
+                     ("--format=posix", "--pax-option=delete=atime,delete=ctime",
+                      "--numeric-owner")]
+
+        def one(binary, variant, names):
+            out = top / "out.tar"
+            if out.exists():
+                out.unlink()
+            ran = subprocess.run([binary, "-cf", str(out), *variant, *names], cwd=tree,
+                                 env=env, stdin=subprocess.DEVNULL, capture_output=True,
+                                 timeout=60)
+            data = out.read_bytes() if out.exists() else b""
+            words = re.sub(rb"^(?:/[^:\s]*/)?tar:", b"tar:", ran.stderr, flags=re.M)
+            return ran.returncode, data, words, ran.stdout
+
+        passed, total, notes = 0, 0, []
+        forward = sorted(os.listdir(tree))
+        for variant in variants:
+            for names in (["."], forward, forward[::-1]):
+                want = one(reference, variant, names)
+                got = one(str(candidate), variant, names)
+                total += 1
+                if want == got:
+                    passed += 1
+                elif len(notes) < 20:
+                    where = next((at for at in range(min(len(want[1]), len(got[1])))
+                                  if want[1][at] != got[1][at]), None)
+                    notes.append("tar -c %s %s: status %s/%s bytes %d/%d first difference %s stderr %r/%r" % (
+                        " ".join(variant), names[:2], want[0], got[0], len(want[1]),
+                        len(got[1]), where, want[2][:200], got[2][:200]))
+    return passed, total, notes
+
+
 def files_find_terminal(farm):
     """find's names on a terminal, against GNU find, through a real pty.
 
@@ -9694,6 +9798,7 @@ def files_address_cap(farm):
 
 
 FILES_CHECKS = (files_column_layout, files_xargs_parallel, files_zones, files_tar,
+                files_tar_formats,
                 files_find_terminal, files_zone_names, files_hostname_set, files_move_across,
                 files_address_cap)
 
@@ -33353,7 +33458,8 @@ def harness_compression(argv):
                 check(label + '/tar-extract/write-limit-' + suffix,
                       made.returncode == 0 and
                       ours.returncode == reference.returncode == 2 and
-                      ours.stderr == b'tar: big: File too large\n' and
+                      ours.stderr == (b'tar: big: File too large\n'
+                                      b'tar: Exiting with failure status due to previous errors\n') and
                       (ours_into / 'small').is_file() and
                       (ours_into / 'small').read_bytes() ==
                       (reference_into / 'small').read_bytes() ==
