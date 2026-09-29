@@ -63,6 +63,12 @@ typedef bool (*parallel_sink)(void *context, positive index, void *data, positiv
 static positive parallel_width(void) { return 1; }
 static positive parallel_slot(void) { return 0; }
 static positive parallel_slots(void) { return 1; }
+typedef int32_t b32_t;
+#define atomic_load(address) __atomic_load_n(address, __ATOMIC_SEQ_CST)
+static bool parallel_beside(void (*job)(void *, positive), void *context) { (void)job; (void)context; return false; }
+static bool parallel_beside_wait(void) { return false; }
+static bipolar thread_wait(int32_t *word, int32_t expected) { (void)word; (void)expected; return 0; }
+static bipolar thread_wake(int32_t *word, int32_t count) { (void)word; (void)count; return 0; }
 static bool parallel_write(parallel_output *o, void *data, positive length)
 {
         if (!length) return true;
