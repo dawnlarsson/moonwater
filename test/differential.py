@@ -8475,6 +8475,11 @@ FILES_SCENES = {
     "deeptree": ("python3 -c 'import os\nos.mkdir(\"top\")\nhere = os.open(\".\", os.O_RDONLY)\nos.chdir(\"top\")\n"
                  "for i in range(30):\n    os.mkdir(\"d\" * 200)\n    os.chdir(\"d\" * 200)\n"
                  "open(\"leaf\", \"w\").close()\nos.fchdir(here)' || exit 9\n", "", "cd /\n"),
+    # --parents through a link: the destination's a is a link to another
+    # directory, which the copy is made through and whose b is then given the
+    # mode of the source's (read-only), by the link as much as by any path.
+    "parentlink": ("env mkdir -p a/b && echo q > a/b/f && env chmod 555 a/b && env mkdir d X && env ln -s ../X d/a || exit 9\n", "",
+                   "env stat -c '%a %n' X/b X/b/f 2>&1; env chmod -R u+w .\n"),
     # a file with a hole, one of zeros and one of both, and the blocks each
     # copy of them takes (du) with whether it reads back the same (cmp).
     "sparse": ("env truncate -s 4M f && echo x >> f && env head -c 1048576 /dev/zero > z && "
@@ -8574,6 +8579,8 @@ FILES_SCENE_CASES = (
     ("tmax", "ls", "-lgo", "--time-style=+%Y", "f"),
     ("noco", "ls", "--color=always", "-d", "dir", "a.txt", "exe", "link", "dangling", "/dev/null", "loop"),
     ("dumbterm", "ls", "--color=always", "-d", "dir", "exe"), ("colorterm", "ls", "--color=always", "-d", "dir", "exe"),
+    ("parentlink", "cp", "--parents", "a/b/f", "d"), ("parentlink", "cp", "-p", "--parents", "a/b/f", "d"),
+    ("parentlink", "cp", "-a", "--parents", "a/b/f", "d"), ("parentlink", "cp", "--parents", "-v", "a/b/f", "d"),
     # --sparse=never writes the holes out, --sparse=always makes one of every
     # block of zeros, and auto keeps the input's own.
     ("sparse", "cp", "--sparse=never", "f", "gf"), ("sparse", "cp", "--sparse=never", "z", "gz"), ("sparse", "cp", "--sparse=never", "mix", "gmix"), ("sparse", "cp", "--sparse=always", "f", "gf"), ("sparse", "cp", "--sparse=always", "z", "gz"), ("sparse", "cp", "--sparse=always", "mix", "gmix"), ("sparse", "cp", "--sparse=auto", "f", "gf"), ("sparse", "cp", "--sparse=auto", "z", "gz"), ("sparse", "cp", "--sparse=auto", "mix", "gmix"),

@@ -7563,11 +7563,21 @@ typedef struct
         file_facts source;
         bool restore;
         positive mode;
+        //      The directory itself, held from when it was made or met: the
+        //      way there may have crossed a link, which the copy followed as
+        //      GNU's does, so it is not walked to again by name.
+        bipolar handle;
 } file_parent_record;
 static file_parent_record file_parent_records[64];
 static positive file_parent_record_count;
-static p8 file_parent_path[FILE_PATH_MAX];
-static p8 file_parent_top[FILE_PATH_MAX];
+
+static fn file_parent_records_release(void)
+{
+        for (positive i = 0; i < file_parent_record_count; i++)
+                if (file_parent_records[i].handle >= 0)
+                        system_close(file_parent_records[i].handle);
+        file_parent_record_count = 0;
+}
 
 /* GNU make_dir_parents_private: mkdir each dest component after the named
    target, with that source directory's mode, including in a world-writable
@@ -7592,7 +7602,7 @@ static bipolar file_parents_ensure_open(string_address dest_dir,
         p8 component[SYSTEM_PATH_LEAF_ROOM];
         positive flags = O_PATH | O_DIRECTORY | O_CLOEXEC;
 
-        file_parent_record_count = 0;
+        file_parent_records_release();
         address_to said = false;
         if (failed)
                 failed[0] = end;
@@ -7602,8 +7612,6 @@ static bipolar file_parents_ensure_open(string_address dest_dir,
                 return 0;
         if (!file_name_without_trailing_slashes(dest_prefix, dest_dir))
                 return -ERROR_NAME_TOO_LONG;
-        memory_copy_apart_end(file_parent_top, dest_prefix,
-                              string_length(dest_prefix));
 
         bipolar held = system_open_at(AT_FDCWD, dest_dir, flags);
         if (held < 0)
@@ -7711,6 +7719,7 @@ static bipolar file_parents_ensure_open(string_address dest_dir,
                         record->source = source;
                         record->restore = false;
                         record->mode = 0;
+                        record->handle = -1;
                 }
 
                 if (missing)
@@ -7777,11 +7786,11 @@ static bipolar file_parents_ensure_open(string_address dest_dir,
                         system_close(held);
                         return next;
                 }
+                if (record)
+                        record->handle = system_open_at(next, (string_address) ".", flags);
                 system_close(held);
                 held = next;
         }
-        memory_copy_apart_end(file_parent_path, dest_prefix,
-                              string_length(dest_prefix));
         return held;
 }
 
@@ -7790,86 +7799,50 @@ static bipolar file_change_owner_kept(bipolar destination, bipolar directory,
                                       file_facts address_to facts,
                                       bool address_to given);
 
-/* After the copy: each recorded parent, walked to again without following
-   a link, is given its source's times, owner and mode as -p asks, or the
-   mode it was made without while the copy went in. */
+/* After the copy: each recorded parent, by the descriptor it was held by,
+   is given its source's times, owner and mode as -p asks, or the mode it was
+   made without while the copy went in. */
 static fn file_parents_reprotect(void)
 {
         positive count = file_parent_record_count;
         positive keeps = file_keeps;
 
-        file_parent_record_count = 0;
-        if (!count)
-                return;
-
-        bipolar held = system_open_at(AT_FDCWD, file_parent_top,
-                                      O_PATH | O_DIRECTORY | O_CLOEXEC);
-        positive length = string_length(file_parent_path);
-        positive at = string_length(file_parent_top);
-        positive depth = 0;
-
-        while (held >= 0 && at < length)
+        for (positive i = 0; i < count; i++)
         {
-                p8 component[SYSTEM_PATH_LEAF_ROOM];
+                file_parent_record address_to record = file_parent_records + i;
+                bipolar held = record->handle;
 
-                at += memory_span_byte(file_parent_path + at, '/', length - at);
-                positive start = at;
-                at += memory_span_without_byte(file_parent_path + at, '/',
-                                               length - at);
-                positive named = at - start;
-                if (!named || named >= sizeof(component))
-                        break;
-                memory_copy_apart(component, file_parent_path + start, named);
-                component[named] = end;
-                depth++;
-
-                bipolar next = system_open_at(held, component,
-                                              O_PATH | O_DIRECTORY |
-                                                  O_NOFOLLOW | O_CLOEXEC);
-                system_close(held);
-                held = next;
                 if (held < 0)
-                        break;
+                        continue;
 
-                for (positive i = 0; i < count; i++)
+                file_facts address_to source = address_of record->source;
+                bool given = false;
+
+                if (keeps & FILE_KEEP_TIMES)
                 {
-                        file_parent_record address_to record =
-                            file_parent_records + i;
+                        p64 times[4];
 
-                        if (record->depth != depth)
-                                continue;
-
-                        file_facts address_to source = address_of record->source;
-                        bool given = false;
-
-                        if (keeps & FILE_KEEP_TIMES)
-                        {
-                                p64 times[4];
-
-                                file_times_of(source, times);
-                                (void)system_update_times_at(
-                                    held, (string_address)"", times,
-                                    AT_EMPTY_PATH);
-                        }
-                        if (keeps & FILE_KEEP_OWNER)
-                                (void)file_change_owner_kept(
-                                    held, -1, null, source, address_of given);
-                        //      An owner asked for and not given takes the
-                        //      set-ID bits with it, as file_keep_handle has it.
-                        if (keeps & FILE_KEEP_MODE)
-                                (void)file_change_mode_handle(
-                                    held, source->mode & 07777 &
-                                              ((keeps & FILE_KEEP_OWNER) && !given
-                                                   ? ~(positive)(MODE_SET_USER |
-                                                                 MODE_SET_GROUP |
-                                                                 MODE_STICKY)
-                                                   : 07777));
-                        else if (record->restore)
-                                (void)file_change_mode_handle(held, record->mode);
+                        file_times_of(source, times);
+                        (void)system_update_times_at(held, (string_address)"", times,
+                                                     AT_EMPTY_PATH);
                 }
+                if (keeps & FILE_KEEP_OWNER)
+                        (void)file_change_owner_kept(held, -1, null, source,
+                                                     address_of given);
+                //      An owner asked for and not given takes the set-ID bits
+                //      with it, as file_keep_handle has it.
+                if (keeps & FILE_KEEP_MODE)
+                        (void)file_change_mode_handle(
+                            held, source->mode & 07777 &
+                                      ((keeps & FILE_KEEP_OWNER) && !given
+                                           ? ~(positive)(MODE_SET_USER |
+                                                         MODE_SET_GROUP |
+                                                         MODE_STICKY)
+                                           : 07777));
+                else if (record->restore)
+                        (void)file_change_mode_handle(held, record->mode);
         }
-        if (held >= 0)
-                system_close(held);
+        file_parent_records_release();
 }
 
 static bool file_destination_in(string_address program, string_address directory,
