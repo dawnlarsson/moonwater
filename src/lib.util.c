@@ -16993,9 +16993,10 @@ static bool clock_break_down(bipolar seconds, tm address_to broken)
         never asks the time pays nothing for it.
 
         Only where _start said there is an auxiliary vector (see
-        program_vdso_clock): a Spark stack ends after its environment's
-        null. Anything short of a well-formed object and a versioned
-        function reads as no vDSO, and the trap stays.
+        program_vdso_clock): an older Spark loader's stack ends after its
+        environment's null, and a current one says SPARK_ENTRY_AUXV.
+        Anything short of a well-formed object and a versioned function
+        reads as no vDSO, and the trap stays.
 */
 #if X64
 #define CLOCK_VDSO_NAME "__vdso_clock_gettime"

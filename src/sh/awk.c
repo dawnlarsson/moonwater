@@ -5663,10 +5663,10 @@ static fn awk_builtin(awk_node address_to node, awk_value address_to out)
                         awk_seed = (positive)awk_whole_wide(awk_eval_number(first));
                 else
                 {
-                        positive when[2] = {0, 0};
+                        timespec when = {0, 0};
 
-                        system_call_2(syscall(clock_gettime), 0, (positive)when);
-                        awk_seed = when[0];
+                        clock_gettime(CLOCK_REALTIME, address_of when);
+                        awk_seed = when.tv_sec;
                 }
 
                 awk_seed_state = awk_seed + 0x9e3779b97f4a7c15ull;

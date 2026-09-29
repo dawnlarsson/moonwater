@@ -14953,8 +14953,7 @@ static fn time_now(time_reading address_to into)
         memory_fill(address_of children, 0, sizeof(children));
         memory_fill(into, 0, sizeof(address_to into));
 
-        system_call_2(syscall(clock_gettime), READ_CLOCK_MONOTONIC,
-                      (positive)address_of into->real);
+        clock_gettime(READ_CLOCK_MONOTONIC, address_of into->real);
         system_call_2(syscall(getrusage), (positive)TIME_USAGE_SELF,
                       (positive)address_of self);
         system_call_2(syscall(getrusage),
