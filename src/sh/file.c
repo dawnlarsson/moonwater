@@ -15275,6 +15275,8 @@ static fn find_out_byte(p8 byte)
 
 static fn find_out_bytes(address_any data, positive length)
 {
+        const p8 address_to bytes = data;
+
         while (length)
         {
                 positive room = sizeof(find_out.block) - find_out.used;
@@ -15283,8 +15285,6 @@ static fn find_out_bytes(address_any data, positive length)
                 memory_copy(find_out.block + find_out.used, bytes, now);
                 find_out.used += now;
                 bytes += now;
-        const p8 address_to bytes = data;
-
                 length -= now;
                 if (find_out.used == sizeof(find_out.block))
                         find_out_flush();
