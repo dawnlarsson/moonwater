@@ -232,7 +232,7 @@ static fn cells_blank(unsigned int r, unsigned int first, unsigned int count)
         to come back to. This used to be a copy of every cell on the screen
         with the top row thrown away.
 */
-static fn SPARE ring_scroll()
+static inline INLINE fn ring_scroll()
 {
         window_scroll(window);
 
@@ -270,16 +270,10 @@ static fn row_blank(unsigned int r)
 }
 
 /*
-        The region moves up, and the whole screen does it by not moving.
-
-        Only when the region is the screen can the ring be named forward, and
-        only then is what leaves the top kept. A narrower region is a copy and
-        what leaves it is gone, which is what a region means.
-*/
-/*
         A region scrolled count rows up or down. The rows that stay are copied
         along -- a region is the screen not moving as one, so the ring cannot
-        move for it -- and the rows given out are blank.
+        move for it, and what leaves it is gone, which is what a region means --
+        and the rows given out are blank.
 */
 static fn region_scroll(unsigned int count, b32 up)
 {
@@ -304,19 +298,16 @@ static fn region_scroll(unsigned int count, b32 up)
 }
 
 /*
-        Lines leaving the top of the screen, which is where history comes from.
-
-        A region whose top margin is the top of the screen keeps what scrolls
-        off it, as xterm keeps it: apt reserves the last row for its progress
-        bar with DECSTBM, and everything it printed above was being dropped
-        rather than kept for the wheel and for a taller window to take back.
-        The ring moves for the region as it does for the whole screen, and
-        the rows under the region, which moved with it, are put back -- one
+        A region with the top of the screen as its top margin keeps what
+        scrolls off it, as xterm keeps it: apt reserves the last row for its
+        progress bar with DECSTBM, and everything it printed above was being
+        dropped rather than kept for the wheel and for a taller window to take
+        back. The ring moves for the region as it does for the whole screen,
+        and the rows under the region, which moved with it, are put back -- one
         row for apt, where the copy was every row above it. The alternate
         screen keeps nothing: the lines behind it are the primary screen's.
+        Out of the line feed's way, which takes the whole screen's store.
 */
-/* What a region with the top of the page as its top margin does, out of
-   the line feed's way: the whole screen's store is the one taken per line. */
 static fn __attribute__((__noinline__)) region_scroll_kept(unsigned int count)
 {
         unsigned int top;
@@ -326,12 +317,7 @@ static fn __attribute__((__noinline__)) region_scroll_kept(unsigned int count)
                 count = region_bottom;
 
         for (unsigned int n = count; n; n--)
-        {
-                window_scroll(window);
-
-                if (history_lines + ROWS < window->history)
-                        history_lines++;
-        }
+                ring_scroll();
 
         // Bottom up, since a row is copied onto one below it.
         top = row_slot(0);
@@ -436,45 +422,37 @@ static fn __attribute__((__noinline__)) alternate_scroll(unsigned int count)
 
 static fn scroll_up(unsigned int count)
 {
-        if (region_top == 0 && region_bottom == ROWS)
+        if (region_top || region_bottom != ROWS)
         {
-                /* Canvas calls this with interrupts off. Beyond ROWS the
-                   visible result is already blank, so never let a hostile
-                   CSI count turn that critical section into a long loop. */
-                if (count > ROWS)
-                        count = ROWS;
-
-                for (unsigned int n = count; n; n--)
-                {
-                        // Asked where ring_scroll asked it, once a line.
-                        if (alternate)
-                        {
-                                alternate_scroll(n);
-                                return;
-                        }
-
-                        window_scroll(window);
-
-                        if (history_lines + ROWS < window->history)
-                                history_lines++;
-
-                        touch_all();
-                }
-
-                if (paper)
-                        for (unsigned int r = ROWS - count; r < ROWS; r++)
-                                row_blank(r);
+                if (region_top == 0 && !alternate)
+                        region_scroll_kept(count);
+                else
+                        region_scroll(count, true);
 
                 return;
         }
 
-        if (region_top == 0 && !alternate)
+        /* Canvas calls this with interrupts off. Beyond ROWS the visible
+           result is already blank, so never let a hostile CSI count turn
+           that critical section into a long loop. */
+        if (count > ROWS)
+                count = ROWS;
+
+        if (!count)
+                return;
+
+        if (alternate)
         {
-                region_scroll_kept(count);
+                alternate_scroll(count);
                 return;
         }
 
-        region_scroll(count, true);
+        for (unsigned int n = count; n; n--)
+                ring_scroll();
+
+        if (paper)
+                for (unsigned int r = ROWS - count; r < ROWS; r++)
+                        row_blank(r);
 }
 
 // One line down, and the bottom of the region is where that scrolls.
@@ -863,10 +841,28 @@ static fn osc_colour(unsigned int colour, b32 bell)
                 emit_literal("\x1b\\");
 }
 
+// The decimal number at osc_bytes[at], and at moved past it. A number too
+// large for a word stops at the largest one, as a CSI parameter does: a
+// command of 4294967300 wrapped to 4 and was answered as the palette.
+static unsigned int osc_number(unsigned int address_to at)
+{
+        unsigned int value = 0;
+
+        while (address_to at < osc_length && byte_is_digit((b32)osc_bytes[address_to at]))
+        {
+                unsigned int digit = osc_bytes[address_to at] - '0';
+
+                value = value > (~0u - digit) / 10 ? ~0u : value * 10 + digit;
+                address_to at += 1;
+        }
+
+        return value;
+}
+
 static fn osc_finish(b32 bell)
 {
         unsigned int i = 0;
-        unsigned int command = 0;
+        unsigned int command;
         unsigned int n;
 
         // DCS, SOS, PM and APC are read the same way and say nothing here:
@@ -874,8 +870,7 @@ static fn osc_finish(b32 bell)
         if (string_kind != ']')
                 return;
 
-        while (i < osc_length && osc_bytes[i] >= '0' && osc_bytes[i] <= '9')
-                command = command * 10 + (unsigned int)(osc_bytes[i++] - '0');
+        command = osc_number(address_of i);
 
         if (i < osc_length && osc_bytes[i] == ';')
                 i++;
@@ -906,11 +901,7 @@ static fn osc_finish(b32 bell)
                 {
                         unsigned int from = i;
 
-                        for (index = 0; i < osc_length && osc_bytes[i] >= '0' &&
-                                        osc_bytes[i] <= '9';
-                             i++)
-                                if (index < 256)
-                                        index = index * 10 + (osc_bytes[i] - '0');
+                        index = osc_number(address_of i);
 
                         if (i == from || i >= osc_length || osc_bytes[i++] != ';')
                                 break;
@@ -1136,6 +1127,29 @@ static unsigned int sgr_extended(unsigned int at, unsigned int joined,
         return took;
 }
 
+// The SGR numbers that only set or clear style bits: what the number turns
+// on, and what it turns off.
+static const struct
+{
+        unsigned char p;
+        unsigned short set, clear;
+} sgr_styles[] = {
+    {1, WINDOW_CELL_BOLD, 0},
+    {2, WINDOW_CELL_DIM, 0},
+    {3, WINDOW_CELL_ITALIC, 0},
+    {5, WINDOW_CELL_BLINK, 0},
+    {6, WINDOW_CELL_BLINK, 0},
+    {8, WINDOW_CELL_HIDDEN, 0},
+    {9, WINDOW_CELL_STRIKE, 0},
+    {21, WINDOW_CELL_UNDERLINE, 0},
+    {22, 0, WINDOW_CELL_BOLD | WINDOW_CELL_DIM},
+    {23, 0, WINDOW_CELL_ITALIC},
+    {24, 0, WINDOW_CELL_UNDERLINE},
+    {25, 0, WINDOW_CELL_BLINK},
+    {28, 0, WINDOW_CELL_HIDDEN},
+    {29, 0, WINDOW_CELL_STRIKE},
+};
+
 static fn sgr()
 {
         unsigned int count = terminal_csi.count ? terminal_csi.count : 1;
@@ -1154,40 +1168,23 @@ static fn sgr()
                         reverse = false;
                         style = 0;
                 }
-                else if (p == 1)
-                        style |= WINDOW_CELL_BOLD;
-                else if (p == 2)
-                        style |= WINDOW_CELL_DIM;
-                else if (p == 3)
-                        style |= WINDOW_CELL_ITALIC;
                 // 4:0 is no underline and 4:1 to 4:5 its styles, and 21 is
                 // ECMA-48's double one: all of them the one line here.
                 else if (p == 4 && took && !terminal_csi.value[i + 1])
                         style &= (unsigned short)~WINDOW_CELL_UNDERLINE;
-                else if (p == 4 || p == 21)
+                else if (p == 4)
                         style |= WINDOW_CELL_UNDERLINE;
-                else if (p == 5 || p == 6)
-                        style |= WINDOW_CELL_BLINK;
-                else if (p == 7)
-                        reverse = true;
-                else if (p == 8)
-                        style |= WINDOW_CELL_HIDDEN;
-                else if (p == 9)
-                        style |= WINDOW_CELL_STRIKE;
-                else if (p == 22)
-                        style &= (unsigned short)~(WINDOW_CELL_BOLD | WINDOW_CELL_DIM);
-                else if (p == 23)
-                        style &= (unsigned short)~WINDOW_CELL_ITALIC;
-                else if (p == 24)
-                        style &= (unsigned short)~WINDOW_CELL_UNDERLINE;
-                else if (p == 25)
-                        style &= (unsigned short)~WINDOW_CELL_BLINK;
-                else if (p == 27)
-                        reverse = false;
-                else if (p == 28)
-                        style &= (unsigned short)~WINDOW_CELL_HIDDEN;
-                else if (p == 29)
-                        style &= (unsigned short)~WINDOW_CELL_STRIKE;
+                else if (p == 7 || p == 27)
+                        reverse = p == 7;
+                else if (p < 30)
+                {
+                        for (positive k = 0; k < array_count(sgr_styles); k++)
+                        {
+                                if (sgr_styles[k].p == p)
+                                        style = (unsigned short)((style | sgr_styles[k].set) &
+                                                                 ~sgr_styles[k].clear);
+                        }
+                }
                 else if (p >= 30 && p <= 37)
                         ink = (unsigned char)(p - 30);
                 else if (p == 38)
@@ -1212,16 +1209,6 @@ static fn sgr()
                 i += took;
         }
 }
-
-/*
-        The other screen, which is this one further along.
-
-        An alternate buffer is a screen a program is given, scribbles on and
-        hands back with what was underneath still there. The ring already
-        holds what was underneath: moving head on by a screenful gives out
-        blank lines and leaves the old ones behind it, and moving head back is
-        the hand back. There is no second buffer and nothing is copied.
-*/
 
 static fn cursor_save(struct cursor_state address_to into)
 {
@@ -1295,6 +1282,14 @@ static bipolar primary_regrid(unsigned int at, unsigned int was_rows)
 }
 
 /*
+        The other screen, which is this one further along.
+
+        An alternate buffer is a screen a program is given, scribbles on and
+        hands back with what was underneath still there. The ring already
+        holds what was underneath: moving head on by a screenful gives out
+        blank lines and leaves the old ones behind it, and moving head back is
+        the hand back. There is no second buffer and nothing is copied.
+
         Only 1049 saves the cursor on the way in and puts it back on the way
         out, as DECSC and DECRC would; 47 and 1047 leave it where the program
         has it. None of them moves it: a program that wants the alternate
@@ -1542,6 +1537,17 @@ static b32 csi_known(unsigned int final)
         }
 }
 
+// Row a of the page, or of the region in origin mode, counting from one. The
+// count is compared with the room and not added to the top, which a hostile
+// one wraps to a row above the region.
+static unsigned int addressed_row(unsigned int a)
+{
+        unsigned int top = origin_mode ? region_top : 0;
+        unsigned int bottom = origin_mode ? region_bottom : ROWS;
+
+        return a - 1 < bottom - top ? top + a - 1 : (bottom ? bottom - 1 : 0);
+}
+
 static fn csi_final(unsigned int final)
 {
         unsigned int a = terminal_csi.count && terminal_csi.value[0]
@@ -1556,15 +1562,9 @@ static fn csi_final(unsigned int final)
         {
         case 'H':
         case 'f':
-        {
-                unsigned int top = origin_mode ? region_top : 0;
-                unsigned int bottom = origin_mode ? region_bottom : ROWS;
-                unsigned int r = top + a - 1;
-
-                row = r < bottom ? r : (bottom ? bottom - 1 : 0);
+                row = addressed_row(a);
                 column = b - 1 < COLUMNS ? b - 1 : COLUMNS - 1;
                 break;
-        }
         /*
                 Up and down stop at the margin of a region the cursor is in or
                 past, and at the edge of the page from the other side of it, as
@@ -1603,14 +1603,8 @@ static fn csi_final(unsigned int final)
                 column = a - 1 < COLUMNS ? a - 1 : COLUMNS - 1;
                 break;
         case 'd':
-        {
-                unsigned int top = origin_mode ? region_top : 0;
-                unsigned int bottom = origin_mode ? region_bottom : ROWS;
-                unsigned int r = top + a - 1;
-
-                row = r < bottom ? r : (bottom ? bottom - 1 : 0);
+                row = addressed_row(a);
                 break;
-        }
         // A reset parameter slot is 0, so no parameter is ED 0 and EL 0, and
         // a number nobody has defined erases nothing.
         case 'J':
