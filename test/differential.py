@@ -46944,12 +46944,99 @@ b32 main(void)
 """
 
 
+#       The rest of what a secret runs through, for the same count: net.c's
+#       ECDH on P-256 and P-384 over a private scalar (the public value and
+#       the shared secret), AES-128-GCM's key schedule and seal under a
+#       secret key, HMAC-SHA256 and HKDF-Extract keyed by a secret, and the
+#       constant-time compare. argv[1] names the primitive, argv[2]'s first
+#       byte draws the secret; everything but the call runs the same
+#       instructions whatever the byte is.
+CRYPTO_SECRET_COUNT_C = r"""
+#include "src/lib.util.c"
+#include "src/net/net.c"
+static volatile p8 sink;
+
+b32 main(void)
+{
+        string_address primitive = program_argument(1);
+        string_address which = program_argument(2);
+        p8 secret[96], out[160], peer[97], peer_scalar[48], message[64], tag[16];
+        p8 iv[12] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+        crypto_aesgcm_key key;
+        p64 seed = 0x9e3779b97f4a7c15ull * (p64)(p8)which[0];
+
+        for (positive i = 0; i < 96; i++)
+        {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                secret[i] = (p8)seed;
+        }
+        //      Scalars well under both group orders, so no draw is refused.
+        secret[0] &= 0x7f;
+        secret[48] = 0;
+        memory_fill(peer_scalar, 0, 48);
+        peer_scalar[47] = 7;
+        peer_scalar[31] = 7;
+        memory_fill(message, 0x5a, sizeof message);
+        //      The digests ask for their features on the first call.
+        crypto_sha256_of(message, 0, out);
+        switch (primitive[0])
+        {
+        case 'a': crypto_ecdh_p256_public(out, secret); break;
+        case 'b': crypto_ecdh_p256_public(peer, peer_scalar);
+                  crypto_ecdh_p256_shared(out, secret, peer); break;
+        case 'c': crypto_ecdh_p384_public(out, secret); break;
+        case 'd': crypto_ecdh_p384_public(peer, peer_scalar);
+                  crypto_ecdh_p384_shared(out, secret, peer); break;
+        case 'e': crypto_aesgcm_prepare(&key, secret);
+                  crypto_aesgcm_seal(&key, iv, message, 16, message + 16, 32, tag); break;
+        case 'f': crypto_hmac_sha256(secret, 32, message, 64, out); break;
+        case 'g':
+                //      One bit apart, at a place the byte draws: an
+                //      early exit shows as a count that follows it.
+                memory_copy(peer, secret, 32);
+                peer[(p8)which[0] % 32] ^= 1;
+                out[0] = crypto_same(secret, peer, 32);
+                break;
+        case 'i':
+                //      A tag forged in one byte, which the byte draws: the
+                //      refusal costs the same wherever it differs.
+                crypto_aesgcm_prepare(&key, secret);
+                crypto_aesgcm_seal(&key, iv, message, 16, message + 16, 32, tag);
+                tag[(p8)which[0] % 16] ^= 1;
+                out[0] = crypto_aesgcm_open(&key, iv, message, 16, message + 16, 32, tag);
+                break;
+        default: crypto_hkdf_extract(message, 32, secret, 32, out);
+        }
+        //      What was computed is read, or the compiler drops a compare
+        //      whose answer nothing uses.
+        for (positive i = 0; i < 32; i++)
+                sink ^= out[i];
+        return 0;
+}
+"""
+
+CRYPTO_SECRET_PRIMITIVES = (
+    ("a", "ECDH P-256 public"), ("b", "ECDH P-256 shared"),
+    ("c", "ECDH P-384 public"), ("d", "ECDH P-384 shared"),
+    ("e", "AES-128-GCM key and seal"), ("f", "HMAC-SHA256 key"),
+    ("g", "crypto_same"), ("i", "AES-128-GCM refusing a forged tag"),
+    ("h", "HKDF-Extract"))
+
+
 def crypto_x25519_instruction_counts():
     """x25519's guest instruction count under qemu-user and test/insn.c, for
     six scalar and u pairs, on each machine and x86_64 body: a Nehalem
     has no BMI2 or ADX and takes the mulq body, -cpu max has both. Every
     pair must retire the same count -- what a branch or a
-    loop on a secret would change. Returns (lines, failed); a machine
+    loop on a secret would change. The same count is taken of net.c's
+    ECDH on both NIST curves, AES-GCM's key schedule and seal, HMAC-SHA256,
+    HKDF-Extract and the compare, for six secrets each (CRYPTO_SECRET_COUNT_C):
+    lib.c's bodies are held branchless by crypto_branchless_bodies, but the
+    C around them -- the window walk, the masked table scan, the wipes -- is
+    compiled by GCC for each machine, and only what it retires shows what it
+    became. Returns (lines, failed); a machine
     whose cross compiler, qemu or the plugin's headers are missing says
     NOT RUN in its line and does not fail."""
     lines, failed = [], False
@@ -46994,6 +47081,22 @@ def crypto_x25519_instruction_counts():
                              % (machine, built.stderr[-1500:]))
                 failed = True
                 continue
+            secret_binary = work / ("secret." + machine)
+            secret_unit = work / "secret.c"
+            secret_unit.write_text(CRYPTO_SECRET_COUNT_C)
+            built = subprocess.run(
+                [compiler] + flags + ["-O2", "-static", "-nostdlib", "-nostartfiles",
+                                      "-fno-stack-protector", "-fno-builtin", "-w",
+                                      "-I", str(HARNESS_ROOT), "-T",
+                                      str(HARNESS_ROOT / "src/build/spark.ld"),
+                                      "-Wl,-e,_start", "-Wl,--build-id=none",
+                                      "-Wl,--no-warn-rwx-segments", "-o", str(secret_binary),
+                                      str(secret_unit)], capture_output=True, text=True)
+            if built.returncode:
+                lines.append("secret instructions %s: did not build\n%s"
+                             % (machine, built.stderr[-1500:]))
+                failed = True
+                secret_binary = None
             for body, cpu in cpus:
                 counts = []
                 for which in "anqz19":
@@ -47008,6 +47111,24 @@ def crypto_x25519_instruction_counts():
                     machine, " " + body if body else "",
                     ("%s for each of six keys" % counts[0]) if same else
                     "FAIL -- they differ: " + ", ".join(counts)))
+                if not secret_binary:
+                    continue
+                rows = []
+                for primitive, name in CRYPTO_SECRET_PRIMITIVES:
+                    counts = []
+                    for which in "anqz19":
+                        ran = subprocess.run(
+                            [runner] + cpu + ["-plugin", str(plugin), str(secret_binary),
+                                              primitive, which],
+                            capture_output=True, text=True)
+                        counts.append(ran.stderr.strip().split("\n")[-1] if ran.returncode == 0
+                                      else "exit %d" % ran.returncode)
+                    same = len(set(counts)) == 1 and counts[0].isdigit()
+                    failed = failed or not same
+                    rows.append("%s %s" % (name, counts[0] if same else
+                                           "FAIL -- they differ: " + ", ".join(counts)))
+                lines.append("secret instructions %s%s, six secrets each: %s" % (
+                    machine, " " + body if body else "", "; ".join(rows)))
     return lines, failed
 
 
