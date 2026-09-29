@@ -30033,68 +30033,51 @@ static fn sed_write_first_line(b32 which)
 */
 static fn sed_put_listing(positive wrap)
 {
-        p8 shown[8];
+        p64 address_to table = spelling_c(0);
+        p8 address_to bytes = sed_pattern.bytes;
+        positive length = sed_pattern.length;
         positive column = 0;
 
         sed_output_start();
 
-        for (positive at = 0; at <= sed_pattern.length; at++)
+        while (length)
         {
-                positive width = 0;
+                // As many spellings as fit before the column the break's
+                // backslash takes; a whole line's worth when l does not wrap.
+                p8 shown[256];
+                positive room = sizeof(shown);
 
-                if (at == sed_pattern.length)
-                {
-                        sed_stdio(2);
-                        text_put_character('$');
-                        text_put_character('\n');
-                        return;
-                }
+                if (wrap)
+                        room = wrap - 1 > column ? min(wrap - 1 - column, room) : 0;
 
-                p8 character = sed_pattern.bytes[at];
-                p8 letter = character == '\\'  ? '\\'
-                            : character == 7    ? 'a'
-                            : character == '\b' ? 'b'
-                            : character == '\f' ? 'f'
-                            : character == '\n' ? 'n'
-                            : character == '\r' ? 'r'
-                            : character == '\t' ? 't'
-                            : character == 11   ? 'v'
-                                                : 0;
+                positive2 done = memory_into_spelled(shown, bytes, length, room, table);
 
-                if (letter)
-                {
-                        shown[0] = '\\';
-                        shown[1] = letter;
-                        width = 2;
-                }
-                else if (character < 32 || character >= 127)
-                {
-                        shown[0] = '\\';
-                        shown[1] = (p8)('0' + (character >> 6));
-                        shown[2] = (p8)('0' + ((character >> 3) & 7));
-                        shown[3] = (p8)('0' + (character & 7));
-                        width = 4;
-                }
-                else
-                {
-                        shown[0] = character;
-                        width = 1;
-                }
-
-                // The break goes before what will not fit, and the backslash
-                // that marks it takes the last column of the line.
-                if (wrap && column + width > wrap - 1)
+                // The break goes before what will not fit, which then goes
+                // on the next line whole even when it is wider than the wrap.
+                if (!done.x)
                 {
                         sed_stdio(2);
                         text_put_character('\\');
                         text_put_character('\n');
                         column = 0;
+                        done = memory_into_spelled(shown, bytes, 1, sizeof(shown), table);
                 }
 
-                sed_stdio(width);
-                text_put(shown, width);
-                column += width;
+                // GNU writes a spelling at a time, and its stdio is followed
+                // a write at a time.
+                if (unlikely(sed_output_state & (SED_OUTPUT_MODELLING | SED_OUTPUT_PENDING)))
+                        for (positive at = 0; at < done.x; at++)
+                                sed_stdio_follow((positive)(table[bytes[at]] & 255), true);
+
+                text_put(shown, done.y);
+                column += done.y;
+                bytes += done.x;
+                length -= done.x;
         }
+
+        sed_stdio(2);
+        text_put_character('$');
+        text_put_character('\n');
 }
 
 // What r names, whole, wherever the cycle's output had reached. A name that
