@@ -58016,6 +58016,214 @@ int main(void)
     return 0
 
 
+def harness_kernel_dirhash(argv):
+    """hash_half_md4_wide against Linux's own directory hash, bit for bit.
+
+    The oracle is the kernel's fs/ext4/hash.c, and this repository does not
+    carry it: that file is GPL-2.0 and these tests are not. It is read when
+    the harness runs, from linux/ if a build has unpacked one, or from the
+    pinned tarball in artifacts/, and the functions this compares against --
+    half_md4_transform, str2hashbuf_signed and str2hashbuf_unsigned, which are
+    contiguous in the file -- are cut out of it by text and compiled beside a
+    shim. No kernel source, no oracle, and the harness says NOT RUN and not a
+    pass.
+
+    The subject is the routine as it stands in src/lib.c, cut out the same
+    way and assembled for each architecture there is a toolchain for: the
+    machine's own, and arm64 and riscv64 under qemu-user when the cross
+    compilers are installed. Directory blocks of random names are hashed
+    sixteen at a time and each answer is compared with the kernel's: names
+    of one to 255 bytes, ASCII and every byte value, both char signednesses,
+    seeded and not. A copy of the routine with one constant changed is run
+    too, and has to disagree, or nothing here is looking.
+    """
+    import tarfile
+    root = HARNESS_ROOT
+    checks = Checks()
+
+    version = re.search(r'\{"kernel_version", "([^"]+)"\}', (root / "src/build/build.c").read_text()).group(1)
+    kernel_text = origin = None
+    for candidate in (os.environ.get("KERNEL_SRC"), str(root / "linux")):
+        if candidate and (Path(candidate) / "fs/ext4/hash.c").is_file():
+            kernel_text, origin = (Path(candidate) / "fs/ext4/hash.c").read_text(), candidate
+            break
+    tarball = root / "artifacts" / ("linux-%s.tar.xz" % version)
+    if kernel_text is None and tarball.is_file():
+        with tarfile.open(tarball) as archive:
+            kernel_text = archive.extractfile("linux-%s/fs/ext4/hash.c" % version).read().decode()
+        origin = tarball.name
+    if kernel_text is None:
+        print("kernel dirhash: NOT RUN -- no kernel source (linux/, KERNEL_SRC or artifacts/linux-%s.tar.xz)" % version)
+        return 0
+
+    first = kernel_text.index("/* F, G and H are basic MD4 functions")
+    last = kernel_text.index("/*\n * Returns the hash of a filename.")
+    oracle = kernel_text[first:last]
+    checks("half_md4_transform" in oracle and "str2hashbuf_signed" in oracle and "str2hashbuf_unsigned" in oracle,
+           "the kernel's hash functions are where this cuts them, in " + origin)
+
+    library = (root / "src/lib.c").read_text()
+    head = library.index("#ifdef KERNEL_MODE\n#if X64\n__asm__(\n    ASM_SIMD_SECTION\n    ASM_FUNC(hash_half_md4_wide)")
+    tail = library.index("#endif // KERNEL_MODE\n", head) + len("#endif // KERNEL_MODE\n")
+    region = library[head:tail]
+
+    shim = r"""
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+typedef uint32_t __u32;
+typedef uint32_t u32;
+static inline u32 rol32(u32 x, unsigned s) { return (x << s) | (x >> (32 - s)); }
+static inline u32 get_unaligned_be32(const void *p)
+{
+        const unsigned char *b = p;
+        return ((u32)b[0] << 24) | ((u32)b[1] << 16) | ((u32)b[2] << 8) | b[3];
+}
+"""
+    driver = r"""
+void hash_half_md4_wide(const char *base, const u32 *noff, const u32 *len, const u32 *state, u32 flags, u32 *out);
+
+static void reference(const char *name, int len, const u32 seed[4], int use_unsigned, u32 *hash, u32 *minor)
+{
+        u32 in[8], buf[4] = {0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476};
+        if (seed[0] | seed[1] | seed[2] | seed[3])
+                memcpy(buf, seed, 16);
+        for (const char *p = name; len > 0; len -= 32, p += 32) {
+                if (use_unsigned)
+                        str2hashbuf_unsigned(p, len, in, 8);
+                else
+                        str2hashbuf_signed(p, len, in, 8);
+                half_md4_transform(buf, in);
+        }
+        *minor = buf[2];
+        *hash = buf[1];
+}
+
+static uint64_t rng = 88172645463325252ull;
+static u32 rnd(void) { rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; return (u32)(rng >> 16); }
+
+/* A directory block: eight bytes of header, a name, padding to four. Only names whose windows fit are kept. */
+static int build_block(unsigned char *blk, int size, int minlen, int maxlen, int mode, u32 noff[], u32 len[], int max)
+{
+        int pos = 0, n = 0;
+        while (n < max) {
+                int nl = minlen + rnd() % (maxlen - minlen + 1);
+                int rec = (8 + nl + 3) & ~3;
+                if (pos + rec > size)
+                        break;
+                memset(blk + pos, 0xa5, rec);           /* what follows a name is not zero */
+                for (int i = 0; i < nl; i++) {
+                        u32 r = rnd();
+                        blk[pos + 8 + i] = mode == 0 ? 32 + r % 95 : mode == 1 ? ((r % 6 == 0) ? 0x80 | (r >> 8) : 32 + r % 95) : (r >> 3);
+                }
+                if (nl > 0 && pos + 8 + ((nl + 31) & ~31) <= size) {
+                        noff[n] = pos + 8;
+                        len[n] = nl;
+                        n++;
+                }
+                pos += rec;
+        }
+        return n;
+}
+
+int main(int argc, char **argv)
+{
+        static unsigned char blk[4096] __attribute__((aligned(64)));
+        static u32 noff[400], len[400], out[32];
+        long iters = argc > 1 ? atol(argv[1]) : 20000, bad = 0, tested = 0;
+        for (long it = 0; it < iters; it++) {
+                int unsigned_chars = it & 1, mode = it % 3;
+                int longest = (it % 7 == 0) ? 255 : 40;
+                int n = build_block(blk, 4096, 1, longest, mode, noff, len, 400);
+                u32 seed[4] = {0, 0, 0, 0};
+                if (it % 4 == 0)
+                        for (int i = 0; i < 4; i++)
+                                seed[i] = rnd() * 2654435761u;
+                u32 state[4] = {0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476};
+                if (seed[0] | seed[1] | seed[2] | seed[3])
+                        memcpy(state, seed, 16);
+                for (int i = 0; i + 16 <= n; i += 16) {
+                        hash_half_md4_wide((const char *)blk, noff + i, len + i, state, unsigned_chars, out);
+                        for (int l = 0; l < 16; l++) {
+                                u32 h, m;
+                                reference((const char *)blk + noff[i + l], len[i + l], seed, unsigned_chars, &h, &m);
+                                tested++;
+                                if (h != out[l] || m != out[16 + l])
+                                        bad++;
+                        }
+                }
+        }
+        printf("hashes %ld mismatches %ld\n", tested, bad);
+        return 0;
+}
+"""
+
+    def macros(arch):
+        kind = "%function" if arch == "arm64" else "@function"
+        flag = {"x86_64": "X64", "arm64": "ARM64", "riscv64": "RISCV64"}[arch]
+        return ('#define KERNEL_MODE 1\n#define %s 1\n#define ASM_SIMD_SECTION ""\n#define ASM_SIMD_SECTION_END ""\n'
+                '#define ASM_FUNC(name) ".globl " #name "\\n.type " #name ", %s\\n" #name ":\\n"\n'
+                '#define ASM_END(name) ".size " #name ", .-" #name "\\n"\n'
+                '#define ASM_RET "ret\\n"\n') % (flag, kind)
+
+    def run(arch, compiler, runner, cflags, count):
+        """Build and run for one architecture; the answer is (hashes, mismatches, sabotaged mismatches)."""
+        answers = []
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            (work / "test.c").write_text(shim + oracle + driver)
+            #   The copy is changed inside this architecture's own block: the
+            #   region holds all three, and the first constant in it is the x86 one.
+            begin = region.index({"x86_64": "#if X64\n", "arm64": "#elif ARM64\n", "riscv64": "#elif RISCV64\n"}[arch])
+            end = min(found for found in (region.find(marker, begin + 1) for marker in
+                                          ("#elif ARM64\n", "#elif RISCV64\n", "#endif\n#endif // KERNEL_MODE")) if found > 0)
+            sabotaged = region[:begin] + region[begin:end].replace("5a82", "5a83", 1) + region[end:]
+            checks(sabotaged != region, "%s: the constant to change is in its block" % arch)
+            for label, text in (("plain", region), ("sabotaged", sabotaged)):
+                (work / ("wide-%s.c" % label)).write_text(macros(arch) + text)
+                built = subprocess.run(compiler + cflags + ["-O2", "-o", str(work / label), str(work / "test.c"),
+                                                            str(work / ("wide-%s.c" % label))],
+                                       capture_output=True, text=True)
+                if built.returncode:
+                    print("  build failed for %s %s:\n%s" % (arch, label, built.stderr[-600:]))
+                    return None
+                ran = subprocess.run(runner + [str(work / label), str(count)], capture_output=True, text=True, timeout=1800)
+                found = re.search(r"hashes (\d+) mismatches (\d+)", ran.stdout)
+                if not found:
+                    print("  no answer from %s %s: %s" % (arch, label, (ran.stdout + ran.stderr)[-300:]))
+                    return None
+                answers.append((int(found.group(1)), int(found.group(2))))
+        return answers
+
+    machine = platform.machine().lower()
+    targets = []
+    if sys.platform.startswith("linux") and machine in ("x86_64", "amd64"):
+        if " avx2" in " " + open("/proc/cpuinfo").read().replace("\n", " "):
+            targets.append(("x86_64", shlex.split(os.environ.get("CC", "cc")), [], [], ["-static"], 20000))
+        else:
+            print("kernel dirhash: x86_64 NOT RUN -- this CPU has no AVX2")
+    elif sys.platform.startswith("linux") and machine in ("aarch64", "arm64"):
+        targets.append(("arm64", shlex.split(os.environ.get("CC", "cc")), [], [], ["-static"], 20000))
+    if machine not in ("aarch64", "arm64") and shutil.which("aarch64-linux-gnu-gcc") and shutil.which("qemu-aarch64"):
+        targets.append(("arm64", ["aarch64-linux-gnu-gcc"], ["qemu-aarch64"], [], ["-static"], 1500))
+    if machine != "riscv64" and shutil.which("riscv64-linux-gnu-gcc") and shutil.which("qemu-riscv64"):
+        targets.append(("riscv64", ["riscv64-linux-gnu-gcc"], ["qemu-riscv64", "-cpu", "rv64,v=true,vlen=128"],
+                        ["-march=rv64gc"], ["-static"], 1500))
+    if not targets:
+        print("kernel dirhash: NOT RUN -- no toolchain for any architecture here")
+        return 0
+    for arch, compiler, runner, _unused, cflags, count in targets:
+        answers = run(arch, compiler, runner, cflags, count)
+        checks(answers is not None, "%s: built and ran" % arch)
+        if answers:
+            (hashes, bad), (_, sabotaged) = answers
+            checks(hashes > 10000 and bad == 0,
+                   "%s: %d hashes, %d differ from the kernel's" % (arch, hashes, bad))
+            checks(sabotaged > 0, "%s: a copy with one constant changed is caught (%d differ)" % (arch, sabotaged))
+    return checks.verdict("kernel dirhash: checks passed", "kernel-dirhash")
+
+
 HARNESS_CHECKS = {
     "https_bench": harness_https_bench,
     "compression": harness_compression,
@@ -58023,6 +58231,7 @@ HARNESS_CHECKS = {
     "core_state": harness_core_state,
     "pane_pages": harness_pane_pages,
     "shared_page": harness_shared_page,
+    "kernel_dirhash": harness_kernel_dirhash,
     "spark_entry": harness_spark_entry,
     "build_tools": harness_build_tools,
     "macos_read_retry": harness_macos_read_retry,

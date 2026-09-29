@@ -132,6 +132,17 @@ canvas_rect_fill_wide canvas_glyph_wide
      'No timing row here: they are timed by whole composes in the commit '
      'that made them')
 
+cover('correctness_only', 'test/differential.py', 'hash_half_md4_wide',
+      'ext4 directory hashing, sixteen names to a call, held bit for bit to '
+      "Linux's own half_md4 -- cut out of the pinned kernel source when the "
+      'harness runs, since that file is GPL-2.0 and is not kept here -- on '
+      'x86_64 natively and on arm64 and riscv64 under qemu-user, with a copy '
+      'that has one constant changed required to disagree. Timed where the '
+      'kernel calls it, not by a row here: 96 to 19 ticks a name on Zen 5 at '
+      'twelve characters (33.8 million names checked), 22.6 to 7.6 ns on an '
+      'Apple M-series, and getdents over a thousand names 97.2 to 57.8 us in '
+      'a KVM guest; riscv64 is untimed')
+
 cover('correctness_only', 'test/checks.c#CHECK_number', 'string_to_decimal_short',
       'the short-decimal reader is held to the general path by name on '
       '131,072 generated inputs a machine in CHECK_number, and reached '
