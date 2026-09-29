@@ -6042,6 +6042,11 @@ COLD fn shell_pushd(writer write, string_address input)
                         return shell_answer(0);
                 }
 
+                //      rbash: a directory change is what cd refuses, and pushd
+                //      makes one as surely; -n above only edits the stack.
+                if (shell_restricted)
+                        return shell_refuse(1, "pushd: restricted\n");
+
                 string_copy_max_end(previous, shell_directory,
                                     sizeof(previous) - 1);
                 string_copy_max_end(wanted, named, sizeof(wanted) - 1);
@@ -6116,6 +6121,11 @@ COLD fn shell_pushd(writer write, string_address input)
                     "pushd: %s: directory stack index out of range\n",
                     named);
         }
+
+        //      A rotation that moves the shell is the same refusal, made
+        //      before the stack is touched.
+        if (!stack_only && shell_restricted)
+                return shell_refuse(1, "pushd: restricted\n");
 
         string_copy_max_end(wanted, rotated[0], sizeof(wanted) - 1);
 
@@ -6216,6 +6226,9 @@ COLD fn shell_popd(writer write, string_address input)
         // entry out from under it leaves it where it is.
         if (!index)
         {
+                if (shell_restricted)
+                        return shell_refuse(1, "popd: restricted\n");
+
                 string_copy_max_end(wanted, kept[0], sizeof(wanted) - 1);
 
                 if (!shell_dirstack_move(wanted))
