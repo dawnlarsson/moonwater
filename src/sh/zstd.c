@@ -2857,7 +2857,11 @@ static positive zstd_pack_literals(zstd_encoder address_to e,
                                  : 0;
                 new_bits += (p64)freq[at] * length_new[at];
         }
-        if (max_sym <= 128)
+        /* The weights go FSE-compressed when that comes to under half the
+           count of them (and more than one byte), as libzstd's writer
+           decides, and four bits each otherwise. */
+        head = zstd_pack_weights(packed_out, weight, max_sym);
+        if (max_sym <= 128 && !(head > 2 && head - 1 < max_sym / 2))
         {
                 packed_out[0] = (p8)(127 + max_sym);
                 for (at = 0; at < max_sym; at += 2)
@@ -2865,8 +2869,6 @@ static positive zstd_pack_literals(zstd_encoder address_to e,
                                 (at + 1 < max_sym ? weight[at + 1] : 0);
                 head = 1 + (max_sym + 1) / 2;
         }
-        else
-                head = zstd_pack_weights(packed_out, weight, max_sym);
         if (reuse && (!head || (old_bits + 7) / 8 <= head + (new_bits + 7) / 8))
         {
                 table = e->huf_table;
