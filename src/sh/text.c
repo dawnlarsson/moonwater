@@ -31350,6 +31350,25 @@ static PURE bipolar sort_compare_random(p8 address_to a, positive la, p8 address
         return la == lb ? 0 : la < lb ? -1 : 1;
 }
 
+/*
+        The first eight bytes of a key's digest, the way the comparison above
+        reads them, for a window stage: sorting windows is sorting by the front
+        of the digest, and keys whose eight bytes agree -- equal keys, which
+        hash alike, and a chance in 2^64 for the rest -- go on to the whole
+        comparison. One digest a line instead of two a comparison.
+*/
+static inline INLINE p64 sort_random_window(p8 address_to text, positive length)
+{
+        digest_state state = sort_random_state;
+        p8 digest[16];
+
+        digest_write(address_of state, text, length);
+        digest_close(address_of state, digest);
+        return (p64)digest[0] << 56 | (p64)digest[1] << 48 | (p64)digest[2] << 40 |
+               (p64)digest[3] << 32 | (p64)digest[4] << 24 | (p64)digest[5] << 16 |
+               (p64)digest[6] << 8 | (p64)digest[7];
+}
+
 // The salt, from the named file or the kernel; false after GNU's words for
 // a source that would not give sixteen bytes.
 static bool sort_random_ready(string_address source)
@@ -31871,7 +31890,8 @@ static fn sort_stages_ready()
                 sort_stage_reverse[stage] = order->reverse;
                 sort_stage_fold[stage] = (order->how & SORT_FOLD) != 0;
                 sort_stage_kind[stage] =
-                    order->kind == 'n' || order->kind == 'M' || order->kind == 'g'
+                    order->kind == 'n' || order->kind == 'M' || order->kind == 'g' ||
+                            (order->kind == 'R' && !order->how)
                         ? SORT_STAGE_WINDOW
                     : !order->kind && !(order->how & ~(positive)SORT_FOLD)
                         ? SORT_STAGE_BYTES
@@ -32112,7 +32132,12 @@ static inline INLINE fn sort_item_window(sort_item address_to item,
                                                             address_of exact)
                          : kind == 'g' ? sort_general_window(view->at + from, to - from,
                                                              address_of exact)
+                         : kind == 'R' ? sort_random_window(view->at + from, to - from)
                                        : (p64)sort_month_of(view->at + from, to - from) << 56;
+
+                // A digest's front says nothing of whether the keys are equal.
+                if (kind == 'R')
+                        exact = false;
                 item->left = exact ? 8 : 9;
         }
         else

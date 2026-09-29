@@ -4778,8 +4778,12 @@ text_sort_widths()
                 fi
         }
 
+        # -R hashes each key once, in its window, and the hash is the same at
+        # every width and GNU's for the same random source.
         for options in "" "-r" "-n -k2,2" "-k3" "-u -k3,3" "-s -k3,3" "-f" \
-                "-V -k3" "-h -k2" "-S 1M -k2,2n" "-rs -t x -k2"; do
+                "-V -k3" "-h -k2" "-S 1M -k2,2n" "-rs -t x -k2" \
+                "-R --random-source=$widths/input" "-Ru -k3,3 --random-source=$widths/input" \
+                "-rR -k2 --random-source=$widths/input"; do
                 sort_width_case "$widths/input" $options
         done
 
