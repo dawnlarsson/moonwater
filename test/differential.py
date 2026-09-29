@@ -35037,6 +35037,92 @@ def harness_compression(argv):
                           sizes['-' + level] <= reference_size * slack,
                           '%d bytes against the reference %d' % (sizes['-' + level], reference_size))
 
+                # Dictionaries.  A dictionary libzstd trained, one ours
+                # trained, and a raw-content one each work in both directions
+                # at four levels (ours writes what libzstd reads with -D and
+                # the reverse), -D on a frame with no ID is used all the
+                # same, --no-dictID frames need the dictionary to be read, a
+                # frame with an ID asked for and no dictionary (or another)
+                # is refused, a missing dictionary file is refused, and a
+                # mutated dictionary never crashes the decoder.
+                dict_root = root / ('dict-' + label)
+                dict_root.mkdir()
+                dictionary_words = [b'alpha', b'beta', b'gamma', b'delta', b'config', b'server',
+                                    b'client', b'error', b'warning', b'status', b'value', b'timeout']
+                dictionary_random = random.Random(48)
+
+                def dictionary_sample():
+                    body = bytearray()
+                    for _ in range(dictionary_random.randrange(20, 80)):
+                        body += (dictionary_random.choice(dictionary_words) + b'=' +
+                                 str(dictionary_random.randrange(1000)).encode() +
+                                 dictionary_random.choice([b'\n', b';', b', ']))
+                    return bytes(body)
+                training = []
+                for number in range(160):
+                    training.append(dict_root / ('train%03d' % number))
+                    training[-1].write_bytes(dictionary_sample())
+                held = [dictionary_sample() for _ in range(3)] + [b'', b'x', dictionary_sample() * 300]
+                reference_dictionary = dict_root / 'reference.dict'
+                trained_dictionary = dict_root / 'ours.dict'
+                raw_dictionary = dict_root / 'raw.dict'
+                raw_dictionary.write_bytes(dictionary_sample() + dictionary_sample())
+                made_reference = call([refs['zstd'], '-q', '--train'] + [str(f) for f in training] +
+                                      ['-o', str(reference_dictionary), '--maxdict=8192'])
+                made_ours = call(ours_zstd + ['-q', '--train'] + [str(f) for f in training] +
+                                 ['-o', str(trained_dictionary), '--maxdict=8192'])
+                check(label + '/zstd/dictionary/--train writes a dictionary',
+                      made_ours.returncode == 0 and trained_dictionary.exists() and
+                      0 < trained_dictionary.stat().st_size <= 8192 and
+                      trained_dictionary.read_bytes()[:4] == b'\x37\xa4\x30\xec',
+                      made_ours.stderr.decode(errors='replace'))
+                for kind, dictionary in (('reference', reference_dictionary),
+                                         ('ours', trained_dictionary), ('raw', raw_dictionary)):
+                    if not dictionary.exists():
+                        continue
+                    packed_sizes = {}
+                    for level in ('1', '3', '9', '19'):
+                        for number, data in enumerate(held):
+                            made = call(ours_zstd + ['-D', str(dictionary), '-' + level, '-c'], data)
+                            theirs = call([refs['zstd'], '-D', str(dictionary), '-' + level, '-c'], data)
+                            reads = call([refs['zstd'], '-D', str(dictionary), '-dc'], made.stdout)
+                            own = call(ours_zstd + ['-D', str(dictionary), '-dc'], made.stdout)
+                            from_theirs = call(ours_zstd + ['-D', str(dictionary), '-dc'], theirs.stdout)
+                            check('%s/zstd/dictionary/%s -%s sample %d both ways' % (label, kind, level, number),
+                                  made.returncode == reads.returncode == own.returncode ==
+                                  from_theirs.returncode == 0 and reads.stdout == data and
+                                  own.stdout == data and from_theirs.stdout == data,
+                                  (made.stderr + reads.stderr + own.stderr + from_theirs.stderr).decode(errors='replace'))
+                            packed_sizes[(level, number)] = (len(made.stdout), len(theirs.stdout))
+                    if kind != 'raw':
+                        ours_total = sum(a for a, _ in packed_sizes.values())
+                        theirs_total = sum(b for _, b in packed_sizes.values())
+                        check('%s/zstd/dictionary/%s ratio within 5%% of libzstd' % (label, kind),
+                              ours_total <= theirs_total * 1.05, '%d bytes against %d' % (ours_total, theirs_total))
+                    one = held[0]
+                    framed = call(ours_zstd + ['-D', str(dictionary), '-3', '-c'], one)
+                    bare = call(ours_zstd + ['-dc'], framed.stdout)
+                    unnamed = call(ours_zstd + ['-D', str(dictionary), '--no-dictID', '-3', '-c'], one)
+                    if kind != 'raw':
+                        check('%s/zstd/dictionary/%s frame is refused without its dictionary' % (label, kind),
+                              bare.returncode != 0 and b'Dictionary mismatch' in bare.stderr,
+                              bare.stderr.decode(errors='replace'))
+                    check('%s/zstd/dictionary/%s --no-dictID frame needs -D and reads with it' % (label, kind),
+                          call(ours_zstd + ['-D', str(dictionary), '-dc'], unnamed.stdout).stdout == one and
+                          call([refs['zstd'], '-D', str(dictionary), '-dc'], unnamed.stdout).stdout == one)
+                    damaged = bytearray(dictionary.read_bytes())
+                    for seed in range(12):
+                        mutant = bytearray(damaged)
+                        dictionary_random.seed(seed)
+                        for _ in range(dictionary_random.randrange(1, 6)):
+                            mutant[dictionary_random.randrange(len(mutant))] = dictionary_random.randrange(256)
+                        (dict_root / 'mutant.dict').write_bytes(bytes(mutant))
+                        answer = call(ours_zstd + ['-D', str(dict_root / 'mutant.dict'), '-dc'], framed.stdout)
+                        check('%s/zstd/dictionary/%s mutant %d does not crash' % (label, kind, seed),
+                              answer.returncode in (0, 1))
+                check(label + '/zstd/dictionary/a missing dictionary file is refused',
+                      call(ours_zstd + ['-D', str(dict_root / 'none.dict'), '-c'], b'x').returncode != 0)
+
                 # Jobs and tar's codec thread never change a byte with the
                 # CPUs: a frame cut into jobs is one frame on one CPU, every
                 # CPU and -T2, tar --zstd one archive, and an extraction the

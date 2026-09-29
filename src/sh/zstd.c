@@ -78,6 +78,11 @@ typedef struct
 {
         p8 max_bits;
         bool valid;
+        /* The weights the table was built from, with the last one, for a
+           dictionary's encoder to make its codes from. */
+        p8 real_bits;
+        positive weights;
+        p8 weight[256];
         p16 cell[ZSTD_HUF_MAX];
 } zstd_huff;
 
@@ -734,6 +739,9 @@ static bool zstd_huff_from_weights(zstd_huff address_to huff, p8 address_to weig
            weight, then by symbol; the ranks say where each weight's cells
            begin, and one pass over the symbols fills them. */
         huff->max_bits = 11;
+        huff->real_bits = max_bits;
+        huff->weights = provided + 1;
+        memory_copy_apart(huff->weight, weight, provided + 1);
         start = 0;
         for (w = 1; w <= 12; w++)
         {
@@ -1427,6 +1435,90 @@ static fn zstd_window_close(void)
         zstd_window_free();
 }
 
+/*
+        A dictionary, RFC 8878's: content alone (an ID of none, the default
+        history and no tables), or the magic 0xEC30A437, a four-byte ID, a
+        Huffman table, the offset, match length and literal length tables,
+        three repeat offsets and then the content.  It is read once; every
+        frame decoded after starts with its content as history, its tables
+        as the ones a first block may repeat, and its repeat offsets.
+*/
+#define ZSTD_DICT_MAGIC 0xEC30A437u
+static p8 address_to zstd_dict_content;
+static positive zstd_dict_size;
+static p32 zstd_dict_id;
+static bool zstd_dict_on;
+static bool zstd_dict_entropy;
+static bool zstd_cli_no_dict_id;
+static zstd_huff zstd_dict_huff;
+static zstd_fse zstd_dict_fse[3];
+static bipolar zstd_dict_norm[3][256];
+static p8 zstd_dict_log[3];
+static p32 zstd_dict_rep[3] = {1, 4, 8};
+static const p8 zstd_dict_symbols[3] = {35, 31, 52};
+
+static bool zstd_dictionary_load(p8 address_to bytes, positive length)
+{
+        positive at = 8;
+        positive used;
+
+        zstd_dict_on = false;
+        zstd_dict_entropy = false;
+        zstd_dict_id = 0;
+        zstd_dict_rep[0] = 1;
+        zstd_dict_rep[1] = 4;
+        zstd_dict_rep[2] = 8;
+        if (length > ZSTD_WINDOW_MAX)
+                return zstd_fail("zstd dictionary larger than 128 MiB");
+        if (length < 8 || memory_load_unaligned(p32, bytes) != ZSTD_DICT_MAGIC)
+        {
+                zstd_dict_content = bytes;
+                zstd_dict_size = length;
+                zstd_dict_on = true;
+                return true;
+        }
+        zstd_dict_id = memory_load_unaligned(p32, bytes + 4);
+        if (!zstd_huff_read(bytes + at, length - at, address_of used, address_of zstd_dict_huff))
+                return zstd_fail("zstd dictionary is corrupt");
+        at += used;
+        {
+                static const p8 order[3] = {1, 2, 0};
+                static const p8 symbols[3] = {31, 52, 35};
+                static const p8 logs[3] = {8, 9, 9};
+
+                for (positive k = 0; k < 3; k++)
+                {
+                        p8 const kind = order[k];
+
+                        memory_fill(zstd_dict_norm[kind], 0, sizeof(zstd_dict_norm[kind]));
+                        if (at >= length ||
+                            !zstd_fse_read(bytes + at, length - at, address_of used,
+                                           zstd_dict_norm[kind], symbols[k],
+                                           address_of zstd_dict_log[kind], logs[k]) ||
+                            !zstd_seq_build(address_of zstd_dict_fse[kind], zstd_dict_norm[kind],
+                                            symbols[k], zstd_dict_log[kind], kind))
+                                return zstd_fail("zstd dictionary is corrupt");
+                        at += used;
+                }
+        }
+        if (at + 12 > length)
+                return zstd_fail("zstd dictionary is corrupt");
+        for (positive k = 0; k < 3; k++)
+        {
+                p32 const rep = memory_load_unaligned(p32, bytes + at + 4 * k);
+
+                if (!rep || rep > length - at - 12)
+                        return zstd_fail("zstd dictionary is corrupt");
+                zstd_dict_rep[k] = rep;
+        }
+        at += 12;
+        zstd_dict_content = bytes + at;
+        zstd_dict_size = length - at;
+        zstd_dict_entropy = true;
+        zstd_dict_on = true;
+        return true;
+}
+
 static bool zstd_frame(void)
 {
         p8 desc[1];
@@ -1493,8 +1585,8 @@ static bool zstd_frame(void)
                         return false;
                 dict = memory_load_unaligned(p32, scratch);
         }
-        if (dict)
-                return zstd_fail("zstd dictionaries are refused");
+        if (dict && (!zstd_dict_on || dict != zstd_dict_id))
+                return zstd_fail("zstd Dictionary mismatch");
 
         zstd_have_fcs = false;
         zstd_fcs = 0;
@@ -1546,7 +1638,7 @@ static bool zstd_frame(void)
         // may carry anything: this read it as the full 128 KiB and wrote the
         // block into the previous frame's window before the size said no.
         zstd_block_limit = window < ZSTD_BLOCK_MAX ? window : ZSTD_BLOCK_MAX;
-        if (!zstd_window_open(window))
+        if (!zstd_window_open(window + (zstd_dict_on ? zstd_dict_size : 0)))
                 return false;
 
         zstd_rep[0] = 1;
@@ -1556,6 +1648,27 @@ static bool zstd_frame(void)
         zstd_seq_prev[1] = null;
         zstd_seq_prev[2] = null;
         zstd_lit_huff.valid = false;
+        if (zstd_dict_on)
+        {
+                /* The content is history the frame's matches may reach at
+                   any distance while it is kept (a dictionary is not held
+                   to the window), and its tables and repeat offsets are
+                   the state before the first block. */
+                memory_copy(zstd_window, zstd_dict_content, zstd_dict_size);
+                zstd_pos = zstd_dict_size;
+                zstd_window_size = 0;
+                zstd_keep = window + zstd_dict_size;
+                zstd_rep[0] = zstd_dict_rep[0];
+                zstd_rep[1] = zstd_dict_rep[1];
+                zstd_rep[2] = zstd_dict_rep[2];
+                if (zstd_dict_entropy)
+                {
+                        memory_copy_apart(address_of zstd_lit_huff, address_of zstd_dict_huff,
+                                          sizeof(zstd_huff));
+                        for (positive k = 0; k < 3; k++)
+                                zstd_seq_prev[k] = address_of zstd_dict_fse[k];
+                }
+        }
         frame_start = zstd_decoded;
         if (checksum)
         {
@@ -2222,6 +2335,17 @@ typedef struct
         address_any output;
 } zstd_encoder;
 
+/* What a training pass counts in the blocks it parses instead of writing
+   them: the literals and the three sequence code streams. */
+typedef struct
+{
+        p32 lit[256];
+        p32 ll[36];
+        p32 of[32];
+        p32 ml[53];
+} zstd_train_stats;
+static zstd_train_stats address_to zstd_train_sink;
+
 static zstd_encoder zstd_enc;
 static zstd_ctable zstd_ct_ll;
 static zstd_ctable zstd_ct_of;
@@ -2733,6 +2857,72 @@ static positive zstd_literals_header(p8 address_to out, p8 type, positive n)
 }
 
 /*
+        The Huffman code for the counts of literals freq, symbols to max_sym:
+        each symbol's length (eleven bits at most, the tree complete), the
+        weights they name, the longest, the tree's description in out with
+        its size in *head (0 when it cannot be written), and the bits the
+        counts need in *bits.  The weights go FSE-compressed when that comes
+        to under half the count of them (and more than one byte), as
+        libzstd's writer decides, and four bits each otherwise.
+*/
+static fn zstd_huffman_shape(const p32 address_to freq, positive max_sym,
+                             p8 address_to length_new, p8 address_to weight,
+                             positive address_to max_bits_out, p8 address_to out,
+                             positive address_to head_out, p64 address_to bits_out)
+{
+        p32 work[256];
+        p8 max_bits;
+        positive head;
+        p64 new_bits = 0;
+        positive at;
+
+        memory_copy_apart(work, freq, sizeof(work));
+        for (;;)
+        {
+                positive kraft = 0;
+                max_bits = 0;
+                huffman_lengths(work, 256, length_new, 11);
+                for (at = 0; at < 256; at++)
+                        if (length_new[at])
+                        {
+                                kraft += (positive)1 << (11 - length_new[at]);
+                                if (length_new[at] > max_bits)
+                                        max_bits = length_new[at];
+                        }
+                if (kraft == 2048)
+                        break;
+                /* Flatten only when an unconstrained tree exceeds 11 bits.
+                   Every used symbol stays present, and the rebuilt tree is
+                   complete; truncating depths alone oversubscribes it. */
+                for (at = 0; at < 256; at++)
+                        if (work[at])
+                                work[at] = (work[at] + 1) >> 1;
+        }
+        for (at = 0; at <= max_sym; at++)
+        {
+                weight[at] = length_new[at]
+                                 ? (p8)(max_bits + 1 - length_new[at])
+                                 : 0;
+                new_bits += (p64)freq[at] * length_new[at];
+        }
+        /* The weights go FSE-compressed when that comes to under half the
+           count of them (and more than one byte), as libzstd's writer
+           decides, and four bits each otherwise. */
+        head = zstd_pack_weights(out, weight, max_sym);
+        if (max_sym <= 128 && !(head > 2 && head - 1 < max_sym / 2))
+        {
+                out[0] = (p8)(127 + max_sym);
+                for (at = 0; at < max_sym; at += 2)
+                        out[1 + at / 2] = (p8)(weight[at] << 4) |
+                                (at + 1 < max_sym ? weight[at + 1] : 0);
+                head = 1 + (max_sym + 1) / 2;
+        }
+        address_to max_bits_out = max_bits;
+        address_to head_out = head;
+        address_to bits_out = new_bits;
+}
+
+/*
         Huffman literals into the encoder's packed buffer (zstd_packed_lits
         with no encoder): a new tree, or none when the
         encoder's last table codes every symbol here for no more bytes than
@@ -2748,7 +2938,6 @@ static positive zstd_pack_literals(zstd_encoder address_to e,
                                    bool address_to fresh)
 {
         p32 freq[256] = {0}, f1[256] = {0}, f2[256] = {0}, f3[256] = {0};
-        p32 work[256];
         p8 weight[256];
         positive max_sym = 0;
         positive symbols = 0;
@@ -2828,47 +3017,8 @@ static positive zstd_pack_literals(zstd_encoder address_to e,
                                 old_bits += (p64)freq[at] * e->huf_length[at];
                         }
         }
-        memory_copy_apart(work, freq, sizeof(freq));
-        for (;;)
-        {
-                positive kraft = 0;
-                max_bits = 0;
-                huffman_lengths(work, 256, length_new, 11);
-                for (at = 0; at < 256; at++)
-                        if (length_new[at])
-                        {
-                                kraft += (positive)1 << (11 - length_new[at]);
-                                if (length_new[at] > max_bits)
-                                        max_bits = length_new[at];
-                        }
-                if (kraft == 2048)
-                        break;
-                /* Flatten only when an unconstrained tree exceeds 11 bits.
-                   Every used symbol stays present, and the rebuilt tree is
-                   complete; truncating depths alone oversubscribes it. */
-                for (at = 0; at < 256; at++)
-                        if (work[at])
-                                work[at] = (work[at] + 1) >> 1;
-        }
-        for (at = 0; at <= max_sym; at++)
-        {
-                weight[at] = length_new[at]
-                                 ? (p8)(max_bits + 1 - length_new[at])
-                                 : 0;
-                new_bits += (p64)freq[at] * length_new[at];
-        }
-        /* The weights go FSE-compressed when that comes to under half the
-           count of them (and more than one byte), as libzstd's writer
-           decides, and four bits each otherwise. */
-        head = zstd_pack_weights(packed_out, weight, max_sym);
-        if (max_sym <= 128 && !(head > 2 && head - 1 < max_sym / 2))
-        {
-                packed_out[0] = (p8)(127 + max_sym);
-                for (at = 0; at < max_sym; at += 2)
-                        packed_out[1 + at / 2] = (p8)(weight[at] << 4) |
-                                (at + 1 < max_sym ? weight[at + 1] : 0);
-                head = 1 + (max_sym + 1) / 2;
-        }
+        zstd_huffman_shape(freq, max_sym, length_new, weight, address_of max_bits, packed_out,
+                           address_of head, address_of new_bits);
         if (reuse && (!head || (old_bits + 7) / 8 <= head + (new_bits + 7) / 8))
         {
                 table = e->huf_table;
@@ -5103,6 +5253,93 @@ static fn zstd_encoder_close(zstd_encoder address_to e)
         e->filled = 0;
 }
 
+/* fast and dfast take positions only as they parse, so a job's history
+   goes into their tables first, every third position, as libzstd loads a
+   prefix. */
+static fn zstd_encoder_prefix(zstd_encoder address_to e, p32 from, p32 to, p32 step)
+{
+        p8 const mls = e->p.min_match < 4 ? 4 : e->p.min_match > 8 ? 8 : e->p.min_match;
+
+        for (p32 at = from; at < to; at += step)
+        {
+                p8 address_to const p = e->base + at;
+
+                if (e->p.strategy == ZSTD_DFAST)
+                {
+                        e->hash[zstd_hash_bytes(p, e->p.hash_log, 8)] = at;
+                        e->chain[zstd_hash_bytes(p, e->p.chain_log, mls)] = at;
+                }
+                else
+                        e->hash[zstd_hash_bytes(p, e->p.hash_log, mls)] = at;
+        }
+}
+
+/*
+        A dictionary in the encoder: the last window's worth of its content
+        goes before the first block as history that is already there, every
+        position of it into the match finder's tables (the binary trees take
+        theirs as the first searches walk over them), and the state before
+        the first block is the dictionary's: its repeat offsets, its Huffman
+        table and its three sequence tables as the ones a first block may
+        repeat.
+*/
+static positive zstd_dictionary_kept(p8 window_log)
+{
+        positive const window = (positive)1 << window_log;
+
+        return zstd_dict_on ? (zstd_dict_size < window ? zstd_dict_size : window) : 0;
+}
+
+static fn zstd_encoder_dictionary_state(zstd_encoder address_to e)
+{
+        e->rep[0] = zstd_dict_rep[0];
+        e->rep[1] = zstd_dict_rep[1];
+        e->rep[2] = zstd_dict_rep[2];
+        if (!zstd_dict_entropy)
+                return;
+        {
+                zstd_huff address_to const huff = address_of zstd_dict_huff;
+
+                zstd_huffman_codes(e->huf_table, huff->weight, huff->weights, huff->real_bits);
+                for (positive s = 0; s < 256; s++)
+                        e->huf_length[s] = s < huff->weights && huff->weight[s]
+                                               ? (p8)(huff->real_bits + 1 - huff->weight[s])
+                                               : 0;
+                e->huf_valid = true;
+        }
+        for (positive k = 0; k < 3; k++)
+        {
+                zstd_fse_prior address_to const prior = e->prior + k;
+
+                memory_fill(prior->norm, 0, sizeof(prior->norm));
+                for (positive s = 0; s <= zstd_dict_symbols[k] && s < 53; s++)
+                        prior->norm[s] = zstd_dict_norm[k][s];
+                prior->mode = 2;
+                prior->symbol = 0;
+                prior->valid = zstd_ctable_build(address_of prior->table, zstd_dict_norm[k],
+                                                 zstd_dict_symbols[k], zstd_dict_log[k]);
+        }
+}
+
+/* The tables' positions from first to stop: every one for fast and dfast,
+   the rows of the row finder; the trees fill as they are searched. */
+static fn zstd_encoder_dictionary_tables(zstd_encoder address_to e, p32 first, p32 stop)
+{
+        if (stop <= first + 8)
+                return;
+        if (e->p.strategy <= ZSTD_DFAST)
+                zstd_encoder_prefix(e, first, stop - 8, 1);
+        else if (e->p.strategy <= ZSTD_LAZY2)
+        {
+                p8 const row_log = zstd_row_log(address_of e->p);
+                p8 const mls = e->p.min_match < 4 ? 4 : e->p.min_match > 6 ? 6 : e->p.min_match;
+
+                for (p32 at = first; at < stop - 8; at++)
+                        zstd_row_insert(e, at, row_log, mls);
+                e->next = stop - 8;
+        }
+}
+
 /*
         The window and tables for these parameters, kept from the last frame
         when they are the same size.  A frame's indices start a window past
@@ -5186,6 +5423,16 @@ static bool zstd_encoder_open(zstd_encoder address_to e,
                 e->lit_length_new = zstd_lit_length_new;
                 e->opt = zstd_opt;
                 e->matches = zstd_matches;
+        }
+        if (zstd_dict_on)
+        {
+                positive const keep = zstd_dictionary_kept(p->window_log);
+
+                memory_copy(e->storage, zstd_dict_content + zstd_dict_size - keep, keep);
+                e->filled = start + (p32)keep;
+                e->block = start + (p32)keep;
+                zstd_encoder_dictionary_state(e);
+                zstd_encoder_dictionary_tables(e, start, start + (p32)keep);
         }
         return true;
 }
@@ -5456,6 +5703,19 @@ static bool zstd_encode_block(zstd_encoder address_to e, positive n, bool last)
                 memory_copy_apart(e->lits + e->nlit, anchor,
                                   (positive)(src + n - anchor));
                 e->nlit += (positive)(src + n - anchor);
+                if (zstd_train_sink)
+                {
+                        for (positive i = 0; i < e->nlit; i++)
+                                zstd_train_sink->lit[e->lits[i]]++;
+                        for (positive i = 0; i < e->nseq; i++)
+                        {
+                                zstd_train_sink->ll[e->seqs[i].ll_code]++;
+                                zstd_train_sink->of[e->seqs[i].of_code]++;
+                                zstd_train_sink->ml[e->seqs[i].ml_code]++;
+                        }
+                        e->block += (p32)n;
+                        return true;
+                }
                 written = e->p.strategy >= ZSTD_BTOPT && e->p.window_log >= 17
                               ? zstd_split_sequences(e, n, last)
                               : zstd_entropy_block(e, n, last);
@@ -5582,27 +5842,6 @@ static bool zstd_encoder_job_tables(zstd_encoder address_to e,
         return true;
 }
 
-/* fast and dfast take positions only as they parse, so a job's history
-   goes into their tables first, every third position, as libzstd loads a
-   prefix. */
-static fn zstd_encoder_prefix(zstd_encoder address_to e, p32 from, p32 to)
-{
-        p8 const mls = e->p.min_match < 4 ? 4 : e->p.min_match > 8 ? 8 : e->p.min_match;
-
-        for (p32 at = from; at < to; at += 3)
-        {
-                p8 address_to const p = e->base + at;
-
-                if (e->p.strategy == ZSTD_DFAST)
-                {
-                        e->hash[zstd_hash_bytes(p, e->p.hash_log, 8)] = at;
-                        e->chain[zstd_hash_bytes(p, e->p.chain_log, mls)] = at;
-                }
-                else
-                        e->hash[zstd_hash_bytes(p, e->p.hash_log, mls)] = at;
-        }
-}
-
 /* One job: size bytes at from + prefix, with the prefix bytes before them
    as history, into output; a last job's last block ends the frame.  Only
    the frame's first job knows the decoder's repeat offsets (1, 4, 8); any
@@ -5636,8 +5875,10 @@ static bool zstd_encoder_job(zstd_encoder address_to e, const zstd_params addres
         e->prior[1].valid = false;
         e->prior[2].valid = false;
         memory_fill(address_of e->price, 0, sizeof(e->price));
+        if (first && zstd_dict_on)
+                zstd_encoder_dictionary_state(e);
         if (prefix && p->strategy <= ZSTD_DFAST)
-                zstd_encoder_prefix(e, 1, 1 + (p32)prefix);
+                zstd_encoder_prefix(e, 1, 1 + (p32)prefix, first && zstd_dict_on ? 1 : 3);
         /* The row finder takes every position of the prefix, as libzstd
            loads one; left to the parse, its first update would skip all
            but 128 of them as the tail of a long match. */
@@ -5669,7 +5910,9 @@ static fn zstd_job_run(address_any context, positive index,
         positive const input = zstd_jobs.history + zstd_jobs.filled;
         positive const size = index + 1 < zstd_jobs.count ? zstd_jobs.job
                                                           : input - offset;
-        positive const prefix = offset < zstd_jobs.overlap ? offset : zstd_jobs.overlap;
+        positive const prefix = zstd_jobs.first_round && !index && zstd_dict_on
+                                    ? offset
+                                    : offset < zstd_jobs.overlap ? offset : zstd_jobs.overlap;
 
         (void)context;
         zstd_jobs.failed[index] = !zstd_encoder_job(
@@ -5717,7 +5960,7 @@ static b32 zstd_jobs_open(const zstd_params address_to p)
         if (!zstd_job_limit && parallel_width() > 1 && per_round > 2 * parallel_width())
                 per_round = 2 * parallel_width();
         zstd_jobs.overlap = ((positive)1 << p->window_log) >> (9 - overlap_log);
-        room = zstd_jobs.overlap + per_round * job + 64;
+        room = zstd_jobs.overlap + per_round * job + 64 + zstd_dictionary_kept(p->window_log);
         if (zstd_jobs.buffer_room < room)
         {
                 if (zstd_jobs.buffer)
@@ -5736,7 +5979,11 @@ static b32 zstd_jobs_open(const zstd_params address_to p)
         zstd_jobs.p = address_to p;
         zstd_jobs.job = job;
         zstd_jobs.per_round = per_round;
-        zstd_jobs.history = 0;
+        /* A dictionary is the first job's history, before its input. */
+        zstd_jobs.history = zstd_dictionary_kept(p->window_log);
+        if (zstd_jobs.history)
+                memory_copy(zstd_jobs.buffer, zstd_dict_content + zstd_dict_size - zstd_jobs.history,
+                            zstd_jobs.history);
         zstd_jobs.filled = 0;
         zstd_jobs.first_round = true;
         zstd_jobs.active = true;
@@ -5938,7 +6185,9 @@ static bool zstd_encode_taken(positive n)
 
 static bool zstd_encode_start(const zstd_params address_to p, bool checksum)
 {
-        p8 head[6];
+        p8 head[10];
+        positive head_size = 6;
+        p32 const dict_id = zstd_dict_on && !zstd_cli_no_dict_id ? zstd_dict_id : 0;
         b32 jobs;
 
         zstd_why = null;
@@ -5958,8 +6207,16 @@ static bool zstd_encode_start(const zstd_params address_to p, bool checksum)
         head[3] = 0xfd;
         head[4] = checksum ? 0x04 : 0x00;
         head[5] = (p8)((p->window_log - 10) << 3);
+        if (dict_id)
+        {
+                p8 const bytes = dict_id < 256 ? 1 : dict_id < 65536 ? 2 : 4;
+
+                head[4] |= bytes == 1 ? 1 : bytes == 2 ? 2 : 3;
+                for (positive k = 0; k < bytes; k++)
+                        head[head_size++] = (p8)(dict_id >> (8 * k));
+        }
         return (!zstd_output.bytes && zstd_out_fd < 0) ||
-               zstd_enc_out(head, sizeof head);
+               zstd_enc_out(head, head_size);
 }
 
 /* The codec table's entry: a level from 1 to 22 and no size to go by. */
@@ -6089,6 +6346,61 @@ static positive zstd_cli_number(string_address at, positive address_to value)
         --long[=#] a window of 2^# bytes (27 alone).  --no-check leaves out
         the content checksum; -C and --check put it back.
 */
+/* A dictionary file whole, into memory that stays. */
+static bool zstd_cli_dictionary(string_address path)
+{
+        bipolar handle = system_open_at(AT_FDCWD, path, FILE_READ);
+        file_facts facts;
+        p8 address_to bytes;
+        positive size = 0;
+        positive got = 0;
+        p8 reason[64];
+
+        if (handle < 0)
+        {
+                strerror_r((b32)-handle, (string_address)reason, sizeof reason);
+                string_format(log_error, "zstd: error 31 : Stat failed on dictionary file %s: %s \n",
+                              path, reason);
+                return false;
+        }
+        if (file_look_code(handle, (string_address)"", AT_EMPTY_PATH, address_of facts) == 0 &&
+            (facts.mode & MODE_FORMAT) == MODE_FILE)
+                size = facts.size;
+        if (size > ZSTD_WINDOW_MAX)
+        {
+                system_close(handle);
+                string_format(log_error, "zstd: error 32 : dictionary file %s is too large \n", path);
+                return false;
+        }
+        bytes = memory_checked(size + 64);
+        if (!bytes)
+        {
+                system_close(handle);
+                string_format(log_error, "zstd: error 31 : cannot allocate dictionary \n");
+                return false;
+        }
+        while (got < size)
+        {
+                bipolar const n = system_read_retry((positive)handle, bytes + got, size - got);
+
+                if (n <= 0)
+                        break;
+                got += (positive)n;
+        }
+        system_close(handle);
+        if (got != size)
+        {
+                string_format(log_error, "zstd: error 31 : Read error : %s \n", path);
+                return false;
+        }
+        if (!zstd_dictionary_load(bytes, size))
+        {
+                string_format(log_error, "zstd: error 32 : Dictionary is corrupted : %s \n", path);
+                return false;
+        }
+        return true;
+}
+
 static bipolar zstd_cli_option(file_codec_cli address_to codec,
                                string_address at, bool word)
 {
@@ -6110,6 +6422,24 @@ static bipolar zstd_cli_option(file_codec_cli address_to codec,
                         zstd_single_job = false;
                         return (bipolar)taken + 1;
                 }
+                if (*at == 'D')
+                {
+                        string_address const path = at[1] ? at + 1 : codec->next_argument;
+
+                        if (!path)
+                        {
+                                string_format(log_error, "zstd: missing argument to -D\n");
+                                return -1;
+                        }
+                        if (!zstd_cli_dictionary(path))
+                                return -1;
+                        if (!at[1])
+                        {
+                                codec->took_next = true;
+                                return 1;
+                        }
+                        return (bipolar)string_length(at);
+                }
                 if (*at == 'C')
                         zstd_cli_no_check = false;
                 else if (*at == 'q')
@@ -6124,6 +6454,8 @@ static bipolar zstd_cli_option(file_codec_cli address_to codec,
                 zstd_single_job = true;
         else if (string_equals(at, "--no-check"))
                 zstd_cli_no_check = true;
+        else if (string_equals(at, "--no-dictID"))
+                zstd_cli_no_dict_id = true;
         else if (string_equals(at, "--check"))
                 zstd_cli_no_check = false;
         else if (string_equals(at, "--quiet"))
@@ -6189,7 +6521,8 @@ static b32 zstd_encode_fd(bipolar in, bipolar out, p8 level)
                            address_of facts) == 0 &&
             (facts.mode & MODE_FORMAT) == MODE_FILE)
                 size = facts.size;
-        zstd_level_params(wanted, zstd_cli_long, size, address_of params);
+        zstd_level_params(wanted, zstd_cli_long, size ? size + (zstd_dict_on ? zstd_dict_size : 0) : 0,
+                          address_of params);
         zstd_out_fd = out;
         zstd_output.bytes = null;
         if (!zstd_encode_start(address_of params, !zstd_cli_no_check))
@@ -6292,13 +6625,501 @@ static b32 zstd_cli_stream(bipolar in, bipolar out, bool decompress, p8 level)
         return decompress ? zstd_one(in, out) : zstd_encode_fd(in, out, level);
 }
 
+/*
+        Training a dictionary, zstd --train.  The samples are the files,
+        each at most its first 128 KiB.  The content is picked as COVER
+        picks it: every eight-byte string is counted once for each sample
+        it is in, the samples are cut into as many epochs as the dictionary
+        has segments' room, and from each epoch the segment (of k bytes)
+        whose strings have the highest counts is taken, its strings counted
+        no more, the first taken ending nearest the end where matches are
+        cheapest.  Two segment sizes are tried and the dictionary that packs
+        a sample of the files smaller is kept.  The tables are what ZDICT
+        writes: the samples parsed with the content as their dictionary at
+        level 3, the literals and the three code streams counted with every
+        symbol given at least one, a Huffman tree and three FSE tables from
+        the counts, repeat offsets 1, 4 and 8, an ID from the content's
+        hash unless one was asked for.
+*/
+#define ZSTD_TRAIN_SAMPLE 131072
+#define ZSTD_TRAIN_DMER 8
+#define ZSTD_TRAIN_LOG 20
+
+typedef struct
+{
+        p8 address_to bytes;
+        positive address_to sizes;
+        positive count;
+        positive total;
+} zstd_train_set;
+
+static bool zstd_train_load(string_address address_to paths, positive count,
+                            zstd_train_set address_to set)
+{
+        positive total = 0;
+
+        for (positive i = 0; i < count; i++)
+        {
+                bipolar const handle = system_open_at(AT_FDCWD, paths[i], FILE_READ);
+                file_facts facts;
+
+                if (handle < 0)
+                {
+                        string_format(log_error, "zstd: error 31 : Can't open %s \n", paths[i]);
+                        return false;
+                }
+                if (file_look_code(handle, (string_address)"", AT_EMPTY_PATH, address_of facts) == 0 &&
+                    (facts.mode & MODE_FORMAT) == MODE_FILE)
+                        total += facts.size < ZSTD_TRAIN_SAMPLE ? (positive)facts.size : ZSTD_TRAIN_SAMPLE;
+                system_close(handle);
+        }
+        if (!total || total > ((positive)1 << 31))
+        {
+                string_format(log_error, "zstd: error 14 : nothing to train on \n");
+                return false;
+        }
+        set->bytes = memory_checked(total + 64);
+        set->sizes = memory_checked(count * sizeof(positive));
+        if (!set->bytes || !set->sizes)
+                return false;
+        set->count = 0;
+        set->total = 0;
+        for (positive i = 0; i < count; i++)
+        {
+                bipolar const handle = system_open_at(AT_FDCWD, paths[i], FILE_READ);
+                positive got = 0;
+
+                if (handle < 0)
+                        return false;
+                while (set->total + got < total && got < ZSTD_TRAIN_SAMPLE)
+                {
+                        positive const room = total - set->total - got < ZSTD_TRAIN_SAMPLE - got
+                                                  ? total - set->total - got
+                                                  : ZSTD_TRAIN_SAMPLE - got;
+                        bipolar const n = system_read_retry((positive)handle,
+                                                            set->bytes + set->total + got, room);
+
+                        if (n <= 0)
+                                break;
+                        got += (positive)n;
+                }
+                system_close(handle);
+                if (got)
+                {
+                        set->sizes[set->count++] = got;
+                        set->total += got;
+                }
+        }
+        return set->count != 0;
+}
+
+static positive zstd_train_hash(p8 address_to p)
+{
+        return (positive)((memory_load_unaligned(p64, p) * 0x9E3779B185EBCA87ull) >>
+                          (64 - ZSTD_TRAIN_LOG));
+}
+
+/* The best segment of k bytes among [from, stop): the one whose distinct
+   strings' counts sum highest. */
+static positive zstd_train_segment(const zstd_train_set address_to set, positive from,
+                                   positive stop, positive k, p32 address_to freq,
+                                   p8 address_to active)
+{
+        positive best = from;
+        p64 best_score = 0;
+        p64 score = 0;
+        positive const dmers = k - ZSTD_TRAIN_DMER + 1;
+
+        if (stop - from <= k)
+                return from;
+        for (positive at = from; at + k <= stop; at++)
+        {
+                if (at == from)
+                {
+                        for (positive u = 0; u < dmers; u++)
+                        {
+                                positive const h = zstd_train_hash(set->bytes + from + u);
+
+                                if (!active[h]++)
+                                        score += freq[h];
+                        }
+                }
+                else
+                {
+                        positive const out = zstd_train_hash(set->bytes + at - 1);
+                        positive const in = zstd_train_hash(set->bytes + at + dmers - 1);
+
+                        if (!--active[out])
+                                score -= freq[out];
+                        if (!active[in]++)
+                                score += freq[in];
+                }
+                if (score > best_score)
+                {
+                        best_score = score;
+                        best = at;
+                }
+        }
+        /* the last window is still counted in active: clear it */
+        for (positive u = 0; u < dmers; u++)
+                active[zstd_train_hash(set->bytes + stop - k + u)] = 0;
+        return best;
+}
+
+/* A dictionary's content of at most budget bytes, into out; its size. */
+static positive zstd_train_content(const zstd_train_set address_to set, positive k,
+                                   positive budget, p8 address_to out)
+{
+        p32 address_to const freq = memory_checked((positive)4 << ZSTD_TRAIN_LOG);
+        p32 address_to const seen = memory_checked((positive)4 << ZSTD_TRAIN_LOG);
+        p8 address_to const active = memory_checked((positive)1 << ZSTD_TRAIN_LOG);
+        positive tail = budget;
+        positive epochs;
+        positive epoch_size;
+        positive at = 0;
+
+        if (!freq || !seen || !active)
+                return 0;
+        for (positive sample = 0; sample < set->count; sample++)
+        {
+                positive const size = set->sizes[sample];
+
+                for (positive u = 0; u + ZSTD_TRAIN_DMER <= size; u++)
+                {
+                        positive const h = zstd_train_hash(set->bytes + at + u);
+
+                        if (seen[h] != sample + 1)
+                        {
+                                seen[h] = (p32)(sample + 1);
+                                freq[h]++;
+                        }
+                }
+                at += size;
+        }
+        if (k > set->total)
+                k = set->total;
+        if (k < 2 * ZSTD_TRAIN_DMER)
+                k = 2 * ZSTD_TRAIN_DMER;
+        epochs = budget / k;
+        if (!epochs)
+                epochs = 1;
+        epoch_size = set->total / epochs;
+        if (epoch_size < k)
+                epoch_size = k;
+        for (positive epoch = 0; epoch < epochs && tail >= k; epoch++)
+        {
+                positive const from = epoch * epoch_size;
+                positive const stop = epoch + 1 == epochs || from + epoch_size > set->total
+                                          ? set->total
+                                          : from + epoch_size;
+                positive best;
+
+                if (from + k > set->total)
+                        break;
+                best = zstd_train_segment(set, from, stop, k, freq, active);
+                tail -= k;
+                memory_copy_apart(out + tail, set->bytes + best, k);
+                for (positive u = 0; u + ZSTD_TRAIN_DMER <= k; u++)
+                        freq[zstd_train_hash(set->bytes + best + u)] = 0;
+        }
+        memory_free(freq, (positive)4 << ZSTD_TRAIN_LOG);
+        memory_free(seen, (positive)4 << ZSTD_TRAIN_LOG);
+        memory_free(active, (positive)1 << ZSTD_TRAIN_LOG);
+        if (tail)
+                memory_copy(out, out + tail, budget - tail);
+        return budget - tail;
+}
+
+/* The bytes of a dictionary before its content: magic, ID, tables and
+   repeat offsets, from the counts of what samples parsed against content
+   of content_size bytes used.  Its size, or 0 when a table cannot be
+   written. */
+static positive zstd_train_header(zstd_train_stats address_to stats, positive content_size,
+                                  p32 id, p8 address_to out)
+{
+        static const p8 fse_symbols[3] = {35, 31, 52};
+        static const p8 fse_logs[3] = {9, 8, 9};
+        p8 weight[256];
+        p8 length[256];
+        positive max_bits;
+        p8 tree[256];
+        positive head;
+        positive at = 8;
+        p64 bits;
+        p32 count[3][53];
+        positive const of_max = zstd_highbit32((p32)(content_size + (128u << 10))) > 30
+                                    ? 30
+                                    : zstd_highbit32((p32)(content_size + (128u << 10)));
+
+        memory_store_unaligned(p32, out, ZSTD_DICT_MAGIC);
+        memory_store_unaligned(p32, out + 4, id);
+        for (positive s = 0; s < 256; s++)
+                if (!stats->lit[s])
+                        stats->lit[s] = 1;
+        zstd_huffman_shape(stats->lit, 255, length, weight, address_of max_bits, tree,
+                           address_of head, address_of bits);
+        if (!head)
+                return 0;
+        memory_copy_apart(out + at, tree, head);
+        at += head;
+        memory_fill(count, 0, sizeof(count));
+        memory_copy_apart(count[0], stats->ll, sizeof(stats->ll));
+        memory_copy_apart(count[1], stats->of, sizeof(stats->of));
+        memory_copy_apart(count[2], stats->ml, sizeof(stats->ml));
+        for (positive k = 0; k < 3; k++)
+        {
+                static const p8 order[3] = {1, 2, 0};
+                positive const kind = order[k];
+                positive const top = kind == 1 ? of_max : fse_symbols[kind];
+                bipolar norm[53];
+                positive total = 0;
+                positive last = 0;
+                p8 log;
+                positive described;
+
+                for (positive s = 0; s <= top; s++)
+                {
+                        if (!count[kind][s])
+                                count[kind][s] = 1;
+                        total += count[kind][s];
+                }
+                log = zstd_fse_log(total, top, fse_logs[kind]);
+                memory_fill(norm, 0, sizeof(norm));
+                if (!zstd_normalize(count[kind], top + 1, total, log, total >= 2048, norm,
+                                    address_of last))
+                        return 0;
+                described = zstd_write_norm(out + at, norm, last, log);
+                if (!described)
+                        return 0;
+                at += described;
+        }
+        memory_store_unaligned(p32, out + at, 1);
+        memory_store_unaligned(p32, out + at + 4, 4);
+        memory_store_unaligned(p32, out + at + 8, 8);
+        return at + 12;
+}
+
+/* What samples, parsed with content as the dictionary, count. */
+static bool zstd_train_count(const zstd_train_set address_to set, p8 address_to content,
+                             positive content_size, zstd_train_stats address_to stats)
+{
+        positive at = 0;
+        zstd_params params;
+
+        zstd_dict_on = true;
+        zstd_dict_entropy = false;
+        zstd_dict_content = content;
+        zstd_dict_size = content_size;
+        zstd_dict_rep[0] = 1;
+        zstd_dict_rep[1] = 4;
+        zstd_dict_rep[2] = 8;
+        zstd_train_sink = stats;
+        zstd_single_job = true;
+        zstd_out_fd = -1;
+        zstd_output.bytes = null;
+        for (positive i = 0; i < set->count; i++)
+        {
+                zstd_level_params(3, 0, set->sizes[i] + content_size, address_of params);
+                if (!zstd_encode_start(address_of params, false) ||
+                    !zstd_encode_write(set->bytes + at, set->sizes[i]) || !zstd_encode_end())
+                {
+                        zstd_train_sink = null;
+                        return false;
+                }
+                at += set->sizes[i];
+        }
+        zstd_train_sink = null;
+        return true;
+}
+
+/* The bytes a sample of the set takes packed with the dictionary in bytes. */
+static positive zstd_train_score(const zstd_train_set address_to set, p8 address_to dict,
+                                 positive size)
+{
+        positive at = 0;
+        positive total = 0;
+        positive const step = set->count > 64 ? set->count / 64 : 1;
+        p8 address_to const room = memory_checked(ZSTD_TRAIN_SAMPLE + 4096);
+        zstd_params params;
+
+        if (!room || !zstd_dictionary_load(dict, size))
+                return (positive)-1;
+        zstd_single_job = true;
+        for (positive i = 0; i < set->count; i++)
+        {
+                if (i % step == 0)
+                {
+                        zstd_output.bytes = room;
+                        zstd_output.room = ZSTD_TRAIN_SAMPLE + 4096;
+                        zstd_output.used = 0;
+                        zstd_out_fd = -1;
+                        zstd_level_params(3, 0, set->sizes[i] + zstd_dict_size, address_of params);
+                        if (!zstd_encode_start(address_of params, false) ||
+                            !zstd_encode_write(set->bytes + at, set->sizes[i]) || !zstd_encode_end())
+                                total = (positive)-1;
+                        else
+                                total += zstd_output.used;
+                }
+                at += set->sizes[i];
+        }
+        zstd_output.bytes = null;
+        memory_free(room, ZSTD_TRAIN_SAMPLE + 4096);
+        return total;
+}
+
+static b32 zstd_cli_train(void)
+{
+        string_address paths[4096];
+        positive nfiles = 0;
+        string_address output = "dictionary";
+        positive maxdict = 112640;
+        p32 forced_id = 0;
+        positive const count = (positive)program_argument_count();
+        zstd_train_set set = {0};
+        p8 address_to best = null;
+        positive best_size = 0;
+        positive best_score = (positive)-1;
+        zstd_train_stats address_to stats;
+        bool quiet = false;
+
+        for (positive i = 1; i < count; i++)
+        {
+                string_address const word = program_argument((b32)i);
+                positive value = 0;
+
+                if (string_equals(word, "--"))
+                {
+                        for (i++; i < count && nfiles < 4096; i++)
+                                paths[nfiles++] = program_argument((b32)i);
+                        break;
+                }
+                if (string_has_prefix(word, "--train"))
+                        continue;
+                if (string_equals(word, "-o") && i + 1 < count)
+                        output = program_argument((b32)++i);
+                else if (word[0] == '-' && word[1] == 'o' && word[2])
+                        output = word + 2;
+                else if (string_has_prefix(word, "--maxdict=") &&
+                         zstd_cli_number(word + 10, address_of value))
+                        maxdict = value;
+                else if (string_has_prefix(word, "--dictID=") &&
+                         zstd_cli_number(word + 9, address_of value))
+                        forced_id = (p32)value;
+                else if (string_equals(word, "-q") || string_equals(word, "--quiet"))
+                        quiet = true;
+                else if (word[0] == '-' && word[1])
+                        continue;
+                else if (nfiles < 4096)
+                        paths[nfiles++] = word;
+        }
+        if (!nfiles)
+        {
+                string_format(log_error, "zstd: error 14 : nothing to train on \n");
+                return 1;
+        }
+        if (maxdict < 256)
+                maxdict = 256;
+        if (!zstd_train_load(paths, nfiles, address_of set))
+                return 1;
+        if (!quiet && maxdict / 10 > set.total)
+                string_format(log_error,
+                              "WARNING: The maximum dictionary size %p is too large compared to the "
+                              "source size %p! This may lead to a subpar dictionary! We recommend "
+                              "training on sources at least 10x, and preferably 100x the size of the "
+                              "dictionary! \n",
+                              maxdict, set.total);
+        stats = memory_checked(sizeof(zstd_train_stats));
+        best = memory_checked(maxdict + 4096);
+        if (!stats || !best)
+                return 1;
+        zstd_cli_no_dict_id = false;
+        for (positive attempt = 0; attempt < 2; attempt++)
+        {
+                positive const k = attempt ? 256 : 1024;
+                p8 address_to const dict = memory_checked(maxdict + 4096);
+                p8 address_to const content = memory_checked(maxdict + 4096);
+                positive content_size;
+                positive header;
+                positive dict_size;
+                p64 hash_id;
+                p32 id;
+
+                if (!dict || !content)
+                        return 1;
+                content_size = zstd_train_content(address_of set, k, maxdict - 384, content);
+                if (!content_size)
+                        continue;
+                memory_fill(stats, 0, sizeof(zstd_train_stats));
+                if (!zstd_train_count(address_of set, content, content_size, stats))
+                        continue;
+                {
+                        hash_xxh64_begin(address_of zstd_enc_hash, 0);
+                        hash_xxh64_add(address_of zstd_enc_hash, content, content_size);
+                        hash_id = hash_xxh64_finish(address_of zstd_enc_hash);
+                        id = forced_id ? forced_id : (p32)(hash_id % (((p64)1 << 31) - 32768)) + 32768;
+                }
+                header = zstd_train_header(stats, content_size, id, dict);
+                if (!header)
+                        continue;
+                if (header + content_size > maxdict)
+                {
+                        positive const drop = header + content_size - maxdict;
+
+                        content_size -= drop;
+                        memory_copy(content, content + drop, content_size);
+                }
+                memory_copy(dict + header, content, content_size);
+                dict_size = header + content_size;
+                {
+                        positive const score = zstd_train_score(address_of set, dict, dict_size);
+
+                        if (score < best_score)
+                        {
+                                best_score = score;
+                                memory_copy(best, dict, dict_size);
+                                best_size = dict_size;
+                        }
+                }
+        }
+        zstd_dict_on = false;
+        if (!best_size)
+        {
+                string_format(log_error, "zstd: error 20 : dictionary training failed \n");
+                return 1;
+        }
+        {
+                bipolar const handle = system_open_at_mode(AT_FDCWD, output, FILE_WRITE, 0644);
+
+                if (handle < 0 || system_write_all((positive)handle, best, best_size) != best_size)
+                {
+                        string_format(log_error, "zstd: error 31 : cannot write dictionary %s \n", output);
+                        return 1;
+                }
+                system_close(handle);
+        }
+        if (!quiet)
+                string_format(log_error, "Save dictionary of size %p into file %s \n", best_size, output);
+        return 0;
+}
+
 static b32 file_zstd(void)
 {
+        for (positive i = 1; i < (positive)program_argument_count(); i++)
+        {
+                string_address const word = program_argument((b32)i);
+
+                if (string_equals(word, "--"))
+                        break;
+                if (string_has_prefix(word, "--train"))
+                        return zstd_cli_train();
+        }
         file_codec_cli codec = {
             .name = "zstd", .decode_name = "unzstd", .cat_name = "zstdcat",
             .usage =
                 "Usage: zstd [-cdfkqzC#] [-T#] [--ultra] [--fast[=#]] [--long[=#]]\n"
-                "            [--single-thread] [--no-check] [-o FILE] [--rm] [FILE...]",
+                "            [--single-thread] [--no-check] [-D DICT] [--no-dictID]\n"
+                "            [-o FILE] [--rm] [FILE...]\n"
+                "       zstd --train FILE... [-o DICT] [--maxdict=#] [--dictID=#]",
             .version = "zstd from moonwater",
             .status = address_of zstd_status, .suffixes = zstd_suffixes,
             .suffix_count = array_count(zstd_suffixes),
