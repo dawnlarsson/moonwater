@@ -32588,10 +32588,14 @@ enum
         SORT_GENERAL_NUMBER,
 };
 
+// The byte the locale writes a decimal point with: a comma under fr_FR,
+// where strtold reads 1,5 as a number and 1.5 as the number 1.
+static p8 sort_point;
+
 static inline INLINE bool sort_general_byte(p8 byte)
 {
         return byte_is_alnum(byte) || byte == '.' || byte == '+' || byte == '-' ||
-               byte == '_' || byte == '(' || byte == ')';
+               byte == '_' || byte == '(' || byte == ')' || (sort_point && byte == sort_point);
 }
 
 static sort_general sort_general_read(p8 address_to text, positive length,
@@ -32617,6 +32621,10 @@ static sort_general sort_general_read(p8 address_to text, positive length,
 
         memory_copy(copy, text + at, stop - at);
         copy[stop - at] = 0;
+
+        if (sort_point)
+                for (positive i = 0; i < stop - at; i++)
+                        copy[i] = copy[i] == '.' ? 'x' : copy[i] == sort_point ? '.' : copy[i];
 
         union
         {
@@ -33026,11 +33034,29 @@ static PURE bipolar sort_compare_human(p8 address_to a, positive la, p8 address_
 // last resort is what actually orders the text. The names are date's, read
 // three letters deep without regard to case.
 
+// The months a locale spells, when this machine has its data: the whole
+// abbreviated name, as GNU's inittables takes it, and not three letters.
+static string_address sort_months[12];
+static bool sort_months_local;
+
 static b32 sort_month_of(p8 address_to at, positive length)
 {
         positive scan = 0;
 
         scan = string_span_max(at, length, sort_blanks);
+
+        if (sort_months_local)
+        {
+                for (b32 m = 0; m < 12; m++)
+                {
+                        positive size = string_length(sort_months[m]);
+
+                        if (size && length - scan >= size &&
+                            !memory_compare_ascii_case(at + scan, sort_months[m], size))
+                                return m + 1;
+                }
+                return 0;
+        }
 
         if (length - scan < 3)
                 return 0;
@@ -38900,6 +38926,18 @@ static b32 sort_check(bool quiet)
 
 static b32 text_sort()
 {
+        sort_months_local = locale_open(LOCALE_TIME) != null;
+        for (positive m = 0; sort_months_local && m < 12; m++)
+        {
+                sort_months[m] = locale_string(LOCALE_TIME, LOCALE_TIME_ABMON + m);
+                sort_months_local = sort_months[m] != null;
+        }
+        {
+                string_address point = locale_open(LOCALE_NUMERIC)
+                                          ? locale_string(LOCALE_NUMERIC, LOCALE_NUMERIC_DECIMAL) : null;
+
+                sort_point = point && point[0] && !point[1] && point[0] != '.' ? (p8)point[0] : 0;
+        }
         file_taking taking = {
             .program = (string_address) "sort",
             .options = sort_options,

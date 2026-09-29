@@ -5906,6 +5906,313 @@ static string_address file_environment(string_address name)
 }
 
 /*
+        The locale's own data, read from the C library's compiled files where
+        this machine has them: /usr/lib/locale/NAME/LC_CATEGORY, or the
+        locale-archive that holds the same files for a name that is not a
+        directory. A locale that is not there -- C, POSIX, or a name this
+        machine never built, which the C library turns into C -- answers
+        nothing, and every tool keeps its own built-in words. Only the
+        categories the tools ask for are read, each once.
+
+        A category file is a magic word, a count, that many offsets from the
+        start of the file, and the strings the offsets name; which string is
+        which is the C library's langinfo order, the constants below.
+*/
+enum
+{
+        LOCALE_CTYPE,
+        LOCALE_NUMERIC,
+        LOCALE_TIME,
+        LOCALE_COLLATE,
+        LOCALE_CATEGORIES,
+};
+
+typedef struct
+{
+        byte_store file;
+        bool tried;
+        bool have;
+        positive count;
+        p8 name[64];
+} locale_category;
+
+// LC_NUMERIC's strings.
+#define LOCALE_NUMERIC_DECIMAL 0
+#define LOCALE_NUMERIC_THOUSANDS 1
+#define LOCALE_NUMERIC_GROUPING 2
+// LC_TIME's: three sets of days and months, then the formats.
+#define LOCALE_TIME_ABDAY 0
+#define LOCALE_TIME_DAY 7
+#define LOCALE_TIME_ABMON 14
+#define LOCALE_TIME_MON 26
+#define LOCALE_TIME_AM 38
+#define LOCALE_TIME_PM 39
+#define LOCALE_TIME_D_T_FMT 40
+#define LOCALE_TIME_D_FMT 41
+#define LOCALE_TIME_T_FMT 42
+#define LOCALE_TIME_T_FMT_AMPM 43
+#define LOCALE_TIME_DATE_FMT 108
+#define LOCALE_TIME_ALT_MON 111
+
+static locale_category locale_categories[LOCALE_CATEGORIES];
+
+static string_address locale_category_names[LOCALE_CATEGORIES] = {
+    "LC_CTYPE", "LC_NUMERIC", "LC_TIME", "LC_COLLATE"};
+
+// The name the environment gives a category: LC_ALL, then its own variable,
+// then LANG; null for C, POSIX or nothing.
+static string_address locale_named(positive category)
+{
+        string_address name = file_environment((string_address) "LC_ALL");
+
+        if (!name || !name[0])
+                name = file_environment(locale_category_names[category]);
+        if (!name || !name[0])
+                name = file_environment((string_address) "LANG");
+        if (!name || !name[0] || string_equals(name, "C") || string_equals(name, "POSIX"))
+                return null;
+        return name;
+}
+
+static bool locale_read_all(string_address path, byte_store address_to into)
+{
+        bipolar handle = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC);
+
+        if (handle < 0)
+                return false;
+        into->used = 0;
+        for (;;)
+        {
+                if (!byte_store_reserve(into, into->used + 4097, 4096))
+                        break;
+
+                bipolar got = system_read_retry((positive)handle, into->bytes + into->used, 4096);
+
+                if (got < 0)
+                {
+                        system_close((positive)handle);
+                        return false;
+                }
+                if (!got)
+                {
+                        system_close((positive)handle);
+                        return into->used >= 8;
+                }
+                into->used += (positive)got;
+        }
+        system_close((positive)handle);
+        return false;
+}
+
+// One file out of the archive: its offset and length by category, for a
+// name in the archive's table.
+static bool locale_archive_read(string_address name, positive category,
+                                byte_store address_to into)
+{
+        bipolar handle = system_open_at(AT_FDCWD, (string_address) "/usr/lib/locale/locale-archive",
+                                        FILE_READ | O_CLOEXEC);
+        p32 head[12];
+
+        if (handle < 0)
+                return false;
+
+        bool found = false;
+        bipolar got = system_read_retry((positive)handle, head, sizeof(head));
+
+        if (got == (bipolar)sizeof(head) && head[0] == 0xde020109u)
+        {
+                positive table = head[2];
+                positive room = head[4];
+                positive length = string_length(name);
+
+                for (positive at = 0; at < room && !found; at++)
+                {
+                        p32 entry[3];
+
+                        if (system_seek((positive)handle, (bipolar)(table + 12 * at), 0) < 0 ||
+                            system_read_retry((positive)handle, entry, 12) != 12 || !entry[1])
+                                continue;
+
+                        p8 text[80];
+
+                        if (system_seek((positive)handle, entry[1], 0) < 0)
+                                continue;
+                        got = system_read_retry((positive)handle, text, sizeof(text) - 1);
+                        if (got <= 0)
+                                continue;
+                        text[got] = end;
+                        if (string_length((string_address)text) != length ||
+                            memory_compare(text, name, length))
+                                continue;
+
+                        p32 record[2];
+
+                        if (system_seek((positive)handle, entry[2] + 4 + 8 * category, 0) < 0 ||
+                            system_read_retry((positive)handle, record, 8) != 8 ||
+                            record[1] < 8 || record[1] > (1 << 20))
+                                break;
+                        if (!byte_store_reserve(into, record[1] + 1, 4096) ||
+                            system_seek((positive)handle, record[0], 0) < 0 ||
+                            system_read_retry((positive)handle, into->bytes, record[1]) != (bipolar)record[1])
+                                break;
+                        into->used = record[1];
+                        found = true;
+                }
+        }
+        system_close((positive)handle);
+        return found;
+}
+
+// Three pieces into a buffer, cut off at its size.
+static fn locale_join(p8 address_to into, positive room, string_address a,
+                      string_address b, string_address c)
+{
+        positive at = 0;
+        string_address parts[3] = {a, b, c};
+
+        for (positive i = 0; i < 3; i++)
+                for (positive j = 0; parts[i][j] && at + 1 < room; j++)
+                        into[at++] = (p8)parts[i][j];
+        into[at] = end;
+}
+
+// The category's file for the locale the environment names, or null.
+static locale_category address_to locale_open(positive category)
+{
+        locale_category address_to one = locale_categories + category;
+
+        if (one->tried)
+                return one->have ? one : null;
+        one->tried = true;
+
+        string_address name = locale_named(category);
+
+        if (!name)
+                return null;
+
+        // NAME.CODESET@MODIFIER: the C library looks for the codeset in its
+        // normal form (letters and digits, lower case), then as written.
+        p8 language[48];
+        p8 normal[24];
+        p8 written[24];
+        positive at = 0;
+
+        while (name[at] && name[at] != '.' && name[at] != '@' && at < sizeof(language) - 1)
+        {
+                language[at] = (p8)name[at];
+                at++;
+        }
+        language[at] = end;
+
+        positive have = 0;
+        positive spelled = 0;
+
+        if (name[at] == '.')
+        {
+                for (at++; name[at] && name[at] != '@'; at++)
+                {
+                        if (spelled < sizeof(written) - 1)
+                                written[spelled++] = (p8)name[at];
+                        if (byte_is_alpha(name[at]) || byte_is_digit(name[at]))
+                        {
+                                if (have < sizeof(normal) - 1)
+                                        normal[have++] = byte_to_lower(name[at]);
+                        }
+                }
+        }
+        normal[have] = end;
+        written[spelled] = end;
+
+        string_address tries[3] = {null, null, null};
+        p8 first[80], second[80], third[80];
+
+        if (have)
+        {
+                locale_join(first, sizeof(first), (string_address)language, ".", (string_address)normal);
+                locale_join(second, sizeof(second), (string_address)language, ".", (string_address)written);
+                tries[0] = (string_address)first;
+                tries[1] = (string_address)second;
+        }
+        // A name with a codeset is that codeset's locale or none, as the C
+        // library has it; a bare one is the locale of that name.
+        if (!have)
+        {
+                locale_join(third, sizeof(third), (string_address)language, "", "");
+                tries[2] = (string_address)third;
+        }
+
+        for (positive i = 0; i < 3; i++)
+        {
+                if (!tries[i])
+                        continue;
+
+                p8 path[160];
+                p8 below[120];
+
+                locale_join(below, sizeof(below), (string_address) "/usr/lib/locale/", tries[i], "/");
+                locale_join(path, sizeof(path), (string_address)below,
+                            locale_category_names[category], "");
+                if (locale_read_all((string_address)path, address_of one->file) ||
+                    locale_archive_read(tries[i], category, address_of one->file))
+                {
+                        p32 address_to head = (p32 address_to)(address_any)one->file.bytes;
+
+                        if (one->file.used >= 8 && head[1] * 4 + 8 <= one->file.used)
+                        {
+                                one->count = head[1];
+                                one->have = true;
+                                return one;
+                        }
+                }
+        }
+        return null;
+}
+
+// String number INDEX of a category, or null.
+static string_address locale_string(positive category, positive index)
+{
+        locale_category address_to one = locale_open(category);
+
+        if (!one || index >= one->count)
+                return null;
+
+        p32 address_to head = (p32 address_to)(address_any)one->file.bytes;
+        positive at = head[2 + index];
+
+        if (at >= one->file.used)
+                return null;
+        one->file.bytes[one->file.used] = end;
+        return (string_address)one->file.bytes + at;
+}
+
+/*
+        A number as the locale writes it, in the C form the readers below
+        take: the locale's decimal point is the point, and a point of the
+        other kind is not one -- 1,5 is a number under fr_FR and 1.5 is not,
+        as strtod reads them there. Text is returned as it was where the
+        locale's point is a point, which is every locale but the few that
+        write a comma.
+*/
+static string_address locale_number_text(string_address text)
+{
+        static p8 copy[160];
+        locale_category address_to one = locale_open(LOCALE_NUMERIC);
+        string_address point = one ? locale_string(LOCALE_NUMERIC, LOCALE_NUMERIC_DECIMAL) : null;
+
+        if (!point || !point[0] || point[1] || point[0] == '.')
+                return text;
+
+        positive length = string_length(text);
+
+        if (length >= sizeof(copy))
+                return text;
+        for (positive at = 0; at < length; at++)
+                copy[at] = text[at] == '.' ? 'x' : text[at] == point[0] ? '.' : (p8)text[at];
+        copy[length] = end;
+        return (string_address)copy;
+}
+
+/*
         stdbuf -oL or -o0 in front of one of these programs. They are
         statically linked, so libstdbuf's preload never reaches them; stdbuf
         still hands them _STDBUF_O as it hands it to everything, and the
@@ -39296,6 +39603,7 @@ static bool file_duration_overflowed;
 static bool file_duration_read(string_address text, bool units,
                                 positive address_to nanoseconds)
 {
+        text = locale_number_text(text);
         file_duration_overflowed = false;
 
         string_address at = text;
@@ -46925,6 +47233,10 @@ static string_address date_chosen_format;
 */
 static bool date_locale_en_us()
 {
+        //      A locale this machine has the data of is read from that data.
+        if (locale_open(LOCALE_TIME))
+                return true;
+
         string_address name = file_environment((string_address) "LC_ALL");
 
         if (!name || !name[0])
@@ -46946,6 +47258,93 @@ static bool date_locale_en_us()
 }
 
 static byte_store date_localized;
+
+// The format %c, %x and %X stand for: the locale's own where this machine
+// has its data, and for en_US, which it may not have, the C library's.
+static string_address date_composite(p8 letter)
+{
+        string_address own = locale_open(LOCALE_TIME)
+                                 ? locale_string(LOCALE_TIME, letter == 'c' ? LOCALE_TIME_D_T_FMT
+                                                              : letter == 'x' ? LOCALE_TIME_D_FMT
+                                                                              : LOCALE_TIME_T_FMT)
+                                 : null;
+
+        if (own)
+                return own;
+        return letter == 'c'   ? (string_address) "%a %d %b %Y %r %Z"
+               : letter == 'x' ? (string_address) "%m/%d/%Y"
+                               : (string_address) "%r";
+}
+
+static byte_store date_named;
+
+// %a, %A, %b, %B, %h and %p as the locale spells them, put in as text.
+static string_address date_locale_names(string_address format, b64 when)
+{
+        if (!locale_open(LOCALE_TIME))
+                return format;
+
+        time_t stamp = (time_t)when;
+        tm broken;
+
+        if (!localtime_r(address_of stamp, address_of broken))
+                return format;
+
+        date_named.used = 0;
+        for (string_address at = format; string_get(at); at++)
+        {
+                string_address text = null;
+
+                if (string_is(at, '%') && at[1])
+                {
+                        p8 letter = at[1];
+
+                        if (letter == 'a')
+                                text = locale_string(LOCALE_TIME, LOCALE_TIME_ABDAY + (positive)broken.tm_wday);
+                        else if (letter == 'A')
+                                text = locale_string(LOCALE_TIME, LOCALE_TIME_DAY + (positive)broken.tm_wday);
+                        else if (letter == 'b' || letter == 'h')
+                                text = locale_string(LOCALE_TIME, LOCALE_TIME_ABMON + (positive)broken.tm_mon);
+                        else if (letter == 'B')
+                                text = locale_string(LOCALE_TIME, LOCALE_TIME_MON + (positive)broken.tm_mon);
+                        else if (letter == 'p')
+                                text = locale_string(LOCALE_TIME, broken.tm_hour < 12 ? LOCALE_TIME_AM : LOCALE_TIME_PM);
+
+                        if (!text)
+                        {
+                                if (!byte_store_reserve(address_of date_named, date_named.used + 3, 128))
+                                        return format;
+                                date_named.bytes[date_named.used++] = '%';
+                                date_named.bytes[date_named.used++] = (p8)at[1];
+                                at++;
+                                continue;
+                        }
+                        at++;
+                }
+                else if (string_get(at))
+                        text = null;
+
+                if (text)
+                {
+                        for (string_address one = text; string_get(one); one++)
+                        {
+                                if (!byte_store_reserve(address_of date_named, date_named.used + 3, 128))
+                                        return format;
+                                if (string_is(one, '%'))
+                                        date_named.bytes[date_named.used++] = '%';
+                                date_named.bytes[date_named.used++] = (p8)*one;
+                        }
+                        continue;
+                }
+                if (!byte_store_reserve(address_of date_named, date_named.used + 2, 128))
+                        return format;
+                date_named.bytes[date_named.used++] = (p8)*at;
+        }
+        if (!byte_store_reserve(address_of date_named, date_named.used + 1, 128))
+                return format;
+        date_named.bytes[date_named.used] = end;
+        return (string_address)date_named.bytes;
+}
 
 static string_address date_localize(string_address format)
 {
@@ -46980,9 +47379,9 @@ static string_address date_localize(string_address format)
                                 letter = at[2];
                                 skip = 2;
                         }
-                        with = letter == 'c'   ? (string_address) "%a %d %b %Y %r %Z"
-                               : letter == 'x' ? (string_address) "%m/%d/%Y"
-                               : letter == 'X' ? (string_address) "%r"
+                        with = letter == 'c'   ? date_composite('c')
+                               : letter == 'x' ? date_composite('x')
+                               : letter == 'X' ? date_composite('X')
                                                : null;
                         if (!with && at[1])
                         {
@@ -47193,9 +47592,7 @@ static string_address date_flagged_expand(string_address format, b64 when, posit
                         if (modifier == 'O')
                                 date_piece_write((address_any)at, whole);
                         else if (!date_shape(date_piece_write, when, nanoseconds,
-                                             letter == 'c'   ? (string_address) "%a %d %b %Y %r %Z"
-                                             : letter == 'x' ? (string_address) "%m/%d/%Y"
-                                                             : (string_address) "%r"))
+                                             date_composite(letter)))
                                 return format;
                         if (upper)
                                 for (positive i = 0; i < date_piece.used; i++)
@@ -47249,7 +47646,7 @@ static bool date_emit(string_address format, b64 when, positive nanoseconds)
         }
 
         if (!date_shape(log, when, nanoseconds,
-                        date_flagged_expand(format, when, nanoseconds)))
+                        date_locale_names(date_flagged_expand(format, when, nanoseconds), when)))
                 return string_report(log_error, false,
                                      "date: formatted value is too large\n");
 
@@ -47457,6 +47854,9 @@ static b32 file_date()
 
         if (!format)
                 format = resolution           ? (string_address) "%s.%N"
+                         : locale_open(LOCALE_TIME) && locale_string(LOCALE_TIME, LOCALE_TIME_DATE_FMT) &&
+                                   locale_string(LOCALE_TIME, LOCALE_TIME_DATE_FMT)[0]
+                             ? locale_string(LOCALE_TIME, LOCALE_TIME_DATE_FMT)
                          : date_locale_en_us() ? (string_address) "%a %b %e %r %Z %Y"
                                                : (string_address) "%a %b %e %H:%M:%S %Z %Y";
         date_given_format = format;
