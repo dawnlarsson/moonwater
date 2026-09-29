@@ -19064,11 +19064,73 @@ def shell_parse_scan_bounds(farm):
     return passed, total, notes
 
 
+def shell_parse_nesting(farm):
+    """A script nested thirty thousand deep, which ran the parser off its stack.
+
+    Every group, subshell, if, loop, case arm and function body parses its
+    commands by calling the parser again, so a 200 KB file of nested braces
+    was 32,000 frames and a segmentation fault in the process that read it.
+    Bash answers a syntax error past a few thousand, and so must this: below
+    the limit the script runs as it did, past it the answer is a refusal, and
+    never a signal.
+    """
+    import shutil
+    reference = shutil.which("bash")
+    target = Path(farm).resolve() / "bash"
+    if not reference or not target.exists():
+        return 0, 1, ["parse nesting needs bash and the candidate's bash"]
+    shapes = {
+        "brace": lambda n: "{ " * n + ":" + " ; }" * n,
+        "if": lambda n: "if true; then " * n + ":" + "; fi" * n,
+        "while": lambda n: "while false; do " * n + ":" + "; done" * n,
+        "case": lambda n: "case x in x) " * n + ":" + " ;; esac" * n,
+        "func": lambda n: "f() { " * n + ":" + "; }" * n,
+        "subshell": lambda n: "( " * n + ":" + " )" * n,
+    }
+    passed, total, notes = 0, 0, []
+    env = {"PATH": "/usr/bin:/bin", "LC_ALL": "C"}
+    for name, shape in shapes.items():
+        for depth in (50, 400, 200000):
+            if name == "subshell" and depth > 400:
+                depth = 20000     # a subshell forks, so the limit is what is measured
+            script = shape(depth) + "\necho end=$?\n"
+            total += 1
+            ran = []
+            for shell in (reference, str(target)):
+                #       A shell with no limit forks once for each nested
+                #       subshell, so what a timeout leaves behind is a chain
+                #       of them: the whole process group is killed, not the
+                #       one the wrapper started.
+                proc = subprocess.Popen([shell], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE, env=env, start_new_session=True)
+                try:
+                    out, _ = proc.communicate(script.encode(), timeout=20)
+                    ran.append((proc.returncode, out))
+                except subprocess.TimeoutExpired:
+                    ran.append(("timeout", b""))
+                finally:
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    proc.communicate()
+            if depth <= 400:
+                good = ran[0] == ran[1]
+            else:
+                good = isinstance(ran[1][0], int) and ran[1][0] >= 0 and b"end=0" not in ran[1][1]
+            if good:
+                passed += 1
+            elif len(notes) < 6:
+                notes.append("%s at %d: bash %r, ours %r" % (name, depth, ran[0][0], ran[1][0]))
+    return passed, total, notes
+
+
 SHELL_CHECKS = (
     shell_restricted_function_import,
     shell_glob_extended_bounded,
     shell_subscript_side_effects,
     shell_parse_scan_bounds,
+    shell_parse_nesting,
     shell_hostile_environment,
     shell_nesting_limits,
     shell_signal_dispositions,

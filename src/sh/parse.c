@@ -377,6 +377,11 @@ bool parse_eof_can_complete()
 //      token: a for loop's variable that is no name.
 static string_address parse_syntax_reason;
 
+//      How many commands deep the parse is, for parse_command's limit. Every
+//      way out of parse_command passes the one decrement, so nothing needs to
+//      put it back.
+static positive parse_depth;
+
 fn parse_reset()
 {
         parse_syntax_reason = null;
@@ -2781,7 +2786,39 @@ static b32 parse_coproc()
         return parse_state ? 0 : index;
 }
 
+/*
+        How deep one command may sit inside others.
+
+        A group, a subshell, an if, a loop, a case arm and a function body
+        each parse the commands inside them by calling parse_command again,
+        so the depth of a script is the depth of the recursion, and a script
+        of 32,000 nested braces or ifs -- a 200 KB file -- ran the process
+        off the end of its stack. Bash refuses somewhere past two thousand
+        (its parser stack is 10,000 deep) and answers a syntax error; so
+        does this, at four thousand, which no script written by a person
+        approaches.
+*/
+#define PARSE_NESTING 4096
+
+static b32 parse_command_body();
+
 static b32 parse_command()
+{
+        b32 index;
+
+        if (parse_depth >= PARSE_NESTING)
+        {
+                parse_fail();
+                return 0;
+        }
+
+        parse_depth++;
+        index = parse_command_body();
+        parse_depth--;
+        return index;
+}
+
+static b32 parse_command_body()
 {
         b32 index;
         b32 compound = true;
