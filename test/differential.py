@@ -19025,10 +19025,50 @@ def shell_subscript_side_effects(farm):
     return passed, total, notes
 
 
+def shell_parse_scan_bounds(farm):
+    """A line of unclosed (( or [[ groups and $( openings, which took quadratic work.
+
+    Each (( with no close is read to the end of the line to find that out,
+    and each $( in what it reads is a scan of its own, so 2,000 of each --
+    four kilobytes, all of it a syntax error at the first byte in bash --
+    ran thirty seconds here. The first unclosed groups on a line are read as
+    ever; after that they are the operators they would have been made.
+    """
+    import shutil
+    reference = shutil.which("bash")
+    target = Path(farm).resolve() / "bash"
+    if not reference or not target.exists():
+        return 0, 1, ["parse scan bounds need bash and the candidate's bash"]
+    passed, total, notes = 0, 0, []
+    env = {"PATH": "/usr/bin:/bin", "LC_ALL": "C"}
+    for opens, closes in ((30, 30), (500, 500), (2000, 500), (500, 2000), (2000, 2000)):
+        for name, head in (("paren", "echo " + "(" * opens), ("cond", "[[ " * opens),
+                           ("arith", "echo " + "((" * opens), ("assign", "x=" + "(" * opens)):
+            script = head + "$(" * closes + "\n"
+            total += 1
+            ran = []
+            for shell in (reference, str(target)):
+                try:
+                    ran.append(subprocess.run([shell, "-c", script], capture_output=True,
+                                              timeout=3, env=env).returncode)
+                except subprocess.TimeoutExpired:
+                    ran.append("timeout")
+            #       An unclosed x=( is an array assignment bash answers 1 and
+            #       this shell 2; that is an old difference and not this
+            #       check's, which is that the answer comes and is a refusal.
+            #       Bash itself dies of the stack past a thousand nested $( .
+            if ran[1] != "timeout" and ran[1] != 0 and (name == "assign" or ran[0] in (ran[1], -11)):
+                passed += 1
+            elif len(notes) < 6:
+                notes.append("%s %d and %d: bash %s, ours %s" % (name, opens, closes, ran[0], ran[1]))
+    return passed, total, notes
+
+
 SHELL_CHECKS = (
     shell_restricted_function_import,
     shell_glob_extended_bounded,
     shell_subscript_side_effects,
+    shell_parse_scan_bounds,
     shell_hostile_environment,
     shell_nesting_limits,
     shell_signal_dispositions,

@@ -452,6 +452,23 @@ static b32 lex_skip_held(string_address address_to at)
         return LEX_SKIP_NOTHING;
 }
 
+/*
+        How many groups on one line are allowed to run to the end of it and
+        find no close.
+
+        A ((, or a [[ where a word begins, is looked at for its close by a
+        scan of what follows, and a scan that finds none is what makes the
+        bytes ordinary operators. The next (( on the line is scanned in turn,
+        so a line of n of them and no close was n scans of n bytes -- and
+        each byte that opens a $( is a nested scan of its own -- which is
+        4,000 bytes and thirty seconds. The first few unclosed ones are read
+        as they always were; past LEX_SCAN_FAILURES they are not asked about,
+        and are the operators the failed scans would have made them. A line
+        that reaches this is a syntax error already.
+*/
+#define LEX_SCAN_FAILURES 8
+static positive lex_scan_failed;
+
 // One Bash arithmetic command token. Keeping its interior whole prevents the
 // shell operators inside ((...)) -- notably ;, &&, < and > -- from becoming
 // command-language tokens before the arithmetic parser sees them.
@@ -460,12 +477,18 @@ static KEEP string_address lex_arithmetic_end(string_address start)
         string_address at = start + 2;
         positive depth = 0;
 
+        if (lex_scan_failed >= LEX_SCAN_FAILURES)
+                return null;
+
         while (string_get(at))
         {
                 b32 skipped = lex_skip_held(address_of at);
 
                 if (skipped == LEX_SKIP_UNCLOSED)
+                {
+                        lex_scan_failed++;
                         return null;
+                }
 
                 if (skipped)
                         continue;
@@ -483,6 +506,7 @@ static KEEP string_address lex_arithmetic_end(string_address start)
                 at++;
         }
 
+        lex_scan_failed++;
         return null;
 }
 
@@ -497,6 +521,9 @@ static KEEP string_address lex_conditional_end(string_address start)
         //      [[ (a == a)]] closes where bash closes it.
         bool word_start = false;
 
+        if (lex_scan_failed >= LEX_SCAN_FAILURES)
+                return null;
+
         while (string_get(at))
         {
                 //      value is read before the step, because the ]] test
@@ -506,7 +533,10 @@ static KEEP string_address lex_conditional_end(string_address start)
                 b32 skipped = lex_skip_held(address_of at);
 
                 if (skipped == LEX_SKIP_UNCLOSED)
+                {
+                        lex_scan_failed++;
                         return null;
+                }
 
                 if (skipped)
                 {
@@ -529,6 +559,7 @@ static KEEP string_address lex_conditional_end(string_address start)
                 at++;
         }
 
+        lex_scan_failed++;
         return null;
 }
 
@@ -1094,6 +1125,7 @@ static bool lex_line_closed(string_address line)
 {
         string_address step = line;
 
+        lex_scan_failed = 0;
         lex_prepare();
 
         while (1)
@@ -1129,6 +1161,8 @@ static PURE bool lex_assignment_head(string_address text, positive length);
 b32 lex_unfinished(string_address line)
 {
         string_address step = line;
+
+        lex_scan_failed = 0;
         // A # is a comment only where a word could have started, which is the
         // same rule lex_line uses -- echo a#b is one word and not half of one.
         bool fresh = true;
@@ -1667,6 +1701,7 @@ b32 lex_line_floor(string_address line, b32 comments);
 
 HOT b32 lex_line(string_address line)
 {
+        lex_scan_failed = 0;
         lex_prepare();
         return lex_line_floor(line, lex_comments_on());
 }
