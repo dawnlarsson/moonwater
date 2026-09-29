@@ -2445,7 +2445,7 @@ static positive zstd_write_norm(p8 address_to dst, const bipolar address_to norm
                         value += maximum;
                 zstd_bout_add(address_of b, value,
                               count < maximum ? bits - 1 : bits);
-                remaining -= norm[sym];
+                remaining -= norm[sym] < 0 ? 1 : (positive)norm[sym];
                 zero = !norm[sym++];
                 while (remaining < threshold)
                         threshold >>= 1, bits--;
@@ -2463,36 +2463,162 @@ static positive zstd_log_cost(p32 n)
                                ((positive)1 << log);
 }
 
-/* Scale counts to a table of size cells: each present symbol keeps at least
-   one, a surplus comes off the largest cells and the shortfall goes to the
-   most frequent symbol. False when the symbols cannot all fit. */
-static bool zstd_normalize(const p32 address_to freq, positive count,
-                           positive n, positive size, bipolar address_to norm,
-                           positive address_to last)
+/*
+        libzstd's FSE_normalizeCount, symbol for symbol: each count scaled to
+        the table's 2^log cells by a 62-bit reciprocal, the fractions of the
+        small ones rounded by libzstd's own thresholds, a symbol of no more
+        than total >> log occupying one cell as "less than one" (-1) when
+        low_prob and as 1 otherwise, and what is left over given to the
+        largest; where that would take more than half of it the second method
+        spreads the remainder over the symbols not yet placed.  False when
+        the counts cannot be laid out (one symbol holds them all, or the
+        table is too small for the symbols).
+*/
+static bool zstd_normalize_second(bipolar address_to norm, positive log,
+                                  const p32 address_to freq, positive total,
+                                  positive count, bipolar low)
 {
-        positive total = 0, largest = 0;
+        bipolar const not_yet = -2;
+        positive distributed = 0;
+        positive to_distribute;
+        positive const low_threshold = total >> log;
+        positive low_one = (total * 3) >> (log + 1);
 
-        address_to last = 0;
-        for (positive i = 0; i < count; i++)
-                if (freq[i])
-                {
-                        norm[i] = (bipolar)(((positive)freq[i] * size) / n);
-                        if (!norm[i]) norm[i] = 1;
-                        total += (positive)norm[i];
-                        if (freq[i] > freq[largest]) largest = i;
-                        address_to last = i;
-                }
-        while (total > size)
+        for (positive s = 0; s < count; s++)
         {
-                positive most = largest;
-                for (positive i = 0; i <= address_to last; i++)
-                        if (norm[i] > norm[most]) most = i;
-                if (norm[most] <= 1) return false;
-                norm[most]--; total--;
+                if (!freq[s])
+                {
+                        norm[s] = 0;
+                        continue;
+                }
+                if (freq[s] <= low_threshold)
+                {
+                        norm[s] = low;
+                        distributed++;
+                        total -= freq[s];
+                        continue;
+                }
+                if (freq[s] <= low_one)
+                {
+                        norm[s] = 1;
+                        distributed++;
+                        total -= freq[s];
+                        continue;
+                }
+                norm[s] = not_yet;
         }
-        norm[largest] += (bipolar)(size - total);
+        to_distribute = ((positive)1 << log) - distributed;
+        if (!to_distribute)
+                return true;
+        if (total / to_distribute > low_one)
+        {
+                low_one = (total * 3) / (to_distribute * 2);
+                for (positive s = 0; s < count; s++)
+                        if (norm[s] == not_yet && freq[s] <= low_one)
+                        {
+                                norm[s] = 1;
+                                distributed++;
+                                total -= freq[s];
+                        }
+                to_distribute = ((positive)1 << log) - distributed;
+        }
+        if (distributed == count)
+        {
+                positive best = 0, best_count = 0;
+
+                for (positive s = 0; s < count; s++)
+                        if (freq[s] > best_count)
+                                best = s, best_count = freq[s];
+                norm[best] += (bipolar)to_distribute;
+                return true;
+        }
+        if (!total)
+        {
+                for (positive s = 0; to_distribute; s = (s + 1) % count)
+                        if (norm[s] > 0)
+                        {
+                                to_distribute--;
+                                norm[s]++;
+                        }
+                return true;
+        }
+        {
+                p64 const step_log = 62 - log;
+                p64 const mid = ((p64)1 << (step_log - 1)) - 1;
+                p64 const step = ((((p64)1 << step_log) * to_distribute) + mid) / total;
+                p64 running = mid;
+
+                for (positive s = 0; s < count; s++)
+                        if (norm[s] == not_yet)
+                        {
+                                p64 const stop = running + (p64)freq[s] * step;
+                                p32 const weight = (p32)(stop >> step_log) - (p32)(running >> step_log);
+
+                                if (weight < 1)
+                                        return false;
+                                norm[s] = (bipolar)weight;
+                                running = stop;
+                        }
+        }
         return true;
 }
+
+static bool zstd_normalize(const p32 address_to freq, positive count, positive total,
+                           positive log, bool low_prob, bipolar address_to norm,
+                           positive address_to last)
+{
+        static const p32 round_to_beat[8] = {0, 473195, 504333, 520860, 550000, 700000, 750000, 830000};
+        bipolar const low = low_prob ? -1 : 1;
+        p64 const scale = 62 - log;
+        p64 const step = ((p64)1 << 62) / total;
+        p64 const vstep = (p64)1 << (scale - 20);
+        bipolar to_distribute = (bipolar)1 << log;
+        positive const low_threshold = total >> log;
+        positive largest = 0;
+        bipolar largest_p = 0;
+
+        address_to last = 0;
+        for (positive s = 0; s < count; s++)
+        {
+                if (freq[s] == total)
+                        return false;
+                if (!freq[s])
+                {
+                        norm[s] = 0;
+                        continue;
+                }
+                address_to last = s;
+                if (freq[s] <= low_threshold)
+                {
+                        norm[s] = low;
+                        to_distribute--;
+                }
+                else
+                {
+                        bipolar proba = (bipolar)(((p64)freq[s] * step) >> scale);
+
+                        if (proba < 8)
+                        {
+                                p64 const beat = vstep * round_to_beat[proba];
+
+                                proba += ((p64)freq[s] * step) - ((p64)proba << scale) > beat;
+                        }
+                        if (proba > largest_p)
+                        {
+                                largest_p = proba;
+                                largest = s;
+                        }
+                        norm[s] = proba;
+                        to_distribute -= proba;
+                }
+        }
+        if (-to_distribute >= (norm[largest] >> 1))
+                return zstd_normalize_second(norm, log, freq, total, count, low);
+        norm[largest] += to_distribute;
+        return true;
+}
+
+static p8 zstd_fse_log(positive n, positive last, p8 max_log);
 
 static positive zstd_pack_weights(p8 address_to dst, p8 address_to weight,
                                    positive n)
@@ -2503,26 +2629,31 @@ static positive zstd_pack_weights(p8 address_to dst, p8 address_to weight,
         zstd_cstate state[2];
         zstd_bout b = {0};
         positive at;
-        positive max_sym;
+        positive max_sym = 0;
         positive head;
+        p8 log;
 
         if (n < 2)
                 return 0;
         for (at = 0; at < n; at++)
                 freq[weight[at]]++;
-        if (!zstd_normalize(freq, 12, n, 64, norm, address_of max_sym))
-                return 0;
+        for (at = 0; at < 12; at++)
+                if (freq[at])
+                        max_sym = at;
+        log = zstd_fse_log(n, max_sym, 6);
         /* A one-symbol, zero-bit FSE machine has no finite end marker. */
         if (freq[max_sym] == n)
         {
                 positive other = max_sym ? 0 : 1;
+                norm[max_sym] = (bipolar)(((positive)1 << log) - 1);
                 norm[other] = 1;
-                norm[max_sym]--;
                 if (other > max_sym)
                         max_sym = other;
         }
-        head = zstd_write_norm(dst + 1, norm, max_sym, 6);
-        if (!head || !zstd_ctable_build(address_of ct, norm, max_sym, 6))
+        else if (!zstd_normalize(freq, max_sym + 1, n, log, false, norm, address_of at))
+                return 0;
+        head = zstd_write_norm(dst + 1, norm, max_sym, log);
+        if (!head || !zstd_ctable_build(address_of ct, norm, max_sym, log))
                 return 0;
         b.buf = dst + 1 + head;
         b.cap = 256 - head;
@@ -2842,7 +2973,8 @@ static p8 zstd_choose_table(const zstd_fse_prior address_to prior,
                             const bipolar address_to defaults,
                             positive default_max,
                             const zstd_ctable address_to predefined,
-                            p8 address_to header, positive address_to header_n)
+                            p8 address_to header, positive address_to header_n,
+                            positive last_code)
 {
         p64 const none = (p64)-1;
         p64 basic = none;
@@ -2854,6 +2986,7 @@ static p8 zstd_choose_table(const zstd_fse_prior address_to prior,
         positive norm_last = 0;
         positive described = 0;
         p8 log;
+        bool ok;
 
         for (positive s = 0; s <= max; s++)
                 if (freq[s])
@@ -2899,8 +3032,24 @@ static p8 zstd_choose_table(const zstd_fse_prior address_to prior,
         }
         log = zstd_fse_log(nseq, last, max_log);
         memory_fill(norm, 0, sizeof(norm));
-        if (zstd_normalize(freq, last + 1, nseq, (positive)1 << log, norm,
-                           address_of norm_last) &&
+        /* The last symbol is in the first state, not the stream, so the
+           counts the table is built from leave one of it out, as libzstd's
+           do; below 2048 sequences a rare symbol takes a cell whole, above
+           it a fraction of one. */
+        {
+                p32 counted[53];
+                positive total = nseq;
+
+                memory_copy_apart(counted, freq, sizeof(counted));
+                if (counted[last_code] > 1)
+                {
+                        counted[last_code]--;
+                        total--;
+                }
+                ok = zstd_normalize(counted, last + 1, total, log, total >= 2048, norm,
+                                    address_of norm_last);
+        }
+        if (ok &&
             (described = zstd_write_norm(header + address_to header_n, norm,
                                          norm_last, log)))
         {
@@ -2908,7 +3057,7 @@ static p8 zstd_choose_table(const zstd_fse_prior address_to prior,
                 for (positive s = 0; s <= last; s++)
                         if (freq[s])
                                 own += (p64)freq[s] *
-                                       (log * 256 - zstd_log_cost((p32)norm[s]));
+                                       (log * 256 - zstd_log_cost((p32)(norm[s] < 0 ? 1 : norm[s])));
         }
         if (repeat != none && repeat <= basic && repeat <= own)
         {
@@ -3058,13 +3207,16 @@ static b32 zstd_entropy_chunk(zstd_encoder address_to e, const zstd_enc_seq addr
                 }
                 ll_mode = zstd_choose_table(address_of e->prior[0], address_of pending[0],
                                             ll_freq, nseq, 35, 9, zstd_ll_default, 35,
-                                            address_of zstd_ct_ll, at, address_of described);
+                                            address_of zstd_ct_ll, at, address_of described,
+                                            seqs[nseq - 1].ll_code);
                 of_mode = zstd_choose_table(address_of e->prior[1], address_of pending[1],
                                             of_freq, nseq, 31, 8, zstd_of_default, 28,
-                                            address_of zstd_ct_of, at, address_of described);
+                                            address_of zstd_ct_of, at, address_of described,
+                                            seqs[nseq - 1].of_code);
                 ml_mode = zstd_choose_table(address_of e->prior[2], address_of pending[2],
                                             ml_freq, nseq, 52, 9, zstd_ml_default, 52,
-                                            address_of zstd_ct_ml, at, address_of described);
+                                            address_of zstd_ct_ml, at, address_of described,
+                                            seqs[nseq - 1].ml_code);
                 if ((ll_mode | of_mode | ml_mode) > 3)
                         return 0;
                 address_to modes = (p8)(ll_mode << 6 | of_mode << 4 | ml_mode << 2);
