@@ -10532,9 +10532,6 @@ static positive text_tab_stops[TEXT_TAB_STOP_MAX];
 static positive text_tab_stop_count;
 static positive text_tab_repeat;
 static bool text_tab_repeat_relative;
-static bool text_tab_repeat_said;
-static bool text_tab_custom;
-static bool text_tab_option_seen;
 
 // Bytes expand copies as they are, and the space alone.
 static const b8 text_tab_expand_span[256] = {[0 ... 7] = 1, [11 ... 255] = 1};
@@ -10553,9 +10550,6 @@ static fn text_tab_reset()
         text_tab_stop_count = 0;
         text_tab_repeat = 8;
         text_tab_repeat_relative = false;
-        text_tab_repeat_said = false;
-        text_tab_custom = false;
-        text_tab_option_seen = false;
         text_tab_extend = 0;
         text_tab_increment = 0;
         text_tab_t_seen = false;
@@ -10717,7 +10711,6 @@ static bool text_tab_prescan(file_taking address_to taking, bool unexpand)
                         if (file_long_letter(taking, word + 2, name - 2) != 't')
                                 continue;
 
-                        text_tab_option_seen = true;
                         text_tab_t_seen = true;
 
                         if (word[name])
@@ -10734,8 +10727,6 @@ static bool text_tab_prescan(file_taking address_to taking, bool unexpand)
 
                 if (byte_is_digit(word[1]))
                 {
-                        text_tab_option_seen = true;
-
                         if (!unexpand)
                         {
                                 if (!text_tab_parse(word + 1))
@@ -10774,7 +10765,6 @@ static bool text_tab_prescan(file_taking address_to taking, bool unexpand)
                 for (positive c = 1; word[c]; c++)
                         if (word[c] == 't')
                         {
-                                text_tab_option_seen = true;
                                 text_tab_t_seen = true;
 
                                 if (word[c + 1])
@@ -10811,7 +10801,6 @@ static bool text_tab_finish_options()
         if (text_tab_extend && text_tab_increment)
                 return text_tab_complain("%s: '/' specifier is mutually exclusive with '+'\n", null);
 
-        text_tab_custom = text_tab_stop_count != 0;
         text_tab_repeat_relative = false;
 
         if (!text_tab_stop_count)
@@ -11366,7 +11355,6 @@ static bool fmt_crown;
 static bool fmt_tagged;
 static bool fmt_split;
 static bool fmt_uniform;
-static bool fmt_failed;
 static const b8 fmt_word_bytes[STRING_SET_BYTES] = {
     [0 ... 8] = 1, [14 ... 31] = 1, [33 ... 255] = 1};
 
@@ -11500,7 +11488,6 @@ static fn fmt_analyze_line(fmt_line address_to line)
 // took them once: both are mapped on first touch, and a look per line or
 // per word is a check per line or per word.
 static p8 address_to fmt_hold;
-static p8 address_to fmt_spill;
 
 static bool fmt_read_line(fmt_line address_to line)
 {
@@ -11524,24 +11511,7 @@ static bool fmt_read_line(fmt_line address_to line)
 
 static fn fmt_choose_breaks();
 static fn fmt_put_line(positive begin, positive indent);
-
-// GNU's set_other_indent (true), for a flush in the middle of a paragraph.
-static fn fmt_other_same(positive column)
-{
-        if (fmt_split)
-                fmt_other_indent = fmt_first_indent;
-        else if (fmt_crown)
-                fmt_other_indent = column;
-        else if (fmt_tagged)
-        {
-                if (column != fmt_first_indent)
-                        fmt_other_indent = column;
-                else if (fmt_other_indent == fmt_first_indent)
-                        fmt_other_indent = fmt_first_indent ? 0 : 3;
-        }
-        else
-                fmt_other_indent = fmt_first_indent;
-}
+static fn fmt_other(bool same, positive next_indent);
 
 /*
         flush_paragraph: the words held so far are formatted, the break whose
@@ -11613,7 +11583,7 @@ static fn fmt_flush()
         and where the spacing after it ends, which is what GNU's in_column
         holds at those two moments.
 */
-static bool fmt_add_word(p8 address_to at, positive length, positive space,
+static fn fmt_add_word(p8 address_to at, positive length, positive space,
                          bool end_line, positive column_before,
                          positive column_after)
 {
@@ -11623,7 +11593,7 @@ static bool fmt_add_word(p8 address_to at, positive length, positive space,
         {
                 if (fmt_character_count == FMT_CHAR_MAX)
                 {
-                        fmt_other_same(column_before);
+                        fmt_other(true, column_before);
                         fmt_flush();
                 }
 
@@ -11653,15 +11623,14 @@ static bool fmt_add_word(p8 address_to at, positive length, positive space,
 
         if (fmt_word_count == FMT_WORD_MAX - 2)
         {
-                fmt_other_same(column_after);
+                fmt_other(true, column_after);
                 fmt_flush();
         }
 
         fmt_word_count++;
-        return true;
 }
 
-static bool fmt_add_line(fmt_line address_to line)
+static fn fmt_add_line(fmt_line address_to line)
 {
         positive at = line->content;
         positive column = line->indent;
@@ -11689,12 +11658,9 @@ static bool fmt_add_line(fmt_line address_to line)
                 positive space = column - before;
                 bool end_line = at == line->length;
 
-                if (!fmt_add_word(line->at + begin, length, space, end_line,
-                                  start, column))
-                        return false;
+                fmt_add_word(line->at + begin, length, space, end_line,
+                             start, column);
         }
-
-        return true;
 }
 
 static bipolar fmt_square_cost(bipolar difference)
@@ -11895,7 +11861,7 @@ static fn fmt_file()
         fmt_other_indent = 0;
         bool have = fmt_read_line(address_of line);
 
-        while (have && !fmt_failed)
+        while (have)
         {
                 if (!line.suitable)
                 {
@@ -11910,9 +11876,7 @@ static fn fmt_file()
                 fmt_prefix_indent = line.prefix_indent;
                 fmt_first_indent = line.indent;
 
-                if (!fmt_add_line(address_of line))
-                        break;
-
+                fmt_add_line(address_of line);
                 have = fmt_read_line(address_of line);
                 bool same = have && fmt_same(address_of line);
 
@@ -11920,26 +11884,12 @@ static fn fmt_file()
 
                 if (!fmt_split)
                 {
-                        if (fmt_crown && same)
+                        if (same && (fmt_crown ||
+                                     (fmt_tagged && line.indent != fmt_first_indent)))
                         {
                                 do
                                 {
-                                        if (!fmt_add_line(address_of line))
-                                                break;
-
-                                        have = fmt_read_line(address_of line);
-                                }
-                                while (have && fmt_same(address_of line) &&
-                                       line.indent == fmt_other_indent);
-                        }
-                        else if (fmt_tagged && same &&
-                                 line.indent != fmt_first_indent)
-                        {
-                                do
-                                {
-                                        if (!fmt_add_line(address_of line))
-                                                break;
-
+                                        fmt_add_line(address_of line);
                                         have = fmt_read_line(address_of line);
                                 }
                                 while (have && fmt_same(address_of line) &&
@@ -11949,17 +11899,12 @@ static fn fmt_file()
                         {
                                 while (same && line.indent == fmt_other_indent)
                                 {
-                                        if (!fmt_add_line(address_of line))
-                                                break;
-
+                                        fmt_add_line(address_of line);
                                         have = fmt_read_line(address_of line);
                                         same = have && fmt_same(address_of line);
                                 }
                         }
                 }
-
-                if (fmt_failed)
-                        break;
 
                 fmt_words[fmt_word_count - 1].period = true;
                 fmt_words[fmt_word_count - 1].final = true;
@@ -12063,7 +12008,6 @@ static p8 fmt_digit_misplaced()
 static b32 text_fmt()
 {
         fmt_hold = text_record_hold;
-        fmt_spill = relation_spill;
         file_taking taking = {
             .program = (string_address) "fmt",
             .options = fmt_options,
@@ -12140,7 +12084,6 @@ static b32 text_fmt()
         fmt_tagged = (taking.flags & FILE_FLAG('t')) != 0;
         fmt_split = (taking.flags & FILE_FLAG('s')) != 0;
         fmt_uniform = (taking.flags & FILE_FLAG('u')) != 0;
-        fmt_failed = false;
 
         fmt_words = (fmt_word address_to)utility_arena_take(
             (FMT_WORD_MAX + 1) * sizeof(fmt_word));
@@ -12150,7 +12093,7 @@ static b32 text_fmt()
 
         b32 inputs = text_input_count();
 
-        for (b32 i = 0; i < inputs && !fmt_failed; i++)
+        for (b32 i = 0; i < inputs; i++)
         {
                 if (!text_open(text_file_name(i)))
                         continue;
@@ -12159,7 +12102,7 @@ static b32 text_fmt()
                 text_close();
         }
 
-        return text_done((text_status || fmt_failed) ? 1 : 0);
+        return text_done(text_status ? 1 : 0);
 }
 
 /*
@@ -12361,7 +12304,6 @@ static inline INLINE positive pr_plain_run(p8 address_to at, positive left)
 }
 
 static pr_stream address_to pr_stdin;
-static bool pr_stdin_read;
 static file_moment pr_now_moment;
 
 /* gnulib's xstrtoumax in base 10 with no suffixes and an stop pointer. */
@@ -12611,10 +12553,7 @@ static pr_stream address_to pr_stream_open(string_address name)
         bool standard = string_equals(name, "-");
 
         if (standard && pr_stdin)
-        {
-                pr_stdin_read = true;
                 return pr_stdin;
-        }
 
         pr_stream address_to made = (pr_stream address_to)memory_take(sizeof(pr_stream));
 
@@ -12633,10 +12572,7 @@ static pr_stream address_to pr_stream_open(string_address name)
         }
 
         if (standard)
-        {
                 pr_stdin = made;
-                pr_stdin_read = true;
-        }
         return made;
 }
 
@@ -12961,7 +12897,7 @@ static bipolar pr_text_width(string_address text, positive length)
                         if (c >= 0x20 && c < 0x7f)
                                 width++;
                         else if (c >= 0x80)
-                                width += utf8 ? 1 : 1;
+                                width += 1;
                         continue;
                 }
 
@@ -14295,7 +14231,6 @@ static fn pr_reset()
         pr_column_digits_given = false;
         pr_digits_run = false;
         pr_stdin = null;
-        pr_stdin_read = false;
         pr_buff = (byte_store){0};
         pr_line_vector = null;
         pr_end_vector = null;
@@ -17375,7 +17310,7 @@ static fn terminal_colrm_byte(terminal_state address_to state, p8 character)
                 state->remove_phase = 2;
 }
 
-/* The sole scanner for the family.  ESC consumes its command byte here, so a
+/* The sole scanner for the family./* The sole scanner for the family.  ESC consumes its command byte here, so a
    refill boundary cannot make any renderer interpret it twice. */
 static fn terminal_scan(byte_span address_to blob,
                         terminal_state address_to state, bool fill)
@@ -19639,8 +19574,6 @@ static b32 text_cut()
         bool have_delimiter = (flags & FILE_FLAG('d')) != 0;
         bool whitespace = (flags & FILE_FLAG('w')) != 0 || (by_blanks && !have_delimiter);
         bool trimmed = false;
-        positive lists = FILE_FLAG('b') | FILE_FLAG('c') | FILE_FLAG('f') | FILE_FLAG('F');
-        bool multiple_lists = (taking.repeated & lists) || bits_counted(flags & lists) > 1;
         string_address separator = file_option_value(address_of taking, 'O');
         positive separator_length = separator ? string_length(separator) : 0;
 
@@ -19681,7 +19614,6 @@ static b32 text_cut()
                 the -d -- then -d beside -w, and only then the list itself.
                 A second list never gets here; the option loop refused it.
         */
-        (void)multiple_lists;
         if (!have_list)
                 return text_done(text_operand_trouble("you must specify a list of bytes, characters, or fields",
                                                       null, null));
@@ -21153,7 +21085,6 @@ static b32 text_tr()
         b32 at = (b32)taking.first;
         string_address first = at < text_argument_count ? program_argument(at++) : null;
         string_address second = at < text_argument_count ? program_argument(at++) : null;
-        string_address extra = at < text_argument_count ? program_argument(at++) : null;
 
         /*
                 GNU's own arithmetic: two sets to translate or to delete and
@@ -21177,14 +21108,6 @@ static b32 text_tr()
                     "extra operand", program_argument((b32)taking.first + (b32)most),
                     given == 2 ? "Only one string may be given when deleting without squeezing repeats."
                                : null));
-
-        /*
-                How many sets each shape of tr wants, which it has to say out
-                loud rather than quietly ignore the ones it did not use. Two
-                to translate; one to delete or to squeeze; two to delete and
-                squeeze at once, because the second is what gets squeezed.
-        */
-        (void)extra;
 
         bool translating = second && !remove;
         p8 in_first[256];
@@ -34669,14 +34592,6 @@ static bool sort_obsolete_start(sort_key address_to key, string_address plus)
         positive stop = sort_key_flags(key, plus, at, false);
 
         return !plus[stop];
-}
-
-static fn sort_obsolete_refuse(string_address what, string_address word)
-{
-        text_flush();
-        string_format(writer_stderr, "%s: %s: %w\n", text_name, what,
-                      writer_shell_quoted_name, word);
-        sort_obsolete_failed = true;
 }
 
 // The +POS1 at index, and the -POS2 after it when there is one, as a key.
