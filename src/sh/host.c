@@ -161,6 +161,13 @@ static p16 host_machine_event_line(unsigned int event);
 static string_address host_machine_where(void);
 static fn host_machine_refused(string_address name, p16 line);
 static bool host_machine_stop(void);
+
+//      builtin.c's, which stops the machine the way reboot does; it is
+//      included after this file. The number is the one it defines.
+fn shell_stop(writer write, positive command);
+#ifndef REBOOT_RESTART
+#define REBOOT_RESTART 0x01234567
+#endif
 static b32 host_machine_run(void);
 static b32 host_radio(string_address address_to arguments, positive count);
 static fn radio_restore(void);
@@ -3500,6 +3507,165 @@ static b32 host_canvas(string_address address_to arguments, positive count)
         }
 
         return host_usage();
+}
+
+/*
+        moonwater bios: restart into the firmware's own setup screen.
+
+        UEFI firmware asks for it through one bit. OsIndicationsSupported
+        says whether the firmware has a setup screen it can start at the next
+        boot (bit 0), and OsIndications is where the operating system sets
+        that bit; the firmware acts on it and clears it. Both are EFI
+        variables, files of the efivarfs filesystem: four bytes of attributes,
+        then the value. A machine that did not start from UEFI has neither, and
+        nothing here could take it to a setup screen, so that is said instead
+        of a reboot that lands where it always did.
+
+        The variable is written last, and the machine is stopped through the
+        same path poweroff and reboot take, so the disks are synced and what
+        `moonwater bind exit` runs has run. If the machine does not stop, the
+        bit is left set and the next restart of any kind goes to setup.
+*/
+#define HOST_EFI_DIRECTORY "/sys/firmware/efi/efivars"
+#define HOST_EFI_SUPPORTED HOST_EFI_DIRECTORY "/OsIndicationsSupported-8be4df61-93ca-11d2-aa0d-00e098032b8c"
+#define HOST_EFI_INDICATIONS HOST_EFI_DIRECTORY "/OsIndications-8be4df61-93ca-11d2-aa0d-00e098032b8c"
+#define HOST_EFI_BOOT_TO_SETUP 1u
+//      Non-volatile, boot services and runtime: what the firmware's own
+//      OsIndications carries, and what it refuses a write without.
+#define HOST_EFI_ATTRIBUTES 7u
+#define HOST_FS_GETFLAGS 0x80086601u
+#define HOST_FS_SETFLAGS 0x40086602u
+#define HOST_FS_IMMUTABLE 0x10u
+
+static bipolar host_efi_get(string_address path, p64 address_to value)
+{
+        p8 bytes[16];
+        bipolar got = file_slurp_once_at(AT_FDCWD, path, bytes, sizeof(bytes));
+
+        if (got < 0)
+                return got;
+        if (got != 12)
+                return -ERROR_INVALID;
+        memory_copy(value, bytes + 4, 8);
+        return 0;
+}
+
+/* Whether the firmware offers its setup at the next boot: 1 yes, 0 not, and
+   negative when this is not UEFI or the variables cannot be read. */
+static bipolar host_efi_setup_offered(void)
+{
+        p64 value = 0;
+        bipolar handle = system_open_at(AT_FDCWD, "/sys/firmware/efi", FILE_READ | O_CLOEXEC);
+        bipolar failed;
+
+        if (handle < 0)
+                return -ENODEV;
+        system_close((positive)handle);
+
+        failed = host_efi_get(HOST_EFI_SUPPORTED, address_of value);
+        if (failed < 0)
+        {
+                //      A machine that has not mounted efivarfs yet.
+                system_mount("efivarfs", HOST_EFI_DIRECTORY, "efivarfs", 0, 0);
+                failed = host_efi_get(HOST_EFI_SUPPORTED, address_of value);
+        }
+        if (failed < 0)
+                return failed;
+        return (value & HOST_EFI_BOOT_TO_SETUP) != 0;
+}
+
+static b32 host_bios_set(void)
+{
+        p64 indications = 0;
+        p8 image[12];
+        p32 attributes = HOST_EFI_ATTRIBUTES;
+        bipolar handle;
+        positive flags = 0;
+
+        //      The bits the firmware already had set stay set.
+        (void)host_efi_get(HOST_EFI_INDICATIONS, address_of indications);
+        indications |= HOST_EFI_BOOT_TO_SETUP;
+        memory_copy(image, address_of attributes, 4);
+        memory_copy(image + 4, address_of indications, 8);
+
+        //      efivarfs marks a variable immutable, and a write to one is
+        //      refused until the mark is cleared; a variable that does not
+        //      exist yet has nothing to clear.
+        handle = system_open_at(AT_FDCWD, HOST_EFI_INDICATIONS, FILE_READ | O_CLOEXEC);
+        if (handle >= 0)
+        {
+                if (system_call_3(syscall(ioctl), (positive)handle, HOST_FS_GETFLAGS,
+                                  (positive)address_of flags) == 0 &&
+                    (flags & HOST_FS_IMMUTABLE))
+                {
+                        flags &= ~(positive)HOST_FS_IMMUTABLE;
+                        system_call_3(syscall(ioctl), (positive)handle, HOST_FS_SETFLAGS,
+                                      (positive)address_of flags);
+                }
+                system_close((positive)handle);
+        }
+
+        handle = system_open_at_mode(AT_FDCWD, HOST_EFI_INDICATIONS,
+                                     O_WRONLY | FILE_CREATE | O_CLOEXEC | O_NOFOLLOW, 0644);
+        if (handle < 0)
+                return host_fail("firmware setup", handle);
+        if (system_write_all((positive)handle, image, sizeof(image)) != sizeof(image))
+        {
+                system_close((positive)handle);
+                return host_fail("firmware setup", -EIO);
+        }
+        system_close((positive)handle);
+        return 0;
+}
+
+/* moonwater bios [reboot] */
+static b32 host_bios(string_address address_to arguments, positive count)
+{
+        bipolar offered;
+
+        if (count > 3 || (count == 3 && !string_equals(arguments[2], "reboot")))
+                return host_usage();
+
+        offered = host_efi_setup_offered();
+
+        if (count == 2)
+        {
+                if (offered > 0)
+                        string_format(log, host_label "UEFI firmware with a setup screen; "
+                                                     "moonwater bios reboot restarts into it\n");
+                else if (offered == 0)
+                        string_format(log, host_label "UEFI firmware, but it offers no setup "
+                                                     "screen at the next boot\n");
+                else if (offered == -ENODEV)
+                        string_format(log, host_label "this machine did not start from UEFI "
+                                                     "firmware, so there is no setup to restart into\n");
+                else
+                        string_format(log, host_label "UEFI firmware, but its variables cannot "
+                                                     "be read here (error %p)\n",
+                                      (positive)-offered);
+                log_flush();
+                return 0;
+        }
+
+        if (!bowl_is_root())
+                return host_refuse("%s needs root\n", "moonwater bios reboot");
+        if (offered == -ENODEV)
+                return host_refuse("this machine did not start from UEFI firmware, so "
+                                   "there is no setup to restart into%s\n", "");
+        if (offered < 0)
+                return host_fail("firmware setup", offered);
+        if (!offered)
+                return host_refuse("this firmware offers no setup screen at the next boot%s\n", "");
+
+        if (host_bios_set())
+                return 1;
+
+        string_format(log, host_label "restarting into the firmware's setup\n");
+        log_flush();
+        shell_stop(log, REBOOT_RESTART);
+
+        //      Only reached when the machine did not stop.
+        return 1;
 }
 
 /* ---- radio: wifi and bluetooth, and the nl80211 they ask the kernel through. ---- */
@@ -7184,6 +7350,152 @@ static b32 radio_wifi_add(string_address ssid, string_address pass)
 }
 
 /*
+        Forget a saved network. The list is rewritten without it, and the
+        password with it. A network the machine is joined to when this runs
+        is left too: it was saved so the machine would rejoin it, and once it
+        is not saved nothing else would ever ask for the connection to end.
+*/
+static b32 radio_wifi_remove(string_address ssid)
+{
+        radio_network networks[RADIO_WIFI_MOST];
+        bipolar lock;
+        positive count;
+        positive at;
+        bool was_joined = false;
+        positive ssid_length = string_length(ssid);
+
+        if (!ssid_length || ssid_length > RADIO_SSID_MOST)
+                return host_refuse("that network name is empty or too long%s\n",
+                                   "");
+
+        lock = radio_lock(true);
+        if (lock < 0)
+                return host_fail("wifi", lock);
+        count = radio_wifi_load(networks, RADIO_WIFI_MOST);
+
+        for (at = 0; at < count; at++)
+                if (string_equals((string_address)networks[at].ssid, ssid))
+                        break;
+
+        if (at == count)
+        {
+                crypto_forget(networks, sizeof(networks));
+                radio_unlock(lock);
+                return host_refuse("no saved network is called %s\n", ssid);
+        }
+
+        //      What the last scan says, before the network is gone from the
+        //      list the join would have read.
+        {
+                radio_air air;
+                radio_heard address_to heard;
+
+                if (radio_air_take(address_of air, RADIO_AIR_STALE | RADIO_AIR_JOINABLE) &&
+                    (heard = radio_air_find(address_of air, ssid)))
+                        was_joined = heard->joined;
+        }
+
+        for (; at + 1 < count; at++)
+                memory_copy(address_of networks[at], address_of networks[at + 1],
+                            sizeof(networks[at]));
+        count--;
+        crypto_forget(address_of networks[count], sizeof(networks[count]));
+
+        if (radio_wifi_save(networks, count) < 0)
+        {
+                crypto_forget(networks, sizeof(networks));
+                radio_unlock(lock);
+                return host_fail("wifi", -1);
+        }
+        crypto_forget(networks, sizeof(networks));
+
+        {
+                p8 last[RADIO_SSID_MOST + 1];
+                bipolar why;
+
+                if (radio_last_get(last, sizeof(last), address_of why) &&
+                    string_equals((string_address)last, ssid))
+                        radio_last_set(ssid, 0);
+        }
+
+        if (was_joined)
+                (void)radio_wifi_leave();
+        radio_unlock(lock);
+        radio_net_wake();
+
+        string_format(log, host_label "wifi forgot %s%s\n", ssid,
+                      was_joined ? " and left it" : "");
+        log_flush();
+        return 0;
+}
+
+/*
+        Wired, on and off, the way wifi has them.
+
+        Off is remembered on /root, so it holds across a reboot, and does two
+        things: the walk that picks a link to ask for a lease on no longer
+        considers a wired one, and every wired link is taken down, so the
+        lease it held is given up by the same carrier news a pulled cable
+        sends and the machine moves to whatever else has carrier. On raises
+        the links again and wakes the watcher to choose among them. Only a
+        link with Ethernet framing that is neither loopback nor a wireless
+        station is wired here.
+*/
+static bool radio_wired_is_off(void)
+{
+        return radio_word_is(NET_WIRED_POWER, "off");
+}
+
+static b32 radio_wired_set(bool on)
+{
+        netlink_wired wired;
+        bipolar handle;
+        bipolar failed;
+        bipolar written = radio_write_word(NET_WIRED_POWER, on ? "on" : "off");
+
+        if (written < 0)
+                return host_fail("wired", written);
+
+        handle = netlink_open_groups(0);
+        if (handle < 0)
+                return host_fail("wired", handle);
+
+        failed = netlink_wired_list((b32)handle, address_of wired);
+        if (failed >= 0)
+                for (positive at = 0; at < wired.count; at++)
+                        if (((wired.link[at].flags & IFF_UP) != 0) != on)
+                                (void)netlink_link_flag_up((b32)handle, wired.link[at].index, on);
+        socket_close((b32)handle);
+        radio_net_wake();
+
+        if (failed < 0)
+                return host_fail("wired", failed);
+        string_format(log, host_label "wired %s%s\n", on ? "on" : "off",
+                      wired.count ? "" : " (this machine has no wired link)");
+        log_flush();
+        return 0;
+}
+
+static b32 radio_wired_status(void)
+{
+        netlink_wired wired;
+        bipolar handle = netlink_open_groups(0);
+        bipolar failed = handle < 0 ? handle : netlink_wired_list((b32)handle, address_of wired);
+
+        if (handle >= 0)
+                socket_close((b32)handle);
+        string_format(log, host_label "wired %s\n", radio_wired_is_off() ? "off" : "on");
+        if (failed >= 0)
+                for (positive at = 0; at < wired.count; at++)
+                        string_format(log, host_label "  %s: %s, %s\n", wired.link[at].name,
+                                      (wired.link[at].flags & IFF_UP) ? "up" : "down",
+                                      (wired.link[at].flags & IFF_RUNNING) ? "carrier"
+                                                                           : "no carrier");
+        log_flush();
+        return failed < 0 ? host_fail("wired", failed) : 0;
+}
+
+/*
         Bare wifi: the switch and the saved networks as they always were,
         then why wifi cannot be used, or what is in the air -- the saved and
         joined ones marked -- and why the machine is not joined when it is
@@ -7569,6 +7881,17 @@ static b32 host_radio(string_address address_to arguments, positive count)
         if (mutate && !bowl_is_root())
                 return host_refuse("%s needs root\n", "moonwater");
 
+        if (string_equals(verb, "wired"))
+        {
+                if (count < 3)
+                        return radio_wired_status();
+                if (count == 3 && string_equals(word, "on"))
+                        return radio_wired_set(true);
+                if (count == 3 && string_equals(word, "off"))
+                        return radio_wired_set(false);
+                return host_usage();
+        }
+
         if (string_equals(verb, "wifi"))
         {
                 if (count < 3)
@@ -7608,6 +7931,8 @@ static b32 host_radio(string_address address_to arguments, positive count)
                         radio_keeper_start();
                         return result;
                 }
+                if (string_equals(word, "remove") && count == 4)
+                        return radio_wifi_remove(arguments[3]);
                 return host_usage();
         }
 
@@ -11226,11 +11551,17 @@ static fn host_usage_write(writer out)
                       "             " TERM_DIM "the desktop" TERM_RESET "\n"
                       TERM_BOLD "  canvas log|terminal" TERM_RESET
                       "         " TERM_DIM "open the kernel log or a terminal" TERM_RESET "\n"
+                      TERM_BOLD "  bios [reboot]" TERM_RESET
+                      "               " TERM_DIM "restart into the firmware's setup screen" TERM_RESET "\n"
+                      TERM_BOLD "  wired [on|off]" TERM_RESET
+                      "              " TERM_DIM "the wired links: no lease is asked on one when off" TERM_RESET "\n"
                       TERM_BOLD "  wifi [on|off]" TERM_RESET
                       "               " TERM_DIM "the wireless radio" TERM_RESET "\n"
                       TERM_BOLD "  wifi add SSID [PASSWORD|-]" TERM_RESET
                       "  " TERM_DIM "remember a network and join it; asks for" TERM_RESET "\n"
                       "                              " TERM_DIM "the password, - reads it from stdin" TERM_RESET "\n"
+                      TERM_BOLD "  wifi remove SSID" TERM_RESET
+                      "            " TERM_DIM "forget a saved network, and leave it" TERM_RESET "\n"
                       TERM_BOLD "  bluetooth [on|off]" TERM_RESET
                       "          " TERM_DIM "the bluetooth radio" TERM_RESET "\n"
                       TERM_BOLD "  bluetooth add NAME" TERM_RESET
@@ -11494,8 +11825,11 @@ static b32 host_main()
         if (string_equals(verb, "canvas"))
                 return host_canvas(arguments, count);
 
+        if (string_equals(verb, "bios"))
+                return host_bios(arguments, count);
+
         if (string_equals(verb, "wifi") || string_equals(verb, "bluetooth") ||
-            string_equals(verb, "priority"))
+            string_equals(verb, "priority") || string_equals(verb, "wired"))
                 return host_radio(arguments, count);
 
         if (string_equals(verb, "timezone") || string_equals(verb, "ntp") ||

@@ -748,6 +748,8 @@ typedef struct
         bool skip_loopback;
         bool has_hardware;
         bool wireless;
+        //      Wired links are not candidates: `moonwater wired off`.
+        bool skip_wired;
         p8 skip_count;
         p32 skip[8];
         //      The kernel's count of carrier losses, where it says one.
@@ -856,6 +858,8 @@ static bool netlink_link_seen(netlink_header address_to header, address_any cont
                         missing it means wired.
                 */
                 wireless = netlink_link_is_wireless(header, name);
+                if (search->skip_wired && !wireless)
+                        return true;
                 if (search->found)
                 {
                         bool had = (search->flags & IFF_RUNNING) != 0;
@@ -936,8 +940,10 @@ static bipolar netlink_link_find(b32 handle, netlink_search address_to search)
         return search->found ? 0 : -19;
 }
 
-//      IFF_UP raised, and every other flag left exactly as it was found.
-static bipolar netlink_link_up(b32 handle, p32 index)
+//      IFF_UP raised or dropped, and every other flag left exactly as it was
+//      found: the change mask names the one bit, or the kernel would read a
+//      zero as the whole word.
+static bipolar netlink_link_flag_up(b32 handle, p32 index, bool up)
 {
         netlink_buffer request = {0};
         netlink_link address_to body;
@@ -950,11 +956,65 @@ static bipolar netlink_link_up(b32 handle, p32 index)
         body = (netlink_link address_to)netlink_body(address_of request);
         body->family = AF_UNSPEC;
         body->index = index;
-        body->flags = IFF_UP;
+        body->flags = up ? IFF_UP : 0;
         body->change = IFF_UP;
 
         return netlink_transact(handle, address_of request, sequence,
                                 null, null);
+}
+
+static bipolar netlink_link_up(b32 handle, p32 index)
+{
+        return netlink_link_flag_up(handle, index, true);
+}
+
+static bipolar netlink_link_down(b32 handle, p32 index)
+{
+        return netlink_link_flag_up(handle, index, false);
+}
+
+/*
+        The wired links: Ethernet framing, not loopback and not a wireless
+        station. Sixteen is more than a machine has; one past that is not
+        listed.
+*/
+#define NETLINK_WIRED_MOST 16
+
+typedef struct
+{
+        p32 index;
+        p32 flags;
+        p8 name[IFNAME_SIZE];
+} netlink_wired_link;
+
+typedef struct
+{
+        netlink_wired_link link[NETLINK_WIRED_MOST];
+        positive count;
+} netlink_wired;
+
+static bool netlink_wired_seen(netlink_header address_to header, address_any context)
+{
+        netlink_wired address_to wired = (netlink_wired address_to)context;
+        netlink_link address_to link;
+        string_address name = netlink_link_name(header, address_of link);
+
+        if (!name || (link->flags & IFF_LOOPBACK) || link->kind != NETLINK_LINK_ETHER ||
+            netlink_link_is_wireless(header, name) || wired->count == NETLINK_WIRED_MOST)
+                return true;
+
+        wired->link[wired->count].index = link->index;
+        wired->link[wired->count].flags = link->flags;
+        string_copy_max_end(wired->link[wired->count].name, name, IFNAME_SIZE - 1);
+        wired->count++;
+        return true;
+}
+
+static bipolar netlink_wired_list(b32 handle, netlink_wired address_to wired)
+{
+        wired->count = 0;
+        return netlink_dump(handle, RTM_GETLINK, sizeof(netlink_link), AF_UNSPEC,
+                            netlink_wired_seen, wired);
 }
 
 /*

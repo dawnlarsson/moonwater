@@ -20,6 +20,7 @@
 #define NET_INTERNET_ROOT "/root/internet"
 #define NET_WIFI_LIST "/root/wifi"
 #define NET_WIFI_POWER "/root/wifi.power"
+#define NET_WIRED_POWER "/root/wired.power"
 #define NET_BLUETOOTH_LIST "/root/bluetooth"
 #define NET_BLUETOOTH_POWER "/root/bluetooth.power"
 
@@ -1510,6 +1511,21 @@ failed:
         return net_refused(doing, status);
 }
 
+/* Whether `moonwater wired off` was said: no wired link is then one a lease
+   is asked on, and the walk goes to whatever else has carrier. */
+static COLD bool net_wired_off(void)
+{
+        p8 text[8];
+        bipolar got = file_slurp_once_at(AT_FDCWD, NET_WIRED_POWER, text, sizeof(text));
+
+        while (got > 0 && (text[got - 1] == '\n' || text[got - 1] == ' '))
+                got--;
+        if (got < 0)
+                return false;
+        text[got] = end;
+        return string_equals(text, "off");
+}
+
 static COLD p8 net_internet_prefer(void)
 {
         p8 text[16];
@@ -1616,6 +1632,7 @@ static COLD b32 net_auto(b32 handle, net_holding address_to held)
         memory_fill(address_of search, 0, sizeof search);
         search.skip_loopback = true;
         search.prefer = net_internet_prefer();
+        search.skip_wired = net_wired_off();
         radio_links_unleased(address_of search);
 
         if (netlink_link_find(handle, address_of search) < 0)

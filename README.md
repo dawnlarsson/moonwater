@@ -35,11 +35,14 @@ moonwater bind exit remove ID|"command"
 
 moonwater canvas [on|off]              the desktop, and on which screens [on]
 moonwater canvas log|terminal          open the kernel log window, or a terminal
+moonwater bios [reboot]                whether firmware setup is on offer; reboot restarts into it (UEFI)
 moonwater keyboard [LAYOUT]            us uk de se no dk fi fr es it [us]
 
+moonwater wired [on|off]                the wired links, and which have carrier; off keeps them down across a reboot
 moonwater wifi                         the radio, saved networks and networks in range, or why there are none
 moonwater wifi on|off                  unblock or block wifi
 moonwater wifi add SSID [PASSWORD|-]   remember and join a network; asks at a terminal, - reads stdin
+moonwater wifi remove SSID             forget a saved network; leaves it if it is the joined one
 moonwater bluetooth [on|off]           the bluetooth radio and remembered devices
 moonwater bluetooth add NAME           remember a bluetooth device
 moonwater priority internet [wired|wifi]  which link wins when both are up [wired]

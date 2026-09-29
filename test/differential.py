@@ -39640,7 +39640,10 @@ def harness_moonwater_cli(argv):
                 "ntp sampling off", "ntp sampling maybe", "ntp sampling on extra", "ntp a b",
                 "keyboard", "keyboard xx", "keyboard a b", "canvas", "canvas on", "canvas off",
                 "canvas bogus", "bind", "bind init", "bind exit", "bind bogus", "wifi",
-                "wifi off", "wifi on", "wifi add", "bluetooth", "bluetooth off",
+                "wifi off", "wifi on", "wifi add", "wifi remove", "wifi remove nobody",
+                "wifi remove a b", 'wifi remove ""', "wired", "wired on", "wired off",
+                "wired on extra", "wired sideways", "bios", "bios extra", "bios bogus",
+                "bios reboot extra", "bluetooth", "bluetooth off",
                 "bluetooth on", "priority internet", "priority internet wired",
                 "priority internet wifi", "priority internet cable", "wipe extra",
                 "install", "use", "update", "live extra", "boot", "ask", "machine extra",
@@ -39663,8 +39666,11 @@ def harness_moonwater_cli(argv):
                  "UTC+14", "UTC-14", "<+0530>-5:30", "Europe/", "../../etc/passwd", "x" * 300,
                  "\x1b[31m", "tab\there", "sv", "SE", "\u00e5\u00e4\u00f6", "0", "18446744073709551616",
                  "power", "canvas on", "--", "-h", "status"]
+        #       Neither "reboot" nor "bios" carries a reboot into these words: bios
+        #       reboot sets a bit in the firmware, and a run as real root would
+        #       leave it set on the machine that ran the lane.
         verbs = ["", "status", "timezone", "time", "ntp", "keyboard", "canvas", "bind",
-                 "wifi", "bluetooth", "priority", "-h"]
+                 "wifi", "wired", "bluetooth", "priority", "-h"]
         fuzzed = []
         for number in range(300):
             argv = [rng.choice(verbs)] + [rng.choice(words) for _ in range(rng.randint(0, 4))]
@@ -39687,6 +39693,51 @@ def harness_moonwater_cli(argv):
                      "neither zone file is auto", joined[:400])
         check("(manual)" in joined.split("@@ timezone", 3)[2].split("@@status")[0],
                      "a zone with no mode beside it is manual", joined[:400])
+
+        # A saved network is forgotten, and only that one; wired keeps its
+        # word across runs and says what it did to the links it found.
+        lines, finished = session(
+            "rm -f /root/wifi /root/wired.power\n" +
+            say("wifi add scen-a passpass1") + say("wifi add scen-b passpass2") +
+            "echo '@@ saved'; cat /root/wifi; echo '@@end'\n" +
+            say("wifi remove scen-a") +
+            "echo '@@ left'; cat /root/wifi; echo '@@end'\n" +
+            say("wifi remove scen-c") + say("wifi remove scen-b") +
+            "echo '@@ emptied'; wc -c < /root/wifi; echo '@@end'\n" +
+            say("wired off") + "echo '@@ off-word'; cat /root/wired.power; echo '@@end'\n" +
+            say("wired") + say("wired on") +
+            "echo '@@ on-word'; cat /root/wired.power; echo '@@end'\n")
+        seen = answers(lines)
+        check(finished, "the wifi remove and wired session finished", "")
+
+        def block(name):
+            out = []
+            inside = False
+            for line in lines:
+                if line == f"@@ {name}":
+                    inside = True
+                elif inside and line == "@@end":
+                    break
+                elif inside:
+                    out.append(line)
+            return out
+
+        check(block("saved") == ["scen-a", "passpass1", "scen-b", "passpass2"],
+              "two saved networks are on the list", repr(block("saved")))
+        check(seen["wifi remove scen-a"]["status"] == 0 and block("left") == ["scen-b", "passpass2"],
+              "removing one leaves the other, password and all", repr(block("left")))
+        check(any("forgot scen-a" in line for line in seen["wifi remove scen-a"]["out"]),
+              "it says which network it forgot", repr(seen.get("wifi remove scen-a")))
+        check(block("emptied") == ["0"], "the last one removed leaves an empty list", repr(block("emptied")))
+        check(seen["wifi remove scen-c"]["status"] == 1 and
+              any("no saved network" in line for line in seen["wifi remove scen-c"]["out"]),
+              "an unsaved name is refused and named", repr(seen["wifi remove scen-c"]))
+        check(seen["wired off"]["status"] == 0 and block("off-word") == ["off"],
+              "wired off writes its word", repr(seen["wired off"]))
+        check(any("wired off" in line for line in seen["wired"]["out"]),
+              "bare wired reports off", repr(seen["wired"]))
+        check(seen["wired on"]["status"] == 0 and block("on-word") == ["on"],
+              "wired on writes its word", repr(seen["wired on"]))
 
         # Every zone, code and offset: set it, then read what it wrote with
         # the host's glibc and hold it to the host's tzdata.
