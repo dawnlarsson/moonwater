@@ -57779,14 +57779,17 @@ static fn byte_reader_rows(void)
                                 random ^= random << 13;
                                 random ^= random >> 7;
                                 random ^= random << 17;
-                                operation = random % 10;
+                                operation = random % 12;
                                 count = random >> 8 & 15;
                                 //      Operations 0-3 read a number of that
-                                //      many bytes; 7-9 a vector with a prefix
-                                //      of one, two or three.
+                                //      many bytes, big end first; 10 and 11
+                                //      one of two and four, little end
+                                //      first; 7-9 a vector with a prefix of
+                                //      one, two or three.
                                 width = operation < 4 ? operation + 1
+                                        : operation >= 10 ? (operation - 9) * 2
                                         : operation >= 7 ? operation - 6 : count;
-                                if (operation >= 7)
+                                if (operation >= 7 && operation <= 9)
                                 {
                                         positive prefix = width;
                                         positive size = 0;
@@ -57824,15 +57827,19 @@ static fn byte_reader_rows(void)
                                                    byte_reader_ok(&reader) == !dead;
                                         continue;
                                 }
-                                if (operation < 4)
+                                if (operation < 4 || operation >= 10)
                                 {
                                         fits = !dead && width <= length - at;
                                         for (positive i = 0; fits && i < width; i++)
-                                                want = want << 8 | bytes[at + i];
+                                                want = operation >= 10
+                                                           ? want | (p64)bytes[at + i] << 8 * i
+                                                           : want << 8 | bytes[at + i];
                                         got = operation == 0 ? byte_reader_u8(&reader)
                                               : operation == 1 ? byte_reader_u16(&reader)
                                               : operation == 2 ? byte_reader_u24(&reader)
-                                                               : byte_reader_u32(&reader);
+                                              : operation == 3 ? byte_reader_u32(&reader)
+                                              : operation == 10 ? byte_reader_u16le(&reader)
+                                                                : byte_reader_u32le(&reader);
                                         values &= got == want;
                                         if (fits)
                                                 at += width;
@@ -57882,8 +57889,8 @@ static fn byte_reader_rows(void)
                         }
                 }
 
-        check("byte_reader numbers, skips and takes agree with the model on "
-              "every length to 40",
+        check("byte_reader numbers in both byte orders, skips and takes agree "
+              "with the model on every length to 40",
               values);
         check("byte_reader leaves exactly what the model leaves, and fails when it does",
               remains);
