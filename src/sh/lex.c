@@ -894,7 +894,12 @@ static string_address lex_nesting_at(string_address at, positive nesting,
            Legacy backticks are different: Bash finds their raw closing tick
            before parsing the extracted command, so a comment does not hide
            that delimiter. */
-        bool commands = open == '(' && !string_is(at + 1, '(');
+        //      Bash 5.3's ${ command; } and ${| command; } hold commands
+        //      too, and a { in them is a group whose } is not the end.
+        bool funsub = shell_bash_compat && open == '{' &&
+                      (string_is(at + 1, ' ') || string_is(at + 1, '\t') ||
+                       string_is(at + 1, '\n') || string_is(at + 1, '|'));
+        bool commands = (open == '(' && !string_is(at + 1, '(')) || funsub;
         bool fresh = commands;
         bool comment = false;
         bool maybe_here = false;
@@ -1076,7 +1081,7 @@ static string_address lex_nesting_at(string_address at, positive nesting,
                         if (c == open)
                                 depth = depth ? 0 : 1;
                 }
-                else if (c == open && !(open == '{' && depth))
+                else if (c == open && !(open == '{' && depth && !funsub))
                         depth++;
                 else if (c == close)
                         depth--;

@@ -9033,11 +9033,20 @@ bipolar shell_funsub_run(string_address text, bool value_form,
                 shell_argv_room = 0;
                 shell_argc = 0;
 
+                //      Its lines are counted from the one it stands on, so
+                //      a diagnostic names the line of the script.
+                positive held_base = shell_eval_lineno_base;
+                positive base_now = shell_eval_lineno_base_now();
+                positive held_number = exec_line_exchange(0);
+
+                shell_eval_lineno_base = base_now;
                 exec_function_depth++;
                 exec_run_nested(text, true, 0);
                 if (exec_signal == EXEC_SIGNAL_RETURN)
                         exec_signal = EXEC_SIGNAL_NONE;
                 exec_function_depth--;
+                shell_eval_lineno_base = held_base;
+                exec_line_exchange(held_number);
 
                 address_to status = shell_status;
 

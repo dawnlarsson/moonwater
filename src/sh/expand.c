@@ -8951,8 +8951,8 @@ static COLD string_address expand_funsub(string_address step, bool quoted)
 {
         string_address inner = step + 2;
         bool value_form = string_is(inner, '|');
-        string_address close = expand_bracket_end_quoted(inner, '{', '}', false,
-                                                         true);
+        string_address after = lex_nesting(step + 1);
+        string_address close = after == step + 1 ? null : after - 1;
         p8 mark = quoted ? MARK_QUOTED : MARK_FIELD;
         positive start = expand_length;
         p8 address_to text;
