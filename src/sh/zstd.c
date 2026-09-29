@@ -4011,6 +4011,32 @@ zstd_row_insert(zstd_encoder address_to e, p32 at, p8 row_log, p8 mls)
         e->hash[(row << row_log) + head] = at;
 }
 
+/* Positions from at to stop into their rows, the tables and the width held
+   in registers: the tag bytes are stores through a byte pointer, which the
+   compiler must assume may change the table pointers it would otherwise
+   read from the encoder again after every one. */
+static __attribute__((always_inline)) inline fn
+zstd_row_run(zstd_encoder address_to e, p32 at, p32 stop, p8 row_log, p8 mls)
+{
+        p8 address_to const base = e->base;
+        p8 address_to const chain = (p8 address_to)e->chain;
+        p32 address_to const hash = e->hash;
+        p8 const hlog = (p8)(e->p.hash_log - row_log + 8);
+        positive const mask = ((positive)1 << row_log) - 1;
+
+        for (; at < stop; at++)
+        {
+                positive const h = zstd_hash_bytes(base + at, hlog, mls);
+                positive const row = h >> 8;
+                p8 address_to const cell = chain + (row << row_log) + row;
+                positive const head = (positive)(cell[0] - 1) & mask;
+
+                cell[0] = (p8)head;
+                cell[1 + head] = (p8)h;
+                hash[(row << row_log) + head] = at;
+        }
+}
+
 /* The positions from e->next to target go in; after a long match only its
    first 96 and last 32 do, as libzstd skips them. */
 static __attribute__((always_inline)) inline fn
@@ -4020,14 +4046,11 @@ zstd_row_update(zstd_encoder address_to e, p32 target, p32 low, p8 row_log, p8 m
 
         if (target > at && target - at > 384)
         {
-                p32 const bound = at + 96;
-
-                for (; at < bound; at++)
-                        zstd_row_insert(e, at, row_log, mls);
+                zstd_row_run(e, at, at + 96, row_log, mls);
                 at = target - 32;
         }
-        for (; at < target; at++)
-                zstd_row_insert(e, at, row_log, mls);
+        if (at < target)
+                zstd_row_run(e, at, target, row_log, mls);
         if (e->next < target)
                 e->next = target;
 }
