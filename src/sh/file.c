@@ -8605,6 +8605,9 @@ static bool ls_terminal;
 
 static b32 ls_status;
 static bool ls_written;
+//      Whether a directory heading has been written: the blank line goes
+//      before every heading but the first, as GNU's print_dir has it.
+static bool ls_headed;
 static bool ls_broken;
 static b64 ls_now;
 static string_address ls_program;
@@ -8980,7 +8983,7 @@ static fn ls_quote_shell(writer write, string_address name, positive length, boo
                 }
         }
 
-        if (quote_inside && !double_unsafe && !(escaping && unprintable))
+        if (quote_inside && !double_unsafe && !unprintable)
         {
                 write("\"", 1);
                 write(name, length);
@@ -10627,6 +10630,22 @@ static bool ls_recent(b64 seconds)
         return seconds <= ls_now + 3600 && seconds > ls_now - 15778476;
 }
 
+// The columns the style's stamps take for a time that is not recent: what
+// GNU's long_time_expected_width measures from the epoch.
+static positive ls_time_stamp_width()
+{
+        positive width = ls_time_style == 'f' ? 35 : 12;
+
+        if (ls_time_style == '+')
+        {
+                ls_counted = 0;
+                date_shape(ls_count_bytes, 0, 0, ls_time_format_old);
+                width = ls_counted;
+        }
+
+        return width;
+}
+
 static fn ls_time_say(ls_entry address_to entry)
 {
         b64 seconds;
@@ -10647,14 +10666,8 @@ static fn ls_time_say(ls_entry address_to entry)
                 {
                         p8 text[32];
                         positive length = bipolar_into_string(text, seconds);
-                        positive width = ls_time_style == 'f' ? 35 : 12;
+                        positive width = ls_time_stamp_width();
 
-                        if (ls_time_style == '+')
-                        {
-                                ls_counted = 0;
-                                date_shape(ls_count_bytes, 0, 0, ls_time_format_old);
-                                width = ls_counted;
-                        }
                         writer_fill(ls_out, width > length ? width - length : 0, ' ');
                         ls_out(text, length);
                         return;
@@ -10958,7 +10971,7 @@ static fn ls_print_long(string_address directory)
 
                         string_to_field_bulk(ls_out, (string_address) "?", size_width, ' ', false);
                         ls_out(" ", 1);
-                        string_to_field_bulk(ls_out, (string_address) "?", 12, ' ', false);
+                        string_to_field_bulk(ls_out, (string_address) "?", ls_time_stamp_width(), ' ', false);
                         ls_out(" ", 1);
                 }
                 else
@@ -11766,8 +11779,9 @@ static fn ls_directory(string_address path, bool heading, positive depth,
                 //      The blank line before a heading and the one after it
                 //      are newlines even under --zero: what --zero changes
                 //      is what ends a name, and a heading is not a name.
-                if (ls_written)
+                if (ls_headed)
                         ls_out("\n", 1);
+                ls_headed = true;
 
                 if (ls_dired)
                         ls_out("  ", 2);
@@ -12062,6 +12076,23 @@ static bool ls_option_seen(p8 letter, string_address value)
         if (letter == '6')
                 ls_color_when = 0;
 
+        //      A --block-size that is no size is refused where it is read,
+        //      ahead of any word that comes after it and is judged later.
+        if (letter == '7' && value)
+        {
+                positive unit;
+                bool human, si;
+                p8 suffix[sizeof(ls_size_suffix)];
+
+                if (!ls_block_size_read(value, address_of unit, address_of human,
+                                        address_of si, suffix))
+                {
+                        ls_block_size_refused(ls_program, (string_address) "--block-size", value);
+                        ls_option_status = 2;
+                        return false;
+                }
+        }
+
         if (letter == '1' || letter == '6')
         {
                 p8 chosen = ls_selected.format;
@@ -12270,6 +12301,7 @@ static b32 file_ls_as(string_address program, p8 default_format, p8 default_quot
         ls_hide_count = 0;
         ls_status = 0;
         ls_written = false;
+        ls_headed = false;
         ls_broken = false;
         ls_out_bytes = 0;
         ls_dired_count = 0;
@@ -12306,7 +12338,7 @@ static b32 file_ls_as(string_address program, p8 default_format, p8 default_quot
 
         //      --zero came after a --format=WORD that turned out not to be
         //      the long one, so it has its say after all.
-        if (ls_zero_after_word && ls_format != 'l')
+        if (ls_zero_after_word && ls_selected.format == 'J' && ls_format != 'l')
                 ls_format = '1';
 
         ls_owner_shown = !(flags & FILE_FLAG('g'));
@@ -12733,6 +12765,11 @@ static b32 file_ls_as(string_address program, p8 default_format, p8 default_quot
                 ls_measure = 0;
                 ls_count = whole;
                 ls_written = true;
+                //      The blank line after the files is written before
+                //      the first directory is tried, so one that will not
+                //      open still has it.
+                if (have)
+                        ls_out("\n", 1);
         }
 
         bool headings = given > 1 || ls_recursive;
