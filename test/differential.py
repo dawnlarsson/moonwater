@@ -9461,6 +9461,9 @@ def files_tar_formats(farm):
         os.symlink("f", tree / "sl")
         make("plain/f", b"hello\n")
         os.link(tree / "plain/f", tree / "plain/hard")
+        for at in range(300):
+            make("hardlinks/a%d" % at, b"link %d" % at)
+            os.link(tree / ("hardlinks/a%d" % at), tree / ("hardlinks/b%d" % at))
         os.mkfifo(tree / "plain/fifo")
         for name, mode in (("suid", 0o4755), ("sgid", 0o2755), ("plain", 0o644),
                            ("exec", 0o755), ("empty", 0)):

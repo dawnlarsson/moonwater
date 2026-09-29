@@ -90,6 +90,22 @@ static bool tar_field_moment(p8 address_to field, positive width,
         return true;
 }
 
+/* Eight octal digit characters, the first the most significant, read as a
+   number in a handful of instructions: false unless every byte is 0 to 7.
+   The bytes are three-bit groups spread out again by multiply and mask, the
+   way tar_octal_word spreads them out. */
+static inline bool tar_octal_eight(p64 word, p64 address_to value)
+{
+        if ((word ^ 0x3030303030303030ull) & 0xf8f8f8f8f8f8f8f8ull)
+                return false;
+        word &= 0x0707070707070707ull;
+        word = (word * 8 + (word >> 8)) & 0x00ff00ff00ff00ffull;
+        word = (word * 64 + (word >> 16)) & 0x0000ffff0000ffffull;
+        word = (word * 4096 + (word >> 32)) & 0xffffffull;
+        address_to value = word;
+        return true;
+}
+
 static bool tar_field_value(p8 address_to field, positive width,
                             p64 address_to value)
 {
@@ -100,6 +116,45 @@ static bool tar_field_value(p8 address_to field, positive width,
 
         if (width && (field[0] & 0x80))
                 return tar_base256(field, width, value);
+
+        //      The fields as archives write them, digits and a NUL or space,
+        //      without the copy and the scan.
+        if (width == 8)
+        {
+                p64 word;
+                p64 number;
+
+                memory_copy(address_of word, field, 8);
+                if ((word >> 56) == 0 || (word >> 56) == ' ')
+                {
+                        //      The last byte, not a digit, reads as a zero
+                        //      one and is shifted away.
+                        if (tar_octal_eight((word & 0x00ffffffffffffffull) |
+                                                0x3000000000000000ull,
+                                            address_of number))
+                        {
+                                address_to value = number >> 3;
+                                return true;
+                        }
+                }
+        }
+        else if (width == 12 && (field[11] == 0 || field[11] == ' ') &&
+                 field[0] >= '0' && field[0] <= '7' && field[1] >= '0' &&
+                 field[1] <= '7' && field[2] >= '0' && field[2] <= '7')
+        {
+                p64 word;
+                p64 number;
+
+                memory_copy(address_of word, field + 3, 8);
+                if (tar_octal_eight(word, address_of number))
+                {
+                        address_to value =
+                            ((p64)((field[0] - '0') * 64 + (field[1] - '0') * 8 +
+                                   (field[2] - '0'))
+                             << 24) | number;
+                        return true;
+                }
+        }
 
         if (width >= sizeof(digits))
                 return false;
@@ -130,10 +185,60 @@ static bool tar_field_value(p8 address_to field, positive width,
         return true;
 }
 
+/* Eight octal digits of the low 24 bits, most significant first, as the
+   bytes of one little-endian word: three-bit groups spread to bytes by
+   shifts and masks, then the bytes turned round and made characters. */
+static inline p64 tar_octal_word(p64 value)
+{
+        p64 word = value & 0xffffff;
+
+        word = (word | (word << 20)) & 0x00000fff00000fffull;
+        word = (word | (word << 10)) & 0x003f003f003f003full;
+        word = (word | (word << 5)) & 0x0707070707070707ull;
+#if defined(__riscv)
+        //      No byte swap instruction without Zbb, and the compiler's call
+        //      needs a library this build does not link.
+        word = ((word & 0x00ff00ff00ff00ffull) << 8) | ((word >> 8) & 0x00ff00ff00ff00ffull);
+        word = ((word & 0x0000ffff0000ffffull) << 16) | ((word >> 16) & 0x0000ffff0000ffffull);
+        word = (word << 32) | (word >> 32);
+        return word | 0x3030303030303030ull;
+#else
+        return __builtin_bswap64(word) | 0x3030303030303030ull;
+#endif
+}
+
 static fn tar_field_put_octal(p8 address_to field, positive width, p64 value)
 {
         p8 digits[32];
         positive length;
+
+        //      The widths a header has, whole and in a few instructions.
+        if (width == 8 && value < ((p64)1 << 21))
+        {
+                p64 word = tar_octal_word(value) >> 8;
+
+                memory_copy(field, address_of word, 8);
+                return;
+        }
+        if (width == 7 && value < ((p64)1 << 18))
+        {
+                p64 word = tar_octal_word(value) >> 16;
+
+                memory_copy(field, address_of word, 7);
+                return;
+        }
+        if (width == 12 && value < ((p64)1 << 33))
+        {
+                p64 word = tar_octal_word(value);
+                positive high = (positive)(value >> 24);
+
+                field[0] = (p8)('0' + ((high >> 6) & 7));
+                field[1] = (p8)('0' + ((high >> 3) & 7));
+                field[2] = (p8)('0' + (high & 7));
+                memory_copy(field + 3, address_of word, 8);
+                field[11] = end;
+                return;
+        }
 
         memory_fill(field, '0', width);
         if (!width)
@@ -187,6 +292,26 @@ static bool tar_header_ok(p8 address_to block)
                 return false;
 
         return stored == tar_header_sum(block);
+}
+
+/* The same test, given the sum of the whole block a caller already has. */
+static bool tar_header_ok_from(p8 address_to block, p32 total)
+{
+        p64 stored;
+        p64 word;
+
+        //      "006123" NUL space, as GNU writes the field.
+        memory_copy(address_of word, block + TAR_CHKSUM, 8);
+        if ((word >> 48) == 0x2000 &&
+            tar_octal_eight((word & 0x0000ffffffffffffull) | 0x3030000000000000ull,
+                            address_of stored))
+                stored >>= 6;
+        else if (!tar_field_value(block + TAR_CHKSUM, TAR_CHKSUM_WIDTH,
+                                  address_of stored))
+                return false;
+
+        return stored == total - memory_sum_bytes(block + TAR_CHKSUM, TAR_CHKSUM_WIDTH) +
+                             TAR_SPACE_SUM;
 }
 
 static positive tar_padded(p64 size)
@@ -967,6 +1092,14 @@ static positive tar_directory_order_room;
 static positive address_to tar_directory_spare;
 static positive tar_directory_spare_room;
 
+/* Directories by path: an open-addressed table of record numbers plus one,
+   kept under half full, so remembering a directory is not a walk over
+   every one remembered before (an archive of a million of them was a
+   trillion comparisons). */
+static positive address_to tar_directory_index;
+static positive tar_directory_index_slots;
+static positive tar_directory_index_room;
+
 /* A hard-link header names another archive member, not an arbitrary object
    that happened to exist below the extraction root.  Retain the identity of
    each non-directory member this run successfully materialized, replacing a
@@ -1041,17 +1174,29 @@ static positive tar_pax_body_room;
         inodes without a megabyte of BSS, and a miss still writes a
         second copy rather than refusing the archive.
 */
-#define TAR_SEEN_CAP 64
+/*
+        The first name each multiply linked file was archived under, found by
+        device and inode in a table of the entries and an arena of the names,
+        both grown as they fill and both capped so a tree of millions of links
+        cannot take the machine: past the cap a further link is written as a
+        copy of the file rather than as a link.
+*/
+#define TAR_SEEN_LIMIT ((positive)1 << 22)
+#define TAR_SEEN_NAMES_LIMIT ((positive)1 << 30)
 
 typedef struct
 {
         p64 inode;
         p64 device;
-        p32 name_at;
+        positive name_at;
+        bool used;
 } tar_seen_file;
 
-static tar_seen_file tar_seen[TAR_SEEN_CAP];
-static p8 tar_seen_names[TAR_SEEN_CAP * TAR_NAME];
+static tar_seen_file address_to tar_seen;
+static positive tar_seen_slots;
+static positive tar_seen_room;
+static p8 address_to tar_seen_names;
+static positive tar_seen_names_room;
 static positive tar_seen_used;
 static positive tar_seen_fill;
 
@@ -1060,11 +1205,22 @@ static positive tar_seen_fill;
    ASCII, and the backslash doubled, so no name can drive the terminal. */
 static fn tar_quoted(writer output, string_address name)
 {
-        for (; string_get(name); name++)
+        while (string_get(name))
         {
-                p8 byte = (p8)string_get(name);
+                string_address run = name;
+                p8 byte;
                 p8 escaped[4] = {'\\', 0, 0, 0};
 
+                //      A run of bytes that need no spelling goes out in one
+                //      write: a name is nearly all such bytes.
+                while ((byte = (p8)string_get(name)) >= ' ' && byte < 127 &&
+                       byte != '\\')
+                        name++;
+                if (name != run)
+                        output(run, (positive)(name - run));
+                if (!byte)
+                        break;
+                name++;
                 if (byte == '\\')
                         output("\\\\", 2);
                 else if (byte >= 7 && byte <= 13)
@@ -1072,15 +1228,13 @@ static fn tar_quoted(writer output, string_address name)
                         escaped[1] = "abtnvfr"[byte - 7];
                         output(escaped, 2);
                 }
-                else if (byte < ' ' || byte >= 127)
+                else
                 {
                         escaped[1] = (p8)('0' + (byte >> 6));
                         escaped[2] = (p8)('0' + ((byte >> 3) & 7));
                         escaped[3] = (p8)('0' + (byte & 7));
                         output(escaped, 4);
                 }
-                else
-                        output(address_of byte, 1);
         }
 }
 
@@ -2246,23 +2400,72 @@ static bipolar tar_member_settle_at(bipolar directory, string_address name,
         return settled;
 }
 
+static bool tar_directory_index_prepare(positive wanted)
+{
+        positive larger = tar_directory_index_slots ? tar_directory_index_slots : 64;
+
+        if (tar_directory_index_slots && wanted <= tar_directory_index_slots / 2)
+                return true;
+        while (wanted > larger / 2)
+        {
+                if (larger > positive_max / 2)
+                        return false;
+                larger *= 2;
+        }
+        if (!shell_array_room(tar_directory_index, tar_directory_index_room, larger))
+                return false;
+        memory_fill(tar_directory_index, 0, larger * sizeof(tar_directory_index[0]));
+        for (positive at = 0; at < tar_directory_count; at++)
+        {
+                positive slot = tar_directories[at].path_hash & (larger - 1);
+
+                while (tar_directory_index[slot])
+                        slot = (slot + 1) & (larger - 1);
+                tar_directory_index[slot] = at + 1;
+        }
+        tar_directory_index_slots = larger;
+        return true;
+}
+
+static tar_directory_mode address_to tar_directory_find(string_address path,
+                                                        positive hash)
+{
+        positive slot;
+
+        if (!tar_directory_index_slots)
+                return null;
+        slot = hash & (tar_directory_index_slots - 1);
+        while (tar_directory_index[slot])
+        {
+                tar_directory_mode address_to kept =
+                    tar_directories + tar_directory_index[slot] - 1;
+
+                if (kept->path_hash == hash &&
+                    string_equals(tar_directory_paths + kept->path_at, path))
+                        return kept;
+                slot = (slot + 1) & (tar_directory_index_slots - 1);
+        }
+        return null;
+}
+
 static bool tar_directory_remember(string_address path, positive mode,
                                    file_facts address_to facts,
                                    tar_member_meta address_to meta)
 {
         positive2 named = string_hash_33_length(path);
+        tar_directory_mode address_to known = tar_directory_find(path, named.x);
 
-        for (positive at = 0; at < tar_directory_count; at++)
+        if (known)
         {
-                tar_directory_mode address_to kept = tar_directories + at;
-                if (kept->path_hash == named.x &&
-                    string_equals(tar_directory_paths + kept->path_at, path))
-                {
-                        kept->mode = mode;
-                        kept->facts = *facts;
-                        kept->meta = *meta;
-                        return true;
-                }
+                known->mode = mode;
+                known->facts = *facts;
+                known->meta = *meta;
+                return true;
+        }
+        if (!tar_directory_index_prepare(tar_directory_count + 1))
+        {
+                tar_refuse("out of memory while retaining directory metadata");
+                return false;
         }
 
         positive length = named.y + 1;
@@ -2287,6 +2490,13 @@ static bool tar_directory_remember(string_address path, positive mode,
         memory_copy(tar_directory_paths + tar_directory_paths_used,
                     path, length);
         tar_directory_paths_used += length;
+        {
+                positive slot = named.x & (tar_directory_index_slots - 1);
+
+                while (tar_directory_index[slot])
+                        slot = (slot + 1) & (tar_directory_index_slots - 1);
+                tar_directory_index[slot] = tar_directory_count;
+        }
         return true;
 }
 
@@ -2297,11 +2507,10 @@ static bool tar_directory_remember(string_address path, positive mode,
 static fn tar_directory_forget(string_address path)
 {
         positive2 named = string_hash_33_length(path);
+        tar_directory_mode address_to kept = tar_directory_find(path, named.x);
 
-        for (positive at = 0; at < tar_directory_count; at++)
-                if (tar_directories[at].path_hash == named.x &&
-                    string_equals(tar_directory_paths + tar_directories[at].path_at, path))
-                        tar_directories[at].mode = TAR_DIRECTORY_GONE;
+        if (kept)
+                kept->mode = TAR_DIRECTORY_GONE;
 }
 
 static bipolar tar_directory_index_order(positive left, positive right)
@@ -2327,6 +2536,7 @@ static fn tar_directories_finish(void)
                 tar_refuse("out of memory while restoring directory metadata");
                 tar_directory_count = 0;
                 tar_directory_paths_used = 0;
+                tar_directory_index_slots = 0;
                 return;
         }
 
@@ -2363,6 +2573,7 @@ static fn tar_directories_finish(void)
 
         tar_directory_count = 0;
         tar_directory_paths_used = 0;
+        tar_directory_index_slots = 0;
 }
 
 static fn tar_reset(void)
@@ -2371,6 +2582,8 @@ static fn tar_reset(void)
         tar_at = 0;
         tar_seen_used = 0;
         tar_seen_fill = 0;
+        if (tar_seen)
+                memory_fill(tar_seen, 0, tar_seen_slots * sizeof(*tar_seen));
         tar_decoder = null;
         tar_encoder = null;
         tar_output_known = false;
@@ -2378,6 +2591,8 @@ static fn tar_reset(void)
         tar_output_stage_known = false;
         tar_directory_count = 0;
         tar_directory_paths_used = 0;
+        tar_directory_index_slots = 0;
+        tar_directory_index_slots = 0;
         tar_materialized_count = 0;
         tar_materialized_paths_used = 0;
         tar_materialized_index_slots = 0;
@@ -3245,6 +3460,8 @@ static bool tar_pax_sparse_take(bipolar archive, p64 address_to size)
                                 return false;
                 }
 mapped:
+                if ((p64)consumed > address_to size)
+                        return false;
                 address_to size -= (p64)consumed;
         }
         for (at = 0; at < tar_sparse_used; at++)
@@ -4598,7 +4815,9 @@ static fn tar_read_members(tar_members address_to run)
                 p8 shown[TAR_PATH];
                 bool escaped;
 
-                if (tar_header_zero(block))
+                p32 total = memory_sum_bytes(block, TAR_BLOCK);
+
+                if (total == 0)
                 {
                         p8 address_to second = tar_next_block(handle, false);
 
@@ -4612,7 +4831,7 @@ static fn tar_read_members(tar_members address_to run)
                         break;
                 }
 
-                if (!tar_header_ok(block))
+                if (!tar_header_ok_from(block, total))
                 {
                         tar_refuse("invalid header checksum");
                         break;
@@ -5823,36 +6042,78 @@ static p64 tar_identity(file_facts address_to facts)
         return ((p64)facts->device_major << 32) | facts->device_minor;
 }
 
+static positive tar_seen_hash(file_facts address_to facts)
+{
+        p64 mix = facts->inode * 0x9e3779b97f4a7c15ull ^ tar_identity(facts);
+
+        return (positive)(mix ^ (mix >> 29));
+}
+
 static string_address tar_seen_name(file_facts address_to facts)
 {
-        positive at;
+        positive slot;
 
-        if (facts->hard_links < 2)
+        if (facts->hard_links < 2 || !tar_seen_slots)
                 return null;
-
-        for (at = 0; at < tar_seen_used; at++)
-                if (tar_seen[at].inode == facts->inode &&
-                    tar_seen[at].device == tar_identity(facts))
-                        return tar_seen_names + tar_seen[at].name_at;
-
+        slot = tar_seen_hash(facts) & (tar_seen_slots - 1);
+        while (tar_seen[slot].used)
+        {
+                if (tar_seen[slot].inode == facts->inode &&
+                    tar_seen[slot].device == tar_identity(facts))
+                        return (string_address)(tar_seen_names + tar_seen[slot].name_at);
+                slot = (slot + 1) & (tar_seen_slots - 1);
+        }
         return null;
 }
 
 static fn tar_seen_store(file_facts address_to facts, string_address member)
 {
         positive length;
+        positive slot;
 
-        if (facts->hard_links < 2 || tar_seen_used >= TAR_SEEN_CAP)
+        if (facts->hard_links < 2 || tar_seen_used >= TAR_SEEN_LIMIT)
                 return;
 
         length = string_length(member);
-        if (length >= TAR_NAME ||
-            tar_seen_fill + length + 1 > sizeof(tar_seen_names))
+        if (length >= TAR_PATH || tar_seen_fill + length + 1 > TAR_SEEN_NAMES_LIMIT ||
+            !shell_array_room(tar_seen_names, tar_seen_names_room,
+                              tar_seen_fill + length + 1))
                 return;
+        if (tar_seen_used + 1 > tar_seen_slots / 2)
+        {
+                positive larger = tar_seen_slots ? tar_seen_slots * 2 : 1024;
+                tar_seen_file address_to old = tar_seen;
+                positive old_slots = tar_seen_slots;
+                tar_seen_file address_to fresh = memory_take_zeroed(larger, sizeof(*fresh));
 
-        tar_seen[tar_seen_used].inode = facts->inode;
-        tar_seen[tar_seen_used].device = tar_identity(facts);
-        tar_seen[tar_seen_used].name_at = (p32)tar_seen_fill;
+                if (!fresh)
+                        return;
+                for (positive at = 0; at < old_slots; at++)
+                        if (old[at].used)
+                        {
+                                file_facts moved;
+
+                                moved.inode = old[at].inode;
+                                moved.device_major = (p32)(old[at].device >> 32);
+                                moved.device_minor = (p32)old[at].device;
+                                positive place = tar_seen_hash(address_of moved) & (larger - 1);
+
+                                while (fresh[place].used)
+                                        place = (place + 1) & (larger - 1);
+                                fresh[place] = old[at];
+                        }
+                if (old)
+                        memory_give(old);
+                tar_seen = fresh;
+                tar_seen_slots = larger;
+        }
+        slot = tar_seen_hash(facts) & (tar_seen_slots - 1);
+        while (tar_seen[slot].used)
+                slot = (slot + 1) & (tar_seen_slots - 1);
+        tar_seen[slot].used = true;
+        tar_seen[slot].inode = facts->inode;
+        tar_seen[slot].device = tar_identity(facts);
+        tar_seen[slot].name_at = tar_seen_fill;
         memory_copy(tar_seen_names + tar_seen_fill, member, length + 1);
         tar_seen_fill += length + 1;
         tar_seen_used += 1;
