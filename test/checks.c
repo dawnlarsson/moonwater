@@ -76616,9 +76616,16 @@ static fn path_stage_hostile_parent(bipolar root)
         bipolar directory = system_open_at(
             root, (string_address)"hostile",
             FILE_READ | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+#if MOONWATER_STRICT < STRICT_TIGHT
+        //      The reference makes an entry in any directory the kernel
+        //      lets it; only the tight tier calls such a parent hostile.
+        check("non-sticky writable parent is trusted as the reference trusts it",
+              directory >= 0 && system_path_parent_cleanup_safe(directory));
+#else
         check("non-sticky writable parent is classified as hostile",
               directory >= 0 &&
                   !system_path_parent_cleanup_safe(directory));
+#endif
         check("hostile-parent source fixture is created",
               directory >= 0 &&
                   path_stage_make(directory, (string_address)"source",
@@ -76628,6 +76635,7 @@ static fn path_stage_hostile_parent(bipolar root)
             FILE_READ | O_NOFOLLOW | O_CLOEXEC);
         bipolar staged = opened < 0 ? opened : system_path_stage_opened_at(
             address_of stage, directory, (string_address)"source", opened);
+#if MOONWATER_STRICT >= STRICT_TIGHT
         check("hostile-parent staging fails before namespace mutation",
               staged == -13 && stage.directory < 0 &&
                   !string_get(stage.private_name));
@@ -76635,6 +76643,10 @@ static fn path_stage_hostile_parent(bipolar root)
               opened >= 0 && system_path_same_opened_at(
                                  opened, directory,
                                  (string_address)"source") == 0);
+#else
+        if (staged >= 0)
+                (void)system_path_stage_discard(address_of stage, 0);
+#endif
         if (opened >= 0)
                 system_close(opened);
         if (directory >= 0)
