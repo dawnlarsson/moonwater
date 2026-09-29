@@ -211,13 +211,25 @@ struct script_token {
         char word[SCRIPT_WORD];
 };
 
-// The library's compare takes no const, and nothing here writes through what it
-// is handed.
-#define script_same(a, b) string_equals((string_address)(a), (string_address)(b))
+/*
+        The scanner stands alone on purpose. moonwater_scan is the one reader of
+        the machine script, expanded in the kernel module and in the moonwater
+        command, and compiled by itself, with no library under it, by the
+        core_state harness in test/differential.py: so its string compare, its
+        clearing and its prefix test are these, and not lib.c's.
+*/
+static int script_eq(const char *a, const char *b)
+{
+        while (*a && *a == *b) {
+                a++;
+                b++;
+        }
+        return *a == *b;
+}
 
 static int script_word_is(const struct script_token *token, const char *text)
 {
-        return token->kind == SCRIPT_TOK_WORD && script_same(token->word, text);
+        return token->kind == SCRIPT_TOK_WORD && script_eq(token->word, text);
 }
 
 static int script_punct_is(const struct script_token *token, unsigned char value)
@@ -312,8 +324,11 @@ static void script_next(struct script_read *scan, struct script_token *token)
 {
         unsigned char value, quote, kind;
         unsigned int used = 0;
+        unsigned char *b = (unsigned char *)token;
+        unsigned long n = sizeof(*token);
 
-        memory_fill(token, 0, sizeof(*token));
+        while (n--)
+                *b++ = 0;
         while (scan->at < scan->length) {
                 value = scan->text[scan->at];
                 kind = script_kind[value];
@@ -447,13 +462,13 @@ static void script_arm(struct moonwater_overlay *into, const char *pattern,
 {
         unsigned int event, i;
 
-        if (script_same(pattern, "*")) {
+        if (script_eq(pattern, "*")) {
                 if (!into->star_line)
                         into->star_line = line;
                 return;
         }
         for (i = 0; i < MOONWATER_PAIRS; i++)
-                if (script_same(pattern, moonwater_pairs[i].name)) {
+                if (script_eq(pattern, moonwater_pairs[i].name)) {
                         script_arm_event(into, moonwater_pairs[i].on, line);
                         script_arm_event(into, moonwater_pairs[i].off, line);
                         return;
@@ -578,7 +593,7 @@ static int script_take_function(struct script_read *scan, const char *name,
 
         script_next(scan, &token);
         for (i = 0; i < MOONWATER_HOOKS; i++)
-                if (script_same(name, moonwater_hook[i].name)) {
+                if (script_eq(name, moonwater_hook[i].name)) {
                         hook = moonwater_hook[i].bit;
                         off = moonwater_hook[i].line_off;
                         break;
@@ -591,7 +606,10 @@ static int script_take_function(struct script_read *scan, const char *name,
                 if (!*slot)
                         *slot = line;
         }
-        if (!memory_compare((address_any)name, (address_any) "moonwater_", 10) && name[10])
+        if (name[0] == 'm' && name[1] == 'o' && name[2] == 'o' &&
+            name[3] == 'n' && name[4] == 'w' && name[5] == 'a' &&
+            name[6] == 't' && name[7] == 'e' && name[8] == 'r' &&
+            name[9] == '_' && name[10])
                 script_arm(into, name + 10, line);
         script_block(scan, hook == MOONWATER_HOOK_EVENT ? into : 0, 1);
         return 1;
@@ -602,8 +620,11 @@ static void moonwater_scan(const char *text, unsigned long length,
 {
         struct script_read scan;
         struct script_token token;
+        unsigned char *b = (unsigned char *)into;
+        unsigned long n = sizeof(*into);
 
-        memory_fill(into, 0, sizeof(*into));
+        while (n--)
+                *b++ = 0;
         scan.text = (const unsigned char *)text;
         scan.length = length;
         scan.at = 0;
