@@ -26415,6 +26415,133 @@ int main(void) {
         if features.returncode:
             return 1
         write_tally("spark-kernel-features", *re.search(r"(\d+) of (\d+)", features.stdout).groups())
+        #   A process that is 32-bit carries it in its thread flags, and the
+        #   loader puts the machine's own mode back before setup_new_exec reads
+        #   them, as the ELF loader's SET_PERSONALITY does for what it loads.
+        #   The function is cut out and run over each architecture's flags
+        #   with the caller in the compat mode, and the order in the loader
+        #   itself is read from its source.
+        marker = "static inline void spark_personality(void)"
+        gate = 0
+        results = 0
+        if marker in spark:
+            body = spark[spark.index(marker):spark.index("/*\n        The address space randomized, as the ELF loader does it.")]
+            loader = spark[spark.index("int execute_spark(struct linux_binprm *bprm)\n{"):]
+            order = [loader.index(word) for word in ("begin_new_exec(bprm);",
+                                                     "spark_personality();",
+                                                     "setup_new_exec(bprm);")]
+            gate += 1
+            results += order == sorted(order)
+            #   And the process id it hands over is the one getpid answers:
+            #   the id in the program's own pid namespace, never the host's.
+            #   The address space is randomized as the ELF loader does it:
+            #   PF_RANDOMIZE is set again after begin_new_exec cleared it,
+            #   before the layout setup_new_exec picks and the stack is placed.
+            gate += 1
+            results += ("spark_randomize();" in loader and
+                        loader.index("begin_new_exec(bprm);") < loader.index("spark_randomize();")
+                        < loader.index("setup_new_exec(bprm);") and
+                        "setup_arg_pages(bprm, spark_stack_top(), EXSTACK_DEFAULT)" in loader and
+                        "STACK_TOP > SPARK_STACK_ROOM + SPARK_STACK_SLIDE" in loader)
+            gate += 1
+            random_start = spark.index("#if IS_BUILTIN(CONFIG_MOONWATER_CORE)\nstatic inline void spark_randomize(void)")
+            random_body = spark[random_start:spark.index("#else", random_start)].split("\n", 1)[1]
+            random_program = r'''
+#include <stdio.h>
+#define ADDR_NO_RANDOMIZE 0x0040000u
+#define PF_RANDOMIZE 0x00400000u
+#define READ_ONCE(x) (x)
+#define STACK_TOP 0x7ffffffff000ul
+struct { unsigned personality; unsigned flags; } task;
+#define current (&task)
+static int randomize_va_space;
+static unsigned long randomize_stack_top(unsigned long top) { return top - 0x123000ul; }
+''' + random_body + r'''
+int main(void) {
+    int good = 1;
+    for (unsigned no = 0; no < 2; no++)
+        for (int space = 0; space < 3; space++) {
+            task.personality = no ? ADDR_NO_RANDOMIZE : 0; task.flags = 0x11;
+            randomize_va_space = space;
+            spark_randomize();
+            good &= ((task.flags & PF_RANDOMIZE) != 0) == (!no && space) && (task.flags & 0x11) == 0x11;
+        }
+    return !(good && spark_stack_top() == STACK_TOP - 0x123000ul);
+}
+'''
+            (work / "randomize.c").write_text(random_program)
+            built = subprocess.run([compiler, "-O2", "-w", str(work / "randomize.c"), "-o", str(work / "randomize")],
+                                   capture_output=True, text=True)
+            if built.returncode:
+                print("  FAIL the randomization did not build:\n" + built.stderr[-600:])
+            else:
+                results += subprocess.run([str(work / "randomize")]).returncode == 0
+            gate += 1
+            results += ("task_pid_nr(" not in spark and
+                        "static inline pid_t spark_entry_process(void)\n{\n        return task_tgid_vnr(current);" in spark and
+                        loader.count("spark_entry_process()") == 3)
+            configs = {
+                "x86-64 with the 32-bit layer": ("-DCONFIG_X86_64 -DCONFIG_IA32_EMULATION", "x86"),
+                "x86-64 without it": ("-DCONFIG_X86_64", "x86-bare"),
+                "arm64 with compat": ("-DCONFIG_ARM64 -DCONFIG_COMPAT", "arm"),
+                "riscv64 with compat": ("-DCONFIG_RISCV -DCONFIG_COMPAT", "riscv"),
+            }
+            harness = r'''
+#include <stdio.h>
+struct { long orig_ax; } regs;
+struct { unsigned long status; } thread_info;
+struct { unsigned personality; } task = {0x400000u | 0x40000u};
+static unsigned long thread_flags = 6, seen_exec_flags;
+#define current (&task)
+#define current_thread_info() (&thread_info)
+#define task_pt_regs(t) (&regs)
+#define TIF_ADDR32 1
+#define TIF_32BIT 2
+#define TS_COMPAT 4
+#define __NR_execve 59
+#define READ_IMPLIES_EXEC 0x400000u
+#define clear_thread_flag(flag) (thread_flags &= ~(1ul << (flag)))
+''' + body + r'''
+int main(int argc, char **argv) {
+    (void)argc;
+    thread_info.status = TS_COMPAT | 8; regs.orig_ax = 11;
+    spark_personality();
+    int good = 1;
+    switch (argv[1][0]) {
+    case 'x': good = !(thread_flags & 2) && (thread_flags & 4) && !(thread_info.status & TS_COMPAT) &&
+                     (thread_info.status & 8) && regs.orig_ax == 59 &&
+                     task.personality == 0x40000u; break;
+    case 'b': good = thread_flags == 6 && thread_info.status == (TS_COMPAT | 8) && regs.orig_ax == 11 &&
+                     task.personality == 0x40000u; break;
+    case 'a': good = (thread_flags & 2) && !(thread_flags & 4) && regs.orig_ax == 11 &&
+                     task.personality == 0x40000u; break;
+    default:  good = (thread_flags & 2) && !(thread_flags & 4) && regs.orig_ax == 11 &&
+                     task.personality == (0x400000u | 0x40000u); break;
+    }
+    return !good;
+}
+'''
+            (work / "personality.c").write_text(harness)
+            for label, (flags, letter) in configs.items():
+                gate += 1
+                built = subprocess.run([compiler, "-O2", "-w", *flags.split(),
+                                        str(work / "personality.c"), "-o", str(work / "personality")],
+                                       capture_output=True, text=True)
+                if built.returncode:
+                    print("  FAIL the personality did not build for %s:\n%s" % (label, built.stderr[-600:]))
+                    continue
+                ran = subprocess.run([str(work / "personality"), letter[0] if letter != "x86-bare" else "b"])
+                if ran.returncode == 0:
+                    results += 1
+                else:
+                    print("  FAIL a 32-bit caller's mode is not put back: %s" % label)
+        else:
+            gate = 8
+            print("  FAIL the loader does not put the machine's own mode back for a 32-bit caller")
+        print("spark personality: %d of %d" % (results, gate))
+        write_tally("spark-personality", results, gate)
+        if results != gate:
+            return 1
         if platform.system() == "Linux" and platform.machine() in ("x86_64", "amd64"):
             binary = work / "entry"
             subprocess.run([compiler, "-O2", "-static", "-nostdlib", "-nostartfiles",

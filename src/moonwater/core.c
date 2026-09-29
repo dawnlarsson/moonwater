@@ -18,6 +18,7 @@
 #include <linux/init.h>
 #include <linux/namei.h>
 #include <linux/binfmts.h>
+#include <linux/personality.h>
 #include <linux/sched/task_stack.h>
 #include <linux/mm.h>
 #include <linux/vmalloc.h>

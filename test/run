@@ -11867,6 +11867,29 @@ export SPARK_OWNER=parent
 /shell -c 'printf "owner-%s\n" "$SPARK_OWNER"'
 ls /monitor.sh | rev
 #
+#       The address space of a program the Spark loader started is randomized,
+#       as an ELF's is: the loader never set PF_RANDOMIZE, which begin_new_exec
+#       clears, so every program's stack sat at the top of the address space
+#       and its mmap area at a fixed distance below it, and the shell and
+#       every tool that reads a file, a peer or an archive somebody else
+#       wrote ran that way. Eight programs, each asked where its own stack is;
+#       fewer than five different answers is a layout that does not move.
+#
+aslr=$(for i in 1 2 3 4 5 6 7 8; do /shell -c 'grep "\[stack\]" /proc/self/maps'; done | sort -u | wc -l)
+[ "$aslr" -ge 5 ] && printf 'stack-aslr\n' | rev
+#
+#       A 32-bit process that starts a Spark image. The compatibility layers
+#       are on in this build, and a process carries its 32-bit mode in its
+#       thread flags across exec: the ELF loader sets them for what it loads
+#       and this loader did not, so the shell started that way was a 64-bit
+#       program in a 4 GiB address space with the 32-bit mmap layout and died
+#       at its first look at its own arguments. The program here is 163 bytes
+#       of i386: execve("/shell", {"sh", "-c", "echo mode-ok | rev"}, 0).
+#
+printf '\177ELF\001\001\001\000\000\000\000\000\000\000\000\000\002\000\003\000\001\000\000\000T\200\004\0104\000\000\000\000\000\000\000\000\000\000\0004\000 \000\001\000\000\000\000\000\000\000\001\000\000\000\000\000\000\000\000\200\004\010\000\200\004\010\243\000\000\000\243\000\000\000\007\000\000\000\000\020\000\000\270\013\000\000\000\273s\200\004\010\271\223\200\004\0101\322\315\200\270\001\000\000\000\273c\000\000\000\315\200/shell\000sh\000-c\000echo mode-ok | rev\000z\200\004\010}\200\004\010\200\200\004\010\000\000\000\000' > /tmp/e32
+chmod +x /tmp/e32
+/tmp/e32
+#
 #       Floodlight, on a running machine.
 #
 #       Everything else about the register is checked in a harness. This is the
@@ -12280,6 +12303,8 @@ says transcript 'cached environment'   'cache-first'
 says transcript 'changed environment'  'cache-second'
 says transcript 'cache process owner'  'owner-parent'
 says transcript 'monitor at root'     'hs.rotinom/'
+says transcript 'each program has a stack of its own' 'rlsa-kcats'
+says transcript 'a 32-bit caller starts a spark image' 'ko-edom'
 says transcript 'mointor alias'       'alias-hs.rotinom'
 says transcript 'monitor linked'      'path-hs.rotinom/..'
 says transcript 'mount linked'        'mount-link-llehs/..'

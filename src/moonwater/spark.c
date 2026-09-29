@@ -841,6 +841,22 @@ static atomic_long_t stat_map_ns = ATOMIC_LONG_INIT(0);
 static int execute_spark(struct linux_binprm *bprm);
 
 /*
+        The process id a program is handed to start with, which it keeps as
+        who it started as: getpid is task_tgid_vnr, the id in the program's
+        own pid namespace, and so is this. It was task_pid_nr, the id in the
+        namespace of the machine's init, and the two are the same only there.
+        Inside an isolated bowl or under unshare -p the runtime compared the
+        namespace's answer with the host's, took every getpid for another
+        process, and treated its stream buffers as a parent's it had forked
+        away from; and every program in such a namespace was handed the id
+        the host knows it by, which it has no other way to learn.
+*/
+static inline pid_t spark_entry_process(void)
+{
+        return task_tgid_vnr(current);
+}
+
+/*
         The entry facts a loaded program is handed (SPARK_ENTRY_*): read at
         load, when the task is single-threaded and past the point of no
         return, so nothing can change them before the program's first
@@ -934,6 +950,15 @@ static unsigned long spark_cpu_features_now(void)
         within a gigabyte of STACK_TOP.
 */
 #define SPARK_STACK_ROOM (1UL << 30)
+
+/*
+        And the slide the stack takes below STACK_TOP when the address space
+        is randomized: randomize_stack_top moves it down by up to a mask of
+        pages that is 22 bits on x86-64, the widest of the three, which is
+        sixteen GiB. Where the stack may be is not known until the old mm is
+        gone, so an image is kept clear of all of it.
+*/
+#define SPARK_STACK_SLIDE (1UL << 34)
 
 static struct linux_binfmt format = {
     .module = THIS_MODULE,
@@ -1030,6 +1055,95 @@ static int spark_stack(struct linux_binprm *bprm, unsigned long *out)
         return 0;
 }
 
+/*
+        The machine's own mode, put back to native for this program.
+
+        A process that is 32-bit -- a static i386 binary, an armv7 one, and
+        this build has the compatibility layers on -- carries that in its
+        thread flags: TIF_ADDR32 on x86-64, which is the address space it
+        may use, the size STACK_TOP and TASK_SIZE answer and the mmap layout
+        arch_pick_mmap_layout picks, and TIF_32BIT on arm64 and riscv, which
+        picks the signal frame, the syscall table and the audit architecture.
+        The ELF loader sets them for what it loads, by SET_PERSONALITY, and
+        this loader did not: an image exec'd by a 32-bit process was a 64-bit
+        program in a 4 GiB address space with the 32-bit mmap layout, and on
+        the machine that ran it the shell died at its first look at its own
+        argument vector ("no room for arguments"). Before setup_new_exec, as
+        the ELF loader does, because that is what reads them.
+
+        The x86 line is the part of set_personality_64bit that a module can
+        reach: the function itself is not exported. The syscall number the
+        interrupted call left in the registers goes with it, as that
+        function says it comes from a 64-bit execve, and the status bit
+        that says this is a compat call, which the exit path would clear
+        anyway.
+*/
+static inline void spark_personality(void)
+{
+#if defined(CONFIG_X86_64)
+#ifdef CONFIG_IA32_EMULATION
+        clear_thread_flag(TIF_ADDR32);
+        current_thread_info()->status &= ~TS_COMPAT;
+        task_pt_regs(current)->orig_ax = __NR_execve;
+#endif
+        // As the ELF loader's x86-64 and arm64 SET_PERSONALITY do: a Spark
+        // image is laid out with no executable data, and a caller's
+        // READ_IMPLIES_EXEC would make it all so.
+        current->personality &= ~READ_IMPLIES_EXEC;
+#elif defined(CONFIG_ARM64)
+#ifdef CONFIG_COMPAT
+        clear_thread_flag(TIF_32BIT);
+#endif
+        current->personality &= ~READ_IMPLIES_EXEC;
+#elif defined(CONFIG_RISCV) && defined(CONFIG_COMPAT)
+        clear_thread_flag(TIF_32BIT);
+#endif
+}
+
+/*
+        The address space randomized, as the ELF loader does it.
+
+        begin_new_exec clears PF_RANDOMIZE, because whether a program is
+        randomized is its own personality's answer and not the old program's;
+        load_elf_binary then sets it again from the personality and
+        randomize_va_space, and everything after reads it: the mmap base
+        setup_new_exec picks, the stack setup_arg_pages places, the vDSO
+        placed from where that stack ended up. This loader never set it, so
+        every Spark program -- the shell, and every tool that reads a file, a
+        network peer or an archive somebody else wrote -- ran with its stack
+        at the top of the address space, its mmap area at a fixed distance
+        below the stack and its vDSO next to it, where an image that must be
+        based at a fixed address (there are no relocations) had one region
+        left that an exploit could not name in advance, and this made it
+        two fewer. The image itself stays where its header puts it; that is
+        the format's, not this function's.
+
+        Not in a module: randomize_va_space and randomize_stack_top are the
+        kernel's own and are not exported. A modular build keeps the stack
+        where it was, as it kept the whole ring of a window before the ring
+        was held a page at a time.
+*/
+#if IS_BUILTIN(CONFIG_MOONWATER_CORE)
+static inline void spark_randomize(void)
+{
+        if (!(current->personality & ADDR_NO_RANDOMIZE) &&
+            READ_ONCE(randomize_va_space))
+                current->flags |= PF_RANDOMIZE;
+}
+
+static inline unsigned long spark_stack_top(void)
+{
+        return randomize_stack_top(STACK_TOP);
+}
+#else
+static inline void spark_randomize(void) {}
+
+static inline unsigned long spark_stack_top(void)
+{
+        return STACK_TOP;
+}
+#endif
+
 /* Keeping one epilogue lets the cheap format-rejection gate precede all work;
    GCC shrink wrapping otherwise emits one restore island per validation exit. */
 static __attribute__((optimize("no-shrink-wrap-separate")))
@@ -1125,9 +1239,10 @@ int execute_spark(struct linux_binprm *bprm)
                 far inside a gigabyte, and growth past it is the guard gap's
                 job rather than this one's.
         */
-        if (STACK_TOP > SPARK_STACK_ROOM)
+        if (STACK_TOP > SPARK_STACK_ROOM + SPARK_STACK_SLIDE)
         {
-                unsigned long floor = STACK_TOP - SPARK_STACK_ROOM;
+                unsigned long floor = STACK_TOP - SPARK_STACK_ROOM -
+                                      SPARK_STACK_SLIDE;
 
                 if (header->base >= floor || span > floor - header->base)
                         return -ENOEXEC;
@@ -1149,9 +1264,12 @@ int execute_spark(struct linux_binprm *bprm)
         if (ret)
                 return ret;
 
+        spark_personality();
+        spark_randomize();
+
         setup_new_exec(bprm);
 
-        ret = setup_arg_pages(bprm, STACK_TOP, EXSTACK_DEFAULT);
+        ret = setup_arg_pages(bprm, spark_stack_top(), EXSTACK_DEFAULT);
         if (ret < 0)
         {
                 pr_alert_ratelimited("[moonwater] " "setup_arg_pages failed: %d\n", ret);
@@ -1259,7 +1377,7 @@ int execute_spark(struct linux_binprm *bprm)
            and retains its userspace detection fallback. */
         regs->r12 = SPARK_START_MAGIC_FACTS;
         regs->r13 = spark_cpu_features;
-        regs->r14 = task_pid_nr(current);
+        regs->r14 = spark_entry_process();
         regs->r15 = spark_entry_facts();
 
         regs->ip = header->entry;
@@ -1270,7 +1388,7 @@ int execute_spark(struct linux_binprm *bprm)
 #elif defined(CONFIG_ARM64)
         regs->regs[19] = SPARK_START_MAGIC_FACTS;
         regs->regs[20] = spark_cpu_features;
-        regs->regs[21] = task_pid_nr(current);
+        regs->regs[21] = spark_entry_process();
         regs->regs[22] = spark_entry_facts();
         regs->pc = header->entry;
         regs->sp = stack_addr;
@@ -1286,7 +1404,7 @@ int execute_spark(struct linux_binprm *bprm)
         start_thread(regs, header->entry, stack_addr);
         regs->s2 = SPARK_START_MAGIC_FACTS;
         regs->s3 = spark_cpu_features_now();
-        regs->s4 = task_pid_nr(current);
+        regs->s4 = spark_entry_process();
         regs->s5 = spark_entry_facts();
 #endif
 
