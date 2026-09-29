@@ -26,6 +26,8 @@
 static b32 exec_signal;
 static b32 exec_signal_level;
 static b32 exec_loop_depth HOT_STATE;
+/* In dash a function counts LINENO from its own first line; 0 elsewhere. */
+static b32 exec_function_line;
 static b32 exec_function_depth;
 static PURE p8 exec_special_kind(string_address name);
 
@@ -330,6 +332,13 @@ static bool exec_source_tested_hold()
 static fn exec_source_tested_restore(bool kept)
 {
         exec_tested = kept;
+}
+
+/* A substitution begins with errexit whole again in dash, however tested
+   the command it stands in was: `if echo $(false; echo x)` prints nothing. */
+fn exec_tested_forget()
+{
+        exec_tested = false;
 }
 
 /*
@@ -979,53 +988,13 @@ static fn job_monitor_stop()
         job_terminal = -1;
 }
 
-/* Dash will not turn the monitor on without a controlling terminal.
-   /dev/tty is that question: stdin being a pipe is not enough, and
-   neither is stderr. lima 0.5.x says so and leaves `m` off, status 0.
-   The answer is a property of this process, so it is remembered: a
-   script that `set -m`s twice must not open /dev/tty twice. */
-static b32 job_tty_known;
-
-static bool job_tty_reachable()
-{
-        bipolar handle;
-
-        if (job_tty_known)
-                return job_tty_known > 0;
-
-        handle = system_open_at(AT_FDCWD, "/dev/tty", FILE_READ_WRITE);
-
-        if (handle < 0)
-        {
-                job_tty_known = -1;
-                return false;
-        }
-
-        system_close(handle);
-        job_tty_known = 1;
-        return true;
-}
-
 fn job_monitor_told(bool on)
 {
+        /* dash 0.5.13 turns the monitor on with or without a terminal, and
+           without one it goes on arbitrating nothing, as a shell started
+           without one does. */
         if (on)
-        {
-                if (!shell_bash_compat && !job_tty_reachable())
-                {
-                        shell_diagnostic_where();
-                        if (shell_argv && shell_argv[0] &&
-                            string_equals(shell_argv[0], "set"))
-                                string_format(log_error,
-                                    "set: can't access tty; job control turned off\n");
-                        else
-                                string_format(log_error,
-                                    "can't access tty; job control turned off\n");
-                        shell_options &= ~SHELL_FLAG('m');
-                        return;
-                }
-
                 job_monitor_start();
-        }
         else
                 job_monitor_stop();
 }
@@ -7078,6 +7047,9 @@ typedef struct
         positive name_hash;
         positive name_length;
         b32 body;
+        // The line of the definition, which is where dash starts counting
+        // LINENO from inside the body.
+        b32 line;
         // Active calls keep this slot and its name stable. Each call holds
         // its own body independently when a definition replaces this one.
         positive active;
@@ -7814,11 +7786,11 @@ static bool exec_function_text_node(exec_function_text address_to made,
 
         if (node->kind == NODE_TIME)
         {
-                if (node->op)
-                        exec_function_text_literal(made, "! ");
                 exec_function_text_literal(made, "time ");
-                if (node->flags)
+                if (node->flags & 1)
                         exec_function_text_literal(made, "-p ");
+                if (node->flags & 2)
+                        exec_function_text_literal(made, "! ");
                 if (!exec_function_text_node(made, node->left, depth + 1))
                         return false;
                 return exec_function_text_redirects(made, node);
@@ -7841,6 +7813,9 @@ static bool exec_function_text_node(exec_function_text address_to made,
         return false;
 }
 
+static bool exec_pretty_definition(exec_function_text address_to made,
+                                   positive slot);
+
 static bool exec_function_text_definition(exec_function_text address_to made,
                                           positive slot, bool environment)
 {
@@ -7849,6 +7824,17 @@ static bool exec_function_text_definition(exec_function_text address_to made,
         made->used = 0;
         made->failed = false;
         made->pending_used = 0;
+
+        //      declare -f, type and set list a function in bash's own shape;
+        //      only the copy sent to a child in the environment is written
+        //      the way it is transported.
+        if (!environment && shell_bash_compat)
+        {
+                if (!exec_pretty_definition(made, slot))
+                        return false;
+                exec_function_text_literal(made, "\n");
+                return !made->failed;
+        }
 
         if (environment)
         {
@@ -8118,6 +8104,7 @@ static b32 exec_define(b32 index)
                 return (shell_status = string_report(log_error, 1, "No room for function: %s\n", name));
 
         exec_functions[slot].body = body;
+        exec_functions[slot].line = parse_nodes[index].line;
         exec_functions[slot].environment_valid = false;
         exec_function_source_set(slot, exec_frames_code_source());
         exec_function_recent = slot;
@@ -8492,6 +8479,19 @@ static COLD fn exec_frames_publish()
         well, which is what a script printing a backtrace walks. Outside a
         function there is no frame to describe and the answer is a failure.
 */
+PURE positive shell_line_now();
+
+/* $LINENO: the line of the command, or in a dash function that line counted
+   from the line the function was defined on. */
+PURE positive shell_lineno_reported()
+{
+        positive line = shell_line_now();
+
+        return exec_function_line && line >= (positive)exec_function_line
+                   ? line - (positive)exec_function_line + 1
+                   : line;
+}
+
 PURE positive shell_line_now()
 {
         /* A diagnostic before any command has run still needs the line the
@@ -8641,7 +8641,8 @@ fn shell_caller(writer write, string_address input)
 */
 COLD bool shell_frames_wanted(const_string name, positive length)
 {
-        if (exec_frames_published || (!exec_frame_count && !exec_frames_main()))
+        if (shell_dash_compat || exec_frames_published ||
+            (!exec_frame_count && !exec_frames_main()))
                 return false;
 
         if (!memory_is_word((address_any)name, length, "FUNCNAME") &&
@@ -8714,7 +8715,6 @@ static COLD bool exec_not_found_handled()
         return true;
 }
 
-static b32 exec_call(positive slot)
 /*
         How deep functions may call before the stack is spent.
 
@@ -8751,8 +8751,10 @@ static COLD bool exec_stack_spent()
         return (positive)address_of here < exec_stack_floor;
 }
 
+static b32 exec_call(positive slot)
 {
         b32 body = exec_functions[slot].body;
+        b32 held_function_line;
         positive saved_count = shell_parameter_count;
         positive saved = 0;
         b32 status;
@@ -8794,8 +8796,6 @@ static COLD bool exec_stack_spent()
                 }
         }
 
-        if (!shell_local_enter())
-        {
         if (exec_stack_spent())
         {
                 shell_diagnostic_where();
@@ -8807,6 +8807,8 @@ static COLD bool exec_stack_spent()
                 return 1;
         }
 
+        if (!shell_local_enter())
+        {
                 shell_status = 1;
                 return 1;
         }
@@ -8836,6 +8838,8 @@ static COLD bool exec_stack_spent()
         // grow the table, and the table may move when it does.
         exec_function_depth++;
         exec_functions[slot].active++;
+        held_function_line = exec_function_line;
+        exec_function_line = shell_dash_compat ? exec_functions[slot].line : 0;
         parse_kept_bodies[body].references++;
 
         framed = exec_frame_push(exec_functions[slot].name,
@@ -8870,6 +8874,7 @@ static COLD bool exec_stack_spent()
                 exec_frame_pop();
 
         exec_functions[slot].active--;
+        exec_function_line = held_function_line;
         parse_release(body);
         shell_local_leave();
         exec_function_depth--;
@@ -8909,6 +8914,194 @@ static COLD bool exec_stack_spent()
 
         shell_parameters_replaced = saved_replaced;
         return status;
+}
+
+/*
+        ${ command; } and ${| command; }, bash 5.3's substitutions that run in
+        the shell itself.
+
+        The text is a function body without the function: it runs here, so
+        what it assigns and defines stays, `shift` moves the shell's own
+        parameters and `local` and `return` work as they would in a body of
+        one, while what it writes goes to a file the caller reads back. The
+        value form writes nothing back but REPLY, which is put back the way it
+        was on the way out. Returns the file, rewound, or -1.
+*/
+bipolar shell_funsub_run(string_address text, bool value_form,
+                         b32 address_to status)
+{
+        bipolar handle = system_call_2(
+            syscall(memfd_create), (positive)(string_address) "shell-funsub",
+            SHELL_PARSER_MFD_CLOEXEC);
+        bipolar saved = -1;
+        string_address held_reply = null;
+        bool had_reply = false;
+        positive held_size = 0;
+
+        if (handle < 0)
+                return -1;
+
+        if (value_form)
+        {
+                string_address reply = env_get("REPLY");
+
+                had_reply = reply != null;
+                if (reply)
+                {
+                        held_size = string_length(reply) + 1;
+                        held_reply = shell_map(held_size);
+                        if (!held_reply)
+                        {
+                                system_close(handle);
+                                return -1;
+                        }
+                        memory_copy((p8 address_to)held_reply, reply, held_size);
+                }
+                env_unset("REPLY");
+        }
+        else
+        {
+                log_flush();
+                saved = exec_save_duplicate(1, null, 10);
+                if (saved < 0 || system_duplicate(handle, 1, 0) < 0)
+                {
+                        if (saved >= 0)
+                                system_close(saved);
+                        system_close(handle);
+                        return -1;
+                }
+        }
+
+        if (!shell_local_enter())
+        {
+                if (saved >= 0)
+                {
+                        system_duplicate(saved, 1, 0);
+                        system_close(saved);
+                }
+                system_close(handle);
+                return -1;
+        }
+
+        /*
+                The command this stands in is half made: its words so far are
+                in the store and the argument table, its word being built is
+                in the expander's buffers. Whatever runs here makes its own
+                and gives them back.
+        */
+        {
+                p8 address_to held_text = expand_text;
+                positive held_text_room = expand_text_room;
+                p8 address_to held_mark = expand_mark;
+                positive held_mark_room = expand_mark_room;
+                positive held_length = expand_length;
+                bool held_overflow = expand_overflow;
+                bool held_quoted = expand_quoted_seen;
+                positive held_empty = expand_empty_count;
+                bool held_failed = expand_failed;
+                bool held_at_empty = expand_name_at_empty;
+                bool held_explicit = expand_explicit_empty;
+                bool held_assigning = expand_assigning;
+                bool held_element = expand_list_element;
+                bool held_floored = expand_store_floored;
+                shell_mark held_floor = expand_store_floor;
+                string_address address_to held_argv = shell_argv;
+                positive held_argv_room = shell_argv_room;
+                positive held_argc = shell_argc;
+                positive held_token = token_used;
+                bool held_token_overflow = token_overflow;
+                b32 held_wait = exec_wait_node;
+                positive held_line = exec_line;
+                shell_mark inside = shell_store_mark(address_of expand_store);
+
+                expand_text = null;
+                expand_text_room = 0;
+                expand_mark = null;
+                expand_mark_room = 0;
+                expand_length = 0;
+                expand_overflow = false;
+                expand_quoted_seen = false;
+                expand_empty_count = 0;
+                expand_failed = false;
+                expand_name_at_empty = false;
+                expand_explicit_empty = false;
+                expand_assigning = false;
+                expand_list_element = false;
+                expand_store_floor = inside;
+                expand_store_floored = true;
+                shell_argv = null;
+                shell_argv_room = 0;
+                shell_argc = 0;
+
+                exec_function_depth++;
+                exec_run_nested(text, true, 0);
+                if (exec_signal == EXEC_SIGNAL_RETURN)
+                        exec_signal = EXEC_SIGNAL_NONE;
+                exec_function_depth--;
+
+                address_to status = shell_status;
+
+                if (expand_text)
+                        memory_free(expand_text, expand_text_room);
+                if (expand_mark)
+                        memory_free(expand_mark, expand_mark_room);
+                if (shell_argv)
+                        memory_free(shell_argv,
+                                    shell_argv_room * sizeof(shell_argv[0]));
+                expand_text = held_text;
+                expand_text_room = held_text_room;
+                expand_mark = held_mark;
+                expand_mark_room = held_mark_room;
+                expand_length = held_length;
+                expand_overflow = held_overflow;
+                expand_quoted_seen = held_quoted;
+                expand_empty_count = held_empty;
+                expand_failed = held_failed;
+                expand_name_at_empty = held_at_empty;
+                expand_explicit_empty = held_explicit;
+                expand_assigning = held_assigning;
+                expand_list_element = held_element;
+                expand_store_floored = held_floored;
+                expand_store_floor = held_floor;
+                shell_argv = held_argv;
+                shell_argv_room = held_argv_room;
+                shell_argc = held_argc;
+                token_used = held_token;
+                token_overflow = held_token_overflow;
+                exec_wait_node = held_wait;
+                exec_line = held_line;
+                shell_store_rewind(address_of expand_store, inside);
+                shell_status = address_to status;
+        }
+        shell_local_leave();
+
+        if (value_form)
+        {
+                string_address reply = env_get("REPLY");
+
+                if (reply)
+                        (void)system_write_all((positive)handle, reply,
+                                               string_length(reply));
+        }
+        else
+        {
+                log_flush();
+                system_duplicate(saved, 1, 0);
+                system_close(saved);
+        }
+
+        if (value_form)
+        {
+                if (had_reply)
+                        env_assign("REPLY", held_reply);
+                else
+                        env_unset("REPLY");
+                if (held_reply)
+                        memory_free((address_any)held_reply, held_size);
+        }
+
+        (void)system_seek(handle, 0, FILE_SEEK_SET);
+        return handle;
 }
 
 positive shell_function_slot(string_address name)
@@ -9442,6 +9635,21 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
         string_address stop = body + body_length;
         positive next = 0;
         bool answer = true;
+
+        //      A nameref that names nothing is not one for a list: bash says
+        //      so, drops the attribute and makes the name an array.
+        if (shell_bash_compat &&
+            (shell_variable_attributes(name, name_length) &
+             SHELL_ARRAY_NAMEREF) &&
+            !shell_nameref_target(name, name_length))
+        {
+                shell_diagnostic_where();
+                string_format(log_error, "warning: ");
+                log_error(name, name_length);
+                string_format(log_error, ": removing nameref attribute\n");
+                shell_variable_attribute_set(name, name_length, 0,
+                                             SHELL_ARRAY_NAMEREF);
+        }
 
         if (!shell_reference_resolve(name, name_length, address_of resolved_name,
                                      address_of resolved_length))
@@ -10389,6 +10597,30 @@ static bool exec_declaration_compound(string_address word)
         return false;
 }
 
+/*
+        dash asks after the words are expanded, not before they are read: any
+        spelling of the name that comes out as export, readonly or local --
+        `$e`, `\export`, `command $e` -- makes the assignment operands after
+        it declarations, whose values are not split.
+*/
+static COLD __attribute__((noinline)) bool exec_dash_declaring(string_address address_to words, positive n)
+{
+        positive at = 0;
+
+        while (at < n && word_is(words[at], "command"))
+        {
+                at++;
+
+                while (at < n && (word_is(words[at], "-p") ||
+                                  word_is(words[at], "--")))
+                        at++;
+        }
+
+        return at < n && (word_is(words[at], "export") ||
+                          word_is(words[at], "readonly") ||
+                          word_is(words[at], "local"));
+}
+
 static PURE b32 exec_declaration_from(parse_node address_to node)
 {
         b32 at = node->word;
@@ -11295,7 +11527,10 @@ static b32 exec_simple(b32 index)
                         if (declaration_from < 0)
                                 declaration_from = exec_declaration_from(node);
 
-                        if (word_index >= declaration_from)
+                        if (shell_dash_compat
+                                ? exec_dash_declaring(shell_argv + first,
+                                                      count - first)
+                                : word_index >= declaration_from)
                         {
                                 positive value_at =
                                     parse_word_name_lengths[word_index] + 1 +
@@ -13284,7 +13519,8 @@ static PURE bool conditional_unary_op(string_address word)
 static PURE bool conditional_unary_operand(string_address word)
 {
         return !word_is(word, "&&") && !word_is(word, "||") &&
-               !word_is(word, "(") && !word_is(word, ")");
+               !word_is(word, "(") && !word_is(word, ")") &&
+               !word_is(word, "<") && !word_is(word, ">");
 }
 
 // [[ == ]] and case read extended groups whether or not extglob is on, and
@@ -13335,6 +13571,14 @@ static bool conditional_primary(bool invert)
         }
 
         raw = conditional_word[conditional_at];
+
+        //      && || and ) are operators where a primary belongs, and no word.
+        if (word_is(raw, "&&") || word_is(raw, "||") || word_is(raw, ")"))
+        {
+                conditional_bad = true;
+                conditional_at++;
+                return false;
+        }
 
         if (conditional_unary_op(raw))
         {
@@ -13640,6 +13884,829 @@ static b32 exec_conditional(b32 index)
                  : arith_unset ? 1 : conditional_runtime ? 2 : value ? 0 : 1;
         shell_store_rewind(address_of exec_store, arena);
         return status;
+}
+
+
+/*
+        A function as bash lists it: declare -f, type and set.
+
+        Bash prints the tree it parsed rather than the text it was given, and
+        a listing has a shape of its own: the name and empty parentheses, a
+        brace on a line by itself, four spaces to a level, a semicolon after
+        every command of a list that a keyword follows, `else if` where the
+        script said elif, `for i in "$@"` where it said for i, and here
+        documents written out after the line that names them. The shape is
+        one rule set, so it is written as one, over the same tree the
+        environment's copy of a function is written from.
+*/
+static positive exec_pretty_indent;
+static positive exec_pretty_skip;
+
+static COLD bool exec_pretty_node(exec_function_text address_to made, b32 index);
+static COLD bool exec_pretty_body(exec_function_text address_to made, b32 index);
+
+static COLD fn exec_pretty_add(exec_function_text address_to made,
+                          string_address text)
+{
+        exec_function_text_add(made, text, string_length(text));
+}
+
+static COLD fn exec_pretty_indented(exec_function_text address_to made)
+{
+        static const p8 spaces[] = "                                ";
+        positive left = exec_pretty_indent;
+
+        while (left)
+        {
+                positive step = left < sizeof(spaces) - 1 ? left
+                                                          : sizeof(spaces) - 1;
+
+                exec_function_text_add(made, (const_string)spaces, step);
+                left -= step;
+        }
+}
+
+static COLD fn exec_pretty_newline(exec_function_text address_to made,
+                              string_address text)
+{
+        exec_function_text_literal(made, "\n");
+        exec_pretty_indented(made);
+        exec_pretty_add(made, text);
+}
+
+// A semicolon, unless the line already ends in the thing it would mean.
+static COLD fn exec_pretty_semicolon(exec_function_text address_to made)
+{
+        if (made->used)
+        {
+                p8 last = (address_to made->text)[made->used - 1];
+
+                if (last == '&' || last == '\n')
+                        return;
+        }
+
+        exec_function_text_literal(made, ";");
+}
+
+// The here-documents a line still owes, after the line, in the order the
+// redirections named them: a newline, then each body and its delimiter.
+static COLD fn exec_pretty_flush(exec_function_text address_to made,
+                            string_address text)
+{
+        exec_pretty_add(made, text);
+
+        if (!made->pending_used)
+                return;
+
+        exec_function_text_literal(made, "\n");
+
+        for (b32 at = 0; at < made->pending_used; at++)
+        {
+                parse_redirect address_to redirect =
+                    parse_redirects + made->pending[at].redirect;
+                string_address body =
+                    (redirect->kept ? parse_kept_text : here_text) +
+                    redirect->body;
+                string_address name = redirect->text;
+                positive length = redirect->text_length;
+
+                exec_function_text_add(made, body, redirect->body_length);
+                if (redirect->body_length &&
+                    body[redirect->body_length - 1] != '\n')
+                        exec_function_text_literal(made, "\n");
+
+                //      The delimiter as it ends the body: the word with its
+                //      quoting taken off.
+                for (positive step = 0; step < length; step++)
+                        if (string_not(name + step, '\'') &&
+                            string_not(name + step, '"') &&
+                            string_not(name + step, '\\'))
+                                exec_function_text_add(made, name + step, 1);
+
+                exec_function_text_literal(made, "\n");
+        }
+
+        made->pending_used = 0;
+}
+
+// One byte of a word, or the run a $'...' comes to.
+static COLD string_address exec_pretty_ansi(exec_function_text address_to made,
+                                       string_address at)
+{
+        // at stands on the opening quote's first byte. What is written is
+        // the string those escapes stand for, in single quotes, as bash's
+        // parser has already made it by the time it prints.
+        exec_function_text_literal(made, "'");
+
+        while (string_get(at) && string_not(at, '\''))
+        {
+                p8 value = string_get(at++);
+                p8 out[8];
+                positive length = 1;
+
+                if (value == '\\' && string_get(at))
+                {
+                        p8 next = string_get(at++);
+                        positive used;
+
+                        if (next >= '0' && next <= '7')
+                        {
+                                at--;
+                                out[0] = (p8)string_digits_octal_escape_max(
+                                    at, 3, address_of used);
+                                at += used;
+                        }
+                        else if (next == 'x')
+                        {
+                                positive number =
+                                    string_digits_hexadecimal_escape_max(
+                                        at, 2, address_of used);
+
+                                at += used;
+                                out[0] = used ? (p8)number : (p8)0;
+                        }
+                        else if (next == 'u' || next == 'U')
+                        {
+                                positive code =
+                                    string_digits_hexadecimal_escape_max(
+                                        at, next == 'u' ? 4 : 8,
+                                        address_of used);
+
+                                at += used;
+                                length = memory_utf8_encode(out, sizeof(out),
+                                                            code);
+                        }
+                        else if (next == 'c' && string_get(at))
+                                out[0] = (p8)(string_get(at++) & 31);
+                        else if (next == 'e' || next == 'E')
+                                out[0] = 27;
+                        else if (byte_simple_escape(next))
+                                out[0] = byte_simple_escape(next);
+                        else if (next == '\\' || next == '"' || next == '?')
+                                out[0] = next;
+                        else if (next == '\'')
+                        {
+                                exec_function_text_literal(made, "'\\''");
+                                continue;
+                        }
+                        else
+                        {
+                                out[0] = '\\';
+                                out[1] = next;
+                                length = 2;
+                        }
+                }
+                else
+                        out[0] = value;
+
+                if (length == 1 && out[0] == '\'')
+                        exec_function_text_literal(made, "'\\''");
+                else if (length == 1 && !out[0])
+                        break;
+                else
+                        exec_function_text_add(made, (const_string)out, length);
+        }
+
+        exec_function_text_literal(made, "'");
+        return string_get(at) ? at + 1 : at;
+}
+
+/*
+        A word as the listing writes it: the bytes that were typed, except
+        that a $'...' is the quoted string it stands for and a $"..." is the
+        plain double-quoted one.
+*/
+static COLD fn exec_pretty_word(exec_function_text address_to made,
+                           string_address word, positive length)
+{
+        string_address at = word;
+        string_address stop = word + length;
+
+        while (at < stop)
+        {
+                p8 value = string_get(at);
+
+                if (value == '\'')
+                {
+                        string_address close = at + 1;
+
+                        while (close < stop && string_not(close, '\''))
+                                close++;
+                        if (close < stop)
+                                close++;
+                        exec_function_text_add(made, at, (positive)(close - at));
+                        at = close;
+                }
+                else if (value == '"')
+                {
+                        string_address close = at + 1;
+
+                        while (close < stop && string_not(close, '"'))
+                                close += string_is(close, '\\') ? 2 : 1;
+                        if (close < stop)
+                                close++;
+                        exec_function_text_add(made, at, (positive)(close - at));
+                        at = close;
+                }
+                else if (value == '$' && at + 1 < stop && string_is(at + 1, '\''))
+                        at = exec_pretty_ansi(made, at + 2);
+                else if (value == '$' && at + 1 < stop && string_is(at + 1, '"'))
+                        at++;
+                else if (value == '\\' && at + 1 < stop)
+                {
+                        exec_function_text_add(made, at, 2);
+                        at += 2;
+                }
+                else
+                {
+                        exec_function_text_add(made, at, 1);
+                        at++;
+                }
+        }
+}
+
+static COLD fn exec_pretty_words(exec_function_text address_to made,
+                            parse_node address_to node, positive first,
+                            string_address between)
+{
+        for (positive at = first; at < node->word_count; at++)
+        {
+                b32 word = node->word + (b32)at;
+
+                if (at != first)
+                        exec_pretty_add(made, between);
+                exec_pretty_word(made, parse_words[word],
+                                 parse_word_lengths[word]);
+        }
+}
+
+static COLD fn exec_pretty_redirects(exec_function_text address_to made,
+                                parse_node address_to node)
+{
+        for (b32 at = 0; at < node->redirect_count; at++)
+        {
+                parse_redirect address_to redirect =
+                    parse_redirects + node->redirect + at;
+                p8 number[32];
+                string_address spelling = null;
+                b32 fixed = redirect->op == OP_LESS ? 0 : 1;
+                bool duplicate = redirect->op == OP_LESSAND ||
+                                 redirect->op == OP_GREATAND;
+
+                switch (redirect->op)
+                {
+                case OP_LESS: spelling = "<"; fixed = 0; break;
+                case OP_GREAT: spelling = ">"; break;
+                case OP_DGREAT: spelling = ">>"; break;
+                case OP_CLOBBER: spelling = ">|"; break;
+                case OP_LESSGREAT: spelling = "<>"; fixed = 0; break;
+                case OP_LESSAND: spelling = "<&"; fixed = 0; break;
+                case OP_GREATAND: spelling = ">&"; break;
+                case OP_ANDGREAT: spelling = "&>"; break;
+                case OP_ANDDGREAT: spelling = "&>>"; break;
+                case OP_HERESTRING: spelling = "<<<"; fixed = 0; break;
+                case OP_DLESS: spelling = "<<"; fixed = 0; break;
+                default:
+                        made->failed = true;
+                        return;
+                }
+
+                exec_function_text_literal(made, " ");
+
+                if (redirect->var_length)
+                {
+                        exec_function_text_literal(made, "{");
+                        exec_function_text_add(made, redirect->var,
+                                               redirect->var_length);
+                        exec_function_text_literal(made, "}");
+                }
+                else if (redirect->op != OP_ANDGREAT &&
+                         redirect->op != OP_ANDDGREAT &&
+                         (duplicate || redirect->fd != fixed))
+                        exec_function_text_add(
+                            made, number,
+                            positive_into(number, (positive)redirect->fd));
+
+                exec_pretty_add(made, spelling);
+
+                if (redirect->op == OP_DLESS)
+                {
+                        if (made->pending_used >= EXEC_FUNCTION_HERE_MAX)
+                        {
+                                made->failed = true;
+                                return;
+                        }
+
+                        if (redirect->strip)
+                                exec_function_text_literal(made, "-");
+                        exec_function_text_add(made, redirect->text,
+                                               redirect->text_length);
+                        made->pending[made->pending_used].redirect =
+                            node->redirect + at;
+                        made->pending[made->pending_used].ordinal = at;
+                        made->pending_used++;
+                        continue;
+                }
+
+                if (!duplicate)
+                        exec_function_text_literal(made, " ");
+                exec_pretty_word(made, redirect->text, redirect->text_length);
+        }
+}
+
+// [[ ]] as bash prints the tree it made of it: a word alone is -n word.
+static COLD bool exec_pretty_cond(exec_function_text address_to made, bool top);
+
+static COLD fn exec_pretty_cond_operand(exec_function_text address_to made)
+{
+        if (conditional_at < conditional_word_count)
+        {
+                exec_pretty_add(made, conditional_word[conditional_at]);
+                conditional_at++;
+        }
+}
+
+static COLD bool exec_pretty_cond_primary(exec_function_text address_to made)
+{
+        if (conditional_at >= conditional_word_count)
+                return false;
+
+        if (conditional_is("!"))
+        {
+                exec_function_text_literal(made, "! ");
+                conditional_at++;
+                return exec_pretty_cond_primary(made);
+        }
+
+        if (conditional_is("("))
+        {
+                exec_function_text_literal(made, "( ");
+                conditional_at++;
+                exec_pretty_cond(made, false);
+                if (conditional_is(")"))
+                        conditional_at++;
+                exec_function_text_literal(made, " )");
+                return true;
+        }
+
+        if (conditional_unary_op(conditional_word[conditional_at]) &&
+            conditional_at + 1 < conditional_word_count)
+        {
+                exec_pretty_cond_operand(made);
+                exec_function_text_literal(made, " ");
+                exec_pretty_cond_operand(made);
+                return true;
+        }
+
+        if (conditional_at + 1 < conditional_word_count &&
+            !conditional_is("&&") &&
+            (test_is_binary(conditional_word[conditional_at + 1]) ||
+             word_is(conditional_word[conditional_at + 1], "==") ||
+             word_is(conditional_word[conditional_at + 1], "=~") ||
+             word_is(conditional_word[conditional_at + 1], "<") ||
+             word_is(conditional_word[conditional_at + 1], ">")))
+        {
+                exec_pretty_cond_operand(made);
+                exec_function_text_literal(made, " ");
+                exec_pretty_cond_operand(made);
+                exec_function_text_literal(made, " ");
+                exec_pretty_cond_operand(made);
+                return true;
+        }
+
+        exec_function_text_literal(made, "-n ");
+        exec_pretty_cond_operand(made);
+        return true;
+}
+
+static COLD bool exec_pretty_cond(exec_function_text address_to made, bool top)
+{
+        (void)top;
+
+        if (!exec_pretty_cond_primary(made))
+                return false;
+
+        while (conditional_is("&&") || conditional_is("||"))
+        {
+                exec_function_text_literal(made, " ");
+                exec_pretty_cond_operand(made);
+                exec_function_text_literal(made, " ");
+                if (!exec_pretty_cond_primary(made))
+                        return false;
+        }
+
+        return true;
+}
+
+static COLD bool exec_pretty_conditional(exec_function_text address_to made,
+                                    b32 index)
+{
+        string_address whole = parse_words[parse_nodes[index].word];
+        positive length;
+        p8 held;
+        bool answer;
+
+        if (!exec_bracket_strip(whole, address_of length, address_of held))
+                return false;
+
+        conditional_at = 0;
+        exec_function_text_literal(made, "[[ ");
+        answer = conditional_tokenize(whole + 2) && conditional_word_count &&
+                 exec_pretty_cond(made, true);
+        exec_function_text_literal(made, " ]]");
+        exec_bracket_restore(whole, length, held);
+
+        return answer;
+}
+
+// The three parts of for (( ; ; )), each with its leading blanks gone and an
+// empty one read as 1, joined the way bash writes them.
+static COLD fn exec_pretty_arithmetic_for(exec_function_text address_to made,
+                                     b32 index)
+{
+        string_address whole = parse_words[parse_nodes[index].word];
+        positive length = parse_word_lengths[parse_nodes[index].word];
+        string_address at = whole + 2;
+        string_address stop = whole + length - 2;
+
+        exec_function_text_literal(made, "for ((");
+
+        for (positive part = 0; part < 3; part++)
+        {
+                string_address end_of = at;
+
+                while (end_of < stop && (part == 2 || string_not(end_of, ';')))
+                        end_of++;
+                while (at < end_of && (string_is(at, ' ') || string_is(at, '\t')))
+                        at++;
+
+                if (part)
+                        exec_function_text_literal(made, "; ");
+                if (at == end_of)
+                        exec_function_text_literal(made, "1");
+                else
+                        exec_function_text_add(made, at, (positive)(end_of - at));
+                at = end_of < stop ? end_of + 1 : end_of;
+        }
+
+        exec_function_text_literal(made, "))");
+}
+
+// Whatever follows the closing word: the command's own redirections.
+static COLD bool exec_pretty_closed(exec_function_text address_to made,
+                               parse_node address_to node)
+{
+        exec_pretty_redirects(made, node);
+        return !made->failed;
+}
+
+static COLD bool exec_pretty_braces(exec_function_text address_to made, b32 list,
+                               parse_node address_to node)
+{
+        exec_function_text_literal(made, "{ \n");
+        exec_pretty_indent += 4;
+        if (!exec_pretty_node(made, list))
+                return false;
+        exec_pretty_flush(made, "");
+        exec_pretty_indent -= 4;
+        exec_pretty_newline(made, "}");
+
+        return node ? exec_pretty_closed(made, node) : !made->failed;
+}
+
+static COLD bool exec_pretty_function(exec_function_text address_to made,
+                                 b32 body, string_address name,
+                                 positive length, bool nested)
+{
+        bool group = body && parse_nodes[body].kind == NODE_GROUP;
+
+        //      --posix writes the inner definition the way the outer one is.
+        if (nested && !shell_posix_on())
+                exec_function_text_literal(made, "function ");
+        exec_function_text_add(made, name, length);
+        exec_function_text_literal(made, " () \n");
+
+        if (nested)
+                exec_pretty_indented(made);
+
+        return exec_pretty_braces(made, group ? parse_nodes[body].left : body,
+                                  group ? parse_nodes + body : null);
+}
+
+static COLD bool exec_pretty_list(exec_function_text address_to made, b32 first)
+{
+        for (b32 child = first; child; child = parse_nodes[child].next)
+        {
+                b32 next = parse_nodes[child].next;
+                bool background = parse_nodes[child].kind == NODE_ANDOR &&
+                                  parse_nodes[child].flags;
+
+                //      The list has been indented once, and its first
+                //      command stands where that put it.
+                if (child == first)
+                        exec_pretty_skip++;
+
+                if (!exec_pretty_node(made, child))
+                        return false;
+
+                if (!next)
+                        break;
+
+                if (background)
+                {
+                        if (made->pending_used)
+                        {
+                                exec_pretty_flush(made, "");
+                                exec_function_text_literal(made, " ");
+                        }
+                        exec_function_text_literal(made, " ");
+                        exec_pretty_skip++;
+                        continue;
+                }
+
+                //      A list's semicolon is not written after a line that
+                //      ended in a here-document, which has already ended it.
+                if (made->pending_used)
+                        exec_pretty_flush(made, "");
+                else
+                        exec_function_text_literal(made, ";");
+                exec_function_text_literal(made, "\n");
+        }
+
+        return !made->failed;
+}
+
+static COLD bool exec_pretty_body(exec_function_text address_to made, b32 index)
+{
+        parse_node address_to node;
+        b32 child;
+
+        if (!index)
+                return true;
+
+        node = parse_nodes + index;
+
+        switch (node->kind)
+        {
+        case NODE_SIMPLE:
+                exec_pretty_words(made, node, 0, " ");
+                exec_pretty_redirects(made, node);
+                return !made->failed;
+
+        case NODE_ARITHMETIC:
+                exec_pretty_words(made, node, 0, " ");
+                return exec_pretty_closed(made, node);
+
+        case NODE_CONDITIONAL:
+                if (!exec_pretty_conditional(made, index))
+                        return false;
+                return exec_pretty_closed(made, node);
+
+        case NODE_PIPELINE:
+        case NODE_ANDOR:
+        {
+                bool pipeline = node->kind == NODE_PIPELINE;
+
+                if (pipeline && node->flags)
+                        exec_function_text_literal(made, "! ");
+
+                for (child = node->left; child; child = parse_nodes[child].next)
+                {
+                        if (child != node->left)
+                        {
+                                //      A connector that follows a line owing a
+                                //      here-document lets the document out
+                                //      first; what bash writes after it is
+                                //      two blanks behind a pipe and one
+                                //      behind && and ||.
+                                bool owed = made->pending_used != 0;
+
+                                exec_pretty_add(
+                                    made,
+                                    pipeline ? (owed ? " |" : " | ")
+                                    : parse_nodes[child].op == OP_AND_IF
+                                          ? " && " : " || ");
+                                if (owed)
+                                {
+                                        exec_pretty_flush(made, "");
+                                        exec_pretty_add(made, pipeline ? "  "
+                                                                       : " ");
+                                }
+                        }
+                        if (!exec_pretty_body(made, child))
+                                return false;
+                }
+
+                if (!pipeline && node->flags)
+                        exec_function_text_literal(made, " &");
+
+                return exec_pretty_closed(made, node);
+        }
+
+        case NODE_LIST:
+                return exec_pretty_list(made, node->left);
+
+        case NODE_SUBSHELL:
+                exec_function_text_literal(made, "( ");
+                exec_pretty_skip++;
+                if (!exec_pretty_node(made, node->left))
+                        return false;
+                exec_pretty_flush(made, "");
+                exec_function_text_literal(made, " )");
+                return exec_pretty_closed(made, node);
+
+        case NODE_GROUP:
+                return exec_pretty_braces(made, node->left, node);
+
+        case NODE_IF:
+                exec_function_text_literal(made, "if ");
+                exec_pretty_skip++;
+                if (!exec_pretty_node(made, node->left))
+                        return false;
+                if (made->pending_used)
+                {
+                        exec_pretty_flush(made, "");
+                        exec_pretty_indented(made);
+                        exec_function_text_literal(made, "then\n");
+                }
+                else
+                {
+                        exec_pretty_semicolon(made);
+                        exec_function_text_literal(made, " then\n");
+                }
+                exec_pretty_indent += 4;
+                if (!exec_pretty_node(made, node->right))
+                        return false;
+                exec_pretty_flush(made, "");
+                exec_pretty_semicolon(made);
+                exec_pretty_indent -= 4;
+
+                if (node->extra)
+                {
+                        exec_pretty_newline(made, "else\n");
+                        exec_pretty_indent += 4;
+                        if (!exec_pretty_node(made, node->extra))
+                                return false;
+                        exec_pretty_flush(made, "");
+                        exec_pretty_semicolon(made);
+                        exec_pretty_indent -= 4;
+                }
+
+                exec_pretty_newline(made, "fi");
+                return exec_pretty_closed(made, node);
+
+        case NODE_WHILE:
+        case NODE_UNTIL:
+                exec_pretty_add(made, node->kind == NODE_WHILE ? "while "
+                                                               : "until ");
+                exec_pretty_skip++;
+                if (!exec_pretty_node(made, node->left))
+                        return false;
+                if (made->pending_used)
+                {
+                        exec_pretty_flush(made, "");
+                        exec_pretty_indented(made);
+                        exec_function_text_literal(made, "do\n");
+                }
+                else
+                {
+                        exec_pretty_semicolon(made);
+                        exec_function_text_literal(made, " do\n");
+                }
+                exec_pretty_indent += 4;
+                if (!exec_pretty_node(made, node->right))
+                        return false;
+                exec_pretty_flush(made, "");
+                exec_pretty_semicolon(made);
+                exec_pretty_indent -= 4;
+                exec_pretty_newline(made, "done");
+                return exec_pretty_closed(made, node);
+
+        case NODE_FOR:
+        case NODE_SELECT:
+        case NODE_CFOR:
+                if (node->kind == NODE_CFOR)
+                        exec_pretty_arithmetic_for(made, index);
+                else
+                {
+                        exec_pretty_add(made, node->kind == NODE_SELECT
+                                                  ? "select " : "for ");
+                        if (node->word_count)
+                                exec_pretty_word(made, parse_words[node->word],
+                                                 parse_word_lengths[node->word]);
+                        exec_function_text_literal(made, " in ");
+                        if (node->flags)
+                                exec_pretty_words(made, node, 1, " ");
+                        else
+                                exec_function_text_literal(made, "\"$@\"");
+                        exec_function_text_literal(made, ";");
+                }
+
+                exec_function_text_literal(made, "\n");
+                exec_pretty_indented(made);
+                exec_function_text_literal(made, "do\n");
+                exec_pretty_indent += 4;
+                if (!exec_pretty_node(made, node->right))
+                        return false;
+                exec_pretty_flush(made, "");
+                exec_pretty_semicolon(made);
+                exec_pretty_indent -= 4;
+                exec_pretty_newline(made, "done");
+                return exec_pretty_closed(made, node);
+
+        case NODE_CASE:
+                exec_function_text_literal(made, "case ");
+                exec_pretty_words(made, node, 0, " ");
+                exec_function_text_literal(made, " in ");
+                exec_pretty_indent += 4;
+
+                for (child = node->left; child; child = parse_nodes[child].next)
+                {
+                        parse_node address_to item = parse_nodes + child;
+
+                        exec_pretty_newline(made, "");
+                        exec_pretty_words(made, item, 0, " | ");
+                        exec_function_text_literal(made, ")\n");
+
+                        if (item->right)
+                        {
+                                exec_pretty_indent += 4;
+                                if (!exec_pretty_node(made, item->right))
+                                        return false;
+                                exec_pretty_flush(made, "");
+                                exec_pretty_indent -= 4;
+                        }
+
+                        exec_pretty_newline(
+                            made, item->flags == CASE_FALL_THROUGH ? ";&"
+                                  : item->flags == CASE_TEST_ON ? ";;&"
+                                                                : ";;");
+                }
+
+                exec_pretty_indent -= 4;
+                exec_pretty_newline(made, "esac");
+                return exec_pretty_closed(made, node);
+
+        case NODE_FUNCTION:
+                return exec_pretty_function(made, node->right,
+                                            parse_words[node->word],
+                                            parse_word_lengths[node->word],
+                                            true) &&
+                       exec_pretty_closed(made, node);
+
+        case NODE_TIME:
+                exec_function_text_literal(made, "time ");
+                if (node->flags & 1)
+                        exec_function_text_literal(made, "-p ");
+                if (node->flags & 2)
+                        exec_function_text_literal(made, "! ");
+                exec_pretty_skip++;
+                if (!exec_pretty_node(made, node->left))
+                        return false;
+                return exec_pretty_closed(made, node);
+
+        case NODE_COPROC:
+                exec_function_text_literal(made, "coproc ");
+                if (node->word_count &&
+                    !word_is(parse_words[node->word], "COPROC"))
+                {
+                        exec_pretty_words(made, node, 0, " ");
+                        exec_function_text_literal(made, " ");
+                }
+                exec_pretty_skip++;
+                if (!exec_pretty_node(made, node->left))
+                        return false;
+                return exec_pretty_closed(made, node);
+
+        default:
+                return false;
+        }
+}
+
+static COLD bool exec_pretty_node(exec_function_text address_to made, b32 index)
+{
+        if (!index)
+                return true;
+
+        if (exec_pretty_skip)
+                exec_pretty_skip--;
+        else
+                exec_pretty_indented(made);
+
+        return exec_pretty_body(made, index) && !made->failed;
+}
+
+static COLD bool exec_pretty_definition(exec_function_text address_to made,
+                                   positive slot)
+{
+        exec_function address_to function = exec_functions + slot;
+
+        exec_pretty_indent = 0;
+        exec_pretty_skip = 0;
+        made->pending_used = 0;
+
+        return exec_pretty_function(made, function->body, function->name,
+                                    function->name_length, false);
 }
 
 static b32 exec_case(b32 index)
@@ -13964,8 +15031,10 @@ static bipolar exec_spawn_node(b32 index, bool background)
 
                 /* A subshell is outside every loop of the shell that made
                    it: bash's (break) there says it is only meaningful in a
-                   loop, whatever its operand. */
-                exec_loop_depth = 0;
+                   loop, whatever its operand. dash's break and continue
+                   there end the subshell, which is still inside them. */
+                if (!shell_dash_compat)
+                        exec_loop_depth = 0;
                 exec_child_root = index;
 
                 /* The async environment is already a subshell. Turning an
@@ -15283,7 +16352,7 @@ static b32 exec_time(b32 index)
 
         // A bang in front of a time inverts what the whole of it answers, so
         // nothing inside it is what errexit is looking at.
-        if (node->op)
+        if (node->flags & 2)
                 exec_tested = true;
 
         status = node->left ? exec_node(node->left) : 0;
@@ -15291,7 +16360,7 @@ static b32 exec_time(b32 index)
         exec_tested = tested;
         time_now(address_of after);
 
-        time_written(node->flags,
+        time_written(node->flags & 1,
                      time_real_apart(address_of after, address_of before),
                      time_apart(after.user, before.user),
                      time_apart(after.system, before.system));
@@ -15299,7 +16368,7 @@ static b32 exec_time(b32 index)
         if (exec_line_aborted())
                 return shell_status;
 
-        if (node->op)
+        if (node->flags & 2)
                 status = status ? 0 : 1;
 
         shell_status = status;

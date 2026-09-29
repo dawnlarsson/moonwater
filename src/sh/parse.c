@@ -141,6 +141,9 @@ typedef struct
         // A quoted delimiter makes the body literal; an unquoted one lets the
         // parameters in it expand.
         b32 raw;
+        // <<- : the body has had its leading tabs taken off, and a listing
+        // of the command must say so.
+        b32 strip;
         positive body;
         positive body_length;
 } parse_redirect;
@@ -686,6 +689,13 @@ static PURE inline INLINE b32 parse_keyword(b32 ahead)
 {
         b32 keyword = parse_keyword_of(parse_look(ahead));
 
+        /* dash reserves the fifteen of POSIX and no more: select, time,
+           coproc and ]] are ordinary words there. */
+        if (shell_dash_compat &&
+            (keyword == PARSE_KEYWORD_SELECT || keyword == PARSE_KEYWORD_TIME ||
+             keyword == PARSE_KEYWORD_COPROC))
+                return PARSE_KEYWORD_NONE;
+
         return keyword == PARSE_KEYWORD_DEND && !shell_bash_compat
                    ? PARSE_KEYWORD_NONE : keyword;
 }
@@ -1068,6 +1078,74 @@ static COLD positive parse_strip_continuations(p8 address_to text,
         return out;
 }
 
+static const string_address parse_operator_spelling[] = {
+    0,
+    "&&",
+    "||",
+    ";;",
+    "<<",
+    ">>",
+    "<&",
+    ">&",
+    "<>",
+    ">|",
+    ";",
+    "|",
+    "&",
+    "<",
+    ">",
+    "(",
+    ")",
+    "&>",
+    "&>>",
+    "<<<",
+    "|&",
+    ";&",
+    ";;&",
+};
+
+/*
+        bash's longer operators, read the way dash reads them.
+
+        dash has &>, <<<, |&, ;& and ;;& as two operators each, and so the
+        second of the two is where it stops: `cat <<< x` is a here-document
+        with no word, `a |& b` a pipe to nothing and `&> f` a background
+        job with a redirection after it. The lexer is one for both names, so
+        the split is made here where the tokens are copied, which leaves the
+        parser to say what dash says of what follows.
+*/
+static COLD __attribute__((noinline)) bool parse_operator_split(parse_token address_to first,
+                                 parse_token address_to second)
+{
+        static const b32 pairs[][3] = {
+            {OP_ANDGREAT, OP_AMP, OP_GREAT},
+            {OP_ANDDGREAT, OP_AMP, OP_DGREAT},
+            {OP_HERESTRING, OP_DLESS, OP_LESS},
+            {OP_PIPEAND, OP_PIPE, OP_AMP},
+            {OP_SEMIAND, OP_SEMI, OP_AMP},
+            {OP_DSEMIAND, OP_DSEMI, OP_AMP},
+        };
+
+        if (first->kind != PT_OP)
+                return false;
+
+        for (positive at = 0; at < array_count(pairs); at++)
+                if (first->op == pairs[at][0])
+                {
+                        *second = *first;
+                        first->op = pairs[at][1];
+                        first->text = (string_address)parse_operator_spelling[first->op];
+                        first->length = string_length(first->text);
+                        second->op = pairs[at][2];
+                        second->text = (string_address)parse_operator_spelling[second->op];
+                        second->length = string_length(second->text);
+                        second->joined = 1;
+                        return true;
+                }
+
+        return false;
+}
+
 // Lexer's storage is reused on its next call. Copy one token into parser
 // storage, keeping every piece of text in the stable arena.
 static bool parse_copy_lex(parse_token address_to into,
@@ -1090,35 +1168,9 @@ static bool parse_copy_lex(parse_token address_to into,
 
         if (into->kind == PT_OP)
         {
-                static const string_address spelling[] = {
-                    0,
-                    "&&",
-                    "||",
-                    ";;",
-                    "<<",
-                    ">>",
-                    "<&",
-                    ">&",
-                    "<>",
-                    ">|",
-                    ";",
-                    "|",
-                    "&",
-                    "<",
-                    ">",
-                    "(",
-                    ")",
-                    "&>",
-                    "&>>",
-                    "<<<",
-                    "|&",
-                    ";&",
-                    ";;&",
-                };
-
                 if (into->op > 0 &&
-                    into->op < (b32)array_count(spelling))
-                        into->text = (string_address)spelling[into->op];
+                    into->op < (b32)array_count(parse_operator_spelling))
+                        into->text = (string_address)parse_operator_spelling[into->op];
 
                 return true;
         }
@@ -1284,6 +1336,11 @@ bool parse_feed(string_address line)
                         counted = lex_tokens[index].at;
                 }
                 parse_tokens[parse_token_count].line = (b32)token_line;
+
+                if (shell_dash_compat &&
+                    parse_operator_split(parse_tokens + parse_token_count,
+                                         parse_tokens + parse_token_count + 1))
+                        parse_token_count++;
 
                 parse_token_count++;
         }
@@ -1623,6 +1680,10 @@ static b32 parse_word_new(string_address text, positive length)
         assignment = parse_word_kind(text, length, address_of name_length);
         flags = assignment & 4 ? PARSE_WORD_LITERAL : 0;
         assignment &= 3;
+
+        //      dash has no +=: NAME+=x is a command's name.
+        if (assignment == 2 && shell_dash_compat)
+                assignment = 0;
 
         if (assignment)
         {
@@ -2158,8 +2219,9 @@ static fn parse_alias_command()
                         if (token->kind != PT_WORD ||
                             ((!shell_bash_compat || shell_posix_on()) &&
                              parse_keyword(at - parse_position)) ||
-                            parse_word_is_length(at - parse_position,
-                                                 "function", 8) ||
+                            (!shell_dash_compat &&
+                             parse_word_is_length(at - parse_position,
+                                                  "function", 8)) ||
                             !parse_alias_replace(at))
                                 return;
 
@@ -2231,6 +2293,7 @@ static bool parse_take_redirect(b32 index)
         }
 
         delimiter = parse_look(0)->text;
+        bool stripped = false;
 
         // The dash of <<-, read here exactly as parse_feed read it when it
         // registered the delimiter. The two have to agree on how many tokens
@@ -2238,6 +2301,7 @@ static bool parse_take_redirect(b32 index)
         if (op == OP_DLESS && parse_look(0)->joined && string_is(delimiter, '-'))
         {
                 delimiter++;
+                stripped = true;
 
                 if (!string_get(delimiter))
                 {
@@ -2263,7 +2327,7 @@ static bool parse_take_redirect(b32 index)
         parse_redirects[slot] = (parse_redirect){
             .op = op, .fd = descriptor, .var = brace_name,
             .var_length = brace_length, .text = delimiter,
-            .text_length = string_length(delimiter)};
+            .text_length = string_length(delimiter), .strip = stripped};
 
         if (op == OP_DLESS)
         {
@@ -2324,12 +2388,64 @@ static b32 parse_list_required()
         return index;
 }
 
+static COLD __attribute__((noinline)) bool parse_compound_placed(b32 index)
+{
+        static string_address const declarers[] = {
+            "declare", "typeset", "local", "export", "readonly", "let"};
+        b32 at = parse_nodes[index].word;
+        b32 stop = at + parse_nodes[index].word_count;
+        bool prefix = true;
+        bool declaring = false;
+
+        for (; at < stop; at++)
+        {
+                p8 flags = parse_word_flags[at];
+
+                if (flags & PARSE_WORD_COMPOUND)
+                {
+                        if (!declaring && !(prefix && (flags & PARSE_WORD_ASSIGNMENT)))
+                                return false;
+                        continue;
+                }
+
+                if (prefix && (flags & PARSE_WORD_ASSIGNMENT))
+                        continue;
+
+                prefix = false;
+
+                if (declaring || !(flags & PARSE_WORD_LITERAL))
+                        continue;
+
+                if (word_is(parse_words[at], "builtin") ||
+                    word_is(parse_words[at], "command"))
+                        continue;
+
+                declaring = string_table_find(parse_words[at], declarers,
+                                              sizeof(declarers[0]),
+                                              array_count(declarers)) <
+                            array_count(declarers);
+        }
+
+        return true;
+}
+
 static b32 parse_simple()
 {
         b32 index = parse_node_new(NODE_SIMPLE);
+        bool commanded = false;
+        bool compound_seen = false;
 
         while (!parse_state)
         {
+                //      After assignments alone [[ is no keyword: bash reads
+                //      FOO=bar [[ x == x ]] as a command named [[, which is
+                //      not found. The token holds the whole of the
+                //      condition, so the whole of it is the word.
+                if (parse_look(0)->kind == PT_CONDITIONAL &&
+                    parse_nodes[index].word_count && !commanded &&
+                    shell_bash_compat)
+                        parse_tokens[parse_position].kind = PT_WORD;
+
                 if (parse_look(0)->kind == PT_WORD &&
                     parse_look(0)->alias_forced &&
                     parse_look(0)->alias_forced != 2 &&
@@ -2346,12 +2462,29 @@ static b32 parse_simple()
                         break;
 
                 parse_take_word(index);
+
+                if (!parse_state && parse_word_used)
+                {
+                        p8 flags = parse_word_flags[parse_word_used - 1];
+
+                        commanded |= !(flags & PARSE_WORD_ASSIGNMENT);
+                        compound_seen |= (flags & PARSE_WORD_COMPOUND) != 0;
+                }
         }
 
         if (parse_state)
                 return 0;
 
         if (!parse_nodes[index].word_count && !parse_nodes[index].redirect_count)
+        {
+                parse_fail();
+                return 0;
+        }
+
+        //      An array's list belongs to an assignment in front of the
+        //      command or to the operand of a declaration: echo a=(1 2) is
+        //      an echo and a parenthesis.
+        if (compound_seen && !parse_compound_placed(index))
         {
                 parse_fail();
                 return 0;
@@ -2532,8 +2665,19 @@ static b32 parse_for(b32 kind)
                         other -- and stopping at it made "for i in then do"
                         walk one item and then fail to find its own do.
                 */
+                //      A list is words: a=() is `a=` and then a parenthesis.
                 while (parse_look(0)->kind == PT_WORD)
+                {
                         parse_take_word(index);
+
+                        if (!parse_state && parse_word_used &&
+                            (parse_word_flags[parse_word_used - 1] &
+                             PARSE_WORD_COMPOUND))
+                        {
+                                parse_fail();
+                                return 0;
+                        }
+                }
         }
 
         parse_skip_separators();
@@ -2741,12 +2885,26 @@ static b32 parse_function(bool keyword)
                 parse_fail();
                 return 0;
         }
+        //      dash will not have a function named for a special builtin: a
+        //      Syntax error, Bad function name, that ends the script.
+        if (shell_dash_compat &&
+            string_table_find(
+                parse_look(0)->text, shell_special_names,
+                sizeof(shell_special_names[0]),
+                array_count(shell_special_names)) <
+                array_count(shell_special_names) &&
+            string_compare(parse_look(0)->text, "source"))
+        {
+                parse_fail();
+                return 0;
+        }
         parse_position++;
         if (parse_look(0)->kind == PT_OP && parse_look(0)->op == OP_LPAREN &&
             parse_look(1)->kind == PT_OP && parse_look(1)->op == OP_RPAREN)
                 parse_position += 2;
         parse_skip_newlines();
-        if (!parse_at_compound(0))
+        //      dash takes any command for a body: `f() ls` and `f() g() {..}`.
+        if (!shell_dash_compat && !parse_at_compound(0))
         {
                 parse_fail();
                 return 0;
@@ -2828,7 +2986,7 @@ static b32 parse_command_body()
         if (parse_state)
                 return 0;
 
-        if (parse_word_is(0, "function"))
+        if (!shell_dash_compat && parse_word_is(0, "function"))
                 return parse_function(true);
 
         if (parse_look(0)->kind == PT_ARITHMETIC ||
@@ -2977,7 +3135,10 @@ static b32 parse_time(bool inverted)
         if (parse_state)
                 return 0;
 
-        parse_nodes[index].op = inverted;
+        //      Bit 1 is -p and bit 2 the bang: the connector that joins this
+        //      node to its neighbour in an and-or list lives in op, and
+        //      `a && time b` took it for a bang.
+        parse_nodes[index].flags = inverted ? 2 : 0;
 
         //      Bash marks the command it times rather than wrapping it, so a
         //      time in front of a time times once and not twice.
@@ -2987,7 +3148,7 @@ static b32 parse_time(bool inverted)
 
                 if (parse_word_is(0, "-p"))
                 {
-                        parse_nodes[index].flags = 1;
+                        parse_nodes[index].flags |= 1;
                         parse_position++;
                 }
 
@@ -2995,7 +3156,7 @@ static b32 parse_time(bool inverted)
                 //      three lines whether or not -p was among them.
                 if (parse_word_is(0, "--"))
                 {
-                        parse_nodes[index].flags = 1;
+                        parse_nodes[index].flags |= 1;
                         parse_position++;
                         break;
                 }
@@ -3400,7 +3561,7 @@ static bool parse_line_continues_list(positive from)
                         parse_position = held;
 
                         if (keyword ||
-                            (token->length == 8 &&
+                            (!shell_dash_compat && token->length == 8 &&
                              !memory_compare(token->text, "function", 8)) ||
                             (assignment &&
                              string_is(token->text + name_length + assignment, '(')))

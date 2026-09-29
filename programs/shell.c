@@ -688,12 +688,19 @@ b32 main()
         if (called && *called == '-')
                 called++;
         shell_invocation_name = called;
+        shell_invoked_as = arguments[0];
         /* rbash is bash's restricted name: the same policy, already
            restricted before any option is read. A leading dash was
            stripped above, so -rbash is a login rbash. */
         shell_bash_compat = called && (word_is(called, "bash") ||
                                        word_is(called, "rbash"));
-        shell_dash_compat = called && word_is(called, "dash");
+        /* dash, and sh: Debian's /bin/sh is dash, so the name sh is the
+           same shell, the dash grammar with none of bash's additions.
+           Any other name, and an embedded caller, keeps the language whole. */
+        shell_dash_compat = called && (word_is(called, "dash") ||
+                                       word_is(called, "sh"));
+        if (shell_dash_compat)
+                shell_dash_begin();
         if (called && word_is(called, "rbash"))
                 shell_restricted_enter();
 
@@ -883,6 +890,7 @@ b32 main()
                             "sh: -c wants a command\n");
 
                 command = arguments[first];
+                shell_execution_string = command;
                 if (!shell_start_parameters(arguments, first + 2, count))
                         return string_report(log_error, 1, "sh: no room for arguments\n");
 
@@ -956,6 +964,37 @@ b32 main()
                                       shell_script_name);
                         log_flush();
                         return shell_bash_compat ? (input == -2 ? 127 : 126) : 2;
+                }
+                /* bash will not run a file whose first line holds a NUL: its
+                   check_binary_file reads the first 80 bytes and answers 126.
+                   A stream that cannot be read twice is not looked at. */
+                if (shell_bash_compat)
+                {
+                        p8 sample[80];
+                        bipolar got = system_call_4(syscall(pread64),
+                                                    (positive)input,
+                                                    (positive)sample,
+                                                    sizeof(sample), 0);
+
+                        for (bipolar at = 0; at < got; at++)
+                        {
+                                if (sample[at] == '\n')
+                                        break;
+
+                                if (sample[at])
+                                        continue;
+
+                                string_format(log_error,
+                                              "%s: %s: cannot execute binary "
+                                              "file\n",
+                                              shell_invocation_name
+                                                  ? shell_invocation_name
+                                                  : (string_address) "sh",
+                                              shell_script_name);
+                                log_flush();
+                                system_close(input);
+                                return 126;
+                        }
                 }
                 exec_script_fd = (b32)input;
                 if (!exec_script_preserve(null))

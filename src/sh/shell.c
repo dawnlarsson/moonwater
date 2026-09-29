@@ -193,6 +193,8 @@ b32 shell_is_interactive;
    retain Moonwater's existing dash-compatible defaults. */
 KEEP __attribute__((externally_visible)) bool shell_bash_compat;
 bool shell_dash_compat;
+// Takes bash's additions out of the language for the names dash and sh.
+fn shell_dash_begin();
 /* Set by the reader when more source remains after this physical line,
    ignoring trailing newlines. Dash's runtime "Bad fd number" names that
    next line rather than the command's own. */
@@ -1929,6 +1931,9 @@ bool shell_builtin(string_address arguments, positive2 named)
 
                 shell_exit_was_previous = shell_exit_is_current;
                 shell_exit_is_current = command->function == shell_exit;
+
+                if (shell_dash_compat && shell_dash_option_refused(command))
+                        return true;
 
                 command->function(log, arguments);
                 return true;

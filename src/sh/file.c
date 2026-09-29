@@ -44967,6 +44967,10 @@ static b32 kill_listed(string_address word)
                 }
                 else if (!kill_number_named(number, name))
                 {
+                        if (kill_shell_spelling && shell_bash_compat)
+                                return string_report(log_error, 1,
+                                                     "kill: %s: invalid signal specification\n",
+                                                     word);
                         string_format(log_error, "kill: unknown signal: %s\n", word);
                         //      Dash answers two for a number that is not a
                         //      signal and not an exit status with one in
@@ -44996,6 +45000,10 @@ static b32 kill_listed(string_address word)
             (kill_shell_spelling && shell_posix_on() &&
              !string_compare_folded_max(word, "SIG", 3)))
         {
+                if (kill_shell_spelling && shell_bash_compat)
+                        return string_report(log_error, 1,
+                                             "kill: %s: invalid signal specification\n",
+                                             word);
                 return string_report(log_error, 1, "kill: unknown signal: %s\n", word);
         }
 
@@ -45297,6 +45305,13 @@ static b32 file_kill()
                 if (!string_compare(argument, "-s") ||
                     !string_compare(argument, "--signal"))
                 {
+                        //      bash's own words for the three ways a signal
+                        //      is asked for and not given or not known.
+                        if (index + 1 >= count && kill_shell_spelling &&
+                            shell_bash_compat)
+                                return string_report(log_error, 1,
+                                                     "kill: %s: option requires an argument\n",
+                                                     argument);
                         if (index + 1 >= count)
                                 return string_report(log_error, kill_shell_spelling ? 2 : 1,
                                                      "kill: not enough arguments\n");
@@ -45308,6 +45323,11 @@ static b32 file_kill()
                                 string_address value = program_argument((b32)index);
 
                                 number = kill_signal_of(value);
+                                if (number < 0 && kill_shell_spelling &&
+                                    shell_bash_compat)
+                                        return string_report(log_error, 1,
+                                                             "kill: %s: invalid signal specification\n",
+                                                             value);
                                 if (number < 0)
                                 {
                                         string_format(log_error,
@@ -45388,6 +45408,10 @@ static b32 file_kill()
                         break;
 
                 number = kill_signal_of(argument + 1);
+                if (number < 0 && kill_shell_spelling && shell_bash_compat)
+                        return string_report(log_error, 1,
+                                             "kill: %s: invalid signal specification\n",
+                                             argument + 1);
                 if (number < 0)
                         return string_report(log_error, 1,
                                              "kill: invalid signal name or number: %s\n",
@@ -45468,8 +45492,12 @@ static b32 file_kill()
 
                 if (done < 0)
                 {
-                        string_format(log_error, "kill: sending signal to %s failed: %s\n",
-                                      word, file_reason(done));
+                        if (kill_shell_spelling && shell_bash_compat)
+                                string_format(log_error, "kill: (%s) - %s\n",
+                                              word, file_reason(done));
+                        else
+                                string_format(log_error, "kill: sending signal to %s failed: %s\n",
+                                              word, file_reason(done));
                         kill_err++;
                 }
                 else

@@ -116,6 +116,7 @@ KEEP __attribute__((externally_visible)) lex_frame lex_context;
 // The builtins own $LINENO itself and read this for it. What it answers is
 // the line the running command was written on, which the executor keeps.
 PURE positive shell_line_now();
+PURE positive shell_lineno_reported();
 
 fn parse_nest_enter();
 fn parse_nest_leave();
@@ -375,7 +376,23 @@ static PURE string_address lex_escaped_end(string_address at, p8 quote)
 
 /* Where a POSIX dollar-single-quoted run closes. The escape is interpreted
    just before expansion; the lexer only keeps the quoted bytes together. */
-#define lex_dollar_quote_end(at) lex_escaped_end(at, '\'')
+static PURE string_address lex_dollar_quote_end(string_address at)
+{
+        while (string_get(at) && string_not(at, '\''))
+        {
+                //      dash's \c takes whatever follows as its operand, a
+                //      quote included, so $'\c'' is one control character
+                //      and a quote that closes it.
+                if (string_is(at, '\\') && string_get(at + 1))
+                        at += shell_dash_compat && string_is(at + 1, 'c') &&
+                                      string_get(at + 2)
+                                  ? 3 : 2;
+                else
+                        at++;
+        }
+
+        return at;
+}
 
 /*
         Step over whatever begins here that a scanner is not allowed to look
@@ -477,7 +494,8 @@ static KEEP string_address lex_arithmetic_end(string_address start)
         string_address at = start + 2;
         positive depth = 0;
 
-        if (lex_scan_failed >= LEX_SCAN_FAILURES)
+        //      dash has no (( )): two parentheses are two subshells.
+        if (shell_dash_compat || lex_scan_failed >= LEX_SCAN_FAILURES)
                 return null;
 
         while (string_get(at))
@@ -516,6 +534,10 @@ static KEEP string_address lex_arithmetic_end(string_address start)
 static KEEP string_address lex_conditional_end(string_address start)
 {
         string_address at = start + 2;
+
+        //      dash has no [[: it is a word, and a command that is not found.
+        if (shell_dash_compat)
+                return null;
         //      Whether a word may begin here: after a blank, or in bash
         //      after one of the condition's own operators, so that
         //      [[ (a == a)]] closes where bash closes it.
@@ -1180,7 +1202,7 @@ b32 lex_unfinished(string_address line)
                 positive run;
 
                 if (fresh && c == '[' && string_is(step + 1, '[') &&
-                    lex_is_space(string_get(step + 2)))
+                    !shell_dash_compat && lex_is_space(string_get(step + 2)))
                 {
                         string_address stop = lex_conditional_end(step);
 
@@ -1231,7 +1253,7 @@ b32 lex_unfinished(string_address line)
                         //      means something; every other operator skips
                         //      the look-ahead entirely.
                         if ((c == '(' || c == '<' || c == '>') &&
-                            string_is(step + 1, '('))
+                            !shell_dash_compat && string_is(step + 1, '('))
                         {
                                 if (c == '(')
                                 {
@@ -1470,6 +1492,12 @@ static bool lex_compound_body_legal(string_address open)
                 if (c == '(')
                         return false;
 
+                //      A list of words has no place for a command's
+                //      operators: a & or a ; or a redirection in it is the
+                //      syntax error bash names at that token.
+                if (c == ';' || c == '&' || c == '|' || c == '<' || c == '>')
+                        return false;
+
                 at++;
         }
 
@@ -1591,6 +1619,22 @@ static KEEP b32 lex_word(string_address address_to at)
                 //      <( and >( carry a whole command inside the word,
                 //      the same way $( ) does, so the blanks and operators in
                 //      it are not this line's business.
+                //      dash has none: the redirection is an operator and
+                //      the parenthesis after it is a syntax error, which
+                //      is the operator the floor sent here to be made.
+                if ((c == '<' || c == '>') && string_is(step + 1, '(') &&
+                    shell_dash_compat)
+                {
+                        if (step > start)
+                                break;
+
+                        step++;
+                        address_to at = step;
+
+                        return lex_add(LEX_OPERATOR, c == '<' ? OP_LESS : OP_GREAT,
+                                       start, 1);
+                }
+
                 if ((c == '<' || c == '>') && string_is(step + 1, '('))
                 {
                         string_address stop = lex_nesting(step + 1);

@@ -185,10 +185,11 @@ pacman -Syu package_name
 ```
 
 Software can come from several distributions on one system, alongside
-Moonwater's own coreutils, util-linux and shell (which runs bash and dash
-scripts). The default profile binds only a package's loader and libc;
-`--isolated` gives package managers a complete namespace with the host's
-`/proc/sys` and `/sys` read-only. `bowl expose` puts chosen programs on the
+Moonwater's own coreutils, util-linux and shell (bash when it is called
+bash, dash when it is called dash or sh, as Debian's `/bin/sh` is). The
+default profile binds only a package's loader and libc; `--isolated`
+gives package managers a complete namespace with the host's `/proc/sys` and
+`/sys` read-only. `bowl expose` puts chosen programs on the
 global path. A bowl is not a security sandbox: its programs run as root.
 
 `bowl setup` checks for room before downloading. On a live stick bowls live in
