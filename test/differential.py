@@ -3236,6 +3236,54 @@ def awk_gen_strings(rng, count):
     return out
 
 
+def awk_gen_utf8(rng, count):
+    """The string builtins in a UTF-8 locale, where awk counts characters and
+    not bytes: length, substr, index, match, split with no separator and the
+    widths and precisions of %s and %c, over text with two, three and four
+    byte characters. Each case names the locale, and gawk answers in it
+    too. Text that is not well formed is left out: gawk says so on standard
+    error, once for each string it counts, and hangs in gsub over it."""
+    env = (("LC_ALL", "C.UTF-8"), ("LANG", "C.UTF-8"))
+    texts = ("h\u00e9llo w\u00f6rld", "\u6f22\u5b57\u30c6\u30ad", "a\u00e9b\U0001f642c", "\u00e9\u00e9\u00e9",
+             "caf\u00e9", "abc", "", "\u00e9", "x\u00e9y z\u00e9", "\u0416\u0443\u043a \u03a9mega", "a b\tc")
+    starts = ("-1", "0", "1", "2", "3", "4", "5", "7", "9", "1.5", "2.7", "0.5", "\"2\"")
+    lengths = ("-1", "0", "1", "2", "3", "5", "99", "0.4", "1.5", "2.5")
+    needles = ("\"\"", "\"a\"", "\"\u00e9\"", "\"\u5b57\"", "\"l\u00f6\"", "\"\u00e9\u00e9\"", "\" \"", "\"z\u00e9\"")
+    patterns = ("/\u00e9/", "/./", "/../", "/\u5b57./", "/[^a]+/", "/l+/", "/$/", "/^/", "/\u00e9+/", "/[a-z]+/",
+                "/\u00e9*/", "/\u00e9{2}/", "/(\u00e9)+/", "/\u00e9?\u00f6/", "/\u5b57+\u30c6/", "/l\u00f6*/")
+    out = []
+    for _ in range(count):
+        t = awk_str(rng.choice(texts))
+        calls = []
+        for _ in range(rng.choice((2, 3, 3, 4))):
+            kind = rng.random()
+            if kind < 0.20:
+                if rng.random() < 0.5:
+                    calls.append(f"print \"[\" substr({t}, {rng.choice(starts)}) \"]\"")
+                else:
+                    calls.append(f"print \"[\" substr({t}, {rng.choice(starts)}, {rng.choice(lengths)}) \"]\"")
+            elif kind < 0.32:
+                calls.append(f"print index({t}, {rng.choice(needles)})")
+            elif kind < 0.46:
+                calls.append(rng.choice((f"print length({t})", f"$0 = {t}; print length, length()",
+                                         f"x = {t}; print length(x), length(x x)")))
+            elif kind < 0.60:
+                sep = rng.choice((", \"\"", ", \" \"", ", \"\u00e9\"", ", /[\u00e9 ]/"))
+                calls.append(f"n = split({t}, p{sep}); s = n; for (i = 1; i <= n; i++) s = s \"[\" p[i] \"]\"; print s")
+            elif kind < 0.72:
+                calls.append(f"print match({t}, {rng.choice(patterns)}), RSTART, RLENGTH")
+            elif kind < 0.80:
+                fn = rng.choice(("sub", "gsub"))
+                calls.append(f"s = {t}; n = {fn}({rng.choice(patterns)}, \"<&>\", s); print n, s")
+            else:
+                calls.append(rng.choice((
+                    f"print sprintf(\"[%5s|%-6s|%.2s|%7.3s|%c|%3c|%-3c]\", {t}, {t}, {t}, {t}, {t}, {t}, {t})",
+                    f"print sprintf(\"[%c|%c|%c|%c|%c]\", 233, 20013, 128, 255, {rng.choice(('256', '65', '1114111'))})",
+                    f"print sprintf(\"[%c|%5c|%-5c]\", 26085, 26085, 233)")))
+        out.append({"argv": ("BEGIN { " + "; ".join(calls) + " }",), "env": env})
+    return out
+
+
 def awk_gen_control(rng, count):
     """Control flow, arrays and functions, assembled from statement
     templates with small random constants; arrays are printed sorted."""
@@ -4052,6 +4100,7 @@ def awk_extra():
             ("printf", awk_gen_printf, 900),
             ("fields", awk_gen_fields, 1000),
             ("strings", awk_gen_strings, 1000),
+            ("utf8", awk_gen_utf8, 300),
             ("control", awk_gen_control, 800),
             ("getline", awk_gen_getline, 350),
             ("redirect", awk_gen_redirect, 350),
@@ -4071,9 +4120,10 @@ def awk_extra():
     seen = set()
     unique = []
     for row in rows:
-        if row not in seen:
-            seen.add(row)
-            unique.append(tuple(row))
+        key = json.dumps(row, sort_keys=True) if isinstance(row, dict) else row
+        if key not in seen:
+            seen.add(key)
+            unique.append(row if isinstance(row, dict) else tuple(row))
     return tuple(unique)
 
 

@@ -48,6 +48,31 @@ static positive awk_size_add(positive left, positive right)
 }
 
 /*
+        Characters, in a UTF-8 locale, where awk counts bytes in any other:
+        length, substr, index, match, split with no separator and the widths
+        and precisions of %s and %c count what GNU awk counts, a character to
+        a well-formed sequence and a byte that is none to itself. Text with
+        no byte past ASCII, which is nearly all of it, answers with its byte
+        arithmetic untouched, after one mask a block.
+*/
+static bool text_locale_utf8();
+static p8 awk_utf8_known;
+
+static bool awk_wide(string_address text, positive length)
+{
+        if (!awk_utf8_known)
+                awk_utf8_known = text_locale_utf8() ? 2 : 1;
+
+        return awk_utf8_known == 2 && memory_ascii_span(text, length) != length;
+}
+
+// The characters of a text that awk_wide said is wide.
+static positive awk_characters(string_address text, positive length)
+{
+        return memory_utf8_span(text, length, positive_max).y;
+}
+
+/*
         Strings, counted.
 
         A value holds a pointer to one of these rather than a copy, so passing
@@ -1135,6 +1160,19 @@ static fn awk_split_pieces(string_address text, positive length, string_address 
 
         if (!separator_length)
         {
+                if (awk_wide(text, length))
+                {
+                        for (positive i = 0; i < length;)
+                        {
+                                positive size = memory_utf8_span(text + i, length - i, 1).x;
+
+                                awk_piece_add(i, size);
+                                i += size;
+                        }
+
+                        return;
+                }
+
                 for (positive i = 0; i < length; i++)
                         awk_piece_add(i, 1);
 
@@ -2334,6 +2372,7 @@ static awk_text address_to awk_sprintf(string_address format, positive length,
                 p8 prefix[4];
                 b32 prefixed = 0;
                 positive body = 0;
+                positive shown = (positive)-1;
                 bool from_string = false;
                 string_address body_at = room;
 
@@ -2475,12 +2514,33 @@ static awk_text address_to awk_sprintf(string_address format, positive length,
                                                        value < -9223372036854775808.0
                                                    ? (p8)0
                                                    : (p8)((positive)(bipolar)value & 0xff);
+
+                                // In a UTF-8 locale a value that is a
+                                // character is written as its sequence.
+                                if (!awk_utf8_known)
+                                        awk_utf8_known = text_locale_utf8() ? 2 : 1;
+
+                                if (awk_utf8_known == 2 && decimal_is_finite(value) &&
+                                    value >= 128.0 && value < 1114112.0)
+                                {
+                                        positive made = memory_utf8_encode(room, 4, (positive)value);
+
+                                        if (made)
+                                                body = made;
+                                }
                         }
                         else
                         {
                                 awk_text address_to text = awk_to_text(argument);
 
-                                room[body++] = text->length ? text->text[0] : (p8)0;
+                                if (awk_wide(text->text, text->length))
+                                {
+                                        body = memory_utf8_span(text->text, text->length, 1).x;
+                                        memory_copy(room, text->text, body);
+                                        shown = 1;
+                                }
+                                else
+                                        room[body++] = text->length ? text->text[0] : (p8)0;
                         }
 
                         precision = -1;
@@ -2494,6 +2554,16 @@ static awk_text address_to awk_sprintf(string_address format, positive length,
                         body_at = text->text;
                         body = text->length;
                         from_string = true;
+
+                        if (awk_wide(text->text, text->length))
+                        {
+                                // A precision and a width count characters.
+                                if (precision >= 0)
+                                        body = memory_utf8_span(text->text, text->length, precision).x;
+
+                                shown = awk_characters(text->text, body);
+                                break;
+                        }
 
                         if (precision >= 0 && precision < body)
                                 body = precision;
@@ -2590,7 +2660,8 @@ static awk_text address_to awk_sprintf(string_address format, positive length,
                 // padded with spaces, as the reference awk pads them.
                 if (from_string || conversion == 'c')
                         zero = false;
-                positive total = awk_size_add(awk_size_add(prefixed, zeros), body);
+                positive total = awk_size_add(awk_size_add(prefixed, zeros),
+                                              shown == (positive)-1 ? body : shown);
                 positive padding = width > total ? width - total : 0;
 
                 if (padding && !left && !zero)
@@ -5298,6 +5369,9 @@ static awk_text address_to awk_replace(awk_text address_to subject, regex_progra
         positive done = 0;
         positive at = 0;
         positive last = TEXT_UNSET;
+        // Past an empty match the next attempt is one character on, which in
+        // a UTF-8 locale is a whole sequence and not its first byte.
+        bool wide = awk_wide(subject->text, subject->length);
 
         address_to made = 0;
         awk_builder_start(address_of build);
@@ -5319,7 +5393,9 @@ static awk_text address_to awk_replace(awk_text address_to subject, regex_progra
                         if (start >= subject->length)
                                 break;
 
-                        at = start + 1;
+                        at = start + (wide ? memory_utf8_span(subject->text + start,
+                                                              subject->length - start, 1).x
+                                           : 1);
                         continue;
                 }
 
@@ -5386,7 +5462,12 @@ static awk_text address_to awk_replace(awk_text address_to subject, regex_progra
                 address_to made += 1;
                 done = stop;
                 last = stop;
-                at = start == stop ? start + 1 : stop;
+                at = start == stop
+                         ? start + (wide && start < subject->length
+                                        ? memory_utf8_span(subject->text + start,
+                                                           subject->length - start, 1).x
+                                        : 1)
+                         : stop;
 
                 if (!every)
                         break;
@@ -5411,7 +5492,11 @@ static fn awk_builtin(awk_node address_to node, awk_value address_to out)
         {
                 if (!node->count)
                 {
-                        awk_set_number(out, (decimal)awk_to_text(awk_field(0))->length);
+                        awk_text address_to record = awk_to_text(awk_field(0));
+
+                        awk_set_number(out, (decimal)(awk_wide(record->text, record->length)
+                                                          ? awk_characters(record->text, record->length)
+                                                          : record->length));
                         return;
                 }
 
@@ -5431,7 +5516,9 @@ static fn awk_builtin(awk_node address_to node, awk_value address_to out)
 
                 awk_text address_to text = awk_eval_text(first);
 
-                awk_set_number(out, (decimal)text->length);
+                awk_set_number(out, (decimal)(awk_wide(text->text, text->length)
+                                                  ? awk_characters(text->text, text->length)
+                                                  : text->length));
                 awk_text_drop(text);
                 return;
         }
@@ -5440,14 +5527,15 @@ static fn awk_builtin(awk_node address_to node, awk_value address_to out)
         {
                 awk_text address_to text = awk_eval_text(first);
                 decimal start = awk_truncate(awk_eval_number(second));
+                bool wide = awk_wide(text->text, text->length);
+                positive total = wide ? awk_characters(text->text, text->length) : text->length;
                 positive from;
                 positive want;
 
                 if (decimal_is_nan(start) || start < 1)
                         start = 1;
 
-                from = start > (decimal)text->length ? text->length
-                                                     : (positive)start - 1;
+                from = start > (decimal)total ? total : (positive)start - 1;
 
                 if (third)
                 {
@@ -5456,14 +5544,23 @@ static fn awk_builtin(awk_node address_to node, awk_value address_to out)
                         if (decimal_is_nan(length) || length < 0)
                                 length = 0;
 
-                        want = length > (decimal)text->length ? text->length
-                                                              : (positive)length;
+                        want = length > (decimal)total ? total : (positive)length;
                 }
                 else
-                        want = text->length;
+                        want = total;
 
-                if (from + want > text->length)
-                        want = text->length - from;
+                if (from + want > total)
+                        want = total - from;
+
+                if (wide)
+                {
+                        // Characters to bytes: where the from'th begins, and
+                        // where the want'th after it ends.
+                        positive begin = memory_utf8_span(text->text, text->length, from).x;
+
+                        from = begin;
+                        want = memory_utf8_span(text->text + begin, text->length - begin, want).x;
+                }
 
                 awk_set_text(out, awk_text_new(text->text + from, want));
                 awk_text_drop(text);
@@ -5482,7 +5579,12 @@ static fn awk_builtin(awk_node address_to node, awk_value address_to out)
                             text->text, text->length, want->text, want->length);
 
                         if (at)
-                                answer = (positive)(at - text->text) + 1;
+                        {
+                                answer = (positive)(at - text->text);
+                                answer = (awk_wide(text->text, answer)
+                                              ? awk_characters(text->text, answer)
+                                              : answer) + 1;
+                        }
                 }
 
                 awk_text_drop(text);
@@ -5612,10 +5714,18 @@ static fn awk_builtin(awk_node address_to node, awk_value address_to out)
 
                 if (regex_find(REGEX_LONGEST, text->text, text->length, 0))
                 {
-                        awk_set_global_number(awk_where_rstart, (decimal)(regex_slots[0] + 1));
-                        awk_set_global_number(awk_where_rlength,
-                                              (decimal)(regex_slots[1] - regex_slots[0]));
-                        awk_set_number(out, (decimal)(regex_slots[0] + 1));
+                        positive begin = regex_slots[0];
+                        positive length = regex_slots[1] - regex_slots[0];
+
+                        if (awk_wide(text->text, text->length))
+                        {
+                                length = awk_characters(text->text + begin, length);
+                                begin = awk_characters(text->text, begin);
+                        }
+
+                        awk_set_global_number(awk_where_rstart, (decimal)(begin + 1));
+                        awk_set_global_number(awk_where_rlength, (decimal)length);
+                        awk_set_number(out, (decimal)(begin + 1));
                 }
                 else
                 {
