@@ -9206,7 +9206,12 @@ def files_tar(farm):
                     budget -= len(piece)
         return end, digest.hexdigest()[:12]
 
-    commands = (("tf",), ("tvf",), ("xf",), ("xf", "--strip-components=1"), ("xf", "-C", "sub"))
+    #   -d against the tree GNU extracted from the same archive, after a
+    #   touch of every regular file (so times differ) and against nothing
+    #   at all, where every member is a missing file.
+    commands = (("tf",), ("tvf",), ("xf",), ("xf", "--strip-components=1"), ("xf", "-C", "sub"),
+                ("df",), ("dvvf",), ("df", "--strip-components=1"), ("df", "extracted"),
+                ("dvf", "extracted"))
 
     def run(binary, name, data, command):
         with tempfile.TemporaryDirectory(prefix="tar-check-") as temporary:
@@ -9217,6 +9222,14 @@ def files_tar(farm):
             (work / "sub").mkdir(parents=True)
             (top / "a.tar").write_bytes(data)
             before = snapshot(top / "outside")
+            if command[-1] == "extracted":
+                command = command[:-1]
+                subprocess.run([reference, "xf", str(top / "a.tar")], cwd=work,
+                               env={"PATH": os.defpath, "LC_ALL": "C", "TZ": "UTC0"},
+                               stdin=subprocess.DEVNULL, capture_output=True, timeout=20)
+                for path in sorted(work.rglob("*")):
+                    if path.is_file() and not path.is_symlink():
+                        os.utime(path, (1, 1))
             try:
                 ran = subprocess.run([binary, command[0], str(top / "a.tar"), *command[1:]],
                                      cwd=work, env={"PATH": os.defpath, "LC_ALL": "C", "TZ": "UTC0"},
@@ -9226,7 +9239,10 @@ def files_tar(farm):
             outside = snapshot(top / "outside")
             stray = sorted(p.name for p in top.iterdir()
                            if p.name not in ("outside", "work", "a.tar"))
-            return (ran.returncode == 0, ran.stdout, snapshot(work)), \
+            #   -d's answer is its status, 1 for a difference and 2 for
+            #   trouble, so that is compared whole.
+            status = ran.returncode if command[0].startswith("d") else ran.returncode == 0
+            return (status, ran.stdout, snapshot(work)), \
                 (outside if outside != before else None, stray)
 
     rng = random.Random(0x7a52)
