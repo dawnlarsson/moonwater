@@ -4762,6 +4762,7 @@ split-link-replaced|0||d=$(mktemp -d) && cd "$d" && echo a > t && ln -s t xaa &&
 csplit-link-replaced|0||d=$(mktemp -d) && cd "$d" && echo a > t && ln -s t xx01 && seq 2 | "$HB/csplit" -k - 2 > /dev/null && [ "$(cat t)" = a ] && [ ! -L xx01 ]; s=$?; cd /; rm -rf "$d"; exit $s
 chown-L-not-followed|0||d=$(mktemp -d) && cd "$d" && mkdir t && ln -s /etc t/e && n=$("$HB/chown" -RL "$(id -u)" t 2>&1 | wc -l); cd /; rm -rf "$d"; [ "$n" -le 1 ]
 cp-tree-staged|0||d=$(mktemp -d) && cd "$d" && mkdir s && mkfifo s/f && { timeout 5 "$HB/cp" -R --copy-contents s t & p=$!; sleep 1; [ ! -e t ]; r=$?; kill $p 2>/dev/null; wait $p 2>/dev/null; cd /; rm -rf "$d"; exit $r; }
+install-owner-discarded|1|cannot publish|[ "$(id -u)" = 0 ] && { echo cannot publish; exit 1; }; d=$(mktemp -d) && echo x > "$d.src" && "$HB/install" -o 0 "$d.src" "$d/out"; s=$?; [ -e "$d/out" ] && s=9; rm -rf "$d" "$d.src"; exit $s
 sticky-mkdir|0||d=$(mktemp -d) && chmod 1777 "$d" && "$HB/mkdir" -p "$d/x"; s=$?; rm -rf "$d"; exit $s
 masked-find-exec|126|flag refused|/usr/bin/unshare -rm /bin/sh -c 'mount -t tmpfs tmpfs /proc && "$HB/find" /dev/null -exec true {} ";"'
 masked-awk|126||/usr/bin/unshare -rm /bin/sh -c 'mount -t tmpfs tmpfs /proc && echo x | "$HB/awk" 1'

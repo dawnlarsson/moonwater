@@ -523,8 +523,84 @@ static b32 process_stdbuf()
 
 static const argument_option process_chroot_options[] = {
     {"skip-chdir", 'k', ARGUMENT_LONG_ONLY},
+    {"groups", 'G', ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
+    {"userspec", 'U', ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
     {null},
 };
+
+/*
+        --userspec=USER[:GROUP] and --groups=G1,G2,...: the credentials the
+        command runs with, said in the new root's own /etc/passwd and
+        /etc/group, so they are read after the root is changed. A name is
+        looked up and a number is taken as it is; the groups are set first,
+        then the group, then the user, as GNU sets them.
+*/
+static b32 process_chroot_credentials(string_address userspec, string_address groups)
+{
+        bipolar uid = -1;
+        bipolar gid = -1;
+        positive list[64];
+        positive listed = 0;
+
+        if (userspec && userspec[0])
+        {
+                p8 text[128];
+                string_address split = string_first_of(userspec, ':');
+                positive user_length = split ? (positive)(split - userspec) : string_length(userspec);
+                string_address group = split ? split + 1 : null;
+
+                if (user_length >= sizeof(text))
+                        return string_report(log_error, 125, "chroot: invalid user\n");
+                memory_copy(text, userspec, user_length);
+                text[user_length] = end;
+                if (user_length)
+                {
+                        uid = file_identity_of((string_address)text, false);
+                        if (uid < 0)
+                                return string_report(log_error, 125, "chroot: invalid user\n");
+                }
+                if (group && group[0])
+                {
+                        gid = file_identity_of(group, true);
+                        if (gid < 0)
+                                return string_report(log_error, 125, "chroot: invalid group\n");
+                }
+        }
+        if (groups && groups[0])
+        {
+                for (string_address at = groups; *at;)
+                {
+                        p8 text[64];
+                        string_address comma = string_first_of(at, ',');
+                        positive length = comma ? (positive)(comma - at) : string_length(at);
+
+                        if (length && length < sizeof(text) && listed < array_count(list))
+                        {
+                                memory_copy(text, at, length);
+                                text[length] = end;
+                                bipolar id = file_identity_of((string_address)text, true);
+
+                                if (id < 0)
+                                        return string_report(log_error, 125, "chroot: invalid group '%s'\n",
+                                                             (string_address)text);
+                                list[listed++] = (positive)id;
+                        }
+                        at += length + (comma != null);
+                }
+                bipolar grouped = system_call_2(syscall(setgroups), listed, (positive)list);
+
+                if (grouped < 0)
+                        return string_report(log_error, 125, "chroot: failed to set supplemental groups: %s\n",
+                                             file_reason(grouped));
+        }
+        bipolar set = 0;
+
+        if (gid >= 0 && (set = system_call_1(syscall(setgid), (positive)gid)) < 0)
+                return string_report(log_error, 125, "chroot: failed to set group-ID: %s\n", file_reason(set));
+        if (uid >= 0 && (set = system_call_1(syscall(setuid), (positive)uid)) < 0)
+                return string_report(log_error, 125, "chroot: failed to set user-ID: %s\n", file_reason(set));
+        return 0;
+}
 
 static b32 process_chroot()
 {
@@ -573,6 +649,15 @@ static b32 process_chroot()
             (changed = system_change_directory((string_address) "/")) < 0)
                 return string_report(log_error, 125, "chroot: cannot chdir to root directory: %s\n",
                               file_reason(changed));
+
+        {
+                b32 credentials = process_chroot_credentials(
+                    (taking.flags & FILE_FLAG('U')) ? file_option_value(address_of taking, 'U') : null,
+                    (taking.flags & FILE_FLAG('G')) ? file_option_value(address_of taking, 'G') : null);
+
+                if (credentials)
+                        return credentials;
+        }
 
         if (taking.first < count)
                 return process_tool_exec((string_address) "chroot",

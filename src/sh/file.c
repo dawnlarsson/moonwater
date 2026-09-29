@@ -11816,6 +11816,9 @@ static const argument_option ls_options[] = {
     {"no-group", 'G'},
     {"human-readable", 'h', 0, ARGUMENT_SELECT(ls_selection, size)},
     {"si", 'P', ARGUMENT_LONG_ONLY, ARGUMENT_SELECT(ls_selection, size)},
+    // The exact name first, or its two longer relatives are all the table
+    // finds of --dereference and call it ambiguous.
+    {"dereference", 'L', 0, ARGUMENT_SELECT(ls_selection, deref)},
     {"dereference-command-line", 'H', 0, ARGUMENT_SELECT(ls_selection, deref)},
     {"dereference-command-line-symlink-to-dir", 'V', ARGUMENT_LONG_ONLY, ARGUMENT_SELECT(ls_selection, deref)},
     {"hide", 'W', ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
@@ -11824,7 +11827,6 @@ static const argument_option ls_options[] = {
     {"inode", 'i'},
     {"ignore", 'I', ARGUMENT_REQUIRED},
     {"kibibytes", 'k'},
-    {"dereference", 'L', 0, ARGUMENT_SELECT(ls_selection, deref)},
     {"numeric-uid-gid", 'n', 0, ARGUMENT_SELECT(ls_selection, format)},
     {"literal", 'N', 0, ARGUMENT_SELECT(ls_selection, quote)},
     {"hide-control-chars", 'q', 0, ARGUMENT_SELECT(ls_selection, control)},
@@ -30768,11 +30770,131 @@ static bool shuf_range(string_address text, positive address_to low,
         return true;
 }
 
+/*
+        --random-source is GNU's randint: bytes of the file are read as they
+        are wanted, widened until the range holds the choices asked for, and
+        the part of a draw that fell in the rejected tail is kept for the
+        next one. The words below are that routine's, one for one, since the
+        bytes a file yields decide every line that comes out.
+*/
+static bool shuf_sourced;
+static bool shuf_source_dead;
+static bipolar shuf_source_handle;
+static string_address shuf_source_name;
+static p64 shuf_source_number;
+static p64 shuf_source_maximum;
+static positive shuf_source_have;
+static positive shuf_source_at;
+static p8 shuf_source_block[4096];
+
+static bool shuf_source_read(p8 address_to into, positive wanted)
+{
+        while (wanted)
+        {
+                if (shuf_source_at == shuf_source_have)
+                {
+                        bipolar got = system_read_once((positive)shuf_source_handle,
+                                                       (string_address)shuf_source_block,
+                                                       sizeof(shuf_source_block));
+
+                        shuf_source_at = 0;
+                        shuf_source_have = 0;
+
+                        if (got <= 0)
+                        {
+                                if (got < 0)
+                                        string_format(log_error, "shuf: '%w': read error: %s\n",
+                                                      writer_terminal_quoted_name,
+                                                      shuf_source_name, file_reason(got));
+                                else
+                                        string_format(log_error, "shuf: '%w': end of file\n",
+                                                      writer_terminal_quoted_name,
+                                                      shuf_source_name);
+                                log_flush();
+                                shuf_source_dead = true;
+                                return false;
+                        }
+
+                        shuf_source_have = (positive)got;
+                }
+
+                positive take = shuf_source_have - shuf_source_at;
+
+                if (take > wanted)
+                        take = wanted;
+                memory_copy(into, shuf_source_block + shuf_source_at, take);
+                shuf_source_at += take;
+                into += take;
+                wanted -= take;
+        }
+
+        return true;
+}
+
+static positive shuf_source_genmax(p64 genmax)
+{
+        p64 number = shuf_source_number;
+        p64 maximum = shuf_source_maximum;
+        p64 choices = genmax + 1;
+
+        for (;;)
+        {
+                if (maximum < genmax)
+                {
+                        p8 bytes[8];
+                        positive count = 0;
+                        p64 reach = maximum;
+
+                        do
+                        {
+                                reach = (reach << 8) + 255;
+                                count++;
+                        } while (reach < genmax);
+
+                        if (!shuf_source_read(bytes, count))
+                                return 0;
+
+                        count = 0;
+
+                        do
+                        {
+                                number = (number << 8) + bytes[count];
+                                maximum = (maximum << 8) + 255;
+                                count++;
+                        } while (maximum < genmax);
+                }
+
+                if (maximum == genmax)
+                {
+                        shuf_source_number = 0;
+                        shuf_source_maximum = 0;
+                        return (positive)number;
+                }
+
+                p64 excess = maximum - genmax;
+                p64 unusable = excess % choices;
+                p64 last_usable = maximum - unusable;
+                p64 reduced = number % choices;
+
+                if (number <= last_usable)
+                {
+                        shuf_source_number = number / choices;
+                        shuf_source_maximum = excess / choices;
+                        return (positive)reduced;
+                }
+
+                number = reduced;
+                maximum = unusable - 1;
+        }
+}
+
 static positive shuf_uniform(file_random_state address_to random,
                              positive bound)
 {
         if (bound < 2)
                 return 0;
+        if (shuf_sourced)
+                return shuf_source_dead ? 0 : shuf_source_genmax(bound - 1);
 
         p64 width = (p64)bound;
         p64 threshold = (0 - width) % width;
@@ -30828,7 +30950,8 @@ static bool shuf_output_number(shuf_output address_to output, positive number,
 
 static shuf_record address_to shuf_file_records(string_address name,
                                                 p8 delimiter,
-                                                positive address_to count)
+                                                positive address_to count,
+                                                bool address_to streamed)
 {
         bipolar handle = !name || (string_is(name, '-') && !string_get(name + 1))
                              ? 0
@@ -30843,6 +30966,10 @@ static shuf_record address_to shuf_file_records(string_address name,
 
         positive length;
         bool read_failed;
+        file_facts kind;
+        bool plain = file_look((bipolar)handle, (string_address)"", AT_EMPTY_PATH,
+                               address_of kind) &&
+                     (kind.mode & MODE_FORMAT) == MODE_FILE;
         p8 address_to input = utility_arena_read_all(
             (positive)handle, FILE_TRANSFER_SIZE, address_of length,
             address_of read_failed);
@@ -30896,6 +31023,9 @@ static shuf_record address_to shuf_file_records(string_address name,
         }
 
         address_to count = records;
+        //      GNU keeps a reservoir instead of the whole input when the size
+        //      of standard input is unknown, or is over 8 MiB.
+        address_to streamed = !plain || length > 8192 * 1024;
         return table;
 }
 
@@ -30932,7 +31062,8 @@ static bool shuf_emit_records(shuf_output address_to output,
                 {
                         positive chosen = shuf_uniform(random, count);
 
-                        if (!shuf_output_record(output, records + chosen,
+                        if (shuf_source_dead ||
+                            !shuf_output_record(output, records + chosen,
                                                 delimiter))
                                 return false;
                         made++;
@@ -30943,19 +31074,54 @@ static bool shuf_emit_records(shuf_output address_to output,
 
         positive take = limited && wanted < count ? wanted : count;
 
+        //      The whole permutation is drawn before the first line is
+        //      written, as GNU's is, so a source that runs dry writes nothing.
         for (positive made = 0; made < take; made++)
         {
                 positive chosen = made + shuf_uniform(random, count - made);
                 shuf_record held = records[made];
 
+                if (shuf_source_dead)
+                        return false;
                 records[made] = records[chosen];
                 records[chosen] = held;
-
-                if (!shuf_output_record(output, records + made, delimiter))
-                        return false;
         }
 
+        for (positive made = 0; made < take; made++)
+                if (!shuf_output_record(output, records + made, delimiter))
+                        return false;
+
         return true;
+}
+
+/*
+        GNU's reservoir: the first K lines are held, each later line takes a
+        held place at random or is dropped, and one more draw is spent when the
+        input ends. The draws are the same whether the lines come from the
+        file or from the table already read, so the table stands in for the
+        stream and the held lines are its first K places.
+*/
+static positive shuf_reservoir(shuf_record address_to records, positive count,
+                               positive keep)
+{
+        if (count < keep)
+                return count;
+
+        positive seen = keep;
+
+        for (positive at = keep; at < count; at++)
+        {
+                positive place = shuf_uniform(null, seen + 1);
+
+                if (shuf_source_dead)
+                        return 0;
+                if (place < keep)
+                        records[place] = records[at];
+                seen++;
+        }
+
+        shuf_uniform(null, seen + 1);
+        return shuf_source_dead ? 0 : keep;
 }
 
 static bool shuf_set_add(positive address_to set, positive mask,
@@ -31042,6 +31208,85 @@ static bool shuf_emit_sparse_range(shuf_output address_to output, positive low,
         return true;
 }
 
+/*
+        The same swaps as the dense table below, kept only where they land:
+        GNU's sparse map. An index nobody has moved holds itself. Only the
+        places a swap has filled are stored, one per draw at most, and the
+        index a draw starts at is never asked for again.
+*/
+static positive shuf_map_get(positive address_to table, positive mask,
+                             positive index)
+{
+        positive slot = (index * 11400714819323198485u) & mask;
+
+        while (table[2 * slot])
+        {
+                if (table[2 * slot] == index + 1)
+                        return table[2 * slot + 1];
+                slot = (slot + 1) & mask;
+        }
+
+        return index;
+}
+
+static void shuf_map_put(positive address_to table, positive mask,
+                         positive index, positive value)
+{
+        positive slot = (index * 11400714819323198485u) & mask;
+
+        while (table[2 * slot] && table[2 * slot] != index + 1)
+                slot = (slot + 1) & mask;
+
+        table[2 * slot] = index + 1;
+        table[2 * slot + 1] = value;
+}
+
+static bool shuf_emit_mapped_range(shuf_output address_to output, positive low,
+                                   positive count, positive take, p8 delimiter,
+                                   file_random_state address_to random)
+{
+        if (take > positive_max / 8)
+                return false;
+
+        positive capacity = 1;
+
+        while (capacity < take * 2)
+                capacity *= 2;
+
+        if (capacity > positive_max / (2 * sizeof(positive)))
+                return false;
+
+        positive address_to table = (positive address_to)utility_arena_take(
+            capacity * 2 * sizeof(positive));
+        positive address_to values =
+            (positive address_to)utility_arena_take(take * sizeof(positive));
+
+        if (!table || !values)
+                return false;
+
+        memory_fill(table, 0, capacity * 2 * sizeof(positive));
+
+        for (positive made = 0; made < take; made++)
+        {
+                positive other = made + shuf_uniform(random, count - made);
+
+                if (shuf_source_dead)
+                        return false;
+
+                positive held = shuf_map_get(table, capacity - 1, made);
+
+                values[made] = shuf_map_get(table, capacity - 1, other);
+                if (other != made)
+                        shuf_map_put(table, capacity - 1, other, held);
+        }
+
+        for (positive made = 0; made < take; made++)
+                if (!shuf_output_number(output, low + values[made], delimiter))
+                        return false;
+
+        return true;
+}
+
 static bool shuf_emit_range(shuf_output address_to output, positive low,
                             positive count, positive wanted, bool limited,
                             bool repeat, p8 delimiter,
@@ -31055,7 +31300,8 @@ static bool shuf_emit_range(shuf_output address_to output, positive low,
                 {
                         positive chosen = shuf_uniform(random, count);
 
-                        if (!shuf_output_number(output, low + chosen, delimiter))
+                        if (shuf_source_dead ||
+                            !shuf_output_number(output, low + chosen, delimiter))
                                 return false;
                         made++;
                 }
@@ -31067,6 +31313,9 @@ static bool shuf_emit_range(shuf_output address_to output, positive low,
 
         if (!take)
                 return true;
+        if (take <= count / 4 && shuf_sourced)
+                return shuf_emit_mapped_range(output, low, count, take,
+                                              delimiter, random);
         if (take <= count / 4)
                 return shuf_emit_sparse_range(output, low, count, take,
                                               delimiter, random);
@@ -31087,12 +31336,15 @@ static bool shuf_emit_range(shuf_output address_to output, positive low,
                 positive chosen = made + shuf_uniform(random, count - made);
                 positive held = numbers[made];
 
+                if (shuf_source_dead)
+                        return false;
                 numbers[made] = numbers[chosen];
                 numbers[chosen] = held;
+        }
 
+        for (positive made = 0; made < take; made++)
                 if (!shuf_output_number(output, numbers[made], delimiter))
                         return false;
-        }
 
         return true;
 }
@@ -31180,8 +31432,8 @@ static b32 file_shuf()
 
         if (!file_take(address_of taking) || file_operand_failed)
                 return 1;
-        if (file_option_value(address_of taking, 'R'))
-                return string_report(log_error, 1, "shuf: --random-source is unsupported; kernel-seeded randomness is mandatory\n");
+        shuf_sourced = false;
+        shuf_source_dead = false;
 
         positive flags = taking.flags;
         bool echo = (flags & FILE_FLAG('e')) != 0;
@@ -31248,6 +31500,7 @@ static b32 file_shuf()
         positive low = 0;
         positive high = 0;
         positive count = 0;
+        bool streamed = false;
         shuf_record address_to records = null;
 
         utility_arena.used = 0;
@@ -31273,7 +31526,8 @@ static b32 file_shuf()
                                                  : null,
                                              (flags & FILE_FLAG('z')) ? '\0'
                                                                       : '\n',
-                                             address_of count);
+                                             address_of count,
+                                             address_of streamed);
 
         if (!range_text && !records)
         {
@@ -31281,14 +31535,56 @@ static b32 file_shuf()
                 return 1;
         }
 
+        //      GNU opens the source once it is known that a byte may be
+        //      wanted: always when repeating or sampling, else when at least
+        //      one line is to be drawn; a source no draw needs is not opened.
+        string_address source_name = file_option_value(address_of taking, 'R');
+        bool reservoir = source_name && limited && !repeat && !echo &&
+                         !range_text && streamed;
+        bool sampled = repeat || reservoir || (count && (!limited || wanted));
+
+        if (source_name && sampled)
+        {
+                shuf_source_handle = system_open_at(AT_FDCWD, source_name,
+                                                    FILE_READ | O_CLOEXEC);
+
+                if (shuf_source_handle < 0)
+                {
+                        string_format(log_error, "shuf: %w: %s\n", writer_shell_name,
+                                      source_name, file_reason(shuf_source_handle));
+                        utility_arena.used = 0;
+                        return 1;
+                }
+
+                shuf_sourced = true;
+                shuf_source_name = source_name;
+                shuf_source_number = 0;
+                shuf_source_maximum = 0;
+                shuf_source_have = 0;
+                shuf_source_at = 0;
+        }
+
         if (repeat && !count && (!limited || wanted))
         {
                 log_error("shuf: no lines to repeat\n", 0);
+                if (shuf_sourced)
+                        system_close(shuf_source_handle);
                 utility_arena.used = 0;
                 return 1;
         }
 
-        bool need_random = count > 1 && (!limited || wanted);
+        if (reservoir)
+        {
+                count = shuf_reservoir(records, count, wanted);
+                if (shuf_source_dead)
+                {
+                        system_close(shuf_source_handle);
+                        utility_arena.used = 0;
+                        return 1;
+                }
+        }
+
+        bool need_random = !source_name && count > 1 && (!limited || wanted);
         file_random_state random;
 
         if (need_random && !file_random_seed(address_of random))
@@ -31330,18 +31626,25 @@ static b32 file_shuf()
                                             wanted, limited, repeat, delimiter,
                                             address_of random);
 
-        if (good)
-                good = shuf_output_flush(address_of output);
+        //      A source that ran dry has said so already; what was drawn
+        //      before it is written, as stdio does at exit, and the status
+        //      is 1.
+        bool dry = shuf_source_dead;
+
+        if (good || dry)
+                good = shuf_output_flush(address_of output) && !dry;
+        if (shuf_sourced)
+                system_close(shuf_source_handle);
 
         if (output.opened)
         {
                 bipolar finished = 0;
-                if (good)
+                if (good || dry)
                         finished = file_staged_name_finish(
                             address_of output.stage, true, 0);
                 else
                         file_staged_name_abort(address_of output.stage);
-                if (good && finished < 0)
+                if ((good || dry) && finished < 0)
                 {
                         string_format(log_error, "shuf: failed to publish output %w: %s\n",
                                       writer_shell_quoted_name, output_name,
@@ -36284,6 +36587,7 @@ static const argument_option install_options[] = {
     {"no-target-directory", 'T'},
     {"target-directory", 't', ARGUMENT_REQUIRED},
     {"verbose", 'v'},
+    {"debug", 'G', ARGUMENT_LONG_ONLY},
     {"bc", 0},
     {null},
 };
@@ -36353,35 +36657,20 @@ static bool install_strip_result_ours(bipolar handle)
                facts.owner == (p32)system_call(syscall(geteuid));
 }
 
+//      A directory's owner and mode come from gnulib's mkdir-p, which has
+//      one sentence for both and the reason of the call that failed.
+static bool install_attributes_directory;
+//      What -m names, and whether the directory it lands on was already
+//      there: one that was keeps every bit the mode does not mention.
+static positive install_mode_bits = 07777;
+static bool install_attributes_existing;
+
 static bool install_attributes_handle(bipolar destination_handle,
                                       string_address destination,
                                       file_facts address_to source)
 {
-        bipolar owned = install_owner >= 0 || install_group >= 0
-                            ? system_change_owner_at(
-                                  destination_handle,
-                                  (string_address)"", install_owner,
-                                  install_group, AT_EMPTY_PATH)
-                            : 0;
-
-        if (owned < 0)
-        {
-                return string_report(log_error, false, "install: cannot change ownership of %w: %s\n",
-                              writer_shell_quoted_name, destination, file_reason(owned));
-        }
-
-        /* GNU sets the file's ACL from the mode, which takes away the
-           entries a directory's default list gave it; a file with none has
-           nothing to remove, and a filesystem with no ACLs says so. */
-        (void)system_call_2(syscall(fremovexattr), (positive)destination_handle,
-                            (positive) "system.posix_acl_access");
-
-        if (file_change_mode_handle(destination_handle, install_mode) < 0)
-        {
-                return string_report(log_error, false, "install: cannot change mode of %w\n",
-                              writer_shell_quoted_name, destination);
-        }
-
+        //      The times are the copy's, given inside GNU's copy and so
+        //      before the owner is asked for.
         if (install_preserve && source)
         {
                 p64 times[4];
@@ -36394,6 +36683,55 @@ static bool install_attributes_handle(bipolar destination_handle,
                         return string_report(log_error, false, "install: cannot preserve times of %w\n",
                                       writer_shell_quoted_name, destination);
                 }
+        }
+
+        bipolar owned = install_owner >= 0 || install_group >= 0
+                            ? system_change_owner_at(
+                                  destination_handle,
+                                  (string_address)"", install_owner,
+                                  install_group, AT_EMPTY_PATH)
+                            : 0;
+
+        if (owned < 0 && install_attributes_directory)
+                return string_report(log_error, false,
+                                     "install: cannot change owner and permissions of %w: %s\n",
+                                     writer_shell_quoted_name, destination,
+                                     file_reason(owned));
+        if (owned < 0)
+        {
+                return string_report(log_error, false, "install: cannot change ownership of %w: %s\n",
+                              writer_shell_quoted_name, destination, file_reason(owned));
+        }
+
+        /* GNU sets the file's ACL from the mode, which takes away the
+           entries a directory's default list gave it; a file with none has
+           nothing to remove, and a filesystem with no ACLs says so. */
+        (void)system_call_2(syscall(fremovexattr), (positive)destination_handle,
+                            (positive) "system.posix_acl_access");
+
+        positive final_mode = install_mode;
+
+        if (install_attributes_directory && install_attributes_existing)
+        {
+                file_facts now;
+
+                if (file_look_code(destination_handle, (string_address)"",
+                                   AT_EMPTY_PATH, address_of now) >= 0)
+                        final_mode = (now.mode & 07777 & ~install_mode_bits) |
+                                     (install_mode & install_mode_bits);
+        }
+
+        bipolar moded = file_change_mode_handle(destination_handle, final_mode);
+
+        if (moded < 0 && install_attributes_directory)
+                return string_report(log_error, false,
+                                     "install: cannot change owner and permissions of %w: %s\n",
+                                     writer_shell_quoted_name, destination,
+                                     file_reason(moded));
+        if (moded < 0)
+        {
+                return string_report(log_error, false, "install: cannot change mode of %w\n",
+                              writer_shell_quoted_name, destination);
         }
 
         return true;
@@ -36601,6 +36939,14 @@ static bool install_strip_run(string_address name)
         return true;
 }
 
+//      An open source that got no further: GNU's copy still ends with its
+//      --debug line, having learned nothing yet.
+static void install_debug_unknown(void)
+{
+        if (file_debug)
+                string_format(log, "copy offload: unknown, reflink: unknown, sparse detection: unknown\n");
+}
+
 static fn install_pair(string_address source, string_address destination)
 {
         static p8 source_leaf[FILE_PATH_MAX];
@@ -36668,6 +37014,12 @@ static fn install_pair(string_address source, string_address destination)
         if (destination_directory < 0)
         {
                 system_close(source_handle);
+                if (!install_parents && install_loud)
+                {
+                        file_backup_told(source, destination, (string_address) "'",
+                                         (string_address) "' -> '");
+                        install_debug_unknown();
+                }
                 if (!install_parents)
                         string_format(
                             log_error,
@@ -36697,9 +37049,12 @@ static fn install_pair(string_address source, string_address destination)
                         else
                         {
                                 if (install_loud)
+                                {
                                         file_backup_told(source, destination,
                                                          (string_address) "'",
                                                          (string_address) "' -> '");
+                                        install_debug_unknown();
+                                }
                                 string_format(log_error,
                                               "install: cannot create regular file %w: %s\n",
                                               writer_shell_quoted_name, destination,
@@ -36764,9 +37119,12 @@ static fn install_pair(string_address source, string_address destination)
                 else
                 {
                         if (install_no_target && install_loud)
+                        {
                                 file_backup_told(source, destination,
                                                  (string_address) "'",
                                                  (string_address) "' -> '");
+                                install_debug_unknown();
+                        }
                         string_format(log_error,
                                       "install: cannot create regular file %w: %s\n",
                                       writer_shell_quoted_name, destination,
@@ -36837,6 +37195,13 @@ static fn install_pair(string_address source, string_address destination)
         if (file_backup_kind && destination_exists)
                 destination_exists = false;
 
+        //      The arrow is written before the copy is tried, as GNU's is,
+        //      so a name that cannot be made or an owner that cannot be
+        //      given has still been announced.
+        if (install_loud)
+                file_backup_told(source, destination, (string_address) "'",
+                                 (string_address) "' -> '");
+
         system_path_stage protected;
         bipolar destination_handle = file_stage_file_open_at(
             address_of protected, destination_directory,
@@ -36845,6 +37210,7 @@ static fn install_pair(string_address source, string_address destination)
         {
                 system_close(destination_directory);
                 system_close(source_handle);
+                install_debug_unknown();
                 string_format(log_error, "install: cannot create regular file %w: %s\n",
                               writer_shell_quoted_name, destination,
                               file_reason(destination_handle));
@@ -36852,7 +37218,15 @@ static fn install_pair(string_address source, string_address destination)
                 return;
         }
 
+        // The line that says how it was copied comes after the arrow, as
+        // GNU's install writes them.
+        bool debug_wanted = file_debug;
+
+        file_debug = false;
         bool copied = file_copy_handles(source_handle, destination_handle);
+        file_debug = debug_wanted;
+        if (file_debug)
+                file_copy_debug_said();
         system_close(source_handle);
         //      Under -s the copy stays 0600 until strip has run, since
         //      a strip that rewrites its file may not open a read-only one;
@@ -36862,10 +37236,18 @@ static fn install_pair(string_address source, string_address destination)
                            install_attributes_handle(destination_handle,
                                                      destination,
                                                      address_of from));
+        //      GNU gives the owner after the copy is in place, and a refused
+        //      chown leaves that copy where it is, mode 0600, with status 1.
+        //      The tight tier takes the copy away instead of leaving a file
+        //      owned by the wrong user.
+        bool keeping = false;
+#if MOONWATER_STRICT < STRICT_TIGHT
+        keeping = copied;
+#endif
         bipolar published = file_stage_publish_protected_at(
             address_of protected, destination_directory, destination_leaf,
             destination_handle,
-            attributed ? 0 : -ERROR_INPUT_OUTPUT, !destination_exists,
+            attributed || keeping ? 0 : -ERROR_INPUT_OUTPUT, !destination_exists,
             destination_exists ? address_of to : null, 0);
 
         if (!copied || published < 0)
@@ -36883,9 +37265,6 @@ static fn install_pair(string_address source, string_address destination)
                 return;
         }
 
-        if (install_loud)
-                file_backup_told(source, destination, (string_address) "'",
-                                 (string_address) "' -> '");
 
         /*      A failed strip takes the file away again. What a strip that
                 worked leaves at the name -- the same file or a new one it
@@ -36960,10 +37339,14 @@ static bool install_late_checks(string_address owner, string_address group)
 
 static bool install_option_seen(p8 letter, string_address value)
 {
-        if (!file_backup_seen((string_address) "install", letter, value))
-                return false;
+        //      A second -t is refused as it is read; the backup word is
+        //      judged after the last option, so it never outruns that.
         if (!file_into_option_seen((string_address) "install", letter, value))
                 return false;
+        //      The word is only kept here; file_backup_taken judges it
+        //      after the checks GNU makes first.
+        if (letter == 'B' && value)
+                file_backup_control_named = string_get(value) ? value : null;
         if (letter == 'X')
                 log_error("install: WARNING: ignoring --preserve-context; this kernel is not SELinux-enabled\n",
                           0);
@@ -37006,6 +37389,14 @@ static b32 file_install()
         //      the names are gathered in order and read from there.
         taking.first = 0;
         count = file_operand_count;
+        //      These two are judged before the backup word is, as GNU judges
+        //      them, so a bad word does not hide either.
+        if ((taking.flags & FILE_FLAG('d')) && (taking.flags & FILE_FLAG('s')))
+                return string_report(log_error, 1,
+                                     "install: the strip option may not be used when installing a directory\n");
+        if ((taking.flags & FILE_FLAG('d')) && file_option_value(address_of taking, 't'))
+                return string_report(log_error, 1,
+                                     "install: target directory not allowed when installing a directory\n");
         if (!file_backup_taken(address_of taking,
                                (string_address)"install"))
                 return 1;
@@ -37019,7 +37410,9 @@ static b32 file_install()
 
         install_parents = (flags & FILE_FLAG('D')) != 0;
         install_preserve = (flags & FILE_FLAG('p')) != 0;
-        install_loud = (flags & FILE_FLAG('v')) != 0;
+        // --debug says how each file was copied, and implies -v.
+        file_debug = (flags & FILE_FLAG('G')) != 0;
+        install_loud = (flags & (FILE_FLAG('v') | FILE_FLAG('G'))) != 0;
         install_no_target = (flags & FILE_FLAG('T')) != 0;
         install_compare = (flags & FILE_FLAG('C')) != 0;
         install_strip = (flags & FILE_FLAG('s')) != 0;
@@ -37050,8 +37443,11 @@ static b32 file_install()
                                       file_operand_at(taking.first + 2));
                         return !file_try_help((string_address) "install");
                 }
+                install_mode_bits = 07777;
                 if (mode &&
-                    !file_mode_of(mode, 0, true, address_of install_mode))
+                    !file_mode_clauses(mode, 0, true, 07777, false,
+                                       address_of install_mode,
+                                       address_of install_mode_bits))
                         return string_report(log_error, 1,
                                              "install: invalid mode '%w'\n",
                                              writer_terminal_quoted_name,
@@ -37064,6 +37460,11 @@ static b32 file_install()
                         string_address path = file_operand_at(at);
                         p8 leaf[FILE_PATH_MAX];
                         p8 failing[FILE_PATH_MAX];
+                        file_facts before;
+                        bool fresh = file_look_code(AT_FDCWD, path,
+                                                    AT_SYMLINK_NOFOLLOW,
+                                                    address_of before) ==
+                                     -ERROR_NO_ENTRY;
                         bipolar parent = -1;
                         bipolar exact = file_make_directories_open(
                             path, 0755, 0700, true, true,
@@ -37081,9 +37482,23 @@ static b32 file_install()
                                                          exact, parent, leaf,
                                                          address_of bootstrapped,
                                                          address_of old_mode);
+                        install_attributes_directory = true;
+                        install_attributes_existing = !fresh;
+
                         bool attributed = handle >= 0 &&
                                           install_attributes_handle(
                                               handle, path, null);
+
+                        install_attributes_directory = false;
+
+                        //      A directory made for another owner is made
+                        //      with the owner's bits alone, and stays so
+                        //      when the owner is refused.
+                        if (!attributed && fresh && handle >= 0 &&
+                            (install_owner >= 0 || install_group >= 0))
+                                (void)file_change_mode_handle(
+                                    handle,
+                                    install_mode & ~(positive)077 & ~file_umask());
 
                         if (!attributed && bootstrapped && handle >= 0)
                                 (void)file_change_mode_handle(
@@ -37104,8 +37519,9 @@ static b32 file_install()
                         }
                         else if (!attributed)
                         {
-                                string_format(log_error, "install: cannot create directory '%w'\n",
-                                              writer_terminal_quoted_name, path);
+                                if (handle < 0)
+                                        string_format(log_error, "install: cannot create directory '%w'\n",
+                                                      writer_terminal_quoted_name, path);
                                 install_status = 1;
                         }
                 }
@@ -37127,12 +37543,40 @@ static b32 file_install()
                               file_operand_at(taking.first));
                 return !file_try_help((string_address) "install");
         }
+        //      -T's own complaints come before the mode is read.
+        if ((flags & FILE_FLAG('T')) && into)
+                return string_report(
+                    log_error, 1,
+                    "install: cannot combine --target-directory (-t) and --no-target-directory (-T)\n");
+        if ((flags & FILE_FLAG('T')) && count - taking.first > 2)
+        {
+                string_format(log_error, "install: extra operand '%w'\n",
+                              writer_terminal_quoted_name,
+                              file_operand_at(taking.first + 2));
+                return !file_try_help((string_address) "install");
+        }
+        if (into && !(flags & FILE_FLAG('T')))
+        {
+                file_facts into_looked_facts;
+                bipolar into_why = file_look_code(AT_FDCWD, into, 0,
+                                                  address_of into_looked_facts);
+
+                if (into_why >= 0 &&
+                    (into_looked_facts.mode & MODE_FORMAT) != MODE_DIRECTORY)
+                        into_why = -ERROR_NOT_DIRECTORY;
+                if (into_why < 0 &&
+                    !(install_parents && into_why == -ERROR_NO_ENTRY))
+                        return string_report(log_error, 1,
+                                             "install: failed to access %w: %s\n",
+                                             writer_shell_quoted_name, into,
+                                             file_reason(into_why));
+        }
         if (mode && !file_mode_of(mode, 0, false, address_of install_mode))
                 return string_report(log_error, 1, "install: invalid mode '%w'\n",
                                      writer_terminal_quoted_name, mode);
         if (!install_late_checks(owner, group))
                 return 1;
-        if (install_parents && into)
+        if (install_parents && into && !(flags & FILE_FLAG('T')))
         {
                 file_facts into_facts;
                 bipolar into_looked =
