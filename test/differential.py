@@ -7180,6 +7180,33 @@ FIXTURES["files_cpmerge"] = {
 }
 
 
+#       Names of one file met beside a destination that is in the way: the
+#       hard-linked pair a and b copied into a directory whose b dangles, or
+#       whose a and b are newer than the source (-u keeps them, and GNU links
+#       the second to the first all the same), and a lone dangling name that
+#       -n and --update=none still refuse to write through.
+FIXTURES["files_cplinks"] = {
+    "a": files_file(b"one\n", 1000000000),
+    "b": ("hard", "a"),
+    "n": files_file(b"n\n", 1010000000),
+    "m": files_link("nowhere", 1020000000),
+    "dz/b": files_link("zz", 1030000000),
+    "dz": files_dir(1040000000),
+    "dn/a": files_file(b"newer a\n", 1900000000),
+    "dn/b": files_file(b"newer b\n", 1910000000),
+    "dn": files_dir(1920000000),
+}
+
+
+def files_cplinks_cases():
+    argvs = tuple(flags + ("a", "b", "dz") for flags in (("-a",), ("-l",), ("--preserve=links",), ("-a", "-f"), ("-a", "-v"), ("-a", "-n"))) + \
+        tuple(flags + ("a", "b", "dn") for flags in (("-a", "-u"), ("-a", "--update=none"), ("-au", "-v"), ("-u", "--preserve=links"),
+                                                     ("-a", "--update=older"), ("-a", "--update=none-fail"), ("-a", "-n"))) + \
+        tuple(flags + ("n", "m") for flags in ((), ("-n",), ("-nv",), ("--update=none",), ("--update=none-fail",), ("-u",),
+                                              ("-f",), ("-r", "-n"), ("--remove-destination",), ("-b",)))
+    return tuple({"fixture": "files_cplinks", "argv": argv} for argv in argvs)
+
+
 def files_cpmerge_cases():
     controls = (("-b",), ("--backup=numbered",), ("--backup=existing",), ("-b", "-S", ".k"), ("--backup=none",))
     copies = (("-r",), ("-a",), ("-rf",), ("-r", "--remove-destination"), ("-ru",))
@@ -8034,7 +8061,7 @@ FILES_UTILITIES = (
             + tuple({"fixture": "files_self", "argv": words + ("sl", "x")}
                     for words in (("-rl",), ("--link", "-R"), ("-rlP",), ("-rlH",), ("-rld",), ("-al",),
                                   ("-rlL",), ("-l",), ("-lP",)))
-            + files_skip_cases("cp") + files_readonly_cases() + files_cpcorner_cases() + files_cpmerge_cases()
+            + files_skip_cases("cp") + files_readonly_cases() + files_cpcorner_cases() + files_cpmerge_cases() + files_cplinks_cases()
             + files_made_cases("cp", ("-f", "-b", "--backup=numbered", "-d", "-R", "-l", "-s", "-v", "-a",
                                       "-dR", "--remove-destination", "-n")),
             normalize=files_sorted_lines),

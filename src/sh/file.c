@@ -33563,6 +33563,33 @@ static bool cp_same_file_ok(bipolar source_directory, string_address source,
         return false;
 }
 
+/* -u left a destination that is not older, and GNU still remembers it as
+   this file's copy, so the file's other names become links to it -- or links
+   it to the copy an earlier name made. False when that link could not be made. */
+static bool cp_update_kept(file_facts address_to facts, file_facts address_to there,
+                           bool named, bipolar destination_directory,
+                           string_address destination,
+                           string_address destination_shown)
+{
+        bool not_older =
+            cp_update_policy == 'u' &&
+            (facts->modified.seconds < there->modified.seconds ||
+             (facts->modified.seconds == there->modified.seconds &&
+              facts->modified.nanoseconds <= there->modified.nanoseconds));
+
+        if (!not_older || cp_hard || cp_symbolic || !cp_keep_links ||
+            !cp_links_tracked(facts, named))
+                return true;
+
+        file_made_entry address_to earlier = file_linked_find(facts);
+
+        if (!earlier)
+                file_linked_record(facts, destination_shown);
+        else if (file_linked_replace(earlier, destination_directory, destination) < 0)
+                return false;
+        return true;
+}
+
 static bool file_copy_one(bipolar source_directory, string_address source,
                           string_address source_shown,
                           bipolar destination_directory,
@@ -33754,30 +33781,10 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                                                  : address_of there,
                                     address_of cp_status))
         {
-                /* -u left a destination that is not older, and GNU still
-                   remembers it as this file's copy, so the file's other
-                   names become links to it -- or links it to the copy an
-                   earlier name made. */
-                bool not_older =
-                    destination_exists && cp_update_policy == 'u' &&
-                    (facts.modified.seconds < there.modified.seconds ||
-                     (facts.modified.seconds == there.modified.seconds &&
-                      facts.modified.nanoseconds <=
-                          there.modified.nanoseconds));
-                if (not_older && !cp_hard && !cp_symbolic &&
-                    cp_keep_links && cp_links_tracked(address_of facts, named))
-                {
-                        file_made_entry address_to earlier =
-                            file_linked_find(address_of facts);
-
-                        if (!earlier)
-                                file_linked_record(address_of facts,
-                                                   destination_shown);
-                        else if (file_linked_replace(earlier,
-                                                     destination_directory,
-                                                     destination) < 0)
-                                return false;
-                }
+                if (!cp_update_kept(address_of facts, address_of there, named,
+                                    destination_directory, destination,
+                                    destination_shown))
+                        return false;
                 return true;
         }
 
@@ -33835,8 +33842,13 @@ static bool file_copy_one(bipolar source_directory, string_address source,
            retried after removing it. A link that is not dangling but could
            not be followed -- a search permission missing on the way -- is
            GNU's failed stat, named for what it was. */
+        /* A name whose file was already copied this run is linked to that
+           copy, replacing what is there, so a dangling link in its way is no
+           obstacle: cp -a a b d with a and b one file and d/b dangling. */
         if (!moving && destination_is_link && !cp_replace && !cp_hard &&
-            !cp_symbolic && kind != MODE_DIRECTORY && !destination_exists)
+            !cp_symbolic && kind != MODE_DIRECTORY && !destination_exists &&
+            !(cp_links_tracked(address_of facts, named) &&
+              file_linked_find(address_of facts)))
         {
                 if (there_looked == -ERROR_NO_ENTRY)
                         return string_report(log_error, false,
@@ -34864,10 +34876,7 @@ static fn cp_pair(string_address source, string_address destination)
             (destination_entry.mode & MODE_FORMAT) == MODE_LINK &&
             !destination_exists;
         bool refuse_dangling = kind != MODE_DIRECTORY && dangling_dest &&
-                               !cp_replace &&
-                               cp_update_policy != 'n' &&
-                               cp_update_policy != 'F' &&
-                               !file_backup_kind;
+                               !cp_replace && !file_backup_kind;
         if (kind != MODE_DIRECTORY && !refuse_dangling &&
             !file_overwrite_allowed((string_address)"cp", destination,
                                     collision_exists,
@@ -34877,7 +34886,14 @@ static fn cp_pair(string_address source, string_address destination)
                                     cp_update_policy == 'F',
                                     cp_loud, address_of source_facts,
                                     collision_facts, address_of cp_status))
+        {
                 already = true;
+                if (destination_exists &&
+                    !cp_update_kept(address_of source_facts, collision_facts,
+                                    true, destination_directory,
+                                    destination_leaf, destination))
+                        cp_status = 1;
+        }
         if (already)
         {
                 system_close(source_directory);
