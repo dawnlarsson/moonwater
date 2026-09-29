@@ -88,7 +88,13 @@ Every new externally reachable parser must add:
 7. a fixed resource ceiling and a test which reaches it;
 8. identity mutations for every field used to authorize a reply;
 9. fault injection for allocation, randomness, time, and I/O where applicable;
-10. a differential oracle or a documented reason no independent oracle exists.
+10. a differential oracle or a documented reason no independent oracle exists;
+11. its bytes read through lib.util.c's `byte_reader` (a window whose reads are
+    checked and whose first short read fails it for good) rather than an offset
+    kept beside the buffer, and its name in `reader_only` in
+    `harness_security_hygiene`, which refuses a listed parser that subscripts or
+    steps the pointer it was handed; a hosted lift of it takes the cursor with
+    `byte_reader_source()` (and `byte_store_source()` for a writer).
 
 Passing rows are evidence for a particular build and environment, not a
 permanent certification. Unsupported architecture, namespace, sanitizer, or
