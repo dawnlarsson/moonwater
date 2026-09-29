@@ -1233,10 +1233,8 @@ static bool link_size_pack(p8 address_to packed)
         winsize size = {24, 80, 0, 0};
         bool known = system_control(0, TIOCGWINSZ, address_of size) >= 0;
 
-        packed[0] = (p8)size.rows;
-        packed[1] = (p8)(size.rows >> 8);
-        packed[2] = (p8)size.columns;
-        packed[3] = (p8)(size.columns >> 8);
+        memory_store_unaligned(p16, packed, size.rows);
+        memory_store_unaligned(p16, packed + 2, size.columns);
         return known;
 }
 
@@ -2533,8 +2531,7 @@ static fn link_stamps_load(void)
         for (positive at = 0; at < got / sizeof(link_stamp_entry); at++)
         {
                 p8 address_to stamp = link_self.stamp[at].stamp;
-                p64 seconds = (p64)network_load_32(stamp) << 32 |
-                              network_load_32(stamp + 4);
+                p64 seconds = network_load_64(stamp);
 
                 if (seconds <= wall)
                         link_self.stamp[link_self.stamps++] =

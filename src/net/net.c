@@ -2081,21 +2081,6 @@ static COLD bipolar dns_resolve_any(string_address path, string_address name,
 
 typedef unsigned __int128 crypto_wide;
 
-/* Big endian 64 bit fields -- GCM's length block, a key wrap's integrity
-   check, a bignum limb -- are an unaligned pair of 32 bit halves, and the
-   halves are lib.c's own byte-reversing load and store. */
-static p64 crypto_be64(const p8 address_to bytes)
-{
-        return ((p64)network_load_32((p8 address_to)bytes) << 32) |
-               network_load_32((p8 address_to)bytes + 4);
-}
-
-static fn crypto_put_be64(p8 address_to bytes, p64 value)
-{
-        network_store_32(bytes, (p32)(value >> 32));
-        network_store_32(bytes + 4, (p32)value);
-}
-
 /*
         SHA-256 for the transcript, HKDF and the signature hashes, SHA-384 for
         the P-384 and RSA-SHA384 chains: the library's streaming digests over
@@ -2548,8 +2533,8 @@ static fn crypto_aesgcm_crypt(crypto_aesgcm_key address_to key,
                 crypto_ghash_span(s, key->table, text, text_length);
 
         memory_fill(padded, 0, 16);
-        crypto_put_be64(padded, (p64)aad_length * 8);
-        crypto_put_be64(padded + 8, (p64)text_length * 8);
+        network_store_64(padded, (p64)aad_length * 8);
+        network_store_64(padded + 8, (p64)text_length * 8);
         ghash_blocks(s, key->table, padded, 1);
 
         aes128_ctr_blocks(key->round, j0, s, tag, 1);
@@ -2719,7 +2704,7 @@ static fn crypto_fe_load_be(p64 address_to out, const p8 address_to bytes, posit
         positive i;
 
         for (i = 0; i < n; i++)
-                out[n - 1 - i] = crypto_be64(bytes + i * 8);
+                out[n - 1 - i] = network_load_64(bytes + i * 8);
 }
 
 static fn crypto_fe_store_be(p8 address_to bytes, const p64 address_to in, positive n)
@@ -2727,7 +2712,7 @@ static fn crypto_fe_store_be(p8 address_to bytes, const p64 address_to in, posit
         positive i;
 
         for (i = 0; i < n; i++)
-                crypto_put_be64(bytes + i * 8, in[n - 1 - i]);
+                network_store_64(bytes + i * 8, in[n - 1 - i]);
 }
 
 static bipolar crypto_fe_cmp(const p64 address_to a, const p64 address_to b,
@@ -4502,8 +4487,7 @@ static COLD fn tls_expand_label(p8 address_to secret, string_address label,
                 return;
         }
 
-        info[0] = (p8)(out_length >> 8);
-        info[1] = (p8)out_length;
+        network_store_16(info, (p16)out_length);
         info[used++] = (p8)(6 + label_length);
         memory_copy(info + used, "tls13 ", 6);
         used += 6;
@@ -4580,7 +4564,7 @@ static fn tls_record_header(p8 address_to header, p8 type, positive length)
 static fn tls12_aad(p8 address_to aad, p64 seq, p8 address_to header,
                     positive length)
 {
-        crypto_put_be64(aad, seq);
+        network_store_64(aad, seq);
         tls_record_header(aad + 8, header[0], length);
 }
 
@@ -5355,8 +5339,8 @@ static COLD bool tls_ipv6_literal(p8 address_to text, positive length,
                 }
                 if (!digits || digits > 4)
                         return false;
-                groups[count++] = (p8)(group >> 8);
-                groups[count++] = (p8)group;
+                network_store_16(groups + count, (p16)group);
+                count += 2;
                 if (at == length)
                         break;
                 if (text[at++] != ':' || at == length)
@@ -7070,8 +7054,7 @@ static COLD bipolar tls_client_hello(tls_conn address_to tls, p8 address_to out,
 
         {
                 positive ext_length = at - ext_len_at - 2;
-                out[ext_len_at] = (p8)(ext_length >> 8);
-                out[ext_len_at + 1] = (p8)ext_length;
+                network_store_16(out + ext_len_at, (p16)ext_length);
         }
         {
                 positive body = at - 4;

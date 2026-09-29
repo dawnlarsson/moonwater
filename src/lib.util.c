@@ -288,6 +288,30 @@ static inline positive memory_vli_get(const p8 address_to bytes,
            __builtin_memcpy((destination), address_of _memory_stored,        \
                             sizeof(_memory_stored)); })
 
+/* Big-endian 64-bit fields at any alignment, beside lib.c's network_load_32
+   and network_store_32. Spelled as eight shifts, the shape a compiler turns
+   into one load and a byte swap where the machine has one and into plain
+   shifts where it has not: __builtin_bswap64 is a libgcc call on the RV64
+   floor, which has no Zbb and whose programs have no libgcc to link. */
+static inline INLINE p64 network_load_64(const p8 address_to at)
+{
+        return (p64)at[0] << 56 | (p64)at[1] << 48 | (p64)at[2] << 40 |
+               (p64)at[3] << 32 | (p64)at[4] << 24 | (p64)at[5] << 16 |
+               (p64)at[6] << 8 | (p64)at[7];
+}
+
+static inline INLINE fn network_store_64(p8 address_to at, p64 value)
+{
+        at[0] = (p8)(value >> 56);
+        at[1] = (p8)(value >> 48);
+        at[2] = (p8)(value >> 40);
+        at[3] = (p8)(value >> 32);
+        at[4] = (p8)(value >> 24);
+        at[5] = (p8)(value >> 16);
+        at[6] = (p8)(value >> 8);
+        at[7] = (p8)value;
+}
+
 #define memory_cast(type, value)                                             \
         ({ __auto_type _memory_from = (value); type _memory_to;              \
            _Static_assert(sizeof(_memory_to) == sizeof(_memory_from),         \

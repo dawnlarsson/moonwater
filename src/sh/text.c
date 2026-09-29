@@ -33767,9 +33767,7 @@ static inline INLINE p64 sort_random_window(p8 address_to text, positive length)
 
         digest_write(address_of state, text, length);
         digest_close(address_of state, digest);
-        return (p64)digest[0] << 56 | (p64)digest[1] << 48 | (p64)digest[2] << 40 |
-               (p64)digest[3] << 32 | (p64)digest[4] << 24 | (p64)digest[5] << 16 |
-               (p64)digest[6] << 8 | (p64)digest[7];
+        return network_load_64(digest);
 }
 
 // The salt, from the named file or the kernel; false after GNU's words for
@@ -34367,15 +34365,11 @@ static inline INLINE fn sort_view_span(sort_view address_to view, b32 stage,
 /*
         Eight bytes as one big-endian word, the ones past the end masked off.
         Every buffer keeps SORT_SLACK bytes beyond its last line, so the load
-        never leaves the mapping. Spelled as eight shifts because that is the
-        shape a compiler turns into one load and a byte swap where the
-        machine has one and into plain shifts where it has not.
+        never leaves the mapping.
 */
 static inline INLINE p64 sort_window_load(p8 address_to at, positive length)
 {
-        p64 word = (p64)at[0] << 56 | (p64)at[1] << 48 | (p64)at[2] << 40 |
-                   (p64)at[3] << 32 | (p64)at[4] << 24 | (p64)at[5] << 16 |
-                   (p64)at[6] << 8 | (p64)at[7];
+        p64 word = network_load_64(at);
 
         return length >= 8 ? word : word & ~(~(p64)0 >> (length * 8));
 }

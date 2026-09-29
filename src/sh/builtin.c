@@ -1919,8 +1919,6 @@ static PURE string_address array_element_value(array_element address_to element)
 
 static COLD fn array_element_forget(array_table address_to table, positive at)
 {
-        positive left = table->count - at - 1;
-
         env_cell_drop(table->element[at].text);
 
         if (left)
@@ -1943,7 +1941,10 @@ static COLD fn array_element_forget(array_table address_to table, positive at)
 */
 #define ARRAY_ASSOC_ORDERED 8192
 
-static CONST p32 array_assoc_bucket(string_address key, positive length)
+/* Bash's string hash, FNV-1 over the bytes read as signed chars: the order
+   its associative arrays, completion specifications and command hash table
+   list their entries in, which is the order these have to agree with. */
+static CONST p32 shell_fnv1(string_address key, positive length)
 {
         p32 hash = 2166136261u;
 
@@ -1953,7 +1954,12 @@ static CONST p32 array_assoc_bucket(string_address key, positive length)
                 hash ^= (p32)(bipolar)(signed char)key[at];
         }
 
-        return hash & 1023;
+        return hash;
+}
+
+static CONST p32 array_assoc_bucket(string_address key, positive length)
+{
+        return shell_fnv1(key, length) & 1023;
 }
 
 /*
@@ -16652,9 +16658,6 @@ COLD fn shell_unalias(writer write, string_address input)
                                         sizeof(alias_table[0]));
                 }
 
-                if (at < alias_count)
-                        alias_count--;
-
                 index++;
         }
 
@@ -21002,15 +21005,7 @@ static COLD fn comp_drop(positive at)
 
 static COLD p32 comp_chain(string_address name)
 {
-        p32 hash = 2166136261u;
-
-        for (; string_get(name); name++)
-        {
-                hash *= 16777619u;
-                hash ^= (p32)(bipolar)(signed char)string_get(name);
-        }
-
-        return hash & 511;
+        return shell_fnv1(name, string_length(name)) & 511;
 }
 
 static COLD fn comp_quoted(writer write, string_address text)
@@ -23492,17 +23487,8 @@ fn shell_hash(writer write, string_address input)
 
                         for (at = 0; at < hash_count; at++)
                         {
-                                p32 value = 2166136261u;
-
-                                for (string_address name = hash_name[at];
-                                     string_get(name); name++)
-                                {
-                                        value *= 16777619u;
-                                        value ^= (p32)(bipolar)(signed char)
-                                            string_get(name);
-                                }
-
-                                chain[at] = value & 255;
+                                chain[at] = shell_fnv1(hash_name[at],
+                                                       string_length(hash_name[at])) & 255;
                                 order[at] = at;
                         }
 

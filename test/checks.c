@@ -62536,7 +62536,7 @@ static fn tls12_pieces(void)
                                        record) == sizeof record &&
                                   record[0] == TLS_CT_APP &&
                                   network_load_16(record + 3) == 8 + 2 + 16 &&
-                                  crypto_be64(record + 5) == 5);
+                                  network_load_64(record + 5) == 5);
                         check("a TLS 1.2 record does not open at another sequence",
                               tls_send_enc(near, TLS_CT_APP,
                                            (p8 address_to)"ok", 2) == TLS_OK &&

@@ -2380,10 +2380,7 @@ static __attribute__((always_inline)) inline fn zstd_bout_add(zstd_bout address_
         b->bits += nbits;
         if (b->bits >= 32)
         {
-                b->buf[b->n] = (p8)b->acc;
-                b->buf[b->n + 1] = (p8)(b->acc >> 8);
-                b->buf[b->n + 2] = (p8)(b->acc >> 16);
-                b->buf[b->n + 3] = (p8)(b->acc >> 24);
+                memory_store_unaligned(p32, b->buf + b->n, (p32)b->acc);
                 b->n += 4;
                 b->acc >>= 32;
                 b->bits -= 32;
@@ -2850,8 +2847,7 @@ static positive zstd_literals_header(p8 address_to out, p8 type, positive n)
                 v = type | (n < 4096 ? 4u : 12u) | (p32)n << 4;
                 used = n < 4096 ? 2 : 3;
         }
-        out[0] = (p8)v;
-        out[1] = (p8)(v >> 8);
+        memory_store_unaligned(p16, out, (p16)v);
         out[2] = (p8)(v >> 16);
         return used;
 }
@@ -3050,8 +3046,7 @@ static positive zstd_pack_literals(zstd_encoder address_to e,
 
                         if (at < 3)
                         {
-                                packed_out[jump + 2 * at] = (p8)packed;
-                                packed_out[jump + 2 * at + 1] = (p8)(packed >> 8);
+                                memory_store_unaligned(p16, packed_out + jump + 2 * at, (p16)packed);
                         }
                         size += packed;
                         position += take;

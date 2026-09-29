@@ -4194,7 +4194,7 @@ static COLD bool wifi_kw_unwrap(p8 address_to kek, p8 address_to wrap, positive 
                 for (i = words; i > 0; i--)
                 {
                         t = (p64)words * (round - 1) + i;
-                        crypto_put_be64(a, crypto_be64(a) ^ t);
+                        network_store_64(a, network_load_64(a) ^ t);
                         memory_copy(block, a, 8);
                         memory_copy(block + 8, r + (i - 1) * 8, 8);
                         wifi_aes_decrypt(kek, block, block, inverse);
@@ -4204,7 +4204,7 @@ static COLD bool wifi_kw_unwrap(p8 address_to kek, p8 address_to wrap, positive 
 
         //      The check value, and the unwrapped key data forgotten here
         //      whether it held or not.
-        unwrapped = crypto_be64(a) == 0xa6a6a6a6a6a6a6a6ull;
+        unwrapped = network_load_64(a) == 0xa6a6a6a6a6a6a6a6ull;
         if (unwrapped)
         {
                 memory_copy(plain, r, words * 8);

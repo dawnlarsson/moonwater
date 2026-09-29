@@ -25814,14 +25814,6 @@ static bool ul_swap_signature(storage_signature address_to signature,
         return true;
 }
 
-static fn ul_swap_store_32(p8 address_to into, p32 value)
-{
-        into[0] = (p8)value;
-        into[1] = (p8)(value >> 8);
-        into[2] = (p8)(value >> 16);
-        into[3] = (p8)(value >> 24);
-}
-
 static bool ul_swap_page(string_address text, positive address_to page)
 {
         positive value;
@@ -25982,8 +25974,8 @@ static b32 util_linux_mkswap()
                 return 1;
         }
         memory_zero(header, page);
-        ul_swap_store_32(header + 1024, 1);
-        ul_swap_store_32(header + 1028, (p32)(pages - 1));
+        memory_store_unaligned(p32, header + 1024, 1);
+        memory_store_unaligned(p32, header + 1028, (p32)(pages - 1));
         memory_copy(header + 1036, uuid.bytes, sizeof(uuid.bytes));
         string_address label = file_option_value(address_of taking, 'L');
         positive label_length = label ? string_length(label) : 0;

@@ -170,7 +170,7 @@ static bool waterlink_mix_dh(struct waterlink_noise address_to noise,
 static fn waterlink_noise_nonce(p8 address_to iv, p64 nonce)
 {
         memory_zero(iv, 4);
-        crypto_put_be64(iv + 4, nonce);
+        network_store_64(iv + 4, nonce);
 }
 
 // EncryptAndHash: the text is sealed in place and its tag written after it.
@@ -499,7 +499,7 @@ fn waterlink_split(struct waterlink_noise address_to noise, bool initiator,
 */
 fn waterlink_stamp(p8 address_to stamp, p64 seconds, p32 nanoseconds)
 {
-        crypto_put_be64(stamp, seconds + (1ull << 62));
+        network_store_64(stamp, seconds + (1ull << 62));
         network_store_32(stamp + 8, nanoseconds);
 }
 

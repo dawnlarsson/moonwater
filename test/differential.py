@@ -44730,6 +44730,20 @@ static p32 network_load_32(const p8 *bytes)
         return ((p32)bytes[0] << 24) | ((p32)bytes[1] << 16) |
                ((p32)bytes[2] << 8) | (p32)bytes[3];
 }
+static void network_store_16(p8 *bytes, p16 value)
+{
+        bytes[0] = (p8)(value >> 8);
+        bytes[1] = (p8)value;
+}
+static p64 network_load_64(const p8 *bytes)
+{
+        return ((p64)network_load_32(bytes) << 32) | network_load_32(bytes + 4);
+}
+static void network_store_64(p8 *bytes, p64 value)
+{
+        for (int i = 0; i < 8; i++)
+                bytes[i] = (p8)(value >> (56 - 8 * i));
+}
 /* Named hosts take the dNSName path (return < 0). A dotted-decimal IPv4
    host is recognized so iPAddress SANs exercise tls_general_name_match. */
 static bipolar string_to_host(string_address host)
@@ -44765,25 +44779,6 @@ static void crypto_forget(address_any secret, positive length)
                 *at++ = 0;
                 length--;
         }
-}
-static p64 crypto_be64(const p8 *bytes)
-{
-        return ((p64)(((p32)bytes[0] << 24) | ((p32)bytes[1] << 16) |
-                      ((p32)bytes[2] << 8) | (p32)bytes[3])
-                << 32) |
-               (p64)(((p32)bytes[4] << 24) | ((p32)bytes[5] << 16) |
-                     ((p32)bytes[6] << 8) | (p32)bytes[7]);
-}
-static void crypto_put_be64(p8 *bytes, p64 value)
-{
-        bytes[0] = (p8)(value >> 56);
-        bytes[1] = (p8)(value >> 48);
-        bytes[2] = (p8)(value >> 40);
-        bytes[3] = (p8)(value >> 32);
-        bytes[4] = (p8)(value >> 24);
-        bytes[5] = (p8)(value >> 16);
-        bytes[6] = (p8)(value >> 8);
-        bytes[7] = (p8)value;
 }
 static positive memory_span_byte(const void *block, p8 byte, positive size)
 {
@@ -45829,7 +45824,7 @@ static bool crypto_rsa_pkcs1(p8 address_to n, positive n_length, p64 e,
         fuzz_mix(sink, 1, hash, hash_length, sink[0]);
         return signature_length && signature[0] != 0xff;
 }
-static fn crypto_put_be64(p8 address_to bytes, p64 value)
+static fn network_store_64(p8 address_to bytes, p64 value)
 {
         for (int i = 0; i < 8; i++)
                 bytes[i] = (p8)(value >> (56 - 8 * i));
@@ -53820,11 +53815,6 @@ def harness_guest_scenarios(argv):
 WIFI_EAPOL_FUZZ_SHIM = r"""
 static inline p8 byte_is_hexadecimal(p8 b) { return isxdigit(b) != 0; }
 static inline p8 byte_to_lower(p8 b) { return (p8)tolower(b); }
-static void network_store_16(p8 *bytes, p16 value)
-{
-        bytes[0] = (p8)(value >> 8);
-        bytes[1] = (p8)value;
-}
 #define network_order_16(v) ((p16)((((v) & 0xff) << 8) | (((v) >> 8) & 0xff)))
 #define AF_PACKET 17
 #define ETH_P_PAE 0x888e
@@ -53973,7 +53963,7 @@ static void fz_wrap(const p8 *kek, const p8 *plain, positive n, p8 *out)
                         memcpy(block + 8, out + 8 * i, 8);
                         fuzz_aes_encrypt(round, block, block);
                         memcpy(a, block, 8);
-                        crypto_put_be64(a, crypto_be64(a) ^ t);
+                        network_store_64(a, network_load_64(a) ^ t);
                         memcpy(out + 8 * i, block + 8, 8);
                 }
         memcpy(out, a, 8);
@@ -54004,7 +53994,7 @@ static positive fz_frame(p8 *f, p16 info, const p8 *nonce, const p8 *data, posit
         f[4] = 2;
         network_store_16(f + 5, info);
         network_store_16(f + 7, 16);
-        crypto_put_be64(f + 9, fz_replay);
+        network_store_64(f + 9, fz_replay);
         if (nonce)
                 memcpy(f + 17, nonce, 32);
         memcpy(f + 65, fz_rsc, 8);
@@ -54046,7 +54036,7 @@ static void fz_answer(p16 info, const p8 *kck)
         p8 copy[512], hash[20];
 
         if (fz_sends != 1 || fz_sent_length < 99 || network_load_16(fz_sent + 5) != info ||
-            crypto_be64(fz_sent + 9) != fz_replay)
+            network_load_64(fz_sent + 9) != fz_replay)
                 abort();
         memcpy(copy, fz_sent, fz_sent_length);
         memset(copy + 81, 0, 16);
@@ -54186,7 +54176,7 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                                 //      counter: its group key may be one
                                 //      the access point has since replaced.
                                 n = fz_m3_length;
-                                crypto_put_be64(fz_m3 + 9, fz_replay);
+                                network_store_64(fz_m3 + 9, fz_replay);
                                 memcpy(frame, fz_m3, n);
                                 memset(frame + 81, 0, 16);
                                 {
@@ -54220,7 +54210,7 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                         n = fz_frame_length[which];
                         memcpy(frame, fz_frames[which], n);
                         step = fz_deliver(frame, n);
-                        if (n >= 17 && crypto_be64(frame + 9) <= fz_verified && fz_verified &&
+                        if (n >= 17 && network_load_64(frame + 9) <= fz_verified && fz_verified &&
                             (step != 0 || fz_sends))
                                 abort();
                         fz_lost |= step != 0 || fz_sends;
@@ -54237,7 +54227,7 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                         memcpy(frame, fz_frames[which], n);
                         at = (fz_byte() | fz_byte() << 8) % (n * 8);
                         frame[at / 8] ^= (p8)(1u << (at % 8));
-                        crypto_put_be64(frame + 9, ++fz_replay);
+                        network_store_64(frame + 9, ++fz_replay);
                         fz_lost |= fz_deliver(frame, n) != 0 || fz_sends;
                         fz_clean = false;
                 }
@@ -55577,7 +55567,7 @@ static p32 network_load_32(const p8 *at)
 {
         return (p32)at[0] << 24 | (p32)at[1] << 16 | (p32)at[2] << 8 | at[3];
 }
-static void crypto_put_be64(p8 *at, p64 value)
+static void network_store_64(p8 *at, p64 value)
 {
         for (int i = 0; i < 8; i++)
                 at[i] = (p8)(value >> (56 - 8 * i));
@@ -57208,7 +57198,7 @@ static p32 network_load_32(const p8 *at)
 {
         return (p32)at[0] << 24 | (p32)at[1] << 16 | (p32)at[2] << 8 | at[3];
 }
-static void crypto_put_be64(p8 *at, p64 v)
+static void network_store_64(p8 *at, p64 v)
 {
         for (int i = 0; i < 8; i++)
                 at[i] = (p8)(v >> (56 - 8 * i));

@@ -1846,10 +1846,9 @@ static fn gzip_write_stored(gzip_encoder address_to e, p8 address_to src, positi
                 gzip_put_bits(e, last && chunk == length, 1);
                 gzip_put_bits(e, 0, 2);
                 gzip_bits_align(e);
-                e->out[e->out_n++] = (p8)chunk;
-                e->out[e->out_n++] = (p8)(chunk >> 8);
-                e->out[e->out_n++] = (p8)~chunk;
-                e->out[e->out_n++] = (p8)(~chunk >> 8);
+                memory_store_unaligned(p16, e->out + e->out_n, (p16)chunk);
+                memory_store_unaligned(p16, e->out + e->out_n + 2, (p16)~chunk);
+                e->out_n += 4;
                 if (chunk)
                         memory_copy_apart(e->out + e->out_n, src, chunk);
                 e->out_n += chunk;

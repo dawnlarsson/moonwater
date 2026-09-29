@@ -121,11 +121,7 @@ static const storage_tag_descriptor storage_tags[] = {
 #define storage_be16 network_load_16
 #define storage_be32 network_load_32
 
-static p64 storage_be64(p8 address_to at)
-{
-        return ((p64)network_load_32(at) << 32) |
-               network_load_32(at + 4);
-}
+#define storage_be64 network_load_64
 
 static bool storage_bytes(p8 address_to bytes, positive have,
                           positive at, p8 address_to wanted,

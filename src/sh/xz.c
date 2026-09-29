@@ -163,19 +163,6 @@ static fn xz_filter_reset(xz_filter address_to f)
         memory_fill(f->history, 0, sizeof(f->history));
 }
 
-static inline p32 xz_le32(const p8 address_to p)
-{
-        return (p32)p[0] | (p32)p[1] << 8 | (p32)p[2] << 16 | (p32)p[3] << 24;
-}
-
-static inline fn xz_put_le32(p8 address_to p, p32 v)
-{
-        p[0] = (p8)v;
-        p[1] = (p8)(v >> 8);
-        p[2] = (p8)(v >> 16);
-        p[3] = (p8)(v >> 24);
-}
-
 #define XZ_X86_MSB(b) ((b) == 0 || (b) == 0xff)
 
 static positive xz_filter_x86(xz_filter address_to f, bool encode, p8 address_to buffer,
@@ -413,7 +400,7 @@ static positive xz_filter_arm64(xz_filter address_to f, bool encode, p8 address_
         for (i = 0; i < size; i += 4)
         {
                 p32 pc = f->pos + (p32)i;
-                p32 instr = xz_le32(buffer + i);
+                p32 instr = memory_load_unaligned(p32, buffer + i);
 
                 if ((instr >> 26) == 0x25)
                 {
@@ -424,7 +411,7 @@ static positive xz_filter_arm64(xz_filter address_to f, bool encode, p8 address_
                         if (!encode)
                                 pc = 0u - pc;
                         instr |= (src + pc) & 0x03ffffff;
-                        xz_put_le32(buffer + i, instr);
+                        memory_store_unaligned(p32, buffer + i, instr);
                 }
                 else if ((instr & 0x9f000000) == 0x90000000)
                 {
@@ -442,7 +429,7 @@ static positive xz_filter_arm64(xz_filter address_to f, bool encode, p8 address_
                         instr |= (dest & 3) << 29;
                         instr |= (dest & 0x0003fffc) << 3;
                         instr |= (0u - (dest & 0x00020000)) & 0x00e00000;
-                        xz_put_le32(buffer + i, instr);
+                        memory_store_unaligned(p32, buffer + i, instr);
                 }
         }
         return i;
@@ -506,7 +493,7 @@ static positive xz_filter_riscv(xz_filter address_to f, bool encode, p8 address_
                         inst |= (p32)buffer[i + 3] << 24;
                         if (inst & 0xe80)
                         {
-                                p32 inst2 = xz_le32(buffer + i + 4);
+                                p32 inst2 = memory_load_unaligned(p32, buffer + i + 4);
 
                                 if (XZ_RISCV_NOT_PAIR(inst, inst2))
                                 {
@@ -520,7 +507,7 @@ static positive xz_filter_riscv(xz_filter address_to f, bool encode, p8 address_
                                         addr += (inst2 >> 20) - ((inst2 >> 19) & 0x1000);
                                         addr += f->pos + (p32)i;
                                         inst = 0x17 | (2 << 7) | (inst2 << 12);
-                                        xz_put_le32(buffer + i, inst);
+                                        memory_store_unaligned(p32, buffer + i, inst);
                                         buffer[i + 4] = (p8)(addr >> 24);
                                         buffer[i + 5] = (p8)(addr >> 16);
                                         buffer[i + 6] = (p8)(addr >> 8);
@@ -532,8 +519,8 @@ static positive xz_filter_riscv(xz_filter address_to f, bool encode, p8 address_
 
                                         addr += inst2 >> 20;
                                         inst = 0x17 | (2 << 7) | (inst2 << 12);
-                                        xz_put_le32(buffer + i, inst);
-                                        xz_put_le32(buffer + i + 4, addr);
+                                        memory_store_unaligned(p32, buffer + i, inst);
+                                        memory_store_unaligned(p32, buffer + i + 4, addr);
                                 }
                         }
                         else
@@ -547,12 +534,12 @@ static positive xz_filter_riscv(xz_filter address_to f, bool encode, p8 address_
                                 }
                                 if (encode)
                                 {
-                                        p32 fake = xz_le32(buffer + i + 4);
+                                        p32 fake = memory_load_unaligned(p32, buffer + i + 4);
                                         p32 inst2 = (inst >> 12) | (fake << 20);
 
                                         inst = 0x17 | (rs1 << 7) | (fake & 0xfffff000);
-                                        xz_put_le32(buffer + i, inst);
-                                        xz_put_le32(buffer + i + 4, inst2);
+                                        memory_store_unaligned(p32, buffer + i, inst);
+                                        memory_store_unaligned(p32, buffer + i + 4, inst2);
                                 }
                                 else
                                 {
@@ -565,8 +552,8 @@ static positive xz_filter_riscv(xz_filter address_to f, bool encode, p8 address_
                                         p32 inst2 = (inst >> 12) | (addr << 20);
 
                                         inst = 0x17 | (rs1 << 7) | ((addr + 0x800) & 0xfffff000);
-                                        xz_put_le32(buffer + i, inst);
-                                        xz_put_le32(buffer + i + 4, inst2);
+                                        memory_store_unaligned(p32, buffer + i, inst);
+                                        memory_store_unaligned(p32, buffer + i + 4, inst2);
                                 }
                         }
                         i += 8 - 2;
@@ -1643,7 +1630,7 @@ static bool xz_dec_block(xz_decoder address_to d)
                                 if (psize != 0 && psize != 4)
                                         return xz_dec_fail(d, "xz filter properties");
                                 if (psize)
-                                        f->start = xz_le32(props);
+                                        f->start = memory_load_unaligned(p32, props);
                                 if (f->start & (xz_filter_alignment(id) - 1))
                                         return xz_dec_fail(d, "xz filter properties");
                         }
@@ -4422,8 +4409,8 @@ static bool xz_block_encode(xz_encoder address_to e, p8 address_to input, p32 n)
                                 if (take > XZ_CHUNK_PACKED_MAX)
                                         take = XZ_CHUNK_PACKED_MAX;
                                 out[at++] = dict_reset ? 1 : 2;
-                                out[at++] = (p8)((take - 1) >> 8);
-                                out[at++] = (p8)(take - 1);
+                                network_store_16(out + at, (p16)(take - 1));
+                                at += 2;
                                 memory_copy_apart(out + at, input + start + from, take);
                                 at += take;
                                 from += take;
@@ -4435,10 +4422,9 @@ static bool xz_block_encode(xz_encoder address_to e, p8 address_to input, p32 n)
                 out[at++] = (p8)((props ? (dict_reset ? 0xe0 : 0xc0)
                                         : state_reset ? 0xa0 : 0x80) |
                                  ((plain - 1) >> 16));
-                out[at++] = (p8)((plain - 1) >> 8);
-                out[at++] = (p8)(plain - 1);
-                out[at++] = (p8)((packed - 1) >> 8);
-                out[at++] = (p8)(packed - 1);
+                network_store_16(out + at, (p16)(plain - 1));
+                network_store_16(out + at + 2, (p16)(packed - 1));
+                at += 4;
                 if (props)
                         out[at++] = (p8)((e->pb * 5 + e->lp) * 9 + e->lc);
                 memory_copy_apart(out + at, e->chunk, packed);
@@ -4467,7 +4453,7 @@ static bool xz_block_encode(xz_encoder address_to e, p8 address_to input, p32 n)
                 else if (f->start)
                 {
                         header[h++] = 4;
-                        xz_put_le32(header + h, f->start);
+                        memory_store_unaligned(p32, header + h, f->start);
                         h += 4;
                 }
                 else
