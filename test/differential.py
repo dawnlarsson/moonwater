@@ -791,7 +791,22 @@ def shell_grammar_cases(domain, utility, budget, rng):
 #       Running one case both ways.
 # ----------------------------------------------------------------------------
 
+def _die_with_parent():
+    """A case's process dies when the harness does. A driver killed by a
+    rate limit, an agent's teardown or a stray signal used to leave every
+    running case orphaned to init, and a case that loops (while :; do :; done,
+    a fork chain) then held a core for days. PR_SET_PDEATHSIG is Linux's;
+    elsewhere there is nothing to ask for and the CPU limit beside it is what
+    there is."""
+    try:
+        import ctypes
+        ctypes.CDLL(None).prctl(1, int(signal.SIGKILL))
+    except (AttributeError, OSError, ImportError):
+        pass
+
+
 def _limits():
+    _die_with_parent()
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     resource.setrlimit(resource.RLIMIT_FSIZE, (OUTPUT_LIMIT * 8, OUTPUT_LIMIT * 8))
     resource.setrlimit(resource.RLIMIT_CPU, (4, 4))
@@ -18857,9 +18872,17 @@ def shell_reference_walk(farm, cases):
         #      subprocess.run kills only the child when the time is up, and
         #      these scripts start interactive shells whose jobs live in
         #      groups of their own: the whole session goes, every time.
+        #      No limit at all here left a case running for as long as the box
+        #      was up once its driver died: it now dies with the driver, and
+        #      no case may take a minute of CPU.
+        def contained():
+            _die_with_parent()
+            resource.setrlimit(resource.RLIMIT_CPU, (60, 60))
+
         with subprocess.Popen(argv + ["-c", script], cwd=directory, env=environment,
                               stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE, start_new_session=True) as ran:
+                              stderr=subprocess.PIPE, start_new_session=True,
+                              preexec_fn=contained) as ran:
             try:
                 stdout, _ = ran.communicate(timeout=timeout)
             except subprocess.TimeoutExpired:
