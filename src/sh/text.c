@@ -22033,6 +22033,133 @@ static fn cut_blank_line(p8 address_to line, positive line_length, bool compleme
 }
 
 /*
+        The bytes of the blank at AT: a space or tab, or in UTF-8 one of the
+        characters iswblank says are blank (the no-break spaces are not).
+*/
+static positive text_blank_at(const p8 address_to bytes, positive length, positive at)
+{
+        if (at >= length)
+                return 0;
+        if (bytes[at] == ' ' || bytes[at] == '\t')
+                return 1;
+        if (bytes[at] < 0x80 || !text_locale_utf8())
+                return 0;
+
+        p32 code;
+        positive step;
+
+        if (wc_utf8_decode(bytes + at, length - at, address_of code, address_of step) != WC_VALID)
+                return 0;
+        if (code == 0x1680 || (code >= 0x2000 && code <= 0x2006) ||
+            (code >= 0x2008 && code <= 0x200a) || code == 0x205f || code == 0x3000)
+                return step;
+
+        return 0;
+}
+
+// cut -w over a line with characters of more than a byte in a UTF-8 locale:
+// the fields are what lies between runs of blank characters.
+static fn cut_blank_line_wide(p8 address_to line, positive length, bool complement,
+                              bool only_delimited, string_address separator,
+                              positive separator_length, bool trimmed)
+{
+        if (trimmed)
+        {
+                positive first = 0;
+                positive last = 0;
+
+                while (first < length && text_blank_at(line, length, first))
+                        first += text_blank_at(line, length, first);
+                for (positive look = first; look < length;)
+                {
+                        positive step = text_blank_at(line, length, look);
+
+                        if (step)
+                                look += step;
+                        else
+                        {
+                                look += text_mb_length(TEXT_CHARSET_UTF8, line + look, length - look);
+                                last = look;
+                        }
+                }
+                line += first;
+                length = last > first ? last - first : 0;
+        }
+
+        positive at = 0;
+        positive which = 1;
+        bool wrote = false;
+        positive lead = 0;
+        bool any = false;
+
+        for (positive look = 0; look < length && !any;)
+                if (text_blank_at(line, length, look))
+                        any = true;
+                else
+                        look += text_mb_length(TEXT_CHARSET_UTF8, line + look, length - look);
+
+        //      No blank anywhere: the line is one field, whole unless -s.
+        if (!any)
+        {
+                if (!only_delimited)
+                {
+                        text_put(line, length);
+                        text_put_character(text_delimiter);
+                }
+                return;
+        }
+
+        while (lead < length && text_blank_at(line, length, lead))
+                lead += text_blank_at(line, length, lead);
+
+        //      The last character is a blank: the line ends in a field
+        //      of nothing.
+        bool trail = false;
+
+        for (positive look = 0; look < length;)
+        {
+                positive step = text_blank_at(line, length, look);
+
+                trail = step != 0;
+                look += step ? step : text_mb_length(TEXT_CHARSET_UTF8, line + look, length - look);
+        }
+
+        if (lead)
+        {
+                if (text_list_has(1) != complement)
+                        wrote = true;
+                which = 2;
+                at = lead;
+        }
+
+        while (at < length)
+        {
+                positive stop = at;
+
+                while (stop < length && !text_blank_at(line, length, stop))
+                        stop += text_mb_length(TEXT_CHARSET_UTF8, line + stop, length - stop);
+
+                if (text_list_has(which) != complement)
+                {
+                        if (wrote)
+                                text_put(separator, separator_length);
+                        text_put(line + at, stop - at);
+                        wrote = true;
+                }
+                which++;
+
+                at = stop;
+                while (at < length && text_blank_at(line, length, at))
+                        at += text_blank_at(line, length, at);
+        }
+
+        if (trail && text_list_has(which) != complement && wrote)
+                text_put(separator, separator_length);
+
+        text_put_character(text_delimiter);
+}
+
+/*
         cut where a character is more than a byte: fields parted by a
         delimiter of several bytes, and -b with -n, which takes a character
         whole or not at all. A character is wanted by its last byte, as GNU's
@@ -22735,6 +22862,15 @@ static b32 text_cut()
 
                                         while (line_length && byte_is_blank(line[line_length - 1]))
                                                 line_length--;
+                                }
+
+                                if (whitespace && text_locale_utf8() &&
+                                    memory_utf8_span(line, line_length, positive_max).y != line_length)
+                                {
+                                        cut_blank_line_wide(line, line_length, complement,
+                                                            only_delimited, separator,
+                                                            separator_length, trimmed);
+                                        continue;
                                 }
 
                                 if (whitespace)
