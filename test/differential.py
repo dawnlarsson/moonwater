@@ -32425,6 +32425,65 @@ def harness_compression(argv):
                                       back.stdout == body and got.stdout[6:12] == ref.stdout[6:12] and
                                       got.stdout[-4:] == ref.stdout[-4:],
                                       got.stderr.decode(errors='replace') + back.stderr.decode(errors='replace'))
+                        # Filter chains GNU writes, decoded here: every branch
+                        # converter and delta, a start offset, a chain of
+                        # three, one block and several, from a file, a pipe
+                        # and -T1, over data planted with each machine's
+                        # branch shapes and at the sizes where a converter's
+                        # last bytes wait (or pass through).
+                        planted = random.Random(0xB1C7)
+                        code = bytearray()
+                        while len(code) < 150000:
+                            code += planted.randbytes(planted.randrange(4, 60))
+                            code += planted.choice((
+                                b'\xe8' + planted.randbytes(3) + planted.choice((b'\x00', b'\xff')),
+                                planted.randbytes(3) + b'\xeb',
+                                b'\xef' + bytes([planted.randrange(256) & 0xf2]) + planted.randbytes(2),
+                                b'\x17' + planted.randbytes(3) + b'\x03\x30\x00\x00',
+                                b'\x48' + planted.randbytes(2) + b'\x01',
+                                b'\x40' + bytes([planted.randrange(64)]) + planted.randbytes(2),
+                                bytes([planted.randrange(256) & 0xe0 | 0x11]) + planted.randbytes(15),
+                                b'\x00\xf0' + planted.randbytes(2) + b'\x00\xf8',
+                                bytes([planted.randrange(256), 0x94]) * 2))
+                        code = bytes(code)
+                        stuffs = [('code', code)] + [('cut-%d' % n, code[:n]) for n in
+                                                      (0, 1, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 33, 257)]
+                        chains = (['--x86'], ['--powerpc'], ['--ia64'], ['--arm'], ['--armthumb'],
+                                  ['--sparc'], ['--arm64'], ['--riscv'], ['--delta'],
+                                  ['--delta=dist=7'], ['--delta=dist=256'], ['--x86=start=4096'],
+                                  ['--arm64=start=8'], ['--riscv=start=2'], ['--ia64=start=32'],
+                                  ['--delta=dist=3', '--x86'], ['--delta', '--arm', '--x86'])
+                        for chain in chains:
+                            for tag, blob in stuffs:
+                                if tag != 'code' and chain not in (['--x86'], ['--ia64'], ['--riscv'], ['--delta=dist=7'], ['--arm64']):
+                                    continue
+                                for mode in (['-T1'], ['-T2', '--block-size=65536']):
+                                    if tag != 'code' and mode != ['-T1']:
+                                        continue
+                                    made = call([refs['xz'], '-c', '-0'] + mode + chain + ['--lzma2=preset=0'], blob)
+                                    if made.returncode != 0:
+                                        check('%s/xz/filter-gnu-%s' % (label, ''.join(chain)), False,
+                                              made.stderr.decode(errors='replace'))
+                                        continue
+                                    for how in ([], ['-T1']):
+                                        back = call(runner + [exe, '-dc'] + how, made.stdout)
+                                        check('%s/xz/filter%s-%s-%s%s' % (label, ''.join(chain), tag, ''.join(mode), ''.join(how)),
+                                              back.returncode == 0 and back.stdout == blob,
+                                              back.stderr.decode(errors='replace'))
+                        made = call([refs['xz'], '-c', '-0', '-T1', '--x86', '--lzma2=preset=0'], code)
+                        hurt = random.Random(0xF117)
+                        for trial in range(40):
+                            damaged = bytearray(made.stdout)
+                            at = hurt.randrange(len(damaged))
+                            damaged[at] ^= 1 << hurt.randrange(8)
+                            ref = call([refs['xz'], '-dc'], bytes(damaged))
+                            got = call(runner + [exe, '-dc'], bytes(damaged))
+                            check('%s/xz/filter-damage-%d' % (label, trial),
+                                  got.returncode >= 0 and (got.returncode == 0) == (ref.returncode == 0) and
+                                  (ref.returncode != 0 or got.stdout == ref.stdout) and
+                                  ref.stdout.startswith(got.stdout[:max(0, len(got.stdout) - 8192)]),
+                                  'GNU %d ours %d %s' % (ref.returncode, got.returncode,
+                                                         got.stderr.decode(errors='replace')[:100]))
                         for args in (['-C', 'bad'], ['--check='], ['--check=SHA256'], ['-Ccrc6'],
                                      ['-C', '-c'], ['-C'], ['--check'], ['--check', 'none', '-e', '-1'],
                                      ['-Csha256'], ['-9eCcrc32']):

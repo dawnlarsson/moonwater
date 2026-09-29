@@ -101,6 +101,585 @@ static positive xz_dict_from_prop(p8 prop)
 }
 
 /*
+        Filters. A block's chain lists its filters in the order the encoder
+        applied them, LZMA2 last; the decoder runs LZMA2 and then the rest
+        backwards. Delta and the branch converters (x86, PowerPC, IA-64, ARM,
+        ARM Thumb, SPARC, ARM64, RISC-V) are one xz_filter each, with
+        liblzma's arithmetic: a converter treats the bytes it can decide and
+        leaves the last few, up to a whole instruction, for the next call, so
+        chopping the stream anywhere gives the bytes of one call over the
+        whole. At the end of a block what is left passes through as it is.
+*/
+#define XZ_FILTER_DELTA 0x03
+#define XZ_FILTER_X86 0x04
+#define XZ_FILTER_PPC 0x05
+#define XZ_FILTER_IA64 0x06
+#define XZ_FILTER_ARM 0x07
+#define XZ_FILTER_ARMT 0x08
+#define XZ_FILTER_SPARC 0x09
+#define XZ_FILTER_ARM64 0x0a
+#define XZ_FILTER_RISCV 0x0b
+#define XZ_FILTER_LZMA2 0x21
+/* Filters before LZMA2: liblzma takes four in all. */
+#define XZ_FILTERS_MAX 3
+#define XZ_FILTER_CARRY 24
+/* Room before a filtered window for the bytes each stage carries over. */
+#define XZ_FILTER_HEAD 128
+
+typedef struct
+{
+        p8 id;
+        p8 carry_n;
+        p8 dist;
+        p8 delta_at;
+        p32 start;
+        p32 pos;
+        p32 mask;
+        p32 prev;
+        p8 carry[XZ_FILTER_CARRY];
+        p8 history[256];
+} xz_filter;
+
+/* The alignment a converter's start offset must have, 0 for an id that is
+   not one (delta has no start offset, and is not asked here). */
+static positive xz_filter_alignment(p64 id)
+{
+        return id == XZ_FILTER_X86 ? 1
+             : id == XZ_FILTER_ARMT || id == XZ_FILTER_RISCV ? 2
+             : id == XZ_FILTER_PPC || id == XZ_FILTER_ARM || id == XZ_FILTER_SPARC ||
+               id == XZ_FILTER_ARM64 ? 4
+             : id == XZ_FILTER_IA64 ? 16 : 0;
+}
+
+static fn xz_filter_reset(xz_filter address_to f)
+{
+        f->pos = f->start;
+        f->mask = 0;
+        f->prev = (p32)-5;
+        f->carry_n = 0;
+        f->delta_at = 0;
+        memory_fill(f->history, 0, sizeof(f->history));
+}
+
+static inline p32 xz_le32(const p8 address_to p)
+{
+        return (p32)p[0] | (p32)p[1] << 8 | (p32)p[2] << 16 | (p32)p[3] << 24;
+}
+
+static inline fn xz_put_le32(p8 address_to p, p32 v)
+{
+        p[0] = (p8)v;
+        p[1] = (p8)(v >> 8);
+        p[2] = (p8)(v >> 16);
+        p[3] = (p8)(v >> 24);
+}
+
+#define XZ_X86_MSB(b) ((b) == 0 || (b) == 0xff)
+
+static positive xz_filter_x86(xz_filter address_to f, bool encode, p8 address_to buffer,
+                              positive size)
+{
+        static const p32 bit_of_mask[5] = {0, 1, 2, 2, 3};
+        p32 now = f->pos;
+        p32 prev_mask = f->mask;
+        p32 prev_pos = f->prev;
+        positive at = 0;
+
+        if (size < 5)
+                return 0;
+        if (now - prev_pos > 5)
+                prev_pos = now - 5;
+
+        positive limit = size - 5;
+
+        while (at <= limit)
+        {
+                p8 b = buffer[at];
+
+                if (b != 0xe8 && b != 0xe9)
+                {
+                        at++;
+                        continue;
+                }
+
+                p32 offset = now + (p32)at - prev_pos;
+
+                prev_pos = now + (p32)at;
+                if (offset > 5)
+                        prev_mask = 0;
+                else
+                        for (p32 i = 0; i < offset; i++)
+                        {
+                                prev_mask &= 0x77;
+                                prev_mask <<= 1;
+                        }
+                b = buffer[at + 4];
+                if (XZ_X86_MSB(b) && (prev_mask >> 1) <= 4 && (prev_mask >> 1) != 3)
+                {
+                        p32 src = (p32)b << 24 | (p32)buffer[at + 3] << 16 |
+                                  (p32)buffer[at + 2] << 8 | buffer[at + 1];
+                        p32 dest;
+
+                        for (;;)
+                        {
+                                dest = encode ? src + (now + (p32)at + 5)
+                                              : src - (now + (p32)at + 5);
+                                if (prev_mask == 0)
+                                        break;
+
+                                p32 i = bit_of_mask[prev_mask >> 1];
+
+                                b = (p8)(dest >> (24 - i * 8));
+                                if (!XZ_X86_MSB(b))
+                                        break;
+                                src = dest ^ ((1u << (32 - i * 8)) - 1);
+                        }
+                        buffer[at + 4] = (p8)(~(((dest >> 24) & 1) - 1));
+                        buffer[at + 3] = (p8)(dest >> 16);
+                        buffer[at + 2] = (p8)(dest >> 8);
+                        buffer[at + 1] = (p8)dest;
+                        at += 5;
+                        prev_mask = 0;
+                }
+                else
+                {
+                        at++;
+                        prev_mask |= 1;
+                        if (XZ_X86_MSB(b))
+                                prev_mask |= 0x10;
+                }
+        }
+        f->mask = prev_mask;
+        f->prev = prev_pos;
+        return at;
+}
+
+static positive xz_filter_arm(xz_filter address_to f, bool encode, p8 address_to buffer,
+                              positive size)
+{
+        positive i;
+
+        size &= ~(positive)3;
+        for (i = 0; i < size; i += 4)
+                if (buffer[i + 3] == 0xeb)
+                {
+                        p32 src = ((p32)buffer[i + 2] << 16 | (p32)buffer[i + 1] << 8 |
+                                   buffer[i]) << 2;
+                        p32 dest = encode ? f->pos + (p32)i + 8 + src
+                                          : src - (f->pos + (p32)i + 8);
+
+                        dest >>= 2;
+                        buffer[i + 2] = (p8)(dest >> 16);
+                        buffer[i + 1] = (p8)(dest >> 8);
+                        buffer[i] = (p8)dest;
+                }
+        return i;
+}
+
+static positive xz_filter_armt(xz_filter address_to f, bool encode, p8 address_to buffer,
+                               positive size)
+{
+        positive i;
+
+        if (size < 4)
+                return 0;
+        size -= 4;
+        for (i = 0; i <= size; i += 2)
+                if ((buffer[i + 1] & 0xf8) == 0xf0 && (buffer[i + 3] & 0xf8) == 0xf8)
+                {
+                        p32 src = (((p32)buffer[i + 1] & 7) << 19 | (p32)buffer[i] << 11 |
+                                   ((p32)buffer[i + 3] & 7) << 8 | buffer[i + 2]) << 1;
+                        p32 dest = encode ? f->pos + (p32)i + 4 + src
+                                          : src - (f->pos + (p32)i + 4);
+
+                        dest >>= 1;
+                        buffer[i + 1] = (p8)(0xf0 | ((dest >> 19) & 7));
+                        buffer[i] = (p8)(dest >> 11);
+                        buffer[i + 3] = (p8)(0xf8 | ((dest >> 8) & 7));
+                        buffer[i + 2] = (p8)dest;
+                        i += 2;
+                }
+        return i;
+}
+
+static positive xz_filter_ppc(xz_filter address_to f, bool encode, p8 address_to buffer,
+                              positive size)
+{
+        positive i;
+
+        size &= ~(positive)3;
+        for (i = 0; i < size; i += 4)
+                if ((buffer[i] >> 2) == 0x12 && (buffer[i + 3] & 3) == 1)
+                {
+                        p32 src = ((p32)buffer[i] & 3) << 24 | (p32)buffer[i + 1] << 16 |
+                                  (p32)buffer[i + 2] << 8 | ((p32)buffer[i + 3] & ~(p32)3);
+                        p32 dest = encode ? f->pos + (p32)i + src
+                                          : src - (f->pos + (p32)i);
+
+                        buffer[i] = (p8)(0x48 | ((dest >> 24) & 3));
+                        buffer[i + 1] = (p8)(dest >> 16);
+                        buffer[i + 2] = (p8)(dest >> 8);
+                        buffer[i + 3] &= 3;
+                        buffer[i + 3] |= (p8)dest;
+                }
+        return i;
+}
+
+static positive xz_filter_sparc(xz_filter address_to f, bool encode, p8 address_to buffer,
+                                positive size)
+{
+        positive i;
+
+        size &= ~(positive)3;
+        for (i = 0; i < size; i += 4)
+                if ((buffer[i] == 0x40 && (buffer[i + 1] & 0xc0) == 0) ||
+                    (buffer[i] == 0x7f && (buffer[i + 1] & 0xc0) == 0xc0))
+                {
+                        p32 src = ((p32)buffer[i] << 24 | (p32)buffer[i + 1] << 16 |
+                                   (p32)buffer[i + 2] << 8 | buffer[i + 3]) << 2;
+                        p32 dest = encode ? f->pos + (p32)i + src
+                                          : src - (f->pos + (p32)i);
+
+                        dest >>= 2;
+                        dest = (((0 - ((dest >> 22) & 1)) << 22) & 0x3fffffff) |
+                               (dest & 0x3fffff) | 0x40000000;
+                        buffer[i] = (p8)(dest >> 24);
+                        buffer[i + 1] = (p8)(dest >> 16);
+                        buffer[i + 2] = (p8)(dest >> 8);
+                        buffer[i + 3] = (p8)dest;
+                }
+        return i;
+}
+
+static positive xz_filter_ia64(xz_filter address_to f, bool encode, p8 address_to buffer,
+                               positive size)
+{
+        static const p32 branch[32] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                       4, 4, 6, 6, 0, 0, 7, 7, 4, 4, 0, 0, 4, 4, 0, 0};
+        positive i;
+
+        size &= ~(positive)15;
+        for (i = 0; i < size; i += 16)
+        {
+                p32 mask = branch[buffer[i] & 0x1f];
+                p32 bit_pos = 5;
+
+                for (positive slot = 0; slot < 3; slot++, bit_pos += 41)
+                {
+                        if (((mask >> slot) & 1) == 0)
+                                continue;
+
+                        positive byte_pos = bit_pos >> 3;
+                        p32 bit_res = bit_pos & 7;
+                        p64 instruction = 0;
+
+                        for (positive j = 0; j < 6; j++)
+                                instruction += (p64)buffer[i + j + byte_pos] << (8 * j);
+
+                        p64 norm = instruction >> bit_res;
+
+                        if (((norm >> 37) & 0xf) == 0x5 && ((norm >> 9) & 7) == 0)
+                        {
+                                p32 src = (p32)((norm >> 13) & 0xfffff);
+
+                                src |= (p32)((norm >> 36) & 1) << 20;
+                                src <<= 4;
+
+                                p32 dest = encode ? f->pos + (p32)i + src
+                                                  : src - (f->pos + (p32)i);
+
+                                dest >>= 4;
+                                norm &= ~((p64)0x8fffff << 13);
+                                norm |= (p64)(dest & 0xfffff) << 13;
+                                norm |= (p64)(dest & 0x100000) << (36 - 20);
+                                instruction &= (1u << bit_res) - 1;
+                                instruction |= norm << bit_res;
+                                for (positive j = 0; j < 6; j++)
+                                        buffer[i + j + byte_pos] = (p8)(instruction >> (8 * j));
+                        }
+                }
+        }
+        return i;
+}
+
+static positive xz_filter_arm64(xz_filter address_to f, bool encode, p8 address_to buffer,
+                                positive size)
+{
+        positive i;
+
+        size &= ~(positive)3;
+        for (i = 0; i < size; i += 4)
+        {
+                p32 pc = f->pos + (p32)i;
+                p32 instr = xz_le32(buffer + i);
+
+                if ((instr >> 26) == 0x25)
+                {
+                        p32 src = instr;
+
+                        instr = 0x94000000;
+                        pc >>= 2;
+                        if (!encode)
+                                pc = 0u - pc;
+                        instr |= (src + pc) & 0x03ffffff;
+                        xz_put_le32(buffer + i, instr);
+                }
+                else if ((instr & 0x9f000000) == 0x90000000)
+                {
+                        p32 src = ((instr >> 29) & 3) | ((instr >> 3) & 0x001ffffc);
+
+                        if ((src + 0x00020000) & 0x001c0000)
+                                continue;
+                        instr &= 0x9000001f;
+                        pc >>= 12;
+                        if (!encode)
+                                pc = 0u - pc;
+
+                        p32 dest = src + pc;
+
+                        instr |= (dest & 3) << 29;
+                        instr |= (dest & 0x0003fffc) << 3;
+                        instr |= (0u - (dest & 0x00020000)) & 0x00e00000;
+                        xz_put_le32(buffer + i, instr);
+                }
+        }
+        return i;
+}
+
+#define XZ_RISCV_NOT_PAIR(auipc, inst2) ((((auipc) << 8) ^ ((inst2) - 3)) & 0xf8003)
+#define XZ_RISCV_NOT_SPECIAL(auipc, rs1) ((p32)(((auipc) - 0x3117) << 18) >= ((rs1) & 0x1d))
+
+static positive xz_filter_riscv(xz_filter address_to f, bool encode, p8 address_to buffer,
+                                positive size)
+{
+        positive i;
+
+        if (size < 8)
+                return 0;
+        size -= 8;
+        for (i = 0; i <= size; i += 2)
+        {
+                p32 inst = buffer[i];
+
+                if (inst == 0xef)
+                {
+                        p32 b1 = buffer[i + 1];
+
+                        if ((b1 & 0x0d) != 0)
+                                continue;
+
+                        p32 b2 = buffer[i + 2];
+                        p32 b3 = buffer[i + 3];
+                        p32 pc = f->pos + (p32)i;
+
+                        if (encode)
+                        {
+                                p32 addr = ((b1 & 0xf0) << 8) | ((b2 & 0x0f) << 16) |
+                                           ((b2 & 0x10) << 7) | ((b2 & 0xe0) >> 4) |
+                                           ((b3 & 0x7f) << 4) | ((b3 & 0x80) << 13);
+
+                                addr += pc;
+                                buffer[i + 1] = (p8)((b1 & 0x0f) | ((addr >> 13) & 0xf0));
+                                buffer[i + 2] = (p8)(addr >> 9);
+                                buffer[i + 3] = (p8)(addr >> 1);
+                        }
+                        else
+                        {
+                                p32 addr = ((b1 & 0xf0) << 13) | (b2 << 9) | (b3 << 1);
+
+                                addr -= pc;
+                                buffer[i + 1] = (p8)((b1 & 0x0f) | ((addr >> 8) & 0xf0));
+                                buffer[i + 2] = (p8)(((addr >> 16) & 0x0f) |
+                                                     ((addr >> 7) & 0x10) |
+                                                     ((addr << 4) & 0xe0));
+                                buffer[i + 3] = (p8)(((addr >> 4) & 0x7f) |
+                                                     ((addr >> 13) & 0x80));
+                        }
+                        i += 4 - 2;
+                }
+                else if ((inst & 0x7f) == 0x17)
+                {
+                        inst |= (p32)buffer[i + 1] << 8;
+                        inst |= (p32)buffer[i + 2] << 16;
+                        inst |= (p32)buffer[i + 3] << 24;
+                        if (inst & 0xe80)
+                        {
+                                p32 inst2 = xz_le32(buffer + i + 4);
+
+                                if (XZ_RISCV_NOT_PAIR(inst, inst2))
+                                {
+                                        i += 6 - 2;
+                                        continue;
+                                }
+                                if (encode)
+                                {
+                                        p32 addr = inst & 0xfffff000;
+
+                                        addr += (inst2 >> 20) - ((inst2 >> 19) & 0x1000);
+                                        addr += f->pos + (p32)i;
+                                        inst = 0x17 | (2 << 7) | (inst2 << 12);
+                                        xz_put_le32(buffer + i, inst);
+                                        buffer[i + 4] = (p8)(addr >> 24);
+                                        buffer[i + 5] = (p8)(addr >> 16);
+                                        buffer[i + 6] = (p8)(addr >> 8);
+                                        buffer[i + 7] = (p8)addr;
+                                }
+                                else
+                                {
+                                        p32 addr = inst & 0xfffff000;
+
+                                        addr += inst2 >> 20;
+                                        inst = 0x17 | (2 << 7) | (inst2 << 12);
+                                        xz_put_le32(buffer + i, inst);
+                                        xz_put_le32(buffer + i + 4, addr);
+                                }
+                        }
+                        else
+                        {
+                                p32 rs1 = inst >> 27;
+
+                                if (XZ_RISCV_NOT_SPECIAL(inst, rs1))
+                                {
+                                        i += 4 - 2;
+                                        continue;
+                                }
+                                if (encode)
+                                {
+                                        p32 fake = xz_le32(buffer + i + 4);
+                                        p32 inst2 = (inst >> 12) | (fake << 20);
+
+                                        inst = 0x17 | (rs1 << 7) | (fake & 0xfffff000);
+                                        xz_put_le32(buffer + i, inst);
+                                        xz_put_le32(buffer + i + 4, inst2);
+                                }
+                                else
+                                {
+                                        p32 addr = (p32)buffer[i + 4] << 24 |
+                                                   (p32)buffer[i + 5] << 16 |
+                                                   (p32)buffer[i + 6] << 8 | buffer[i + 7];
+
+                                        addr -= f->pos + (p32)i;
+
+                                        p32 inst2 = (inst >> 12) | (addr << 20);
+
+                                        inst = 0x17 | (rs1 << 7) | ((addr + 0x800) & 0xfffff000);
+                                        xz_put_le32(buffer + i, inst);
+                                        xz_put_le32(buffer + i + 4, inst2);
+                                }
+                        }
+                        i += 8 - 2;
+                }
+        }
+        return i;
+}
+
+/* Delta: each byte against the one dist back, zero before the start; dist
+   holds the property, the distance less one. */
+static positive xz_filter_delta(xz_filter address_to f, bool encode, p8 address_to buffer,
+                                positive size)
+{
+        p32 dist = (p32)f->dist + 1;
+        p8 at = f->delta_at;
+
+        for (positive i = 0; i < size; i++)
+        {
+                p8 old = f->history[(dist + at) & 0xff];
+                p8 now = buffer[i];
+
+                if (encode)
+                        buffer[i] = (p8)(now - old);
+                else
+                        now = buffer[i] = (p8)(now + old);
+                f->history[at-- & 0xff] = encode ? now : buffer[i];
+        }
+        f->delta_at = at;
+        return size;
+}
+
+/* How many bytes of buffer[0, size) the filter has decided; the rest wait
+   for more (or pass through at the end). */
+static positive xz_filter_code(xz_filter address_to f, bool encode, p8 address_to buffer,
+                               positive size)
+{
+        switch (f->id)
+        {
+        case XZ_FILTER_DELTA: return xz_filter_delta(f, encode, buffer, size);
+        case XZ_FILTER_X86: return xz_filter_x86(f, encode, buffer, size);
+        case XZ_FILTER_PPC: return xz_filter_ppc(f, encode, buffer, size);
+        case XZ_FILTER_IA64: return xz_filter_ia64(f, encode, buffer, size);
+        case XZ_FILTER_ARM: return xz_filter_arm(f, encode, buffer, size);
+        case XZ_FILTER_ARMT: return xz_filter_armt(f, encode, buffer, size);
+        case XZ_FILTER_SPARC: return xz_filter_sparc(f, encode, buffer, size);
+        case XZ_FILTER_ARM64: return xz_filter_arm64(f, encode, buffer, size);
+        case XZ_FILTER_RISCV: return xz_filter_riscv(f, encode, buffer, size);
+        }
+        return size;
+}
+
+/* One stage over a window that has XZ_FILTER_HEAD bytes of room before it:
+   the stage's carried bytes go in front, and what the stage has decided
+   comes back (or all of it when final). *at moves to the new front. */
+static positive xz_filter_stage(xz_filter address_to f, bool encode, p8 address_to address_to at,
+                                positive n, bool final)
+{
+        p8 address_to start = address_to at - f->carry_n;
+        positive total = n + f->carry_n;
+
+        memory_copy_apart(start, f->carry, f->carry_n);
+
+        positive done = xz_filter_code(f, encode, start, total);
+
+        f->pos += (p32)done;
+        address_to at = start;
+        if (final)
+        {
+                f->carry_n = 0;
+                return total;
+        }
+        f->carry_n = (p8)(total - done);
+        memory_copy_apart(f->carry, start + done, total - done);
+        return done;
+}
+
+/* A whole chain, stages in the order given: the decoder's is the list
+   backwards, the encoder's forwards. */
+static positive xz_filter_chain(xz_filter address_to list, positive count, bool encode,
+                                p8 address_to address_to at, positive n, bool final)
+{
+        for (positive k = 0; k < count; k++)
+                n = xz_filter_stage(list + (encode ? k : count - 1 - k), encode, at, n, final);
+        return n;
+}
+
+/* A failed linear block's bytes, filtered as far as liblzma gets: what each
+   stage in turn has decided, the rest held back and lost. */
+static positive xz_filter_prefix(xz_filter address_to list, positive count,
+                                 p8 address_to buffer, positive n)
+{
+        for (positive k = 0; k < count; k++)
+        {
+                xz_filter address_to f = list + (count - 1 - k);
+
+                xz_filter_reset(f);
+                n = xz_filter_code(f, false, buffer, n);
+        }
+        return n;
+}
+
+/* A whole block in place, its state fresh: no carry, the tail passes as it is. */
+static fn xz_filter_block(xz_filter address_to list, positive count, bool encode,
+                          p8 address_to buffer, positive n)
+{
+        for (positive k = 0; k < count; k++)
+        {
+                xz_filter address_to f = list + (encode ? k : count - 1 - k);
+
+                xz_filter_reset(f);
+                xz_filter_code(f, encode, buffer, n);
+        }
+}
+
+/*
         Decoding. A stream's whole state is one xz_decoder that whoever
         decodes allocates: the span kernel's job, the models, the input
         window, the dictionary, and the LZMA2, block and index framing between
@@ -146,6 +725,8 @@ static positive xz_dict_from_prop(p8 prop)
 #define XZ_DICT_SLACK (XZ_MATCH_MAX + 64)
 #define XZ_COPY_SLACK 32
 #define XZ_SPAN (1u << 20)
+/* A ring decode's window is at most a span and one match past it. */
+#define XZ_FBUF_DATA (XZ_SPAN + 4096)
 
 /* Span ABI, documented above lzma_decode_span in src/lib.c. */
 typedef struct
@@ -207,6 +788,17 @@ typedef struct
         p32 crc32;
         p64 crc64;
         digest_state sha256;
+        /* The block's filters before LZMA2, in header order; the filtered
+           window a ring decode hands out (wo, wn) sits in fbuf. */
+        xz_filter filt[XZ_FILTERS_MAX];
+        positive nfilt;
+        p8 address_to fbuf;
+        p8 address_to wo;
+        positive wn;
+        bool block_filtered;
+        p64 hdr_packed;
+        p64 hdr_plain;
+        p8 hdr_has;
         string_address why;
         p8 scratch[1 + XZ_COPY_SLACK + 8];
         p8 in_buf[XZ_DEC_IN + XZ_IN_PAD];
@@ -259,21 +851,78 @@ static bool xz_dec_le(xz_decoder address_to d, p64 address_to value, p8 bytes)
         return true;
 }
 
-/* Checksum what the dictionary gained since the last call. */
-static fn xz_dec_hash(xz_decoder address_to d)
+/* Count and checksum n bytes of the block's output. */
+static fn xz_dec_sum(xz_decoder address_to d, p8 address_to at, positive n)
+{
+        d->block_out += n;
+        if (d->check == XZ_CHECK_CRC32)
+                d->crc32 = hash_crc32(d->crc32, at, n);
+        else if (d->check == XZ_CHECK_CRC64)
+                d->crc64 = hash_crc64(d->crc64, at, n);
+        else if (d->check == XZ_CHECK_SHA256)
+                digest_write(address_of d->sha256, at, n);
+}
+
+/* A ring decode with filters: what the dictionary gained goes through the
+   chain into fbuf, where it waits as the window to hand out, and is
+   checksummed there, for the check covers the block after its filters.
+   Final at the block's end, when what a stage carried passes as it is. */
+static bool xz_dec_filter(xz_decoder address_to d, bool final)
 {
         positive n = (positive)(d->job.out - d->hashed);
 
+        if (!n && !final)
+                return true;
+        if (n > XZ_FBUF_DATA || d->wn || !d->fbuf)
+                return xz_dec_fail(d, "xz filter window");
+
+        p8 address_to at = d->fbuf + XZ_FILTER_HEAD;
+
+        memory_copy_apart(at, d->hashed, n);
+        d->hashed = d->emitted = d->job.out;
+        n = xz_filter_chain(d->filt, d->nfilt, false, address_of at, n, final);
+        d->wo = at;
+        d->wn = n;
+        xz_dec_sum(d, at, n);
+        return true;
+}
+
+/* Checksum what the dictionary gained since the last call. A block with
+   filters waits: a linear one for its end, a ring one through its window. */
+static bool xz_dec_hash(xz_decoder address_to d)
+{
+        positive n = (positive)(d->job.out - d->hashed);
+
+        if (d->nfilt)
+                return d->linear || xz_dec_filter(d, false);
         if (!n)
-                return;
-        d->block_out += n;
-        if (d->check == XZ_CHECK_CRC32)
-                d->crc32 = hash_crc32(d->crc32, d->hashed, n);
-        else if (d->check == XZ_CHECK_CRC64)
-                d->crc64 = hash_crc64(d->crc64, d->hashed, n);
-        else if (d->check == XZ_CHECK_SHA256)
-                digest_write(address_of d->sha256, d->hashed, n);
+                return true;
+        xz_dec_sum(d, d->hashed, n);
         d->hashed = d->job.out;
+        return true;
+}
+
+/* The window a reader takes: the dictionary's undelivered bytes, or the
+   filtered ones. */
+static inline positive xz_win_len(xz_decoder address_to d)
+{
+        return d->nfilt && !d->linear ? d->wn : (positive)(d->job.out - d->emitted);
+}
+
+static inline p8 address_to xz_win_ptr(xz_decoder address_to d)
+{
+        return d->nfilt && !d->linear ? d->wo : d->emitted;
+}
+
+static inline fn xz_win_take(xz_decoder address_to d, positive k)
+{
+        if (d->nfilt && !d->linear)
+        {
+                d->wo += k;
+                d->wn -= k;
+        }
+        else
+                d->emitted += k;
 }
 
 /* Hand the undelivered window on. A descriptor takes it whole, a linear
@@ -281,6 +930,24 @@ static fn xz_dec_hash(xz_decoder address_to d)
    through xz_pull_span, so until it has the stream pauses. */
 static bool xz_dec_drain(xz_decoder address_to d)
 {
+        if (d->nfilt && !d->linear)
+        {
+                if (!xz_dec_hash(d))
+                        return false;
+                d->emitted = d->job.out;
+                if (!d->wn)
+                        return true;
+                if (d->pull)
+                {
+                        d->paused = true;
+                        return true;
+                }
+                if (d->out_fd >= 0 &&
+                    system_write_all((positive)d->out_fd, d->wo, d->wn) != (bipolar)d->wn)
+                        return xz_dec_fail(d, "xz write failed");
+                d->wn = 0;
+                return true;
+        }
         xz_dec_hash(d);
 
         positive n = (positive)(d->job.out - d->emitted);
@@ -849,6 +1516,26 @@ static fn xz_dec_index_note(xz_decoder address_to d, p64 unpadded,
         xz_dec_index_digest(address_of d->index_digest, unpadded, uncompressed);
 }
 
+/* The block's data is all decoded: filter what is left and checksum it. A
+   linear block is filtered whole, in place, here; a ring block's last window
+   is filtered with what its stages carried. */
+static bool xz_dec_block_data(xz_decoder address_to d)
+{
+        if (!d->nfilt)
+                return xz_dec_hash(d);
+        if (!d->linear)
+                return xz_dec_filter(d, true);
+
+        p8 address_to from = d->hashed;
+        positive n = (positive)(d->job.out - from);
+
+        xz_filter_block(d->filt, d->nfilt, false, from, n);
+        d->block_filtered = true;
+        xz_dec_sum(d, from, n);
+        d->hashed = d->job.out;
+        return true;
+}
+
 static bool xz_dec_block(xz_decoder address_to d)
 {
         if (!d->block_live)
@@ -880,43 +1567,103 @@ static bool xz_dec_block(xz_decoder address_to d)
 
                 p8 flags = header[1];
                 positive at = 2;
+                positive limit = header_size - 4;
+                positive count = (positive)(flags & 3) + 1;
+                p32 got = 0;
 
+                for (positive i = 0; i < 4; i++)
+                        got |= (p32)header[limit + i] << (8 * i);
+                if (got != ~hash_crc32(0xffffffffu, header, limit))
+                        return xz_dec_fail(d, "xz block header CRC");
                 if (flags & 0x3c)
                         return xz_dec_fail(d, "xz reserved block flags");
-                if ((flags & 3) != 0)
-                        return xz_dec_fail(d, "xz filter chain");
+                d->hdr_packed = d->hdr_plain = 0;
+                d->hdr_has = flags & 0xc0;
                 if (flags & 0x40)
                 {
-                        if (at < header_size - 4)
-                                at += string_span_max(header + at,
-                                                      header_size - 4 - at,
-                                                      string_set_high);
-                        at++;
+                        positive k = memory_vli_get(header + at, limit - at, 9, address_of d->hdr_packed);
+
+                        if (!k || !d->hdr_packed)
+                                return xz_dec_fail(d, "xz block header");
+                        at += k;
                 }
                 if (flags & 0x80)
                 {
-                        if (at < header_size - 4)
-                                at += string_span_max(header + at,
-                                                      header_size - 4 - at,
-                                                      string_set_high);
-                        at++;
+                        positive k = memory_vli_get(header + at, limit - at, 9, address_of d->hdr_plain);
+
+                        if (!k)
+                                return xz_dec_fail(d, "xz block header");
+                        at += k;
                 }
-                if (at + 2 >= header_size - 4)
-                        return xz_dec_fail(d, "xz filter flags");
-                if (header[at] != 0x21)
-                        return xz_dec_fail(d, "xz filter is not LZMA2");
-                if (header[at + 1] != 1)
-                        return xz_dec_fail(d, "xz LZMA2 properties size");
 
-                positive dict = xz_dict_from_prop(header[at + 2]);
-                p32 got = 0;
+                positive dict = 0;
 
+                d->nfilt = 0;
+                for (positive i = 0; i < count; i++)
+                {
+                        p64 id;
+                        p64 psize;
+                        positive k = memory_vli_get(header + at, limit - at, 9, address_of id);
+
+                        if (!k)
+                                return xz_dec_fail(d, "xz filter flags");
+                        at += k;
+                        k = memory_vli_get(header + at, limit - at, 9, address_of psize);
+                        if (!k || psize > limit - at - k)
+                                return xz_dec_fail(d, "xz filter flags");
+                        at += k;
+
+                        const p8 address_to props = header + at;
+
+                        at += (positive)psize;
+                        if (i == count - 1)
+                        {
+                                if (id != XZ_FILTER_LZMA2)
+                                        return xz_dec_fail(d, "xz filter is not LZMA2");
+                                if (psize != 1 || props[0] > 40)
+                                        return xz_dec_fail(d, "xz LZMA2 properties size");
+                                dict = xz_dict_from_prop(props[0]);
+                                continue;
+                        }
+
+                        xz_filter address_to f = d->filt + i;
+
+                        memory_fill(f, 0, sizeof(*f));
+                        f->id = (p8)id;
+                        if (id == XZ_FILTER_DELTA)
+                        {
+                                if (psize != 1)
+                                        return xz_dec_fail(d, "xz filter properties");
+                                f->dist = props[0];
+                        }
+                        else if (xz_filter_alignment(id))
+                        {
+                                if (psize != 0 && psize != 4)
+                                        return xz_dec_fail(d, "xz filter properties");
+                                if (psize)
+                                        f->start = xz_le32(props);
+                                if (f->start & (xz_filter_alignment(id) - 1))
+                                        return xz_dec_fail(d, "xz filter properties");
+                        }
+                        else
+                                return xz_dec_fail(d, "xz filter chain");
+                        xz_filter_reset(f);
+                        d->nfilt++;
+                }
+                for (; at < limit; at++)
+                        if (header[at])
+                                return xz_dec_fail(d, "xz block header");
                 if (!dict || !xz_dec_dict_open(d, dict))
                         return xz_dec_fail(d, "xz dictionary");
-                for (at = 0; at < 4; at++)
-                        got |= (p32)header[header_size - 4 + at] << (8 * at);
-                if (got != ~hash_crc32(0xffffffffu, header, header_size - 4))
-                        return xz_dec_fail(d, "xz block header CRC");
+                if (d->nfilt && !d->linear && !d->fbuf)
+                {
+                        d->fbuf = (p8 address_to)memory_checked(XZ_FILTER_HEAD + XZ_FBUF_DATA +
+                                                                XZ_FILTER_HEAD);
+                        if (!d->fbuf)
+                                return xz_dec_fail(d, "xz cannot map the filter window");
+                }
+                d->wn = 0;
+                d->block_filtered = false;
 
                 d->block_hdr_size = header_size;
                 d->block_body_abs = d->in_abs;
@@ -938,7 +1685,11 @@ static bool xz_dec_block(xz_decoder address_to d)
         d->block_packed = d->in_abs - d->block_body_abs;
         if (!xz_dec_pad4(d, d->block_hdr_size + (positive)d->block_packed))
                 return false;
-        xz_dec_hash(d);
+        if (!xz_dec_block_data(d))
+                return false;
+        if (((d->hdr_has & 0x40) && d->hdr_packed != d->block_packed) ||
+            ((d->hdr_has & 0x80) && d->hdr_plain != d->block_out))
+                return xz_dec_fail(d, "xz block sizes");
         if (!xz_dec_check(d))
                 return false;
         xz_dec_index_note(d, d->block_hdr_size + d->block_packed +
@@ -1135,6 +1886,8 @@ static fn xz_dec_open(xz_decoder address_to d)
         d->out_fd = -1;
         d->pull = false;
         d->paused = false;
+        d->nfilt = 0;
+        d->wn = 0;
         d->finished = false;
         d->hdr_done = false;
         d->block_live = false;
@@ -1147,6 +1900,7 @@ static fn xz_dec_free(xz_decoder address_to d)
         if (!d)
                 return;
         xz_dec_dict_close(d);
+        memory_free(d->fbuf, XZ_FILTER_HEAD + XZ_FBUF_DATA + XZ_FILTER_HEAD);
         memory_free(d, sizeof(xz_decoder));
 }
 
@@ -1154,6 +1908,22 @@ static fn xz_dec_free(xz_decoder address_to d)
    as xz writes what it decoded from a damaged file. */
 static bool xz_dec_salvage(xz_decoder address_to d)
 {
+        if (d->nfilt && !d->linear)
+        {
+                //      A window already filtered goes out, then what the
+                //      dictionary holds through the chain, unfinished stages
+                //      keeping their last bytes as liblzma does.
+                if (!d->pull && d->out_fd >= 0)
+                {
+                        if (d->wn && system_write_all((positive)d->out_fd, d->wo, d->wn) == (bipolar)d->wn)
+                                d->wn = 0;
+                        if (!d->wn && xz_dec_filter(d, false) && d->wn &&
+                            system_write_all((positive)d->out_fd, d->wo, d->wn) == (bipolar)d->wn)
+                                d->wn = 0;
+                }
+                return false;
+        }
+
         positive n = (positive)(d->job.out - d->emitted);
 
         if (n && !d->linear && !d->pull && d->out_fd >= 0 &&
@@ -1246,6 +2016,9 @@ static bool xz_block_decode(address_any state, p8 address_to block,
 
         bool ok = xz_dec_block(d);
 
+        if (d->nfilt && !d->block_filtered && !ok)
+                d->job.out = out + xz_filter_prefix(d->filt, d->nfilt, out,
+                                                    (positive)(d->job.out - out));
         if (written)
                 address_to written = (positive)(d->job.out - out);
         if (!ok)
@@ -1292,7 +2065,7 @@ static bipolar xz_pull_more(xz_decoder address_to d)
 {
         for (;;)
         {
-                positive left = (positive)(d->job.out - d->emitted);
+                positive left = xz_win_len(d);
 
                 if (left)
                         return (bipolar)left;
@@ -1309,8 +2082,13 @@ static bipolar xz_pull_more(xz_decoder address_to d)
                 }
                 d->paused = false;
                 /* A failure hands out what the window holds before -1. */
-                if (!xz_dec_stream(d) && d->job.out == d->emitted)
-                        return -1;
+                if (!xz_dec_stream(d))
+                {
+                        if (d->nfilt && !d->linear && !d->wn)
+                                xz_dec_filter(d, false);
+                        if (!xz_win_len(d))
+                                return -1;
+                }
         }
 }
 
@@ -1321,8 +2099,8 @@ static bipolar xz_pull_span(address_any state, p8 address_to address_to span)
 
         if (n > 0)
         {
-                address_to span = d->emitted;
-                d->emitted = d->job.out;
+                address_to span = xz_win_ptr(d);
+                xz_win_take(d, (positive)n);
         }
         return n;
 }
@@ -1343,8 +2121,8 @@ static bipolar xz_pull_read(address_any state, p8 address_to into, positive n)
 
                 positive take = min((positive)left, n - copied);
 
-                memory_copy_apart(into + copied, d->emitted, take);
-                d->emitted += take;
+                memory_copy_apart(into + copied, xz_win_ptr(d), take);
+                xz_win_take(d, take);
                 copied += take;
         }
         return (bipolar)copied;
