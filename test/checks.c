@@ -72715,10 +72715,48 @@ static fn large_roundtrip(void)
         m = gzip_inflate_mem(packed, (positive)n, back, sizeof(back));
         check("64k repeated roundtrip",
               m == (bipolar)sizeof(src) && !memory_compare(back, src, sizeof(src)));
+        n = gzip_deflate_mem(src, sizeof(src), packed, sizeof(packed), GZIP_ULTRA);
+        check("ultra encode 64k repeated", n > 0 && n < (bipolar)sizeof(packed));
+        m = gzip_inflate_mem(packed, (positive)n, back, sizeof(back));
+        check("ultra 64k repeated roundtrip",
+              m == (bipolar)sizeof(src) && !memory_compare(back, src, sizeof(src)));
+}
+
+/* Every level, the optimal parser's included, over text-like data with
+   long and short repeats, and over bytes with nothing to find. */
+static fn every_level(void)
+{
+        static p8 src[400000];
+        static p8 packed[500000];
+        static p8 back[400000];
+        p32 random = 0x9e3779b9u;
+
+        for (positive kind = 0; kind < 2; kind++)
+        {
+                for (positive i = 0; i < sizeof(src); i++)
+                {
+                        random ^= random << 13;
+                        random ^= random >> 17;
+                        random ^= random << 5;
+                        src[i] = kind ? (p8)random
+                                      : (i > 300 && (random & 7) < 6) ? src[i - 1 - (random >> 8) % 250]
+                                                                       : (p8)('a' + (random >> 20) % 12);
+                }
+                for (positive level = 1; level <= GZIP_ULTRA; level++)
+                {
+                        bipolar n = gzip_deflate_mem(src, sizeof(src), packed, sizeof(packed),
+                                                     (p8)level);
+                        bipolar m = n > 0 ? gzip_inflate_mem(packed, (positive)n, back, sizeof(back))
+                                          : -1;
+
+                        check("every level decodes to its input",
+                              m == (bipolar)sizeof(src) && !memory_compare(back, src, sizeof(src)));
+                }
+        }
 }
 
 /* Fixed blocks through the pool: the same bytes at every width. */
-static fn threaded(void)
+static fn threaded(positive level)
 {
         static p8 src[3 * 1048576 + 12345];
         static p8 first[3 * 1048576 + 65536];
@@ -72739,7 +72777,7 @@ static fn threaded(void)
         {
                 parallel_reset(widths[w]);
                 bipolar n = gzip_deflate_mem(src, sizeof(src), w ? again : first,
-                                             sizeof(first), 6);
+                                             sizeof(first), (p8)level);
                 if (!w)
                 {
                         n1 = n;
@@ -72760,7 +72798,9 @@ b32 main(void)
         members();
         roundtrip();
         large_roundtrip();
-        threaded();
+        every_level();
+        threaded(6);
+        threaded(GZIP_ULTRA);
         return test_report(null);
 }
 #endif /* CHECK_gzip */

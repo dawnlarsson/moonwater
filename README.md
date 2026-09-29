@@ -194,6 +194,15 @@ global path. A bowl is not a security sandbox: its programs run as root.
 `bowl setup` checks for room before downloading. On a live stick bowls live in
 memory; `moonwater install` puts them on a data partition.
 
+## gzip
+
+`gzip` is GNU gzip's command line: `-1` to `-9`, `--fast`, `--best`, and
+GNU's refusals of everything else. One spelling GNU refuses is Moonwater's own:
+`gzip --ultra` runs an optimal parser past `-9` (the parse behind libdeflate's
+levels 10 to 12), which takes several times `-9`'s time for a few percent less
+output, and every gzip reads what it writes. `-10` and up still mean their
+last digit, as in GNU. The bytes never depend on how many CPUs ran.
+
 ## Building
 
 The build is one C program, `src/build/build.c`, on this project's own

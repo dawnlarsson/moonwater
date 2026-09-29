@@ -1147,7 +1147,8 @@ static bipolar gzip_inflate_mem(p8 address_to src, positive src_len,
         is what makes the small blocks free on one core.
 */
 
-#define GZIP_BLOCK (1u << 16)
+static positive gzip_block_size = 1u << 16;
+#define GZIP_BLOCK gzip_block_size
 /* A deflate block holds at most this many pairs and, once it is past
    GZIP_SPLIT_MOST bytes, ends at the next token. */
 #define GZIP_PAIRS 16384
@@ -1165,6 +1166,8 @@ static bipolar gzip_inflate_mem(p8 address_to src, positive src_len,
 #define GZIP_PARSE_GREEDY 1
 #define GZIP_PARSE_LAZY 2
 #define GZIP_PARSE_LAZY2 3
+/* --ultra: the optimal parser, a level past 9 that GNU gzip has no spelling for. */
+#define GZIP_ULTRA 10
 
 typedef struct
 {
@@ -1173,7 +1176,7 @@ typedef struct
         p16 nice;
 } gzip_level_shape;
 
-static const gzip_level_shape gzip_levels[10] = {
+static const gzip_level_shape gzip_levels[11] = {
         {GZIP_PARSE_LAZY, 35, 65},
         {GZIP_PARSE_FAST, 2, 32},
         {GZIP_PARSE_GREEDY, 6, 10},
@@ -1183,6 +1186,7 @@ static const gzip_level_shape gzip_levels[10] = {
         {GZIP_PARSE_LAZY, 35, 65},
         {GZIP_PARSE_LAZY, 100, 130},
         {GZIP_PARSE_LAZY2, 300, 258},
+        {GZIP_PARSE_LAZY2, 600, 258},
         {GZIP_PARSE_LAZY2, 600, 258}};
 
 typedef struct
@@ -1222,9 +1226,15 @@ typedef struct
         /* The open deflate block: its pairs and symbol counts, and what
            kind of symbols it has seen for the split test. */
         positive pairs;
-        p32 mpos[GZIP_PAIRS];
-        p16 mlen[GZIP_PAIRS];
-        p16 mdist[GZIP_PAIRS];
+        /* The open block's pairs: the arrays below, or the optimal
+           parser's own, which a block of any number of pairs fits. */
+        p32 address_to mpos;
+        p16 address_to mlen;
+        p16 address_to mdist;
+        struct gzip_ultra address_to ultra;
+        p32 own_pos[GZIP_PAIRS];
+        p16 own_len[GZIP_PAIRS];
+        p16 own_dist[GZIP_PAIRS];
         p32 lit_freq[GZIP_MAXLIT];
         p32 dist_freq[GZIP_MAXDIST];
         p32 seen[10];
@@ -1495,33 +1505,124 @@ static fn gzip_write_fixed(gzip_encoder address_to e, p8 address_to src, positiv
         gzip_write_tokens(e, src, length, gzip_fixed_lit_code, gzip_fixed_dist_code);
 }
 
-/* The open block as a dynamic block, or fixed or stored when the tree
-   would not pay; then a new block is open. */
-static fn gzip_block_emit(gzip_encoder address_to e, p8 address_to src, positive length,
-                          bool last)
+/* What a block would cost as each kind, and the dynamic kind's trees.
+   dynamic is positive_max when no valid tree can be built. Every count
+   is in bits and includes the three-bit block header. */
+typedef struct
+{
+        p8 lit_len[GZIP_MAXLIT];
+        p8 dist_len[GZIP_MAXDIST];
+        p8 clen[19];
+        p8 seq[288 + 32];
+        /* The code lengths as code-length symbols and their extra bits. */
+        p8 tok[288 + 32];
+        p8 tok_extra[288 + 32];
+        p32 cfreq[19];
+        positive ntok;
+        positive nseq;
+        positive hlit;
+        positive hdist;
+        positive hclen;
+        positive dynamic;
+        positive fixed;
+        positive stored;
+} gzip_plan;
+
+/* The lengths seq[0, n) as code-length symbols: runs of a length by 16, of
+   zeros by 17 and 18, each only when its flag bit (1, 2, 4) is set. The
+   best mix differs by block, so the plan tries all eight. */
+static positive gzip_rle_tokens(p8 address_to seq, positive n, positive flags,
+                                p8 address_to tok, p8 address_to extra,
+                                p32 address_to freq)
+{
+        positive i = 0, count = 0;
+
+        memory_fill(freq, 0, 19 * sizeof(p32));
+        while (i < n)
+        {
+                p8 here = seq[i];
+                positive run = 1;
+
+                while (i + run < n && seq[i + run] == here)
+                        run++;
+                i += run;
+                if (!here)
+                {
+                        while ((flags & 4) && run >= 11)
+                        {
+                                positive r = run > 138 ? 138 : run;
+
+                                tok[count] = 18;
+                                extra[count++] = (p8)(r - 11);
+                                freq[18]++;
+                                run -= r;
+                        }
+                        while ((flags & 2) && run >= 3)
+                        {
+                                positive r = run > 10 ? 10 : run;
+
+                                tok[count] = 17;
+                                extra[count++] = (p8)(r - 3);
+                                freq[17]++;
+                                run -= r;
+                        }
+                }
+                else if ((flags & 1) && run >= 4)
+                {
+                        tok[count] = here;
+                        extra[count++] = 0;
+                        freq[here]++;
+                        run--;
+                        while (run >= 3)
+                        {
+                                positive r = run > 6 ? 6 : run;
+
+                                tok[count] = 16;
+                                extra[count++] = (p8)(r - 3);
+                                freq[16]++;
+                                run -= r;
+                        }
+                }
+                while (run)
+                {
+                        tok[count] = here;
+                        extra[count++] = 0;
+                        freq[here]++;
+                        run--;
+                }
+        }
+        return count;
+}
+
+static fn gzip_block_plan(gzip_encoder address_to e, positive length, gzip_plan address_to plan)
 {
         p32 address_to lit_freq = e->lit_freq;
         p32 address_to dist_freq = e->dist_freq;
-        p8 lit_len[GZIP_MAXLIT];
-        p8 dist_len[GZIP_MAXDIST];
-        p32 lit_code[GZIP_MAXLIT];
-        p32 dist_code[GZIP_MAXDIST];
+        p8 address_to lit_len = plan->lit_len;
+        p8 address_to dist_len = plan->dist_len;
+        p8 address_to clen = plan->clen;
+        p8 address_to seq = plan->seq;
+        p32 address_to cfreq = plan->cfreq;
         positive bits = 0, extra_bits = 0, fixed_bits = 3;
         positive chunks = length ? (length + 65534) / 65535 : 1;
-        positive stored_bits = length * 8 + chunks * 40 +
-                               ((8 - ((e->bitn + 3) & 7)) & 7) - 5;
+        positive i, run, nseq;
+        positive hlit = 286, hdist = 30, hclen = 19;
+        p8 here;
 
+        plan->stored = length * 8 + chunks * 40 + ((8 - ((e->bitn + 3) & 7)) & 7) - 5;
+        plan->dynamic = positive_max;
         lit_freq[256] = 1;
-        for (positive i = 0; i < 29; i++)
+        for (i = 0; i < 29; i++)
                 extra_bits += lit_freq[257 + i] * gzip_len_extra[i];
-        for (positive i = 0; i < 30; i++)
+        for (i = 0; i < 30; i++)
                 extra_bits += dist_freq[i] * gzip_dist_extra[i];
 
         fixed_bits += extra_bits;
-        for (positive i = 0; i < GZIP_MAXLIT; i++)
+        for (i = 0; i < GZIP_MAXLIT; i++)
                 fixed_bits += lit_freq[i] * gzip_fixed_lit_len[i];
-        for (positive i = 0; i < GZIP_MAXDIST; i++)
+        for (i = 0; i < GZIP_MAXDIST; i++)
                 fixed_bits += dist_freq[i] * 5;
+        plan->fixed = fixed_bits;
 
         huffman_lengths(lit_freq, GZIP_MAXLIT, lit_len, GZIP_MAXBITS);
         huffman_lengths(dist_freq, GZIP_MAXDIST, dist_len, GZIP_MAXBITS);
@@ -1530,7 +1631,7 @@ static fn gzip_block_emit(gzip_encoder address_to e, p8 address_to src, positive
         {
                 bool any_dist = false;
 
-                for (positive i = 0; i < GZIP_MAXDIST; i++)
+                for (i = 0; i < GZIP_MAXDIST; i++)
                         if (dist_len[i])
                                 any_dist = true;
                 if (!any_dist)
@@ -1540,32 +1641,13 @@ static fn gzip_block_emit(gzip_encoder address_to e, p8 address_to src, positive
             !gzip_lengths_ok(dist_len, GZIP_MAXDIST, GZIP_MAXBITS) ||
             !gzip_used_coded(lit_freq, lit_len, GZIP_MAXLIT) ||
             !gzip_used_coded(dist_freq, dist_len, GZIP_MAXDIST))
-        {
-                if (stored_bits <= fixed_bits)
-                        gzip_write_stored(e, src, length, last);
-                else
-                        gzip_write_fixed(e, src, length, last);
-                gzip_block_open(e);
                 return;
-        }
-        huffman_codes(lit_len, GZIP_MAXLIT, lit_code);
-        huffman_codes(dist_len, GZIP_MAXDIST, dist_code);
 
         bits = extra_bits;
-        for (positive i = 0; i < GZIP_MAXLIT; i++)
+        for (i = 0; i < GZIP_MAXLIT; i++)
                 bits += lit_freq[i] * lit_len[i];
-        for (positive i = 0; i < GZIP_MAXDIST; i++)
+        for (i = 0; i < GZIP_MAXDIST; i++)
                 bits += dist_freq[i] * dist_len[i];
-
-        p8 clen[19];
-        p32 ccode[19];
-        p32 cfreq[19];
-        p8 seq[288 + 32];
-        positive nseq = 0;
-        positive i;
-        positive run;
-        positive hlit = 286, hdist = 30, hclen = 19;
-        p8 here;
 
         hlit -= memory_span_byte_reverse(lit_len + 257, 0, hlit - 257);
         hdist -= memory_span_byte_reverse(dist_len + 1, 0, hdist - 1);
@@ -1573,120 +1655,97 @@ static fn gzip_block_emit(gzip_encoder address_to e, p8 address_to src, positive
         memory_copy(seq + hlit, dist_len, hdist);
         nseq = hlit + hdist;
 
-        memory_fill(cfreq, 0, sizeof(cfreq));
-        i = 0;
-        while (i < nseq)
         {
-                here = seq[i];
-                run = 1;
-                i++;
-                while (i < nseq && seq[i] == here && run < 138)
+                p32 tries[19];
+                p8 tclen[19];
+                p8 ttok[288 + 32];
+                p8 textra[288 + 32];
+                positive least = positive_max;
+
+                for (positive flags = 0; flags < 8; flags++)
                 {
-                        run++;
-                        i++;
-                }
-                if (here)
-                {
-                        cfreq[here]++;
-                        run--;
-                        while (run >= 3)
+                        positive count = gzip_rle_tokens(seq, nseq, flags, ttok, textra, tries);
+                        positive size = 0, h = 19;
+
+                        huffman_lengths(tries, 19, tclen, 7);
+                        if (!gzip_lengths_ok(tclen, 19, 7) || !gzip_used_coded(tries, tclen, 19))
+                                continue;
+                        while (h > 4 && !tclen[gzip_clen_order[h - 1]])
+                                h--;
+                        size = h * 3 + tries[16] * 2 + tries[17] * 3 + tries[18] * 7;
+                        for (positive c = 0; c < 19; c++)
+                                size += tries[c] * tclen[c];
+                        if (size < least)
                         {
-                                positive take = run > 6 ? 6 : run;
-
-                                cfreq[16]++;
-                                run -= take;
+                                least = size;
+                                hclen = h;
+                                memory_copy(cfreq, tries, sizeof(tries));
+                                memory_copy(clen, tclen, sizeof(tclen));
+                                memory_copy(plan->tok, ttok, count);
+                                memory_copy(plan->tok_extra, textra, count);
+                                plan->ntok = count;
                         }
-                        cfreq[here] += run;
                 }
-                else if (run >= 11)
-                        cfreq[18]++;
-                else if (run >= 3)
-                        cfreq[17]++;
-                else
-                        cfreq[0] += run;
+                if (least == positive_max)
+                        return;
         }
-        huffman_lengths(cfreq, 19, clen, 7);
-        if (!gzip_lengths_ok(clen, 19, 7) || !gzip_used_coded(cfreq, clen, 19))
-        {
-                if (stored_bits <= fixed_bits)
-                        gzip_write_stored(e, src, length, last);
-                else
-                        gzip_write_fixed(e, src, length, last);
-                gzip_block_open(e);
-                return;
-        }
-        huffman_codes(clen, 19, ccode);
-
-        while (hclen > 4 && !clen[gzip_clen_order[hclen - 1]])
-                hclen--;
         bits += 17 + hclen * 3 + cfreq[16] * 2 + cfreq[17] * 3 + cfreq[18] * 7;
         for (positive c = 0; c < 19; c++)
                 bits += cfreq[c] * clen[c];
-        if (stored_bits <= bits && stored_bits <= fixed_bits)
+        plan->nseq = nseq;
+        plan->hlit = hlit;
+        plan->hdist = hdist;
+        plan->hclen = hclen;
+        plan->dynamic = bits;
+}
+
+/* The open block as a dynamic block, or fixed or stored when the tree
+   would not pay; then a new block is open. */
+static fn gzip_block_emit(gzip_encoder address_to e, p8 address_to src, positive length,
+                          bool last)
+{
+        gzip_plan plan;
+        p32 lit_code[GZIP_MAXLIT];
+        p32 dist_code[GZIP_MAXDIST];
+        p32 ccode[19];
+        positive i, run;
+        p8 here;
+
+        gzip_block_plan(e, length, address_of plan);
+        if (plan.stored <= plan.fixed && plan.stored <= plan.dynamic)
         {
                 gzip_write_stored(e, src, length, last);
                 gzip_block_open(e);
                 return;
         }
-        if (fixed_bits <= bits)
+        if (plan.fixed <= plan.dynamic)
         {
                 gzip_write_fixed(e, src, length, last);
                 gzip_block_open(e);
                 return;
         }
+        huffman_codes(plan.lit_len, GZIP_MAXLIT, lit_code);
+        huffman_codes(plan.dist_len, GZIP_MAXDIST, dist_code);
+        huffman_codes(plan.clen, 19, ccode);
         gzip_put_bits(e, last ? 1 : 0, 1);
         gzip_put_bits(e, 2, 2);
-        gzip_put_bits(e, (p32)(hlit - 257), 5);
-        gzip_put_bits(e, (p32)(hdist - 1), 5);
-        gzip_put_bits(e, (p32)(hclen - 4), 4);
-        for (i = 0; i < hclen; i++)
-                gzip_put_bits(e, clen[gzip_clen_order[i]], 3);
+        gzip_put_bits(e, (p32)(plan.hlit - 257), 5);
+        gzip_put_bits(e, (p32)(plan.hdist - 1), 5);
+        gzip_put_bits(e, (p32)(plan.hclen - 4), 4);
+        for (i = 0; i < plan.hclen; i++)
+                gzip_put_bits(e, plan.clen[gzip_clen_order[i]], 3);
 
-        i = 0;
-        while (i < nseq)
+        for (i = 0; i < plan.ntok; i++)
         {
-                here = seq[i];
-                run = 1;
-                i++;
-                while (i < nseq && seq[i] == here && run < 138)
-                {
-                        run++;
-                        i++;
-                }
-                if (here)
-                {
-                        gzip_put_bits(e, ccode[here] & 0xffff, ccode[here] >> 16);
-                        run--;
-                        while (run >= 3)
-                        {
-                                positive take = run > 6 ? 6 : run;
+                positive sym = plan.tok[i];
 
-                                gzip_put_bits(e, ccode[16] & 0xffff, ccode[16] >> 16);
-                                gzip_put_bits(e, (p32)(take - 3), 2);
-                                run -= take;
-                        }
-                        while (run)
-                        {
-                                gzip_put_bits(e, ccode[here] & 0xffff, ccode[here] >> 16);
-                                run--;
-                        }
-                }
-                else if (run >= 11)
-                {
-                        gzip_put_bits(e, ccode[18] & 0xffff, ccode[18] >> 16);
-                        gzip_put_bits(e, (p32)(run - 11), 7);
-                }
-                else if (run >= 3)
-                {
-                        gzip_put_bits(e, ccode[17] & 0xffff, ccode[17] >> 16);
-                        gzip_put_bits(e, (p32)(run - 3), 3);
-                }
-                else
-                        while (run)
-                        {
-                                gzip_put_bits(e, ccode[0] & 0xffff, ccode[0] >> 16);
-                                run--;
-                        }
+                gzip_put_bits(e, ccode[sym] & 0xffff, ccode[sym] >> 16);
+                if (sym == 16)
+                        gzip_put_bits(e, plan.tok_extra[i], 2);
+                else if (sym == 17)
+                        gzip_put_bits(e, plan.tok_extra[i], 3);
+                else if (sym == 18)
+                        gzip_put_bits(e, plan.tok_extra[i], 7);
         }
         gzip_write_tokens(e, src, length, lit_code, dist_code);
         gzip_block_open(e);
@@ -2162,6 +2221,658 @@ static __attribute__((noinline)) positive gzip_parse_lazy2(gzip_encoder address_
         return gzip_parse_chain(e, start, pos, limit, GZIP_PARSE_LAZY2, depth, nice);
 }
 
+/*
+        The optimal parser, --ultra.
+
+        Every position of a deflate block is searched in binary trees keyed
+        by a four-byte hash, and the matches each finds, longest last and
+        each longer than the one before, wait in a cache. The block is then
+        parsed backwards: the cheapest way from each position to the block's
+        end, a literal or any length of any cached match, priced from a cost
+        model in sixteenths of a bit. The first pass prices from defaults,
+        or from the last block's prices when the symbols look alike; each
+        further pass prices from the code lengths the last pass's parse
+        gives, and the cheapest block seen is kept. A block of only
+        literals and, for small blocks, the fixed code are priced too.
+        Blocks end where the symbol-kind test says the statistics moved,
+        cut back to the last test that said they had not. This is
+        libdeflate's near-optimal parser, its levels 10 to 12.
+*/
+#define GZIP_OPT_MOST 300000
+#define GZIP_OPT_CACHE (GZIP_OPT_MOST * 5)
+#define GZIP_OPT_DEPTH 300
+#define GZIP_OPT_NICE 258
+#define GZIP_OPT_PASSES 10
+#define GZIP_OPT_STATIC 10000
+#define GZIP_BIT 16
+#define GZIP_OPT_BLOCK (4u << 20)
+
+typedef struct
+{
+        p16 length;
+        p16 offset;
+} gzip_match;
+
+typedef struct
+{
+        p32 cost;
+        /* length | offset << 9, a literal being length 1 and its byte */
+        p32 item;
+} gzip_node;
+
+typedef struct
+{
+        p32 lit[256];
+        p32 len[GZIP_MAX_MATCH + 1];
+        p32 off[GZIP_MAXDIST];
+} gzip_costs;
+
+struct gzip_ultra
+{
+        /* Positions plus one, zero for none: two a three-byte hash, a tree
+           root a four-byte hash, and each position's two children. */
+        p32 hash3[2u << 16];
+        p32 hash4[1u << 16];
+        p32 child[2 * GZIP_WINDOW];
+        gzip_costs costs;
+        gzip_costs saved;
+        p32 prev_seen[10];
+        p32 prev_seen_n;
+        /* Longest match at each observed position: the merged block's, and
+           those since the last split test. */
+        p32 len_freq[GZIP_MAX_MATCH + 1];
+        p32 new_len_freq[GZIP_MAX_MATCH + 1];
+        gzip_match cache[GZIP_OPT_CACHE + 4 * GZIP_MAX_MATCH];
+        gzip_node node[GZIP_OPT_MOST + GZIP_SPLIT_LEAST + 2 * GZIP_MAX_MATCH];
+        p32 mpos[(GZIP_OPT_MOST + GZIP_SPLIT_LEAST) / 3 + 8];
+        p16 mlen[(GZIP_OPT_MOST + GZIP_SPLIT_LEAST) / 3 + 8];
+        p16 mdist[(GZIP_OPT_MOST + GZIP_SPLIT_LEAST) / 3 + 8];
+};
+
+/* 65536 log2(x), floored, for x at least 1. */
+static p64 gzip_log2_q16(p64 x)
+{
+        positive whole = 63 - (positive)bits_leading_zeros(x);
+        p64 m = whole >= 31 ? x >> (whole - 31) : x << (31 - whole);
+        p64 fraction = 0;
+
+        for (positive bit = 15; bit < 16; bit--)
+        {
+                m = (m * m) >> 31;
+                if (m >= (1ull << 32))
+                {
+                        m >>= 1;
+                        fraction |= 1ull << bit;
+                }
+        }
+        return ((p64)whole << 16) | fraction;
+}
+
+/* In sixteenths of a bit, log2(a / b), floored; a >= b. */
+static p32 gzip_bits16(p64 a, p64 b)
+{
+        return (p32)((gzip_log2_q16(a) - gzip_log2_q16(b)) >> 12);
+}
+
+/* One position into the trees, and when out is not null, its matches
+   written there: first a three-byte one when found, then each longer
+   than the last. most bytes may match, and at least five follow pos. */
+static inline INLINE gzip_match address_to gzip_bt_advance(struct gzip_ultra address_to u,
+                                                           p8 address_to base, positive pos,
+                                                           positive most, positive nice,
+                                                           positive depth, p32 address_to h3,
+                                                           p32 address_to h4,
+                                                           gzip_match address_to out)
+{
+        p8 address_to here = base + pos;
+        p32 floor = pos + 1 > GZIP_WINDOW ? (p32)(pos + 1 - GZIP_WINDOW) : 0;
+        p32 cur = (p32)(pos + 1);
+        p32 seq = memory_load_unaligned(p32, here + 1);
+        p32 a = address_to h3, b = address_to h4;
+        p32 node3, node3b, node;
+        p32 address_to lt;
+        p32 address_to gt;
+        positive best_lt = 0, best_gt = 0, len = 0, best = 3;
+
+        address_to h3 = gzip_hash(seq << 8, 16);
+        address_to h4 = gzip_hash(seq, 16);
+        __builtin_prefetch(u->hash3 + 2 * address_to h3, 1);
+        __builtin_prefetch(u->hash4 + address_to h4, 1);
+        node3 = u->hash3[2 * a];
+        node3b = u->hash3[2 * a + 1];
+        u->hash3[2 * a] = cur;
+        u->hash3[2 * a + 1] = node3;
+        if (out && node3 > floor)
+        {
+                p32 seq3 = memory_load_unaligned(p32, here) & 0xffffff;
+
+                if ((memory_load_unaligned(p32, base + node3 - 1) & 0xffffff) == seq3)
+                {
+                        out->length = 3;
+                        out->offset = (p16)(cur - node3);
+                        out++;
+                }
+                else if (node3b > floor &&
+                         (memory_load_unaligned(p32, base + node3b - 1) & 0xffffff) == seq3)
+                {
+                        out->length = 3;
+                        out->offset = (p16)(cur - node3b);
+                        out++;
+                }
+        }
+        node = u->hash4[b];
+        u->hash4[b] = cur;
+        lt = u->child + 2 * (pos & GZIP_WMASK);
+        gt = lt + 1;
+        if (node <= floor)
+        {
+                *lt = 0;
+                *gt = 0;
+                return out;
+        }
+        for (;;)
+        {
+                p8 address_to match = base + node - 1;
+                p32 address_to kids = u->child + 2 * ((node - 1) & GZIP_WMASK);
+
+                if (match[len] == here[len])
+                {
+                        len = gzip_extend(here, match, len + 1, most);
+                        if (!out || len > best)
+                        {
+                                if (out)
+                                {
+                                        best = len;
+                                        out->length = (p16)len;
+                                        out->offset = (p16)(cur - node);
+                                        out++;
+                                }
+                                if (len >= nice)
+                                {
+                                        *lt = kids[0];
+                                        *gt = kids[1];
+                                        return out;
+                                }
+                        }
+                }
+                if (match[len] < here[len])
+                {
+                        *lt = node;
+                        lt = kids + 1;
+                        node = *lt;
+                        best_lt = len;
+                        if (best_gt < len)
+                                len = best_gt;
+                }
+                else
+                {
+                        *gt = node;
+                        gt = kids;
+                        node = *gt;
+                        best_gt = len;
+                        if (best_lt < len)
+                                len = best_lt;
+                }
+                if (node <= floor || !--depth)
+                {
+                        *lt = 0;
+                        *gt = 0;
+                        return out;
+                }
+        }
+}
+
+/* The prices a code's lengths give; a symbol the code left out is priced
+   as if it were rare. */
+static fn gzip_costs_from(gzip_costs address_to c, p8 address_to lit_len, p8 address_to dist_len)
+{
+        for (positive i = 0; i < 256; i++)
+                c->lit[i] = (lit_len[i] ? lit_len[i] : 13) * GZIP_BIT;
+        for (positive length = 3; length <= GZIP_MAX_MATCH; length++)
+        {
+                positive code = deflate_symbol_tab[length - 3];
+                positive bits = lit_len[257 + code] ? lit_len[257 + code] : 13;
+
+                c->len[length] = (p32)((bits + gzip_len_extra[code]) * GZIP_BIT);
+        }
+        for (positive i = 0; i < 30; i++)
+                c->off[i] = (p32)(((dist_len[i] ? dist_len[i] : 10) + gzip_dist_extra[i]) *
+                                  GZIP_BIT);
+}
+
+/* Prices from the code lengths a pass's parse gives, moved a quarter of
+   the way toward the symbol counts themselves: -log2 of a symbol's share,
+   in sixteenths of a bit, where a code length would round it to whole
+   bits. Whole-bit lengths alone stall the search a percent or two short
+   of what fractional prices reach; a quarter measured best of the shares
+   tried (0, 6, 8, 12 and 16 sixteenths). */
+static fn gzip_costs_freq(gzip_costs address_to c, p32 address_to lit_freq,
+                          p32 address_to dist_freq, p8 address_to lit_len, p8 address_to dist_len)
+{
+        p64 lit_total = 0, dist_total = 0, lit_log, dist_log;
+        gzip_costs f;
+
+        for (positive i = 0; i < 286; i++)
+                lit_total += lit_freq[i];
+        for (positive i = 0; i < 30; i++)
+                dist_total += dist_freq[i];
+        lit_log = gzip_log2_q16(lit_total ? lit_total : 1);
+        dist_log = gzip_log2_q16(dist_total ? dist_total : 1);
+        gzip_costs_from(c, lit_len, dist_len);
+        gzip_costs_from(address_of f, lit_len, dist_len);
+        for (positive i = 0; i < 256; i++)
+                if (lit_freq[i])
+                        f.lit[i] = (p32)((lit_log - gzip_log2_q16(lit_freq[i])) >> 12);
+        for (positive length = 3; length <= GZIP_MAX_MATCH; length++)
+        {
+                positive code = deflate_symbol_tab[length - 3];
+
+                if (lit_freq[257 + code])
+                        f.len[length] = (p32)(((lit_log - gzip_log2_q16(lit_freq[257 + code])) >> 12) +
+                                              gzip_len_extra[code] * GZIP_BIT);
+        }
+        for (positive i = 0; i < 30; i++)
+                if (dist_freq[i])
+                        f.off[i] = (p32)(((dist_log - gzip_log2_q16(dist_freq[i])) >> 12) +
+                                         gzip_dist_extra[i] * GZIP_BIT);
+        for (positive i = 0; i < 256; i++)
+                c->lit[i] = (c->lit[i] * 12 + f.lit[i] * 4) / 16;
+        for (positive i = 3; i <= GZIP_MAX_MATCH; i++)
+                c->len[i] = (c->len[i] * 12 + f.len[i] * 4) / 16;
+        for (positive i = 0; i < 30; i++)
+                c->off[i] = (c->off[i] * 12 + f.off[i] * 4) / 16;
+}
+
+/* Default prices for a block: a literal by how many kinds of byte it has
+   and how often a greedy parse found matches, a length symbol by the
+   same, a distance symbol as one of thirty. */
+static fn gzip_costs_default(struct gzip_ultra address_to u, p8 address_to block,
+                             positive length, gzip_costs address_to c)
+{
+        p32 counts[256];
+        positive kinds = 0, literals = length, matches = 0, share;
+        p32 lit_cost, len_cost;
+
+        memory_fill(counts, 0, sizeof(counts));
+        for (positive i = 0; i < length; i++)
+                counts[block[i]]++;
+        for (positive i = 0; i < 256; i++)
+                kinds += counts[i] > (length >> 11);
+        if (!kinds)
+                kinds = 1;
+        for (positive i = gzip_min_match(kinds, GZIP_OPT_DEPTH); i <= GZIP_MAX_MATCH; i++)
+        {
+                matches += u->len_freq[i];
+                literals -= min(literals, i * u->len_freq[i]);
+        }
+        share = matches > literals ? 2 : matches * 4 > literals ? 1 : 0;
+        /* -log2((1 - p) / kinds) with p = 1/4, 1/2 or 3/4, and -log2(p / 29) */
+        lit_cost = share == 0 ? gzip_bits16(4 * kinds, 3)
+                   : share == 1 ? gzip_bits16(2 * kinds, 1) : gzip_bits16(4 * kinds, 1);
+        len_cost = share == 0 ? gzip_bits16(116, 1) : share == 1 ? gzip_bits16(58, 1)
+                                                            : gzip_bits16(116, 3);
+        for (positive i = 0; i < 256; i++)
+                c->lit[i] = lit_cost;
+        for (positive i = 3; i <= GZIP_MAX_MATCH; i++)
+                c->len[i] = len_cost + gzip_len_extra[deflate_symbol_tab[i - 3]] * GZIP_BIT;
+        for (positive i = 0; i < 30; i++)
+                c->off[i] = 4 * GZIP_BIT + (907 * GZIP_BIT) / 1000 + gzip_dist_extra[i] * GZIP_BIT;
+}
+
+/* The first pass's prices: the defaults, blended with the last block's
+   prices by how alike the two blocks' symbol kinds look. */
+static fn gzip_costs_open(gzip_encoder address_to e, struct gzip_ultra address_to u,
+                          p8 address_to block, positive length, bool first)
+{
+        gzip_costs d;
+        p64 delta = 0, cutoff;
+        positive mix;
+
+        gzip_costs_default(u, block, length, address_of d);
+        if (first || !u->prev_seen_n || !e->seen_n)
+        {
+                u->costs = d;
+                return;
+        }
+        for (positive i = 0; i < 10; i++)
+        {
+                p64 was = (p64)u->prev_seen[i] * e->seen_n;
+                p64 now = (p64)e->seen[i] * u->prev_seen_n;
+
+                delta += was > now ? was - now : now - was;
+        }
+        cutoff = ((p64)u->prev_seen_n * e->seen_n * 200) / 512;
+        if (delta > 3 * cutoff)
+        {
+                u->costs = d;
+                return;
+        }
+        mix = 4 * delta > 9 * cutoff ? 3 : 2 * delta > 3 * cutoff ? 2 : 2 * delta > cutoff ? 1 : 0;
+        p32 address_to to = (p32 address_to)address_of u->costs;
+        p32 address_to from = (p32 address_to)address_of d;
+
+        for (positive i = 0; i < sizeof(gzip_costs) / sizeof(p32); i++)
+                to[i] = mix == 0 ? (from[i] + 3 * to[i]) / 4
+                        : mix == 1 ? (from[i] + to[i]) / 2
+                        : mix == 2 ? (5 * from[i] + 3 * to[i]) / 8 : (3 * from[i] + to[i]) / 4;
+}
+
+/* The cheapest parse of the block at the current prices, backwards from
+   its stop; then its symbols counted and its pairs written. stop is the
+   cache entry past the block's last position. */
+static fn gzip_opt_path(gzip_encoder address_to e, struct gzip_ultra address_to u,
+                        positive length, gzip_match address_to stop)
+{
+        gzip_node address_to node = u->node;
+        gzip_match address_to c = stop;
+        gzip_costs address_to cost = address_of u->costs;
+        positive pairs = 0;
+
+        node[length].cost = 0;
+        for (positive at = length; at-- > 0;)
+        {
+                positive count;
+                p32 best, item;
+
+                c--;
+                count = c->length;
+                best = cost->lit[c->offset] + node[at + 1].cost;
+                item = (p32)c->offset << 9 | 1;
+                if (count)
+                {
+                        gzip_match address_to m = c - count;
+                        positive len = 3;
+
+                        do
+                        {
+                                positive offset = m->offset;
+                                p32 oc = cost->off[gzip_dist_code(offset)];
+
+                                do
+                                {
+                                        p32 here = oc + cost->len[len] + node[at + len].cost;
+
+                                        if (here < best)
+                                        {
+                                                best = here;
+                                                item = (p32)(len | offset << 9);
+                                        }
+                                } while (++len <= m->length);
+                        } while (++m != c);
+                        c -= count;
+                }
+                node[at].cost = best;
+                node[at].item = item;
+        }
+        memory_fill(e->lit_freq, 0, sizeof(e->lit_freq));
+        memory_fill(e->dist_freq, 0, sizeof(e->dist_freq));
+        for (positive at = 0; at < length;)
+        {
+                p32 item = node[at].item;
+                positive len = item & 511;
+                positive offset = item >> 9;
+
+                if (len == 1)
+                        e->lit_freq[offset]++;
+                else
+                {
+                        e->mpos[pairs] = (p32)at;
+                        e->mlen[pairs] = (p16)len;
+                        e->mdist[pairs] = (p16)offset;
+                        pairs++;
+                        e->lit_freq[257 + deflate_symbol_tab[len - 3]]++;
+                        e->dist_freq[gzip_dist_code(offset)]++;
+                }
+                at += len;
+        }
+        e->pairs = pairs;
+}
+
+/* The cheapest a block with the counted symbols can be written. */
+static positive gzip_opt_cost(gzip_encoder address_to e, positive length,
+                              gzip_plan address_to plan)
+{
+        gzip_block_plan(e, length, plan);
+        return min(plan->dynamic, plan->fixed);
+}
+
+/* Choose and write one block: its matches are the cache entries before
+   stop. Answers whether literals alone were cheapest. */
+static bool gzip_opt_block(gzip_encoder address_to e, struct gzip_ultra address_to u,
+                           positive start, positive length, gzip_match address_to stop,
+                           bool first)
+{
+        p8 address_to block = e->base + start;
+        gzip_plan plan;
+        positive only_literals, fixed = positive_max, best = positive_max, cost = 0;
+        p32 seen[10], fresh[10];
+        positive seen_n = e->seen_n, fresh_n = e->fresh_n;
+
+        memory_copy(seen, e->seen, sizeof(seen));
+        memory_copy(fresh, e->fresh, sizeof(fresh));
+        for (positive at = length; at <= length + GZIP_MAX_MATCH - 1; at++)
+                u->node[at].cost = 0x80000000u;
+
+        memory_fill(e->lit_freq, 0, sizeof(e->lit_freq));
+        memory_fill(e->dist_freq, 0, sizeof(e->dist_freq));
+        for (positive i = 0; i < length; i++)
+                e->lit_freq[block[i]]++;
+        only_literals = gzip_opt_cost(e, length, address_of plan);
+
+        if (length <= GZIP_OPT_STATIC)
+        {
+                u->saved = u->costs;
+                gzip_costs_from(address_of u->costs, gzip_fixed_lit_len, gzip_fixed_dist_len);
+                gzip_opt_path(e, u, length, stop);
+                fixed = u->node[0].cost / GZIP_BIT + 7 + 3;
+                u->costs = u->saved;
+        }
+        gzip_costs_open(e, u, block, length, first);
+        for (positive pass = 0; pass < GZIP_OPT_PASSES; pass++)
+        {
+                gzip_opt_path(e, u, length, stop);
+                cost = gzip_opt_cost(e, length, address_of plan);
+                if (cost + 1 > best)
+                        break;
+                best = cost;
+                u->saved = u->costs;
+                gzip_costs_freq(address_of u->costs, e->lit_freq, e->dist_freq, plan.lit_len,
+                                plan.dist_len);
+        }
+        bool literals = false;
+
+        if (min(only_literals, fixed) < best)
+        {
+                if (only_literals < fixed)
+                {
+                        memory_fill(e->lit_freq, 0, sizeof(e->lit_freq));
+                        memory_fill(e->dist_freq, 0, sizeof(e->dist_freq));
+                        for (positive i = 0; i < length; i++)
+                                e->lit_freq[block[i]]++;
+                        e->pairs = 0;
+                        gzip_block_plan(e, length, address_of plan);
+                        gzip_costs_from(address_of u->costs, plan.lit_len, plan.dist_len);
+                        literals = true;
+                }
+                else
+                {
+                        gzip_costs_from(address_of u->costs, gzip_fixed_lit_len,
+                                        gzip_fixed_dist_len);
+                        gzip_opt_path(e, u, length, stop);
+                }
+        }
+        else if (cost > best)
+        {
+                u->costs = u->saved;
+                gzip_opt_path(e, u, length, stop);
+                gzip_block_plan(e, length, address_of plan);
+                gzip_costs_from(address_of u->costs, plan.lit_len, plan.dist_len);
+        }
+        gzip_block_emit(e, block, length, false);
+        memory_copy(e->seen, seen, sizeof(seen));
+        memory_copy(e->fresh, fresh, sizeof(fresh));
+        e->seen_n = seen_n;
+        e->fresh_n = fresh_n;
+        return literals;
+}
+
+/* The open input from pos to its stop in optimally parsed blocks, then the
+   empty stored block that ends it on a byte boundary. */
+static fn gzip_ultra_run(gzip_encoder address_to e, positive pos)
+{
+        struct gzip_ultra address_to u = e->ultra;
+        p8 address_to base = e->base;
+        positive total = e->total;
+        positive start = pos;
+        gzip_match address_to cache = u->cache;
+        gzip_match address_to at = cache;
+        bool first = true, literals = false;
+        p32 h3 = 0, h4 = 0;
+
+        memory_fill(u->hash3, 0, sizeof(u->hash3));
+        memory_fill(u->hash4, 0, sizeof(u->hash4));
+        memory_fill(u->len_freq, 0, sizeof(u->len_freq));
+        memory_fill(u->new_len_freq, 0, sizeof(u->new_len_freq));
+        u->prev_seen_n = 0;
+        if (total >= 5)
+        {
+                p32 seq = memory_load_unaligned(p32, base);
+
+                h3 = gzip_hash(seq << 8, 16);
+                h4 = gzip_hash(seq, 16);
+        }
+        for (positive p = 0; p < pos && total - p >= 5; p++)
+                gzip_bt_advance(u, base, p, GZIP_OPT_NICE, GZIP_OPT_NICE, GZIP_OPT_DEPTH,
+                                address_of h3, address_of h4, null);
+        gzip_block_open(e);
+        while (pos < total)
+        {
+                positive cap = total - start < GZIP_OPT_MOST + GZIP_SPLIT_LEAST
+                                       ? total : start + GZIP_OPT_MOST;
+                positive least = literals ? GZIP_MAX_MATCH + 1
+                                          : gzip_min_match_ahead(base + start, cap - start,
+                                                                 GZIP_OPT_DEPTH);
+                positive checked = 0, observe = pos;
+                bool moved = false;
+
+                for (;;)
+                {
+                        positive most = min(total - pos, (positive)GZIP_MAX_MATCH);
+                        positive nice = min(most, (positive)GZIP_OPT_NICE);
+                        gzip_match address_to matches = at;
+                        positive best = 0;
+
+                        if (most >= 5)
+                        {
+                                at = gzip_bt_advance(u, base, pos, most, nice, GZIP_OPT_DEPTH,
+                                                     address_of h3, address_of h4, matches);
+                                if (at > matches)
+                                        best = at[-1].length;
+                        }
+                        if (pos >= observe)
+                        {
+                                if (best >= least)
+                                {
+                                        e->fresh[8 + (best >= 9)]++;
+                                        u->new_len_freq[best]++;
+                                        observe = pos + best;
+                                }
+                                else
+                                {
+                                        p8 c = base[pos];
+
+                                        e->fresh[((c >> 5) & 6) | (c & 1)]++;
+                                        observe = pos + 1;
+                                }
+                                e->fresh_n++;
+                        }
+                        at->length = (p16)(at - matches);
+                        at->offset = base[pos];
+                        at++;
+                        pos++;
+                        if (best >= 3 && best >= nice)
+                                for (positive skip = best - 1; skip; skip--)
+                                {
+                                        most = min(total - pos, (positive)GZIP_MAX_MATCH);
+                                        nice = min(most, (positive)GZIP_OPT_NICE);
+                                        if (most >= 5)
+                                                gzip_bt_advance(u, base, pos, nice, nice,
+                                                                GZIP_OPT_DEPTH, address_of h3,
+                                                                address_of h4, null);
+                                        at->length = 0;
+                                        at->offset = base[pos];
+                                        at++;
+                                        pos++;
+                                }
+                        if (pos >= cap || at >= cache + GZIP_OPT_CACHE)
+                                break;
+                        if (e->fresh_n < GZIP_SPLIT_CHECK || pos - start < GZIP_SPLIT_LEAST ||
+                            total - pos < GZIP_SPLIT_LEAST)
+                                continue;
+                        if (gzip_split_test(e, pos - start, total - pos))
+                        {
+                                moved = true;
+                                break;
+                        }
+                        for (positive i = 0; i <= GZIP_MAX_MATCH; i++)
+                        {
+                                u->len_freq[i] += u->new_len_freq[i];
+                                u->new_len_freq[i] = 0;
+                        }
+                        checked = pos;
+                }
+                if (moved && checked)
+                {
+                        /* End the block where the statistics had not yet
+                           moved; what was found past it opens the next. */
+                        gzip_match address_to cut = at;
+
+                        for (positive back = pos - checked; back; back--)
+                        {
+                                cut--;
+                                cut -= cut->length;
+                        }
+                        literals = gzip_opt_block(e, u, start, checked - start, cut, first);
+                        memory_copy(cache, cut, (positive)(at - cut) * sizeof(gzip_match));
+                        at = cache + (at - cut);
+                        memory_copy(u->prev_seen, e->seen, sizeof(u->prev_seen));
+                        u->prev_seen_n = (p32)e->seen_n;
+                        memory_fill(e->seen, 0, sizeof(e->seen));
+                        e->seen_n = 0;
+                        memory_fill(u->len_freq, 0, sizeof(u->len_freq));
+                        start = checked;
+                }
+                else
+                {
+                        for (positive i = 0; i < 10; i++)
+                        {
+                                e->seen[i] += e->fresh[i];
+                                e->fresh[i] = 0;
+                        }
+                        e->seen_n += e->fresh_n;
+                        e->fresh_n = 0;
+                        for (positive i = 0; i <= GZIP_MAX_MATCH; i++)
+                        {
+                                u->len_freq[i] += u->new_len_freq[i];
+                                u->new_len_freq[i] = 0;
+                        }
+                        literals = gzip_opt_block(e, u, start, pos - start, at, first);
+                        at = cache;
+                        memory_copy(u->prev_seen, e->seen, sizeof(u->prev_seen));
+                        u->prev_seen_n = (p32)e->seen_n;
+                        memory_fill(e->seen, 0, sizeof(e->seen));
+                        memory_fill(e->fresh, 0, sizeof(e->fresh));
+                        e->seen_n = 0;
+                        e->fresh_n = 0;
+                        memory_fill(u->len_freq, 0, sizeof(u->len_freq));
+                        memory_fill(u->new_len_freq, 0, sizeof(u->new_len_freq));
+                        start = pos;
+                }
+                first = false;
+        }
+        gzip_write_stored(e, e->base + pos, 0, false);
+}
+
 /* The open input from pos to its end in deflate blocks, then the empty
    stored block that ends it on a byte boundary. */
 static fn gzip_block_run(gzip_encoder address_to e, positive pos)
@@ -2222,6 +2933,11 @@ static fn gzip_block_deflate(gzip_encoder address_to e, p8 address_to data,
         e->out_n = 0;
         e->bits = 0;
         e->bitn = 0;
+        if (e->ultra)
+        {
+                gzip_ultra_run(e, history);
+                return;
+        }
         if (shape.parse == GZIP_PARSE_FAST)
                 memory_fill(e->fast, 0, sizeof(e->fast));
         else
@@ -2336,6 +3052,22 @@ static gzip_encoder address_to gzip_encoder_open(p8 level)
         e->out_room = 0;
         e->out = null;
         e->level = level;
+        e->mpos = e->own_pos;
+        e->mlen = e->own_len;
+        e->mdist = e->own_dist;
+        e->ultra = null;
+        if (level == GZIP_ULTRA)
+        {
+                e->ultra = (struct gzip_ultra address_to)memory_checked(sizeof(struct gzip_ultra));
+                if (!e->ultra)
+                {
+                        memory_free(e, sizeof(gzip_encoder));
+                        return null;
+                }
+                e->mpos = e->ultra->mpos;
+                e->mlen = e->ultra->mlen;
+                e->mdist = e->ultra->mdist;
+        }
         e->last = positive_max - 1;
         e->total = 0;
         return e;
@@ -2349,6 +3081,8 @@ static fn gzip_writer_close(void)
 
                 if (e)
                 {
+                        if (e->ultra)
+                                memory_free(e->ultra, sizeof(struct gzip_ultra));
                         memory_free(e, sizeof(gzip_encoder));
                 }
         }
@@ -2396,7 +3130,7 @@ static fn gzip_batch_job(address_any context, positive index,
                 return;
         p8 address_to data = w->input + GZIP_WINDOW + index * GZIP_BLOCK;
 
-        if (e->last + 1 == w->blocks + index && e->total < (1u << 30))
+        if (e->last + 1 == w->blocks + index && e->total < (1u << 30) && !e->ultra)
                 gzip_block_follow(e, data, n);
         else
                 gzip_block_deflate(e, data, index ? GZIP_WINDOW : w->history, n);
@@ -2451,8 +3185,9 @@ static bool gzip_encode_setup(p8 level)
         gzip_why = null;
         gzip_fixed_init();
         level = level ? level : 6;
-        gzip_writer.level = level > 9 ? 9 : level;
-        header[8] = gzip_writer.level == 1 ? 4 : gzip_writer.level == 9 ? 2 : 0;
+        gzip_writer.level = level > GZIP_ULTRA ? 9 : level;
+        gzip_block_size = gzip_writer.level == GZIP_ULTRA ? GZIP_OPT_BLOCK : (1u << 16);
+        header[8] = gzip_writer.level == 1 ? 4 : gzip_writer.level >= 9 ? 2 : 0;
         gzip_writer.history = 0;
         gzip_writer.blocks = 0;
         gzip_writer.n = 0;
@@ -2469,7 +3204,7 @@ static bool gzip_encode_setup(p8 level)
 
                 gzip_writer.batch_blocks =
                     width == 1 ? 1
-                    : min(width * GZIP_BATCH_PER_WORKER, (positive)GZIP_BATCH_BLOCKS);
+                    : min(width * (gzip_writer.level == GZIP_ULTRA ? 2 : GZIP_BATCH_PER_WORKER), (positive)GZIP_BATCH_BLOCKS);
         }
         gzip_writer.done = (p8 address_to)memory_checked(gzip_writer.batch_blocks);
         gzip_writer.input_room = GZIP_WINDOW + gzip_writer.batch_blocks * GZIP_BLOCK;
@@ -2638,6 +3373,16 @@ static b32 gzip_stream(bipolar in, bipolar out, bool decode, p8 level)
 static const file_codec_suffix gzip_suffixes[] = {
     {".gz", ""}, {".Z", ""}, {".tgz", ".tar"}};
 
+/* --ultra: the optimal parser, past -9. GNU gzip refuses the word, so no
+   GNU spelling changes meaning; -10 and up still read as their last digit. */
+static bipolar gzip_option(file_codec_cli address_to codec, string_address at, bool word)
+{
+        if (!word || !string_equals(at, "--ultra"))
+                return 0;
+        codec->level = GZIP_ULTRA;
+        return 1;
+}
+
 static b32 file_gzip(void)
 {
         file_codec_cli codec = {
@@ -2651,7 +3396,7 @@ static b32 file_gzip(void)
             .features = FILE_CODEC_LONG_QUIET | FILE_CODEC_LEVEL_WORDS |
                         FILE_CODEC_NO_NAME | FILE_CODEC_SHORT_VERSION,
             .remove_source = true, .level = 6,
-            .run = gzip_stream};
+            .run = gzip_stream, .option = gzip_option};
         return file_codec_main(address_of codec);
 }
 
