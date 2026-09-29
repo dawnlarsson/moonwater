@@ -19745,6 +19745,18 @@ INPUTS.update({
     "text_uniq_edge": ((b"x" * 65535 + b"\n") * 2 + (b"y" * 65536 + b"\n") * 2 + b"tail\ntail"),
     "text_tabs": b"  \tA\tB\b\tC\r\tD\f\tE\n        X        Y\n\t\tz\n   a   b\n\t \t\n",
     "text_tabs_wide": b" " * 65535 + b"\tX\b\tY\n",
+    #   Every kind of character a tab can follow: one, two and zero columns wide,
+    #   a control, a byte that is none (stray, cut off, overlong, a surrogate),
+    #   and sequences a read of 65536 bytes ends inside, at two, three and four.
+    "text_tabs_utf8": ("h\u00e9llo\tw\u00f6rld\t\u6f22\u5b57x\n"
+                       "a\tx\n\x01\tx\n\x7f\tx\n\u0085\tx\n" "e\u0301\tx\n\u200b\tx\n\u6f22\tx\n\U0001f642\tx\n"
+                       "\u00a0\tx\n\u00e9\u6f22\tx\n").encode()
+                       + b"\xff\tx\n\xc3\tx\n\xed\xa0\x80\tx\n\xc0\x80\tx\n\xf0\x9f\x99\tx\n\xe2\x82\tx\n\xc3a\tx\n"
+                       + "\u6f22\b\tx\n".encode() + b"e\xcc\x81\b\tx\n"
+                       + "        \u00e9\tx\n\u00e9        x\n\u00e9 \u00e9  x\n\u6f22\u5b57\u30c6        x\n".encode()
+                       + b"\xc3        x\n\t\xe6\xbc\xa2 \t x\n"
+                       + b"x" * 65535 + "\u00e9\tz\n".encode() + b"y" * 65534 + "\u6f22\tz\n".encode()
+                       + b"w" * 65533 + "\U0001f642\t \tz\n".encode() + b"tail\xf0\x9f",
     "text_fmt": _TEXT_FMT,
     "text_fmt_indent": _TEXT_FMT_INDENT,
     "text_fmt_prefix": _TEXT_FMT_PREFIX,
@@ -19877,6 +19889,7 @@ FIXTURES["text"] = {
 #       first 65536 bytes inside a character, where a read does.
 FIXTURES["text_wide"] = {
     **FIXTURES["text"],
+    "tabs_utf8.txt": INPUTS["text_tabs_utf8"],
     "utf8.txt": ("caf\u00e9 na\u00efve \u65e5\u672c\u8a9e\n"
                  "a\u00a0b c\u2003d e\u3000f g\u2007h\n"
                  "\U0001f600 emoji \u0301\u200b zero\tTab\n").encode()
@@ -20941,7 +20954,7 @@ _TEXT_TAB_LISTS = ("3", "3,5", "3,5,/4", "3,5,+4", "0", "1", "8", "3 5", "5,3", 
 _TEXT_TAB_OPERANDS = ((), ("tabs",), ("a.txt",), ("tabs_part", "tabs"), ("missing",), ("dir",),
                       ("-",), ("tabs", "-"), ("nonl",), ("empty",))
 _TEXT_TAB_STDIN = ("tabs", "text_tabs", "spaces", "empty", "nonl", "controls", "crlf",
-                   "text_tabs_wide", "text", "edge_65535", "edge_65536", "edge_65537")
+                   "text_tabs_wide", "text_tabs_utf8", "text", "edge_65535", "edge_65536", "edge_65537")
 
 #       Output the kernel refuses, for the tools that copy. A tmpfs sixteen
 #       pages wide stands for a full disk -- empty, so the copy fills it, or
@@ -21617,7 +21630,10 @@ TEXT_UTILITIES = (
                      Option("--tabs", ("3,5", "4"), True), Option("-4"), Option("-3,5"), Option("-8"),
                      Option("-0")),
             operands=_TEXT_TAB_OPERANDS, stdin=_TEXT_TAB_STDIN, fixture="text",
-            extra=(("--nosuchflag",), ("-Q",), ("-t", "3", "-t", "5"), ("-t", "65536,65544"),
+            extra=(*({"fixture": "text_wide", "argv": argv} for argv in (
+                        ("tabs_utf8.txt",), ("-t", "4", "tabs_utf8.txt"), ("-i", "tabs_utf8.txt"),
+                        ("-t", "3,7", "tabs_utf8.txt"), ("-t", "2,+3", "tabs_utf8.txt"))),
+                   ("--nosuchflag",), ("-Q",), ("-t", "3", "-t", "5"), ("-t", "65536,65544"),
                    ("-t", "5,3"), ("--first-only",), ("-a",),
                    #   GNU's list grammar: a / or + marks every number after it
                    #   in its list, doubled marks are one mark, a repeat is
@@ -21633,7 +21649,10 @@ TEXT_UTILITIES = (
                      Option("-t", _TEXT_TAB_LISTS, None, repeat=True), Option("--tabs", ("3,5", "4"), True),
                      Option("-4"), Option("-3,5"), Option("-8"), Option("-0")),
             operands=_TEXT_TAB_OPERANDS, stdin=_TEXT_TAB_STDIN, fixture="text",
-            extra=(("--nosuchflag",), ("-Q",), ("-t", "3", "-t", "5"), ("-a", "--first-only"),
+            extra=(*({"fixture": "text_wide", "argv": argv} for argv in (
+                        ("-a", "tabs_utf8.txt"), ("-a", "-t", "4", "tabs_utf8.txt"), ("-t", "3", "tabs_utf8.txt"),
+                        ("-a", "-t", "2,6", "tabs_utf8.txt"), ("tabs_utf8.txt",), ("--first-only", "tabs_utf8.txt"))),
+                   ("--nosuchflag",), ("-Q",), ("-t", "3", "-t", "5"), ("-a", "--first-only"),
                    ("-t", "3,/4,+2"), ("-t", "3 5"), ("-i",),
                    #   The old -N sets the stops and not -a; -t sets both.
                    ("-3",), ("-3,5",), ("-8", "-4"), ("-3", "-a"), ("-3", "--first-only"), ("-t", "3"),

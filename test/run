@@ -5306,6 +5306,9 @@ lane_text()
                 --jobs "${MW_JOBS:-$(nproc 2> /dev/null || echo 4)}"
         text_lane_status=$?
 
+        #       expand and unexpand advance a column by a character's width
+        #       where LC_CTYPE says so, and are in this walk for it.
+        #
         #       cut -c and fold -w are widths in characters where LC_CTYPE
         #       says a character is more than a byte, and the walk above is
         #       the C locale, where a byte is a character and every answer
@@ -5314,7 +5317,7 @@ lane_text()
         #       green suite said nothing about either one. Pins and budget
         #       as wc's, and for the same reasons.
         python3 test/differential.py "$farm" --domain text \
-                --utility cut --utility fold \
+                --utility cut --utility fold --utility expand --utility unexpand \
                 --locale C.UTF-8 --no-pinned --budget singles \
                 --jobs "${MW_JOBS:-$(nproc 2> /dev/null || echo 4)}" ||
                 [ "$text_lane_status" != 0 ] || text_lane_status=1
