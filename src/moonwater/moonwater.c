@@ -1337,9 +1337,25 @@ static long report_machine_script(struct machine_script __user *out)
                    in it is the caller's room, on the way out it is the
                    script's length, and the two share one word. */
                 unsigned int room = request.length;
+                unsigned int length;
+                char *copy = NULL;
+
+                /*      The text is root's. It is read from
+                        /root/main.moonwater.sh, which is where a person who
+                        cannot open that file was kept from it, and it can
+                        carry what an operator would not print: a network's
+                        password, a token in a command. /dev/spark is open to
+                        everyone, so the copy needs the capability the
+                        settings' GET needs. What anyone may still ask for is
+                        the overlay, the length and the origin -- the answer
+                        moonwater status is made from -- which is the request
+                        that names no address. */
+                if (request.address && !capable(CAP_SYS_ADMIN))
+                        return -EPERM;
 
                 mutex_lock(&machine_script_lock);
-                if (request.address && machine_script_length > room) {
+                length = machine_script_length;
+                if (request.address && length > room) {
                         machine_script_answer(&request);
                         mutex_unlock(&machine_script_lock);
                         return copy_to_user(out, &request, sizeof(request))
@@ -1347,13 +1363,31 @@ static long report_machine_script(struct machine_script __user *out)
                                        : -ENOSPC;
                 }
                 machine_script_answer(&request);
-                if (request.address && machine_script_length &&
-                    copy_to_user((void __user *)request.address,
-                                 machine_script_text, machine_script_length)) {
-                        mutex_unlock(&machine_script_lock);
-                        return -EFAULT;
+
+                /*      Taken out of the lock before it goes to the caller. A
+                        page the caller mapped from a file on a filesystem
+                        that answers slowly, or never, would otherwise hold
+                        this lock for as long -- and SET, the machine
+                        process re-reading its own script, and module exit
+                        all wait for it. */
+                if (request.address && length) {
+                        copy = kvmalloc(length, GFP_KERNEL);
+                        if (!copy) {
+                                mutex_unlock(&machine_script_lock);
+                                return -ENOMEM;
+                        }
+                        memcpy(copy, machine_script_text, length);
                 }
                 mutex_unlock(&machine_script_lock);
+
+                if (copy) {
+                        unsigned long failed = copy_to_user(
+                                (void __user *)request.address, copy, length);
+
+                        kvfree(copy);
+                        if (failed)
+                                return -EFAULT;
+                }
                 break;
         }
         case MOONWATER_SCRIPT_SET: {
@@ -1702,7 +1736,20 @@ static void bind_stop(void)
         mutex_unlock(&machine_script_lock);
 }
 
-static void bind_answer(struct bind_control *request, struct bind_row *row)
+/*
+        What a row says, to whoever asked.
+
+        The line a row runs is run as root with every capability, and the
+        settings' own GET is CAP_SYS_ADMIN "because a command can carry a
+        secret": a bound line is the same text. So a caller without the
+        capability sees the event, its name, how often it has run and what
+        state it is in, and the line only while it is the event's default --
+        which is public, it is in this file. A line somebody set reads as
+        empty to them, with the DEFAULT flag clear, so that they can still
+        tell that it was changed.
+*/
+static void bind_answer(struct bind_control *request, struct bind_row *row,
+                        _Bool reveal)
 {
         unsigned long flags;
 
@@ -1717,6 +1764,8 @@ static void bind_answer(struct bind_control *request, struct bind_row *row)
         request->flags = 0;
         if (!strcmp(request->command, row->def))
                 request->flags |= SPARK_BIND_DEFAULT;
+        else if (!reveal)
+                request->command[0] = 0;
         if (atomic_read(&row->busy))
                 request->flags |= SPARK_BIND_RUNNING;
         if (work_pending(&row->work) ||
@@ -1745,7 +1794,10 @@ static long report_bind(struct bind_control __user *out)
         if (request.op == SPARK_BIND_SET) {
                 if (!capable(CAP_SYS_ADMIN) ||
                     ((row->flags & BIND_BOOT) && !capable(CAP_SYS_BOOT))) {
-                        bind_answer(&request, row);
+                        /* CAP_SYS_BOOT alone is not the capability that
+                           reads a line, and the answer to a refusal is a
+                           read like any other. */
+                        bind_answer(&request, row, capable(CAP_SYS_ADMIN));
                         return copy_to_user(out, &request, sizeof(request))
                                        ? -EFAULT
                                        : -EPERM;
@@ -1763,7 +1815,7 @@ static long report_bind(struct bind_control __user *out)
                 spin_unlock_irqrestore(&bind_lock, flags);
         }
 
-        bind_answer(&request, row);
+        bind_answer(&request, row, capable(CAP_SYS_ADMIN));
         return copy_to_user(out, &request, sizeof(request)) ? -EFAULT : 0;
 }
 

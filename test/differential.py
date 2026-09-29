@@ -23043,7 +23043,22 @@ static void *kvrealloc(void *old, size_t bytes, int flags) {
     (void)flags;
     return ++allocations == fail_allocation ? NULL : realloc(old, bytes);
 }
+#define kvmalloc(n,flags) kvrealloc(NULL,n,flags)
+#define kvfree free
+static void *kmemdup(const void *from, size_t bytes, int flags) {
+    void *got = kvrealloc(NULL, bytes, flags);
+    if (got) memcpy(got, from, bytes);
+    return got;
+}
+/* Every lock a copy to or from a caller's buffer must not be made under. The
+   copy is where a page that a filesystem answers slowly, or never, holds the
+   caller, and /dev/spark is open to everyone: a lock held across it is a lock
+   every other caller waits on for as long. Filled in where the locks are. */
+static const int *lock_watch[4];
+static unsigned copies_under_lock;
 static int user_copy(void *to, const void *from, size_t bytes) {
+    for (unsigned watched = 0; watched < sizeof(lock_watch) / sizeof(lock_watch[0]); watched++)
+        if (lock_watch[watched] && *lock_watch[watched]) copies_under_lock++;
     if (++copies == fail_copy) {
         /* A real copy_from_user can land a prefix and then fault. partial_copy
            says how many bytes land before the refusal; zero, which is what
@@ -23831,6 +23846,18 @@ static unsigned canvas_logs,canvas_terminals;
 static long canvas_log_open(void) { canvas_logs++; return 0; }
 static long canvas_terminal_open(void) { canvas_terminals++; return 0; }
 '''
+    #   The three diagnostics, the real macro over collectors that fill one
+    #   field each: what a collector does not fill is zero or it is the stack.
+    source += r'''
+static void canvas_input_stats(struct input_stats *out) { out->events = 5; }
+static void canvas_cursor_stats(struct cursor_stats *out) { out->updates = 3; }
+static void canvas_input_devices(struct input_devices *out) { out->count = 1; }
+'''
+    source += section(canvas, "#define REPORT_CANVAS(name, type, collect)",
+                      "#undef REPORT_CANVAS")
+    source += ("REPORT_CANVAS(report_input_real, input_stats, canvas_input_stats)\n"
+               "REPORT_CANVAS(report_cursor_real, cursor_stats, canvas_cursor_stats)\n"
+               "REPORT_CANVAS(report_devices_real, input_devices, canvas_input_devices)\n")
     source += canvas[canvas.index("static long report_canvas"):]
     # Here rather than beside the geometry it reshapes: resize_move reads the
     # drag state off desktop, and desktop is the mock declared just above.
@@ -24265,11 +24292,25 @@ static void check_bind(void) {
     check(report_bind(&request)==-EPERM && !strcmp(power->command,"echo set") &&
           !strcmp(request.name,"poweroff"),
           "setting with CAP_SYS_BOOT but not CAP_SYS_ADMIN is refused: it runs with every capability");
+    check(report_bind(&request)==-EPERM && !request.command[0],
+          "a refusal does not hand the line back to the caller it refused");
     power_capable=0; power_admin=1;
     memset(&request,0,sizeof(request));
     request.event=SPARK_BIND_POWEROFF;
     check(!report_bind(&request) && !strcmp(request.command,"echo set"),
-          "reading the line needs no capability");
+          "CAP_SYS_ADMIN reads the line without CAP_SYS_BOOT");
+    /* A bound line runs as root with every capability and can carry what
+       nobody would print -- the settings' own GET is CAP_SYS_ADMIN for that
+       reason. Who lacks it reads the event and its state, and the line only
+       while it is the event's default, which is public. */
+    power_capable=1; power_admin=0;
+    memset(&request,0,sizeof(request));
+    request.event=SPARK_BIND_POWEROFF;
+    check(!report_bind(&request) && !request.command[0] &&
+          !(request.flags & SPARK_BIND_DEFAULT) && !strcmp(request.name,"poweroff") &&
+          request.count==SPARK_BIND_EVENTS && (request.flags & SPARK_BIND_BOOT),
+          "a line somebody set reads as empty, and not the default, without CAP_SYS_ADMIN");
+    power_capable=0; power_admin=1;
     memset(&request,0,sizeof(request));
     request.op=SPARK_BIND_SET; request.event=SPARK_BIND_VOLUME_UP;
     snprintf(request.command,sizeof(request.command),"true");
@@ -24307,6 +24348,12 @@ static void check_bind(void) {
     check(!report_bind(&request) && !strcmp(power->command,"poweroff") &&
           (request.flags & SPARK_BIND_DEFAULT),
           "an empty command puts the default back");
+    power_admin=0;
+    memset(&request,0,sizeof(request)); request.event=SPARK_BIND_POWEROFF;
+    check(!report_bind(&request) && !strcmp(request.command,"poweroff") &&
+          (request.flags & SPARK_BIND_DEFAULT),
+          "the default line is public and is read without CAP_SYS_ADMIN");
+    power_admin=1;
     atomic_set(&power->runs,0);
     bind_idle(power); bind_idle(sleep); bind_idle(vol); bind_idle(cad);
     bind_idle(bind_row(SPARK_BIND_LID_CLOSE)); bind_idle(bind_row(SPARK_BIND_LID_OPEN));
@@ -24816,6 +24863,28 @@ static void check_machine_script(void) {
     check(!answer && request.length == wrote,
           "a GET for the overlay alone names no address and needs no room");
 
+    /* The text is root's -- /root/main.moonwater.sh, which somebody who
+       cannot open that file has no other way to read -- and /dev/spark is
+       open to everyone. The overlay is what moonwater status is made from,
+       and is not the text. */
+    power_admin = 0;
+    memset(room, '#', sizeof room);
+    memset(&request, 0, sizeof request);
+    request.op = MOONWATER_SCRIPT_GET;
+    request.address = (unsigned long)room;
+    request.length = (unsigned int)sizeof room;
+    answer = report_machine_script(&request);
+    check(answer == -EPERM && room[0] == '#' && room[wrote - 1] == '#',
+          "the script's text is not handed to a caller without CAP_SYS_ADMIN");
+    memset(&request, 0, sizeof request);
+    request.op = MOONWATER_SCRIPT_GET;
+    answer = report_machine_script(&request);
+    check(!answer && request.length == wrote &&
+          request.origin == MOONWATER_ORIGIN_DISK &&
+          (request.overlay.hooks & MOONWATER_HOOK_INIT),
+          "and the overlay, the length and the origin are still anyone's to ask for");
+    power_admin = 1;
+
     /* A SET whose copy faults after landing a prefix. Taken straight into the
        live text, the front of the new script would sit on the tail of the old
        one while the length and the overlay still described the old one, and
@@ -24997,6 +25066,54 @@ static void check_settings_sum(void) {
     check(spark_settings_sum(&slot) == 0x3f693c1fu, "a slot with an entry sums as zlib sums it");
     slot.sum = spark_settings_sum(&slot);
     check(spark_settings_check(&slot) == 1, "and checks");
+}
+
+/* What the input handler counted is a live record of somebody's hands: a
+   report count per device moves with every key pressed, the cursor's
+   coordinates are where the pointer is. CAP_SYS_ADMIN, refused before
+   anything is collected, and the struct that goes back is zero where the
+   collector wrote nothing rather than whatever the stack held. */
+__attribute__((noinline)) static void poison_stack(void) {
+    volatile unsigned char junk[8192];
+    for (unsigned i=0; i<sizeof(junk); i++) junk[i]=0xa5;
+}
+static void check_input_reports(void) {
+    struct input_stats stats;
+    struct cursor_stats cursor;
+    struct input_devices devices;
+    unsigned char *bytes;
+    unsigned i, dirty;
+
+    power_admin=0;
+    memset(&stats,0x5a,sizeof(stats));memset(&cursor,0x5a,sizeof(cursor));
+    memset(&devices,0x5a,sizeof(devices));
+    check(report_input_real(&stats)==-EPERM && stats.events==0x5a5a5a5a5a5a5a5aul,
+          "the input counters are refused without CAP_SYS_ADMIN, and nothing is written");
+    check(report_cursor_real(&cursor)==-EPERM && cursor.updates==0x5a5a5a5a5a5a5a5aul,
+          "so is where the cursor is");
+    check(report_devices_real(&devices)==-EPERM && devices.count==0x5a5a5a5a5a5a5a5aul,
+          "so is which devices have reported how much");
+    power_admin=1;
+    poison_stack();
+    memset(&stats,0x5a,sizeof(stats));
+    check(!report_input_real(&stats) && stats.events==5,"CAP_SYS_ADMIN reads them");
+    bytes=(unsigned char *)&stats;
+    for (i=sizeof(stats.events),dirty=0; i<sizeof(stats); i++) dirty+=bytes[i]!=0;
+    check(!dirty,"the counters a collector did not fill are zero, not the stack's");
+    poison_stack();
+    memset(&cursor,0x5a,sizeof(cursor));
+    check(!report_cursor_real(&cursor) && cursor.updates==3,"the cursor's state likewise");
+    bytes=(unsigned char *)&cursor;
+    for (i=0,dirty=0; i<sizeof(cursor); i++)
+        dirty+=bytes[i]!=0 && (i<offsetof(struct cursor_stats,updates) ||
+                               i>=offsetof(struct cursor_stats,updates)+sizeof(cursor.updates));
+    check(!dirty,"and every field but the one written is zero");
+    poison_stack();
+    memset(&devices,0x5a,sizeof(devices));
+    check(!report_devices_real(&devices) && devices.count==1,"and the devices");
+    bytes=(unsigned char *)&devices;
+    for (i=sizeof(devices.count),dirty=0; i<sizeof(devices); i++) dirty+=bytes[i]!=0;
+    check(!dirty,"with every device slot past the count zero");
 }
 
 // moonwater canvas on and off: who may, and what comes back.
@@ -25223,6 +25340,7 @@ static void check_focus_visibility(void) {
     screen=saved;
 }
 int main(void) {
+    lock_watch[0]=&machine_script_lock;
     check_spawn_dispatch();
     check_console_teardown();
     check_focus_visibility();
@@ -25540,10 +25658,13 @@ int main(void) {
     check_bind();
     check_bind_edges();
     check_canvas_control();
+    check_input_reports();
     check_machine_script();
     check_machine_events();
     check_settings_sum();
     check_input_suspension();
+    check(!copies_under_lock,
+          "nothing was copied to or from a caller with machine_script_lock held");
     free(output);
     printf("  core-state %u of %u\n",checks-failures,checks);
     const char *tally=getenv("TEST_TALLY");

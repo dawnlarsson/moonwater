@@ -189,7 +189,9 @@ struct stats {
 
 // _IOR('s', 3, struct input_stats). Nanoseconds from a pointer event
 // reaching the kernel to the cursor being on screen, and what the
-// acceleration curve did with the counts a mouse reported.
+// acceleration curve did with the counts a mouse reported. This, the cursor
+// stats and the input devices need CAP_SYS_ADMIN: they are a live record of
+// somebody's hands.
 #define SPARK_IOCTL_INPUT_STATS 0x80707303u
 
 struct input_stats {

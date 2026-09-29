@@ -11000,10 +11000,29 @@ static void canvas_cursor_stats(struct cursor_stats *out)
 
 /* ---- ioctl: what the device asks of Canvas ---- */
 
+/*
+        The three diagnostics: what the input handler counted, where the
+        cursor is and what the planes did, and which devices it is attached
+        to and how many reports each has delivered.
+
+        CAP_SYS_ADMIN, because /dev/spark is open to everyone and these are
+        a live record of somebody else's hands: a report count per device
+        moves with every key pressed at a keyboard, a process that reads it
+        in a loop reads when another user types and how fast, and the
+        cursor's coordinates are where their pointer is. `pointer` and
+        `spawn` are the machine's operator's tools, which need nothing they
+        did not need before -- root runs them. The struct starts zeroed, not
+        as whatever the stack held: a collector that fills every field today
+        is one field short the day one is added, and the copy is of all of
+        it.
+*/
 #define REPORT_CANVAS(name, type, collect)                                   \
         static long name(struct type __user *out)                            \
         {                                                                    \
-                struct type stats;                                           \
+                struct type stats = {};                                      \
+                                                                             \
+                if (!capable(CAP_SYS_ADMIN))                                 \
+                        return -EPERM;                                       \
                 collect(&stats);                                             \
                 return copy_to_user(out, &stats, sizeof(stats)) ? -EFAULT : 0; \
         }
