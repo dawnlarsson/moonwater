@@ -4761,6 +4761,7 @@ cp-link-replaced|0||d=$(mktemp -d) && cd "$d" && echo a > f && ln -s f l && echo
 cp-dangling-refused|1|not writing through dangling|d=$(mktemp -d) && cd "$d" && echo b > g && ln -s gone l && POSIXLY_CORRECT=1 "$HB/cp" g l; s=$?; cd /; rm -rf "$d"; exit $s
 split-link-replaced|0||d=$(mktemp -d) && cd "$d" && echo a > t && ln -s t xaa && seq 2 | "$HB/split" -b 1 - && [ "$(cat t)" = a ] && [ ! -L xaa ]; s=$?; cd /; rm -rf "$d"; exit $s
 csplit-link-replaced|0||d=$(mktemp -d) && cd "$d" && echo a > t && ln -s t xx01 && seq 2 | "$HB/csplit" -k - 2 > /dev/null && [ "$(cat t)" = a ] && [ ! -L xx01 ]; s=$?; cd /; rm -rf "$d"; exit $s
+chown-L-not-followed|0||d=$(mktemp -d) && cd "$d" && mkdir t && ln -s /etc t/e && n=$("$HB/chown" -RL "$(id -u)" t 2>&1 | wc -l); cd /; rm -rf "$d"; [ "$n" -le 1 ]
 sticky-mkdir|0||d=$(mktemp -d) && chmod 1777 "$d" && "$HB/mkdir" -p "$d/x"; s=$?; rm -rf "$d"; exit $s
 masked-find-exec|126|flag refused|/usr/bin/unshare -rm /bin/sh -c 'mount -t tmpfs tmpfs /proc && "$HB/find" /dev/null -exec true {} ";"'
 masked-awk|126||/usr/bin/unshare -rm /bin/sh -c 'mount -t tmpfs tmpfs /proc && echo x | "$HB/awk" 1'

@@ -21136,13 +21136,52 @@ static fn chown_tree_enter(address_any context, address_any node_address,
 
                 file_facts facts;
                 positive name_length = string_length(name);
-                bipolar seen = type == 0 || type == DT_DIR
+#if MOONWATER_STRICT < STRICT_TIGHT
+                /*      -L follows a link met in the tree into the directory it
+                        names, as fts's FTS_LOGICAL does; -H and -P follow none
+                        below the operand. STRICT_TIGHT follows none at all. */
+                bool through_link = type == DT_LNK && chown_selected.traverse == 'L';
+#else
+                bool through_link = false;
+#endif
+                bipolar seen = type == 0 || type == DT_DIR || through_link
                                    ? file_look_code(directory, name,
-                                                    AT_SYMLINK_NOFOLLOW,
+                                                    through_link ? 0 : AT_SYMLINK_NOFOLLOW,
                                                     address_of facts)
                                    : -ERROR_NO_ENTRY;
                 bool looked = seen >= 0;
                 bool here = looked && (facts.mode & MODE_FORMAT) == MODE_DIRECTORY;
+
+                if (here && through_link)
+                {
+                        //      What the walk would go round for ever, or that
+                        //      would carry it to the root: refused as fts and
+                        //      the preserve-root failsafe refuse them.
+                        bool cycle = false;
+                        file_facts root;
+
+                        for (file_change_tree_node address_to up = node; up && !cycle; up = up->parent)
+                                cycle = file_same_identity(address_of up->expected, address_of facts);
+                        //      A link back into the walk is met as the name it is,
+                        //      as fts hands it over, and not gone into.
+                        if (cycle)
+                                here = false;
+                        else if (file_change_preserve_root &&
+                            file_look_code(AT_FDCWD, (string_address) "/", 0, address_of root) >= 0 &&
+                            file_same_identity(address_of facts, address_of root))
+                        {
+                                p8 full[FILE_PATH_MAX];
+
+                                if (file_path_join(full, (string_address)node->path, name))
+                                        string_format(log_error,
+                                                      "%s: it is dangerous to operate recursively on %w (same as '/')\n"
+                                                      "%s: use --no-preserve-root to override this failsafe\n",
+                                                      chown_program, writer_shell_quoted_name,
+                                                      (string_address)full, chown_program);
+                                chown_status = 1;
+                                continue;
+                        }
+                }
 
                 if (!here)
                 {
@@ -21230,6 +21269,16 @@ static bool chown_tree_sink(address_any context, address_any node_address,
         return true;
 }
 
+// Whether the walk follows the links it meets: -L, below STRICT_TIGHT.
+static bool chown_tree_follows(void)
+{
+#if MOONWATER_STRICT < STRICT_TIGHT
+        return chown_selected.traverse == 'L';
+#else
+        return false;
+#endif
+}
+
 //      One operand of chown -R: everything under it on the pool, then the
 //      operand itself on this thread, as the serial walk visits it last.
 static fn chown_tree(string_address path)
@@ -21292,7 +21341,7 @@ static fn chown_tree(string_address path)
                      top->trusted = (opened.owner == file_change_user || opened.owner == 0) &&
                                     !(opened.mode & 0022),
                      !parallel_tree(chown_tree_enter, null, chown_tree_sink, null, handle, top,
-                                    O_NOFOLLOW)))
+                                    chown_tree_follows() ? 0 : O_NOFOLLOW)))
                 {
                         string_format(log_error, "%s: out of memory while walking the tree\n",
                                       chown_program);
