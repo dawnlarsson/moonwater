@@ -2351,6 +2351,19 @@ static fn tar_attrs_apply(bipolar fd, string_address path, positive at,
                             !string_compare_max((string_address)text,
                                                 "system.posix_acl_", 17))
                                 continue;
+#if MOONWATER_STRICT >= STRICT_TIGHT
+                        /* An archive says what security.* attributes a file
+                           gets -- a capability, an SELinux label -- and root
+                           carrying it out gives a file what only a package
+                           manager should. GNU does; STRICT_TIGHT does not. */
+                        if (!string_compare_max((string_address)text, "security.", 9))
+                        {
+                                string_format(log_error,
+                                              "tar: %s: Not setting the '%s' extended attribute from the archive\n",
+                                              path, (string_address)text);
+                                continue;
+                        }
+#endif
                         failed = system_call_5(syscall(fsetxattr), (positive)fd,
                                                (positive)text, (positive)value,
                                                value_length, 0);
@@ -3769,6 +3782,61 @@ static positive tar_matched_count;
 static bool tar_fatal_exit;
 
 /*
+        --owner and --group: the user and group every member is written
+        with, as NAME, ID or NAME:ID. A number alone has no name, a name is
+        looked up for its number and, unknown, leaves the file's own, and
+        NAME:ID takes both as given.
+*/
+static bool tar_owner_forced[2];
+static bipolar tar_owner_forced_id[2];
+static p8 tar_owner_forced_name[2][32];
+
+static bool tar_owner_parse(string_address text, bool group)
+{
+        string_address colon = string_first_of(text, ':');
+        positive name_length = colon ? (positive)(colon - text) : string_length(text);
+        p8 address_to name = tar_owner_forced_name[group];
+        bipolar id = -1;
+
+        tar_owner_forced[group] = true;
+        tar_owner_forced_id[group] = -1;
+        name[0] = end;
+        if (colon)
+        {
+                positive number;
+
+                if (!string_digits_checked_exact(colon + 1, 10, address_of number) || number >= p32_max)
+                {
+                        string_format(log_error, "tar: Invalid %s: %s\n",
+                                      group ? "group" : "owner", text);
+                        tar_status = 2;
+                        return false;
+                }
+                id = (bipolar)number;
+        }
+        else if (string_digits_exact(text, null))
+        {
+                positive number;
+
+                if (!string_digits_checked_exact(text, 10, address_of number) || number >= p32_max)
+                        return true;
+                tar_owner_forced_id[group] = (bipolar)number;
+                // The name the number has here, if it has one.
+                (void)(group ? file_group_name(number, name, 32) : file_user_name(number, name, 32));
+                return true;
+        }
+        if (name_length && name_length < 32)
+        {
+                memory_copy(name, text, name_length);
+                name[name_length] = end;
+        }
+        if (!colon && name_length)
+                id = group ? file_group_id((string_address)name) : file_user_id((string_address)name);
+        tar_owner_forced_id[group] = id;
+        return true;
+}
+
+/*
         --exclude and -X: a name is left out when a pattern matches it, or a
         directory that leads to it, as GNU's exclude does with wildcards on
         and slashes matched by * -- so --exclude=foo leaves out a/foo and
@@ -3779,7 +3847,13 @@ static bool tar_fatal_exit;
 static string_address tar_exclude[TAR_EXCLUDE_MAX];
 static positive tar_exclude_count;
 static bool tar_exclude_anchored;
+static bool tar_dereference;
 static bool tar_files_null;
+
+static bool tar_transform_add(string_address expression);
+static string_address tar_transformed(string_address name);
+static fn tar_transforms_reset(void);
+static positive tar_transform_count_now(void);
 
 static bool tar_excluded(string_address name)
 {
@@ -5884,6 +5958,47 @@ static bipolar tar_put_facts(bipolar handle, string_address name, p8 type,
                           p64 size, string_address link,
                           file_facts address_to facts)
 {
+        p8 transformed[TAR_PATH];
+        p8 linked[TAR_PATH];
+
+        // What a link points at is transformed too, by default.
+        if (link && tar_transform_count_now() && (type == '1' || type == '2'))
+        {
+                string_address moved = tar_transformed(link);
+                positive moved_length = string_length(moved);
+
+                if (moved_length + 1 < sizeof(linked))
+                {
+                        memory_copy(linked, moved, moved_length + 1);
+                        link = (string_address)linked;
+                }
+        }
+
+        if (tar_transform_count_now())
+        {
+                // A directory's slash is added after the transform, as GNU adds it.
+                positive whole = string_length(name);
+                bool slash = whole > 1 && name[whole - 1] == '/';
+                p8 bare[TAR_PATH];
+
+                if (whole < sizeof(bare) - 2)
+                {
+                        memory_copy(bare, name, whole);
+                        bare[slash ? whole - 1 : whole] = end;
+
+                        string_address moved = tar_transformed((string_address)bare);
+                        positive moved_length = string_length(moved);
+
+                        if (moved_length + 2 < sizeof(transformed))
+                        {
+                                memory_copy(transformed, moved, moved_length);
+                                if (slash && moved_length && transformed[moved_length - 1] != '/')
+                                        transformed[moved_length++] = '/';
+                                transformed[moved_length] = end;
+                                name = (string_address)transformed;
+                        }
+                }
+        }
         p8 block[TAR_BLOCK];
         p8 kept[TAR_NAME + 1];
         string_address leaf = name;
@@ -6030,8 +6145,13 @@ static bipolar tar_put_facts(bipolar handle, string_address name, p8 type,
         }
         memory_copy(block, leaf, name_length < limit ? name_length : limit);
         tar_field_put_octal(block + 100, 8, mode);
-        if (!tar_number(block + 108, 8, (b64)facts->owner, "uid", "uid_t") ||
-            !tar_number(block + 116, 8, (b64)facts->group, "gid", "gid_t") ||
+        positive uid = tar_owner_forced[0] && tar_owner_forced_id[0] >= 0
+                           ? (positive)tar_owner_forced_id[0] : facts->owner;
+        positive gid = tar_owner_forced[1] && tar_owner_forced_id[1] >= 0
+                           ? (positive)tar_owner_forced_id[1] : facts->group;
+
+        if (!tar_number(block + 108, 8, (b64)uid, "uid", "uid_t") ||
+            !tar_number(block + 116, 8, (b64)gid, "gid", "gid_t") ||
             !tar_number(block + 124, 12, (b64)field_size, "size", "off_t"))
                 return 0;
         if (posix)
@@ -6062,9 +6182,13 @@ static bipolar tar_put_facts(bipolar handle, string_address name, p8 type,
                 {
                         //      Both fields are 32 bytes holding a terminated
                         //      name, so 31 bytes of name at most.
-                        if (file_user_name(facts->owner, owner, sizeof(owner)))
+                        if (tar_owner_forced[0])
+                                string_copy_max_end(block + 265, (string_address)tar_owner_forced_name[0], 31);
+                        else if (file_user_name(facts->owner, owner, sizeof(owner)))
                                 string_copy_max_end(block + 265, owner, 31);
-                        if (file_group_name(facts->group, owner, sizeof(owner)))
+                        if (tar_owner_forced[1])
+                                string_copy_max_end(block + 297, (string_address)tar_owner_forced_name[1], 31);
+                        else if (file_group_name(facts->group, owner, sizeof(owner)))
                                 string_copy_max_end(block + 297, owner, 31);
                 }
                 if (type == '3' || type == '4')
@@ -6116,8 +6240,8 @@ static bipolar tar_put_facts(bipolar handle, string_address name, p8 type,
                         return -1;
         }
         if (tar_create_verbose > 1)
-                tar_long_line(block, type, mode & 07777, size, facts->owner,
-                              facts->group, facts->rdev_major, facts->rdev_minor,
+                tar_long_line(block, type, mode & 07777, size, uid,
+                              gid, facts->rdev_major, facts->rdev_minor,
                               mtime, name, link, false);
         tar_dumped++;
         if (!tar_write_block(handle, block))
@@ -6233,9 +6357,172 @@ static fn tar_seen_store(file_facts address_to facts, string_address member)
         tar_seen_used += 1;
 }
 
+/*
+        -r appends to an archive and -u only what is newer than the member of
+        that name already in it: the archive is read to its end marker, which
+        the new members overwrite, and cut to length after the new end. Only
+        an archive that is a plain file can be written in the middle, and a
+        compressed one cannot be. The names and times of what is there are
+        kept for -u.
+*/
+static bool tar_updating;
+static byte_store tar_archived_names;
+static p64 address_to tar_archived_times;
+static positive address_to tar_archived_offsets;
+static positive tar_archived_count;
+static positive tar_archived_room;
+static bool tar_skip_header;
+static p64 tar_append_end;
+
+static bool tar_archived_note(string_address name, p64 time)
+{
+        if (tar_archived_count == tar_archived_room)
+        {
+                positive room = tar_archived_room ? tar_archived_room * 2 : 256;
+                p64 address_to times = memory_resize(tar_archived_times, room * sizeof(p64));
+
+                if (!times)
+                        return false;
+                tar_archived_times = times;
+
+                positive address_to offsets = memory_resize(tar_archived_offsets, room * sizeof(positive));
+
+                if (!offsets)
+                        return false;
+                tar_archived_offsets = offsets;
+                tar_archived_room = room;
+        }
+
+        positive length = string_length(name);
+
+        if (!byte_store_reserve(address_of tar_archived_names, tar_archived_names.used + length + 1, 4096))
+                return false;
+        memory_copy(tar_archived_names.bytes + tar_archived_names.used, name, length + 1);
+        tar_archived_offsets[tar_archived_count] = tar_archived_names.used;
+        tar_archived_times[tar_archived_count] = time;
+        tar_archived_names.used += length + 1;
+        tar_archived_count++;
+        return true;
+}
+
+// Whether the archive already holds this name as new as the file.
+static bool tar_archived_current(string_address name, p64 time)
+{
+        p64 latest = 0;
+        bool found = false;
+        positive length = string_length(name);
+
+        while (length > 1 && name[length - 1] == '/')
+                length--;
+        for (positive at = 0; at < tar_archived_count; at++)
+        {
+                string_address held = (string_address)tar_archived_names.bytes + tar_archived_offsets[at];
+                positive held_length = string_length(held);
+
+                while (held_length > 1 && held[held_length - 1] == '/')
+                        held_length--;
+                if (held_length == length && !memory_compare(held, name, length) &&
+                    (!found || tar_archived_times[at] > latest))
+                {
+                        latest = tar_archived_times[at];
+                        found = true;
+                }
+        }
+        return found && latest >= time;
+}
+
+// The offset of the end marker of an archive open for reading and writing,
+// with what it holds noted; -1 when it is not a tar archive.
+static bipolar tar_scan_end(bipolar handle)
+{
+        p8 block[TAR_BLOCK];
+        p8 long_name[TAR_PATH];
+        bool have_long = false;
+        p64 offset = 0;
+
+        tar_archived_count = 0;
+        tar_archived_names.used = 0;
+        for (;;)
+        {
+                bipolar got = system_read_retry((positive)handle, block, TAR_BLOCK);
+
+                if (got == 0)
+                        return (bipolar)offset;
+                if (got != TAR_BLOCK)
+                        return -1;
+                if (memory_sum_bytes(block, TAR_BLOCK) == 0)
+                        return (bipolar)offset;
+                if (!tar_header_ok(block))
+                        return -1;
+
+                p64 size;
+                p64 time = 0;
+                p8 type = block[156];
+
+                if (!tar_field_value(block + 124, 12, address_of size))
+                        return -1;
+                if (!tar_field_moment(block + 136, 12, address_of time))
+                        time = 0;
+
+                offset += TAR_BLOCK;
+                positive data = (positive)((size + TAR_BLOCK - 1) / TAR_BLOCK * TAR_BLOCK);
+
+                if (type == 'L' && size < TAR_PATH)
+                {
+                        if (system_read_retry((positive)handle, long_name, (positive)size) != (bipolar)size)
+                                return -1;
+                        long_name[size] = end;
+                        have_long = true;
+                        if (system_seek(handle, (bipolar)(data - size), FILE_SEEK_CUR) < 0)
+                                return -1;
+                        offset += data;
+                        continue;
+                }
+                if (type == 'x' || type == 'g' || type == 'K')
+                {
+                        if (system_seek(handle, (bipolar)data, FILE_SEEK_CUR) < 0)
+                                return -1;
+                        offset += data;
+                        continue;
+                }
+
+                if (tar_updating)
+                {
+                        p8 name[TAR_PATH];
+
+                        if (have_long)
+                                string_copy_bounded((char address_to)name, (string_address)long_name, sizeof(name));
+                        else
+                        {
+                                positive at = 0;
+
+                                if (!memory_compare(block + 257, "ustar", 5) && block[345])
+                                {
+                                        for (positive i = 0; i < 155 && block[345 + i]; i++)
+                                                name[at++] = block[345 + i];
+                                        name[at++] = '/';
+                                }
+                                for (positive i = 0; i < 100 && block[i] && at < sizeof(name) - 1; i++)
+                                        name[at++] = block[i];
+                                name[at] = end;
+                        }
+                        if (!tar_archived_note((string_address)name, time))
+                                return -1;
+                }
+                have_long = false;
+                if (system_seek(handle, (bipolar)data, FILE_SEEK_CUR) < 0)
+                        return -1;
+                offset += data;
+        }
+}
+
 static b32 tar_add_named(bipolar archive, bipolar directory,
                          string_address name, string_address member,
                          bool verbose, bool selected, p8 kind);
+
+static b32 tar_add_directory_walk(bipolar archive, file_walk address_to walk_in,
+                                  string_address member,
+                                  file_facts address_to facts, bool verbose);
 
 static b32 tar_add_directory(bipolar archive, bipolar directory,
                              string_address name, string_address member,
@@ -6246,17 +6533,29 @@ static b32 tar_add_directory(bipolar archive, bipolar directory,
         if (!file_walk_open_found_same(address_of walk, directory, name,
                                        facts))
                 return tar_fail_at(member, "Cannot open", walk.error), tar_status;
+        return tar_add_directory_walk(archive, address_of walk, member, facts, verbose);
+}
+
+static b32 tar_add_directory_walk(bipolar archive, file_walk address_to walk_in,
+                                  string_address member,
+                                  file_facts address_to facts, bool verbose)
+{
+        file_walk walk = *walk_in;
 
         p8 spelled[TAR_PATH];
 
         bipolar put;
 
         tar_attr_fd = walk.handle;
-        put = tar_put_facts(archive,
-                            tar_spell_directory(member, spelled,
-                                                sizeof(spelled))
-                                ? (string_address)spelled : member,
-                            '5', 0, null, facts);
+        if (tar_updating && tar_archived_current(tar_transformed(member),
+                                                 (p64)facts->modified.seconds))
+                put = 1;
+        else
+                put = tar_put_facts(archive,
+                                    tar_spell_directory(member, spelled,
+                                                        sizeof(spelled))
+                                        ? (string_address)spelled : member,
+                                    '5', 0, null, facts);
         tar_attr_fd = -1;
 
         if (put <= 0)
@@ -6314,6 +6613,87 @@ static b32 tar_add_named(bipolar archive, bipolar directory,
         if (tar_excluded(member))
                 return tar_status;
 
+        if (tar_updating && kind != DT_DIR)
+        {
+                file_facts newest;
+
+                if (file_look_code(directory, name, tar_dereference ? 0 : AT_SYMLINK_NOFOLLOW,
+                                   address_of newest) >= 0 &&
+                    (newest.mode & MODE_FORMAT) != MODE_DIRECTORY &&
+                    tar_archived_current(tar_transformed(member), (p64)newest.modified.seconds))
+                        return tar_status;
+        }
+
+        if (tar_dereference)
+        {
+                /*      -h archives what a link names, not the link: the name is
+                        opened following it, and what was opened is looked at and
+                        stored as the member of the link's own name. */
+                file_facts entry;
+
+                if (file_look_code(directory, name, AT_SYMLINK_NOFOLLOW,
+                                   address_of entry) >= 0 &&
+                    (entry.mode & MODE_FORMAT) == MODE_LINK)
+                {
+                        bipolar followed = system_open_at(
+                            directory, name, O_PATH | O_CLOEXEC);
+                        file_facts target;
+
+                        if (followed < 0 ||
+                            file_look_code(followed, (string_address)"", AT_EMPTY_PATH,
+                                           address_of target) < 0)
+                        {
+                                bipolar why = followed < 0 ? followed : -ERROR_NO_ENTRY;
+
+                                if (followed >= 0)
+                                        system_close(followed);
+                                tar_fail_at(member, "Cannot stat", why);
+                                return tar_status;
+                        }
+                        if ((target.mode & MODE_FORMAT) == MODE_DIRECTORY)
+                        {
+                                system_close(followed);
+                                followed = system_open_at(directory, name,
+                                                          FILE_READ | O_DIRECTORY | O_CLOEXEC);
+                                if (followed < 0)
+                                {
+                                        tar_fail_at(member, "Cannot open", followed);
+                                        return tar_status;
+                                }
+                                if (verbose)
+                                {
+                                        p8 spelled[TAR_PATH];
+
+                                        tar_name_line(tar_listing,
+                                                      tar_spell_directory(member, spelled, sizeof(spelled))
+                                                          ? (string_address)spelled : member);
+                                }
+                                file_walk walk = {.handle = followed, .error = 0, .have = 0, .at = 0};
+                                b32 result = tar_add_directory_walk(archive, address_of walk, member,
+                                                                    address_of target, verbose);
+
+                                return result;
+                        }
+                        if ((target.mode & MODE_FORMAT) == MODE_FILE)
+                        {
+                                system_close(followed);
+                                followed = system_open_at(directory, name,
+                                                          FILE_READ | O_CLOEXEC | O_NONBLOCK);
+                                if (followed < 0)
+                                {
+                                        tar_fail_at(member, "Cannot open", followed);
+                                        return tar_status;
+                                }
+                                handle = followed;
+                                facts = target;
+                                looked = 0;
+                                kind = DT_REG;
+                                goto dereferenced;
+                        }
+                        system_close(followed);
+                }
+        }
+
         if (kind == DT_REG)
         {
                 handle = system_open_at(
@@ -6341,6 +6721,7 @@ static b32 tar_add_named(bipolar archive, bipolar directory,
                 return tar_status;
         }
 
+dereferenced:;
         bool active_output =
             tar_output_known &&
             file_same_identity(address_of facts, address_of tar_output_facts);
@@ -6516,7 +6897,10 @@ static b32 tar_write_archive(struct tar_options address_to options)
         if (tar_refuse_pack(tar_pack))
                 return tar_status;
 
+        bool in_place = options->mode == 'r' || options->mode == 'u';
+
         tar_reset();
+        tar_updating = options->mode == 'u';
         tar_create_verbose = options->verbose;
         tar_listing = log_error;
         tar_create_fatal = false;
@@ -6530,7 +6914,42 @@ static b32 tar_write_archive(struct tar_options address_to options)
         tar_sparse_version = options->sparse_version;
         output_stage.directory = -1;
         output_stage.handle = -1;
-        if (!options->archive || string_equals(options->archive, "-"))
+        if (in_place)
+        {
+                if (!options->archive || string_equals(options->archive, "-"))
+                {
+                        tar_refuse("Cannot update standard output");
+                        tar_fatal_exit = true;
+                        return tar_status;
+                }
+                if (tar_pack != TAR_PACK_NONE)
+                {
+                        tar_refuse("Cannot update compressed archives");
+                        tar_fatal_exit = true;
+                        return tar_status;
+                }
+                handle = system_open_at(AT_FDCWD, options->archive, O_RDWR | O_CLOEXEC);
+                if (handle < 0)
+                {
+                        tar_fail_at(options->archive, "Cannot open", handle);
+                        tar_fatal_exit = true;
+                        return tar_status;
+                }
+
+                bipolar end_at = tar_scan_end(handle);
+
+                if (end_at < 0 || system_seek(handle, end_at, FILE_SEEK_SET) < 0)
+                {
+                        system_close(handle);
+                        tar_refuse("This does not look like a tar archive");
+                        tar_fatal_exit = true;
+                        return tar_status;
+                }
+                tar_listing = log;
+                tar_append_end = (p64)end_at;
+                tar_out_bytes = (p64)end_at;
+        }
+        else if (!options->archive || string_equals(options->archive, "-"))
                 handle = 1;
         else
         {
@@ -6654,6 +7073,15 @@ static b32 tar_write_archive(struct tar_options address_to options)
         }
         else if (handle > 2)
         {
+                if (in_place && !tar_create_fatal)
+                {
+                        // The old end marker and what followed it were written
+                        // over or are left behind the new end: cut there.
+                        bipolar here = system_seek(handle, 0, FILE_SEEK_CUR);
+
+                        if (here > 0)
+                                (void)system_truncate_handle(handle, (positive)here);
+                }
                 bipolar closed = system_close(handle);
                 if (closed < 0 && !tar_create_fatal)
                         tar_fail(options->archive, closed);
@@ -6694,12 +7122,17 @@ enum
         TAR_NULL,
         TAR_ANCHORED,
         TAR_NO_ANCHORED,
+        TAR_OWNER,
+        TAR_GROUP,
+        TAR_TRANSFORM,
 };
 
 static const argument_option tar_option_rules[] = {
     {"extract", 'x'},
     {"list", 't'},
     {"create", 'c'},
+    {"append", 'r'},
+    {"update", 'u'},
     {"diff", 'd'},
     {"compare", 'd'},
     {"file", 'f', ARGUMENT_REQUIRED},
@@ -6731,6 +7164,11 @@ static const argument_option tar_option_rules[] = {
     {"null", TAR_NULL, ARGUMENT_LONG_ONLY},
     {"anchored", TAR_ANCHORED, ARGUMENT_LONG_ONLY},
     {"no-anchored", TAR_NO_ANCHORED, ARGUMENT_LONG_ONLY},
+    {"dereference", 'h'},
+    {"transform", TAR_TRANSFORM, ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
+    {"xform", TAR_TRANSFORM, ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
+    {"owner", TAR_OWNER, ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
+    {"group", TAR_GROUP, ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
     {"posix", TAR_POSIX_OPTION, ARGUMENT_LONG_ONLY},
     {"pax-option", TAR_PAX_OPTION, ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
     {"blocking-factor", 'b', ARGUMENT_REQUIRED},
@@ -6777,6 +7215,7 @@ static bool tar_take(struct tar_options address_to options, p8 letter,
         switch (letter)
         {
         case 'x': case 't': case 'c': case 'd': options->mode = letter; break;
+        case 'r': case 'u': options->mode = letter; break;
         case 'f': options->archive = value; break;
         case 'C': options->directory = value; break;
         case 'v': options->verbose++; break;
@@ -6863,6 +7302,23 @@ static bool tar_take(struct tar_options address_to options, p8 letter,
         case TAR_EXCLUDE:
                 if (tar_exclude_count < TAR_EXCLUDE_MAX)
                         tar_exclude[tar_exclude_count++] = value;
+                break;
+        case TAR_OWNER:
+                if (!tar_owner_parse(value, false))
+                        return false;
+                break;
+        case TAR_GROUP:
+                if (!tar_owner_parse(value, true))
+                        return false;
+                break;
+        case 'h': tar_dereference = true; break;
+        case TAR_TRANSFORM:
+                if (!tar_transform_add(value))
+                {
+                        string_format(log_error, "tar: Invalid transform expression: %s\n", value);
+                        tar_status = 2;
+                        return false;
+                }
                 break;
         case TAR_ANCHORED: tar_exclude_anchored = true; break;
         case TAR_NO_ANCHORED: tar_exclude_anchored = false; break;
@@ -6957,7 +7413,10 @@ static bool tar_parse(struct tar_options address_to options)
         tar_xattr_exclude_count = 0;
         tar_pax_deleted_count = 0;
         tar_exclude_count = 0;
+        tar_transforms_reset();
+        tar_owner_forced[0] = tar_owner_forced[1] = false;
         tar_exclude_anchored = false;
+        tar_dereference = false;
         tar_files_null = false;
         cursor.at += *keys != end;
 
@@ -7164,7 +7623,7 @@ static b32 file_tar(void)
                 return 0;
 
         tar_fatal_exit = false;
-        b32 status = options.mode == TAR_CREATE
+        b32 status = options.mode == TAR_CREATE || options.mode == 'r' || options.mode == 'u'
                          ? tar_write_archive(address_of options)
                          : tar_read_archive(address_of options);
 

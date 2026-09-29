@@ -29441,6 +29441,250 @@ static b32 sed_text_add(string_address from, positive length)
 static b32 sed_recent = -1;
 static string_address sed_failed;
 static bool sed_io_failed;
+/*
+        tar's --transform=s/PATTERN/REPLACEMENT/FLAGS, which rewrites a member's
+        name as sed's s does: & and \1 to \9 in the replacement, flags g, i, x
+        (an extended expression) and a number, any character for the delimiter.
+        The expressions are applied one after the other. They live here, beside
+        the one regular-expression compiler, and tar.c asks for them by name.
+*/
+#define TAR_TRANSFORMS_MAX 16
+
+typedef struct
+{
+        regex_program program;
+        p8 replacement[256];
+        bool global;
+        positive which;
+        bool references;
+} tar_transform;
+
+static tar_transform tar_transforms[TAR_TRANSFORMS_MAX];
+static positive tar_transform_count;
+static byte_store tar_transform_a;
+static byte_store tar_transform_b;
+
+static fn tar_transforms_reset(void)
+{
+        tar_transform_count = 0;
+}
+
+static positive tar_transform_count_now(void)
+{
+        return tar_transform_count;
+}
+
+static bool tar_transform_add(string_address expression)
+{
+        if (tar_transform_count >= TAR_TRANSFORMS_MAX || expression[0] != 's' || !expression[1])
+                return false;
+
+        p8 delimiter = (p8)expression[1];
+        p8 pattern[256];
+        tar_transform address_to one = tar_transforms + tar_transform_count;
+        string_address at = expression + 2;
+        positive have = 0;
+
+        for (; *at && *at != (char)delimiter; at++)
+        {
+                if (*at == '\\' && at[1] == (char)delimiter)
+                        at++;
+                else if (*at == '\\' && at[1])
+                {
+                        if (have + 2 >= sizeof(pattern))
+                                return false;
+                        pattern[have++] = (p8)*at++;
+                }
+                if (have + 1 >= sizeof(pattern))
+                        return false;
+                pattern[have++] = (p8)*at;
+        }
+        if (!*at)
+                return false;
+        pattern[have] = end;
+        at++;
+
+        positive length = 0;
+
+        for (; *at && *at != (char)delimiter; at++)
+        {
+                if (*at == '\\' && at[1] == (char)delimiter)
+                        at++;
+                else if (*at == '\\' && at[1])
+                {
+                        if (length + 2 >= sizeof(one->replacement))
+                                return false;
+                        one->replacement[length++] = (p8)*at++;
+                }
+                if (length + 1 >= sizeof(one->replacement))
+                        return false;
+                one->replacement[length++] = (p8)*at;
+        }
+        if (!*at)
+                return false;
+        one->replacement[length] = end;
+        at++;
+
+        bool extended = false;
+        bool icase = false;
+
+        one->global = false;
+        one->which = 1;
+        for (; *at; at++)
+        {
+                if (*at == 'g')
+                        one->global = true;
+                else if (*at == 'i' || *at == 'I')
+                        icase = true;
+                else if (*at == 'x')
+                        extended = true;
+                else if (byte_is_digit(*at))
+                {
+                        positive number = 0;
+
+                        while (byte_is_digit(*at))
+                                number = number * 10 + (positive)(*at++ - '0');
+                        at--;
+                        one->which = number ? number : 1;
+                }
+                else if (!string_first_of("rRsShH", *at))
+                        return false;
+        }
+        one->references = string_first_of((string_address)one->replacement, '\\') != null;
+        if (!regex_compile((string_address)pattern, extended, icase, true, text_regex_policy()))
+                return false;
+        regex_keep(&one->program);
+        tar_transform_count++;
+        return true;
+}
+
+// A name after every transform, in a store of the module's: the name itself
+// when there are none.
+static string_address tar_transformed(string_address name)
+{
+        if (!tar_transform_count)
+                return name;
+
+        byte_store address_to now = address_of tar_transform_a;
+        byte_store address_to next = address_of tar_transform_b;
+        positive size = string_length(name);
+
+        if (!byte_store_reserve(now, size + 1, 256))
+                return name;
+        memory_copy(now->bytes, name, size + 1);
+        now->used = size;
+
+        for (positive t = 0; t < tar_transform_count; t++)
+        {
+                tar_transform address_to one = tar_transforms + t;
+                positive at = 0;
+                positive seen = 0;
+
+                next->used = 0;
+                regex_current = one->program;
+                while (at <= now->used)
+                {
+                        if (!regex_find(REGEX_LONGEST | REGEX_CAPTURES, (string_address)now->bytes,
+                                        now->used, at))
+                                break;
+
+                        positive address_to slots = regex_match.slots;
+                        positive from = slots[0];
+                        positive to = slots[1];
+
+                        if (!byte_store_reserve(next, next->used + (from - at) + 1, 256))
+                                return name;
+                        memory_copy(next->bytes + next->used, now->bytes + at, from - at);
+                        next->used += from - at;
+                        seen++;
+
+                        if (seen >= one->which && (one->global || seen == one->which))
+                        {
+                                for (positive c = 0; one->replacement[c]; c++)
+                                {
+                                        positive copy_from = TEXT_UNSET;
+                                        positive copy_to = TEXT_UNSET;
+                                        p8 character = one->replacement[c];
+
+                                        if (character == '&')
+                                        {
+                                                copy_from = from;
+                                                copy_to = to;
+                                        }
+                                        else if (character == '\\' && one->replacement[c + 1])
+                                        {
+                                                p8 escaped = one->replacement[++c];
+
+                                                if (byte_is_digit(escaped))
+                                                {
+                                                        copy_from = slots[(escaped - '0') * 2];
+                                                        copy_to = slots[(escaped - '0') * 2 + 1];
+                                                        if (copy_from == TEXT_UNSET || copy_to == TEXT_UNSET)
+                                                                continue;
+                                                }
+                                                else
+                                                        character = escaped == 'n' ? '\n' : escaped;
+                                        }
+
+                                        if (copy_from != TEXT_UNSET)
+                                        {
+                                                if (!byte_store_reserve(next, next->used + (copy_to - copy_from) + 1, 256))
+                                                        return name;
+                                                memory_copy(next->bytes + next->used, now->bytes + copy_from,
+                                                            copy_to - copy_from);
+                                                next->used += copy_to - copy_from;
+                                        }
+                                        else
+                                        {
+                                                if (!byte_store_reserve(next, next->used + 2, 256))
+                                                        return name;
+                                                next->bytes[next->used++] = character;
+                                        }
+                                }
+                        }
+                        else if (!byte_store_reserve(next, next->used + (to - from) + 1, 256))
+                                return name;
+                        else
+                        {
+                                memory_copy(next->bytes + next->used, now->bytes + from, to - from);
+                                next->used += to - from;
+                        }
+
+                        if (from == to)
+                        {
+                                if (from >= now->used)
+                                {
+                                        at = from;
+                                        break;
+                                }
+                                if (!byte_store_reserve(next, next->used + 2, 256))
+                                        return name;
+                                next->bytes[next->used++] = now->bytes[from];
+                                at = from + 1;
+                        }
+                        else
+                                at = to;
+
+                        if (!one->global && seen >= one->which)
+                                break;
+                }
+                if (at < now->used)
+                {
+                        if (!byte_store_reserve(next, next->used + (now->used - at) + 1, 256))
+                                return name;
+                        memory_copy(next->bytes + next->used, now->bytes + at, now->used - at);
+                        next->used += now->used - at;
+                }
+                next->bytes[next->used] = end;
+
+                byte_store swap = *now;
+
+                *now = *next;
+                *next = swap;
+        }
+        return (string_address)now->bytes;
+}
+
 static bool sed_replaced;
 
 static bool sed_use_regex(b32 which)
