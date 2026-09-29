@@ -5174,33 +5174,11 @@ static bipolar storage_format_zero(bipolar handle, p64 offset, p64 length)
 }
 
 /*
-        CRC-32C the way ext4 and jbd2 chain it: no inversion on the way in or
-        out, so a seed of ~0 starts a superblock's and a previous result
-        continues one. hash_crc32 is the other polynomial, GPT's, and chains
-        the same way, so a GPT sum is its complement from a seed of ~0.
+        CRC-32C the way ext4 and jbd2 chain it is hash_crc32c: no inversion on
+        the way in or out, so a seed of ~0 starts a superblock's and a previous
+        result continues one. hash_crc32 is the other polynomial, GPT's, and
+        chains the same way, so a GPT sum is its complement from a seed of ~0.
 */
-static p32 storage_crc32c_table[256];
-
-static p32 storage_crc32c(p32 crc, p8 address_to bytes, positive length)
-{
-        if (!storage_crc32c_table[128])
-                for (positive at = 0; at < 256; at++)
-                {
-                        p32 value = (p32)at;
-
-                        for (positive bit = 0; bit < 8; bit++)
-                                value = value & 1 ? (value >> 1) ^ 0x82F63B78
-                                                  : value >> 1;
-
-                        storage_crc32c_table[at] = value;
-                }
-
-        while (length--)
-                crc = storage_crc32c_table[(crc ^ *bytes++) & 0xff] ^
-                      (crc >> 8);
-
-        return crc;
-}
 
 // GPT -----------------------------------------------------------
 
@@ -5721,9 +5699,9 @@ static p32 storage_ext4_inode_seed(p32 filesystem_seed, p32 number)
         p8 word[4];
 
         storage_put32(word, number);
-        filesystem_seed = storage_crc32c(filesystem_seed, word, 4);
+        filesystem_seed = hash_crc32c(filesystem_seed, word, 4);
         storage_put32(word, 0);
-        return storage_crc32c(filesystem_seed, word, 4);
+        return hash_crc32c(filesystem_seed, word, 4);
 }
 
 /*
@@ -5762,7 +5740,7 @@ static fn storage_ext4_inode(p8 address_to inode, p32 seed, p32 number,
                 storage_put32(inode + 0x90, time);
         }
 
-        seed = storage_crc32c(storage_ext4_inode_seed(seed, number), inode,
+        seed = hash_crc32c(storage_ext4_inode_seed(seed, number), inode,
                               STORAGE_EXT4_INODE);
         storage_put16(inode + 0x7c, seed);
         if (extra)
@@ -5789,7 +5767,7 @@ static fn storage_ext4_tail(p8 address_to block, p32 seed, p32 inode)
         storage_put16(tail + 4, 12);
         tail[7] = 0xde;
         storage_put32(tail + 8,
-                      storage_crc32c(storage_ext4_inode_seed(seed, inode),
+                      hash_crc32c(storage_ext4_inode_seed(seed, inode),
                                      block, STORAGE_EXT4_TAIL));
 }
 
@@ -5845,7 +5823,7 @@ static fn storage_ext4_super(p8 address_to super,
         storage_put16(super + 0x15e, 32);
         storage_put32(super + 0x160, 1);
         super[0x175] = 1;
-        storage_put32(super + 0x3fc, storage_crc32c(~(p32)0, super, 0x3fc));
+        storage_put32(super + 0x3fc, hash_crc32c(~(p32)0, super, 0x3fc));
 }
 
 static bipolar storage_format_ext4(bipolar handle, p64 offset, p64 bytes,
@@ -5862,7 +5840,7 @@ static bipolar storage_format_ext4(bipolar handle, p64 offset, p64 bytes,
         if (!storage_ext4_layout(address_of plan, bytes))
                 return -ERROR_INVALID;
 
-        seed = storage_crc32c(~(p32)0, identity->uuid, 16);
+        seed = hash_crc32c(~(p32)0, identity->uuid, 16);
         descriptor_bytes = (positive)plan.descriptor_blocks * STORAGE_EXT4_BLOCK;
         descriptors = memory_checked(descriptor_bytes + STORAGE_EXT4_BLOCK);
         if (!descriptors)
@@ -5907,7 +5885,7 @@ static bipolar storage_format_ext4(bipolar handle, p64 offset, p64 bytes,
                 storage_put16(descriptor + 0x12, group ? STORAGE_EXT4_INODE_UNINIT
                                                        : STORAGE_EXT4_ITABLE_ZEROED);
                 storage_put16(descriptor + 0x18,
-                              storage_crc32c(seed, block, STORAGE_EXT4_BLOCK));
+                              hash_crc32c(seed, block, STORAGE_EXT4_BLOCK));
                 storage_put16(descriptor + 0x1c, free_inodes);
                 free_blocks += group_blocks - used;
 
@@ -5923,7 +5901,7 @@ static bipolar storage_format_ext4(bipolar handle, p64 offset, p64 bytes,
                 storage_bits_set(block, plan.inodes_per_group,
                                  STORAGE_EXT4_BLOCK * 8);
                 storage_put16(descriptors + 0x1a,
-                              storage_crc32c(seed, block,
+                              hash_crc32c(seed, block,
                                              plan.inodes_per_group / 8));
                 failed = storage_format_write(
                     handle, block, STORAGE_EXT4_BLOCK,
@@ -5939,8 +5917,8 @@ static bipolar storage_format_ext4(bipolar handle, p64 offset, p64 bytes,
                 p32 sum;
 
                 storage_put32(word, group);
-                sum = storage_crc32c(seed, word, 4);
-                sum = storage_crc32c(sum, descriptor, STORAGE_EXT4_DESCRIPTOR);
+                sum = hash_crc32c(seed, word, 4);
+                sum = hash_crc32c(sum, descriptor, STORAGE_EXT4_DESCRIPTOR);
                 storage_put16(descriptor + 0x1e, sum);
         }
 

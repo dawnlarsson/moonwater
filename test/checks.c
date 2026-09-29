@@ -13960,7 +13960,7 @@ fn check_span_byte()
         X(byte_is_digit) X(byte_is_graphic) X(byte_is_hexadecimal)            \
         X(byte_is_lower) X(byte_is_printable) X(byte_is_punctuation)          \
         X(byte_is_space) X(byte_is_upper) X(byte_to_ascii) X(byte_to_lower)   \
-        X(byte_to_upper) X(hash_crc32) X(hash_crc32_msb)                      \
+        X(byte_to_upper) X(hash_crc32) X(hash_crc32_msb) X(hash_crc32c)      \
         X(memory_checksum_bsd16) X(unicode_width) X(bits_first_set)           \
         X(absolute_whole) X(wait_status_code_base) X(string_to_number)        \
         X(string_to_number_unsigned) X(string_to_number_checked)              \
@@ -15252,6 +15252,9 @@ static fn dirty_words_32(void)
                 if (DIRTY_HAS(hash_crc32))
                         AGREE(hash_crc32, DIRTY_ROUTINE(hash_crc32)(C32(seed), at, size),
                               (p32)DIRTY(3, hash_crc32)(D32(seed), P(at), size), size);
+                if (DIRTY_HAS(hash_crc32c))
+                        AGREE(hash_crc32c, DIRTY_ROUTINE(hash_crc32c)(C32(seed), at, size),
+                              (p32)DIRTY(3, hash_crc32c)(D32(seed), P(at), size), size);
                 if (DIRTY_HAS(hash_crc32_msb))
                         AGREE(hash_crc32_msb,
                               DIRTY_ROUTINE(hash_crc32_msb)(C32(seed), at, size),
@@ -78321,12 +78324,12 @@ static fn format_sums(void)
         static const p8 digits[] = "123456789";
 
         check("CRC-32C of 123456789 is its published check value",
-              (storage_crc32c(~(p32)0, digits, 9) ^ ~(p32)0) == 0xe3069283);
+              (hash_crc32c(~(p32)0, digits, 9) ^ ~(p32)0) == 0xe3069283);
         check("CRC-32 of 123456789 is its published check value",
               ~hash_crc32(~(p32)0, digits, 9) == 0xcbf43926);
         check("CRC-32C chains across a split",
-              storage_crc32c(storage_crc32c(~(p32)0, digits, 4), digits + 4, 5) ==
-                  storage_crc32c(~(p32)0, digits, 9));
+              hash_crc32c(hash_crc32c(~(p32)0, digits, 4), digits + 4, 5) ==
+                  hash_crc32c(~(p32)0, digits, 9));
         check("the backup superblock groups are 0, 1 and powers of 3, 5 and 7",
               storage_ext4_backup(0) && storage_ext4_backup(1) &&
                   storage_ext4_backup(3) && storage_ext4_backup(25) &&
@@ -81328,6 +81331,124 @@ static fn crc_check_all(p8 address_to bytes)
               hash_crc32_msb(0x12345678u, null, 0) == 0x12345678u);
 }
 
+/*
+        hash_crc32c against the bit-at-a-time reflected model: its table
+        slice by slice, RFC 3720's check value, then every size to 300 at 32
+        alignments, runs that end on the protected page -- long enough for
+        the three-stream path -- and random lengths, alignments and splits,
+        under every body this machine has: slicing by eight, the crc32
+        instruction one stream at a time, and the three streams PCLMULQDQ or
+        PMULL joins (on RISC-V the table and the Zbc Barrett step).
+*/
+static p32 crc32c_model(const p8 address_to bytes, positive length, p32 crc)
+{
+        while (length--)
+        {
+                crc ^= *bytes++;
+                for (positive bit = 0; bit < 8; bit++)
+                        crc = (crc >> 1) ^ (crc & 1 ? 0x82f63b78u : 0);
+        }
+        return crc;
+}
+
+static positive crc32c_check_case(p8 address_to at, positive size, p32 seed,
+                                  positive split)
+{
+        p32 want = crc32c_model(at, size, seed);
+        positive rest = (size - split) / 2;
+        positive bad = 0;
+        p8 pclmul = cpu_has_pclmul;
+#if X64
+        p8 instruction = cpu_has_sse42;
+#elif ARM64
+        p8 instruction = cpu_has_crc32;
+#else
+        p8 instruction = pclmul;
+#endif
+
+        for (positive tier = 0; tier < 3; tier++)
+        {
+                cpu_has_pclmul = tier == 2 ? pclmul : 0;
+#if X64
+                cpu_has_sse42 = tier >= 1 ? instruction : 0;
+#elif ARM64
+                cpu_has_crc32 = tier >= 1 ? instruction : 0;
+#endif
+                bad += hash_crc32c(seed, at, size) != want;
+
+                p32 crc = hash_crc32c(seed, at, split);
+                crc = hash_crc32c(crc, at + split, rest);
+                crc = hash_crc32c(crc, at + split + rest, size - split - rest);
+                bad += crc != want;
+        }
+
+        cpu_has_pclmul = pclmul;
+#if X64
+        cpu_has_sse42 = instruction;
+#elif ARM64
+        cpu_has_crc32 = instruction;
+#endif
+        return bad;
+}
+
+static fn crc32c_check_all(p8 address_to bytes)
+{
+        static const p8 zero = 0;
+        static const p8 digits[] = "123456789";
+        positive table = 0;
+        p32 sink = hash_crc32c(0, digits, 1);
+
+        for (positive slice = 0; slice < 8; slice++)
+                for (positive value = 0; value < 256; value++)
+                {
+                        p8 byte = (p8)value;
+                        p32 entry = crc32c_model(address_of byte, 1, 0);
+
+                        for (positive at = 0; at < slice; at++)
+                                entry = crc32c_model(address_of zero, 1, entry);
+                        table += hash_crc32c_tab[slice * 256 + value] != entry;
+                }
+
+        positive aligned = 0;
+        positive tails = 0;
+        positive draws = 0;
+
+        for (positive size = 0; size <= 300; size++)
+                for (positive offset = 0; offset < 32; offset++)
+                        aligned += crc32c_check_case(bytes + offset, size,
+                                                     (p32)(size * 0x9e3779b9u + offset),
+                                                     size / 3);
+        for (positive size = 0; size <= 8192; size += size < 300 ? 1 : size < 3000 ? 7 : 127)
+                tails += crc32c_check_case(bytes + 8192 - size, size, 0xdeadbeef,
+                                           size / 3);
+
+        p32 random = 0x2545f491u ^ sink;
+        for (positive draw = 0; draw < 400; draw++)
+        {
+                random ^= random << 13;
+                random ^= random >> 17;
+                random ^= random << 5;
+                positive offset = random % 64;
+                p32 seed = random;
+                random ^= random << 13;
+                random ^= random >> 17;
+                random ^= random << 5;
+                positive size = random % (8192 - offset + 1);
+                draws += crc32c_check_case(bytes + offset, size, seed,
+                                           (random >> 7) % (size + 1));
+        }
+
+        check("the CRC-32C table is the model's, slice by slice", table == 0);
+        check("hash_crc32c of 123456789 is RFC 3720's check value",
+              (hash_crc32c(~(p32)0, digits, 9) ^ ~(p32)0) == 0xe3069283);
+        check("hash_crc32c is the model at every size to 300 and 32 alignments",
+              aligned == 0);
+        check("hash_crc32c runs that end on a protected page", tails == 0);
+        check("hash_crc32c at random lengths, alignments and splits", draws == 0);
+        check("hash_crc32c of nothing is the crc",
+              hash_crc32c(0x12345678u, null, 0) == 0x12345678u);
+}
+
 b32 main(void)
 {
         positive page = system_page_size();
@@ -81341,6 +81462,7 @@ b32 main(void)
                 bytes[at] = (p8)((at * 73) ^ (at >> 3));
         hash_check_all(bytes + 8192);
         crc_check_all(bytes);
+        crc32c_check_all(bytes);
         return test_report(null);
 }
 #endif /* CHECK_checksum_crc */
@@ -81362,6 +81484,14 @@ b32 main(void)
         emulator's instruction count sees one body a process; the former
         body pays its table preparation as the applet did. `none` exits
         after the block is filled, for the fixed cost.
+
+        Then CRC-32C the way the ext4 format asks for it: a block group's
+        4 KiB bitmap, its number and its 32-byte descriptor, and a reserved
+        inode's two seed words and 256 bytes -- the loop storage.c carried
+        until hash_crc32c, copied under former_crc32c, against the assembly
+        tier by tier (1 the table, 2 the crc32 instruction or Zbc, 3 three
+        streams joined by PCLMULQDQ or PMULL). `former32c|assembly32c <tier>
+        groups|inodes [<calls>]` runs one body once for perf stat.
 */
 #include "../src/lib.util.c"
 #define SHARED_bench_measure
@@ -81758,6 +81888,79 @@ static positive cksum_bench_number(string_address text, positive otherwise)
         return value;
 }
 
+static p32 former_crc32c_table[256];
+
+static __attribute__((noinline)) p32 former_crc32c(p32 crc, p8 address_to bytes,
+                                                  positive length)
+{
+        if (!former_crc32c_table[128])
+                for (positive at = 0; at < 256; at++)
+                {
+                        p32 value = (p32)at;
+
+                        for (positive bit = 0; bit < 8; bit++)
+                                value = value & 1 ? (value >> 1) ^ 0x82F63B78
+                                                  : value >> 1;
+
+                        former_crc32c_table[at] = value;
+                }
+
+        while (length--)
+                crc = former_crc32c_table[(crc ^ *bytes++) & 0xff] ^ (crc >> 8);
+
+        return crc;
+}
+
+static p32 (*volatile crc32c_bench_call)(p32, address_any, positive) = hash_crc32c;
+static const positive crc32c_bench_groups[] = {4096, 4, 32};
+static const positive crc32c_bench_inodes[] = {4, 4, 256};
+static const positive address_to crc32c_bench_shape = crc32c_bench_groups;
+static positive crc32c_bench_calls = 3u << 14;
+static p8 crc32c_bench_instruction;
+
+static fn crc32c_bench_former(void)
+{
+        p32 crc = ~(p32)0;
+
+        for (positive call = 0; call < crc32c_bench_calls; call++)
+                crc = former_crc32c(crc, cksum_bench_block + (call & 7) * 4096,
+                                    crc32c_bench_shape[call % 3]);
+        cksum_bench_sink = crc;
+}
+
+static fn crc32c_bench_assembly(void)
+{
+        p32 crc = ~(p32)0;
+
+        for (positive call = 0; call < crc32c_bench_calls; call++)
+                crc = crc32c_bench_call(crc, cksum_bench_block + (call & 7) * 4096,
+                                        crc32c_bench_shape[call % 3]);
+        cksum_bench_sink = crc;
+}
+
+static fn crc32c_bench_tier(positive tier)
+{
+#if RISCV64
+        cpu_has_pclmul = tier >= 2 ? cksum_bench_pclmul : 0;
+#else
+        cpu_has_pclmul = tier >= 3 ? cksum_bench_pclmul : 0;
+#endif
+#if X64
+        cpu_has_sse42 = tier >= 2 ? crc32c_bench_instruction : 0;
+#elif ARM64
+        cpu_has_crc32 = tier >= 2 ? crc32c_bench_instruction : 0;
+#endif
+}
+
+static positive crc32c_bench_bytes(void)
+{
+        positive bytes = 0;
+
+        for (positive call = 0; call < crc32c_bench_calls; call++)
+                bytes += crc32c_bench_shape[call % 3];
+        return bytes;
+}
+
 b32 main(void)
 {
         p32 random = 0x7433291u;
@@ -81775,6 +81978,12 @@ b32 main(void)
         cksum_bench_vpclmul = cpu_has_vpclmul;
         cksum_bench_avx512 = cpu_has_avx512;
 #endif
+        cksum_bench_sink = hash_crc32c(0, cksum_bench_block, 1);
+#if X64
+        crc32c_bench_instruction = cpu_has_sse42;
+#elif ARM64
+        crc32c_bench_instruction = cpu_has_crc32;
+#endif
 
         string_address body = program_argument(1);
 
@@ -81782,12 +81991,28 @@ b32 main(void)
         {
                 positive tier = cksum_bench_number(program_argument(2), 3);
 
+                if (string_equals(body, "former32c") || string_equals(body, "assembly32c"))
+                {
+                        string_address shape = program_argument(3);
+
+                        if (shape && string_equals(shape, "inodes"))
+                                crc32c_bench_shape = crc32c_bench_inodes;
+                        crc32c_bench_calls = cksum_bench_number(program_argument(4), 3u << 20);
+                        crc32c_bench_tier(tier);
+                        if (string_equals(body, "former32c"))
+                                crc32c_bench_former();
+                        else
+                                crc32c_bench_assembly();
+                        string_format(log, "%p\n", (positive)cksum_bench_sink);
+                        return 0;
+                }
                 cksum_bench_size = cksum_bench_number(program_argument(3), 4096);
                 cksum_bench_total = cksum_bench_number(program_argument(4), 64) << 20;
                 if (!cksum_bench_size || cksum_bench_size > CKSUM_BENCH_LARGEST)
                         return 2;
                 if (string_equals(body, "none"))
                         return 0;
+
                 if (string_equals(body, "former"))
                 {
                         former_crc_prepare();
@@ -81837,6 +82062,36 @@ b32 main(void)
                 }
         }
         cksum_bench_tier(3, false);
+
+        static const string_address shapes[] = {"groups", "inodes"};
+        static const string_address former32c_names[] = {
+            "tier 1 former C", "tier 2 former C", "tier 3 former C"};
+        static const string_address assembly32c_names[] = {
+            "tier 1 hash_crc32c", "tier 2 hash_crc32c", "tier 3 hash_crc32c"};
+#if RISCV64
+        positive crc32c_tiers = 2;
+#else
+        positive crc32c_tiers = 3;
+#endif
+
+        for (positive which = 0; which < 2; which++)
+        {
+                crc32c_bench_shape = which ? crc32c_bench_inodes : crc32c_bench_groups;
+                crc32c_bench_calls = 3u << 14;
+                string_format(log, "  CRC-32C over ext4 %s calls:\n", shapes[which]);
+                for (positive tier = 1; tier <= crc32c_tiers; tier++)
+                {
+                        crc32c_bench_tier(tier);
+                        bench_report(former32c_names[tier - 1], crc32c_bench_former, 7,
+                                     crc32c_bench_bytes(), "byte");
+                        p32 former = cksum_bench_sink;
+
+                        bench_report(assembly32c_names[tier - 1], crc32c_bench_assembly, 7,
+                                     crc32c_bench_bytes(), "byte");
+                        agree = agree && former == cksum_bench_sink;
+                }
+        }
+        crc32c_bench_tier(3);
         if (!agree)
                 string_format(log, "  the former C and the assembly disagree\n");
         return agree ? 0 : 1;

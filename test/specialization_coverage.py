@@ -405,6 +405,10 @@ cover('folds_already', 'size', '''
 hash_xxh64 hash_xxh64_add hash_crc32 hash_crc64 zstd_bits_open zstd_huffman_stream zstd_huffman_4x
 ''', 'production spans are compressed-block or hash lengths; short and long '
      'paths already live in the floor')
+cover('folds_already', 'size', 'hash_crc32c',
+      "storage.c hands literal 4, 32 and 256-byte spans, but only while it "
+      'formats a partition, once per group or inode; the body already takes '
+      'them one crc32 per word after a single dispatch compare')
 cover('folds_already', 'size', 'hash_crc32_msb',
       "cksum's read blocks, build.c's path and the one to eight length bytes "
       'are all counted at run time; no call site hands a literal')

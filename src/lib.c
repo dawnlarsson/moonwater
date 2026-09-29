@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        365 routines (347 public, 18 local), 359 of them on all three and 6 local to one.
+        366 routines (348 public, 18 local), 360 of them on all three and 6 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -159,6 +159,7 @@
           ghash_key                      public  yes     yes     yes
           hash_crc32                     public  yes     yes     yes
           hash_crc32_msb                 public  yes     yes     yes
+          hash_crc32c                    public  yes     yes     yes
           hash_crc64                     public  yes     yes     yes
           hash_xxh64                     public  yes     yes     yes
           hash_xxh64_add                 public  yes     yes     yes
@@ -1958,6 +1959,17 @@ __asm__(
     ASM_CRC_TABLE(0xc96c5795d7870f42, ".quad")
     ASM_OBJECT_END(hash_crc64_tab)
 );
+
+/* CRC-32C's (Castagnoli, 0x82F63B78 reflected), for hash_crc32c's slices on
+   a machine without the crc32 instruction or Zbc. */
+#ifndef KERNEL_MODE
+extern const p32 hash_crc32c_tab[8 * 256];
+__asm__(
+    ASM_RODATA_OBJECT_BEGIN(hash_crc32c_tab, 16)
+    ASM_CRC_TABLE(0x82f63b78, ".long")
+    ASM_OBJECT_END(hash_crc32c_tab)
+);
+#endif
 
 /* deflate_symbol_tab: the length and distance symbols of RFC 1951 for
    deflate_tokens_count and deflate_tokens_encode. At 0 the length code of
@@ -8382,7 +8394,8 @@ __asm__(
        loaded and stored once a call. Whether it has them is asked lazily --
        the Spark feature word is full -- by cpu_hash_detect on the first call
        that finds cpu_hash_probed clear; after that the dispatch is one byte
-       compare a call, not a block.
+       compare a call, not a block. The same call answers SSE4.2 for
+       hash_crc32c and BMI2 with ADX (cpu_has_mulx).
 
        Measured on a 9950X at 64 KiB: md5 1.02 GB/s, sha1 1.31 floor and 2.58
        SHA-NI, sha256 0.62 floor and 2.44 SHA-NI, sha512 0.98, blake2b 1.59;
@@ -8391,14 +8404,19 @@ __asm__(
 #ifndef KERNEL_MODE
     ASM_LOCAL_FUNC(cpu_hash_detect)
     "push %rbx\n   push %rcx\n   push %rdx\n"
-    "xor %eax, %eax\n   cpuid\n   xor %r11d, %r11d\n   cmp $7, %eax\n   jb .Lcpu_hash_detect_x64_store\n"
-    "mov $1, %eax\n   xor %ecx, %ecx\n   cpuid\n   mov %ecx, %r11d\n"
+    "mov $1, %eax\n   xor %ecx, %ecx\n   cpuid\n"
+    "bt $20, %ecx\n   setc %al\n   mov %al, cpu_has_sse42(%rip)\n"
+    "xor %r11d, %r11d\n   bt $19, %ecx\n   jnc .Lcpu_hash_detect_x64_old\n   bt $9, %ecx\n   jnc .Lcpu_hash_detect_x64_old\n   inc %r11d\n"
+    ".Lcpu_hash_detect_x64_old:\n"
+    "xor %eax, %eax\n   cpuid\n   cmp $7, %eax\n   jb .Lcpu_hash_detect_x64_none\n"
     "mov $7, %eax\n   xor %ecx, %ecx\n   cpuid\n"
-    "mov %ebx, %eax\n   and $0x80100, %eax\n   cmp $0x80100, %eax\n   sete cpu_has_mulx(%rip)  # BMI2 and ADX\n"
-    "xor %eax, %eax\n   bt $29, %ebx\n   jnc .Lcpu_hash_detect_x64_none\n   bt $19, %r11d\n   jnc .Lcpu_hash_detect_x64_none\n   bt $9, %r11d\n   jnc .Lcpu_hash_detect_x64_none\n   mov $1, %eax\n"
+    "bt $29, %ebx\n   sbb %eax, %eax\n   and %eax, %r11d\n"
+    "mov %ebx, %eax\n   and $0x80100, %eax\n   cmp $0x80100, %eax\n   sete %al  # BMI2 and ADX\n"
+    "jmp .Lcpu_hash_detect_x64_store\n"
     ".Lcpu_hash_detect_x64_none:\n"
-    "mov %eax, %r11d\n"
+    "xor %r11d, %r11d\n   xor %eax, %eax\n"
     ".Lcpu_hash_detect_x64_store:\n"
+    "mov %al, cpu_has_mulx(%rip)\n"
     "mov %r11b, cpu_has_sha(%rip)\n   movb $1, cpu_hash_probed(%rip)\n"
     "pop %rdx\n   pop %rcx\n   pop %rbx\n"
     ASM_RET
@@ -22556,24 +22574,30 @@ __asm__(
     // The hash block cores: see the x86_64 block for the contract, the
     // renamed registers and the lazy feature question.
     //
-    // cpu_hash_detect -- the SHA1, SHA2 and SHA3 fields of ID_AA64ISAR0_EL1.
+    // cpu_hash_detect -- the SHA1, SHA2, CRC32, SHA3 and SM3 fields of
+    // ID_AA64ISAR0_EL1.
     //
     // Linux emulates the MRS for EL0 and reports the sanitised value. Writes
-    // both bytes and cpu_hash_probed in one pass. Clobbers x16 and the
+    // every byte and cpu_hash_probed in one pass. Clobbers x16 and the
     // flags and nothing else, so x17 may carry a caller's return address.
     //
 #ifndef KERNEL_MODE
     ASM_LOCAL_FUNC(cpu_hash_detect)
-    "stp x0, x1, [sp, #-32]!\n   stp x2, x3, [sp, #16]\n"
+    "stp x0, x1, [sp, #-48]!\n   stp x2, x3, [sp, #16]\n   stp x4, x5, [sp, #32]\n"
     "mrs x16, id_aa64isar0_el1\n"
     "ubfx x0, x16, #8, #4\n   ubfx x1, x16, #12, #4\n   ubfx x2, x16, #32, #4\n"
+    "ubfx x3, x16, #36, #4\n   ubfx x4, x16, #16, #4\n"
     "cmp x0, #0\n   ccmp x1, #0, #4, ne\n   cset w0, ne\n"
     "cmp x1, #2\n   cset w1, eq\n"
-    "cmp x2, #0\n   cset w2, ne\n   mov w3, #1\n"
+    "cmp x2, #0\n   cset w2, ne\n   cmp x3, #0\n   cset w3, ne\n"
+    "cmp x4, #0\n   cset w4, ne\n   mov w5, #1\n"
     "adrp x16, cpu_has_sha\n   strb w0, [x16, :lo12:cpu_has_sha]\n"
     "adrp x16, cpu_has_sha512\n   strb w1, [x16, :lo12:cpu_has_sha512]\n"
-    "adrp x16, cpu_hash_probed\n   strb w3, [x16, :lo12:cpu_hash_probed]\n"
-    "ldp x2, x3, [sp, #16]\n   ldp x0, x1, [sp], #32\n"
+    "adrp x16, cpu_has_sha3\n   strb w2, [x16, :lo12:cpu_has_sha3]\n"
+    "adrp x16, cpu_has_sm3\n   strb w3, [x16, :lo12:cpu_has_sm3]\n"
+    "adrp x16, cpu_has_crc32\n   strb w4, [x16, :lo12:cpu_has_crc32]\n"
+    "adrp x16, cpu_hash_probed\n   strb w5, [x16, :lo12:cpu_hash_probed]\n"
+    "ldp x4, x5, [sp, #32]\n   ldp x2, x3, [sp, #16]\n   ldp x0, x1, [sp], #48\n"
     ASM_RET
     ASM_LOCAL_END(cpu_hash_detect)
 #endif
@@ -49480,6 +49504,15 @@ extern p8 cpu_has_mulx;
 // Not in the word Spark publishes, which is full: 0 until the first routine
 // that wants it asks the processor, then 1 for absent and 2 for present.
 extern p8 cpu_has_avx512_vbmi2;
+/* More answers cpu_hash_detect writes on the same first call, 0 or 1 like
+   cpu_has_sha: on x86_64 cpu_has_sse42 is SSE4.2 (the crc32 instruction),
+   beside cpu_has_mulx above; on arm64 cpu_has_sha3 is the SHA3 extension (eor3, rax1, xar, bcax), cpu_has_sm3
+   the SM3 extension and cpu_has_crc32 the CRC32 instructions. Each is 0 on
+   the machines it does not name. */
+extern p8 cpu_has_sse42;
+extern p8 cpu_has_sha3;
+extern p8 cpu_has_sm3;
+extern p8 cpu_has_crc32;
 
 __asm__(
     ASM_BSS_OBJECT_BEGIN(cpu_has_pclmul, 1)
@@ -49521,6 +49554,18 @@ __asm__(
     ASM_BSS_OBJECT_BEGIN(cpu_has_avx512_vbmi2, 1)
     ".zero 1\n"
     ASM_OBJECT_END(cpu_has_avx512_vbmi2)
+    ASM_BSS_OBJECT_BEGIN(cpu_has_sse42, 1)
+    ".zero 1\n"
+    ASM_OBJECT_END(cpu_has_sse42)
+    ASM_BSS_OBJECT_BEGIN(cpu_has_sha3, 1)
+    ".zero 1\n"
+    ASM_OBJECT_END(cpu_has_sha3)
+    ASM_BSS_OBJECT_BEGIN(cpu_has_sm3, 1)
+    ".zero 1\n"
+    ASM_OBJECT_END(cpu_has_sm3)
+    ASM_BSS_OBJECT_BEGIN(cpu_has_crc32, 1)
+    ".zero 1\n"
+    ASM_OBJECT_END(cpu_has_crc32)
 );
 #endif
 fn moonwater_cpu_detect(void);
@@ -61635,6 +61680,460 @@ __asm__(
 );
 
 #endif // !KERNEL_MODE && !STANDARD_NO_PLATFORM
+
+/*
+        The digest cores: CRC-32C.
+
+        hash_crc32c keeps hash_crc32's convention with Castagnoli's polynomial:
+        reflected 0x82F63B78, no inversion in or out, so ext4 and jbd2 chain
+        raw seeds through it and a superblock sum starts from ~0. Zero size is
+        crc unchanged and reads nothing.
+
+        The instruction is the floor wherever the machine has one -- SSE4.2's
+        crc32 on x86_64, the CRC32 extension's crc32c on arm64 -- asked
+        lazily through cpu_hash_detect like the SHA extensions. One chain
+        retires eight bytes per crc32 latency, three cycles on both, so runs
+        of 768 bytes and more go three streams of 256 at once and PCLMUL or
+        PMULL joins them: the first two streams' crcs are carried over the
+        bytes after them by one carry-less multiply each against x^(8n)
+        folded for the instruction's own reduction (K below), and one crc32
+        of zero finishes the pair. RISC-V with Zbc takes a Barrett step a
+        word (clmul by the quotient of x^96, clmulr by the polynomial); every
+        other machine takes slicing by eight over hash_crc32c_tab, the
+        Castagnoli table beside hash_crc32's.
+
+        Userspace only: nothing in a kernel build hashes with these.
+*/
+#ifndef KERNEL_MODE
+PURE READS(2, 3) p32 hash_crc32c(p32 crc, address_any data, positive size);
+
+#if X64
+__asm__(
+    ASM_SECTION
+    ASM_FUNC(hash_crc32c)
+    "mov %edi, %eax\n"
+    "test %rdx, %rdx\n"
+    "jz .Lcrc32c_x64_done\n"
+    ".Lcrc32c_x64_dispatch:\n"
+    "cmpb $0, cpu_has_sse42(%rip)\n"
+    "jne .Lcrc32c_x64_hw\n"
+    "cmpb $0, cpu_hash_probed(%rip)\n"
+    "jne .Lcrc32c_x64_table\n"
+    "call cpu_hash_detect\n"
+    "mov %edi, %eax\n"
+    "jmp .Lcrc32c_x64_dispatch\n"
+    ".Lcrc32c_x64_hw:\n"
+    "cmp $768, %rdx\n"
+    "jb .Lcrc32c_x64_one\n"
+    "cmpb $0, cpu_has_pclmul(%rip)\n"
+    "je .Lcrc32c_x64_one\n"
+    ".Lcrc32c_x64_three:\n"
+    "xor %r8d, %r8d\n"
+    "xor %r9d, %r9d\n"
+    "xor %ecx, %ecx\n"
+    ".balign 16\n"
+    ".Lcrc32c_x64_three_turn:\n"
+    "crc32q 0(%rsi,%rcx), %rax\n"
+    "crc32q 256(%rsi,%rcx), %r8\n"
+    "crc32q 512(%rsi,%rcx), %r9\n"
+    "crc32q 8(%rsi,%rcx), %rax\n"
+    "crc32q 264(%rsi,%rcx), %r8\n"
+    "crc32q 520(%rsi,%rcx), %r9\n"
+    "crc32q 16(%rsi,%rcx), %rax\n"
+    "crc32q 272(%rsi,%rcx), %r8\n"
+    "crc32q 528(%rsi,%rcx), %r9\n"
+    "crc32q 24(%rsi,%rcx), %rax\n"
+    "crc32q 280(%rsi,%rcx), %r8\n"
+    "crc32q 536(%rsi,%rcx), %r9\n"
+    "add $32, %rcx\n"
+    "cmp $256, %rcx\n"
+    "jb .Lcrc32c_x64_three_turn\n"
+    "movq %rax, %xmm0\n"
+    "movq %r8, %xmm1\n"
+    "pclmulqdq $0x00, .Lcrc32c_x64_k(%rip), %xmm0\n"
+    "pclmulqdq $0x10, .Lcrc32c_x64_k(%rip), %xmm1\n"
+    "pxor %xmm1, %xmm0\n"
+    "movq %xmm0, %r10\n"
+    "xor %eax, %eax\n"
+    "crc32q %r10, %rax\n"
+    "xor %r9, %rax\n"
+    "add $768, %rsi\n"
+    "sub $768, %rdx\n"
+    "cmp $768, %rdx\n"
+    "jae .Lcrc32c_x64_three\n"
+    ".Lcrc32c_x64_one:\n"
+    "cmp $8, %rdx\n"
+    "jb .Lcrc32c_x64_bytes\n"
+    ".balign 16\n"
+    ".Lcrc32c_x64_one_turn:\n"
+    "crc32q (%rsi), %rax\n"
+    "add $8, %rsi\n"
+    "sub $8, %rdx\n"
+    "cmp $8, %rdx\n"
+    "jae .Lcrc32c_x64_one_turn\n"
+    ".Lcrc32c_x64_bytes:\n"
+    "test %rdx, %rdx\n"
+    "jz .Lcrc32c_x64_done\n"
+    ".Lcrc32c_x64_byte:\n"
+    "crc32b (%rsi), %eax\n"
+    "inc %rsi\n"
+    "dec %rdx\n"
+    "jnz .Lcrc32c_x64_byte\n"
+    "jmp .Lcrc32c_x64_done\n"
+    ".Lcrc32c_x64_table:\n"
+    "lea hash_crc32c_tab(%rip), %r8\n"
+    "cmp $8, %rdx\n"
+    "jb .Lcrc32c_x64_table_byte\n"
+    ".balign 16\n"
+    ".Lcrc32c_x64_table_eight:\n"
+    "mov (%rsi), %r9\n"
+    "xor %rax, %r9\n"
+    "xor %eax, %eax\n"
+    "movzbl %r9b, %ecx\n"
+    "xor 7168(%r8,%rcx,4), %eax\n"
+    "shr $8, %r9\n"
+    "movzbl %r9b, %ecx\n"
+    "xor 6144(%r8,%rcx,4), %eax\n"
+    "shr $8, %r9\n"
+    "movzbl %r9b, %ecx\n"
+    "xor 5120(%r8,%rcx,4), %eax\n"
+    "shr $8, %r9\n"
+    "movzbl %r9b, %ecx\n"
+    "xor 4096(%r8,%rcx,4), %eax\n"
+    "shr $8, %r9\n"
+    "movzbl %r9b, %ecx\n"
+    "xor 3072(%r8,%rcx,4), %eax\n"
+    "shr $8, %r9\n"
+    "movzbl %r9b, %ecx\n"
+    "xor 2048(%r8,%rcx,4), %eax\n"
+    "shr $8, %r9\n"
+    "movzbl %r9b, %ecx\n"
+    "xor 1024(%r8,%rcx,4), %eax\n"
+    "shr $8, %r9\n"
+    "movzbl %r9b, %ecx\n"
+    "xor 0(%r8,%rcx,4), %eax\n"
+    "add $8, %rsi\n"
+    "sub $8, %rdx\n"
+    "cmp $8, %rdx\n"
+    "jae .Lcrc32c_x64_table_eight\n"
+    "test %rdx, %rdx\n"
+    "jz .Lcrc32c_x64_done\n"
+    ".Lcrc32c_x64_table_byte:\n"
+    "xor (%rsi), %al\n"
+    "movzbl %al, %ecx\n"
+    "shr $8, %eax\n"
+    "xor (%r8,%rcx,4), %eax\n"
+    "inc %rsi\n"
+    "dec %rdx\n"
+    "jnz .Lcrc32c_x64_table_byte\n"
+    ".Lcrc32c_x64_done:\n"
+    ASM_RET
+    ".pushsection .rodata\n"
+    ".balign 16\n"
+    ".Lcrc32c_x64_k:\n"
+    ".quad 0xdd7e3b0c, 0xb9e02b86\n"
+    ".popsection\n"
+    ASM_END(hash_crc32c)
+);
+#elif ARM64
+__asm__(
+    ASM_SECTION
+    ASM_FUNC(hash_crc32c)
+    "cbz x2, .Lcrc32c_arm64_done\n"
+    "mov w0, w0\n"
+    ".Lcrc32c_arm64_dispatch:\n"
+    "adrp x16, cpu_has_crc32\n"
+    "ldrb w16, [x16, :lo12:cpu_has_crc32]\n"
+    "cbnz w16, .Lcrc32c_arm64_hw\n"
+    "adrp x16, cpu_hash_probed\n"
+    "ldrb w16, [x16, :lo12:cpu_hash_probed]\n"
+    "cbnz w16, .Lcrc32c_arm64_table\n"
+    "stp x29, x30, [sp, #-16]!\n"
+    "bl cpu_hash_detect\n"
+    "ldp x29, x30, [sp], #16\n"
+    "b .Lcrc32c_arm64_dispatch\n"
+    ".Lcrc32c_arm64_hw:\n"
+    ".arch_extension crc\n"
+    "cmp x2, #768\n"
+    "b.lo .Lcrc32c_arm64_one\n"
+    "adrp x16, cpu_has_pclmul\n"
+    "ldrb w16, [x16, :lo12:cpu_has_pclmul]\n"
+    "cbz w16, .Lcrc32c_arm64_one\n"
+    ".arch_extension crypto\n"
+    "adrp x16, .Lcrc32c_arm64_k\n"
+    "add x16, x16, :lo12:.Lcrc32c_arm64_k\n"
+    "ldp d2, d3, [x16]\n"
+    ".Lcrc32c_arm64_three:\n"
+    "mov w8, #0\n"
+    "mov w9, #0\n"
+    "add x10, x1, #256\n"
+    "add x11, x1, #512\n"
+    "mov x12, #8\n"
+    ".balign 16\n"
+    ".Lcrc32c_arm64_three_turn:\n"
+    "ldp x3, x4, [x1], #16\n"
+    "ldp x5, x6, [x10], #16\n"
+    "ldp x7, x13, [x11], #16\n"
+    "crc32cx w0, w0, x3\n"
+    "crc32cx w8, w8, x5\n"
+    "crc32cx w9, w9, x7\n"
+    "crc32cx w0, w0, x4\n"
+    "crc32cx w8, w8, x6\n"
+    "crc32cx w9, w9, x13\n"
+    "ldp x3, x4, [x1], #16\n"
+    "ldp x5, x6, [x10], #16\n"
+    "ldp x7, x13, [x11], #16\n"
+    "crc32cx w0, w0, x3\n"
+    "crc32cx w8, w8, x5\n"
+    "crc32cx w9, w9, x7\n"
+    "crc32cx w0, w0, x4\n"
+    "crc32cx w8, w8, x6\n"
+    "crc32cx w9, w9, x13\n"
+    "subs x12, x12, #1\n"
+    "b.ne .Lcrc32c_arm64_three_turn\n"
+    "fmov d0, x0\n"
+    "fmov d1, x8\n"
+    "pmull v0.1q, v0.1d, v2.1d\n"
+    "pmull v1.1q, v1.1d, v3.1d\n"
+    "eor v0.16b, v0.16b, v1.16b\n"
+    "fmov x3, d0\n"
+    "crc32cx w0, wzr, x3\n"
+    "eor w0, w0, w9\n"
+    "mov x1, x11\n"
+    "sub x2, x2, #768\n"
+    "cmp x2, #768\n"
+    "b.hs .Lcrc32c_arm64_three\n"
+    ".arch_extension nocrypto\n"
+    ".Lcrc32c_arm64_one:\n"
+    "cmp x2, #8\n"
+    "b.lo .Lcrc32c_arm64_bytes\n"
+    ".balign 16\n"
+    ".Lcrc32c_arm64_one_turn:\n"
+    "ldr x3, [x1], #8\n"
+    "crc32cx w0, w0, x3\n"
+    "sub x2, x2, #8\n"
+    "cmp x2, #8\n"
+    "b.hs .Lcrc32c_arm64_one_turn\n"
+    ".Lcrc32c_arm64_bytes:\n"
+    "cbz x2, .Lcrc32c_arm64_done\n"
+    ".Lcrc32c_arm64_byte:\n"
+    "ldrb w3, [x1], #1\n"
+    "crc32cb w0, w0, w3\n"
+    "subs x2, x2, #1\n"
+    "b.ne .Lcrc32c_arm64_byte\n"
+    ".arch_extension nocrc\n"
+    "b .Lcrc32c_arm64_done\n"
+    ".Lcrc32c_arm64_table:\n"
+    "adrp x4, hash_crc32c_tab\n"
+    "add x4, x4, :lo12:hash_crc32c_tab\n"
+    "cmp x2, #8\n"
+    "b.lo .Lcrc32c_arm64_table_byte\n"
+    ".Lcrc32c_arm64_table_eight:\n"
+    "ldr x3, [x1], #8\n"
+    "eor x3, x3, x0\n"
+    "mov x0, #0\n"
+    "ubfx x6, x3, #0, #8\n"
+    "add x6, x4, x6, lsl #2\n"
+    "ldr w5, [x6, #7168]\n"
+    "eor w0, w0, w5\n"
+    "ubfx x6, x3, #8, #8\n"
+    "add x6, x4, x6, lsl #2\n"
+    "ldr w5, [x6, #6144]\n"
+    "eor w0, w0, w5\n"
+    "ubfx x6, x3, #16, #8\n"
+    "add x6, x4, x6, lsl #2\n"
+    "ldr w5, [x6, #5120]\n"
+    "eor w0, w0, w5\n"
+    "ubfx x6, x3, #24, #8\n"
+    "add x6, x4, x6, lsl #2\n"
+    "ldr w5, [x6, #4096]\n"
+    "eor w0, w0, w5\n"
+    "ubfx x6, x3, #32, #8\n"
+    "add x6, x4, x6, lsl #2\n"
+    "ldr w5, [x6, #3072]\n"
+    "eor w0, w0, w5\n"
+    "ubfx x6, x3, #40, #8\n"
+    "add x6, x4, x6, lsl #2\n"
+    "ldr w5, [x6, #2048]\n"
+    "eor w0, w0, w5\n"
+    "ubfx x6, x3, #48, #8\n"
+    "add x6, x4, x6, lsl #2\n"
+    "ldr w5, [x6, #1024]\n"
+    "eor w0, w0, w5\n"
+    "ubfx x6, x3, #56, #8\n"
+    "add x6, x4, x6, lsl #2\n"
+    "ldr w5, [x6, #0]\n"
+    "eor w0, w0, w5\n"
+    "sub x2, x2, #8\n"
+    "cmp x2, #8\n"
+    "b.hs .Lcrc32c_arm64_table_eight\n"
+    "cbz x2, .Lcrc32c_arm64_done\n"
+    ".Lcrc32c_arm64_table_byte:\n"
+    "ldrb w5, [x1], #1\n"
+    "eor x5, x0, x5\n"
+    "and w5, w5, #255\n"
+    "ldr w5, [x4, x5, lsl #2]\n"
+    "eor w0, w5, w0, lsr #8\n"
+    "subs x2, x2, #1\n"
+    "b.ne .Lcrc32c_arm64_table_byte\n"
+    ".Lcrc32c_arm64_done:\n"
+    ASM_RET
+    ".pushsection .rodata\n"
+    ".balign 16\n"
+    ".Lcrc32c_arm64_k:\n"
+    ".quad 0xdd7e3b0c, 0xb9e02b86\n"
+    ".popsection\n"
+    ASM_END(hash_crc32c)
+);
+#elif RISCV64
+__asm__(
+    ASM_SECTION
+    ASM_FUNC(hash_crc32c)
+    "slli a0, a0, 32\n"
+    "srli a0, a0, 32\n"
+    "beqz a2, .Lcrc32c_rv_done\n"
+    "lla t0, hash_crc32c_tab\n"
+    "lla t1, cpu_has_pclmul\n"
+    "lbu t1, 0(t1)\n"
+    "beqz t1, .Lcrc32c_rv_gate\n"
+    ".option push\n"
+    ".option arch, +zbc\n"
+    "li t5, 0xa434f61c6f5389f8\n"
+    "li t6, 0x82f63b7800000000\n"
+    ".Lcrc32c_rv_zbc_gate:\n"
+    "li t2, 8\n"
+    "bltu a2, t2, .Lcrc32c_rv_byte\n"
+    "andi t1, a1, 7\n"
+    "bnez t1, .Lcrc32c_rv_zbc_peel\n"
+    ".Lcrc32c_rv_zbc_eight:\n"
+    "ld t1, 0(a1)\n"
+    "xor t1, t1, a0\n"
+    "clmul t3, t1, t5\n"
+    "slli t3, t3, 1\n"
+    "xor t3, t3, t1\n"
+    "clmulr t3, t3, t6\n"
+    "srli a0, t3, 32\n"
+    "addi a1, a1, 8\n"
+    "addi a2, a2, -8\n"
+    "bgeu a2, t2, .Lcrc32c_rv_zbc_eight\n"
+    "beqz a2, .Lcrc32c_rv_done\n"
+    "j .Lcrc32c_rv_byte\n"
+    ".Lcrc32c_rv_zbc_peel:\n"
+    "lbu t1, 0(a1)\n"
+    "xor t1, a0, t1\n"
+    "andi t1, t1, 255\n"
+    "slli t1, t1, 2\n"
+    "add t1, t0, t1\n"
+    "lwu t1, 0(t1)\n"
+    "srli a0, a0, 8\n"
+    "xor a0, a0, t1\n"
+    "addi a1, a1, 1\n"
+    "addi a2, a2, -1\n"
+    "j .Lcrc32c_rv_zbc_gate\n"
+    ".option pop\n"
+    ".Lcrc32c_rv_gate:\n"
+    "li t6, 8\n"
+    "bltu a2, t6, .Lcrc32c_rv_byte\n"
+    "andi t1, a1, 7\n"
+    "bnez t1, .Lcrc32c_rv_peel\n"
+    ".Lcrc32c_rv_eight:\n"
+    "ld t2, 0(a1)\n"
+    "xor t2, t2, a0\n"
+    "li a0, 0\n"
+    "li t1, 7168\n"
+    "add t1, t0, t1\n"
+    "andi t3, t2, 255\n"
+    "slli t3, t3, 2\n"
+    "add t3, t1, t3\n"
+    "lwu t4, 0(t3)\n"
+    "xor a0, a0, t4\n"
+    "srli t2, t2, 8\n"
+    "addi t1, t1, -1024\n"
+    "andi t3, t2, 255\n"
+    "slli t3, t3, 2\n"
+    "add t3, t1, t3\n"
+    "lwu t4, 0(t3)\n"
+    "xor a0, a0, t4\n"
+    "srli t2, t2, 8\n"
+    "addi t1, t1, -1024\n"
+    "andi t3, t2, 255\n"
+    "slli t3, t3, 2\n"
+    "add t3, t1, t3\n"
+    "lwu t4, 0(t3)\n"
+    "xor a0, a0, t4\n"
+    "srli t2, t2, 8\n"
+    "addi t1, t1, -1024\n"
+    "andi t3, t2, 255\n"
+    "slli t3, t3, 2\n"
+    "add t3, t1, t3\n"
+    "lwu t4, 0(t3)\n"
+    "xor a0, a0, t4\n"
+    "srli t2, t2, 8\n"
+    "addi t1, t1, -1024\n"
+    "andi t3, t2, 255\n"
+    "slli t3, t3, 2\n"
+    "add t3, t1, t3\n"
+    "lwu t4, 0(t3)\n"
+    "xor a0, a0, t4\n"
+    "srli t2, t2, 8\n"
+    "addi t1, t1, -1024\n"
+    "andi t3, t2, 255\n"
+    "slli t3, t3, 2\n"
+    "add t3, t1, t3\n"
+    "lwu t4, 0(t3)\n"
+    "xor a0, a0, t4\n"
+    "srli t2, t2, 8\n"
+    "addi t1, t1, -1024\n"
+    "andi t3, t2, 255\n"
+    "slli t3, t3, 2\n"
+    "add t3, t1, t3\n"
+    "lwu t4, 0(t3)\n"
+    "xor a0, a0, t4\n"
+    "srli t2, t2, 8\n"
+    "addi t1, t1, -1024\n"
+    "andi t3, t2, 255\n"
+    "slli t3, t3, 2\n"
+    "add t3, t1, t3\n"
+    "lwu t4, 0(t3)\n"
+    "xor a0, a0, t4\n"
+    "addi a1, a1, 8\n"
+    "addi a2, a2, -8\n"
+    "li t6, 8\n"
+    "bgeu a2, t6, .Lcrc32c_rv_eight\n"
+    "beqz a2, .Lcrc32c_rv_done\n"
+    ".Lcrc32c_rv_byte:\n"
+    "lbu t1, 0(a1)\n"
+    "xor t1, a0, t1\n"
+    "andi t1, t1, 255\n"
+    "slli t1, t1, 2\n"
+    "add t1, t0, t1\n"
+    "lwu t1, 0(t1)\n"
+    "srli a0, a0, 8\n"
+    "xor a0, a0, t1\n"
+    "addi a1, a1, 1\n"
+    "addi a2, a2, -1\n"
+    "bnez a2, .Lcrc32c_rv_byte\n"
+    "j .Lcrc32c_rv_done\n"
+    ".Lcrc32c_rv_peel:\n"
+    "lbu t1, 0(a1)\n"
+    "xor t1, a0, t1\n"
+    "andi t1, t1, 255\n"
+    "slli t1, t1, 2\n"
+    "add t1, t0, t1\n"
+    "lwu t1, 0(t1)\n"
+    "srli a0, a0, 8\n"
+    "xor a0, a0, t1\n"
+    "addi a1, a1, 1\n"
+    "addi a2, a2, -1\n"
+    "j .Lcrc32c_rv_gate\n"
+    ".Lcrc32c_rv_done:\n"
+    "sext.w a0, a0\n"
+    ASM_RET
+    ASM_END(hash_crc32c)
+);
+#endif
+#endif // !KERNEL_MODE, the digest cores
+
 
 /*
         The restorer, which is the whole of what x86_64 needs and the other
