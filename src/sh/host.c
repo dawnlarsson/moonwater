@@ -7881,6 +7881,14 @@ static fn radio_restore(void)
                 radio_bluetooth_power(false, false);
         else if (radio_word_is(NET_BLUETOOTH_POWER, "on"))
                 radio_bluetooth_power(true, false);
+
+        /*      The watcher took its first pass before /root was the kept
+                disk, so it knew none of what was set there: a wired-only
+                machine, a wired-off or wifi-first priority, a wifi that was
+                already associated. Nothing above woke it in those cases, and
+                its idle wait had grown to thirty seconds by the time bowl
+                asked for a lease. */
+        radio_net_wake();
 }
 
 static fn radio_recover(void)

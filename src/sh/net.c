@@ -2109,8 +2109,8 @@ static COLD b32 net_watch(void)
                                         if (!held.index || !held.lease.seconds)
                                         {
                                                 retry_seconds *= 2;
-                                                if (retry_seconds > 30)
-                                                        retry_seconds = 30;
+                                                if (retry_seconds > 10)
+                                                        retry_seconds = 10;
                                         }
                                         else
                                                 retry_seconds = 4;
