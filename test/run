@@ -4736,6 +4736,8 @@ unsafe-mkfifo|1|Permission denied|d=$(mktemp -d) && chmod 0777 "$d" && "$HB/mkfi
 unsafe-mknod|1|Permission denied|d=$(mktemp -d) && chmod 0777 "$d" && "$HB/mknod" "$d/n" p; s=$?; rm -rf "$d"; exit $s
 unsafe-install|1|Permission denied|d=$(mktemp -d) && chmod 0777 "$d" && echo x > "$d.src" && "$HB/install" -D "$d.src" "$d/a/out"; s=$?; rm -rf "$d" "$d.src"; exit $s
 unsafe-cp|1|Permission denied|d=$(mktemp -d) && chmod 0777 "$d" && echo x > "$d.src" && "$HB/cp" "$d.src" "$d/c"; s=$?; rm -rf "$d" "$d.src"; exit $s
+cp-link-replaced|0||d=$(mktemp -d) && cd "$d" && echo a > f && ln -s f l && echo b > g && "$HB/cp" g l && [ "$(cat f)" = a ] && [ ! -L l ] && [ "$(cat l)" = b ]; s=$?; cd /; rm -rf "$d"; exit $s
+cp-dangling-refused|1|not writing through dangling|d=$(mktemp -d) && cd "$d" && echo b > g && ln -s gone l && POSIXLY_CORRECT=1 "$HB/cp" g l; s=$?; cd /; rm -rf "$d"; exit $s
 sticky-mkdir|0||d=$(mktemp -d) && chmod 1777 "$d" && "$HB/mkdir" -p "$d/x"; s=$?; rm -rf "$d"; exit $s
 masked-find-exec|126|flag refused|/usr/bin/unshare -rm /bin/sh -c 'mount -t tmpfs tmpfs /proc && "$HB/find" /dev/null -exec true {} ";"'
 masked-awk|126||/usr/bin/unshare -rm /bin/sh -c 'mount -t tmpfs tmpfs /proc && echo x | "$HB/awk" 1'

@@ -33998,6 +33998,73 @@ static bool file_copy_one(bipolar source_directory, string_address source,
         bipolar there_looked = -ERROR_NO_ENTRY;
         bipolar entry_looked = -ERROR_NO_ENTRY;
 
+        bool through = false;
+#if MOONWATER_STRICT < STRICT_TIGHT
+        /*      A destination that is a link is written through, as GNU's
+                open does it, and a link to nothing is the thing to make
+                under POSIXLY_CORRECT: the copy goes where the link points,
+                by the directory holding that name and the name in it, and
+                everything below sees only that. STRICT_TIGHT keeps the
+                staged replacement of the link itself, which never touches
+                what a planted link points at. */
+        p8 through_leaf[FILE_PATH_MAX];
+        static bipolar through_directory = -1;
+
+        if (!fresh && !moving && kind != MODE_DIRECTORY && kind != MODE_LINK &&
+            !cp_replace && !cp_hard && !cp_symbolic &&
+            !file_backup_kind)
+        {
+                bipolar held = -1;
+                bipolar at_directory = destination_directory;
+                string_address at_name = destination;
+                bool posix = file_environment("POSIXLY_CORRECT") != null;
+
+                for (positive hops = 0; hops < 40; hops++)
+                {
+                        file_facts entry;
+                        file_facts final;
+                        p8 target[FILE_PATH_MAX];
+
+                        if (file_look_code(at_directory, at_name, AT_SYMLINK_NOFOLLOW,
+                                           address_of entry) < 0 ||
+                            (entry.mode & MODE_FORMAT) != MODE_LINK)
+                                break;
+
+                        bipolar length = system_read_link_at(at_directory, at_name,
+                                                             target, sizeof(target) - 1);
+                        bipolar seen = file_look_code(at_directory, at_name, 0,
+                                                      address_of final);
+
+                        if (length <= 0 ||
+                            (seen >= 0 && (final.mode & MODE_FORMAT) == MODE_DIRECTORY) ||
+                            (seen < 0 && !(posix && seen == -ERROR_NO_ENTRY)))
+                                break;
+                        target[length] = end;
+
+                        bipolar parent = system_open_parent_pinned(
+                            target[0] == '/' ? AT_FDCWD : at_directory,
+                            (string_address)target, through_leaf, sizeof(through_leaf));
+
+                        if (parent < 0)
+                                break;
+                        if (held >= 0)
+                                system_close(held);
+                        held = parent;
+                        at_directory = parent;
+                        at_name = (string_address)through_leaf;
+                }
+                if (held >= 0)
+                {
+                        if (through_directory >= 0)
+                                system_close(through_directory);
+                        through_directory = held;
+                        through = true;
+                        destination_directory = held;
+                        destination = (string_address)through_leaf;
+                }
+        }
+#endif
+
         if (fresh)
         {
                 memory_fill(address_of there, 0, sizeof(there));
@@ -34018,7 +34085,7 @@ static bool file_copy_one(bipolar source_directory, string_address source,
         bool destination_is_link = destination_entry_exists &&
             (destination_entry.mode & MODE_FORMAT) == MODE_LINK;
 
-        if (!moving && named && cp_destination_decided &&
+        if (!moving && named && cp_destination_decided && !through &&
             (destination_exists != cp_destination_existed ||
              destination_entry_exists != cp_destination_entry_existed ||
              (destination_exists &&
