@@ -4877,7 +4877,7 @@ static bipolar file_open_same_facts(bipolar directory, string_address name,
 bool file_walk_open(file_walk address_to walk, bipolar directory, string_address path)
 {
         walk->handle = system_open_at(directory, path,
-                                     FILE_READ | O_DIRECTORY);
+                                     FILE_READ | O_DIRECTORY | O_CLOEXEC);
         walk->error = walk->handle < 0 ? walk->handle : 0;
         walk->have = 0;
         walk->at = 0;
@@ -4910,7 +4910,7 @@ static bool file_walk_open_found_same(
 {
         walk->handle = file_open_same(
             directory, name, expected,
-            FILE_READ | O_DIRECTORY | O_NOFOLLOW);
+            FILE_READ | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
         walk->error = walk->handle < 0 ? walk->handle : 0;
         walk->have = 0;
         walk->at = 0;
@@ -5167,7 +5167,7 @@ static fn file_change_walk_as(bipolar directory, string_address name,
 
         walk.handle = file_open_same_facts(
             directory, name, address_of facts,
-            FILE_READ | O_DIRECTORY | O_NOFOLLOW, address_of opened);
+            FILE_READ | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW, address_of opened);
         walk.error = walk.handle < 0 ? walk.handle : 0;
         walk.have = 0;
         walk.at = 0;
@@ -6545,7 +6545,7 @@ static bipolar file_remove_same(bipolar directory, string_address name,
                                 file_facts address_to expected)
 {
         bipolar handle = file_open_same(directory, name, expected,
-                                        O_PATH | O_NOFOLLOW);
+                                        O_PATH | O_CLOEXEC | O_NOFOLLOW);
         if (handle < 0)
                 return handle;
 
@@ -6912,7 +6912,7 @@ static bipolar file_directory_empty_same(bipolar directory,
 {
         bipolar handle = file_open_same(
             directory, name, expected,
-            FILE_READ | O_DIRECTORY | nofollow);
+            FILE_READ | O_DIRECTORY | O_CLOEXEC | nofollow);
         if (handle < 0)
                 return handle;
 
@@ -7070,7 +7070,7 @@ static bipolar file_copy_directory_open(
 {
         if (exists && !stage)
                 return file_open_same(directory, name, expected,
-                                      FILE_READ | O_DIRECTORY |
+                                      FILE_READ | O_DIRECTORY | O_CLOEXEC |
                                           (slashed ? 0 : O_NOFOLLOW));
         if (!stage)
                 return -ERROR_INVALID;
@@ -7103,7 +7103,7 @@ static bipolar file_created_open_at(bipolar directory, string_address name,
 {
         positive flags = O_PATH | O_NOFOLLOW | O_CLOEXEC;
         if (kind == MODE_DIRECTORY)
-                flags |= O_DIRECTORY;
+                flags |= O_DIRECTORY | O_CLOEXEC;
 
         bipolar handle = system_open_at(directory, name, flags);
         file_facts facts;
@@ -14879,7 +14879,7 @@ static fn find_printf_walk(string_address format, bipolar handle)
 // the file is made once however many entries reach it.
 static bipolar find_output_open(string_address path)
 {
-        bipolar handle = system_open_at_mode(AT_FDCWD, path, FILE_WRITE, 0666);
+        bipolar handle = system_open_at_mode(AT_FDCWD, path, FILE_WRITE | O_CLOEXEC, 0666);
 
         if (handle < 0)
         {
@@ -15296,7 +15296,7 @@ static fn find_walk(string_address path, string_address name, positive depth, bo
 
                 walk.handle = file_open_same(
                     parent, entry, address_of facts,
-                    FILE_READ | O_DIRECTORY | (follow ? 0 : O_NOFOLLOW));
+                    FILE_READ | O_DIRECTORY | O_CLOEXEC | (follow ? 0 : O_NOFOLLOW));
                 walk.error = walk.handle < 0 ? walk.handle : 0;
                 walk.have = 0;
                 walk.at = 0;
@@ -15958,7 +15958,7 @@ static fn find_tree_root(string_address path, string_address name, bipolar paren
         if (directory && find_maximum > 0 && !find_quit)
         {
                 bipolar handle = file_open_same(parent, entry, address_of facts,
-                                                FILE_READ | O_DIRECTORY | (follow ? 0 : O_NOFOLLOW));
+                                                FILE_READ | O_DIRECTORY | O_CLOEXEC | (follow ? 0 : O_NOFOLLOW));
 
                 if (handle < 0)
                 {
@@ -19943,7 +19943,7 @@ static fn chmod_decide(bipolar directory, string_address name,
         {
                 bipolar handle = file_open_same(
                     directory, name, address_of facts,
-                    O_PATH | (through ? 0 : O_NOFOLLOW));
+                    O_PATH | O_CLOEXEC | (through ? 0 : O_NOFOLLOW));
 
                 done = handle < 0 ? handle : system_call_4(
                     syscall(fchmodat2), (positive)handle,
@@ -20225,7 +20225,7 @@ static fn chmod_tree(string_address path)
 
         file_facts opened;
         bipolar handle = file_open_same_facts(AT_FDCWD, path, address_of facts,
-                                              FILE_READ | O_DIRECTORY | O_NOFOLLOW,
+                                              FILE_READ | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW,
                                               address_of opened);
 
         if (handle < 0)
@@ -20694,7 +20694,7 @@ static fn chown_decide(bipolar directory, string_address name,
                 //      through is the AT_ flag: set, it says not to follow.
                 bipolar handle = file_open_same(
                     directory, name, address_of facts,
-                    O_PATH | (through ? O_NOFOLLOW : 0));
+                    O_PATH | O_CLOEXEC | (through ? O_NOFOLLOW : 0));
 
                 done = handle < 0 ? handle : system_change_owner_at(
                     handle, (string_address)"", chown_user, chown_group,
@@ -21031,7 +21031,7 @@ static fn chown_tree(string_address path)
 
         file_facts opened;
         bipolar handle = file_open_same_facts(AT_FDCWD, path, address_of facts,
-                                              FILE_READ | O_DIRECTORY |
+                                              FILE_READ | O_DIRECTORY | O_CLOEXEC |
                                                   (named_follow ? 0 : O_NOFOLLOW),
                                               address_of opened);
 
@@ -21634,7 +21634,7 @@ static bool ln_make(string_address target, string_address name)
 
                 source_handle = file_open_same(
                     AT_FDCWD, target, address_of source,
-                    O_PATH | (ln_through ? 0 : O_NOFOLLOW));
+                    O_PATH | O_CLOEXEC | (ln_through ? 0 : O_NOFOLLOW));
                 if (source_handle < 0)
                 {
                         return string_report(log_error, false, "ln: failed to access %w: %s\n",
@@ -21840,7 +21840,7 @@ static bool ln_make(string_address target, string_address name)
                 {
                         bipolar again = file_open_same(
                             AT_FDCWD, target, address_of still,
-                            O_PATH | (ln_through ? 0 : O_NOFOLLOW));
+                            O_PATH | O_CLOEXEC | (ln_through ? 0 : O_NOFOLLOW));
                         if (again < 0)
                         {
                                 system_close(destination_directory);
@@ -26272,7 +26272,7 @@ static b32 file_split()
 
         bipolar in = string_is(input_name, '-') && !string_get(input_name + 1)
                          ? 0
-                         : system_open_at(AT_FDCWD, input_name, FILE_READ);
+                         : system_open_at(AT_FDCWD, input_name, FILE_READ | O_CLOEXEC);
 
         if (in < 0)
         {
@@ -27376,7 +27376,7 @@ static b32 file_csplit()
         string_address input_name = file_operand_at(0);
         bipolar in = string_is(input_name, '-') && !string_get(input_name + 1)
                          ? 0
-                         : system_open_at(AT_FDCWD, input_name, FILE_READ);
+                         : system_open_at(AT_FDCWD, input_name, FILE_READ | O_CLOEXEC);
 
         if (in < 0)
         {
@@ -29789,7 +29789,7 @@ static bool shred_remove(string_address path, file_facts address_to named,
 
         if (how->removal == 's')
                 directory = system_open_at(AT_FDCWD, folder,
-                                           O_RDONLY | O_DIRECTORY | O_NOCTTY | O_NONBLOCK);
+                                           O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOCTTY | O_NONBLOCK);
 
         if (how->verbose)
                 file_shell_name_message(log_error, (string_address)"shred: ", path,
@@ -30213,7 +30213,7 @@ static shuf_record address_to shuf_file_records(string_address name,
 {
         bipolar handle = !name || (string_is(name, '-') && !string_get(name + 1))
                              ? 0
-                             : system_open_at(AT_FDCWD, name, FILE_READ);
+                             : system_open_at(AT_FDCWD, name, FILE_READ | O_CLOEXEC);
 
         if (handle < 0)
         {
@@ -31232,7 +31232,7 @@ static b32 file_dircolors()
         {
                 name = file_operand_at(0);
                 handle = string_is(name, '-') && !string_get(name + 1)
-                             ? 0 : system_open_at(AT_FDCWD, name, FILE_READ);
+                             ? 0 : system_open_at(AT_FDCWD, name, FILE_READ | O_CLOEXEC);
 
                 if (handle < 0)
                 {
@@ -32566,7 +32566,7 @@ static bool cp_linked(bipolar source_directory, string_address source,
                                     ? known_source_handle
                                     : file_open_same(
                                           source_directory, source, facts,
-                                          O_PATH |
+                                          O_PATH | O_CLOEXEC |
                                               (follow ? 0 : O_NOFOLLOW));
                 if (source_handle < 0)
                         return false;
@@ -32726,7 +32726,7 @@ static bipolar file_move_remove_tree(
 
         bipolar inside = file_open_same(
             directory, source, expected,
-            FILE_READ | O_DIRECTORY | O_NOFOLLOW);
+            FILE_READ | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
         if (inside < 0)
                 return inside;
 
@@ -34039,7 +34039,7 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                 bipolar pinned = known_source_handle >= 0
                     ? known_source_handle
                     : file_open_same(source_directory, source,
-                                     address_of facts, O_PATH | O_NOFOLLOW);
+                                     address_of facts, O_PATH | O_CLOEXEC | O_NOFOLLOW);
                 if (pinned < 0)
                         return false;
 
@@ -34896,12 +34896,12 @@ static fn cp_pair(string_address source, string_address destination)
         }
         positive source_flags =
             kind == MODE_DIRECTORY
-                ? FILE_READ | O_DIRECTORY
+                ? FILE_READ | O_DIRECTORY | O_CLOEXEC
                 : kind == MODE_LINK || cp_hard || cp_symbolic ||
                           cp_attributes_only ||
                           (cp_recursive && !cp_copy_contents &&
                            kind != MODE_FILE)
-                      ? O_PATH
+                      ? O_PATH | O_CLOEXEC
                       : FILE_READ | (kind == MODE_FILE ? O_NONBLOCK : 0);
         if (!follow)
                 source_flags |= O_NOFOLLOW;
@@ -35676,7 +35676,7 @@ static bipolar file_directory_real(
         address_to old_mode = facts.mode & 07777;
         bipolar real = file_open_same(
             exact, (string_address)".", address_of facts,
-            FILE_READ | O_DIRECTORY | O_NOFOLLOW);
+            FILE_READ | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
         if (real >= 0)
                 return real;
 
@@ -35700,7 +35700,7 @@ static bipolar file_directory_real(
         address_to changed = true;
         real = file_open_same(
             exact, (string_address)".", address_of facts,
-            FILE_READ | O_DIRECTORY | O_NOFOLLOW);
+            FILE_READ | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
         if (real < 0)
         {
                 bipolar restored = file_change_mode_handle(
@@ -36790,7 +36790,7 @@ static fn mv_one(string_address source, string_address destination)
                 if (kind == MODE_FILE || kind == MODE_DIRECTORY)
                 {
                         positive flags = kind == MODE_DIRECTORY
-                                             ? FILE_READ | O_DIRECTORY
+                                             ? FILE_READ | O_DIRECTORY | O_CLOEXEC
                                              : FILE_READ | O_NONBLOCK;
                         copy_handle = file_open_same(
                             source_directory, source_leaf, address_of from,
@@ -37500,7 +37500,7 @@ static bool rm_tree(bipolar directory, string_address name, string_address shown
                 {
                 inside = file_open_same(
                     directory, name, address_of facts,
-                    FILE_READ | O_DIRECTORY | O_NOFOLLOW);
+                    FILE_READ | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
 
                 if (inside < 0)
                 {
@@ -45518,7 +45518,7 @@ static b32 file_rename()
                                 : file_open_same(
                                       source_directory, source_leaf,
                                       address_of facts,
-                                      O_PATH | O_NOFOLLOW);
+                                      O_PATH | O_CLOEXEC | O_NOFOLLOW);
                         bipolar target_length =
                             source_handle < 0 ||
                                     (facts.mode & MODE_FORMAT) != MODE_LINK
@@ -46513,7 +46513,7 @@ static bool date_batch(string_address path, string_address format, b64 now,
                             writer_shell_name, path,
                             file_reason(-ERROR_IS_DIRECTORY));
 
-                handle = system_open_at(AT_FDCWD, path, FILE_READ);
+                handle = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC);
                 if (handle < 0)
                         return string_report(log_error, false, "date: %w: %s\n",
                                              writer_shell_name, path,
