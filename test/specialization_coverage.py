@@ -453,6 +453,9 @@ cover('folds_already', 'groups', 'memory_encode_power2 memory_decode_power2',
 cover('folds_already', 'size', 'memory_escape_index memory_into_escaped',
       'the bounded bytes remain runtime; shared scalar/vector paths handle '
       'policy selection without adding a second escaping engine at call sites')
+cover('folds_already', 'size', 'memory_into_spelled',
+      'the bytes, capacity and spelling table are runtime; one table-driven '
+      'body serves every style, chosen by the table rather than a mode')
 cover('folds_already', 'step', 'memory_decimal_series',
       'the production stride, decimal field bounds and record length are '
       'runtime; assembly already selects a short unit-stride record path')

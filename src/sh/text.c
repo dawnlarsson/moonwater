@@ -5988,9 +5988,17 @@ static inline INLINE bool cat_fill()
 
 // A byte as -v spells it: control characters as ^X, the high half as M- and
 // then the same rule again. Tab and newline are touched separately by -T.
+// With no line numbers, no squeezing and no carriage return held back for
+// -E, every byte is spelled alone, so a whole read goes through one table.
 static fn cat_walked()
 {
         bool cr_held = (cat_flags & CAT_ENDS) && !(cat_flags & CAT_SHOW);
+        p64 address_to spellings =
+            cr_held || (cat_flags & (CAT_NUMBER | CAT_NUMBER_FULL | CAT_SQUEEZE))
+                ? null
+                : spelling_caret(((cat_flags & CAT_SHOW) ? SPELL_SHOW : 0) |
+                                 ((cat_flags & CAT_TABS) ? SPELL_TABS : 0) |
+                                 ((cat_flags & CAT_ENDS) ? SPELL_ENDS : 0));
         const b8 address_to set =
             cr_held
                 ? cat_ends_set[(cat_flags & CAT_TABS) ? 1 : 0]
@@ -6018,7 +6026,16 @@ static fn cat_walked()
                 bool held = cat_pending_cr;
                 positive number = cat_line_number;
                 text_scan scan = {.scanned = at, .set = set};
-                while (at < stop && (positive)(limit - into) >= positive_char_max + 6)
+                if (spellings && at < stop)
+                {
+                        positive2 done = memory_into_spelled(into, at, (positive)(stop - at),
+                                                             (positive)(limit - into), spellings);
+                        at += done.x;
+                        into += done.y;
+                        if (done.x)
+                                line_start = at[-1] == '\n';
+                }
+                while (!spellings && at < stop && (positive)(limit - into) >= positive_char_max + 6)
                 {
                         p8 value = *at;
                         if (line_start)

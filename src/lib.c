@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        376 routines (357 public, 19 local), 369 of them on all three and 7 local to one.
+        377 routines (358 public, 19 local), 370 of them on all three and 7 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -232,6 +232,7 @@
           memory_into_escaped            public  yes     yes     yes
           memory_into_hex                public  yes     yes     yes
           memory_into_hex_case           public  yes     yes     yes
+          memory_into_spelled            public  yes     yes     yes
           memory_last_of                 public  yes     yes     yes
           memory_last_of_either          public  yes     yes     yes
           memory_nth_last_of             public  yes     yes     yes
@@ -51900,6 +51901,29 @@ PURE positive memory_escape_index(address_any source, positive size, p8 policy);
 WRITES(1, 4) READS(2, 3)
 positive2 memory_into_escaped(address_any destination, address_any source,
                               positive size, positive capacity, p8 policy);
+/* Encode source into destination through a 256-entry spelling table: entry b
+   is 8 bytes (the table is exactly 2048), byte 0 the spelling's length 1..7,
+   bytes 1..7 the spelling. A byte whose entry is {1, b} is literal; {1, c}
+   for another c is a translation and is spelled like any other. Answers
+   {consumed, written}; a spelling is indivisible, so a short capacity stops
+   before that input byte (sed l's wrap is capacity = columns left). Nothing
+   is written at or past destination + capacity, though bytes between written
+   and capacity may be scratch; nothing is read past size or past the table's
+   2048 bytes. No overlap; zero size or capacity touches nothing.
+
+   Each byte's entry is loaded as one qword q and q >> 8 stored as one 8-byte
+   store, the output moving on by q & 255 with no branch per byte, while
+   eight bytes of room are left; the last seven bytes of capacity take each
+   spelling at its exact length. With AVX2 and a long input, a bitmap of the
+   literal entries is built once per call (a word compare per entry) and
+   32-byte blocks with no special byte are copied whole. Utilities only: the
+   kernel spells nothing. */
+#ifndef KERNEL_MODE
+WRITES(1, 4) READS(2, 3) READS(5)
+positive2 memory_into_spelled(address_any destination, address_any source,
+                              positive size, positive capacity,
+                              address_any spellings);
+#endif
 extern const p8 escape_categories[256];
 __asm__(
     ASM_RODATA_OBJECT_BEGIN(escape_categories, 16)
@@ -52136,6 +52160,115 @@ __asm__(
     ".Lescape_into_x_next:\n   inc %rax\n   jmp .Lescape_into_x_loop\n"
     ".Lescape_into_x_done:\n   pop %r13\n   pop %r12\n   pop %rbx\n" ASM_RET
     ASM_END(memory_into_escaped)
+#ifndef KERNEL_MODE
+// Four spellings, two a pair sharing one add on the output's chain: rax the
+// input, r9 the output, rbx/r11 the entries, r12/r13 their lengths.
+#define SPELL_FOUR_X \
+    "movzbl (%rsi,%rax), %r11d\n   movzbl 1(%rsi,%rax), %ebx\n   mov (%r8,%r11,8), %r11\n   mov (%r8,%rbx,8), %rbx\n" \
+    "movzbl %r11b, %r12d\n   movzbl %bl, %r13d\n   shr $8, %r11\n   shr $8, %rbx\n   add %r12, %r13\n   add %r9, %r12\n" \
+    "mov %r11, (%rdi,%r9)\n   mov %rbx, (%rdi,%r12)\n   add %r13, %r9\n" \
+    "movzbl 2(%rsi,%rax), %r11d\n   movzbl 3(%rsi,%rax), %ebx\n   mov (%r8,%r11,8), %r11\n   mov (%r8,%rbx,8), %rbx\n" \
+    "movzbl %r11b, %r12d\n   movzbl %bl, %r13d\n   shr $8, %r11\n   shr $8, %rbx\n   add %r12, %r13\n   add %r9, %r12\n" \
+    "mov %r11, (%rdi,%r9)\n   mov %rbx, (%rdi,%r12)\n   add %r13, %r9\n   add $4, %rax\n"
+// A classified block, rbx its special bits, rax its start, r14 its end.
+// Fewer than four specials: each literal run copied as 64 bytes (the store
+// may run past, into room the next spelling covers) and each special's
+// entry as one qword. Four or more: up to 1024 bytes four spellings a turn
+// before the next classification, since binary input stays binary and a
+// classified block of it costs more than it saves (cat -v rand.bin: 174 M
+// cycles classifying every block, 99 M not classifying at all).
+#define SPELL_BLOCK_X(tag, loop) \
+    ".Lspell_x_" tag "_some:\n   mov %rbx, %r11\n   lea -1(%r11), %r13\n   and %r13, %r11\n" \
+    "lea -1(%r11), %r13\n   and %r13, %r11\n   lea -1(%r11), %r13\n   test %r13, %r11\n   jnz .Lspell_x_" tag "_dense\n" \
+    "mov %rax, %r10\n" \
+    ".Lspell_x_" tag "_bit:\n   bsf %rbx, %r11\n   add %r10, %r11\n" \
+    "vmovdqu (%rsi,%rax), %ymm1\n   vmovdqu 32(%rsi,%rax), %ymm2\n   vmovdqu %ymm1, (%rdi,%r9)\n   vmovdqu %ymm2, 32(%rdi,%r9)\n" \
+    "add %r11, %r9\n   sub %rax, %r9\n   mov %r11, %rax\n" \
+    "movzbl (%rsi,%rax), %r11d\n   mov (%r8,%r11,8), %r11\n   movzbl %r11b, %r13d\n   shr $8, %r11\n" \
+    "mov %r11, (%rdi,%r9)\n   add %r13, %r9\n   inc %rax\n" \
+    "lea -1(%rbx), %r11\n   and %r11, %rbx\n   jnz .Lspell_x_" tag "_bit\n" \
+    "vmovdqu (%rsi,%rax), %ymm1\n   vmovdqu 32(%rsi,%rax), %ymm2\n   vmovdqu %ymm1, (%rdi,%r9)\n   vmovdqu %ymm2, 32(%rdi,%r9)\n" \
+    "add %r14, %r9\n   sub %rax, %r9\n   mov %r14, %rax\n   jmp " loop "\n" \
+    ".Lspell_x_" tag "_dense:\n   mov %rcx, %r14\n   sub %r9, %r14\n   shr $3, %r14\n   mov %rdx, %r11\n   sub %rax, %r11\n" \
+    "cmp %r11, %r14\n   cmova %r11, %r14\n   mov $1024, %r11d\n   cmp %r11, %r14\n   cmova %r11, %r14\n" \
+    "and $-4, %r14\n   add %rax, %r14\n" \
+    ".balign 16\n.Lspell_x_" tag "_run:\n" SPELL_FOUR_X "   cmp %r14, %rax\n   jb .Lspell_x_" tag "_run\n   jmp " loop "\n"
+
+    // memory_into_spelled: rdi destination, rsi source, rdx size, rcx
+    // capacity, r8 table; rax consumed and r9 written, answered in rax:rdx.
+    ASM_FUNC(memory_into_spelled)
+    "xor %eax, %eax\n   xor %r9d, %r9d\n   test %rdx, %rdx\n   jz .Lspell_x_empty\n"
+    "test %rcx, %rcx\n   jz .Lspell_x_empty\n"
+    "push %rbx\n   push %r12\n   push %r13\n   push %r14\n"
+    "cmp $512, %rdx\n   jb .Lspell_x_batch\n   cmp $512, %rcx\n   jb .Lspell_x_batch\n"
+    ASM_NARROW("cpu_has_avx2", ".Lspell_x_batch")
+    // The special bitmap: an entry is literal when its first word is
+    // (b << 8) | 1. Four entries a compare, sixteen compares a 64-bit word,
+    // each compare's four bits rotated in at the top, the word inverted.
+    "sub $32, %rsp\n   mov $0xffff, %r11d\n   vmovq %r11, %xmm13\n   vpbroadcastq %xmm13, %ymm13\n"
+    "vmovdqu .Lspell_x_first(%rip), %ymm14\n   mov $0x400, %r11d\n   vmovq %r11, %xmm12\n"
+    "vpbroadcastq %xmm12, %ymm12\n   xor %r11d, %r11d\n   xor %r10d, %r10d\n"
+    ".Lspell_x_word:\n   xor %r13d, %r13d\n   mov $16, %r12d\n"
+    ".Lspell_x_entries:\n   vpand (%r8,%r11), %ymm13, %ymm0\n   vpcmpeqq %ymm14, %ymm0, %ymm0\n"
+    "vpaddq %ymm12, %ymm14, %ymm14\n   vmovmskpd %ymm0, %ebx\n   shr $4, %r13\n   shl $60, %rbx\n"
+    "or %rbx, %r13\n   add $32, %r11\n   dec %r12d\n   jnz .Lspell_x_entries\n"
+    "not %r13\n   mov %r13, (%rsp,%r10,8)\n   inc %r10d\n   cmp $4, %r10d\n   jb .Lspell_x_word\n"
+    ASM_NARROW("cpu_has_avx512", ".Lspell_x_avx2")
+    ASM_NARROW("cpu_has_avx512_vbmi", ".Lspell_x_avx2")
+    // VBMI: bitmap byte v >> 3 by vpermb (the bitmap twice over, so the bit
+    // vpsrlw brings in from the byte above does not matter), bit v & 7 by
+    // vpermb from a pattern, 64 bytes a block: 7 * 64 + 64 of room, and 64
+    // past the block to read.
+    "vbroadcasti64x4 (%rsp), %zmm15\n   add $32, %rsp\n   vmovdqu64 .Lspell_x_bits(%rip), %zmm14\n"
+    ".Lspell_x_z:\n   lea 128(%rax), %r11\n   cmp %rdx, %r11\n   ja .Lspell_x_wide_end\n"
+    "lea 512(%r9), %r11\n   cmp %rcx, %r11\n   ja .Lspell_x_wide_end\n"
+    "vmovdqu64 (%rsi,%rax), %zmm0\n   vpsrlw $3, %zmm0, %zmm1\n   vpermb %zmm15, %zmm1, %zmm1\n"
+    "vpermb %zmm14, %zmm0, %zmm2\n   vptestmb %zmm1, %zmm2, %k1\n   kmovq %k1, %rbx\n   lea 64(%rax), %r14\n"
+    "test %rbx, %rbx\n   jnz .Lspell_x_z_some\n"
+    "vmovdqu64 %zmm0, (%rdi,%r9)\n   mov %r14, %rax\n   add $64, %r9\n   jmp .Lspell_x_z\n"
+    SPELL_BLOCK_X("z", ".Lspell_x_z")
+    // AVX2: bitmap byte (v >> 3) & 15 from the low or high half as v's top
+    // bit says, bit v & 7 by vpshufb, 32 bytes a block: 7 * 32 + 64 of room.
+    ".Lspell_x_avx2:\n   vbroadcasti128 (%rsp), %ymm15\n   vbroadcasti128 16(%rsp), %ymm14\n   add $32, %rsp\n"
+    "vmovdqu .Lspell_x_nibble(%rip), %ymm13\n   vmovdqu .Lspell_x_bits(%rip), %ymm12\n"
+    "vpxor %xmm11, %xmm11, %xmm11\n"
+    ".Lspell_x_y:\n   lea 96(%rax), %r11\n   cmp %rdx, %r11\n   ja .Lspell_x_wide_end\n"
+    "lea 288(%r9), %r11\n   cmp %rcx, %r11\n   ja .Lspell_x_wide_end\n"
+    "vmovdqu (%rsi,%rax), %ymm0\n   vpsrlw $3, %ymm0, %ymm1\n   vpand %ymm13, %ymm1, %ymm1\n"
+    "vpshufb %ymm1, %ymm15, %ymm2\n   vpshufb %ymm1, %ymm14, %ymm3\n   vpblendvb %ymm0, %ymm3, %ymm2, %ymm2\n"
+    "vpand %ymm13, %ymm0, %ymm1\n   vpshufb %ymm1, %ymm12, %ymm1\n   vpand %ymm1, %ymm2, %ymm2\n"
+    "vpcmpeqb %ymm11, %ymm2, %ymm2\n   vpmovmskb %ymm2, %ebx\n   not %ebx\n   lea 32(%rax), %r14\n   test %ebx, %ebx\n"
+    "jnz .Lspell_x_y_some\n   vmovdqu %ymm0, (%rdi,%r9)\n   mov %r14, %rax\n   add $32, %r9\n   jmp .Lspell_x_y\n"
+    SPELL_BLOCK_X("y", ".Lspell_x_y")
+    ".Lspell_x_wide_end:\n   vzeroupper\n"
+    // Unchecked groups of four: n bytes need 8n of room at most (7 each
+    // and the last store's 8), so n = min(size - i, (capacity - w) / 8).
+    ".Lspell_x_batch:\n   mov %rcx, %r14\n   sub %r9, %r14\n   shr $3, %r14\n"
+    "mov %rdx, %r11\n   sub %rax, %r11\n   cmp %r11, %r14\n   cmova %r11, %r14\n"
+    "and $-4, %r14\n   jz .Lspell_x_one\n   add %rax, %r14\n"
+    ".balign 16\n.Lspell_x_four:\n" SPELL_FOUR_X
+    "cmp %r14, %rax\n   jb .Lspell_x_four\n   jmp .Lspell_x_batch\n"
+    // One at a time: the qword store while eight bytes are left, then the
+    // spelling's exact length, and a spelling that does not fit stops.
+    ".Lspell_x_one:\n   cmp %rdx, %rax\n   jae .Lspell_x_leave\n"
+    "movzbl (%rsi,%rax), %r11d\n   mov (%r8,%r11,8), %r11\n   movzbl %r11b, %r12d\n   shr $8, %r11\n"
+    "lea 8(%r9), %r13\n   cmp %rcx, %r13\n   ja .Lspell_x_exact\n"
+    "mov %r11, (%rdi,%r9)\n   add %r12, %r9\n   inc %rax\n   jmp .Lspell_x_one\n"
+    ".Lspell_x_exact:\n   lea (%r9,%r12), %r13\n   cmp %rcx, %r13\n   ja .Lspell_x_leave\n"
+    "test %r12, %r12\n   jz 2f\n"
+    "1:  mov %r11b, (%rdi,%r9)\n   shr $8, %r11\n   inc %r9\n   dec %r12\n   jnz 1b\n"
+    "2:  inc %rax\n   jmp .Lspell_x_one\n"
+    ".Lspell_x_leave:\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbx\n"
+    ".Lspell_x_empty:\n   mov %r9, %rdx\n" ASM_RET
+    ".pushsection .rodata\n   .balign 64\n"
+    ".Lspell_x_bits:\n   .rept 8\n   .byte 1,2,4,8,16,32,64,128\n   .endr\n"
+    ".Lspell_x_first:\n   .quad 0x0001, 0x0101, 0x0201, 0x0301\n"
+    ".Lspell_x_nibble:\n   .rept 32\n .byte 15\n .endr\n"
+    ".popsection\n"
+    ASM_END(memory_into_spelled)
+#undef SPELL_FOUR_X
+#undef SPELL_BLOCK_X
+#endif
 );
 #elif ARM64
 __asm__(
@@ -52191,6 +52324,61 @@ __asm__(
     ".Lescape_into_a_next:\n   add x0, x0, #1\n   b .Lescape_into_a_loop\n"
     ".Lescape_into_a_done:\n" ASM_RET
     ASM_END(memory_into_escaped)
+#ifndef KERNEL_MODE
+    // memory_into_spelled: x5 consumed, x6 written. With NEON and a long
+    // input the literal bitmap is built once (ld4 puts each entry's first
+    // halfword in one lane) and 16-byte blocks are classified by two tbl;
+    // otherwise, and at the end, four spellings a turn with their lengths
+    // summed apart from the output's chain. The x86_64 block carries the
+    // contract.
+    ASM_FUNC(memory_into_spelled)
+    "mov x5, xzr\n   mov x6, xzr\n   cbz x2, .Lspell_a_done\n   cbz x3, .Lspell_a_done\n"
+    "cmp x2, #512\n   b.lo .Lspell_a_batch\n   cmp x3, #256\n   b.lo .Lspell_a_batch\n"
+    "sub sp, sp, #32\n   mov x9, sp\n   mov x10, x4\n"
+    "adrp x11, .Lspell_a_first\n   add x11, x11, :lo12:.Lspell_a_first\n"
+    "ld1 {v20.8h}, [x11], #16\n   ld1 {v22.16b}, [x11]\n   movi v21.8h, #8, lsl #8\n   mov w11, #32\n"
+    "1:  ld4 {v0.8h, v1.8h, v2.8h, v3.8h}, [x10], #64\n   cmeq v0.8h, v0.8h, v20.8h\n"
+    "add v20.8h, v20.8h, v21.8h\n   xtn v0.8b, v0.8h\n   and v0.8b, v0.8b, v22.8b\n   addv b0, v0.8b\n"
+    "umov w12, v0.b[0]\n   mvn w12, w12\n   strb w12, [x9], #1\n   subs w11, w11, #1\n   b.ne 1b\n"
+    "ld1 {v16.16b, v17.16b}, [sp]\n   add sp, sp, #32\n   movi v24.16b, #7\n"
+    "mov x13, #0x8888888888888888\n"
+    ".Lspell_a_block:\n   sub x9, x2, x5\n   cmp x9, #32\n   b.lo .Lspell_a_batch\n"
+    "sub x9, x3, x6\n   cmp x9, #128\n   b.lo .Lspell_a_batch\n"
+    "ldr q0, [x1, x5]\n   ushr v1.16b, v0.16b, #3\n   tbl v1.16b, {v16.16b, v17.16b}, v1.16b\n"
+    "and v2.16b, v0.16b, v24.16b\n   tbl v2.16b, {v22.16b}, v2.16b\n   cmtst v1.16b, v1.16b, v2.16b\n"
+    "shrn v1.8b, v1.8h, #4\n   fmov x9, d1\n   cbnz x9, .Lspell_a_some\n"
+    "str q0, [x0, x6]\n   add x5, x5, #16\n   add x6, x6, #16\n   b .Lspell_a_block\n"
+    ".Lspell_a_some:\n   and x9, x9, x13\n   mov x12, x5\n"
+    ".Lspell_a_bit:\n   rbit x10, x9\n   clz x10, x10\n   add x10, x12, x10, lsr #2\n"
+    "ldr q1, [x1, x5]\n   str q1, [x0, x6]\n   sub x11, x10, x5\n   add x6, x6, x11\n   mov x5, x10\n"
+    "ldrb w10, [x1, x5]\n   ldr x10, [x4, x10, lsl #3]\n   and x11, x10, #255\n   lsr x10, x10, #8\n"
+    "str x10, [x0, x6]\n   add x6, x6, x11\n   add x5, x5, #1\n"
+    "sub x10, x9, #1\n   and x9, x9, x10\n   cbnz x9, .Lspell_a_bit\n"
+    "add x12, x12, #16\n   ldr q1, [x1, x5]\n   str q1, [x0, x6]\n   sub x11, x12, x5\n   add x6, x6, x11\n"
+    "mov x5, x12\n   b .Lspell_a_block\n"
+    ".Lspell_a_batch:\n   sub x7, x3, x6\n   lsr x7, x7, #3\n   sub x8, x2, x5\n   cmp x7, x8\n   csel x7, x8, x7, hi\n"
+    "and x7, x7, #-4\n   cbz x7, .Lspell_a_one\n   add x7, x7, x5\n"
+    ".Lspell_a_four:\n   add x9, x1, x5\n   ldrb w10, [x9]\n   ldrb w11, [x9, #1]\n   ldrb w12, [x9, #2]\n   ldrb w13, [x9, #3]\n"
+    "ldr x10, [x4, x10, lsl #3]\n   ldr x11, [x4, x11, lsl #3]\n   ldr x12, [x4, x12, lsl #3]\n   ldr x13, [x4, x13, lsl #3]\n"
+    "and x14, x10, #255\n   and x15, x11, #255\n   and x16, x12, #255\n   and x17, x13, #255\n"
+    "add x15, x15, x14\n   add x16, x16, x15\n   add x17, x17, x16\n   add x9, x0, x6\n"
+    "lsr x10, x10, #8\n   lsr x11, x11, #8\n   lsr x12, x12, #8\n   lsr x13, x13, #8\n"
+    "str x10, [x9]\n   str x11, [x9, x14]\n   str x12, [x9, x15]\n   str x13, [x9, x16]\n   add x6, x6, x17\n"
+    "add x5, x5, #4\n   cmp x5, x7\n   b.lo .Lspell_a_four\n   b .Lspell_a_batch\n"
+    ".Lspell_a_one:\n   cmp x5, x2\n   b.hs .Lspell_a_done\n"
+    "ldrb w10, [x1, x5]\n   ldr x10, [x4, x10, lsl #3]\n   and x11, x10, #255\n   lsr x10, x10, #8\n"
+    "add x12, x6, #8\n   cmp x12, x3\n   b.hi .Lspell_a_exact\n"
+    "str x10, [x0, x6]\n   add x6, x6, x11\n   add x5, x5, #1\n   b .Lspell_a_one\n"
+    ".Lspell_a_exact:\n   add x12, x6, x11\n   cmp x12, x3\n   b.hi .Lspell_a_done\n   cbz x11, 2f\n"
+    "1:  strb w10, [x0, x6]\n   lsr x10, x10, #8\n   add x6, x6, #1\n   subs x11, x11, #1\n   b.ne 1b\n"
+    "2:  add x5, x5, #1\n   b .Lspell_a_one\n"
+    ".Lspell_a_done:\n   mov x0, x5\n   mov x1, x6\n" ASM_RET
+    ".pushsection .rodata\n   .balign 16\n"
+    ".Lspell_a_first:\n   .hword 0x0001, 0x0101, 0x0201, 0x0301, 0x0401, 0x0501, 0x0601, 0x0701\n"
+    "   .byte 1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128\n"
+    ".popsection\n"
+    ASM_END(memory_into_spelled)
+#endif
 );
 #elif RISCV64
 __asm__(
@@ -52226,6 +52414,21 @@ __asm__(
     ".Lescape_into_r_next:\n   addi a0, a0, 1\n   j .Lescape_into_r_loop\n"
     ".Lescape_into_r_done:\n" ASM_RET
     ASM_END(memory_into_escaped)
+#ifndef KERNEL_MODE
+    // memory_into_spelled: a spelling at a time, its length's bytes stored
+    // one by one (a misaligned sd is a trap to emulate here), and one that
+    // does not fit stops. The x86_64 block carries the contract.
+    ASM_FUNC(memory_into_spelled)
+    "li t0, 0\n   li t1, 0\n   beqz a2, .Lspell_r_done\n   beqz a3, .Lspell_r_done\n"
+    ".Lspell_r_one:\n   bgeu t0, a2, .Lspell_r_done\n   add t2, a1, t0\n   lbu t2, 0(t2)\n"
+    "slli t2, t2, 3\n   add t2, a4, t2\n   ld t3, 0(t2)\n   andi t4, t3, 255\n   srli t3, t3, 8\n"
+    "add t5, t1, t4\n   bltu a3, t5, .Lspell_r_done\n   add t5, a0, t1\n   add t1, t1, t4\n   addi t0, t0, 1\n"
+    "beqz t4, .Lspell_r_one\n"
+    "1:  sb t3, 0(t5)\n   srli t3, t3, 8\n   addi t5, t5, 1\n   addi t4, t4, -1\n   bnez t4, 1b\n"
+    "j .Lspell_r_one\n"
+    ".Lspell_r_done:\n   mv a0, t0\n   mv a1, t1\n" ASM_RET
+    ASM_END(memory_into_spelled)
+#endif
 );
 #endif
 

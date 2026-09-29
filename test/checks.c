@@ -13946,7 +13946,8 @@ fn check_span_byte()
         X(memory_offsets_outside) X(memory_escape_index)                      \
         X(memory_offsets_fields_blank) X(memory_nth_of)                       \
         X(memory_nth_last_of) X(memory_last_of_either)                        \
-        X(memory_into_escaped) X(memory_search_prepare)                       \
+        X(memory_into_escaped) X(memory_into_spelled)                         \
+        X(memory_search_prepare)                                              \
         X(memory_count_records_with_prepared) X(memory_count_words)           \
         X(string_first_of) X(string_first_of_or_end) X(string_first_of_max)   \
         X(string_last_of) X(string_last_of_or_end) X(string_cut)              \
@@ -14619,6 +14620,40 @@ static fn dirty_escape_one(positive size, positive residue, positive turn)
 }
 
 static fn dirty_escape(void) { dirty_plane(dirty_escape_one, 513); }
+
+//      Spellings through cat's caret table, on odd turns a short capacity:
+//      the output and the bytes after it compared whole.
+static fn dirty_spelled_one(positive size, positive residue, positive turn)
+{
+        p64 address_to table = spelling_caret(turn & 7);
+        p8 address_to at = dirty_in + 64 + residue;
+        positive capacity = turn & 1 ? size * 2 + turn % 7 : size * 4 + 8;
+        p8 address_to one = dirty_one + 64 + (turn & 15);
+        p8 address_to two = dirty_two + 64 + (turn & 15);
+        p8 guard = (p8)(0x5a ^ turn);
+        positive where = size << 16 | residue << 8 | (turn & 255);
+
+        if (!DIRTY_HAS(memory_into_spelled))
+                return;
+        for (positive i = 0; i < size; i++)
+        {
+                positive r = dirty_random();
+
+                at[i] = r % 3 ? (p8)(' ' + (r >> 8) % 95) : (p8)(r >> 16);
+        }
+        reference_fill(one - 64, guard, capacity + 128);
+        reference_fill(two - 64, guard, capacity + 128);
+        positive2 clean = DIRTY_ROUTINE(memory_into_spelled)(one, at, size,
+                                                             capacity, table);
+        positive2 answer = DIRTY(pair_5, memory_into_spelled)(
+            P(two), P(at), size, capacity, P(table));
+        AGREE(memory_into_spelled, clean.x, answer.x, where);
+        AGREE(memory_into_spelled, clean.y, answer.y, where);
+        AGREE(memory_into_spelled, 0,
+              dirty_differ(one - 64, two - 64, capacity + 128), where);
+}
+
+static fn dirty_spelled(void) { dirty_plane(dirty_spelled_one, 1000); }
 
 //      Word counts, from inside a word and out of one.
 static fn dirty_words_one(positive size, positive residue, positive turn)
@@ -15588,6 +15623,7 @@ fn check_dirty_arguments(void)
         dirty_tiers(dirty_offsets);
         dirty_tiers(dirty_record_scans);
         dirty_tiers(dirty_escape);
+        dirty_tiers(dirty_spelled);
         dirty_tiers(dirty_words);
         dirty_tiers(dirty_records);
         dirty_tiers(dirty_prepare);
@@ -33283,16 +33319,313 @@ static fn hex_suite(void)
                         memory_free(guarded[at], quantum * 3);
 }
 
+/*
+        memory_into_spelled against a C encoder written from the contract:
+        every size to 300 at sixteen source residues, then the lengths either
+        side of the wide path's 512 and past, over four tables -- the caret
+        spelling cat -v uses, a substitution whose specials are {1, '?'},
+        random lengths with junk above each spelling, and a mix of literal,
+        translated and long entries -- and three input shapes. Every answer
+        is compared whole, the bytes before the destination and the 64 at and
+        after destination + capacity must be untouched, and the capacity runs
+        through full, exact, exact less one to eight and a spread below, so
+        the exact-length tail meets every length. Guard pages hold the source,
+        the destination and the table each at a page end.
+*/
+static p64 spelled_tables[4][256];
+static p64 spelled_seed = 0x243f6a8885a308d3ull;
+
+static p64 spelled_random(void)
+{
+        spelled_seed ^= spelled_seed << 13;
+        spelled_seed ^= spelled_seed >> 7;
+        spelled_seed ^= spelled_seed << 17;
+        return spelled_seed;
+}
+
+static p64 spelled_junk_entry(positive length)
+{
+        return (spelled_random() << 8) | length;
+}
+
+static fn spelled_tables_build(void)
+{
+        p64 address_to caret = spelling_caret(SPELL_SHOW | SPELL_TABS | SPELL_ENDS);
+        for (positive byte = 0; byte < 256; byte++)
+        {
+                positive r = (positive)spelled_random();
+                spelled_tables[0][byte] = caret[byte];
+                spelled_tables[1][byte] = (byte < 32 || byte >= 128)
+                                              ? ((p64)'?' << 8 | 1)
+                                              : ((p64)byte << 8 | 1);
+                spelled_tables[2][byte] = spelled_junk_entry(1 + r % 7);
+                spelled_tables[3][byte] =
+                    r % 3 == 0 ? ((p64)byte << 8 | 1)
+                    : r % 3 == 1 ? ((p64)(p8)(byte ^ (1 + (r >> 8) % 255)) << 8 | 1 |
+                                    (spelled_random() & ~(p64)0xffff))
+                                 : spelled_junk_entry(2 + (r >> 8) % 6);
+        }
+}
+
+static positive2 spelled_oracle(p8 address_to out, p8 address_to in,
+                                positive size, positive capacity,
+                                p64 address_to table)
+{
+        positive read = 0, written = 0;
+        while (read < size)
+        {
+                p64 entry = table[in[read]];
+                positive length = (positive)(entry & 255);
+                if (length > capacity - written)
+                        break;
+                for (positive at = 0; at < length; at++)
+                        out[written + at] = (p8)(entry >> (8 * (at + 1)));
+                written += length;
+                read++;
+        }
+        return (positive2){.x = read, .y = written};
+}
+
+#define SPELLED_MOST 4200
+static p8 spelled_in[SPELLED_MOST + 64], spelled_out[SPELLED_MOST * 7 + 256],
+    spelled_expected[SPELLED_MOST * 7 + 256];
+
+static fn spelled_input(p8 address_to in, positive size, positive shape)
+{
+        for (positive at = 0; at < size; at++)
+        {
+                p64 r = spelled_random();
+                in[at] = shape == 0   ? (p8)r
+                         : shape == 1 ? (r % 40 ? (p8)('a' + (r >> 8) % 26) : (p8)(r >> 16))
+                                      : (p8)(' ' + (r >> 8) % 95);
+        }
+}
+
+static bool spelled_one(p8 address_to in, positive size, positive capacity,
+                        p64 address_to table, positive shift)
+{
+        p8 address_to out = spelled_out + 16 + shift;
+        positive span = capacity + 64 + 32;
+        if (span > sizeof(spelled_out) - 16 - shift)
+                span = sizeof(spelled_out) - 16 - shift;
+        memory_fill(spelled_out, 0xa5, 16 + shift + span);
+        positive2 want = spelled_oracle(spelled_expected, in, size, capacity, table);
+        positive2 got = memory_into_spelled(out, in, size, capacity, table);
+        bool right = got.x == want.x && got.y == want.y &&
+                     !memory_compare(out, spelled_expected, want.y);
+        for (positive at = 0; at < 16 + shift; at++)
+                right = right && spelled_out[at] == 0xa5;
+        for (positive at = capacity; at < capacity + 64 && 16 + shift + at < sizeof(spelled_out); at++)
+                right = right && out[at] == 0xa5;
+        return right;
+}
+
+static fn spelled_capacities(p8 address_to in, positive size,
+                             p64 address_to table, positive shift)
+{
+        positive full = spelled_oracle(spelled_expected, in, size, positive_max, table).y;
+        positive capacities[24], count = 0;
+        capacities[count++] = full;
+        capacities[count++] = full + 1 + (positive)(spelled_random() % 9);
+        for (positive less = 1; less <= 8; less++)
+                if (full >= less)
+                        capacities[count++] = full - less;
+        capacities[count++] = full / 2;
+        capacities[count++] = full / 3 + 1;
+        capacities[count++] = 0;
+        capacities[count++] = (positive)(spelled_random() % (full + 1));
+        if (full > 257)
+        {
+                capacities[count++] = 255;
+                capacities[count++] = 256;
+                capacities[count++] = 257;
+        }
+        for (positive c = 0; c < count; c++)
+                check("spelled output, answer and canaries against the C encoder",
+                      spelled_one(in, size, capacities[c], table, shift));
+}
+
+static fn spelled_caret_check(void)
+{
+        for (positive flags = 0; flags < 8; flags++)
+        {
+                p64 address_to table = spelling_caret(flags);
+                bool right = table == spelling_caret(flags);
+                for (positive byte = 0; byte < 256; byte++)
+                {
+                        p8 text[8];
+                        positive length = 0, value = byte;
+                        bool show = flags & SPELL_SHOW;
+                        if (byte == 9)
+                                length = (flags & SPELL_TABS) ? (text[0] = '^', text[1] = 'I', 2)
+                                                             : (text[0] = 9, 1);
+                        else if (byte == 10)
+                                length = (flags & SPELL_ENDS) ? (text[0] = '$', text[1] = 10, 2)
+                                                             : (text[0] = 10, 1);
+                        else if (!show)
+                                text[length++] = (p8)byte;
+                        else
+                        {
+                                if (value > 127)
+                                {
+                                        text[length++] = 'M';
+                                        text[length++] = '-';
+                                        value -= 128;
+                                }
+                                if (value == 127 || value < 32)
+                                {
+                                        text[length++] = '^';
+                                        text[length++] = value == 127 ? '?' : (p8)(value + 64);
+                                }
+                                else
+                                        text[length++] = (p8)value;
+                        }
+                        p64 entry = table[byte];
+                        right = right && (entry & 255) == length;
+                        for (positive at = 0; at < length; at++)
+                                right = right && (p8)(entry >> (8 * (at + 1))) == text[at];
+                }
+                check("spelling_caret: every byte under every flag set", right);
+        }
+}
+
+//      Mutation fuzz against the C encoder: a random table (real caret
+//      tables, substitution, junk and mixed entries, some then rewritten a
+//      few entries at a time), a random size biased across the wide path's
+//      thresholds, a random capacity from nothing to a little past
+//      complete, and a random residue on both sides.
+static fn spelled_fuzz(positive rounds)
+{
+        static p64 mutated[256];
+        for (positive round = 0; round < rounds; round++)
+        {
+                positive r = (positive)spelled_random();
+                positive pick = r % 5;
+                p64 address_to table = pick < 4 ? spelled_tables[pick]
+                                                : spelling_caret((positive)(r >> 8) & 7);
+                memory_copy(mutated, table, 2048);
+                for (positive flips = (r >> 16) % 5; flips; flips--)
+                {
+                        positive which = (positive)(spelled_random() & 255);
+                        mutated[which] = spelled_junk_entry(1 + (positive)(spelled_random() % 7));
+                }
+                positive size = (r >> 24) % 3 ? (positive)(spelled_random() % 700)
+                                              : (positive)(spelled_random() % SPELLED_MOST);
+                positive residue = (positive)(spelled_random() & 63);
+                spelled_input(spelled_in + residue, size, (positive)(spelled_random() % 3));
+                positive full = spelled_oracle(spelled_expected, spelled_in + residue, size,
+                                               positive_max, mutated).y;
+                positive capacity = (positive)(spelled_random() % (full + 12));
+                check("spelled fuzz against the C encoder",
+                      spelled_one(spelled_in + residue, size, capacity, mutated,
+                                  (positive)(spelled_random() & 15)));
+        }
+}
+
+static fn spelled_suite(void)
+{
+        static const positive longer[] = {400, 500, 511, 512, 513, 515, 543, 600,
+                                          777, 1024, 1100, 2047, 4096, SPELLED_MOST};
+        spelled_caret_check();
+        spelled_fuzz(40000);
+        for (positive t = 0; t < 4; t++)
+        {
+                p64 address_to table = spelled_tables[t];
+                for (positive size = 0; size <= 300; size++)
+                        for (positive residue = 0; residue < 16; residue++)
+                        {
+                                spelled_input(spelled_in + residue, size, (size + residue) % 3);
+                                spelled_capacities(spelled_in + residue, size, table,
+                                                   (residue * 5) & 15);
+                        }
+                for (positive s = 0; s < array_count(longer); s++)
+                        for (positive residue = 0; residue < 16; residue += 3)
+                                for (positive shape = 0; shape < 3; shape++)
+                                {
+                                        spelled_input(spelled_in + residue, longer[s], shape);
+                                        spelled_capacities(spelled_in + residue, longer[s],
+                                                           table, residue);
+                                }
+        }
+        positive2 empty = memory_into_spelled(address_bad, address_bad, 0, 99, address_bad);
+        check("spelled zero size touches nothing", !empty.x && !empty.y);
+        empty = memory_into_spelled(address_bad, address_bad, 17, 0, address_bad);
+        check("spelled zero capacity touches nothing", !empty.x && !empty.y);
+
+        const positive quantum = 65536;
+        p8 address_to guarded[2] = {memory(quantum * 3), memory(quantum * 3)};
+        bool mapped = guarded[0] && guarded[1] &&
+                      (positive)guarded[0] < positive_max - 4095 &&
+                      (positive)guarded[1] < positive_max - 4095;
+        check("spelled guard mappings", mapped);
+        if (!mapped)
+                return;
+        for (positive at = 0; at < 2; at++)
+        {
+                system_call_3(syscall(mprotect), (positive)guarded[at], quantum, 0);
+                system_call_3(syscall(mprotect), (positive)(guarded[at] + quantum * 2), quantum, 0);
+        }
+        static const positive sizes[] = {0, 1, 2, 3, 7, 8, 9, 15, 16, 17, 31, 32, 33,
+                                          63, 64, 65, 100, 511, 512, 513, 600, 1000};
+        for (positive t = 0; t < 4; t++)
+        {
+                // The table at the end of a page, the rest well inside.
+                p64 address_to table = (p64 address_to)(guarded[0] + quantum * 2 - 2048);
+                memory_copy(table, spelled_tables[t], 2048);
+                for (positive s = 0; s < array_count(sizes); s++)
+                {
+                        positive size = sizes[s];
+                        p8 address_to in = guarded[0] + quantum * 2 - 2048 - size;
+                        spelled_input(in, size, t % 3);
+                        positive full = spelled_oracle(spelled_expected, in, size,
+                                                       positive_max, table).y;
+                        // Every capacity to 80, then steps, with the output
+                        // ending at the page.
+                        for (positive capacity = 0; capacity <= full + 8;
+                             capacity += capacity < 80 ? 1 : 1 + capacity / 64)
+                        {
+                                p8 address_to into = guarded[1] + quantum * 2 - capacity;
+                                positive2 want = spelled_oracle(spelled_expected, in, size,
+                                                                capacity, table);
+                                positive2 got = memory_into_spelled(into, in, size, capacity, table);
+                                check("spelled source, destination and table at page ends",
+                                      got.x == want.x && got.y == want.y &&
+                                      !memory_compare(into, spelled_expected, want.y));
+                        }
+                        // The source alone at the page end.
+                        p8 address_to end_in = guarded[0] + quantum * 2 - size;
+                        memory_copy(spelled_in, in, size);
+                        memory_copy(end_in, spelled_in, size);
+                        check("spelled source at a page end",
+                              spelled_one(end_in, size, full, spelled_tables[t], 0));
+                        memory_copy(table, spelled_tables[t], 2048);
+                }
+        }
+        for (positive at = 0; at < 2; at++)
+                memory_free(guarded[at], quantum * 3);
+}
+
 b32 main(void)
 {
+        spelled_tables_build();
 #if X64
-        p8 vector = cpu_has_avx2;
+        p8 vector = cpu_has_avx2, wide = cpu_has_avx512, vbmi = cpu_has_avx512_vbmi;
         cpu_has_avx2 = 0;
         hex_suite();
+        spelled_suite();
         cpu_has_avx2 = vector;
-        if (vector) hex_suite();
+        if (vector)
+        {
+                hex_suite();
+                cpu_has_avx512 = 0;
+                spelled_suite();
+                cpu_has_avx512 = wide;
+                if (wide && vbmi)
+                        spelled_suite();
+        }
 #else
         hex_suite();
+        spelled_suite();
 #endif
         return test_report(null);
 }
@@ -90381,6 +90714,139 @@ b32 main(void)
         return 0;
 }
 #endif /* BENCH_escape */
+
+#ifdef BENCH_spelled
+/* memory_into_spelled against the C it replaces: cat -v's text_visible, a
+   call per byte into a buffer with the literal runs found by a table scan,
+   at the sizes the folded callers hand over -- a name, a sed l line, a whole
+   read -- over printable text, sparse controls and random bytes. Native
+   timings only measure hardware; QEMU remains useful for equal bytes. */
+#include "../src/lib.util.c"
+#define SHARED_bench_measure
+#include "checks.c"
+#undef SHARED_bench_measure
+
+#define TRIES 9
+#define MAXIMUM 131072
+static p8 input[MAXIMUM], output[MAXIMUM * 4 + 16], expected[MAXIMUM * 4 + 16];
+static volatile positive sink;
+
+static positive former_visible(p8 address_to into, p8 value)
+{
+        positive have = 0;
+        if (value >= 128)
+        {
+                into[have++] = 'M';
+                into[have++] = '-';
+                value -= 128;
+        }
+        if (value == 127)
+        {
+                into[have++] = '^';
+                into[have++] = '?';
+        }
+        else if (value < 32)
+        {
+                into[have++] = '^';
+                into[have++] = (p8)(value + 64);
+        }
+        else
+                into[have++] = value;
+        into[have] = 0;
+        return have;
+}
+
+//      cat_walked's -v loop as it stood: a printable run copied whole, and
+//      every other byte through text_visible (tab and newline kept).
+__attribute__((noinline, noclone)) static positive former(p8 address_to into,
+                                                          p8 address_to at,
+                                                          positive size)
+{
+        p8 address_to start = into;
+        p8 address_to stop = at + size;
+        while (at < stop)
+        {
+                p8 address_to run = at;
+                while (run < stop && *run >= 32 && *run < 127)
+                        run++;
+                if (run > at)
+                {
+                        memory_copy_apart(into, at, (positive)(run - at));
+                        into += run - at;
+                        at = run;
+                        continue;
+                }
+                p8 value = *at++;
+                if (value == '\t' || value == '\n')
+                        *into++ = value;
+                else
+                        into += former_visible(into, value);
+        }
+        return (positive)(into - start);
+}
+
+static p64 run(bool assembly, positive size, positive rounds)
+{
+        p64 address_to table = spelling_caret(SPELL_SHOW);
+        p64 start = get_cpu_time();
+        for (positive at = 0; at < rounds; at++)
+                sink += assembly ? memory_into_spelled(output, input, size,
+                                                       sizeof(output), table).y
+                                 : former(output, input, size);
+        return get_cpu_time() - start;
+}
+
+b32 main(void)
+{
+        static const positive sizes[] = {1, 4, 8, 12, 16, 24, 32, 48, 64, 80,
+                                         128, 511, 512, 1024, 4096, MAXIMUM};
+        static string_address shapes[] = {"text", "sparse", "binary"};
+        p64 seed = 0x9e3779b97f4a7c15ull;
+        for (positive shape = 0; shape < array_count(shapes); shape++)
+                for (positive row = 0; row < array_count(sizes); row++)
+                {
+                        positive size = sizes[row], ratios[TRIES];
+                        for (positive at = 0; at < size; at++)
+                        {
+                                seed ^= seed << 13;
+                                seed ^= seed >> 7;
+                                seed ^= seed << 17;
+                                input[at] = shape == 2 ? (p8)seed
+                                            : shape == 1 && seed % 23 == 0 ? (p8)(seed >> 8)
+                                                                           : (p8)(' ' + (seed >> 16) % 95);
+                        }
+                        positive want = former(expected, input, size);
+                        positive2 got = memory_into_spelled(output, input, size, sizeof(output),
+                                                            spelling_caret(SPELL_SHOW));
+                        if (got.x != size || got.y != want || memory_compare(expected, output, want))
+                                return 1;
+                        positive rounds = (1u << 24) / size;
+                        if (rounds > 200000) rounds = 200000;
+                        for (positive trial = 0; trial < TRIES; trial++)
+                        {
+                                p64 before, after;
+                                if (trial & 1)
+                                {
+                                        after = run(true, size, rounds);
+                                        before = run(false, size, rounds);
+                                }
+                                else
+                                {
+                                        before = run(false, size, rounds);
+                                        after = run(true, size, rounds);
+                                }
+                                ratios[trial] = after * 10000 / (before ? before : 1);
+                        }
+                        order(ratios, TRIES);
+                        string_format(log, "spelled %s %p bytes: paired median ASM/C %p.",
+                                      shapes[shape], size, ratios[TRIES / 2] / 100);
+                        positive_to_padded(log, ratios[TRIES / 2] % 100, 2, '0', 0);
+                        log("%\n", 2);
+                        log_flush();
+                }
+        return 0;
+}
+#endif /* BENCH_spelled */
 
 #ifdef BENCH_codec
 /* Body-to-body timing, separate from the shell's streaming benchmark. The C

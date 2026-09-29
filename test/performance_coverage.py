@@ -76,6 +76,9 @@ memory_escape_index memory_into_escaped
       anchors={'memory_escape_index': 'writer_hex_escaped',
                'memory_into_escaped': 'writer_hex_escaped'})
 
+cover('direct_benchmark', 'test/checks.c#BENCH_spelled', 'memory_into_spelled',
+      'paired former-C/assembly timing at name, line and read sizes over text, sparse and binary bytes')
+
 cover('direct_benchmark', 'test/checks.c#BENCH_codec', '''
 memory_encode_power2 memory_decode_power2
 ''', 'bounded codec quanta against independent scalar bit loops; native timing required')

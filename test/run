@@ -15946,7 +15946,7 @@ counted
 #       absolute number that is not. A Linux host target runs directly.
 #
 
-benchmarks="floor baseline numbers bases hex escape codec fixed table padded input-bases fields human human-nearest hash-33 span-byte utf8-valid net-parsers cells-ascii fill-u32 fill-u64 paths reverse writer-field writer-text text-hot prefix-known translate delete squeeze offsets record-scans ascii-case ascii-case-fold line-break bounded-fold ascii-convert ascii-search grep-search grep-count last-of words clock scan-literal random allocator lock pool ordered tree reserve storage-read compare-max string-copy stream-get stream-write format-bounds startup montgomery limbs shell tools awk find boot-time engines compression compression-floor cksum-crc cksum-digests unicode-width link"
+benchmarks="floor baseline numbers bases hex escape spelled codec fixed table padded input-bases fields human human-nearest hash-33 span-byte utf8-valid net-parsers cells-ascii fill-u32 fill-u64 paths reverse writer-field writer-text text-hot prefix-known translate delete squeeze offsets record-scans ascii-case ascii-case-fold line-break bounded-fold ascii-convert ascii-search grep-search grep-count last-of words clock scan-literal random allocator lock pool ordered tree reserve storage-read compare-max string-copy stream-get stream-write format-bounds startup montgomery limbs shell tools awk find boot-time engines compression compression-floor cksum-crc cksum-digests unicode-width link"
 
 #       One benchmark's section and one line about it. A name with no section
 #       is one of the drivers below, which time a whole binary against the
@@ -15967,6 +15967,8 @@ bench_about()
                  bench_line="bulk hex output against the former checksum loop" ;;
         escape)  bench_section=BENCH_escape
                  bench_line="shared escaping against the former writer loops" ;;
+        spelled) bench_section=BENCH_spelled
+                 bench_line="table-driven spelling against cat -v's former byte loop" ;;
         codec)   bench_section=BENCH_codec
                  bench_line="the radix codec bodies, apart from the shell's streaming" ;;
         fixed)   bench_section=BENCH_fixed

@@ -2743,6 +2743,68 @@ static fn writer_terminal_quoted_name(writer output, string_address value)
 {
         writer_terminal_quoted_name_span(output, value, string_length(value));
 }
+
+/* Spelling tables for memory_into_spelled: entry b is the length of b's
+   spelling in its low byte and the spelling above it, so {1, b} is b as it
+   is. Built once a style, on first use, and published after the whole
+   table is written, so a thread that sees the flag sees every entry. */
+typedef p64 spelling_table[256];
+
+static inline INLINE p64 spelling_entry(const p8 address_to text, positive length)
+{
+        p64 entry = length;
+        for (positive at = 0; at < length; at++)
+                entry |= (p64)text[at] << (8 * (at + 1));
+        return entry;
+}
+
+enum { SPELL_SHOW = 1, SPELL_TABS = 2, SPELL_ENDS = 4 };
+
+/* cat's -v, -T and -E, and cmp -b's column: under SPELL_SHOW the high half
+   as M- and the same rule again on what is left, 127 as ^?, a control as ^
+   and the letter sixty four above it; TAB and LF themselves are left alone
+   unless SPELL_TABS makes TAB ^I and SPELL_ENDS makes LF $ and LF. M-TAB is
+   M-^I whatever -T says, as cat has it. */
+static p64 address_to spelling_caret(positive flags)
+{
+        static spelling_table tables[8];
+        static p8 built[8];
+
+        flags &= 7;
+        p64 address_to table = tables[flags];
+        if (__atomic_load_n(&built[flags], __ATOMIC_ACQUIRE))
+                return table;
+        for (positive byte = 0; byte < 256; byte++)
+        {
+                p8 text[7];
+                positive length = 0;
+                p8 value = (p8)byte;
+
+                if (value == '\t' && (flags & SPELL_TABS))
+                        text[length++] = '^', text[length++] = 'I';
+                else if (value == '\n' && (flags & SPELL_ENDS))
+                        text[length++] = '$', text[length++] = '\n';
+                else if (value == '\t' || value == '\n' || !(flags & SPELL_SHOW))
+                        text[length++] = value;
+                else
+                {
+                        if (value >= 128)
+                        {
+                                text[length++] = 'M', text[length++] = '-';
+                                value -= 128;
+                        }
+                        if (value == 127)
+                                text[length++] = '^', text[length++] = '?';
+                        else if (value < 32)
+                                text[length++] = '^', text[length++] = (p8)(value + 64);
+                        else
+                                text[length++] = value;
+                }
+                table[byte] = spelling_entry(text, length);
+        }
+        __atomic_store_n(&built[flags], 1, __ATOMIC_RELEASE);
+        return table;
+}
 #endif // KERNEL_MODE
 
 typedef struct { p8 address_to bytes; positive length; } byte_span;
