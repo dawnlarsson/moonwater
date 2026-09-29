@@ -33076,6 +33076,14 @@ static bool cp_tree_put(parallel_output address_to output, p8 kind, bipolar code
 static bool cp_tree_file(bipolar source, bipolar copy, string_address name)
 {
         file_facts facts;
+
+        //      cp -l: a plain file is one more name for its source, made in
+        //      the fresh directory in one call. A source on another device,
+        //      or one that will not take a link, goes the serial way, which
+        //      says why (and copies, as GNU's -l does not, only where asked).
+        if (cp_hard)
+                return system_link_at(source, name, copy, name, 0) >= 0;
+
         bipolar in = system_open_at(source, name,
                                     FILE_READ | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
 
@@ -34509,7 +34517,7 @@ static bool file_copy_one(bipolar source_directory, string_address source,
 
         /*      A directory cp made in its own stage is filled in batches; the
                 ones below it, and every other kind of copy, name by name. */
-        if (staged && !moving && !cp_hard && !cp_symbolic && !cp_attributes_only &&
+        if (staged && !moving && !cp_symbolic && !cp_attributes_only &&
             !file_debug)
         {
                 complete = cp_tree_parallel(walk.handle, source_shown,

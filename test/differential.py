@@ -7228,6 +7228,17 @@ FIXTURES["files_cplinks"] = {
 }
 
 
+def files_cptree_link_cases():
+    """cp -l over trees: every plain file becomes one more name for its source,
+    directories are made, and links and specials take the ordinary road."""
+    argvs = tuple(flags + ("dir", "out") for flags in (("-rl",), ("-al",), ("-alv",), ("-rlv",), ("-rlf",), ("-l", "-R", "--preserve=links"),
+                                                       ("-rlp",), ("-rlL",), ("-rlP",), ("-rlH",), ("-al", "--parents"), ("-rl", "-T"),
+                                                       ("-rl", "-n"), ("-rl", "-u"), ("-rl", "--debug"), ("-rl", "-b")))
+    argvs += (("-rl", "dir", "dup", "out"), ("-al", "a.txt", "dir", "hollow", "out"), ("-rl", "hollow", "shut", "out"),
+              ("-rl", "deep", "out"), ("-al", "twin", "out"))
+    return tuple({"fixture": "files", "argv": argv} for argv in argvs)
+
+
 def files_cplinks_cases():
     argvs = tuple(flags + ("a", "b", "dz") for flags in (("-a",), ("-l",), ("--preserve=links",), ("-a", "-f"), ("-a", "-v"), ("-a", "-n"))) + \
         tuple(flags + ("a", "b", "dn") for flags in (("-a", "-u"), ("-a", "--update=none"), ("-au", "-v"), ("-u", "--preserve=links"),
@@ -8111,7 +8122,7 @@ FILES_UTILITIES = (
             + tuple({"fixture": "files_self", "argv": words + ("sl", "x")}
                     for words in (("-rl",), ("--link", "-R"), ("-rlP",), ("-rlH",), ("-rld",), ("-al",),
                                   ("-rlL",), ("-l",), ("-lP",)))
-            + files_skip_cases("cp") + files_readonly_cases() + files_cpcorner_cases() + files_cpmerge_cases() + files_cplinks_cases()
+            + files_skip_cases("cp") + files_readonly_cases() + files_cpcorner_cases() + files_cpmerge_cases() + files_cplinks_cases() + files_cptree_link_cases()
             + files_made_cases("cp", ("-f", "-b", "--backup=numbered", "-d", "-R", "-l", "-s", "-v", "-a",
                                       "-dR", "--remove-destination", "-n")),
             normalize=files_sorted_lines),
