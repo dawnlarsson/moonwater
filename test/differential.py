@@ -9550,6 +9550,7 @@ def files_tar_formats(farm):
         sparse("islands", [(at * 8192, bytes([65 + at % 26]) * 4096) for at in range(30)])
         sparse("short", [(4096 * 3, b"I" * 5000)])
         sparse("plain", [(0, b"small")])
+        sparse("many", [(at * 8192, bytes([65 + at % 26]) * 100) for at in range(6000)])
 
         env = {"PATH": os.defpath, "LC_ALL": "C", "TZ": "UTC0"}
         variants = []

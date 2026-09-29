@@ -13,7 +13,8 @@
 */
 
 #define TAR_BLOCK 512
-#define TAR_SPARSE_MAX 4096
+#define TAR_SPARSE_MAX ((positive)1 << 22)
+#define TAR_PSP_MAX 16384
 #define TAR_PATH 4096
 #define TAR_NAME 100
 #define TAR_PREFIX 155
@@ -496,7 +497,7 @@ typedef struct
         p64 bytes;
 } tar_psp_span;
 
-static tar_psp_span tar_psp[TAR_SPARSE_MAX];
+static tar_psp_span tar_psp[TAR_PSP_MAX];
 static positive tar_psp_used;
 static p64 tar_psp_real;
 static p64 tar_psp_offset;
@@ -544,7 +545,7 @@ static bool tar_pax_attr_add(p8 kind, string_address name, positive name_length,
 
 static fn tar_psp_add(p64 offset, p64 bytes)
 {
-        if (tar_psp_used >= TAR_SPARSE_MAX)
+        if (tar_psp_used >= TAR_PSP_MAX)
         {
                 tar_psp_bad = true;
                 return;
@@ -3296,7 +3297,8 @@ typedef struct
         p64 bytes;
 } tar_sparse_span;
 
-static tar_sparse_span tar_sparse[TAR_SPARSE_MAX];
+static tar_sparse_span address_to tar_sparse;
+static positive tar_sparse_room;
 static positive tar_sparse_used;
 static p64 tar_sparse_real;
 static bool tar_sparse_active;
@@ -3317,7 +3319,8 @@ static bool tar_sparse_add(p64 offset, p64 bytes)
         if (offset > (p64)-1 - bytes)
                 return false;
 
-        if (tar_sparse_used >= TAR_SPARSE_MAX)
+        if (tar_sparse_used >= TAR_SPARSE_MAX ||
+            !shell_array_room(tar_sparse, tar_sparse_room, tar_sparse_used + 1))
                 return false;
 
         if (tar_sparse_used &&
@@ -3409,61 +3412,67 @@ static bool tar_pax_sparse_take(bipolar archive, p64 address_to size)
         }
         else
         {
-                p8 text[TAR_BLOCK * 8];
-                positive have = 0;
                 p64 wanted = 0;
                 p64 seen = 0;
                 positive consumed = 0;
                 p64 pending = 0;
+                p64 accumulated = 0;
+                positive digits = 0;
                 bool first = true;
                 bool half = false;
-                positive start = 0;
 
+                //      The text is taken a block at a time and never held:
+                //      a number is what its digits add up to when its
+                //      newline comes, and anything else before the last one
+                //      refuses the map.
                 for (;;)
                 {
                         p8 address_to block;
 
-                        if (consumed >= (p64)*size || have + TAR_BLOCK > sizeof(text))
+                        if (consumed >= (p64)*size)
                                 return false;
                         block = tar_next_block(archive, false);
                         if (!block)
                                 return false;
-                        memory_copy(text + have, block, TAR_BLOCK);
-                        have += TAR_BLOCK;
                         consumed += TAR_BLOCK;
-                        for (at = start; at < have; at++)
+                        for (at = 0; at < TAR_BLOCK; at++)
                         {
-                                p64 number;
+                                p8 byte = block[at];
 
-                                if (text[at] != '\n')
+                                if (byte >= '0' && byte <= '9')
+                                {
+                                        if (accumulated > ((p64)bipolar_max - (p64)(byte - '0')) / 10)
+                                                return false;
+                                        accumulated = accumulated * 10 + (p64)(byte - '0');
+                                        digits++;
                                         continue;
-                                if (!tar_pax_wide(text + start, at - start, address_of number))
+                                }
+                                if (byte != '\n' || !digits)
                                         return false;
-                                start = at + 1;
                                 if (first)
                                 {
-                                        wanted = number;
+                                        wanted = accumulated;
                                         if (wanted > TAR_SPARSE_MAX)
                                                 return false;
                                         first = false;
                                 }
                                 else if (!half)
                                 {
-                                        pending = number;
+                                        pending = accumulated;
                                         half = true;
                                 }
                                 else
                                 {
-                                        if (!tar_sparse_add(pending, number))
+                                        if (!tar_sparse_add(pending, accumulated))
                                                 return false;
                                         half = false;
                                         seen++;
                                 }
-                                if (!first && seen == wanted)
+                                accumulated = 0;
+                                digits = 0;
+                                if (seen == wanted && !first && !half)
                                         goto mapped;
                         }
-                        if (start == 0 && have == sizeof(text))
-                                return false;
                 }
 mapped:
                 if ((p64)consumed > address_to size)
