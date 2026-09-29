@@ -202,6 +202,9 @@ GNU's refusals of everything else. One spelling GNU refuses is Moonwater's own:
 levels 10 to 12), which takes several times `-9`'s time for a few percent less
 output, and every gzip reads what it writes. `-10` and up still mean their
 last digit, as in GNU. The bytes never depend on how many CPUs ran.
+`gzip -d` says what GNU gzip says, word for word, and keeps what it keeps: the
+data of a truncated or corrupt stream up to where it broke, trailing zeros as
+padding, other trailing bytes as a warning with status 2.
 
 ## xz
 
