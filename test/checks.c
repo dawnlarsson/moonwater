@@ -73452,7 +73452,11 @@ static fn blocks(void)
         bipolar n;
 
         xz_fixture(src, sizeof(src), 0x2545f491u);
+        //      -0 writes blocks of eight MiB or more; --block-size gives
+        //      the fixture the several it is about.
+        xz_block_size = 1048576;
         n = xz_deflate_mem(src, sizeof(src), packed, sizeof(packed), 0);
+        xz_block_size = 0;
         check("block fixture encodes", n > 64);
         if (n <= 64)
                 return;

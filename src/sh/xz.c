@@ -15,7 +15,9 @@
 #define XZ_IN 16384
 #define XZ_MATCH_MAX 273
 #define XZ_MATCH_MIN 2
-#define XZ_DICT_MAX (1u << 26)
+/* liblzma's property 40: a dictionary of 4 GiB less one. Nothing is mapped
+   for it until a stream's data reaches that far. */
+#define XZ_DICT_MAX 0xffffffffu
 #define XZ_PROB_LIT (0x300u * 16)
 #define XZ_STATES 12
 #define XZ_POS 16
@@ -1653,6 +1655,11 @@ static bool xz_dec_block(xz_decoder address_to d)
                 for (; at < limit; at++)
                         if (header[at])
                                 return xz_dec_fail(d, "xz block header");
+                //      A block that says how much it holds never reaches back
+                //      further than that, so a dictionary claimed larger maps
+                //      no more than the block.
+                if ((flags & 0x80) && d->hdr_plain < dict)
+                        dict = d->hdr_plain ? (positive)d->hdr_plain : 1;
                 if (!dict || !xz_dec_dict_open(d, dict))
                         return xz_dec_fail(d, "xz dictionary");
                 if (d->nfilt && !d->linear && !d->fbuf)
@@ -2180,7 +2187,7 @@ static p8 xz_prop_from_dict(positive dict)
 #define XZ_HASH3_SIZE (1u << 16)
 #define XZ_CHUNK_PACKED_MAX 65536u
 #define XZ_CHUNK_PLAIN_MAX (1u << 21)
-#define XZ_BLOCK_HEADER_MAX 32
+#define XZ_BLOCK_HEADER_MAX 96
 #define XZ_SLACK 64
 #define XZ_LITERAL 0xffffffffu
 #define XZ_LEN_SYMBOLS (XZ_LEN_LOW + XZ_LEN_MID + XZ_LEN_HIGH)
@@ -2194,7 +2201,14 @@ typedef struct
         bool normal;
         p8 finder;
         p16 nice;
-        p16 depth;
+        p32 depth;
+        /* The rest is what a preset leaves to the command line: the exact
+           dictionary size (a preset's power of two, or any value from 4 KiB
+           to 1.5 GiB) and the literal and position bits. */
+        p32 dict;
+        p8 lc;
+        p8 lp;
+        p8 pb;
 } xz_preset;
 
 /* xz 5.8's -0 .. -9, all lc=3 lp=0 pb=2, then -0e .. -9e: the normal parser
@@ -2225,12 +2239,26 @@ static const xz_preset xz_presets[20] = {
         {25, true, XZ_FINDER_BT4, 273, 512},
         {26, true, XZ_FINDER_BT4, 273, 512}};
 
-static const xz_preset address_to xz_preset_of(p8 level)
+static xz_preset xz_preset_of(p8 level)
 {
         p8 number = level & 15;
+        xz_preset p = xz_presets[(number > 9 ? 9 : number) + (level & XZ_EXTREME ? 10 : 0)];
 
-        return xz_presets + (number > 9 ? 9 : number) + (level & XZ_EXTREME ? 10 : 0);
+        p.dict = (p32)1 << p.dict_log;
+        p.lc = 3;
+        p.lp = 0;
+        p.pb = 2;
+        return p;
 }
+
+/* What a stream is encoded with: the LZMA2 options and the filters in front
+   of it, whose states are templates each block copies. */
+typedef struct
+{
+        xz_preset lz;
+        xz_filter filt[XZ_FILTERS_MAX];
+        positive nfilt;
+} xz_options;
 
 typedef struct
 {
@@ -2259,7 +2287,11 @@ typedef struct
 
 typedef struct
 {
-        const xz_preset address_to preset;
+        xz_preset preset;
+        xz_filter filt[XZ_FILTERS_MAX];
+        positive nfilt;
+        p8 address_to fbuf;
+        positive fbuf_room;
 
         /* The block: input_n bytes at input, zero-based read position,
            how many of those the parser has looked at but not coded, and the
@@ -2339,19 +2371,21 @@ static bool xz_area(p8 address_to address_to area, positive address_to room,
         return true;
 }
 
-static xz_encoder address_to xz_encoder_open(p8 level)
+static xz_encoder address_to xz_encoder_open_with(const xz_options address_to o)
 {
         xz_encoder address_to e = (xz_encoder address_to)memory_checked(sizeof(xz_encoder));
 
         if (!e)
                 return null;
-        e->preset = xz_preset_of(level);
+        e->preset = o->lz;
+        e->nfilt = o->nfilt;
+        memory_copy_apart(e->filt, o->filt, sizeof(e->filt));
         e->check = XZ_CHECK_CRC64;
-        e->lc = 3;
-        e->lp = 0;
-        e->pb = 2;
-        e->lp_mask = 0;
-        e->pos_mask = 3;
+        e->lc = o->lz.lc;
+        e->lp = o->lz.lp;
+        e->pb = o->lz.pb;
+        e->lp_mask = ((p32)1 << e->lp) - 1;
+        e->pos_mask = ((p32)1 << e->pb) - 1;
         for (p32 i = 8; i < 2048; i += 16)
         {
                 p32 w = i;
@@ -2372,6 +2406,15 @@ static xz_encoder address_to xz_encoder_open(p8 level)
         return e;
 }
 
+static xz_encoder address_to xz_encoder_open(p8 level)
+{
+        xz_options o;
+
+        memory_fill(address_of o, 0, sizeof(o));
+        o.lz = xz_preset_of(level);
+        return xz_encoder_open_with(address_of o);
+}
+
 static fn xz_encoder_close(xz_encoder address_to e)
 {
         if (!e)
@@ -2379,6 +2422,7 @@ static fn xz_encoder_close(xz_encoder address_to e)
         memory_free(e->hash, e->hash_room);
         memory_free(e->son, e->son_room);
         memory_free(e->out, e->out_room);
+        memory_free(e->fbuf, e->fbuf_room);
         memory_free(e, sizeof(xz_encoder));
 }
 
@@ -2642,7 +2686,7 @@ static fn xz_length(xz_encoder address_to e, bool rep, p32 ps, p32 len)
                                           len - XZ_LEN_MID, 8);
                 }
         }
-        if (e->preset->normal)
+        if (e->preset.normal)
         {
                 xz_length_price address_to t = rep ? address_of e->rep_prices
                                                    : address_of e->match_prices;
@@ -2984,7 +3028,7 @@ static fn xz_tree_skip(p32 address_to son, p8 address_to cur, p32 pos, p32 cur_m
 /* One find at read_pos: the matches in increasing length, their count. */
 static p32 xz_finder_find(xz_encoder address_to e)
 {
-        const xz_preset address_to p = e->preset;
+        const xz_preset address_to p = address_of e->preset;
         p32 avail = e->input_n - e->read_pos;
         p32 len_min = p->finder == XZ_FINDER_HC3 ? 3 : 4;
         p32 len_limit = e->nice;
@@ -3095,7 +3139,7 @@ static p32 xz_finder_find(xz_encoder address_to e)
 
 static fn xz_finder_skip(xz_encoder address_to e, p32 amount)
 {
-        const xz_preset address_to p = e->preset;
+        const xz_preset address_to p = address_of e->preset;
         p32 len_min = p->finder == XZ_FINDER_HC3 ? 3 : 4;
 
         while (amount--)
@@ -3853,7 +3897,7 @@ static fn xz_lzma_reset(xz_encoder address_to e)
         e->align_price_count = 0x7fffffffu;
         e->opts_end = 0;
         e->opts_current = 0;
-        if (e->preset->normal)
+        if (e->preset.normal)
                 for (p32 ps = 0; ps <= e->pos_mask; ps++)
                 {
                         xz_length_prices(e, false, ps);
@@ -3865,8 +3909,8 @@ static fn xz_lzma_reset(xz_encoder address_to e)
    the output span holds the block's worst case. */
 static bool xz_block_prepare(xz_encoder address_to e, p32 n)
 {
-        const xz_preset address_to p = e->preset;
-        p32 dict = (p32)1 << p->dict_log;
+        const xz_preset address_to p = address_of e->preset;
+        p32 dict = p->dict;
         bool fresh;
 
         while (dict > 4096 && dict / 2 >= n)
@@ -3916,7 +3960,11 @@ static bool xz_block_prepare(xz_encoder address_to e, p32 n)
         e->nice = p->nice;
         e->depth = p->depth ? p->depth
                  : p->finder == XZ_FINDER_BT4 ? 16 + e->nice / 2 : 4 + e->nice / 4;
-        e->dist_table_size = 2 * xz_top_bit(dict);
+        //      Two slots a bit of the dictionary's size rounded up to a power
+        //      of two, as liblzma counts them: a dictionary that is not one
+        //      (3 MiB, 96 MiB) has distances in the slot the floor left out,
+        //      and priced at nothing they were never chosen.
+        e->dist_table_size = 2 * (xz_top_bit(dict - 1) + 1);
         e->len_table_size = e->nice + 1 - 2;
         return true;
 }
@@ -3927,7 +3975,22 @@ static bool xz_block_prepare(xz_encoder address_to e, p32 n)
 static bool xz_block_encode(xz_encoder address_to e, p8 address_to input, p32 n)
 {
         xz_probability_state address_to m = address_of e->models;
+        p8 address_to original = input;
 
+        //      With filters the block is coded from a filtered copy, and the
+        //      check is of the block as it was.
+        if (e->nfilt && n)
+        {
+                bool fresh;
+
+                if (!xz_area(address_of e->fbuf, address_of e->fbuf_room,
+                             (positive)n + XZ_SLACK, address_of fresh))
+                        return false;
+                memory_copy_apart(e->fbuf, input, n);
+                memory_fill(e->fbuf + n, 0, XZ_SLACK);
+                xz_filter_block(e->filt, e->nfilt, true, e->fbuf, n);
+                input = e->fbuf;
+        }
         e->input = input;
         e->input_n = n;
         if (!n || !xz_block_prepare(e, n))
@@ -3976,7 +4039,7 @@ static bool xz_block_encode(xz_encoder address_to e, p8 address_to input, p32 n)
                         p32 back;
                         p32 len;
 
-                        if (e->preset->normal)
+                        if (e->preset.normal)
                                 xz_optimum_normal(e, address_of back, address_of len,
                                                   (p32)e->position);
                         else
@@ -4032,12 +4095,33 @@ static bool xz_block_encode(xz_encoder address_to e, p8 address_to input, p32 n)
         p8 header[XZ_BLOCK_HEADER_MAX];
         positive h = 2;
 
-        header[1] = 0x40 | 0x80;
+        header[1] = (p8)(0x40 | 0x80 | e->nfilt);
         h += memory_vli_put(header + h, at);
         h += memory_vli_put(header + h, n);
+        for (positive i = 0; i < e->nfilt; i++)
+        {
+                const xz_filter address_to f = e->filt + i;
+
+                header[h++] = f->id;
+                if (f->id == XZ_FILTER_DELTA)
+                {
+                        header[h++] = 1;
+                        header[h++] = f->dist;
+                }
+                else if (f->start)
+                {
+                        header[h++] = 4;
+                        xz_put_le32(header + h, f->start);
+                        h += 4;
+                }
+                else
+                        header[h++] = 0;
+        }
         header[h++] = 0x21;
         header[h++] = 1;
-        header[h++] = xz_prop_from_dict(e->dict);
+        //      The header names the dictionary asked for, as xz does, though
+        //      a short block's match finder needs no more than the block.
+        header[h++] = xz_prop_from_dict(e->preset.dict);
         positive header_padding = (0 - (h + 4)) & 3;
         memory_zero(header + h, header_padding);
         h += header_padding;
@@ -4053,15 +4137,15 @@ static bool xz_block_encode(xz_encoder address_to e, p8 address_to input, p32 n)
         memory_zero(out + at, data_padding);
         at += data_padding;
         if (e->check == XZ_CHECK_CRC32)
-                memory_store_unaligned(p32, out + at, ~hash_crc32(0xffffffffu, input, n));
+                memory_store_unaligned(p32, out + at, ~hash_crc32(0xffffffffu, original, n));
         else if (e->check == XZ_CHECK_CRC64)
-                memory_store_unaligned(p64, out + at, ~hash_crc64(~(p64)0, input, n));
+                memory_store_unaligned(p64, out + at, ~hash_crc64(~(p64)0, original, n));
         else if (e->check == XZ_CHECK_SHA256)
         {
                 digest_state digest;
 
                 digest_open(address_of digest, DIGEST_SHA256, 32);
-                digest_write(address_of digest, input, n);
+                digest_write(address_of digest, original, n);
                 digest_close(address_of digest, out + at);
         }
         e->out_at = XZ_BLOCK_HEADER_MAX - h;
@@ -4082,7 +4166,7 @@ static bool xz_block_encode(xz_encoder address_to e, p8 address_to input, p32 n)
 
 typedef struct
 {
-        p8 level;
+        xz_options options;
         positive block;
         positive batch_blocks;
         p8 address_to input;
@@ -4106,6 +4190,14 @@ static xz_stream_writer xz_writer;
 /* The check every block of the next stream carries: CRC64, as xz writes
    by default, unless the command line's -C names another. */
 static p8 xz_encode_check = XZ_CHECK_CRC64;
+
+/* The options of the next stream: a preset's, unless the command line
+   built its own chain (xz_encode_custom), and the block size --block-size
+   asked for, 0 for three dictionaries and at least 1 MiB. */
+static xz_options xz_encode_options;
+static bool xz_encode_custom;
+static positive xz_block_size;
+#define XZ_BLOCK_MAX ((positive)1 << 30)
 
 /* -e on the command line: the extreme form of the preset. */
 static bool xz_cli_extreme;
@@ -4194,7 +4286,7 @@ static fn xz_batch_job(address_any context, positive index,
         w->unpadded[index] = 0;
         if (!e)
         {
-                e = xz_encoder_open(w->level);
+                e = xz_encoder_open_with(address_of w->options);
                 if (!e)
                         return;
                 w->slots[slot] = e;
@@ -4256,15 +4348,32 @@ static positive xz_batch_room(positive block)
 
 static bool xz_encode_setup(p8 level)
 {
-        const xz_preset address_to p = xz_preset_of(level);
-        positive dict = (positive)1 << p->dict_log;
+        if (!xz_encode_custom)
+        {
+                memory_fill(address_of xz_encode_options, 0, sizeof(xz_encode_options));
+                xz_encode_options.lz = xz_preset_of(level);
+        }
+
+        positive dict = xz_encode_options.lz.dict;
         p8 header[12] = {0xfd, 0x37, 0x7a, 0x58, 0x5a, 0, 0, xz_encode_check};
 
         xz_writer_close();
         xz_why = null;
-        xz_writer.level = level;
+        xz_writer.options = xz_encode_options;
         xz_writer.check = xz_encode_check;
-        xz_writer.block = 3 * dict > ((positive)1 << 20) ? 3 * dict : (positive)1 << 20;
+        //      A block starts with an empty dictionary and untrained models,
+        //      so a small one costs ratio: xz's three dictionaries and 1 MiB
+        //      lose 0.7% at -0 and -1 on silesia against one block. The fast
+        //      modes run at tens of MB/s, so a block of four dictionaries and
+        //      at least 8 MiB keeps the loss to 0.1-0.3% and still gives a
+        //      pool something to spread once the input is a few blocks long.
+        xz_writer.block = xz_block_size ? xz_block_size
+                        : !xz_encode_options.lz.normal
+                              ? (4 * dict > ((positive)8 << 20) ? 4 * dict : (positive)8 << 20)
+                        : 3 * dict > ((positive)1 << 20) ? 3 * dict : (positive)1 << 20;
+        //      A block's positions are 32 bits with the dictionary added.
+        if (xz_writer.block > XZ_BLOCK_MAX)
+                xz_writer.block = XZ_BLOCK_MAX;
         xz_writer.batch_blocks = xz_batch_room(xz_writer.block) / xz_writer.block;
         if (xz_writer.batch_blocks > XZ_BATCH_BLOCKS)
                 xz_writer.batch_blocks = XZ_BATCH_BLOCKS;
@@ -4942,6 +5051,8 @@ static bool xz_par_decode(bipolar in, bipolar out)
         return ok;
 }
 
+static bool xz_cli_setup(void);
+
 static b32 xz_stream_cli(bipolar in, bipolar out, bool decode, p8 level)
 {
         bool ok;
@@ -4974,6 +5085,11 @@ static b32 xz_stream_cli(bipolar in, bipolar out, bool decode, p8 level)
                 byte_input_open_fd(address_of xz_input, in, xz_in_buf, XZ_IN);
                 xz_out_fd = out;
                 xz_output.bytes = null;
+                if (!xz_cli_setup())
+                {
+                        xz_status = 1;
+                        return 1;
+                }
                 ok = xz_stream_encode(level | (xz_cli_extreme ? XZ_EXTREME : 0));
         }
         if (!ok)
@@ -4987,6 +5103,306 @@ static b32 xz_stream_cli(bipolar in, bipolar out, bool decode, p8 level)
                 return 1;
         }
         return 0;
+}
+
+/*
+        The options that shape a stream, as xz 5.8 reads them and in its
+        order: -0 .. -9, --fast and --best set the preset and forget any
+        chain built so far; -e sets the extreme flag and forgets it too; a
+        filter (--x86 and its kin, --delta, --lzma2, --lzma1) is added to the
+        chain and puts the preset back to 6; and --block-size, -C and -T. A
+        chain must end in exactly one LZMA2 and hold at most four filters.
+        Words that xz refuses are refused with its wording and status.
+*/
+enum { XZ_CLI_FILTER, XZ_CLI_LZMA2, XZ_CLI_LZMA1 };
+
+typedef struct
+{
+        p8 kind;
+        xz_filter f;
+        xz_preset lz;
+} xz_cli_entry;
+
+static xz_cli_entry xz_cli_chain[4];
+static positive xz_cli_count;
+
+static bool xz_cli_say(string_address one, string_address two, string_address three)
+{
+        string_format(log_error, "xz: %s%s%s\n", one, two, three);
+        return false;
+}
+
+static positive xz_cli_decimal(p8 address_to into, p64 value)
+{
+        p8 digits[20];
+        positive n = 0;
+        positive at = 0;
+
+        do
+                digits[n++] = (p8)('0' + value % 10);
+        while (value /= 10);
+        while (n)
+                into[at++] = digits[--n];
+        into[at] = 0;
+        return at;
+}
+
+/* xz's str_to_uint64: blanks, "max", decimal digits, a k/m/g suffix with
+   Ki, KiB, KB or B after it, and a range. */
+static bool xz_cli_number(string_address name, string_address value, p64 min, p64 max,
+                          p64 address_to out)
+{
+        p64 result = 0;
+        p8 low[24];
+        p8 high[24];
+
+        while (*value == ' ' || *value == '\t')
+                value++;
+        if (string_equals(value, "max"))
+        {
+                address_to out = max;
+                return true;
+        }
+        if (*value < '0' || *value > '9')
+        {
+                string_format(log_error, "xz: %s: Value is not a non-negative decimal integer\n",
+                              value);
+                return false;
+        }
+        do
+        {
+                p64 add = (p64)(*value - '0');
+
+                if (result > ~(p64)0 / 10)
+                        goto range;
+                result *= 10;
+                if (~(p64)0 - add < result)
+                        goto range;
+                result += add;
+                value++;
+        } while (*value >= '0' && *value <= '9');
+        if (*value)
+        {
+                p64 multiplier = 0;
+                string_address suffix = value;
+
+                if (*value == 'k' || *value == 'K')
+                        multiplier = (p64)1 << 10;
+                else if (*value == 'm' || *value == 'M')
+                        multiplier = (p64)1 << 20;
+                else if (*value == 'g' || *value == 'G')
+                        multiplier = (p64)1 << 30;
+                value++;
+                if (*value && !string_equals(value, "i") && !string_equals(value, "iB") &&
+                    !string_equals(value, "B"))
+                        multiplier = 0;
+                if (!multiplier)
+                {
+                        string_format(log_error, "xz: %s: Invalid multiplier suffix\n", suffix);
+                        string_format(log_error,
+                                      "xz: Valid suffixes are 'KiB' (2^10), 'MiB' (2^20), and 'GiB' (2^30).\n");
+                        return false;
+                }
+                if (result > ~(p64)0 / multiplier)
+                        goto range;
+                result *= multiplier;
+        }
+        if (result < min || result > max)
+                goto range;
+        address_to out = result;
+        return true;
+
+range:
+        xz_cli_decimal(low, min);
+        xz_cli_decimal(high, max);
+        string_format(log_error, "xz: Value of the option '%s' must be in the range [%s, %s]\n",
+                      name, low, high);
+        return false;
+}
+
+typedef struct
+{
+        string_address name;
+        p8 kind; /* 0 a number, 1 the LZMA preset, 2 a word from words */
+        p64 min;
+        p64 max;
+        const string_address address_to words;
+} xz_cli_option_map;
+
+static const string_address xz_cli_modes[] = {"fast", "normal", null};
+static const string_address xz_cli_mfs[] = {"hc3", "hc4", "bt2", "bt3", "bt4", null};
+
+/* xz's parse_options over `str`, calling set(key, value or word index). The
+   value is copied to a small buffer, as a number needs its end. */
+static bool xz_cli_options(string_address str, const xz_cli_option_map address_to map,
+                           positive kinds, bool (*set)(address_any who, positive key, p64 value,
+                                                       string_address text),
+                           address_any who)
+{
+        positive at = 0;
+        p8 text[64];
+
+        if (!str)
+                return true;
+        while (str[at])
+        {
+                if (str[at] == ',')
+                {
+                        at++;
+                        continue;
+                }
+
+                positive stop = at;
+                positive eq = 0;
+
+                while (str[stop] && str[stop] != ',')
+                {
+                        if (!eq && str[stop] == '=')
+                                eq = stop;
+                        stop++;
+                }
+                if (!eq || eq + 1 == stop)
+                {
+                        string_format(log_error,
+                                      "xz: %s: Options must be 'name=value' pairs separated with commas\n",
+                                      str);
+                        return false;
+                }
+
+                positive name_n = eq - at;
+                positive value_n = stop - eq - 1;
+                positive key = 0;
+
+                while (key < kinds && (string_length(map[key].name) != name_n ||
+                                       string_compare_max(map[key].name, str + at, name_n)))
+                        key++;
+                if (key == kinds)
+                {
+                        p8 name[64];
+                        positive k = name_n < sizeof(name) - 1 ? name_n : sizeof(name) - 1;
+
+                        memory_copy_apart(name, str + at, k);
+                        name[k] = 0;
+                        return xz_cli_say(name, ": Invalid option name", "");
+                }
+                if (value_n >= sizeof(text))
+                        value_n = sizeof(text) - 1;
+                memory_copy_apart(text, str + eq + 1, value_n);
+                text[value_n] = 0;
+
+                p64 value = 0;
+
+                if (map[key].words)
+                {
+                        positive w = 0;
+
+                        while (map[key].words[w] && !string_equals(map[key].words[w], (string_address)text))
+                                w++;
+                        if (!map[key].words[w])
+                                return xz_cli_say((string_address)text, ": Invalid option value", "");
+                        value = w;
+                }
+                else if (map[key].kind == 0 &&
+                         !xz_cli_number(map[key].name, (string_address)text, map[key].min,
+                                        map[key].max, address_of value))
+                        return false;
+                if (!set(who, key, value, (string_address)text))
+                        return false;
+                at = stop;
+        }
+        return true;
+}
+
+static bool xz_cli_set_delta(address_any who, positive key, p64 value, string_address text)
+{
+        (void)key;
+        (void)text;
+        ((xz_cli_entry address_to)who)->f.dist = (p8)(value - 1);
+        return true;
+}
+
+static bool xz_cli_set_bcj(address_any who, positive key, p64 value, string_address text)
+{
+        (void)key;
+        (void)text;
+        ((xz_cli_entry address_to)who)->f.start = (p32)value;
+        return true;
+}
+
+static bool xz_cli_set_lzma(address_any who, positive key, p64 value, string_address text)
+{
+        xz_preset address_to lz = &((xz_cli_entry address_to)who)->lz;
+
+        switch (key)
+        {
+        case 0: /* preset */
+        {
+                if (text[0] < '0' || text[0] > '9' ||
+                    (text[1] && (text[1] != 'e' || text[2])))
+                        return xz_cli_say("Unsupported LZMA1/LZMA2 preset: ", text, "");
+                *lz = xz_preset_of((p8)((text[0] - '0') | (text[1] ? XZ_EXTREME : 0)));
+                break;
+        }
+        case 1: lz->dict = (p32)value; break;
+        case 2: lz->lc = (p8)value; break;
+        case 3: lz->lp = (p8)value; break;
+        case 4: lz->pb = (p8)value; break;
+        case 5: lz->normal = value == 1; break;
+        case 6: lz->nice = (p16)value; break;
+        case 7:
+                //      Hash chains of three and four bytes and binary trees
+                //      of two, three and four: the trees of two and three
+                //      bytes are searched as the tree of four, which finds
+                //      what they find and more.
+                lz->finder = value == 0 ? XZ_FINDER_HC3 : value == 1 ? XZ_FINDER_HC4 : XZ_FINDER_BT4;
+                break;
+        case 8: lz->depth = (p32)value; break;
+        }
+        return true;
+}
+
+static const xz_cli_option_map xz_cli_delta_map[] = {{"dist", 0, 1, 256, null}};
+static const xz_cli_option_map xz_cli_bcj_map[] = {{"start", 0, 0, 0xffffffffu, null}};
+static const xz_cli_option_map xz_cli_lzma_map[] = {
+    {"preset", 1, 0, 0, null},
+    {"dict", 0, 4096, ((p64)1 << 30) + ((p64)1 << 29), null},
+    {"lc", 0, 0, 4, null},
+    {"lp", 0, 0, 4, null},
+    {"pb", 0, 0, 4, null},
+    {"mode", 2, 0, 0, xz_cli_modes},
+    {"nice", 0, 2, 273, null},
+    {"mf", 2, 0, 0, xz_cli_mfs},
+    {"depth", 0, 0, 0xffffffffu, null}};
+
+/* Add a filter: id, and the text after '=' when there was one. */
+static bool xz_cli_add(p8 kind, p8 id, string_address text)
+{
+        if (xz_cli_count == 4)
+                return xz_cli_say("Maximum number of filters is four", "", "");
+
+        xz_cli_entry address_to e = xz_cli_chain + xz_cli_count;
+
+        memory_fill(e, 0, sizeof(*e));
+        e->kind = kind;
+        e->f.id = id;
+        e->lz = xz_preset_of(6);
+        if (kind != XZ_CLI_FILTER)
+        {
+                if (!xz_cli_options(text, xz_cli_lzma_map, array_count(xz_cli_lzma_map),
+                                    xz_cli_set_lzma, e))
+                        return false;
+                if (e->lz.lc + e->lz.lp > 4)
+                        return xz_cli_say("The sum of lc and lp must not exceed 4", "", "");
+        }
+        else if (id == XZ_FILTER_DELTA)
+        {
+                if (!xz_cli_options(text, xz_cli_delta_map, 1, xz_cli_set_delta, e))
+                        return false;
+        }
+        else if (!xz_cli_options(text, xz_cli_bcj_map, 1, xz_cli_set_bcj, e))
+                return false;
+        xz_cli_count++;
+        return true;
 }
 
 /* -e / --extreme, whatever order it takes with -0 .. -9, as xz keeps its
@@ -5009,14 +5425,61 @@ static bool xz_cli_check(string_address word)
         return false;
 }
 
+/* A setting from the chain of words: the value of --word=VALUE, or the next
+   argument for --word VALUE. */
+static bipolar xz_cli_value(file_codec_cli address_to codec, string_address at,
+                            string_address name, string_address address_to value)
+{
+        positive n = string_length(name);
+
+        if (string_has_prefix(at, "--") && !string_compare_max(at + 2, name, n))
+        {
+                if (at[2 + n] == '=')
+                {
+                        address_to value = at + 3 + n;
+                        return 1;
+                }
+                if (!at[2 + n])
+                {
+                        if (!codec->next_argument)
+                        {
+                                string_format(log_error,
+                                              "xz: option '--%s' requires an argument\n"
+                                              "xz: Try 'xz --help' for more information.\n", name);
+                                return -1;
+                        }
+                        codec->took_next = true;
+                        address_to value = codec->next_argument;
+                        return 1;
+                }
+        }
+        return 0;
+}
+
 static bipolar xz_cli_option(file_codec_cli address_to codec, string_address at,
                              bool word)
 {
+        static const struct
+        {
+                string_address name;
+                positive id;
+        } bcj[] = {{"x86", XZ_FILTER_X86}, {"powerpc", XZ_FILTER_PPC}, {"ia64", XZ_FILTER_IA64},
+                   {"arm", XZ_FILTER_ARM}, {"armthumb", XZ_FILTER_ARMT}, {"arm64", XZ_FILTER_ARM64},
+                   {"sparc", XZ_FILTER_SPARC}, {"riscv", XZ_FILTER_RISCV}, {"delta", XZ_FILTER_DELTA},
+                   {"lzma2", XZ_FILTER_LZMA2}, {"lzma1", 0x4000}};
+
         if (!word)
         {
+                if (*at >= '0' && *at <= '9')
+                {
+                        codec->level = (p8)(*at - '0');
+                        xz_cli_count = 0;
+                        return 1;
+                }
                 if (*at == 'e')
                 {
                         xz_cli_extreme = true;
+                        xz_cli_count = 0;
                         return 1;
                 }
                 if (*at != 'C')
@@ -5036,21 +5499,109 @@ static bipolar xz_cli_option(file_codec_cli address_to codec, string_address at,
         if (string_equals(at, "--extreme"))
         {
                 xz_cli_extreme = true;
+                xz_cli_count = 0;
                 return 1;
+        }
+        if (string_equals(at, "--fast") || string_equals(at, "--best"))
+        {
+                codec->level = at[2] == 'f' ? 0 : 9;
+                xz_cli_count = 0;
+                return 1;
+        }
+        for (positive i = 0; i < array_count(bcj); i++)
+        {
+                positive n = string_length(bcj[i].name);
+
+                if (string_has_prefix(at, "--") && !string_compare_max(at + 2, bcj[i].name, n) &&
+                    (!at[2 + n] || at[2 + n] == '='))
+                {
+                        string_address text = at[2 + n] ? at + 3 + n : null;
+
+                        if (!xz_cli_add(bcj[i].id == XZ_FILTER_LZMA2 ? XZ_CLI_LZMA2
+                                        : bcj[i].id == 0x4000 ? XZ_CLI_LZMA1 : XZ_CLI_FILTER,
+                                        (p8)bcj[i].id, text))
+                                return -1;
+                        codec->level = 6;
+                        xz_cli_extreme = false;
+                        return 1;
+                }
         }
         if (string_has_prefix(at, "--check="))
                 return xz_cli_check(at + 8) ? 1 : -1;
-        if (!string_equals(at, "--check"))
-                return 0;
-        if (!codec->next_argument)
+        if (string_equals(at, "--check"))
         {
-                string_format(log_error,
-                              "xz: option '--check' requires an argument\n"
-                              "xz: Try 'xz --help' for more information.\n");
-                return -1;
+                if (!codec->next_argument)
+                {
+                        string_format(log_error,
+                                      "xz: option '--check' requires an argument\n"
+                                      "xz: Try 'xz --help' for more information.\n");
+                        return -1;
+                }
+                codec->took_next = true;
+                return xz_cli_check(codec->next_argument) ? 1 : -1;
         }
-        codec->took_next = true;
-        return xz_cli_check(codec->next_argument) ? 1 : -1;
+
+        string_address text = null;
+        bipolar got = xz_cli_value(codec, at, "block-size", address_of text);
+
+        if (got <= 0)
+                return got;
+
+        p64 size;
+
+        if (!xz_cli_number("block-size", text, 0, ((p64)1 << 63) - 1, address_of size))
+                return -1;
+        xz_block_size = size > XZ_BLOCK_MAX ? XZ_BLOCK_MAX : (positive)size;
+        return 1;
+}
+
+/* The chain the words built, checked as xz checks it before it encodes:
+   LZMA2 last and alone, start offsets aligned. Nothing built is a preset. */
+static bool xz_cli_setup(void)
+{
+        xz_encode_custom = false;
+        if (!xz_cli_count)
+                return true;
+
+        positive last = xz_cli_count - 1;
+        bool has_lzma2 = false;
+        bool bad_start = false;
+
+        for (positive i = 0; i <= last; i++)
+        {
+                xz_cli_entry address_to e = xz_cli_chain + i;
+
+                if (e->kind == XZ_CLI_LZMA1)
+                        return xz_cli_say("LZMA1 cannot be used with the .xz format", "", "");
+                has_lzma2 |= e->kind == XZ_CLI_LZMA2;
+                bad_start |= e->kind == XZ_CLI_FILTER && e->f.id != XZ_FILTER_DELTA &&
+                             (e->f.start & (xz_filter_alignment(e->f.id) - 1));
+        }
+
+        //      xz's threaded encoder looks for the block size of the chain
+        //      first, and names the chain when it finds none or a start
+        //      offset it cannot use; a chain that is only badly ordered is
+        //      what the encoder itself refuses.
+        string_address why = file_codec_threads != 1 && (!has_lzma2 || bad_start)
+                                 ? "Unsupported options in filter chain 0"
+                                 : "Unsupported filter chain or filter options";
+
+        if (xz_cli_chain[last].kind != XZ_CLI_LZMA2 || bad_start)
+                return xz_cli_say(why, "", "");
+        memory_fill(address_of xz_encode_options, 0, sizeof(xz_encode_options));
+        for (positive i = 0; i < last; i++)
+        {
+                xz_cli_entry address_to e = xz_cli_chain + i;
+
+                if (e->kind != XZ_CLI_FILTER ||
+                    (e->f.id != XZ_FILTER_DELTA &&
+                     (e->f.start & (xz_filter_alignment(e->f.id) - 1))))
+                        return xz_cli_say(why, "", "");
+                xz_encode_options.filt[xz_encode_options.nfilt++] = e->f;
+        }
+        xz_encode_options.lz = xz_cli_chain[last].lz;
+        xz_encode_custom = true;
+        return true;
 }
 
 static const file_codec_suffix xz_suffixes[] = {
@@ -5060,7 +5611,7 @@ static b32 file_xz(void)
 {
         file_codec_cli codec = {
             .name = "xz", .decode_name = "unxz", .cat_name = "xzcat",
-            .usage = "Usage: xz [-cdefkqt0123456789] [-C CHECK] [-T N] [FILE...]",
+            .usage = "Usage: xz [-cdefkqt0123456789] [-C CHECK] [-T N] [--x86|--arm|--delta|--lzma2[=OPTS]...] [FILE...]",
             .version = "xz from moonwater",
             .status = address_of xz_status,
             .suffixes = xz_suffixes, .suffix_count = array_count(xz_suffixes),

@@ -33011,6 +33011,230 @@ def harness_compression(argv):
                                         check('%s/xz/filter%s-%s-%s%s' % (label, ''.join(chain), tag, ''.join(mode), ''.join(how)),
                                               back.returncode == 0 and back.stdout == blob,
                                               back.stderr.decode(errors='replace'))
+                        # The words that shape a stream, in xz 5.8's order and
+                        # with its refusals: presets forgetting a chain, -e,
+                        # the filters and their options, dictionary sizes
+                        # with suffixes, --block-size. Same status and same
+                        # words on stderr, and where xz accepts them the
+                        # stream header, the chain xz -lvv lists and a round
+                        # trip through xz.
+                        import re
+
+                        def chain_of(blob):
+                            path = root / 'chain.xz'
+                            path.write_bytes(blob)
+                            listing = call([refs['xz'], '-lvv', str(path)]).stdout.decode(errors='replace')
+                            for line in listing.splitlines():
+                                found = re.search(r'(--\S+(?: --\S+)*)\s*$', line)
+                                if found:
+                                    return found.group(1)
+                            return None
+
+                        words = """
+                            --x86 -9|-9 --x86|--x86|--x86 --lzma2|--x86 --lzma2=dict=4MiB|--delta --lzma2=dict=4MiB|
+                            --delta=dist=3 --lzma2=lc=0,lp=2,pb=0|--x86 --x86 --x86 --lzma2|--x86 --x86 --x86 --x86 --lzma2|
+                            --lzma2 --lzma2|--lzma2 --x86|--lzma1|-e --x86 --lzma2=preset=3|--x86 -6e|-6e --lzma2=dict=2MiB|
+                            -9 --lzma2 -e|--lzma2=dict=1|--lzma2=bogus=1|--lzma2=preset=10|--lzma2=preset=3e|--lzma2=preset=e|
+                            --lzma2=preset=3ee|--arm=start=3|--arm=start=4 --lzma2|--armthumb=start=2 --lzma2|
+                            --x86=start=3 --lzma2|--x86=start=1KiB --lzma2|--x86=foo|--x86=start=|--x86=start=0x10|--delta=dist=0|
+                            --delta=dist=257|--delta=dist=|--delta=dist=256 --lzma2|--delta=foo=1|--lzma2=lc=5|--lzma2=lc=3,lp=2|
+                            --lzma2=pb=5|--lzma2=mode=xxx|--lzma2=mf=xx|--lzma2=nice=1|--lzma2=nice=274|--lzma2=depth=-1|
+                            --lzma2=dict=4095|--lzma2=dict=1610612737|--lzma2=dict=1.5GiB|--lzma2=dict=1MiB,dict=2MiB|--lzma2=|
+                            --lzma2=,|--lzma2=lc=1,,lp=1|--lzma2=dict=3MiB|--lzma2=nice=3,mode=fast|--lzma2=depth=0|
+                            --lzma2=mode=normal,mf=hc3|--lzma2=mode=fast,mf=bt4,nice=200,depth=7|--lzma2=mf=bt2|
+                            --lzma2=mf=bt3,nice=30|--lzma2=dict=100KiB|--lzma2=dict=max|--lzma2=dict=4KiB,lc=4,lp=0,pb=0|
+                            --lzma2=nice=2|--lzma2=nice=273,mode=normal,depth=1|--lzma2=lc=0,lp=4,pb=4|--sparc --lzma2=preset=1|
+                            --powerpc --ia64 --lzma2=preset=0|--riscv --arm64 --armthumb --lzma2=preset=0|--fast|--best|-0 --x86|
+                            --block-size=1MiB|--block-size 100KiB|--block-size=|--block-size=abc|--block-size=1x|--block-size|
+                            -e -6|-6 -e|--extreme --best|--fast --extreme""".replace('\n', '').split('|')
+                        sample = code[:60000]
+                        for word in words:
+                            word = word.strip()
+                            for mode in ('-T1', '-T2', None):
+                                pre = [mode] if mode else []
+                                ref = call([refs['xz']] + pre + word.split() + ['-c'], sample)
+                                got = call(runner + [exe] + pre + word.split() + ['-c'], sample)
+                                same = (got.returncode == ref.returncode and
+                                        got.stderr == ref.stderr.replace(refs['xz'].encode(), b'xz'))
+                                detail = 'GNU %d %r, ours %d %r' % (ref.returncode, ref.stderr[:100],
+                                                                    got.returncode, got.stderr[:100])
+                                if same and ref.returncode == 0:
+                                    back = call([refs['xz'], '-dc'], got.stdout)
+                                    same = (back.stdout == sample and got.stdout[6:12] == ref.stdout[6:12] and
+                                            chain_of(got.stdout) == chain_of(ref.stdout))
+                                    detail = 'chain %s against %s' % (chain_of(got.stdout), chain_of(ref.stdout))
+                                check('%s/xz/words%s-%s' % (label, mode or '', word.replace(' ', '_')), same, detail)
+                        # Streams this binary writes with each chain, in one
+                        # block and in several, read back by xz and by itself.
+                        for chain in chains:
+                            for blocks in ([], ['--block-size=50000']):
+                                for lvl in ('-0', '-6'):
+                                    mine = call(runner + [exe, '-c', lvl] + chain + ['--lzma2=preset=%s' % lvl[1:]] +
+                                                blocks, code[:120000])
+                                    back = call([refs['xz'], '-dc'], mine.stdout)
+                                    own = call(runner + [exe, '-dc'], mine.stdout)
+                                    check('%s/xz/write%s%s%s' % (label, ''.join(chain), ''.join(blocks), lvl),
+                                          mine.returncode == back.returncode == own.returncode == 0 and
+                                          back.stdout == code[:120000] and own.stdout == back.stdout,
+                                          (mine.stderr + back.stderr + own.stderr).decode(errors='replace'))
+                        # Streams assembled field by field with valid CRCs, then
+                        # bent where the decoder trusts a size: every header
+                        # field (sizes, dictionary property up to and past
+                        # xz's limit, filter ids and properties, padding),
+                        # the check, the index records and the footer, over
+                        # chains and check types. xz and this binary must
+                        # agree on accept or refuse and on the bytes of an
+                        # accepted stream, and this one never dies or hangs.
+                        import hashlib
+                        import lzma
+                        import struct
+                        import zlib
+
+                        def vli(number):
+                            out = bytearray()
+                            while number >= 0x80:
+                                out.append((number & 0x7f) | 0x80)
+                                number >>= 7
+                            out.append(number)
+                            return bytes(out)
+
+                        crc64_table = []
+                        for i in range(256):
+                            c = i
+                            for _ in range(8):
+                                c = (c >> 1) ^ (0xC96C5795D7870F42 if c & 1 else 0)
+                            crc64_table.append(c)
+
+                        def crc64(blob):
+                            c = 0xFFFFFFFFFFFFFFFF
+                            for byte in blob:
+                                c = crc64_table[(c ^ byte) & 0xff] ^ (c >> 8)
+                            return c ^ 0xFFFFFFFFFFFFFFFF
+
+                        filter_ids = {'x86': (4, lzma.FILTER_X86), 'ppc': (5, lzma.FILTER_POWERPC),
+                                      'ia64': (6, lzma.FILTER_IA64), 'arm': (7, lzma.FILTER_ARM),
+                                      'armt': (8, lzma.FILTER_ARMTHUMB), 'sparc': (9, lzma.FILTER_SPARC),
+                                      'delta': (3, lzma.FILTER_DELTA)}
+
+                        def assemble(rand, plain, chain, kind, sized, pieces, bend):
+                            out = bytearray(b'\xfd7zXZ\x00') + bytes([0, kind])
+                            out += struct.pack('<I', zlib.crc32(bytes([0, kind])))
+                            records = []
+                            for n in range(pieces):
+                                piece = plain[n * len(plain) // pieces:(n + 1) * len(plain) // pieces]
+                                spec = []
+                                for name, option in chain:
+                                    entry = {'id': filter_ids[name][1]}
+                                    entry.update(option)
+                                    spec.append(entry)
+                                spec.append({'id': lzma.FILTER_LZMA2, 'preset': 1})
+                                payload = lzma.compress(piece, format=lzma.FORMAT_RAW, filters=spec)
+                                flags = len(chain)
+                                head = bytearray([0, 0])
+                                csize = bend.get('csize', len(payload)) if sized else None
+                                usize = bend.get('usize', len(piece)) if sized else None
+                                if csize is not None:
+                                    flags |= 0x40
+                                    head += vli(csize)
+                                if usize is not None:
+                                    flags |= 0x80
+                                    head += vli(usize)
+                                head[1] = flags | bend.get('flagbits', 0)
+                                for name, option in chain:
+                                    props = (bytes([option.get('dist', 1) - 1]) if name == 'delta' else
+                                             struct.pack('<I', option['start_offset']) if option.get('start_offset') else b'')
+                                    head += vli(filter_ids[name][0]) + vli(len(props)) + props
+                                head += vli(0x21) + vli(1) + bytes([bend.get('dict', 16)])
+                                head += bend.get('extra', b'') + bytes(bend.get('pad', 0))
+                                while (len(head) + 4) % 4:
+                                    head.append(0)
+                                head[0] = (len(head) + 4) // 4 - 1
+                                head += struct.pack('<I', zlib.crc32(bytes(head)) ^ bend.get('hdrcrc', 0))
+                                check_bytes = (b'' if kind == 0 else struct.pack('<I', zlib.crc32(piece)) if kind == 1 else
+                                               struct.pack('<Q', crc64(piece)) if kind == 4 else hashlib.sha256(piece).digest())
+                                if bend.get('badcheck') and check_bytes:
+                                    check_bytes = bytes([check_bytes[0] ^ 1]) + check_bytes[1:]
+                                out += bytes(head) + payload + bytes((-len(payload)) % 4) + check_bytes
+                                records.append((len(head) + len(payload) + len(check_bytes), len(piece)))
+                            index = bytearray([0]) + vli(max(0, len(records) + bend.get('records', 0)))
+                            for n, (unpadded, size) in enumerate(records):
+                                index += vli(max(1, unpadded + (bend.get('unpadded', 0) if n == 0 else 0)))
+                                index += vli(max(0, size + (bend.get('size', 0) if n == 0 else 0)))
+                            while len(index) % 4:
+                                index.append(0)
+                            out += index + struct.pack('<I', zlib.crc32(bytes(index)) ^ bend.get('idxcrc', 0))
+                            foot = struct.pack('<I', ((len(index) + 4) // 4 - 1 + bend.get('back', 0)) & 0xffffffff)
+                            foot += bytes([0, bend.get('fkind', kind)])
+                            out += struct.pack('<I', zlib.crc32(foot) ^ bend.get('footcrc', 0)) + foot + b'YZ'
+                            return bytes(out)
+
+                        rand = random.Random(0x5EED5)
+                        for case in range(160):
+                            size = rand.choice([0, 1, 5, 100, 1000, 20000, 70000])
+                            plain = (rand.randbytes(size) if rand.randrange(3) == 0 else
+                                     bytes(rand.choice(b'abcdefgh\n ') for _ in range(size)))
+                            chain = []
+                            for _ in range(rand.choice([0, 0, 1, 1, 2, 3])):
+                                name = rand.choice(['x86', 'ppc', 'ia64', 'arm', 'armt', 'sparc', 'delta'])
+                                option = ({'dist': rand.choice([1, 2, 7, 256])} if name == 'delta' else
+                                          {'start_offset': rand.choice([0, 16, 4096])} if rand.random() < 0.3 else {})
+                                chain.append((name, option))
+                            bend = {}
+                            for _ in range(rand.choice([0, 0, 1, 2])):
+                                field = rand.choice(['csize', 'usize', 'dict', 'extra', 'pad', 'hdrcrc', 'badcheck', 'records',
+                                                     'unpadded', 'size', 'idxcrc', 'back', 'fkind', 'footcrc', 'flagbits'])
+                                bend[field] = {'csize': rand.choice([0, 1, 2, 100, 1 << 40, (1 << 63) - 1]),
+                                               'usize': rand.choice([0, 1, size + 1, max(0, size - 1), 1 << 40, (1 << 63) - 1]),
+                                               'dict': rand.choice([0, 1, 12, 16, 38, 39, 40, 41, 63]),
+                                               'extra': rand.choice([b'\x01', b'\x00' * 5, vli(0x21) + vli(1) + b'\x10']),
+                                               'pad': rand.choice([1, 3, 100]), 'hdrcrc': 1, 'badcheck': 1,
+                                               'records': rand.choice([-1, 1, 5]), 'unpadded': rand.choice([1, -1]),
+                                               'size': rand.choice([1, -1]), 'idxcrc': 1, 'back': rand.choice([-1, 1, 1000]),
+                                               'fkind': rand.choice([0, 1, 4, 10, 15]), 'footcrc': 1,
+                                               'flagbits': rand.choice([0x04, 0x08, 0x10, 0x20])}[field]
+                            blob = assemble(rand, plain, chain, rand.choice([0, 1, 4, 4, 10]), rand.random() < 0.6,
+                                            rand.choice([1, 1, 2, 5]), bend)
+                            if rand.random() < 0.3:
+                                bent = bytearray(blob)
+                                for _ in range(rand.randrange(1, 4)):
+                                    if bent:
+                                        at = rand.randrange(len(bent)) if rand.random() < 0.6 else rand.randrange(min(len(bent), 80))
+                                        how = rand.randrange(4)
+                                        if how == 0:
+                                            bent[at] ^= 1 << rand.randrange(8)
+                                        elif how == 1:
+                                            bent[at] = rand.choice([0, 1, 0x7f, 0x80, 0xff, 0xe0, 0xa0, 0x21])
+                                        elif how == 2:
+                                            del bent[at:at + rand.randrange(1, 40)]
+                                        else:
+                                            bent[at:at] = rand.randbytes(rand.randrange(1, 40))
+                                blob = bytes(bent)
+                            ref = call([refs['xz'], '-dc'], blob)
+                            for how in ([], ['-T1']):
+                                try:
+                                    got = subprocess.run(runner + [exe, '-dc'] + how, input=blob, stdout=subprocess.PIPE,
+                                                         stderr=subprocess.PIPE, timeout=30)
+                                except subprocess.TimeoutExpired:
+                                    check('%s/xz/assembled-%d%s' % (label, case, ''.join(how)), False, 'did not finish')
+                                    continue
+                                same = (got.returncode >= 0 and (got.returncode == 0) == (ref.returncode == 0) and
+                                        (ref.returncode != 0 or got.stdout == ref.stdout) and
+                                        (ref.returncode == 0 or chain or ref.stdout.startswith(got.stdout) or
+                                         got.stdout.startswith(ref.stdout)))
+                                check('%s/xz/assembled-%d%s' % (label, case, ''.join(how)), same,
+                                      'GNU %d %d bytes, ours %d %d bytes %s' % (ref.returncode, len(ref.stdout), got.returncode,
+                                                                                len(got.stdout), got.stderr[:80]))
+                        for prop in (39, 40):
+                            stem = call([refs['xz'], '-c', '-T1', '--lzma2=preset=0', '-Ccrc32'], code[:5000]).stdout
+                            size = (stem[12] + 1) * 4
+                            head = bytearray(stem[12:12 + size - 4])
+                            at = bytes(head).rindex(b'\x21\x01') + 2
+                            head[at] = prop
+                            patched = (stem[:12] + bytes(head) + struct.pack('<I', zlib.crc32(bytes(head))) +
+                                       stem[12 + size:])
+                            got = call(runner + [exe, '-dc'], patched)
+                            check('%s/xz/dictionary-property-%d' % (label, prop),
+                                  got.returncode == 0 and got.stdout == code[:5000], got.stderr.decode(errors='replace'))
                         made = call([refs['xz'], '-c', '-0', '-T1', '--x86', '--lzma2=preset=0'], code)
                         hurt = random.Random(0xF117)
                         for trial in range(40):
