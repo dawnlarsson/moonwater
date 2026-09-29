@@ -540,6 +540,36 @@ static fn unpair(struct window_cell address_to cells, unsigned int length,
         }
 }
 
+/*
+        A character width columns wide that does not fit on what is left of
+        the line wraps whole and leaves the last cell blank, as xterm does.
+        DECAWM off pins the cursor to the last column and every further
+        character overwrites it, which is what stops a status line from
+        scrolling the screen it is drawn on.
+*/
+static inline INLINE fn wrap_for(unsigned int width)
+{
+        if (column + width <= COLUMNS)
+                return;
+
+        if (!autowrap)
+                column = COLUMNS - width;
+        else
+        {
+                column = 0;
+                line_feed();
+        }
+}
+
+// A cell's colours and flags where BLANK_CELL_WORD lays them out, above the
+// character.
+static PURE positive cell_attribute()
+{
+        return ((positive)(reverse ? paper : ink_drawn()) << 32) |
+               ((positive)(reverse ? ink_drawn() : paper) << 40) |
+               ((positive)style << 48);
+}
+
 static fn put_cells(unsigned int character, unsigned int width)
 {
         struct window_cell address_to cells;
@@ -550,21 +580,7 @@ static fn put_cells(unsigned int character, unsigned int width)
         if (width > COLUMNS)
                 width = 1;
 
-        // A character wider than what is left of the line wraps whole and
-        // leaves the last cell blank, as xterm does.
-        if (column + width > COLUMNS)
-        {
-                // DECAWM off pins the cursor to the last column and every
-                // further character overwrites it, which is what stops a
-                // status line from scrolling the screen it is drawn on.
-                if (!autowrap)
-                        column = COLUMNS - width;
-                else
-                {
-                        column = 0;
-                        line_feed();
-                }
-        }
+        wrap_for(width);
 
         // The row's slot, once: nothing below moves head.
         slot = row_slot(row);
@@ -2203,17 +2219,7 @@ static positive text_ascii(const p8 address_to bytes, positive count)
         unsigned int first, had, slot;
         positive room, limit, guarded, attribute, n = 0;
 
-        // put_cells' wrap, for a character one column wide.
-        if (column + 1 > COLUMNS)
-        {
-                if (!autowrap)
-                        column = COLUMNS - 1;
-                else
-                {
-                        column = 0;
-                        line_feed();
-                }
-        }
+        wrap_for(1);
 
         first = column;
         room = COLUMNS - first;
@@ -2231,11 +2237,7 @@ static positive text_ascii(const p8 address_to bytes, positive count)
         limit = count < room ? count : room;
         guarded = had - first;
 
-        // A cell as BLANK_CELL_WORD lays one out: the character in the low
-        // half, the colours and flags above it.
-        attribute = ((positive)(reverse ? paper : ink_drawn()) << 32) |
-                    ((positive)(reverse ? ink_drawn() : paper) << 40) |
-                    ((positive)style << 48);
+        attribute = cell_attribute();
 
         /*
                 The first cell is put here, and the rest of the run, if there
@@ -2392,10 +2394,7 @@ static positive __attribute__((__noinline__)) text_wide(const p8 address_to byte
                                 }
 
                                 had = address_to length;
-                                attribute =
-                                    ((positive)(reverse ? paper : ink_drawn()) << 32) |
-                                    ((positive)(reverse ? ink_drawn() : paper) << 40) |
-                                    ((positive)style << 48);
+                                attribute = cell_attribute();
                         }
 
                         unpair(cells, had, at);
