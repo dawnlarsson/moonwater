@@ -1605,6 +1605,8 @@ static COLD bipolar net_dhcp_apart(string_address device, p8 address_to hardware
         return DHCP_OK;
 }
 
+static COLD fn radio_links_unleased(netlink_search address_to search);
+
 static COLD b32 net_auto(b32 handle, net_holding address_to held)
 {
         netlink_search search;
@@ -1614,6 +1616,7 @@ static COLD b32 net_auto(b32 handle, net_holding address_to held)
         memory_fill(address_of search, 0, sizeof search);
         search.skip_loopback = true;
         search.prefer = net_internet_prefer();
+        radio_links_unleased(address_of search);
 
         if (netlink_link_find(handle, address_of search) < 0)
         {

@@ -93,6 +93,7 @@
 #define NETLINK_PREFER_ANY 0
 #define NETLINK_PREFER_WIRED 1
 #define NETLINK_PREFER_WIFI 2
+#define NETLINK_LINK_ETHER 1
 
 #define IFA_ADDRESS 1
 #define IFA_LOCAL 2
@@ -739,6 +740,8 @@ typedef struct
         bool skip_loopback;
         bool has_hardware;
         bool wireless;
+        p8 skip_count;
+        p32 skip[8];
         //      The kernel's count of carrier losses, where it says one.
         bool carrier_counted;
         p32 carrier_downs;
@@ -814,8 +817,20 @@ static bool netlink_link_seen(netlink_header address_to header, address_any cont
 
         if (search->skip_loopback)
         {
-                if (link->flags & IFF_LOOPBACK)
+                /*
+                        Only a link a lease can be had on: Ethernet framing
+                        (ARPHRD_ETHER), which a wifi station has too, and not
+                        one of the wifi links the caller named in skip -- an
+                        access point or anything else that is no station.
+                        A radio's monitor (hwsim0, ARPHRD_IEEE80211_RADIOTAP)
+                        was taken, and DHCP waited out its whole schedule
+                        on it before the station was looked at.
+                */
+                if ((link->flags & IFF_LOOPBACK) || link->kind != NETLINK_LINK_ETHER)
                         return true;
+                for (positive at = 0; at < search->skip_count && at < 8; at++)
+                        if (search->skip[at] == link->index)
+                                return true;
 
                 /*
                         Not the first one found -- the best one.

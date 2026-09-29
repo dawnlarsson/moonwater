@@ -44839,8 +44839,8 @@ def netlink_fuzz_seeds():
     def rta(kind, data):
         return pad(struct.pack("<HH", 4 + len(data), kind) + data)
 
-    def link(index, flags, name, *more):
-        return message(16, struct.pack("<BBHiII", 0, 0, 1, index, flags, 0) +
+    def link(index, flags, name, *more, kind=1):
+        return message(16, struct.pack("<BBHiII", 0, 0, kind, index, flags, 0) +
                        rta(3, name + b"\0") + b"".join(more))
 
     def done(status=0, sequence=1):
@@ -44874,6 +44874,10 @@ def netlink_fuzz_seeds():
         "discover.bin": b"\0" + kernel(lo, eth, down) + kernel(done()),
         "discover_wifi.bin": b"\x20" + kernel(lo, eth, wifi, done()),
         "discover_wired.bin": b"\x10" + kernel(lo, wifi, eth, done()),
+        # A radio's monitor (ARPHRD_IEEE80211_RADIOTAP) and a tunnel, running,
+        # ahead of a wired link that is not: discovery passes over both.
+        "discover_monitor.bin": b"\0" + kernel(lo, link(5, 1 | 2 | 64, b"hwsim0", hardware, kind=803),
+                                                link(6, 1 | 64, b"wg0", kind=65534), down, done()),
         "named.bin": b"\1" + kernel(lo, eth, wifi, done()),
         "link_show.bin": b"\3" + kernel(lo, eth, wifi, down, done()),
         "addr_show.bin": b"\4" + kernel(address, message(
@@ -46911,6 +46915,7 @@ def harness_tls_fuzz(argv):
     seeds = {corpus: len(tls_fuzz_seeds(corpus))
              for corpus in ("tls_der", "tls_hs", "waterlink", "dhcp", "sntp", "dns", "netlink", "crypto", "http")}
     seeds["waterlink_pre"] = len(waterlink_pre_seeds())
+    seeds["wifi_eapol"] = len(wifi_eapol_fuzz_seeds())
     targets = []
     for name, corpus, harness in (
             ("tls_der_fuzz", "tls_der", harness_tls_der_fuzz),
@@ -46920,6 +46925,7 @@ def harness_tls_fuzz(argv):
             ("waterlink_fuzz", "waterlink", harness_waterlink_fuzz),
             ("dhcp_fuzz", "dhcp", harness_dhcp_fuzz),
             ("sntp_fuzz", "sntp", harness_sntp_fuzz),
+            ("wifi_eapol_fuzz", "wifi_eapol", harness_wifi_eapol_fuzz),
             ("dns_fuzz", "dns", harness_dns_fuzz),
             ("netlink_fuzz", "netlink", harness_netlink_fuzz),
             ("crypto_fuzz", "crypto", harness_crypto_fuzz),
@@ -46995,8 +47001,8 @@ def harness_msan_net(argv):
          (same lift pieces as tls_der_fuzz)
       4. thin CHECK_net-equivalent probes (align/sizeof + parser shape checks);
          not a full freestanding CHECK_net under MSan
-      5. short tls_der_fuzz / tls_hs_fuzz / sntp_fuzz / dns_fuzz / netlink_fuzz
-         seed smokes with MOONWATER_MSAN=1
+      5. short tls_der_fuzz / tls_hs_fuzz / sntp_fuzz / wifi_eapol_fuzz /
+         dns_fuzz / netlink_fuzz seed smokes with MOONWATER_MSAN=1
     Returns 2 (NOT RUN) when MSan is unavailable (Apple clang, many qemu
     images).
 
@@ -48081,6 +48087,7 @@ int main(void)
         hs = harness_tls_hs_fuzz([])
         dhcp = harness_dhcp_fuzz([])
         sntp = harness_sntp_fuzz([])
+        wifi = harness_wifi_eapol_fuzz([])
         dns = harness_dns_fuzz([])
         netlink = harness_netlink_fuzz([])
         crypto = harness_crypto_fuzz([])
@@ -48100,6 +48107,7 @@ int main(void)
     checks(hs == 0, "tls_hs_fuzz clean under MSan")
     checks(dhcp == 0, "dhcp_fuzz clean under MSan")
     checks(sntp == 0, "sntp_fuzz clean under MSan")
+    checks(wifi == 0, "wifi_eapol_fuzz clean under MSan")
     checks(dns == 0, "dns_fuzz clean under MSan")
     checks(netlink == 0, "netlink_fuzz clean under MSan")
     checks(crypto in (0, 2), "crypto_fuzz clean under MSan")
@@ -48132,7 +48140,7 @@ def harness_security_hygiene(argv):
     security = ("tls_chains", "https_downgrade", "http_response_framing",
                 "tls_der_fuzz", "tls_hs_fuzz", "tls_fuzz", "msan_net", "pathname_race",
                 "dhcp_fuzz", "sntp_fuzz", "dns_fuzz", "netlink_fuzz", "tls_peer",
-                "http_fuzz", "http_urls")
+                "http_fuzz", "http_urls", "wifi_eapol_fuzz")
     for name in security + ("tls_verify_fuzz",):
         checks(name in HARNESS_CHECKS, "differential.py: %s is not registered" % name)
     table = re.search(r"^HARNESS_CHECKS = \{$(.*?)^\}$", source, re.M | re.S)
@@ -48143,7 +48151,7 @@ def harness_security_hygiene(argv):
     for name in security:
         checks("--harness " + name in run, "test/run: no lane asks for --harness " + name)
     for name in ("tls_der_fuzz", "tls_hs_fuzz", "pathname_race", "dhcp_fuzz",
-                 "sntp_fuzz", "dns_fuzz", "netlink_fuzz", "http_fuzz"):
+                 "sntp_fuzz", "dns_fuzz", "netlink_fuzz", "http_fuzz", "wifi_eapol_fuzz"):
         checks(name + ": skipped (soft)" in run, "test/run: no soft skip for " + name)
 
     names = set()
@@ -50498,6 +50506,527 @@ def harness_guest_scenarios(argv):
     return 0
 
 
+#       wifi_eapol_fuzz: what the lift of host.c's EAPOL-Key state machine
+#       stands on, below net.c's hosted crypto: the frame and key calls it
+#       makes, recorded, and the rules every key it installs is held to.
+WIFI_EAPOL_FUZZ_SHIM = r"""
+static inline p8 byte_is_hexadecimal(p8 b) { return isxdigit(b) != 0; }
+static inline p8 byte_to_lower(p8 b) { return (p8)tolower(b); }
+static void network_store_16(p8 *bytes, p16 value)
+{
+        bytes[0] = (p8)(value >> 8);
+        bytes[1] = (p8)value;
+}
+#define network_order_16(v) ((p16)((((v) & 0xff) << 8) | (((v) >> 8) & 0xff)))
+#define AF_PACKET 17
+#define ETH_P_PAE 0x888e
+typedef struct
+{
+        p16 family;
+        p16 protocol;
+        p32 index;
+        p16 hatype;
+        p8 pkttype;
+        p8 halen;
+        p8 addr[8];
+} socket_address_packet;
+typedef struct
+{
+        b32 handle;
+        p16 family;
+        p32 mlme;
+        p32 scan;
+} nl80211;
+#define NL80211_KEYTYPE_GROUP 0
+#define NL80211_KEYTYPE_PAIRWISE 1
+#define WIFI_EAPOL_HDR 99
+#define WIFI_GTK_WRAP 24
+#define WIFI_WRAP_MOST 408
+
+static const p8 *fz_at;
+static positive fz_left;
+static p8 fz_byte(void)
+{
+        if (!fz_left)
+                return 0;
+        fz_left--;
+        return *fz_at++;
+}
+static void fz_take(p8 *into, positive n)
+{
+        for (positive i = 0; i < n; i++)
+                into[i] = fz_byte();
+}
+
+/* What the station sent, and the keys the model access point allows. */
+static p8 fz_sent[512];
+static positive fz_sent_length;
+static int fz_sends;
+static p8 fz_ap_tk[16], fz_ap_gtk[16], fz_ap_gtk_idx;
+/* Every key the access point has put in a message 3 or group message 1:
+   an old message 3 let through before any handshake completed is still
+   the access point's, and its key may go in. */
+static p8 fz_made[32][17];
+static positive fz_made_count;
+static void fz_made_add(p8 idx, const p8 *key)
+{
+        if (fz_made_count < 32)
+        {
+                fz_made[fz_made_count][0] = idx;
+                memcpy(fz_made[fz_made_count++] + 1, key, 16);
+        }
+}
+static bool fz_made_by_ap(p8 idx, const p8 *key)
+{
+        for (positive at = 0; at < fz_made_count; at++)
+                if (fz_made[at][0] == idx && !memcmp(fz_made[at] + 1, key, 16))
+                        return true;
+        return false;
+}
+static p8 fz_sta_tk[16], fz_sta_gtk[4][16];
+static bool fz_sta_tk_set, fz_sta_gtk_set[4], fz_authorized;
+
+static bipolar socket_send(b32 handle, const void *data, positive size, b32 flags,
+                           const void *to, positive to_size)
+{
+        const socket_address_packet *packet = to;
+
+        (void)handle, (void)flags;
+        if (size > sizeof fz_sent || !to || to_size != sizeof *packet || packet->halen != 6)
+                abort();
+        memcpy(fz_sent, data, size);
+        fz_sent_length = size;
+        fz_sends++;
+        return (bipolar)size;
+}
+static void socket_close(b32 handle) { (void)handle; }
+static void nl80211_close(nl80211 *session) { session->handle = -1; }
+static bipolar system_random_fill(address_any into, positive length, positive flags)
+{
+        (void)flags;
+        fz_take(into, length);
+        return 0;
+}
+
+/* A key goes in only as the access point made it, and never twice the
+   same: a reinstalled key is a reset nonce (KRACK). */
+static bipolar nl80211_new_key(nl80211 *session, p32 index, p8 idx, p32 type, p8 *mac,
+                               p8 *key, positive key_length, p8 *seq, positive seq_length,
+                               bool group_default)
+{
+        (void)session, (void)index, (void)mac, (void)seq;
+        if (key_length != 16)
+                abort();
+        if (type == NL80211_KEYTYPE_PAIRWISE)
+        {
+                if (idx || !mac || group_default || !fz_made_by_ap(0, key) ||
+                    (fz_sta_tk_set && !memcmp(key, fz_sta_tk, 16)))
+                        abort();
+                memcpy(fz_sta_tk, key, 16);
+                fz_sta_tk_set = true;
+                return 0;
+        }
+        if (!idx || idx > 3 || !fz_made_by_ap(idx, key) ||
+            seq_length != 6 || !group_default ||
+            (fz_sta_gtk_set[idx] && !memcmp(key, fz_sta_gtk[idx], 16)))
+                abort();
+        memcpy(fz_sta_gtk[idx], key, 16);
+        fz_sta_gtk_set[idx] = true;
+        return 0;
+}
+static bipolar nl80211_authorize(nl80211 *session, p32 index, p8 *mac)
+{
+        (void)session, (void)index, (void)mac;
+        if (!fz_sta_tk_set)
+                abort();
+        fz_authorized = true;
+        return 0;
+}
+"""
+
+WIFI_EAPOL_FUZZ_DRIVER = r"""
+static void wifi_rekey_offload(wifi_link *link) { (void)link; }
+
+/* RFC 3394 key wrap, the access point's half of wifi_kw_unwrap. */
+static void fz_wrap(const p8 *kek, const p8 *plain, positive n, p8 *out)
+{
+        p8 round[176], block[16], a[8];
+        positive words = n / 8;
+
+        crypto_aes128_expand((p8 *)kek, round);
+        memset(a, 0xa6, 8);
+        memcpy(out + 8, plain, n);
+        for (positive j = 0; j < 6; j++)
+                for (positive i = 1; i <= words; i++)
+                {
+                        p64 t = (p64)words * j + i;
+
+                        memcpy(block, a, 8);
+                        memcpy(block + 8, out + 8 * i, 8);
+                        fuzz_aes_encrypt(round, block, block);
+                        memcpy(a, block, 8);
+                        crypto_put_be64(a, crypto_be64(a) ^ t);
+                        memcpy(out + 8 * i, block + 8, 8);
+                }
+        memcpy(out, a, 8);
+}
+
+static wifi_link fz_link;
+static p8 fz_pmk[32], fz_anonce[32], fz_ptk[64], fz_pending[64], fz_rsc[8];
+static const p8 fz_ap[6] = {2, 0, 0, 0, 1, 0}, fz_sta[6] = {2, 0, 0, 0, 2, 0};
+static p64 fz_replay, fz_verified;
+static bool fz_pending_set, fz_ptk_set, fz_clean;
+/* A replayed, bent or raw frame the station answered leaves it where the
+   model cannot follow; the rules on installs still hold, the expectations
+   of each answer no longer do. */
+static bool fz_lost;
+static p8 fz_frames[8][512];
+static positive fz_frame_length[8], fz_frame_count;
+static p8 fz_m3[512];
+static positive fz_m3_length, fz_g1_length;
+
+/* The frame the model access point sends: MIC under kck when given. */
+static positive fz_frame(p8 *f, p16 info, const p8 *nonce, const p8 *data, positive n,
+                         const p8 *kck)
+{
+        memset(f, 0, 99 + n);
+        f[0] = (p8)(1 + (fz_replay & 1));
+        f[1] = 3;
+        network_store_16(f + 2, (p16)(95 + n));
+        f[4] = 2;
+        network_store_16(f + 5, info);
+        network_store_16(f + 7, 16);
+        crypto_put_be64(f + 9, fz_replay);
+        if (nonce)
+                memcpy(f + 17, nonce, 32);
+        memcpy(f + 65, fz_rsc, 8);
+        network_store_16(f + 97, (p16)n);
+        if (n)
+                memcpy(f + 99, data, n);
+        if (kck)
+        {
+                p8 hash[20];
+
+                wifi_hmac_sha1((p8 *)kck, 16, f, 99 + n, hash);
+                memcpy(f + 81, hash, 16);
+        }
+        return 99 + n;
+}
+
+/* One frame through the station, from a heap block exactly its length. */
+static bipolar fz_deliver(const p8 *frame, positive length)
+{
+        p8 *copy = malloc(length ? length : 1);
+        bipolar step;
+
+        memcpy(copy, frame, length);
+        fz_sends = 0;
+        step = wifi_eapol_step(&fz_link, copy, length);
+        free(copy);
+        if (fz_frame_count < 8 && length <= 512)
+        {
+                memcpy(fz_frames[fz_frame_count], frame, length);
+                fz_frame_length[fz_frame_count++] = length;
+        }
+        return step;
+}
+
+/* The station's answer checked: its key information, the replay counter
+   it answers and a MIC under kck. */
+static void fz_answer(p16 info, const p8 *kck)
+{
+        p8 copy[512], hash[20];
+
+        if (fz_sends != 1 || fz_sent_length < 99 || network_load_16(fz_sent + 5) != info ||
+            crypto_be64(fz_sent + 9) != fz_replay)
+                abort();
+        memcpy(copy, fz_sent, fz_sent_length);
+        memset(copy + 81, 0, 16);
+        wifi_hmac_sha1((p8 *)kck, 16, copy, fz_sent_length, hash);
+        if (memcmp(hash, fz_sent + 81, 16))
+                abort();
+}
+
+/* The GTK KDE after the RSN element for message 3, alone for group message
+   1, padded and wrapped under the KEK. */
+static positive fz_key_data(p8 *out, const p8 *kek, bool rsn)
+{
+        p8 plain[64];
+        positive n = 0;
+
+        if (rsn)
+        {
+                memcpy(plain, wifi_rsn_ie, sizeof wifi_rsn_ie);
+                n = sizeof wifi_rsn_ie;
+        }
+        plain[n++] = 0xdd, plain[n++] = 22;
+        plain[n++] = 0, plain[n++] = 0x0f, plain[n++] = 0xac, plain[n++] = 1;
+        plain[n++] = fz_ap_gtk_idx, plain[n++] = 0;
+        memcpy(plain + n, fz_ap_gtk, 16);
+        n += 16;
+        if (n % 8)
+        {
+                plain[n++] = 0xdd;
+                while (n % 8)
+                        plain[n++] = 0;
+        }
+        fz_wrap(kek, plain, n, out);
+        return n + 8;
+}
+
+static void fz_new_gtk(void)
+{
+        static p8 turn;
+
+        fz_take(fz_ap_gtk, 16);
+        fz_ap_gtk[0] ^= ++turn;
+        fz_ap_gtk[1] ^= 0x5a;
+        fz_ap_gtk_idx = fz_ap_gtk_idx == 1 ? 2 : 1;
+        fz_made_add(fz_ap_gtk_idx, fz_ap_gtk);
+}
+
+int LLVMFuzzerTestOneInput(const p8 *data, positive size)
+{
+        fz_at = data, fz_left = size;
+        memset(&fz_link, 0, sizeof fz_link);
+        fz_link.eapol = 3, fz_link.session.handle = 4, fz_link.index = 7;
+        memcpy(fz_link.sta, fz_sta, 6);
+        memcpy(fz_link.bssid, fz_ap, 6);
+        fz_take(fz_pmk, 32);
+        memcpy(fz_link.pmk, fz_pmk, 32);
+        fz_replay = fz_byte();
+        fz_verified = 0;
+        fz_pending_set = fz_ptk_set = false;
+        fz_clean = true;
+        fz_lost = false;
+        fz_frame_count = fz_m3_length = fz_g1_length = 0;
+        fz_sta_tk_set = fz_authorized = false;
+        fz_made_count = 0;
+        memset(fz_sta_gtk_set, 0, sizeof fz_sta_gtk_set);
+        fz_ap_gtk_idx = 2;
+        fz_new_gtk();
+
+        for (int ops = 0; fz_left && ops < 24; ops++)
+        {
+                p8 op = fz_byte() % 8;
+                p8 frame[512], wrapped[80];
+                positive n;
+                bipolar step;
+
+                fz_take(fz_rsc, 6);
+                if (op == 0)                    /* message 1 */
+                {
+                        fz_take(fz_anonce, 32);
+                        fz_replay++;
+                        step = fz_deliver(frame, fz_frame(frame, 0x008a, fz_anonce, 0, 0, 0));
+                        if (step != 0 || fz_sends != 1 ||
+                            network_load_16(fz_sent + 97) != sizeof wifi_rsn_ie ||
+                            memcmp(fz_sent + 99, wifi_rsn_ie, sizeof wifi_rsn_ie))
+                                abort();
+                        wifi_ptk(fz_pmk, (p8 *)fz_ap, (p8 *)fz_sta, fz_anonce, fz_sent + 17,
+                                 fz_pending);
+                        fz_answer(0x010a, fz_pending);
+                        fz_pending_set = true;
+                        fz_clean = !fz_lost;
+                }
+                else if (op == 1 && fz_pending_set)     /* message 3 */
+                {
+                        memcpy(fz_ap_tk, fz_pending + 32, 16);
+                        fz_made_add(0, fz_ap_tk);
+                        fz_made_add(fz_ap_gtk_idx, fz_ap_gtk);
+                        fz_replay++;
+                        n = fz_key_data(wrapped, fz_pending + 16, true);
+                        n = fz_frame(frame, 0x13ca, fz_anonce, wrapped, n, fz_pending);
+                        step = fz_deliver(frame, n);
+                        if (fz_clean && (step != 1 || !fz_authorized ||
+                                         memcmp(fz_sta_tk, fz_pending + 32, 16)))
+                                abort();
+                        if (step == 1)
+                        {
+                                fz_answer(0x030a, fz_pending);
+                                memcpy(fz_ptk, fz_pending, 64);
+                                memcpy(fz_m3, frame, n);
+                                fz_m3_length = n;
+                                fz_verified = fz_replay;
+                                fz_ptk_set = true;
+                        }
+                        fz_pending_set = false;
+                }
+                else if (op == 2 && fz_ptk_set)         /* group message 1 */
+                {
+                        fz_new_gtk();
+                        fz_replay++;
+                        n = fz_key_data(wrapped, fz_ptk + 16, false);
+                        n = fz_frame(frame, 0x1382, 0, wrapped, n, fz_ptk);
+                        fz_g1_length = n;
+                        step = fz_deliver(frame, n);
+                        if (fz_clean && step != 2)
+                                abort();
+                        if (step == 2)
+                        {
+                                fz_answer(0x0302, fz_ptk);
+                                fz_verified = fz_replay;
+                        }
+                }
+                else if ((op == 3 && fz_m3_length && fz_ptk_set) ||
+                         (op == 4 && fz_g1_length))     /* resent: no key again */
+                {
+                        fz_replay++;
+                        if (op == 3)
+                        {
+                                //      Message 3 as it was, under a new
+                                //      counter: its group key may be one
+                                //      the access point has since replaced.
+                                n = fz_m3_length;
+                                crypto_put_be64(fz_m3 + 9, fz_replay);
+                                memcpy(frame, fz_m3, n);
+                                memset(frame + 81, 0, 16);
+                                {
+                                        p8 hash[20];
+
+                                        wifi_hmac_sha1(fz_ptk, 16, frame, n, hash);
+                                        memcpy(frame + 81, hash, 16);
+                                }
+                        }
+                        else
+                        {
+                                //      The current group key again, wrapped
+                                //      and signed under the current PTK, as
+                                //      hostapd's RESEND_GROUP_M1 sends it.
+                                n = fz_key_data(wrapped, fz_ptk + 16, false);
+                                n = fz_frame(frame, 0x1382, 0, wrapped, n, fz_ptk);
+                        }
+                        step = fz_deliver(frame, n);
+                        if (fz_clean && fz_ptk_set && step != (op == 3 ? 1 : 2))
+                                abort();
+                        if (step > 0)
+                        {
+                                fz_answer(op == 3 ? 0x030a : 0x0302, fz_ptk);
+                                fz_verified = fz_replay;
+                        }
+                }
+                else if (op == 5 && fz_frame_count)     /* an old frame again */
+                {
+                        positive which = fz_byte() % fz_frame_count;
+
+                        n = fz_frame_length[which];
+                        memcpy(frame, fz_frames[which], n);
+                        step = fz_deliver(frame, n);
+                        if (n >= 17 && crypto_be64(frame + 9) <= fz_verified && fz_verified &&
+                            (step != 0 || fz_sends))
+                                abort();
+                        fz_lost |= step != 0 || fz_sends;
+                        fz_clean = false;
+                }
+                else if (op == 6 && fz_frame_count)     /* one bit bent */
+                {
+                        positive which = fz_byte() % fz_frame_count;
+                        positive at;
+
+                        n = fz_frame_length[which];
+                        if (n < 17)
+                                continue;
+                        memcpy(frame, fz_frames[which], n);
+                        at = (fz_byte() | fz_byte() << 8) % (n * 8);
+                        frame[at / 8] ^= (p8)(1u << (at % 8));
+                        crypto_put_be64(frame + 9, ++fz_replay);
+                        fz_lost |= fz_deliver(frame, n) != 0 || fz_sends;
+                        fz_clean = false;
+                }
+                else if (op == 7)                       /* anything at all */
+                {
+                        n = fz_byte() | (fz_byte() & 1) << 8;
+                        fz_take(frame, n);
+                        fz_lost |= fz_deliver(frame, n) != 0 || fz_sends;
+                        fz_clean = false;
+                }
+        }
+        return 0;
+}
+"""
+
+
+def wifi_eapol_fuzz_source(net, host, checks):
+    """The lift: net.c's hosted crypto (crypto_fuzz's, without its oracle and
+    driver), then host.c's WPA key derivation, AES unwrap and EAPOL-Key
+    state machine by their anchors, over WIFI_EAPOL_FUZZ_SHIM; then the
+    model access point. ValueError when an anchor moved."""
+    crypto = crypto_fuzz_source(net, checks, False)
+    if CRYPTO_FUZZ_DRIVER_C not in crypto:
+        raise ValueError("crypto_fuzz_source no longer ends in its driver")
+    crypto = crypto.replace(CRYPTO_FUZZ_DRIVER_C, "")
+    derive = net_zone_fuzz_slice(host, "static COLD fn wifi_hmac_sha1(",
+                                 "static COLD bool nl80211_ext_bit(")
+    link = net_zone_fuzz_slice(host, "#define WIFI_KEY_PAIRWISE",
+                               "/* The replay counter and keys for a driver")
+    step = net_zone_fuzz_slice(host, "/*\n        One EAPOL-Key frame from the access point",
+                               "/* The link's news on the mlme socket")
+    return "\n".join((crypto, "#include <ctype.h>", WIFI_EAPOL_FUZZ_SHIM, derive, link,
+                      "static void wifi_rekey_offload(wifi_link *link);", step,
+                      WIFI_EAPOL_FUZZ_DRIVER))
+
+
+def wifi_eapol_fuzz_seeds():
+    """Whole exchanges in the driver's op language: a handshake, then every
+    rekey and resend, replays and bent bits after it. Each op byte is
+    followed by six RSC bytes; messages 1 carry an ANonce and the station's
+    SNonce, group rekeys a GTK."""
+    rng = random.Random(8021)
+
+    def draw(size):
+        return bytes(rng.getrandbits(8) for _ in range(size))
+
+    def op(code, *extra):
+        return bytes((code,)) + draw(6) + b"".join(extra)
+
+    def handshake():
+        return op(0, draw(32), draw(32)) + op(1)
+
+    seeds = {"empty.bin": b""}
+    start = draw(32) + b"\x05"
+    seeds["handshake.bin"] = start + handshake()
+    seeds["group_rekey.bin"] = start + handshake() + op(2, draw(16)) + op(2, draw(16))
+    seeds["ptk_rekey.bin"] = start + handshake() + op(0, draw(32), draw(32)) + op(1)
+    seeds["resend_m3.bin"] = start + handshake() + op(3) + op(3)
+    seeds["resend_group.bin"] = start + handshake() + op(2, draw(16)) + op(4) + op(4)
+    seeds["retransmitted_m1.bin"] = start + op(0, draw(32), draw(32)) + op(0, draw(32)) + op(1)
+    seeds["replays.bin"] = (start + handshake() + op(2, draw(16)) + op(5, b"\x00") +
+                            op(5, b"\x01") + op(5, b"\x02"))
+    seeds["bent.bin"] = start + handshake() + op(6, b"\x01", b"\x40\x02") + op(2, draw(16))
+    seeds["raw.bin"] = start + op(7, b"\x63\x00", draw(99)) + handshake()
+    seeds["everything.bin"] = (start + handshake() + op(2, draw(16)) + op(0, draw(32), draw(32)) +
+                               op(1) + op(3) + op(4) + op(5, b"\x03") + op(6, b"\x02", b"\x10\x00") +
+                               op(2, draw(16)) + op(7, b"\x20\x00", draw(32)))
+    return seeds
+
+
+def harness_wifi_eapol_fuzz(argv):
+    """libFuzzer over host.c's EAPOL-Key state machine, the one the join's
+    four-way handshake and the keeper's rekeys both run: wifi_eapol_step
+    and the frame, MIC, unwrap and GTK helpers under it, lifted by their
+    anchors over net.c's hosted crypto. The input drives a model access
+    point -- message 1, message 3, group message 1, each resent, old frames
+    replayed, bits bent, raw frames -- whose MICs and wrapped keys are
+    real, so the whole machine is reached. Every key the station installs
+    has to be the access point's current one and never the one already in
+    (KRACK); every answer has to carry the right key information, replay
+    counter and MIC; a replayed frame has to go unanswered. Bounded
+    fixed-seed; 2 when clang/libFuzzer is absent.
+
+        python3 test/differential.py --harness wifi_eapol_fuzz
+    """
+    del argv
+    try:
+        source = wifi_eapol_fuzz_source((HARNESS_ROOT / "src/net/net.c").read_text(),
+                                        (HARNESS_ROOT / "src/sh/host.c").read_text(),
+                                        (HARNESS_ROOT / "test/checks.c").read_text())
+    except (ValueError, RuntimeError) as exc:
+        print("  FAIL wifi eapol fuzz: " + str(exc))
+        write_tally("wifi-eapol-fuzz", 0, 1)
+        return 1
+    return tls_fuzz_run("wifi eapol", wifi_eapol_fuzz_seeds(), source, 2048)
+
+
 def harness_wifi_air(argv):
     """Networks in the air of a virtual machine, for the wifi lane.
 
@@ -50526,12 +51055,29 @@ def harness_wifi_air(argv):
              first, marked joined or saved, its name made safe; then with
              only a network whose password is wrong saved, why the machine
              is not joined, there and in moonwater status
+      watch  ip watch leases the station and never the radio's monitor
+             (hwsim0) or an access point in the machine's own namespace
+      reassoc the link held while idle; the access point gone and back,
+             joined again; a twin by the same name taking over when the
+             first goes, and the first again after it
+      rekey  (--hostapd, a hostapd built with CONFIG_TESTING_OPTIONS) the
+             access point's group and pairwise rekeys and resent messages
+             answered with the link and its data intact; an access point
+             that never sends message 1 is said to have ended the
+             handshake, quickly; one that stops answering authentication
+             is left for its twin
+
+    The access points other than the WPA3-only one run in a network
+    namespace of their own (hwsim_radio hold/move/in), with a DHCP server
+    in raw frames on the first (hwsim_radio dhcp), so the station's lease
+    comes over the air. Lines "wifi-time NAME SECONDS" are join times.
     """
     import random
     seed = 1
     if "--seed" in argv:
         seed = int(argv[argv.index("--seed") + 1])
     rng = random.Random(seed)
+    hostapd = "--hostapd" in argv
     out = []
     expects = []
 
@@ -50618,8 +51164,17 @@ def harness_wifi_air(argv):
     prep.append("[ -d /sys/module/mac80211_hwsim ] && echo hwsm-on | rev")
     prep.append("for i in $(seq 40); do [ -b /dev/sda1 ] && break; sleep 0.25; done")
     prep.append("mkdir -p /mnt/stick && mount -r -t vfat /dev/sda1 /mnt/stick")
-    prep.append("W=\"/mnt/stick/lib/ld-linux-x86-64.so.2 --library-path /mnt/stick/lib /mnt/stick/wpa_supplicant\"")
+    prep.append("L=\"/mnt/stick/lib/ld-linux-x86-64.so.2 --library-path /mnt/stick/lib\"")
+    prep.append("W=\"$L /mnt/stick/wpa_supplicant\"")
     prep.append("rm -f /root/wifi /root/wifi.power /run/moonwater/wifi.last")
+    prep.append("printf 'wifi\\n' > /root/internet")
+    # Every access point's radio made first, so each is wlanN by its place;
+    # all but the WPA3-only one then go to the access points' namespace.
+    # That one stays as an access point beside the station, for ip watch
+    # to pass over.
+    prep.append("NS=$(/mnt/stick/hwsim_radio hold); A=\"/mnt/stick/hwsim_radio in $NS\"; K=wlan3")
+    for at, ap in enumerate(aps):
+        prep.append("/mnt/stick/hwsim_radio new > /dev/null")
     for at, ap in enumerate(aps):
         body = ["network={", "ssid=%s" % ap["ssid"].hex(), "mode=2",
                 "frequency=%d" % (2407 + 5 * ap["channel"])]
@@ -50635,15 +51190,28 @@ def harness_wifi_air(argv):
                 body += ["sae_password=\"%s\"" % ap["password"],
                          "ieee80211w=%d" % (2 if ap["kind"] == "wpa3" else 1)]
         body.append("}")
-        prep.append("/mnt/stick/hwsim_radio new > /dev/null")
         prep.append("printf '%%s\\n' %s > /tmp/ap%d.conf" % (" ".join(q(line) for line in body), at))
-        prep.append("$W -B -i wlan%d -c /tmp/ap%d.conf -D nl80211 -f /tmp/ap%d.log" % (at, at, at))
+        if at == 3:
+            prep.append("i3=wlan3; $W -B -i wlan3 -c /tmp/ap3.conf -D nl80211 -f /tmp/ap3.log -P /tmp/ap3.pid")
+        else:
+            prep.append("i%d=$(/mnt/stick/hwsim_radio move $NS wlan%d)" % (at, at))
+            prep.append("$A $W -B -i $i%d -c /tmp/ap%d.conf -D nl80211 -f /tmp/ap%d.log -P /tmp/ap%d.pid"
+                        % (at, at, at, at))
     prep.append("for i in $(seq 40); do n=$(cat /tmp/ap*.log 2>/dev/null | grep -c AP-ENABLED); [ \"$n\" = %d ] && break; sleep 0.25; done" % len(aps))
     for at, ap in enumerate(aps):
-        prep.append("/mnt/stick/hwsim_radio power wlan%d %d" % (at, ap["power"]))
+        prep.append("%s/mnt/stick/hwsim_radio power $i%d %d" % ("" if at == 3 else "$A ", at, ap["power"]))
+    prep.append("$A /mnt/stick/hwsim_radio dhcp $i0 40 > /tmp/dhcp0.log 2>&1 &")
     for at, ap in enumerate(aps):
         prep.append("ap%d=\"$(printf '%s')\"" % (at, octal(ap["ssid"])))
-    station = "wlan%d" % len(aps)
+    # The station: the one radio here that is not the access point K.
+    prep.append("station() { for f in /sys/class/net/*/phy80211; do d=${f%/phy80211}; d=${d##*/}; "
+                "[ \"$d\" = \"$K\" ] || [ \"$d\" = \"$1\" ] || echo $d; done | head -1; }")
+    prep.append("uptime_now() { cut -d' ' -f1 /proc/uptime; }")
+    prep.append("took() { awk -v a=\"$1\" -v b=\"$(uptime_now)\" 'BEGIN { printf \"%.2f\\n\", b - a }'; }")
+    prep.append("joined() { moonwater status 2>/dev/null | grep -c -x -F \"  wifi joined $1\"; }")
+    # When the station last associated: how long a handshake took to fail
+    # is from there, not from before the scan a join may start with.
+    prep.append("associated_at() { dmesg | grep \": associated\\$\" | tail -1 | sed 's/^\\[ *\\([0-9.]*\\)\\].*/\\1/'; }")
     out.extend(prep)
 
     # ---- late: saved first, the radio after
@@ -50656,11 +51224,72 @@ def harness_wifi_air(argv):
     lines.append("scen_count 'late radio joined with no command' 1 \"$(moonwater status 2>/dev/null | grep -c -x -F \"  wifi joined $ap0\")\"")
     family("late", lines)
 
+    # ---- watch: the lease is for the station and nothing else wifi
+    lines = []
+    lines.append("S=$(station); echo \"station $S\"")
+    lines.append("for i in $(seq 120); do dmesg | grep -q \"ip: 192.168.77.100/24 on $S\" && break; sleep 0.5; done")
+    lines.append("scen_count 'watch leased the station' 1 \"$(dmesg | grep -c \"ip: 192.168.77.100/24 on $S\")\"")
+    lines.append("scen_count 'watch never took the radio monitor' 0 \"$(dmesg | grep -c 'ip: using hwsim0')\"")
+    lines.append("scen_count 'watch never took an access point' 0 \"$(dmesg | grep -c \"ip: using $K\\$\")\"")
+    family("watch", lines)
+
+    # ---- reassoc: joined, the machine keeps the association while idle;
+    # the access point goes and comes back, and the machine joins again;
+    # then a second access point with the same name and password takes
+    # over when the first goes (a roam), and the first once more after it.
+    lines = []
+    lines.append("a0=$(dmesg | grep -c \"$S: authenticate with\"); l0=$(dmesg | grep -c \"$S: deauthenticating from .* by local choice\")")
+    lines.append("sleep 20")
+    lines.append("scen_count 'reassoc idle still joined' 1 \"$(joined \"$ap0\")\"")
+    lines.append("scen_count 'reassoc idle no new authentication' \"$a0\" \"$(dmesg | grep -c \"$S: authenticate with\")\"")
+    lines.append("scen_count 'reassoc idle no local deauth' \"$l0\" \"$(dmesg | grep -c \"$S: deauthenticating from .* by local choice\")\"")
+    lines.append("kill $(cat /tmp/ap0.pid)")
+    lines.append("for i in $(seq 60); do [ \"$(joined \"$ap0\")\" = 0 ] && break; sleep 0.5; done")
+    lines.append("scen_count 'reassoc access point gone' 0 \"$(joined \"$ap0\")\"")
+    lines.append("sleep 2; t0=$(uptime_now); $A $W -B -i $i0 -c /tmp/ap0.conf -D nl80211 -f /tmp/ap0.log -P /tmp/ap0.pid")
+    lines.append("for i in $(seq 120); do [ \"$(joined \"$ap0\")\" = 1 ] && break; sleep 0.25; done; echo \"wifi-time back $(took $t0)\"")
+    lines.append("scen_count 'reassoc access point back, joined again' 1 \"$(joined \"$ap0\")\"")
+    lines.append("scen_count 'reassoc no four-way timeout' 0 \"$(dmesg | grep -c 4WAY_HANDSHAKE_TIMEOUT)\"")
+    lines.append("for i in $(seq 60); do ip addr 2>/dev/null | grep -q 192.168.77.100 && break; sleep 0.5; done")
+    lines.append("scen_count 'reassoc lease held after rejoin' 1 \"$(ip addr 2>/dev/null | grep -c 192.168.77.100)\"")
+    body = ["network={", "ssid=%s" % good["ssid"].hex(), "mode=2",
+            "frequency=%d" % (2407 + 5 * (1 if good["channel"] != 1 else 6)),
+            "proto=RSN", "pairwise=CCMP", "group=CCMP", "key_mgmt=WPA-PSK",
+            "psk=\"%s\"" % good["password"], "}"]
+    lines.append("/mnt/stick/hwsim_radio new > /dev/null")
+    lines.append("printf '%%s\\n' %s > /tmp/aptwin.conf" % " ".join(q(line) for line in body))
+    lines.append("tn=$(station $S); tm=$(cat /sys/class/net/$tn/address); it=$(/mnt/stick/hwsim_radio move $NS $tn); echo \"twin $tn $tm $it\"")
+    lines.append("$A $W -B -i $it -c /tmp/aptwin.conf -D nl80211 -f /tmp/aptwin.log -P /tmp/aptwin.pid")
+    lines.append("for i in $(seq 40); do grep -q AP-ENABLED /tmp/aptwin.log 2>/dev/null && break; sleep 0.25; done")
+    lines.append("$A /mnt/stick/hwsim_radio power $it %d" % good["power"])
+    lines.append("$A /mnt/stick/hwsim_radio dhcp $it 40 > /tmp/dhcp1.log 2>&1 &")
+    lines.append("t1=$(dmesg | grep -c \"$S: authenticate with $tm\")")
+    lines.append("kill $(cat /tmp/ap0.pid); t0=$(uptime_now)")
+    lines.append("for i in $(seq 60); do [ \"$(joined \"$ap0\")\" = 0 ] && break; sleep 0.25; done")
+    lines.append("for i in $(seq 120); do [ \"$(joined \"$ap0\")\" = 1 ] && break; sleep 0.25; done; echo \"wifi-time roam $(took $t0)\"")
+    lines.append("scen_count 'reassoc roamed to the twin, joined' 1 \"$(joined \"$ap0\")\"")
+    lines.append("scen_count 'reassoc roam went to the twin' 1 \"$([ \"$(dmesg | grep -c \"$S: authenticate with $tm\")\" -gt \"$t1\" ] && echo 1 || echo 0)\"")
+    lines.append("scen_count 'reassoc roam no four-way timeout' 0 \"$(dmesg | grep -c 4WAY_HANDSHAKE_TIMEOUT)\"")
+    # An access point that has gone stays in the kernel's list for thirty
+    # seconds; a join by name alone took it from there and waited out its
+    # authentication, once for every access point that went.
+    lines.append("scen_count 'reassoc never tried a gone access point' 0 \"$(dmesg | grep -c \"$S: authentication with .* timed out\")\"")
+    lines.append("$A $W -B -i $i0 -c /tmp/ap0.conf -D nl80211 -f /tmp/ap0.log -P /tmp/ap0.pid")
+    lines.append("kill $(cat /tmp/aptwin.pid)")
+    lines.append("for i in $(seq 120); do [ \"$(joined \"$ap0\")\" = 1 ] && [ ! -d /proc/$(cat /tmp/aptwin.pid) ] && break; sleep 0.5; done")
+    lines.append("scen_count 'reassoc back on the first, joined' 1 \"$(joined \"$ap0\")\"")
+    lines.append("dmesg | grep -a -e \"$S:\" -e 'ip:' | tail -60 | sed 's/^/reassoc-log /'")
+    family("reassoc", lines)
+
     # ---- join
     lines = []
-    lines.append("moonwater wifi add \"$ap1\" %s > /tmp/sc.got 2>&1; scen_status 'join wrong password' 1 $?" % q(wrong))
+    lines.append("t0=$(uptime_now); moonwater wifi add \"$ap1\" %s > /tmp/sc.got 2>&1; scen_status 'join wrong password' 1 $?; echo \"wifi-time wrong-password $(took $t0)\"" % q(wrong))
+    # The access point sends the machine away some three seconds after it
+    # gives up on message 2; the join used to wait out eight on its own.
+    lines.append("echo \"wifi-time wrong-password-handshake $(took $(associated_at))\"")
+    lines.append("scen_count 'join wrong password said within 6 s of associating' 1 \"$(awk -v t=\"$(took $(associated_at))\" 'BEGIN { print (t < 6) }')\"")
     lines.append("scen_count 'join wrong password says so' 1 \"$(grep -c 'saved, but the network did not accept the password' /tmp/sc.got)\"")
-    lines.append("moonwater wifi add \"$ap2\" < /dev/null > /tmp/sc.got 2>&1; scen_status 'join open' 0 $?")
+    lines.append("t0=$(uptime_now); moonwater wifi add \"$ap2\" < /dev/null > /tmp/sc.got 2>&1; scen_status 'join open' 0 $?; echo \"wifi-time open $(took $t0)\"")
     lines.append("scen_count 'join open joined' 1 \"$(grep -c -x -F \"$(printf '\\033[1m[Moonwater]\\033[0m ')wifi joined $ap2\" /tmp/sc.got)\"")
     lines.append("moonwater wifi add \"$ap3\" %s > /tmp/sc.got 2>&1; scen_status 'join WPA3 alone' 1 $?" % q(sae["password"]))
     lines.append("scen_count 'join WPA3 alone refused' 1 \"$(grep -c 'saved, but it asks for WPA3, which moonwater cannot join yet' /tmp/sc.got)\"")
@@ -50701,6 +51330,67 @@ def harness_wifi_air(argv):
     lines.append("scen_count 'air none in range' 1 \"$(moonwater wifi 2>&1 | scen_strip | grep -c -x 'not joined: no saved network is in range')\"")
     lines.append("rm -f /root/wifi /run/moonwater/wifi.last")
     family("air", lines)
+
+    # ---- rekey: hostapd, whose control socket starts rekeys on demand.
+    # Two access points by one name, the first much the stronger, each
+    # with its own DHCP server; a lease of 20 s, so a renewal every ten
+    # is unicast data through the pairwise key.
+    if hostapd:
+        lines = []
+        rk = name(plain, taken)
+        word = "".join(rng.choice("abcdefghjkmnpqrstuvwxyz23456789") for _ in range(12))
+        lines.append("H=\"$L /mnt/stick/hostapd\"; HC=\"$L /mnt/stick/hostapd_cli -p /tmp/hostapd\"")
+        lines.append("rk=\"$(printf '%s')\"" % octal(rk))
+        for at, (channel, power) in enumerate(((1, 20), (11, 4))):
+            lines.append("/mnt/stick/hwsim_radio new > /dev/null; r=$(station $S); "
+                         "rm%d=$(cat /sys/class/net/$r/address); j%d=$(/mnt/stick/hwsim_radio move $NS $r)" % (at, at))
+            conf = ["driver=nl80211", "ssid2=%s" % rk.hex(), "hw_mode=g",
+                    "channel=%d" % channel, "wpa=2", "wpa_key_mgmt=WPA-PSK",
+                    "rsn_pairwise=CCMP", "wpa_passphrase=%s" % word,
+                    "ctrl_interface=/tmp/hostapd"]
+            lines.append("printf '%%s\\n' \"interface=$j%d\" %s > /tmp/rk%d.conf" % (at, " ".join(q(c) for c in conf), at))
+            lines.append("$A $H -B -dd -t -P /tmp/rk%d.pid -f /tmp/rk%d.log /tmp/rk%d.conf" % (at, at, at))
+            lines.append("for i in $(seq 40); do grep -q AP-ENABLED /tmp/rk%d.log 2>/dev/null && break; sleep 0.25; done" % at)
+            lines.append("$A /mnt/stick/hwsim_radio power $j%d %d" % (at, power))
+            lines.append("$A /mnt/stick/hwsim_radio dhcp $j%d 20 > /tmp/dhcprk%d.log 2>&1 &" % (at, at))
+        lines.append("mac=$(cat /sys/class/net/$S/address)")
+        lines.append("t0=$(uptime_now); moonwater wifi add \"$rk\" %s > /tmp/sc.got 2>&1; scen_status 'rekey join' 0 $?; echo \"wifi-time hostapd $(took $t0)\"" % q(word))
+        lines.append("for i in $(seq 60); do [ \"$(dmesg | grep -c \"lease renewed on $S\")\" -gt 0 ] && ip addr | grep -q 192.168.77.100 && break; sleep 0.5; done")
+        lines.append("a0=$(dmesg | grep -c \"$S: authenticate with\"); g0=$(grep -c 'group key handshake completed' /tmp/rk0.log); p0=$(grep -c 'pairwise key handshake completed' /tmp/rk0.log)")
+        lines.append("h0=$(dmesg | grep -c -e 4WAY_HANDSHAKE_TIMEOUT -e GROUP_KEY_HANDSHAKE_TIMEOUT)")
+        lines.append("$HC -i $j0 raw REKEY_GTK > /dev/null; sleep 6")
+        lines.append("scen_count 'rekey group key handshake completed' 1 \"$(( $(grep -c 'group key handshake completed' /tmp/rk0.log) - g0 ))\"")
+        lines.append("$HC -i $j0 raw REKEY_PTK $mac > /dev/null; sleep 6")
+        lines.append("scen_count 'rekey pairwise key handshake completed' 1 \"$(( $(grep -c 'pairwise key handshake completed' /tmp/rk0.log) - p0 ))\"")
+        lines.append("$HC -i $j0 raw RESEND_M3 $mac > /dev/null; sleep 3")
+        lines.append("$HC -i $j0 raw RESEND_GROUP_M1 $mac > /dev/null; sleep 6")
+        lines.append("scen_count 'rekey still joined' 1 \"$(joined \"$rk\")\"")
+        lines.append("scen_count 'rekey no new authentication' \"$a0\" \"$(dmesg | grep -c \"$S: authenticate with\")\"")
+        lines.append("scen_count 'rekey no handshake timeout' \"$h0\" \"$(dmesg | grep -c -e 4WAY_HANDSHAKE_TIMEOUT -e GROUP_KEY_HANDSHAKE_TIMEOUT)\"")
+        lines.append("n0=$(dmesg | grep -c \"lease renewed on $S\"); for i in $(seq 60); do [ \"$(dmesg | grep -c \"lease renewed on $S\")\" -gt \"$n0\" ] && break; sleep 0.5; done")
+        lines.append("scen_count 'rekey data through the new keys' 1 \"$([ \"$(dmesg | grep -c \"lease renewed on $S\")\" -gt \"$n0\" ] && echo 1 || echo 0)\"")
+        # No message 1 from either: hostapd hands its EAPOL frames to the
+        # control socket instead of the air, then gives up on its own
+        # schedule and sends the machine away.
+        lines.append("rm -f /root/wifi; $HC -i $j0 SET ext_eapol_frame_io 1 > /dev/null; $HC -i $j1 SET ext_eapol_frame_io 1 > /dev/null")
+        lines.append("t0=$(uptime_now); moonwater wifi add \"$rk\" %s > /tmp/sc.got 2>&1; scen_status 'rekey no message 1' 1 $?; echo \"wifi-time no-message-1 $(took $t0)\"" % q(word))
+        lines.append("echo \"wifi-time no-message-1-handshake $(took $(associated_at))\"")
+        lines.append("scen_count 'rekey no message 1 said within 6 s of associating' 1 \"$(awk -v t=\"$(took $(associated_at))\" 'BEGIN { print (t < 6) }')\"")
+        lines.append("scen_count 'rekey no message 1 says the network ended it' 1 \"$(grep -c 'saved, but the network ended the handshake (reason 15)' /tmp/sc.got)\"")
+        lines.append("$HC -i $j0 SET ext_eapol_frame_io 0 > /dev/null; $HC -i $j1 SET ext_eapol_frame_io 0 > /dev/null")
+        lines.append("rm -f /run/moonwater/wifi.avoid; moonwater wifi add \"$rk\" %s > /tmp/sc.got 2>&1; scen_status 'rekey joined again' 0 $?" % q(word))
+        # The first stops answering authentication and sends the machine
+        # away: it still beacons, strongest by far, and the twin is the
+        # one to join.
+        lines.append("b0=$(dmesg | grep -c \"$S: authenticate with $rm0\"); c0=$(dmesg | grep -c \"$S: authenticate with $rm1\")")
+        lines.append("$HC -i $j0 SET ignore_auth_probability 1.0 > /dev/null; t0=$(uptime_now); $HC -i $j0 deauthenticate $mac > /dev/null")
+        lines.append("for i in $(seq 160); do [ \"$(dmesg | grep -c \"$S: authenticate with $rm1\")\" -gt \"$c0\" ] && [ \"$(joined \"$rk\")\" = 1 ] && break; sleep 0.25; done; echo \"wifi-time roam-silent $(took $t0)\"")
+        lines.append("scen_count 'rekey roam: the twin joined' 1 \"$([ \"$(dmesg | grep -c \"$S: authenticate with $rm1\")\" -gt \"$c0\" ] && [ \"$(joined \"$rk\")\" = 1 ] && echo 1 || echo 0)\"")
+        lines.append("scen_count 'rekey roam: the silent one tried at most twice' 1 \"$([ $(( $(dmesg | grep -c \"$S: authenticate with $rm0\") - b0 )) -le 2 ] && echo 1 || echo 0)\"")
+        lines.append("sleep 1; scen_count 'rekey no zombie keeper' 0 \"$(scen_zombies)\"")
+        lines.append("grep -a -h -e 'handshake completed' -e 'disassoc' -e 'deauth' /tmp/rk0.log /tmp/rk1.log | tail -20 | sed 's/^/rekey-ap /'")
+        lines.append("rm -f /root/wifi")
+        family("rekey", lines)
 
     head = ["#expect %s %d" % item for item in expects]
     print("\n".join(head))
@@ -54668,6 +55358,7 @@ HARNESS_CHECKS = {
     "tls_hs_fuzz": harness_tls_hs_fuzz,
     "tls_verify_fuzz": harness_tls_verify_fuzz,
     "sntp_fuzz": harness_sntp_fuzz,
+    "wifi_eapol_fuzz": harness_wifi_eapol_fuzz,
     "dns_fuzz": harness_dns_fuzz,
     "netlink_fuzz": harness_netlink_fuzz,
     "crypto_vectors": harness_crypto_vectors,
