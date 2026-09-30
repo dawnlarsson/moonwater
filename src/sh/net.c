@@ -2202,69 +2202,165 @@ static COLD bipolar net_watch_events(b32 events, netlink_buffer address_to messa
         return acted;
 }
 
-#if MOONWATER_STRICT >= STRICT_TIGHT
 /*
-        What sec_hardened asks of the kernel's network stack, once, when the
-        watcher starts.
+        What the image asks of the kernel's network stack and of its shared
+        filesystem settings, once, when the watcher starts (before any link is
+        brought up, so before the first frame of a lease).
 
         Nothing else in the image writes /proc/sys, so a machine ran on
-        Linux's own defaults: ICMP redirects accepted from whoever sits on
-        the link (a host that does not forward takes one when EITHER the
-        interface or `all` allows it, so both are written, and `default`
-        reaches every interface not set by hand, wlan0 as it appears
-        included), the per-interface source-route switch on for new
-        interfaces, and TIME-WAIT assassination by a forged RST allowed.
-        IPv6 has no such copy from `default` to the interfaces already there,
-        and this image's own tools speak IPv4 only, so it is left as the
-        kernel has it. rp_filter is left alone on purpose: the DHCP client is
-        a UDP socket, its OFFER comes from an address with no route yet, and
-        with rp_filter 1 or 2 the OFFER is dropped and no lease is ever taken
-        (measured: OFFERs sent, no REQUEST, in a KVM guest booted with either).
+        Linux's own defaults: ICMP redirects accepted from whoever sits on the
+        link (a host that does not forward takes one when EITHER the interface
+        or `all` allows it, so both are written, and `default` reaches every
+        interface not set by hand, wlan0 as it appears included), the
+        per-interface source-route switch on for new interfaces, TIME-WAIT
+        assassination by a forged RST allowed, and IPv6 router advertisements
+        and SLAAC on although nothing here speaks IPv6 (waterlink's dual-stack
+        sockets and link-local addresses stay: only what a neighbour can push
+        at the machine is refused). IPv6 has no copy from `default` to the
+        interfaces already there, so each directory under net/ipv6/conf is
+        written.
+
+        The reference tier (STRICT_REFERENCE) keeps the kernel's own values,
+        the rest write the table below. Default is what Debian and Arch ship
+        or a host that forwards nothing needs: rp_filter 2 (loose: a packet
+        must have a route back out of SOME interface; the DHCP client reads
+        the wire with a packet socket, so the OFFER that arrives before any
+        route exists is no longer the reason to leave it at 0), the redirect,
+        source-route and send-redirect switches off, tcp_rfc1337, the four
+        fs.protected_* switches, kptr_restrict 1 (pointers hidden from
+        processes without CAP_SYSLOG; root's perf and kallsyms work),
+        dmesg_restrict 1 and io_uring_disabled 1 (io_uring_setup refused to
+        processes without CAP_SYS_ADMIN, nothing in the image uses it and
+        root, bowls included, is not affected). sec_hardened (STRICT_TIGHT)
+        goes further: rp_filter 1, protected_fifos and protected_regular 2,
+        kptr_restrict 2 and io_uring_disabled 2. unprivileged_bpf_disabled has
+        no knob here, the image is built without bpf(2) (classic socket
+        filters, which the DHCP client uses, are unaffected), and unprivileged
+        user namespaces stay as the kernel has them: root is unaffected, no
+        tool here needs them, and a kiosk tier that wants them off sets
+        user.max_user_namespaces itself.
 */
-static COLD fn net_kernel_harden(void)
+#if MOONWATER_STRICT >= STRICT_SAFE
+static COLD fn net_sysctl(string_address path, string_address value)
+{
+        bipolar handle = system_open_at(AT_FDCWD, path, 1 | O_CLOEXEC);
+
+        if (handle < 0)
+                return;
+        system_write_all((positive)handle, (p8 address_to)value,
+                         string_length(value));
+        system_close((positive)handle);
+}
+
+//      "directory/name/leaf" into `to`, cut short when it would not fit.
+static COLD fn net_sysctl_path(p8 address_to to, positive size,
+                               string_address directory, string_address name,
+                               string_address leaf)
+{
+        string_address parts[3] = {directory, name, leaf};
+        positive at = 0;
+
+        for (positive part = 0; part < 3; part++)
+        {
+                positive length = string_length(parts[part]);
+
+                if (!parts[part][0])
+                        continue;
+                if (at + length + 2 > size)
+                {
+                        to[0] = 0;
+                        return;
+                }
+                if (at)
+                        to[at++] = '/';
+                memory_copy(to + at, parts[part], length);
+                at += length;
+        }
+        to[at] = 0;
+}
+
+//      leaf, written in `all`, `default` and every interface the directory
+//      lists, or only the first two for the IPv4 switches the kernel copies.
+static COLD fn net_sysctl_family(string_address directory, string_address leaf,
+                                 string_address value, bool each)
+{
+        p8 path[128];
+        static const string_address wide[] = {"all", "default", null};
+
+        for (positive at = 0; wide[at]; at++)
+        {
+                net_sysctl_path(path, sizeof path, directory, wide[at], leaf);
+                net_sysctl((string_address)path, value);
+        }
+        if (each)
+        {
+                p8 names[1024];
+                bipolar handle;
+                bipolar got;
+                positive at = 0;
+
+                handle = system_open_at(AT_FDCWD, directory,
+                                        O_DIRECTORY | O_CLOEXEC);
+                if (handle < 0)
+                        return;
+                got = system_read_directory(handle, names, sizeof names);
+                system_close((positive)handle);
+                while (got > 0 && at + 19 < (positive)got)
+                {
+                        p16 length = *(p16 address_to)(names + at + 16);
+                        string_address name = (string_address)(names + at + 19);
+
+                        if (length < 20 || at + length > (positive)got)
+                                break;
+                        if (name[0] != '.' && !string_equals(name, "all") &&
+                            !string_equals(name, "default"))
+                        {
+                                net_sysctl_path(path, sizeof path, directory,
+                                                name, leaf);
+                                net_sysctl((string_address)path, value);
+                        }
+                        at += length;
+                }
+        }
+}
+
+static COLD fn net_kernel_defaults(void)
 {
         static const string_address quiet[] = {
-            "/proc/sys/net/ipv4/conf/all/accept_redirects",
-            "/proc/sys/net/ipv4/conf/default/accept_redirects",
-            "/proc/sys/net/ipv4/conf/all/secure_redirects",
-            "/proc/sys/net/ipv4/conf/default/secure_redirects",
-            "/proc/sys/net/ipv4/conf/all/accept_source_route",
-            "/proc/sys/net/ipv4/conf/default/accept_source_route",
-            null};
+            "accept_redirects", "secure_redirects", "accept_source_route",
+            "send_redirects", null};
+        static const string_address quiet_v6[] = {
+            "accept_ra", "autoconf", "accept_redirects", null};
 
         for (positive at = 0; quiet[at]; at++)
-        {
-                bipolar handle = system_open_at(AT_FDCWD, quiet[at],
-                                                1 | O_CLOEXEC);
-
-                if (handle < 0)
-                        continue;
-                system_write_all((positive)handle, (p8 address_to)"0\n", 2);
-                system_close((positive)handle);
-        }
-        {
-                bipolar handle = system_open_at(
-                    AT_FDCWD, "/proc/sys/net/ipv4/tcp_rfc1337", 1 | O_CLOEXEC);
-
-                if (handle >= 0)
-                {
-                        system_write_all((positive)handle, (p8 address_to)"1\n", 2);
-                        system_close((positive)handle);
-                }
-        }
-        //      Nothing in this image uses io_uring, and it is among the most
-        //      attacked kernel interfaces: 2 refuses io_uring_setup to
-        //      everyone, and programs that can use it (libuv) fall back.
-        {
-                bipolar handle = system_open_at(
-                    AT_FDCWD, "/proc/sys/kernel/io_uring_disabled", 1 | O_CLOEXEC);
-
-                if (handle >= 0)
-                {
-                        system_write_all((positive)handle, (p8 address_to)"2\n", 2);
-                        system_close((positive)handle);
-                }
-        }
+                net_sysctl_family("/proc/sys/net/ipv4/conf", quiet[at], "0\n",
+                                  false);
+        net_sysctl_family("/proc/sys/net/ipv4/conf", "rp_filter",
+#if MOONWATER_STRICT >= STRICT_TIGHT
+                          "1\n",
+#else
+                          "2\n",
+#endif
+                          false);
+        for (positive at = 0; quiet_v6[at]; at++)
+                net_sysctl_family("/proc/sys/net/ipv6/conf", quiet_v6[at],
+                                  "0\n", true);
+        net_sysctl("/proc/sys/net/ipv4/tcp_rfc1337", "1\n");
+        net_sysctl("/proc/sys/net/ipv4/tcp_syncookies", "1\n");
+        net_sysctl("/proc/sys/fs/protected_symlinks", "1\n");
+        net_sysctl("/proc/sys/fs/protected_hardlinks", "1\n");
+#if MOONWATER_STRICT >= STRICT_TIGHT
+        net_sysctl("/proc/sys/fs/protected_fifos", "2\n");
+        net_sysctl("/proc/sys/fs/protected_regular", "2\n");
+        net_sysctl("/proc/sys/kernel/kptr_restrict", "2\n");
+        net_sysctl("/proc/sys/kernel/io_uring_disabled", "2\n");
+#else
+        net_sysctl("/proc/sys/fs/protected_fifos", "1\n");
+        net_sysctl("/proc/sys/fs/protected_regular", "1\n");
+        net_sysctl("/proc/sys/kernel/kptr_restrict", "1\n");
+        net_sysctl("/proc/sys/kernel/io_uring_disabled", "1\n");
+#endif
+        net_sysctl("/proc/sys/kernel/dmesg_restrict", "1\n");
 }
 #endif
 
@@ -2304,8 +2400,8 @@ static COLD b32 net_watch(void)
                 return 1;
         }
 
-#if MOONWATER_STRICT >= STRICT_TIGHT
-        net_kernel_harden();
+#if MOONWATER_STRICT >= STRICT_SAFE
+        net_kernel_defaults();
 #endif
         wake = net_wake_listen();
         net_wake_watch = wake;
