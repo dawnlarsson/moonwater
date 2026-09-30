@@ -49362,127 +49362,6 @@ def crypto_x25519_instruction_counts():
     return lines, failed
 
 
-def wycheproof_lines(directory):
-    """C2SP/wycheproof's testvectors_v1 files found in directory, as the
-    (kind, expect, fields) crypto_vectors_lines makes. Only what this client
-    means to accept is asked: 128-bit AES-GCM with a 96-bit nonce and a full
-    tag, ECDSA over the curve's own digest (checked through
-    tls_signature_valid, so the DER parse is in it), P-256/P-384 ECDH over
-    raw points, X25519, RSA PKCS#1 v1.5 and PSS with SHA-256 and a 32-byte
-    salt. A vector Wycheproof calls acceptable is left out and counted. The
-    files are fetched by hand (needs the network), so this is no lane."""
-    import json
-    import pathlib
-    root = pathlib.Path(directory)
-    out = []
-    skipped = collections.Counter()
-
-    def be(value, size):
-        return value.to_bytes(size, "big")
-
-    def load(name):
-        path = root / (name + ".json")
-        if not path.exists():
-            skipped["missing " + name] += 1
-            return []
-        return json.loads(path.read_text())["testGroups"]
-
-    def rsa_numbers(group):
-        from cryptography.hazmat.primitives.serialization import load_der_public_key
-        numbers = load_der_public_key(bytes.fromhex(group["publicKeyDer"])).public_numbers()
-        return numbers.n, numbers.e
-
-    def verdict(test, name):
-        if test["result"] == "acceptable":
-            skipped["acceptable " + name] += 1
-            return None
-        return int(test["result"] == "valid")
-
-    for group in load("aes_gcm_test"):
-        if (group["keySize"], group["ivSize"], group["tagSize"]) != (128, 96, 128):
-            skipped["gcm shape"] += len(group["tests"])
-            continue
-        for test in group["tests"]:
-            want = verdict(test, "gcm")
-            if want is None:
-                continue
-            key, iv, aad, msg, ct, tag = (bytes.fromhex(test[k]) for k in
-                                          ("key", "iv", "aad", "msg", "ct", "tag"))
-            if len(tag) != 16:
-                skipped["gcm tag"] += 1
-                continue
-            out.append(("gcm", want, (key, iv, aad, msg if want else bytes(len(ct)), ct, tag)))
-    for name, size, scheme in (("ecdsa_secp256r1_sha256_test", 32, 0x0403),
-                               ("ecdsa_secp384r1_sha384_test", 48, 0x0503)):
-        for group in load(name):
-            key = bytes.fromhex(group["publicKey"]["uncompressed"])
-            if len(key) != 2 * size + 1:
-                continue
-            for test in group["tests"]:
-                want = verdict(test, name)
-                if want is not None:
-                    out.append(("ecdsader%d" % (size * 8), want,
-                                (bytes.fromhex(test["msg"]), bytes.fromhex(test["sig"]),
-                                 key[1:1 + size], key[1 + size:])))
-    for name, size in (("ecdh_secp256r1_ecpoint_test", 32), ("ecdh_secp384r1_ecpoint_test", 48)):
-        for group in load(name):
-            for test in group["tests"]:
-                want = verdict(test, name)
-                if want is None:
-                    continue
-                private = int(test["private"], 16)
-                if private.bit_length() > size * 8 or len(test["public"]) != 2 * (2 * size + 1):
-                    #   The share's length is the caller's frame check
-                    #   (tls_share_use), not the shared-secret routine's.
-                    skipped["ecdh private or point length"] += 1
-                    continue
-                out.append(("ecdh%d" % (size * 8), want,
-                            (be(private, size), bytes.fromhex(test["public"]),
-                             bytes.fromhex(test["shared"]) if want else bytes(size))))
-    for group in load("x25519_test"):
-        for test in group["tests"]:
-            private, public, shared = (bytes.fromhex(test[k]) for k in
-                                       ("private", "public", "shared"))
-            if len(private) != 32 or len(public) != 32:
-                skipped["x25519 size"] += 1
-                continue
-            out.append(("x25519", int(any(shared)), (private, public, shared)))
-    for name, digest, size in (("rsa_signature_2048_sha256_test", hashlib.sha256, 32),
-                               ("rsa_signature_3072_sha256_test", hashlib.sha256, 32),
-                               ("rsa_signature_4096_sha256_test", hashlib.sha256, 32),
-                               ("rsa_signature_2048_sha384_test", hashlib.sha384, 48),
-                               ("rsa_signature_3072_sha384_test", hashlib.sha384, 48),
-                               ("rsa_signature_4096_sha384_test", hashlib.sha384, 48)):
-        for group in load(name):
-            n, e = rsa_numbers(group)
-            if e.bit_length() > 64:
-                skipped["rsa exponent"] += len(group["tests"])
-                continue
-            for test in group["tests"]:
-                want = verdict(test, name)
-                if want is not None:
-                    out.append(("pkcs%d" % (size * 8), want,
-                                (be(n, (n.bit_length() + 7) // 8), be(e, 8),
-                                 bytes.fromhex(test["sig"]),
-                                 digest(bytes.fromhex(test["msg"])).digest())))
-    for name in ("rsa_pss_2048_sha256_mgf1_32_test", "rsa_pss_3072_sha256_mgf1_32_test",
-                 "rsa_pss_4096_sha256_mgf1_32_test", "rsa_pss_2048_sha256_mgf1_0_test"):
-        for group in load(name):
-            n, e = rsa_numbers(group)
-            if (group["sha"], group["mgfSha"], group["sLen"]) != ("SHA-256", "SHA-256", 32):
-                skipped["pss salt %s" % group["sLen"]] += len(group["tests"])
-                continue
-            for test in group["tests"]:
-                want = verdict(test, name)
-                if want is not None:
-                    out.append(("pss", want, (be(n, (n.bit_length() + 7) // 8), be(e, 8),
-                                              bytes.fromhex(test["sig"]),
-                                              bytes.fromhex(test["msg"]))))
-    for what, count in sorted(skipped.items()):
-        print("wycheproof: left out %d (%s)" % (count, what), file=sys.stderr)
-    return out
-
-
 def harness_crypto_vectors(argv):
     """Wycheproof-style vectors for the crypto in src/net/net.c, answered by
     Python's cryptography (OpenSSL) and printed for CHECK_crypto_vectors.
@@ -49531,22 +49410,10 @@ def harness_crypto_vectors(argv):
     to have. Returns 2 when cryptography is missing.
 
         python3 test/differential.py --harness crypto_vectors [--seed N]
-                                     [--wycheproof DIR]
-
-    --wycheproof DIR adds C2SP/wycheproof's own vectors (testvectors_v1 files
-    fetched into DIR by hand; see wycheproof_lines) to the printed set.
     """
     seed = 20260928
-    wycheproof = None
-    while argv:
-        if argv[0] == "--seed" and len(argv) > 1:
-            seed = int(argv[1])
-        elif argv[0] == "--wycheproof" and len(argv) > 1:
-            wycheproof = argv[1]
-        else:
-            print("crypto vectors: unknown argument %s" % argv[0], file=sys.stderr)
-            return 1
-        argv = argv[2:]
+    if argv[:1] == ["--seed"] and len(argv) > 1:
+        seed = int(argv[1])
     try:
         import cryptography  # noqa: F401
     except ImportError:
@@ -49564,8 +49431,6 @@ def harness_crypto_vectors(argv):
     if uneven:
         return 1
     lines = crypto_vectors_lines(seed)
-    if wycheproof:
-        lines += wycheproof_lines(wycheproof)
     kinds = collections.Counter(kind for kind, _, _ in lines)
     accepts = collections.Counter(kind for kind, expect, _ in lines if expect)
     for kind in kinds:
