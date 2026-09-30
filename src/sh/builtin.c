@@ -87,7 +87,6 @@ fn run_line(string_address line);
 fn shell_input_end();
 bool exec_function_here_hashed(string_address name, positive2 named);
 bool exec_function_readonly_set(string_address name);
-bool exec_function_readonly_hashed(string_address name, positive2 named);
 b32 exec_function_unset(string_address name);
 static bool exec_line_aborted();
 static COLD fn shell_posix_changed(bool on);

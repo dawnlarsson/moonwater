@@ -7707,13 +7707,6 @@ bool exec_function_readonly_clear(string_address name)
         return true;
 }
 
-bool exec_function_readonly_hashed(string_address name, positive2 named)
-{
-        positive slot = exec_function_slot(name, named);
-
-        return slot != positive_max && exec_functions[slot].readonly;
-}
-
 b32 exec_function_attributes_hashed(string_address name, positive2 named)
 {
         positive slot = exec_function_slot(name, named);

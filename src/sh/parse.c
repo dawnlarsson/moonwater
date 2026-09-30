@@ -338,17 +338,8 @@ static string_address parse_want_opener[PARSE_WANT_ROOM];
 static positive parse_want_line[PARSE_WANT_ROOM];
 static positive parse_want_used;
 
-static fn parse_want_push(string_address word)
-{
-        if (parse_want_used < PARSE_WANT_ROOM)
-        {
-                parse_want_opener[parse_want_used] = null;
-                parse_want[parse_want_used++] = word;
-        }
-}
-
-//      The same, with the command that is waiting and the line it began on,
-//      which is what bash names when the input ends before it is closed.
+//      A closer waited for, with the command waiting and its line, which
+//      is what bash names when the input ends before it is closed.
 static fn parse_want_push_for(string_address word, b32 index)
 {
         string_address opener = null;
