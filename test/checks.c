@@ -79132,6 +79132,14 @@ static fn storage_test_link_state(void)
                   held.lost);
         check("new interface can retry after configuration failure",
               net_link_news(13, 0, address_of held));
+        /* A flapping second link must not cut every exchange as it starts:
+           after a cut the news waits out the hold-off, then cuts again. */
+        check("link news may cut an exchange nothing has cut", net_news_may_cut(100));
+        net_news_holdoff_until = 104;
+        check("link news is held off for the seconds after a cut",
+              !net_news_may_cut(100) && !net_news_may_cut(103));
+        check("and cuts again when the hold-off ends", net_news_may_cut(104));
+        net_news_holdoff_until = 0;
 
         dhcp_lease same = held.lease;
         dhcp_lease changed = held.lease;

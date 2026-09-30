@@ -1630,6 +1630,27 @@ static bool net_exchange_cut;
 #define NET_DHCP_TIMED_OUT (-10)
 #define NET_DHCP_INTERRUPTED (-11)
 
+/*
+        Link news may cut an exchange, but not again at once.
+
+        Every carrier change on any link is news while no lease is held, so
+        a second port whose cable flaps (or a radio whose association an
+        attacker keeps dropping) cut each exchange as it started, and a
+        server whose round trip was longer than the flap's period never got
+        to finish one: the good link's lease waited for the flapping to
+        stop. After a cut the link news is left unread for
+        NET_NEWS_HOLDOFF_SECONDS, which is longer than any round trip worth
+        waiting for, and read when it ends. The wake pipe is the operator's
+        and always cuts.
+*/
+#define NET_NEWS_HOLDOFF_SECONDS 4
+static positive net_news_holdoff_until;
+
+static bool net_news_may_cut(positive now)
+{
+        return now >= net_news_holdoff_until;
+}
+
 /* 1 when the exchange spoke, 0 when the budget ran out, -2 when the wake
    pipe or the link news did, negative for a broken descriptor. */
 static COLD bipolar net_exchange_wait(bipolar answer,
@@ -1642,11 +1663,20 @@ static COLD bipolar net_exchange_wait(bipolar answer,
                 timespec limit;
                 system_poll_descriptor waited[3];
                 positive count = 1;
+                positive now = net_seconds();
+                bool news = net_events_watch >= 0 && net_news_may_cut(now);
                 bipolar ready;
 
                 if (!network_deadline_left(deadline, address_of seconds,
                                            address_of nanoseconds))
                         return 0;
+                //      While the news is held off, wake up when it ends.
+                if (net_events_watch >= 0 && !news &&
+                    seconds >= net_news_holdoff_until - now)
+                {
+                        seconds = net_news_holdoff_until - now;
+                        nanoseconds = 0;
+                }
                 limit.tv_sec = (b64)seconds;
                 limit.tv_nsec = (b64)nanoseconds;
                 waited[0].descriptor = (b32)answer;
@@ -1658,7 +1688,7 @@ static COLD bipolar net_exchange_wait(bipolar answer,
                         waited[count].events = SYSTEM_POLL_READ;
                         waited[count++].returned = 0;
                 }
-                if (net_events_watch >= 0)
+                if (news)
                 {
                         waited[count].descriptor = (b32)net_events_watch;
                         waited[count].events = SYSTEM_POLL_READ;
@@ -1666,6 +1696,8 @@ static COLD bipolar net_exchange_wait(bipolar answer,
                 }
                 ready = system_poll_wait(waited, count, address_of limit, null);
                 if (ready == NETWORK_INTERRUPTED)
+                        continue;
+                if (ready == 0 && !news)
                         continue;
                 if (ready <= 0)
                         return ready;
@@ -1733,6 +1765,8 @@ static COLD bipolar net_dhcp_apart(string_address device, p8 address_to hardware
                 if (watching && waited == -2)
                 {
                         net_exchange_cut = true;
+                        net_news_holdoff_until = net_seconds() +
+                                                 NET_NEWS_HOLDOFF_SECONDS;
                         return NET_DHCP_INTERRUPTED;
                 }
                 return watching && waited == 0 ? NET_DHCP_TIMED_OUT
@@ -2190,6 +2224,7 @@ static COLD b32 net_watch(void)
         net_wake_watch = wake;
         net_events_watch = events;
         net_exchange_cut = false;
+        net_news_holdoff_until = 0;
 
         //      Configure whatever is already plugged in before waiting for
         //      anything to change, or a machine that boots with its cable in
