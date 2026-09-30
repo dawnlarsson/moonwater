@@ -36733,6 +36733,12 @@ typedef char *string_address;
 static positive string_length(string_address text) {
     return text ? (positive)strlen(text) : 0;
 }
+static string_address string_get_environment(string_address *list, string_address name) {
+    positive length = strlen(name);
+    for (; *list; list++)
+        if (!strncmp(*list, name, length) && (*list)[length] == '=') return *list + length + 1;
+    return null;
+}
 static positive positive_into_string(p8 *into, positive value) {
     char digits[24];
     unsigned used = 0;

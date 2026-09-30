@@ -1121,34 +1121,14 @@ static DEAD_END fn bowl_inside(string_address root,
 
 static b32 bowl_env_named(string_address entry, string_address name)
 {
-        positive i = 0;
+        positive length = string_length(name);
 
-        if (!entry)
-                return false;
-
-        while (name[i] && entry[i] == name[i])
-                i++;
-
-        return name[i] == 0 && entry[i] == '=';
+        return entry && !string_compare_max(entry, name, length) &&
+               entry[length] == '=';
 }
 
-static string_address bowl_env_payload(string_address entry, string_address name)
-{
-        return entry + string_length(name) + 1;
-}
-
-static string_address bowl_env_value(string_address address_to environment,
-                                     string_address name)
-{
-        if (!environment)
-                return null;
-
-        for (; *environment; environment++)
-                if (bowl_env_named(*environment, name))
-                        return bowl_env_payload(*environment, name);
-
-        return null;
-}
+#define bowl_env_value(environment, name) \
+        ((environment) ? string_get_environment((environment), (name)) : null)
 
 /*
         The session a guest program expects.
@@ -1229,35 +1209,56 @@ static b32 bowl_runtime_shared(string_address path)
                bowl_path_same(path, "/dev") || bowl_path_same(path, "/");
 }
 
+/*
+        The variables a session cannot do without, in the order the defaults
+        are appended. A path one must be an absolute path that is not a host
+        tree; the rest only have to be non-empty. also is the row that a
+        name counts for when it is present: LC_ALL keeps LANG's default away.
+*/
+enum { BOWL_VAR_TERM, BOWL_VAR_TERMINFO, BOWL_VAR_HOME, BOWL_VAR_PATH,
+       BOWL_VAR_LANG, BOWL_VAR_USER, BOWL_VAR_LOGNAME, BOWL_VAR_RUNTIME,
+       BOWL_VAR_SHELL, BOWL_VAR_TMPDIR, BOWL_VAR_LC_ALL, BOWL_VARS };
+
+static const struct
+{
+        string_address name;
+        string_address fallback;
+        bool path;
+        p8 counts_as;
+} bowl_variables[BOWL_VARS] = {
+    [BOWL_VAR_TERM] = {"TERM", "TERM=" TERM_NAME, false, BOWL_VAR_TERM},
+    [BOWL_VAR_TERMINFO] = {"TERMINFO", "TERMINFO=" TERM_INFO_DIRECTORY, false, BOWL_VAR_TERMINFO},
+    [BOWL_VAR_HOME] = {"HOME", "HOME=" BOWL_SESSION_HOME, true, BOWL_VAR_HOME},
+    [BOWL_VAR_PATH] = {"PATH", "PATH=" BOWL_DEFAULT_PATH, false, BOWL_VAR_PATH},
+    [BOWL_VAR_LANG] = {"LANG", "LANG=C.UTF-8", false, BOWL_VAR_LANG},
+    [BOWL_VAR_USER] = {"USER", (string_address)bowl_user_assignment, false, BOWL_VAR_USER},
+    [BOWL_VAR_LOGNAME] = {"LOGNAME", (string_address)bowl_logname_assignment, false, BOWL_VAR_LOGNAME},
+    [BOWL_VAR_RUNTIME] = {"XDG_RUNTIME_DIR", (string_address)bowl_runtime_assignment, true, BOWL_VAR_RUNTIME},
+    [BOWL_VAR_SHELL] = {"SHELL", "SHELL=/bin/sh", false, BOWL_VAR_SHELL},
+    [BOWL_VAR_TMPDIR] = {"TMPDIR", "TMPDIR=/tmp", true, BOWL_VAR_TMPDIR},
+    [BOWL_VAR_LC_ALL] = {"LC_ALL", null, false, BOWL_VAR_LANG},
+};
+
+// Which row an environment entry is, or BOWL_VARS.
+static positive bowl_variable_of(string_address entry)
+{
+        for (positive at = 0; at < BOWL_VARS; at++)
+                if (bowl_env_named(entry, bowl_variables[at].name))
+                        return at;
+        return BOWL_VARS;
+}
+
 static b32 bowl_session_unusable(string_address entry)
 {
-        static string_address empty[] = {
-            "TERM", "TERMINFO", "PATH", "LANG", "LC_ALL", "USER", "LOGNAME",
-            "SHELL", null};
-        static string_address path[] = {"HOME", "XDG_RUNTIME_DIR", "TMPDIR",
-                                        null};
-        positive i;
+        positive which = entry ? bowl_variable_of(entry) : BOWL_VARS;
         string_address value;
 
-        if (!entry)
+        if (which == BOWL_VARS)
                 return false;
-
-        for (i = 0; path[i]; i++)
-                if (bowl_env_named(entry, path[i]))
-                {
-                        value = bowl_env_payload(entry, path[i]);
-                        return bowl_path_steps(value) ||
-                               bowl_session_host_path(value);
-                }
-
-        for (i = 0; empty[i]; i++)
-                if (bowl_env_named(entry, empty[i]))
-                {
-                        value = bowl_env_payload(entry, empty[i]);
-                        return !value[0];
-                }
-
-        return false;
+        value = entry + string_length(bowl_variables[which].name) + 1;
+        return bowl_variables[which].path
+                   ? bowl_path_steps(value) || bowl_session_host_path(value)
+                   : !value[0];
 }
 
 static b32 bowl_session_default_missing(string_address name,
@@ -1442,76 +1443,51 @@ static string_address address_to bowl_environment(
     string_address address_to inherited)
 {
         static string_address mixed[BOWL_ENV_ROOM];
+        bool have[BOWL_VARS] = {false};
         positive n = 0;
         b32 skipped = false;
-        b32 have_term = false;
-        b32 have_terminfo = false;
-        b32 have_home = false;
-        b32 have_path = false;
-        b32 have_lang = false;
-        b32 have_user = false;
-        b32 have_logname = false;
-        b32 have_runtime = false;
-        b32 have_shell = false;
-        b32 have_tmpdir = false;
 
         bowl_session_fill();
 
-        if (inherited)
+        for (positive at = 0; inherited && inherited[at]; at++)
         {
-                for (positive at = 0; inherited[at]; at++)
+                positive which;
+
+                if (bowl_session_unusable(inherited[at]))
                 {
-                        if (bowl_session_unusable(inherited[at]))
-                        {
-                                skipped = true;
-                                continue;
-                        }
-
-                        if (bowl_env_named(inherited[at], "TERM"))
-                                have_term = true;
-                        else if (bowl_env_named(inherited[at], "TERMINFO"))
-                                have_terminfo = true;
-                        else if (bowl_env_named(inherited[at], "HOME"))
-                                have_home = true;
-                        else if (bowl_env_named(inherited[at], "PATH"))
-                                have_path = true;
-                        else if (bowl_env_named(inherited[at], "LANG") ||
-                                 bowl_env_named(inherited[at], "LC_ALL"))
-                                have_lang = true;
-                        else if (bowl_env_named(inherited[at], "USER"))
-                                have_user = true;
-                        else if (bowl_env_named(inherited[at], "LOGNAME"))
-                                have_logname = true;
-                        else if (bowl_env_named(inherited[at],
-                                                "XDG_RUNTIME_DIR"))
-                                have_runtime = true;
-                        else if (bowl_env_named(inherited[at], "SHELL"))
-                                have_shell = true;
-                        else if (bowl_env_named(inherited[at], "TMPDIR"))
-                                have_tmpdir = true;
-
-                        /*  Out of room. Handing back the block as it
-                            arrived is only safe while nothing has been
-                            dropped from it: once an entry has been refused,
-                            returning the original puts that entry back into
-                            the guest, which is the whole of what the refusal
-                            was for. What fit is then what is passed. */
-                        if (n + 1 >= BOWL_ENV_ROOM)
-                        {
-                                if (!skipped)
-                                        return inherited;
-                                mixed[n] = null;
-                                return mixed;
-                        }
-
-                        mixed[n++] = inherited[at];
+                        skipped = true;
+                        continue;
                 }
 
-                if (!skipped && have_term && have_terminfo && have_home &&
-                    have_path && have_lang && have_user && have_logname &&
-                    have_runtime && have_shell && have_tmpdir)
-                        return inherited;
+                which = bowl_variable_of(inherited[at]);
+                if (which < BOWL_VARS)
+                        have[bowl_variables[which].counts_as] = true;
 
+                /*  Out of room. Handing back the block as it
+                    arrived is only safe while nothing has been
+                    dropped from it: once an entry has been refused,
+                    returning the original puts that entry back into
+                    the guest, which is the whole of what the refusal
+                    was for. What fit is then what is passed. */
+                if (n + 1 >= BOWL_ENV_ROOM)
+                {
+                        if (!skipped)
+                                return inherited;
+                        mixed[n] = null;
+                        return mixed;
+                }
+
+                mixed[n++] = inherited[at];
+        }
+
+        if (inherited)
+        {
+                positive missing = 0;
+
+                for (positive at = 0; at < BOWL_VAR_LC_ALL; at++)
+                        missing += !have[at];
+                if (!skipped && !missing)
+                        return inherited;
                 if (n + BOWL_ENV_DEFAULTS >= BOWL_ENV_ROOM)
                 {
                         if (!skipped)
@@ -1521,26 +1497,9 @@ static string_address address_to bowl_environment(
                 }
         }
 
-        if (!have_term)
-                mixed[n++] = "TERM=" TERM_NAME;
-        if (!have_terminfo)
-                mixed[n++] = "TERMINFO=" TERM_INFO_DIRECTORY;
-        if (!have_home)
-                mixed[n++] = "HOME=" BOWL_SESSION_HOME;
-        if (!have_path)
-                mixed[n++] = "PATH=" BOWL_DEFAULT_PATH;
-        if (!have_lang)
-                mixed[n++] = "LANG=C.UTF-8";
-        if (!have_user)
-                mixed[n++] = bowl_user_assignment;
-        if (!have_logname)
-                mixed[n++] = bowl_logname_assignment;
-        if (!have_runtime)
-                mixed[n++] = bowl_runtime_assignment;
-        if (!have_shell)
-                mixed[n++] = "SHELL=/bin/sh";
-        if (!have_tmpdir)
-                mixed[n++] = "TMPDIR=/tmp";
+        for (positive at = 0; at < BOWL_VAR_LC_ALL; at++)
+                if (!have[at])
+                        mixed[n++] = (string_address)bowl_variables[at].fallback;
         mixed[n] = null;
         return mixed;
 }
