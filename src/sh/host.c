@@ -3375,10 +3375,71 @@ static bool host_console_is_screen(void)
         return false;
 }
 
+/* Whether a process that is not gone is on tty1: its controlling terminal is 4:1. */
+static bool host_tty1_held(void)
+{
+        bipolar handle = system_open_at(AT_FDCWD, "/proc", FILE_READ | O_DIRECTORY | O_CLOEXEC);
+        p8 records[2048];
+        positive have = 0;
+        positive at = 0;
+        bipolar error = 0;
+        struct linux_dirent64 address_to record;
+        bool held = false;
+
+        if (handle < 0)
+                return false;
+        while (!held && (record = file_directory_next(handle, records, sizeof(records),
+                                                      address_of have, address_of at,
+                                                      address_of error)))
+        {
+                string_address name = (string_address)record->d_name;
+                p8 path[48];
+                p8 text[512];
+                bipolar got;
+                positive bracket = 0;
+
+                if (!byte_is_digit(name[0]) ||
+                    !host_join(path, sizeof(path), "/proc/", name) ||
+                    string_append_bounded(path, "/stat", sizeof(path)) >= sizeof(path))
+                        continue;
+                got = file_slurp_once_at(AT_FDCWD, path, text, sizeof(text) - 1);
+                if (got <= 0)
+                        continue;
+                text[got] = end;
+
+                //      "pid (comm) S ppid pgrp session tty_nr": the name may hold
+                //      anything, so the fields are counted from its last bracket.
+                for (positive scan = 0; text[scan]; scan++)
+                        if (text[scan] == ')')
+                                bracket = scan;
+                if (!bracket || text[bracket + 1] != ' ' || text[bracket + 2] == 'Z')
+                        continue;
+                {
+                        string_address field = (string_address)text + bracket + 3;
+                        positive skipped = 0;
+
+                        while (skipped < 4 && *field)
+                                skipped += *field++ == ' ';
+                        held = skipped == 4 && field[0] == '1' && field[1] == '0' &&
+                               field[2] == '2' && field[3] == '5' && field[4] == ' ';
+                }
+        }
+        system_close((positive)handle);
+        return held;
+}
+
 /* A shell on tty1, in a session of its own, for a console that has none. */
 static fn host_tty1_shell(void)
 {
-        bipolar child = system_fork();
+        bipolar child;
+
+        //      One is enough: each canvas off over a console that is not a
+        //      screen forked another, and none ended, so after a few round
+        //      trips tty1 had as many shells splitting its keys.
+        if (host_tty1_held())
+                return;
+
+        child = system_fork();
 
         if (child)
                 return;

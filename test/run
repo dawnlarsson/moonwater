@@ -15619,9 +15619,11 @@ ovmf = next((path for path in ("/usr/share/edk2/x64/OVMF.4m.fd", "/usr/share/OVM
                                "/usr/share/edk2/ovmf/OVMF_CODE.fd") if os.path.exists(path)), "")
 fw_names = ("a firmware card is the only display", "canvas off and on three times with it",
             "with no refusal naming a holder", "on when it is on says so", "off when it is off says so",
-            "and canvas on does not claim another program holds the display")
+            "and canvas on does not claim another program holds the display",
+            "and it says it is on at the end, the desktop is on the screen",
+            "three off and on rounds over a serial console leave one shell on tty1")
 if ovmf:
-    shifted = {">": "dot", "$": "4", "?": "slash", "&": "7"}
+    shifted = {">": "dot", "$": "4", "?": "slash", "&": "7", "*": "8", "|": "backslash"}
     def type_shell(line):
         for character in line:
             if character == ";":
@@ -15637,7 +15639,10 @@ if ovmf:
                (["-cpu", "host", "-enable-kvm"] if os.access("/dev/kvm", os.R_OK | os.W_OK) else ["-cpu", "Nehalem"]) + [
         "-kernel", image, "-vga", "none", "-device", "ramfb", "-bios", ovmf,
         "-device", "qemu-xhci", "-device", "usb-tablet", "-device", "usb-kbd",
-        "-no-reboot", "-display", "none", "-serial", "file:" + work + "/fw-serial"],
+        "-no-reboot", "-display", "none", "-serial", "file:" + work + "/fw-serial",
+        #   The console on the serial port: what moonwater canvas off finds is a
+        #   console that is not a screen, and starts a shell on tty1 for.
+        "-append", "console=ttyS0"],
         work + "/fw-qmp", work + "/fw-mon", work)
     time.sleep(40)
     type_shell("moonwater canvas > /dev/ttyS0 2>&1")
@@ -15659,13 +15664,23 @@ if ovmf:
     time.sleep(8)
     type_shell("moonwater canvas > /dev/ttyS0 2>&1; echo fwstate > /dev/ttyS0")
     time.sleep(4)
+    type_shell("ls -l /proc/*/fd/0 2>/dev/null | grep -c tty1 > /dev/ttyS0; echo fwcount > /dev/ttyS0")
+    time.sleep(3)
+    shot("fw-on", 0.5)
+    vga, white = vga_share("fw-on")
     fw_serial = open(work + "/fw-serial", "rb").read()
-    out.append((fw_names[0], "yes" if b"simpledrm" in fw_serial else "no: " + repr(fw_serial[-200:]), "yes"))
+    out.append((fw_names[0], "yes" if b"Canvas is on: simpledrm" in fw_serial else "no: " + repr(fw_serial[-200:]), "yes"))
     out.append((fw_names[1], "yes" if fw_serial.count(b"fwrc-0") == 3 else "rc " + repr(re.findall(rb"fwrc-(\d+)", fw_serial)), "yes"))
     out.append((fw_names[2], str(fw_serial.count(b"Canvas stays off")), "0"))
     out.append((fw_names[3], "yes" if b"fwagain-1" in fw_serial and b"already on" in fw_serial else "no", "yes"))
     out.append((fw_names[4], "yes" if b"fwtwice-1" in fw_serial and b"already off" in fw_serial else "no", "yes"))
     out.append((fw_names[5], str(fw_serial.count(b"another program holds")), "0"))
+    out.append(("and it says it is on at the end, the desktop is on the screen",
+                "yes" if fw_serial.count(b"Canvas is on: simpledrm") >= 2 and vga < 80
+                else "%d status lines, %d%% console colours" % (fw_serial.count(b"Canvas is on: simpledrm"), vga), "yes"))
+    shells = re.findall(rb"(\d+)\s+fwcount", fw_serial.replace(b"\r", b""))
+    out.append(("three off and on rounds over a serial console leave one shell on tty1",
+                shells[-1].decode() if shells else "no count", "1"))
     fw.quit()
     time.sleep(1)
     fw.terminate()
@@ -15675,7 +15690,7 @@ if ovmf:
         fw.kill()
 else:
     for name in fw_names:
-        out.append((name, "not run: no OVMF", "0" if name in fw_names[2:3] + fw_names[5:] else "yes"))
+        out.append((name, "not run: no OVMF", "0" if name in fw_names[2:3] + fw_names[5:6] else "1" if name == fw_names[7] else "yes"))
 
 for name, got, want in out:
     print("%s|%s|%s" % (name, got, want))

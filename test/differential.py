@@ -40865,6 +40865,28 @@ while True:
         check(any(line.strip().startswith("brightness [N%|+N|-N]") for line in rows),
               "the brightness row shows N%|+N|-N", [line for line in rows if "brightness" in line])
 
+        # A state file a verb writes, planted as a link to something else
+        # before the verb runs: the verb may refuse or may replace the link,
+        # and what the link pointed at is left as it was.
+        planted = [("wifi.power", "wifi on"), ("wired.power", "wired off"),
+                   ("bluetooth.power", "bluetooth off"), ("internet", "priority internet wifi"),
+                   ("ntp", "ntp off"), ("ntp.sampling", "ntp sampling off"), ("keyboard", "keyboard de"),
+                   ("timezone", "timezone se"), ("timezone.mode", "timezone se"),
+                   ("wifi", "wifi add linkednet passpass1"), ("bluetooth", "bluetooth add linkeddev"),
+                   ("tune", "charge limit 80")]
+        script = ""
+        for state, command in planted:
+            script += (f"rm -rf /root/{state}; echo SAFE > /tmp/victim; ln -s /tmp/victim /root/{state}\n"
+                       f"timeout 20 /tmp/moonwater {command} > /dev/null 2>&1\n"
+                       f"echo \"@@planted {state} $(cat /tmp/victim)\"\n")
+        sys_reset()
+        lines, finished = session("rm -f /root/tune\n" + script)
+        check(finished, "the planted links run finished", "")
+        for state, command in planted:
+            check(f"@@planted {state} SAFE" in lines,
+                  f"moonwater {command} does not write through a link at /root/{state}",
+                  [line for line in lines if f"@@planted {state}" in line])
+
         # Canvas with no kernel desktop to ask: off and on say why and say
         # nothing about windows closing.
         lines, finished = session(say("canvas off") + say("canvas on") + say("canvas"))
