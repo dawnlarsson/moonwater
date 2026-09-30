@@ -77,6 +77,49 @@
 #define XORSHIFT32(state) \
         ((state) ^= (state) << 13, (state) ^= (state) >> 17, (state) ^= (state) << 5)
 
+/*
+        BENCH_PAIRED fills ratios[] with one measurement per trial and sorts
+        it, so ratios[TRIES / 2] is the paired median: each trial takes one
+        (the baseline) and two (what is under test) in the order BENCH_ALTERNATE
+        gives, and records two * 10000 / one, ten thousand being parity.
+        BENCH_PAIRED_RUNS is the common case, one run(bool assembly, ...) that
+        the flag turns from the former body into the assembly. The section
+        supplies TRIES and order().
+*/
+#define BENCH_PAIRED(ratios, one, one_run, two, two_run)                      \
+        do {                                                                  \
+                for (positive trial = 0; trial < TRIES; trial++)              \
+                {                                                             \
+                        p64 one, two;                                         \
+                        BENCH_ALTERNATE(trial, one, one_run, two, two_run);   \
+                        (ratios)[trial] =                                     \
+                            (positive)((two) * 10000 / ((one) ? (one) : 1));  \
+                }                                                             \
+                order(ratios, TRIES);                                         \
+        } while (0)
+#define BENCH_PAIRED_RUNS(ratios, former, assembly, ...)                      \
+        BENCH_PAIRED(ratios, former, run(false, __VA_ARGS__), assembly,       \
+                     run(true, __VA_ARGS__))
+
+/*
+        BENCH_BEST_PAIRED is the best-of form of the same alternation: over
+        TRIES trials it keeps the fastest time of each side, the two best
+        variables being ones the section has already set to its maximum.
+*/
+#define BENCH_BEST_PAIRED(first_best, first_run, second_best, second_run)     \
+        do {                                                                  \
+                for (positive trial = 0; trial < TRIES; trial++)              \
+                {                                                             \
+                        p64 first_took, second_took;                          \
+                        BENCH_ALTERNATE(trial, first_took, first_run,         \
+                                        second_took, second_run);             \
+                        if (first_took < (first_best))                        \
+                                (first_best) = first_took;                    \
+                        if (second_took < (second_best))                      \
+                                (second_best) = second_took;                  \
+                }                                                             \
+        } while (0)
+
 #if defined(SHARED_sizes)
 /* Literal arguments exercise compiler-owned specializations. The scan checks
    keep their twenty-size function bands to bound compiler resource use. */
@@ -90715,14 +90758,7 @@ b32 main(void)
                     memory_into_hex(assembly_output, input, size) ||
                     memory_compare(former_output, assembly_output, size * 2))
                         return 1;
-                for (positive trial = 0; trial < TRIES; trial++)
-                {
-                        p64 former, assembly;
-                        BENCH_BOTH_ORDERS(trial, assembly, former,
-                                          size, rounds);
-                        ratios[trial] = (positive)(assembly * 10000 / (former ? former : 1));
-                }
-                order(ratios, TRIES);
+                BENCH_PAIRED_RUNS(ratios, former, assembly, size, rounds);
                 string_format(log, "memory_into_hex %p bytes: paired median ASM/C %p.%p%%\n",
                               size, ratios[TRIES / 2] / 100, ratios[TRIES / 2] % 100);
         }
@@ -90867,14 +90903,7 @@ b32 main(void)
                                         return 1;
                                 positive rounds = (1u << 22) / size;
                                 if (rounds > 100000) rounds = 100000;
-                                for (positive trial = 0; trial < TRIES; trial++)
-                                {
-                                        p64 former, assembly;
-                                        BENCH_BOTH_ORDERS(trial, assembly, former,
-                                                          size, rounds, json);
-                                        ratios[trial] = assembly * 10000 / (former ? former : 1);
-                                }
-                                order(ratios, TRIES);
+                                BENCH_PAIRED_RUNS(ratios, former, assembly, size, rounds, json);
                                 string_format(log, "%s policy%p %s %p bytes: paired median ASM/C %p.",
                                     json ? "JSON" : "hex", json ? 64 : hex_policy, shapes[shape], size,
                                     ratios[TRIES / 2] / 100);
@@ -90991,14 +91020,7 @@ b32 main(void)
                                 return 1;
                         positive rounds = (1u << 24) / size;
                         if (rounds > 200000) rounds = 200000;
-                        for (positive trial = 0; trial < TRIES; trial++)
-                        {
-                                p64 before, after;
-                                BENCH_BOTH_ORDERS(trial, after, before,
-                                                  size, rounds);
-                                ratios[trial] = after * 10000 / (before ? before : 1);
-                        }
-                        order(ratios, TRIES);
+                        BENCH_PAIRED_RUNS(ratios, before, after, size, rounds);
                         string_format(log, "spelled %s %p bytes: paired median ASM/C %p.",
                                       shapes[shape], size, ratios[TRIES / 2] / 100);
                         positive_to_padded(log, ratios[TRIES / 2] % 100, 2, '0', 0);
@@ -91306,20 +91328,8 @@ static fn row(string_address name, positive width, p8 prefix)
         // Alternate who runs first. Frequency changes over a long callback
         // row otherwise consistently reward the first implementation and can
         // turn the same binary from an apparent win into an apparent loss.
-        for (positive t = 0; t < TRIES; t++)
-        {
-                p64 got_former;
-                p64 got_assembly;
-
-                BENCH_ALTERNATE(t, got_former, former_once(width, prefix),
-                                got_assembly, assembly_once(width, prefix));
-
-                if (got_former < former)
-                        former = got_former;
-
-                if (got_assembly < assembly)
-                        assembly = got_assembly;
-        }
+        BENCH_BEST_PAIRED(former, former_once(width, prefix),
+                          assembly, assembly_once(width, prefix));
 
         string_format(log, "  %s: former-C %p  assembly %p  asm/C %p%%\n",
                       name, (positive)former, (positive)assembly,
@@ -91804,19 +91814,8 @@ static fn row(string_address name, positive width)
         p64 former = positive_max;
         p64 assembly = positive_max;
 
-        for (positive t = 0; t < TRIES; t++)
-        {
-                p64 got_former;
-                p64 got_assembly;
-
-                BENCH_ALTERNATE(t, got_former, former_once(width),
-                                got_assembly, assembly_once(width));
-
-                if (got_former < former)
-                        former = got_former;
-                if (got_assembly < assembly)
-                        assembly = got_assembly;
-        }
+        BENCH_BEST_PAIRED(former, former_once(width),
+                          assembly, assembly_once(width));
 
         string_format(log, "  %s: former-C %p  assembly %p  asm/C %p%%\n",
                       name, (positive)former, (positive)assembly,
@@ -92015,24 +92014,12 @@ static fn row(string_address name, positive shape, bool writer_form)
         p64 former = positive_max;
         p64 assembly = positive_max;
 
-        for (positive t = 0; t < TRIES; t++)
-        {
-                p64 got_former;
-                p64 got_assembly;
-
-                BENCH_ALTERNATE(t,
-                                got_former, writer_form
-                                                ? writer_once(shape, false)
-                                                : buffer_once(shape, false),
-                                got_assembly, writer_form
-                                                  ? writer_once(shape, true)
-                                                  : buffer_once(shape, true));
-
-                if (got_former < former)
-                        former = got_former;
-                if (got_assembly < assembly)
-                        assembly = got_assembly;
-        }
+        BENCH_BEST_PAIRED(former,
+                          writer_form ? writer_once(shape, false)
+                                      : buffer_once(shape, false),
+                          assembly,
+                          writer_form ? writer_once(shape, true)
+                                      : buffer_once(shape, true));
 
         string_format(log, "  %s: former-C %p  assembly %p  asm/C %p%%\n",
                       name, (positive)former, (positive)assembly,
@@ -92210,17 +92197,8 @@ static fn row(string_address name, bool binary, positive shape)
         p64 former = positive_max;
         p64 assembly = positive_max;
 
-        for (positive t = 0; t < TRIES; t++)
-        {
-                p64 got_former, got_assembly;
-                BENCH_ALTERNATE(t, got_former, run_once(false, binary, shape),
-                                got_assembly, run_once(true, binary, shape));
-
-                if (got_former < former)
-                        former = got_former;
-                if (got_assembly < assembly)
-                        assembly = got_assembly;
-        }
+        BENCH_BEST_PAIRED(former, run_once(false, binary, shape),
+                          assembly, run_once(true, binary, shape));
 
         string_format(log, "  %s: former-C %p  assembly %p  asm/C %p%%\n",
                       name, (positive)former, (positive)assembly,
@@ -92372,18 +92350,7 @@ static fn row(positive length)
         positive ratios[TRIES];
         positive rounds = rounds_for(length);
 
-        for (positive trial = 0; trial < TRIES; trial++)
-        {
-                p64 former;
-                p64 assembly;
-
-                BENCH_BOTH_ORDERS(trial, assembly, former, length, rounds);
-
-                ratios[trial] = (positive)(assembly * 10000 /
-                                            (former ? former : 1));
-        }
-
-        order(ratios, TRIES);
+        BENCH_PAIRED_RUNS(ratios, former, assembly, length, rounds);
         string_format(log, "  %p bytes  median asm/C %p.%p%%\n", length,
                       ratios[TRIES / 2] / 100, ratios[TRIES / 2] % 100);
 }
@@ -92397,19 +92364,8 @@ static fn string_row(positive length)
                 block[at] = (p8)(at % 251 + 1);
         block[length] = 0;
 
-        for (positive trial = 0; trial < TRIES; trial++)
-        {
-                p64 former;
-                p64 assembly;
-
-                BENCH_ALTERNATE(trial, former, run_string(false, rounds),
-                                assembly, run_string(true, rounds));
-
-                ratios[trial] = (positive)(assembly * 10000 /
-                                            (former ? former : 1));
-        }
-
-        order(ratios, TRIES);
+        BENCH_PAIRED(ratios, former, run_string(false, rounds),
+                     assembly, run_string(true, rounds));
         string_format(log, "  %p bytes  median one-pass/two-pass %p.%p%%\n",
                       length, ratios[TRIES / 2] / 100,
                       ratios[TRIES / 2] % 100);
@@ -93995,20 +93951,8 @@ static fn path_row(string_address label, positive operation,
         p64 former = positive_max;
         p64 assembly = positive_max;
 
-        for (positive t = 0; t < TRIES; t++)
-        {
-                p64 one;
-                p64 two;
-
-                BENCH_ALTERNATE(t,
-                                one, path_run(false, operation, directory, name, path, rounds),
-                                two, path_run(true, operation, directory, name, path, rounds));
-
-                if (one < former)
-                        former = one;
-                if (two < assembly)
-                        assembly = two;
-        }
+        BENCH_BEST_PAIRED(former, path_run(false, operation, directory, name, path, rounds),
+                          assembly, path_run(true, operation, directory, name, path, rounds));
 
         string_format(log, "  %s: former-C %p  assembly %p  asm/C %p%%\n",
                       label, (positive)former, (positive)assembly,
@@ -94183,16 +94127,8 @@ static fn primitive_row(positive size)
 
         prepare(size);
 
-        for (positive trial = 0; trial < TRIES; trial++)
-        {
-                p64 one, two;
-
-                BENCH_ALTERNATE(trial, one, primitive_run(false, size, rounds),
-                                two, primitive_run(true, size, rounds));
-
-                if (one < former) former = one;
-                if (two < assembly) assembly = two;
-        }
+        BENCH_BEST_PAIRED(former, primitive_run(false, size, rounds),
+                          assembly, primitive_run(true, size, rounds));
 
         string_format(log,
                       "  primitive %p bytes: former-C %p  assembly %p  asm/C %p%%\n",
@@ -94208,16 +94144,8 @@ static fn rev_row(positive size)
 
         prepare(size);
 
-        for (positive trial = 0; trial < TRIES; trial++)
-        {
-                p64 one, two;
-
-                BENCH_ALTERNATE(trial, one, rev_run(false, size, rounds),
-                                two, rev_run(true, size, rounds));
-
-                if (one < former) former = one;
-                if (two < folded) folded = two;
-        }
+        BENCH_BEST_PAIRED(former, rev_run(false, size, rounds),
+                          folded, rev_run(true, size, rounds));
 
         string_format(log,
                       "  rev fold  %p bytes: former-loop %p  folded %p  new/old %p%%\n",
@@ -94362,24 +94290,14 @@ static fn row(string_address name, bool string_form, positive shape,
         p64 former = positive_max;
         p64 assembly = positive_max;
 
-        for (positive trial = 0; trial < TRIES; trial++)
-        {
-                p64 one;
-                p64 two;
-
-                BENCH_ALTERNATE(trial,
-                                one, string_form
-                                         ? string_once(false, shape, width, left, rounds)
-                                         : raw_once(false, shape, width, left, rounds),
-                                two, string_form
-                                         ? string_once(true, shape, width, left, rounds)
-                                         : raw_once(true, shape, width, left, rounds));
-
-                if (one < former)
-                        former = one;
-                if (two < assembly)
-                        assembly = two;
-        }
+        BENCH_BEST_PAIRED(former,
+                          string_form
+                              ? string_once(false, shape, width, left, rounds)
+                              : raw_once(false, shape, width, left, rounds),
+                          assembly,
+                          string_form
+                              ? string_once(true, shape, width, left, rounds)
+                              : raw_once(true, shape, width, left, rounds));
 
         string_format(log,
                       "  %s (%p calls): former-C %p  assembly %p  asm/C %p%%\n",
@@ -94668,25 +94586,16 @@ static fn row(string_address name, positive length, bool hold_equal,
 {
         positive ratios[TRIES];
 
-        for (positive t = 0; t < TRIES; t++)
-        {
-                p64 former;
-                p64 assembly;
-
-                BENCH_ALTERNATE(t,
-                                former, byte ? byte_once(false)
-                                             : (flush ? flush_once(false)
-                                                      : put_once(length, hold_equal, false,
-                                                                 rounds, pending)),
-                                assembly, byte ? byte_once(true)
-                                               : (flush ? flush_once(true)
-                                                        : put_once(length, hold_equal, true,
-                                                                   rounds, pending)));
-
-                ratios[t] = (positive)(assembly * 10000 / (former ? former : 1));
-        }
-
-        order(ratios, TRIES);
+        BENCH_PAIRED(ratios, former,
+                     byte ? byte_once(false)
+                          : (flush ? flush_once(false)
+                                   : put_once(length, hold_equal, false, rounds,
+                                              pending)),
+                     assembly,
+                     byte ? byte_once(true)
+                          : (flush ? flush_once(true)
+                                   : put_once(length, hold_equal, true, rounds,
+                                              pending)));
         string_format(log, "  %s  median asm/C %p.%p%%\n", name,
                       ratios[TRIES / 2] / 100, ratios[TRIES / 2] % 100);
 }
@@ -94699,18 +94608,8 @@ static fn log_row(string_address name, positive length)
            benchmark deliberately reuses the process log buffer as scratch. */
         log_flush();
 
-        for (positive t = 0; t < TRIES; t++)
-        {
-                p64 former;
-                p64 assembly;
-
-                BENCH_ALTERNATE(t, former, log_once(length, false),
-                                assembly, log_once(length, true));
-
-                ratios[t] = (positive)(assembly * 10000 / (former ? former : 1));
-        }
-
-        order(ratios, TRIES);
+        BENCH_PAIRED(ratios, former, log_once(length, false),
+                     assembly, log_once(length, true));
         log_writer_buffer_length = 0;
         string_format(log, "  %s  median current/former %p.%p%%\n", name,
                       ratios[TRIES / 2] / 100, ratios[TRIES / 2] % 100);
@@ -95115,18 +95014,8 @@ static fn row(string_address name, p64 (*run)(bool))
 {
         positive ratios[TRIES];
 
-        for (positive trial = 0; trial < TRIES; trial++)
-        {
-                p64 former;
-                p64 folded;
-
-                BENCH_ALTERNATE(trial, former, run(false), folded, run(true));
-
-                ratios[trial] = (positive)(folded * 10000 /
-                                            (former ? former : 1));
-        }
-
-        order(ratios, TRIES);
+        BENCH_PAIRED(ratios, former, run(false),
+                     folded, run(true));
         string_format(log, "  %s  median folded/scalar %p.%p%%\n", name,
                       ratios[TRIES / 2] / 100, ratios[TRIES / 2] % 100);
 }
@@ -96469,18 +96358,7 @@ static fn row(string_address name, positive length, bool late)
 
         prepare(length, late);
 
-        for (positive trial = 0; trial < TRIES; trial++)
-        {
-                p64 former;
-                p64 assembly;
-
-                BENCH_BOTH_ORDERS(trial, assembly, former, length, rounds);
-
-                ratios[trial] = (positive)(assembly * 10000 /
-                                            (former ? former : 1));
-        }
-
-        order(ratios, TRIES);
+        BENCH_PAIRED_RUNS(ratios, former, assembly, length, rounds);
         string_format(log, "  %s  median asm/C %p.%p%%\n", name,
                       ratios[TRIES / 2] / 100, ratios[TRIES / 2] % 100);
 }
@@ -96750,18 +96628,7 @@ static void row(string_address name, positive length, positive columns, bool wra
         if (space < length)
                 text[space] = ' ';
 
-        for (positive trial = 0; trial < TRIES; trial++)
-        {
-                p64 former;
-                p64 shared;
-
-                BENCH_BOTH_ORDERS(trial, shared, former,
-                                  length, columns, wrap, rounds);
-
-                ratios[trial] = (positive)(shared * 10000 / (former ? former : 1));
-        }
-
-        order(ratios, TRIES);
+        BENCH_PAIRED_RUNS(ratios, former, shared, length, columns, wrap, rounds);
         string_format(log, "  %s  shared/C %p.%p%%\n", name,
                       ratios[TRIES / 2] / 100, ratios[TRIES / 2] % 100);
 }
@@ -97305,19 +97172,7 @@ static fn row(string_address name, positive length, string_address wanted,
         positive rounds = traffic / (length ? length : 1) + 1;
         positive ratios[TRIES];
 
-        for (positive trial = 0; trial < TRIES; trial++)
-        {
-                p64 former;
-                p64 assembly;
-
-                BENCH_BOTH_ORDERS(trial, assembly, former,
-                                  length, size, rounds);
-
-                ratios[trial] = (positive)(assembly * 10000 /
-                                             (former ? former : 1));
-        }
-
-        order(ratios, TRIES);
+        BENCH_PAIRED_RUNS(ratios, former, assembly, length, size, rounds);
         string_format(log, "  %s  median asm/former %p.%p%%\n", name,
                       ratios[TRIES / 2] / 100, ratios[TRIES / 2] % 100);
 }
@@ -97465,19 +97320,7 @@ static fn row(string_address name, string_address wanted, bool icase,
                 return;
         }
 
-        for (positive trial = 0; trial < TRIES; trial++)
-        {
-                p64 current;
-                p64 prepared_time;
-
-                BENCH_BOTH_ORDERS(trial, prepared_time, current,
-                                  ROOM, address_of search, rounds);
-
-                ratios[trial] = (positive)(prepared_time * 10000 /
-                                            (current ? current : 1));
-        }
-
-        order(ratios, TRIES);
+        BENCH_PAIRED_RUNS(ratios, current, prepared_time, ROOM, address_of search, rounds);
         string_format(log, "  %s  prepared/current %p.%p%%\n", name,
                       ratios[TRIES / 2] / 100, ratios[TRIES / 2] % 100);
 }
@@ -97694,18 +97537,8 @@ static fn gap(void)
 {
         positive ratios[TRIES];
 
-        for (positive trial = 0; trial < TRIES; trial++)
-        {
-                p64 floor_time;
-                p64 fused_time;
-
-                BENCH_ALTERNATE(trial, floor_time, run(0), fused_time, run(3));
-
-                ratios[trial] = (positive)(fused_time * 10000 /
-                                            (floor_time ? floor_time : 1));
-        }
-
-        order(ratios, TRIES);
+        BENCH_PAIRED(ratios, floor_time, run(0),
+                     fused_time, run(3));
         positive ratio = ratios[TRIES / 2];
 
         if (ratio < 10000)
@@ -97966,18 +97799,7 @@ static fn row(string_address name, positive length, positive hit)
 
         prepare(length, hit);
 
-        for (positive trial = 0; trial < TRIES; trial++)
-        {
-                p64 former;
-                p64 assembly;
-
-                BENCH_BOTH_ORDERS(trial, assembly, former, length, rounds);
-
-                ratios[trial] = (positive)(assembly * 10000 /
-                                            (former ? former : 1));
-        }
-
-        order(ratios, TRIES);
+        BENCH_PAIRED_RUNS(ratios, former, assembly, length, rounds);
         string_format(log, "  %s  median asm/C %p.%p%%\n", name,
                       ratios[TRIES / 2] / 100, ratios[TRIES / 2] % 100);
 }
@@ -98152,16 +97974,7 @@ static fn row(string_address name, positive length, positive shape)
 
         prepare(length, shape);
 
-        for (positive trial = 0; trial < TRIES; trial++)
-        {
-                p64 former;
-                p64 assembly;
-                BENCH_BOTH_ORDERS(trial, assembly, former, length, rounds);
-                ratios[trial] = (positive)(assembly * 10000 /
-                                            (former ? former : 1));
-        }
-
-        order(ratios, TRIES);
+        BENCH_PAIRED_RUNS(ratios, former, assembly, length, rounds);
         string_format(log, "  %s  median asm/C %p.%p%%\n", name,
                       ratios[TRIES / 2] / 100, ratios[TRIES / 2] % 100);
 }
