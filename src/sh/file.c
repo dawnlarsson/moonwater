@@ -5205,6 +5205,53 @@ CONST positive file_letter_bit(p8 letter)
 #define FILE_FLAG(letter) ((positive)1 << file_letter_bit(letter))
 
 /*
+        What usage() says in coreutils and errtryhelp() in util-linux after a
+        complaint about the line, and the complaints that always bring it: a
+        missing operand, a missing destination, an extra operand. The status
+        is what the tool leaves with, which is theirs to say.
+*/
+static COLD b32 file_try_help(string_address program, b32 status)
+{
+        return string_report(log_error, status,
+                             "Try '%s --help' for more information.\n", program);
+}
+
+static COLD b32 file_need_operand(string_address program)
+{
+        string_format(log_error, "%s: missing operand\n", program);
+        return file_try_help(program, 1);
+}
+
+static COLD b32 file_need_operand_after(string_address program, string_address word)
+{
+        string_format(log_error, "%s: missing operand after '%w'\n", program,
+                      writer_terminal_quoted_name, word);
+        return file_try_help(program, 1);
+}
+
+static COLD b32 file_need_file(string_address program, b32 status)
+{
+        string_format(log_error, "%s: missing file operand\n", program);
+        return file_try_help(program, status);
+}
+
+static COLD b32 file_need_destination(string_address program, string_address word,
+                                      b32 status)
+{
+        string_format(log_error, "%s: missing destination file operand after %w\n",
+                      program, writer_shell_quoted_name, word);
+        return file_try_help(program, status);
+}
+
+static COLD b32 file_extra_operand(string_address program, string_address word,
+                                   b32 status)
+{
+        string_format(log_error, "%s: extra operand '%w'\n", program,
+                      writer_terminal_quoted_name, word);
+        return file_try_help(program, status);
+}
+
+/*
         A word chosen from a list, and the complaint that names every word
         the option would have taken. Rows that answer alike are written on
         one line, the way the reference writes its synonyms.
@@ -5269,7 +5316,7 @@ static b32 file_word_choose(string_address program, string_address option,
 
         log_error("\n", 1);
         if (help)
-                string_format(log_error, "Try '%s --help' for more information.\n", program);
+                file_try_help(program, 0);
         return -1;
 }
 
@@ -5407,23 +5454,7 @@ static bool file_option_needs(file_taking address_to taking, string_address word
                 An option given without its value was a line short of the
                 reference in every program that has one.
         */
-        return string_report(log_error, false, "Try '%s --help' for more information.\n",
-                      taking->program);
-}
-
-static COLD b32 file_need_operand(string_address program)
-{
-        string_format(log_error, "%s: missing operand\n", program);
-        return string_report(log_error, 1, "Try '%s --help' for more information.\n",
-                      program);
-}
-
-static COLD b32 file_need_operand_after(string_address program, string_address word)
-{
-        string_format(log_error, "%s: missing operand after '%w'\n", program,
-                      writer_terminal_quoted_name, word);
-        return string_report(log_error, 1, "Try '%s --help' for more information.\n",
-                      program);
+        return file_try_help(taking->program, false);
 }
 
 static p8 file_long_letter(file_taking address_to taking, string_address name,
@@ -5554,9 +5585,7 @@ static bool file_take_from(file_taking address_to taking, positive index)
                                 reference here, and nothing noticed because
                                 no grammar fed a letter that is not there.
                         */
-                        return string_report(log_error, false,
-                                      "Try '%s --help' for more information.\n",
-                                      taking->program);
+                        return file_try_help(taking->program, false);
                 }
                 positive bit = file_letter_bit(letter);
                 bool optional = match.optional;
@@ -5573,9 +5602,7 @@ static bool file_take_from(file_taking address_to taking, positive index)
                         //      an unknown option gets: both families send the
                         //      reader on to --help and this path was a line
                         //      short of them.
-                        return string_report(log_error, false,
-                                      "Try '%s --help' for more information.\n",
-                                      taking->program);
+                        return file_try_help(taking->program, false);
                 }
                 taking->repeated |= taking->flags & ((positive)1 << bit);
                 taking->flags |= (positive)1 << bit;
@@ -5621,6 +5648,47 @@ static bool file_take_from(file_taking address_to taking, positive index)
 static bool file_take(file_taking address_to taking)
 {
         return file_take_from(taking, 1);
+}
+
+/*
+        The scan a tool that keeps its operands where they stand begins with:
+        the list is emptied, options and names are taken in getopt's order,
+        and a list that could not be kept is the tool's failure and not a
+        shorter list. False says why has been said and the tool leaves.
+*/
+static bool file_operands_take(file_taking address_to taking)
+{
+        file_operands_begin();
+        taking->operand = file_operand;
+
+        if (!file_take(taking))
+                return false;
+
+        //      Options may follow the names, as getopt permutes them; the
+        //      names are gathered in order and read from the first.
+        taking->first = 0;
+
+        return !file_operand_failed ||
+               string_report(log_error, false, "%s: memory exhausted\n",
+                             taking->program);
+}
+
+/*
+        For the tools that read options and no names: the scan, then a
+        complaint about the first name left over. Zero says go on; anything
+        else is the status to leave with.
+*/
+static const argument_option file_no_options[] = {{null}};
+
+static b32 file_options_only(file_taking address_to taking, b32 status)
+{
+        if (!file_operands_take(taking))
+                return status;
+
+        if (file_operand_count)
+                return file_extra_operand(taking->program, file_operand_at(0), status);
+
+        return 0;
 }
 
 /*
@@ -8526,15 +8594,6 @@ static bool file_destination_in(string_address program, string_address directory
         return true;
 }
 
-/* GNU's cp, mv and install answer a missing or extra operand through
-   usage(), which adds the line that points at --help. */
-static COLD bool file_try_help(string_address program)
-{
-        return string_report(log_error, false,
-                             "Try '%s --help' for more information.\n",
-                             program);
-}
-
 static bool file_source_destination(string_address program, positive first,
                                     positive count, string_address into, bool alone,
                                     fn(address_to pair)(string_address source,
@@ -8546,17 +8605,10 @@ static bool file_source_destination(string_address program, positive first,
         // GNU's order: what is missing first, then the two options that
         // cannot be together.
         if (first >= count)
-        {
-                string_format(log_error, "%s: missing file operand\n", program);
-                return file_try_help(program);
-        }
+                return file_need_file(program, false);
 
         if (!into && first + 1 >= count)
-        {
-                string_format(log_error, "%s: missing destination file operand after %w\n",
-                              program, writer_shell_quoted_name, file_operand_at(first));
-                return file_try_help(program);
-        }
+                return file_need_destination(program, file_operand_at(first), false);
 
         if (into && alone)
                 return string_report(
@@ -8576,10 +8628,8 @@ static bool file_source_destination(string_address program, positive first,
                 {
                         /* GNU extra operand is files[2], the first name
                            beyond the pair, not the destination. */
-                        string_format(log_error, "%s: extra operand '%w'\n", program,
-                                      writer_terminal_quoted_name,
-                                      file_operand_at(first + 2));
-                        return file_try_help(program);
+                        return file_extra_operand(program, file_operand_at(first + 2),
+                                                  false);
                 }
 
                 //      GNU says so after the operands have been counted and the
@@ -8589,7 +8639,7 @@ static bool file_source_destination(string_address program, positive first,
                 {
                         string_format(log_error, "%s: with --parents, the destination must be a directory\n",
                                       program);
-                        return file_try_help(program);
+                        return file_try_help(program, false);
                 }
 
                 pair(file_operand_at(first), last);
@@ -13374,8 +13424,7 @@ static b32 file_nice()
                                     "nice: invalid option -- '%s'\n", named);
                         }
 
-                        return string_report(log_error, 125,
-                            "Try 'nice --help' for more information.\n");
+                        return file_try_help((string_address) "nice", 125);
                 }
 
                 break;
@@ -19313,7 +19362,7 @@ static b32 file_du()
                        (taking.first < count && count - taking.first > 1));
 
         if (du_option_failed)
-                return string_report(log_error, 1, "Try 'du --help' for more information.\n");
+                return file_try_help((string_address) "du", 1);
 
         positive block_unit = 0;
         bool block_human = false;
@@ -19416,7 +19465,7 @@ static b32 file_du()
                               du_depth_said < 0 ? (string_address) "-" : (string_address) "",
                               du_depth_said < 0 ? (positive)0 - (positive)du_depth_said
                                                 : (positive)du_depth_said);
-                return string_report(log_error, 1, "Try 'du --help' for more information.\n");
+                return file_try_help((string_address) "du", 1);
         }
 
         if (du_inodes && du_apparent)
@@ -19643,7 +19692,7 @@ static bool df_refused(string_address message, string_address word)
                 string_format(log_error, message, word);
         else
                 string_format(log_error, message, writer_terminal_quoted_name, word);
-        return string_report(log_error, false, "Try 'df --help' for more information.\n");
+        return file_try_help((string_address) "df", false);
 }
 
 // One --output: its list, comma separated, goes on the end of the table.
@@ -21088,19 +21137,15 @@ static b32 file_chmod()
         //      not change the walk, and the ledger records that.
         //      The operands are collected wherever they stand, as getopt
         //      permutes them: chmod u+w -R dir is a recursive change.
-        file_operands_begin();
         file_taking taking = {
             .program = (string_address) "chmod",
             .options = chmod_options,
             .selection = (p8 address_to)address_of chmod_selected,
-            .operand = file_operand,
             .posix_order = true,
         };
 
-        if (!file_take(address_of taking))
+        if (!file_operands_take(address_of taking))
                 return 1;
-        if (file_operand_failed)
-                return string_report(log_error, 1, "chmod: memory exhausted\n");
 
         positive first = 0;
         count = file_operand_count;
@@ -22122,19 +22167,15 @@ static b32 file_chown_common(string_address program, bool groups_only)
         chown_has_new_user = false;
         chown_has_new_group = false;
 
-        file_operands_begin();
         file_taking taking = {
             .program = program,
             .options = chown_options,
             .selection = (p8 address_to)address_of chown_selected,
-            .operand = file_operand,
             .posix_order = true,
         };
 
-        if (!file_take(address_of taking))
+        if (!file_operands_take(address_of taking))
                 return 1;
-        if (file_operand_failed)
-                return string_report(log_error, 1, "%s: memory exhausted\n", program);
         count = file_operand_count;
 
         //      --from's spec is read first: the reference is a getopt loop
@@ -22174,10 +22215,9 @@ static b32 file_chown_common(string_address program, bool groups_only)
         if (first >= count || (!like && first + 1 >= count))
         {
                 if (first >= count)
-                        return string_report(log_error, 1, "%s: missing operand\n", program);
+                        return file_need_operand(program);
 
-                return string_report(log_error, 1, "%s: missing operand after '%w'\n",
-                                     program, writer_terminal_quoted_name, file_operand_at(count - 1));
+                return file_need_operand_after(program, file_operand_at(count - 1));
         }
 
         if (like)
@@ -22841,7 +22881,6 @@ static b32 file_ln()
 
         file_taking taking = {
             .program = (string_address) "ln",
-            .operand = file_operand,
             .posix_order = true,
             //      -d, -F and --directory ask for a hard link to a
             //      directory, which the kernel gives only to a privileged
@@ -22851,15 +22890,8 @@ static b32 file_ln()
             .seen = ln_option_seen,
         };
 
-        file_operands_begin();
-        if (!file_take(address_of taking))
+        if (!file_operands_take(address_of taking))
                 return 1;
-        if (file_operand_failed)
-                return string_report(log_error, 1, "%s: memory exhausted\n",
-                                     (string_address) "ln");
-        //      Options may follow the names, as getopt permutes them;
-        //      the names are gathered in order and read from there.
-        taking.first = 0;
         count = file_operand_count;
 
         if (!file_targets_told((string_address) "ln", (taking.repeated & FILE_FLAG('t')) != 0))
@@ -22879,10 +22911,7 @@ static b32 file_ln()
         ln_through = ln_selected.dereference == 'L';
 
         if (first >= count)
-        {
-                log_error("ln: missing file operand\n", 0);
-                return string_report(log_error, 1, "Try 'ln --help' for more information.\n");
-        }
+                return file_need_file((string_address) "ln", 1);
 
         if (ln_relative && !ln_symbolic)
         {
@@ -22898,23 +22927,12 @@ static b32 file_ln()
         if (alone)
         {
                 if (count - first == 1)
-                {
-                        string_format(log_error,
-                                      "ln: missing destination file operand after %w\n",
-                                      writer_shell_quoted_name,
-                                      file_operand_at(first));
-                        return string_report(log_error, 1,
-                                      "Try 'ln --help' for more information.\n");
-                }
+                        return file_need_destination((string_address) "ln",
+                                                     file_operand_at(first), 1);
 
                 if (count - first != 2)
-                {
-                        string_format(log_error, "ln: extra operand '%w'\n",
-                                      writer_terminal_quoted_name,
-                                      file_operand_at(first + 2));
-                        return string_report(log_error, 1,
-                                      "Try 'ln --help' for more information.\n");
-                }
+                        return file_extra_operand((string_address) "ln",
+                                                  file_operand_at(first + 2), 1);
 
                 if (!file_backup_taken(address_of taking, (string_address) "ln"))
                         return 1;
@@ -23055,32 +23073,20 @@ static b32 file_ln()
 
 static bool file_simple_operands(string_address program, positive wanted)
 {
-        file_operands_begin();
-        file_taking taking = {
-            .program = program,
-            .options = (const argument_option[]){
-    {null},
-        }, .operand = file_operand,
-        };
+        file_taking taking = {.program = program, .options = file_no_options};
 
-        if (!file_take(address_of taking) || file_operand_failed)
+        if (!file_operands_take(address_of taking))
                 return false;
         if (file_operand_count == wanted)
                 return true;
 
         if (file_operand_count > wanted)
-        {
-                string_format(log_error, "%s: extra operand '%w'\n", program,
-                              writer_terminal_quoted_name, file_operand_at(wanted));
-        }
+                file_extra_operand(program, file_operand_at(wanted), 1);
         else if (file_operand_count)
-        {
-                string_format(log_error, "%s: missing operand after '%w'\n", program,
-                              writer_terminal_quoted_name,
-                              file_operand_at(file_operand_count - 1));
-        }
+                file_need_operand_after(program,
+                                        file_operand_at(file_operand_count - 1));
         else
-                string_format(log_error, "%s: missing operand\n", program);
+                file_need_operand(program);
 
         return false;
 }
@@ -23447,14 +23453,12 @@ static fn namei_show(bool modes, bool owners, bool vertical)
 
 static b32 file_namei()
 {
-        file_operands_begin();
         file_taking taking = {
             .program = (string_address)"namei",
             .options = namei_options,
-            .operand = file_operand,
         };
 
-        if (!file_take(address_of taking) || file_operand_failed)
+        if (!file_operands_take(address_of taking))
                 return 1;
         if (file_meta(address_of taking, "[options] pathname...", log))
         {
@@ -23807,7 +23811,7 @@ static bool whereis_scan(positive want, string_address query, bool glob)
 static COLD b32 whereis_bad_usage()
 {
         log_error("whereis: bad usage\n", 0);
-        return string_report(log_error, 1, "Try 'whereis --help' for more information.\n");
+        return file_try_help((string_address) "whereis", 1);
 }
 
 static bool whereis_lookup(string_address name, positive want, bool glob,
@@ -23852,7 +23856,7 @@ static b32 file_whereis()
         if (count <= 1)
         {
                 log_error("whereis: not enough arguments\n", 0);
-                return string_report(log_error, 1, "Try 'whereis --help' for more information.\n");
+                return file_try_help((string_address) "whereis", 1);
         }
 
         if (string_equals(program_argument(1), "--help"))
@@ -24027,28 +24031,20 @@ static b32 file_readlink()
 
         file_taking taking = {
             .program = (string_address) "readlink",
-            .operand = file_operand,
             .posix_order = true,
             .options = readlink_options,
             .selection = (p8 address_to)address_of readlink_selected,
         };
 
-        file_operands_begin();
-        if (!file_take(address_of taking))
+        if (!file_operands_take(address_of taking))
                 return 1;
-        if (file_operand_failed)
-                return string_report(log_error, 1, "%s: memory exhausted\n",
-                                     (string_address) "readlink");
-        //      Options may follow the names, as getopt permutes them;
-        //      the names are gathered in order and read from there.
-        taking.first = 0;
 
         positive first = taking.first;
         positive count = file_operand_count;
         positive flags = taking.flags;
 
         if (first >= count)
-                return string_report(log_error, 1, "%s: missing operand\n", (string_address) "readlink");
+                return file_need_operand((string_address) "readlink");
 
         bool resolve = readlink_selected.canonical != 0;
         bool no_newline = (flags & FILE_FLAG('n')) != 0;
@@ -24207,11 +24203,8 @@ static b32 file_basename()
                 suffix = program_argument((b32)(index + 1));
 
         if (!many && index + 2 < count)
-        {
-                return string_report(log_error, 1, "basename: extra operand '%w'\n"
-                              "Try 'basename --help' for more information.\n",
-                              writer_terminal_quoted_name, program_argument((b32)(index + 2)));
-        }
+                return file_extra_operand((string_address) "basename",
+                                          program_argument((b32)(index + 2)), 1);
 
         if (many)
         {
@@ -24500,7 +24493,7 @@ static b32 file_realpath()
         positive count = (positive)program_argument_count();
 
         if (first >= count)
-                return string_report(log_error, 1, "%s: missing operand\n", (string_address) "realpath");
+                return file_need_operand((string_address) "realpath");
 
         bool allow_missing = realpath_selected.missing == 'm';
         bool written_name = realpath_selected.walk == 's';
@@ -24822,7 +24815,7 @@ static b32 file_pathchk()
         positive first = taking.first;
 
         if (first >= count)
-                return string_report(log_error, 1, "%s: missing operand\n", (string_address) "pathchk");
+                return file_need_operand((string_address) "pathchk");
 
         bool basic = (taking.flags &
                       (FILE_FLAG('p') | FILE_FLAG('Q'))) != 0;
@@ -24886,7 +24879,6 @@ static b32 file_mkdir()
         positive count = (positive)program_argument_count();
         file_taking taking = {
             .program = (string_address) "mkdir",
-            .operand = file_operand,
             .posix_order = true,
             .options = mkdir_options,
             .seen = file_context_seen,
@@ -24895,15 +24887,8 @@ static b32 file_mkdir()
         file_context_program = (string_address) "mkdir";
         file_context_said = false;
 
-        file_operands_begin();
-        if (!file_take(address_of taking))
+        if (!file_operands_take(address_of taking))
                 return 1;
-        if (file_operand_failed)
-                return string_report(log_error, 1, "%s: memory exhausted\n",
-                                     (string_address) "mkdir");
-        //      Options may follow the names, as getopt permutes them;
-        //      the names are gathered in order and read from there.
-        taking.first = 0;
         count = file_operand_count;
 
         positive index = taking.first;
@@ -25051,10 +25036,8 @@ static b32 file_make_node(string_address program, string_address path,
 static bool file_node_options(string_address program, file_taking address_to taking,
                               positive address_to mode, bool address_to given)
 {
-        file_operands_begin();
         taking->program = program;
         taking->options = file_node_arguments;
-        taking->operand = file_operand;
         //      This image has neither SELinux nor SMACK. -Z and a bare
         //      --context are no-ops; a named context is ignored with a
         //      warning, written where the option is read.
@@ -25062,7 +25045,7 @@ static bool file_node_options(string_address program, file_taking address_to tak
         file_context_program = program;
         file_context_said = false;
 
-        if (!file_take(taking) || file_operand_failed)
+        if (!file_operands_take(taking))
                 return false;
 
         address_to given = (taking->flags & FILE_FLAG('m')) != 0;
@@ -25107,7 +25090,7 @@ static b32 file_mkfifo()
                 return 1;
 
         if (!file_operand_count)
-                return string_report(log_error, 1, "%s: missing operand\n", (string_address) "mkfifo");
+                return file_need_operand((string_address) "mkfifo");
 
         if (!file_node_mode_taken((string_address) "mkfifo", address_of taking,
                                   address_of mode, given_mode))
@@ -25186,13 +25169,10 @@ static b32 file_mknod()
                 says so in a line of its own.
         */
         if (!file_operand_count)
-                return string_report(log_error, 1, "%s: missing operand\n", (string_address) "mknod");
+                return file_need_operand((string_address) "mknod");
 
         if (file_operand_count == 1)
-        {
-                return string_report(log_error, 1, "mknod: missing operand after '%w'\n",
-                              writer_terminal_quoted_name, file_operand_at(0));
-        }
+                return file_need_operand_after((string_address) "mknod", file_operand_at(0));
 
         //      Only the first letter of the type is read, so that the
         //      mnemonic spellings the reference allows -- character, block,
@@ -25208,10 +25188,9 @@ static b32 file_mknod()
                         /* GNU names the first spare word always, and adds the
                            fifo trailer only when both a major and a minor
                            were given (`node p 1` vs `node p 1 2`). */
-                        if (file_operand_count < 4)
-                                return 1;
-                        return string_report(log_error, 1,
-                                             "Fifos do not have major and minor device numbers.\n");
+                        if (file_operand_count == 4)
+                                log_error("Fifos do not have major and minor device numbers.\n", 0);
+                        return file_try_help((string_address) "mknod", 1);
                 }
         }
         else if (file_operand_count < 4)
@@ -25225,11 +25204,10 @@ static b32 file_mknod()
                 if (file_operand_count == 2)
                         log_error("Special files require major and minor device numbers.\n", 0);
 
-                return 1;
+                return file_try_help((string_address) "mknod", 1);
         }
         else if (file_operand_count > 4)
-                return string_report(log_error, 1, "mknod: extra operand '%w'\n",
-                                     writer_terminal_quoted_name, file_operand_at(4));
+                return file_extra_operand((string_address) "mknod", file_operand_at(4), 1);
 
         string_address path = file_operand_at(0);
         p8 type = string_get(file_operand_at(1));
@@ -25346,14 +25324,12 @@ static bool file_sync_one(string_address path, p8 mode)
 
 static b32 file_sync()
 {
-        file_operands_begin();
         file_taking taking = {
             .program = (string_address) "sync",
             .options = sync_options,
-            .operand = file_operand,
         };
 
-        if (!file_take(address_of taking) || file_operand_failed)
+        if (!file_operands_take(address_of taking))
                 return 1;
 
         bool data = (taking.flags & FILE_FLAG('d')) != 0;
@@ -26946,7 +26922,7 @@ static bool split_try_help(string_address message)
 {
         if (message)
                 log_error(message, 0);
-        return string_report(log_error, false, "Try 'split --help' for more information.\n");
+        return file_try_help((string_address) "split", false);
 }
 
 static bool split_option_seen(p8 letter, string_address value)
@@ -27066,7 +27042,6 @@ static b32 file_split()
         split_separator_byte = '\n';
         split_suffix_start = null;
 
-        file_operands_begin();
         file_taking taking = {
             .program = (string_address)"split",
             .options = split_options,
@@ -27074,12 +27049,11 @@ static b32 file_split()
                -l.  Only the long -d/-x spellings take an optional FROM: in
                `-d7 -b3`, coreutils reads 7 as that old line count. */
             .digits = 'D',
-            .operand = file_operand,
             .seen = split_option_seen,
             .selection = address_of suffix_kind,
         };
 
-        if (!file_take(address_of taking) || file_operand_failed)
+        if (!file_operands_take(address_of taking))
                 return 1;
 
         string_address filter = file_option_value(address_of taking, 'F');
@@ -28317,23 +28291,18 @@ static bool csplit_patterns_valid()
 
 static b32 file_csplit()
 {
-        file_operands_begin();
         file_taking taking = {
             .program = (string_address)"csplit",
             .options = csplit_options,
-            .operand = file_operand,
             .seen = csplit_seen,
         };
 
-        if (!file_take(address_of taking) || file_operand_failed)
+        if (!file_operands_take(address_of taking))
                 return 1;
         if (!file_operand_count)
-                return string_report(log_error, 1, "csplit: missing operand\n"
-                                     "Try 'csplit --help' for more information.\n");
+                return file_need_operand((string_address) "csplit");
         if (file_operand_count < 2)
-                return string_report(log_error, 1, "csplit: missing operand after '%w'\n"
-                                     "Try 'csplit --help' for more information.\n",
-                                     writer_terminal_quoted_name, file_operand_at(0));
+                return file_need_operand_after((string_address) "csplit", file_operand_at(0));
 
         positive digits = 2;
         string_address digit_text = file_option_value(address_of taking, 'n');
@@ -29037,7 +29006,6 @@ static bool truncate_option_seen(p8 letter, string_address value)
 
 static b32 file_truncate()
 {
-        file_operands_begin();
 
         truncate_asked = 0;
         truncate_relation = TRUNCATE_ABSOLUTE;
@@ -29046,11 +29014,10 @@ static b32 file_truncate()
         file_taking taking = {
             .program = (string_address) "truncate",
             .options = truncate_options,
-            .operand = file_operand,
             .seen = truncate_option_seen,
         };
 
-        if (!file_take(address_of taking) || file_operand_failed)
+        if (!file_operands_take(address_of taking))
                 return 1;
 
         string_address reference_path = file_option_value(address_of taking, 'r');
@@ -29062,23 +29029,24 @@ static b32 file_truncate()
 
         if (!reference_path && !size_text)
         {
-                return string_report(log_error, 1,
-                                     "truncate: you must specify either '--size' or '--reference'\n");
+                log_error("truncate: you must specify either '--size' or '--reference'\n", 0);
+                return file_try_help((string_address) "truncate", 1);
         }
 
         if (reference_path && size_text && relation == TRUNCATE_ABSOLUTE)
         {
-                return string_report(log_error, 1,
-                                     "truncate: you must specify a relative '--size'"
-                          " with '--reference'\n");
+                log_error("truncate: you must specify a relative '--size' with '--reference'\n", 0);
+                return file_try_help((string_address) "truncate", 1);
         }
 
         if (blocks && !size_text)
-                return string_report(log_error, 1,
-                                     "truncate: '--io-blocks' was specified but '--size' was not\n");
+        {
+                log_error("truncate: '--io-blocks' was specified but '--size' was not\n", 0);
+                return file_try_help((string_address) "truncate", 1);
+        }
 
         if (!file_operand_count)
-                return string_report(log_error, 1, "truncate: missing file operand\n");
+                return file_need_file((string_address) "truncate", 1);
 
         b64 reference = -1;
 
@@ -30488,7 +30456,6 @@ static bool hardlink_option_seen(p8 letter, string_address value)
 
 static b32 file_hardlink()
 {
-        file_operands_begin();
         hardlink_quiet_asked = hardlink_verbose_asked = hardlink_parse_failed = false;
         hardlink_first_asked = 0;
         hardlink_verbosity = 0;
@@ -30504,11 +30471,10 @@ static b32 file_hardlink()
         file_taking taking = {
             .program = (string_address)"hardlink",
             .options = hardlink_options,
-            .operand = file_operand,
             .seen = hardlink_option_seen,
         };
 
-        if (!file_take(address_of taking) || file_operand_failed)
+        if (!file_operands_take(address_of taking))
                 return 1;
         if (file_meta(address_of taking, "[options] <directory>|<file> ...\n"
                       "  -c content only  -n dry-run  -l list  -q quiet\n"
@@ -31705,7 +31671,6 @@ static bool shred_option_seen(p8 letter, string_address value)
 
 static b32 file_shred()
 {
-        file_operands_begin();
 
         shred_iterations = 3;
         shred_asked_size = -1;
@@ -31716,15 +31681,13 @@ static b32 file_shred()
         file_taking taking = {
             .program = (string_address) "shred",
             .options = shred_options,
-            .operand = file_operand,
             .seen = shred_option_seen,
         };
 
-        if (!file_take(address_of taking) || file_operand_failed)
+        if (!file_operands_take(address_of taking))
                 return 1;
         if (!file_operand_count)
-                return string_report(log_error, 1, "shred: missing file operand\n"
-                                                   "Try 'shred --help' for more information.\n");
+                return file_need_file((string_address) "shred", 1);
 
         shred_random.handle = -1;
         shred_random.name = shred_source_name;
@@ -32502,7 +32465,6 @@ static bool shuf_seen(p8 letter, string_address value)
 
 static b32 file_shuf()
 {
-        file_operands_begin();
         shuf_wanted = 0;
         shuf_limited = false;
         shuf_ranged = false;
@@ -32510,11 +32472,10 @@ static b32 file_shuf()
         file_taking taking = {
             .program = (string_address) "shuf",
             .options = shuf_options,
-            .operand = file_operand,
             .seen = shuf_seen,
         };
 
-        if (!file_take(address_of taking) || file_operand_failed)
+        if (!file_operands_take(address_of taking))
                 return 1;
         shuf_sourced = false;
         shuf_source_dead = false;
@@ -32528,17 +32489,9 @@ static b32 file_shuf()
                 return string_report(log_error, 1, "shuf: cannot combine -e and -i options\n"
                                      "Try 'shuf --help' for more information.\n");
         if (range_text && file_operand_count)
-        {
-                return string_report(log_error, 1, "shuf: extra operand '%w'\nTry 'shuf --help' for more information.\n",
-                                     writer_terminal_quoted_name,
-                              file_operand_at(0));
-        }
+                return file_extra_operand((string_address) "shuf", file_operand_at(0), 1);
         if (!echo && !range_text && file_operand_count > 1)
-        {
-                return string_report(log_error, 1, "shuf: extra operand '%w'\nTry 'shuf --help' for more information.\n",
-                                     writer_terminal_quoted_name,
-                              file_operand_at(1));
-        }
+                return file_extra_operand((string_address) "shuf", file_operand_at(1), 1);
 
         positive wanted = shuf_wanted;
         bool limited = shuf_limited;
@@ -33314,21 +33267,19 @@ static bool dircolors_parse(string_address input, positive length, string_addres
 static b32 dircolors_refused(string_address sentence)
 {
         string_format(log_error, "dircolors: %s", sentence);
-        return string_report(log_error, 1, "Try 'dircolors --help' for more information.\n");
+        return file_try_help((string_address) "dircolors", 1);
 }
 
 static b32 file_dircolors()
 {
-        file_operands_begin();
         dircolors_shell_option = 0;
         file_taking taking = {
             .program = (string_address) "dircolors",
             .options = dircolors_options,
-            .operand = file_operand,
             .selection = address_of dircolors_shell_option,
         };
 
-        if (!file_take(address_of taking) || file_operand_failed)
+        if (!file_operands_take(address_of taking))
                 return 1;
 
         positive flags = taking.flags;
@@ -33356,17 +33307,11 @@ static b32 file_dircolors()
                               writer_terminal_quoted_name, file_operand_at(0));
                 log_error("file operands cannot be combined with "
                           "--print-database (-p)\n", 0);
-                return string_report(log_error, 1,
-                                     "Try 'dircolors --help' for more information.\n");
+                return file_try_help((string_address) "dircolors", 1);
         }
 
         if (file_operand_count > 1)
-        {
-                string_format(log_error, "dircolors: extra operand '%w'\n",
-                              writer_terminal_quoted_name, file_operand_at(1));
-                return string_report(log_error, 1,
-                                     "Try 'dircolors --help' for more information.\n");
-        }
+                return file_extra_operand((string_address) "dircolors", file_operand_at(1), 1);
         if (print_database)
         {
                 log(dircolors_database, 0);
@@ -33526,27 +33471,19 @@ static b32 file_rmdir()
         positive count = (positive)program_argument_count();
         file_taking taking = {
             .program = (string_address) "rmdir",
-            .operand = file_operand,
             .posix_order = true,
             .options = rmdir_options,
         };
 
-        file_operands_begin();
-        if (!file_take(address_of taking))
+        if (!file_operands_take(address_of taking))
                 return 1;
-        if (file_operand_failed)
-                return string_report(log_error, 1, "%s: memory exhausted\n",
-                                     (string_address) "rmdir");
-        //      Options may follow the names, as getopt permutes them;
-        //      the names are gathered in order and read from there.
-        taking.first = 0;
         count = file_operand_count;
 
         positive flags = taking.flags;
         positive first = taking.first;
 
         if (first >= count)
-                return string_report(log_error, 1, "%s: missing operand\n", (string_address) "rmdir");
+                return file_need_operand((string_address) "rmdir");
 
         b32 status = 0;
 
@@ -37986,7 +37923,6 @@ static b32 file_cp()
 
         file_taking taking = {
             .program = (string_address) "cp",
-            .operand = file_operand,
             .posix_order = true,
             .options = cp_options,
             .selection = (p8 address_to)address_of cp_selected,
@@ -38004,15 +37940,8 @@ static b32 file_cp()
         file_join_source_path = false;
         file_backup_control_named = null;
 
-        file_operands_begin();
-        if (!file_take(address_of taking))
+        if (!file_operands_take(address_of taking))
                 return 1;
-        if (file_operand_failed)
-                return string_report(log_error, 1, "%s: memory exhausted\n",
-                                     (string_address) "cp");
-        //      Options may follow the names, as getopt permutes them;
-        //      the names are gathered in order and read from there.
-        taking.first = 0;
         count = file_operand_count;
 
         if (cp_selected.collision == 'n')
@@ -38022,7 +37951,7 @@ static b32 file_cp()
         if ((taking.flags & FILE_FLAG('l')) && (taking.flags & FILE_FLAG('s')))
         {
                 log_error("cp: cannot make both hard and symbolic links\n", 0);
-                return string_report(log_error, 1, "Try 'cp --help' for more information.\n");
+                return file_try_help((string_address) "cp", 1);
         }
 
         if ((taking.flags & (FILE_FLAG('b') | FILE_FLAG('B') | FILE_FLAG('S'))) &&
@@ -38037,8 +37966,7 @@ static b32 file_cp()
                 if (reflink == 'A' && sparse != 'a')
                 {
                         log_error("cp: --reflink can be used only with --sparse=auto\n", 0);
-                        return string_report(log_error, 1,
-                                             "Try 'cp --help' for more information.\n");
+                        return file_try_help((string_address) "cp", 1);
                 }
         }
 
@@ -38889,7 +38817,7 @@ static bool install_late_checks(string_address owner, string_address group)
         {
                 log_error("install: options --compare (-C) and --strip are mutually exclusive\n",
                           0);
-                return file_try_help((string_address) "install");
+                return file_try_help((string_address) "install", false);
         }
         if (install_compare && (install_mode & ~0777))
                 log_error("install: the --compare (-C) option is ignored when you specify a mode with non-permission bits\n",
@@ -38924,7 +38852,6 @@ static b32 file_install()
 
         file_taking taking = {
             .program = (string_address) "install",
-            .operand = file_operand,
             .posix_order = true,
             .options = install_options,
             .seen = install_option_seen,
@@ -38940,15 +38867,8 @@ static b32 file_install()
         file_join_source_path = false;
         file_backup_control_named = null;
 
-        file_operands_begin();
-        if (!file_take(address_of taking))
+        if (!file_operands_take(address_of taking))
                 return 1;
-        if (file_operand_failed)
-                return string_report(log_error, 1, "%s: memory exhausted\n",
-                                     (string_address) "install");
-        //      Options may follow the names, as getopt permutes them;
-        //      the names are gathered in order and read from there.
-        taking.first = 0;
         count = file_operand_count;
         //      These two are judged before the backup word is, as GNU judges
         //      them, so a bad word does not hide either.
@@ -38993,17 +38913,10 @@ static b32 file_install()
                             log_error, 1,
                             "install: target directory not allowed when installing a directory\n");
                 if (taking.first >= count)
-                {
-                        log_error("install: missing file operand\n", 0);
-                        return !file_try_help((string_address) "install");
-                }
+                        return file_need_file((string_address) "install", 1);
                 if ((flags & FILE_FLAG('T')) && count - taking.first > 2)
-                {
-                        string_format(log_error, "install: extra operand '%w'\n",
-                                      writer_terminal_quoted_name,
-                                      file_operand_at(taking.first + 2));
-                        return !file_try_help((string_address) "install");
-                }
+                        return file_extra_operand((string_address) "install",
+                                                  file_operand_at(taking.first + 2), 1);
                 install_mode_bits = 07777;
                 if (mode &&
                     !file_mode_clauses(mode, 0, true, 07777, false,
@@ -39092,30 +39005,18 @@ static b32 file_install()
         }
 
         if (taking.first >= count)
-        {
-                log_error("install: missing file operand\n", 0);
-                return !file_try_help((string_address) "install");
-        }
+                return file_need_file((string_address) "install", 1);
         if (!into && taking.first + 1 >= count)
-        {
-                string_format(log_error,
-                              "install: missing destination file operand after %w\n",
-                              writer_shell_quoted_name,
-                              file_operand_at(taking.first));
-                return !file_try_help((string_address) "install");
-        }
+                return file_need_destination((string_address) "install",
+                                             file_operand_at(taking.first), 1);
         //      -T's own complaints come before the mode is read.
         if ((flags & FILE_FLAG('T')) && into)
                 return string_report(
                     log_error, 1,
                     "install: cannot combine --target-directory (-t) and --no-target-directory (-T)\n");
         if ((flags & FILE_FLAG('T')) && count - taking.first > 2)
-        {
-                string_format(log_error, "install: extra operand '%w'\n",
-                              writer_terminal_quoted_name,
-                              file_operand_at(taking.first + 2));
-                return !file_try_help((string_address) "install");
-        }
+                return file_extra_operand((string_address) "install",
+                                          file_operand_at(taking.first + 2), 1);
         if (into && !(flags & FILE_FLAG('T')))
         {
                 file_facts into_looked_facts;
@@ -39735,7 +39636,6 @@ static b32 file_mv()
 
         file_taking taking = {
             .program = (string_address) "mv",
-            .operand = file_operand,
             .posix_order = true,
             //      X carries --exchange, which has no letter of its own
             //      in the reference either.
@@ -39756,15 +39656,8 @@ static b32 file_mv()
         file_xattr_required = false;
         file_xattr_quiet = false;
 
-        file_operands_begin();
-        if (!file_take(address_of taking))
+        if (!file_operands_take(address_of taking))
                 return 1;
-        if (file_operand_failed)
-                return string_report(log_error, 1, "%s: memory exhausted\n",
-                                     (string_address) "mv");
-        //      Options may follow the names, as getopt permutes them;
-        //      the names are gathered in order and read from there.
-        taking.first = 0;
         count = file_operand_count;
 
         mv_backup_taking = address_of taking;
@@ -41549,8 +41442,7 @@ static b32 file_touch()
         }
 
         if (first >= count)
-                return string_report(log_error, 1, "touch: missing file operand\n"
-                                                   "Try 'touch --help' for more information.\n");
+                return file_need_file((string_address) "touch", 1);
 
         b64 obsolete;
 
@@ -41944,7 +41836,7 @@ static b32 file_sleep()
         positive count = (positive)program_argument_count();
 
         if (count < 2)
-                return string_report(log_error, 1, "%s: missing operand\n", (string_address) "sleep");
+                return file_need_operand((string_address) "sleep");
 
         bool intervals_only = false;
         bool refused = false;
@@ -41982,8 +41874,7 @@ static b32 file_sleep()
                                     "sleep: invalid option -- '%s'\n", named);
                         }
 
-                        return string_report(log_error, 1,
-                            "Try 'sleep --help' for more information.\n");
+                        return file_try_help((string_address) "sleep", 1);
                 }
 
                 /*
@@ -42008,8 +41899,7 @@ static b32 file_sleep()
         }
 
         if (refused)
-                return string_report(log_error, 1,
-                                     "Try 'sleep --help' for more information.\n");
+                return file_try_help((string_address) "sleep", 1);
 
         // A signal that arrives partway through leaves the remainder in the
         // second timespec, and the sleep goes on from there.
@@ -42064,23 +41954,15 @@ static const argument_option tty_options[] = {
 
 static b32 file_tty()
 {
-        file_operands_begin();
         file_taking taking = {
             .program = (string_address) "tty",
             .options = tty_options,
-            .operand = file_operand,
         };
 
-        if (!file_take(address_of taking))
-                return 2;
+        b32 left = file_options_only(address_of taking, 2);
 
-        if (file_operand_count)
-        {
-                string_format(log_error, "tty: extra operand '%w'\n",
-                              writer_terminal_quoted_name, file_operand_at(0));
-                file_try_help((string_address) "tty");
-                return 2;
-        }
+        if (left)
+                return left;
 
         if (taking.flags & FILE_FLAG('s'))
                 return stream_is_terminal(0) ? 0 : 1;
@@ -43842,7 +43724,7 @@ static fn seq_operand_shape(string_address text, seq_operand address_to operand)
 
 static COLD b32 seq_usage(void)
 {
-        return string_report(log_error, 1, "Try 'seq --help' for more information.\n");
+        return file_try_help((string_address) "seq", 1);
 }
 
 //      false after saying why, the way the reference's scan_arg says it.
@@ -45900,16 +45782,12 @@ static bool groups_written(positive have)
 
 static b32 file_groups()
 {
-        file_operands_begin();
         file_taking taking = {
             .program = (string_address) "groups",
-            .options = (const argument_option[]){
-    {null},
-        },
-            .operand = file_operand,
+            .options = file_no_options,
         };
 
-        if (!file_take(address_of taking) || file_operand_failed)
+        if (!file_operands_take(address_of taking))
                 return 1;
 
         b32 status = 0;
@@ -45962,25 +45840,14 @@ static b32 file_groups()
 // whoami ---------------------------------------------------------
 static b32 file_whoami()
 {
-        file_operands_begin();
         file_taking taking = {
             .program = (string_address) "whoami",
-            .options = (const argument_option[]){
-    {null},
-        },
-            .operand = file_operand,
+            .options = file_no_options,
         };
+        b32 left = file_options_only(address_of taking, 1);
 
-        if (!file_take(address_of taking))
-                return 1;
-
-        if (file_operand_count)
-        {
-                string_format(log_error, "whoami: extra operand '%w'\n",
-                              writer_terminal_quoted_name, file_operand_at(0));
-                file_try_help((string_address) "whoami");
-                return 1;
-        }
+        if (left)
+                return left;
 
         positive user = (positive)system_call(syscall(geteuid));
         p8 name[FILE_NAME_MAX];
@@ -46134,25 +46001,14 @@ static bool file_logname_utmp(string_address tty, p8 address_to name)
 
 static b32 file_logname()
 {
-        file_operands_begin();
         file_taking taking = {
             .program = (string_address) "logname",
-            .options = (const argument_option[]){
-    {null},
-        },
-            .operand = file_operand,
+            .options = file_no_options,
         };
+        b32 left = file_options_only(address_of taking, 1);
 
-        if (!file_take(address_of taking))
-                return 1;
-
-        if (file_operand_count)
-        {
-                string_format(log_error, "logname: extra operand '%w'\n",
-                              writer_terminal_quoted_name, file_operand_at(0));
-                file_try_help((string_address) "logname");
-                return 1;
-        }
+        if (left)
+                return left;
 
         p8 loginuid[32];
         positive user = positive_max;
@@ -46248,14 +46104,12 @@ static b32 file_hostname()
         bipolar failed;
         p8 line[4096];
 
-        file_operands_begin();
         file_taking taking = {
             .program = (string_address) "hostname",
             .options = hostname_options,
-            .operand = file_operand,
         };
 
-        if (!file_take(address_of taking))
+        if (!file_operands_take(address_of taking))
                 return 1;
 
         from = file_option_value(address_of taking, 'F');
@@ -46376,12 +46230,8 @@ static b32 file_uname()
                 return 1;
 
         if (taking.first < (positive)program_argument_count())
-        {
-                string_format(log_error, "uname: extra operand '%w'\n",
-                              writer_terminal_quoted_name, program_argument((b32)taking.first));
-                file_try_help((string_address) "uname");
-                return 1;
-        }
+                return file_extra_operand((string_address) "uname",
+                                          program_argument((b32)taking.first), 1);
 
         positive flags = taking.flags;
 
@@ -46804,26 +46654,18 @@ static positive nproc_count(bool all, positive ignore)
 
 static b32 file_nproc()
 {
-        file_operands_begin();
         nproc_ignore = 0;
 
         file_taking taking = {
             .program = (string_address) "nproc",
             .options = nproc_options,
-            .operand = file_operand,
             .seen = nproc_option_seen,
         };
 
-        if (!file_take(address_of taking))
-                return 1;
+        b32 left = file_options_only(address_of taking, 1);
 
-        if (file_operand_count)
-        {
-                string_format(log_error, "nproc: extra operand '%w'\n",
-                              writer_terminal_quoted_name, file_operand_at(0));
-                file_try_help((string_address) "nproc");
-                return 1;
-        }
+        if (left)
+                return left;
 
         positive count = nproc_count((taking.flags & FILE_FLAG('a')) != 0,
                                       nproc_ignore);
@@ -48315,18 +48157,16 @@ static bool rename_option_seen(p8 letter, string_address value)
 
 static b32 file_rename()
 {
-        file_operands_begin();
         rename_all_last = 0;
         rename_ask_keep = 0;
 
         file_taking taking = {
             .program = (string_address)"rename",
             .options = rename_options,
-            .operand = file_operand,
             .seen = rename_option_seen,
         };
 
-        if (!file_take(address_of taking) || file_operand_failed)
+        if (!file_operands_take(address_of taking))
                 return 1;
         if (file_meta(address_of taking, "[options] SUBSTRING REPLACEMENT FILE...\n"
                       "  -n no-act  -v verbose  -a all  -l last\n"
@@ -48964,18 +48804,16 @@ static b32 file_cal()
         cal_span = false;
         cal_option_failed = false;
         cal_exclusive_first = 0;
-        file_operands_begin();
         p8 week_start = 0;
 
         file_taking taking = {
             .program = (string_address)"cal",
             .options = cal_options,
-            .operand = file_operand,
             .selection = address_of week_start,
             .seen = cal_option_seen,
         };
 
-        if (!file_take(address_of taking) || file_operand_failed)
+        if (!file_operands_take(address_of taking))
                 return 1;
         if (file_meta(address_of taking, "[-1|-3|-y|-Y] [-n MONTHS] [-Ssmj] [[MONTH] YEAR]", log_error))
                 return 0;
@@ -49047,7 +48885,7 @@ static b32 file_cal()
         if (operands > 3)
         {
                 log_error("cal: bad usage\n", 0);
-                return string_report(log_error, 1, "Try 'cal --help' for more information.\n");
+                return file_try_help((string_address) "cal", 1);
         }
 
         //      One word that is not a number is a moment, or else a month
