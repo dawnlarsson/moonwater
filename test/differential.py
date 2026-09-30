@@ -23824,6 +23824,194 @@ def canvas_part(canvas, name):
 HARNESS_ROOT = Path(__file__).resolve().parents[1]
 
 
+#       C the hosted harnesses' shims have in common, as the exact text each
+#       one had, so every assembled program is the program it was.
+WATERLINK_HOSTED_TYPES = r"""typedef int32_t b32;
+typedef long long b64;
+typedef p64 positive;
+typedef b64 bipolar;
+typedef p8 *string_address;
+#define address_to *
+#define address_of &
+#define address_any void *
+#define null ((void *)0)
+#define fn void
+#define COLD
+#define HOT
+#define PURE
+#define CONST
+#define KEEP"""
+
+
+WATERLINK_HOSTED_HELPERS = r"""static b32 byte_is_alnum(b32 c)
+{
+        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+}
+static bool crypto_same(const void *one, const void *two, positive size)
+{
+        const p8 *a = one, *b = two;
+        p8 differ = 0;
+
+        for (positive at = 0; at < size; at++)
+                differ |= a[at] ^ b[at];
+        return !differ;
+}
+static void crypto_forget(void *into, positive size) { memory_zero(into, size); }"""
+
+
+HOSTED_XORSHIFT = r"""
+static uint64_t rng_state;
+static p32 draw(p32 below)
+{
+        rng_state ^= rng_state << 13;
+        rng_state ^= rng_state >> 7;
+        rng_state ^= rng_state << 17;
+        return below ? (p32)(rng_state % below) : (p32)rng_state;
+}
+"""
+
+
+HOSTED_STRING_HELPERS = r"""static address_any memory_search(address_any block, positive size,
+                                 address_any needle, positive needle_size)
+{
+        if (!needle_size || needle_size > size)
+                return null;
+        const p8 *hay = block, *ndl = needle;
+        for (positive i = 0; i + needle_size <= size; i++)
+                if (!memcmp(hay + i, ndl, needle_size))
+                        return (address_any)(hay + i);
+        return null;
+}
+static b32 memory_compare_ascii_case(const void *one, const void *two,
+                                     positive size)
+{
+        const p8 *a = one, *b = two;
+        for (positive i = 0; i < size; i++) {
+                p8 x = a[i], y = b[i];
+                if (x >= 'A' && x <= 'Z')
+                        x = (p8)(x - 'A' + 'a');
+                if (y >= 'A' && y <= 'Z')
+                        y = (p8)(y - 'A' + 'a');
+                if (x != y)
+                        return (b32)(x - y);
+        }
+        return 0;
+}
+static unsigned char string_set_blanks[256];
+static positive string_span_max(const_string source, positive bound,
+                                const b8 *set)
+{
+        (void)set;
+        positive i = 0;
+        while (i < bound && (source[i] == ' ' || source[i] == '\t'))
+                i++;
+        return i;
+}
+static positive digit_known(p8 character, positive base)
+{
+        positive v;
+        if (character >= '0' && character <= '9')
+                v = character - '0';
+        else if (character >= 'a' && character <= 'z')
+                v = 10 + character - 'a';
+        else if (character >= 'A' && character <= 'Z')
+                v = 10 + character - 'A';
+        else
+                return base;
+        return v < base ? v : base;
+}
+static bool string_digits_checked(string_address *text, positive base,
+                                  positive *value)
+{
+        string_address at = *text;
+        positive got = 0;
+        bool any = false;
+        while (1) {
+                positive digit = digit_known(string_get(at), base);
+                positive scaled;
+                if (digit >= base)
+                        break;
+                if (__builtin_mul_overflow(got, base, &scaled) ||
+                    __builtin_add_overflow(scaled, digit, &got))
+                        return false;
+                at++;
+                any = true;
+        }
+        if (!any)
+                return false;
+        *text = at;
+        *value = got;
+        return true;
+}"""
+
+
+HOSTED_WIDE_TYPES = r"""typedef int8_t b8;
+typedef uint16_t p16;
+typedef uint32_t p32;
+typedef uint64_t p64;
+typedef int32_t b32;
+typedef long bipolar;
+typedef unsigned long positive;
+typedef void *address_any;
+typedef char *string_address;
+typedef const char *const_string;
+#define COLD
+#define CONST
+#define PURE
+#define fn void
+#define address_to *
+#define address_of &
+#define null NULL
+#define end ((p8)0)
+#define positive_max (~(positive)0)
+#define min(a, b) ((a) < (b) ? (a) : (b))"""
+
+
+HOSTED_FILE_HEAD = r"""#include <string.h>
+#include <stdbool.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/stat.h>
+typedef unsigned char p8;
+typedef unsigned long positive;
+typedef long bipolar;
+typedef const char *string_address;
+#define fn void
+#define address_to *"""
+
+
+HOSTED_NETWORK_LOADS = r"""static p16 network_load_16(const p8 *bytes)
+{
+        return (p16)(((p16)bytes[0] << 8) | (p16)bytes[1]);
+}
+static p32 network_load_32(const p8 *bytes)
+{
+        return ((p32)bytes[0] << 24) | ((p32)bytes[1] << 16) |
+               ((p32)bytes[2] << 8) | (p32)bytes[3];
+}"""
+
+
+HOSTED_BYTE_CLASSES = r"""static inline p8 byte_is_alnum(p8 b) { return isalnum(b) != 0; }
+static inline p8 byte_is_digit(p8 b) { return isdigit(b) != 0; }
+static inline p8 byte_is_control(p8 b) { return b < 0x20 || b == 0x7f; }
+static inline p8 byte_is_blank(p8 b) { return b == ' ' || b == '\t'; }
+static positive string_length(const_string s) { return (positive)strlen(s); }
+static string_address string_first_of(string_address s, int c)
+{
+        return (string_address)strchr(s, c);
+}"""
+
+
+HOSTED_SPAN_BYTE = r"""static positive memory_span_byte(const void *block, p8 byte, positive size)
+{
+        const p8 *at = block;
+        positive i = 0;
+        while (i < size && at[i] == byte)
+                i++;
+        return i;
+}"""
+
+
 def ustar_header(name, size, typeflag=b"0", linkname=b"", mode=0o644):
     block = bytearray(512)
 
@@ -37248,17 +37436,7 @@ static fn host_state_ready(void)
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
-#include <stdbool.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/stat.h>
-typedef unsigned char p8;
-typedef unsigned long positive;
-typedef long bipolar;
-typedef const char *string_address;
-#define fn void
-#define address_to *
+''' + HOSTED_FILE_HEAD + r'''
 #define FILE_READ O_RDONLY
 #define FILE_WRITE (O_WRONLY | O_CREAT | O_TRUNC)
 #define HOST_STATE "run/moonwater"
@@ -39103,17 +39281,7 @@ static fn terminal_terminfo_install()
     shim = r'''
 #define _GNU_SOURCE
 #include <stdio.h>
-#include <string.h>
-#include <stdbool.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/stat.h>
-typedef unsigned char p8;
-typedef unsigned long positive;
-typedef long bipolar;
-typedef const char *string_address;
-#define fn void
-#define address_to *
+''' + HOSTED_FILE_HEAD + r'''
 #define array_count(a) (sizeof(a) / sizeof((a)[0]))
 #define FILE_READ O_RDONLY
 #define FILE_WRITE (O_WRONLY | O_CREAT | O_TRUNC)
@@ -41910,78 +42078,7 @@ static positive memory_span_without_byte(const void *block, p8 byte,
                 i++;
         return i;
 }
-static address_any memory_search(address_any block, positive size,
-                                 address_any needle, positive needle_size)
-{
-        if (!needle_size || needle_size > size)
-                return null;
-        const p8 *hay = block, *ndl = needle;
-        for (positive i = 0; i + needle_size <= size; i++)
-                if (!memcmp(hay + i, ndl, needle_size))
-                        return (address_any)(hay + i);
-        return null;
-}
-static b32 memory_compare_ascii_case(const void *one, const void *two,
-                                     positive size)
-{
-        const p8 *a = one, *b = two;
-        for (positive i = 0; i < size; i++) {
-                p8 x = a[i], y = b[i];
-                if (x >= 'A' && x <= 'Z')
-                        x = (p8)(x - 'A' + 'a');
-                if (y >= 'A' && y <= 'Z')
-                        y = (p8)(y - 'A' + 'a');
-                if (x != y)
-                        return (b32)(x - y);
-        }
-        return 0;
-}
-static unsigned char string_set_blanks[256];
-static positive string_span_max(const_string source, positive bound,
-                                const b8 *set)
-{
-        (void)set;
-        positive i = 0;
-        while (i < bound && (source[i] == ' ' || source[i] == '\t'))
-                i++;
-        return i;
-}
-static positive digit_known(p8 character, positive base)
-{
-        positive v;
-        if (character >= '0' && character <= '9')
-                v = character - '0';
-        else if (character >= 'a' && character <= 'z')
-                v = 10 + character - 'a';
-        else if (character >= 'A' && character <= 'Z')
-                v = 10 + character - 'A';
-        else
-                return base;
-        return v < base ? v : base;
-}
-static bool string_digits_checked(string_address *text, positive base,
-                                  positive *value)
-{
-        string_address at = *text;
-        positive got = 0;
-        bool any = false;
-        while (1) {
-                positive digit = digit_known(string_get(at), base);
-                positive scaled;
-                if (digit >= base)
-                        break;
-                if (__builtin_mul_overflow(got, base, &scaled) ||
-                    __builtin_add_overflow(scaled, digit, &got))
-                        return false;
-                at++;
-                any = true;
-        }
-        if (!any)
-                return false;
-        *text = at;
-        *value = got;
-        return true;
-}
+""" + HOSTED_STRING_HELPERS + r"""
 static positive string_digits_max(string_address source, positive bound,
                                   positive *used)
 {
@@ -44496,26 +44593,7 @@ typedef uint8_t p8;
 /* lib.c's b8 is signed: crypto_wnaf's digits are negative half the time,
    and an unsigned b8 indexes crypto_point_add_digit's table far past its 8
    entries. */
-typedef int8_t b8;
-typedef uint16_t p16;
-typedef uint32_t p32;
-typedef uint64_t p64;
-typedef int32_t b32;
-typedef long bipolar;
-typedef unsigned long positive;
-typedef void *address_any;
-typedef char *string_address;
-typedef const char *const_string;
-#define COLD
-#define CONST
-#define PURE
-#define fn void
-#define address_to *
-#define address_of &
-#define null NULL
-#define end ((p8)0)
-#define positive_max (~(positive)0)
-#define min(a, b) ((a) < (b) ? (a) : (b))
+""" + HOSTED_WIDE_TYPES + r"""
 #define array_count(a) (sizeof(a) / sizeof((a)[0]))
 #define memory_compare memcmp
 #define memory_copy memcpy
@@ -44524,15 +44602,7 @@ typedef const char *const_string;
 #define TLS_FAIL (-1)
 /* glibc ctype macros return bit flags (often > 255); truncate-to-p8
    would turn a hit into 0. Keep the same helpers as http_response_framing. */
-static inline p8 byte_is_alnum(p8 b) { return isalnum(b) != 0; }
-static inline p8 byte_is_digit(p8 b) { return isdigit(b) != 0; }
-static inline p8 byte_is_control(p8 b) { return b < 0x20 || b == 0x7f; }
-static inline p8 byte_is_blank(p8 b) { return b == ' ' || b == '\t'; }
-static positive string_length(const_string s) { return (positive)strlen(s); }
-static string_address string_first_of(string_address s, int c)
-{
-        return (string_address)strchr(s, c);
-}
+""" + HOSTED_BYTE_CLASSES + r"""
 static b32 memory_compare_ascii_case(const void *one, const void *two,
                                      positive size)
 {
@@ -44557,15 +44627,7 @@ static positive memory_span_without_byte(const void *block, p8 byte,
                 i++;
         return i;
 }
-static p16 network_load_16(const p8 *bytes)
-{
-        return (p16)(((p16)bytes[0] << 8) | (p16)bytes[1]);
-}
-static p32 network_load_32(const p8 *bytes)
-{
-        return ((p32)bytes[0] << 24) | ((p32)bytes[1] << 16) |
-               ((p32)bytes[2] << 8) | (p32)bytes[3];
-}
+""" + HOSTED_NETWORK_LOADS + r"""
 static void network_store_16(p8 *bytes, p16 value)
 {
         bytes[0] = (p8)(value >> 8);
@@ -44616,14 +44678,7 @@ static void crypto_forget(address_any secret, positive length)
                 length--;
         }
 }
-static positive memory_span_byte(const void *block, p8 byte, positive size)
-{
-        const p8 *at = block;
-        positive i = 0;
-        while (i < size && at[i] == byte)
-                i++;
-        return i;
-}
+""" + HOSTED_SPAN_BYTE + r"""
 /* Compact SHA-256 / SHA-384 for hosted tls_verify_fuzz (public-domain style). */
 typedef struct {
         p64 len;
@@ -49114,14 +49169,7 @@ static void network_store_32(p8 *bytes, p32 value)
         bytes[2] = (p8)(value >> 8);
         bytes[3] = (p8)value;
 }
-static positive memory_span_byte(const void *block, p8 byte, positive size)
-{
-        const p8 *at = block;
-        positive i = 0;
-        while (i < size && at[i] == byte)
-                i++;
-        return i;
-}
+""" + HOSTED_SPAN_BYTE + r"""
 
 typedef struct { p32 state[5]; p8 block[64]; positive used; p64 total; } fuzz_sha1;
 static p32 fuzz_rol32(p32 x, int n) { return (x << n) | (x >> (32 - n)); }
@@ -50306,41 +50354,14 @@ def harness_msan_net(argv):
 #include <stdbool.h>
 #include <ctype.h>
 typedef uint8_t p8;
-typedef int8_t b8;
-typedef uint16_t p16;
-typedef uint32_t p32;
-typedef uint64_t p64;
-typedef int32_t b32;
-typedef long bipolar;
-typedef unsigned long positive;
-typedef void *address_any;
-typedef char *string_address;
-typedef const char *const_string;
-#define COLD
-#define CONST
-#define PURE
-#define fn void
-#define address_to *
-#define address_of &
-#define null NULL
-#define end ((p8)0)
-#define positive_max (~(positive)0)
-#define min(a, b) ((a) < (b) ? (a) : (b))
+""" + HOSTED_WIDE_TYPES + r"""
 #define memory_compare memcmp
 #define memory_copy memcpy
 #define memory_copy_apart memcpy
 #define memory_fill(at, v, n) memset((at), (int)(v), (n))
 #define memory_zero(at, size) memset((at), 0, (size))
 #define string_get(s) (*(const unsigned char *)(s))
-static inline p8 byte_is_alnum(p8 b) { return isalnum(b) != 0; }
-static inline p8 byte_is_digit(p8 b) { return isdigit(b) != 0; }
-static inline p8 byte_is_control(p8 b) { return b < 0x20 || b == 0x7f; }
-static inline p8 byte_is_blank(p8 b) { return b == ' ' || b == '\t'; }
-static positive string_length(const_string s) { return (positive)strlen(s); }
-static string_address string_first_of(string_address s, int c)
-{
-        return (string_address)strchr(s, c);
-}
+""" + HOSTED_BYTE_CLASSES + r"""
 static address_any memory_first_of(address_any block, b8 value, positive size)
 {
         return memchr(block, value, size);
@@ -50354,95 +50375,9 @@ static positive memory_span_without_byte(const void *block, p8 byte,
                 i++;
         return i;
 }
-static positive memory_span_byte(const void *block, p8 byte, positive size)
-{
-        const p8 *at = block;
-        positive i = 0;
-        while (i < size && at[i] == byte)
-                i++;
-        return i;
-}
-static address_any memory_search(address_any block, positive size,
-                                 address_any needle, positive needle_size)
-{
-        if (!needle_size || needle_size > size)
-                return null;
-        const p8 *hay = block, *ndl = needle;
-        for (positive i = 0; i + needle_size <= size; i++)
-                if (!memcmp(hay + i, ndl, needle_size))
-                        return (address_any)(hay + i);
-        return null;
-}
-static b32 memory_compare_ascii_case(const void *one, const void *two,
-                                     positive size)
-{
-        const p8 *a = one, *b = two;
-        for (positive i = 0; i < size; i++) {
-                p8 x = a[i], y = b[i];
-                if (x >= 'A' && x <= 'Z')
-                        x = (p8)(x - 'A' + 'a');
-                if (y >= 'A' && y <= 'Z')
-                        y = (p8)(y - 'A' + 'a');
-                if (x != y)
-                        return (b32)(x - y);
-        }
-        return 0;
-}
-static unsigned char string_set_blanks[256];
-static positive string_span_max(const_string source, positive bound,
-                                const b8 *set)
-{
-        (void)set;
-        positive i = 0;
-        while (i < bound && (source[i] == ' ' || source[i] == '\t'))
-                i++;
-        return i;
-}
-static positive digit_known(p8 character, positive base)
-{
-        positive v;
-        if (character >= '0' && character <= '9')
-                v = character - '0';
-        else if (character >= 'a' && character <= 'z')
-                v = 10 + character - 'a';
-        else if (character >= 'A' && character <= 'Z')
-                v = 10 + character - 'A';
-        else
-                return base;
-        return v < base ? v : base;
-}
-static bool string_digits_checked(string_address *text, positive base,
-                                  positive *value)
-{
-        string_address at = *text;
-        positive got = 0;
-        bool any = false;
-        while (1) {
-                positive digit = digit_known(string_get(at), base);
-                positive scaled;
-                if (digit >= base)
-                        break;
-                if (__builtin_mul_overflow(got, base, &scaled) ||
-                    __builtin_add_overflow(scaled, digit, &got))
-                        return false;
-                at++;
-                any = true;
-        }
-        if (!any)
-                return false;
-        *text = at;
-        *value = got;
-        return true;
-}
-static p16 network_load_16(const p8 *bytes)
-{
-        return (p16)(((p16)bytes[0] << 8) | (p16)bytes[1]);
-}
-static p32 network_load_32(const p8 *bytes)
-{
-        return ((p32)bytes[0] << 24) | ((p32)bytes[1] << 16) |
-               ((p32)bytes[2] << 8) | (p32)bytes[3];
-}
+""" + HOSTED_SPAN_BYTE + r"""
+""" + HOSTED_STRING_HELPERS + r"""
+""" + HOSTED_NETWORK_LOADS + r"""
 """ + byte_store_source() + byte_reader_source()
 
     # --- 1a. Generic wire-header pad prove (original). ---
@@ -54313,14 +54248,7 @@ def wifi_scan_fuzz_seeds():
 WIFI_SCAN_FUZZ_PRELUDE = r"""
 #define GENL_HEADER 4
 #define RADIO_SSID_MOST 32
-static positive memory_span_byte(const void *block, p8 byte, positive size)
-{
-        const p8 *at = block;
-        positive i = 0;
-        while (i < size && at[i] == byte)
-                i++;
-        return i;
-}
+""" + HOSTED_SPAN_BYTE + r"""
 """
 
 WIFI_SCAN_FUZZ_DRIVER = r"""
@@ -55347,21 +55275,7 @@ typedef uint16_t p16;
 typedef uint32_t p32;
 typedef unsigned long long p64;
 typedef int8_t b8;
-typedef int32_t b32;
-typedef long long b64;
-typedef p64 positive;
-typedef b64 bipolar;
-typedef p8 *string_address;
-#define address_to *
-#define address_of &
-#define address_any void *
-#define null ((void *)0)
-#define fn void
-#define COLD
-#define HOT
-#define PURE
-#define CONST
-#define KEEP
+''' + WATERLINK_HOSTED_TYPES + r'''
 #define DEAD_END __attribute__((noreturn))
 #define array_count(a) (sizeof(a) / sizeof((a)[0]))
 #define TIOCGWINSZ 0x5413u
@@ -55479,20 +55393,7 @@ static positive string_append_bounded(void *into, const void *from, positive roo
                 return room + strlen(from);
         return have + string_copy_bounded((p8 *)into + have, from, room - have);
 }
-static b32 byte_is_alnum(b32 c)
-{
-        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
-}
-static bool crypto_same(const void *one, const void *two, positive size)
-{
-        const p8 *a = one, *b = two;
-        p8 differ = 0;
-
-        for (positive at = 0; at < size; at++)
-                differ |= a[at] ^ b[at];
-        return !differ;
-}
-static void crypto_forget(void *into, positive size) { memory_zero(into, size); }
+''' + WATERLINK_HOSTED_HELPERS + r'''
 static void network_store_16(p8 *at, p16 value) { at[0] = value >> 8; at[1] = (p8)value; }
 static void network_store_32(p8 *at, p32 value)
 {
@@ -55764,16 +55665,7 @@ static bool ref_alnum_word(const p8 *from, positive length)
         }
         return true;
 }
-
-static uint64_t rng_state;
-static p32 draw(p32 below)
-{
-        rng_state ^= rng_state << 13;
-        rng_state ^= rng_state >> 7;
-        rng_state ^= rng_state << 17;
-        return below ? (p32)(rng_state % below) : (p32)rng_state;
-}
-
+''' + HOSTED_XORSHIFT + r'''
 static const p8 ask_bytes[] = {LINK_ASK_SHELL, LINK_ASK_RUN, LINK_ASK_PUSH,
                                LINK_ASK_PULL, LINK_ASK_LOG};
 
@@ -55954,16 +55846,7 @@ int main(int argc, char **argv)
 */
 
 
-
-static uint64_t rng_state;
-static p32 draw(p32 below)
-{
-        rng_state ^= rng_state << 13;
-        rng_state ^= rng_state >> 7;
-        rng_state ^= rng_state << 17;
-        return below ? (p32)(rng_state % below) : (p32)rng_state;
-}
-
+''' + HOSTED_XORSHIFT + r'''
 /*      A DNS name written uncompressed: length-prefixed labels then a zero.
         Answers the bytes used. */
 static positive put_name(p8 *at, const char **labels, int n)
@@ -56243,16 +56126,7 @@ int main(int argc, char **argv)
         and every kind; a well-formed one must pass, a wrong padding byte or a
         wrong mac must not, and no input at all may read out of bounds.
 */
-
-static uint64_t rng_state;
-static p32 draw(p32 below)
-{
-        rng_state ^= rng_state << 13;
-        rng_state ^= rng_state >> 7;
-        rng_state ^= rng_state << 17;
-        return below ? (p32)(rng_state % below) : (p32)rng_state;
-}
-
+''' + HOSTED_XORSHIFT + r'''
 /*      The model's own reading of the gate, spelled as numbers. */
 static bool ref_gate(struct waterlink_identity *me, const p8 *datagram, positive length)
 {
@@ -57025,21 +56899,7 @@ typedef uint16_t p16;
 typedef uint32_t p32;
 typedef unsigned long long p64;
 typedef int16_t b16;
-typedef int32_t b32;
-typedef long long b64;
-typedef p64 positive;
-typedef b64 bipolar;
-typedef p8 *string_address;
-#define address_to *
-#define address_of &
-#define address_any void *
-#define null ((void *)0)
-#define fn void
-#define COLD
-#define HOT
-#define PURE
-#define CONST
-#define KEEP
+''' + WATERLINK_HOSTED_TYPES + r'''
 #define array_count(a) (sizeof(a) / sizeof((a)[0]))
 #define EPERM 1
 #define ENOENT 2
@@ -57110,20 +56970,7 @@ static positive memory_into_hex(void *into, const void *from, positive size)
 static positive string_length(const void *text) { return strlen(text); }
 static void *string_copy(void *into, const void *from) { return strcpy(into, from); }
 static bool string_equals(const void *a, const void *b) { return !strcmp(a, b); }
-static b32 byte_is_alnum(b32 c)
-{
-        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
-}
-static bool crypto_same(const void *one, const void *two, positive size)
-{
-        const p8 *a = one, *b = two;
-        p8 differ = 0;
-
-        for (positive at = 0; at < size; at++)
-                differ |= a[at] ^ b[at];
-        return !differ;
-}
-static void crypto_forget(void *into, positive size) { memory_zero(into, size); }
+''' + WATERLINK_HOSTED_HELPERS + r'''
 static void network_store_16(p8 *at, p16 v) { at[0] = v >> 8; at[1] = (p8)v; }
 static void network_store_32(p8 *at, p32 v)
 {
