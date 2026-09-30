@@ -12,10 +12,10 @@ The stack has strong hand-written boundary checks and unusually broad
 deterministic regression coverage. Local lanes now exist for coverage-guided
 TLS fuzzing under ASan/UBSan (`sh test/run fuzz`), MSan over hosted parser
 lifts (`sh test/run msan`), resource-exhaustion and mid-path fault sweeps, and
-an `http.client` response-framing oracle. It is **not yet release-grade
+`http.client`, curl and GNU wget oracles for HTTP framing and delivery. It is **not yet release-grade
 evidence for memory safety or parser completeness** because those lanes are
 not mandatory (the CI `security` job is parked, `workflow_dispatch` only),
-fuzzing covers TLS only, and HTTP framing has one independent oracle.
+fuzzing covers TLS, DER, DHCP, SNTP, Wi-Fi, DNS, netlink, crypto and the HTTP section (a default-tier model) but not continuously.
 
 | Area | Evidence present | Important remaining gap |
 | --- | --- | --- |
@@ -23,7 +23,7 @@ fuzzing covers TLS only, and HTTP framing has one independent oracle.
 | DNS | exact question/ID binding, compression loops, full RR framing, UDP truncation to TCP | coverage-guided compression/name fuzzing; independent packet oracle; DNSSEC is out of scope |
 | TLS records/handshake | record and handshake fragmentation, transcript/Finished, AEAD limits, state ordering, `tls_hs_fuzz` libFuzzer target | record-layer fuzzing; mandatory fuzz budget in CI |
 | X.509 | strict DER and generated-chain policy matrix against OpenSSL; `tls_der_fuzz` / `tls_verify_fuzz` libFuzzer targets; DNS-name and IP matching against OpenSSL's own check (`tls_hostnames`); Wycheproof's vectors under the crypto (`crypto_vectors --wycheproof`); wget's status 5 and wording for every refused chain | a second independent path validator; name-constraints breadth; Mozilla `distrust-after` dates and per-anchor constraints (the anchor table is key-only); revocation |
-| HTTP/URL | sink-side request validation, framing conflicts, 204/205/304 as wget and curl take them (the tight tier, `MOONWATER_STRICT` 2, holds them to RFC 9110), split-point and chunk/trailer checks, `http.client` and curl framing oracles, HTTPS downgrade harness, GNU wget and curl as live oracles for byte-at-a-time, split, FIN, RST, 1xx-storm and pipelined-bytes schedules (`wget_mutation`) | coverage-guided framing fuzzing that models the tight tier; slow-stream scheduling across TLS and redirects; open decision: the default refuses an identical duplicate `Content-Length` (and a list `3, 3`), an obs-fold line and a control byte in the reason phrase, all of which wget and curl accept |
+| HTTP/URL | sink-side request validation, framing conflicts, 204/205/304 as wget and curl take them (the tight tier, `MOONWATER_STRICT` 2, holds them to RFC 9110), split-point and chunk/trailer checks, `http.client` and curl framing oracles, HTTPS downgrade harness, GNU wget and curl as live oracles for byte-at-a-time, split, FIN, RST, 1xx-storm and pipelined-bytes schedules (`wget_mutation`) and for request lines, redirects, saved files and exit statuses against scripted servers (`wget_hostile`), URL splitting and Location resolution against `urllib` (`http_urls`) | coverage-guided framing fuzzing that models the tight tier; slow-stream scheduling across TLS and redirects; open decision: the default refuses an identical duplicate `Content-Length` (and a list `3, 3`), an obs-fold line and a control byte in the reason phrase, all of which wget and curl accept |
 | DHCPv4 | peer/xid/MAC binding, option framing/overload, state cross-product, entropy faults | coverage-guided option-stream fuzzing; mandatory namespace/netem retransmission runs |
 | SNTP | nonce and peer binding, ancillary timestamp parsing, arithmetic and selection checks | adversarial scheduling/netem as a mandatory lane; era-boundary integration tests |
 
