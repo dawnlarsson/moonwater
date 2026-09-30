@@ -9424,6 +9424,28 @@ def files_tar_archives(rng, count):
     owned.uname, owned.gname = "a\x1b]0;title\x07b", "g\nh\tt"
     moments.append(("owner-controls", gnu((owned, b"o")), True))
 
+    #   A global pax header speaks for every member after it: -tv owes it the
+    #   owner, the group and the time as -x gives them, and a member's own
+    #   extended header still overrules it.
+    def globally(headers, *members):
+        stream = io.BytesIO()
+        with tarfile.open(fileobj=stream, mode="w", format=tarfile.PAX_FORMAT,
+                          pax_headers=headers) as archive:
+            for info, data in members:
+                archive.addfile(info, io.BytesIO(data))
+        return stream.getvalue()
+
+    later, _ = member("file", "later", mtime=1600000000, data=b"l")
+    later.pax_headers = {"mtime": "1650000000.5"}
+    for number, (headers, members) in enumerate((
+            ({"mtime": "1500000000"}, (member("file", "g", data=b"g"),)),
+            ({"uname": "globaluser", "gname": "globalgroup", "uid": "4242", "gid": "4343"},
+             (member("file", "g", data=b"g"), member("dir", "gd"))),
+            ({"mtime": "1500000000.25", "uid": "77"},
+             (member("file", "g", data=b"g"), (later, b"l"))))):
+        moments.append((f"global-pax-{number}",
+                        globally(headers, *((info, data) for info, data in members)), True))
+
     return archives, moments, files_tar_sparse(rng, 24)
 
 
@@ -9625,7 +9647,8 @@ def files_tar(farm):
              for name, data, settled in archives for command in commands] + \
             [(name, data, ("tvf",), settled) for name, data, settled in moments] + \
             [(name, data, ("xf",), settled) for name, data, settled in moments
-             if name in ("gnu-moment-1", "gnu-moment-2", "gnu-moment-3")] + \
+             if name in ("gnu-moment-1", "gnu-moment-2", "gnu-moment-3") or
+             name.startswith("global-pax-")] + \
             [(name, data, command, settled) for name, data, settled in sparse
              for command in (("tvf",), ("xf",))]
 

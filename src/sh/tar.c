@@ -436,6 +436,8 @@ typedef struct
         p32 group;
         b64 seconds;
         p32 nanoseconds;
+        p8 uname[64];
+        p8 gname[64];
         bool has_path;
         bool has_link;
         bool has_size;
@@ -548,6 +550,8 @@ static fn tar_pax_clear(tar_pax_state address_to state)
         state->has_user = false;
         state->has_group = false;
         state->has_time = false;
+        state->uname[0] = end;
+        state->gname[0] = end;
         state->path[0] = end;
         state->link[0] = end;
 }
@@ -700,6 +704,18 @@ static bool tar_pax_apply(tar_pax_state address_to state,
                         state->has_time = tar_pax_time(
                             equal + 1, value, address_of state->seconds,
                             address_of state->nanoseconds);
+                else if (key == 5 && (!memory_compare(mark + 1, "uname", 5) ||
+                                      !memory_compare(mark + 1, "gname", 5)))
+                {
+                        p8 address_to name = mark[1] == 'u' ? state->uname
+                                                            : state->gname;
+
+                        if (value < sizeof(state->uname))
+                        {
+                                memory_copy(name, equal + 1, value);
+                                name[value] = end;
+                        }
+                }
                 else if (key == 3 && (!memory_compare(mark + 1, "uid", 3) ||
                                       !memory_compare(mark + 1, "gid", 3)))
                 {
@@ -1225,8 +1241,10 @@ static positive tar_header_word(p8 address_to into, p8 address_to field,
 }
 
 static fn tar_long_line(p8 address_to block, p8 type, p64 mode, p64 size,
-                        p64 user, p64 group, p64 major, p64 minor, b64 stamp,
-                        string_address name, string_address link, bool numeric)
+                        p64 user, p64 group, string_address user_name,
+                        string_address group_name, p64 major, p64 minor,
+                        b64 stamp, string_address name, string_address link,
+                        bool numeric)
 {
         static const struct
         {
@@ -1236,8 +1254,8 @@ static fn tar_long_line(p8 address_to block, p8 type, p64 mode, p64 size,
                      {'5', 0040000}, {'6', 0010000}, {'D', 0040000}};
         positive format = 0100000;
         p8 letters[12];
-        p8 owner[4 * 32 + 1];
-        p8 grouped[4 * 32 + 1];
+        p8 owner[4 * 64 + 1];
+        p8 grouped[4 * 64 + 1];
         p8 amount[48];
         positive widths;
         positive length;
@@ -1254,8 +1272,11 @@ static fn tar_long_line(p8 address_to block, p8 type, p64 mode, p64 size,
         else if (type == '7')
                 letters[0] = 'C';
 
-        widths = tar_header_word(owner, block + 265, 32, user, numeric) +
-                 tar_header_word(grouped, block + 297, 32, group, numeric);
+        //      A pax uname or gname stands in for the header's own field.
+        widths = tar_header_word(owner, user_name ? (p8 address_to)user_name : block + 265,
+                                 user_name ? 63 : 32, user, numeric) +
+                 tar_header_word(grouped, group_name ? (p8 address_to)group_name : block + 297,
+                                 group_name ? 63 : 32, group, numeric);
 
         if (type == '3' || type == '4')
         {
@@ -4789,7 +4810,6 @@ typedef struct
         struct tar_options address_to options;
         bipolar handle;
         bool seekable;
-        bool listed;
         positive count;
 } tar_members;
 
@@ -4800,7 +4820,6 @@ static fn tar_read_members(tar_members address_to run)
         bool const seekable = run->seekable;
         positive const count = run->count;
         p8 address_to block;
-        bool listed = false;
         p8 long_name[TAR_PATH];
         p8 long_link[TAR_PATH];
         bool have_long_name = false;
@@ -4820,6 +4839,10 @@ static fn tar_read_members(tar_members address_to run)
                 p64 group = 0;
                 b64 stamp = 0;
                 bool stamped;
+                p32 nanoseconds;
+                bool timed;
+                string_address user_name;
+                string_address group_name;
                 tar_member_meta meta;
                 p8 kept[TAR_PATH];
                 p8 kept_link[TAR_PATH];
@@ -4968,53 +4991,43 @@ static fn tar_read_members(tar_members address_to run)
                         continue;
                 }
 
-                /*      A listing names each member as the archive spells it,
-                        as the reference does, an unsafe one included; only
-                        extraction is held to a safe name. A hard link's
-                        target is shown the way extraction would read it,
-                        without its leading slashes and parent steps. */
-                if (options->mode == TAR_LIST)
-                {
-                        string_address target = tar_link;
-
-                        if (type == '1')
-                                for (;;)
-                                {
-                                        if (string_is(target, '/'))
-                                                target++;
-                                        else if (!string_compare_max(target, (string_address) "../", 3))
-                                                target += 3;
-                                        else
-                                                break;
-                                }
-
-                        listed = true;
-                        if (options->verbose)
-                                tar_long_line(block, type, mode,
-                                              tar_sparse_active ? tar_sparse_real : size,
-                                              tar_pax_local.has_user ? tar_pax_local.user : user,
-                                              tar_pax_local.has_group ? tar_pax_local.group : group,
-                                              major, minor,
-                                              tar_pax_local.has_time ? tar_pax_local.seconds
-                                                                     : stamp,
-                                              tar_name, target, options->numeric);
-                        else
-                                tar_name_line(tar_listing, tar_name);
-                        tar_skip(handle, tar_padded(size), seekable);
-                        tar_pax_clear(address_of tar_pax_local);
-                        continue;
-                }
-
-                /*      A comparison names each member as a listing does
-                        when asked to (-v, and -vv the long line), then
-                        looks at the file GNU's name for it names. */
-                if (options->mode == TAR_DIFF)
+                /*      A global pax header speaks for every member it
+                        precedes, a member's own extended header over it,
+                        for a listing and a comparison as for an extraction. */
                 {
                         tar_pax_state address_to said =
                             tar_pax_local.has_time ? address_of tar_pax_local
                                                    : address_of tar_pax_global;
 
+                        if (tar_pax_local.has_user)
+                                user = tar_pax_local.user;
+                        else if (tar_pax_global.has_user)
+                                user = tar_pax_global.user;
+                        if (tar_pax_local.has_group)
+                                group = tar_pax_local.group;
+                        else if (tar_pax_global.has_group)
+                                group = tar_pax_global.group;
+                        user_name = tar_pax_local.uname[0] ? tar_pax_local.uname
+                                  : tar_pax_global.uname[0] ? tar_pax_global.uname
+                                                            : null;
+                        group_name = tar_pax_local.gname[0] ? tar_pax_local.gname
+                                   : tar_pax_global.gname[0] ? tar_pax_global.gname
+                                                             : null;
+                        if (said->has_time)
+                                stamp = said->seconds;
+                        nanoseconds = said->has_time ? said->nanoseconds : 0;
+                        timed = said->has_time || stamped;
+                }
+
+                /*      A listing names each member as the archive spells it,
+                        as the reference does, an unsafe one included; only
+                        extraction is held to a safe name. A hard link's
+                        target is shown the way extraction would read it,
+                        without its leading slashes and parent steps. */
+                if (options->mode == TAR_LIST || options->mode == TAR_DIFF)
+                {
                         string_address target = tar_link;
+                        bool diff = options->mode == TAR_DIFF;
 
                         if (type == '1')
                                 for (;;)
@@ -5026,30 +5039,25 @@ static fn tar_read_members(tar_members address_to run)
                                         else
                                                 break;
                                 }
-                        listed = true;
-                        if (options->verbose > 1)
+
+                        if (options->verbose > diff)
                                 tar_long_line(block, type, mode,
                                               tar_sparse_active ? tar_sparse_real : size,
-                                              tar_pax_local.has_user ? tar_pax_local.user : user,
-                                              tar_pax_local.has_group ? tar_pax_local.group : group,
-                                              major, minor,
-                                              said->has_time ? said->seconds : stamp,
-                                              tar_name, target, options->numeric);
-                        else if (options->verbose)
+                                              user, group, user_name, group_name,
+                                              major, minor, stamp, tar_name,
+                                              target, options->numeric);
+                        else if (!diff || options->verbose)
                                 tar_name_line(tar_listing, tar_name);
-                        tar_diff_member(handle, block, type, tar_name, tar_link,
-                                        size, mode,
-                                        tar_pax_local.has_user ? tar_pax_local.user
-                                        : tar_pax_global.has_user ? tar_pax_global.user
-                                                                  : user,
-                                        tar_pax_local.has_group ? tar_pax_local.group
-                                        : tar_pax_global.has_group ? tar_pax_global.group
-                                                                   : group,
-                                        major, minor,
-                                        said->has_time ? said->seconds : stamp,
-                                        said->has_time ? said->nanoseconds : 0,
-                                        tar_pax_local.has_time,
-                                        options, seekable);
+                        /*      A comparison then looks at the file GNU's
+                                name for it names. */
+                        if (diff)
+                                tar_diff_member(handle, block, type, tar_name, tar_link,
+                                                size, mode, user, group, major, minor,
+                                                stamp, nanoseconds,
+                                                tar_pax_local.has_time,
+                                                options, seekable);
+                        else
+                                tar_skip(handle, tar_padded(size), seekable);
                         tar_pax_clear(address_of tar_pax_local);
                         continue;
                 }
@@ -5106,31 +5114,18 @@ static fn tar_read_members(tar_members address_to run)
                                 string_copy_max_end(shown, kept, TAR_PATH - 1);
                 }
 
-                listed = true;
                 {
-                        tar_pax_state address_to said =
-                            tar_pax_local.has_user ? address_of tar_pax_local
-                                                   : address_of tar_pax_global;
-
-                        meta.user = said->has_user ? said->user : (p32)user;
-                        said = tar_pax_local.has_group
-                                   ? address_of tar_pax_local
-                                   : address_of tar_pax_global;
-                        meta.group = said->has_group ? said->group
-                                                     : (p32)group;
-                        said = tar_pax_local.has_time
-                                   ? address_of tar_pax_local
-                                   : address_of tar_pax_global;
-                        meta.seconds = said->has_time ? said->seconds
-                                                      : stamp;
-                        meta.nanoseconds = said->has_time ? said->nanoseconds
-                                                          : 0;
-                        meta.timed = said->has_time || stamped;
+                        meta.user = (p32)user;
+                        meta.group = (p32)group;
+                        meta.seconds = stamp;
+                        meta.nanoseconds = nanoseconds;
+                        meta.timed = timed;
                         tar_attrs_keep(address_of meta);
                         if (options->verbose > 1)
                                 tar_long_line(block, type, mode,
                                               tar_sparse_active ? tar_sparse_real : size,
-                                              meta.user, meta.group, major, minor,
+                                              meta.user, meta.group, user_name,
+                                              group_name, major, minor,
                                               meta.seconds, shown, kept_link,
                                               options->numeric);
                         else if (options->verbose)
@@ -5142,15 +5137,12 @@ static fn tar_read_members(tar_members address_to run)
 
                 tar_pax_clear(address_of tar_pax_local);
         }
-
-        run->listed = listed;
 }
 
 static b32 tar_read_archive(struct tar_options address_to options)
 {
         bipolar handle;
         bool seekable;
-        bool listed;
         positive count = tar_word_count;
 
         tar_pax_clear(address_of tar_pax_global);
@@ -5219,9 +5211,7 @@ static b32 tar_read_archive(struct tar_options address_to options)
                 if (got < 0)
                 {
                         tar_refuse("cannot read archive");
-                        if (handle > 0)
-                                system_close(handle);
-                        return tar_status;
+                        goto leave;
                 }
                 if (tar_pack == TAR_PACK_NONE || tar_pack == TAR_PACK_AUTO)
                 {
@@ -5230,20 +5220,12 @@ static b32 tar_read_archive(struct tar_options address_to options)
                         tar_pack = sniffed;
                 }
                 if (tar_refuse_pack(tar_pack))
-                {
-                        if (handle > 0)
-                                system_close(handle);
-                        return tar_status;
-                }
+                        goto leave;
                 if (tar_packed())
                 {
                         seekable = false;
                         if (!tar_codec_begin_read(handle, magic, (positive)got))
-                        {
-                                if (handle > 0)
-                                        system_close(handle);
-                                return tar_status;
-                        }
+                                goto leave;
                 }
                 else if (got > 0 && (positive)got <= sizeof(magic))
                 {
@@ -5266,10 +5248,7 @@ static b32 tar_read_archive(struct tar_options address_to options)
                 {
                         tar_fail(options->directory, moved);
                         tar_codec_end_read(handle);
-                        if (handle > 0)
-                                system_close(handle);
-
-                        return tar_status;
+                        goto leave;
                 }
         }
 
@@ -5290,10 +5269,9 @@ static b32 tar_read_archive(struct tar_options address_to options)
         }
 
         {
-                tar_members run = {options, handle, seekable, false, count};
+                tar_members run = {options, handle, seekable, count};
 
                 tar_read_members(address_of run);
-                listed = run.listed;
         }
 
         tar_codec_end_read(handle);
@@ -5314,9 +5292,13 @@ static b32 tar_read_archive(struct tar_options address_to options)
                                       writer_terminal_name, tar_words[at]);
                         tar_status = 2;
                 }
-        (void)listed;
 
         log_flush();
+        return tar_status;
+
+leave:
+        if (handle > 0)
+                system_close(handle);
         return tar_status;
 }
 
@@ -6063,8 +6045,8 @@ static bipolar tar_put_facts(bipolar handle, string_address name, p8 type,
         }
         if (tar_create_verbose > 1)
                 tar_long_line(block, type, mode & 07777, size, uid,
-                              gid, facts->rdev_major, facts->rdev_minor,
-                              mtime, name, link, false);
+                              gid, null, null, facts->rdev_major,
+                              facts->rdev_minor, mtime, name, link, false);
         tar_dumped++;
         if (!tar_write_block(handle, block))
                 return -1;
