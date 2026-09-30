@@ -1340,8 +1340,7 @@ static bipolar file_stage_file_open_at(
 static bipolar file_change_mode_handle(
     bipolar destination, positive mode);
 static bipolar file_directory_real(
-    bipolar exact, bipolar parent, string_address leaf,
-    bool address_to changed, positive address_to old_mode);
+    bipolar exact, bool address_to changed, positive address_to old_mode);
 static bipolar file_stage_publish_protected_at(
     system_path_stage address_to stage, bipolar destination_directory,
     string_address destination, bipolar writer, bipolar result,
@@ -6919,8 +6918,7 @@ static bool file_debug;
 static bool file_copy_range_fallback(bipolar result)
 {
         return result == -ERROR_NOT_PERMITTED || result == -ERROR_CROSS_DEVICE ||
-               result == -ERROR_INVALID || result == -ERROR_NO_SYSTEM_CALL ||
-               result == -ERROR_NOT_SUPPORTED;
+               result == -ERROR_INVALID || result == -ERROR_NOT_SUPPORTED;
 }
 
 /* Where a bounded copy stopped when a write failed for a reason no
@@ -7973,8 +7971,7 @@ static bipolar file_created_directory_mode_at(
         bool prepared;
         positive old_mode;
         bipolar real = file_directory_real(
-            exact, directory, name, address_of prepared,
-            address_of old_mode);
+            exact, address_of prepared, address_of old_mode);
         if (real < 0)
                 return real;
 
@@ -34124,17 +34121,12 @@ static bool file_backup_taken(file_taking address_to taking, string_address prog
                                    file_environment((string_address) "VERSION_CONTROL"));
 }
 
-/* Ordinary fchmod handles writable files and directories. O_PATH special
-   files use the descriptor-only fchmodat2 form. */
+/* The descriptor-only fchmodat2 takes an ordinary descriptor and an O_PATH
+   one alike, where fchmod refuses the second with EBADF. */
 static bipolar file_change_mode_handle(bipolar destination, positive mode)
 {
-        bipolar changed = system_call_2(
-            syscall(fchmod), (positive)destination, mode);
-        if (changed == -ERROR_BAD_DESCRIPTOR)
-                changed = system_call_4(
-                    syscall(fchmodat2), (positive)destination,
-                    (positive)(string_address)"", mode, AT_EMPTY_PATH);
-        return changed;
+        return system_call_4(syscall(fchmodat2), (positive)destination,
+                             (positive)(string_address)"", mode, AT_EMPTY_PATH);
 }
 
 /* A plain copy creates an object owned by the caller. Never carry the
@@ -38191,13 +38183,10 @@ static bool install_attributes_handle(bipolar destination_handle,
 
 /* Turn an exact O_PATH directory into a normal descriptor for metadata and
    directory I/O.  Newly created callers can start at 0700 and open directly;
-   existing mode-000 directories need a temporary owner mode.  Prefer the
-   descriptor-only fchmodat2 bootstrap there; on older kernels, use the held
-   parent only after its ownership/mode policy and the exact leaf identity
-   establish that another principal cannot redirect the pathname chmod. */
+   existing mode-000 directories need a temporary owner mode, which the
+   descriptor-only fchmodat2 gives without a name to redirect. */
 static bipolar file_directory_real(
-    bipolar exact, bipolar parent, string_address leaf,
-    bool address_to changed, positive address_to old_mode)
+    bipolar exact, bool address_to changed, positive address_to old_mode)
 {
         file_facts facts;
         bipolar looked = file_look_code(
@@ -38216,19 +38205,6 @@ static bipolar file_directory_real(
 
         bipolar prepared = file_change_mode_handle(exact, 0700);
         if (prepared < 0)
-        {
-                bipolar same = parent >= 0 && string_get(leaf)
-                                   ? system_path_same_opened_at(
-                                         exact, parent, leaf)
-                                   : -ERROR_ACCESS;
-                if (same < 0 || !file_name_stable(parent, address_of facts))
-                        return prepared;
-                prepared = system_change_mode_at(parent, leaf, 0700);
-                if (prepared >= 0)
-                        prepared = system_path_same_opened_at(
-                            exact, parent, leaf);
-        }
-        if (prepared < 0)
                 return prepared;
 
         address_to changed = true;
@@ -38237,13 +38213,7 @@ static bipolar file_directory_real(
             FILE_READ | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
         if (real < 0)
         {
-                bipolar restored = file_change_mode_handle(
-                    exact, address_to old_mode);
-                if (restored < 0 && parent >= 0 && string_get(leaf) &&
-                    file_name_stable(parent, address_of facts) &&
-                    system_path_same_opened_at(exact, parent, leaf) >= 0)
-                        (void)system_change_mode_at(
-                            parent, leaf, address_to old_mode);
+                (void)file_change_mode_handle(exact, address_to old_mode);
                 address_to changed = false;
         }
         return real;
@@ -38908,7 +38878,7 @@ static b32 file_install()
                                                    exact, parent, leaf)
                                                    ? -ERROR_ACCESS
                                              : file_directory_real(
-                                                         exact, parent, leaf,
+                                                         exact,
                                                          address_of bootstrapped,
                                                          address_of old_mode);
                         install_attributes_directory = true;

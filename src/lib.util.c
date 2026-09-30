@@ -1269,27 +1269,10 @@ static COLD bipolar system_path_private_directory_open_at(
                 valid = -13;
         bool change_mode = valid >= 0 && (opened.mode & 07777) != 0700;
         if (change_mode)
-                valid = system_call_2(syscall(fchmod), (positive)handle,
-                                      0700);
-        if (change_mode && valid == -9)
                 valid = system_call_4(
                     syscall(fchmodat2), (positive)handle,
                     (positive)(string_address)"", 0700,
                     SYSTEM_PATH_AT_EMPTY_PATH);
-        if (change_mode && valid < 0 &&
-            system_path_parent_cleanup_safe(directory) &&
-            system_path_same_opened_at(handle, directory, name) >= 0)
-        {
-                /* fchmodat2 arrived after the oldest supported kernels.
-                   A sticky or caller-private parent makes the legacy named
-                   fallback stable; verify the same inode again afterward. */
-                valid = system_call_3(
-                    syscall(fchmodat), (positive)directory,
-                    (positive)name, 0700);
-                if (valid >= 0)
-                        valid = system_path_same_opened_at(
-                            handle, directory, name);
-        }
         if (valid >= 0)
                 valid = system_path_private_directory_valid(
                     handle, directory, name);
@@ -1554,29 +1537,15 @@ static bipolar system_path_remove_opened_at(
 }
 
 #if !defined(KERNEL_MODE)
-/* Link the inode behind an open descriptor.  Older kernels require a
-   capability for AT_EMPTY_PATH; procfs exposes the same descriptor without
-   weakening the identity binding. */
+/* Link the inode behind an open descriptor, by the descriptor itself:
+   AT_EMPTY_PATH needs no capability for a file its caller holds open. */
 static bipolar system_path_link_opened_at(
     bipolar handle, bipolar directory, string_address name)
 {
-        bipolar linked = system_call_5(
+        return system_call_5(
             syscall(linkat), (positive)handle,
             (positive)(string_address)"", (positive)directory,
             (positive)name, 0x1000);
-        if (linked != -2 && linked != -1 && linked != -95 &&
-            linked != -38 && linked != -18 && linked != -22)
-                return linked;
-
-        p8 path[64];
-        static const p8 prefix[] = "/proc/self/fd/";
-        memory_copy_apart(path, prefix, sizeof(prefix) - 1);
-        positive length = positive_into_string(
-            path + sizeof(prefix) - 1, (positive)handle);
-        path[sizeof(prefix) - 1 + length] = 0;
-        return system_call_5(
-            syscall(linkat), (positive)(bipolar)-100, (positive)path,
-            (positive)directory, (positive)name, 0x400);
 }
 
 #endif

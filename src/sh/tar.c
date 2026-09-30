@@ -1725,8 +1725,7 @@ static bipolar tar_stack_parent(string_address path, p8 address_to leaf,
 /* Reopen a name this run made.  openat2 resolves it below the extraction
    root in one call and refuses a symlink anywhere on the way, which is
    the component walk's promise without a descriptor per component; an
-   absolute name, a kernel without openat2 or a resolution that raced a
-   rename takes the walk. */
+   absolute name or a resolution that raced a rename takes the walk. */
 static bipolar tar_open_beneath(string_address path, positive flags)
 {
         if (path[0] != '/')
@@ -1739,8 +1738,7 @@ static bipolar tar_open_beneath(string_address path, positive flags)
                     root, path, flags | O_NOFOLLOW | O_CLOEXEC,
                     SYSTEM_RESOLVE_BENEATH | SYSTEM_RESOLVE_NO_SYMLINKS |
                         SYSTEM_RESOLVE_NO_MAGICLINKS);
-                if (opened != -ERROR_NO_SYSTEM_CALL &&
-                    opened != -ERROR_AGAIN)
+                if (opened != -ERROR_AGAIN)
                         return opened;
         }
 
@@ -3926,8 +3924,7 @@ static bipolar tar_extract_directory(bipolar parent, bool parent_owned,
                 bool changed;
                 positive old_mode;
                 bipolar opened = file_directory_real(
-                    exact, parent, leaf, address_of changed,
-                    address_of old_mode);
+                    exact, address_of changed, address_of old_mode);
 
                 made = opened;
                 if (made >= 0 && (facts.mode & 07777) != 0700)
