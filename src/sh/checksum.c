@@ -663,26 +663,43 @@ typedef struct
 
 #define CHECKSUM_DEFERRED 1
 
+/*
+        The pool's run over a list of inputs, whichever list it is. NAME says
+        what input AT is called, null where there is nothing for a job to read,
+        MAKE hashes it into ANSWER on a worker with BLOCK to read through, and
+        TAKE turns the answer into output on the calling thread, in order.
+*/
+typedef struct checksum_pool checksum_pool;
+struct checksum_pool
+{
+        positive count;
+        positive width;
+        positive slots;
+        positive group;
+        positive done; // inputs the sink has written, in order
+        p8 address_to address_to blocks;
+        bool spread;
+        string_address (address_to name)(checksum_pool address_to pool, positive at);
+        fn(address_to make)(checksum_pool address_to pool, positive at,
+                            checksum_answer address_to answer, p8 address_to block);
+        fn(address_to take)(checksum_pool address_to pool, positive at,
+                            checksum_answer address_to answer);
+};
+
 typedef struct
 {
+        checksum_pool pool;
         const checksum_algorithm address_to algorithm;
         positive bytes;
         positive first;
-        positive width;
-        positive slots;
-        positive inputs;
-        positive group;
         bool from_files;
         bool tagged;
-        bool spread;
         b32 answer;
-        positive done; // inputs the sink has written, in order
-        p8 address_to address_to blocks;
 } checksum_batch;
 
-static string_address checksum_input_name(checksum_batch address_to batch,
-                                          positive index)
+static string_address checksum_input_name(checksum_pool address_to pool, positive index)
 {
+        checksum_batch address_to batch = (checksum_batch address_to)pool;
         string_address name = batch->from_files
                                   ? text_file_name((b32)index)
                               : batch->first < (positive)program_argument_count()
@@ -741,25 +758,13 @@ static fn checksum_answer_make(checksum_answer address_to answer,
                                                     answer->digest, block);
 }
 
-static fn checksum_batch_job(address_any context, positive index,
-                             parallel_output address_to output)
+static fn checksum_batch_make(checksum_pool address_to pool, positive at,
+                              checksum_answer address_to answer, p8 address_to block)
 {
-        checksum_batch address_to batch = context;
-        positive first = index * batch->group;
-        positive last = first + batch->group < batch->inputs ? first + batch->group
-                                                             : batch->inputs;
-        p8 address_to block = checksum_slot_block(batch->blocks, batch->slots);
+        checksum_batch address_to batch = (checksum_batch address_to)pool;
 
-        for (positive at = first; at < last; at++)
-        {
-                checksum_answer answer;
-
-                checksum_answer_make(address_of answer, batch->algorithm, batch->bytes,
-                                     checksum_input_name(batch, at), batch->spread, block);
-
-                if (!parallel_write(output, address_of answer, sizeof(answer)))
-                        return;
-        }
+        checksum_answer_make(answer, batch->algorithm, batch->bytes,
+                             checksum_input_name(pool, at), pool->spread, block);
 }
 
 /*
@@ -768,10 +773,11 @@ static fn checksum_batch_job(address_any context, positive index,
         with the answers it made and no word of the rest, so every input
         the answers did not cover is hashed on this thread, in order.
 */
-static fn checksum_batch_put(checksum_batch address_to batch, positive at,
+static fn checksum_batch_put(checksum_pool address_to pool, positive at,
                              checksum_answer address_to answer)
 {
-        string_address name = checksum_input_name(batch, at);
+        checksum_batch address_to batch = (checksum_batch address_to)pool;
+        string_address name = checksum_input_name(pool, at);
 
         if (answer->status == CHECKSUM_DEFERRED)
                 answer->status = checksum_hash_path(batch->algorithm, batch->bytes,
@@ -785,15 +791,33 @@ static fn checksum_batch_put(checksum_batch address_to batch, positive at,
         else
                 checksum_line_put(batch->algorithm, batch->bytes, answer->digest,
                                   name, batch->tagged);
-        batch->done = at + 1;
 }
 
-static bool checksum_batch_sink(address_any context, positive index,
-                                address_any data, positive length)
+static fn checksum_pool_job(address_any context, positive index,
+                            parallel_output address_to output)
 {
-        checksum_batch address_to batch = context;
-        positive first = index * batch->group;
-        positive last = min(first + batch->group, batch->inputs);
+        checksum_pool address_to pool = context;
+        positive first = index * pool->group;
+        positive last = min(first + pool->group, pool->count);
+        p8 address_to block = checksum_slot_block(pool->blocks, pool->slots);
+
+        for (positive at = first; at < last; at++)
+        {
+                checksum_answer answer;
+
+                pool->make(pool, at, address_of answer, block);
+
+                if (!parallel_write(output, address_of answer, sizeof(answer)))
+                        return;
+        }
+}
+
+static bool checksum_pool_sink(address_any context, positive index,
+                               address_any data, positive length)
+{
+        checksum_pool address_to pool = context;
+        positive first = index * pool->group;
+        positive last = min(first + pool->group, pool->count);
 
         for (positive at = first; at < last; at++)
         {
@@ -804,7 +828,8 @@ static bool checksum_batch_sink(address_any context, positive index,
                         memory_copy(address_of answer, (p8 address_to)data + offset, sizeof(answer));
                 else
                         answer.status = CHECKSUM_DEFERRED;
-                checksum_batch_put(batch, at, address_of answer);
+                pool->take(pool, at, address_of answer);
+                pool->done = at + 1;
         }
         return true;
 }
@@ -825,32 +850,25 @@ static bool checksum_batch_sink(address_any context, positive index,
 #define CHECKSUM_GROUP_BYTES (1 << 20)
 #define CHECKSUM_GROUP_MAX 256
 
-static positive checksum_weigh(positive total, positive sampled, positive count,
-                               positive address_to group)
-{
-        address_to group = 1;
-        if (count <= CHECKSUM_WEIGHED)
-                return total;
+#define CHECKSUM_WEIGHED 64
+#define CHECKSUM_GROUP_BYTES (1 << 20)
+#define CHECKSUM_GROUP_MAX 256
 
-        positive mean = sampled ? total / sampled : 0;
-        positive per = mean ? CHECKSUM_GROUP_BYTES / mean : CHECKSUM_GROUP_MAX;
-
-        address_to group = per < 1 ? 1 : per > CHECKSUM_GROUP_MAX ? CHECKSUM_GROUP_MAX : per;
-        return PARALLEL_SPREAD;
-}
-
-static positive checksum_batch_weight(checksum_batch address_to batch,
-                                      positive count, positive address_to group)
+/* Every input of the pool through the ordered run, then the storage back. */
+static fn checksum_pool_run(checksum_pool address_to pool)
 {
         positive total = 0;
         positive sampled = 0;
+        positive weight;
 
-        for (positive index = 0; index < count && index < CHECKSUM_WEIGHED; index++)
+        for (positive index = 0; index < pool->count && index < CHECKSUM_WEIGHED; index++)
         {
                 file_facts facts;
+                string_address name = pool->name(pool, index);
 
-                if (system_stat_at(AT_FDCWD, checksum_input_name(batch, index),
-                                   AT_NO_AUTOMOUNT, STATX_BASIC, address_of facts) == 0 &&
+                if (name &&
+                    system_stat_at(AT_FDCWD, name, AT_NO_AUTOMOUNT, STATX_BASIC,
+                                   address_of facts) == 0 &&
                     (facts.mode & MODE_FORMAT) == MODE_FILE)
                 {
                         total += facts.size;
@@ -858,7 +876,49 @@ static positive checksum_batch_weight(checksum_batch address_to batch,
                 }
         }
 
-        return checksum_weigh(total, sampled, count, group);
+        pool->group = 1;
+        weight = total;
+        if (pool->count > CHECKSUM_WEIGHED)
+        {
+                positive mean = sampled ? total / sampled : 0;
+                positive per = mean ? CHECKSUM_GROUP_BYTES / mean : CHECKSUM_GROUP_MAX;
+
+                pool->group = per < 1 ? 1 : per > CHECKSUM_GROUP_MAX ? CHECKSUM_GROUP_MAX : per;
+                weight = PARALLEL_SPREAD;
+        }
+
+        // One thread, or too little to share: the jobs run inline in order
+        // on the caller and need neither worker blocks nor the stat test.
+        if (pool->count > 1 && pool->width > 1 && weight >= PARALLEL_MINIMUM_BYTES)
+                pool->blocks = memory_checked(pool->slots * sizeof(p8 address_to));
+        pool->spread = pool->blocks != null;
+        if (!pool->spread)
+        {
+                pool->group = 1;
+                weight = 0;
+        }
+
+        pool->done = 0;
+        parallel_ordered(checksum_pool_job, checksum_pool_sink, pool,
+                         (pool->count + pool->group - 1) / pool->group, weight);
+
+        // Whatever a pool that could not start or carry on left unwritten.
+        for (; pool->done < pool->count; pool->done++)
+        {
+                checksum_answer answer = {.status = CHECKSUM_DEFERRED};
+
+                pool->take(pool, pool->done, address_of answer);
+        }
+
+        if (pool->blocks)
+        {
+                for (positive slot = 1; slot < pool->slots; slot++)
+                        if (pool->blocks[slot])
+                                memory_free(pool->blocks[slot], FILE_TRANSFER_SIZE);
+                memory_free(pool->blocks, pool->slots * sizeof(p8 address_to));
+        }
+        pool->blocks = null;
+        pool->spread = false;
 }
 
 /* cksum's collected operands and the named sums' argv tail differ only at
@@ -870,45 +930,20 @@ static b32 checksum_generate(const checksum_algorithm address_to algorithm,
         positive inputs = from_files ? (positive)text_input_count()
                                      : first < count ? count - first : 1;
         checksum_batch batch = {
+            .pool = {.count = inputs,
+                     .width = parallel_width(),
+                     .slots = parallel_slots(),
+                     .name = checksum_input_name,
+                     .make = checksum_batch_make,
+                     .take = checksum_batch_put},
             .algorithm = algorithm,
             .bytes = checksum_bytes(algorithm),
             .first = first,
-            .width = parallel_width(),
-            .slots = parallel_slots(),
-            .inputs = inputs,
             .from_files = from_files,
             .tagged = tagged,
         };
-        positive weight = checksum_batch_weight(address_of batch, inputs, address_of batch.group);
 
-        // One thread, or too little to share: the jobs run inline in order
-        // on the caller and need neither worker blocks nor the stat test.
-        if (inputs > 1 && batch.width > 1 && weight >= PARALLEL_MINIMUM_BYTES)
-                batch.blocks = memory_checked(batch.slots * sizeof(p8 address_to));
-        if (!batch.blocks)
-                weight = 0;
-        batch.spread = batch.blocks != null;
-
-        if (!batch.spread)
-                batch.group = 1;
-        parallel_ordered(checksum_batch_job, checksum_batch_sink, address_of batch,
-                         (inputs + batch.group - 1) / batch.group, weight);
-
-        // Whatever a pool that could not start or carry on left unwritten.
-        while (batch.done < inputs)
-        {
-                checksum_answer answer = {.status = CHECKSUM_DEFERRED};
-
-                checksum_batch_put(address_of batch, batch.done, address_of answer);
-        }
-
-        if (batch.blocks)
-        {
-                for (positive slot = 1; slot < batch.slots; slot++)
-                        if (batch.blocks[slot])
-                                memory_free(batch.blocks[slot], FILE_TRANSFER_SIZE);
-                memory_free(batch.blocks, batch.slots * sizeof(p8 address_to));
-        }
+        checksum_pool_run(address_of batch.pool);
 
         return batch.answer;
 }
@@ -1264,20 +1299,14 @@ typedef struct
 
 typedef struct
 {
+        checksum_pool pool; // first, for the pool's callbacks; its count is the records held
         const checksum_algorithm address_to algorithm;
         string_address manifest;
         checksum_record address_to records;
-        positive count;
         positive room;
         p8 address_to names;
         positive names_used;
         positive names_room;
-        positive width;
-        positive slots;
-        positive group;
-        positive done; // records the sink has answered, in order
-        p8 address_to address_to blocks;
-        bool spread;
         bool quiet;
         bool status;
         bool warn;
@@ -1331,7 +1360,7 @@ static bool checksum_check_collect(checksum_check_run address_to run)
 {
         positive line = run->line;
 
-        while (run->count < CHECKSUM_BATCH && text_line_next(text_line, 0))
+        while (run->pool.count < CHECKSUM_BATCH && text_line_next(text_line, 0))
         {
                 checksum_record record = {0};
                 string_address filename;
@@ -1370,14 +1399,14 @@ static bool checksum_check_collect(checksum_check_run address_to run)
                 p8 address_to records = (p8 address_to)run->records;
 
                 if (!checksum_region_grow(address_of records, address_of run->room,
-                                          (run->count + 1) * sizeof(record)))
+                                          (run->pool.count + 1) * sizeof(record)))
                         break;
                 run->records = (checksum_record address_to)records;
-                run->records[run->count++] = record;
+                run->records[run->pool.count++] = record;
         }
 
         run->line = line;
-        return run->count == CHECKSUM_BATCH;
+        return run->pool.count == CHECKSUM_BATCH;
 }
 
 static string_address checksum_record_name(checksum_check_run address_to run,
@@ -1386,34 +1415,33 @@ static string_address checksum_record_name(checksum_check_run address_to run,
         return (string_address)(run->names + record->name);
 }
 
-static fn checksum_check_job(address_any context, positive index,
-                             parallel_output address_to output)
+static string_address checksum_check_name(checksum_pool address_to pool, positive at)
 {
-        checksum_check_run address_to run = context;
-        positive first = index * run->group;
-        positive last = first + run->group < run->count ? first + run->group : run->count;
-        p8 address_to block = checksum_slot_block(run->blocks, run->slots);
+        checksum_check_run address_to run = (checksum_check_run address_to)pool;
+        const checksum_record address_to record = run->records + at;
 
-        for (positive at = first; at < last; at++)
-        {
-                const checksum_record address_to record = run->records + at;
-                checksum_answer answer;
-
-                if (!record->algorithm)
-                        answer.status = CHECKSUM_DEFERRED;
-                else
-                        checksum_answer_make(address_of answer, record->algorithm, record->width,
-                                             checksum_record_name(run, record), run->spread, block);
-
-                if (!parallel_write(output, address_of answer, sizeof(answer)))
-                        return;
-        }
+        return record->algorithm ? checksum_record_name(run, record) : null;
 }
 
-static fn checksum_check_one(checksum_check_run address_to run,
-                             const checksum_record address_to record,
+static fn checksum_check_make(checksum_pool address_to pool, positive at,
+                              checksum_answer address_to answer, p8 address_to block)
+{
+        checksum_check_run address_to run = (checksum_check_run address_to)pool;
+        const checksum_record address_to record = run->records + at;
+
+        if (!record->algorithm)
+                answer->status = CHECKSUM_DEFERRED;
+        else
+                checksum_answer_make(answer, record->algorithm, record->width,
+                                     checksum_record_name(run, record), pool->spread, block);
+}
+
+static fn checksum_check_one(checksum_pool address_to pool, positive at,
                              checksum_answer address_to answer)
 {
+        checksum_check_run address_to run = (checksum_check_run address_to)pool;
+        const checksum_record address_to record = run->records + at;
+
         if (!record->algorithm)
         {
                 run->malformed++;
@@ -1463,79 +1491,11 @@ static fn checksum_check_one(checksum_check_run address_to run,
                 checksum_check_result_put(filename, (string_address) "OK");
 }
 
-static bool checksum_check_sink(address_any context, positive index,
-                                address_any data, positive length)
-{
-        checksum_check_run address_to run = context;
-        positive first = index * run->group;
-        positive last = min(first + run->group, run->count);
-
-        // A record the answers did not reach is hashed here, as in the
-        // batch sink: a stopped pool must not end the check early.
-        for (positive at = first; at < last; at++)
-        {
-                checksum_answer answer;
-                positive offset = (at - first) * sizeof(answer);
-
-                if (offset + sizeof(answer) <= length)
-                        memory_copy(address_of answer, (p8 address_to)data + offset, sizeof(answer));
-                else
-                        answer.status = CHECKSUM_DEFERRED;
-                checksum_check_one(run, run->records + at, address_of answer);
-                run->done = at + 1;
-        }
-        return true;
-}
-
 /* Every collected record through the pool, then the storage back. */
 static fn checksum_check_records(checksum_check_run address_to run)
 {
-        positive total = 0;
-        positive sampled = 0;
+        checksum_pool_run(address_of run->pool);
 
-        for (positive index = 0; index < run->count && index < CHECKSUM_WEIGHED; index++)
-        {
-                file_facts facts;
-                const checksum_record address_to record = run->records + index;
-
-                if (record->algorithm &&
-                    system_stat_at(AT_FDCWD, checksum_record_name(run, record),
-                                   AT_NO_AUTOMOUNT, STATX_BASIC, address_of facts) == 0 &&
-                    (facts.mode & MODE_FORMAT) == MODE_FILE)
-                {
-                        total += facts.size;
-                        sampled++;
-                }
-        }
-
-        positive weight = checksum_weigh(total, sampled, run->count, address_of run->group);
-
-        if (run->count > 1 && run->width > 1 && weight >= PARALLEL_MINIMUM_BYTES)
-                run->blocks = memory_checked(run->slots * sizeof(p8 address_to));
-        run->spread = run->blocks != null;
-        if (!run->spread)
-                run->group = 1;
-
-        run->done = 0;
-        parallel_ordered(checksum_check_job, checksum_check_sink, run,
-                         (run->count + run->group - 1) / run->group,
-                         run->spread ? weight : 0);
-
-        while (run->done < run->count)
-        {
-                checksum_answer answer = {.status = CHECKSUM_DEFERRED};
-
-                checksum_check_one(run, run->records + run->done, address_of answer);
-                run->done++;
-        }
-
-        if (run->blocks)
-        {
-                for (positive slot = 1; slot < run->slots; slot++)
-                        if (run->blocks[slot])
-                                memory_free(run->blocks[slot], FILE_TRANSFER_SIZE);
-                memory_free(run->blocks, run->slots * sizeof(p8 address_to));
-        }
         if (run->records)
                 memory_free(run->records, run->room);
         if (run->names)
@@ -1602,8 +1562,11 @@ static b32 checksum_verify(const checksum_algorithm address_to algorithm,
                     .status = checksum_selected.verify == 's',
                     .warn = checksum_selected.verify == 'w',
                     .ignore_missing = ignore_missing,
-                    .width = parallel_width(),
-                    .slots = parallel_slots(),
+                    .pool = {.width = parallel_width(),
+                             .slots = parallel_slots(),
+                             .name = checksum_check_name,
+                             .make = checksum_check_make,
+                             .take = checksum_check_one},
                 };
 
                 bool more;
@@ -1624,11 +1587,9 @@ static b32 checksum_verify(const checksum_algorithm address_to algorithm,
                         checksum_check_records(address_of run);
                         text_flush();
                         run.records = null;
-                        run.room = run.count = 0;
+                        run.room = run.pool.count = 0;
                         run.names = null;
                         run.names_room = run.names_used = 0;
-                        run.blocks = null;
-                        run.spread = false;
                 } while (more && !text_out_failed);
 
                 //      A refused answer ends the check where it stands, as
