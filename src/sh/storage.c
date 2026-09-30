@@ -4345,48 +4345,25 @@ b32 storage_mount_command(positive argc, string_address address_to argv,
                         goto done;
         }
 
-        if (named_source)
+        if (named_source || named_target)
         {
-                if (operands > 1 || (named_target && operands))
+                //      What -L, -U and the like name goes before the operand
+                //      given, and --target after it; with both named there is
+                //      room for no operand at all.
+                string_address given = operands ? operand[0] : null;
+
+                if (operands > (named_source && named_target ? 0 : 1))
                 {
                         string_format(diagnostic, "mount: too many operands\n");
                         goto done;
                 }
-                if (operands == 1)
-                {
-                        operand[1] = operand[0];
-                        operand[0] = named_source;
-                        operands = 2;
-                }
-                else if (named_target)
-                {
-                        operand[0] = named_source;
-                        operand[1] = named_target;
-                        operands = 2;
-                }
-                else
-                {
-                        operand[0] = named_source;
-                        operands = 1;
-                }
-        }
-        else if (named_target)
-        {
-                if (operands > 1)
-                {
-                        string_format(diagnostic, "mount: too many operands\n");
-                        goto done;
-                }
-                if (operands == 1)
-                {
-                        operand[1] = named_target;
-                        operands = 2;
-                }
-                else
-                {
-                        operand[0] = named_target;
-                        operands = 1;
-                }
+                operands = 0;
+                if (named_source)
+                        operand[operands++] = named_source;
+                if (given)
+                        operand[operands++] = given;
+                if (named_target)
+                        operand[operands++] = named_target;
         }
 
         if (all)
