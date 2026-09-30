@@ -156,6 +156,8 @@ static fn host_bind_apply(host_settings address_to settings);
 static b32 host_bind(string_address address_to arguments, positive count);
 static b32 host_usage(void);
 static fn host_usage_write(writer out);
+static positive radio_display(p8 address_to into, positive room, p8 address_to name,
+                              positive length);
 static p16 host_machine_hook_line(p8 hook);
 static p16 host_machine_event_line(unsigned int event);
 static string_address host_machine_where(void);
@@ -2702,6 +2704,34 @@ static fn host_settings_save(host_settings address_to settings)
         heading on the session page. Only the frame around them differs,
         and a page is one block of output, so it does not flush per list.
 */
+/*
+        A saved command as it is shown: a script keeps its lines and tabs, and
+        every other control byte, and bytes that are not valid text, are
+        written as \xNN, so what an image carries in its settings cannot put
+        a control sequence in front of the terminal's parser.
+*/
+static string_address host_plain(string_address text)
+{
+        static p8 shown[SPARK_SETTINGS_TEXT_MOST * 4 + 8];
+        positive used = 0;
+        positive at = 0;
+
+        while (text[at] && used + 8 < sizeof(shown))
+        {
+                positive start = at;
+
+                while (text[at] && text[at] != '\n' && text[at] != '\t')
+                        at++;
+                radio_display(shown + used, sizeof(shown) - used, (p8 address_to)text + start,
+                              at - start);
+                used += string_length((string_address)shown + used);
+                if (text[at] && used + 8 < sizeof(shown))
+                        shown[used++] = (p8)text[at++];
+        }
+        shown[used] = end;
+        return (string_address)shown;
+}
+
 static fn host_settings_lines(host_settings address_to settings, positive which,
                               bool page)
 {
@@ -2732,7 +2762,7 @@ static fn host_settings_lines(host_settings address_to settings, positive which,
 
                 host_settings_text(text, address_of setting);
                 string_format(log, page ? "    %p  %s\n" : "%p  %s\n",
-                              (positive)setting.entry.id, text);
+                              (positive)setting.entry.id, host_plain((string_address)text));
                 shown++;
         }
 
@@ -12312,7 +12342,7 @@ static fn host_bind_say(string_address prefix, struct bind_control address_to co
                 string_format(log, "%s%s\n", prefix, (string_address)control->name);
         else
                 string_format(log, "%s%s: %s\n", prefix, (string_address)control->name,
-                              (string_address)control->command);
+                              host_plain((string_address)control->command));
 }
 
 static fn host_bind_forget(host_settings address_to settings, p16 event)

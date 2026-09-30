@@ -40865,6 +40865,22 @@ while True:
         check(any(line.strip().startswith("brightness [N%|+N|-N]") for line in rows),
               "the brightness row shows N%|+N|-N", [line for line in rows if "brightness" in line])
 
+        # What an image keeps as a command is shown with its control bytes
+        # written out, and a script keeps its lines: no escape sequence
+        # reaches the terminal from the list of init entries or from status.
+        lines, finished = session(
+            "printf 'echo a\\033]0;title\\007b\\nline2\\tx\\177\\200' > /tmp/entry\n"
+            "timeout 20 /tmp/moonwater bind init add \"$(cat /tmp/entry)\" > /dev/null 2>&1\n"
+            "echo '@@ list'; timeout 20 /tmp/moonwater bind init 2>&1; echo '@@end'\n"
+            "echo '@@ page'; timeout 20 /tmp/moonwater status 2>&1; echo '@@end'\n")
+        listed = "\n".join(block("list"))
+        paged = "\n".join(block("page"))
+        check(finished and "\x1b" not in listed and "\x1b" not in paged and "\x07" not in listed and "\x7f" not in listed,
+              "saved commands are listed without raw control bytes", repr(listed[:200]))
+        check("echo a\\x1b]0;title\\x07b\nline2\tx\\x7f\\x80" in listed.replace("1  ", "", 1),
+              "with the bytes written out and the script's lines kept", repr(listed[:200]))
+        check("\\x1b]0;title" in paged, "and status shows them the same way", repr(paged[:300]))
+
         # A state file a verb writes, planted as a link to something else
         # before the verb runs: the verb may refuse or may replace the link,
         # and what the link pointed at is left as it was.
