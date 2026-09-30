@@ -73022,6 +73022,8 @@ static fn distros(void)
                 bool store_own = false;
                 bool foreign = false;
 
+                //      A release pinned by commit or by date names its build by
+                //      the digest, which Debian's URL has no arch in to show.
                 for (string_address address_to name = own; *name; name++)
                 {
                         url_own |= string_find(row->url, *name) != null;
@@ -73031,7 +73033,7 @@ static fn distros(void)
                         foreign |= string_find(row->url, *name) != null ||
                                    string_find(row->store, *name) != null;
                 check("Every setup downloads this machine's own build",
-                      url_own && store_own && !foreign);
+                      (url_own || row->sha256) && store_own && !foreign);
         }
 
         const struct bowl_distro address_to alpine = bowl_find_distro("alpine");
@@ -73497,6 +73499,201 @@ static fn isolated_root_children(void)
               code == 0);
 }
 
+/*
+        The downloads a setup takes, against a mirror that lies. The bytes a
+        download leaves are checked here as bowl_setup_download checks them
+        (the digest or the key a row pins), on files: right bytes, one byte
+        wrong, one byte short, one byte long, another release's bytes, and
+        for a signature an older signed archive (the replay a floor refuses),
+        another key's signature, a bit flipped in the signature, a packet cut
+        short, junk after it and a critical subpacket this does not know. The
+        signatures are gpg's own, made with a throwaway 2048-bit key; every
+        pinned row is checked for having a digest or a key, and the Arch Linux
+        ARM key for being the key its fingerprint names.
+*/
+static bool put_file(string_address path, const p8 address_to bytes,
+                     positive length)
+{
+        bipolar handle = system_open_at_mode(
+            AT_FDCWD, path, O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC, 0600);
+        bool done = handle >= 0 &&
+                    system_write_all((positive)handle, bytes, length) == length;
+
+        if (handle >= 0)
+                system_close(handle);
+        return done;
+}
+
+static fn downloads(void)
+{
+        static const p8 archive[] = "moonwater bowl test archive\n";
+        static const struct bowl_key signer = {
+            "5F40E0EDD18BC9772C6354D481303DFF244CBCB8", 1785542400, 65537,
+            "f1e4a224eedcd103607b82d65374a0d08d22a8d70f84379d16f8f047e4bc0873"
+            "576ff2e3ded41edfaeb9f3552b9abc5b7a4f2f38f15a9b7b850620884eaa2c71"
+            "5724d899f7a232bac78ce30302202af58e69a41a1b3507de4c27d91c21a0797d"
+            "e0368e3c5f867d61ef4a6026461df7e215d82e123e8e87c34c5d5c9389034a4d"
+            "5ecc61ccc209e9462fc7104d5ad2a55229d0e6ccdedd7ac7d4decf99743544dc"
+            "e71e545a7085b6be0944af85a90b7a662321024f2fb3da60f702b1cf5770986d"
+            "e8e6f00ba0d01c24ab774e76bddb0f185eb7053a56e1d79d9e993b4a6a38b230"
+            "b50053004d433625bdfb7332463f81e8af60edbad759167439fd94379692ad4f",
+            0};
+        static const struct bowl_key other = {
+            "F3FACE255553013000D17F663396A190CC8CC5BB", 1785542400, 65537,
+            "b18cae83b331b6f3a64a7173d37a9ea50fb182a14a369fb20b097b7d0517fae7"
+            "e69118340d3155163d1e70139b933da728b9649b0019a2b8ae2b685113f54adc"
+            "4f962d2c91189b3501dd7649ff88318975b7a426ceb0694c2475bf86821fb4fa"
+            "4ed9bd02de402f0a6657d6a762ac668b663d4c2537db6940f9436e6bb56c9376"
+            "e37a57d3f6346994e98dd1673901f0631619b33c1c22aac3b3312c8982d188e2"
+            "6f7ed846bdccc8cece966eff85f845aad626c46e9bb6d2fe1d096f7a75c02320"
+            "99ba9260b1ff615bad3da031d0ac1d430a80b47ddcfdab20a243547d4fa5e1c1"
+            "233abe192523ef9c21df8d686578eef4358e207f89d61fd164009f1e64536187",
+            0};
+        static const p8 sig_sha512[] = {0x89, 0x01, 0x4f, 0x04, 0x00, 0x01, 0x0a, 0x00, 0x39, 0x16, 0x21, 0x04, 0x5f, 0x40, 0xe0, 0xed, 0xd1, 0x8b, 0xc9, 0x77, 0x2c, 0x63, 0x54, 0xd4, 0x81, 0x30, 0x3d, 0xff, 0x24, 0x4c, 0xbc, 0xb8, 0x05, 0x02, 0x6a, 0x96, 0xbe, 0x40, 0x1b, 0x14, 0x80, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x0e, 0x6d, 0x61, 0x6e, 0x75, 0x32, 0x2c, 0x32, 0x2e, 0x35, 0x2b, 0x31, 0x2e, 0x31, 0x32, 0x2c, 0x30, 0x2c, 0x33, 0x00, 0x0a, 0x09, 0x10, 0x81, 0x30, 0x3d, 0xff, 0x24, 0x4c, 0xbc, 0xb8, 0xf2, 0x74, 0x08, 0x00, 0xa9, 0xdc, 0x2b, 0xc6, 0xf4, 0xa5, 0xdd, 0xc4, 0x4a, 0x94, 0x56, 0xda, 0xc3, 0x38, 0x46, 0x9f, 0x66, 0xa3, 0x95, 0xad, 0x41, 0x8d, 0x5a, 0xa3, 0x6b, 0xec, 0x7a, 0x9d, 0x9c, 0x65, 0xbd, 0xb1, 0xbc, 0xef, 0x58, 0xa0, 0x52, 0x99, 0xfc, 0xa8, 0x8c, 0xd8, 0x9b, 0x92, 0xc7, 0xf2, 0x71, 0xd9, 0xcd, 0x82, 0xcb, 0x92, 0x6b, 0x1a, 0x3e, 0x60, 0xd7, 0xa7, 0x12, 0xdd, 0x99, 0x57, 0xd4, 0x2b, 0xa6, 0xad, 0xea, 0x35, 0x08, 0xd8, 0x44, 0xbb, 0xde, 0xc1, 0xa8, 0x9a, 0xd2, 0x61, 0xfd, 0xd5, 0x48, 0x9f, 0xbb, 0x5c, 0x16, 0x03, 0x0a, 0x94, 0x16, 0x4a, 0xc4, 0x3d, 0x86, 0x8f, 0xf5, 0x0a, 0x13, 0xef, 0x43, 0xd6, 0xbb, 0xa7, 0xc9, 0x56, 0xdf, 0x21, 0xe0, 0xec, 0xa1, 0xf6, 0x15, 0xd5, 0x90, 0x32, 0xc6, 0xac, 0x55, 0x1e, 0x3a, 0x45, 0x00, 0x3b, 0x11, 0xa5, 0x3f, 0x3d, 0x61, 0xf0, 0xb2, 0x5c, 0x3a, 0x88, 0x6f, 0xd3, 0x2d, 0xcb, 0x8f, 0xd8, 0x70, 0x78, 0x53, 0x6e, 0x9c, 0xa7, 0x23, 0xf5, 0x35, 0x61, 0xb6, 0x57, 0xbd, 0x92, 0x8f, 0xee, 0xa8, 0x74, 0xfb, 0xb2, 0x42, 0x52, 0x66, 0x9f, 0x18, 0x2d, 0xc6, 0xa5, 0x50, 0x26, 0x60, 0xb8, 0x03, 0xbd, 0xde, 0x0f, 0x4f, 0x4a, 0xc2, 0x74, 0xe1, 0xc4, 0x19, 0xa5, 0x38, 0x28, 0xb9, 0x31, 0x34, 0x3f, 0x9d, 0xef, 0x72, 0x54, 0x34, 0x0e, 0x3e, 0xb4, 0xae, 0x06, 0x79, 0x8b, 0xe5, 0xb7, 0xb9, 0x5e, 0x57, 0x7f, 0xea, 0x62, 0x8f, 0x45, 0x1e, 0x80, 0x9d, 0x9f, 0x5e, 0x2a, 0xd0, 0x88, 0x67, 0x06, 0x73, 0xa4, 0x99, 0xa3, 0xf3, 0xe7, 0x6d, 0x2a, 0xf4, 0xa6, 0x1e, 0x8f, 0x84, 0x63, 0xc1, 0x13, 0x02, 0xf6, 0xa2, 0xf8, 0x2b, 0x51, 0x01, 0x44, 0xb4, 0x11, 0x47, 0xc6, 0xd1, 0x06, 0x7f, 0x2a, 0xed, 0x3f, 0x39, 0x82};
+        static const p8 sig_sha256[] = {0x89, 0x01, 0x4f, 0x04, 0x00, 0x01, 0x08, 0x00, 0x39, 0x16, 0x21, 0x04, 0x5f, 0x40, 0xe0, 0xed, 0xd1, 0x8b, 0xc9, 0x77, 0x2c, 0x63, 0x54, 0xd4, 0x81, 0x30, 0x3d, 0xff, 0x24, 0x4c, 0xbc, 0xb8, 0x05, 0x02, 0x6a, 0x96, 0xbe, 0x40, 0x1b, 0x14, 0x80, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x0e, 0x6d, 0x61, 0x6e, 0x75, 0x32, 0x2c, 0x32, 0x2e, 0x35, 0x2b, 0x31, 0x2e, 0x31, 0x32, 0x2c, 0x30, 0x2c, 0x33, 0x00, 0x0a, 0x09, 0x10, 0x81, 0x30, 0x3d, 0xff, 0x24, 0x4c, 0xbc, 0xb8, 0xf9, 0xd8, 0x07, 0xfd, 0x12, 0x9c, 0x15, 0x9c, 0xde, 0xba, 0x04, 0x64, 0x8f, 0x58, 0xcc, 0x10, 0x86, 0x2c, 0x3e, 0xe9, 0x5b, 0x94, 0xde, 0x5a, 0x8e, 0x99, 0x2d, 0x5c, 0xc1, 0x79, 0xbc, 0x3e, 0xab, 0xe2, 0xcd, 0x8c, 0x79, 0x4d, 0xb2, 0xbc, 0x50, 0xb1, 0x61, 0x7f, 0x14, 0x42, 0x01, 0x7b, 0x1a, 0x63, 0xbd, 0x61, 0x83, 0x46, 0xf1, 0xeb, 0x16, 0xbc, 0x3b, 0x90, 0x65, 0x78, 0xe2, 0xb5, 0x0c, 0xf4, 0x1b, 0x65, 0x47, 0x12, 0x51, 0xb1, 0x04, 0x69, 0x35, 0xb8, 0x0d, 0xbf, 0x19, 0x4f, 0xc0, 0xfb, 0x17, 0xb1, 0x28, 0xaa, 0x54, 0x7d, 0x7b, 0xc9, 0x76, 0x21, 0xd5, 0xd7, 0xe3, 0x14, 0xc5, 0x20, 0xfc, 0xb6, 0x26, 0x93, 0xe9, 0x9c, 0x37, 0x2e, 0xb8, 0x8a, 0xa6, 0x05, 0x5a, 0xf5, 0x96, 0x31, 0xfa, 0x6f, 0x4f, 0xf4, 0x5e, 0xcc, 0x28, 0xbd, 0x4e, 0xa6, 0x91, 0x0c, 0x1b, 0x8c, 0x84, 0x7e, 0x62, 0x0b, 0x31, 0xe9, 0xce, 0xbe, 0x68, 0x47, 0xcd, 0x33, 0x02, 0x13, 0xe4, 0x02, 0x7e, 0x75, 0x7f, 0x57, 0x0d, 0x75, 0x18, 0x82, 0x80, 0xb2, 0xdb, 0x1a, 0x87, 0xda, 0x8d, 0x35, 0xf4, 0x6b, 0x3d, 0xb1, 0xbc, 0xae, 0x07, 0x6b, 0xaa, 0xd8, 0x55, 0xfe, 0xb6, 0xf3, 0x9b, 0xdf, 0x93, 0x33, 0xef, 0x61, 0x46, 0x44, 0xfa, 0x0e, 0xc8, 0x3a, 0xd8, 0x27, 0xd5, 0x47, 0xe7, 0x6d, 0xda, 0x27, 0x57, 0x55, 0x74, 0x78, 0x8a, 0xde, 0x94, 0xdf, 0xdc, 0xb2, 0x10, 0x28, 0xb6, 0x6d, 0x6d, 0x7e, 0xc9, 0xbf, 0xa3, 0x1e, 0x65, 0x4f, 0x58, 0x8e, 0x9c, 0xb0, 0xb8, 0x0a, 0x18, 0x9c, 0x48, 0x89, 0x5f, 0x31, 0x7a, 0x0e, 0x88, 0x53, 0xce, 0x5c, 0x39, 0x83, 0xbe, 0x77, 0xa2, 0xcb, 0xdc, 0xf2, 0x5a, 0x99, 0x05, 0x86, 0x0e, 0x32, 0xe3, 0x93, 0x2f, 0x7d, 0x6d, 0x0c, 0x91, 0x83, 0x61, 0x9f, 0x87, 0x24};
+        const positive size = sizeof(archive) - 1;
+        p8 copy[sizeof(sig_sha512) + 1];
+        p8 hex[BOWL_DIGEST_HEX + 1];
+        p8 wrong[sizeof(archive)];
+        bipolar handle;
+        struct bowl_key floor_ok;
+        struct bowl_key floor_late;
+        string_address file = BOWL_ROOT_DIRECTORY "/download";
+        string_address sign = BOWL_ROOT_DIRECTORY "/download.sig";
+
+        system_make_directory_at(AT_FDCWD, BOWL_ROOT_DIRECTORY, 0755);
+
+        // A digest pin: the right bytes and nothing else.
+        put_file(file, archive, size);
+        handle = system_open_at(AT_FDCWD, file, FILE_READ | O_CLOEXEC);
+        bowl_sha256_of(handle, hex, null);
+        system_close(handle);
+        check("A pinned digest takes the bytes it names",
+              bowl_archive_digest_ok(file, (string_address)hex));
+        check("A row that pins no digest takes nothing",
+              !bowl_archive_digest_ok(file, null));
+        put_file(file, archive, size - 1);
+        check("A download one byte short of its digest is refused",
+              !bowl_archive_digest_ok(file, (string_address)hex));
+        put_file(file, archive, 0);
+        check("An empty download is refused",
+              !bowl_archive_digest_ok(file, (string_address)hex));
+        memory_copy(wrong, archive, size);
+        wrong[size] = 'x';
+        put_file(file, wrong, size + 1);
+        check("A download one byte long is refused",
+              !bowl_archive_digest_ok(file, (string_address)hex));
+        memory_copy(wrong, archive, size);
+        wrong[3] ^= 1;
+        put_file(file, wrong, size);
+        check("A download with one bit changed is refused",
+              !bowl_archive_digest_ok(file, (string_address)hex));
+        put_file(file, archive, size);
+        check("A digest in capitals is not the pinned one",
+              !bowl_archive_digest_ok(file,
+                                      "895661BDF6C64E91B7725874165FD05DD30C438D3FFEC661671AB5CFB261CA58"));
+        check("A download that is not there is refused",
+              !bowl_archive_digest_ok(BOWL_ROOT_DIRECTORY "/absent", (string_address)hex));
+
+        // A signature pin.
+        put_file(file, archive, size);
+        floor_ok = signer;
+        floor_ok.since = 1788264000;
+        floor_late = signer;
+        floor_late.since = 1788264001;
+        for (positive which = 0; which < 2; which++)
+        {
+                const p8 address_to sig = which ? sig_sha256 : sig_sha512;
+                positive length = which ? sizeof(sig_sha256) : sizeof(sig_sha512);
+
+                put_file(sign, sig, length);
+                check("A signature by the pinned key over the archive is taken",
+                      bowl_signature_ok(file, sign, address_of signer));
+                check("A signature made on the floor's second is taken",
+                      bowl_signature_ok(file, sign, address_of floor_ok));
+                check("An older signed archive is a replay and is refused",
+                      !bowl_signature_ok(file, sign, address_of floor_late));
+                check("A signature by another key is refused",
+                      !bowl_signature_ok(file, sign, address_of other));
+
+                put_file(file, archive, size - 1);
+                check("A signed archive one byte short is refused",
+                      !bowl_signature_ok(file, sign, address_of signer));
+                put_file(file, wrong, size);
+                check("A signed archive with a bit changed is refused",
+                      !bowl_signature_ok(file, sign, address_of signer));
+                put_file(file, archive, size);
+
+                {
+                        //      Every byte is covered but the unhashed area,
+                        //      which bowl_signature_read does not read.
+                        positive hashed = 3 + 6 + ((positive)sig[7] << 8) + sig[8];
+                        positive unhashed = ((positive)sig[hashed] << 8) + sig[hashed + 1];
+                        bool refused = true;
+                        bool cut_refused = true;
+
+                        for (positive at = 0; at < length; at++)
+                        {
+                                bool free_byte = at >= hashed + 2 &&
+                                                 at < hashed + 2 + unhashed;
+
+                                memory_copy(copy, sig, length);
+                                copy[at] ^= 1 << (at & 7);
+                                put_file(sign, copy, length);
+                                refused &= bowl_signature_ok(file, sign,
+                                                             address_of signer) == free_byte;
+                        }
+                        check("A signature with any one bit changed is refused, "
+                              "unless it is in the unhashed area", refused);
+                        for (positive cut = 0; cut < length; cut += 7)
+                        {
+                                put_file(sign, sig, cut);
+                                cut_refused &= !bowl_signature_ok(file, sign,
+                                                                  address_of signer);
+                        }
+                        check("A signature cut short is refused", cut_refused);
+                }
+                memory_copy(copy, sig, length);
+                copy[length] = 0;
+                put_file(sign, copy, length + 1);
+                check("A byte after the signature packet is refused",
+                      !bowl_signature_ok(file, sign, address_of signer));
+        }
+        check("A signature that is not there is refused",
+              !bowl_signature_ok(file, BOWL_ROOT_DIRECTORY "/absent", address_of signer));
+
+        // The pinned key is the key its fingerprint names.
+        {
+                p8 made[41];
+
+                check("The Arch Linux ARM key's numbers make its fingerprint",
+                      bowl_key_fingerprint(address_of bowl_alarm_key, made) &&
+                          string_equals((string_address)made,
+                                        bowl_alarm_key.fingerprint));
+                check("The test key's numbers make its fingerprint",
+                      bowl_key_fingerprint(address_of signer, made) &&
+                          string_equals((string_address)made, signer.fingerprint));
+        }
+
+        // Every row names how it is checked, and only one way.
+        for (positive at = 0; at < array_count(bowl_distros); at++)
+        {
+                const struct bowl_distro address_to row = bowl_distros + at;
+                p8 made[41];
+
+                check("Every setup download is pinned by a digest or by a key, not neither",
+                      row->sha256 || row->key);
+                check("A row pins a digest or a key, not both", !(row->sha256 && row->key));
+                check("A key a row names makes its own fingerprint",
+                      !row->key ||
+                          (bowl_key_fingerprint(row->key, made) &&
+                           string_equals((string_address)made, row->key->fingerprint)));
+        }
+
+        system_remove_at(AT_FDCWD, file, 0);
+        system_remove_at(AT_FDCWD, sign, 0);
+}
+
 b32 main(void)
 {
         names();
@@ -73508,6 +73705,7 @@ b32 main(void)
         archive_policy();
         landing();
         distros();
+        downloads();
         json();
         oci();
         nix();
