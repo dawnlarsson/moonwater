@@ -12081,6 +12081,29 @@ static b32 locale_keyboard_set(string_address name)
         return 0;
 }
 
+//      moonwater dns: how wget and host ask the public resolvers (see the
+//      DNS over TLS comment in net.c): plain, tls or tls-only.
+static b32 locale_dns_status(void)
+{
+        static const string_address names[] = {"plain", "tls", "tls-only"};
+
+        host_say(log, host_label "dns %s\n",
+                 names[dns_mode((string_address)DNS_MODE_PATH)]);
+        return 0;
+}
+
+static b32 locale_dns_set(string_address word)
+{
+        if (!string_equals(word, "plain") && !string_equals(word, "tls") &&
+            !string_equals(word, "tls-only"))
+                return host_refuse("unknown dns mode %s -- plain, tls or "
+                                   "tls-only\n", word);
+        if (radio_write_word(DNS_MODE_PATH, word) < 0)
+                return host_fail("dns", -1);
+        host_say(log, host_label "dns %s\n", word);
+        return 0;
+}
+
 static fn locale_restore(void)
 {
         p8 zone[80];
@@ -12273,6 +12296,16 @@ static b32 host_locale(string_address address_to arguments, positive count)
                 return locale_ntp_set(false, word);
         }
 
+        if (string_equals(verb, "dns"))
+        {
+                if (count == 2)
+                        return locale_dns_status();
+                if (count != 3)
+                        return host_usage();
+                host_need_root("moonwater");
+                return locale_dns_set(word);
+        }
+
         if (count == 2)
                 return locale_keyboard_status();
         if (count != 3)
@@ -12305,6 +12338,7 @@ static string_address host_wipe_keep[] = {
     "ntp.server",
     "ntp.sampling",
     "keyboard",
+    "dns",
     "link",
     "link.key",
     "link.peers",
@@ -12684,6 +12718,7 @@ static fn host_usage_write(writer out)
                  HOST_ROW("ntp sampling [on|off]", "       ", "keep the lowest-delay sample of five [on]")
                  HOST_ROW("link [on|off|help]", "         ", "shell and run on paired machines, by key")
                  HOST_ROW("keyboard [LAYOUT|list]", "      ", "Canvas keys: us uk de se no dk fi fr es it")
+                 HOST_ROW("dns [plain|tls|tls-only]", "    ", "wget and host over TLS to 1.1.1.1 and 9.9.9.9 [plain]")
                  HOST_ROW("wipe", "                        ", "forget /home and /root, keep the machine")
                  "\n"
                  TERM_DIM                       "  Settings stay in the image this session started from.\n"
@@ -12821,6 +12856,13 @@ static b32 host_status(void)
                 string_format(log, "  keyboard %s\n",
                               keyboard[0] ? (string_address)keyboard
                                           : (string_address) "us");
+                {
+                        static const string_address dns[] = {"plain", "tls",
+                                                             "tls-only"};
+
+                        string_format(log, "  dns %s\n",
+                                      dns[dns_mode((string_address)DNS_MODE_PATH)]);
+                }
         }
 
         host_status_wifi();
@@ -12937,7 +12979,8 @@ static b32 host_main()
                 return host_radio(arguments, count);
 
         if (string_equals(verb, "timezone") || string_equals(verb, "ntp") ||
-            string_equals(verb, "keyboard") || string_equals(verb, "time"))
+            string_equals(verb, "keyboard") || string_equals(verb, "time") ||
+            string_equals(verb, "dns"))
                 return host_locale(arguments, count);
 
         if (string_equals(verb, "link"))

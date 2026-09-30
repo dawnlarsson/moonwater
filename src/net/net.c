@@ -1914,6 +1914,52 @@ static COLD fn dns_bind_random_port(b32 handle)
         }
 }
 
+//      The question for `name` as a query of id `id`: the header, the name
+//      (its letters in random case when `mixed`, which is set false when
+//      randomness is refused), type A class IN, and the EDNS0 option when
+//      `edns`. The length of the name's labels, or negative when it does not
+//      fit.
+static COLD bipolar dns_build_request(p8 address_to request, positive room,
+                                      string_address name, p16 id,
+                                      bool address_to mixed, bool edns,
+                                      positive address_to question_length,
+                                      positive address_to request_length)
+{
+        bipolar written = dns_write_name(request + DNS_HEADER,
+                                         room - DNS_HEADER - 4 - DNS_EDNS_LENGTH,
+                                         name);
+
+        if (written < 0)
+                return written;
+        if (address_to mixed)
+                address_to mixed = dns_mix_case(request + DNS_HEADER,
+                                                (positive)written);
+
+        memory_fill(request, 0, DNS_HEADER);
+        network_store_16(request, id);
+        network_store_16(request + 2, DNS_FLAG_RECURSE);
+        network_store_16(request + 4, 1);
+        network_store_16(request + DNS_HEADER + written, DNS_TYPE_A);
+        network_store_16(request + DNS_HEADER + written + 2, DNS_CLASS_IN);
+
+        address_to question_length = (positive)written + 4;
+        address_to request_length = DNS_HEADER + address_to question_length;
+
+        if (edns)
+        {
+                p8 address_to option = request + address_to request_length;
+
+                network_store_16(request + 10, 1);
+                option[0] = 0;                        // the root as owner
+                network_store_16(option + 1, 41);     // OPT
+                network_store_16(option + 3, DNS_EDNS_SIZE);
+                network_store_32(option + 5, 0);      // version 0, no flags
+                network_store_16(option + 9, 0);
+                address_to request_length += DNS_EDNS_LENGTH;
+        }
+        return written;
+}
+
 //      The reply matches what was sent except in case: the same id, one
 //      question, the same bytes under ASCII case folding.
 static COLD bool dns_reply_identity_folded(
@@ -1974,40 +2020,10 @@ static COLD bipolar dns_query_once(p32 server, p16 port, string_address name,
             system_random_fill(address_of id, sizeof id, 0))
                 return DNS_NO_RANDOM;
 
-        written = dns_write_name(request + DNS_HEADER,
-                                 sizeof(request) - DNS_HEADER - 4 -
-                                     DNS_EDNS_LENGTH,
-                                 name);
-
+        written = dns_build_request(request, sizeof request, name, id, &mixed,
+                                    edns, &question_length, &request_length);
         if (written < 0)
                 return DNS_MALFORMED;
-
-        if (mixed)
-                mixed = dns_mix_case(request + DNS_HEADER, (positive)written);
-
-        memory_fill(request, 0, DNS_HEADER);
-        network_store_16(request, id);
-        network_store_16(request + 2, DNS_FLAG_RECURSE);
-        network_store_16(request + 4, 1);
-
-        network_store_16(request + DNS_HEADER + written, DNS_TYPE_A);
-        network_store_16(request + DNS_HEADER + written + 2, DNS_CLASS_IN);
-
-        question_length = (positive)written + 4;
-        request_length = DNS_HEADER + question_length;
-
-        if (edns)
-        {
-                p8 address_to option = request + request_length;
-
-                network_store_16(request + 10, 1);
-                option[0] = 0;                        // the root as owner
-                network_store_16(option + 1, 41);     // OPT
-                network_store_16(option + 3, DNS_EDNS_SIZE);
-                network_store_32(option + 5, 0);      // version 0, no flags
-                network_store_16(option + 9, 0);
-                request_length += DNS_EDNS_LENGTH;
-        }
 
         handle = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
 
@@ -2159,6 +2175,9 @@ static COLD bipolar dns_resolve_at(p32 server, p16 port, string_address name,
 */
 #define DNS_FALLBACK 0x01010101u
 #define DNS_SERVERS_MAX 3
+//      Where `moonwater dns` keeps its setting (see the DNS over TLS comment
+//      in the HTTP section, which reads it).
+#define DNS_MODE_PATH "/root/dns"
 
 static CONST COLD bool dns_answer_is_final(bipolar status)
 {
@@ -2166,8 +2185,15 @@ static CONST COLD bool dns_answer_is_final(bipolar status)
                status == DNS_NO_ADDRESS;
 }
 
-static COLD bipolar dns_resolve_any(string_address path, string_address name,
-                               p32 address_to found, positive seconds)
+//      How one server is asked: the walk below does not care whether by
+//      plain UDP or over TLS.
+typedef bipolar (*dns_asker)(p32 server, string_address name,
+                             p32 address_to found, positive seconds,
+                             address_any context);
+
+static COLD bipolar dns_walk(string_address path, string_address name,
+                             p32 address_to found, positive seconds,
+                             dns_asker ask, address_any context)
 {
         bipolar status = DNS_NO_SERVER;
         bipolar server;
@@ -2178,18 +2204,30 @@ static COLD bipolar dns_resolve_any(string_address path, string_address name,
                (server = dns_server_at(path, index++)) >= 0)
         {
                 asked = true;
-                status = dns_resolve_at((p32)server, DNS_PORT, name, found,
-                                        seconds);
+                status = ask((p32)server, name, found, seconds, context);
 
                 if (dns_answer_is_final(status))
                         return status;
         }
 
         if (!asked)
-                return dns_resolve_at(DNS_FALLBACK, DNS_PORT, name, found,
-                                      seconds);
+                return ask(DNS_FALLBACK, name, found, seconds, context);
 
         return status;
+}
+
+static COLD bipolar dns_ask_plain(p32 server, string_address name,
+                                  p32 address_to found, positive seconds,
+                                  address_any context)
+{
+        (void)context;
+        return dns_resolve_at(server, DNS_PORT, name, found, seconds);
+}
+
+static COLD bipolar dns_resolve_any(string_address path, string_address name,
+                               p32 address_to found, positive seconds)
+{
+        return dns_walk(path, name, found, seconds, dns_ask_plain, null);
 }
 
 #endif // STANDARD_MODERN_C_NET_DNS
@@ -9395,6 +9433,13 @@ static bipolar http_get_request(p8 address_to request, positive room,
                                 p8 version_minor, string_address agent,
                                 positive address_to used);
 
+//      dns_resolve_any under the DNS over TLS setting (defined below, past
+//      the part of this section the URL and fetch harnesses lift).
+static COLD bipolar dns_resolve_policy(string_address path,
+                                       string_address mode_path,
+                                       string_address name,
+                                       p32 address_to found, positive seconds);
+
 static bipolar http_stream_open(p32 host, p16 port, positive seconds)
 {
         socket_address_internet where = {
@@ -10292,10 +10337,192 @@ static p32 http_lookup(string_address host)
                 return (p32)server;
         if (http_ipv4_legacy(host, address_of ip))
                 return ip;
-        if (dns_resolve_any((string_address) "/etc/resolv.conf", host, address_of ip,
+        if (dns_resolve_policy((string_address) "/etc/resolv.conf",
+                               (string_address)DNS_MODE_PATH, host, address_of ip,
                             3) != DNS_OK)
                 return 0;
         return ip;
+}
+
+/*
+        DNS over TLS (RFC 7858), for the public resolvers known to offer it.
+
+        Setting (the file /root/dns, written by `moonwater dns`): plain, the
+        default, asks every resolver over UDP as this resolver always has;
+        tls asks 1.1.1.1, 1.0.0.1, 9.9.9.9 and 149.112.112.112 (Cloudflare and
+        Quad9) over TLS on port 853 first and, when that cannot be done,
+        over UDP as before; tls-only asks them over TLS alone and asks no
+        other resolver at all (the network's own, which offers nothing of the
+        kind, is skipped: its names, and the machine's own, do not resolve).
+
+        The certificate is checked as for https: the chain to a Mozilla root,
+        the dates against the clock, and the resolver's own address against an
+        iPAddress name (each of the four publishes its address as one;
+        openssl s_client -verify_ip accepts all four). So a resolver that
+        presents no acceptable certificate is not believed, and with `tls`
+        falls back to plain UDP at a cost of a handshake; an on-path attacker
+        who can block TCP 853 gets the plain query exactly as without the
+        setting, which is why `tls-only` exists.
+
+        Why it is off by default, and why `tls` is not the default either: a
+        captive portal answers or drops port 853 and a first lease arrives
+        with the clock unset, before SNTP has run, where a certificate that
+        has not yet begun is refused: both the ordinary first minute of a
+        machine. The fallback keeps `tls` working through them at a cost of
+        up to two seconds, which is a cost a default should not charge; and
+        `tls-only` cannot have a clock set by names it cannot resolve, so the
+        time servers' names (sntp) are always asked in plain.
+
+        Only wget and host follow the setting; the other users of the
+        resolver (hostid, logger's server, waterlink's peers and sntp) ask
+        plain.
+*/
+#define DNS_TLS_PORT 853
+#define DNS_TLS_SECONDS 2
+#define DNS_TLS_FAILED (-11)
+
+enum
+{
+        DNS_MODE_PLAIN,
+        DNS_MODE_TLS,
+        DNS_MODE_TLS_ONLY
+};
+
+static CONST COLD bool dns_offers_tls(p32 server)
+{
+        return server == 0x01010101u || server == 0x01000001u ||
+               server == 0x09090909u || server == 0x95707070u;
+}
+
+//      The setting: its first word, plain when the file is not there, not
+//      readable or not one of the two others.
+static COLD positive dns_mode(string_address path)
+{
+        p8 text[32];
+        bipolar got = file_slurp(path, text, sizeof text - 1);
+
+        if (got < 0)
+                return DNS_MODE_PLAIN;
+        text[got] = 0;
+        while (got > 0 && (text[got - 1] == '\n' || text[got - 1] == ' '))
+                text[--got] = 0;
+        if (string_equals((string_address)text, "tls"))
+                return DNS_MODE_TLS;
+        if (string_equals((string_address)text, "tls-only"))
+                return DNS_MODE_TLS_ONLY;
+        return DNS_MODE_PLAIN;
+}
+
+//      Exactly `length` bytes of the TLS stream into `into`.
+static COLD bool dns_tls_read_all(http_link address_to link, p8 address_to into,
+                                  positive length,
+                                  const network_deadline address_to deadline)
+{
+        positive have = 0;
+
+        while (have < length)
+        {
+                positive got = 0;
+
+                if (http_link_read_until(link, into + have, length - have,
+                                         address_of got, deadline) ||
+                    !got)
+                        return false;
+                have += got;
+        }
+        return true;
+}
+
+//      One query over TLS to `server`: DNS_TLS_FAILED when no answer to it
+//      came (no connection, a handshake or certificate refused, a stream
+//      that ended), otherwise what the answer says.
+static COLD bipolar dns_query_tls(p32 server, string_address name,
+                                  p32 address_to found, positive seconds)
+{
+        http_link link;
+        p8 request[2 + DNS_MAX_MESSAGE];
+        p8 reply[DNS_MAX_MESSAGE];
+        p8 host[16];
+        network_deadline deadline;
+        bool mixed = false;
+        positive question_length;
+        positive request_length;
+        positive length;
+        p16 id;
+        bipolar status = DNS_TLS_FAILED;
+
+        if (!network_transaction_secure(address_of id, sizeof id) &&
+            system_random_fill(address_of id, sizeof id, 0))
+                return DNS_NO_RANDOM;
+        if (dns_build_request(request + 2, sizeof request - 2, name, id,
+                              address_of mixed, true,
+                              address_of question_length,
+                              address_of request_length) < 0)
+                return DNS_MALFORMED;
+        network_store_16(request, (p16)request_length);
+        host[host_into(host, server)] = 0;
+
+        if (!network_deadline_begin(address_of deadline, seconds, 0) ||
+            http_link_open(address_of link, server, DNS_TLS_PORT,
+                           (string_address)host, true, true) != HTTP_OK)
+                return DNS_TLS_FAILED;
+
+        if (!http_link_write(address_of link, request, 2 + request_length) &&
+            dns_tls_read_all(address_of link, reply, 2, address_of deadline))
+        {
+                length = network_load_16(reply);
+                if (length > sizeof reply)
+                        status = DNS_MALFORMED;
+                else if (dns_tls_read_all(address_of link, reply, length,
+                                          address_of deadline))
+                {
+                        status = dns_reply_result(reply, length, id,
+                                                  request + 2, question_length,
+                                                  found);
+                        if (status == DNS_TRY_TCP)
+                                status = DNS_MALFORMED;
+                }
+        }
+        http_link_close(address_of link);
+        return status;
+}
+
+//      How the walk asks each server under the setting in `context`.
+static COLD bipolar dns_ask_policy(p32 server, string_address name,
+                                   p32 address_to found, positive seconds,
+                                   address_any context)
+{
+        positive mode = *(positive address_to)context;
+        bipolar status;
+
+        if (mode == DNS_MODE_PLAIN)
+                return dns_resolve_at(server, DNS_PORT, name, found, seconds);
+        if (!dns_offers_tls(server))
+                return mode == DNS_MODE_TLS_ONLY
+                           ? DNS_NO_SERVER
+                           : dns_resolve_at(server, DNS_PORT, name, found,
+                                            seconds);
+        status = dns_query_tls(server, name, found,
+                               mode == DNS_MODE_TLS_ONLY || seconds <= DNS_TLS_SECONDS
+                                   ? seconds : DNS_TLS_SECONDS);
+        if (status != DNS_TLS_FAILED)
+                return status;
+        return mode == DNS_MODE_TLS_ONLY
+                   ? DNS_NO_REPLY
+                   : dns_resolve_at(server, DNS_PORT, name, found, seconds);
+}
+
+//      dns_resolve_any under the setting in `mode_path` (DNS_MODE_PATH, for
+//      the callers that follow it).
+static COLD bipolar dns_resolve_policy(string_address path,
+                                       string_address mode_path,
+                                       string_address name,
+                                       p32 address_to found, positive seconds)
+{
+        positive mode = dns_mode(mode_path);
+
+        return dns_walk(path, name, found, seconds, dns_ask_policy,
+                        address_of mode);
 }
 
 /* Whether a fetch whose destination the peer chose may go to ip: not this

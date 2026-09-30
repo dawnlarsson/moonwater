@@ -3982,6 +3982,12 @@ lane_net()
         2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
         *) net_outcome=1 ;;
         esac
+        python3 test/differential.py --harness dns_tls
+        case $? in
+        0) ;;
+        2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
+        *) net_outcome=1 ;;
+        esac
         python3 test/differential.py --harness http_fuzz
         case $? in
         0) ;;

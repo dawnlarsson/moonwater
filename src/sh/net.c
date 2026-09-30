@@ -538,8 +538,9 @@ static COLD b32 net_host(void)
         }
         else
         {
-                status = dns_resolve_any((string_address) "/etc/resolv.conf",
-                                         net_word(1), address_of found, 3);
+                status = dns_resolve_policy((string_address) "/etc/resolv.conf",
+                                            (string_address)DNS_MODE_PATH,
+                                            net_word(1), address_of found, 3);
         }
 
         switch (status)
