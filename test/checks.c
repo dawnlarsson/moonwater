@@ -53302,19 +53302,29 @@ static fn fetching(void)
 
                 framing_harness("204-clean", true, FRAME,
                                 "HTTP/1.1 204 No Content\r\n\r\n", "");
-                framing_harness("204-with-content-length", false, FRAME,
+                /* The default accepts these as wget and curl do; the tight tier
+                   refuses them. */
+                framing_harness("204-with-content-length",
+                                MOONWATER_STRICT < STRICT_TIGHT, FRAME,
                                 "HTTP/1.1 204 No Content\r\n"
                                 "Content-Length: 0\r\n\r\n", "");
-                framing_harness("204-with-transfer-encoding", false, FRAME,
+                framing_harness("204-with-transfer-encoding",
+                                MOONWATER_STRICT < STRICT_TIGHT, FRAME,
                                 "HTTP/1.1 204 No Content\r\n"
                                 "Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
                                 "");
                 framing_harness("205-with-zero-content-length", true, FRAME,
                                 "HTTP/1.1 205 Reset Content\r\n"
                                 "Content-Length: 0\r\n\r\n", "");
+#if MOONWATER_STRICT < STRICT_TIGHT
+                framing_harness("205-with-content-length", true, FRAME,
+                                "HTTP/1.1 205 Reset Content\r\n"
+                                "Content-Length: 5\r\n\r\nhello", "hello");
+#else
                 framing_harness("205-with-content-length", false, FRAME,
                                 "HTTP/1.1 205 Reset Content\r\n"
                                 "Content-Length: 5\r\n\r\nhello", "");
+#endif
                 framing_harness("te-cl-conflict", false, FRAME,
                                 "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"
                                 "Content-Length: 5\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
@@ -62954,6 +62964,14 @@ static fn fetching_for_real(void)
                                          "Content-Length: 9\r\n"
                                          "\r\n"
                                          "forbidden";
+                p8 answer_reset_length[] = "HTTP/1.1 205 Reset Content\r\n"
+                                           "Content-Length: 5\r\n"
+                                           "\r\n"
+                                           "reset";
+                p8 answer_reset_chunked[] = "HTTP/1.1 205 Reset Content\r\n"
+                                            "Transfer-Encoding: chunked\r\n"
+                                            "\r\n"
+                                            "1\r\nx\r\n0\r\n\r\n";
                 p8 answer_not_modified[] = "HTTP/1.1 304 Not Modified\r\n"
                                            "Content-Length: 9\r\n"
                                            "\r\n"
@@ -62991,6 +63009,8 @@ static fn fetching_for_real(void)
                     (string_address)answer_interim,
                     (string_address)answer_no_content,
                     (string_address)answer_no_content,
+                    (string_address)answer_reset_length,
+                    (string_address)answer_reset_chunked,
                     (string_address)answer_not_modified,
                     (string_address)answer_use_proxy,
                     (string_address)answer_unused,
@@ -63012,6 +63032,8 @@ static fn fetching_for_real(void)
                     sizeof(answer_interim) - 1,
                     sizeof(answer_no_content) - 1,
                     sizeof(answer_no_content) - 1,
+                    sizeof(answer_reset_length) - 1,
+                    sizeof(answer_reset_chunked) - 1,
                     sizeof(answer_not_modified) - 1,
                     sizeof(answer_use_proxy) - 1,
                     sizeof(answer_unused) - 1,
@@ -63174,15 +63196,62 @@ static fn fetching_for_real(void)
                           body.bytes &&
                           !memory_compare(body.bytes, "final", 5));
 
+                /* A 204 that declares a body: the default does what wget and
+                   curl do (succeeds, the body ignored, nothing published);
+                   the tight tier refuses the declaration. */
+#if MOONWATER_STRICT >= STRICT_TIGHT
+                /* A refused fetch leaves the caller's store as it was, so
+                   start each of these from an empty one. */
+                http_forget(address_of body);
+#endif
                 status = http_get(url, address_of body, address_of code);
+#if MOONWATER_STRICT < STRICT_TIGHT
                 check("a 204 response publishes an empty buffered body",
                       status == HTTP_OK && code == 204 && !body.used);
+#else
+                check("a 204 that declares a body is refused by the tight tier",
+                      status == HTTP_MALFORMED && !body.used);
+#endif
 
                 {
                         status = http_fetch_to(url, -1, false,
                                                address_of code, null);
+#if MOONWATER_STRICT < STRICT_TIGHT
                         check("a streaming 204 succeeds without writing its forbidden body",
                               status == HTTP_OK && code == 204);
+#else
+                        check("a streaming 204 that declares a body is refused by the tight tier",
+                              status == HTTP_MALFORMED);
+#endif
+                        /* 205: the default reads its content as a 200's, as
+                           wget and curl print it; the tight tier consumes the
+                           framing and refuses any content. */
+#if MOONWATER_STRICT >= STRICT_TIGHT
+                        http_forget(address_of body);
+#endif
+                        status = http_get(url, address_of body, address_of code);
+#if MOONWATER_STRICT < STRICT_TIGHT
+                        check("a 205 with content-length publishes its body by default",
+                              status == HTTP_OK && code == 205 && body.used == 5 &&
+                                  !memory_compare(body.bytes, "reset", 5));
+#else
+                        check("a 205 with non-zero content-length is refused by the tight tier",
+                              status == HTTP_MALFORMED && !body.used);
+#endif
+#if MOONWATER_STRICT >= STRICT_TIGHT
+                        http_forget(address_of body);
+#endif
+                        status = http_get(url, address_of body, address_of code);
+#if MOONWATER_STRICT < STRICT_TIGHT
+                        check("a 205 with a chunked body publishes it by default",
+                              status == HTTP_OK && code == 205 && body.used == 1 &&
+                                  !memory_compare(body.bytes, "x", 1));
+#else
+                        check("a 205 with chunked content is refused by the tight tier",
+                              status != HTTP_OK && !body.used);
+#endif
+                        /* A failed fetch leaves the caller's store as it was. */
+                        http_forget(address_of body);
                         status = http_fetch_to(url, -1, false,
                                                address_of code, null);
                         check("a terminal 304 is not redirected or accepted as a download",

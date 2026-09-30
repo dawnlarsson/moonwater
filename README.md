@@ -324,10 +324,14 @@ coreutils does:
 | `cp -r` | makes the new directory where it goes and fills it | builds it in a private stage and publishes it whole |
 | `install` | leaves the copy in place, mode 0600, when the owner asked for is refused | takes the copy away and says it was not published |
 | `pinky -l` | copies each user's `~/.project` and `~/.plan` to the terminal as they are | leaves them out |
+| `wget`, `fetch` and every other HTTP client in the tree | accept a `204` that declares `Content-Length` or `Transfer-Encoding` (its body is never read; the connection closes after the one response) and read a `205`'s content like any other body, as wget and curl do | refuse a `204` that declares any body framing and a `205` with a non-zero length, chunked or close-delimited content (RFC 9110 15.3.5, 15.3.6, RFC 9112 6.1) |
 
-Every row has a check in `floodlight_hardened` (`test/run`), run against a shell
-built from `kernel/profile/sec_hardened`'s configuration; the default half is
-the differential engine's, against GNU.
+Every row but the HTTP one has a check in `floodlight_hardened` (`test/run`),
+run against a shell built from `kernel/profile/sec_hardened`'s configuration;
+the default half is the differential engine's, against GNU. The HTTP row's
+tight half is `CHECK_net` built with `MOONWATER_STRICT` 2 (the `net-tight`
+tally of `sh test/run net`) and the framing harness's second tier; its default
+half is held against GNU wget and curl by `wget_mutation`.
 
 Two differences are not tier choices. `kill` is util-linux's, not
 coreutils' (`kill -l` takes several names, `-s0` is a signal), because

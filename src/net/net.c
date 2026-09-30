@@ -8901,16 +8901,23 @@ static bipolar http_response_framing_from(p8 address_to bytes, positive size,
                 /* RFC 9110 15.3.5: a 204 response ends at the blank line;
                    Content-Length is forbidden, and RFC 9112 6.1 likewise
                    forbids Transfer-Encoding.  Section 15.3.6 permits a 205
-                   Content-Length only when it is zero. Refuse a declaration
-                   that cannot describe the no-content response instead of
-                   accepting it and silently leaving its bytes unread: an
-                   intermediary which obeys that framing could otherwise see
-                   a different response boundary from this client. */
-                if ((response->code == 204 &&
-                     response->body_kind != HTTP_BODY_CLOSE) ||
-                    (response->code == 205 &&
-                     response->body_kind == HTTP_BODY_LENGTH &&
-                     response->body_length))
+                   Content-Length only when it is zero.  The default does
+                   what wget and curl do -- both accept every one of these,
+                   ignore a 204's declared body and print a 205's -- because
+                   real servers send 204 with Content-Length: 0 and this
+                   client closes the connection after one response, so bytes
+                   left unread after the head can never be taken for the next
+                   response.  A build that wants the RFC's framing exactly
+                   refuses a declaration that cannot describe the no-content
+                   response.  (Plain C, not #if: a hosted lift of this section that
+                   forgets to define the tier fails to build instead of
+                   silently running as the tight one.) */
+                if (MOONWATER_STRICT >= STRICT_TIGHT &&
+                    ((response->code == 204 &&
+                      response->body_kind != HTTP_BODY_CLOSE) ||
+                     (response->code == 205 &&
+                      response->body_kind == HTTP_BODY_LENGTH &&
+                      response->body_length)))
                         return HTTP_MALFORMED;
 
                 /* Informational responses precede, rather than replace, the
@@ -10149,13 +10156,13 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                         status = HTTP_STATUS;
                 else if (!status && !http_response_has_no_body(response.code))
                 {
-                        /* A 205 may describe its zero content with
-                           Content-Length: 0, a zero chunk or the connection
-                           closing after the head.  Unlike 204, its framing is
-                           consumed; give it a zero-capacity store so any
-                           content is refused before it reaches the caller's
-                           output. */
-                        bool reset = response.code == 205;
+                        /* The default reads a 205's content as any other
+                           response's, as wget and curl do.  The tight tier
+                           holds it to the RFC: the framing is consumed and a
+                           zero-capacity store refuses any content before it
+                           reaches the caller's output. */
+                        bool reset = MOONWATER_STRICT >= STRICT_TIGHT &&
+                                     response.code == 205;
                         http_body body = {
                             .link = address_of link,
                             .stash = head + header,

@@ -3809,11 +3809,39 @@ lane_socket() { freestanding_checks_lane socket socket; }
 #       still propagate exit 2 into net_outcome when the lane was otherwise 0.
 #       security_hygiene holds the guards no one harness sees: registration
 #       and soft-skip wiring, the seed tables, the verify lift's proves.
+#       CHECK_net again with the tight tier (MOONWATER_STRICT 2, what
+#       kernel/profile/sec_hardened builds), on the host architecture only: the RFC 9110 204/205
+#       framing refusals live there, and no other build of the checks says
+#       whether the tier still refuses what the default accepts.
+net_tight_one()
+{
+        #       Native only: the check runs the host's own build, no runner.
+        [ "$target" = "$host_arch" ] && [ -z "$target_runner" ] || return 0
+        target_build freestanding_check net "$work/net.tight" "$target" \
+                -DMOONWATER_STRICT=2 || return 1
+        "$work/net.tight" > "$work/net.tight.out" 2>&1
+        net_tight_status=$?
+        sed -n '/FAIL/p;/NOT RUN/p' "$work/net.tight.out"
+        net_tight_line=$(sed -n \
+                's/^\([0-9]*\) checks, \([0-9]*\) failures$/\1 \2/p' \
+                "$work/net.tight.out")
+        [ -n "$net_tight_line" ] || { note "net tight printed no verdict"; return 1; }
+        tally "net-tight-$target" "$(( ${net_tight_line% *} - ${net_tight_line#* } ))" \
+                "${net_tight_line% *}"
+        [ "$net_tight_status" = 0 ] && [ "${net_tight_line#* }" = 0 ]
+}
+
 lane_net()
 {
         python3 test/differential.py --harness security_hygiene || return 1
         freestanding_checks_lane net net
         net_outcome=$?
+        target_lane net_tight_one
+        case $? in
+        0) ;;
+        2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
+        *) net_outcome=1 ;;
+        esac
         #       The crypto against OpenSSL on all three machines: the vectors
         #       come from Python's cryptography, the answers from
         #       CHECK_crypto_vectors reading them on its standard input.

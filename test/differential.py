@@ -42402,6 +42402,12 @@ static positive string_digits_max(string_address source, positive bound,
                 *used = n;
         return got;
 }
+#define STRICT_REFERENCE 0
+#define STRICT_SAFE 1
+#define STRICT_TIGHT 2
+#ifndef MOONWATER_STRICT
+#define MOONWATER_STRICT STRICT_SAFE
+#endif
 typedef struct { int handle; bool tls; } tls_conn;
 typedef struct { bipolar handle; bool tls; tls_conn session; } http_link;
 typedef struct { p8 *bytes; positive used; positive room; } http_buffer;
@@ -42562,6 +42568,45 @@ int main(void)
          b"HTTP/1.1 204 No Content\r\n\r\n", None),
         ("204-with-content-length", "frame",
          b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n", None),
+        ("204-with-content-length-and-body", "frame",
+         b"HTTP/1.1 204 No Content\r\nContent-Length: 5\r\n\r\nhello", None),
+        ("204-chunked-trailers", "frame",
+         b"HTTP/1.1 204 No Content\r\nTransfer-Encoding: chunked\r\n\r\n"
+         b"0\r\nX-Trailer: y\r\n\r\n", None),
+        ("204-then-pipelined-response", "frame",
+         b"HTTP/1.1 204 No Content\r\n\r\n"
+         b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabc", None),
+        ("1xx-storm-then-204", "frame",
+         b"HTTP/1.1 103 Early Hints\r\nLink: </a>\r\n\r\n" * 40 +
+         b"HTTP/1.1 204 No Content\r\n\r\n", None),
+        ("1xx-storm-then-204-with-content-length", "frame",
+         b"HTTP/1.1 103 Early Hints\r\nLink: </a>\r\n\r\n" * 40 +
+         b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n", None),
+        ("1xx-storm-then-205-with-content-length", "frame",
+         b"HTTP/1.1 102 Processing\r\n\r\n" * 40 +
+         b"HTTP/1.1 205 Reset Content\r\nContent-Length: 4\r\n\r\nabcd", None),
+        ("205-chunked-content", "full",
+         b"HTTP/1.1 205 Reset Content\r\nTransfer-Encoding: chunked\r\n\r\n"
+         b"1\r\nx\r\n0\r\n\r\n", b"x"),
+        ("205-close-delimited", "frame",
+         b"HTTP/1.1 205 Reset Content\r\nConnection: close\r\n\r\nx", None),
+        ("http10-205-close", "frame",
+         b"HTTP/1.0 205 Reset Content\r\n\r\n", None),
+        ("304-with-content-length", "frame",
+         b"HTTP/1.1 304 Not Modified\r\nContent-Length: 99\r\n\r\n", None),
+        ("304-with-body", "frame",
+         b"HTTP/1.1 304 Not Modified\r\nContent-Length: 5\r\n\r\nhello", None),
+        ("reason-phrase-control", "frame",
+         b"HTTP/1.1 200 O\x01K\r\nContent-Length: 0\r\n\r\n", None),
+        ("reason-phrase-bare-lf-injection", "frame",
+         b"HTTP/1.1 200 OK\nContent-Length: 999\nX: y\r\nContent-Length: 0\r\n\r\n",
+         None),
+        ("content-length-equal-twice", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nContent-Length: 3\r\n\r\nabc",
+         None),
+        ("content-length-conflict-twice", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nContent-Length: 4\r\n\r\nabcd",
+         None),
         ("204-with-transfer-encoding", "frame",
          b"HTTP/1.1 204 No Content\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
          None),
@@ -42738,6 +42783,14 @@ int main(void)
     ]
     MUST_ACCEPT = {
         "simple-length", "empty-length", "204-clean",
+        "204-with-content-length", "204-with-transfer-encoding",
+        "204-with-content-length-and-body", "204-chunked-trailers",
+        "204-then-pipelined-response", "1xx-storm-then-204",
+        "1xx-storm-then-204-with-content-length",
+        "1xx-storm-then-205-with-content-length", "205-chunked-content",
+        "205-close-delimited", "http10-205-close",
+        "205-with-content-length", "304-with-content-length",
+        "304-with-body",
         "205-with-zero-content-length", "bare-lf-headers", "chunked-full",
         "chunked-extension", "redirect-location",
         "1xx-then-200", "http10-length", "dup-date-ok", "dup-host-ok",
@@ -42753,12 +42806,12 @@ int main(void)
             "RFC 9112 forbids TE with Content-Length; Moonwater refuses both",
         "duplicate-content-length":
             "duplicate framing fields are refused before a length is chosen",
-        "204-with-content-length":
-            "RFC 9110 forbids Content-Length on 204; its blank line ends the response",
-        "204-with-transfer-encoding":
-            "RFC 9112 forbids Transfer-Encoding on 204; its blank line ends the response",
-        "205-with-content-length":
-            "RFC 9110 permits Content-Length on 205 only when its value is zero",
+        "reason-phrase-control":
+            "a control byte in the status line is refused: it would reach logs and terminals",
+        "content-length-equal-twice":
+            "duplicate framing fields are refused before a length is chosen",
+        "content-length-conflict-twice":
+            "duplicate framing fields are refused before a length is chosen",
         "bare-cr-in-location":
             "response field values reject embedded controls (NUL/CR/LF)",
         "obs-fold-location":
@@ -42845,6 +42898,29 @@ int main(void)
             "chunk data is followed by its own line ending, or the frame is cut",
     }
 
+    #       What only the tight tier (MOONWATER_STRICT 2, kernel/profile/
+    #       sec_hardened) refuses. wget and curl, and so the default, accept
+    #       all of them: a real server sends 204 with Content-Length: 0, both
+    #       tools ignore a 204's declared body and print a 205's, and this
+    #       client closes the connection after one response, so a declared
+    #       body left unread can never be taken for the next response.
+    TIGHT_REFUSES = {
+        "204-with-content-length":
+            "RFC 9110 15.3.5 forbids Content-Length on 204",
+        "204-with-transfer-encoding":
+            "RFC 9112 6.1 forbids Transfer-Encoding on 204",
+        "204-with-content-length-and-body":
+            "RFC 9110 15.3.5 forbids Content-Length on 204",
+        "204-chunked-trailers":
+            "RFC 9112 6.1 forbids Transfer-Encoding on 204",
+        "1xx-storm-then-204-with-content-length":
+            "RFC 9110 15.3.5 forbids Content-Length on 204",
+        "205-with-content-length":
+            "RFC 9110 15.3.6 permits Content-Length on 205 only when it is zero",
+        "1xx-storm-then-205-with-content-length":
+            "RFC 9110 15.3.6 permits Content-Length on 205 only when it is zero",
+    }
+
     def python_oracle(mode, wire):
         if mode == "unchunk":
             wire = (b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
@@ -42918,34 +42994,57 @@ int main(void)
         source = shim + defines + headers + body + status + driver
         (work / "http_response_framing.c").write_text(source)
         compiler = "clang" if shutil.which("clang") else os.environ.get("CC", "cc")
-        built = subprocess.run(
-            [compiler, "-O1", "-g", "-std=gnu11", "-Wno-unused-function",
-             str(work / "http_response_framing.c"),
-             "-o", str(work / "http_response_framing")],
-            capture_output=True, text=True)
-        if built.returncode:
-            print("  FAIL the response framing probe did not build:\n" +
-                  built.stderr[-3000:])
-            write_tally("http-response-framing", 0, 1)
-            return 1
-
         stdin = "".join(
             "%s %s %s\n" % (name, mode, wire.hex() or "00")
             for name, mode, wire, _ in CASES)
-        ran = subprocess.run([str(work / "http_response_framing")],
-                             input=stdin, capture_output=True, text=True,
-                             timeout=60)
-        if ran.returncode or ran.stderr.strip():
-            print("  FAIL the probe aborted:\n" + (ran.stderr or ran.stdout)[-3000:])
+
+        def probe(strict):
+            """The matrix through the lifted framing at a MOONWATER_STRICT
+            tier: (verdict lines, None), or (None, why it failed)."""
+            binary = work / ("http_response_framing_%d" % strict)
+            built = subprocess.run(
+                [compiler, "-O1", "-g", "-std=gnu11", "-Wno-unused-function",
+                 "-DMOONWATER_STRICT=%d" % strict,
+                 str(work / "http_response_framing.c"), "-o", str(binary)],
+                capture_output=True, text=True)
+            if built.returncode:
+                return None, ("the response framing probe did not build:\n" +
+                              built.stderr[-3000:])
+            ran = subprocess.run([str(binary)], input=stdin,
+                                 capture_output=True, text=True, timeout=60)
+            if ran.returncode or ran.stderr.strip():
+                return None, ("the probe aborted:\n" +
+                              (ran.stderr or ran.stdout)[-3000:])
+            return ran.stdout, None
+
+        stdout, failure = probe(1)
+        if failure:
+            print("  FAIL " + failure)
             write_tally("http-response-framing", 0, 1)
             return 1
+        tight_stdout, failure = probe(2)
+        if failure:
+            print("  FAIL tight tier: " + failure)
+            write_tally("http-response-framing", 0, 1)
+            return 1
+        tight = {line.split("\t")[0]: line.split("\t")[1] == "ACCEPT"
+                 for line in tight_stdout.splitlines()}
 
         answers = {}
-        for line in ran.stdout.splitlines():
+        for line in stdout.splitlines():
             name, verdict, body_hex = line.split("\t")
             body = (binascii.unhexlify(body_hex) if body_hex != "-" else None)
             answers[name] = (verdict == "ACCEPT", body)
 
+        for name, mode, wire, want_body in CASES:
+            want_tight = (answers[name][0] and name not in TIGHT_REFUSES)
+            checks(tight[name] == want_tight,
+                   "%s: the tight tier %s a frame the matrix says to %s" % (
+                       name, "accepts" if tight[name] else "refuses",
+                       "accept" if want_tight else "refuse"))
+        for name in sorted(TIGHT_REFUSES):
+            checks(name in answers and answers[name][0],
+                   "%s: TIGHT_REFUSES names a row the default refuses" % name)
         for name, mode, wire, want_body in CASES:
             ours_ok, ours_body = answers[name]
             expected = name in MUST_ACCEPT
@@ -43037,6 +43136,12 @@ typedef long bipolar;
 typedef void *address_any;
 typedef p8 *string_address;
 typedef const p8 *const_string;
+#define STRICT_REFERENCE 0
+#define STRICT_SAFE 1
+#define STRICT_TIGHT 2
+#ifndef MOONWATER_STRICT
+#define MOONWATER_STRICT STRICT_SAFE
+#endif
 #define INLINE
 #define COLD
 #define CONST
@@ -43987,29 +44092,29 @@ def harness_wget_mutation(argv):
             ("an informational-response storm completes within the transaction bound",
              [informational[at:at + 1] for at in range(len(informational))],
              False, (0, payload)),
-            ("204 with Content-Length is refused end to end",
-             [b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"], False, None),
-            ("204 with Transfer-Encoding is refused end to end",
+            ("204 with Content-Length is accepted as wget accepts it",
+             [b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"], False, (0, b"")),
+            ("204 with Transfer-Encoding is accepted as wget accepts it",
              [b"HTTP/1.1 204 No Content\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n"],
-             False, None),
+             False, (0, b"")),
             ("205 with a zero Content-Length is accepted",
              [b"HTTP/1.1 205 Reset Content\r\nContent-Length: 0\r\n\r\n"],
              False, (0, b"")),
-            ("205 with a nonzero Content-Length is refused end to end",
+            ("205 with a nonzero Content-Length is read as wget reads it",
              [b"HTTP/1.1 205 Reset Content\r\nContent-Length: 5\r\n\r\nhello"],
-             False, None),
+             False, (0, b"hello")),
             ("205 with a zero chunk is accepted",
              [b"HTTP/1.1 205 Reset Content\r\nTransfer-Encoding: chunked\r\n\r\n"
               b"0\r\nWitness: yes\r\n\r\n"], False, (0, b"")),
-            ("205 with a nonzero chunk is refused before output",
+            ("205 with a nonzero chunk is read as wget reads it",
              [b"HTTP/1.1 205 Reset Content\r\nTransfer-Encoding: chunked\r\n\r\n"
-              b"1\r\nx\r\n0\r\n\r\n"], False, None),
+              b"1\r\nx\r\n0\r\n\r\n"], False, (0, b"x")),
             ("close-delimited 205 with no content is accepted",
              [b"HTTP/1.1 205 Reset Content\r\nConnection: close\r\n\r\n"],
              False, (0, b"")),
-            ("close-delimited 205 content is refused before output",
+            ("close-delimited 205 content is read as wget reads it",
              [b"HTTP/1.1 205 Reset Content\r\nConnection: close\r\n\r\nx"],
-             False, None),
+             False, (0, b"x")),
             ("304 metadata may carry the selected representation's length",
              [b"HTTP/1.1 304 Not Modified\r\nContent-Length: 99\r\n\r\n"],
              False, (8, b"")),
