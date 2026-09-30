@@ -62315,16 +62315,16 @@ static fn crypto_rsa_served_sizes(void)
                   child.sig_length == 512);
         check("ISRG Root X1's 4096-bit PKCS#1 signature over Root YR verifies",
               child.sig_length == 512 &&
-                  tls_anchor_verifies(address_of child));
+                  tls_anchor_verifies(address_of child, 20260101000000ull));
         if (child.sig_length == 512)
         {
                 child.sig[child.sig_length - 1] ^= 1;
                 check("the 4096-bit verify refuses one flipped signature bit",
-                      !tls_anchor_verifies(address_of child));
+                      !tls_anchor_verifies(address_of child, 20260101000000ull));
                 child.sig[child.sig_length - 1] ^= 1;
                 child.tbs[child.tbs_length - 1] ^= 1;
                 check("the 4096-bit verify refuses one flipped TBS bit",
-                      !tls_anchor_verifies(address_of child));
+                      !tls_anchor_verifies(address_of child, 20260101000000ull));
                 child.tbs[child.tbs_length - 1] ^= 1;
         }
 
@@ -62966,28 +62966,28 @@ static fn tls_trust_anchor_chains(void)
                 return;
 
         check("kernel.org's Atlas intermediate finds GlobalSign Root CA - R3 by Name",
-              tls_anchor_verifies(address_of atlas_cert));
+              tls_anchor_verifies(address_of atlas_cert, 20260101000000ull));
         check("a served GTS Root R1 cross-certificate carries an anchor key",
-              tls_spki_is_anchor(address_of gts_cert) &&
-                  !tls_spki_is_anchor(address_of wr2_cert));
+              tls_spki_is_anchor(address_of gts_cert, 20260101000000ull) &&
+                  !tls_spki_is_anchor(address_of wr2_cert, 20260101000000ull));
         check("WR2 chains to the served GTS Root R1",
               tls_certificate_names_chain(address_of wr2_cert,
                                           address_of gts_cert) &&
                   tls_verify_one(address_of wr2_cert, address_of gts_cert));
         check("Sectigo OV R36 verifies under Root R46 with sha384WithRSAEncryption",
-              tls_anchor_verifies(address_of r36_cert));
+              tls_anchor_verifies(address_of r36_cert, 20260101000000ull));
         r36_cert.sig[r36_cert.sig_length - 1] ^= 1;
         check("the SHA-384 PKCS#1 verify refuses one flipped signature bit",
-              !tls_anchor_verifies(address_of r36_cert));
+              !tls_anchor_verifies(address_of r36_cert, 20260101000000ull));
         r36_cert.sig[r36_cert.sig_length - 1] ^= 1;
         check("Certum Trusted Root CA verifies under Certum Trusted Network CA with sha512WithRSAEncryption",
-              tls_anchor_verifies(address_of certum_cert));
+              tls_anchor_verifies(address_of certum_cert, 20260101000000ull));
         certum_cert.sig[certum_cert.sig_length - 1] ^= 1;
         check("the SHA-512 PKCS#1 verify refuses one flipped signature bit",
-              !tls_anchor_verifies(address_of certum_cert));
+              !tls_anchor_verifies(address_of certum_cert, 20260101000000ull));
         atlas_cert.issuer[atlas_cert.issuer_length - 1] ^= 1;
         check("an issuer Name no anchor carries fails closed",
-              !tls_anchor_verifies(address_of atlas_cert));
+              !tls_anchor_verifies(address_of atlas_cert, 20260101000000ull));
         atlas_cert.issuer[atlas_cert.issuer_length - 1] ^= 1;
 
         for (positive i = 0; i < array_count(tls_anchors); i++)
@@ -62995,7 +62995,7 @@ static fn tls_trust_anchor_chains(void)
                 tls_cert root;
 
                 if (!tls_anchor_key(tls_anchors + i, address_of root) ||
-                    !tls_spki_is_anchor(address_of root) ||
+                    !tls_spki_is_anchor(address_of root, 0) ||
                     (root.curve == 3 &&
                      (root.modulus_length < 256 ||
                       !(root.modulus[root.modulus_length - 1] & 1) ||
@@ -63004,6 +63004,29 @@ static fn tls_trust_anchor_chains(void)
         }
         check("every anchor decodes to its length and finds itself by key",
               bad_anchors == 0 && array_count(tls_anchors) == 120);
+
+        /* Mozilla's distrust-after: a root that has a date anchors a leaf
+           issued up to it, to the second, and none after. */
+        {
+                positive dated = 0;
+                positive wrong = 0;
+
+                for (positive i = 0; i < array_count(tls_anchors); i++)
+                {
+                        tls_cert root;
+                        p64 date = tls_anchors[i].distrust;
+
+                        if (!date || !tls_anchor_key(tls_anchors + i, address_of root))
+                                continue;
+                        dated++;
+                        wrong += !tls_spki_is_anchor(address_of root, date) ||
+                                 !tls_spki_is_anchor(address_of root, date - 1) ||
+                                 tls_spki_is_anchor(address_of root, date + 1) ||
+                                 tls_spki_is_anchor(address_of root, date + 10000000000ull);
+                }
+                check("a root with a distrust-after date anchors leaves up to it and none after",
+                      dated >= 1 && !wrong);
+        }
 }
 
 /*

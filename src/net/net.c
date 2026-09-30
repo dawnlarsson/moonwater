@@ -4366,7 +4366,11 @@ static bool crypto_rsa_pss_sha256(p8 address_to n_bytes, positive n_length,
 
 /* One trust anchor from anchors.inc: hashes that find candidates, then the
    key itself (curve 1 P-256, 2 P-384, 3 RSA), key_length raw bytes at key_at
-   in tls_anchor_keys. */
+   in tls_anchor_keys. distrust is Mozilla's server-auth distrust-after date
+   as YYYYMMDDHHMMSS, the form a certificate's dates are kept in, or 0 for
+   none: a chain that ends at this anchor is refused when its leaf's
+   notBefore is later than that (NSS applies the same comparison, and Chrome
+   and Firefox refuse the same chains). */
 typedef struct
 {
         p8 name[8];
@@ -4375,6 +4379,7 @@ typedef struct
         p32 exponent;
         p16 key_length;
         p32 key_at;
+        p64 distrust;
 } tls_anchor;
 
 #include "anchors.inc"
@@ -6458,11 +6463,30 @@ static COLD bool tls_anchor_key(const tls_anchor address_to anchor,
    anchors.inc. */
 #ifdef TLS_BENCH_ANCHOR
 #include TLS_BENCH_ANCHOR
+/* The bench root carries a distrust-after date only when the file says so,
+   so a test can put a chain on either side of one. */
+static COLD bool tls_bench_distrusts(p64 leaf_from)
+{
+#ifdef TLS_BENCH_DISTRUST
+        return leaf_from > TLS_BENCH_DISTRUST;
+#else
+        (void)leaf_from;
+        return false;
 #endif
+}
+#endif
+
+/* Whether this anchor's distrust-after date is earlier than the leaf's
+   notBefore. */
+static COLD bool tls_anchor_distrusts(const tls_anchor address_to anchor,
+                                      p64 leaf_from)
+{
+        return anchor->distrust && leaf_from > anchor->distrust;
+}
 
 /* A served certificate carrying an anchor's key ends the chain, whoever
    signed it: the key hash finds candidates and the whole key decides. */
-static COLD bool tls_spki_is_anchor(tls_cert address_to cert)
+static COLD bool tls_spki_is_anchor(tls_cert address_to cert, p64 leaf_from)
 {
         p8 key[96];
         p8 digest[32];
@@ -6483,7 +6507,7 @@ static COLD bool tls_spki_is_anchor(tls_cert address_to cert)
         if (cert->curve == 2 &&
             !memory_compare(cert->qx, tls_bench_anchor_x, 48) &&
             !memory_compare(cert->qy, tls_bench_anchor_y, 48))
-                return true;
+                return !tls_bench_distrusts(leaf_from);
 #endif
 
         for (positive i = 0; i < array_count(tls_anchors); i++)
@@ -6492,6 +6516,7 @@ static COLD bool tls_spki_is_anchor(tls_cert address_to cert)
 
                 if (tls_anchors[i].curve != cert->curve ||
                     memory_compare(tls_anchors[i].key_hash, digest, 8) ||
+                    tls_anchor_distrusts(tls_anchors + i, leaf_from) ||
                     !tls_anchor_key(tls_anchors + i, address_of root))
                         continue;
                 if (cert->curve == 3
@@ -6571,7 +6596,7 @@ static COLD bool tls_verify_one(tls_cert address_to child, tls_cert address_to i
 /* The last certificate served names its issuer.  Each anchor with that
    subject Name is tried, and one signature that verifies ends the chain; a
    Name no anchor carries fails without any signature check. */
-static COLD bool tls_anchor_verifies(tls_cert address_to child)
+static COLD bool tls_anchor_verifies(tls_cert address_to child, p64 leaf_from)
 {
         p8 digest[32];
 
@@ -6585,7 +6610,8 @@ static COLD bool tls_anchor_verifies(tls_cert address_to child)
                 root.curve = 2;
                 memory_copy(root.qx, tls_bench_anchor_x, 48);
                 memory_copy(root.qy, tls_bench_anchor_y, 48);
-                if (tls_verify_one(child, address_of root))
+                if (!tls_bench_distrusts(leaf_from) &&
+                    tls_verify_one(child, address_of root))
                         return true;
         }
 #endif
@@ -6595,6 +6621,7 @@ static COLD bool tls_anchor_verifies(tls_cert address_to child)
                 tls_cert root;
 
                 if (memory_compare(tls_anchors[i].name, digest, 8) ||
+                    tls_anchor_distrusts(tls_anchors + i, leaf_from) ||
                     !tls_anchor_key(tls_anchors + i, address_of root))
                         continue;
                 if (tls_verify_one(child, address_of root))
@@ -6862,7 +6889,8 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
                 tls->fault = TLS_FAULT_EARLY;
         else if (certs[0].not_after < now)
                 tls->fault = TLS_FAULT_LATE;
-        if (!tls_leaf_authorized(certs, now) || tls_spki_is_anchor(certs))
+        if (!tls_leaf_authorized(certs, now) ||
+            tls_spki_is_anchor(certs, certs[0].not_before))
                 return false;
         for (;;)
         {
@@ -6873,7 +6901,8 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
                         if (!(unusable >> next & 1) &&
                             tls_certificate_names_chain(certs + child,
                                                         certs + next) &&
-                            ((anchor = tls_spki_is_anchor(certs + next)) ||
+                            ((anchor = tls_spki_is_anchor(certs + next,
+                                                          certs[0].not_before)) ||
                              tls_issuer_authorized(certs + next, depth, now)) &&
                             tls_verify_one(certs + child, certs + next) &&
                             tls_path_permitted(certs, path, depth + 1,
@@ -6883,7 +6912,8 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
                 {
                         positive length;
 
-                        if (tls_anchor_verifies(certs + child))
+                        if (tls_anchor_verifies(certs + child,
+                                                certs[0].not_before))
                                 return true;
                         if (asked || !certs[child].ca_issuers)
                                 return false;

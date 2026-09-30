@@ -40892,6 +40892,8 @@ def openssl_workbench(work):
         "policy=names\nunique_subject=no\n[names]\ncommonName=supplied\n")
 
     def when(days):
+        if isinstance(days, str):
+            return days
         moment = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=days)
         return moment.strftime("%Y%m%d%H%M%SZ")
 
@@ -40972,6 +40974,7 @@ def harness_tls_chains(argv):
     import threading
     parser = argparse.ArgumentParser(prog="differential.py --harness tls_chains")
     parser.add_argument("--cc", default=os.environ.get("CC", "gcc"))
+    parser.add_argument("--only", help="run only the rows whose name contains this text")
     args = parser.parse_args(argv)
     if platform.system() != "Linux" or not shutil.which("openssl"):
         print("tls chains: NOT RUN -- needs Linux and openssl")
@@ -41198,6 +41201,24 @@ def harness_tls_chains(argv):
         ("an unrelated root served too", 2, good_leaf, {"extra": "stranger"}),
         ("a SHA-1 legacy root served too", 2, good_leaf, {"extra": "legacy"}),
         ("an impostor intermediate served first", 2, good_leaf, {"impostor": True}),
+        # Mozilla's server-auth distrust-after (anchors.inc's last field): the
+        # bench root carries the date 2024-06-15 23:59:59 in a second build of
+        # the shell, and a leaf whose notBefore is later than that is refused
+        # however the chain ends at the root.
+        ("distrust-after: leaf issued before the date", 2, good_leaf,
+         {"distrust": True, "leaf_dates": ("20240101000000Z", 90)}),
+        ("distrust-after: leaf issued on the date", 2, good_leaf,
+         {"distrust": True, "leaf_dates": ("20240615235959Z", 90)}),
+        ("distrust-after: leaf issued a second after", 2, good_leaf,
+         {"distrust": True, "leaf_dates": ("20240616000000Z", 90)}),
+        ("distrust-after: leaf issued long after", 2, good_leaf,
+         {"distrust": True}),
+        ("distrust-after: leaf under the root, issued after", 0, good_leaf,
+         {"distrust": True}),
+        ("distrust-after: root served too, leaf issued after", 2, good_leaf,
+         {"distrust": True, "serve_root": True}),
+        ("distrust-after: root served first, leaf issued after", 2, good_leaf,
+         {"distrust": True, "root_first": True}),
     )
     keys = (("P-256", ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1"]),
             ("P-384", ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:secp384r1"]),
@@ -41208,6 +41229,11 @@ def harness_tls_chains(argv):
     every_key = ("P-256", "P-384", "RSA-2048")
     #       This tree's policy where it is stricter than openssl, on purpose.
     DELIBERATE = {
+        "distrust-after: leaf issued a second after": "Mozilla's distrust-after date; openssl has none",
+        "distrust-after: leaf issued long after": "Mozilla's distrust-after date; openssl has none",
+        "distrust-after: leaf under the root, issued after": "Mozilla's distrust-after date; openssl has none",
+        "distrust-after: root served too, leaf issued after": "Mozilla's distrust-after date; openssl has none",
+        "distrust-after: root served first, leaf issued after": "Mozilla's distrust-after date; openssl has none",
         "no subject alternative name": "a name is taken from subjectAltName only, never the CN",
         "leaf is a CA": "a certificate that says CA:TRUE is not an end entity (tls_leaf_authorized)",
         "leaf wildcard whose star can be an excluded label":
@@ -41243,6 +41269,7 @@ def harness_tls_chains(argv):
         "a permitted subject compared case-folded", "leaf mailbox on a permitted host",
         "RSA-8192 leaf under an RSA-8192 intermediate",
         "a left-out intermediate fetched from the leaf's caIssuers",
+        "distrust-after: leaf issued before the date", "distrust-after: leaf issued on the date",
     }
 
     checks = Checks()
@@ -41343,6 +41370,16 @@ def harness_tls_chains(argv):
             print(built.stderr[-3000:])
             return 1
         (work / "wget").symlink_to(work / "shell")
+        #   The same shell with a distrust-after date on the bench root.
+        built = subprocess.run(spark_shell_command(
+            args.cc, work / "shell_distrust", bench_anchor(work),
+            ("TLS_BENCH_DISTRUST=20240615235959",)), cwd=HARNESS_ROOT,
+            capture_output=True, text=True)
+        if built.returncode:
+            print(built.stderr[-3000:])
+            return 1
+        (work / "distrust").mkdir()
+        (work / "distrust" / "wget").symlink_to(work / "shell_distrust")
 
         #   caIssuers locations are served from the work directory.
         import functools
@@ -41358,6 +41395,8 @@ def harness_tls_chains(argv):
         files_port = files.server_address[1]
 
         for mutation, depth, leaf_ext, change in mutations:
+            if args.only and args.only not in mutation:
+                continue
             for key_name, key in keys:
                 if key_name not in change.get("keys", every_key):
                     continue
@@ -41490,7 +41529,8 @@ def harness_tls_chains(argv):
                     server = threading.Thread(target=serve, daemon=True)
                     server.start()
                     fetched = subprocess.run(
-                        [str(work / "wget"), "-q", "-O", "-", "https://127.0.0.1:%d/" %
+                        [str(work / ("distrust/wget" if change.get("distrust") else "wget")),
+                         "-q", "-O", "-", "https://127.0.0.1:%d/" %
                          listener.getsockname()[1]], capture_output=True, timeout=30,
                         env={"PATH": "/usr/bin:/bin", "HOME": str(work)})
                     server.join(25)
@@ -48300,9 +48340,10 @@ def anchor_escape(data):
 
 def anchors_render(head, anchors):
     """anchors.inc from its header comment and (name, cert sha256 prefix, subject hash, key hash,
-    curve, exponent, key) rows: the keys as one string literal, then a row per root."""
+    curve, exponent, key, distrust) rows: the keys as one string literal, then a row per root.
+    distrust is Mozilla's server-auth distrust-after date as YYYYMMDDHHMMSS, or 0."""
     keys = []
-    for name, fingerprint, _, _, _, _, key in anchors:
+    for name, fingerprint, _, _, _, _, key, _ in anchors:
         keys.append("    /* %s, sha256 %s */" % (name, fingerprint))
         line = '    "'
         for token in anchor_escape(key):
@@ -48313,11 +48354,11 @@ def anchors_render(head, anchors):
         keys.append(line + '"')
     rows = []
     at = 0
-    for name, fingerprint, subject, digest, curve, exponent, key in anchors:
+    for name, fingerprint, subject, digest, curve, exponent, key, distrust in anchors:
         rows.append("    /* %s, sha256 %s */" % (name, fingerprint))
-        rows.append("    {{%s}, {%s}, %d, %d, %d, %d}," % (
+        rows.append("    {{%s}, {%s}, %d, %d, %d, %d, %d}," % (
             ", ".join("0x%02x" % b for b in subject), ", ".join("0x%02x" % b for b in digest),
-            curve, exponent, len(key), at))
+            curve, exponent, len(key), at, distrust))
         at += len(key)
     return "%s\n\nstatic const p8 tls_anchor_keys[%d] __attribute__((nonstring)) =\n%s;\n\nstatic const tls_anchor tls_anchors[] = {\n%s\n};\n" % (
         head, at, "\n".join(keys), "\n".join(rows))
@@ -48335,19 +48376,39 @@ def anchors_parse(text):
                         and len(match.group(1)) == 3 else ord(match.group(1) or match.group(2)))
     assert len(keys) == int(declared.group(1))
     anchors = []
-    for name, fingerprint, subject, digest, curve, exponent, length, at in re.findall(
-            r"/\* (.*?), sha256 ([0-9a-f]{16}) \*/\n    \{\{([^}]*)\}, \{([^}]*)\}, (\d), (\d+), (\d+), (\d+)\},",
+    for name, fingerprint, subject, digest, curve, exponent, length, at, distrust in re.findall(
+            r"/\* (.*?), sha256 ([0-9a-f]{16}) \*/\n    \{\{([^}]*)\}, \{([^}]*)\}, (\d), (\d+), (\d+), (\d+), (\d+)\},",
             text[declared.end():]):
         anchors.append((name, fingerprint, bytes(int(b, 16) for b in subject.split(",")),
                         bytes(int(b, 16) for b in digest.split(",")), int(curve), int(exponent),
-                        bytes(keys[int(at):int(at) + int(length)])))
+                        bytes(keys[int(at):int(at) + int(length)]), int(distrust)))
     return head, anchors
 
 
-def anchors_from_bundle(pem):
+def anchors_distrust_dates(source):
+    """Mozilla's server-auth distrust-after dates from a p11-kit trust source (Arch's
+    /usr/share/ca-certificates/trust-source/mozilla.trust.p11-kit): {certificate sha256 hex:
+    YYYYMMDDHHMMSS} for each root that has one. The value is a UTCTime, "%00" when there is
+    none; a year under 50 is 20YY, as RFC 5280 reads one."""
+    import base64
+    dates = {}
+    for block in source.split("[p11-kit-object-v1]")[1:]:
+        date = re.search(r'^nss-server-distrust-after: "([^"]*)"', block, re.M)
+        pem = re.search(r"-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----", block, re.S)
+        if not date or not pem or date.group(1) == "%00":
+            continue
+        match = re.fullmatch(r"(\d\d)(\d{10})Z", date.group(1))
+        assert match, "a distrust-after date that is not a UTCTime: %r" % date.group(1)
+        year = int(match.group(1))
+        digest = hashlib.sha256(base64.b64decode("".join(pem.group(1).split()))).hexdigest()
+        dates[digest] = ((2000 if year < 50 else 1900) + year) * 10**10 + int(match.group(2))
+    return dates
+
+
+def anchors_from_bundle(pem, distrust=None):
     """The roots this client verifies, from a PEM bundle whose certificates each follow a
     '# label' line: RSA of 2048 to 4096 bits with an odd exponent, and P-256 and P-384,
-    sorted by label."""
+    sorted by label. distrust is anchors_distrust_dates' answer, for the last field."""
     from cryptography import x509
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.asymmetric import ec, rsa
@@ -48369,7 +48430,8 @@ def anchors_from_bundle(pem):
             continue
         anchors.append((label.decode(), certificate.fingerprint(hashes.SHA256()).hex()[:16],
                         hashlib.sha256(certificate.subject.public_bytes()).digest()[:8],
-                        hashlib.sha256(key).digest()[:8], curve, exponent, key))
+                        hashlib.sha256(key).digest()[:8], curve, exponent, key,
+                        (distrust or {}).get(certificate.fingerprint(hashes.SHA256()).hex(), 0)))
     return sorted(anchors, key=lambda row: row[0].casefold())
 
 
@@ -48378,18 +48440,24 @@ def harness_anchors(argv):
 
     Without --bundle, parses anchors.inc and holds it to what net.c relies on: the declared
     size is the keys' length, each row's offset is the running sum of the lengths before it,
-    its key is the size its curve (or an RSA modulus of 2048 to 4096 bits) has, and its key
-    hash is the SHA-256 of that key; and that anchors_render writes the file back byte for
-    byte. With --bundle FILE (a PEM bundle, each certificate after a '# label' line; the
-    pinned one is Arch ca-certificates-mozilla 3.127, and a later one changes labels and
-    roots) it lists what the bundle changes against the file, and with --write regenerates
-    the file from it, keeping the header comment.
+    its key is the size its curve (or an RSA modulus of 2048 to 4096 bits) has, its key
+    hash is the SHA-256 of that key, and its distrust-after date is 0 or a real
+    YYYYMMDDHHMMSS; and that anchors_render writes the file back byte for byte. With
+    --bundle FILE (a PEM bundle, each certificate after a '# label' line; Arch's
+    ca-certificates-mozilla) and --trust-source FILE (its mozilla.trust.p11-kit, where
+    Mozilla's server-auth distrust-after dates are; /usr/share/ca-certificates/trust-source/
+    mozilla.trust.p11-kit by default) it lists what they change against the file, and with
+    --write regenerates the file from them, keeping the header comment and rewriting the
+    two input digests in it. When the two inputs are the very ones the header names, the
+    file must be exactly what they regenerate to: that is the reproducibility check.
 
         python3 test/differential.py --harness anchors
         python3 test/differential.py --harness anchors --bundle /etc/ssl/certs/ca-certificates.crt [--write]
     """
     parser = argparse.ArgumentParser(prog="differential.py --harness anchors")
     parser.add_argument("--bundle")
+    parser.add_argument("--trust-source",
+                        default="/usr/share/ca-certificates/trust-source/mozilla.trust.p11-kit")
     parser.add_argument("--write", action="store_true")
     args = parser.parse_args(argv)
     path = HARNESS_ROOT / "src/net/anchors.inc"
@@ -48397,18 +48465,30 @@ def harness_anchors(argv):
     head, anchors = anchors_parse(text)
     checks = Checks()
     at = 0
-    for name, _, _, digest, curve, exponent, key in anchors:
+    for name, _, _, digest, curve, exponent, key, distrust in anchors:
         checks(len(key) == {1: 64, 2: 96}.get(curve, len(key)) and (curve != 3 or 256 <= len(key) <= 512),
                "%s: a key of %d bytes for curve %d" % (name, len(key), curve))
         checks(hashlib.sha256(key).digest()[:8] == digest, "%s: the key hash is not the key's" % name)
         checks(curve == 3 or exponent == 0, "%s: an exponent on a curve" % name)
+        checks(distrust == 0 or (2000 <= distrust // 10**10 <= 2100 and 1 <= distrust // 10**8 % 100 <= 12 and
+                                 1 <= distrust // 10**6 % 100 <= 31 and distrust // 10**4 % 100 < 24 and
+                                 distrust // 100 % 100 < 60 and distrust % 100 < 60),
+               "%s: a distrust-after of %d is not a date" % (name, distrust))
         at += len(key)
     checks(len(anchors) == 120 and at == 39328, "%d anchors, %d key bytes" % (len(anchors), at))
     checks([row[0].casefold() for row in anchors] == sorted(row[0].casefold() for row in anchors),
            "the rows are not sorted by name")
     checks(anchors_render(head, anchors) == text, "anchors.inc is not what anchors_render writes for it")
     if args.bundle:
-        fresh = anchors_from_bundle(Path(args.bundle).read_bytes())
+        bundle = Path(args.bundle).read_bytes()
+        source = Path(args.trust_source).read_bytes()
+        digests = "bundle sha256 %s\n            trust-source sha256 %s" % (
+            hashlib.sha256(bundle).hexdigest(), hashlib.sha256(source).hexdigest())
+        fresh = anchors_from_bundle(bundle, anchors_distrust_dates(source.decode()))
+        rendered = anchors_render(re.sub(r"bundle sha256 [0-9a-f]+\n            trust-source sha256 [0-9a-f]+",
+                                         digests, head), fresh)
+        if digests in head:
+            checks(rendered == text, "the inputs the header names do not regenerate anchors.inc byte for byte")
         now = {row[1]: row for row in anchors}
         new = {row[1]: row for row in fresh}
         for fingerprint in sorted(now.keys() | new.keys()):
@@ -48420,7 +48500,7 @@ def harness_anchors(argv):
             elif now[fingerprint][0] != row[0] or now[fingerprint][2:] != row[2:]:
                 print("  changed: %s %s (%s)" % (now[fingerprint][0], fingerprint, row[0]))
         if args.write:
-            path.write_text(anchors_render(head, fresh))
+            path.write_text(rendered)
             print("anchors: wrote %s (%d roots, %d key bytes)" % (path, len(fresh), sum(len(r[6]) for r in fresh)))
     print("anchors: %d roots, %d key bytes" % (len(anchors), at))
     return checks.verdict("anchors", "anchors")
