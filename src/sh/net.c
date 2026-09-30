@@ -2202,6 +2202,72 @@ static COLD bipolar net_watch_events(b32 events, netlink_buffer address_to messa
         return acted;
 }
 
+#if MOONWATER_STRICT >= STRICT_TIGHT
+/*
+        What sec_hardened asks of the kernel's network stack, once, when the
+        watcher starts.
+
+        Nothing else in the image writes /proc/sys, so a machine ran on
+        Linux's own defaults: ICMP redirects accepted from whoever sits on
+        the link (a host that does not forward takes one when EITHER the
+        interface or `all` allows it, so both are written, and `default`
+        reaches every interface not set by hand, wlan0 as it appears
+        included), the per-interface source-route switch on for new
+        interfaces, and TIME-WAIT assassination by a forged RST allowed.
+        IPv6 has no such copy from `default` to the interfaces already there,
+        and this image's own tools speak IPv4 only, so it is left as the
+        kernel has it. rp_filter is left alone on purpose: the DHCP client is
+        a UDP socket, its OFFER comes from an address with no route yet, and
+        with rp_filter 1 or 2 the OFFER is dropped and no lease is ever taken
+        (measured: OFFERs sent, no REQUEST, in a KVM guest booted with either).
+*/
+static COLD fn net_kernel_harden(void)
+{
+        static const string_address quiet[] = {
+            "/proc/sys/net/ipv4/conf/all/accept_redirects",
+            "/proc/sys/net/ipv4/conf/default/accept_redirects",
+            "/proc/sys/net/ipv4/conf/all/secure_redirects",
+            "/proc/sys/net/ipv4/conf/default/secure_redirects",
+            "/proc/sys/net/ipv4/conf/all/accept_source_route",
+            "/proc/sys/net/ipv4/conf/default/accept_source_route",
+            null};
+
+        for (positive at = 0; quiet[at]; at++)
+        {
+                bipolar handle = system_open_at(AT_FDCWD, quiet[at],
+                                                1 | O_CLOEXEC);
+
+                if (handle < 0)
+                        continue;
+                system_write_all((positive)handle, (p8 address_to)"0\n", 2);
+                system_close((positive)handle);
+        }
+        {
+                bipolar handle = system_open_at(
+                    AT_FDCWD, "/proc/sys/net/ipv4/tcp_rfc1337", 1 | O_CLOEXEC);
+
+                if (handle >= 0)
+                {
+                        system_write_all((positive)handle, (p8 address_to)"1\n", 2);
+                        system_close((positive)handle);
+                }
+        }
+        //      Nothing in this image uses io_uring, and it is among the most
+        //      attacked kernel interfaces: 2 refuses io_uring_setup to
+        //      everyone, and programs that can use it (libuv) fall back.
+        {
+                bipolar handle = system_open_at(
+                    AT_FDCWD, "/proc/sys/kernel/io_uring_disabled", 1 | O_CLOEXEC);
+
+                if (handle >= 0)
+                {
+                        system_write_all((positive)handle, (p8 address_to)"2\n", 2);
+                        system_close((positive)handle);
+                }
+        }
+}
+#endif
+
 static COLD b32 net_watch(void)
 {
         netlink_buffer message = {0};
@@ -2238,6 +2304,9 @@ static COLD b32 net_watch(void)
                 return 1;
         }
 
+#if MOONWATER_STRICT >= STRICT_TIGHT
+        net_kernel_harden();
+#endif
         wake = net_wake_listen();
         net_wake_watch = wake;
         net_events_watch = events;
