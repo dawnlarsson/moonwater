@@ -1378,6 +1378,10 @@ typedef struct
         bipolar directory;
         bipolar opened;
         bool verified;
+        //      A file with no name yet, made in `parent` and given its name by
+        //      linking it there, for a name known not to exist: there is no
+        //      stage directory (directory is -1) and nothing to remove.
+        bool unnamed;
         p8 original[SYSTEM_PATH_LEAF_ROOM];
         p8 private_name[SYSTEM_PATH_LEAF_ROOM];
 } system_path_stage;
@@ -1388,6 +1392,7 @@ static fn system_path_stage_reset(system_path_stage address_to stage)
         stage->directory = -1;
         stage->opened = -1;
         stage->verified = false;
+        stage->unnamed = false;
         stage->original[0] = end;
         stage->private_name[0] = end;
 }

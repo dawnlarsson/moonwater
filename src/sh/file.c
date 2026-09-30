@@ -7364,6 +7364,111 @@ static bipolar file_stage_file_open_at(
         return file_stage_bound(stage, handle, 0);
 }
 
+/*
+        A regular output for a name that is known not to exist, made as a file
+        with no name in the directory the name will be in (O_TMPFILE) and
+        given its name at the end by linking that very file there
+        (linkat with AT_EMPTY_PATH), where the transaction above makes a
+        private directory, an object in it, and renames the object out.
+
+        What the private directory is for is that nobody else can reach the
+        object until it is complete, and that nothing they do can send its
+        publication anywhere but the name it was made for. An unnamed file
+        has both without a directory: it has no name for another writer of
+        the parent to open, rename or link, and the descriptor is the only
+        way to it; and linkat fails with EEXIST for a name that has come to
+        exist, exactly as the rename it replaces refused to replace one, so a
+        name planted meanwhile is refused and never followed. The parent is
+        the descriptor already held and the directory is never named again.
+        Mode, owner, attributes and contents are all given before the link,
+        so no name ever shows the file half made, and a failed transaction
+        leaves no directory behind in a parent that anyone else may write,
+        which is what the tight tier asked of a stage. A file system that
+        cannot make one (EOPNOTSUPP), and every other refusal, takes the
+        transaction above; a name that exists takes it too, since a link does
+        not replace.
+*/
+static bipolar file_stage_new_open_at(
+    system_path_stage address_to stage, bipolar directory,
+    string_address destination, positive mode)
+{
+        positive length = string_length(destination);
+        bipolar handle = -1;
+
+        if (length && length < sizeof(stage->original) &&
+            !string_last_of(destination, '/') &&
+            !(length == 1 && destination[0] == '.') &&
+            !(length == 2 && destination[0] == '.' && destination[1] == '.')
+#if MOONWATER_STRICT >= STRICT_TIGHT
+            && system_path_parent_cleanup_safe(directory)
+#endif
+            )
+                handle = system_open_at_mode(
+                    directory, (string_address)".",
+                    O_WRONLY | O_CLOEXEC | O_TMPFILE_CREATE | O_DIRECTORY, mode);
+        if (handle < 0)
+                return file_stage_file_open_at(stage, directory, destination,
+                                               mode);
+
+        system_path_stage_reset(stage);
+        stage->parent = directory;
+        stage->unnamed = true;
+        memory_copy_end(stage->original, destination, length);
+        return handle;
+}
+
+/* Finish an unnamed output: the descriptor is duplicated so that closing the
+   writer, which is where a delayed write error is said, comes before the
+   name exists, and the duplicate is what the name is linked from. */
+static bipolar file_stage_publish_unnamed(
+    system_path_stage address_to stage, bipolar destination_directory,
+    string_address destination, bipolar writer, bipolar result,
+    file_facts address_to replaced, bipolar address_to published_handle)
+{
+        file_facts facts;
+        bipolar identity = -1;
+
+        if (published_handle)
+                address_to published_handle = -1;
+        if (result >= 0 && replaced)
+                result = -ERROR_INVALID;
+        if (result >= 0)
+                result = file_look_code(writer, (string_address)"",
+                                        AT_EMPTY_PATH, address_of facts);
+        if (result >= 0 && (facts.mask & STATX_BASIC) != STATX_BASIC)
+                result = -ERROR_INPUT_OUTPUT;
+        if (result >= 0)
+                result = identity = system_call_3(
+                    syscall(fcntl), (positive)writer, 1030, 0);
+
+        bipolar closed = system_close(writer);
+
+        if (result >= 0 && closed < 0)
+                result = closed;
+        if (result >= 0)
+                result = system_path_link_opened_at(
+                    identity, destination_directory, destination);
+        if (result >= 0 && published_handle)
+        {
+                address_to published_handle = identity;
+                identity = -1;
+        }
+        if (identity >= 0)
+                system_close(identity);
+        if (result < 0)
+        {
+                //      A named output made and thrown away moves its
+                //      directory's time, as its creation and removal do.
+                p64 moved[4] = {0, UTIME_OMIT, 0, UTIME_NOW};
+
+                (void)system_update_times_at(destination_directory,
+                                             (string_address)"", moved,
+                                             AT_EMPTY_PATH);
+        }
+        system_path_stage_reset(stage);
+        return result;
+}
+
 /* Finish one protected output transaction.  The writable descriptor is
    closed before the namespace changes, while an O_PATH descriptor retains
    the exact source identity.  Thus delayed writeback/close errors leave the
@@ -7379,6 +7484,10 @@ static bipolar file_stage_publish_protected_keep_at(
         file_facts facts;
         bipolar identity = -1;
 
+        if (stage->unnamed)
+                return file_stage_publish_unnamed(
+                    stage, destination_directory, destination, writer, result,
+                    replaced, published_handle);
         if (published_handle)
                 address_to published_handle = -1;
 
@@ -7603,7 +7712,9 @@ static bipolar file_staged_name_open_at(
                 reason = 0;
 
         if (reason >= 0)
-                reason = stage->handle = file_stage_file_open_at(
+                reason = stage->handle = (stage->replaced_known
+                                              ? file_stage_file_open_at
+                                              : file_stage_new_open_at)(
                     address_of stage->protected, stage->directory,
                     stage->leaf, 0600);
         if (reason < 0)
@@ -36564,8 +36675,9 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                                                                  : 0;
                 system_path_stage protected;
                 system_path_stage_reset(address_of protected);
+                bool absent = !destination_exists && !destination_entry_exists;
                 bipolar out = staged
-                    ? file_stage_file_open_at(
+                    ? (absent ? file_stage_new_open_at : file_stage_file_open_at)(
                           address_of protected, destination_directory,
                           destination, 0600)
                     : file_copy_destination_open(
@@ -38575,7 +38687,9 @@ static fn install_pair(string_address source, string_address destination)
                                  (string_address) "' -> '");
 
         system_path_stage protected;
-        bipolar destination_handle = file_stage_file_open_at(
+        bipolar destination_handle = (destination_exists
+                                          ? file_stage_file_open_at
+                                          : file_stage_new_open_at)(
             address_of protected, destination_directory,
             destination_leaf, 0600);
         if (destination_handle < 0)

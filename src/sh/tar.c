@@ -6620,7 +6620,9 @@ static b32 tar_write_archive(struct tar_options address_to options)
                 if (tar_output_target_known)
                         tar_output_target_facts = output_stage.replaced;
 
-                if (!output_stage.direct)
+                //      A stage directory is there to be told apart from the
+                //      tree being archived; an unnamed output has none.
+                if (!output_stage.direct && output_stage.protected.directory >= 0)
                 {
                         looked = file_look_code(
                             output_stage.protected.directory,
