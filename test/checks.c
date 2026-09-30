@@ -73016,6 +73016,32 @@ static const p8 sswu4_p[64] = {0xc9, 0x8a, 0x04, 0x68, 0xfd, 0x11, 0x62, 0xee, 0
 static const p8 sswu5_u[32] = {0x7f, 0xff, 0xff, 0xff, 0x80, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
 static const p8 sswu5_p[64] = {0x91, 0xf5, 0xe3, 0x9a, 0x5a, 0x89, 0x47, 0x6f, 0xec, 0xc0, 0x0d, 0x7b, 0x1f, 0x42, 0x8e, 0x39, 0x23, 0x7d, 0xce, 0x46, 0x52, 0xfc, 0xfe, 0x18, 0x87, 0xfb, 0xa3, 0xf7, 0x47, 0xbe, 0x61, 0x77, 0x09, 0x2b, 0xaf, 0x09, 0x59, 0x63, 0x30, 0x89, 0xb1, 0xfb, 0xa8, 0x12, 0x3f, 0xb5, 0x3d, 0x0e, 0x12, 0x94, 0x17, 0xa3, 0x89, 0x9a, 0x29, 0x03, 0x3e, 0xd6, 0x18, 0x4c, 0x91, 0x95, 0xc3, 0x3f};
 
+/* The access point's frames are the ones answered: a frame on the EAPOL
+   socket from any other address is dropped. */
+static fn wifi_source_checks(void)
+{
+        wifi_link link;
+        socket_address_packet from;
+
+        memory_fill(address_of link, 0, sizeof(link));
+        memory_fill(address_of from, 0, sizeof(from));
+        memory_copy(link.bssid, "\x02\x00\x00\x00\x01\x00", 6);
+        from.family = AF_PACKET;
+        from.halen = 6;
+        memory_copy(from.addr, "\x02\x00\x00\x00\x01\x00", 6);
+        check("an EAPOL frame from the access point's address is taken",
+              wifi_eapol_from(address_of link, address_of from, sizeof(from)));
+        from.addr[5] = 1;
+        check("one from another address is not", !wifi_eapol_from(address_of link, address_of from, sizeof(from)));
+        from.addr[5] = 0;
+        from.halen = 4;
+        check("one whose hardware address is not six bytes is not",
+              !wifi_eapol_from(address_of link, address_of from, sizeof(from)));
+        from.halen = 6;
+        check("the kernel's 18 bytes of it are enough", wifi_eapol_from(address_of link, address_of from, 18));
+        check("one the kernel gave no address for is not", !wifi_eapol_from(address_of link, address_of from, 4));
+}
+
 static fn wifi_h2e_checks(void)
 {
         static const p8 access[6] = {2, 0, 0, 0, 1, 0};
@@ -73646,6 +73672,7 @@ b32 main(void)
         wifi_key_checks();
         wifi_sae_checks();
         wifi_h2e_checks();
+        wifi_source_checks();
         key_text();
         places();
         ipv4_only();

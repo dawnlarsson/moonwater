@@ -5751,13 +5751,36 @@ static COLD bipolar wifi_wait(wifi_link address_to link,
         }
 }
 
+/* Whether a frame on the EAPOL socket came from the access point the link
+   is with: its hardware address is the access point's and no other's.
+   Anything else is another station's frame the access point relayed, or a
+   forgery, and is not the access point talking (wpa_supplicant drops it
+   too): before this, a message 1 from any source address was answered, and
+   its ANonce replaced the pending key a real message 3 is checked under. */
+static COLD bool wifi_eapol_from(wifi_link address_to link, socket_address_packet address_to from,
+                                 p32 size)
+{
+        //      The kernel gives back the address only as far as the hardware
+        //      address goes, which is 18 bytes of the 20 here.
+        return size >= (p32)((p8 address_to)from->addr - (p8 address_to)from) + 6 &&
+               from->halen == 6 && !memory_compare(from->addr, link->bssid, 6);
+}
+
 /* One frame off the EAPOL socket, through the state machine. */
 static COLD bipolar wifi_eapol_take(wifi_link address_to link)
 {
         p8 frame[512];
-        bipolar got = socket_receive(link->eapol, frame, sizeof(frame), MSG_DONTWAIT, null,
-                                     null);
-        bipolar step = got > 0 ? wifi_eapol_step(link, frame, (positive)got) : 0;
+        socket_address_packet from;
+        p32 size = sizeof(from);
+        bipolar got;
+        bipolar step;
+
+        memory_fill(address_of from, 0, sizeof(from));
+        got = socket_receive(link->eapol, frame, sizeof(frame), MSG_DONTWAIT, address_of from,
+                             address_of size);
+        step = got > 0 && wifi_eapol_from(link, address_of from, size)
+                   ? wifi_eapol_step(link, frame, (positive)got)
+                   : 0;
 
         crypto_forget(frame, sizeof(frame));
         return step;
