@@ -283,17 +283,68 @@ static bipolar host_open_state(bipolar directory, string_address path,
 static bipolar host_write_file(string_address path, p8 address_to bytes,
                                positive length, positive mode, bool sync)
 {
-        bipolar handle = host_open_state(AT_FDCWD, path, mode);
+        p8 next[HOST_PATH_ROOM];
+        bipolar handle;
         bipolar failed;
 
+        if (!sync)
+        {
+                handle = host_open_state(AT_FDCWD, path, mode);
+                if (handle < 0)
+                        return handle;
+                failed = storage_format_write(handle, bytes, length, 0);
+                system_close(handle);
+                return failed;
+        }
+
+        /*      A file that has to survive is written beside itself, synced,
+                and renamed over the old one, and the directory is synced
+                after: the old bytes are opened for writing never, so a crash
+                or a signal part way (the saved wifi list, passwords and all,
+                was truncated first and written second) leaves the list as it
+                was or as it is to be, and nothing half of each. A leftover
+                from a crash is removed and the name made again exclusively,
+                which also never follows a planted link; the rename replaces
+                a link at the final name instead of writing through it. */
+        if (string_length(path) + 5 >= sizeof(next))
+                return -36;
+        string_copy_bounded(next, path, sizeof(next));
+        string_append_bounded(next, ".new", sizeof(next));
+        system_remove_at(AT_FDCWD, next, 0);
+        handle = system_open_output_at(AT_FDCWD, next, false, mode);
         if (handle < 0)
                 return handle;
-
-        failed = storage_format_write(handle, bytes, length, 0);
-        if (!failed && sync)
+        failed = system_call_2(syscall(fchmod), (positive)handle, mode);
+        if (!failed)
+                failed = storage_format_write(handle, bytes, length, 0);
+        if (!failed)
                 failed = system_call_1(syscall(fsync), (positive)handle);
         system_close(handle);
-        return failed;
+        if (!failed)
+                failed = system_rename_at(AT_FDCWD, next, AT_FDCWD, path, 0);
+        if (failed)
+        {
+                system_remove_at(AT_FDCWD, next, 0);
+                return failed;
+        }
+
+        {
+                positive cut = string_length(path);
+                bipolar parent;
+
+                while (cut > 1 && path[cut - 1] != '/')
+                        cut--;
+                string_copy_bounded(next, path, sizeof(next));
+                next[cut > 1 ? cut - 1 : cut] = end;
+                parent = system_open_at(AT_FDCWD, next,
+                                        FILE_READ | O_DIRECTORY | O_CLOEXEC);
+                if (parent >= 0)
+                {
+                        system_call_1(syscall(fsync), (positive)parent);
+                        system_close(parent);
+                }
+        }
+        return 0;
 }
 
 static bipolar host_write_text(string_address path, string_address text)
@@ -7732,8 +7783,8 @@ static b32 radio_bluetooth_power(bool on, bool say)
 static b32 radio_bluetooth_add(string_address identity)
 {
         p8 text[4096];
-        bipolar got = file_slurp_once_at(AT_FDCWD, NET_BLUETOOTH_LIST, text,
-                                         sizeof(text));
+        bipolar got;
+        bipolar lock;
         p8 line[320];
         positive used;
 
@@ -7743,6 +7794,13 @@ static b32 radio_bluetooth_add(string_address identity)
         if (!radio_text_plain(identity, string_length(identity)))
                 return host_refuse("that bluetooth name cannot be stored%s\n", "");
 
+        /*      The list is read, changed and written back whole, so two
+                runs at once lost one of the names: under the lock the wifi
+                verbs take, the second reads what the first wrote. */
+        lock = radio_lock(true);
+        if (lock < 0)
+                return host_fail("bluetooth", lock);
+        got = file_slurp_once_at(AT_FDCWD, NET_BLUETOOTH_LIST, text, sizeof(text));
         if (got < 0)
         {
                 text[0] = end;
@@ -7755,14 +7813,21 @@ static b32 radio_bluetooth_add(string_address identity)
                 string_append_bounded(line, "\n", sizeof(line));
                 used = (positive)got;
                 if (used + string_length(line) >= sizeof(text))
+                {
+                        radio_unlock(lock);
                         return host_refuse("too many saved bluetooth devices%s\n",
                                            "");
+                }
                 memory_copy(text + used, line, string_length(line));
                 used += string_length(line);
                 if (host_write_file(NET_BLUETOOTH_LIST, text, used, 0644,
                                     true) < 0)
+                {
+                        radio_unlock(lock);
                         return host_fail("bluetooth", -1);
+                }
         }
+        radio_unlock(lock);
 
         radio_bluetooth_power(true, false);
         host_say(log, host_label "bluetooth remembered %s\n", identity);
@@ -7774,7 +7839,8 @@ static b32 radio_bluetooth_remove(string_address identity)
 {
         p8 text[4096];
         p8 kept[4096];
-        bipolar got = file_slurp_once_at(AT_FDCWD, NET_BLUETOOTH_LIST, text, sizeof(text));
+        bipolar got;
+        bipolar lock;
         positive at = 0;
         positive used = 0;
         bool found = false;
@@ -7782,8 +7848,15 @@ static b32 radio_bluetooth_remove(string_address identity)
 
         if (!want_length || want_length > 128)
                 return host_refuse("that bluetooth name is empty or too long%s\n", "");
+        lock = radio_lock(true);
+        if (lock < 0)
+                return host_fail("bluetooth", lock);
+        got = file_slurp_once_at(AT_FDCWD, NET_BLUETOOTH_LIST, text, sizeof(text));
         if (got <= 0 || !radio_line_has(text, (positive)got, identity))
+        {
+                radio_unlock(lock);
                 return host_refuse("no remembered bluetooth device is called %s\n", identity);
+        }
 
         while (at < (positive)got)
         {
@@ -7805,7 +7878,11 @@ static b32 radio_bluetooth_remove(string_address identity)
         }
 
         if (!found || host_write_file(NET_BLUETOOTH_LIST, kept, used, 0644, true) < 0)
+        {
+                radio_unlock(lock);
                 return host_fail("bluetooth", -1);
+        }
+        radio_unlock(lock);
         host_say(log, host_label "bluetooth forgot %s\n", identity);
         return 0;
 }

@@ -40693,6 +40693,52 @@ def harness_moonwater_cli(argv):
         check(left == ["mouse2"], "bluetooth remove takes one device out and leaves the other", repr(left))
         check(answers(got)["bluetooth remove kbd1"]["status"] == 1, "a forgotten device is refused a second time")
 
+        # The saved lists survive a write cut short. RLIMIT_FSIZE 0 makes
+        # every write fail and kills the writer with SIGXFSZ, the way a
+        # crash part way through would: a list written in place was truncated
+        # first, so the saved networks (with their passwords) were gone; one
+        # written beside itself and renamed is what it was. A leftover from a
+        # crash (the killed writer leaves its temporary file) is not in the way of the next write.
+        got = tuned("rm -f /root/wifi /root/wifi.new /root/bluetooth /root/bluetooth.new\n" +
+                    say("wifi add cut-a passpass1") + say("wifi add cut-b passpass2") +
+                    say("bluetooth add cut-k") +
+                    "cp /root/wifi /tmp/wifi.before; cp /root/bluetooth /tmp/bluetooth.before\n"
+                    "( ulimit -f 0; /tmp/moonwater wifi add cut-c passpass3 >/dev/null 2>&1 )\n"
+                    "( ulimit -f 0; /tmp/moonwater wifi remove cut-a >/dev/null 2>&1 )\n"
+                    "( ulimit -f 0; /tmp/moonwater bluetooth add cut-m >/dev/null 2>&1 )\n"
+                    "cmp /root/wifi /tmp/wifi.before && echo '@@ wifi intact'\n"
+                    "cmp /root/bluetooth /tmp/bluetooth.before && echo '@@ bluetooth intact'\n"
+                    "echo partial > /root/wifi.new\n" + say("wifi add cut-d passpass4") +
+                    "echo '@@ after'; cat /root/wifi; ls /root | grep -c '^wifi[.]new$'; echo '@@end'\n")
+        joined = "\n".join(got)
+        check("@@ wifi intact" in joined, "a wifi list write cut short leaves the saved list as it was", joined[-300:])
+        check("@@ bluetooth intact" in joined, "a bluetooth list write cut short leaves the list as it was", joined[-300:])
+        after = joined.split("@@ after\n", 1)[1].split("@@end", 1)[0].split() if "@@ after" in joined else []
+        check(after == ["cut-a", "passpass1", "cut-b", "passpass2", "cut-d", "passpass4", "0"],
+              "a leftover temporary file from a crash is replaced by the next write", repr(after))
+
+        # Bluetooth add and remove read the list, change it and write it
+        # whole: with the radio lock held by another run they wait for it.
+        got = tuned("rm -f /root/bluetooth\n"
+                    "mkdir -p /run/moonwater\n"
+                    "flock -x /run/moonwater/radio.lock sleep 3 &\n"
+                    "sleep 1\n"
+                    "s=$(date +%s); /tmp/moonwater bluetooth add held-one >/dev/null 2>&1; e=$(date +%s)\n"
+                    "echo \"@@ waited $((e - s))\"\n"
+                    "flock -x /run/moonwater/radio.lock sleep 3 &\n"
+                    "sleep 1\n"
+                    "s=$(date +%s); /tmp/moonwater bluetooth remove held-one >/dev/null 2>&1; e=$(date +%s)\n"
+                    "echo \"@@ waited $((e - s))\"\n"
+                    "for i in 1 2 3 4 5 6 7 8 9 10 11 12; do /tmp/moonwater bluetooth add race$i >/dev/null 2>&1 & done; wait\n"
+                    "echo '@@ race'; sort /root/bluetooth | tr '\\n' ' '; echo; echo '@@end'\n")
+        joined = "\n".join(got)
+        waits = re.findall(r"@@ waited (\d+)", joined)
+        check(len(waits) == 2 and all(int(w) >= 1 for w in waits),
+              "bluetooth add and remove wait for the radio lock the wifi verbs take", repr(waits) + joined[-200:])
+        race = joined.split("@@ race\n", 1)[1].split("@@end", 1)[0].split() if "@@ race" in joined else []
+        check(sorted(race) == sorted(f"race{i}" for i in range(1, 13)),
+              "twelve bluetooth adds at once keep all twelve names", repr(race))
+
         # Every zone, code and offset: set it, then read what it wrote with
         # the host's glibc and hold it to the host's tzdata.
         wanted = [z for z in zones if z != "UTC"] + codes + ["+1", "-5", "+5:30", "-3:30",
