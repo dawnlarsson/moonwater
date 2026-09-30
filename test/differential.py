@@ -56670,8 +56670,10 @@ static p64 fz_replay, fz_verified;
 static bool fz_pending_set, fz_ptk_set, fz_clean;
 /* Mode 1: a network with PSK-SHA256 and management frame protection, whose
    key frames are descriptor version 3 (AES-128-CMAC) and whose message 3
-   and group message 1 carry an IGTK; mode 0 is WPA2-PSK as it always was. */
+   and group message 1 carry an IGTK; mode 2 is SAE, whose frames say version
+   0 and are signed with the same CMAC; mode 0 is WPA2-PSK as it always was. */
 static int fz_mode;
+static p16 fz_version(void) { return fz_mode == 0 ? 2 : fz_mode == 1 ? 3 : 0; }
 static void fz_mic(const p8 *kck, p8 *frame, positive n, p8 *out)
 {
         p8 hash[32];
@@ -56700,7 +56702,7 @@ static positive fz_frame(p8 *f, p16 info, const p8 *nonce, const p8 *data, posit
         f[1] = 3;
         network_store_16(f + 2, (p16)(95 + n));
         f[4] = 2;
-        network_store_16(f + 5, (p16)((info & ~7) | (fz_mode ? 3 : 2)));
+        network_store_16(f + 5, (p16)((info & ~7) | fz_version()));
         network_store_16(f + 7, 16);
         network_store_64(f + 9, fz_replay);
         if (nonce)
@@ -56738,7 +56740,7 @@ static void fz_answer(p16 info, const p8 *kck)
 {
         p8 copy[512], hash[16];
 
-        info = (p16)((info & ~7) | (fz_mode ? 3 : 2));
+        info = (p16)((info & ~7) | fz_version());
         if (fz_sends != 1 || fz_sent_length < 99 || network_load_16(fz_sent + 5) != info ||
             network_load_64(fz_sent + 9) != fz_replay)
                 abort();
@@ -56811,10 +56813,10 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
         fz_at = data, fz_left = size;
         memset(&fz_link, 0, sizeof fz_link);
         fz_link.eapol = 3, fz_link.session.handle = 4, fz_link.index = 7;
-        fz_mode = fz_byte() & 1;
-        fz_link.akm = fz_mode ? 6 : 2;
+        fz_mode = fz_byte() % 3;
+        fz_link.akm = fz_mode == 2 ? 8 : fz_mode ? 6 : 2;
         fz_link.version = wifi_key_version(fz_link.akm);
-        fz_link.rsn_length = (p8)wifi_rsn_build(fz_link.rsn, fz_link.akm, fz_mode ? 3 : 0);
+        fz_link.rsn_length = (p8)wifi_rsn_build(fz_link.rsn, fz_link.akm, fz_mode ? 3 : 0, 0);
         fz_igtk_made_count = 0;
         fz_ap_igtk_id = 4;
         memset(fz_sta_igtk_set, 0, sizeof fz_sta_igtk_set);
@@ -57686,15 +57688,23 @@ def harness_wifi_air(argv):
     lines = []
     lines.append("t0=$(uptime_now); moonwater wifi add \"$ap1\" %s > /tmp/sc.got 2>&1; scen_status 'join wrong password' 1 $?; echo \"wifi-time wrong-password $(took $t0)\"" % q(wrong))
     # The access point sends the machine away some three seconds after it
-    # gives up on message 2; the join used to wait out eight on its own.
-    lines.append("echo \"wifi-time wrong-password-handshake $(took $(associated_at))\"")
-    lines.append("scen_count 'join wrong password said within 6 s of associating' 1 \"$(awk -v t=\"$(took $(associated_at))\" 'BEGIN { print (t < 6) }')\"")
+    # gives up on message 2; the join used to wait out eight on its own. A
+    # WPA3 network turns the password away in the exchange before any
+    # association, which is said at once; the clock then runs from the add.
+    lines.append("a1=$(associated_at); case $(awk -v a=\"$a1\" -v t=\"$t0\" 'BEGIN { print (a < t) }') in 1) a1=$t0 ;; esac")
+    lines.append("echo \"wifi-time wrong-password-handshake $(took $a1)\"")
+    lines.append("scen_count 'join wrong password said within 6 s of associating' 1 \"$(awk -v t=\"$(took $a1)\" 'BEGIN { print (t < 6) }')\"")
     lines.append("scen_count 'join wrong password says so' 1 \"$(grep -c 'saved, but the network did not accept the password' /tmp/sc.got)\"")
     lines.append("t0=$(uptime_now); moonwater wifi add \"$ap2\" < /dev/null > /tmp/sc.got 2>&1; scen_status 'join open' 0 $?; echo \"wifi-time open $(took $t0)\"")
     lines.append("scen_count 'join open joined' 1 \"$(grep -c -x -F \"$(printf '\\033[1m[Moonwater]\\033[0m ')wifi joined $ap2\" /tmp/sc.got)\"")
-    lines.append("moonwater wifi add \"$ap3\" %s > /tmp/sc.got 2>&1; scen_status 'join WPA3 alone' 1 $?" % q(sae["password"]))
-    lines.append("scen_count 'join WPA3 alone refused' 1 \"$(grep -c 'saved, but it asks for WPA3, which moonwater cannot join yet' /tmp/sc.got)\"")
-    lines.append("scen_count 'join WPA3 still joined to the open one' 1 \"$(moonwater status 2>/dev/null | grep -c -x -F \"  wifi joined $ap2\")\"")
+    lines.append("t0=$(uptime_now); moonwater wifi add \"$ap3\" %s > /tmp/sc.got 2>&1; scen_status 'join WPA3 alone' 0 $?; echo \"wifi-time wpa3 $(took $t0)\"" % q(sae["password"]))
+    lines.append("scen_count 'join WPA3 alone joined' 1 \"$(joined \"$ap3\")\"")
+    lines.append("moonwater wifi add \"$ap3\" %s > /tmp/sc.got 2>&1; scen_status 'join WPA3 alone, wrong password' 1 $?" % q(sae["password"] + "x"))
+    lines.append("scen_count 'join WPA3 wrong password says so' 1 \"$(grep -c 'saved, but the network did not accept the password' /tmp/sc.got)\"")
+    lines.append("printf '%%s\\n' %s | moonwater wifi add \"$ap3\" - > /tmp/sc.got 2>&1; scen_status 'join WPA3 alone, right password again' 0 $?" % q(sae["password"]))
+    # The machine is left on the open network, as the rest of the lane expects.
+    lines.append("moonwater wifi add \"$ap2\" < /dev/null > /tmp/sc.got 2>&1; scen_status 'join open again' 0 $?")
+    lines.append("scen_count 'join WPA3 then back on the open one' 1 \"$(moonwater status 2>/dev/null | grep -c -x -F \"  wifi joined $ap2\")\"")
     family("join", lines)
 
     # ---- air
@@ -57750,8 +57760,10 @@ def harness_wifi_air(argv):
         if kind == "open":
             body.append("key_mgmt=NONE")
         else:
+            #       WPA3 by the real name with a password its owner never
+            #       chose: the machine may try it and must be turned away.
             body += ["proto=RSN", "pairwise=CCMP", "group=CCMP", "key_mgmt=SAE", "ieee80211w=2",
-                     "sae_password=\"%s\"" % good["password"]]
+                     "sae_password=\"%s\"" % (good["password"] + "-not-it")]
         body.append("}")
         lines.append("/mnt/stick/hwsim_radio new > /dev/null; tn=$(station $S); tm%d=$(cat /sys/class/net/$tn/address); "
                      "it%d=$(/mnt/stick/hwsim_radio move $NS $tn)" % (at, at))
@@ -57788,15 +57800,15 @@ def harness_wifi_air(argv):
     pm_word = "pmf-password-1"
     chan = {"req": 1, "opt": 6, "off": 11}
 
-    def pmf_ap(tag, ssid, channel, extra):
-        body = ["network={", "ssid=%s" % ssid.encode().hex(), "mode=2",
-                "frequency=%d" % (2407 + 5 * channel), "proto=RSN", "key_mgmt=WPA-PSK",
-                "psk=\"%s\"" % pm_word] + extra + ["}"]
+    def pmf_ap(tag, ssid, channel, extra, mgmt=None, globals_=()):
+        body = list(globals_) + ["network={", "ssid=%s" % ssid.encode().hex(), "mode=2",
+                "frequency=%d" % (2407 + 5 * channel), "proto=RSN"] + \
+            (mgmt or ["key_mgmt=WPA-PSK", "psk=\"%s\"" % pm_word]) + extra + ["}"]
         return [
             "/mnt/stick/hwsim_radio new > /dev/null; tn=$(station $S); %sm=$(cat /sys/class/net/$tn/address); "
             "%si=$(/mnt/stick/hwsim_radio move $NS $tn)" % (tag, tag),
             "printf '%%s\\n' %s > /tmp/%s.conf" % (" ".join(q(line) for line in body), tag),
-            "$A $W -B -i $%si -c /tmp/%s.conf -D nl80211 -f /tmp/%s.log -P /tmp/%s.pid" % (tag, tag, tag, tag),
+            "$A $W -B -d -i $%si -c /tmp/%s.conf -D nl80211 -f /tmp/%s.log -P /tmp/%s.pid" % (tag, tag, tag, tag),
             "for i in $(seq 40); do grep -q AP-ENABLED /tmp/%s.log 2>/dev/null && break; sleep 0.25; done" % tag,
             "$A /mnt/stick/hwsim_radio power $%si 12" % tag,
         ]
@@ -57869,6 +57881,74 @@ def harness_wifi_air(argv):
     lines.append("kill $(cat /tmp/pe.pid); rm -f /root/wifi /root/wifi.pmf")
     family("pmf", lines)
 
+    # ---- sae: WPA3-Personal. The join is an SAE exchange (commit, commit,
+    # confirm, confirm) through the kernel's authentication command, the
+    # PMK it makes and a four-way handshake on it, with protected
+    # management frames required. Against wpa_supplicant's own access point:
+    # WPA3 alone, WPA2 and WPA3 together, the anti-clogging token a busy
+    # access point asks for, and a wrong password turned away at once.
+    lines = []
+    sae_word = "sae-password-1"
+    sae_mgmt = ["key_mgmt=SAE", "sae_password=\"%s\"" % sae_word]
+    lines.append("rm -f /root/wifi /root/wifi.pmf /run/moonwater/wifi.avoid /run/moonwater/wifi.last")
+    lines += pmf_ap("sa", "saeonly", chan["opt"], ["ieee80211w=2", "pairwise=CCMP", "group=CCMP"], sae_mgmt)
+    lines.append("t0=$(uptime_now); printf '%%s\\n' %s | moonwater wifi add saeonly - > /tmp/sc.got 2>&1; scen_status 'sae join, WPA3 alone' 0 $?; echo \"wifi-time sae $(took $t0)\"" % q(sae_word))
+    lines.append("scen_count 'sae WPA3 alone, joined' 1 \"$(joined saeonly)\"")
+    lines.append("d0=%s; a0=%s" % (dm("$S: deauthenticated from $sam"), dm("$S: authenticate with $sam")))
+    lines.append(spoof("sa", "deauth", 5, chan["opt"]))
+    lines.append(spoof("sa", "disassoc", 5, chan["opt"]))
+    lines.append("sleep 3")
+    lines.append("scen_count 'sae spoofed management frames ignored' 0 \"$(( %s - d0 + %s - a0 ))\"" % (dm("$S: deauthenticated from $sam"), dm("$S: authenticate with $sam")))
+    lines.append("scen_count 'sae still joined' 1 \"$(joined saeonly)\"")
+    lines.append("scen_count 'sae WPA3 remembered as requiring protection' 1 \"$(grep -c -x saeonly /root/wifi.pmf)\"")
+    lines.append("t0=$(uptime_now); moonwater wifi add saeonly %s > /tmp/sc.got 2>&1; scen_status 'sae wrong password' 1 $?; echo \"wifi-time sae-wrong $(took $t0)\"" % q(sae_word + "x"))
+    lines.append("scen_count 'sae wrong password says so' 1 \"$(grep -c 'saved, but the network did not accept the password' /tmp/sc.got)\"")
+    lines.append("scen_count 'sae wrong password said within 8 s' 1 \"$(awk -v t=\"$(took $t0)\" 'BEGIN { print (t < 8) }')\"")
+    lines.append("kill $(cat /tmp/sa.pid); rm -f /root/wifi /root/wifi.pmf")
+    # Both at once: WPA3 is used, and a network that answers one of them only is still joined.
+    lines += pmf_ap("sb", "saetrans", chan["req"], ["ieee80211w=1", "pairwise=CCMP", "group=CCMP"],
+                    ["key_mgmt=WPA-PSK SAE", "psk=\"%s\"" % (sae_word + "-psk-is-another"), "sae_password=\"%s\"" % sae_word])
+    lines.append(join_word("saetrans").replace(q(pm_word), q(sae_word)) + "; scen_status 'sae join, WPA2 and WPA3' 0 $?")
+    #       The PSK of this access point is not the password given, so a join
+    #       that took the WPA2 side of it would have been turned away: joining
+    #       is WPA3 having been used.
+    lines.append("scen_count 'sae transition, joined with WPA3 (the PSK is another one)' 1 \"$(joined saetrans)\"")
+    lines.append("d0=%s; spoof_ok=1" % dm("$S: deauthenticated from $sbm"))
+    lines.append(spoof("sb", "deauth", 5, chan["req"]))
+    lines.append("sleep 3")
+    lines.append("scen_count 'sae transition, spoofed deauthentication ignored' 0 \"$(( %s - d0 ))\"" % dm("$S: deauthenticated from $sbm"))
+    lines.append("kill $(cat /tmp/sb.pid); rm -f /root/wifi /root/wifi.pmf")
+    # hostapd itself, which says more of what it does: WPA3 alone with each
+    # password element method it speaks, and once with a token demanded of
+    # every commit; its own log is what says how far the exchange went.
+    if hostapd:
+        lines.append("H=\"$L /mnt/stick/hostapd\"")
+        for at, (pwe_mode, channel, token) in enumerate(((0, 11, False), (2, 1, False), (0, 6, True))):
+            tag = "sh%d" % at
+            word = "hostapd-sae-%d" % at
+            what = "sae_pwe=%d%s" % (pwe_mode, ", anti-clogging token" if token else "")
+            lines.append("/mnt/stick/hwsim_radio new > /dev/null; r=$(station $S); "
+                         "%sm=$(cat /sys/class/net/$r/address); %si=$(/mnt/stick/hwsim_radio move $NS $r)" % (tag, tag))
+            conf = ["driver=nl80211", "ssid2=%s" % ("saeh%d" % at).encode().hex(), "hw_mode=g",
+                    "channel=%d" % channel, "wpa=2", "wpa_key_mgmt=SAE", "rsn_pairwise=CCMP",
+                    "ieee80211w=2", "sae_password=%s" % word, "sae_pwe=%d" % pwe_mode]
+            #       An access point under load asks for a token before it does
+            #       the curve: a threshold of 0 is always.
+            if token:
+                conf.append("sae_anti_clogging_threshold=0")
+            lines.append("printf '%%s\\n' \"interface=$%si\" %s > /tmp/%s.conf" % (tag, " ".join(q(c) for c in conf), tag))
+            lines.append("$A $H -B -dd -t -P /tmp/%s.pid -f /tmp/%s.log /tmp/%s.conf" % (tag, tag, tag))
+            lines.append("for i in $(seq 40); do grep -q AP-ENABLED /tmp/%s.log 2>/dev/null && break; sleep 0.25; done" % tag)
+            lines.append("$A /mnt/stick/hwsim_radio power $%si 14" % tag)
+            lines.append("printf '%%s\\n' %s | moonwater wifi add saeh%d - > /tmp/sc.got 2>&1; scen_status 'sae hostapd, %s' 0 $?" % (q(word), at, what))
+            lines.append("scen_count 'sae hostapd %d, joined' 1 \"$(joined saeh%d)\"" % (at, at))
+            lines.append("sleep 1; scen_count 'sae hostapd %d took the exchange to Accepted and the handshake to its end' 1 "
+                         "\"$(grep -c -e 'SAE: State Confirmed -> Accepted' -e 'EAPOL-4WAY-HS-COMPLETED' /tmp/%s.log | awk '{ print ($1 > 1) }')\"" % (at, tag))
+            if token:
+                lines.append("scen_count 'sae hostapd %d asked for a token and was given it' 1 \"$(grep -c 'SAE: Request anti-clogging token' /tmp/%s.log | awk '{ print ($1 > 0) }')\"" % (at, tag))
+                lines.append("grep -a -e 'SAE:' -e 'nti-clogging' /tmp/%s.log | grep -a -v -e 'pwd-' -e 'counter' -e 'nl80211' | head -40 | sed 's/^/sae-hostapd-%d /'" % (tag, at))
+            lines.append("kill $(cat /tmp/%s.pid); rm -f /root/wifi /root/wifi.pmf" % tag)
+    family("sae", lines)
 
     # ---- rekey: hostapd, whose control socket starts rekeys on demand.
     # Two access points by one name, the first much the stronger, each
