@@ -1426,6 +1426,80 @@ static fn file_codec_print(string_address text)
         log_flush();
 }
 
+/* The options every codec shares, each spelled --word or -letter, or only
+   one of the two, and the feature a spelling needs before it is one. What
+   one does is its act, shared by both spellings. */
+static const struct
+{
+        string_address word;
+        p8 letter;
+        p8 act;
+        p8 word_needs;
+        p8 letter_needs;
+} file_codec_rows[] = {
+    {"--decompress", 'd', 'd', 0, 0},
+    {"--uncompress", 0, 'd', 0, 0},
+    {"--compress", 'z', 'z', FILE_CODEC_COMPRESS_OPTION, FILE_CODEC_COMPRESS_OPTION},
+    {"--stdout", 'c', 'c', 0, 0},
+    {"--to-stdout", 0, 'c', 0, 0},
+    {"--force", 'f', 'f', 0, 0},
+    {"--test", 't', 't', 0, 0},
+    {"--keep", 'k', 'k', 0, 0},
+    {"--rm", 0, 'r', FILE_CODEC_REMOVE_OPTION, 0},
+    {"--quiet", 'q', 'q', FILE_CODEC_LONG_QUIET, 0},
+    {0, 'n', 'q', 0, FILE_CODEC_NO_NAME},
+    {"--fast", 0, '1', FILE_CODEC_LEVEL_WORDS, 0},
+    {"--best", 0, '9', FILE_CODEC_LEVEL_WORDS, 0},
+    {"--help", 'h', 'h', 0, 0},
+    {"--version", 'V', 'v', 0, FILE_CODEC_SHORT_VERSION},
+};
+
+/* The act of a shared option this codec has, spelled as a word, or as a
+   letter when word is null; 0 when it has none. */
+static p8 file_codec_option_act(file_codec_cli address_to codec,
+                                string_address word, p8 letter)
+{
+        for (positive at = 0; at < array_count(file_codec_rows); at++)
+        {
+                p8 needs = word ? file_codec_rows[at].word_needs
+                                 : file_codec_rows[at].letter_needs;
+
+                if ((word ? file_codec_rows[at].word &&
+                                string_equals(word, file_codec_rows[at].word)
+                          : file_codec_rows[at].letter == letter) &&
+                    (codec->features & needs) == needs)
+                        return file_codec_rows[at].act;
+        }
+        return 0;
+}
+
+/* What an option does; false once it has said what it had to and the run
+   is over, with the status in *result. */
+static bool file_codec_act(file_codec_cli address_to codec, p8 act,
+                           b32 address_to result)
+{
+        bool keeps = !(codec->features & FILE_CODEC_REMOVE_OPTION);
+
+        switch (act)
+        {
+        case 'd': codec->decompress = true; break;
+        case 'z': codec->decompress = false; break;
+        case 'c': codec->stdout_out = true; codec->remove_source &= !keeps; break;
+        case 'f': codec->replace = true; break;
+        case 't': codec->test = codec->decompress = true; codec->remove_source &= !keeps; break;
+        case 'k': codec->remove_source = false; break;
+        case 'r': codec->remove_source = true; break;
+        case '1': codec->level = 1; break;
+        case '9': codec->level = 9; break;
+        case 'h':
+        case 'v':
+                file_codec_print(act == 'h' ? codec->usage : codec->version);
+                address_to result = 0;
+                return false;
+        }
+        return true;
+}
+
 static bool file_codec_parse(file_codec_cli address_to codec,
                              positive address_to first,
                              b32 address_to result)
@@ -1452,6 +1526,7 @@ static bool file_codec_parse(file_codec_cli address_to codec,
                         bipolar taken = codec->option
                                             ? codec->option(codec, word, true)
                                             : 0;
+                        p8 act = taken ? 0 : file_codec_option_act(codec, word, 0);
 
                         if (taken < 0)
                         {
@@ -1459,63 +1534,13 @@ static bool file_codec_parse(file_codec_cli address_to codec,
                                 return false;
                         }
                         if (taken)
-                        {
                                 *first += codec->took_next;
-                                continue;
-                        }
-                        if (string_equals(word, "--decompress") ||
-                            string_equals(word, "--uncompress"))
-                                codec->decompress = true;
-                        else if (string_equals(word, "--compress") &&
-                                 (codec->features &
-                                  FILE_CODEC_COMPRESS_OPTION))
-                                codec->decompress = false;
-                        else if (string_equals(word, "--stdout") ||
-                                 string_equals(word, "--to-stdout"))
+                        else if (act)
                         {
-                                codec->stdout_out = true;
-                                if (!(codec->features &
-                                      FILE_CODEC_REMOVE_OPTION))
-                                        codec->remove_source = false;
+                                if (!file_codec_act(codec, act, result))
+                                        return false;
                         }
-                        else if (string_equals(word, "--force"))
-                                codec->replace = true;
-                        else if (string_equals(word, "--test"))
-                        {
-                                codec->test = true;
-                                codec->decompress = true;
-                                if (!(codec->features &
-                                      FILE_CODEC_REMOVE_OPTION))
-                                        codec->remove_source = false;
-                        }
-                        else if (string_equals(word, "--keep"))
-                                codec->remove_source = false;
-                        else if (string_equals(word, "--rm") &&
-                                 (codec->features & FILE_CODEC_REMOVE_OPTION))
-                                codec->remove_source = true;
-                        else if (string_equals(word, "--quiet") &&
-                                 (codec->features & FILE_CODEC_LONG_QUIET))
-                                ;
-                        else if (string_equals(word, "--fast") &&
-                                 (codec->features & FILE_CODEC_LEVEL_WORDS))
-                                codec->level = 1;
-                        else if (string_equals(word, "--best") &&
-                                 (codec->features & FILE_CODEC_LEVEL_WORDS))
-                                codec->level = 9;
-                        else if (string_equals(word, "--help"))
-                        {
-                                file_codec_print(codec->usage);
-                                *result = 0;
-                                return false;
-                        }
-                        else if (string_equals(word, "--version"))
-                        {
-                                file_codec_print(codec->version);
-                                *result = 0;
-                                return false;
-                        }
-                        else if ((codec->features &
-                                  FILE_CODEC_OUTPUT_OPTION) &&
+                        else if ((codec->features & FILE_CODEC_OUTPUT_OPTION) &&
                                  string_has_prefix(word, "--output="))
                                 codec->output_path = word + 9;
                         else
@@ -1534,6 +1559,7 @@ static bool file_codec_parse(file_codec_cli address_to codec,
                         bipolar taken = codec->option
                                             ? codec->option(codec, letter, false)
                                             : 0;
+                        p8 act = taken ? 0 : file_codec_option_act(codec, null, *letter);
 
                         if (taken < 0)
                         {
@@ -1550,54 +1576,14 @@ static bool file_codec_parse(file_codec_cli address_to codec,
                                 }
                                 continue;
                         }
-                        if ((*letter >= '1' ||
-                             (*letter == '0' &&
-                              (codec->features & FILE_CODEC_LEVEL_ZERO))) &&
-                            *letter <= '9')
+                        if (act)
+                        {
+                                if (!file_codec_act(codec, act, result))
+                                        return false;
+                        }
+                        else if (*letter >= '0' && *letter <= '9' &&
+                                 (*letter > '0' || (codec->features & FILE_CODEC_LEVEL_ZERO)))
                                 codec->level = (p8)(*letter - '0');
-                        else if (*letter == 'd')
-                                codec->decompress = true;
-                        else if (*letter == 'z' &&
-                                 (codec->features &
-                                  FILE_CODEC_COMPRESS_OPTION))
-                                codec->decompress = false;
-                        else if (*letter == 'c')
-                        {
-                                codec->stdout_out = true;
-                                if (!(codec->features &
-                                      FILE_CODEC_REMOVE_OPTION))
-                                        codec->remove_source = false;
-                        }
-                        else if (*letter == 'f')
-                                codec->replace = true;
-                        else if (*letter == 'k')
-                                codec->remove_source = false;
-                        else if (*letter == 'n' &&
-                                 (codec->features & FILE_CODEC_NO_NAME))
-                                ;
-                        else if (*letter == 'q')
-                                ;
-                        else if (*letter == 't')
-                        {
-                                codec->test = true;
-                                codec->decompress = true;
-                                if (!(codec->features &
-                                      FILE_CODEC_REMOVE_OPTION))
-                                        codec->remove_source = false;
-                        }
-                        else if (*letter == 'V' &&
-                                 (codec->features & FILE_CODEC_SHORT_VERSION))
-                        {
-                                file_codec_print(codec->version);
-                                *result = 0;
-                                return false;
-                        }
-                        else if (*letter == 'h')
-                        {
-                                file_codec_print(codec->usage);
-                                *result = 0;
-                                return false;
-                        }
                         else if (*letter == 'o' &&
                                  (codec->features & FILE_CODEC_OUTPUT_OPTION))
                         {
