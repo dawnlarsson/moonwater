@@ -3476,7 +3476,12 @@ static b32 host_canvas(string_address address_to arguments, positive count)
                         return host_refuse("Canvas is already on%s\n", "");
                 if (failed == -EBUSY)
                 {
-                        if (control.master_command[0])
+                        if (control.master_command[0] && !control.master_pid)
+                                string_format(log_error, host_label "%s, outside this process namespace, "
+                                                                    "holds the display; "
+                                                                    "Canvas stays off until it lets go\n",
+                                              (string_address)control.master_command);
+                        else if (control.master_command[0])
                                 string_format(log_error, host_label "%s (pid %p) holds the display; "
                                                                     "Canvas stays off until it lets go\n",
                                               (string_address)control.master_command,

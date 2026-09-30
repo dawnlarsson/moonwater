@@ -15605,6 +15605,78 @@ if leak_guest.poll() is None:
     except Exception:
         leak_guest.kill()
 
+#       The card firmware left, as the only one. A machine whose one display
+#       is the firmware's framebuffer (simpledrm, a VM without a driver for its
+#       GPU) has no native card, so moonwater canvas on opens the node in a
+#       first pass that skips it and again in a second that takes it. The first
+#       open was closed but not yet gone, it was still the card's master, and
+#       the answer was "shell (pid N) holds the display" naming the caller
+#       itself, a process gone when anyone looked and a new one on every
+#       retry. Off and on three times, then on when it is on, off when it is
+#       off, and the commands' own words in the serial file: no refusal, no
+#       "another program", and the status after says on.
+ovmf = next((path for path in ("/usr/share/edk2/x64/OVMF.4m.fd", "/usr/share/OVMF/OVMF_CODE.fd",
+                               "/usr/share/edk2/ovmf/OVMF_CODE.fd") if os.path.exists(path)), "")
+fw_names = ("a firmware card is the only display", "canvas off and on three times with it",
+            "with no refusal naming a holder", "on when it is on says so", "off when it is off says so",
+            "and canvas on does not claim another program holds the display")
+if ovmf:
+    shifted = {">": "dot", "$": "4", "?": "slash", "&": "7"}
+    def type_shell(line):
+        for character in line:
+            if character == ";":
+                key("semicolon")
+            elif character in shifted:
+                chord("shift", shifted[character])
+            elif character.isupper():
+                chord("shift", character.lower())
+            else:
+                type_text(character)
+        type_text("\n")
+    fw = Guest(["qemu-system-x86_64", "-m", "2G", "-smp", "2"] +
+               (["-cpu", "host", "-enable-kvm"] if os.access("/dev/kvm", os.R_OK | os.W_OK) else ["-cpu", "Nehalem"]) + [
+        "-kernel", image, "-vga", "none", "-device", "ramfb", "-bios", ovmf,
+        "-device", "qemu-xhci", "-device", "usb-tablet", "-device", "usb-kbd",
+        "-no-reboot", "-display", "none", "-serial", "file:" + work + "/fw-serial"],
+        work + "/fw-qmp", work + "/fw-mon", work)
+    time.sleep(40)
+    type_shell("moonwater canvas > /dev/ttyS0 2>&1")
+    time.sleep(2)
+    #       Off closes the terminal the line was typed into, and the keys go
+    #       to the console's shell after it, so each command is its own line.
+    for _ in range(3):
+        type_shell("moonwater canvas off")
+        time.sleep(6)
+        type_shell("moonwater canvas on > /dev/ttyS0 2>&1; echo fwrc-$? > /dev/ttyS0")
+        time.sleep(8)
+    type_shell("moonwater canvas on > /dev/ttyS0 2>&1; echo fwagain-$? > /dev/ttyS0")
+    time.sleep(4)
+    type_shell("moonwater canvas off")
+    time.sleep(6)
+    type_shell("moonwater canvas off > /dev/ttyS0 2>&1; echo fwtwice-$? > /dev/ttyS0")
+    time.sleep(4)
+    type_shell("moonwater canvas on")
+    time.sleep(8)
+    type_shell("moonwater canvas > /dev/ttyS0 2>&1; echo fwstate > /dev/ttyS0")
+    time.sleep(4)
+    fw_serial = open(work + "/fw-serial", "rb").read()
+    out.append((fw_names[0], "yes" if b"simpledrm" in fw_serial else "no: " + repr(fw_serial[-200:]), "yes"))
+    out.append((fw_names[1], "yes" if fw_serial.count(b"fwrc-0") == 3 else "rc " + repr(re.findall(rb"fwrc-(\d+)", fw_serial)), "yes"))
+    out.append((fw_names[2], str(fw_serial.count(b"Canvas stays off")), "0"))
+    out.append((fw_names[3], "yes" if b"fwagain-1" in fw_serial and b"already on" in fw_serial else "no", "yes"))
+    out.append((fw_names[4], "yes" if b"fwtwice-1" in fw_serial and b"already off" in fw_serial else "no", "yes"))
+    out.append((fw_names[5], str(fw_serial.count(b"another program holds")), "0"))
+    fw.quit()
+    time.sleep(1)
+    fw.terminate()
+    try:
+        fw.wait(10)
+    except Exception:
+        fw.kill()
+else:
+    for name in fw_names:
+        out.append((name, "not run: no OVMF", "0" if name in fw_names[2:3] + fw_names[5:] else "yes"))
+
 for name, got, want in out:
     print("%s|%s|%s" % (name, got, want))
 PY

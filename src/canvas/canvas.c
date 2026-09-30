@@ -9316,8 +9316,15 @@ static int canvas_master_holder(struct drm_device *dev, char *command, size_t ro
                 task = pid_task(rcu_dereference(file->pid), PIDTYPE_TGID);
                 if (task)
                 {
-                        holder = task_tgid_nr(task);
+                        // In the asker's pid namespace, where a number the
+                        // asker can kill means something; 0 is a holder it
+                        // cannot see. A program names itself with prctl, so
+                        // only printable bytes go to the asker's terminal.
+                        holder = task_tgid_nr_ns(task, task_active_pid_ns(current));
                         strscpy(command, task->comm, room);
+                        for (char *at = command; *at; at++)
+                                if (*at < ' ' || *at > '~')
+                                        *at = '?';
                 }
                 rcu_read_unlock();
                 break;
@@ -9376,6 +9383,27 @@ static _Bool canvas_has_native(void)
         return native;
 }
 
+/*
+        Close a node this code opened, and have it gone before returning.
+
+        A plain close from a program's ioctl puts the last fput on the task's
+        work list, which runs as the call returns to the program, and on a
+        kernel thread on a worker a jiffy later. Until it runs, the file is
+        still open on the card, and the first program to open a card is its
+        master. So a refused pass held the card against the next pass of the
+        same call: with a firmware card as the only one, the first pass opens
+        and skips it, the second opens it again, finds the first still master
+        and the refusal names the caller itself -- a shell that is gone by the
+        time anyone looks, and a different one on every retry. And the first
+        commit of a card taken from a kernel thread lost the same race, so
+        the desktop began suspended. This is the only reference, so the last
+        put is done here.
+*/
+static void canvas_node_close(struct file *filp)
+{
+        __fput_sync(filp);
+}
+
 static int canvas_claim(const char *path, unsigned int minor,
                         struct canvas_control *on, _Bool firmware_ok)
 {
@@ -9395,7 +9423,7 @@ static int canvas_claim(const char *path, unsigned int minor,
 
         if (!file_priv || !file_priv->minor || !file_priv->minor->dev)
         {
-                filp_close(filp, NULL);
+                canvas_node_close(filp);
                 return -ENODEV;
         }
 
@@ -9423,7 +9451,7 @@ static int canvas_claim(const char *path, unsigned int minor,
 
                 if (skip)
                 {
-                        filp_close(filp, NULL);
+                        canvas_node_close(filp);
                         return skip;
                 }
         }
@@ -9445,7 +9473,7 @@ static int canvas_claim(const char *path, unsigned int minor,
                                 on->master_pid = canvas_master_holder(
                                     dev, on->master_command,
                                     sizeof(on->master_command));
-                        filp_close(filp, NULL);
+                        canvas_node_close(filp);
                         return -EACCES;
                 }
 
@@ -9469,22 +9497,7 @@ static int canvas_claim(const char *path, unsigned int minor,
                 run: the one answer it was written to read was the one answer
                 it could never get.
         */
-        filp_close(filp, NULL);
-
-        /*
-                And gone, not only closed. On a kernel thread -- the boot probe
-                runs on a workqueue -- the last fput is not done here but put
-                on the delayed list for a worker a jiffy later, and until it
-                runs this file is still the device's master. The hotplug that
-                registering fires reaches the first commit well before that,
-                so every boot's first picture was refused EBUSY, the desktop
-                went suspended, and it took a resume -- a second whole redraw
-                and modeset, 20 ms on virtio-gpu -- before anything was on the
-                screen. From a program's ioctl the fput runs as the call
-                returns instead, which the resume still covers.
-        */
-        if (current->flags & PF_KTHREAD)
-                flush_delayed_fput();
+        canvas_node_close(filp);
 
         if (!canvas)
                 return -EBUSY;
