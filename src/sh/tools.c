@@ -23,6 +23,19 @@ static bipolar dns_resolve_any(string_address path, string_address name,
 #include "../net/wait.c"
 #endif
 
+// The usage hint every coreutils complaint about a command line ends with.
+#define TOOLS_TRY(program) "Try '" program " --help' for more information.\n"
+
+/*      A text tool's refusal of its own options, when the condition holds:
+        the diagnostic with status 1, and the text stream closed the way
+        every return of these tools closes it. */
+#define text_refuse(condition, message) \
+        do \
+        { \
+                if (condition) \
+                        return text_done(string_diagnostic(&text_diagnostic, 1, null, message)); \
+        } while (0)
+
 /* coreutils' complaint about a surplus word, with the usage hint. */
 static b32 tools_extra_operand(string_address program, string_address word)
 {
@@ -2126,8 +2139,7 @@ static b32 tools_write()
                 return meta;
 
         positive argc = (positive)program_argument_count();
-        if (taking.first >= argc)
-                return text_done(string_diagnostic(&text_diagnostic, 1, null, "missing user operand"));
+        text_refuse(taking.first >= argc, "missing user operand");
         if (taking.first + 2 < argc)
                 return text_done(string_diagnostic(&text_diagnostic, 1, program_argument((b32)taking.first + 2), "extra operand"));
 
@@ -2139,8 +2151,7 @@ static b32 tools_write()
                 if (!file_look_at(source_path, address_of source) ||
                     (source.mode & MODE_FORMAT) != MODE_CHARACTER)
                         return text_done(string_diagnostic(&text_diagnostic, 1, source_path, "cannot inspect your terminal"));
-                if (system_call(syscall(getuid)) && !(source.mode & 0020))
-                        return text_done(string_diagnostic(&text_diagnostic, 1, null, "you have write permission turned off"));
+                text_refuse(system_call(syscall(getuid)) && !(source.mode & 0020), "you have write permission turned off");
                 source_line = login_message_line(source_path);
         }
 
@@ -2653,10 +2664,8 @@ static b32 tools_utmpdump()
         }
         if (file_meta(address_of taking, "[options] [filename]", text_put))
                 return text_done(0);
-        if (taking.flags & FILE_FLAG('r'))
-                return text_done(string_diagnostic(&text_diagnostic, 1, null, "reverse import is not supported; binary login state is never mutated"));
-        if (taking.flags & FILE_FLAG('f'))
-                return text_done(string_diagnostic(&text_diagnostic, 1, null, "follow mode is not supported"));
+        text_refuse(taking.flags & FILE_FLAG('r'), "reverse import is not supported; binary login state is never mutated");
+        text_refuse(taking.flags & FILE_FLAG('f'), "follow mode is not supported");
 
         // util-linux dumps the first operand and ignores any others.
         positive output_handle = 1;
@@ -3229,10 +3238,8 @@ static b32 tools_last()
                 return text_done(1);
         if (file_meta(address_of taking, "[options] [username|tty ...]", text_put))
                 return text_done(0);
-        if (taking.flags & FILE_FLAG('d'))
-                return text_done(string_diagnostic(&text_diagnostic, 1, null, "DNS lookup is not supported"));
-        if (taking.flags & (FILE_FLAG('p') | FILE_FLAG('s') | FILE_FLAG('t')))
-                return text_done(string_diagnostic(&text_diagnostic, 1, null, "time selection is not supported"));
+        text_refuse(taking.flags & FILE_FLAG('d'), "DNS lookup is not supported");
+        text_refuse(taking.flags & (FILE_FLAG('p') | FILE_FLAG('s') | FILE_FLAG('t')), "time selection is not supported");
 
         memory_fill(address_of login_last, 0, sizeof(login_last));
         login_last.limit = positive_max;
@@ -6046,8 +6053,7 @@ static fn numfmt_fields_begin()
 
 static bool numfmt_hint()
 {
-        return string_report(writer_stderr, false,
-                      "Try 'numfmt --help' for more information.\n");
+        return string_report(writer_stderr, false, TOOLS_TRY("numfmt"));
 }
 
 /* The reference's complaint about a word that is not one of a fixed set:
@@ -6378,8 +6384,7 @@ static b32 tools_numfmt()
 
         /* The reference refuses the pair before it reads the format, so a
            format it could not read is not what it complains about. */
-        if (value && numfmt.grouping)
-                return text_done(string_diagnostic(&text_diagnostic, 1, null, "--grouping cannot be combined with --format"));
+        text_refuse(value && numfmt.grouping, "--grouping cannot be combined with --format");
 
         if (value)
         {
@@ -6407,8 +6412,7 @@ static b32 tools_numfmt()
                 numfmt.have_format = true;
         }
 
-        if (numfmt.grouping && numfmt.have_format)
-                return text_done(string_diagnostic(&text_diagnostic, 1, null, "--grouping cannot be combined with --format"));
+        text_refuse(numfmt.grouping && numfmt.have_format, "--grouping cannot be combined with --format");
         if (numfmt.grouping && numfmt.to != NUMFMT_SCALE_NONE)
         {
                 text_flush();
@@ -8251,15 +8255,12 @@ static b32 tools_uuidgen()
                          ((flags & FILE_FLAG('6')) != 0) +
                          ((flags & FILE_FLAG('7')) != 0) + named;
 
-        if (modes > 1)
-                return text_done(string_diagnostic(&text_diagnostic, 1, null, "generation modes cannot be combined"));
+        text_refuse(modes > 1, "generation modes cannot be combined");
 
         if (named)
         {
-                if (count_text)
-                        return text_done(string_diagnostic(&text_diagnostic, 1, null, "name mode and --count cannot be combined"));
-                if (!namespace || !name || md5 == sha1)
-                        return text_done(string_diagnostic(&text_diagnostic, 1, null, "name mode needs namespace, name and exactly one digest"));
+                text_refuse(count_text, "name mode and --count cannot be combined");
+                text_refuse(!namespace || !name || md5 == sha1, "name mode needs namespace, name and exactly one digest");
 
                 tools_uuid space;
                 if (!tools_uuidgen_namespace(namespace, address_of space))
@@ -8284,8 +8285,7 @@ static b32 tools_uuidgen()
                 return text_done(0);
 
         file_random_state random;
-        if (!file_random_seed(address_of random))
-                return text_done(string_diagnostic(&text_diagnostic, 1, null, "kernel random source failed"));
+        text_refuse(!file_random_seed(address_of random), "kernel random source failed");
 
         bool time_one = (flags & FILE_FLAG('t')) != 0;
         bool time_six = (flags & FILE_FLAG('6')) != 0;
@@ -8495,8 +8495,7 @@ static b32 tools_uuidparse()
         bool json = (taking.flags & FILE_FLAG('J')) != 0;
         bool noheadings = (taking.flags & FILE_FLAG('n')) != 0;
         bool raw = (taking.flags & FILE_FLAG('r')) != 0;
-        if (json && raw)
-                return text_done(string_diagnostic(&text_diagnostic, 1, null, "--json and --raw cannot be combined"));
+        text_refuse(json && raw, "--json and --raw cannot be combined");
 
         p8 columns[32] = {
             TOOLS_UUID_COLUMN_UUID, TOOLS_UUID_COLUMN_VARIANT,
@@ -8718,8 +8717,7 @@ static b32 tools_mcookie()
         }
 
         file_random_state random;
-        if (!file_random_seed(address_of random))
-                return text_done(string_diagnostic(&text_diagnostic, 1, null, "kernel random source failed"));
+        text_refuse(!file_random_seed(address_of random), "kernel random source failed");
 
         /* Upstream draws 128 kernel bytes.  Four uses of the existing
            32-byte seeder preserve that entropy budget without a direct
@@ -8727,8 +8725,7 @@ static b32 tools_mcookie()
         for (positive round = 1; round < 4; round++)
         {
                 file_random_state additional;
-                if (!file_random_seed(address_of additional))
-                        return text_done(string_diagnostic(&text_diagnostic, 1, null, "kernel random source failed"));
+                text_refuse(!file_random_seed(address_of additional), "kernel random source failed");
                 for (positive at = 0; at < array_count(random.words); at++)
                         random.words[at] ^= additional.words[at];
                 (void)file_random_word(address_of random);
@@ -10084,8 +10081,7 @@ static b32 tools_dd(void)
                             string_get(argument + 2))
                         {
                                 return string_report(log_error, 1,
-                                    "dd: unrecognized option '%s'\n"
-                                    "Try 'dd --help' for more information.\n",
+                                    "dd: unrecognized option '%s'\n" TOOLS_TRY("dd"),
                                     argument);
                         }
 
@@ -10105,15 +10101,13 @@ static b32 tools_dd(void)
                                 spelled[1] = end;
                                 text_flush();
                                 return string_report(writer_stderr, 1,
-                                    "dd: invalid option -- '%s'\n"
-                                    "Try 'dd --help' for more information.\n",
+                                    "dd: invalid option -- '%s'\n" TOOLS_TRY("dd"),
                                     (string_address)spelled);
                         }
 
                         text_flush();
                         return string_report(writer_stderr, 1,
-                            "dd: unrecognized operand '%w'\n"
-                            "Try 'dd --help' for more information.\n",
+                            "dd: unrecognized operand '%w'\n" TOOLS_TRY("dd"),
                             writer_terminal_quoted_name, argument);
                 }
         }
@@ -11583,8 +11577,7 @@ static bool dump_od_seen(p8 letter, string_address value)
                         text_flush();
                         return string_report(writer_stderr, false,
                                       "od: invalid argument '%w' for '--endian'\n"
-                                      "Valid arguments are:\n  - 'little'\n  - 'big'\n"
-                                      "Try 'od --help' for more information.\n",
+                                      "Valid arguments are:\n  - 'little'\n  - 'big'\n" TOOLS_TRY("od"),
                                       writer_terminal_quoted_name, value);
                 }
 
@@ -12837,8 +12830,7 @@ static b32 dump_run(positive first, positive count)
         /* A skip that outlived every input is only worth complaining about
            when there was an input: where nothing could be opened at all the
            reference has already said why, and says no more. */
-        if (skip && dump_arguments.od && opened)
-                return text_done(string_diagnostic(&text_diagnostic, 1, null, "cannot skip past end of combined input"));
+        text_refuse(skip && dump_arguments.od && opened, "cannot skip past end of combined input");
 
         if (!dump_arguments.od && attempted && !opened)
         {
@@ -16055,8 +16047,7 @@ static b32 tools_ps(void)
                         if (!value)
                                 return text_done(string_diagnostic(&text_diagnostic, 1, null, long_option ? "option requires an argument -- format"
                                                             : "option requires an argument -- o"));
-                        if (!string_get(value))
-                                return text_done(string_diagnostic(&text_diagnostic, 1, null, "format specification must follow -o"));
+                        text_refuse(!string_get(value), "format specification must follow -o");
                         // An empty item anywhere in the list is a syntax
                         // error to procps, not an absent column.
                         if (string_is(value, ',') || string_search(value, ",,") ||
@@ -16951,8 +16942,7 @@ static b32 tools_dmesg_main()
                 return text_done(0);
 
         positive flags = taking.flags;
-        if ((flags & FILE_FLAG('F')) && (flags & FILE_FLAG('K')))
-                return text_done(string_diagnostic(&text_diagnostic, 1, null, "--file and --kmsg-file cannot be combined"));
+        text_refuse((flags & FILE_FLAG('F')) && (flags & FILE_FLAG('K')), "--file and --kmsg-file cannot be combined");
         if ((flags & FILE_FLAG('r')) &&
             (flags & (FILE_FLAG('x') | FILE_FLAG('t') | FILE_FLAG('T') |
                       FILE_FLAG('e') | FILE_FLAG('d') | FILE_FLAG('J'))))
@@ -16972,15 +16962,13 @@ static b32 tools_dmesg_main()
                 return text_done(string_report(writer_stderr, 1,
                     "dmesg: only kmsg supports multi-line messages\n"));
         }
-        if (flags & (FILE_FLAG('a') | FILE_FLAG('b')))
-                return text_done(string_diagnostic(&text_diagnostic, 1, null, "--since and --until are not supported"));
+        text_refuse(flags & (FILE_FLAG('a') | FILE_FLAG('b')), "--since and --until are not supported");
 
         positive control_count = ((flags & FILE_FLAG('C')) != 0) +
                                  ((flags & FILE_FLAG('D')) != 0) +
                                  ((flags & FILE_FLAG('E')) != 0) +
                                  ((flags & FILE_FLAG('n')) != 0);
-        if (control_count > 1)
-                return text_done(string_diagnostic(&text_diagnostic, 1, null, "kernel log controls cannot be combined"));
+        text_refuse(control_count > 1, "kernel log controls cannot be combined");
 
         if (flags & FILE_FLAG('C'))
                 return tools_dmesg_control(DMESG_CLEAR, 0,
@@ -17097,10 +17085,8 @@ static b32 tools_dmesg_main()
 
         if (flags & (FILE_FLAG('w') | FILE_FLAG('W')))
         {
-                if (flags & FILE_FLAG('c'))
-                        return text_done(string_diagnostic(&text_diagnostic, 1, null, "--read-clear and --follow cannot be combined"));
-                if (state.json)
-                        return text_done(string_diagnostic(&text_diagnostic, 1, null, "JSON follow output is not supported"));
+                text_refuse(flags & FILE_FLAG('c'), "--read-clear and --follow cannot be combined");
+                text_refuse(state.json, "JSON follow output is not supported");
                 return tools_dmesg_follow(address_of state,
                                           (flags & FILE_FLAG('W')) != 0);
         }
@@ -17935,6 +17921,15 @@ static bool ul_options_done(file_taking address_to taking, string_address syntax
         return true;
 }
 
+/*      "name: reason" on standard error and the status 1, when the condition
+        holds: what most of a program's refusals of its own options say. */
+#define tools_refuse(condition, program, message) \
+        do \
+        { \
+                if (condition) \
+                        return string_report(log_error, 1, "%s: %s\n", program, message); \
+        } while (0)
+
 /*      Nearly every one of them opens the same way: its name, the table of
         options it answers and the syntax line its --help prints, then the
         shared reader's verdict.  Taking the three together leaves an
@@ -18044,8 +18039,7 @@ static b32 util_linux_taskset()
         {
                 positive operands = count - taking.first;
 
-                if (operands != 1 && operands != 2)
-                        return string_report(log_error, 1, "%s: %s\n", "taskset", "bad usage");
+                tools_refuse(operands != 1 && operands != 2, "taskset", "bad usage");
 
                 work.setting = operands == 2;
                 if (work.setting &&
@@ -18071,8 +18065,7 @@ static b32 util_linux_taskset()
         /*  --all-tasks says nothing about a command being run; it is only
             about the threads of a pid, and the reference takes it either
             way. */
-        if (taking.first + 1 >= count)
-                return string_report(log_error, 1, "%s: %s\n", "taskset", "bad usage");
+        tools_refuse(taking.first + 1 >= count, "taskset", "bad usage");
 
         if (!ul_cpu_set(program_argument((b32)taking.first), work.list,
                         work.wanted))
@@ -18176,8 +18169,7 @@ static b32 util_linux_renice()
         bool relative = false;
         string_address priority_text;
 
-        if (at >= count)
-                return string_report(log_error, 1, "%s: %s\n", "renice", "not enough arguments");
+        tools_refuse(at >= count, "renice", "not enough arguments");
 
         string_address first = program_argument((b32)at++);
         if (string_equals(first, "-h") || string_equals(first, "--help"))
@@ -18515,8 +18507,7 @@ static b32 util_linux_prlimit()
 
         if (file_option_value(address_of taking, 'p'))
         {
-                if (command)
-                        return string_report(log_error, 1, "%s: %s\n", "prlimit", "cannot specify a PID and a command");
+                tools_refuse(command, "prlimit", "cannot specify a PID and a command");
                 if (!ul_pid(file_option_value(address_of taking, 'p'),
                             "prlimit", "PID", address_of pid))
                         return 1;
@@ -18788,8 +18779,7 @@ static b32 util_linux_chrt()
 
         if (by_pid)
         {
-                if (first + 1 != count)
-                        return string_report(log_error, 1, "%s: %s\n", "chrt", "bad usage");
+                tools_refuse(first + 1 != count, "chrt", "bad usage");
         }
         else if (first >= count || all)
                 return string_report(log_error, 1, "%s: %s\n", "chrt", "bad usage");
@@ -18812,8 +18802,7 @@ static b32 util_linux_chrt()
                 return answer;
         }
 
-        if ((policy->value == 1 || policy->value == 2) && !priority_given)
-                return string_report(log_error, 1, "%s: %s\n", "chrt", "missing priority");
+        tools_refuse((policy->value == 1 || policy->value == 2) && !priority_given, "chrt", "missing priority");
 
         ul_chrt_work work;
         memory_fill(address_of work, 0, sizeof(work));
@@ -18836,8 +18825,7 @@ static b32 util_linux_chrt()
                 string_address value =
                     file_option_value(address_of taking, parameters[at].option);
                 positive got;
-                if (value && !ul_unsigned(value, positive_max, address_of got))
-                        return string_report(log_error, 1, "%s: %s\n", "chrt", "invalid scheduling parameter");
+                tools_refuse(value && !ul_unsigned(value, positive_max, address_of got), "chrt", "invalid scheduling parameter");
                 if (value)
                         address_to parameters[at].into = (p64)got;
         }
@@ -18969,8 +18957,7 @@ static b32 util_linux_uclampset()
                 string_address value = file_option_value(address_of taking,
                                                           values[at].option);
                 bipolar got;
-                if (value && !ul_signed(value, -1, 1024, address_of got))
-                        return string_report(log_error, 1, "%s: %s\n", "uclampset", "utilization value must be -1..1024");
+                tools_refuse(value && !ul_signed(value, -1, 1024, address_of got), "uclampset", "utilization value must be -1..1024");
                 if (value)
                         address_to values[at].into = (p32)got;
         }
@@ -18995,8 +18982,7 @@ static b32 util_linux_uclampset()
 
         if (system)
         {
-                if (pid_text || all || taking.first < count)
-                        return string_report(log_error, 1, "%s: %s\n", "uclampset", "bad usage");
+                tools_refuse(pid_text || all || taking.first < count, "uclampset", "bad usage");
 
                 string_address paths[] = {
                     "/proc/sys/kernel/sched_util_clamp_min",
@@ -19204,8 +19190,7 @@ static const argument_option ul_flock_options[] = {
 static COLD b32 ul_flock_usage()
 {
         return string_report(log_error, 64,
-                             "flock: bad usage\n"
-                             "Try 'flock --help' for more information.\n");
+                             "flock: bad usage\n" TOOLS_TRY("flock"));
 }
 
 /*      Every occurrence of a valued option is checked as it is read, not
@@ -19609,8 +19594,7 @@ static b32 ul_setarch_show(string_address value, b32 pid)
 
         if (value && !string_equals(value, "current"))
         {
-                if (!ul_personality_number(value, address_of personality))
-                        return string_report(log_error, 1, "%s: %s\n", "setarch", "could not parse personality");
+                tools_refuse(!ul_personality_number(value, address_of personality), "setarch", "could not parse personality");
         }
         else
         {
@@ -19810,10 +19794,8 @@ static b32 util_linux_waitpid()
         file_operands_begin();
         ul_taking("waitpid", ul_waitpid_options, "[options] PID[:inode]...",
                   .operand = file_operand);
-        if (file_operand_failed)
-                return string_report(log_error, 1, "%s: %s\n", "waitpid", "not enough memory");
-        if (!file_operand_count)
-                return string_report(log_error, 1, "%s: %s\n", "waitpid", "no PIDs specified");
+        tools_refuse(file_operand_failed, "waitpid", "not enough memory");
+        tools_refuse(!file_operand_count, "waitpid", "no PIDs specified");
         if ((taking.flags & FILE_FLAG('e')) &&
             (taking.flags & FILE_FLAG('c')))
                 return string_report(log_error, 1, "%s: %s\n", "waitpid", "options --exited and --count are mutually exclusive");
@@ -19825,8 +19807,7 @@ static b32 util_linux_waitpid()
                 if (!ul_unsigned(file_option_value(address_of taking, 'c'),
                                  positive_max, address_of count) || !count)
                         return string_report(log_error, 1, "%s: %s\n", "waitpid", "invalid count");
-                if (count > wanted)
-                        return string_report(log_error, 1, "%s: %s\n", "waitpid", "count exceeds number of PIDs");
+                tools_refuse(count > wanted, "waitpid", "count exceeds number of PIDs");
         }
 
         positive timeout = 0;
@@ -20188,8 +20169,7 @@ static COLD __attribute__((noinline)) b32 ul_setpriv_dump(positive dumps)
         log("Securebits: ", 12);
         ul_setpriv_secure_say((b32)ul_prctl(UL_PR_GET_SECUREBITS, 0, 0));
         b32 death = 0;
-        if (ul_prctl(UL_PR_GET_PDEATHSIG, (positive)address_of death, 0) < 0)
-                return string_report(log_error, 1, "%s: %s\n", "setpriv", "failed to get parent death signal");
+        tools_refuse(ul_prctl(UL_PR_GET_PDEATHSIG, (positive)address_of death, 0) < 0, "setpriv", "failed to get parent death signal");
         log("Parent death signal: ", 21);
         if (death > 0) {
                 p8 name[16];
@@ -20238,14 +20218,12 @@ static b32 util_linux_setpriv()
 
         if (given.dumps)
         {
-                if (given.total != given.dumps || taking.first < (positive)program_argument_count())
-                        return string_report(log_error, 1, "%s: %s\n", "setpriv", "--dump is incompatible with all other options");
+                tools_refuse(given.total != given.dumps || taking.first < (positive)program_argument_count(), "setpriv", "--dump is incompatible with all other options");
                 return ul_setpriv_dump(given.dumps);
         }
         if (taking.flags & FILE_FLAG('l'))
         {
-                if (given.total != 1 || taking.first < (positive)program_argument_count())
-                        return string_report(log_error, 1, "%s: %s\n", "setpriv", "--list-caps must be specified alone");
+                tools_refuse(given.total != 1 || taking.first < (positive)program_argument_count(), "setpriv", "--list-caps must be specified alone");
                 for (b32 i = 0; i <= ul_cap_last(); i++)
                         if ((positive)i < array_count(ul_cap_names))
                                 string_format(log, "%s\n", ul_cap_names[i]);
@@ -20262,8 +20240,7 @@ static b32 util_linux_setpriv()
                             FILE_FLAG('A') | FILE_FLAG('L') | FILE_FLAG('D') |
                             FILE_FLAG('f') | FILE_FLAG('e')))
                 return string_report(log_error, 1, "%s: %s\n", "setpriv", "requested policy is not supported by this build");
-        if (taking.first >= (positive)program_argument_count())
-                return string_report(log_error, 1, "%s: %s\n", "setpriv", "No program specified");
+        tools_refuse(taking.first >= (positive)program_argument_count(), "setpriv", "No program specified");
 
 #define UL_ID(letter, field, is_group) do { if (taking.flags & FILE_FLAG(letter)) { if (!ul_setpriv_id(file_option_value(address_of taking, letter), is_group, address_of set.field)) return string_report(log_error, 1, "%s: %s\n", "setpriv", "failed to parse identity"); set.field##_set = true; } } while (0)
         UL_ID('r', ruid, false); UL_ID('u', euid, false);
@@ -20275,8 +20252,7 @@ static b32 util_linux_setpriv()
         set.group_list = file_option_value(address_of taking, 's');
         positive group_count = 0;
 
-        if ((set.rgid_set || set.egid_set) && !set.groups)
-                return string_report(log_error, 1, "%s: %s\n", "setpriv", "--[re]gid requires a supplementary group option");
+        tools_refuse((set.rgid_set || set.egid_set) && !set.groups, "setpriv", "--[re]gid requires a supplementary group option");
         if (set.groups == 's')
         {
                 group_count = 1 + memory_count(set.group_list,
@@ -20290,8 +20266,7 @@ static b32 util_linux_setpriv()
                         string_address comma = string_first_of(p, ',');
                         positive length = comma ? (positive)(comma - p)
                                                 : string_length(p);
-                        if (!length || length >= FILE_NAME_MAX)
-                                return string_report(log_error, 1, "%s: %s\n", "setpriv", "invalid supplementary group id");
+                        tools_refuse(!length || length >= FILE_NAME_MAX, "setpriv", "invalid supplementary group id");
                         p8 name[FILE_NAME_MAX];
                         memory_copy_apart(name, p, length);
                         name[length] = 0;
@@ -21228,20 +21203,15 @@ static b32 util_linux_lsns()
 
         ul_refuse_group(taking, ul_json_raw);
 
-        if (taking.flags & FILE_FLAG('T'))
-                return string_report(log_error, 1, "%s: %s\n", "lsns", "tree output is not supported");
-        if (taking.flags & FILE_FLAG('P'))
-                return string_report(log_error, 1, "%s: %s\n", "lsns", "persistent namespace discovery is not supported");
-        if (taking.flags & FILE_FLAG('A'))
-                return string_report(log_error, 1, "%s: %s\n", "lsns", "--output-all is not supported");
+        tools_refuse(taking.flags & FILE_FLAG('T'), "lsns", "tree output is not supported");
+        tools_refuse(taking.flags & FILE_FLAG('P'), "lsns", "persistent namespace discovery is not supported");
+        tools_refuse(taking.flags & FILE_FLAG('A'), "lsns", "--output-all is not supported");
 
         positive argument_count = (positive)program_argument_count();
         positive operands = argument_count - taking.first;
 
-        if (operands > 1)
-                return string_report(log_error, 1, "%s: %s\n", "lsns", "too many namespace operands");
-        if (operands && file_option_value(address_of taking, 'p'))
-                return string_report(log_error, 1, "%s: %s\n", "lsns", "--task and a namespace operand are mutually exclusive");
+        tools_refuse(operands > 1, "lsns", "too many namespace operands");
+        tools_refuse(operands && file_option_value(address_of taking, 'p'), "lsns", "--task and a namespace operand are mutually exclusive");
 
         b32 type = -1;
         string_address type_name = file_option_value(address_of taking, 't');
@@ -21680,12 +21650,9 @@ static b32 util_linux_lslocks()
 
         ul_refuse_group(taking, ul_json_raw);
         /* Operands mean nothing to lslocks and the reference ignores them. */
-        if (taking.flags & FILE_FLAG('Q'))
-                return string_report(log_error, 1, "%s: %s\n", "lslocks", "display filters are not supported");
-        if (taking.flags & FILE_FLAG('H'))
-                return string_report(log_error, 1, "%s: %s\n", "lslocks", "column metadata output is not supported");
-        if (taking.flags & FILE_FLAG('A'))
-                return string_report(log_error, 1, "%s: %s\n", "lslocks", "--output-all is not supported");
+        tools_refuse(taking.flags & FILE_FLAG('Q'), "lslocks", "display filters are not supported");
+        tools_refuse(taking.flags & FILE_FLAG('H'), "lslocks", "column metadata output is not supported");
+        tools_refuse(taking.flags & FILE_FLAG('A'), "lslocks", "--output-all is not supported");
 
         b32 wanted_pid = 0;
         bool pid_selected = file_option_value(address_of taking, 'p') != null;
@@ -21704,8 +21671,7 @@ static b32 util_linux_lslocks()
             file_option_value(address_of taking, 'o'));
 
         for (positive i = 0; i < column_count; i++)
-                if (columns[i] == UL_LOCKS_HOLDERS)
-                        return string_report(log_error, 1, "%s: %s\n", "lslocks", "HOLDERS requires an unsupported second process-fd census");
+                tools_refuse(columns[i] == UL_LOCKS_HOLDERS, "lslocks", "HOLDERS requires an unsupported second process-fd census");
 
         text_begin("lslocks");
         utility_arena.used = 0;
@@ -22162,27 +22128,20 @@ static b32 util_linux_lsfd()
 {
         ul_lsfd_release();
         ul_taking("lsfd", ul_lsfd_options, "[options]");
-        if (taking.first != (positive)program_argument_count())
-                return string_report(log_error, 1, "%s: %s\n", "lsfd", "unexpected operand");
+        tools_refuse(taking.first != (positive)program_argument_count(), "lsfd", "unexpected operand");
         if ((taking.flags & FILE_FLAG('J')) &&
             (taking.flags & FILE_FLAG('r')))
                 return string_report(log_error, 1, "%s: %s\n", "lsfd", "--json and --raw are mutually exclusive");
-        if (taking.flags & FILE_FLAG('l'))
-                return string_report(log_error, 1, "%s: %s\n", "lsfd", "thread descriptors are not supported");
-        if (taking.flags & FILE_FLAG('i'))
-                return string_report(log_error, 1, "%s: %s\n", "lsfd", "network endpoint filtering is not supported");
-        if (taking.flags & FILE_FLAG('Q'))
-                return string_report(log_error, 1, "%s: %s\n", "lsfd", "display filters are not supported");
-        if (taking.flags & FILE_FLAG('D'))
-                return string_report(log_error, 1, "%s: %s\n", "lsfd", "filter debugging is not supported");
+        tools_refuse(taking.flags & FILE_FLAG('l'), "lsfd", "thread descriptors are not supported");
+        tools_refuse(taking.flags & FILE_FLAG('i'), "lsfd", "network endpoint filtering is not supported");
+        tools_refuse(taking.flags & FILE_FLAG('Q'), "lsfd", "display filters are not supported");
+        tools_refuse(taking.flags & FILE_FLAG('D'), "lsfd", "filter debugging is not supported");
         if ((taking.flags & FILE_FLAG('C')) ||
             (taking.flags & FILE_FLAG('d')) ||
             (taking.flags & FILE_FLAG('s')))
                 return string_report(log_error, 1, "%s: %s\n", "lsfd", "descriptor counters are not supported");
-        if (taking.flags & FILE_FLAG('k'))
-                return string_report(log_error, 1, "%s: %s\n", "lsfd", "terminal hyperlinks are not supported");
-        if (taking.flags & FILE_FLAG('H'))
-                return string_report(log_error, 1, "%s: %s\n", "lsfd", "column metadata output is not supported");
+        tools_refuse(taking.flags & FILE_FLAG('k'), "lsfd", "terminal hyperlinks are not supported");
+        tools_refuse(taking.flags & FILE_FLAG('H'), "lsfd", "column metadata output is not supported");
 
         static const p8 defaults[] = {
             UL_LSFD_COMMAND, UL_LSFD_PID, UL_LSFD_USER, UL_LSFD_FD,
@@ -22789,8 +22748,7 @@ static b32 ul_unshare_time(file_taking address_to taking, bool apply)
                 if (!values[which])
                         continue;
                 bipolar offset;
-                if (!nice_adjustment(values[which], address_of offset))
-                        return string_report(log_error, 1, "%s: %s\n", "unshare", "invalid time offset");
+                tools_refuse(!nice_adjustment(values[which], address_of offset), "unshare", "invalid time offset");
                 positive length = string_length(names[which]);
                 memory_copy_apart(line + at, names[which], length);
                 at += length;
@@ -22838,13 +22796,11 @@ static b32 util_linux_unshare()
         if (ul_unshare_time(address_of taking, false))
                 return 1;
         string_address setting = file_option_value(address_of taking, 's');
-        if (setting && !(flags & CLONE_NEWUSER))
-                return string_report(log_error, 1, "%s: %s\n", "unshare", "setgroups requires user namespace");
+        tools_refuse(setting && !(flags & CLONE_NEWUSER), "unshare", "setgroups requires user namespace");
         positive propagation = file_option_value(address_of taking, 'P')
             ? ul_unshare_propagation(file_option_value(address_of taking, 'P'))
             : MS_PRIVATE;
-        if (propagation == positive_max)
-                return string_report(log_error, 1, "%s: %s\n", "unshare", "invalid propagation mode");
+        tools_refuse(propagation == positive_max, "unshare", "invalid propagation mode");
         string_address set_uid = file_option_value(address_of taking, 'S');
         string_address set_gid = file_option_value(address_of taking, 'G');
         positive uid = 0;
@@ -22872,14 +22828,12 @@ static b32 util_linux_unshare()
                 positive id;
                 if (ul_unshare_selected.uid == 'x')
                 {
-                        if (!ul_namespace_id(map_user, false, address_of id))
-                                return string_report(log_error, 1, "%s: %s\n", "unshare", "invalid map user");
+                        tools_refuse(!ul_namespace_id(map_user, false, address_of id), "unshare", "invalid map user");
                         map.uid_single.inside = (p32)id;
                 }
                 if (ul_unshare_selected.gid == 'y')
                 {
-                        if (!ul_namespace_id(map_group, true, address_of id))
-                                return string_report(log_error, 1, "%s: %s\n", "unshare", "invalid map group");
+                        tools_refuse(!ul_namespace_id(map_group, true, address_of id), "unshare", "invalid map group");
                         map.gid_single.inside = (p32)id;
                 }
 
@@ -22962,8 +22916,7 @@ static b32 util_linux_unshare()
                      system_call_1(syscall(chroot), (positive)".") < 0 ||
                      system_change_directory("/") < 0))
                 return string_report(log_error, 1, "%s: %s\n", "unshare", "cannot change root");
-        if (wd && system_change_directory(wd) < 0)
-                return string_report(log_error, 1, "%s: %s\n", "unshare", "cannot change directory");
+        tools_refuse(wd && system_change_directory(wd) < 0, "unshare", "cannot change directory");
 
         string_address proc = file_option_value(address_of taking, 'q');
         if (taking.flags & FILE_FLAG('q'))
@@ -22974,8 +22927,7 @@ static b32 util_linux_unshare()
                         bipolar changed = system_call_5(
                             syscall(mount), 0, (positive)target, 0,
                             MS_PRIVATE | MS_REC, 0);
-                        if (changed < 0 && (!proc || changed != -ERROR_INVALID))
-                                return string_report(log_error, 1, "%s: %s\n", "unshare", "cannot privatize proc");
+                        tools_refuse(changed < 0 && (!proc || changed != -ERROR_INVALID), "unshare", "cannot privatize proc");
                 }
                 if (system_mount("proc", target, "proc",
                                   MS_NOSUID | MS_NODEV | MS_NOEXEC, 0) < 0)
@@ -23240,8 +23192,7 @@ static b32 util_linux_nsenter()
                 process_signal_default(SIGCHLD);
                 log_flush();
                 bipolar child = system_fork();
-                if (child < 0)
-                        return string_report(log_error, 1, "%s: %s\n", "nsenter", "fork failed");
+                tools_refuse(child < 0, "nsenter", "fork failed");
                 if (child > 0)
                         return ul_namespace_wait(child, true);
         }
@@ -23271,8 +23222,7 @@ static b32 util_linux_setsid()
                   "[options] program [argument ...]");
         bipolar pid;
         bool waiting;
-        if (taking.first >= (positive)program_argument_count())
-                return string_report(log_error, 1, "%s: %s\n", "setsid", "no command specified");
+        tools_refuse(taking.first >= (positive)program_argument_count(), "setsid", "no command specified");
 
         waiting = (taking.flags & FILE_FLAG('w')) != 0;
         pid = system_call_1(syscall(getpid), 0);
@@ -23320,8 +23270,7 @@ static b32 util_linux_setpgid()
         ul_taking("setpgid", ul_setpgid_options,
                   "[options] program [argument ...]");
         bipolar changed;
-        if (taking.first >= (positive)program_argument_count())
-                return string_report(log_error, 1, "%s: %s\n", "setpgid", "no command specified");
+        tools_refuse(taking.first >= (positive)program_argument_count(), "setpgid", "no command specified");
 
         changed = system_call_2(syscall(setpgid), 0, 0);
         if (changed < 0)
@@ -23474,12 +23423,9 @@ static b32 util_linux_fallocate()
         positive flags;
         positive operations;
         positive mode = 0;
-        if (taking.first >= count)
-                return string_report(log_error, 1, "%s: %s\n", "fallocate", "no filename specified");
-        if (taking.first + 1 != count)
-                return string_report(log_error, 1, "%s: %s\n", "fallocate", "unexpected number of arguments");
-        if (!file_option_value(address_of taking, 'l'))
-                return string_report(log_error, 1, "%s: %s\n", "fallocate", "no length argument specified");
+        tools_refuse(taking.first >= count, "fallocate", "no filename specified");
+        tools_refuse(taking.first + 1 != count, "fallocate", "unexpected number of arguments");
+        tools_refuse(!file_option_value(address_of taking, 'l'), "fallocate", "no length argument specified");
         if (!ul_size(file_option_value(address_of taking, 'l'),
                      address_of length) || !length || length > (positive)b64_max)
                 return string_report(log_error, 1, "%s: %s\n", "fallocate", "invalid length");
@@ -23669,8 +23615,7 @@ static b32 util_linux_copyfilerange()
         ul_taking("copyfilerange", ul_copyfilerange_options,
                   "[options] source destination range...");
         positive count = (positive)program_argument_count();
-        if (count - taking.first < 3)
-                return string_report(log_error, 1, "%s: %s\n", "copyfilerange", "too few arguments");
+        tools_refuse(count - taking.first < 3, "copyfilerange", "too few arguments");
 
         string_address source = program_argument((b32)taking.first++);
         string_address destination = program_argument((b32)taking.first++);
@@ -23760,8 +23705,7 @@ static b32 util_linux_fadvise()
         {
                 advice = ul_fadvise_kind(
                     file_option_value(address_of taking, 'a'));
-                if (advice < 0)
-                        return string_report(log_error, 1, "%s: %s\n", "fadvise", "invalid advice argument");
+                tools_refuse(advice < 0, "fadvise", "invalid advice argument");
         }
 
         if ((file_option_value(address_of taking, 'l') &&
@@ -23816,8 +23760,7 @@ static b32 util_linux_fadvise()
         }
         if (!given_descriptor)
         {
-                if (taking.first >= (positive)program_argument_count())
-                        return string_report(log_error, 1, "%s: %s\n", "fadvise", "no file specified");
+                tools_refuse(taking.first >= (positive)program_argument_count(), "fadvise", "no file specified");
                 if (taking.first + 1 !=
                     (positive)program_argument_count())
                         return string_report(log_error, 1, "%s: %s\n", "fadvise", "too many files");
@@ -23935,8 +23878,7 @@ static b32 util_linux_ionice()
         {
                 class = ul_ionice_class(
                     file_option_value(address_of taking, 'c'));
-                if (class < 0)
-                        return string_report(log_error, 1, "%s: %s\n", "ionice", "unknown scheduling class");
+                tools_refuse(class < 0, "ionice", "unknown scheduling class");
                 setting |= 2;
         }
 
@@ -24054,12 +23996,9 @@ static b32 util_linux_choom()
         if (adjustment &&
             !ul_signed(adjustment, b32_min, b32_max, address_of parsed))
                 return string_report(log_error, 1, "%s: %s\n", "choom", "invalid adjust argument");
-        if (pid && taking.first < count)
-                return string_report(log_error, 1, "%s: %s\n", "choom", "PID and command are mutually exclusive");
-        if (!pid && taking.first >= count)
-                return string_report(log_error, 1, "%s: %s\n", "choom", "no PID or COMMAND specified");
-        if (!adjustment && taking.first < count)
-                return string_report(log_error, 1, "%s: %s\n", "choom", "no OOM score adjust value specified");
+        tools_refuse(pid && taking.first < count, "choom", "PID and command are mutually exclusive");
+        tools_refuse(!pid && taking.first >= count, "choom", "no PID or COMMAND specified");
+        tools_refuse(!adjustment && taking.first < count, "choom", "no OOM score adjust value specified");
 
         b32 target = pid ? pid : (b32)system_call(syscall(getpid));
         p8 score_path[64];
@@ -24088,10 +24027,8 @@ static b32 util_linux_choom()
         }
 
         b32 old = 0;
-        if (pid && !ul_choom_read(adjust_path, address_of old))
-                return string_report(log_error, 1, "%s: %s\n", "choom", "failed to read OOM score adjust value");
-        if (!ul_choom_write(adjust_path, (b32)parsed))
-                return string_report(log_error, 1, "%s: %s\n", "choom", "failed to set OOM score adjust value");
+        tools_refuse(pid && !ul_choom_read(adjust_path, address_of old), "choom", "failed to read OOM score adjust value");
+        tools_refuse(!ul_choom_write(adjust_path, (b32)parsed), "choom", "failed to set OOM score adjust value");
         if (pid)
         {
                 string_format(log,
@@ -24150,18 +24087,15 @@ static b32 util_linux_getino()
         file_operands_begin();
         ul_taking("getino", ul_getino_options, "[options] PID[:inode]...",
                   .operand = file_operand);
-        if (file_operand_failed)
-                return string_report(log_error, 1, "%s: %s\n", "getino", "not enough memory");
-        if (!file_operand_count)
-                return string_report(log_error, 1, "%s: %s\n", "getino", "no process specified");
+        tools_refuse(file_operand_failed, "getino", "not enough memory");
+        tools_refuse(!file_operand_count, "getino", "no process specified");
 
         positive kind = 0;
         bool selected = false;
         for (positive i = 0; i < array_count(ul_getino_requests); i++)
                 if (taking.flags & FILE_FLAG((p8)('0' + i)))
                 {
-                        if (selected)
-                                return string_report(log_error, 1, "%s: %s\n", "getino", "namespace options are mutually exclusive");
+                        tools_refuse(selected, "getino", "namespace options are mutually exclusive");
                         selected = true;
                         kind = i;
                 }
@@ -25369,8 +25303,7 @@ static b32 util_linux_blockdev()
                 return ul_usage_error("blockdev", "not enough arguments");
         if (!report && taking.first == count)
                 return ul_usage_error("blockdev", "no device specified");
-        if (report && run.count)
-                return string_report(log_error, 1, "%s: %s\n", "blockdev", "--report cannot be combined with commands");
+        tools_refuse(report && run.count, "blockdev", "--report cannot be combined with commands");
 
         b32 status = 0;
         if (report)
@@ -25409,8 +25342,7 @@ static b32 util_linux_isosize()
                   "[options] <iso9660_image_file> ...");
 
         positive count = (positive)program_argument_count();
-        if (taking.first == count)
-                return string_report(log_error, 1, "%s: %s\n", "isosize", "no device specified");
+        tools_refuse(taking.first == count, "isosize", "no device specified");
 
         /* util-linux takes a signed 32-bit divisor: a negative one divides. */
         bipolar divisor = 0;
@@ -25705,21 +25637,16 @@ static b32 util_linux_wipefs()
         bool all = (taking.flags & FILE_FLAG('a')) != 0;
         bool no_act = (taking.flags & FILE_FLAG('n')) != 0;
         string_address offset_text = file_option_value(address_of taking, 'o');
-        if ((all || offset_text) && !no_act)
-                return string_report(log_error, 1, "%s: %s\n", "wipefs", "mutation is not supported; use --no-act");
-        if (all && offset_text)
-                return string_report(log_error, 1, "%s: %s\n", "wipefs", "--all and --offset conflict");
+        tools_refuse((all || offset_text) && !no_act, "wipefs", "mutation is not supported; use --no-act");
+        tools_refuse(all && offset_text, "wipefs", "--all and --offset conflict");
 
         positive count = (positive)program_argument_count();
-        if (taking.first == count)
-                return string_report(log_error, 1, "%s: %s\n", "wipefs", "no device specified");
+        tools_refuse(taking.first == count, "wipefs", "no device specified");
         positive operands = count - taking.first;
-        if (operands > 256)
-                return string_report(log_error, 1, "%s: %s\n", "wipefs", "too many devices");
+        tools_refuse(operands > 256, "wipefs", "too many devices");
 
         positive offset = 0;
-        if (offset_text && !ul_size(offset_text, address_of offset))
-                return string_report(log_error, 1, "%s: %s\n", "wipefs", "invalid offset");
+        tools_refuse(offset_text && !ul_size(offset_text, address_of offset), "wipefs", "invalid offset");
 
         utility_arena.used = 0;
         ul_wipefs_work work = {
@@ -25744,8 +25671,7 @@ static b32 util_linux_wipefs()
                         status = 1;
                         continue;
                 }
-                if (work.failed)
-                        return string_report(log_error, 1, "%s: %s\n", "wipefs", "too many signatures");
+                tools_refuse(work.failed, "wipefs", "too many signatures");
         }
 
         if (all || offset_text)
@@ -25884,12 +25810,10 @@ static b32 util_linux_mkswap()
             !string_equals(endian, "little"))
                 return string_report(log_error, 1, "%s: %s\n", "mkswap", "only little-endian swap is supported");
         string_address version = file_option_value(address_of taking, 'v');
-        if (version && !string_equals(version, "1"))
-                return string_report(log_error, 1, "%s: %s\n", "mkswap", "only swap version 1 is supported");
+        tools_refuse(version && !string_equals(version, "1"), "mkswap", "only swap version 1 is supported");
 
         positive count = (positive)program_argument_count();
-        if (taking.first >= count || count - taking.first > 2)
-                return string_report(log_error, 1, "%s: %s\n", "mkswap", "expected device and optional size");
+        tools_refuse(taking.first >= count || count - taking.first > 2, "mkswap", "expected device and optional size");
         string_address path = program_argument((b32)taking.first);
         bipolar handle = system_open_at(AT_FDCWD, path,
                                         FILE_READ_WRITE | O_CLOEXEC);
@@ -26021,8 +25945,7 @@ static b32 util_linux_swaplabel()
         ul_taking("swaplabel", ul_swaplabel_options, "[options] <device>");
         positive count = (positive)program_argument_count();
         /* One device is read; util-linux ignores whatever follows it. */
-        if (taking.first >= count)
-                return string_report(log_error, 1, "%s: %s\n", "swaplabel", "expected exactly one device");
+        tools_refuse(taking.first >= count, "swaplabel", "expected exactly one device");
 
         string_address path = program_argument((b32)taking.first);
         bool changing = file_option_value(address_of taking, 'L') ||
@@ -27123,14 +27046,10 @@ static const argument_option ul_lscpu_options[] = {
 static b32 util_linux_lscpu()
 {
         ul_taking("lscpu", ul_lscpu_options, "[options]");
-        if (taking.first != (positive)program_argument_count())
-                return string_report(log_error, 1, "%s: %s\n", "lscpu", "unexpected operand");
-        if (taking.flags & FILE_FLAG('y'))
-                return string_report(log_error, 1, "%s: %s\n", "lscpu", "physical identifiers are not supported");
-        if (file_option_value(address_of taking, 's'))
-                return string_report(log_error, 1, "%s: %s\n", "lscpu", "--sysroot is not supported");
-        if (taking.flags & (FILE_FLAG('H') | FILE_FLAG('A')))
-                return string_report(log_error, 1, "%s: %s\n", "lscpu", "column metadata is not supported");
+        tools_refuse(taking.first != (positive)program_argument_count(), "lscpu", "unexpected operand");
+        tools_refuse(taking.flags & FILE_FLAG('y'), "lscpu", "physical identifiers are not supported");
+        tools_refuse(file_option_value(address_of taking, 's'), "lscpu", "--sysroot is not supported");
+        tools_refuse(taking.flags & (FILE_FLAG('H') | FILE_FLAG('A')), "lscpu", "column metadata is not supported");
 
         positive modes = ((taking.flags & FILE_FLAG('p')) != 0) +
                          ((taking.flags & FILE_FLAG('e')) != 0) +
@@ -27138,10 +27057,8 @@ static b32 util_linux_lscpu()
         positive filters = ((taking.flags & FILE_FLAG('a')) != 0) +
                            ((taking.flags & FILE_FLAG('b')) != 0) +
                            ((taking.flags & FILE_FLAG('c')) != 0);
-        if (modes > 1)
-                return string_report(log_error, 1, "%s: %s\n", "lscpu", "output modes are mutually exclusive");
-        if (filters > 1)
-                return string_report(log_error, 1, "%s: %s\n", "lscpu", "CPU filters are mutually exclusive");
+        tools_refuse(modes > 1, "lscpu", "output modes are mutually exclusive");
+        tools_refuse(filters > 1, "lscpu", "CPU filters are mutually exclusive");
 
         string_address selected = null;
         if (taking.flags & FILE_FLAG('p'))
@@ -27151,16 +27068,14 @@ static b32 util_linux_lscpu()
         else if (taking.flags & FILE_FLAG('C'))
                 selected = file_option_value(address_of taking, 'C');
         string_address output = file_option_value(address_of taking, 'o');
-        if (output && !modes)
-                return string_report(log_error, 1, "%s: %s\n", "lscpu", "--output needs a table mode");
+        tools_refuse(output && !modes, "lscpu", "--output needs a table mode");
         if (output)
                 selected = output;
         if (selected && string_is(selected, '='))
                 selected++;
         utility_arena.used = 0;
         ul_lscpu_failed = false;
-        if (!ul_lscpu_take())
-                return string_report(log_error, 1, "%s: %s\n", "lscpu", "cannot read CPU topology");
+        tools_refuse(!ul_lscpu_take(), "lscpu", "cannot read CPU topology");
         ul_lscpu_columns[UL_LSCPU_CACHE].heading = ul_lscpu_cache_heading;
         bool json = (taking.flags & FILE_FLAG('J')) != 0;
         bool raw = (taking.flags & FILE_FLAG('r')) != 0;
@@ -27600,14 +27515,10 @@ static b32 util_linux_lsmem()
             {'a', (string_address)"all"}, {'S', (string_address)"split"}};
         ul_refuse_group(taking, lsmem_formats);
         ul_refuse_group(taking, lsmem_split);
-        if (taking.first != (positive)program_argument_count())
-                return string_report(log_error, 1, "%s: %s\n", "lsmem", "unexpected operand");
-        if (taking.flags & FILE_FLAG('P'))
-                return string_report(log_error, 1, "%s: %s\n", "lsmem", "--pairs is not supported");
-        if (taking.flags & FILE_FLAG('A'))
-                return string_report(log_error, 1, "%s: %s\n", "lsmem", "--output-all is not supported");
-        if (file_option_value(address_of taking, 's'))
-                return string_report(log_error, 1, "%s: %s\n", "lsmem", "--sysroot is not supported");
+        tools_refuse(taking.first != (positive)program_argument_count(), "lsmem", "unexpected operand");
+        tools_refuse(taking.flags & FILE_FLAG('P'), "lsmem", "--pairs is not supported");
+        tools_refuse(taking.flags & FILE_FLAG('A'), "lsmem", "--output-all is not supported");
+        tools_refuse(file_option_value(address_of taking, 's'), "lsmem", "--sysroot is not supported");
 
         string_address selected = file_option_value(address_of taking, 'o');
         string_address splitting = file_option_value(address_of taking, 'S');
@@ -27665,8 +27576,7 @@ static b32 util_linux_lsmem()
                     "options --{raw,json,pairs} and --summary=only are mutually exclusive");
 
         utility_arena.used = 0;
-        if (!ul_lsmem_take())
-                return string_report(log_error, 1, "%s: %s\n", "lsmem", "memory hotplug sysfs is unavailable");
+        tools_refuse(!ul_lsmem_take(), "lsmem", "memory hotplug sysfs is unavailable");
         ul_lsmem_ranges(split, every);
         ul_lsmem_bytes = (taking.flags & FILE_FLAG('b')) != 0;
         bool raw = (taking.flags & FILE_FLAG('r')) != 0;
@@ -28817,12 +28727,9 @@ static b32 util_linux_lsblk()
             {'r', (string_address)"raw"}};
         ul_refuse_group(taking, lsblk_formats);
         ul_refuse_group(taking, lsblk_shapes);
-        if (taking.flags & (FILE_FLAG('D') | FILE_FLAG('z')))
-                return string_report(log_error, 1, "%s: %s\n", "lsblk", "discard/zoned fields are not supported");
-        if (taking.flags & (FILE_FLAG('O') | FILE_FLAG('P')))
-                return string_report(log_error, 1, "%s: %s\n", "lsblk", "output-all/pairs metadata is not supported");
-        if (file_option_value(address_of taking, 's'))
-                return string_report(log_error, 1, "%s: %s\n", "lsblk", "--sysroot is not supported");
+        tools_refuse(taking.flags & (FILE_FLAG('D') | FILE_FLAG('z')), "lsblk", "discard/zoned fields are not supported");
+        tools_refuse(taking.flags & (FILE_FLAG('O') | FILE_FLAG('P')), "lsblk", "output-all/pairs metadata is not supported");
+        tools_refuse(file_option_value(address_of taking, 's'), "lsblk", "--sysroot is not supported");
         if (file_option_value(address_of taking, 'C') ||
             file_option_value(address_of taking, 'Q'))
                 return string_report(log_error, 1, "%s: %s\n", "lsblk", "display filters are not supported");
@@ -28883,8 +28790,7 @@ static b32 util_linux_lsblk()
         for (positive i = 0; i < column_count; i++)
                 requires |= ul_lsblk_columns[columns[i]].requires;
         utility_arena.used = 0;
-        if (!ul_lsblk_take(requires))
-                return string_report(log_error, 1, "%s: %s\n", "lsblk", "block-device sysfs is unavailable");
+        tools_refuse(!ul_lsblk_take(requires), "lsblk", "block-device sysfs is unavailable");
         ul_lsblk_select_operands(taking.first);
 
         bool list = (taking.flags & FILE_FLAG('l')) != 0;
@@ -29337,8 +29243,7 @@ static const argument_option ul_ipcmk_options[] = {
 static b32 util_linux_ipcmk()
 {
         ul_taking("ipcmk", ul_ipcmk_options, "[options]");
-        if (taking.first != (positive)program_argument_count())
-                return string_report(log_error, 1, "%s: %s\n", "ipcmk", "unexpected operand");
+        tools_refuse(taking.first != (positive)program_argument_count(), "ipcmk", "unexpected operand");
         if (taking.flags &
             (FILE_FLAG('m') | FILE_FLAG('s') | FILE_FLAG('q') |
              FILE_FLAG('n')))
@@ -29347,8 +29252,7 @@ static b32 util_linux_ipcmk()
         bool shared = (taking.flags & FILE_FLAG('M')) != 0;
         bool message = (taking.flags & FILE_FLAG('Q')) != 0;
         bool semaphore = (taking.flags & FILE_FLAG('S')) != 0;
-        if (!shared && !message && !semaphore)
-                return string_report(log_error, 1, "%s: %s\n", "ipcmk", "no System V resource requested");
+        tools_refuse(!shared && !message && !semaphore, "ipcmk", "no System V resource requested");
         positive mode = 0644;
         if ((taking.flags & FILE_FLAG('p')) &&
             !ul_ipc_octal(file_option_value(address_of taking, 'p'),
@@ -29367,8 +29271,7 @@ static b32 util_linux_ipcmk()
                 return string_report(log_error, 1, "%s: %s\n", "ipcmk", "invalid semaphore count");
 
         file_random_state random;
-        if (!file_random_seed(address_of random))
-                return string_report(log_error, 1, "%s: %s\n", "ipcmk", "kernel randomness unavailable");
+        tools_refuse(!file_random_seed(address_of random), "ipcmk", "kernel randomness unavailable");
         bipolar ids[UL_IPC_TYPES] = {-1, -1, -1};
         if (shared)
                 ids[UL_IPC_SHARED] = ul_ipc_create_one(
@@ -29467,8 +29370,7 @@ static b32 util_linux_ipcrm()
         if (taking.flags &
             (FILE_FLAG('x') | FILE_FLAG('y') | FILE_FLAG('z')))
                 return string_report(log_error, 1, "%s: %s\n", "ipcrm", "POSIX IPC is not supported");
-        if (taking.flags & FILE_FLAG('a'))
-                return string_report(log_error, 1, "%s: %s\n", "ipcrm", "bulk removal is not supported");
+        tools_refuse(taking.flags & FILE_FLAG('a'), "ipcrm", "bulk removal is not supported");
 
         bool verbose = (taking.flags & FILE_FLAG('v')) != 0;
         positive count = (positive)program_argument_count();
@@ -29479,8 +29381,7 @@ static b32 util_linux_ipcrm()
             one word it refuses before it reads anything at all. */
         if (count < 2)
         {
-                string_format(log_error, "ipcrm: bad usage\n"
-                              "Try 'ipcrm --help' for more information.\n");
+                string_format(log_error, "ipcrm: bad usage\n" TOOLS_TRY("ipcrm"));
                 log_flush();
                 return 1;
         }
@@ -29510,8 +29411,7 @@ static b32 util_linux_ipcrm()
                 if (taking.first != 1 || type == UL_IPC_TYPES)
                 {
                         string_format(log_error,
-                                      "ipcrm: unknown argument: %s\n"
-                                      "Try 'ipcrm --help' for more information.\n",
+                                      "ipcrm: unknown argument: %s\n" TOOLS_TRY("ipcrm"),
                                       kind);
                         log_flush();
                         return 1;
@@ -29582,8 +29482,7 @@ static b32 util_linux_lsipc()
             {'o', (string_address)"output"}};
         ul_refuse_group(taking, lsipc_pairs);
         ul_refuse_group(taking, ul_json_raw);
-        if (taking.first != (positive)program_argument_count())
-                return string_report(log_error, 1, "%s: %s\n", "lsipc", "unexpected operand");
+        tools_refuse(taking.first != (positive)program_argument_count(), "lsipc", "unexpected operand");
         /* An empty column list is refused without a word, as the reference
            does, and after the options that cannot be combined. */
         if (file_option_value(address_of taking, 'o') &&
@@ -29593,19 +29492,16 @@ static b32 util_linux_lsipc()
             (FILE_FLAG('M') | FILE_FLAG('Q') | FILE_FLAG('S') |
              FILE_FLAG('N')))
                 return string_report(log_error, 1, "%s: %s\n", "lsipc", "POSIX IPC is not supported");
-        if (taking.flags & FILE_FLAG('g'))
-                return string_report(log_error, 1, "%s: %s\n", "lsipc", "global summary is not supported");
+        tools_refuse(taking.flags & FILE_FLAG('g'), "lsipc", "global summary is not supported");
         if (taking.flags &
             (FILE_FLAG('e') | FILE_FLAG('y') | FILE_FLAG('u')))
                 return string_report(log_error, 1, "%s: %s\n", "lsipc", "export/shell/notruncate modes are not supported");
-        if (file_option_value(address_of taking, 'F'))
-                return string_report(log_error, 1, "%s: %s\n", "lsipc", "custom time format is not supported");
+        tools_refuse(file_option_value(address_of taking, 'F'), "lsipc", "custom time format is not supported");
 
         positive selected = ((taking.flags & FILE_FLAG('m')) != 0) +
                             ((taking.flags & FILE_FLAG('q')) != 0) +
                             ((taking.flags & FILE_FLAG('s')) != 0);
-        if (selected != 1)
-                return string_report(log_error, 1, "%s: %s\n", "lsipc", "select exactly one System V resource");
+        tools_refuse(selected != 1, "lsipc", "select exactly one System V resource");
         p8 type = taking.flags & FILE_FLAG('q') ? UL_IPC_MESSAGE
                   : taking.flags & FILE_FLAG('m') ? UL_IPC_SHARED
                                                   : UL_IPC_SEMAPHORE;
@@ -29660,8 +29556,7 @@ static b32 util_linux_lsipc()
                 }
         }
         for (positive at = 0; at < column_count; at++)
-                if (!ul_ipc_column_applies(type, columns[at]))
-                        return string_report(log_error, 1, "%s: %s\n", "lsipc", "column does not apply to resource");
+                tools_refuse(!ul_ipc_column_applies(type, columns[at]), "lsipc", "column does not apply to resource");
 
         bool have_id = (taking.flags & FILE_FLAG('i')) != 0;
         positive id = 0;
@@ -29669,12 +29564,10 @@ static b32 util_linux_lsipc()
             !ul_unsigned(file_option_value(address_of taking, 'i'),
                          b32_max, address_of id))
                 return string_report(log_error, 1, "%s: %s\n", "lsipc", "invalid resource id");
-        if (have_id && !(taking.flags & FILE_FLAG('l')))
-                return string_report(log_error, 1, "%s: %s\n", "lsipc", "--id requires --list");
+        tools_refuse(have_id && !(taking.flags & FILE_FLAG('l')), "lsipc", "--id requires --list");
 
         utility_arena.used = 0;
-        if (!ul_ipc_snapshot_load((positive)1 << type))
-                return string_report(log_error, 1, "%s: %s\n", "lsipc", "cannot read System V IPC snapshot");
+        tools_refuse(!ul_ipc_snapshot_load((positive)1 << type), "lsipc", "cannot read System V IPC snapshot");
         ul_ipc_filter(type, have_id, id);
         ul_ipc_bytes = (taking.flags & FILE_FLAG('b')) != 0;
         ul_ipc_numeric_permissions =
@@ -29683,10 +29576,8 @@ static b32 util_linux_lsipc()
         bool json = (taking.flags & FILE_FLAG('J')) != 0;
         bool newline = (taking.flags & FILE_FLAG('n')) != 0;
         bool raw = (taking.flags & FILE_FLAG('r')) != 0;
-        if (json + newline + raw > 1)
-                return string_report(log_error, 1, "%s: %s\n", "lsipc", "output modes are mutually exclusive");
-        if ((taking.flags & FILE_FLAG('l')) && (json || newline || raw))
-                return string_report(log_error, 1, "%s: %s\n", "lsipc", "--list is incompatible with structured output");
+        tools_refuse(json + newline + raw > 1, "lsipc", "output modes are mutually exclusive");
+        tools_refuse((taking.flags & FILE_FLAG('l')) && (json || newline || raw), "lsipc", "--list is incompatible with structured output");
         if (newline)
                 ul_lsipc_newline(columns, column_count);
         else
@@ -29791,8 +29682,7 @@ static const argument_option ul_ipcs_options[] = {
 static b32 util_linux_ipcs()
 {
         ul_taking("ipcs", ul_ipcs_options, "[-m|-q|-s] [options]");
-        if (taking.first != (positive)program_argument_count())
-                return string_report(log_error, 1, "%s: %s\n", "ipcs", "unexpected operand");
+        tools_refuse(taking.first != (positive)program_argument_count(), "ipcs", "unexpected operand");
         if (taking.flags &
             (FILE_FLAG('i') | FILE_FLAG('t') | FILE_FLAG('p') |
              FILE_FLAG('c') | FILE_FLAG('l') | FILE_FLAG('u')))
@@ -29803,8 +29693,7 @@ static b32 util_linux_ipcs()
         if (taking.flags & FILE_FLAG('s')) types |= UL_IPC_SEMAPHORE_BIT;
         if (!types || (taking.flags & FILE_FLAG('a'))) types = UL_IPC_ALL_BITS;
         utility_arena.used = 0;
-        if (!ul_ipc_snapshot_load(types))
-                return string_report(log_error, 1, "%s: %s\n", "ipcs", "cannot read System V IPC snapshot");
+        tools_refuse(!ul_ipc_snapshot_load(types), "ipcs", "cannot read System V IPC snapshot");
         ul_ipc_bytes = !(taking.flags & FILE_FLAG('H'));
         ul_ipcs_size_align = ul_ipc_bytes ? 0 : 6;
         ul_ipcs_columns[UL_IPC_SIZE].heading = ul_ipc_bytes ? "bytes" : "size";
@@ -30219,8 +30108,7 @@ static b32 ul_rfkill_change(ul_rfkill_row address_to rows, positive count,
 {
         if (first == arguments)
                 return 0; /* The reference does nothing, quietly, and is content. */
-        if (arguments - first > UL_RFKILL_FILTER_MAX)
-                return string_report(log_error, 1, "%s: %s\n", "rfkill", "too many identifiers");
+        tools_refuse(arguments - first > UL_RFKILL_FILTER_MAX, "rfkill", "too many identifiers");
 
         string_address device = file_environment_override(
             (string_address)"MOONWATER_RFKILL_DEVICE",
@@ -30318,8 +30206,7 @@ static b32 util_linux_rfkill()
                 log_flush();
                 return 0;
         }
-        if (string_equals(action, "event"))
-                return string_report(log_error, 1, "%s: %s\n", "rfkill", "unbounded event monitoring is not supported");
+        tools_refuse(string_equals(action, "event"), "rfkill", "unbounded event monitoring is not supported");
         if (!table && !explicit_list &&
             !string_equals(action, "block") &&
             !string_equals(action, "unblock") &&
@@ -30332,8 +30219,7 @@ static b32 util_linux_rfkill()
                 action = (string_address)"list-table";
                 table = true;
         }
-        if (arguments - taking.first > UL_RFKILL_FILTER_MAX)
-                return string_report(log_error, 1, "%s: %s\n", "rfkill", "too many identifiers");
+        tools_refuse(arguments - taking.first > UL_RFKILL_FILTER_MAX, "rfkill", "too many identifiers");
 
         ul_rfkill_row address_to rows;
         positive count;
@@ -30670,16 +30556,11 @@ static b32 tools_fincore_main()
                 log_flush();
                 return 0;
         }
-        if (!file_operand_count)
-                return string_report(log_error, 1, "%s: %s\n", "fincore", "no file specified");
-        if (taking.flags & FILE_FLAG('c'))
-                return string_report(log_error, 1, "%s: %s\n", "fincore", "grand totals are not supported");
-        if (taking.flags & FILE_FLAG('R'))
-                return string_report(log_error, 1, "%s: %s\n", "fincore", "recursive traversal is not supported");
-        if (taking.flags & FILE_FLAG('C'))
-                return string_report(log_error, 1, "%s: %s\n", "fincore", "cachestat option is not supported");
-        if (taking.flags & FILE_FLAG('A'))
-                return string_report(log_error, 1, "%s: %s\n", "fincore", "extended output metadata is not supported");
+        tools_refuse(!file_operand_count, "fincore", "no file specified");
+        tools_refuse(taking.flags & FILE_FLAG('c'), "fincore", "grand totals are not supported");
+        tools_refuse(taking.flags & FILE_FLAG('R'), "fincore", "recursive traversal is not supported");
+        tools_refuse(taking.flags & FILE_FLAG('C'), "fincore", "cachestat option is not supported");
+        tools_refuse(taking.flags & FILE_FLAG('A'), "fincore", "extended output metadata is not supported");
 
         static const p8 defaults[] = {
             TOOLS_FINCORE_RES, TOOLS_FINCORE_PAGES,
@@ -30699,8 +30580,7 @@ static b32 tools_fincore_main()
 
         text_begin("fincore");
         utility_arena.used = 0;
-        if (file_operand_count > positive_max / sizeof(tools_fincore_row))
-                return text_done(string_diagnostic(&text_diagnostic, 1, null, "too many files"));
+        text_refuse(file_operand_count > positive_max / sizeof(tools_fincore_row), "too many files");
         tools_fincore_row address_to rows =
             (tools_fincore_row address_to)utility_arena_take(
                 file_operand_count * sizeof(*rows));

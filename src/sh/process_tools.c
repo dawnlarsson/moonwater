@@ -440,8 +440,7 @@ static b32 process_stdbuf()
         positive count = (positive)program_argument_count();
 
         if (taking.first >= count)
-                return string_report(log_error, 125, "stdbuf: missing operand\n"
-                                                     "Try 'stdbuf --help' for more information.\n");
+                return string_report(log_error, 125, "stdbuf: missing operand\n" TOOLS_TRY("stdbuf"));
         if (!modes)
                 return string_report(log_error, 125,
                                      "stdbuf: you must specify a buffering mode option\n"
@@ -613,8 +612,7 @@ static b32 process_chroot()
         if (!file_take(address_of taking))
                 return 125;
         if (taking.first >= count)
-                return string_report(log_error, 125, "chroot: missing operand\n"
-                                                     "Try 'chroot --help' for more information.\n");
+                return string_report(log_error, 125, "chroot: missing operand\n" TOOLS_TRY("chroot"));
 
         string_address root = program_argument((b32)taking.first++);
 
@@ -634,8 +632,7 @@ static b32 process_chroot()
                         //      coreutils sends the reader on to --help here,
                         //      as it does for every usage complaint.
                         log_error("chroot: option --skip-chdir only permitted if NEWROOT is old '/'\n", 0);
-                        return string_report(log_error, 125,
-                                             "Try 'chroot --help' for more information.\n");
+                        return string_report(log_error, 125, TOOLS_TRY("chroot"));
                 }
         }
 
@@ -760,8 +757,7 @@ static b32 process_nohup()
         if (!file_take(address_of taking))
                 return failure;
         if (taking.first >= count)
-                return string_report(log_error, failure, "nohup: missing operand\n"
-                                                     "Try 'nohup --help' for more information.\n");
+                return string_report(log_error, failure, "nohup: missing operand\n" TOOLS_TRY("nohup"));
 
         bool input_terminal = stream_is_terminal(0);
         bool output_terminal = stream_is_terminal(1);
@@ -2518,8 +2514,7 @@ static b32 process_script()
         if (ul_options_done(address_of taking,
                 "[options] [file] [-- command [argument...]]", address_of answer))
                 return answer;
-        if (taking.flags & FILE_FLAG('o'))
-                return string_report(log_error, 1, "%s: %s\n", "script", "output limits are not supported");
+        tools_refuse(taking.flags & FILE_FLAG('o'), "script", "output limits are not supported");
 
         positive separator = count;
         for (positive at = 1; at < count; at++)
@@ -2541,14 +2536,12 @@ static b32 process_script()
                                              : null;
         if (command)
         {
-                if (separator + 1 < count || operands > 1)
-                        return string_report(log_error, 1, "%s: %s\n", "script", "--command cannot be combined with -- command");
+                tools_refuse(separator + 1 < count || operands > 1, "script", "--command cannot be combined with -- command");
         }
         else if (separator < count)
         {
                 // A bare -- with nothing after it means the shell itself.
-                if (operands > 1)
-                        return string_report(log_error, 1, "%s: %s\n", "script", "invalid command operands");
+                tools_refuse(operands > 1, "script", "invalid command operands");
                 command_first = separator + 1;
         }
         else if (operands > 1)
@@ -2556,12 +2549,10 @@ static b32 process_script()
 
         bool has_io = (taking.flags & (FILE_FLAG('I') | FILE_FLAG('O') |
                                        FILE_FLAG('B'))) != 0;
-        if (positional && has_io)
-                return string_report(log_error, 1, "%s: %s\n", "script", "positional log conflicts with explicit log");
+        tools_refuse(positional && has_io, "script", "positional log conflicts with explicit log");
         //      --log-timing and --timing name the same file by two spellings,
         //      and the reference refuses the pair rather than choosing.
-        if ((taking.flags & FILE_FLAG('T')) && (taking.flags & FILE_FLAG('t')))
-                return string_report(log_error, 1, "%s: %s\n", "script", "options --log-timing and --timing cannot be combined");
+        tools_refuse((taking.flags & FILE_FLAG('T')) && (taking.flags & FILE_FLAG('t')), "script", "options --log-timing and --timing cannot be combined");
 
         process_script_state state;
         memory_fill(address_of state, 0, sizeof(state));
@@ -3109,8 +3100,7 @@ static b32 process_scriptreplay()
         if (ul_options_done(address_of taking,
                 "[options] timingfile [typescript [divisor]]", address_of answer))
                 return answer;
-        if (taking.flags & FILE_FLAG('S'))
-                return string_report(log_error, 1, "%s: %s\n", "scriptreplay", "summary mode is not supported");
+        tools_refuse(taking.flags & FILE_FLAG('S'), "scriptreplay", "summary mode is not supported");
 
         string_address timing_path = timing_letter
             ? file_option_value(address_of taking, timing_letter)
@@ -3118,8 +3108,7 @@ static b32 process_scriptreplay()
         positive operand = taking.first;
         if (!timing_path)
         {
-                if (operand >= argument_count)
-                        return string_report(log_error, 1, "%s: %s\n", "scriptreplay", "missing timing file");
+                tools_refuse(operand >= argument_count, "scriptreplay", "missing timing file");
                 timing_path = program_argument((b32)operand++);
         }
 
