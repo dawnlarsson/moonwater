@@ -4498,9 +4498,13 @@ static bool crypto_rsa_pss_sha256(p8 address_to n_bytes, positive n_length,
 #define TLS_NOT_YET (-4)
 /* Or that no name in it was the host's. */
 #define TLS_MISMATCH (-5)
+/* Or that the clock is below its floor: it was never set, so no date in a
+   certificate can be judged against it. */
+#define TLS_CLOCK (-6)
 #define TLS_FAULT_EARLY 1
 #define TLS_FAULT_LATE 2
 #define TLS_FAULT_NAME 3
+#define TLS_FAULT_CLOCK 4
 
 #define TLS_CT_CCS 20
 #define TLS_CT_ALERT 21
@@ -6808,13 +6812,74 @@ static COLD fn tls_keep_leaf(tls_conn address_to tls, tls_cert address_to leaf)
         }
 }
 
+/*
+        Whether the clock can be believed at all, before anything asks what
+        it says.
+
+        A certificate is only as current as the clock that judges it, and a
+        clock that nobody set reads 1970, or whatever a dead RTC battery
+        left, which is earlier than the certificate's own notBefore on the
+        one hand and, rolled back on purpose, earlier than an expired
+        certificate's notAfter on the other. So the clock has a floor, the
+        latest of two moments this system already knows it is past:
+
+            MOONWATER_CLOCK_FLOOR, the date of the source this was built
+            from (the same constant the NTP client refuses to step below),
+            moved forward with each release so that nothing older than the
+            code counts as now; and
+
+            /root/clock.good, the latest time this machine knew for sure:
+            written after every authenticated (NTS) answer and, at most a
+            day ahead of the last write, while it runs and when it stops.
+            A file that is not a decimal number of seconds between the
+            build floor and the end of the NTP window is ignored, so a
+            damaged or planted one can only fail to help, never push the
+            floor out of reach of a real clock. Deleting it is always safe.
+
+        A clock below the floor is not wrong by some amount, it is unset:
+        tls_date_now refuses it and the connection says so, with how to
+        fix it, instead of judging dates against a number that means
+        nothing. The real time comes from `moonwater time sync` (NTS first,
+        plain NTP if no server offers it), or by hand with `date -s`.
+*/
+#ifndef MOONWATER_CLOCK_FLOOR
+#define MOONWATER_CLOCK_FLOOR 1790726400ll /* 2026-09-30 */
+#endif
+#ifndef CLOCK_GOOD_PATH
+#define CLOCK_GOOD_PATH "/root/clock.good"
+#endif
+#define CLOCK_GOOD_MOST 2082758400ll /* 2036-01-01, SNTP_WALL_MOST */
+
+//      The floor, in seconds since the epoch: the build's, or the
+//      persisted last-known-good time when that is later.
+static COLD p64 clock_trust_floor(void)
+{
+        p8 text[24];
+        bipolar got = file_slurp_once_at(AT_FDCWD, (string_address)CLOCK_GOOD_PATH,
+                                         text, sizeof(text) - 1);
+        p64 value = 0;
+        positive at = 0;
+
+        if (got < 1 || got > 12)
+                return MOONWATER_CLOCK_FLOOR;
+        while (at < (positive)got && text[at] >= '0' && text[at] <= '9')
+                value = value * 10 + (p64)(text[at++] - '0');
+        while (at < (positive)got && text[at] == '\n')
+                at++;
+        if (at != (positive)got || value < MOONWATER_CLOCK_FLOOR ||
+            value > CLOCK_GOOD_MOST)
+                return MOONWATER_CLOCK_FLOOR;
+        return value;
+}
+
 static COLD bool tls_date_now(p64 address_to value)
 {
         time_t stamp = time(null);
         tm calendar;
         p64 answer;
 
-        if (stamp < 0 || !gmtime_r(address_of stamp, address_of calendar))
+        if (stamp < 0 || (p64)stamp < clock_trust_floor() ||
+            !gmtime_r(address_of stamp, address_of calendar))
                 return false;
         answer = (p64)(calendar.tm_year + 1900);
         answer = answer * 100 + (p64)(calendar.tm_mon + 1);
@@ -7040,7 +7105,10 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
                 return true;
 
         if (!tls_date_now(address_of now))
+        {
+                tls->fault = TLS_FAULT_CLOCK;
                 return false;
+        }
         if (certs[0].not_before > now)
                 tls->fault = TLS_FAULT_EARLY;
         else if (certs[0].not_after < now)
@@ -8339,6 +8407,7 @@ static COLD bipolar tls_connect(tls_conn address_to tls, bipolar handle,
                          : tls->fault == TLS_FAULT_EARLY ? TLS_NOT_YET
                          : tls->fault == TLS_FAULT_LATE ? TLS_EXPIRED
                          : tls->fault == TLS_FAULT_NAME ? TLS_MISMATCH
+                         : tls->fault == TLS_FAULT_CLOCK ? TLS_CLOCK
                                                         : TLS_UNTRUSTED;
                 tls_forget(tls);
         }
@@ -8538,6 +8607,8 @@ static bipolar tls_read_until(
 //      STRICT_TIGHT only: a redirect that leaves public address space for
 //      an address that is not public.
 #define HTTP_PRIVATE (-17)
+//      The clock is below its floor: it was never set.
+#define HTTP_CLOCK (-18)
 
 typedef byte_store http_buffer;
 #define http_forget(buffer) byte_store_release(buffer)
@@ -9379,6 +9450,7 @@ static bipolar http_link_open(http_link address_to link, p32 ip, p16 port,
                                : verdict == TLS_EXPIRED ? HTTP_EXPIRED
                                : verdict == TLS_NOT_YET ? HTTP_NOT_YET
                                : verdict == TLS_MISMATCH ? HTTP_MISMATCH
+                               : verdict == TLS_CLOCK ? HTTP_CLOCK
                                                         : HTTP_TLS;
                 }
                 link->tls = true;
