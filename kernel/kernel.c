@@ -42,14 +42,17 @@
         by hand; edit the tags and run it again.
 
 //  (index begin)
-//    routine                 replaces                                x86_64  arm64   riscv64 measured
-//    ----------------------  --------------------------------------  ------- ------- ------- --------
-//    htree_dirblock_to_tree  fs/ext4/namei.c htree_dirblock_to_tree  yes     yes     yes     x86_64 getdents: 1000 names 92.5 -> 52.5 us (-43%), 100 names -36%, 16 names -19%; 8 names level
-//    ext4_find_dest_de       fs/ext4/namei.c ext4_find_dest_de       yes     yes     yes     full 4 KiB block, 134 entries: 590 -> 350 ns (1.7x); guest create+unlink -2.7% (noise floor 4%)
-//    offset_iterate_dir      fs/libfs.c offset_iterate_dir           yes     yes     yes     x86_64 tmpfs getdents: 1000 entries 20.4 -> 9.1 us (-55%, 2.2x); locked operations per entry 2.1 -> 0.39
-//    call_filldir            fs/ext4/dir.c call_filldir              yes     yes     yes     x86_64 ext4 getdents: 1000 names 51.1 -> 40.8 us (-20%)
+//    routine                  replaces                                x86_64  arm64   riscv64 measured
+//    -----------------------  --------------------------------------  ------- ------- ------- --------
+//    htree_dirblock_to_tree   fs/ext4/namei.c htree_dirblock_to_tree  yes     yes     yes     x86_64 getdents: 1000 names 92.5 -> 52.5 us (-43%), 100 names -36%, 16 names -19%; 8 names level
+//    ext4_find_dest_de        fs/ext4/namei.c ext4_find_dest_de       yes     yes     yes     full 4 KiB block, 134 entries: 590 -> 350 ns (1.7x); guest create+unlink -2.7% (noise floor 4%)
+//    offset_iterate_dir       fs/libfs.c offset_iterate_dir           yes     yes     yes     x86_64 tmpfs getdents: 1000 entries 20.4 -> 9.1 us (-55%, 2.2x); locked operations per entry 2.1 -> 0.39
+//    call_filldir             fs/ext4/dir.c call_filldir              yes     yes     yes     x86_64 ext4 getdents: 1000 names 51.1 -> 40.8 us (-20%)
+//    ext4_htree_store_dirent  fs/ext4/dir.c ext4_htree_store_dirent   yes     yes     yes     x86_64 ext4 getdents: 1000 names 54.4 -> 35.8 us (-34%) with call_filldir; the tree half -17%
+//    free_rb_tree_fname       fs/ext4/dir.c free_rb_tree_fname        yes     yes     yes     x86_64 ext4 getdents: 1000 names 54.4 -> 35.8 us (-34%) with call_filldir; the tree half -17%
+//    ext4_dir_open            fs/ext4/dir.c ext4_dir_open             yes     yes     yes     x86_64 ext4 getdents: 1000 names 54.4 -> 35.8 us (-34%) with call_filldir; the tree half -17%
 //
-//    4 routines.
+//    7 routines.
 //  (index end)
 */
 
@@ -2439,6 +2442,322 @@ __asm__(
     ".Lcf_fn:      .asciz \"call_filldir\"\n"
     "        .popsection\n"
     ASM_END(call_filldir)
+);
+#endif // CONFIG_RISCV
+
+//
+//       ext4_htree_store_dirent, free_rb_tree_fname, ext4_dir_open -- fs/ext4/dir.c
+//
+//       int  ext4_htree_store_dirent(struct file *dir_file, __u32 hash,
+//                                    __u32 minor_hash,
+//                                    struct ext4_dir_entry_2 *dirent,
+//                                    struct fscrypt_str *ent_name)
+//       void free_rb_tree_fname(struct rb_root *root)
+//       int  ext4_dir_open(struct inode *inode, struct file *file)
+//
+//       The other half of an ext4 directory read: the tree. Every getdents on
+//       an ext4 directory reads the blocks' entries into an rb-tree of struct
+//       fname in hash order, and this is where each of them is made: a kzalloc
+//       of an eighty-odd byte object per name, a memcpy, the descent, the
+//       insert -- and later a kfree of each, one at a time, when the tree is
+//       thrown away. In a guest profile of a thousand-name directory the
+//       allocation, the zeroing and the free were 16% of the pass, and the
+//       insert and the copy 14% more.
+//
+//       The names now come out of the file's own arena. ext4_dir_open asks for
+//       thirty-two bytes more than a dir_private_info and the four words after
+//       it are the arena: the list of chunks, where the next object goes, where
+//       the chunk ends. ext4_htree_store_dirent takes the object (forty-six
+//       bytes of header, the name and its NUL, to a multiple of eight, the size
+//       the C asks kzalloc_flex for) off the end of the current chunk, and asks
+//       for a new zeroed page of the allocator when it has none left; the
+//       descent and the link are the C's, the collision chain too, and the
+//       insert is rb_insert_color as before. free_rb_tree_fname frees the
+//       chunks -- a handful a block instead of an object a name -- and empties
+//       the tree. ext4_htree_free_dir_info, which frees the tree and then the
+//       info, is the C's and frees the larger allocation without knowing.
+//
+//       What is different: a chunk is one allocation, so the allocator's
+//       checks (KASAN's redzones) guard its ends and not each name in it; a
+//       tree's memory is freed together when the tree is, which is when it was
+//       freed anyway. free_rb_tree_fname is only ever given &info->root, the
+//       first member, which is how it finds the arena; the build asserts that.
+//
+//       MEASURED (x86_64). One getdents64 pass over an ext4 directory of a
+//       thousand names of 40 characters, in a KVM guest on a Ryzen 9 9950X
+//       (Zen 5), minimum over 800 bursts of 50 passes, three kernels booted in
+//       turn, three rounds:
+//
+//                                          round 1  round 2  round 3
+//           the C                            53846    54565    54912
+//           call_filldir above               43263    43192    42835
+//           and the arena                    36571    35688    35052
+//
+//       so the arena is 17% off what was left and the two together 34% off the
+//       pass. The stock and the ported kernel list the same directory at every
+//       buffer size and edge. The harness builds trees with collision chains
+//       through the real ext4_htree_store_dirent and through this, compares
+//       every node and every chain member, fails the allocator at a chunk and
+//       checks the tree holds what was stored before it, and checks that
+//       freeing the tree leaves the info alone allocated and freeing that
+//       leaves nothing; in a KASAN and lockdep guest, 30 s of listing and
+//       churning an ext4 directory drew no report and the 4 KiB slab went from
+//       4620 objects in use to 141 after the caches were dropped (it is not
+//       growing).
+//
+//> arch x86_64 arm64 riscv64
+//> perf x86_64 ext4 getdents: 1000 names 54.4 -> 35.8 us (-34%) with call_filldir; the tree half -17%
+//> replace fs/ext4/dir.c ext4_htree_store_dirent
+//> replace fs/ext4/dir.c free_rb_tree_fname
+//> replace fs/ext4/dir.c ext4_dir_open
+//> assert fs/ext4/dir.c offsetof(struct dir_private_info, root) == 0
+//> assert fs/ext4/dir.c offsetof(struct ext4_dir_entry_2, inode) == 0 && offsetof(struct ext4_dir_entry_2, file_type) == 7
+//> assert fs/ext4/dir.c offsetof(struct rb_node, rb_right) == 8 && offsetof(struct rb_node, rb_left) == 16
+//> offset MW_FS_NAME fscrypt_str name
+//> offset MW_FS_LEN fscrypt_str len
+//> const MW_DPI_ARENA ((sizeof(struct dir_private_info) + 7) & ~7UL)
+//> const MW_GFP_KZ (GFP_KERNEL | __GFP_ZERO)
+#ifdef CONFIG_X86_64
+__asm__(
+    MWSET(MW_FS_NAME)
+    MWSET(MW_FS_LEN)
+    MWSET(MW_DPI_ARENA)
+    MWSET(MW_GFP_KZ)
+    ".set AR_CHUNK, 4096\n"
+);
+
+__asm__(
+    ASM_FUNC(ext4_dir_open)
+    "        push    %rbp\n   mov     %rsp, %rbp\n   push    %rbx\n   push    %r12\n   mov     %rsi, %r12\n"
+    "        mov     $(MW_DPI_ARENA+32), %edi\n   mov     $MW_GFP_KZ, %esi\n   call    __kmalloc_noprof\n"
+    "        test    %rax, %rax\n   jz      1f\n   mov     %rax, MW_FILE_PRIV(%r12)\n   xor     %eax, %eax\n   jmp     2f\n"
+    "1:      mov     $-12, %eax\n"
+    "2:      pop     %r12\n   pop     %rbx\n   pop     %rbp\n"
+    "        " ASM_RET
+    ASM_END(ext4_dir_open)
+);
+
+__asm__(
+    ASM_FUNC(free_rb_tree_fname)
+    "        push    %rbp\n   mov     %rsp, %rbp\n   push    %r13\n   push    %r12\n   push    %rbx\n   sub     $8, %rsp\n"
+    "        mov     %rdi, %rbx\n   lea     MW_DPI_ARENA(%rbx), %r12\n   mov     (%r12), %rdi\n"
+    "1:      test    %rdi, %rdi\n   jz      2f\n   mov     (%rdi), %r13\n   call    kfree\n   mov     %r13, %rdi\n   jmp     1b\n"
+    "2:      movq    $0, (%r12)\n   movq    $0, 8(%r12)\n   movq    $0, 16(%r12)\n   movq    $0, (%rbx)\n"
+    "        add     $8, %rsp\n   pop     %rbx\n   pop     %r12\n   pop     %r13\n   pop     %rbp\n"
+    "        " ASM_RET
+    ASM_END(free_rb_tree_fname)
+);
+
+__asm__(
+    ASM_FUNC(ext4_htree_store_dirent)
+    "        push    %rbp\n   mov     %rsp, %rbp\n   push    %r15\n   push    %r14\n   push    %r13\n   push    %r12\n   push    %rbx\n"
+    "        sub     $8, %rsp\n   mov     %esi, %r12d\n   mov     %edx, %r13d\n   mov     %rcx, %r14\n   mov     %r8, %r15\n"
+    "        mov     MW_FILE_PRIV(%rdi), %rbx\n   mov     MW_FS_LEN(%r15), %edx\n   lea     54(%rdx), %edx\n   and     $-8, %edx\n"
+    "        # the object off the end of the current chunk, or off a new chunk when there is not room\n"
+    "        lea     MW_DPI_ARENA(%rbx), %rcx\n   mov     8(%rcx), %rax\n   lea     (%rax,%rdx), %rsi\n   cmp     16(%rcx), %rsi\n   ja      .Lsd_grow\n"
+    ".Lsd_have:\n"
+    "        mov     %rsi, 8(%rcx)\n   mov     %rax, (%rsp)\n"
+    "        mov     %r12d, (%rax)\n   mov     %r13d, 4(%rax)\n   mov     (%r14), %edx\n   mov     %edx, 40(%rax)\n"
+    "        mov     MW_FS_LEN(%r15), %ecx\n   mov     %cl, 44(%rax)\n   movzbl  7(%r14), %edx\n   mov     %dl, 45(%rax)\n"
+    "        mov     MW_FS_NAME(%r15), %rsi\n   lea     46(%rax), %rdi\n   cmp     $8, %ecx\n   jb      .Lsd_small\n"
+    "        lea     -8(%rsi,%rcx), %r8\n   lea     -8(%rdi,%rcx), %r9\n"
+    "1:      mov     (%rsi), %rax\n   mov     %rax, (%rdi)\n   add     $8, %rsi\n   add     $8, %rdi\n"
+    "        sub     $8, %ecx\n   cmp     $8, %ecx\n   jae     1b\n"
+    "        mov     (%r8), %rax\n   mov     %rax, (%r9)\n   jmp     .Lsd_copied\n"
+    ".Lsd_small:\n"
+    "        cmp     $4, %ecx\n   jb      2f\n"
+    "        mov     (%rsi), %eax\n   mov     -4(%rsi,%rcx), %r8d\n   mov     %eax, (%rdi)\n"
+    "        mov     %r8d, -4(%rdi,%rcx)\n   jmp     .Lsd_copied\n"
+    "2:      test    %ecx, %ecx\n   jz      .Lsd_copied\n"
+    "        movzbl  (%rsi), %eax\n   movzbl  -1(%rsi,%rcx), %r8d\n   mov     %al, (%rdi)\n"
+    "        mov     %r8b, -1(%rdi,%rcx)\n   cmp     $3, %ecx\n   jne     .Lsd_copied\n"
+    "        movzbl  1(%rsi), %eax\n   mov     %al, 1(%rdi)\n"
+    ".Lsd_copied:\n"
+    "        # the descent: by hash, then minor hash; the same pair goes on the node's chain\n"
+    "        mov     (%rsp), %r8\n   mov     %rbx, %r9\n   xor     %r10d, %r10d\n"
+    ".Lsd_walk:\n"
+    "        mov     (%r9), %rdx\n   test    %rdx, %rdx\n   jz      .Lsd_link\n   mov     %rdx, %r10\n"
+    "        mov     -8(%rdx), %eax\n   mov     -4(%rdx), %esi\n   cmp     %eax, %r12d\n   jne     1f\n   cmp     %esi, %r13d\n   jne     1f\n"
+    "        mov     24(%rdx), %rax\n   mov     %rax, 32(%r8)\n   mov     %r8, 24(%rdx)\n   xor     %eax, %eax\n   jmp     .Lsd_out\n"
+    "1:      jb      2f\n   ja      3f\n   cmp     %esi, %r13d\n   jb      2f\n"
+    "3:      lea     8(%rdx), %r9\n   jmp     .Lsd_walk\n"
+    "2:      lea     16(%rdx), %r9\n   jmp     .Lsd_walk\n"
+    "        # rb_link_node and rb_insert_color\n"
+    ".Lsd_link:\n"
+    "        lea     8(%r8), %rdi\n   mov     %r10, (%rdi)\n   movq    $0, 8(%rdi)\n   movq    $0, 16(%rdi)\n   mov     %rdi, (%r9)\n"
+    "        mov     %rbx, %rsi\n   call    rb_insert_color\n   xor     %eax, %eax\n   jmp     .Lsd_out\n"
+    "        # a new chunk: linked in front of the list, its first word the old head\n"
+    ".Lsd_grow:\n"
+    "        mov     $AR_CHUNK, %edi\n   mov     $MW_GFP_KZ, %esi\n   call    __kmalloc_noprof\n   test    %rax, %rax\n   jz      .Lsd_enomem\n"
+    "        lea     MW_DPI_ARENA(%rbx), %rcx\n   mov     (%rcx), %rdx\n   mov     %rdx, (%rax)\n   mov     %rax, (%rcx)\n"
+    "        lea     AR_CHUNK(%rax), %rdx\n   mov     %rdx, 16(%rcx)\n   add     $8, %rax\n"
+    "        mov     MW_FS_LEN(%r15), %edx\n   lea     54(%rdx), %edx\n   and     $-8, %edx\n   lea     (%rax,%rdx), %rsi\n   jmp     .Lsd_have\n"
+    ".Lsd_enomem:\n"
+    "        mov     $-12, %eax\n"
+    ".Lsd_out:\n"
+    "        add     $8, %rsp\n   pop     %rbx\n   pop     %r12\n   pop     %r13\n   pop     %r14\n   pop     %r15\n   pop     %rbp\n"
+    "        " ASM_RET
+    ASM_END(ext4_htree_store_dirent)
+);
+#endif // CONFIG_X86_64
+
+#ifdef CONFIG_ARM64
+__asm__(
+    MWSET(MW_FS_NAME)
+    MWSET(MW_FS_LEN)
+    MWSET(MW_DPI_ARENA)
+    MWSET(MW_GFP_KZ)
+    ".set AR_CHUNK, 4096\n"
+);
+
+__asm__(
+    ASM_FUNC(ext4_dir_open)
+    "        stp     x29, x30, [sp, #-32]!\n   mov     x29, sp\n   str     x19, [sp, #16]\n   mov     x19, x1\n"
+    "        mov     w0, #(MW_DPI_ARENA+32)\n   mov     w1, #(MW_GFP_KZ & 0xffff)\n   movk    w1, #((MW_GFP_KZ >> 16) & 0xffff), lsl #16\n"
+    "        bl      __kmalloc_noprof\n   cbz     x0, 1f\n   str     x0, [x19, #MW_FILE_PRIV]\n   mov     w0, #0\n   b       2f\n"
+    "1:      mov     w0, #-12\n"
+    "2:      ldr     x19, [sp, #16]\n   ldp     x29, x30, [sp], #32\n"
+    "        " ASM_RET
+    ASM_END(ext4_dir_open)
+);
+
+__asm__(
+    ASM_FUNC(free_rb_tree_fname)
+    "        stp     x29, x30, [sp, #-48]!\n   mov     x29, sp\n   stp     x19, x20, [sp, #16]\n   str     x21, [sp, #32]\n"
+    "        mov     x19, x0\n   add     x20, x19, #MW_DPI_ARENA\n   ldr     x0, [x20]\n"
+    "1:      cbz     x0, 2f\n   ldr     x21, [x0]\n   bl      kfree\n   mov     x0, x21\n   b       1b\n"
+    "2:      str     xzr, [x20]\n   str     xzr, [x20, #8]\n   str     xzr, [x20, #16]\n   str     xzr, [x19]\n"
+    "        ldr     x21, [sp, #32]\n   ldp     x19, x20, [sp, #16]\n   ldp     x29, x30, [sp], #48\n"
+    "        " ASM_RET
+    ASM_END(free_rb_tree_fname)
+);
+
+__asm__(
+    ASM_FUNC(ext4_htree_store_dirent)
+    "        stp     x29, x30, [sp, #-96]!\n   mov     x29, sp\n   stp     x19, x20, [sp, #16]\n   stp     x21, x22, [sp, #32]\n"
+    "        stp     x23, x24, [sp, #48]\n   stp     x25, x26, [sp, #64]\n   stp     x27, x28, [sp, #80]\n"
+    "        mov     w20, w1\n   mov     w21, w2\n   mov     x22, x3\n   mov     x23, x4\n   ldr     x19, [x0, #MW_FILE_PRIV]\n"
+    "        ldr     w5, [x23, #MW_FS_LEN]\n   add     w5, w5, #54\n   and     w5, w5, #0xfffffff8\n   mov     w25, w5\n"
+    "        # the object off the end of the current chunk, or off a new chunk when there is not room\n"
+    "        add     x6, x19, #MW_DPI_ARENA\n   ldr     x0, [x6, #8]\n   add     x7, x0, x5\n   ldr     x8, [x6, #16]\n   cmp     x7, x8\n   b.hi    .Lsd_grow\n"
+    ".Lsd_have:\n"
+    "        str     x7, [x6, #8]\n   mov     x24, x0\n"
+    "        str     w20, [x24]\n   str     w21, [x24, #4]\n   ldr     w8, [x22]\n   str     w8, [x24, #40]\n"
+    "        ldr     w3, [x23, #MW_FS_LEN]\n   strb    w3, [x24, #44]\n   ldrb    w8, [x22, #7]\n   strb    w8, [x24, #45]\n"
+    "        ldr     x1, [x23, #MW_FS_NAME]\n   add     x0, x24, #46\n   cmp     w3, #8\n   b.lo    .Lsd_small\n"
+    "        add     x4, x1, x3\n   sub     x4, x4, #8\n   add     x5, x0, x3\n   sub     x5, x5, #8\n"
+    "1:      ldr     x6, [x1], #8\n   str     x6, [x0], #8\n   sub     w3, w3, #8\n   cmp     w3, #8\n   b.hs    1b\n"
+    "        ldr     x6, [x4]\n   str     x6, [x5]\n   b       .Lsd_copied\n"
+    ".Lsd_small:\n"
+    "        cmp     w3, #4\n   b.lo    2f\n"
+    "        ldr     w6, [x1]\n   add     x4, x1, x3\n   ldur    w7, [x4, #-4]\n   str     w6, [x0]\n"
+    "        add     x5, x0, x3\n   stur    w7, [x5, #-4]\n   b       .Lsd_copied\n"
+    "2:      cbz     w3, .Lsd_copied\n"
+    "        ldrb    w6, [x1]\n   add     x4, x1, x3\n   ldurb   w7, [x4, #-1]\n   strb    w6, [x0]\n"
+    "        add     x5, x0, x3\n   sturb   w7, [x5, #-1]\n   cmp     w3, #3\n   b.ne    .Lsd_copied\n"
+    "        ldrb    w6, [x1, #1]\n   strb    w6, [x0, #1]\n"
+    ".Lsd_copied:\n"
+    "        # the descent: by hash, then minor hash; the same pair goes on the node's chain\n"
+    "        mov     x9, x19\n   mov     x10, #0\n"
+    ".Lsd_walk:\n"
+    "        ldr     x11, [x9]\n   cbz     x11, .Lsd_link\n   mov     x10, x11\n   ldur    w12, [x11, #-8]\n   ldur    w13, [x11, #-4]\n"
+    "        cmp     w20, w12\n   b.ne    1f\n   cmp     w21, w13\n   b.ne    1f\n"
+    "        ldr     x12, [x11, #24]\n   str     x12, [x24, #32]\n   str     x24, [x11, #24]\n   mov     w0, #0\n   b       .Lsd_out\n"
+    "1:      b.lo    2f\n   b.hi    3f\n   cmp     w21, w13\n   b.lo    2f\n"
+    "3:      add     x9, x11, #8\n   b       .Lsd_walk\n"
+    "2:      add     x9, x11, #16\n   b       .Lsd_walk\n"
+    "        # rb_link_node and rb_insert_color\n"
+    ".Lsd_link:\n"
+    "        add     x0, x24, #8\n   str     x10, [x0]\n   str     xzr, [x0, #8]\n   str     xzr, [x0, #16]\n   str     x0, [x9]\n"
+    "        mov     x1, x19\n   bl      rb_insert_color\n   mov     w0, #0\n   b       .Lsd_out\n"
+    "        # a new chunk: linked in front of the list, its first word the old head\n"
+    ".Lsd_grow:\n"
+    "        mov     w0, #AR_CHUNK\n   mov     w1, #(MW_GFP_KZ & 0xffff)\n   movk    w1, #((MW_GFP_KZ >> 16) & 0xffff), lsl #16\n"
+    "        bl      __kmalloc_noprof\n   cbz     x0, .Lsd_enomem\n"
+    "        add     x6, x19, #MW_DPI_ARENA\n   ldr     x8, [x6]\n   str     x8, [x0]\n   str     x0, [x6]\n   add     x8, x0, #AR_CHUNK\n"
+    "        str     x8, [x6, #16]\n   add     x0, x0, #8\n   add     x7, x0, x25\n   b       .Lsd_have\n"
+    ".Lsd_enomem:\n"
+    "        mov     w0, #-12\n"
+    ".Lsd_out:\n"
+    "        ldp     x27, x28, [sp, #80]\n   ldp     x25, x26, [sp, #64]\n   ldp     x23, x24, [sp, #48]\n"
+    "        ldp     x21, x22, [sp, #32]\n   ldp     x19, x20, [sp, #16]\n   ldp     x29, x30, [sp], #96\n"
+    "        " ASM_RET
+    ASM_END(ext4_htree_store_dirent)
+);
+#endif // CONFIG_ARM64
+
+#ifdef CONFIG_RISCV
+__asm__(
+    MWSET(MW_FS_NAME)
+    MWSET(MW_FS_LEN)
+    MWSET(MW_DPI_ARENA)
+    MWSET(MW_GFP_KZ)
+    ".set AR_CHUNK, 4096\n"
+);
+
+__asm__(
+    ASM_FUNC(ext4_dir_open)
+    "        addi    sp, sp, -32\n   sd      ra, 24(sp)\n   sd      s0, 16(sp)\n   addi    s0, sp, 32\n   sd      s1, 8(sp)\n   mv      s1, a1\n"
+    "        li      a0, MW_DPI_ARENA+32\n   li      a1, MW_GFP_KZ\n   call    __kmalloc_noprof\n   beqz    a0, 1f\n"
+    "        sd      a0, MW_FILE_PRIV(s1)\n   li      a0, 0\n   j       2f\n"
+    "1:      li      a0, -12\n"
+    "2:      ld      ra, 24(sp)\n   ld      s0, 16(sp)\n   ld      s1, 8(sp)\n   addi    sp, sp, 32\n"
+    "        " ASM_RET
+    ASM_END(ext4_dir_open)
+);
+
+__asm__(
+    ASM_FUNC(free_rb_tree_fname)
+    "        addi    sp, sp, -48\n   sd      ra, 40(sp)\n   sd      s0, 32(sp)\n   addi    s0, sp, 48\n   sd      s1, 24(sp)\n   sd      s2, 16(sp)\n"
+    "        sd      s3, 8(sp)\n   mv      s1, a0\n   addi    s2, s1, MW_DPI_ARENA\n   ld      a0, 0(s2)\n"
+    "1:      beqz    a0, 2f\n   ld      s3, 0(a0)\n   call    kfree\n   mv      a0, s3\n   j       1b\n"
+    "2:      sd      zero, 0(s2)\n   sd      zero, 8(s2)\n   sd      zero, 16(s2)\n   sd      zero, 0(s1)\n"
+    "        ld      ra, 40(sp)\n   ld      s0, 32(sp)\n   ld      s1, 24(sp)\n   ld      s2, 16(sp)\n   ld      s3, 8(sp)\n   addi    sp, sp, 48\n"
+    "        " ASM_RET
+    ASM_END(free_rb_tree_fname)
+);
+
+__asm__(
+    ASM_FUNC(ext4_htree_store_dirent)
+    "        addi    sp, sp, -96\n   sd      ra, 88(sp)\n   sd      s0, 80(sp)\n   addi    s0, sp, 96\n   sd      s1, 72(sp)\n   sd      s2, 64(sp)\n"
+    "        sd      s3, 56(sp)\n   sd      s4, 48(sp)\n   sd      s5, 40(sp)\n   sd      s6, 32(sp)\n   sd      s7, 24(sp)\n"
+    "        slli    s2, a1, 32\n   srli    s2, s2, 32\n   slli    s3, a2, 32\n   srli    s3, s3, 32\n   mv      s4, a3\n   mv      s5, a4\n"
+    "        ld      s1, MW_FILE_PRIV(a0)\n"
+    "        lwu     t0, MW_FS_LEN(s5)\n   addi    t0, t0, 54\n   andi    t0, t0, -8\n   mv      s7, t0\n"
+    "        # the object off the end of the current chunk, or off a new chunk when there is not room\n"
+    "        addi    t1, s1, MW_DPI_ARENA\n   ld      a0, 8(t1)\n   add     t2, a0, t0\n   ld      t3, 16(t1)\n   bgtu    t2, t3, .Lsd_grow\n"
+    ".Lsd_have:\n"
+    "        sd      t2, 8(t1)\n   mv      s6, a0\n"
+    "        sw      s2, 0(s6)\n   sw      s3, 4(s6)\n   lwu     t4, 0(s4)\n   sw      t4, 40(s6)\n"
+    "        lwu     a3, MW_FS_LEN(s5)\n   sb      a3, 44(s6)\n   lbu     t4, 7(s4)\n   sb      t4, 45(s6)\n"
+    "        ld      a1, MW_FS_NAME(s5)\n   addi    a0, s6, 46\n   mv      a2, a3\n   beqz    a2, .Lsd_copied\n"
+    "3:      lbu     t0, 0(a1)\n   sb      t0, 0(a0)\n   addi    a1, a1, 1\n   addi    a0, a0, 1\n   addi    a2, a2, -1\n   bnez    a2, 3b\n"
+    ".Lsd_copied:\n"
+    "        # the descent: by hash, then minor hash; the same pair goes on the node's chain\n"
+    "        mv      t5, s1\n   li      t6, 0\n"
+    ".Lsd_walk:\n"
+    "        ld      t0, 0(t5)\n   beqz    t0, .Lsd_link\n   mv      t6, t0\n   lwu     t1, -8(t0)\n   lwu     t2, -4(t0)\n"
+    "        bne     s2, t1, 1f\n   bne     s3, t2, 1f\n"
+    "        ld      t1, 24(t0)\n   sd      t1, 32(s6)\n   sd      s6, 24(t0)\n   li      a0, 0\n   j       .Lsd_out\n"
+    "1:      bltu    s2, t1, 2f\n   bltu    t1, s2, 3f\n   bltu    s3, t2, 2f\n"
+    "3:      addi    t5, t0, 8\n   j       .Lsd_walk\n"
+    "2:      addi    t5, t0, 16\n   j       .Lsd_walk\n"
+    "        # rb_link_node and rb_insert_color\n"
+    ".Lsd_link:\n"
+    "        addi    a0, s6, 8\n   sd      t6, 0(a0)\n   sd      zero, 8(a0)\n   sd      zero, 16(a0)\n   sd      a0, 0(t5)\n"
+    "        mv      a1, s1\n   call    rb_insert_color\n   li      a0, 0\n   j       .Lsd_out\n"
+    "        # a new chunk: linked in front of the list, its first word the old head\n"
+    ".Lsd_grow:\n"
+    "        li      a0, AR_CHUNK\n   li      a1, MW_GFP_KZ\n   call    __kmalloc_noprof\n   beqz    a0, .Lsd_enomem\n"
+    "        addi    t1, s1, MW_DPI_ARENA\n   ld      t0, 0(t1)\n   sd      t0, 0(a0)\n   sd      a0, 0(t1)\n   li      t0, AR_CHUNK\n"
+    "        add     t0, a0, t0\n   sd      t0, 16(t1)\n   addi    a0, a0, 8\n   add     t2, a0, s7\n   j       .Lsd_have\n"
+    ".Lsd_enomem:\n"
+    "        li      a0, -12\n"
+    ".Lsd_out:\n"
+    "        ld      ra, 88(sp)\n   ld      s0, 80(sp)\n   ld      s1, 72(sp)\n   ld      s2, 64(sp)\n   ld      s3, 56(sp)\n"
+    "        ld      s4, 48(sp)\n   ld      s5, 40(sp)\n   ld      s6, 32(sp)\n   ld      s7, 24(sp)\n   addi    sp, sp, 96\n"
+    "        " ASM_RET
+    ASM_END(ext4_htree_store_dirent)
 );
 #endif // CONFIG_RISCV
 

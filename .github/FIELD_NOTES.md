@@ -254,3 +254,30 @@ node and its hashes, or the last node handed over).
 allocation of every entry, is untouched by this. The arm64 and riscv64 bodies have not
 been booted or timed.
 
+---
+
+## 2026-09-30 · the tree an ext4 directory read builds (`ext4_htree_store_dirent`)
+
+The other half of an ext4 directory read is the tree it builds. Each entry is a
+`kzalloc`ed object (name and all), copied and inserted, and thrown away one `kfree` at a
+time when the tree is. With `call_filldir` above, the tree was about half of what was left
+of a pass. `kernel/kernel.c` now makes the entries out of an arena that hangs off the
+open directory (`ext4_dir_open` asks for thirty-two bytes more): zeroed 4 KiB chunks, the
+entries bump-allocated out of them, the chunks freed together when the tree is.
+
+- **In a guest, three kernels booted in turn, three rounds, minimum over 800 bursts:** a
+  thousand-name ext4 directory read, the C 53.8 to 54.9 microseconds; with `call_filldir`
+  42.8 to 43.3; with the arena too 35.1 to 36.6. The arena is 17% off what was left, the
+  two together 34% off the pass.
+- **Checked:** the harness builds trees, collision chains included, through the real
+  function and through the port and compares every node and chain member; an allocation
+  that fails leaves what was stored before it; freeing leaves nothing. A KASAN and lockdep
+  guest that listed and churned an ext4 directory for 30 seconds said nothing, and the
+  4 KiB slab does not grow.
+
+**What it does not show.** A chunk is one allocation, so the allocator's checks guard
+its ends, not every name in it. The hash of every name, the other big part of an ext4
+directory read, is the wide SIMD hash already in the tree and is not touched here. The
+arm64 and riscv64 bodies are checked against the C under qemu-user and have not been
+booted.
+

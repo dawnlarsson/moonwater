@@ -27504,7 +27504,11 @@ int main(void) {
                 "static void offset_iterate_dir(struct file *file, struct dir_context *ctx)\n{\n\tctx->pos = DIR_OFFSET_EOD;\n}\n",
             "linux/fs/ext4/dir.c":
                 "struct fname {\n\t__u32\t\thash;\n};\n\n"
-                "static int call_filldir(struct file *file, struct dir_context *ctx,\n\t\t\tstruct fname *fname)\n{\n\treturn 0;\n}\n",
+                "static int call_filldir(struct file *file, struct dir_context *ctx,\n\t\t\tstruct fname *fname)\n{\n\treturn 0;\n}\n"
+                "static void free_rb_tree_fname(struct rb_root *root)\n{\n\t*root = RB_ROOT;\n}\n"
+                "int ext4_htree_store_dirent(struct file *dir_file, __u32 hash,\n\t\t\t     __u32 minor_hash,\n\t\t\t    struct ext4_dir_entry_2 *dirent,\n"
+                "\t\t\t    struct fscrypt_str *ent_name)\n{\n\treturn 0;\n}\n"
+                "static int ext4_dir_open(struct inode *inode, struct file *file)\n{\n\treturn 0;\n}\n",
             "linux/fs/readdir.c":
                 "struct getdents_callback64 {\n\tstruct dir_context ctx;\n};\n\n"
                 "static bool filldir64(struct dir_context *ctx, const char *name, int namlen,\n"
@@ -27559,6 +27563,9 @@ int main(void) {
                     "_Static_assert(DIR_OFFSET_EOD == S32_MAX," in libfs and
                     "/* Moonwater: call_filldir is in kernel/kernel.c */\nint call_filldir(" in (tree / "linux/fs/ext4/dir.c").read_text() and
                     "_Static_assert(offsetof(struct fname, hash) == 0" in (tree / "linux/fs/ext4/dir.c").read_text() and
+                    "/* Moonwater: free_rb_tree_fname is in kernel/kernel.c */\nvoid free_rb_tree_fname(" in (tree / "linux/fs/ext4/dir.c").read_text() and
+                    "/* Moonwater: ext4_htree_store_dirent is in kernel/kernel.c */" in (tree / "linux/fs/ext4/dir.c").read_text() and
+                    "/* Moonwater: ext4_dir_open is in kernel/kernel.c */\nint ext4_dir_open(" in (tree / "linux/fs/ext4/dir.c").read_text() and
                     "\nbool filldir64(" in readdir and "static bool filldir64(" not in readdir and
                     "_Static_assert(offsetof(struct getdents_callback64, current_dir) == 24," in readdir and
                     "void moonwater_offsets(void)" in offsets and
@@ -59345,6 +59352,8 @@ enum { DIR_OFFSET_FIRST = 2, DIR_OFFSET_MIN = 3, DIR_OFFSET_EOD = S32_MAX };
 #define FMODE_64BITHASH (1 << 10)
 #define EXT4_FEATURE_INCOMPAT_FILETYPE 0x0002
 #define EXT4_FT_MAX 8
+#define GFP_KERNEL 0xcc0
+#define __GFP_ZERO 0x100
 struct task_struct { struct { unsigned long flags; unsigned status; } thread_info; char comm[16]; };
 struct rb_node { unsigned long __rb_parent_color; struct rb_node *rb_right; struct rb_node *rb_left; };
 struct rb_root { struct rb_node *rb_node; };
@@ -59504,6 +59513,7 @@ struct buffer_head *__ext4_read_dirblock(struct inode *inode, ext4_lblk_t block,
 }
 void __brelse(struct buffer_head *bh) { (void)bh; R.brelse++; }
 
+#ifndef MW_REAL_STORE
 int ext4_htree_store_dirent(struct file *dir_file, __u32 hash, __u32 minor_hash, struct ext4_dir_entry_2 *dirent, struct fscrypt_str *ent_name)
 {
         (void)dir_file;
@@ -59515,6 +59525,7 @@ int ext4_htree_store_dirent(struct file *dir_file, __u32 hash, __u32 minor_hash,
         }
         return (G.store_fail_at && R.stores == G.store_fail_at) ? -ENOMEM : 0;
 }
+#endif
 
 int __fscrypt_prepare_readdir(struct inode *dir) { (void)dir; return G.prepare_ret; }
 int fscrypt_fname_alloc_buffer(u32 max, struct fscrypt_str *s)
@@ -59542,6 +59553,17 @@ void _raw_spin_lock(void *l) { int *p = l; if (*p) LF.bad++; *p = 1; LF.locks++;
 void _raw_spin_unlock(void *l) { int *p = l; if (!*p) LF.bad++; *p = 0; }
 void dput(struct dentry *d) { LF.dputs++; if (d->d_lockref.count <= 0) LF.bad++; d->d_lockref.count--; }
 struct dentry *offset_dir_lookup(struct dentry *parent, loff_t offset) { return lf_lookup ? lf_lookup(parent, offset) : NULL; }
+static struct { long live, allocs, frees, fail_at; } MA;
+void *__kmalloc_noprof(size_t size, unsigned gfp)
+{
+        MA.allocs++;
+        if (MA.fail_at && MA.allocs == MA.fail_at) return NULL;
+        if ((gfp & 0x100) == 0) abort();              /* the arena wants zeroed pages: the flag must be there */
+        MA.live++;
+        return calloc(1, size);
+}
+void kfree(const void *p) { if (p) { MA.frees++; MA.live--; free((void *)p); } }
+void rb_insert_color(struct rb_node *node, struct rb_root *root) { (void)node; (void)root; }
 static long mw_msgs;
 void __ext4_msg(struct super_block *sb, const char *level, const char *fmt, ...) { (void)sb; (void)level; (void)fmt; mw_msgs++; }
 struct rb_node *rb_next(const struct rb_node *node)
@@ -60203,6 +60225,90 @@ int main(int argc, char **argv)
 }
 """
 
+KERNEL_PORTS_ARENA_PRELUDE = r"""
+#define MW_REAL_STORE 1
+void rb_insert_color(struct rb_node *, struct rb_root *);
+static inline void *mw_kzalloc_flex(size_t sz, size_t off, size_t extra) { size_t n = off + extra; return calloc(1, n > sz ? n : sz); }
+#define kzalloc_flex(var, member, count) mw_kzalloc_flex(sizeof(var), offsetof(typeof(var), member), (size_t)(count) * sizeof((var).member[0]))
+static inline void rb_link_node(struct rb_node *node, struct rb_node *parent, struct rb_node **link)
+{ node->__rb_parent_color = (unsigned long)parent; node->rb_left = node->rb_right = NULL; *link = node; }
+"""
+
+KERNEL_PORTS_ARENA_TEST = r"""
+int ext4_dir_open(struct inode *inode, struct file *file);
+void free_rb_tree_fname(struct rb_root *root);
+int ext4_htree_store_dirent(struct file *dir_file, __u32 hash, __u32 minor_hash, struct ext4_dir_entry_2 *dirent, struct fscrypt_str *ent_name);
+
+static int same_trees(struct dir_private_info *a, struct dir_private_info *b, char *why)
+{
+        struct rb_node *x = a->root.rb_node, *y = b->root.rb_node;
+        while (x && x->rb_left) x = x->rb_left;
+        while (y && y->rb_left) y = y->rb_left;
+        int at = 0;
+        for (; x && y; x = rb_next(x), y = rb_next(y), at++) {
+                struct fname *f = rb_entry(x, struct fname, rb_hash), *g = rb_entry(y, struct fname, rb_hash);
+                for (int k = 0; f || g; f = f ? f->next : NULL, g = g ? g->next : NULL, k++) {
+                        if (!f || !g) { sprintf(why, "chain %d of node %d is %s", k, at, f ? "longer" : "shorter"); return 0; }
+                        if (f->hash != g->hash || f->minor_hash != g->minor_hash || f->inode != g->inode || f->name_len != g->name_len || f->file_type != g->file_type
+                            || memcmp(f->name, g->name, f->name_len + 1)) { sprintf(why, "node %d entry %d differs (hash %x/%x len %u/%u type %u/%u)", at, k, f->hash, g->hash, f->name_len, g->name_len, f->file_type, g->file_type); return 0; }
+                }
+        }
+        if (x || y) { sprintf(why, "the trees have different lengths"); return 0; }
+        return 1;
+}
+
+int main(int argc, char **argv)
+{
+        long iters = argc > 1 ? atol(argv[1]) : 3000, bad = 0, stored = 0;
+        for (long it = 0; it < iters; it++) {
+                int m = rnd() % 4 == 0 ? rnd() % 300 : rnd() % 40;
+                struct ext4_dir_entry_2 *de = calloc(m + 1, sizeof *de);
+                struct fscrypt_str *nm = calloc(m + 1, sizeof *nm);
+                u32 seen[64]; int ns = 0;
+                for (int i = 0; i < m; i++) {
+                        int len = rnd() % 5 == 0 ? 1 + rnd() % 255 : 1 + rnd() % 30;
+                        de[i].inode = rnd(); de[i].file_type = rnd() % 4 ? rnd() % 8 : rnd();
+                        nm[i].name = malloc(len); nm[i].len = len;
+                        for (int k = 0; k < len; k++) nm[i].name[k] = rnd();
+                }
+                u32 hash[m + 1], minor[m + 1];
+                for (int i = 0; i < m; i++) {
+                        if (ns && rnd() % 7 == 0) { hash[i] = seen[rnd() % ns]; minor[i] = rnd() % 2 ? 0 : rnd(); }
+                        else { hash[i] = (rnd() << 1) | (rnd() & 1); minor[i] = rnd() % 3 ? 0 : rnd(); if (ns < 64) seen[ns++] = hash[i]; }
+                }
+                struct inode inode; struct file fa, fc; memset(&inode, 0, sizeof inode); memset(&fa, 0, sizeof fa); memset(&fc, 0, sizeof fc);
+                MA.live = MA.allocs = MA.frees = 0; MA.fail_at = 0;
+                char why[200] = "";
+                for (int round = 0; round < 2 && !*why; round++) {
+                        if (round == 0) {
+                                if (ext4_dir_open(&inode, &fa) || !fa.private_data) { sprintf(why, "open failed"); break; }
+                        }
+                        struct dir_private_info *ia = fa.private_data;
+                        MA.fail_at = rnd() % 4 == 0 ? MA.allocs + 1 + rnd() % 4 : 0;
+                        int done = 0, r = 0;
+                        for (int i = 0; i < m; i++) { r = ext4_htree_store_dirent(&fa, hash[i], minor[i], &de[i], &nm[i]); if (r) break; done++; }
+                        MA.fail_at = 0;
+                        if (r && r != -ENOMEM) { sprintf(why, "returned %d", r); break; }
+                        if (r && MA.fail_at == 0 && done == m) { sprintf(why, "failed with nothing to fail"); break; }
+                        struct dir_private_info *ic = calloc(1, sizeof *ic); fc.private_data = ic;
+                        for (int i = 0; i < done; i++) if (ext4_htree_store_dirent_c(&fc, hash[i], minor[i], &de[i], &nm[i])) { sprintf(why, "the C failed"); break; }
+                        if (!*why && !same_trees(ic, ia, why)) break;
+                        stored += done;
+                        /* the tree is thrown away and the file goes on: what it had is freed, what it makes next is whole */
+                        free_rb_tree_fname(&ia->root);
+                        if (ia->root.rb_node) { sprintf(why, "the tree was not emptied"); break; }
+                        if (MA.live != 1) { sprintf(why, "%ld allocations live after the tree was freed (want the info alone)", MA.live); break; }
+                }
+                if (!*why) { kfree(fa.private_data); if (MA.live) sprintf(why, "%ld allocations live at the end", MA.live); }
+                if (*why && bad++ < 5) printf("case %ld differs: %s (m %d)\n", it, why, m);
+                for (int i = 0; i < m; i++) free(nm[i].name);
+                free(de); free(nm);
+        }
+        printf("cases %ld differ %ld stores %ld\n", iters, bad, stored);
+        return bad != 0;
+}
+"""
+
 def harness_kernel_ports(argv):
     """The kernel functions in kernel/kernel.c against Linux's own C, call for call.
 
@@ -60280,7 +60386,15 @@ def harness_kernel_ports(argv):
             "#define call_filldir call_filldir_c\n" + cut(dirc, "static int call_filldir(", "\n}\n", True) + "\n#undef call_filldir\n"))
         return KERNEL_PORTS_EXT4DIR_PRELUDE + code
 
+    def arena_oracle():
+        dirc = sources["fs/ext4/dir.c"]
+        text = cut(dirc, "struct fname {", "};", True) + "\n#define ext4_htree_store_dirent ext4_htree_store_dirent_c\n" + \
+               cut(dirc, "int ext4_htree_store_dirent(struct file *dir_file,", "\n}\n", True) + "\n#undef ext4_htree_store_dirent\n"
+        return KERNEL_PORTS_ARENA_PRELUDE + text.replace("int ext4_htree_store_dirent_c", "int ext4_htree_store_dirent_c", 1)
+
     ports = {
+        "ext4_htree_store_dirent": (arena_oracle(), KERNEL_PORTS_ARENA_TEST,
+                                    "new_fn->file_type = dirent->file_type;", "new_fn->file_type = 0;"),
         "call_filldir": (KERNEL_PORTS_LIBFS_PRELUDE + readdir_code.replace("static bool filldir64(", "bool filldir64(", 1) + "\n" + ext4dir_oracle(),
                          KERNEL_PORTS_EXT4DIR_TEST, "info->extra_fname = fname;", "info->extra_fname = NULL;"),
         "offset_iterate_dir": (libfs_code, KERNEL_PORTS_LIBFS_TEST, "ctx->pos = DIR_OFFSET_EOD;", "ctx->pos = DIR_OFFSET_EOD - 1;"),
@@ -60359,7 +60473,7 @@ def harness_kernel_ports(argv):
                     '#define ASM_FUNC(name) ".globl " #name "\\n.type " #name ", @function\\n" #name ":\\n"\n'
                     '#define ASM_END(name) ".size " #name ", .-" #name "\\n"\n#define ASM_RET "ret\\n"\n' + wide_region)
                 objects.append(str(work / "wide.c"))
-            built = subprocess.run(compiler + cflags + [defines, "-DCONFIG_FS_ENCRYPTION=1", "-DCONFIG_UNICODE=1", "-O2", "-w", "-I", str(work), "-o", str(work / "test")] + objects,
+            built = subprocess.run(compiler + cflags + [defines, "-DCONFIG_FS_ENCRYPTION=1", "-DCONFIG_UNICODE=1", "-O2", "-w", "-Wl,--allow-multiple-definition", "-I", str(work), "-o", str(work / "test")] + objects,
                                    capture_output=True, text=True)
             if built.returncode:
                 print("  build failed for %s:\n%s" % (arch, built.stderr[-1500:]))
