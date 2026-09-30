@@ -74183,6 +74183,43 @@ static fn downloads(void)
         system_remove_at(AT_FDCWD, sign, 0);
 }
 
+/*
+        A secret on a command line is not kept in the history: the two
+        moonwater verbs that took one there (wifi add SSID PASSWORD, link join
+        NAME SECRET) are judged by history_wanted before the line is copied.
+        The same verbs with "-", with no word, with allow after the namespace,
+        and other commands entirely are kept.
+*/
+static fn secret_lines(void)
+{
+        static const struct { string_address line; bool secret; } lines[] = {
+            {"moonwater wifi add home hunter2hunter2", true},
+            {"moonwater wifi add 'my home' 'pass phrase here'", true},
+            {"moonwater wifi add \"my home\" pass\\ phrase", true},
+            {"  /usr/bin/moonwater wifi add home hunter2hunter2", true},
+            {"ls; moonwater wifi add home hunter2hunter2", true},
+            {"ls && moonwater link join lab s3cr3t allow run", true},
+            {"moonwater link join lab s3cr3t", true},
+            {"moonwater wifi add home -", false},
+            {"moonwater wifi add home", false},
+            {"moonwater wifi add 'my home'", false},
+            {"moonwater link join lab -", false},
+            {"moonwater link join lab", false},
+            {"moonwater link join lab allow run", false},
+            {"moonwater wifi remove home", false},
+            {"moonwater wifi", false},
+            {"echo moonwater wifi add home hunter2hunter2 | cat", false},
+            {"echo hi", false},
+            {"", false},
+        };
+
+        for (positive at = 0; at < array_count(lines); at++)
+                check("A line with a secret on it is kept out of the history",
+                      history_secret_line(lines[at].line,
+                                          string_length(lines[at].line)) ==
+                          lines[at].secret);
+}
+
 b32 main(void)
 {
         names();
@@ -74195,6 +74232,7 @@ b32 main(void)
         landing();
         distros();
         downloads();
+        secret_lines();
         json();
         oci();
         nix();

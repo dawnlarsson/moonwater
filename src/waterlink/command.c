@@ -44,7 +44,7 @@ static fn link_usage_write(writer out)
                       "                    " TERM_DIM "this machine's public key, made on first use" TERM_RESET "\n"
                       TERM_BOLD "  link pair NAME KEY [HOST[:PORT]]" TERM_RESET "\n"
                       "                              " TERM_DIM "know a machine by its key" TERM_RESET "\n"
-                      TERM_BOLD "  link join NAMESPACE [SECRET] [allow GRANT...]" TERM_RESET "\n"
+                      TERM_BOLD "  link join NAMESPACE [SECRET|-] [allow GRANT...]" TERM_RESET "\n"
                       "                              " TERM_DIM "pair with every machine on this network in it" TERM_RESET "\n"
                       TERM_BOLD "  link leave NAMESPACE [forget]" TERM_RESET "\n"
                       "                              " TERM_DIM "stop, and maybe forget the machines it paired" TERM_RESET "\n"
@@ -600,6 +600,8 @@ static b32 link_join(string_address address_to words, positive count)
         p32 may = 0;
         positive at = 1;
         p8 grants[96];
+        p8 typed[128];
+        bool entered = false;
 
         if (!link_name_good(namespace) ||
             string_length(namespace) >= WATERLINK_NAMESPACE_MAX)
@@ -607,7 +609,33 @@ static b32 link_join(string_address address_to words, positive count)
                                    ". - _, up to 31\n",
                                    namespace);
         if (at < count && !string_equals(words[at], "allow"))
+        {
                 secret = words[at++];
+                /*      "-" is one line of standard input (asked for at a
+                        terminal, with no echo), which keeps the secret out
+                        of argv, where ps shows it to everybody, and out of
+                        the shell's history. Given on the line it still
+                        works, is kept from the history by the reader and
+                        scrubbed from argv once read; the tight tier refuses
+                        it. A machine script that joins every boot reads the
+                        secret from a file: join NAME - < /root/secret. */
+                if (string_equals(secret, "-"))
+                {
+                        if (radio_password_read(typed, sizeof typed, namespace,
+                                                false, true) <= 0)
+                        {
+                                crypto_forget(typed, sizeof typed);
+                                return host_refuse("nothing saved%s\n", "");
+                        }
+                        secret = (string_address)typed;
+                        entered = true;
+                }
+                else if (MOONWATER_STRICT >= STRICT_TIGHT)
+                        return host_refuse("a secret on the command line is "
+                                           "refused: give it on standard input "
+                                           "with -%s\n",
+                                           "");
+        }
         if (at < count)
         {
                 if (!string_equals(words[at], "allow") || at + 1 == count)
@@ -701,6 +729,9 @@ static b32 link_join(string_address address_to words, positive count)
                                               "one is made\n");
         log_flush();
         crypto_forget(made, sizeof made);
+        crypto_forget(typed, sizeof typed);
+        if (secret && !entered && !generated)
+                crypto_forget((address_any)secret, string_length(secret));
         crypto_forget(address_of groups, sizeof groups);
         return link_switch(true);
 }
