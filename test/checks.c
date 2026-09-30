@@ -13318,6 +13318,49 @@ fn same(string_address name, string_address detail, positive got, positive want)
                 report(name, detail, got, want);
 }
 
+/*
+        Three pages with the outer two protected, so a read or write past
+        either edge of the middle one is a fault and ends the run. Each step
+        is a check named for the routine under test; the answer is the
+        mapping, or null once a step has failed, with the mapping given back.
+*/
+static p8 address_to guard_pages(string_address routine)
+{
+        p8 address_to pages = memory(3 * 4096);
+        bool mapped = (bipolar)(positive)pages > 0;
+
+        same(routine, "guard mapping", mapped, 1);
+        if (!mapped)
+                return null;
+        bool protected =
+            system_call_3(syscall(mprotect), (positive)pages, 4096, 0) == 0 &&
+            system_call_3(syscall(mprotect), (positive)(pages + 8192), 4096, 0) == 0;
+        same(routine, "guard pages protected", protected, 1);
+        if (!protected)
+        {
+                memory_free(pages, 3 * 4096);
+                return null;
+        }
+        return pages;
+}
+
+/*
+        The bytes round a routine's answer still hold the guard it was handed:
+        the eight in front of got, and the eight behind its length bytes from
+        the one at `after` on (one is the byte past a terminator).
+*/
+fn same_guarded(string_address name, p8 address_to got, positive length,
+                p8 guard, positive after)
+{
+        for (positive back = 1; back <= 8; back++)
+                same(name, "in front of it", (positive)*(got - back),
+                     (positive)guard);
+
+        for (positive at = after; at < after + 8; at++)
+                same(name, "behind it", (positive)got[length + at],
+                     (positive)guard);
+}
+
 fn same_bytes(string_address name, string_address detail, b8 address_to got,
               b8 address_to want, positive size)
 {
@@ -14266,21 +14309,10 @@ fn check_delete_bytes()
             255, 256, 257, 1000, 4095, 4096,
         };
         static p8 want[4096], table[256];
-        p8 address_to pages = memory(3 * 4096);
-        bool mapped = (bipolar)(positive)pages > 0;
+        p8 address_to pages = guard_pages("memory_delete_bytes");
 
-        same("memory_delete_bytes", "guard mapping", mapped, 1);
-        if (!mapped)
+        if (!pages)
                 return;
-        bool protected =
-            system_call_3(syscall(mprotect), (positive)pages, 4096, 0) == 0 &&
-            system_call_3(syscall(mprotect), (positive)(pages + 8192), 4096, 0) == 0;
-        same("memory_delete_bytes", "guard pages protected", protected, 1);
-        if (!protected)
-        {
-                memory_free(pages, 3 * 4096);
-                return;
-        }
         p8 address_to got = pages + 4096;
         p64 seed = 0x9e3779b97f4a7c15ull;
 #if X64
@@ -14356,21 +14388,10 @@ fn check_squeeze_bytes()
             191, 255, 256, 257, 1000, 4095, 4096,
         };
         static p8 want[4096], table[256];
-        p8 address_to pages = memory(3 * 4096);
-        bool mapped = (bipolar)(positive)pages > 0;
+        p8 address_to pages = guard_pages("memory_squeeze_bytes");
 
-        same("memory_squeeze_bytes", "guard mapping", mapped, 1);
-        if (!mapped)
+        if (!pages)
                 return;
-        bool protected =
-            system_call_3(syscall(mprotect), (positive)pages, 4096, 0) == 0 &&
-            system_call_3(syscall(mprotect), (positive)(pages + 8192), 4096, 0) == 0;
-        same("memory_squeeze_bytes", "guard pages protected", protected, 1);
-        if (!protected)
-        {
-                memory_free(pages, 3 * 4096);
-                return;
-        }
         p8 address_to got = pages + 4096;
         p64 seed = 0x2545f4914f6cdd1dull;
 #if X64
@@ -14455,21 +14476,10 @@ fn check_offsets_of_either()
             0, 1, 2, 15, 16, 17, 31, 63, 64, 65, 127, 128, 129, 200, 1000, 4096,
         };
         static p32 got[4200], want[4200];
-        p8 address_to pages = memory(3 * 4096);
-        bool mapped = (bipolar)(positive)pages > 0;
+        p8 address_to pages = guard_pages("memory_offsets_of_either");
 
-        same("memory_offsets_of_either", "guard mapping", mapped, 1);
-        if (!mapped)
+        if (!pages)
                 return;
-        bool protected =
-            system_call_3(syscall(mprotect), (positive)pages, 4096, 0) == 0 &&
-            system_call_3(syscall(mprotect), (positive)(pages + 8192), 4096, 0) == 0;
-        same("memory_offsets_of_either", "guard pages protected", protected, 1);
-        if (!protected)
-        {
-                memory_free(pages, 3 * 4096);
-                return;
-        }
         p8 address_to bytes = pages + 4096;
         p64 seed = 0x243f6a8885a308d3ull;
 #if X64
@@ -14637,21 +14647,10 @@ static fn span_byte_block(p8 address_to at, positive size, p8 fill, p8 around,
 fn check_span_byte()
 {
         static const p8 fills[] = {0x00, 0xff, 0x80, 0x7f, '0', ' '};
-        p8 address_to pages = memory(3 * 4096);
-        bool mapped = (bipolar)(positive)pages > 0;
+        p8 address_to pages = guard_pages("memory_span_byte");
 
-        same("memory_span_byte", "guard mapping", mapped, 1);
-        if (!mapped)
+        if (!pages)
                 return;
-        bool protected =
-            system_call_3(syscall(mprotect), (positive)pages, 4096, 0) == 0 &&
-            system_call_3(syscall(mprotect), (positive)(pages + 8192), 4096, 0) == 0;
-        same("memory_span_byte", "guard pages protected", protected, 1);
-        if (!protected)
-        {
-                memory_free(pages, 3 * 4096);
-                return;
-        }
         span_byte_page = pages + 4096;
 #if X64
         p8 avx2 = cpu_has_avx2, avx512 = cpu_has_avx512;
@@ -16549,21 +16548,10 @@ fn check_record_guards()
 {
         static p32 got[2 * 256];
         static b8 table[256];
-        p8 address_to pages = memory(3 * 4096);
-        bool mapped = (bipolar)(positive)pages > 0;
+        p8 address_to pages = guard_pages("record scans");
 
-        same("record scans", "guard mappings", mapped, 1);
-        if (!mapped)
+        if (!pages)
                 return;
-        bool protected =
-            system_call_3(syscall(mprotect), (positive)pages, 4096, 0) == 0 &&
-            system_call_3(syscall(mprotect), (positive)(pages + 8192), 4096, 0) == 0;
-        same("record scans", "guard pages protected", protected, 1);
-        if (!protected)
-        {
-                memory_free(pages, 3 * 4096);
-                return;
-        }
         for (positive i = 0; i < 256; i++)
                 table[i] = i == ' ' || i == '\t';
 #if X64
@@ -20829,13 +20817,7 @@ fn check_into_one(positive value, positive offset, p8 guard)
         // Nothing in front of the answer and nothing behind it. A routine
         // that terminates the string, or hands back the whole scratch, gets
         // the length right and is still wrong.
-        for (positive back = 1; back <= 8; back++)
-                same("positive_into", "in front of it",
-                     (positive)*(got - back), (positive)guard);
-
-        for (positive after = 0; after < 8; after++)
-                same("positive_into", "behind it",
-                     (positive)got[got_length + after], (positive)guard);
+        same_guarded("positive_into", got, got_length, guard, 0);
 
         reference_fill(span_room, guard, sizeof(span_room));
         reference_fill(field, guard, sizeof(field));
@@ -20851,13 +20833,7 @@ fn check_into_one(positive value, positive offset, p8 guard)
         same_bytes("positive_into_string", "the string",
                    got, want, want_length + 1);
 
-        for (positive back = 1; back <= 8; back++)
-                same("positive_into_string", "in front of it",
-                     (positive)*(got - back), (positive)guard);
-
-        for (positive after = 1; after <= 8; after++)
-                same("positive_into_string", "behind it",
-                     (positive)got[got_length + after], (positive)guard);
+        same_guarded("positive_into_string", got, got_length, guard, 1);
 }
 
 fn check_bipolar_into_one(bipolar value, positive offset, p8 guard)
@@ -20886,13 +20862,7 @@ fn check_bipolar_into_one(bipolar value, positive offset, p8 guard)
         same("bipolar_into", "how many", got_length, want_length);
         same_bytes("bipolar_into", "the field", got, want, want_length);
 
-        for (positive back = 1; back <= 8; back++)
-                same("bipolar_into", "in front of it",
-                     (positive)*(got - back), (positive)guard);
-
-        for (positive after = 0; after < 8; after++)
-                same("bipolar_into", "behind it",
-                     (positive)got[got_length + after], (positive)guard);
+        same_guarded("bipolar_into", got, got_length, guard, 0);
 
         reference_fill(span_room, guard, sizeof(span_room));
         got = span_subject(offset);
@@ -20904,13 +20874,7 @@ fn check_bipolar_into_one(bipolar value, positive offset, p8 guard)
         same_bytes("bipolar_into_string", "the string",
                    got, want, want_length + 1);
 
-        for (positive back = 1; back <= 8; back++)
-                same("bipolar_into_string", "in front of it",
-                     (positive)*(got - back), (positive)guard);
-
-        for (positive after = 1; after <= 8; after++)
-                same("bipolar_into_string", "behind it",
-                     (positive)got[got_length + after], (positive)guard);
+        same_guarded("bipolar_into_string", got, got_length, guard, 1);
 }
 
 fn check_into()
@@ -21030,13 +20994,7 @@ fn check_human_one(positive value, positive offset, p8 guard)
         same_bytes("positive_into_human_1024_string", "the terminated bytes",
                    got, want, want_length + 1);
 
-        for (positive back = 1; back <= 8; back++)
-                same("positive_into_human_1024_string", "in front of it",
-                     (positive)*(got - back), (positive)guard);
-
-        for (positive after = 1; after <= 8; after++)
-                same("positive_into_human_1024_string", "behind the terminator",
-                     (positive)got[got_length + after], (positive)guard);
+        same_guarded("positive_into_human_1024_string", got, got_length, guard, 1);
 
         reference_fill(human_capture, guard, sizeof(human_capture));
         human_used = 0;
@@ -22073,13 +22031,7 @@ fn check_into_padded_one(positive value, positive width, p8 pad,
         same("positive_into_padded", "how many", length, wanted);
         same_bytes("positive_into_padded", "the field", got, want, wanted);
 
-        for (positive back = 1; back <= 8; back++)
-                same("positive_into_padded", "in front of it",
-                     (positive)*(got - back), (positive)guard);
-
-        for (positive after = 0; after < 8; after++)
-                same("positive_into_padded", "behind it",
-                     (positive)got[wanted + after], (positive)guard);
+        same_guarded("positive_into_padded", got, wanted, guard, 0);
 }
 
 fn check_into_padded()
@@ -22169,12 +22121,7 @@ fn check_into_pair()
                                 same("positive_into_pair", "ones", got[1],
                                      '0' + value % 10);
 
-                                for (positive back = 1; back <= 8; back++)
-                                        same("positive_into_pair", "in front of it",
-                                             *(got - back), guards[g]);
-                                for (positive after = 0; after < 8; after++)
-                                        same("positive_into_pair", "behind it",
-                                             got[2 + after], guards[g]);
+                                same_guarded("positive_into_pair", got, 2, guards[g], 0);
                         }
 }
 
@@ -22208,13 +22155,7 @@ fn check_into_base_one(positive value, positive base, bool upper,
         same("positive_into_base", "how many", got_length, want_length);
         same_bytes("positive_into_base", "the digits", got, want, want_length);
 
-        for (positive back = 1; back <= 8; back++)
-                same("positive_into_base", "in front of it",
-                     (positive)*(got - back), (positive)guard);
-
-        for (positive after = 0; after < 8; after++)
-                same("positive_into_base", "behind it",
-                     (positive)got[got_length + after], (positive)guard);
+        same_guarded("positive_into_base", got, got_length, guard, 0);
 }
 
 fn check_into_base()
