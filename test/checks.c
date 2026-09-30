@@ -72957,6 +72957,30 @@ static fn checksums(void)
         }
 }
 
+static fn tar_field_put_base256(p8 address_to field, positive width, p64 value)
+{
+        positive at;
+
+        memory_fill(field, 0, width);
+        for (at = width; at; at--)
+        {
+                field[at - 1] = (p8)value;
+                value >>= 8;
+        }
+
+        field[0] |= 0x80;
+}
+
+static fn tar_field_put(p8 address_to field, positive width, p64 value)
+{
+        positive bits = width > 1 ? 3 * (width - 1) : 0;
+
+        if (bits && bits < 64 && value <= (((p64)1 << bits) - 1))
+                tar_field_put_octal(field, width, value);
+        else
+                tar_field_put_base256(field, width, value);
+}
+
 static fn fields(void)
 {
         static p64 values[] = {0, 1, 7, 8, 0777, 0x7f, 0x80, 0xff, TAR_BLOCK - 1,
@@ -73429,14 +73453,8 @@ static fn name_precedence(void)
 }
 
 /*
-        Where a long name splits, and how a directory member is spelled.
-
-        The piece after a split is the member's own last component, so a
-        directory member's trailing slash is never the split point: splitting
-        there leaves the leaf field empty and the name unreadable.  Names are
-        walked with a trailing slash and without, with the slash at every
-        position and with none at all, and the split is compared against a
-        scan written the other way round.
+        How a directory member is spelled: with one trailing slash, unless
+        the name is empty, ends in one already, or leaves no room for it.
 */
 static fn name_spelling(void)
 {
@@ -73446,26 +73464,6 @@ static fn name_spelling(void)
         p8 spelled[TAR_PATH];
         p8 wide[TAR_PATH];
         positive at;
-
-        for (at = 0; at < array_count(names); at++)
-        {
-                string_address name = names[at];
-                positive length = string_length(name);
-                positive body = length && name[length - 1] == '/' ? length - 1
-                                                                  : length;
-                string_address want = null;
-                positive scan;
-
-                for (scan = body; scan; scan--)
-                        if (name[scan - 1] == '/')
-                        {
-                                want = name + scan - 1;
-                                break;
-                        }
-
-                check("a name splits at the last slash that is not its own trailing one",
-                      tar_split_at(name, length) == want);
-        }
 
         for (at = 0; at < array_count(names); at++)
         {

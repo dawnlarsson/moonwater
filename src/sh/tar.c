@@ -253,30 +253,6 @@ static fn tar_field_put_octal(p8 address_to field, positive width, p64 value)
         memory_copy(field + (width - 1 - length), digits, length);
 }
 
-static fn tar_field_put_base256(p8 address_to field, positive width, p64 value)
-{
-        positive at;
-
-        memory_fill(field, 0, width);
-        for (at = width; at; at--)
-        {
-                field[at - 1] = (p8)value;
-                value >>= 8;
-        }
-
-        field[0] |= 0x80;
-}
-
-static fn tar_field_put(p8 address_to field, positive width, p64 value)
-{
-        positive bits = width > 1 ? 3 * (width - 1) : 0;
-
-        if (bits && bits < 64 && value <= (((p64)1 << bits) - 1))
-                tar_field_put_octal(field, width, value);
-        else
-                tar_field_put_base256(field, width, value);
-}
-
 static fn tar_header_put_checksum(p8 address_to block)
 {
         tar_field_put_octal(block + TAR_CHKSUM, 7, tar_header_sum(block));
@@ -885,26 +861,6 @@ static bool tar_header_gnu_old(p8 address_to block)
 }
 
 /*
-        Where a name too long for one field splits.
-
-        The piece after the split is the member's own last component, so a
-        directory member's trailing slash is not a split point: it belongs to
-        that last piece.  Without this a long directory name split at its own
-        trailing slash and left the leaf field empty.
-*/
-static string_address tar_split_at(string_address name, positive length)
-{
-        positive at = length;
-
-        if (at && name[at - 1] == '/')
-                at--;
-        while (at)
-                if (name[--at] == '/')
-                        return name + at;
-        return null;
-}
-
-/*
         A directory member is spelled with a trailing slash: ustar says a
         directory's name ends in one and the reference writes it that way.
         False when the name has no room for it, and the caller keeps the
@@ -1212,37 +1168,8 @@ static positive tar_seen_fill;
    ASCII, and the backslash doubled, so no name can drive the terminal. */
 static fn tar_quoted(writer output, string_address name)
 {
-        while (string_get(name))
-        {
-                string_address run = name;
-                p8 byte;
-                p8 escaped[4] = {'\\', 0, 0, 0};
-
-                //      A run of bytes that need no spelling goes out in one
-                //      write: a name is nearly all such bytes.
-                while ((byte = (p8)string_get(name)) >= ' ' && byte < 127 &&
-                       byte != '\\')
-                        name++;
-                if (name != run)
-                        output(run, (positive)(name - run));
-                if (!byte)
-                        break;
-                name++;
-                if (byte == '\\')
-                        output("\\\\", 2);
-                else if (byte >= 7 && byte <= 13)
-                {
-                        escaped[1] = "abtnvfr"[byte - 7];
-                        output(escaped, 2);
-                }
-                else
-                {
-                        escaped[1] = (p8)('0' + (byte >> 6));
-                        escaped[2] = (p8)('0' + ((byte >> 3) & 7));
-                        escaped[3] = (p8)('0' + (byte & 7));
-                        output(escaped, 4);
-                }
-        }
+        writer_spelled(output, (address_any)name, string_length(name),
+                       spelling_c(0));
 }
 
 static fn tar_name_line(writer output, string_address name)
@@ -4608,8 +4535,7 @@ static bool tar_diff_mode_same(p64 mode, file_facts address_to facts)
 /* The archive's bytes against the file's, read beside each other; the
    first that differ are said and the rest of the member passed over. */
 static bool tar_diff_bytes(bipolar archive, bipolar file, p64 offset,
-                           p64 size, bool seekable, string_address name,
-                           bool address_to said)
+                           p64 size, string_address name, bool address_to said)
 {
         p8 mine[TAR_RECORD];
 
@@ -4671,7 +4597,6 @@ static bool tar_diff_bytes(bipolar archive, bipolar file, p64 offset,
                 offset += take;
                 size -= take;
         }
-        (void)seekable;
         return true;
 }
 
@@ -4779,7 +4704,7 @@ static fn tar_diff_file(bipolar archive, p8 address_to block, p8 type,
                         tar_diff_holes(file, cursor, tar_sparse[at].offset,
                                        name, address_of said);
                         if (!tar_diff_bytes(archive, file, tar_sparse[at].offset,
-                                            tar_sparse[at].bytes, seekable, name,
+                                            tar_sparse[at].bytes, name,
                                             address_of said))
                         {
                                 system_close(file);
@@ -4789,8 +4714,7 @@ static fn tar_diff_file(bipolar archive, p8 address_to block, p8 type,
                 }
                 tar_diff_holes(file, cursor, real, name, address_of said);
         }
-        else if (!tar_diff_bytes(archive, file, 0, size, seekable, name,
-                                 address_of said))
+        else if (!tar_diff_bytes(archive, file, 0, size, name, address_of said))
         {
                 system_close(file);
                 return;
