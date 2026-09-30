@@ -820,6 +820,14 @@ static COLD b32 net_wget_failed(bipolar status, b32 code, p8 address_to where,
                                      "`--no-check-certificate'.\n",
                                      writer_terminal_quoted_name, host,
                                      writer_terminal_quoted_name, host);
+        case HTTP_MISMATCH:
+                return string_report(log_error, WGET_SSL,
+                                     "The certificate's owner does not match "
+                                     "hostname '%w'\n"
+                                     "To connect to %w insecurely, use "
+                                     "`--no-check-certificate'.\n",
+                                     writer_terminal_quoted_name, host,
+                                     writer_terminal_quoted_name, host);
         case HTTP_EXPIRED:
         case HTTP_NOT_YET:
                 return string_report(log_error, WGET_SSL,

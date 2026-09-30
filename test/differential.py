@@ -41888,13 +41888,18 @@ def harness_tls_chains(argv):
                     said = fetched.stderr.decode(errors="replace")
                     reason = ("has expired" if mutation == "leaf expired" else
                               "is not yet activated" if mutation == "leaf not yet valid" else
+                              "owner does not match" if mutation in (
+                                  "name is another address", "name is only a DNS name",
+                                  "no subject alternative name",
+                                  #   OpenSSL's extfile keeps one of the two, a DNS name.
+                                  "duplicate subjectAltName leaf extension") else
                               "is not trusted")
                     checks(fetched.returncode == 5,
                            "%s: wget refuses the certificate with status %d, not GNU wget's 5 (%s)" % (
                                "%s with a %s leaf" % (mutation, key_name), fetched.returncode,
                                said.strip()[:200]))
                     checks(reason in said,
-                           "%s with a %s leaf: wget does not say the certificate %s (%s)" % (
+                           "%s with a %s leaf: wget does not say '%s' (%s)" % (
                                mutation, key_name, reason, said.strip()[:200]))
                 expected = mutation in MUST_ACCEPT
                 checks(openssl_ok == expected or mutation in DELIBERATE or
@@ -43230,6 +43235,7 @@ typedef struct { int dummy; } network_deadline;
 #define TLS_UNTRUSTED (-2)
 #define TLS_EXPIRED (-3)
 #define TLS_NOT_YET (-4)
+#define TLS_MISMATCH (-5)
 #define ENOSPC 28
 #define syscall(name) 0
 static bipolar tls_borrow(void *a, positive b, p8 **c, positive *d,
@@ -44241,6 +44247,7 @@ static bipolar network_stream_read_some_for(bipolar h, p8 *into, positive room,
 #define TLS_UNTRUSTED (-2)
 #define TLS_EXPIRED (-3)
 #define TLS_NOT_YET (-4)
+#define TLS_MISMATCH (-5)
 typedef struct
 {
         p8 *receive;
@@ -47825,7 +47832,7 @@ static fn fuzz_connection(const p8 *data, positive length)
                 if (tls->handle != -1 ||
                     (status != TLS_FAIL &&
                      ((status != TLS_UNTRUSTED && status != TLS_EXPIRED &&
-                       status != TLS_NOT_YET) || !(flags & 2))))
+                       status != TLS_NOT_YET && status != TLS_MISMATCH) || !(flags & 2))))
                         abort();
                 free(tls);
                 return;
@@ -47952,8 +47959,9 @@ def tls_verify_chain_lift(net, now=None, aia=None):
             "static COLD bool tls_cert_current(")
     return (r"""
 #define array_count(a) (sizeof(a) / sizeof((a)[0]))
-#define TLS_DATED_EARLY 1
-#define TLS_DATED_LATE 2
+#define TLS_FAULT_EARLY 1
+#define TLS_FAULT_LATE 2
+#define TLS_FAULT_NAME 3
 typedef struct
 {
         bool check_cert;
@@ -47963,7 +47971,7 @@ typedef struct
         positive leaf_n_length;
         p64 leaf_e;
         p8 leaf_curve;
-        p8 dated;
+        p8 fault;
 } tls_conn;
 """ + anchor_types + (HARNESS_ROOT / "src/net/anchors.inc").read_text() + anchor_code + date +
             "static COLD positive tls_aia_fetch(const p8 address_to url, positive length,\n"
