@@ -12047,6 +12047,24 @@ static p128 dump_bits_at(p64 address_to limb, bipolar from)
         return out;
 }
 
+//      value /= 10, answering the remainder, by long division in 32 bit
+//      steps: a p128 division would be a call to libgcc's __udivti3.
+static p8 dump_ld_divide_ten(p128 address_to value)
+{
+        p128 quotient = 0;
+        positive rest = 0;
+
+        for (bipolar shift = 96; shift >= 0; shift -= 32)
+        {
+                positive part = rest << 32 | (p32)(address_to value >> shift);
+
+                quotient |= (p128)(part / 10) << shift;
+                rest = part % 10;
+        }
+        address_to value = quotient;
+        return (p8)rest;
+}
+
 /*
         And whether those digits read back as the value, from the same
         numbers: the digits are |fraction| from the value in units of their
@@ -12064,10 +12082,12 @@ static bool dump_ld_digits(p64 mantissa, bipolar exponent, positive precision,
         if (!mantissa || precision > 21)
                 return false;
 
-        p128 limit = 1;
+        p128 limit = 1, below;
 
         for (positive at = 0; at < precision; at++)
                 limit *= 10;
+        below = limit;
+        dump_ld_divide_ten(address_of below);
 
         bipolar bits = (bipolar)(64 - bits_leading_zeros(mantissa));
         bipolar guess = ((exponent + bits - 1) * 315653) >> 20;
@@ -12094,7 +12114,7 @@ static bool dump_ld_digits(p64 mantissa, bipolar exponent, positive precision,
                         power++;
                         continue;
                 }
-                if (whole < limit / 10)
+                if (whole < below)
                 {
                         power--;
                         continue;
@@ -12133,15 +12153,12 @@ static bool dump_ld_digits(p64 mantissa, bipolar exponent, positive precision,
                         whole++;
                 if (whole == limit)
                 {
-                        whole /= 10;
+                        dump_ld_divide_ten(address_of whole);
                         power++;
                 }
 
                 for (positive at = precision; at-- > 0;)
-                {
-                        digits[at] = (p8)('0' + (p8)(whole % 10));
-                        whole /= 10;
-                }
+                        digits[at] = (p8)('0' + dump_ld_divide_ten(address_of whole));
                 address_to decimal = power + (bipolar)precision - 1;
                 return true;
         }
