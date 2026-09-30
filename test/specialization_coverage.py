@@ -415,6 +415,10 @@ cover('nothing_to_fold', None, 'keccak_blocks sm3_blocks',
 cover('folds_already', 'size', 'hash_crc32_msb',
       "cksum's read blocks, build.c's path and the one to eight length bytes "
       'are all counted at run time; no call site hands a literal')
+cover('folds_already', 'mode', 'unicode_case',
+      'callers pass a mode they choose from the command line or a template at '
+      'run time; the body is one lookup either way and a body per mode would '
+      'only duplicate the compare and the loads')
 cover('folds_already', 'variant', 'unicode_width',
       'every call site names its variant, but the variant is only the shift '
       'of a nibble the body loads for both; a body per variant would remove '

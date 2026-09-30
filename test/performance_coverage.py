@@ -452,6 +452,10 @@ cover('direct_benchmark', 'test/checks.c#BENCH_unicode_width', 'unicode_width',
       'both variants over mixed, Latin, box-drawing, wide, emoji and mark '
       'streams against the C term.c and text.c ran '
       '(SHARED_unicode_width_reference); every code point in CHECK_verify')
+cover('correctness_only', 'test/checks.c#CHECK_verify', 'unicode_case',
+      'a table lookup that is three loads a code point, timed by no row: every '
+      'code point in all three modes against glibc 2.44 runs on the three '
+      'machines, and dirty-register agreement, both in CHECK_verify')
 cover('benchmark_context', 'test/checks.c#BENCH_compression_floor', 'lzma_range_shift',
       'carry flushing inside the measured range-tree work; not isolated')
 cover('correctness_only', 'test/checks.c#CHECK_compression_floor', 'lzma_decode_span',

@@ -10647,6 +10647,29 @@ static struct input_handler pointer_handler = {
 
 static void canvas_input_drop(void);
 
+/*
+        The first redraw after a wake can land before the panel has its link
+        back: the driver's resume returns, the panel is still training, and a
+        commit made then is accepted and shows nothing. The desktop is drawn
+        again from scratch half a second and two and a half seconds later,
+        which costs nothing when the first one took.
+*/
+static int canvas_pm_again_left;
+
+static void canvas_pm_again_work(struct work_struct *work);
+static DECLARE_DELAYED_WORK(canvas_pm_again, canvas_pm_again_work);
+
+static void canvas_pm_again_work(struct work_struct *work)
+{
+        rt_mutex_lock(&desktop.lock);
+        if (!READ_ONCE(desktop.asleep) && !desktop_taken())
+                desktop_resume();
+        rt_mutex_unlock(&desktop.lock);
+
+        if (--canvas_pm_again_left > 0)
+                schedule_delayed_work(&canvas_pm_again, msecs_to_jiffies(2000));
+}
+
 static void canvas_pm_sleep(_Bool sleeping)
 {
         rt_mutex_lock(&desktop.lock);
@@ -10672,6 +10695,7 @@ static void canvas_pm_sleep(_Bool sleeping)
 
         if (sleeping)
         {
+                cancel_delayed_work_sync(&canvas_pm_again);
                 hrtimer_cancel(&desktop.frame);
                 canvas_input_drop();
                 wait_event_timeout(desktop.flush_idle, !atomic_read(&desktop.flushes_in_flight),
@@ -10681,6 +10705,8 @@ static void canvas_pm_sleep(_Bool sleeping)
         {
                 canvas_flush_wake();
                 canvas_thread_wake();
+                canvas_pm_again_left = 2;
+                schedule_delayed_work(&canvas_pm_again, msecs_to_jiffies(500));
         }
 }
 
@@ -10725,6 +10751,7 @@ static void canvas_thread_stop(void)
                 canvas_pm_registered = false;
         }
         WRITE_ONCE(desktop.asleep, false);
+        cancel_delayed_work_sync(&canvas_pm_again);
 
         /* Registration can be interrupted before the input core initializes
            the handler's lists.  Only hand a handler back after the matching

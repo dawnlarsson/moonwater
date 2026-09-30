@@ -7127,9 +7127,45 @@ static fn wc_bytes_longest(const p8 address_to at, positive left, bool want_line
                            positive address_to column_out, p32 address_to wc_specials);
 static p32 wc_specials[4096]; // WC_SPECIALS
 
+// Where, from from, the first sequence that can be a space past ASCII is in
+// the whole sequences that end at to (or to, where none is): U+00A0, U+1680
+// and U+3000 by their bytes, and the U+2000s by their lead, which curly
+// quotes share. Each remembers where it was last found so a run of text is
+// searched once.
+static positive wc_utf8_spacey(const p8 address_to at, positive from, positive to,
+                               const p8 address_to hit[4])
+{
+        static const p8 needles[4][3] = {{0xc2, 0xa0}, {0xe1, 0x9a, 0x80}, {0xe2},
+                                         {0xe3, 0x80, 0x80}};
+        static const p8 sizes[4] = {2, 3, 1, 3};
+        const p8 address_to first = at + to;
+        const p8 address_to now = at + from;
+        const p8 address_to near = first;
+
+        for (positive i = 0; i < 4; i++)
+        {
+                if (!hit[i] || hit[i] < now)
+                {
+                        const p8 address_to found = memory_search(now, to - from, needles[i],
+                                                                  sizes[i]);
+
+                        hit[i] = found ? found : near;
+                }
+
+                if (hit[i] < first)
+                        first = hit[i];
+        }
+
+        return (positive)(first - at);
+}
+
 static fn wc_utf8_block(wc_utf8 address_to state, const p8 address_to at, positive size)
 {
         positive p = 0;
+        positive whole = 0; // the bytes before it are known whole sequences
+        const p8 address_to hit[4] = {null, null, null, null};
+        positive decoded = 0; // spaces' leads decoded by hand
+        bool dense = false;
 
         while (state->carried && p < size)
         {
@@ -7242,27 +7278,68 @@ static fn wc_utf8_block(wc_utf8 address_to state, const p8 address_to at, positi
                                         break;
                         }
                 }
-                else
+                else if (!dense)
                 {
-                        positive run = at[p] < 0x80 ? memory_ascii_span(at + p, size - p) : 0;
-
-                        if (run)
+                        /*
+                                Without -L a character is counted, not looked
+                                at: the validator proves the longest run of
+                                whole sequences and its second answer is how
+                                many characters they are. Words need more
+                                only where a sequence can be a space past
+                                ASCII (a lead of U+00A0, U+1680, U+2000s,
+                                U+3000): the run up to one is counted, that
+                                one is decoded, and the search goes on --
+                                until they are a sixteenth of the bytes, as
+                                in kana, where decoding all of them is the
+                                cheaper way.
+                        */
+                        if (p >= whole)
                         {
-                                state->chars += run;
+                                positive left = size - p;
+                                positive2 span = memory_utf8_valid_span(
+                                    at + p, state->want_words && left > 16384 ? 16384 : left);
 
-                                if (state->want_words)
+                                whole = p + span.x;
+                                hit[0] = hit[1] = hit[2] = hit[3] = null;
+
+                                if (!state->want_words && span.x)
                                 {
-                                        positive2 counted = memory_count_words(
-                                            at + p, run, state->inside);
+                                        state->chars += span.y;
+                                        p = whole;
+                                        continue;
+                                }
+                        }
 
+                        if (p < whole)
+                        {
+                                positive stop = state->want_words ? wc_utf8_spacey(at, p, whole, hit)
+                                                                  : whole;
+
+                                if (stop > p)
+                                {
+                                        positive2 span = memory_utf8_valid_span(at + p, stop - p);
+                                        positive2 counted = memory_count_words(at + p, stop - p,
+                                                                               state->inside);
+
+                                        state->chars += span.y;
                                         state->words += counted.x;
                                         state->inside = (bool)counted.y;
+                                        p = stop;
                                 }
 
-                                p += run;
+                                if (p < whole && stop < whole)
+                                {
+                                        p32 code;
+                                        positive length;
 
-                                if (p == size)
-                                        break;
+                                        wc_utf8_decode(at + p, whole - p, address_of code,
+                                                       address_of length);
+                                        wc_utf8_step(state, true, code);
+                                        p += length;
+                                        dense = ++decoded >= 32 && decoded * 16 >= p;
+                                }
+
+                                continue;
                         }
                 }
 
@@ -21425,6 +21502,17 @@ static inline INLINE p8 address_to cut_bytes_copy(p8 address_to out, p8 address_
         return memory_copy_apart_end(out, from, size);
 }
 
+// Whether a line has more characters than bytes. The validator answers a
+// line that is whole sequences in one pass; only a line with a byte that
+// begins none is counted the long way, where such a byte is a character.
+static inline INLINE bool cut_multibyte(const p8 address_to line, positive length)
+{
+        positive2 whole = memory_utf8_valid_span(line, length);
+
+        return whole.x == length ? whole.y != length
+                                 : memory_utf8_span(line, length, positive_max).y != length;
+}
+
 /*
         A line whose characters are not its bytes, cut by characters with no
         output delimiter between the runs: the list is asked about a run of
@@ -21500,8 +21588,7 @@ static inline INLINE positive cut_bytes_into(p8 address_to out, positive address
 
                         // Where characters are not bytes, only a line that has one
                         // that is not is walked by them.
-                        if (characters &&
-                            memory_utf8_span(line, length, positive_max).y != length)
+                        if (characters && cut_multibyte(line, length))
                                 at_out += cut_characters_into(at_out, line, length, complement);
                         else if (single)
                         {
@@ -22813,7 +22900,7 @@ static b32 text_cut()
                                 }
 
                                 if (whitespace && text_locale_utf8() &&
-                                    memory_utf8_span(line, line_length, positive_max).y != line_length)
+                                    cut_multibyte(line, line_length))
                                 {
                                         cut_blank_line_wide(line, line_length, complement,
                                                             only_delimited, separator,
@@ -33193,34 +33280,88 @@ static sort_general sort_general_read(p8 address_to text, positive length,
         if (stop == at)
                 return out;
 
-        if (stop - at >= sizeof(small) &&
-            !(copy = memory_take(stop - at + 1)))
-                return out;
-
-        memory_copy(copy, text + at, stop - at);
-        copy[stop - at] = 0;
-
-        if (sort_point)
-                for (positive i = 0; i < stop - at; i++)
-                        copy[i] = copy[i] == '.' ? ';' : copy[i] == sort_point ? '.' : copy[i];
-
         union
         {
                 f128 value;
                 p128 bits;
         } shape;
-        string_address stopped = copy;
+        bool converted = false;
 
         shape.bits = 0;
-        shape.value = string_to_extended(copy, address_of stopped);
 
-        bool converted = stopped != copy;
+        /*
+                A whole number of up to nineteen digits is its own significand
+                and needs no register: the format's bits are the digits, shifted
+                up to the top, over the exponent that shift leaves. What can go
+                on past the digits (a point, an exponent, a hexadecimal prefix,
+                or a twentieth digit) is read by strtold's own path.
+        */
+        {
+                positive first = at + (text[at] == '-' || text[at] == '+');
+                positive next = first;
+                p64 whole = 0;
 
-        if (converted)
-                address_to consumed = at + (positive)(stopped - copy);
+                while (next < stop && next - first < 19 && (p8)(text[next] - '0') < 10)
+                        whole = whole * 10 + (p8)(text[next++] - '0');
 
-        if (copy != small)
-                memory_give(copy);
+                if (next > first &&
+                    (next >= stop || !((p8)(text[next] - '0') < 10 || text[next] == '.' ||
+                                       text[next] == 'e' || text[next] == 'E' ||
+                                       text[next] == 'x' || text[next] == 'X' ||
+                                       text[next] == 'p' || text[next] == 'P' ||
+                                       (sort_point && text[next] == sort_point))))
+                {
+                        p128 sign = text[at] == '-';
+
+                        if (whole)
+                        {
+                                positive lead = bits_leading_zeros(whole);
+                                p64 top = whole << lead;
+                                p128 exponent = 16383 + 63 - lead;
+
+#if __LDBL_MANT_DIG__ == 64
+                                shape.bits = sign << 79 | exponent << 64 | top;
+#else
+                                shape.bits = sign << 127 | exponent << 112 |
+                                             (p128)(top & 0x7fffffffffffffffull) << 49;
+#endif
+                        }
+                        else
+#if __LDBL_MANT_DIG__ == 64
+                                shape.bits = sign << 79;
+#else
+                                shape.bits = sign << 127;
+#endif
+
+                        converted = true;
+                        address_to consumed = next;
+                }
+        }
+
+        if (!converted)
+        {
+                if (stop - at >= sizeof(small) &&
+                    !(copy = memory_take(stop - at + 1)))
+                        return out;
+
+                memory_copy(copy, text + at, stop - at);
+                copy[stop - at] = 0;
+
+                if (sort_point)
+                        for (positive i = 0; i < stop - at; i++)
+                                copy[i] = copy[i] == '.' ? ';' : copy[i] == sort_point ? '.' : copy[i];
+
+                string_address stopped = copy;
+
+                shape.value = string_to_extended(copy, address_of stopped);
+                converted = stopped != copy;
+
+                if (converted)
+                        address_to consumed = at + (positive)(stopped - copy);
+
+                if (copy != small)
+                        memory_give(copy);
+        }
 
         if (!converted)
                 return out;
@@ -33307,23 +33448,37 @@ static bipolar sort_compare_general(p8 address_to a, positive la, p8 address_to 
         return one.order == two.order ? 0 : one.order < two.order ? -1 : 1;
 }
 
-static bool sort_looked_at(p8 character, positive how)
+// -d keeps blanks and alphanumerics; -i keeps what a terminal would show. A
+// byte neither keeps is not there at all, so the two sides walk at their own
+// pace rather than in step. Alphanumeric, not a word character: sort -d keeps
+// no underscore, which is what separates it from every other definition
+// here. Blank is GNU's field_sep, which a newline is too: under -z a record
+// can hold one. Which bytes are kept is asked a byte at a time, so it is
+// answered from a table made when the run starts, for each of -d, -i, both.
+static b8 sort_kept[4][256];
+
+static fn sort_kept_ready()
 {
-        // -d keeps blanks and alphanumerics; -i keeps what a terminal would
-        // show. A byte neither keeps is not there at all, so the two sides
-        // walk at their own pace rather than in step.
-        // Alphanumeric, not a word character: sort -d keeps no underscore,
-        // which is what separates it from every other definition here.
-        // Blank is GNU's field_sep, which a newline is too: under -z a
-        // record can hold one.
-        if ((how & SORT_DICTIONARY) &&
-            !(sort_blanks[character] || byte_is_alnum(character)))
-                return false;
+        for (positive how = 0; how < 4; how++)
+        {
+                for (positive character = 0; character < 256; character++)
+                {
+                        bool keep = true;
 
-        if ((how & SORT_PRINTABLE) && (character < 0x20 || character >= 0x7f))
-                return false;
+                        if (how & 1)
+                                keep = sort_blanks[character] || byte_is_alnum((p8)character);
 
-        return true;
+                        if ((how & 2) && (character < 0x20 || character >= 0x7f))
+                                keep = false;
+
+                        sort_kept[how][character] = keep;
+                }
+        }
+}
+
+static inline INLINE bool sort_looked_at(p8 character, positive how)
+{
+        return sort_kept[(how >> 1) & 3][character];
 }
 
 static positive sort_translate(p8 address_to into, p8 address_to from, positive length,
@@ -34019,6 +34174,7 @@ static fn sort_stages_ready()
                 sort_stage_fold[stage] = (order->how & SORT_FOLD) != 0;
                 sort_stage_kind[stage] =
                     order->kind == 'n' || order->kind == 'M' || order->kind == 'g' ||
+                            (order->kind == 'h' && !(order->how & SORT_FOLD)) ||
                             (order->kind == 'R' && !order->how)
                         ? SORT_STAGE_WINDOW
                     : !order->kind && !(order->how & ~(positive)SORT_FOLD) && !sort_collating
@@ -34249,6 +34405,22 @@ static p64 sort_number_window(p8 address_to text, positive length,
         return (p64)(0x80 + rank) << 56 | body;
 }
 
+/*
+        The same order as a radix window: the suffix's rank, ten either side
+        of nought, in the top five bits, then the number's own window without
+        its last five bits. Equal windows are equal keys when the number's
+        was exact and those five bits were nothing, which is any number of
+        six digits or fewer.
+*/
+static p64 sort_human_window(p8 address_to text, positive length, bool address_to exact)
+{
+        p64 rank = (p64)(10 + sort_human_order(text, length));
+        p64 number = sort_number_window(text, length, exact);
+
+        address_to exact = *exact && !(number & 31);
+        return rank << 59 | number >> 5;
+}
+
 // The window of one line for one stage, the key read from `depth` on. A
 // window stage says whether its eight bytes were the whole number in `left`:
 // eight exact, nine not.
@@ -34272,6 +34444,8 @@ static inline INLINE fn sort_item_window(sort_item address_to item,
                                                             address_of exact)
                          : kind == 'g' ? sort_general_window(view->at + from, to - from,
                                                              address_of exact)
+                         : kind == 'h' ? sort_human_window(view->at + from, to - from,
+                                                           address_of exact)
                          : kind == 'R' ? sort_random_window(view->at + from, to - from)
                                        : (p64)sort_month_of(view->at + from, to - from) << 56;
 
@@ -39775,6 +39949,7 @@ static b32 text_sort()
         sort_release();
         sort_collating = collate_ready();
         sort_stages_ready();
+        sort_kept_ready();
         sort_line_cost = sizeof(sort_line) + 2 * sizeof(sort_item) +
                          (sort_keys[0].whole ? 0 : sizeof(sort_span));
         sort_output_handle = -1;

@@ -8605,15 +8605,37 @@ static b32 tune_cpu(string_address address_to arguments, positive count)
 
 /*
         A machine asleep in s2idle wakes only for what is armed to wake it, and
-        the kernel leaves a keyboard's wakeup off until somebody turns it on:
-        nothing but the power button then brings it back, which from the chair
-        is a machine that never woke. A USB device with a human interface
-        (class 03) and every PS/2 port are armed before sleeping, and left
-        armed, since an armed keyboard is what anyone wants of a sleeping
-        machine. A radio or a camera is not armed: those wake it for their own
-        reasons.
+        the kernel leaves a keyboard's wakeup disabled: nothing but the power
+        button then brings it back, which from the chair is a machine that
+        never woke. PS/2 ports and USB keyboards (an interface of class 03
+        speaking the boot keyboard protocol, 01) are armed before sleeping and
+        left armed. Not the whole HID class: a handheld's own controller is
+        HID too, presents itself as keyboard and mouse, and woke the machine
+        a few seconds after it slept. What is armed is said, and after the
+        wake the kernel's own wakeup sources are asked which of them fired.
 */
-static fn tune_wake_arm(string_address bus, bool human)
+static bool tune_usb_keyboard(string_address bus, string_address name)
+{
+        for (positive interface = 0; interface < 4; interface++)
+        {
+                p8 path[192];
+                p8 word[16];
+                p8 tail[40];
+                p8 number[4] = {(p8)('0' + interface), 0, 0, 0};
+
+                if (!tune_path(tail, sizeof(tail), "/", name, ":1.") ||
+                    string_append_bounded(tail, (string_address)number, sizeof(tail)) >= sizeof(tail) ||
+                    !tune_path(path, sizeof(path), bus, (string_address)tail, "/bInterfaceClass") ||
+                    !tune_word(path, word, sizeof(word)) || !string_equals((string_address)word, "03") ||
+                    !tune_path(path, sizeof(path), bus, (string_address)tail, "/bInterfaceProtocol") ||
+                    !tune_word(path, word, sizeof(word)) || !string_equals((string_address)word, "01"))
+                        continue;
+                return true;
+        }
+        return false;
+}
+
+static fn tune_wake_arm(string_address bus, bool usb)
 {
         p8 name[64];
 
@@ -8622,23 +8644,72 @@ static fn tune_wake_arm(string_address bus, bool human)
                 p8 path[192];
                 p8 word[16];
 
-                if (human)
-                {
-                        p8 tail[80];
-
-                        //      An interface's own name, 1-2:1.0, has no wakeup file.
-                        if (string_first_of((string_address)name, ':') ||
-                            !tune_path(tail, sizeof(tail), "/", (string_address)name, ":1.0/bInterfaceClass") ||
-                            !tune_path(path, sizeof(path), bus, (string_address)tail, "") ||
-                            !tune_word(path, word, sizeof(word)) || !string_equals((string_address)word, "03"))
-                                continue;
-                }
+                //      An interface's own name, 1-2:1.0, has no wakeup file.
+                if (usb && (string_first_of((string_address)name, ':') ||
+                            !tune_usb_keyboard(bus, (string_address)name)))
+                        continue;
                 if (!tune_path(path, sizeof(path), bus, "/", (string_address)name) ||
                     string_append_bounded(path, "/power/wakeup", sizeof(path)) >= sizeof(path))
                         continue;
-                if (tune_word(path, word, sizeof(word)) && string_equals((string_address)word, "disabled"))
-                        (void)tune_write(path, "enabled");
+                if (tune_word(path, word, sizeof(word)) && string_equals((string_address)word, "disabled") &&
+                    tune_write(path, "enabled") >= 0)
+                        host_say(log, host_label "wakes on %s\n", (string_address)name);
         }
+}
+
+#define TUNE_WAKE_MOST 64
+#define TUNE_WAKE_CLASS "/sys/class/wakeup"
+
+/* The event count of every wakeup source, in directory order. */
+static positive tune_wake_counts(positive address_to counts)
+{
+        p8 name[48];
+        positive n = 0;
+
+        for (positive at = 0; n < TUNE_WAKE_MOST && tune_entry(TUNE_WAKE_CLASS, at, name, sizeof(name)); at++)
+        {
+                p8 path[160];
+                positive value = 0;
+
+                if (tune_path(path, sizeof(path), TUNE_WAKE_CLASS "/", (string_address)name, "/event_count") &&
+                    tune_number(path, address_of value))
+                        counts[n] = value;
+                else
+                        counts[n] = 0;
+                n++;
+        }
+        return n;
+}
+
+/* The wakeup sources that fired since the counts were taken, said and kept in /root/sleep.log. */
+static fn tune_wake_report(positive address_to before, positive n)
+{
+        p8 text[512];
+        p8 name[48];
+        positive after[TUNE_WAKE_MOST];
+        positive seen = tune_wake_counts(after);
+        bool any = false;
+
+        string_copy_bounded(text, "woken by:", sizeof(text));
+        for (positive at = 0; at < n && at < seen && tune_entry(TUNE_WAKE_CLASS, at, name, sizeof(name)); at++)
+        {
+                p8 path[160];
+                p8 label[48];
+
+                if (after[at] == before[at])
+                        continue;
+                if (!tune_path(path, sizeof(path), TUNE_WAKE_CLASS "/", (string_address)name, "/name") ||
+                    !tune_word(path, label, sizeof(label)))
+                        string_copy_bounded(label, name, sizeof(label));
+                string_append_bounded(text, " ", sizeof(text));
+                string_append_bounded(text, (string_address)label, sizeof(text));
+                any = true;
+        }
+        if (!any)
+                string_append_bounded(text, " nothing the kernel counted", sizeof(text));
+        host_say(log, host_label "%s\n", (string_address)text);
+        string_append_bounded(text, "\n", sizeof(text));
+        (void)host_write_text("/root/sleep.log", (string_address)text);
 }
 
 /* What the kernel says went wrong, when it says anything: the device, the step and the error. */
@@ -8660,6 +8731,9 @@ static fn tune_suspend_failure(void)
 /* moonwater sleep and moonwater hibernate: the kernel's own suspend and hibernate. */
 static b32 tune_suspend(string_address verb, string_address state)
 {
+        positive before[TUNE_WAKE_MOST];
+        positive sources;
+
         if (!tune_lists(TUNE_SYS_POWER "/state", state))
                 return host_refuse(string_equals(state, "mem")
                                        ? "this kernel does not offer sleep%s\n"
@@ -8678,6 +8752,7 @@ static b32 tune_suspend(string_address verb, string_address state)
                 if (tune_word(TUNE_SYS_POWER "/mem_sleep", mode, sizeof(mode)))
                         host_say(log, host_label "sleeping, mem_sleep %s\n", (string_address)mode);
         }
+        sources = tune_wake_counts(before);
         system_call(syscall(sync));
         {
                 bipolar failed = tune_write(TUNE_SYS_POWER "/state", state);
@@ -8689,6 +8764,7 @@ static b32 tune_suspend(string_address verb, string_address state)
                 }
         }
         //      Reached again once the machine has woken.
+        tune_wake_report(before, sources);
         host_say(log, host_label "awake again\n");
         return 0;
 }

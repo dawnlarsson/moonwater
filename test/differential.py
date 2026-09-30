@@ -27502,6 +27502,13 @@ int main(void) {
                 "static noinline_for_stack struct dentry *\noffset_dir_lookup(struct dentry *parent, loff_t offset)\n{\n\treturn NULL;\n}\n\n"
                 "static bool offset_dir_emit(struct dir_context *ctx, struct dentry *dentry)\n{\n\treturn true;\n}\n\n"
                 "static void offset_iterate_dir(struct file *file, struct dir_context *ctx)\n{\n\tctx->pos = DIR_OFFSET_EOD;\n}\n",
+            "linux/fs/ext4/dir.c":
+                "struct fname {\n\t__u32\t\thash;\n};\n\n"
+                "static int call_filldir(struct file *file, struct dir_context *ctx,\n\t\t\tstruct fname *fname)\n{\n\treturn 0;\n}\n"
+                "static void free_rb_tree_fname(struct rb_root *root)\n{\n\t*root = RB_ROOT;\n}\n"
+                "int ext4_htree_store_dirent(struct file *dir_file, __u32 hash,\n\t\t\t     __u32 minor_hash,\n\t\t\t    struct ext4_dir_entry_2 *dirent,\n"
+                "\t\t\t    struct fscrypt_str *ent_name)\n{\n\treturn 0;\n}\n"
+                "static int ext4_dir_open(struct inode *inode, struct file *file)\n{\n\treturn 0;\n}\n",
             "linux/fs/readdir.c":
                 "struct getdents_callback64 {\n\tstruct dir_context ctx;\n};\n\n"
                 "static bool filldir64(struct dir_context *ctx, const char *name, int namlen,\n"
@@ -27554,6 +27561,11 @@ int main(void) {
                     "static bool offset_dir_emit(" not in libfs and "static noinline_for_stack struct dentry *\noffset_dir_lookup" not in libfs and
                     "noinline_for_stack struct dentry *\noffset_dir_lookup(struct dentry *parent, loff_t offset);\n" in libfs and
                     "_Static_assert(DIR_OFFSET_EOD == S32_MAX," in libfs and
+                    "/* Moonwater: call_filldir is in kernel/kernel.c */\nint call_filldir(" in (tree / "linux/fs/ext4/dir.c").read_text() and
+                    "_Static_assert(offsetof(struct fname, hash) == 0" in (tree / "linux/fs/ext4/dir.c").read_text() and
+                    "/* Moonwater: free_rb_tree_fname is in kernel/kernel.c */\nvoid free_rb_tree_fname(" in (tree / "linux/fs/ext4/dir.c").read_text() and
+                    "/* Moonwater: ext4_htree_store_dirent is in kernel/kernel.c */" in (tree / "linux/fs/ext4/dir.c").read_text() and
+                    "/* Moonwater: ext4_dir_open is in kernel/kernel.c */\nint ext4_dir_open(" in (tree / "linux/fs/ext4/dir.c").read_text() and
                     "\nbool filldir64(" in readdir and "static bool filldir64(" not in readdir and
                     "_Static_assert(offsetof(struct getdents_callback64, current_dir) == 24," in readdir and
                     "void moonwater_offsets(void)" in offsets and
@@ -40232,6 +40244,13 @@ def harness_moonwater_cli(argv):
         sys_file("bus/serio/devices/serio0/power/wakeup", "disabled\n")
         sys_file("bus/usb/devices/1-2/power/wakeup", "disabled\n")
         sys_file("bus/usb/devices/1-2:1.0/bInterfaceClass", "03\n")
+        sys_file("bus/usb/devices/1-2:1.0/bInterfaceProtocol", "01\n")
+        # A handheld's controller is HID too and must not wake the machine.
+        sys_file("bus/usb/devices/1-4/power/wakeup", "disabled\n")
+        sys_file("bus/usb/devices/1-4:1.0/bInterfaceClass", "03\n")
+        sys_file("bus/usb/devices/1-4:1.0/bInterfaceProtocol", "00\n")
+        sys_file("class/wakeup/wakeup0/name", "serio0\n")
+        sys_file("class/wakeup/wakeup0/event_count", "3\n")
         sys_file("bus/usb/devices/1-3/power/wakeup", "disabled\n")
         sys_file("bus/usb/devices/1-3:1.0/bInterfaceClass", "e0\n")
         got, done = session("rm -f /root/tune\n" + say("sleep"))
@@ -40239,6 +40258,8 @@ def harness_moonwater_cli(argv):
         check(sys_read("bus/serio/devices/serio0/power/wakeup") == "enabled", "sleep arms the PS/2 keyboard's wakeup")
         check(sys_read("bus/usb/devices/1-2/power/wakeup") == "enabled", "sleep arms a USB keyboard's wakeup")
         check(sys_read("bus/usb/devices/1-3/power/wakeup") == "disabled", "sleep leaves a USB radio's wakeup alone")
+        check(sys_read("bus/usb/devices/1-4/power/wakeup") == "disabled", "sleep leaves a controller's wakeup alone")
+        check("woken by:" in "\n".join(got), "sleep says what woke the machine", "\n".join(got)[-200:])
         check(sys_read("power/pm_debug_messages") == "1", "sleep asks the kernel to log each device it suspends")
         check("mem_sleep [s2idle] deep" in "\n".join(got), "sleep says which kind of sleep it is", "\n".join(got)[-200:])
 
@@ -60599,8 +60620,8 @@ struct super_block { unsigned long s_blocksize; void *s_fs_info; };
 struct inode { struct super_block *i_sb; unsigned int i_flags; unsigned char i_blkbits; unsigned short i_mode; unsigned long i_ino; };
 struct buffer_head { char *b_data; size_t b_size; unsigned long b_blocknr; };
 struct dentry;
-struct file { void *private_data; struct { void *mnt; struct dentry *dentry; } f_path; };
-struct ext4_super_block { u32 s_inodes_count; u32 s_feature_ro_compat; };
+struct file { void *private_data; struct { void *mnt; struct dentry *dentry; } f_path; unsigned f_mode; struct inode *f_inode; };
+struct ext4_super_block { u32 s_inodes_count; u32 s_feature_ro_compat; u32 s_feature_incompat; };
 struct ext4_sb_info { struct ext4_super_block *s_es; };
 struct dx_hash_info { u32 hash; u32 minor_hash; int hash_version; u32 *seed; };
 struct fscrypt_str { unsigned char *name; u32 len; };
@@ -60675,7 +60696,25 @@ enum { DIR_OFFSET_FIRST = 2, DIR_OFFSET_MIN = 3, DIR_OFFSET_EOD = S32_MAX };
 #define TIF_SIGPENDING 1
 #define TIF_NOTIFY_SIGNAL 2
 #define EFAULT 14
-struct task_struct { struct { unsigned long flags; } thread_info; };
+#define TS_COMPAT 2
+#define TIF_32BIT 22
+#define FMODE_32BITHASH (1 << 9)
+#define FMODE_64BITHASH (1 << 10)
+#define EXT4_FEATURE_INCOMPAT_FILETYPE 0x0002
+#define EXT4_FT_MAX 8
+#define GFP_KERNEL 0xcc0
+#define __GFP_ZERO 0x100
+struct task_struct { struct { unsigned long flags; unsigned status; } thread_info; char comm[16]; };
+struct rb_node { unsigned long __rb_parent_color; struct rb_node *rb_right; struct rb_node *rb_left; };
+struct rb_root { struct rb_node *rb_node; };
+struct fname;
+struct dir_private_info { struct rb_root root; struct rb_node *curr_node; struct fname *extra_fname; long long last_pos; u32 curr_hash; u32 curr_minor_hash; u32 next_hash; u64 cookie; bool initialized; };
+struct rb_node *rb_next(const struct rb_node *);
+#define rb_entry(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
+#define __counted_by(x)
+#define KERN_ERR "\0013"
+void __ext4_msg(struct super_block *, const char *, const char *, ...);
+#define ext4_msg(sb, level, fmt, ...) __ext4_msg(sb, level, fmt, ##__VA_ARGS__)
 struct hlist_node { struct hlist_node *next, **pprev; };
 struct hlist_head { struct hlist_node *first; };
 struct hlist_bl_node { struct hlist_bl_node *next, **pprev; };
@@ -60769,6 +60808,21 @@ typedef unsigned short umode_t;
 #define EXPORT_SYMBOL_GPL(x)
 """
 
+KERNEL_PORTS_EXT4DIR_PRELUDE = r"""
+#define CONFIG_COMPAT 1
+#if defined(CONFIG_X86_64)
+static inline int in_compat_syscall(void) { return (current_task->thread_info.status & TS_COMPAT) != 0; }
+#else
+static inline int in_compat_syscall(void) { return (current_task->thread_info.flags & (1UL << TIF_32BIT)) != 0; }
+#endif
+#define BITS_PER_LONG 64
+typedef uint64_t __u64;
+#define file_inode(f) ((f)->f_inode)
+static inline struct ext4_sb_info *EXT4_SB_(struct super_block *sb) { return sb->s_fs_info; }
+static inline bool ext4_has_feature_filetype(struct super_block *sb)
+{ return (EXT4_SB_(sb)->s_es->s_feature_incompat & EXT4_FEATURE_INCOMPAT_FILETYPE) != 0; }
+"""
+
 KERNEL_PORTS_COMMON = r"""
 /* ---- what the two implementations do, recorded ---- */
 struct record {
@@ -60809,6 +60863,7 @@ struct buffer_head *__ext4_read_dirblock(struct inode *inode, ext4_lblk_t block,
 }
 void __brelse(struct buffer_head *bh) { (void)bh; R.brelse++; }
 
+#ifndef MW_REAL_STORE
 int ext4_htree_store_dirent(struct file *dir_file, __u32 hash, __u32 minor_hash, struct ext4_dir_entry_2 *dirent, struct fscrypt_str *ent_name)
 {
         (void)dir_file;
@@ -60820,6 +60875,7 @@ int ext4_htree_store_dirent(struct file *dir_file, __u32 hash, __u32 minor_hash,
         }
         return (G.store_fail_at && R.stores == G.store_fail_at) ? -ENOMEM : 0;
 }
+#endif
 
 int __fscrypt_prepare_readdir(struct inode *dir) { (void)dir; return G.prepare_ret; }
 int fscrypt_fname_alloc_buffer(u32 max, struct fscrypt_str *s)
@@ -60847,7 +60903,28 @@ void _raw_spin_lock(void *l) { int *p = l; if (*p) LF.bad++; *p = 1; LF.locks++;
 void _raw_spin_unlock(void *l) { int *p = l; if (!*p) LF.bad++; *p = 0; }
 void dput(struct dentry *d) { LF.dputs++; if (d->d_lockref.count <= 0) LF.bad++; d->d_lockref.count--; }
 struct dentry *offset_dir_lookup(struct dentry *parent, loff_t offset) { return lf_lookup ? lf_lookup(parent, offset) : NULL; }
+static struct { long live, allocs, frees, fail_at; } MA;
+void *__kmalloc_noprof(size_t size, unsigned gfp)
+{
+        MA.allocs++;
+        if (MA.fail_at && MA.allocs == MA.fail_at) return NULL;
+        if ((gfp & 0x100) == 0) abort();              /* the arena wants zeroed pages: the flag must be there */
+        MA.live++;
+        return calloc(1, size);
+}
+void kfree(const void *p) { if (p) { MA.frees++; MA.live--; free((void *)p); } }
+void rb_insert_color(struct rb_node *node, struct rb_root *root) { (void)node; (void)root; }
+static long mw_msgs;
+void __ext4_msg(struct super_block *sb, const char *level, const char *fmt, ...) { (void)sb; (void)level; (void)fmt; mw_msgs++; }
+struct rb_node *rb_next(const struct rb_node *node)
+{
+        struct rb_node *parent;
+        if (node->rb_right) { node = node->rb_right; while (node->rb_left) node = node->rb_left; return (struct rb_node *)node; }
+        while ((parent = (struct rb_node *)(node->__rb_parent_color & ~3UL)) && node == parent->rb_right) node = parent;
+        return parent;
+}
 char *mw_user_lo, *mw_user_hi;
+int copy_to_user_nofault(void *to, const void *from, unsigned long n);
 static struct task_struct mw_task;
 struct task_struct *current_task = &mw_task;
 unsigned long _copy_to_user(void *to, const void *from, unsigned long n)
@@ -60859,6 +60936,7 @@ unsigned long _copy_to_user(void *to, const void *from, unsigned long n)
         memcpy(t, from, ok);
         return n - ok;
 }
+int copy_to_user_nofault(void *to, const void *from, unsigned long n) { return _copy_to_user(to, from, n) ? -EFAULT : 0; }
 
 bool fscrypt_has_encryption_key(const struct inode *inode) { (void)inode; return G.haskey; }
 int generic_ci_match(const struct inode *parent, const struct qstr *name, const struct qstr *folded_name, const u8 *de_name, u32 de_name_len)
@@ -61325,6 +61403,262 @@ int main(int argc, char **argv)
 """
 
 
+KERNEL_PORTS_EXT4DIR_TEST = r"""
+#include <sys/mman.h>
+int call_filldir(struct file *file, struct dir_context *ctx, struct fname *fname);
+
+static struct { int n; struct { char name[256]; int len; long off; u64 ino; unsigned type; long pos; } e[600]; int limit; } XM;
+static bool xd_actor(struct dir_context *ctx, const char *name, int namelen, loff_t offset, u64 ino, unsigned type)
+{
+        if (XM.n < 600) {
+                memcpy(XM.e[XM.n].name, name, namelen);
+                XM.e[XM.n].len = namelen; XM.e[XM.n].off = offset; XM.e[XM.n].ino = ino; XM.e[XM.n].type = type; XM.e[XM.n].pos = ctx->pos;
+        }
+        XM.n++;
+        return !(XM.limit && XM.n >= XM.limit);
+}
+
+/* ext4_dx_readdir's walk over the nodes, as the source has it, around whichever call_filldir it is given */
+static int xd_drive(int (*call)(struct file *, struct dir_context *, struct fname *), struct file *file, struct dir_context *ctx, struct fname *start, int extra)
+{
+        struct dir_private_info *info = file->private_data;
+        struct fname *fname;
+        if (extra) {
+                if (call(file, ctx, info->extra_fname)) return 1;
+                info->extra_fname = NULL;
+                goto next_node;
+        }
+        for (;;) {
+                fname = rb_entry(info->curr_node, struct fname, rb_hash);
+                info->curr_hash = fname->hash;
+                info->curr_minor_hash = fname->minor_hash;
+                if (call(file, ctx, fname)) return 1;
+        next_node:
+                info->curr_node = rb_next(info->curr_node);
+                if (!info->curr_node) return 0;
+                fname = rb_entry(info->curr_node, struct fname, rb_hash);
+                info->curr_hash = fname->hash;
+                info->curr_minor_hash = fname->minor_hash;
+        }
+}
+
+static void xd_insert(struct dir_private_info *info, struct fname *f)
+{
+        struct rb_node **p = &info->root.rb_node, *parent = NULL;
+        f->rb_hash.rb_left = f->rb_hash.rb_right = NULL;
+        while (*p) {
+                struct fname *o = rb_entry(*p, struct fname, rb_hash);
+                parent = *p;
+                if (f->hash == o->hash && f->minor_hash == o->minor_hash) { f->next = o->next; o->next = f; return; }
+                p = (f->hash < o->hash || (f->hash == o->hash && f->minor_hash < o->minor_hash)) ? &parent->rb_left : &parent->rb_right;
+        }
+        f->rb_hash.__rb_parent_color = (unsigned long)parent;
+        *p = &f->rb_hash;
+}
+
+int main(int argc, char **argv)
+{
+        long iters = argc > 1 ? atol(argv[1]) : 3000, bad = 0, emitted = 0;
+        lf_lookup = NULL;
+        for (long it = 0; it < iters; it++) {
+                int n = 1 + rnd() % (rnd() % 4 == 0 ? 60 : 20);
+                struct dir_private_info base; memset(&base, 0, sizeof base);
+                struct super_block sb; struct ext4_sb_info sbi; struct ext4_super_block es; struct inode inode; struct file file;
+                memset(&sb, 0, sizeof sb); memset(&inode, 0, sizeof inode); memset(&file, 0, sizeof file);
+                sb.s_fs_info = &sbi; sbi.s_es = &es; es.s_feature_incompat = rnd() % 4 ? EXT4_FEATURE_INCOMPAT_FILETYPE : 0;
+                inode.i_sb = &sb; inode.i_ino = 12345;
+                unsigned char *region = mmap(NULL, (2 * (n * 2) + 2) * 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                int nalloc = 0;
+                u32 hashes[64]; int nh = 0;
+                for (int i = 0; i < n * 2 && nalloc < n + 12; i++) {
+                        if (i >= n && rnd() % 2) break;
+                        int len = rnd() % 4 == 0 ? 1 + rnd() % 255 : 1 + rnd() % 40;
+                        size_t size = 46 + len;
+                        unsigned char *page = region + (2 * nalloc + 1) * 4096;
+                        struct fname *f = (struct fname *)(page - ((size + 7) & ~7ul));
+                        mprotect(page, 4096, PROT_NONE); nalloc++;
+                        memset(f, 0, size);
+                        if (nh && rnd() % 6 == 0) { f->hash = hashes[rnd() % nh]; f->minor_hash = rnd() % 2 ? 0 : rnd(); }
+                        else { f->hash = rnd() << 1 | (rnd() & 1); f->minor_hash = rnd() % 3 ? 0 : rnd(); if (nh < 64) hashes[nh++] = f->hash; }
+                        f->inode = rnd(); f->name_len = len; f->file_type = rnd() % 5 ? rnd() % 8 : rnd() % 256;
+                        for (int k = 0; k < len; k++) f->name[k] = rnd();
+                        if (rnd() % 12 == 0) f->name[rnd() % len] = '/';
+                        xd_insert(&base, f);
+                }
+                static const unsigned fm[] = {0, 0, FMODE_32BITHASH, FMODE_64BITHASH, FMODE_32BITHASH | FMODE_64BITHASH};
+                file.f_mode = fm[rnd() % 5]; file.f_inode = &inode;
+                unsigned compat = rnd() % 2;
+                struct rb_node *first = base.root.rb_node; while (first && first->rb_left) first = first->rb_left;
+                /* where to start: the first node, or partway along, or the member of a chain that was refused */
+                struct rb_node *start = first; for (int k = rnd() % n; k > 0 && start; k--) { struct rb_node *nx = rb_next(start); if (!nx) break; start = nx; }
+                struct dir_private_info ia = base, ib = base;
+                ia.curr_node = ib.curr_node = start;
+                { struct fname *sf = rb_entry(start, struct fname, rb_hash);      /* the invariant ext4_dx_readdir keeps: curr_hash is the hash of curr_node */
+                  ia.curr_hash = ib.curr_hash = sf->hash; ia.curr_minor_hash = ib.curr_minor_hash = sf->minor_hash; }
+                int extra = 0;
+                if (rnd() % 4 == 0) {
+                        struct fname *h = rb_entry(start, struct fname, rb_hash);
+                        if (h->next) { ia.extra_fname = ib.extra_fname = h->next; extra = 1; }
+                }
+                for (int round = 0; round < 6; round++) {
+                        int real = rnd() % 2;
+                        int usize = 64 + rnd() % 8000, count = rnd() % 4 == 0 ? rnd() % 400 : rnd() % (usize + 300) + (rnd() % 6 == 0 ? 0 : usize);
+                        if (rnd() % 11 == 0) count = 0x7fffffff;
+                        mw_task.thread_info.flags = 0; mw_task.thread_info.status = 0;
+                        if (compat) { mw_task.thread_info.status = TS_COMPAT; mw_task.thread_info.flags = 1UL << TIF_32BIT; }
+                        if (rnd() % 7 == 0) mw_task.thread_info.flags |= 1UL << TIF_SIGPENDING;
+                        unsigned char *ua = malloc(usize + 16), *ub = malloc(usize + 16);
+                        memset(ua, 0xAA, usize + 16); memset(ub, 0xAA, usize + 16);
+                        int window = rnd() % 4 == 0 ? usize - rnd() % (usize / 2) : usize;
+                        int limit = rnd() % 3 == 0 ? 0 : 1 + rnd() % 40;
+                        struct getdents_callback64 ga, gb;
+                        memset(&ga, 0, sizeof ga);
+                        ga.ctx.actor = real ? filldir64 : xd_actor; ga.ctx.count = count; ga.ctx.dt_flags_mask = FILLDIR_FLAG_NOINTR;
+                        ga.current_dir = (struct linux_dirent64 *)ua; ga.ctx.pos = 77;
+                        gb = ga; gb.current_dir = (struct linux_dirent64 *)ub;
+                        file.private_data = &ia; memset(&XM, 0, sizeof XM); XM.limit = limit; mw_msgs = 0;
+                        mw_user_lo = (char *)ua; mw_user_hi = (char *)ua + window;
+                        int ra = xd_drive(call_filldir_c, &file, &ga.ctx, NULL, extra);
+                        typeof(XM) xa = XM; long ma = mw_msgs;
+                        file.private_data = &ib; memset(&XM, 0, sizeof XM); XM.limit = limit; mw_msgs = 0;
+                        mw_user_lo = (char *)ub; mw_user_hi = (char *)ub + window;
+                        int rb = xd_drive(call_filldir, &file, &gb.ctx, NULL, extra);
+                        char why[240] = "";
+                        if (ra != rb) sprintf(why, "refused %d vs %d", ra, rb);
+                        else if (ga.ctx.pos != gb.ctx.pos) sprintf(why, "pos %lld vs %lld", (long long)ga.ctx.pos, (long long)gb.ctx.pos);
+                        else if (ia.curr_node != ib.curr_node || ia.extra_fname != ib.extra_fname || ia.curr_hash != ib.curr_hash || ia.curr_minor_hash != ib.curr_minor_hash)
+                                sprintf(why, "state node %p/%p extra %p/%p hash %x/%x minor %x/%x", (void *)ia.curr_node, (void *)ib.curr_node, (void *)ia.extra_fname, (void *)ib.extra_fname, ia.curr_hash, ib.curr_hash, ia.curr_minor_hash, ib.curr_minor_hash);
+                        if (!*why && !real) {
+                                if (xa.n != XM.n) sprintf(why, "emitted %d vs %d", xa.n, XM.n);
+                                for (int i = 0; !*why && i < xa.n && i < 600; i++)
+                                        if (xa.e[i].len != XM.e[i].len || memcmp(xa.e[i].name, XM.e[i].name, xa.e[i].len) || xa.e[i].off != XM.e[i].off || xa.e[i].ino != XM.e[i].ino || xa.e[i].type != XM.e[i].type || xa.e[i].pos != XM.e[i].pos)
+                                                sprintf(why, "entry %d differs (off %ld/%ld type %u/%u ino %lu/%lu)", i, xa.e[i].off, XM.e[i].off, xa.e[i].type, XM.e[i].type, (unsigned long)xa.e[i].ino, (unsigned long)XM.e[i].ino);
+                                emitted += xa.n;
+                        }
+                        if (!*why && real) {
+                                long res[2]; struct getdents_callback64 *g[2] = { &ga, &gb }; unsigned char *u[2] = { ua, ub };
+                                for (int k = 0; k < 2; k++) {
+                                        mw_user_lo = (char *)u[k]; mw_user_hi = (char *)u[k] + window;
+                                        res[k] = g[k]->error;
+                                        if (g[k]->prev_reclen) {
+                                                struct linux_dirent64 *last = (void *)((char *)g[k]->current_dir - g[k]->prev_reclen);
+                                                if (!mw_uok(&last->d_off, 8)) res[k] = -EFAULT; else { last->d_off = g[k]->ctx.pos; res[k] = count - g[k]->ctx.count; }
+                                        }
+                                }
+                                long ea = (char *)ga.current_dir - (char *)ua, eb = (char *)gb.current_dir - (char *)ub;
+                                if (res[0] != res[1]) sprintf(why, "returns %ld vs %ld", res[0], res[1]);
+                                else if (ea != eb || ga.prev_reclen != gb.prev_reclen || ga.error != gb.error || ga.ctx.count != gb.ctx.count)
+                                        sprintf(why, "state: end %ld/%ld prev %d/%d error %d/%d count %d/%d", ea, eb, ga.prev_reclen, gb.prev_reclen, ga.error, gb.error, ga.ctx.count, gb.ctx.count);
+                                else {
+                                        long at = 0;
+                                        while (!*why && at < ea) {
+                                                struct linux_dirent64 *da = (void *)(ua + at), *db = (void *)(ub + at);
+                                                if (da->d_ino != db->d_ino || da->d_off != db->d_off || da->d_reclen != db->d_reclen || da->d_type != db->d_type || strcmp(da->d_name, db->d_name))
+                                                        sprintf(why, "dirent at %ld differs (off %ld/%ld type %u/%u reclen %u/%u)", at, (long)da->d_off, (long)db->d_off, da->d_type, db->d_type, da->d_reclen, db->d_reclen);
+                                                if (da->d_reclen < 20) break;
+                                                at += da->d_reclen;
+                                        }
+                                        if (!*why && ga.error != -EFAULT && memcmp(ua + ea, ub + eb, usize + 16 - ea)) sprintf(why, "bytes past the end differ");
+                                }
+                                emitted += ea ? 1 : 0;
+                        }
+                        if (!*why && ma != mw_msgs) sprintf(why, "messages %ld vs %ld", ma, mw_msgs);
+                        free(ua); free(ub);
+                        if (*why) { if (bad++ < 5) printf("case %ld round %d differs: %s (n %d mode %x compat %u limit %d real %d)\n", it, round, why, n, file.f_mode, compat, limit, real); break; }
+                        if (!ra) break;
+                        extra = 1;                      /* a refusal leaves extra_fname and curr_node: the next call goes on from there */
+                }
+                munmap(region, (2 * (n * 2) + 2) * 4096);
+        }
+        printf("cases %ld differ %ld stores %ld\n", iters, bad, emitted);
+        return bad != 0;
+}
+"""
+
+KERNEL_PORTS_ARENA_PRELUDE = r"""
+#define MW_REAL_STORE 1
+void rb_insert_color(struct rb_node *, struct rb_root *);
+static inline void *mw_kzalloc_flex(size_t sz, size_t off, size_t extra) { size_t n = off + extra; return calloc(1, n > sz ? n : sz); }
+#define kzalloc_flex(var, member, count) mw_kzalloc_flex(sizeof(var), offsetof(typeof(var), member), (size_t)(count) * sizeof((var).member[0]))
+static inline void rb_link_node(struct rb_node *node, struct rb_node *parent, struct rb_node **link)
+{ node->__rb_parent_color = (unsigned long)parent; node->rb_left = node->rb_right = NULL; *link = node; }
+"""
+
+KERNEL_PORTS_ARENA_TEST = r"""
+int ext4_dir_open(struct inode *inode, struct file *file);
+void free_rb_tree_fname(struct rb_root *root);
+int ext4_htree_store_dirent(struct file *dir_file, __u32 hash, __u32 minor_hash, struct ext4_dir_entry_2 *dirent, struct fscrypt_str *ent_name);
+
+static int same_trees(struct dir_private_info *a, struct dir_private_info *b, char *why)
+{
+        struct rb_node *x = a->root.rb_node, *y = b->root.rb_node;
+        while (x && x->rb_left) x = x->rb_left;
+        while (y && y->rb_left) y = y->rb_left;
+        int at = 0;
+        for (; x && y; x = rb_next(x), y = rb_next(y), at++) {
+                struct fname *f = rb_entry(x, struct fname, rb_hash), *g = rb_entry(y, struct fname, rb_hash);
+                for (int k = 0; f || g; f = f ? f->next : NULL, g = g ? g->next : NULL, k++) {
+                        if (!f || !g) { sprintf(why, "chain %d of node %d is %s", k, at, f ? "longer" : "shorter"); return 0; }
+                        if (f->hash != g->hash || f->minor_hash != g->minor_hash || f->inode != g->inode || f->name_len != g->name_len || f->file_type != g->file_type
+                            || memcmp(f->name, g->name, f->name_len + 1)) { sprintf(why, "node %d entry %d differs (hash %x/%x len %u/%u type %u/%u)", at, k, f->hash, g->hash, f->name_len, g->name_len, f->file_type, g->file_type); return 0; }
+                }
+        }
+        if (x || y) { sprintf(why, "the trees have different lengths"); return 0; }
+        return 1;
+}
+
+int main(int argc, char **argv)
+{
+        long iters = argc > 1 ? atol(argv[1]) : 3000, bad = 0, stored = 0;
+        for (long it = 0; it < iters; it++) {
+                int m = rnd() % 4 == 0 ? rnd() % 300 : rnd() % 40;
+                struct ext4_dir_entry_2 *de = calloc(m + 1, sizeof *de);
+                struct fscrypt_str *nm = calloc(m + 1, sizeof *nm);
+                u32 seen[64]; int ns = 0;
+                for (int i = 0; i < m; i++) {
+                        int len = rnd() % 5 == 0 ? 1 + rnd() % 255 : 1 + rnd() % 30;
+                        de[i].inode = rnd(); de[i].file_type = rnd() % 4 ? rnd() % 8 : rnd();
+                        nm[i].name = malloc(len); nm[i].len = len;
+                        for (int k = 0; k < len; k++) nm[i].name[k] = rnd();
+                }
+                u32 hash[m + 1], minor[m + 1];
+                for (int i = 0; i < m; i++) {
+                        if (ns && rnd() % 7 == 0) { hash[i] = seen[rnd() % ns]; minor[i] = rnd() % 2 ? 0 : rnd(); }
+                        else { hash[i] = (rnd() << 1) | (rnd() & 1); minor[i] = rnd() % 3 ? 0 : rnd(); if (ns < 64) seen[ns++] = hash[i]; }
+                }
+                struct inode inode; struct file fa, fc; memset(&inode, 0, sizeof inode); memset(&fa, 0, sizeof fa); memset(&fc, 0, sizeof fc);
+                MA.live = MA.allocs = MA.frees = 0; MA.fail_at = 0;
+                char why[200] = "";
+                for (int round = 0; round < 2 && !*why; round++) {
+                        if (round == 0) {
+                                if (ext4_dir_open(&inode, &fa) || !fa.private_data) { sprintf(why, "open failed"); break; }
+                        }
+                        struct dir_private_info *ia = fa.private_data;
+                        MA.fail_at = rnd() % 4 == 0 ? MA.allocs + 1 + rnd() % 4 : 0;
+                        int done = 0, r = 0;
+                        for (int i = 0; i < m; i++) { r = ext4_htree_store_dirent(&fa, hash[i], minor[i], &de[i], &nm[i]); if (r) break; done++; }
+                        MA.fail_at = 0;
+                        if (r && r != -ENOMEM) { sprintf(why, "returned %d", r); break; }
+                        if (r && MA.fail_at == 0 && done == m) { sprintf(why, "failed with nothing to fail"); break; }
+                        struct dir_private_info *ic = calloc(1, sizeof *ic); fc.private_data = ic;
+                        for (int i = 0; i < done; i++) if (ext4_htree_store_dirent_c(&fc, hash[i], minor[i], &de[i], &nm[i])) { sprintf(why, "the C failed"); break; }
+                        if (!*why && !same_trees(ic, ia, why)) break;
+                        stored += done;
+                        /* the tree is thrown away and the file goes on: what it had is freed, what it makes next is whole */
+                        free_rb_tree_fname(&ia->root);
+                        if (ia->root.rb_node) { sprintf(why, "the tree was not emptied"); break; }
+                        if (MA.live != 1) { sprintf(why, "%ld allocations live after the tree was freed (want the info alone)", MA.live); break; }
+                }
+                if (!*why) { kfree(fa.private_data); if (MA.live) sprintf(why, "%ld allocations live at the end", MA.live); }
+                if (*why && bad++ < 5) printf("case %ld differs: %s (m %d)\n", it, why, m);
+                for (int i = 0; i < m; i++) free(nm[i].name);
+                free(de); free(nm);
+        }
+        printf("cases %ld differ %ld stores %ld\n", iters, bad, stored);
+        return bad != 0;
+}
+"""
+
 def harness_kernel_ports(argv):
     """The kernel functions in kernel/kernel.c against Linux's own C, call for call.
 
@@ -61365,7 +61699,7 @@ def harness_kernel_ports(argv):
                 return archive.extractfile("linux-%s/%s" % (version, relative)).read().decode()
         return None
 
-    sources = {name: kernel_file(name) for name in ("fs/ext4/namei.c", "fs/ext4/dir.c", "fs/ext4/hash.c", "fs/crypto/fname.c", "fs/libfs.c", "fs/fs_dirent.c", "fs/readdir.c")}
+    sources = {name: kernel_file(name) for name in ("fs/ext4/namei.c", "fs/ext4/dir.c", "fs/ext4/hash.c", "fs/crypto/fname.c", "fs/libfs.c", "fs/fs_dirent.c", "fs/readdir.c", "fs/ext4/dir.c", "fs/ext4/ext4.h")}
     if not all(sources.values()):
         print("kernel ports: NOT RUN -- no kernel source (linux/, KERNEL_SRC or artifacts/linux-%s.tar.xz)" % version)
         return 0
@@ -61391,7 +61725,28 @@ def harness_kernel_ports(argv):
     readdir_code = "\n".join(cut(sources["fs/readdir.c"], head, tail, True) for head, tail in (
         ("struct getdents_callback64 {", "};"), ("static int verify_dirent_name(", "\n}\n"), ("static bool filldir64(", "\n}\n")))
     libfs_code = KERNEL_PORTS_LIBFS_PRELUDE + readdir_code.replace("static bool filldir64(", "bool filldir64(", 1) + "\n" + libfs_code.replace("static void offset_iterate_dir(", "static void offset_iterate_dir_c(", 1)
+    def ext4dir_oracle():
+        dirc, exth = sources["fs/ext4/dir.c"], sources["fs/ext4/ext4.h"]
+        code = "\n".join((
+            cut(dirc, "struct fname {", "};", True),
+            cut(dirc, "static inline int is_32bit_api(void)", "\n}\n", True),
+            cut(dirc, "static inline loff_t hash2pos(", "\n}\n", True),
+            cut(exth, "static const unsigned char ext4_filetype_table[] = {", "};", True),
+            cut(exth, "static inline  unsigned char get_dtype(", "\n}\n", True),
+            "#define call_filldir call_filldir_c\n" + cut(dirc, "static int call_filldir(", "\n}\n", True) + "\n#undef call_filldir\n"))
+        return KERNEL_PORTS_EXT4DIR_PRELUDE + code
+
+    def arena_oracle():
+        dirc = sources["fs/ext4/dir.c"]
+        text = cut(dirc, "struct fname {", "};", True) + "\n#define ext4_htree_store_dirent ext4_htree_store_dirent_c\n" + \
+               cut(dirc, "int ext4_htree_store_dirent(struct file *dir_file,", "\n}\n", True) + "\n#undef ext4_htree_store_dirent\n"
+        return KERNEL_PORTS_ARENA_PRELUDE + text.replace("int ext4_htree_store_dirent_c", "int ext4_htree_store_dirent_c", 1)
+
     ports = {
+        "ext4_htree_store_dirent": (arena_oracle(), KERNEL_PORTS_ARENA_TEST,
+                                    "new_fn->file_type = dirent->file_type;", "new_fn->file_type = 0;"),
+        "call_filldir": (KERNEL_PORTS_LIBFS_PRELUDE + readdir_code.replace("static bool filldir64(", "bool filldir64(", 1) + "\n" + ext4dir_oracle(),
+                         KERNEL_PORTS_EXT4DIR_TEST, "info->extra_fname = fname;", "info->extra_fname = NULL;"),
         "offset_iterate_dir": (libfs_code, KERNEL_PORTS_LIBFS_TEST, "ctx->pos = DIR_OFFSET_EOD;", "ctx->pos = DIR_OFFSET_EOD - 1;"),
         "htree_dirblock_to_tree": (oracle_of("htree_dirblock_to_tree", "static int htree_dirblock_to_tree(struct file *dir_file,"),
                                    KERNEL_PORTS_HTREE_TEST, "count++;", "count += 2;"),
@@ -61420,7 +61775,10 @@ def harness_kernel_ports(argv):
     def macros(arch):
         kind = "%function" if arch == "arm64" else "@function"
         config = {"x86_64": "CONFIG_X86_64", "arm64": "CONFIG_ARM64", "riscv64": "CONFIG_RISCV"}[arch]
-        return ("#define %s 1\n#define CONFIG_FS_ENCRYPTION 1\n#define __stringify_1(x...) #x\n#define __stringify(x...) __stringify_1(x)\n"
+        return (("#define MW_GET_CURRENT \"adrp x8, current_task\\n   ldr x8, [x8, :lo12:current_task]\\n\"\n" if arch == "arm64" else "") +
+                ("#define CONFIG_IA32_EMULATION 1\n" if arch == "x86_64" else "") +
+                ("#define MW_GET_CURRENT_RV \"la t5, current_task\\n   ld t5, 0(t5)\\n\"\n" if arch == "riscv64" else "") +
+                "#define %s 1\n#define CONFIG_FS_ENCRYPTION 1\n#define __stringify_1(x...) #x\n#define __stringify(x...) __stringify_1(x)\n"
                 "#define module_param_named(a, b, c, d)\n#define ASM_RET \"ret\\n\"\n"
                 '#define ASM_FUNC(name) ".globl " #name "\\n.type " #name ", %s\\n" #name ":\\n"\n'
                 '#define ASM_END(name) ".size " #name ", .-" #name "\\n"\n') % (config, kind)
@@ -61457,7 +61815,7 @@ def harness_kernel_ports(argv):
             oracle_text, test_text, plain, broken_text = ports[port]
             walk_text = oracle_text.replace(plain, broken_text, 1) if sabotage else oracle_text
             defines = {"x86_64": "-DCONFIG_X86_64", "arm64": "-DCONFIG_ARM64", "riscv64": "-DCONFIG_RISCV"}[arch]
-            (work / "oracle.c").write_text(KERNEL_PORTS_SHIM + hash_code + "\n" + dir_code + "\n" + match_code + "\n" + dirent_code + "\n" + walk_text + (stub_actor if port != "offset_iterate_dir" else "") + KERNEL_PORTS_COMMON + test_text)
+            (work / "oracle.c").write_text(KERNEL_PORTS_SHIM + hash_code + "\n" + dir_code + "\n" + match_code + "\n" + dirent_code + "\n" + walk_text + (stub_actor if port not in ("offset_iterate_dir", "call_filldir") else "") + KERNEL_PORTS_COMMON + test_text)
             objects = [str(work / "oracle.c"), str(work / "port.c")]
             if arch == "x86_64":
                 (work / "wide.c").write_text(
@@ -61465,7 +61823,7 @@ def harness_kernel_ports(argv):
                     '#define ASM_FUNC(name) ".globl " #name "\\n.type " #name ", @function\\n" #name ":\\n"\n'
                     '#define ASM_END(name) ".size " #name ", .-" #name "\\n"\n#define ASM_RET "ret\\n"\n' + wide_region)
                 objects.append(str(work / "wide.c"))
-            built = subprocess.run(compiler + cflags + [defines, "-DCONFIG_FS_ENCRYPTION=1", "-DCONFIG_UNICODE=1", "-O2", "-w", "-I", str(work), "-o", str(work / "test")] + objects,
+            built = subprocess.run(compiler + cflags + [defines, "-DCONFIG_FS_ENCRYPTION=1", "-DCONFIG_UNICODE=1", "-O2", "-w", "-Wl,--allow-multiple-definition", "-I", str(work), "-o", str(work / "test")] + objects,
                                    capture_output=True, text=True)
             if built.returncode:
                 print("  build failed for %s:\n%s" % (arch, built.stderr[-1500:]))

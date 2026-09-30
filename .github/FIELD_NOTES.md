@@ -212,11 +212,72 @@ frame, checked with `filldir64`'s own checks in its own order, and written with 
 a VM, not of a program's run time, and it says nothing about directories on disk. One
 thing is different from the C and it is a choice: the zeros after a name's NUL, up to
 the next eight bytes of a dirent, are written where the C leaves whatever the buffer
-held; the kernel promises nothing about those bytes. The arm64 and riscv64 bodies
-have the batches and the written-out type, not the image; they are checked against
-the C under qemu-user and have not been booted or timed.
+held; the kernel promises nothing about those bytes. arm64 has the image too
+(through `copy_to_user_nofault`, which sends a batch whose page is not resident to
+`filldir64`); riscv64 has the batches and the written-out type only, because a dirent's
+name starts three bytes into an eight and riscv cores may trap on the word store. The
+arm64 and riscv64 bodies are checked against the C under qemu-user; the two arm64
+kernels (image, and batches only) were booted under qemu TCG and listed the directory
+the same as each other and as the x86_64 kernel with the C, at every buffer size and
+edge. Neither has been timed, and riscv64 has not been booted.
 
 **A measurement note.** The first runs of this, on a box that had 40 forgotten
 guests from earlier sessions running, read 60 microseconds a pass and showed no
 change. With them killed, the same images read 20.6 and 16.9. A timing taken under
 load is a timing of the load.
+
+---
+
+## 2026-09-30 · listing an ext4 directory (`call_filldir`)
+
+ext4 reads a directory in hash order: it builds an rb-tree of the entries and hands them
+to `filldir64` one node at a time. In a guest profile of a thousand-name directory the
+handing over (`filldir64`, its slash check, `call_filldir`, `rb_next`, `kfree`) was 44%
+of the pass and building the tree the other 50%. `kernel/kernel.c` now takes the handing
+over in batches, through the same image of dirents the tmpfs port uses: it walks the
+nodes and their collision chains itself, sixteen entries at a time, and leaves
+`ext4_dx_readdir`'s state as the node-at-a-time calls would (the entry refused, its
+node and its hashes, or the last node handed over).
+
+- **In a guest, stock kernel against the port, booted in turn, three rounds, minimum over
+  800 bursts:** one `getdents64` pass over a thousand names, 51.1 -> 40.8 microseconds
+  (-20%).
+- **Checked against the kernel's own C** (`kernel_ports`, x86_64, arm64 and riscv64 under
+  qemu-user): a tree with collision chains, from the first node, the middle, and a
+  refused chain member, in 32- and 64-bit position modes, with and without file types,
+  handed to the recording actor and to the real `filldir64` over a window that ends
+  where the test says: same entries, positions, resume state and dirents. In the guest
+  the same 484-entry directory lists the same as the stock kernel's at every buffer size
+  and edge.
+
+**What it does not show.** The other half of an ext4 directory read, the hash and the
+allocation of every entry, is untouched by this. The arm64 and riscv64 bodies have not
+been booted or timed.
+
+---
+
+## 2026-09-30 · the tree an ext4 directory read builds (`ext4_htree_store_dirent`)
+
+The other half of an ext4 directory read is the tree it builds. Each entry is a
+`kzalloc`ed object (name and all), copied and inserted, and thrown away one `kfree` at a
+time when the tree is. With `call_filldir` above, the tree was about half of what was left
+of a pass. `kernel/kernel.c` now makes the entries out of an arena that hangs off the
+open directory (`ext4_dir_open` asks for thirty-two bytes more): zeroed 4 KiB chunks, the
+entries bump-allocated out of them, the chunks freed together when the tree is.
+
+- **In a guest, three kernels booted in turn, three rounds, minimum over 800 bursts:** a
+  thousand-name ext4 directory read, the C 53.8 to 54.9 microseconds; with `call_filldir`
+  42.8 to 43.3; with the arena too 35.1 to 36.6. The arena is 17% off what was left, the
+  two together 34% off the pass.
+- **Checked:** the harness builds trees, collision chains included, through the real
+  function and through the port and compares every node and chain member; an allocation
+  that fails leaves what was stored before it; freeing leaves nothing. A KASAN and lockdep
+  guest that listed and churned an ext4 directory for 30 seconds said nothing, and the
+  4 KiB slab does not grow.
+
+**What it does not show.** A chunk is one allocation, so the allocator's checks guard
+its ends, not every name in it. The hash of every name, the other big part of an ext4
+directory read, is the wide SIMD hash already in the tree and is not touched here. The
+arm64 and riscv64 bodies are checked against the C under qemu-user and have not been
+booted.
+
