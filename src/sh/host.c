@@ -12003,17 +12003,18 @@ static bipolar locale_ntp_apply_offset(bipolar offset_ns, bipolar distance_ns)
         second it set and the boot second it was set at, and the time now is
         that wall second plus the boot seconds since: the machine's own
         uptime, which no later step of the wall clock changes. With no such
-        answer this boot, the wall clock may raise the floor by at most a
-        day over what is already kept, so that a machine that only ever asks
-        plain NTP still follows the calendar while one answer that lies
-        cannot push the floor a year out of reach. The file only ever goes
-        forward, is written in place (a torn write reads as no floor, which
+        answer this boot, the wall clock is not read at all: what is written
+        is the floor the boot began with (/run/moonwater/clock.base) plus the
+        seconds the machine has run, which is a lower bound on the time
+        whatever any answer said, so no forgery, plain or not, can put the
+        floor ahead of the truth and lock out the real time. The file only
+        ever goes forward, is written in place (a torn write reads as no floor,
         is the build's), and is written after every authenticated answer,
         every six hours of uptime, and when the machine stops.
 */
 #define LOCALE_CLOCK_AUTH_PATH HOST_STATE "/clock.auth"
 #define LOCALE_CLOCK_GOOD_EVERY ((p64)6 * 3600 * 1000000000ull)
-#define LOCALE_CLOCK_GOOD_STEP 86400
+#define LOCALE_CLOCK_BASE_PATH HOST_STATE "/clock.base"
 
 static p64 locale_clock_next;
 
@@ -12025,7 +12026,10 @@ static bool locale_clock_number(string_address text, positive address_to at,
 
         while (text[address_to at] >= '0' && text[address_to at] <= '9' &&
                address_to at - from < 12)
-                number = number * 10 + (p64)(text[address_to at]++ - '0');
+        {
+                number = number * 10 + (p64)(text[address_to at] - '0');
+                address_to at += 1;
+        }
         if (address_to at == from)
                 return false;
         address_to value = number;
@@ -12050,24 +12054,52 @@ static p64 locale_clock_authenticated_now(void)
         return wall + (now_boot - booted);
 }
 
+//      The floor this boot started with, which /run/moonwater/clock.base
+//      keeps so that every process can ask, or 0.
+static p64 locale_clock_base(void)
+{
+        p8 text[24];
+        positive at = 0;
+        p64 value;
+
+        locale_word(LOCALE_CLOCK_BASE_PATH, text, sizeof(text));
+        return locale_clock_number((string_address)text, address_of at, address_of value) &&
+                       !text[at]
+                   ? value : 0;
+}
+
+static fn locale_clock_base_keep(void)
+{
+        p8 text[24];
+        positive length;
+
+        if (locale_clock_base())
+                return;
+        length = positive_into(text, (positive)clock_trust_floor());
+        text[length++] = '\n';
+        (void)host_write_file(LOCALE_CLOCK_BASE_PATH, text, length, 0644, false);
+}
+
 static bool locale_clock_persist(bool sync)
 {
         p64 floor = clock_trust_floor();
         p64 value = locale_clock_authenticated_now();
-        time_t stamp = time(null);
         p8 text[24];
         positive length;
 
         if (!value)
         {
-                //      Nothing a forged answer cannot have moved: the wall
-                //      clock once the kernel calls it synchronised, a day at a
-                //      time.
-                if (stamp < 0 || (p64)stamp <= floor || !locale_clock_synced())
+                //      Nothing a forged answer can have moved: the floor the
+                //      boot started with and the seconds the machine has run
+                //      since. Time was at least that, whatever the wall clock
+                //      says, so it is a bound that cannot take the floor
+                //      past the truth (and only lags it by the time spent
+                //      switched off).
+                p64 base = locale_clock_base();
+
+                if (!base)
                         return false;
-                value = (p64)stamp < floor + LOCALE_CLOCK_GOOD_STEP
-                            ? (p64)stamp
-                            : floor + LOCALE_CLOCK_GOOD_STEP;
+                value = base + system_clock_ns(HOST_CLOCK_BOOTTIME) / 1000000000ull;
         }
         if (value <= floor || value > CLOCK_GOOD_MOST)
                 return false;
@@ -12328,6 +12360,7 @@ static fn locale_restore(void)
         locale_ntp_next = 0;
         locale_ntp_retry = LOCALE_NTP_RETRY_LEAST;
         locale_ntp_synced = 0;
+        locale_clock_base_keep();
         locale_ntp_every = LOCALE_NTP_AGAIN_FIRST;
         locale_auto_next = 0;
         locale_auto_wait = LOCALE_AUTO_LEAST;
