@@ -40232,6 +40232,13 @@ def harness_moonwater_cli(argv):
         sys_file("bus/serio/devices/serio0/power/wakeup", "disabled\n")
         sys_file("bus/usb/devices/1-2/power/wakeup", "disabled\n")
         sys_file("bus/usb/devices/1-2:1.0/bInterfaceClass", "03\n")
+        sys_file("bus/usb/devices/1-2:1.0/bInterfaceProtocol", "01\n")
+        # A handheld's controller is HID too and must not wake the machine.
+        sys_file("bus/usb/devices/1-4/power/wakeup", "disabled\n")
+        sys_file("bus/usb/devices/1-4:1.0/bInterfaceClass", "03\n")
+        sys_file("bus/usb/devices/1-4:1.0/bInterfaceProtocol", "00\n")
+        sys_file("class/wakeup/wakeup0/name", "serio0\n")
+        sys_file("class/wakeup/wakeup0/event_count", "3\n")
         sys_file("bus/usb/devices/1-3/power/wakeup", "disabled\n")
         sys_file("bus/usb/devices/1-3:1.0/bInterfaceClass", "e0\n")
         got, done = session("rm -f /root/tune\n" + say("sleep"))
@@ -40239,6 +40246,8 @@ def harness_moonwater_cli(argv):
         check(sys_read("bus/serio/devices/serio0/power/wakeup") == "enabled", "sleep arms the PS/2 keyboard's wakeup")
         check(sys_read("bus/usb/devices/1-2/power/wakeup") == "enabled", "sleep arms a USB keyboard's wakeup")
         check(sys_read("bus/usb/devices/1-3/power/wakeup") == "disabled", "sleep leaves a USB radio's wakeup alone")
+        check(sys_read("bus/usb/devices/1-4/power/wakeup") == "disabled", "sleep leaves a controller's wakeup alone")
+        check("woken by:" in "\n".join(got), "sleep says what woke the machine", "\n".join(got)[-200:])
         check(sys_read("power/pm_debug_messages") == "1", "sleep asks the kernel to log each device it suspends")
         check("mem_sleep [s2idle] deep" in "\n".join(got), "sleep says which kind of sleep it is", "\n".join(got)[-200:])
 
