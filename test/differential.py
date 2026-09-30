@@ -44141,6 +44141,28 @@ def harness_wget_hostile(argv):
 
     GET = lambda target: b"GET " + target
     CASES = [
+        case("a Location with UTF-8 is fetched, escaped", hop(b"/caf\xc3\xa9"),
+             "http://127.0.0.1:PORT/x", [GET(b"/x"), GET(b"/caf%C3%A9")]),
+        case("a Location with a space is fetched, escaped", hop(b"/a b"),
+             "http://127.0.0.1:PORT/x", [GET(b"/x"), GET(b"/a%20b")]),
+        case("a Location with a backslash in the path is escaped", hop(b"/a\\b"),
+             "http://127.0.0.1:PORT/x", [GET(b"/x"), GET(b"/a%5Cb")], refs=("wget",)),
+        case("a relative Location is escaped whole", hop(b"dir/a b?q=x y"),
+             "http://127.0.0.1:PORT/x", [GET(b"/x"), GET(b"/dir/a%20b?q=x%20y")],
+             refs=("wget",)),
+        case("an absolute Location with UTF-8", hop(b"http://127.0.0.1:PORT/\xc3\xa9"),
+             "http://127.0.0.1:PORT/x", [GET(b"/x"), GET(b"/%C3%A9")]),
+        case("a network-path Location with a space", hop(b"//127.0.0.1:PORT/a b"),
+             "http://127.0.0.1:PORT/x", [GET(b"/x"), GET(b"/a%20b")]),
+        case("an escape already there is not doubled", hop(b"/a%20b%zz"),
+             "http://127.0.0.1:PORT/x", [GET(b"/x"), GET(b"/a%20b%zz")],
+             refs=("curl",)),
+        case("a URL typed with UTF-8", answer(ok()), "http://127.0.0.1:PORT/é",
+             [GET(b"/%C3%A9")]),
+        case("a URL typed with a space", answer(ok()), "http://127.0.0.1:PORT/a b?c d",
+             [GET(b"/a%20b?c%20d")], refs=("wget",)),
+        case("a schemeless URL typed with a space", answer(ok()), "127.0.0.1:PORT/a b",
+             [GET(b"/a%20b")], refs=("wget",)),
         case("a redirect loop stops", answer(redirect(b"/x")),
              "http://127.0.0.1:PORT/x", [GET(b"/x")] * 21, code=8, refs=(), saved=None,
              message=b"redirections exceeded"),
@@ -44296,6 +44318,17 @@ int main(void)
                         if (http_ipv4_legacy((string_address)url, &ip))
                                 printf("OK\t%u\t%d\n", ip, (int)http_address_public(ip));
                         else
+                                printf("BAD\n");
+                } else if (mode[0] == 'E' || mode[0] == 'F') {
+                        p8 into[8192];
+                        unsigned room;
+                        if (scanf("%u", &room) == 1 && room <= sizeof into &&
+                            !http_url_escape((string_address)url, strlen((char *)url),
+                                             mode[0] == 'E', into, room)) {
+                                printf("OK\t");
+                                emit(into);
+                                printf("\n");
+                        } else
                                 printf("BAD\n");
                 } else if (scanf("%8191s", second) == 1) {
                         p8 *ref = unhex(strcmp(second, "-") ? second : "");
@@ -44482,6 +44515,58 @@ int main(void)
                        % (base, reference, got, joined))
         for key, why in DELIBERATE.items():
             checks(seen[key] > 0, "DELIBERATE %s never generated (%s)" % (key, why))
+
+        #   http_url_escape: after the authority a space, a backslash and every
+        #   byte over 0x7f is %XX in upper case, and nothing else moves.  The
+        #   oracle is a regular expression, not the C's loop; that GNU wget and
+        #   curl agree on these bytes is wget_hostile's, against the real ones.
+        authority = re.compile(rb"^(?:[A-Za-z][A-Za-z0-9+.-]*:)?//[^/?#]*")
+        bare_host = re.compile(rb"^[^/?#]*")
+
+        def escaped(text, bare):
+            raw = text.encode("utf-8")
+            found = authority.match(raw)
+            if not found and bare:
+                found = bare_host.match(raw)
+            if not found and not bare and raw.startswith(b"//"):
+                found = re.match(rb"^//[^/?#]*", raw)
+            end = found.end() if found else 0
+            tail = re.sub(rb"[ \\\x80-\xff]", lambda hit: b"%%%02X" % hit.group()[0], raw[end:])
+            return raw[:end] + tail
+
+        texts = sorted(set(urls[:1500]) | set(references) | {
+            "", "/", " ", "\\", "\u00e9", "//", "//h", "//h/a b", "h/a b", "a b:c",
+            "http://h/a b#f g", "http://h b/", "http:", "http://", "x:// y"})
+        modes = [("E", True), ("F", False)]
+        wire = [(mode, text) for text in texts for mode, _ in modes]
+        want_room = {}
+        questions = []
+        for mode, text in wire:
+            want = escaped(text, mode == "E")
+            want_room[(mode, text)] = want
+            questions.append("%s %s %d" % (mode, encode(text), 8192))
+            #   Exactly enough room, and one byte less.
+            questions.append("%s %s %d" % (mode, encode(text), len(want) + 1))
+            questions.append("%s %s %d" % (mode, encode(text), len(want)))
+        ran = subprocess.run([str(work / "http_urls")], input="\n".join(questions) + "\n",
+                             capture_output=True, text=True, timeout=120,
+                             env=dict(os.environ, ASAN_OPTIONS="detect_leaks=0"))
+        answers = ran.stdout.splitlines()
+        if ran.returncode or len(answers) != len(questions):
+            print("  FAIL the escape lift stopped:\n" + ran.stderr[-3000:])
+            write_tally("http-urls", 0, 1)
+            return 1
+        for at, (mode, text) in enumerate(wire):
+            want = want_room[(mode, text)]
+            for offset, room_ok in ((0, True), (1, True), (2, False)):
+                got = answers[3 * at + offset]
+                if room_ok:
+                    checks(got.startswith("OK\t") and
+                           binascii.unhexlify(got.split("\t")[1]) == want,
+                           "%s %r: escaped %r, wanted %r" % (mode, text, got, want))
+                else:
+                    checks(got == "BAD", "%s %r: one byte too little room answered %r"
+                           % (mode, text, got))
 
         #   http_ipv4_legacy: inet_aton's spellings, judged by inet_aton (glibc's,
         #   through Python), and http_address_public on what they name.
