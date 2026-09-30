@@ -2135,25 +2135,23 @@ static COLD bipolar dns_resolve_at(p32 server, p16 port, string_address name,
 }
 
 /*
-        The servers resolv.conf names, in the order it names them.
+        The servers resolv.conf names, in the order it names them, asked the
+        way glibc and musl ask them.
 
-        Which servers those are is not decided here -- that is what writes the
-        file, and this only reads it. What is decided here is what happens
-        when one of them does not answer, and the answer is: ask the next.
+        The first server that gives an answer about the name is believed: an
+        address, "no such name" or "no address for it". Only a server that
+        gives none (no reply, refused, a malformed or failed answer, no
+        socket) sends the walk on to the next. The walk stops after three
+        servers, which is all glibc and musl read (MAXNS): a file listing more
+        would otherwise hold a lookup for its timeout once per line.
 
-        "No such name" does not end the walk either, and that is deliberate
-        rather than thorough. The file is written with a public resolver
-        first, and a public resolver has never heard of anything inside the
-        network it is outside of, so a name that exists only on the local
-        network comes back from it as NXDOMAIN. Treating that as final would
-        make a machine unable to reach anything on its own network. So it is
-        remembered as the answer to fall back on, the rest of the list is
-        asked anyway, and only an actual address stops the walk.
-
-        The cost is one extra query for a name that genuinely exists nowhere.
-        The walk stops after three servers, which is all glibc and musl read
-        (MAXNS): a file listing more would otherwise hold a lookup for its
-        timeout once per line.
+        That is a change of rule with the order the file is written in (see
+        net_write_resolv_to: the network's own resolver first, a public one
+        behind it). While a public resolver was written first, its "no such
+        name" for an inside-the-network name could not be final, so the walk
+        went on past it and every name that existed nowhere was also asked in
+        the clear of the next server. With the network's resolver first and
+        believed, a name the network does not know is not sent anywhere else.
 
         With no resolv.conf at all there is still somewhere to ask. A machine
         that has not been configured yet should be able to resolve a name, if
@@ -2162,10 +2160,15 @@ static COLD bipolar dns_resolve_at(p32 server, p16 port, string_address name,
 #define DNS_FALLBACK 0x01010101u
 #define DNS_SERVERS_MAX 3
 
+static CONST COLD bool dns_answer_is_final(bipolar status)
+{
+        return status == DNS_OK || status == DNS_NO_SUCH_NAME ||
+               status == DNS_NO_ADDRESS;
+}
+
 static COLD bipolar dns_resolve_any(string_address path, string_address name,
                                p32 address_to found, positive seconds)
 {
-        bipolar definite = DNS_NO_SERVER;
         bipolar status = DNS_NO_SERVER;
         bipolar server;
         positive index = 0;
@@ -2178,19 +2181,15 @@ static COLD bipolar dns_resolve_any(string_address path, string_address name,
                 status = dns_resolve_at((p32)server, DNS_PORT, name, found,
                                         seconds);
 
-                if (status == DNS_OK)
-                        return DNS_OK;
-
-                if (definite == DNS_NO_SERVER &&
-                    (status == DNS_NO_SUCH_NAME || status == DNS_NO_ADDRESS))
-                        definite = status;
+                if (dns_answer_is_final(status))
+                        return status;
         }
 
         if (!asked)
                 return dns_resolve_at(DNS_FALLBACK, DNS_PORT, name, found,
                                       seconds);
 
-        return definite != DNS_NO_SERVER ? definite : status;
+        return status;
 }
 
 #endif // STANDARD_MODERN_C_NET_DNS

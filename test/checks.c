@@ -52055,6 +52055,22 @@ static bipolar net_test_write(string_address path, string_address text)
         return wrote == (bipolar)string_length(text) ? 0 : -1;
 }
 
+//      A file made with `text` in it.
+static bipolar net_test_create(string_address path, string_address text)
+{
+        bipolar handle = system_call_4(syscall(openat), (positive)AT_FDCWD,
+                                       (positive)path,
+                                       1 | 0100 | 01000 | O_CLOEXEC, 0600);
+        bipolar wrote;
+
+        if (handle < 0)
+                return handle;
+        wrote = system_write_all((positive)handle, (p8 address_to)text,
+                                 string_length(text));
+        system_close((positive)handle);
+        return wrote == (bipolar)string_length(text) ? 0 : -1;
+}
+
 //      "0 <id> 1\n", the id map of one user.
 static fn net_test_map(p8 address_to to, positive id)
 {
@@ -53642,6 +53658,11 @@ static fn dns_policy_server(bipolar datagram, positive mode, b32 report,
                 network_store_16(reply + 10, 0);
                 if (mode == 2 && (note[0] & 2))
                         network_store_16(reply + 2, DNS_FLAG_RESPONSE | 1);
+                else if (mode == 3 || mode == 4)
+                        //      No such name (3), or the server failed (4).
+                        network_store_16(reply + 2,
+                                         DNS_FLAG_RESPONSE | DNS_FLAG_RECURSE |
+                                             (mode == 3 ? 3 : 2));
                 else
                 {
                         network_store_16(reply + 6, 1);
@@ -53703,6 +53724,113 @@ static bipolar dns_policy_case(positive mode, positive queries,
         system_read_retry((positive)pipes[0], notes, 3 * served);
         system_close((positive)pipes[0]);
         return status;
+}
+
+/*
+        Which resolvers a lookup asks, in a namespace of its own where port 53
+        is bindable: the first listed answers "no such name" (or fails), the
+        second would answer with an address. "No such name" is the network's
+        answer and is final; a failure goes on to the second.
+*/
+static fn net_test_dns_walk(positive uid, positive gid)
+{
+        static const string_address path = "/tmp/closenet-dns-walk.conf";
+        static const string_address conf =
+            "nameserver 127.0.0.2\nnameserver 127.0.0.3\n";
+        positive result = 0;
+        bipolar lo;
+        b32 nl;
+
+        if (!net_test_enter_namespaces(uid, gid))
+                system_call_1(syscall(exit_group), 0x7f);
+        lo = net_test_index((string_address)"lo");
+        nl = (b32)netlink_open_groups(0);
+        if (lo <= 0 || (bipolar)nl < 0 || netlink_link_up(nl, (p32)lo) < 0 ||
+            net_test_create(path, conf) < 0)
+                system_call_1(syscall(exit_group), 0x7f);
+        for (positive which = 0; which < 2; which++)
+        {
+                static const positive first_mode[2] = {3, 4};
+                bipolar servers[2];
+                b32 notes[2][2];
+                bipolar children[2];
+                p32 found = 0;
+                bipolar status;
+                p8 heard[3];
+                bool second_asked;
+
+                for (positive at = 0; at < 2; at++)
+                {
+                        socket_address_internet bound = {
+                            .family = AF_INET, .port = network_order_16(53),
+                            .host = network_order_32(0x7f000002 + at)};
+
+                        servers[at] = socket_new(AF_INET,
+                                                 SOCK_DGRAM | SOCK_CLOEXEC, 0);
+                        if (servers[at] < 0 ||
+                            socket_bind((b32)servers[at], address_of bound,
+                                        sizeof bound) < 0 ||
+                            system_call_2(syscall(pipe2), (positive)notes[at],
+                                          O_CLOEXEC | 04000) < 0)
+                                system_call_1(syscall(exit_group), 0x7f);
+                        children[at] = system_fork();
+                        if (!children[at])
+                                dns_policy_server(servers[at],
+                                                  at ? 0 : first_mode[which],
+                                                  notes[at][1], 1);
+                        socket_close((b32)servers[at]);
+                }
+                status = dns_resolve_any(path, (string_address)"walk.example.com",
+                                         address_of found, 2);
+                second_asked = system_call_3(syscall(read),
+                                             (positive)notes[1][0],
+                                             (positive)address_of heard,
+                                             3) == 3;
+                for (positive at = 0; at < 2; at++)
+                {
+                        system_call_2(syscall(kill), (positive)children[at],
+                                      SIGKILL);
+                        system_call_4(syscall(wait4), (positive)children[at],
+                                      0, 0, 0);
+                        system_close((positive)notes[at][0]);
+                        system_close((positive)notes[at][1]);
+                }
+                if (which == 0 && status == DNS_NO_SUCH_NAME && !second_asked)
+                        result |= 1;
+                if (which == 1 && status == DNS_OK && found == 0xc0000207 &&
+                    second_asked)
+                        result |= 2;
+        }
+        system_remove_at(AT_FDCWD, path, 0);
+        system_call_1(syscall(exit_group), 0x80 | result);
+}
+
+static fn resolving_walk(void)
+{
+        b32 status = 0;
+        bipolar child;
+
+        if (net_as_emulated())
+        {
+                log_direct(str("net: DNS resolver walk NOT RUN -- under emulation\n"));
+                return;
+        }
+        child = system_fork();
+        if (child == 0)
+                net_test_dns_walk((positive)system_call(syscall(getuid)),
+                                  (positive)system_call(syscall(getgid)));
+        if (child < 0 ||
+            system_call_4(syscall(wait4), (positive)child,
+                          (positive)address_of status, 0, 0) < 0 ||
+            status >> 8 == 0x7f)
+        {
+                log_direct(str("net: DNS resolver walk NOT RUN -- user or network namespaces unavailable\n"));
+                return;
+        }
+        check("a resolver that says no such name ends the lookup, the second is not asked",
+              (status >> 8) & 1);
+        check("a resolver that fails sends the lookup on to the second",
+              (status >> 8) & 2);
 }
 
 static fn resolving_policy(void)
@@ -65842,6 +65970,7 @@ b32 main(void)
         resolving_edges();
         resolving_truncated();
         resolving_policy();
+        resolving_walk();
         resolving_servers();
         fetching();
         streaming_chunk_boundaries();
@@ -81467,11 +81596,34 @@ static fn storage_test_net_files(void)
                         address_of resolver_facts) &&
                   (resolver_facts.mode & 0777) == 0600);
         static p8 wanted[] =
-            "nameserver 1.1.1.1\nnameserver 10.0.0.1\n";
+            "nameserver 10.0.0.1\nnameserver 1.1.1.1\n";
         got = storage_test_file_read(target, bytes, sizeof bytes);
-        check("resolver writes are complete and ordered",
+        check("resolver writes are complete and ordered (the network's resolver first)",
               got == sizeof(wanted) - 1 &&
                   !memory_compare(bytes, wanted, sizeof(wanted) - 1));
+        {
+                static p8 alone[] = "nameserver 1.1.1.1\n";
+
+                check("a network with no resolver of its own gets the public one alone",
+                      net_write_resolv_to(target, 0) == 0 &&
+                          storage_test_file_read(target, bytes, sizeof bytes) ==
+                              sizeof(alone) - 1 &&
+                          !memory_compare(bytes, alone, sizeof(alone) - 1));
+                check("and one that names the public resolver itself is not asked twice",
+                      net_write_resolv_to(target, DNS_FALLBACK) == 0 &&
+                          storage_test_file_read(target, bytes, sizeof bytes) ==
+                              sizeof(alone) - 1 &&
+                          !memory_compare(bytes, alone, sizeof(alone) - 1));
+                check("only an answer about the name ends the walk over resolvers",
+                      dns_answer_is_final(DNS_OK) &&
+                          dns_answer_is_final(DNS_NO_SUCH_NAME) &&
+                          dns_answer_is_final(DNS_NO_ADDRESS) &&
+                          !dns_answer_is_final(DNS_NO_REPLY) &&
+                          !dns_answer_is_final(DNS_REFUSED) &&
+                          !dns_answer_is_final(DNS_MALFORMED) &&
+                          !dns_answer_is_final(DNS_NO_SERVER));
+        }
+
         p8 unsafe[] = {'h', 'o', 's', 't', 27, 0};
         storage_test_output_used = 0;
         string_format(storage_test_capture, "bad %w\n",

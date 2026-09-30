@@ -1035,19 +1035,26 @@ static b32 net_wget(void)
 
 
 /*
-        /etc/resolv.conf, written with a resolver that is known to work.
+        /etc/resolv.conf: the network's resolver first, a public one behind it.
 
-        Cloudflare goes first, and the one the network handed out goes under
-        it. A DHCP nameserver is usually the router in the corner, which is
-        also the thing most likely to answer slowly, cache a stale record, or
-        have been handed a captive portal's idea of the truth. Naming a public
-        resolver first is what lets a machine work on a network whose own
-        resolver does not.
+        The resolver the DHCP server handed out goes first, as dhclient and
+        every other client write it, and Cloudflare's goes second, to be
+        asked only when the first gives no answer at all (a router whose
+        resolver is down, slow or refusing): the resolver believes the first
+        server that answers, "no such name" included (dns_resolve_any). A
+        network with no resolver of its own, or one that names Cloudflare
+        itself, has Cloudflare alone.
 
-        The network's own is still written, and is still asked, because it is
-        the only one that knows the names inside the network. The resolver
-        walks this list in order and does not stop at a public resolver saying
-        it has never heard of something local.
+        This replaces an order written in the other direction, public resolver
+        first. Its reason was a network whose own resolver was slow or
+        answered with a captive portal's idea of the truth; it cost every
+        machine on every network one name in the clear per lookup, to a
+        third party, before the network's own resolver (which knows the names
+        inside the network and is the only one that should be told them) was
+        asked at all. The two failures it guarded against are the ones the
+        fallback still covers, the first directly (no answer goes on), the
+        second only as far as a portal that lies about a name is one that
+        also lied before.
 
         Order is the whole of the policy. Putting it here rather than in the
         resolver means changing which server is preferred is one line in a
@@ -1056,7 +1063,8 @@ static b32 net_wget(void)
 static COLD bipolar net_write_resolv_to(string_address path, p32 nameserver)
 {
         const p32 servers[2] = {
-            DNS_FALLBACK, nameserver == DNS_FALLBACK ? 0 : nameserver};
+            nameserver ? nameserver : DNS_FALLBACK,
+            nameserver && nameserver != DNS_FALLBACK ? DNS_FALLBACK : 0};
         p8 line[64];
         positive used = 0;
         file_staged_name staged;
@@ -1524,12 +1532,13 @@ static COLD b32 net_apply_lease(b32 handle, p32 index, string_address name,
                                       net_host_text(written, lease->router));
 
                 string_format(net_out, "ip: nameserver %s",
-                              net_host_text(written, DNS_FALLBACK));
+                              net_host_text(written, lease->nameserver
+                                                         ? lease->nameserver
+                                                         : DNS_FALLBACK));
 
                 if (lease->nameserver && lease->nameserver != DNS_FALLBACK)
                         string_format(net_out, ", then %s",
-                                      net_host_text(written,
-                                                    lease->nameserver));
+                                      net_host_text(written, DNS_FALLBACK));
 
                 string_format(net_out, "\n");
         }
