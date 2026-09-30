@@ -36138,11 +36138,15 @@ static bool file_copy_one(bipolar source_directory, string_address source,
            linked, -b of a distinct dirent and --remove-destination of a
            dest symlink or extra hard link all proceed. */
         file_facts same_there;
+        positive same_flags = cp_same_file_look(kind) ? AT_SYMLINK_NOFOLLOW : 0;
         if (!moving && !fresh && cp_update_policy != 'n' &&
             cp_update_policy != 'F' &&
-            file_look(destination_directory, destination,
-                      cp_same_file_look(kind) ? AT_SYMLINK_NOFOLLOW : 0,
-                      address_of same_there))
+            (same_flags == destination_flags
+                 ? (same_there = there, destination_exists)
+                 : same_flags == AT_SYMLINK_NOFOLLOW
+                       ? (same_there = destination_entry, destination_entry_exists)
+                       : file_look(destination_directory, destination, same_flags,
+                                   address_of same_there)))
         {
                 bool done = false;
 
@@ -37384,18 +37388,30 @@ static fn cp_pair(string_address source, string_address destination)
             (kind == MODE_DIRECTORY && !destination_slashed) ||
                     (kind == MODE_LINK && !follow)
                 ? AT_SYMLINK_NOFOLLOW : 0;
+        //      Three looks that are two, or one: a name looked at the same way
+        //      twice one after the other has the same answer.
+        positive same_flags = cp_same_file_look(kind) ? AT_SYMLINK_NOFOLLOW : 0;
         bool destination_exists = file_look(
             destination_directory, destination_leaf, destination_flags,
             address_of destination_facts);
-        bool entry_exists = file_look(
-            destination_directory, destination_leaf, AT_SYMLINK_NOFOLLOW,
-            address_of destination_entry);
+        bool entry_exists = destination_flags == AT_SYMLINK_NOFOLLOW
+            ? destination_exists
+            : file_look(destination_directory, destination_leaf,
+                        AT_SYMLINK_NOFOLLOW, address_of destination_entry);
+        if (destination_flags == AT_SYMLINK_NOFOLLOW)
+                destination_entry = destination_facts;
         file_facts same_there;
         bool already = false;
-        bool same_there_exists = file_look(
-            destination_directory, destination_leaf,
-            cp_same_file_look(kind) ? AT_SYMLINK_NOFOLLOW : 0,
-            address_of same_there);
+        bool same_there_exists = same_flags == destination_flags
+            ? destination_exists
+            : same_flags == AT_SYMLINK_NOFOLLOW
+                  ? entry_exists
+                  : file_look(destination_directory, destination_leaf, same_flags,
+                              address_of same_there);
+        if (same_flags == destination_flags)
+                same_there = destination_facts;
+        else if (same_flags == AT_SYMLINK_NOFOLLOW)
+                same_there = destination_entry;
         if (cp_update_policy != 'n' && cp_update_policy != 'F' &&
             same_there_exists)
         {
@@ -39065,14 +39081,16 @@ static fn mv_one(string_address source, string_address destination)
 
         //      The destination is looked at before anything is moved, and
         //      any answer but "not there" ends it, as GNU's copy_internal
-        //      has it.
-        if (!slashed_destination)
+        //      has it. Named without a slash it is the same look the
+        //      destination's facts come from below, and is kept for it.
+        bool destination_looked = !slashed_destination;
+        bipolar probed = -ERROR_NO_ENTRY;
+
+        if (destination_looked)
         {
-                file_facts probe;
-                bipolar probed = file_look_code(destination_directory,
-                                                destination_leaf,
-                                                AT_SYMLINK_NOFOLLOW,
-                                                address_of probe);
+                probed = file_look_code(destination_directory,
+                                        destination_leaf,
+                                        AT_SYMLINK_NOFOLLOW, address_of to);
 
                 if (probed < 0 && probed != -ERROR_NO_ENTRY)
                 {
@@ -39161,9 +39179,11 @@ static fn mv_one(string_address source, string_address destination)
         // -f is the default and asks nothing; -n, -u and -i are cp's. A
         // slash that reached a directory through a link names the
         // directory, and it is the directory the answers below are about.
-        bool destination_exists = file_look(
-            destination_directory, destination_leaf,
-            slashed_destination ? 0 : AT_SYMLINK_NOFOLLOW, address_of to);
+        bool destination_exists = destination_looked
+            ? probed == 0
+            : file_look(destination_directory, destination_leaf,
+                        slashed_destination ? 0 : AT_SYMLINK_NOFOLLOW,
+                        address_of to);
         /* GNU same_file_ok runs before -u/-i skip, and is itself skipped
            only for UPDATE_NONE / UPDATE_NONE_FAIL. A later --update must
            still see two names for one file. */
