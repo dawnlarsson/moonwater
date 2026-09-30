@@ -232,10 +232,8 @@ static b32 checksum_done(b32 code, bool plain)
 /* coreutils' complaint about an option out of place, with its usage hint. */
 static b32 checksum_usage_error(string_address command, string_address message)
 {
-        text_flush();
-        return text_done(string_report(writer_stderr, 1,
-                                       "%s: %s\nTry '%s --help' for more information.\n",
-                                       command, message, command));
+        return text_done(text_report(1, "%s: %s\nTry '%s --help' for more information.\n",
+                                     command, message, command));
 }
 
 /* coreutils' refusals of options that belong to the other mode, in its order
@@ -257,10 +255,8 @@ static b32 checksum_refuse_modes(string_address command, bool checking,
                 return checksum_usage_error(command, "the --binary and --text options are meaningless when verifying checksums");
         if (checking || !verifying)
                 return 0;
-        text_flush();
-        return text_done(string_report(writer_stderr, 1,
-            "%s: the --%s option is meaningful only when verifying checksums\n"
-            "Try '%s --help' for more information.\n", command, verifying, command));
+        return text_done(text_report(1, "%s: the --%s option is meaningful only when verifying checksums\n"
+          "Try '%s --help' for more information.\n", command, verifying, command));
 }
 
 /*
@@ -303,24 +299,18 @@ static b32 checksum_blake2b_length(string_address program, string_address text,
 
         if (why)
         {
-                text_flush();
-                return text_done(string_report(writer_stderr, 1,
-                    "%s: invalid length: '%w'%s\n", program, writer_terminal_quoted_name, text, why));
+                return text_done(text_report(1, "%s: invalid length: '%w'%s\n", program, writer_terminal_quoted_name, text, why));
         }
         if (bits > 512)
         {
-                text_flush();
-                return text_done(string_report(writer_stderr, 1,
-                    "%s: invalid length: '%w'\n"
-                    "%s: maximum digest length for 'BLAKE2b' is 512 bits\n",
-                    program, writer_terminal_quoted_name, text, program));
+                return text_done(text_report(1, "%s: invalid length: '%w'\n"
+                  "%s: maximum digest length for 'BLAKE2b' is 512 bits\n",
+                  program, writer_terminal_quoted_name, text, program));
         }
         if (bits % 8)
         {
-                text_flush();
-                return text_done(string_report(writer_stderr, 1,
-                    "%s: invalid length: '%w'\n%s: length is not a multiple of 8\n",
-                    program, writer_terminal_quoted_name, text, program));
+                return text_done(text_report(1, "%s: invalid length: '%w'\n%s: length is not a multiple of 8\n",
+                  program, writer_terminal_quoted_name, text, program));
         }
 
         address_to bytes = bits ? bits / 8 : 64;
@@ -544,8 +534,7 @@ static b32 checksum_blame(string_address name, string_address reason)
         //      SIGSEGV where coreutils says "cksum: -: Is a directory".
         if (!name)
                 name = (string_address) "-";
-        text_flush();
-        return string_report(writer_stderr, 0, "%s: %w: %s\n", text_name,
+        return text_complain("%s: %w: %s\n", text_name,
                              checksum_name_put, name, reason);
 }
 
@@ -1625,8 +1614,7 @@ static b32 checksum_verify(const checksum_algorithm address_to algorithm,
                         if (!read_failed)
                         {
                                 failed = true;
-                                text_flush();
-                                string_format(writer_stderr, "%s: %w: %s\n",
+                                text_complain("%s: %w: %s\n",
                                     text_name, checksum_name_put, manifest,
                                     (string_address) "no properly formatted checksum lines found");
                         }
@@ -1652,8 +1640,7 @@ static b32 checksum_verify(const checksum_algorithm address_to algorithm,
                                 }
                                 if (ignore_missing && !matched)
                                 {
-                                        text_flush();
-                                        string_format(writer_stderr, "%s: %w: %s\n",
+                                        text_complain("%s: %w: %s\n",
                                             text_name, checksum_name_put, manifest,
                                             (string_address) "no file was verified");
                                 }
@@ -2029,9 +2016,7 @@ static bool cksum_option_seen(p8 letter, string_address value)
                 if (string_equals(value, known[at]))
                         return true;
 
-        text_flush();
-        string_format(writer_stderr,
-            "cksum: invalid argument '%w' for '--algorithm'\nValid arguments are:\n",
+        text_complain("cksum: invalid argument '%w' for '--algorithm'\nValid arguments are:\n",
             writer_terminal_quoted_name, value);
         for (positive at = 0; at < array_count(known); at++)
                 string_format(writer_stderr, "  - '%s'\n", known[at]);
@@ -2082,15 +2067,11 @@ static b32 cksum_main()
 
         if (why)
         {
-                text_flush();
-                return text_done(string_report(writer_stderr, 1,
-                    "cksum: invalid length: '%w'%s\n", writer_terminal_quoted_name, length, why));
+                return text_done(text_report(1, "cksum: invalid length: '%w'%s\n", writer_terminal_quoted_name, length, why));
         }
         if (lengthed && bits && !blake2b && !sha2 && !sha3)
         {
-                text_flush();
-                return text_done(string_report(writer_stderr, 1,
-                    "cksum: --length is only supported with --algorithm blake2b, sha2, or sha3\n"));
+                return text_done(text_report(1, "cksum: --length is only supported with --algorithm blake2b, sha2, or sha3\n"));
         }
         if (lengthed && blake2b)
         {
@@ -2103,28 +2084,22 @@ static b32 cksum_main()
 
         if (lengthed && (sha2 || sha3) && !cksum_sha2_width(family, bits))
         {
-                text_flush();
-                return text_done(string_report(writer_stderr, 1,
-                    "cksum: invalid length: '%w'\n"
-                    "cksum: digest length for '%w' must be 224, 256, 384, or 512\n",
-                    writer_terminal_quoted_name, length, writer_terminal_quoted_name, sha2 ? (string_address) "SHA2" : (string_address) "SHA3"));
+                return text_done(text_report(1, "cksum: invalid length: '%w'\n"
+                  "cksum: digest length for '%w' must be 224, 256, 384, or 512\n",
+                  writer_terminal_quoted_name, length, writer_terminal_quoted_name, sha2 ? (string_address) "SHA2" : (string_address) "SHA3"));
         }
         // The SHA-2 and SHA-3 families need their width said, before any
         // complaint about the other mode's options.
         if ((sha2 || sha3) && !lengthed && !checking)
         {
-                text_flush();
-                return text_done(string_report(writer_stderr, 1,
-                    "cksum: --algorithm=%s requires specifying --length 224, 256, 384, or 512\n",
-                    algorithm));
+                return text_done(text_report(1, "cksum: --algorithm=%s requires specifying --length 224, 256, 384, or 512\n",
+                  algorithm));
         }
         if (checking && algorithm &&
             (string_equals(algorithm, "bsd") || string_equals(algorithm, "sysv") ||
              string_equals(algorithm, "crc") || string_equals(algorithm, "crc32b")))
         {
-                text_flush();
-                return text_done(string_report(writer_stderr, 1,
-                    "cksum: --check is not supported with --algorithm={bsd,sysv,crc,crc32b}\n"));
+                return text_done(text_report(1, "cksum: --check is not supported with --algorithm={bsd,sysv,crc,crc32b}\n"));
         }
         if (raw && (taking.flags & FILE_FLAG('B')))
                 return checksum_usage_error("cksum", "--base64 and --raw are mutually exclusive");

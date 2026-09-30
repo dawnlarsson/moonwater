@@ -160,6 +160,12 @@ static fn text_flush()
         text_flush_out();
 }
 
+// A word on standard error, after what the tool has written so far has been
+// put out ahead of it: string_report's answer is the RESULT it was given.
+#define text_report(result, ...) \
+        (text_flush(), string_report(writer_stderr, (result), __VA_ARGS__))
+#define text_complain(...) text_report(0, __VA_ARGS__)
+
 // Changing where output goes has to empty what was written for the old one.
 static fn text_out_to(positive handle)
 {
@@ -302,8 +308,7 @@ static b32 text_invalid_context(string_address message, p8 letter, bool help)
 
         spelled[0] = letter;
         spelled[1] = 0;
-        text_flush();
-        string_format(writer_stderr, "%s: %s -- %s\n", text_name, message,
+        text_complain("%s: %s -- %s\n", text_name, message,
                       (string_address)spelled);
 
         if (help)
@@ -316,8 +321,7 @@ static b32 text_invalid_context(string_address message, p8 letter, bool help)
 static b32 text_argmatch(string_address option, string_address value,
                          string_address list, string_address usage)
 {
-        text_flush();
-        string_format(writer_stderr, "%s: invalid argument '%w' for '%w'\n%s%s",
+        text_complain("%s: invalid argument '%w' for '%w'\n%s%s",
                       text_name, writer_terminal_quoted_name, value, writer_terminal_quoted_name, option, list, usage ? usage : (string_address) "");
         return string_report(writer_stderr, 1, "Try '%s --help' for more information.\n",
                       text_name);
@@ -1282,8 +1286,7 @@ static bool text_xnum(string_address said, bipolar floor, bipolar ceiling,
                 return true;
         }
 
-        text_flush();
-        string_format(writer_stderr, "%s: %s: '%w'%s\n", text_name, what,
+        text_complain("%s: %s: '%w'%s\n", text_name, what,
                       writer_terminal_quoted_name, said,
                       invalid ? ""
                       : (flags & (below ? TEXT_XNUM_MIN_RANGE : TEXT_XNUM_MAX_RANGE))
@@ -3722,8 +3725,7 @@ static bool encoding_option_seen(p8 letter, string_address value)
 
         if (at == digits || at[0] || (negative && made))
         {
-                text_flush();
-                string_format(writer_stderr, "%s: invalid wrap size: '%w'\n",
+                text_complain("%s: invalid wrap size: '%w'\n",
                               text_name, writer_terminal_quoted_name, value);
                 return false;
         }
@@ -4312,8 +4314,7 @@ static b32 text_comm()
                 for (positive s = 0; s < 2; s++)
                         for (positive k = 0; k < 2; k++)
                                 byte_store_release(comm_copies[s] + k);
-                text_flush();
-                string_format(writer_stderr, "%s: -\n", text_name);
+                text_complain("%s: -\n", text_name);
                 return text_done(1);
         }
 
@@ -4541,9 +4542,7 @@ static b32 text_paste()
                               delimiters, delimiter_room,
                               address_of delimiter_count))
         {
-                text_flush();
-                string_format(writer_stderr,
-                              "%s: delimiter list ends with an unescaped backslash: %w\n",
+                text_complain("%s: delimiter list ends with an unescaped backslash: %w\n",
                               text_name, text_c_maybe_colon, said);
                 return text_done(1);
         }
@@ -4800,8 +4799,7 @@ static bool join_complained;
 // spelled as quote() spells it in the C locale.
 static bool join_complain(string_address format, string_address word)
 {
-        text_flush();
-        string_format(writer_stderr, format, writer_terminal_quoted_name, word);
+        text_complain(format, writer_terminal_quoted_name, word);
         join_complained = true;
         return false;
 }
@@ -4811,8 +4809,7 @@ static bool join_key_set(positive side, positive field)
         //      GNU names the two fields as it holds them, from zero.
         if (join_key_said[side] && join_key[side] != field)
         {
-                text_flush();
-                string_format(writer_stderr, "join: incompatible join fields %p, %p\n",
+                text_complain("join: incompatible join fields %p, %p\n",
                               join_key[side], field);
                 join_complained = true;
                 return false;
@@ -5596,8 +5593,7 @@ static bool join_advance(text_record_cursor address_to cursor,
                         old + key_offset, old_key_length,
                         cursor->key, cursor->key_length, fold) > 0)
                 {
-                        text_flush();
-                        string_format(writer_stderr, "join: %s:%p: is not sorted: ",
+                        text_complain("join: %s:%p: is not sorted: ",
                                       join_names[side], join_lines[side]);
                         if (cursor->length)
                                 writer_stderr((string_address)cursor->record, cursor->length);
@@ -7421,9 +7417,7 @@ static b32 text_wc()
         {
                 if (text_files_count)
                 {
-                        text_flush();
-                        string_format(writer_stderr,
-                                      "wc: extra operand '%w'\nfile operands cannot be combined with --files0-from\n"
+                        text_complain("wc: extra operand '%w'\nfile operands cannot be combined with --files0-from\n"
                                       "Try 'wc --help' for more information.\n",
                                       writer_terminal_quoted_name, text_file_name(0));
                         return text_done(1);
@@ -7941,8 +7935,7 @@ static bool tac_spilled(positive handle, p8 address_to bytes, positive length)
         if (wrote.bytes == length)
                 return true;
 
-        text_flush();
-        string_format(writer_stderr, "tac: temporary file: write error: %s\n",
+        text_complain("tac: temporary file: write error: %s\n",
                       file_reason(wrote.error ? wrote.error : -28));
         text_status = 1;
         return false;
@@ -8025,9 +8018,7 @@ static bool tac_read(tac_buffer address_to buffer, string_address name)
         {
                 if (okay && spilled && !tac_map(buffer, (positive)spill, spilled))
                 {
-                        text_flush();
-                        string_format(writer_stderr,
-                                      "tac: temporary file: read error: %s\n",
+                        text_complain("tac: temporary file: read error: %s\n",
                                       file_reason(-12));
                         text_status = 1;
                         okay = false;
@@ -8639,8 +8630,7 @@ static bool text_files_take(string_address address_to name)
                 {
                         if (text_files_reader.failed)
                         {
-                                text_flush();
-                                string_format(writer_stderr, "wc: %w: read error: %s\n",
+                                text_complain("wc: %w: read error: %s\n",
                                               writer_shell_name, text_files_lazy_path,
                                               file_reason(text_files_reader.error
                                                               ? text_files_reader.error : -5));
@@ -8657,8 +8647,7 @@ static bool text_files_take(string_address address_to name)
 
                 if (!text_files_name.used)
                 {
-                        text_flush();
-                        string_format(writer_stderr, "%s: %w:%p: invalid zero-length file name\n",
+                        text_complain("%s: %w:%p: invalid zero-length file name\n",
                                       text_name, writer_shell_name, text_files_lazy_path,
                                       text_files_from_names);
                         text_files_from_bad++;
@@ -8719,8 +8708,7 @@ static bool text_files_from(string_address path)
                 text_quiet_read = false;
                 if (worded)
                 {
-                        text_flush();
-                        string_format(writer_stderr, "wc: cannot open '%w' for reading: %s\n",
+                        text_complain("wc: cannot open '%w' for reading: %s\n",
                                       writer_terminal_quoted_name, path,
                                       file_reason(text_input.error ? text_input.error : -2));
                 }
@@ -8774,8 +8762,7 @@ static bool text_files_from(string_address path)
         {
                 if (worded)
                 {
-                        text_flush();
-                        string_format(writer_stderr, "wc: %w: read error: %s\n",
+                        text_complain("wc: %w: read error: %s\n",
                                       writer_shell_name, path, file_reason(reason ? reason : -5));
                 }
                 text_file_list = text_files_from_list;
@@ -8813,8 +8800,7 @@ static bool text_files_from(string_address path)
 
                 if (!length)
                 {
-                        text_flush();
-                        string_format(writer_stderr, "%s: %w:%p: invalid zero-length file name\n",
+                        text_complain("%s: %w:%p: invalid zero-length file name\n",
                                       text_name, writer_shell_name, path, text_files_from_names);
                         text_files_from_bad++;
                         if (text_files_from_strict)
@@ -9362,8 +9348,7 @@ static bool text_count_refused(string_address said, p8 letter)
         string_address after = shown + string_span(shown, string_set_space);
         bool below = text_count_tail && after[0] == '-' && byte_is_digit(after[1]);
 
-        text_flush();
-        string_format(writer_stderr, "%s: invalid number of %s: '%w'%s\n",
+        text_complain("%s: invalid number of %s: '%w'%s\n",
                       text_name, letter == 'c' ? "bytes" : "lines",
                       writer_terminal_quoted_name, shown,
                       below ? ": Value too large for defined data type" : "");
@@ -9393,8 +9378,7 @@ static positive head_tail_old_count(string_address digits, positive by);
 static bool tail_value_refused(string_address what, string_address said,
                                bool too_large)
 {
-        text_flush();
-        string_format(writer_stderr, "%s: %s: '%w'%s\n", text_name, what,
+        text_complain("%s: %s: '%w'%s\n", text_name, what,
                       writer_terminal_quoted_name, said,
                       too_large ? ": Value too large for defined data type" : "");
         return false;
@@ -9417,9 +9401,7 @@ static bool tail_follow_word(string_address said)
                 return true;
         }
 
-        text_flush();
-        string_format(writer_stderr,
-                      "%s: %s argument '%w' for '--follow'\n"
+        text_complain("%s: %s argument '%w' for '--follow'\n"
                       "Valid arguments are:\n  - 'descriptor'\n  - 'name'\n"
                       "Try '%s --help' for more information.\n",
                       text_name, said[0] ? "invalid" : "ambiguous",
@@ -10030,8 +10012,7 @@ static bool tail_is_stdin(tail_file address_to f)
 // "tail: 'name' what[: reason]", the name through quoteaf.
 static fn tail_say(tail_file address_to f, string_address what, bipolar reason)
 {
-        text_flush();
-        string_format(writer_stderr, "%s: %w %s%s%s\n", text_name,
+        text_complain("%s: %w %s%s%s\n", text_name,
                       writer_shell_quoted_name, f->shown, what,
                       reason < 0 ? ": " : "",
                       reason < 0 ? file_reason(reason) : (string_address) "");
@@ -10040,8 +10021,7 @@ static fn tail_say(tail_file address_to f, string_address what, bipolar reason)
 // "tail: name: what", the name through quotef.
 static fn tail_say_plain(tail_file address_to f, string_address what)
 {
-        text_flush();
-        string_format(writer_stderr, "%s: %w: %s\n", text_name,
+        text_complain("%s: %w: %s\n", text_name,
                       writer_shell_name, f->shown, what);
 }
 
@@ -10400,8 +10380,7 @@ static b32 tail_polled(bool headers, bool okay)
                                         // change, and is read as it is.
                                         if (!(tail_regular(mode) && set == -ERROR_NOT_PERMITTED))
                                         {
-                                                text_flush();
-                                                string_format(writer_stderr, "%s: %w: cannot change nonblocking mode: %s\n",
+                                                text_complain("%s: %w: cannot change nonblocking mode: %s\n",
                                                               text_name, writer_shell_name, f->shown,
                                                               file_reason(set));
                                                 return 1;
@@ -10687,8 +10666,7 @@ static b32 tail_notified(bipolar notify, bool headers)
                         {
                                 if (f->parent != -ERROR_NO_SPACE)
                                 {
-                                        text_flush();
-                                        string_format(writer_stderr, "%s: cannot watch parent directory of %w: %s\n",
+                                        text_complain("%s: cannot watch parent directory of %w: %s\n",
                                                       text_name, writer_shell_quoted_name, f->name,
                                                       file_reason(f->parent));
                                 }
@@ -10717,8 +10695,7 @@ static b32 tail_notified(bipolar notify, bool headers)
 
                         if (reason != f->error)
                         {
-                                text_flush();
-                                string_format(writer_stderr, "%s: cannot watch %w: %s\n", text_name,
+                                text_complain("%s: cannot watch %w: %s\n", text_name,
                                               writer_shell_quoted_name, f->name, file_reason(reason));
                         }
                         continue;
@@ -10897,8 +10874,7 @@ static b32 tail_notified(bipolar notify, bool headers)
                                                 return TAIL_REVERT;
                                         }
 
-                                        text_flush();
-                                        string_format(writer_stderr, "%s: cannot watch %w: %s\n", text_name,
+                                        text_complain("%s: cannot watch %w: %s\n", text_name,
                                                       writer_shell_quoted_name, f->name, file_reason(fresh));
                                 }
                         }
@@ -10996,8 +10972,7 @@ static COLD b32 tail_follow_run(positive count, bool by_bytes, bool marked,
 
         if (hyphen && tail_follow_mode == 'n')
         {
-                text_flush();
-                string_format(writer_stderr, "%s: cannot follow '-' by name\n", text_name);
+                text_complain("%s: cannot follow '-' by name\n", text_name);
                 return 1;
         }
 
@@ -11046,8 +11021,7 @@ static COLD b32 tail_follow_run(positive count, bool by_bytes, bool marked,
                 if (!ok)
                 {
                         f->error = looked;
-                        text_flush();
-                        string_format(writer_stderr, "%s: cannot fstat %w: %s\n", text_name,
+                        text_complain("%s: cannot fstat %w: %s\n", text_name,
                                       writer_shell_quoted_name, f->shown, file_reason(looked));
                 }
                 else
@@ -11646,8 +11620,7 @@ static bool nl_refused_any;
 
 static bool nl_refused(string_address what, string_address value)
 {
-        text_flush();
-        string_format(writer_stderr, "%s: %s: '%w'\n", text_name, what,
+        text_complain("%s: %s: '%w'\n", text_name, what,
                       writer_terminal_quoted_name, value);
         nl_refused_any = true;
         return true;
@@ -11975,8 +11948,7 @@ static bool text_tab_add(positive value)
 
 static bool text_tab_complain(string_address format, string_address about)
 {
-        text_flush();
-        string_format(writer_stderr, format, text_name, about);
+        text_complain(format, text_name, about);
         text_status = 1;
         return false;
 }
@@ -13727,9 +13699,7 @@ static b32 text_fmt()
         {
                 p8 spelled[2] = {misplaced, 0};
 
-                text_flush();
-                string_format(writer_stderr,
-                              "%s: invalid option -- %s; -WIDTH is recognized only when it is the first\n"
+                text_complain("%s: invalid option -- %s; -WIDTH is recognized only when it is the first\n"
                               "option; use -w N instead\n"
                               "Try '%s --help' for more information.\n",
                               text_name, (string_address)spelled, text_name);
@@ -14133,8 +14103,7 @@ static fn pr_option_argument(string_address text, p8 letter,
 
         if (!text[0])
         {
-                text_flush();
-                string_format(writer_stderr, "%s: '-%s': Invalid argument: '%w'\n",
+                text_complain("%s: '-%s': Invalid argument: '%w'\n",
                               text_name, (string_address)named,
                               writer_terminal_quoted_name, text);
                 pr_usage_exit();
@@ -14166,9 +14135,7 @@ static fn pr_option_argument(string_address text, p8 letter,
 
         if (invalid || over)
         {
-                text_flush();
-                string_format(writer_stderr,
-                              "%s: '-%s' extra characters or invalid number in the argument: '%w'%s\n",
+                text_complain("%s: '-%s' extra characters or invalid number in the argument: '%w'%s\n",
                               text_name, (string_address)named,
                               writer_terminal_quoted_name, text,
                               over ? ": Value too large for defined data type" : "");
@@ -14789,9 +14756,7 @@ static bool pr_skip_to_page(positive page)
 
                 if (pr_files_ready < 1)
                 {
-                        text_flush();
-                        string_format(writer_stderr,
-                                      "%s: starting page number %p exceeds page count %p\n",
+                        text_complain("%s: starting page number %p exceeds page count %p\n",
                                       text_name, page, n);
                         break;
                 }
@@ -15692,8 +15657,7 @@ static bool pr_option_seen(p8 letter, string_address value)
         case 'P':
                 if (!pr_first_last_page(true, value))
                 {
-                        text_flush();
-                        string_format(writer_stderr, "%s: invalid page range '%w'\n",
+                        text_complain("%s: invalid page range '%w'\n",
                                       text_name, writer_terminal_quoted_name, value);
                         exit(text_done(1));
                 }
@@ -16170,9 +16134,7 @@ static positive ptx_context_next(ptx_file address_to file, positive from,
                 // match at the start, which GNU refuses.
                 if (file->text.bytes[from] == '\n')
                 {
-                        text_flush();
-                        string_format(writer_stderr,
-                                      "%s: error: regular expression has a match of length zero: '%w'\n",
+                        text_complain("%s: error: regular expression has a match of length zero: '%w'\n",
                                       text_name, writer_terminal_quoted_name,
                                       (string_address) "\n");
                         ptx_failed = true;
@@ -16191,9 +16153,7 @@ static positive ptx_context_next(ptx_file address_to file, positive from,
 
                 if (match == from)
                 {
-                        text_flush();
-                        string_format(writer_stderr,
-                                      "%s: error: regular expression has a match of length zero: '%w'\n",
+                        text_complain("%s: error: regular expression has a match of length zero: '%w'\n",
                                       text_name, writer_terminal_quoted_name,
                                       (string_address) "[.?!][]\"')}]*\\($\\|\t\\|  \\)[ \t\n]*");
                         ptx_failed = true;
@@ -16212,9 +16172,7 @@ static positive ptx_context_next(ptx_file address_to file, positive from,
                 // the match's length, is what GNU refuses.
                 if (begin == from)
                 {
-                        text_flush();
-                        string_format(writer_stderr,
-                                      "%s: error: regular expression has a match of length zero: '%w'\n",
+                        text_complain("%s: error: regular expression has a match of length zero: '%w'\n",
                                       text_name, writer_terminal_quoted_name,
                                       ptx_sentence_pattern);
                         ptx_failed = true;
@@ -17237,8 +17195,7 @@ static bool ptx_option_seen(p8 letter, string_address value)
                 if (!ptx_number(value, letter == 'g' ? address_of ptx_gap
                                                      : address_of ptx_width))
                 {
-                        text_flush();
-                        string_format(writer_stderr, "%s: %s: '%w'\n", text_name,
+                        text_complain("%s: %s: '%w'\n", text_name,
                                       letter == 'g' ? "invalid gap width" : "invalid line width",
                                       writer_terminal_quoted_name, value);
                         return false;
@@ -17261,9 +17218,7 @@ static bool ptx_option_seen(p8 letter, string_address value)
 
                 if (!length)
                 {
-                        text_flush();
-                        string_format(writer_stderr,
-                                      "%s: ambiguous argument '' for '--format'\n"
+                        text_complain("%s: ambiguous argument '' for '--format'\n"
                                       "Valid arguments are:\n  - 'roff'\n  - 'tex'\n"
                                       "Try '%s --help' for more information.\n",
                                       text_name, text_name);
@@ -18290,8 +18245,7 @@ static b32 text_column()
                 // (the row count wrapped to zero).
                 else if (width > 0xffffffffu)
                 {
-                        text_flush();
-                        string_format(writer_stderr, "column: invalid columns argument: '%w': Numerical result out of range\n",
+                        text_complain("column: invalid columns argument: '%w': Numerical result out of range\n",
                                       writer_terminal_quoted_name, width_option);
                         return text_done(1);
                 }
@@ -18307,8 +18261,7 @@ static b32 text_column()
 
         if (spaces && spacing > 0xffffffffu)
         {
-                text_flush();
-                string_format(writer_stderr, "column: invalid spaces argument: '%w': Numerical result out of range\n",
+                text_complain("column: invalid spaces argument: '%w': Numerical result out of range\n",
                               writer_terminal_quoted_name, file_option_value(address_of taking, 'S'));
                 return text_done(1);
         }
@@ -20926,8 +20879,7 @@ static bool text_list_parse(string_address spec)
 // What text_list_parse refused, then usage's pointer at --help.
 static b32 text_list_trouble()
 {
-        text_flush();
-        string_format(writer_stderr, "%s: ", text_name);
+        text_complain("%s: ", text_name);
         if (text_list_subject)
         {
                 string_address mark = string_first_of(text_list_complaint, '%');
@@ -21846,9 +21798,7 @@ static bool cut_option_seen(p8 letter, string_address value)
                 string_address close = text_locale_utf8() ? (string_address) "\xe2\x80\x99"
                                                           : (string_address) "'";
 
-                text_flush();
-                string_format(writer_stderr,
-                              "%s: invalid argument %s%w%s for %s--whitespace-delimited%s\n"
+                text_complain("%s: invalid argument %s%w%s for %s--whitespace-delimited%s\n"
                               "Valid arguments are:\n  - %strimmed%s\n"
                               "Try '%s --help' for more information.\n",
                               text_name, open, writer_terminal_quoted_name, value, close,
@@ -23100,9 +23050,7 @@ static bool tr_unquote(string_address spec, positive address_to length)
                                                 p8 all[4] = {(p8)spec[i], (p8)spec[i + 1], (p8)spec[i + 2], 0};
                                                 p8 pair[3] = {(p8)spec[i], (p8)spec[i + 1], 0};
 
-                                                text_flush();
-                                                string_format(writer_stderr,
-                                                    "tr: warning: the ambiguous octal escape \\%s is being\n"
+                                                text_complain("tr: warning: the ambiguous octal escape \\%s is being\n"
                                                     "\tinterpreted as the 2-byte sequence \\0%s, %s\n",
                                                     all, pair, all + 2);
                                         }
@@ -23328,9 +23276,7 @@ static bool tr_parse(string_address spec, tr_list address_to list)
                                                 shown[made++] = '-';
                                 }
                                 shown[made] = '\0';
-                                text_flush();
-                                string_format(writer_stderr,
-                                              "tr: range-endpoints of '%s' are in reverse collating sequence order\n",
+                                text_complain("tr: range-endpoints of '%s' are in reverse collating sequence order\n",
                                               shown);
                                 text_status = 1;
                                 return false;
@@ -23500,8 +23446,7 @@ static bool tr_stats(tr_list address_to list)
 
 static bool tr_fatal(string_address message)
 {
-        text_flush();
-        string_format(writer_stderr, "tr: %s\n", message);
+        text_complain("tr: %s\n", message);
         text_status = 1;
         return false;
 }
@@ -24078,9 +24023,7 @@ static positive uniq_group_how;
 static bool uniq_argument_refused(string_address value, string_address option,
                                   string_address known)
 {
-        text_flush();
-        string_format(writer_stderr,
-                      "uniq: invalid argument '%w' for '%s'\nValid arguments are:\n%s"
+        text_complain("uniq: invalid argument '%w' for '%s'\nValid arguments are:\n%s"
                       "Try 'uniq --help' for more information.\n",
                       writer_terminal_quoted_name, value, option, known);
         return false;
@@ -24316,8 +24259,7 @@ static b32 text_uniq()
                 if (target < 0)
                 {
                         //      quotef's name and the system's reason.
-                        text_flush();
-                        string_format(writer_stderr, "%s: %w: %s\n", text_name,
+                        text_complain("%s: %w: %s\n", text_name,
                                       writer_shell_name, name, file_reason(target));
                         return text_done(1);
                 }
@@ -29288,8 +29230,7 @@ static b32 text_grep()
         // once for each.
         for (positive k = 0; !never && k < regex_warning_count && k < sizeof(regex_warnings); k++)
         {
-                text_flush();
-                string_format(writer_stderr, "grep: warning: %s at start of expression\n",
+                text_complain("grep: warning: %s at start of expression\n",
                               regex_warnings[k] == '{' ? (string_address) "{...}"
                               : regex_warnings[k] == '*' ? (string_address) "*"
                               : regex_warnings[k] == '+' ? (string_address) "+"
@@ -35611,24 +35552,18 @@ static fn sort_debug_warnings(sort_ordering address_to defaults, b32 count, bool
 
                 if (sort_separator == '.')
                 {
-                        text_flush();
-                        string_format(writer_stderr,
-                                      "%s: field separator '%w' is treated as a decimal point in numbers\n",
+                        text_complain("%s: field separator '%w' is treated as a decimal point in numbers\n",
                                       text_name, writer_terminal_quoted_name, tab);
                         warned = true;
                 }
                 else if (sort_separator == '-')
                 {
-                        text_flush();
-                        string_format(writer_stderr,
-                                      "%s: field separator '%w' is treated as a minus sign in numbers\n",
+                        text_complain("%s: field separator '%w' is treated as a minus sign in numbers\n",
                                       text_name, writer_terminal_quoted_name, tab);
                 }
                 else if (general_span && sort_separator == '+')
                 {
-                        text_flush();
-                        string_format(writer_stderr,
-                                      "%s: field separator '%w' is treated as a plus sign in numbers\n",
+                        text_complain("%s: field separator '%w' is treated as a plus sign in numbers\n",
                                       text_name, writer_terminal_quoted_name, tab);
                 }
         }
@@ -35979,8 +35914,7 @@ static bipolar sort_temporary()
                 return -1;
         }
 
-        text_flush();
-        string_format(writer_stderr, "%s: cannot create temporary file in '%w': %s\n",
+        text_complain("%s: cannot create temporary file in '%w': %s\n",
                       text_name, writer_terminal_quoted_name, directory, file_reason(handle));
         return -1;
 }
@@ -36180,8 +36114,7 @@ static bool sort_proc_wait(bipolar pid, bool loud)
 
         if (waited < 0)
         {
-                text_flush();
-                string_format(writer_stderr, "%s: waiting for %w [-d]: %s\n", text_name,
+                text_complain("%s: waiting for %w [-d]: %s\n", text_name,
                               writer_shell_quoted_name, sort_compress, file_reason(waited));
                 sort_failed = true;
                 return false;
@@ -36189,8 +36122,7 @@ static bool sort_proc_wait(bipolar pid, bool loud)
 
         if (status)
         {
-                text_flush();
-                string_format(writer_stderr, "%s: %w [-d] terminated abnormally\n", text_name,
+                text_complain("%s: %w [-d] terminated abnormally\n", text_name,
                               writer_shell_quoted_name, sort_compress);
                 sort_failed = true;
                 return false;
@@ -36236,8 +36168,7 @@ static bipolar sort_compress_begin(sort_writer address_to out, bipolar handle,
         {
                 if (result != sort_compress_said)
                 {
-                        text_flush();
-                        string_format(writer_stderr, "%s: could not run compress program %w: %s\n",
+                        text_complain("%s: could not run compress program %w: %s\n",
                                       text_name, writer_shell_quoted_name, sort_compress,
                                       file_reason(result));
                 }
@@ -36405,8 +36336,7 @@ static bool sort_compress_open(sort_source address_to source, sort_entry address
 
         if (result)
         {
-                text_flush();
-                string_format(writer_stderr, "%s: could not run compress program %w -d: %s\n",
+                text_complain("%s: could not run compress program %w -d: %s\n",
                               text_name, writer_shell_quoted_name, sort_compress,
                               file_reason(result));
                 sort_failed = true;
@@ -36709,8 +36639,7 @@ static fn sort_sources_drop_last()
 // sort_die's shape: what failed, the name through quotef, and the reason.
 static b32 sort_open_failed(string_address name, bipolar reason)
 {
-        text_flush();
-        string_format(writer_stderr, "%s: open failed: %w: %s\n", text_name,
+        text_complain("%s: open failed: %w: %s\n", text_name,
                       writer_shell_name, name ? name : (string_address) "-",
                       file_reason(reason));
         return 2;
@@ -37334,8 +37263,7 @@ static b32 sort_pool_merge_ready()
 
                         if (failed)
                         {
-                                text_flush();
-                                string_format(writer_stderr, "%s: read failed: %s: %s\n",
+                                text_complain("%s: read failed: %s: %s\n",
                                               text_name,
                                               sort_temporary_place
                                                   ? sort_temporary_place
@@ -37412,8 +37340,7 @@ static b32 sort_pool_merge_ready()
                 for (positive at = 0; at < pieces; at++)
                         if (sort_piece_errors[at])
                         {
-                                text_flush();
-                                string_format(writer_stderr, "%s: read failed: %s: %s\n",
+                                text_complain("%s: read failed: %s: %s\n",
                                               text_name,
                                               sort_temporary_place
                                                   ? sort_temporary_place
@@ -37449,8 +37376,7 @@ static bool sort_pool_merge(sort_writer address_to out)
         for (positive at = 0; at < pieces; at++)
                 if (sort_piece_errors[at])
                 {
-                        text_flush();
-                        string_format(writer_stderr, "%s: %s failed: %s\n", text_name,
+                        text_complain("%s: %s failed: %s\n", text_name,
                                       sort_piece_errors[at] == -12 ? "merge" : "read",
                                       file_reason(sort_piece_errors[at]));
                         return false;
@@ -37463,8 +37389,7 @@ static bool sort_pool_merge(sort_writer address_to out)
 // directory it lives in, which is what an operator needs to free anyway.
 static fn sort_writer_failed(sort_writer address_to out)
 {
-        text_flush();
-        string_format(writer_stderr, "%s: write failed: %s: %s\n", text_name,
+        text_complain("%s: write failed: %s: %s\n", text_name,
                       sort_temporary_place ? sort_temporary_place
                                            : (string_address) "temporary file",
                       file_reason(out->error ? out->error : -5));
@@ -38213,9 +38138,7 @@ static bool sort_order_settle(sort_ordering address_to order)
                         letters[used++] = 'V';
                 letters[used] = 0;
 
-                text_flush();
-                return string_report(writer_stderr, false,
-                                     "%s: options '-%s' are incompatible\n", text_name,
+                return text_complain("%s: options '-%s' are incompatible\n", text_name,
                                      letters);
         }
 
@@ -38270,17 +38193,13 @@ static positive sort_field_count(string_address spec, positive address_to taken)
 // from where it should have started, and a key that is wrong as a whole.
 static bool sort_count_refused(string_address what, string_address from)
 {
-        text_flush();
-        return string_report(writer_stderr, false,
-                             "%s: %s: invalid count at start of '%w'\n", text_name,
+        return text_complain("%s: %s: invalid count at start of '%w'\n", text_name,
                              what, writer_terminal_quoted_name, from);
 }
 
 static bool sort_key_refused(string_address what, string_address spec)
 {
-        text_flush();
-        return string_report(writer_stderr, false,
-                             "%s: %s: invalid field specification '%w'\n", text_name,
+        return text_complain("%s: %s: invalid field specification '%w'\n", text_name,
                              what, writer_terminal_quoted_name, spec);
 }
 
@@ -38499,9 +38418,7 @@ static fn sort_obsolete_key(string_address plus, string_address minus)
                         offset = sort_field_count(minus + at, address_of taken);
                         if (!taken)
                         {
-                                text_flush();
-                                string_format(writer_stderr,
-                                              "%s: invalid number after '.': invalid count at start of %w\n",
+                                text_complain("%s: invalid number after '.': invalid count at start of %w\n",
                                               text_name, writer_shell_quoted_name, minus + at);
                                 sort_obsolete_failed = true;
                                 return;
@@ -38517,9 +38434,7 @@ static fn sort_obsolete_key(string_address plus, string_address minus)
 
                 if (minus[stop])
                 {
-                        text_flush();
-                        string_format(writer_stderr,
-                                      "%s: stray character in field spec: invalid field specification %w\n",
+                        text_complain("%s: stray character in field spec: invalid field specification %w\n",
                                       text_name, writer_shell_quoted_name, minus);
                         sort_obsolete_failed = true;
                         return;
@@ -38612,8 +38527,7 @@ static fn sort_ambiguous_say(string_address word)
         while (word[2 + length] && word[2 + length] != '=')
                 length++;
 
-        text_flush();
-        string_format(writer_stderr, "%s: option '%s' is ambiguous; possibilities:", text_name,
+        text_complain("%s: option '%s' is ambiguous; possibilities:", text_name,
                       word);
 
         for (positive at = 0; sort_long_names[at]; at++)
@@ -38863,8 +38777,7 @@ static bool sort_key_seen(p8 letter, string_address value)
 
                 if (value[1] && !escaped)
                 {
-                        text_flush();
-                        return string_report(writer_stderr, false, "%s: multi-character tab '%w'\n",
+                        return text_complain("%s: multi-character tab '%w'\n",
                                       text_name, writer_terminal_quoted_name, value);
                 }
 
@@ -38879,8 +38792,7 @@ static bool sort_key_seen(p8 letter, string_address value)
 
         if (letter == 'S' && !sort_size_valid(value))
         {
-                text_flush();
-                return string_report(writer_stderr, false, "%s: invalid -S argument '%s'\n",
+                return text_complain("%s: invalid -S argument '%s'\n",
                               text_name, value);
         }
 
@@ -38930,9 +38842,7 @@ static bool sort_key_seen(p8 letter, string_address value)
 
                 if (!byte_is_digit(at[0]))
                 {
-                        text_flush();
-                        return string_report(writer_stderr, false,
-                                             "%s: invalid --batch-size argument '%s'\n",
+                        return text_complain("%s: invalid --batch-size argument '%s'\n",
                                              text_name, value);
                 }
 
@@ -38940,26 +38850,20 @@ static bool sort_key_seen(p8 letter, string_address value)
 
                 if (at[0])
                 {
-                        text_flush();
-                        return string_report(writer_stderr, false,
-                                             "%s: invalid suffix in --batch-size argument '%s'\n",
+                        return text_complain("%s: invalid suffix in --batch-size argument '%s'\n",
                                              text_name, value);
                 }
 
                 if (!over && number < 2)
                 {
-                        text_flush();
-                        return string_report(writer_stderr, false,
-                                      "%s: invalid --batch-size argument '%s'\n"
+                        return text_complain("%s: invalid --batch-size argument '%s'\n"
                                       "%s: minimum --batch-size argument is '2'\n",
                                       text_name, value, text_name);
                 }
 
                 if (over || number > (positive)most)
                 {
-                        text_flush();
-                        return string_report(writer_stderr, false,
-                                             "%s: --batch-size argument '%s' too large\n"
+                        return text_complain("%s: --batch-size argument '%s' too large\n"
                                              "%s: maximum --batch-size argument with current rlimit is %p\n",
                                              text_name, value, text_name, (positive)most);
                 }
@@ -38973,9 +38877,7 @@ static bool sort_key_seen(p8 letter, string_address value)
 
                 if (!text_unsigned_option(value, false, address_of number))
                 {
-                        text_flush();
-                        return string_report(writer_stderr, false,
-                                      "%s: invalid --parallel argument '%s'\n",
+                        return text_complain("%s: invalid --parallel argument '%s'\n",
                                       text_name, value);
                 }
 
@@ -39526,8 +39428,7 @@ static b32 sort_check(bool quiet)
                         {
                                 if (!quiet)
                                 {
-                                        text_flush();
-                                        string_format(writer_stderr, "%s: %s:%p: disorder: ",
+                                        text_complain("%s: %s:%p: disorder: ",
                                                       text_name,
                                                       name ? name : (string_address) "-",
                                                       number);
@@ -39656,9 +39557,7 @@ static b32 text_sort()
 
                 if (text_files_count)
                 {
-                        text_flush();
-                        string_format(writer_stderr,
-                                      "%s: extra operand %w\nfile operands cannot be combined with --files0-from\n",
+                        text_complain("%s: extra operand %w\nfile operands cannot be combined with --files0-from\n",
                                       text_name, writer_shell_quoted_name, text_file_name(0));
                         return text_done(string_report(writer_stderr, 2,
                                                        "Try '%s --help' for more information.\n",
@@ -39698,9 +39597,8 @@ static b32 text_sort()
 
                 if (!text_files_count)
                 {
-                        text_flush();
-                        return text_done(string_report(writer_stderr, 2, "%s: no input from %w\n",
-                                                       text_name, writer_shell_quoted_name, list));
+                        return text_done(text_report(2, "%s: no input from %w\n",
+                                                     text_name, writer_shell_quoted_name, list));
                 }
         }
 
@@ -39781,11 +39679,9 @@ static b32 text_sort()
 
         if (sort_debug && (checking || output))
         {
-                text_flush();
-                return text_done(string_report(writer_stderr, 2,
-                                               "%s: options '-%s --debug' are incompatible\n",
-                                               text_name,
-                                               checking ? (checking_quiet ? "C" : "c") : "o"));
+                return text_done(text_report(2, "%s: options '-%s --debug' are incompatible\n",
+                                             text_name,
+                                             checking ? (checking_quiet ? "C" : "c") : "o"));
         }
 
         if (sort_debug)
@@ -39808,8 +39704,7 @@ static b32 text_sort()
 
         if (checking && text_files_count > 1)
         {
-                text_flush();
-                string_format(writer_stderr, "%s: extra operand '%w' not allowed with -%s\n",
+                text_complain("%s: extra operand '%w' not allowed with -%s\n",
                               text_name, writer_terminal_quoted_name, text_file_name(1),
                               check_letter);
                 return text_done(2);
@@ -39817,10 +39712,8 @@ static b32 text_sort()
 
         if (checking && output)
         {
-                text_flush();
-                return text_done(string_report(writer_stderr, 2,
-                                               "%s: options '-%so' are incompatible\n",
-                                               text_name, check_letter));
+                return text_done(text_report(2, "%s: options '-%so' are incompatible\n",
+                                             text_name, check_letter));
         }
 
 
@@ -40122,8 +40015,7 @@ static b32 text_cmp()
                 {
                         //      GNU names it as quotef does, as it does an
                         //      input that would not open.
-                        text_flush();
-                        string_format(writer_stderr, "cmp: %w: Is a directory\n",
+                        text_complain("cmp: %w: Is a directory\n",
                                       writer_shell_name, reader->name);
                         return cmp_ends(2);
                 }
@@ -40173,9 +40065,7 @@ static b32 text_cmp()
                 {
                         if (!silent)
                         {
-                                text_flush();
-                                string_format(writer_stderr,
-                                    !at ? "cmp: EOF on '%s' which is empty\n"
+                                text_complain(!at ? "cmp: EOF on '%s' which is empty\n"
                                     : listing ? "cmp: EOF on '%s' after byte %p\n"
                                     : "cmp: EOF on '%s' after byte %p, in line %p\n",
                                     !have_left ? cmp_left.name : cmp_right.name,
@@ -40332,8 +40222,7 @@ static fn expr_stop_at(string_address reason, string_address word)
 {
         if (!expr_fault)
         {
-                text_flush();
-                string_format(writer_stderr, "%s: syntax error: %s '%w'\n",
+                text_complain("%s: syntax error: %s '%w'\n",
                               text_name, reason, writer_terminal_quoted_name,
                               word);
         }
