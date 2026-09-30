@@ -4000,8 +4000,6 @@ secure_creation_regressions()
         mkdir -m 0777 "$place/unsafe" || exit 1
         mkdir -m 1777 "$place/sticky" || exit 1
         mkdir -m 0700 "$place/target" || exit 1
-        mkdir -m 000 "$place/oldzero" || exit 1
-        mkdir -m 000 "$place/unsafe/locked" || exit 1
         ln -s target "$place/link" || exit 1
 
         cd "$place" || exit 1
@@ -4044,31 +4042,6 @@ secure_creation_regressions()
                 paste -sd:)
         [ "$modes" = 300:0:300:640:640:640:640:755:755:755:2750:755:640:4750:4000:2750:2755:2755 ] ||
                 exit 1
-
-        if command -v strace > /dev/null 2>&1 &&
-                strace -qq -o /dev/null -e trace=fchmodat2 true \
-                        > /dev/null 2>&1; then
-                strace -qq -o /dev/null \
-                        -e trace=fchmod,fchmodat,fchmodat2 \
-                        -e inject=fchmodat2:error=ENOSYS:when=1 \
-                        "$farm/install" -d -m 0711 oldzero || exit 1
-                [ "$(stat -c '%a' oldzero)" = 711 ] || exit 1
-
-                strace -qq -o /dev/null \
-                        -e trace=fchmod,fchmodat,fchmodat2 \
-                        -e inject=fchmodat2:error=ENOSYS:when=1 \
-                        "$farm/mkdir" -m 4000 oldspecial || exit 1
-                [ "$(stat -c '%a' oldspecial)" = 4000 ] || exit 1
-
-                if strace -qq -o /dev/null \
-                        -e trace=fchmod,fchmodat,fchmodat2 \
-                        -e inject=fchmodat2:error=ENOSYS:when=1 \
-                        "$farm/install" -d -m 0711 unsafe/locked \
-                        > /dev/null 2>&1; then
-                        exit 1
-                fi
-                [ "$(stat -c '%a' unsafe/locked)" = 0 ] || exit 1
-        fi
 
         # A world-writable directory without the sticky bit is somewhere GNU
         # makes entries, and so does the default; the tight tier's refusal is

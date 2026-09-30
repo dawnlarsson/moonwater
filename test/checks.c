@@ -78209,15 +78209,15 @@ done:
 static fn storage_test_copy_faults(void)
 {
         static const copy_test_step partial[] = {
-            {false, -4, 12}, {false, 5, 12}, {false, -38, 7},
+            {false, -4, 12}, {false, 5, 12}, {false, -95, 7},
             {true, -4, 7}, {true, 4, 7}, {true, 3, 3},
         };
         static const copy_test_step range_eof[] = {{false, 0, 12}};
-        static const copy_test_step send_eof[] = {{false, -38, 12}, {true, 0, 12}};
+        static const copy_test_step send_eof[] = {{false, -95, 12}, {true, 0, 12}};
         static const copy_test_step range_error[] = {{false, 5, 12}, {false, -5, 7}};
-        static const copy_test_step send_error[] = {{false, -38, 12}, {true, 5, 12}, {true, -5, 7}};
-        static const copy_test_step seek_error[] = {{false, -38, 12}};
-        static const copy_test_step exhausted[] = {{false, -38, 12}, {true, -38, 12}};
+        static const copy_test_step send_error[] = {{false, -95, 12}, {true, 5, 12}, {true, -5, 7}};
+        static const copy_test_step seek_error[] = {{false, -95, 12}};
+        static const copy_test_step exhausted[] = {{false, -95, 12}, {true, -95, 12}};
         static const struct {
                 const copy_test_step address_to steps;
                 positive count, copied, seek_failure, seeks;
