@@ -74164,6 +74164,74 @@ static fn secret_lines(void)
                           lines[at].secret);
 }
 
+/*
+        The disks boot takes without asking are the ones on a bus nothing is
+        plugged into: the place sysfs gives a disk says USB or Thunderbolt for
+        the rest (host_link_external); the `removable` files above it are read
+        from the real sysfs and are the lane's to show (an NVMe disk in a
+        guest is taken).
+*/
+static fn boot_links(void)
+{
+        static const struct { string_address link; bool external; } links[] = {
+            {"../../devices/pci0000:00/0000:00:14.0/usb2/2-1/2-1:1.0/host6/target6:0:0/6:0:0:0/block/sdb", true},
+            {"../../devices/pci0000:00/0000:00:03.0/usb1/1-1/1-1:1.0/host0/target0:0:0/0:0:0:0/block/sda", true},
+            {"../../devices/pci0000:00/0000:00:0d.2/0-0/thunderbolt/0-1/nvme/nvme1/nvme1n1", true},
+            {"../../devices/pci0000:00/0000:00:1d.0/0000:3d:00.0/nvme/nvme0/nvme0n1", false},
+            {"../../devices/pci0000:00/0000:00:17.0/ata1/host0/target0:0:0/0:0:0:0/block/sda", false},
+            {"../../devices/platform/soc/mmc_host/mmc0/mmc0:0001/block/mmcblk0", false},
+            {"../../devices/virtual/block/loop0", false},
+        };
+
+        for (positive at = 0; at < array_count(links); at++)
+                check("A disk on USB or Thunderbolt is external, one on NVMe or SATA is not",
+                      host_link_external(links[at].link) == links[at].external);
+        check("A disk named with a path that could not be read is external",
+              host_disk_external("no/such"));
+        check("A disk that does not exist is external", host_disk_external("nosuchdisk9"));
+}
+
+/*
+        Which install boot takes without asking: the one this session started
+        from (its medium identity) outranks a disk that enumerates earlier;
+        failing that the first same-build one on a bus nothing is plugged into;
+        an external one never, and another build never; tight takes the first
+        kind only. The rows are (same build, medium match, external) per
+        disk, in census order.
+*/
+static fn boot_choice(void)
+{
+        static const struct
+        {
+                bool same[4], medium[4], external[4];
+                positive count;
+                bool tight;
+                positive want;
+        } rows[] = {
+            // A planted internal disk that enumerates first, this session's own second.
+            {{1, 1}, {0, 1}, {0, 0}, 2, false, 1},
+            {{1, 1}, {0, 1}, {0, 0}, 2, true, 1},
+            // No medium to go by: the first internal one, never the USB one before it.
+            {{1, 1, 1}, {0, 0, 0}, {1, 0, 0}, 3, false, 1},
+            {{1, 1}, {0, 0}, {0, 0}, 2, false, 0},
+            // Only an external one: asked about.
+            {{1}, {0}, {1}, 1, false, 1},
+            {{1, 1}, {0, 0}, {1, 1}, 2, false, 2},
+            // Tight takes the medium match alone.
+            {{1, 1}, {0, 0}, {0, 0}, 2, true, 2},
+            {{1, 1}, {0, 1}, {1, 0}, 2, true, 1},
+            // Another build is never taken, whatever else it is.
+            {{0, 1}, {1, 0}, {0, 0}, 2, false, 1},
+            {{0}, {1}, {0}, 1, false, 1},
+            {{0}, {0}, {0}, 0, false, 0},
+        };
+
+        for (positive at = 0; at < array_count(rows); at++)
+                check("Boot takes this session's own disk first, then the first fixed one, else asks",
+                      host_census_pick(rows[at].same, rows[at].medium, rows[at].external,
+                                       rows[at].count, rows[at].tight) == rows[at].want);
+}
+
 b32 main(void)
 {
         names();
@@ -74177,6 +74245,8 @@ b32 main(void)
         distros();
         downloads();
         secret_lines();
+        boot_links();
+        boot_choice();
         json();
         oci();
         nix();

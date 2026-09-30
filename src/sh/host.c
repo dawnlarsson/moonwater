@@ -151,6 +151,7 @@ static fn host_settings_session(host_settings address_to settings);
 static fn host_settings_keep(host_settings address_to settings);
 static bool host_settings_install(host_install address_to install,
                                   host_settings address_to into);
+static PURE bool host_medium_blank(const p8 address_to medium, positive size);
 static fn host_events_boot(host_settings address_to settings);
 static fn host_bind_apply(host_settings address_to settings);
 static b32 host_bind(string_address address_to arguments, positive count);
@@ -916,6 +917,13 @@ static bool host_install_refresh(host_install address_to install)
             !string_equals(system_disk, data_disk))
                 return false;
 
+        /*      The disk the census found, and no other: a second disk that
+                carries the same partition identities (copied from this one,
+                which anybody who has read its table can do) answers the tag
+                first some boots, and would be mounted in its place. */
+        if (install->disk[0] && !string_equals(install->disk, system_disk))
+                return false;
+
         string_copy(install->disk, system_disk);
         string_copy(install->system, system);
         string_copy(install->data, data);
@@ -925,6 +933,93 @@ static bool host_install_refresh(host_install address_to install)
 static fn host_unmount(string_address target)
 {
         system_call_2(syscall(umount2), (positive)target, 0);
+}
+
+/*
+        Whether a disk's place in sysfs says something can be plugged into it:
+        a USB or Thunderbolt bus in the path. The link is what
+        /sys/class/block/NAME points at.
+*/
+static PURE bool host_link_external(string_address link)
+{
+        return string_find(link, "/usb") || string_find(link, "/thunderbolt");
+}
+
+/*
+        Whether a disk is on a bus something can be plugged into. The path
+        says USB or Thunderbolt, the block device says removable, and a device
+        above it may say so itself: a PCI device behind an external-facing
+        port (a USB4 or Thunderbolt NVMe enclosure looks like any NVMe disk)
+        reads "removable" in its own `removable` file, as does a USB device
+        that is not soldered in. A disk that cannot be told is taken to be
+        external.
+*/
+static bool host_disk_external(string_address disk)
+{
+        p8 sysfs[HOST_PATH_ROOM];
+        p8 link[HOST_PATH_ROOM * 2];
+        p8 path[HOST_PATH_ROOM * 2];
+        p8 flag[16];
+        string_address devices;
+
+        if (!host_name_valid(disk) ||
+            !host_join(sysfs, sizeof(sysfs), "/sys/class/block/", disk) ||
+            file_link_text(sysfs, link, sizeof(link)) <= 0 ||
+            host_link_external(link))
+                return true;
+
+        if (!host_join(sysfs, sizeof(sysfs), "/sys/block/", disk) ||
+            !host_join(path, sizeof(path), sysfs, "/removable") ||
+            host_read_text(path, flag, sizeof(flag)) < 0 || flag[0] != '0')
+                return true;
+
+        //      Every directory above the block device, up to /sys/devices.
+        devices = string_find(link, "/devices/");
+        if (!devices || !host_join(path, sizeof(path), "/sys", devices))
+                return true;
+
+        for (;;)
+        {
+                p8 address_to slash = memory_last_of(path, '/', string_length(path));
+
+                if (!slash || slash <= path + sizeof("/sys/devices") - 1)
+                        break;
+                *slash = end;
+                if (host_join(sysfs, sizeof(sysfs), path, "/removable") &&
+                    host_read_text(sysfs, flag, sizeof(flag)) >= 0 &&
+                    (string_equals(flag, "removable") || string_equals(flag, "1")))
+                        return true;
+        }
+
+        return false;
+}
+
+/*
+        Which install boot takes without asking, or count for none. The one
+        this session started from first, found by the medium identity its
+        image carries (drawn at install, the same in this session's
+        settings): a disk that enumerates earlier does not outrank it. Only
+        when there is none, the first on a bus nothing is plugged into. Only
+        installs whose image says this build are in question, and another
+        disk that says so too -- every copy of a public release does -- is
+        asked about, because a stick somebody pushed in can say it. Tight
+        takes the first kind only.
+*/
+static positive host_census_pick(const bool address_to same,
+                                 const bool address_to medium,
+                                 const bool address_to external,
+                                 positive count, bool tight)
+{
+        for (positive at = 0; at < count; at++)
+                if (same[at] && medium[at])
+                        return at;
+
+        if (!tight)
+                for (positive at = 0; at < count; at++)
+                        if (same[at] && !external[at])
+                                return at;
+
+        return count;
 }
 
 static fn host_install_read(host_install address_to install)
@@ -1375,12 +1470,33 @@ static b32 host_boot(void)
                 return 0;
         }
 
-        for (positive at = 0; at < census.count; at++)
         {
-                host_install_read(census.found + at);
-                if (!chosen && running[0] && census.found[at].readable &&
-                    string_equals(census.found[at].build, running))
-                        chosen = census.found + at;
+                bool same[HOST_INSTALLS];
+                bool medium[HOST_INSTALLS];
+                bool external[HOST_INSTALLS];
+                positive pick;
+
+                for (positive at = 0; at < census.count; at++)
+                {
+                        host_install address_to look = census.found + at;
+                        host_settings theirs;
+
+                        host_install_read(look);
+                        same[at] = running[0] && look->readable &&
+                                   string_equals(look->build, running);
+                        medium[at] = same[at] && known &&
+                                     !host_medium_blank(settings.medium,
+                                                        sizeof(settings.medium)) &&
+                                     host_settings_install(look, address_of theirs) &&
+                                     !memory_compare(theirs.medium, settings.medium,
+                                                     sizeof(theirs.medium));
+                        external[at] = host_disk_external(look->disk);
+                }
+
+                pick = host_census_pick(same, medium, external, census.count,
+                                        MOONWATER_STRICT >= STRICT_TIGHT);
+                if (pick < census.count)
+                        chosen = census.found + pick;
         }
 
         if (chosen)
@@ -1417,10 +1533,14 @@ static b32 host_boot(void)
         chosen = census.found;
         host_write_text(HOST_QUESTION, "");
         host_verdict_set("ask ", chosen->disk);
-        host_say(log, host_label "%s has Moonwater installed from another build.\n"
+        host_say(log, host_label "%s has Moonwater installed %s.\n"
                       host_label "A terminal will ask what to do with it, or "
                       "moonwater use, update or live answers from a shell.\n",
-                 chosen->disk);
+                 chosen->disk,
+                 chosen->readable && running[0] &&
+                         string_equals(chosen->build, running)
+                     ? "on a disk that is not this one"
+                     : "from another build");
         host_events_boot(known ? address_of settings : null);
         return 0;
 }
