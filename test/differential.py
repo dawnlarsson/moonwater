@@ -55762,13 +55762,14 @@ static p8 rsn_model(const p8 *element, positive length)
                : owe ? RADIO_OWE : eap ? RADIO_EAP : RADIO_WPA2;
 }
 
-/* What a beacon's elements say, counted the long way: the first name of at
-   most 32 bytes while there is none, the first RSN element, a WPA vendor
+/* What a beacon's elements say, counted the long way: the first name element
+   (the one the kernel joins by: a later one is not this access point's name,
+   and one over 32 bytes or empty leaves it with none), the first RSN element, a WPA vendor
    element, and what the capability bit says when there is neither. */
 static void elements_model(const p8 *ies, positive size, p16 capability,
                            p8 *ssid, p8 *ssid_length, p8 *security)
 {
-        bool rsn = false, wpa = false;
+        bool rsn = false, wpa = false, named = false;
         *ssid_length = 0;
         *security = RADIO_OPEN;
         for (positive at = 0; at + 2 <= size;)
@@ -55778,10 +55779,14 @@ static void elements_model(const p8 *ies, positive size, p16 capability,
                 const p8 *data = ies + at + 2;
                 if (at + 2 + span > size)
                         break;
-                if (id == 0 && span <= RADIO_SSID_MOST && !*ssid_length)
+                if (id == 0 && !named)
                 {
-                        memcpy(ssid, data, span);
-                        *ssid_length = span;
+                        named = true;
+                        if (span <= RADIO_SSID_MOST)
+                        {
+                                memcpy(ssid, data, span);
+                                *ssid_length = span;
+                        }
                 }
                 else if (id == 48 && !rsn)
                 {
