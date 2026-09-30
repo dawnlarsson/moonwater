@@ -4184,6 +4184,89 @@ static b32 tools_pinky()
         return text_done(0);
 }
 
+// logname: what the login records say of a terminal ---------------
+
+static string_address logname_line;
+static p8 address_to logname_name;
+static bool logname_found;
+
+static bool logname_visit(login_record address_to record)
+{
+        positive line = string_length_max(record->line, sizeof(record->line));
+
+        if (record->type != LOGIN_USER_PROCESS || !record->user[0] ||
+            line != string_length(logname_line) ||
+            memory_compare(record->line, logname_line, line))
+                return true;
+
+        login_field(logname_name, 65, record->user, sizeof(record->user), false);
+        logname_found = true;
+        return false;
+}
+
+static bool logname_utmp(string_address tty, p8 address_to name)
+{
+        // GNU consults utmp only for the traditional /dev/tty namespace.
+        if (string_compare_max(tty, (string_address) "/dev/tty", 8))
+                return false;
+
+        logname_line = tty + 5;
+        logname_name = name;
+        logname_found = false;
+        login_records((string_address)LOGIN_UTMP_PATH, false, true, logname_visit);
+        return logname_found;
+}
+
+static b32 tools_logname()
+{
+        file_taking taking = {
+            .program = (string_address) "logname",
+            .options = file_no_options,
+        };
+        b32 left = file_options_only(address_of taking, 1);
+
+        if (left)
+                return left;
+
+        p8 loginuid[32];
+        positive user = positive_max;
+        p8 name[65];
+        bool found = file_slurp((string_address) "/proc/self/loginuid", loginuid,
+                                sizeof(loginuid)) > 0 &&
+                     string_digits_exact(loginuid, address_of user) &&
+                     user < p32_max &&
+                     file_user_name(user, name, sizeof(name)) &&
+                     string_length(name) < 64;
+
+        if (!found)
+        {
+                p8 tty[FILE_PATH_MAX];
+
+                if (file_input_terminal_name(tty, sizeof(tty)) >= 0)
+                {
+                        found = logname_utmp(tty, name);
+
+                        if (!found)
+                        {
+                                file_facts facts;
+
+                                found = file_look_at(tty, address_of facts) &&
+                                        file_user_name(facts.owner, name,
+                                                       sizeof(name)) &&
+                                        string_length(name) < 64;
+                        }
+                }
+        }
+
+        if (!found)
+                return string_report(log_error, 1, "logname: no login name\n");
+
+        file_line(name);
+        log_flush();
+        return 0;
+}
+
+
 // tsort -----------------------------------------------------
 
 /* A node is named by a token kept in the input buffer.  Edges and all graph
