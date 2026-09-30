@@ -473,6 +473,14 @@ static b32 text_done(b32 code)
         return code;
 }
 
+// A failure of the tool's own, said and ended: the word on standard error and
+// status 1 once the output is out.
+static DEAD_END fn text_die(string_address message)
+{
+        string_diagnostic(&text_diagnostic, 0, null, message);
+        exit(text_done(1));
+}
+
 // The same, for a run whose output went to a file it opened: flushed there,
 // then closed, because the shell that ran the tool goes on living with the
 // descriptors it leaves open.
@@ -4107,10 +4115,7 @@ static bool comm_next(text_record_cursor address_to cursor, positive side,
         byte_store address_to store = comm_copies[side] + (comm_copy_flip[side] ^= 1);
 
         if (!byte_store_reserve(store, length + 1, 4096))
-        {
-                string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
-                exit(text_done(1));
-        }
+                text_die("memory exhausted");
         memory_copy_apart(store->bytes, shared->record, length);
         cursor->record = store->bytes;
         cursor->length = length;
@@ -14169,10 +14174,7 @@ static pr_stream address_to pr_stream_open(string_address name)
         pr_stream address_to made = (pr_stream address_to)memory_take(sizeof(pr_stream));
 
         if (!made)
-        {
-                string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
-                exit(text_done(1));
-        }
+                text_die("memory exhausted");
 
         made->pushed = -1;
         made->is_stdin = standard;
@@ -14411,10 +14413,7 @@ static fn pr_store_char(p8 c)
 {
         if (pr_buff.used >= pr_buff.room &&
             !byte_store_reserve(address_of pr_buff, pr_buff.used + 1, 1 << 12))
-        {
-                string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
-                exit(text_done(1));
-        }
+                text_die("memory exhausted");
         pr_buff.bytes[pr_buff.used++] = c;
 }
 
@@ -14526,10 +14525,7 @@ static fn pr_print_header()
         pr_print_white_space();
 
         if (pr_page_number == 0)
-        {
-                string_diagnostic(&text_diagnostic, 0, null, "page number overflow");
-                exit(text_done(1));
-        }
+                text_die("page number overflow");
 
         p8 page_text[40];
         positive page_length = 5 + positive_into(page_text + 5, pr_page_number);
@@ -14876,11 +14872,7 @@ static bool pr_read_line(pr_column address_to p)
                                 {
                                         if (!byte_store_reserve(address_of pr_buff,
                                                                 pr_buff.used + run, 1 << 12))
-                                        {
-                                                string_diagnostic(&text_diagnostic, 0, null,
-                                                                  "memory exhausted");
-                                                exit(text_done(1));
-                                        }
+                                                text_die("memory exhausted");
                                         memory_copy_apart(pr_buff.bytes + pr_buff.used, at, run);
                                         pr_buff.used += run;
                                 }
@@ -15058,10 +15050,7 @@ static fn pr_init_store_cols()
                                         (pr_use_col_separator + 1),
                                     (positive)1 << 20),
                                 1 << 12))
-        {
-                string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
-                exit(text_done(1));
-        }
+                text_die("memory exhausted");
 }
 
 /* Setting up ------------------------------------------------------------ */
@@ -15134,18 +15123,12 @@ static fn pr_init_parameters(positive number_of_files)
         pr_chars_per_column = useful / pr_columns;
 
         if (pr_chars_per_column < 1)
-        {
-                string_diagnostic(&text_diagnostic, 0, null, "page width too narrow");
-                exit(text_done(1));
-        }
+                text_die("page width too narrow");
 
         memory_give(pr_clump);
         pr_clump = (p8 address_to)memory_take((positive)max(8, pr_chars_per_input_tab));
         if (!pr_clump)
-        {
-                string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
-                exit(text_done(1));
-        }
+                text_die("memory exhausted");
 }
 
 // The date and name for a header: the file's own modification time, or
@@ -15171,10 +15154,7 @@ static fn pr_init_header(string_address filename, pr_stream address_to stream)
                         memory_give(pr_date_text);
                         pr_date_text = (p8 address_to)memory_take(room);
                         if (!pr_date_text)
-                        {
-                                string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
-                                exit(text_done(1));
-                        }
+                                text_die("memory exhausted");
                         pr_date_length = clock_format_extended(pr_date_text, room, pr_date_format,
                                                                address_of broken, when.nanoseconds);
                         if (pr_date_length || !pr_date_format[0] || room > (1 << 20))
@@ -15249,10 +15229,7 @@ static bool pr_init_fps(positive number_of_files, string_address address_to name
         memory_give(pr_column_vector);
         pr_column_vector = (pr_column address_to)memory_take((positive)pr_columns * sizeof(pr_column));
         if (!pr_column_vector)
-        {
-                string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
-                exit(text_done(1));
-        }
+                text_die("memory exhausted");
         memory_fill(pr_column_vector, 0, (positive)pr_columns * sizeof(pr_column));
 
         if (pr_parallel)
@@ -15640,10 +15617,7 @@ static bool pr_option_seen(p8 letter, string_address value)
                 pr_column_digits_given = true;
                 if (!byte_store_reserve(address_of pr_column_digits,
                                         pr_column_digits.used + digits + 1, 64))
-                {
-                        string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
-                        exit(text_done(1));
-                }
+                        text_die("memory exhausted");
                 memory_copy_apart(pr_column_digits.bytes + pr_column_digits.used, value, digits);
                 pr_column_digits.used += digits;
                 pr_column_digits.bytes[pr_column_digits.used] = 0;
@@ -20743,10 +20717,7 @@ static fn text_list_piece(positive first, positive last, bool open,
         if (!array_store_reserve(text_list_ranges, text_list_ranges_room,
                                  text_list_ranges_count,
                                  text_list_ranges_count + 1, 16))
-        {
-                string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
-                exit(text_done(1));
-        }
+                text_die("memory exhausted");
         text_list_ranges[text_list_ranges_count++] =
             (text_range){first, open ? TEXT_UNSET : last};
 }
@@ -20868,10 +20839,7 @@ static bool text_list_parse(string_address spec)
                                         "missing list of byte/character positions");
 
         if (!text_list_settle())
-        {
-                string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
-                exit(text_done(1));
-        }
+                text_die("memory exhausted");
 
         return true;
 }
@@ -21699,11 +21667,7 @@ static fn cut_stream_fields(p8 delimiter, bool complement, bool only_delimited,
                         {
                                 if (!byte_store_reserve(address_of cut_first_field,
                                                         cut_first_field.used + span, 1 << 16))
-                                {
-                                        string_diagnostic(&text_diagnostic, 0, null,
-                                                          "memory exhausted");
-                                        exit(text_done(1));
-                                }
+                                        text_die("memory exhausted");
                                 memory_copy_apart(cut_first_field.bytes + cut_first_field.used,
                                                   at + i, span);
                                 cut_first_field.used += span;
