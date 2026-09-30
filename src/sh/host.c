@@ -1560,20 +1560,9 @@ static bool host_partition_resolve(p8 address_to guid,
                                    p8 address_to into)
 {
         p8 uuid[37];
-        p8 query[sizeof("PARTUUID=") - 1 + 37];
-        p8 path[HOST_PATH_ROOM];
 
         host_partuuid(uuid, guid);
-        memory_copy(query, "PARTUUID=", sizeof("PARTUUID=") - 1);
-        string_copy(query + sizeof("PARTUUID=") - 1, uuid);
-
-        if (!storage_resolve_tag(query, path, sizeof(path)) ||
-            !host_starts(path, "/dev/") ||
-            !host_name_valid(path + sizeof("/dev/") - 1))
-                return false;
-
-        string_copy(into, path + sizeof("/dev/") - 1);
-        return true;
+        return host_partition_uuid_resolve(uuid, into);
 }
 
 static bool host_partitions_wait(host_install address_to install,
