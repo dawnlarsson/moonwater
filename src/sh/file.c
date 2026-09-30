@@ -49903,13 +49903,10 @@ static b32 file_date()
 
         if (set_date)
         {
-                p64 tv[2];
+                p64 at[2] = {when, nanoseconds};
 
-                tv[0] = when;
-                tv[1] = nanoseconds / 1000;
-
-                bipolar set = (bipolar)system_call_2(syscall(settimeofday),
-                                                     (positive)tv, 0);
+                bipolar set = (bipolar)system_call_2(syscall(clock_settime), 0,
+                                                     (positive)at);
 
                 if (set < 0)
                 {
