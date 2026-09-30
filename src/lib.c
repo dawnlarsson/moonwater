@@ -62029,7 +62029,7 @@ __asm__(
     "vmovdqu (%rdi,%rax), %ymm0\n   vpmovmskb %ymm0, %ecx\n"
     "test %ecx, %ecx\n   jnz .Lutf8_span_x64_enter\n"
     "add $32, %rax\n   add $32, %r9\n   sub $32, %rdx\n"
-    "lea 32(%rax), %rcx\n   cmp %rsi, %rcx\n   ja .Lutf8_span_x64_out\n"
+    "lea 32(%rax), %rcx\n   cmp %rsi, %rcx\n   ja .Lutf8_span_x64_tail\n"
     "cmp $32, %rdx\n   jae .Lutf8_span_x64_ascii\n"
     "jmp .Lutf8_span_x64_out\n"
     ".Lutf8_span_x64_enter:\n"
@@ -62061,7 +62061,7 @@ __asm__(
     "popcnt %r11d, %r11d\n   add %r11, %r9\n   sub %r11, %rdx\n"
     "mov %ecx, %r11d\n   and $0xe0000000, %r11d\n   add $32, %rax\n"
     ".Lutf8_span_x64_next:\n"
-    "lea 32(%rax), %rcx\n   cmp %rsi, %rcx\n   ja .Lutf8_span_x64_out\n"
+    "lea 32(%rax), %rcx\n   cmp %rsi, %rcx\n   ja .Lutf8_span_x64_tail\n"
     "cmp $32, %rdx\n   jae .Lutf8_span_x64_block\n"
     //  Back to the start of a character the vector may have stopped inside,
     //  its lead uncounted, then the walk.
@@ -62081,6 +62081,33 @@ __asm__(
     "add %rax, %rdi\n   sub %rax, %rsi\n   mov %rax, %r8\n"
     "movabs $0x8080808080808080, %r10\n"
     "jmp .Lmemory_utf8_span_x64_walk\n"
+    //  Fewer than 32 bytes left and the count reaches past them: one block
+    //  ending at size proves them all, as memory_utf8_valid_span's tail does,
+    //  when there are three bytes before it to load; the bytes it repeats
+    //  are shifted out of the count. A sequence size cuts off is left to the
+    //  walk, which is what out does with anything the block refuses.
+    ".Lutf8_span_x64_tail:\n"
+    "mov %rsi, %rcx\n   sub %rax, %rcx\n   jz .Lutf8_span_x64_out\n"
+    "cmp %rcx, %rdx\n   jb .Lutf8_span_x64_out\n"
+    "cmp $35, %rsi\n   jb .Lutf8_span_x64_out\n"
+    "movzbl -1(%rdi,%rsi), %r11d\n   cmp $0xc0, %r11d\n   jae .Lutf8_span_x64_out\n"
+    "movzbl -2(%rdi,%rsi), %r11d\n   cmp $0xe0, %r11d\n   jae .Lutf8_span_x64_out\n"
+    "movzbl -3(%rdi,%rsi), %r11d\n   cmp $0xf0, %r11d\n   jae .Lutf8_span_x64_out\n"
+    "vbroadcasti128 .Lutf8_valid_x64_tables(%rip), %ymm8\n"
+    "vbroadcasti128 .Lutf8_valid_x64_tables+16(%rip), %ymm9\n"
+    "vbroadcasti128 .Lutf8_valid_x64_tables+32(%rip), %ymm10\n"
+    "vpbroadcastb .Lutf8_valid_x64_tables+48(%rip), %ymm11\n"
+    "vpbroadcastb .Lutf8_valid_x64_tables+49(%rip), %ymm12\n"
+    "vpbroadcastb .Lutf8_valid_x64_tables+50(%rip), %ymm13\n"
+    "vpbroadcastb .Lutf8_valid_x64_tables+51(%rip), %ymm14\n"
+    "vpbroadcastb .Lutf8_valid_x64_tables+52(%rip), %ymm15\n"
+    "vmovdqu -32(%rdi,%rsi), %ymm0\n   vmovdqu -33(%rdi,%rsi), %ymm1\n"
+    "vmovdqu -34(%rdi,%rsi), %ymm2\n   vmovdqu -35(%rdi,%rsi), %ymm3\n"
+    UTF8_VALID_X64_CHECK(".Lutf8_span_x64_out")
+    "vpcmpgtb %ymm12, %ymm0, %ymm5\n   vpmovmskb %ymm5, %r11d\n"
+    "neg %ecx\n   add $32, %ecx\n   shr %cl, %r11d\n   popcnt %r11d, %r11d\n"
+    "add %r11, %r9\n   sub %r11, %rdx\n   mov %rsi, %rax\n"
+    "jmp .Lutf8_span_x64_out\n"
     ASM_LOCAL_END(memory_utf8_span_wide)
 #endif
 );
@@ -62243,7 +62270,7 @@ __asm__(
     "movi v24.16b, #0x70\n   movi v23.16b, #0x80\n   movi v22.16b, #0\n"
     ".p2align 4\n"
     ".Lutf8_span_arm64_block:\n"
-    "add x7, x6, #16\n   cmp x7, x1\n   b.hi .Lutf8_span_arm64_out\n"
+    "add x7, x6, #16\n   cmp x7, x1\n   b.hi .Lutf8_span_arm64_tail\n"
     "cmp x2, #16\n   b.lo .Lutf8_span_arm64_out\n"
     "ldr q0, [x0, x6]\n   umaxv b4, v0.16b\n   fmov w9, s4\n"
     "and w9, w9, #0x80\n   orr w9, w9, w11\n   cbnz w9, .Lutf8_span_arm64_check\n"
@@ -62280,6 +62307,26 @@ __asm__(
     "add x0, x0, x6\n   sub x1, x1, x6\n   mov x3, x6\n"
     "mov x5, #0x8080808080808080\n"
     "b .Lmemory_utf8_span_arm64_walk\n"
+    //  Fewer than 16 bytes left and the count reaches past them: one block
+    //  ending at size proves them, as memory_utf8_valid_span's tail does, and
+    //  the bytes it repeats are shifted out of the count. What the block
+    //  refuses, or a sequence size cuts off, is left to out and the walk.
+    ".Lutf8_span_arm64_tail:\n"
+    "sub x13, x1, x6\n   cbz x13, .Lutf8_span_arm64_out\n"
+    "cmp x2, x13\n   b.lo .Lutf8_span_arm64_out\n"
+    "cmp x1, #19\n   b.lo .Lutf8_span_arm64_out\n"
+    "add x10, x0, x1\n"
+    "ldurb w9, [x10, #-1]\n   cmp w9, #0xc0\n   b.hs .Lutf8_span_arm64_out\n"
+    "ldurb w9, [x10, #-2]\n   cmp w9, #0xe0\n   b.hs .Lutf8_span_arm64_out\n"
+    "ldurb w9, [x10, #-3]\n   cmp w9, #0xf0\n   b.hs .Lutf8_span_arm64_out\n"
+    "ldur q0, [x10, #-16]\n   ldur q1, [x10, #-17]\n"
+    "ldur q2, [x10, #-18]\n   ldur q3, [x10, #-19]\n"
+    UTF8_VALID_ARM64_CHECK(".Lutf8_span_arm64_out")
+    "cmgt v5.16b, v0.16b, v26.16b\n   shrn v5.8b, v5.8h, #4\n   fmov x12, d5\n"
+    "mov x9, #16\n   sub x9, x9, x13\n   lsl x9, x9, #2\n   lsr x12, x12, x9\n"
+    "fmov d5, x12\n   cnt v5.8b, v5.8b\n   addv b5, v5.8b\n   fmov w12, s5\n"
+    "lsr w12, w12, #2\n"
+    "add x4, x4, x12\n   sub x2, x2, x12\n   mov x6, x1\n   b .Lutf8_span_arm64_out\n"
     ".p2align 4\n"
     ".Lutf8_span_arm64_tables:\n"
     UTF8_VALID_TABLES
