@@ -617,7 +617,8 @@ static inline INLINE bool size_scale_power_checked(
         through it, which is the one failure a system under memory pressure
         is certain to reach. Four places in the tree wrote the pair out and
         seven wrote only half of it, so the pair is spelled once here: the
-        mapping, or null.
+        mapping, or null. The pages come
+        zeroed, and callers rely on it.
 
         Behind the same guard memory() itself is declared behind: a kernel
         object has no mmap of its own and never sees either name.

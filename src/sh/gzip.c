@@ -435,34 +435,10 @@ static gzip_inflater address_to gzip_inflater_new(void)
         if (!z)
                 return null;
         tail = (p8 address_to)(z + 1);
-        z->bits = 0;
-        z->count = 0;
         byte_input_open_fd(address_of z->input, -1, tail, GZIP_DECODE_IN);
         z->out = tail + GZIP_DECODE_IN + GZIP_WINDOW;
-        z->fill = 0;
-        z->taken = 0;
-        z->crc_at = 0;
-        z->flushed = 0;
-        z->member_start = 0;
         z->crc = 0xffffffffu;
-        z->members = 0;
-        z->stored_left = 0;
-        z->block_kind = 0;
-        z->have_block = false;
-        z->block_last = false;
-        z->stored_open = false;
-        z->head_done = false;
-        z->finished = false;
-        z->fixed_loaded = false;
-        z->carry = 0;
-        z->alt = null;
-        z->alt_base = null;
         z->size = GZIP_INFLATER_SIZE;
-        z->garbage = false;
-        z->look_lit = 0;
-        z->look_dist = 0;
-        z->why = null;
-        z->why2 = null;
         return z;
 }
 
@@ -3581,13 +3557,10 @@ static gzip_encoder address_to gzip_encoder_open(p8 level)
 
         if (!e)
                 return null;
-        e->out_room = 0;
-        e->out = null;
         e->level = level;
         e->mpos = e->own_pos;
         e->mlen = e->own_len;
         e->mdist = e->own_dist;
-        e->ultra = null;
         if (level == GZIP_ULTRA)
         {
                 e->ultra = (struct gzip_ultra address_to)memory_checked(sizeof(struct gzip_ultra));
@@ -3601,7 +3574,6 @@ static gzip_encoder address_to gzip_encoder_open(p8 level)
                 e->mdist = e->ultra->mdist;
         }
         e->last = positive_max - 1;
-        e->total = 0;
         return e;
 }
 
