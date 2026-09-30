@@ -40879,8 +40879,12 @@ static b32 file_tty()
                 return 2;
 
         if (file_operand_count)
-                return string_report(log_error, 2, "tty: extra operand '%w'\n",
+        {
+                string_format(log_error, "tty: extra operand '%w'\n",
                               writer_terminal_quoted_name, file_operand_at(0));
+                file_try_help((string_address) "tty");
+                return 2;
+        }
 
         if (taking.flags & FILE_FLAG('s'))
                 return stream_is_terminal(0) ? 0 : 1;
@@ -44775,8 +44779,12 @@ static b32 file_whoami()
                 return 1;
 
         if (file_operand_count)
-                return string_report(log_error, 1, "whoami: extra operand '%w'\n",
+        {
+                string_format(log_error, "whoami: extra operand '%w'\n",
                               writer_terminal_quoted_name, file_operand_at(0));
+                file_try_help((string_address) "whoami");
+                return 1;
+        }
 
         positive user = (positive)system_call(syscall(geteuid));
         p8 name[FILE_NAME_MAX];
@@ -44943,8 +44951,12 @@ static b32 file_logname()
                 return 1;
 
         if (file_operand_count)
-                return string_report(log_error, 1, "logname: extra operand '%w'\n",
+        {
+                string_format(log_error, "logname: extra operand '%w'\n",
                               writer_terminal_quoted_name, file_operand_at(0));
+                file_try_help((string_address) "logname");
+                return 1;
+        }
 
         p8 loginuid[32];
         positive user = positive_max;
@@ -45134,10 +45146,10 @@ static b32 file_hostname()
 /*
         uname [-asnrvmpio]
 
-        -a is every field the kernel keeps and then the operating system name
-        GNU compiles in, GNU/Linux, which is what -o answers as well: a script
-        that asks for -o asks what GNU answers, and this userland is the one
-        that name describes.
+        -a is every field the kernel actually keeps. The system's own uname
+        adds a compiled in operating system name after them, which is not in
+        struct utsname and is not ours to claim, so -o names this system and
+        -a stops at the machine.
 
         By the same rule -p answers unknown, as GNU's does on Linux: the
         processor type is not a field the kernel keeps either, and the machine
@@ -45169,8 +45181,10 @@ static b32 file_uname()
 
         if (taking.first < (positive)program_argument_count())
         {
-                return string_report(log_error, 1, "uname: extra operand '%w'\n",
+                string_format(log_error, "uname: extra operand '%w'\n",
                               writer_terminal_quoted_name, program_argument((b32)taking.first));
+                file_try_help((string_address) "uname");
+                return 1;
         }
 
         positive flags = taking.flags;
@@ -45203,7 +45217,7 @@ static b32 file_uname()
             {'m', facts.machine, true, true},
             {'p', (string_address) "unknown", false, false},
             {'i', (string_address) "unknown", false, false},
-            {'o', (string_address) "GNU/Linux", true, true},
+            {'o', (string_address) "Moonwater", false, true},
         };
 
         bool all = (flags & FILE_FLAG('a')) != 0;
@@ -45608,8 +45622,12 @@ static b32 file_nproc()
                 return 1;
 
         if (file_operand_count)
-                return string_report(log_error, 1, "nproc: extra operand '%w'\n",
+        {
+                string_format(log_error, "nproc: extra operand '%w'\n",
                               writer_terminal_quoted_name, file_operand_at(0));
+                file_try_help((string_address) "nproc");
+                return 1;
+        }
 
         positive count = nproc_count((taking.flags & FILE_FLAG('a')) != 0,
                                       nproc_ignore);

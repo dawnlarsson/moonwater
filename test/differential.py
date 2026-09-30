@@ -6269,6 +6269,17 @@ def files_sorted_lines(channel, data):
 
 
 files_when = files_normal(files_hide_now)
+def files_uname_normal(channel, data):
+    """The operating system name is the one field that is not the kernel's:
+    the reference ends -a on GNU/Linux and answers it for -o, where this
+    system answers Moonwater for -o and stops -a at the machine, because
+    Moonwater is not GNU and never claims to be. It is not compared here;
+    files_uname_identity says what it must be."""
+    if channel != "stdout":
+        return data
+    return re.sub(rb"(?m)[ ]?(GNU/Linux|Moonwater)$", b"", data)
+
+
 files_listing = files_normal(files_hide_now, files_hide_inodes)
 files_stdout_sorted = files_normal(files_sorted_records)
 
@@ -7540,7 +7551,8 @@ FILES_UTILITIES = (
                               Option("--nodename"), Option("--kernel-release"), Option("--kernel-version"),
                               Option("--machine"), Option("--processor"), Option("--hardware-platform"),
                               Option("--operating-system")),
-            operands=((), ("extra",)), stdin=("empty",), fixture="files", stderr="exact"),
+            operands=((), ("extra",)), stdin=("empty",), fixture="files", stderr="exact",
+            normalize=files_uname_normal),
     Utility("nice", options=(Option("-n", ("1", "10", "19", "20", "-1", "nope", "9223372036854775807",
                                           "9223372036854775808", "18446744073709551616", "", "+5"), None),
                              Option("--adjustment", ("1", "-1", "x"), True), Option("--adj", ("1",), True)),
@@ -10310,7 +10322,34 @@ def files_large_inputs(farm):
     return passed, total, notes
 
 
-FILES_CHECKS = (files_large_inputs, files_column_layout, files_xargs_parallel, files_zones, files_tar,
+def files_uname_identity(farm):
+    """uname -o is Moonwater and nothing uname answers claims GNU."""
+    import subprocess
+
+    candidate = Path(farm) / "uname"
+    if not candidate.exists():
+        return 0, 1, ["uname identity needs the candidate uname"]
+    passed = total = 0
+    notes = []
+    for arguments, want in ((["-o"], b"Moonwater\n"), (["--operating-system"], b"Moonwater\n"),
+                            (["-s"], b"Linux\n")):
+        total += 1
+        done = subprocess.run([str(candidate), *arguments], capture_output=True, timeout=8)
+        if done.stdout == want and done.returncode == 0:
+            passed += 1
+        else:
+            notes.append(f"uname {' '.join(arguments)}: {done.stdout!r}, want {want!r}")
+    for arguments in (["-a"], ["--all"], ["-o"], ["--version"], ["--help"], ["-asnrvmpio"]):
+        total += 1
+        done = subprocess.run([str(candidate), *arguments], capture_output=True, timeout=8)
+        if b"GNU" not in done.stdout + done.stderr:
+            passed += 1
+        else:
+            notes.append(f"uname {' '.join(arguments)} claims GNU: {(done.stdout + done.stderr)[:120]!r}")
+    return passed, total, notes
+
+
+FILES_CHECKS = (files_uname_identity, files_large_inputs, files_column_layout, files_xargs_parallel, files_zones, files_tar,
                 files_tar_formats,
                 files_find_terminal, files_zone_names, files_hostname_set, files_move_across,
                 files_address_cap)
@@ -59982,7 +60021,6 @@ REASONS = {
  "r128": "-e elides empty pieces, and a byte count ending in a bare B is taken rather than refused.",
  "r13": "sub() on a value that cannot be assigned to: POSIX leaves it undefined, ours refuses it (exit 2), gawk computes and discards the result",
  "r133": "a division by zero is refused as a bad number rather than named.",
- "r135": "deliberate: the operating system name is not in struct utsname and is not ours to claim on another system's behalf. This one answers Moonwater, and -a stops at the machine for the same reason.",
  "r136": "-B, -M and -S take a list of directories terminated by -f, which this one reads as a single directory.",
  "r137": "--show-limits reports the environment own bookkeeping rather than an answer, -s beyond the batch is held at the batch, and a child ended by a signal is named without its number in one shape.",
  "r138": "--show-limits reports the environment's own bookkeeping rather than an answer, and --open-tty asks a question of a terminal this suite has none of.",
