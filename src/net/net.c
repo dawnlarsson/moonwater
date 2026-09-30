@@ -1096,7 +1096,7 @@ static bipolar netlink_address_change(b32 handle, p16 type, p16 flags,
 */
 static bipolar netlink_route_change(b32 handle, p16 type, p16 flags,
                                     p32 destination, p8 bits, p32 gateway,
-                                    p32 index)
+                                    p32 index, bool onlink)
 {
         netlink_buffer request = {0};
         netlink_route address_to body;
@@ -1115,6 +1115,9 @@ static bipolar netlink_route_change(b32 handle, p16 type, p16 flags,
         body->protocol = RTPROT_BOOT;
         body->scope = gateway ? RT_SCOPE_UNIVERSE : RT_SCOPE_LINK;
         body->kind = RTN_UNICAST;
+        //      RTNH_F_ONLINK: the gateway is on this link whatever the
+        //      address's prefix says (a /32 lease from a router outside it).
+        body->flags = onlink && gateway ? 4 : 0;
 
         if (bits)
                 netlink_attribute_add(address_of request, RTA_DST,
@@ -1138,17 +1141,29 @@ static bipolar netlink_route_change(b32 handle, p16 type, p16 flags,
 //      EEXIST.
 #define netlink_route_add(handle, destination, bits, gateway, index) netlink_route_change( \
         handle, RTM_NEWROUTE, NLM_REQUEST | NLM_ACK | NLM_CREATE | NLM_REPLACE,            \
-        destination, bits, gateway, index)
+        destination, bits, gateway, index, false)
+
+/* The same, for a gateway the lease's own prefix does not cover: a /32
+   address with a router outside it is what some clouds hand out, and
+   without RTNH_F_ONLINK the kernel says ENETUNREACH ("Nexthop has invalid
+   gateway") and the lease can never be used. */
+#define netlink_route_add_lease(handle, gateway, index, onlink) netlink_route_change( \
+        handle, RTM_NEWROUTE, NLM_REQUEST | NLM_ACK | NLM_CREATE | NLM_REPLACE,       \
+        0, 0, gateway, index, onlink)
 
 /* An existing route is state, not spare capacity.  Initial DHCP acquisition
    uses EXCLUSIVE so a pre-existing default route is reported as a conflict
    and remains byte-for-byte kernel state owned by whoever installed it. */
 #define netlink_route_acquire(handle, destination, bits, gateway, index) netlink_route_change( \
         handle, RTM_NEWROUTE, NLM_REQUEST | NLM_ACK | NLM_CREATE | NLM_EXCLUSIVE,              \
-        destination, bits, gateway, index)
+        destination, bits, gateway, index, false)
+
+#define netlink_route_acquire_lease(handle, gateway, index, onlink) netlink_route_change( \
+        handle, RTM_NEWROUTE, NLM_REQUEST | NLM_ACK | NLM_CREATE | NLM_EXCLUSIVE,         \
+        0, 0, gateway, index, onlink)
 
 #define netlink_route_delete(handle, destination, bits, gateway, index) netlink_route_change( \
-        handle, RTM_DELROUTE, NLM_REQUEST | NLM_ACK, destination, bits, gateway, index)
+        handle, RTM_DELROUTE, NLM_REQUEST | NLM_ACK, destination, bits, gateway, index, false)
 
 /*
         Everything of one kind, walked.
