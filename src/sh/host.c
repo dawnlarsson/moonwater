@@ -12271,6 +12271,11 @@ static fn host_title(writer out)
         string_format(out, TERM_BOLD "Moonwater" TERM_RESET "\n\n");
 }
 
+/*      One line of the list: the command in bold, then padding that brings
+        the description to its column, then the description dimmed. */
+#define HOST_ROW(command, padding, description) \
+        TERM_BOLD "  " command TERM_RESET padding TERM_DIM description TERM_RESET "\n"
+
 /*
         One list as it is typed, then what it does. Status, help and a
         wrong argument share it, so the picture and the usage read as the
@@ -12279,78 +12284,44 @@ static fn host_title(writer out)
 static fn host_usage_write(writer out)
 {
         host_say(out,
-                 TERM_BOLD "  status" TERM_RESET
-                 "                      " TERM_DIM "this picture" TERM_RESET "\n"
-                 TERM_BOLD "  install DISK [--removable]" TERM_RESET
-                 "  " TERM_DIM "put Moonwater on a disk" TERM_RESET "\n"
-                 TERM_BOLD "  use [DISK]" TERM_RESET
-                 "                  " TERM_DIM "keep that disk this session" TERM_RESET "\n"
-                 TERM_BOLD "  update [DISK]" TERM_RESET
-                 "               " TERM_DIM "write this build onto a disk" TERM_RESET "\n"
-                 TERM_BOLD "  live" TERM_RESET
-                 "                        " TERM_DIM "leave the disks alone" TERM_RESET "\n"
-                 TERM_BOLD "  bind" TERM_RESET
-                 "                        " TERM_DIM "what the machine's events run" TERM_RESET "\n"
-                 TERM_BOLD "  bind EVENT [COMMAND]" TERM_RESET
-                 "        " TERM_DIM "one event; empty puts the default back" TERM_RESET "\n"
-                 TERM_BOLD "  bind init [add|remove ...]" TERM_RESET
-                 "  " TERM_DIM "what runs at boot" TERM_RESET "\n"
-                 TERM_BOLD "  bind init mount [on|off]" TERM_RESET
-                 "    " TERM_DIM "mount kept disks at boot" TERM_RESET "\n"
-                 TERM_BOLD "  bind exit [add|remove ...]" TERM_RESET
-                 "  " TERM_DIM "what runs when the machine stops" TERM_RESET "\n"
-                 TERM_BOLD "  canvas [on|off]" TERM_RESET
-                 "             " TERM_DIM "the desktop" TERM_RESET "\n"
-                 TERM_BOLD "  canvas log|terminal" TERM_RESET
-                 "         " TERM_DIM "open the kernel log or a terminal" TERM_RESET "\n"
-                 TERM_BOLD "  airplane [on|off]" TERM_RESET
-                 "          " TERM_DIM "every radio at once" TERM_RESET "\n"
-                 TERM_BOLD "  brightness [N%|+N|-N]" TERM_RESET
-                 "      " TERM_DIM "the screen backlight" TERM_RESET "\n"
-                 TERM_BOLD "  power [performance|balanced|powersave]" TERM_RESET
-                 " " TERM_DIM "profile and CPU governor" TERM_RESET "\n"
-                 TERM_BOLD "  cpu [boost|smt on|off] [online|offline N]" TERM_RESET
-                 " " TERM_DIM "turbo, SMT and hotplug" TERM_RESET "\n"
-                 TERM_BOLD "  charge [limit N|off]" TERM_RESET
-                 "       " TERM_DIM "where the battery stops charging" TERM_RESET "\n"
+                 HOST_ROW("status", "                      ", "this picture")
+                 HOST_ROW("install DISK [--removable]", "  ", "put Moonwater on a disk")
+                 HOST_ROW("use [DISK]", "                  ", "keep that disk this session")
+                 HOST_ROW("update [DISK]", "               ", "write this build onto a disk")
+                 HOST_ROW("live", "                        ", "leave the disks alone")
+                 HOST_ROW("bind", "                        ", "what the machine's events run")
+                 HOST_ROW("bind EVENT [COMMAND]", "        ", "one event; empty puts the default back")
+                 HOST_ROW("bind init [add|remove ...]", "  ", "what runs at boot")
+                 HOST_ROW("bind init mount [on|off]", "    ", "mount kept disks at boot")
+                 HOST_ROW("bind exit [add|remove ...]", "  ", "what runs when the machine stops")
+                 HOST_ROW("canvas [on|off]", "             ", "the desktop")
+                 HOST_ROW("canvas log|terminal", "         ", "open the kernel log or a terminal")
+                 HOST_ROW("airplane [on|off]", "          ", "every radio at once")
+                 HOST_ROW("brightness [N%|+N|-N]", "      ", "the screen backlight")
+                 HOST_ROW("power [performance|balanced|powersave]", " ", "profile and CPU governor")
+                 HOST_ROW("cpu [boost|smt on|off] [online|offline N]", " ", "turbo, SMT and hotplug")
+                 HOST_ROW("charge [limit N|off]", "       ", "where the battery stops charging")
                  TERM_BOLD "  sleep" TERM_RESET " | " TERM_BOLD "hibernate" TERM_RESET
                  "           " TERM_DIM "suspend to RAM or to disk" TERM_RESET "\n"
-                 TERM_BOLD "  bios [reboot]" TERM_RESET
-                 "               " TERM_DIM "restart into the firmware's setup screen" TERM_RESET "\n"
-                 TERM_BOLD "  wired [on|off]" TERM_RESET
-                 "              " TERM_DIM "the wired links: no lease is asked on one when off" TERM_RESET "\n"
-                 TERM_BOLD "  wifi [on|off]" TERM_RESET
-                 "               " TERM_DIM "the wireless radio" TERM_RESET "\n"
-                 TERM_BOLD "  wifi add SSID [PASSWORD|-]" TERM_RESET
-                 "  " TERM_DIM "remember a network and join it; asks for" TERM_RESET "\n"
+                 HOST_ROW("bios [reboot]", "               ", "restart into the firmware's setup screen")
+                 HOST_ROW("wired [on|off]", "              ", "the wired links: no lease is asked on one when off")
+                 HOST_ROW("wifi [on|off]", "               ", "the wireless radio")
+                 HOST_ROW("wifi add SSID [PASSWORD|-]", "  ", "remember a network and join it; asks for")
                  "                              " TERM_DIM "the password, - reads it from stdin" TERM_RESET "\n"
-                 TERM_BOLD "  wifi remove SSID" TERM_RESET
-                 "            " TERM_DIM "forget a saved network, and leave it" TERM_RESET "\n"
-                 TERM_BOLD "  bluetooth [on|off]" TERM_RESET
-                 "          " TERM_DIM "the bluetooth radio" TERM_RESET "\n"
-                 TERM_BOLD "  bluetooth add NAME" TERM_RESET
-                 "          " TERM_DIM "remember a bluetooth device" TERM_RESET "\n"
-                 TERM_BOLD "  bluetooth remove NAME" TERM_RESET
-                 "       " TERM_DIM "forget a bluetooth device" TERM_RESET "\n"
-                 TERM_BOLD "  priority internet [wired|wifi]" TERM_RESET
-                 " " TERM_DIM "which link when both are up [wired]" TERM_RESET "\n"
-                 TERM_BOLD "  time [sync]" TERM_RESET
-                 "                 " TERM_DIM "the clock; sync sets it and the zone now" TERM_RESET "\n"
-                 TERM_BOLD "  timezone [ZONE|se|+1|list]" TERM_RESET
-                 " " TERM_DIM "the clock's zone; setting one makes it manual" TERM_RESET "\n"
-                 TERM_BOLD "  timezone auto" TERM_RESET
-                 "               " TERM_DIM "from the network [auto]: one Cloudflare" TERM_RESET "\n"
+                 HOST_ROW("wifi remove SSID", "            ", "forget a saved network, and leave it")
+                 HOST_ROW("bluetooth [on|off]", "          ", "the bluetooth radio")
+                 HOST_ROW("bluetooth add NAME", "          ", "remember a bluetooth device")
+                 HOST_ROW("bluetooth remove NAME", "       ", "forget a bluetooth device")
+                 HOST_ROW("priority internet [wired|wifi]", " ", "which link when both are up [wired]")
+                 HOST_ROW("time [sync]", "                 ", "the clock; sync sets it and the zone now")
+                 HOST_ROW("timezone [ZONE|se|+1|list]", " ", "the clock's zone; setting one makes it manual")
+                 HOST_ROW("timezone auto", "               ", "from the network [auto]: one Cloudflare")
                  "                              " TERM_DIM "request per network joined" TERM_RESET "\n"
-                 TERM_BOLD "  ntp [on|off]" TERM_RESET
-                 "                " TERM_DIM "set the clock from the network [on]" TERM_RESET "\n"
-                 TERM_BOLD "  ntp sampling [on|off]" TERM_RESET
-                 "       " TERM_DIM "keep the lowest-delay sample of five [on]" TERM_RESET "\n"
-                 TERM_BOLD "  link [on|off|help]" TERM_RESET
-                 "         " TERM_DIM "shell and run on paired machines, by key" TERM_RESET "\n"
-                 TERM_BOLD "  keyboard [LAYOUT|list]" TERM_RESET
-                 "      " TERM_DIM "Canvas keys: us uk de se no dk fi fr es it" TERM_RESET "\n"
-                 TERM_BOLD "  wipe" TERM_RESET
-                 "                        " TERM_DIM "forget /home and /root, keep the machine" TERM_RESET "\n"
+                 HOST_ROW("ntp [on|off]", "                ", "set the clock from the network [on]")
+                 HOST_ROW("ntp sampling [on|off]", "       ", "keep the lowest-delay sample of five [on]")
+                 HOST_ROW("link [on|off|help]", "         ", "shell and run on paired machines, by key")
+                 HOST_ROW("keyboard [LAYOUT|list]", "      ", "Canvas keys: us uk de se no dk fi fr es it")
+                 HOST_ROW("wipe", "                        ", "forget /home and /root, keep the machine")
                  "\n"
                  TERM_DIM                       "  Settings stay in the image this session started from.\n"
                  "  install takes this session's; update keeps the disk's.\n"
