@@ -266,6 +266,10 @@ struct canvas
         // queue, which is a lockup: the first picture stays, the pointer
         // thread never runs, and the kernel log is what is left.
         struct work_struct plug;
+
+        // A hotplug that arrived while the machine slept: the card's power was
+        // going or half back, so it waits for the wake to run.
+        _Bool replug;
 };
 
 static struct desktop
@@ -535,6 +539,7 @@ static void desktop_watch(void);
 static u64 canvas_frame_ns(void);
 static void cursor_move(int x, int y);
 static _Bool desktop_taken(void);
+static _Bool desktop_lit(void);
 
 // Nanoseconds from an event arriving to the cursor being on screen.
 static u64 pointer_latency_total;
@@ -634,6 +639,19 @@ void canvas_glyph_wide(u32 *at, unsigned long pitch, const u8 *bits,
 */
 static bool canvas_simd = true;
 module_param_named(simd, canvas_simd, bool, 0644);
+
+/*
+        moonwater.pm_dark, for the guest lane, makes a card wake the way one
+        that lost its pipe does. Value 1: the card is treated as a real one (it
+        gets the hotplug rebind and the off and on cycle a guest's display is
+        spared), its screens are turned off once everything is quiet so the
+        driver's own suspend saves an off pipe and its resume restores that,
+        and a hotplug is sent while the machine sleeps, as amdgpu's resume
+        does. Value 2: the wake's own redraws are left undone, so only what the
+        hotplug finds can bring the picture back. Value 4: no off and on cycle.
+*/
+static int canvas_pm_dark;
+module_param_named(pm_dark, canvas_pm_dark, int, 0644);
 
 struct canvas_simd_hold
 {
@@ -7633,7 +7651,7 @@ static int canvas_rebind(struct canvas *canvas)
         struct output *output;
         _Bool placed = false;
 
-        if (canvas_is_virtual(client->dev))
+        if (canvas_is_virtual(client->dev) && !(canvas_pm_dark & 1))
                 return 0;
 
         if (canvas_probe_modes(canvas,
@@ -7670,6 +7688,20 @@ static int canvas_rebind(struct canvas *canvas)
                 desktop_place_outputs();
                 canvas_modes_keep();
                 desktop_redraw();
+        }
+        else if (!desktop_lit())
+        {
+                /*
+                        Nothing grew, and the driver no longer shows Canvas's
+                        picture: a connector that went and came back (a panel
+                        after a wake) leaves a mode of the same size, which
+                        used to mean no commit and a screen that stayed off.
+                */
+                if (!desktop_taken())
+                {
+                        pr_info("[moonwater canvas] " "hotplug: the screen is not showing the desktop, drawing it again\n");
+                        desktop_redraw();
+                }
         }
 
         return 0;
@@ -8097,6 +8129,106 @@ static void desktop_resume(void)
                 cursor_plane_armed_generation = cursor_plane_requested_generation;
                 cursor_plane_armed_x = desktop.cursor_x;
                 cursor_plane_armed_y = desktop.cursor_y;
+        }
+}
+
+/*
+        Whether the driver's own record has every screen showing what Canvas
+        drew, and what it says, said.
+
+        A wake, or a hotplug that changes no size, leaves nothing else to go on:
+        the commit that answered zero may have been for a pipe the driver had
+        already written off, and a probe that did not grow the mode used to
+        commit nothing at all. Read under the device's modeset locks, the order
+        drm_client_modeset_commit takes them in after desktop.lock.
+*/
+static _Bool output_lit_locked(struct output *output)
+{
+        struct drm_crtc *crtc = output->mode_set ? output->mode_set->crtc : NULL;
+        struct drm_plane *primary = crtc ? crtc->primary : NULL;
+
+        return crtc && primary && crtc->state && primary->state &&
+               crtc->state->active && crtc->state->enable &&
+               primary->state->crtc == crtc && output->buffer &&
+               primary->state->fb == output->buffer->fb;
+}
+
+static _Bool desktop_lit(void)
+{
+        struct output *output;
+        _Bool lit = true;
+
+        list_for_each_entry(output, &desktop.outputs, link)
+        {
+                struct drm_device *dev = output->canvas->client.dev;
+
+                drm_modeset_lock_all(dev);
+                lit &= output_lit_locked(output);
+                drm_modeset_unlock_all(dev);
+        }
+
+        return lit;
+}
+
+static void desktop_report(const char *tag)
+{
+        struct output *output;
+
+        list_for_each_entry(output, &desktop.outputs, link)
+        {
+                struct drm_device *dev = output->canvas->client.dev;
+                struct drm_crtc *crtc = output->mode_set->crtc;
+                struct drm_connector *connector = output->mode_set->num_connectors
+                                                      ? output->mode_set->connectors[0]
+                                                      : NULL;
+                struct iosys_map map;
+                _Bool mapped = output_map(output, &map);
+                int active, enable, lit;
+
+                drm_modeset_lock_all(dev);
+                active = crtc && crtc->state ? crtc->state->active : -1;
+                enable = crtc && crtc->state ? crtc->state->enable : -1;
+                lit = output_lit_locked(output);
+                drm_modeset_unlock_all(dev);
+
+                if (mapped)
+                        drm_client_buffer_vunmap_local(output->buffer);
+
+                pr_info("[moonwater canvas] " "%s: %s: crtc active %d enabled %d, %s, connector status %d dpms %d, buffer %s, last commit %d, cursor %s\n",
+                        tag, connector && connector->name ? connector->name : "?",
+                        active, enable, lit ? "primary shows ours" : "primary does NOT show ours",
+                        connector ? (int)connector->status : -1,
+                        connector ? connector->dpms : -1,
+                        mapped ? (map.is_iomem ? "maps (device memory)" : "maps") : "does NOT map",
+                        output->canvas->set_result,
+                        output->cursor_plane ? (output->cursor_shown ? "plane shown" : "plane off")
+                                             : "drawn");
+        }
+}
+
+/*
+        Every screen off or on through the client's own modesets, one card at a
+        time: an active-false commit, and the on that follows it is an
+        active-changed one, which is the only kind a driver whose idea of the
+        pipe has drifted from the hardware's cannot skip.
+*/
+static void desktop_dpms(int mode)
+{
+        struct canvas *done = NULL;
+        struct output *output;
+
+        desktop_attach_buffers();
+
+        list_for_each_entry(output, &desktop.outputs, link)
+        {
+                int ret;
+
+                if (output->canvas == done)
+                        continue;
+
+                done = output->canvas;
+                ret = drm_client_modeset_dpms(&done->client, mode);
+                pr_info("[moonwater canvas] " "screens %s: %d\n", mode == DRM_MODE_DPMS_ON ? "on" : "off", ret);
         }
 }
 
@@ -8939,6 +9071,22 @@ static void canvas_plug_work(struct work_struct *work)
 
         rt_mutex_lock(&desktop.lock);
 
+        /*
+                Not while the card sleeps.
+
+                A driver reports a connector as it comes back from suspend
+                (amdgpu's resume ends with a hotplug event, and the DRM core
+                hands it to a client only when that client's resume returns),
+                and a rebind commits. The commit belongs after the wake has
+                redrawn, not in the middle of the driver's own resume.
+        */
+        if (canvas->started && READ_ONCE(desktop.asleep))
+        {
+                canvas->replug = true;
+                rt_mutex_unlock(&desktop.lock);
+                return;
+        }
+
         if (!canvas->started)
         {
                 ret = canvas_start(canvas);
@@ -9010,7 +9158,9 @@ static int client_restore(struct drm_client_dev *client, _Bool in_atomic)
                 return -EBUSY;
 
         rt_mutex_lock(&desktop.lock);
-        if (canvas->started)
+        // The wake's own redraw is the restore; a commit now is the one into
+        // a card whose power is going or has not come back.
+        if (canvas->started && !READ_ONCE(desktop.asleep))
         {
                 // The last program that held the card has closed it.
                 if (desktop.suspended)
@@ -10701,7 +10851,7 @@ static struct input_handler pointer_handler = {
 */
 #define CANVAS_PM_FLUSH_WAIT_MS 2000
 
-static void canvas_input_drop(void);
+static void canvas_input_drop(_Bool keys);
 
 /*
         The first redraw after a wake can land before the panel has its link
@@ -10712,14 +10862,47 @@ static void canvas_input_drop(void);
 */
 static int canvas_pm_again_left;
 
+/*
+        Whether the wake should turn the screens off and on again before the
+        redraw. A real card's driver restores the state it saved, and a panel
+        that state says is on but the hardware is not showing is answered by
+        a plane update as if nothing had happened; only an active change makes
+        it program the pipe again. A guest's display has no such drift, and
+        virtio-gpu does not always get its host window back from an off.
+*/
+static _Bool desktop_cycle_wanted(void)
+{
+        struct output *output;
+
+        if (canvas_pm_dark & 4)
+                return false;
+
+        if (canvas_pm_dark & 1)
+                return true;
+
+        list_for_each_entry(output, &desktop.outputs, link)
+                if (!canvas_is_virtual(output->canvas->client.dev))
+                        return true;
+
+        return false;
+}
+
 static void canvas_pm_again_work(struct work_struct *work);
 static DECLARE_DELAYED_WORK(canvas_pm_again, canvas_pm_again_work);
 
 static void canvas_pm_again_work(struct work_struct *work)
 {
+        unsigned int pass = 3 - canvas_pm_again_left;
+
         rt_mutex_lock(&desktop.lock);
-        if (!READ_ONCE(desktop.asleep) && !desktop_taken())
+        if (!READ_ONCE(desktop.asleep) && !desktop_taken() && !(canvas_pm_dark & 2))
+        {
+                if (pass == 1 && desktop_cycle_wanted())
+                        desktop_dpms(DRM_MODE_DPMS_OFF);
+
                 desktop_resume();
+                desktop_report(pass == 1 ? "wake +0.5 s" : "wake +2.5 s");
+        }
         rt_mutex_unlock(&desktop.lock);
 
         if (--canvas_pm_again_left > 0)
@@ -10728,6 +10911,8 @@ static void canvas_pm_again_work(struct work_struct *work)
 
 static void canvas_pm_sleep(_Bool sleeping)
 {
+        struct output *output;
+
         rt_mutex_lock(&desktop.lock);
 
         if (sleeping)
@@ -10743,8 +10928,26 @@ static void canvas_pm_sleep(_Bool sleeping)
 
                 // The other program that took the card while this slept is
                 // still there: the loop draws when it lets go.
-                if (desktop.suspended && !desktop_taken())
+                if (canvas_pm_dark & 2)
+                        pr_info("[moonwater canvas] " "wake: redraw left undone (moonwater.pm_dark)\n");
+                else if (desktop.suspended && !desktop_taken())
+                {
                         desktop_resume();
+                        desktop_watch();
+                        desktop_report("wake");
+                }
+                else
+                        pr_info("[moonwater canvas] " "wake: another program has the card, the redraw waits for it\n");
+
+                // What the driver reported while it came back, run now that
+                // the desktop is drawn.
+                list_for_each_entry(output, &desktop.outputs, link)
+                        if (output->canvas->replug)
+                        {
+                                output->canvas->replug = false;
+                                queue_work(canvas_plug_wq ? canvas_plug_wq : system_unbound_wq,
+                                           &output->canvas->plug);
+                        }
         }
 
         rt_mutex_unlock(&desktop.lock);
@@ -10753,9 +10956,25 @@ static void canvas_pm_sleep(_Bool sleeping)
         {
                 cancel_delayed_work_sync(&canvas_pm_again);
                 hrtimer_cancel(&desktop.frame);
-                canvas_input_drop();
+                canvas_input_drop(true);
                 wait_event_timeout(desktop.flush_idle, !atomic_read(&desktop.flushes_in_flight),
                                    msecs_to_jiffies(CANVAS_PM_FLUSH_WAIT_MS));
+
+                if (canvas_pm_dark & 1)
+                {
+                        struct canvas *done = NULL;
+
+                        rt_mutex_lock(&desktop.lock);
+                        desktop_dpms(DRM_MODE_DPMS_OFF);
+                        list_for_each_entry(output, &desktop.outputs, link)
+                                if (output->canvas != done)
+                                {
+                                        done = output->canvas;
+                                        drm_kms_helper_hotplug_event(done->client.dev);
+                                }
+                        rt_mutex_unlock(&desktop.lock);
+                }
+                pr_info("[moonwater canvas] " "sleep: quiet, flushes waited for\n");
         }
         else
         {
@@ -10899,7 +11118,7 @@ static _Bool canvas_thread_running(void)
 */
 #define CANVAS_SUSPENDED_POLL_MS 250
 
-static void canvas_input_drop(void)
+static void canvas_input_drop(_Bool keys)
 {
         atomic_set(&desktop.button_changed, 0);
         atomic_set(&desktop.client_changed, 0);
@@ -10911,7 +11130,8 @@ static void canvas_input_drop(void)
         atomic_set(&desktop.frame_pending, 0);
 
         // The tail is this thread's to move; the handler only moves head.
-        atomic_set(&desktop.key_tail, atomic_read(&desktop.key_head));
+        if (keys)
+                atomic_set(&desktop.key_tail, atomic_read(&desktop.key_head));
 
         /*
                 A wanted terminal is not dropped.
@@ -10951,8 +11171,13 @@ static _Bool canvas_suspend_check(void)
 
         rt_mutex_unlock(&desktop.lock);
 
+        // Keys are not dropped while the card only sleeps: a keyboard that
+        // reports the key that woke the machine after its resume (a USB one
+        // does; a PS/2 controller's buffer is flushed by its own resume) has
+        // that key delivered once the wake has redrawn. Another program
+        // holding the card is what drops them.
         if (taken)
-                canvas_input_drop();
+                canvas_input_drop(!READ_ONCE(desktop.asleep));
 
         return taken;
 }

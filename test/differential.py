@@ -25314,9 +25314,13 @@ static struct {
     atomic_t frame_pending;
     int lock;
     _Bool suspended;
+    _Bool asleep;
     _Bool awake;
     _Bool terminal;
 } desktop;
+#ifndef READ_ONCE
+#define READ_ONCE(x) (x)
+#endif
 static unsigned long pointer_counts,pointer_moved;
 static unsigned wakes,wheel_cas,drain_race;
 static int atomic_read(const atomic_t *p) { return *p; }
@@ -26575,6 +26579,13 @@ static void check_input_suspension(void) {
           "input arriving after the card is given back is delivered");
     check(!canvas_suspend_check() && mock_resumes==1,
           "a desktop that was not suspended is not resumed again");
+    // A machine asleep is a card taken, but the key that woke it is kept.
+    memset(&desktop,0,sizeof(desktop));
+    suspend_pending();mock_taken=1;desktop.asleep=1;
+    check(canvas_suspend_check() && desktop.key_tail==3 && desktop.key_head==7,
+          "keys typed while the machine wakes are kept for the redraw");
+    check(!desktop.motion_pending && !desktop.button_changed,
+          "the pointer's movement and buttons of that time are dropped");
     memset(&desktop,0,sizeof(desktop));
     desktop.spawn=1;mock_taken=1;
     check(canvas_suspend_check() && desktop.spawn,

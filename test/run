@@ -91,7 +91,7 @@ export TEST_TALLY
 #       kernel/profile/sec_sanitize.
 asked_lanes="wifi fuzz msan ring0"
 
-lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex slurp wait writer native probe stack checksum storage_io storage_format machine sensors cli differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas"
+lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex slurp wait writer native probe stack checksum storage_io storage_format machine sensors cli differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep"
 
 describe()
 {
@@ -166,6 +166,7 @@ describe()
         boot)     echo "the image boots, init starts, and the shell answers" ;;
         install)  echo "Moonwater installed to a disk, started from it, asked about and updated from a stick" ;;
         canvas)   echo "what is actually on the screen, read back a pixel at a time" ;;
+        sleep)    echo "moonwater sleep from a terminal, woken by a key: the desktop back on a card that lost its pipe, input alive, the log" ;;
         wifi)     echo "networks in the air of a machine with simulated radios, joined and listed" ;;
         fuzz)     echo "every network libFuzzer target for an hour each, or a release report" ;;
         msan)     echo "the net wire parsers under MemorySanitizer" ;;
@@ -15761,6 +15762,187 @@ else
         while IFS='|' read -r name got want; do
                 same "$name" "$want" "$got"
         done < "$work/plane-answers"
+fi
+
+counted
+)
+
+#       moonwater sleep, from a terminal, woken by a key.
+#
+#       The display is bochs, not virtio-gpu: bochs suspends through the same
+#       drm_mode_config_helper_suspend the atomic drivers use (amdgpu's
+#       dm_suspend saves the same drm_atomic_helper_suspend state), so the
+#       pipe really is turned off and restored, where virtio-gpu has no power
+#       management at all. Three guests: the plain one, one told by
+#       moonwater.pm_dark=1 to wake as a card that lost its pipe does (the
+#       screens turned off and a hotplug sent while asleep, and the card
+#       treated as a real one, which is what runs the hotplug rebind and the
+#       off and on cycle), and one with pm_dark=3, where the wake's own
+#       redraws are left undone so only what the hotplug finds can put the
+#       picture back. Each runs the verb from the Canvas terminal (its tty
+#       frozen with it) and is woken by a key: "awake again" must be said,
+#       the screen must have the desktop on it, a letter typed after the
+#       wake must reach the terminal, the log must name the steps, a lease
+#       must be back, and the kernel must have warned of nothing.
+lane_sleep()
+(
+image=${MOONWATER_IMAGE:-dist/bootx64.efi}
+
+counting sleep
+
+if ! command -v qemu-system-x86_64 > /dev/null 2>&1 || ! command -v python3 > /dev/null 2>&1; then
+        echo "  sleep        no qemu-system-x86_64 or python3, skipped"
+        exit 2
+fi
+
+if [ ! -f "$image" ]; then
+        echo "  sleep        no image at $image, skipped"
+        exit 2
+fi
+
+if [ ! -w /dev/kvm ]; then
+        echo "  sleep        no /dev/kvm: a guest that sleeps needs it, skipped"
+        exit 2
+fi
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/dawning-sleep.XXXXXX") || exit 1
+trap 'rm -rf "$work"' EXIT INT TERM
+
+MOONWATER_SLEEP_WORK=$work
+export MOONWATER_SLEEP_WORK
+qmp_guest_module "$work"
+
+PYTHONPATH=$work python3 - "$image" > "$work/answers" 2>"$work/why" <<'PY'
+import os, socket, sys, time
+from qmp_guest import *
+
+image = sys.argv[1]
+base = os.environ["MOONWATER_SLEEP_WORK"]
+out = []
+
+def lit(name):
+    """How many colours a screendump holds and what share is not the commonest: a blank screen is one colour."""
+    w, h, px = load(name)
+    seen = {}
+    for i in range(0, len(px) - 2, 21):
+        seen[px[i:i + 3]] = seen.get(px[i:i + 3], 0) + 1
+    return len(seen), 1 - max(seen.values()) / sum(seen.values())
+
+def drawn(name):
+    colours, share = lit(name)
+    return colours >= 5 and share > 0.05
+
+for label, extra in (("plain", ""), ("dark", "moonwater.pm_dark=5"), ("undone", "moonwater.pm_dark=3")):
+    work = base + "/" + label
+    os.makedirs(work, exist_ok=True)
+    console = work + "/console"
+    guest = Guest(["qemu-system-x86_64", "-m", "2G", "-smp", "2", "-cpu", "host", "-enable-kvm",
+        "-kernel", image, "-vga", "std", "-no-reboot", "-display", "none", "-nic", "user,model=e1000",
+        "-chardev", "socket,id=console,path=" + console + ",server=on,wait=off", "-serial", "chardev:console",
+        "-append", "console=ttyS0 drm_client_lib.active= " + extra],
+        work + "/qmp", work + "/mon", work, (console,), 0.1)
+    serial = socket.socket(socket.AF_UNIX)
+    serial.connect(console)
+    serial.settimeout(0.2)
+    transcript = bytearray()
+
+    def pump(seconds):
+        stop = time.time() + seconds
+        while time.time() < stop:
+            try:
+                chunk = serial.recv(65536)
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            if not chunk:
+                return
+            transcript.extend(chunk)
+
+    def wait_for(marker, seconds):
+        stop = time.time() + seconds
+        while marker.encode() not in transcript and time.time() < stop:
+            pump(0.3)
+        return marker.encode() in transcript
+
+    def say(line):
+        serial.sendall(line.encode() + b"\n")
+
+    #       The desktop first, read off the screen rather than waited for.
+    stop = time.time() + 60
+    up = False
+    while time.time() < stop and not up:
+        time.sleep(2)
+        shot("up", 1)
+        up = drawn("up")
+    #       And the terminal it opens, which is what the keys go to.
+    wait_for("canvas] terminal: 0", 60)
+    time.sleep(4)
+    say("echo READY-$((20+1))")
+    out.append((label + ": the serial shell answers", "yes" if wait_for("READY-21", 20) else "no", "yes"))
+
+    #       What the terminal will run: the verb with its words on the serial
+    #       line, then a read that only a delivered key can satisfy.
+    say("echo 'moonwater sleep > /dev/ttyS0 2>&1' > /tmp/w")
+    say("echo 'read k' >> /tmp/w")
+    say("echo 'echo KEY=$k > /dev/ttyS0' >> /tmp/w")
+    time.sleep(1)
+    shot("before", 1)
+    out.append((label + ": the desktop is up before the sleep", "yes" if drawn("before") else "no", "yes"))
+    mark = len(transcript)
+    type_text("sh /tmp/w\n")
+    out.append((label + ": the verb is sleeping", "yes" if wait_for("mem_sleep", 20) else "no", "yes"))
+    time.sleep(4)
+    shot("during", 1)
+    out.append((label + ": the screen is off while it sleeps", "yes" if not drawn("during") else "no", "yes"))
+    #       A modifier wakes it: a PS/2 controller's own resume flushes the
+    #       key that woke the machine, so a letter would be lost to the
+    #       hardware and prove nothing about Canvas.
+    key("shift")
+    out.append((label + ": a key wakes it", "yes" if wait_for("awake again", 40) else "no", "yes"))
+    time.sleep(5)
+    shot("after", 1)
+    out.append((label + ": the desktop is on the screen again", "yes" if drawn("after") else "no", "yes"))
+    key("a")
+    key("ret")
+    out.append((label + ": a key typed after the wake reaches the terminal", "yes" if wait_for("KEY=a", 10) else "no", "yes"))
+
+    say("cat /root/sleep.log; echo LOG-END")
+    wait_for("LOG-END\r\n", 10)
+    for line in (("woken by:", "kernel log lines:") if label == "undone" else
+                 ("woken by:", "kernel log lines:", "wake: ", "primary shows ours")):
+        out.append((label + ": the log says " + line.strip(), "yes" if line.encode() in transcript[mark:] else "no", "yes"))
+    if label != "plain":
+        out.append((label + ": the screens were turned off", "yes" if b"screens off: 0" in transcript[mark:] else "no", "yes"))
+    say("ip addr; echo IP-END")
+    wait_for("IP-END\r\n", 10)
+    out.append((label + ": the lease is back", "yes" if b"inet 10.0.2." in transcript[mark:] else "no", "yes"))
+    pump(1)
+    after = bytes(transcript[mark:])
+    bad = [word for word in ("WARNING:", "BUG:", "Oops", "Call Trace") if word.encode() in after]
+    out.append((label + ": the kernel says nothing is wrong", ",".join(bad) or "yes", "yes"))
+    if os.environ.get("SLEEP_KEEP"):
+        open(work + "/transcript", "wb").write(transcript)
+
+    guest.quit()
+    time.sleep(1)
+    guest.terminate()
+    try:
+        guest.wait(10)
+    except Exception:
+        guest.kill()
+
+for name, got, want in out:
+    print("%s|%s|%s" % (name, got, want))
+PY
+
+if [ ! -s "$work/answers" ]; then
+        same "the sleep guests answered" "yes" "no"
+        sed 's/^/    /' "$work/why" | tail -5
+else
+        while IFS='|' read -r name got want; do
+                same "$name" "$want" "$got"
+        done < "$work/answers"
 fi
 
 counted
