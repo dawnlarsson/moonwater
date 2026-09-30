@@ -53976,7 +53976,7 @@ def harness_security_hygiene(argv):
                 "dhcp_fuzz", "sntp_fuzz", "dns_fuzz", "netlink_fuzz", "tls_peer",
                 "http_fuzz", "http_fuzz_tight", "http_urls", "wifi_eapol_fuzz",
                 "wifi_scan_fuzz",
-                "wget_mutation", "wget_hostile", "sntp_era")
+                "wget_mutation", "wget_hostile", "sntp_era", "net_netem")
     for name in security + ("tls_verify_fuzz",):
         checks(name in HARNESS_CHECKS, "differential.py: %s is not registered" % name)
     table = re.search(r"^HARNESS_CHECKS = \{$(.*?)^\}$", source, re.M | re.S)
@@ -55250,6 +55250,318 @@ def harness_waterlink_noise(argv):
     print("waterlink noise: references run: written here%s" %
           (", noiseprotocol" if have_package else " (noiseprotocol not importable)"))
     return checks.verdict("waterlink noise:", "waterlink-noise")
+
+
+NET_NETEM_DHCP_SERVER = r"""import socket, struct, sys, time, threading
+mode = sys.argv[1]
+OFFER_IP = "10.88.0.50"; BAD_IP = "10.88.0.66"; SERVER = "10.88.0.2"
+def parse(data):
+    xid = data[4:8]; chaddr = data[28:34]
+    opts = {}
+    i = 240
+    while i < len(data) and data[i] != 255:
+        if data[i] == 0: i += 1; continue
+        opts[data[i]] = data[i+2:i+2+data[i+1]]; i += 2 + data[i+1]
+    return xid, chaddr, opts
+def reply(xid, chaddr, mtype, ip):
+    p = struct.pack("!BBBB4sHH4s4s4s4s16s64s128s", 2, 1, 6, 0, xid, 0, 0x8000,
+                    b"\0"*4, socket.inet_aton(ip), b"\0"*4, b"\0"*4, chaddr + b"\0"*10, b"", b"")
+    p += b"\x63\x82\x53\x63"
+    p += bytes([53,1,mtype]) + bytes([54,4]) + socket.inet_aton(SERVER)
+    if mtype != 6:
+        p += bytes([51,4]) + struct.pack("!I", 3600) + bytes([1,4]) + socket.inet_aton("255.255.255.0")
+        p += bytes([3,4]) + socket.inet_aton(SERVER) + bytes([6,4]) + socket.inet_aton(SERVER)
+    return p + b"\xff"
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, b"cb")
+s.bind(("0.0.0.0", 67))
+log = open(sys.argv[2], "a", buffering=1)
+seen_discover = 0; naked = False
+def send(pkt, delay=0.0):
+    def go():
+        time.sleep(delay); s.sendto(pkt, ("255.255.255.255", 68))
+    threading.Thread(target=go, daemon=True).start()
+while True:
+    data, _ = s.recvfrom(2048)
+    if len(data) < 241 or data[0] != 1: continue
+    xid, chaddr, opts = parse(data)
+    t = opts.get(53, b"\0")[0]
+    log.write("%.3f rx type %d xid %s\n" % (time.time(), t, xid.hex()))
+    if t == 1:
+        seen_discover += 1
+        if mode == "drop3" and seen_discover <= 3: continue
+        msgs = []
+        if mode == "stale":  msgs.append(reply(bytes(a ^ 0xff for a in xid), chaddr, 2, BAD_IP))
+        msgs.append(reply(xid, chaddr, 2, OFFER_IP))
+        d = 1.5 if mode == "late" else 0.0
+        for m in msgs:
+            for _ in range(3 if mode == "dup" else 1): send(m, d)
+    elif t == 3:
+        if mode == "nak" and not naked:
+            naked = True; send(reply(xid, chaddr, 6, "0.0.0.0")); continue
+        msgs = []
+        if mode == "stale": msgs.append(reply(bytes(a ^ 0xff for a in xid), chaddr, 5, BAD_IP))
+        msgs.append(reply(xid, chaddr, 5, OFFER_IP))
+        for m in msgs:
+            for _ in range(3 if mode == "dup" else 1): send(m, 1.5 if mode == "late" else 0)
+        if mode == "dup":
+            send(reply(xid, chaddr, 2, BAD_IP), 0.3)   # an OFFER after the ACK
+"""
+
+NET_NETEM_NTP_SERVER = r"""import socket, struct, sys, time, threading
+mode = sys.argv[1]; log = open(sys.argv[2], "a", buffering=1)
+skew = float(sys.argv[3]) if len(sys.argv) > 3 else 0.0
+def ntp(t):  # unix float -> 8 bytes
+    s = int(t) + 2208988800
+    return struct.pack(">II", s & 0xffffffff, int((t - int(t)) * 2**32) & 0xffffffff)
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, b"cb")
+s.bind(("0.0.0.0", 123))
+n = 0
+def send(pkt, addr, d=0.0):
+    def go(): time.sleep(d); s.sendto(pkt, addr)
+    threading.Thread(target=go, daemon=True).start()
+def reply(req, stratum=2, refid=b"\x7f\x00\x00\x01", origin=None, t=None):
+    now = (t if t is not None else time.time()) + skew
+    origin = origin if origin is not None else req[40:48]
+    return (bytes([0x24, stratum, 6, 0xec]) + struct.pack(">II", 0x100, 0x100) + refid +
+            ntp(now - 1) + origin + ntp(now) + ntp(now))
+while True:
+    req, addr = s.recvfrom(512)
+    if len(req) < 48: continue
+    n += 1
+    log.write("%.3f rx %d\n" % (time.time(), n))
+    if mode == "drop2" and n <= 2: continue
+    if mode == "spoof":   send(reply(req, origin=bytes(8), t=time.time() + 10800), addr)   # wrong nonce, wrong hour, first
+    if mode == "kod":     send(reply(req, stratum=0, refid=b"RATE"), addr); continue
+    if mode == "late":    send(reply(req), addr, 1.0); continue
+    if mode == "era":     send(reply(req, t=time.time()), addr); continue
+    for _ in range(3 if mode == "dup" else 1): send(reply(req), addr)
+"""
+
+NET_NETEM_INNER = r"""
+import fcntl, os, socket, struct, subprocess, sys, time
+
+top, kind, mode, netem_on = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4] == "netem"
+env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": "/root", "LC_ALL": "C"}
+procs = []
+
+def say(ok, what):
+    print(("ok " if ok else "FAIL ") + what, flush=True)
+
+def run(*argv, **kw):
+    return subprocess.run(list(argv), capture_output=True, text=True, timeout=kw.pop("timeout", 30), **kw)
+
+try:
+    for directory in ("/etc", "/root", "/run"):
+        run("mount", "-t", "tmpfs", "none", directory)
+    peer = subprocess.Popen(["unshare", "-n", "sleep", "900"], stdin=subprocess.DEVNULL)
+    procs.append(peer)
+    time.sleep(0.3)
+    pid = str(peer.pid)
+
+    def there(*argv):
+        return run("nsenter", "-t", pid, "-n", *argv)
+
+    run("ip", "link", "add", "eth0", "type", "veth", "peer", "name", "cb")
+    run("ip", "link", "set", "cb", "netns", pid)
+    there("ip", "link", "set", "lo", "up")
+    there("ip", "addr", "add", "10.88.0.2/24", "dev", "cb")
+    there("ip", "link", "set", "cb", "up")
+    if netem_on:
+        #   DHCP retransmits, so it gets loss too. SNTP spends one ten second
+        #   budget across its five samples and a lost datagram eats the rest
+        #   of it (the drop2 row below pins that), so its netem has none.
+        profile = ["delay", "20ms", "10ms"] + (["loss", "25%"] if kind == "dhcp" else []) + [
+                   "duplicate", "10%", "reorder", "25%", "50%", "seed", "7"]
+        for one in (run("tc", "qdisc", "add", "dev", "eth0", "root", "netem", *profile),
+                    there("tc", "qdisc", "add", "dev", "cb", "root", "netem", *profile)):
+            if one.returncode:
+                say(False, "netem profile refused: " + one.stderr.strip())
+    run("ip", "link", "set", "eth0", "up")
+    for scope in ("all", "default", "eth0"):
+        try:
+            open("/proc/sys/net/ipv4/conf/%s/rp_filter" % scope, "w").write(os.environ.get("NETEM_RP_FILTER", "0"))
+        except OSError:
+            pass
+    for name in ("ip", "moonwater"):
+        if not os.path.exists(top + "/" + name):
+            os.symlink("shell", top + "/" + name)
+
+    def server(script, *argv):
+        procs.append(subprocess.Popen(["nsenter", "-t", pid, "-n", sys.executable, top + "/" + script, *argv],
+                                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                      stderr=subprocess.DEVNULL))
+        time.sleep(0.5)
+
+    def address():
+        s = socket.socket()
+        try:
+            return socket.inet_ntoa(fcntl.ioctl(s, 0x8915, struct.pack("256s", b"eth0"))[20:24])
+        except OSError:
+            return None
+
+    label = "%s %s%s%s" % (kind, mode, " under netem" if netem_on else "",
+                           " rp_filter " + os.environ["NETEM_RP_FILTER"]
+                           if os.environ.get("NETEM_RP_FILTER", "0") != "0" else "")
+    if kind == "dhcp":
+        server("dhcpsrv.py", mode, top + "/dhcp.log")
+        began = time.time()
+        client = run(top + "/ip", "auto", env=env, timeout=150)
+        if mode == "nak":
+            #   The one-shot ip auto reports a refused REQUEST and leaves
+            #   nothing configured; the watcher asks again, which is a second
+            #   run here, and the server answers that one.
+            say(client.returncode != 0 and address() is None,
+                "%s: a NAK leaves no address and a failed status (%d, %s)" % (
+                    label, client.returncode, address()))
+            client = run(top + "/ip", "auto", env=env, timeout=150)
+        took = time.time() - began
+        route = open("/proc/net/route").read().splitlines()[1:]
+        default = [line.split() for line in route if line.split()[1] == "00000000"]
+        say(client.returncode == 0, "%s: ip auto took a lease (status %d, %.1f s: %s)" % (
+            label, client.returncode, took, (client.stdout + client.stderr).strip().replace("\n", " | ")[-160:]))
+        say(address() == "10.88.0.50", "%s: the address is the real server's, not a forged one (%s)" % (label, address()))
+        say(bool(default) and default[0][2] == "0200580A", "%s: the default route is via the server" % label)
+        say("nameserver 10.88.0.2" in open("/etc/resolv.conf").read() if os.path.exists("/etc/resolv.conf") else False,
+            "%s: the resolver is the server's" % label)
+        log = open(top + "/dhcp.log").read() if os.path.exists(top + "/dhcp.log") else ""
+        say(" type 1 " in log and " type 3 " in log, "%s: the server saw a DISCOVER and a REQUEST" % label)
+        say(took < 120, "%s: the lease came within two minutes (%.1f s)" % (label, took))
+    else:
+        run("ip", "addr", "add", "10.88.0.1/24", "dev", "eth0")
+        open("/root/ntp.server", "w").write("10.88.0.2\n")
+        skew = "10800" if mode == "skewed" else "0"
+        server("ntpsrv.py", mode, top + "/ntp.log", skew)
+        said = run(top + "/moonwater", "time", "sync", env=env, timeout=90)
+        text = said.stdout + said.stderr
+        log = open(top + "/ntp.log").read() if os.path.exists(top + "/ntp.log") else ""
+        asked = len(log.splitlines())
+        #   answered = the sample passed every check and reached the clock,
+        #   which an unprivileged namespace then refuses to set.
+        answered = "answered, but the clock could not be set" in text or "synchronised" in text
+        if mode == "drop2":
+            #   Known open (closeclock): the five samples share one ten
+            #   second deadline, so a datagram that is lost first spends all
+            #   of it and the rest are sent with no time to wait. When this
+            #   row starts to fail because an answer is taken, the weakness
+            #   is fixed: move drop2 in with the modes that must answer.
+            say(not answered, "%s: KNOWN OPEN, two lost requests end the exchange with no answer (%s)" % (
+                label, text.strip().replace("\n", " | ")[:100]))
+        elif mode in ("skewed", "kod"):
+            say(not answered, "%s: a lone far-off or rate-limit answer is not believed (%s)" % (
+                label, text.strip().replace("\n", " | ")[:120]))
+        else:
+            say(answered, "%s: an answer was taken (%s)" % (label, text.strip().replace("\n", " | ")[:140]))
+        say(asked >= 1, "%s: the server was asked (%d requests)" % (label, asked))
+except Exception as failure:
+    say(False, "scene %s %s crashed: %r" % (kind, mode, failure))
+finally:
+    for one in procs:
+        try:
+            one.kill()
+        except OSError:
+            pass
+"""
+
+
+def harness_net_netem(argv):
+    """The DHCP client and the SNTP client, as built, against a server that
+    schedules its answers adversarially, over a veth pair in namespaces with
+    netem on both ends.
+
+    A user namespace (mapped with --map-auto so that the DHCP child can drop
+    to nobody) owns two network namespaces joined by a veth pair; the far one
+    runs a Python server that is deliberately hostile, and both ends carry
+    netem delay, jitter, 25% loss, duplication and reordering (fixed seed).
+    `ip auto` is the DHCP client: against a server that answers clean, three
+    times over, with a forged reply (wrong transaction id, another address)
+    before each real one, 1.5 s late, not at all for the first three
+    DISCOVERs, or with a NAK for the first REQUEST, it has to end with the
+    real server's address, route and resolver and never a forged one.
+    `moonwater time sync` is the SNTP client, with `/root/ntp.server` naming
+    the far end: it has to take a clean, tripled, late or once-dropped answer,
+    take the right one of a forged reply (wrong origin, three hours off) and
+    a true one, and not believe a lone server that is three hours off or
+    that says RATE. NOT RUN (exit 2) where unprivileged user namespaces,
+    --map-auto, veth, netem, ip, tc or nsenter are not there.
+
+        python3 test/differential.py --harness net_netem [--shell PATH]
+    """
+    import shutil
+    import subprocess
+    import tempfile
+    parser = argparse.ArgumentParser(prog="differential.py --harness net_netem")
+    parser.add_argument("--shell")
+    parser.add_argument("--cc", default=os.environ.get("CC", "gcc"))
+    args = parser.parse_args(argv)
+    if platform.system() != "Linux":
+        print("net netem: NOT RUN -- Linux namespaces")
+        return 2
+    for tool in ("unshare", "ip", "tc", "nsenter"):
+        if not shutil.which(tool):
+            print("net netem: NOT RUN -- no %s" % tool)
+            return 2
+    unshare = ["unshare", "--map-root-user", "--map-auto", "-m", "-n", "--fork"]
+    probe = subprocess.run(unshare + ["sh", "-c",
+                                      "ip link add na type veth peer name nb && "
+                                      "tc qdisc add dev na root netem delay 1ms seed 7"],
+                           capture_output=True, stdin=subprocess.DEVNULL)
+    if probe.returncode:
+        print("net netem: NOT RUN -- no user namespaces with --map-auto, veth or netem here: " +
+              probe.stderr.decode(errors="replace")[:200])
+        return 2
+
+    with tempfile.TemporaryDirectory(prefix="net-netem-") as temporary:
+        top = Path(temporary)
+        if args.shell:
+            shutil.copy(args.shell, top / "shell")
+        else:
+            built = subprocess.run(spark_shell_command(args.cc, top / "shell"),
+                                   cwd=HARNESS_ROOT, capture_output=True, text=True)
+            if built.returncode:
+                print(built.stderr[-3000:])
+                return 1
+        (top / "dhcpsrv.py").write_text(NET_NETEM_DHCP_SERVER)
+        (top / "ntpsrv.py").write_text(NET_NETEM_NTP_SERVER)
+        (top / "inner.py").write_text(NET_NETEM_INNER)
+        scenes = [("dhcp", mode, netem, "0") for netem in ("", "netem")
+                  for mode in ("clean", "dup", "stale", "late", "drop3", "nak")]
+        #   The OFFER comes from an address with no route yet: a UDP socket
+        #   lost it to reverse-path filtering, so the client reads it from a
+        #   packet socket, and strict and loose filtering must both lease.
+        scenes += [("dhcp", mode, netem, rp) for rp in ("1", "2")
+                   for netem in ("", "netem") for mode in ("clean", "stale")]
+        scenes += [("sntp", mode, netem, "0") for netem in ("", "netem")
+                   for mode in ("clean", "dup", "spoof", "late", "drop2", "skewed", "kod")]
+        checks = Checks()
+        for kind, mode, netem, rp in scenes:
+            for leftover in ("dhcp.log", "ntp.log"):
+                (top / leftover).unlink(missing_ok=True)
+            said = top / "said"
+            with open(said, "wb") as sink:
+                scene = subprocess.Popen(unshare + [sys.executable, str(top / "inner.py"),
+                                                    str(top), kind, mode, netem or "plain"],
+                                         stdin=subprocess.DEVNULL, stdout=sink, stderr=sink,
+                                         env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                                              "LC_ALL": "C", "NETEM_RP_FILTER": rp})
+                try:
+                    scene.wait(timeout=300)
+                except subprocess.TimeoutExpired:
+                    scene.kill()
+                    scene.wait()
+                    checks(False, "%s %s %s rp_filter %s: the scene hung" % (kind, mode, netem, rp))
+            text = said.read_bytes().decode(errors="replace")
+            asked = 0
+            for line in text.splitlines():
+                if line.startswith("ok ") or line.startswith("FAIL "):
+                    asked += 1
+                    checks(line.startswith("ok "), line.split(" ", 1)[1])
+            checks(asked >= 2, "%s %s %s: the scene asked its questions (%d)%s" % (
+                kind, mode, netem, asked, "" if asked >= 2 else ": " + text[-400:]))
+        return checks.verdict("net netem", "net-netem")
 
 
 def harness_waterlink_link(argv):
@@ -63020,6 +63332,7 @@ HARNESS_CHECKS = {
     "http_response_framing": harness_http_response_framing,
     "http_fuzz": harness_http_fuzz,
     "http_fuzz_tight": harness_http_fuzz_tight,
+    "net_netem": harness_net_netem,
     "sntp_era": harness_sntp_era,
     "http_urls": harness_http_urls,
     "tls_der_fuzz": harness_tls_der_fuzz,
