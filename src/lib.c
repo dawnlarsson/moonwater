@@ -18812,7 +18812,8 @@ ASM_FUNC(positive_to_string)
     ".Lpositive_into_padded_x86_fixed_done:\n   mov %rdx, %rax\n"
     ASM_RET
     //
-    //       Any pad, a width of two to nine and a value that fits it: the
+    //       Any pad, a width of two to sixteen and a value that fits it and
+    //       thirty two bits (the pair loop divides by a 32-bit magic): the
     //       field is exactly the width, so the pad is laid over all of it
     //       with two overlapping stores and the digits are written over its
     //       end a pair at a time, most significant last. cat -n and uniq -c
@@ -18821,8 +18822,9 @@ ASM_FUNC(positive_to_string)
     //       cat -n.
     //
     ".Lpositive_into_padded_x86_general:\n   test %cl, %cl\n   jz .Lpositive_into_padded_x86_call\n"
-    "lea -2(%rdx), %rax\n   cmp $7, %rax\n   ja .Lpositive_into_padded_x86_call\n"
+    "lea -2(%rdx), %rax\n   cmp $14, %rax\n   ja .Lpositive_into_padded_x86_call\n"
     "lea ten_powers(%rip), %r8\n   cmp (%r8,%rdx,8), %rsi\n   jae .Lpositive_into_padded_x86_call\n"
+    "mov %esi, %eax\n   cmp %rsi, %rax\n   jne .Lpositive_into_padded_x86_call\n"
     "movzbl %cl, %eax\n   movabs $0x0101010101010101, %r9\n   imul %r9, %rax\n"
     "cmp $4, %rdx\n   jb .Lpositive_into_padded_x86_lay2\n   cmp $8, %rdx\n   jb .Lpositive_into_padded_x86_lay4\n"
     "mov %rax, (%rdi)\n   mov %rax, -8(%rdi,%rdx)\n   jmp .Lpositive_into_padded_x86_laid\n"
@@ -31333,13 +31335,14 @@ ASM_FUNC(positive_to_string)
     "strb w1, [x0]\n"
     ".Lpositive_into_padded_arm_fixed_done:\n   mov x0, x2\n"
     ASM_RET
-    //       Any pad, a width of two to nine and a value that fits it: the
+    //       Any pad, a width of two to sixteen and a value that fits it: the
     //       x86_64 block says why. The pad is two overlapping stores of the
     //       pad byte times 0x0101010101010101.
     ".Lpositive_into_padded_arm_general:\n   ands w4, w3, #255\n   b.eq .Lpositive_into_padded_arm_call\n"
-    "sub x5, x2, #2\n   cmp x5, #7\n   b.hi .Lpositive_into_padded_arm_call\n"
+    "sub x5, x2, #2\n   cmp x5, #14\n   b.hi .Lpositive_into_padded_arm_call\n"
     "adrp x6, ten_powers\n   add x6, x6, :lo12:ten_powers\n   ldr x6, [x6, x2, lsl #3]\n"
     "cmp x1, x6\n   b.hs .Lpositive_into_padded_arm_call\n"
+    "lsr x9, x1, #32\n   cbnz x9, .Lpositive_into_padded_arm_call\n"
     "mov x7, #0x0101010101010101\n   mul x7, x4, x7\n   add x8, x0, x2\n"
     "cmp x2, #4\n   b.lo .Lpositive_into_padded_arm_lay2\n   cmp x2, #8\n   b.lo .Lpositive_into_padded_arm_lay4\n"
     "str x7, [x0]\n   stur x7, [x8, #-8]\n   b .Lpositive_into_padded_arm_laid\n"
@@ -45370,12 +45373,13 @@ ASM_FUNC(positive_to_string)
     "bne a2, t0, .Lpositive_into_padded_rv_fixed_done\n   addi a1, a1, 48\n   sb a1, 0(a0)\n"
     ".Lpositive_into_padded_rv_fixed_done:\n   mv a0, a2\n"
     ASM_RET
-    //       Any pad, a width of two to nine and a value that fits it: the
+    //       Any pad, a width of two to sixteen and a value that fits it: the
     //       x86_64 block says why. Byte stores throughout, as above.
     ".Lpositive_into_padded_rv_general:\n   andi t0, a3, 255\n   beqz t0, .Lpositive_into_padded_rv_call\n"
-    "addi t1, a2, -2\n   li t2, 7\n   bgtu t1, t2, .Lpositive_into_padded_rv_call\n"
+    "addi t1, a2, -2\n   li t2, 14\n   bgtu t1, t2, .Lpositive_into_padded_rv_call\n"
     "lla t1, ten_powers\n   slli t2, a2, 3\n   add t1, t1, t2\n   ld t1, 0(t1)\n"
     "bgeu a1, t1, .Lpositive_into_padded_rv_call\n"
+    "srli t1, a1, 32\n   bnez t1, .Lpositive_into_padded_rv_call\n"
     "li t1, 0\n"
     ".Lpositive_into_padded_rv_lay:\n   add t2, a0, t1\n   sb t0, 0(t2)\n   addi t1, t1, 1\n"
     "bltu t1, a2, .Lpositive_into_padded_rv_lay\n"

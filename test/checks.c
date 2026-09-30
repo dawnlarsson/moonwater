@@ -22446,11 +22446,12 @@ fn check_into_padded()
                                                     into_exacts[e], widths[w],
                                                     pads[p], offset, guards[g]);
 
-        // Every width the any-pad lane takes, on both sides of every power
-        // of ten, so a value that just fits and one that just does not are
+        // Every width the any-pad lane takes (two to sixteen; above that, and
+        // for a value past thirty two bits, it calls positive_into), on both
+        // sides of every power of ten, so a value that just fits and one that just does not are
         // both asked of each width with every pad.
-        for (positive w = 2; w <= 9; w++)
-                for (positive k = 0, power = 1; k < 12; k++, power *= 10)
+        for (positive w = 2; w <= 17; w++)
+                for (positive k = 0, power = 1; k < 20; k++, power *= 10)
                         for (positive d = 0; d < 3; d++)
                                 for (positive p = 0;
                                      p < sizeof(pads) / sizeof(pads[0]); p++)
@@ -22461,7 +22462,7 @@ fn check_into_padded()
 
         for (positive r = 0; r < 20000; r++)
         {
-                positive w = 2 + r % 8;
+                positive w = 2 + r % 16;
                 positive power = 1;
 
                 for (positive k = 0; k < w; k++)
