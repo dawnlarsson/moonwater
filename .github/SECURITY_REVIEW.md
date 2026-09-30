@@ -134,3 +134,54 @@ Until the P0 queue is complete, the honest rating is **strong deterministic
 unit/integration coverage, incomplete high-assurance evidence**. More isolated
 unit cases may still fix real bugs, but they do not move that rating by
 themselves.
+
+## Link, lease and kernel network defaults (netlow pass, 2026-09-30)
+
+Measured on a built default image in a KVM guest (`/proc/sys`, `/proc/net`,
+`artifacts/.config`), not read from the profiles.
+
+Found sound, and how: the watcher's wake FIFO is `prw-------` root in a
+root-owned `0755` `/run/moonwater`, so only root can restart an exchange from
+it; a cut exchange's child is killed and reaped, the answer wins a race with
+the cut, and a renewal is never cut. The DHCP client asks for options 1, 3 and
+6 only and stores every one as a 32-bit address, so there is no hostname,
+domain, search list, NTP, MTU, classless route (121, 249) or any text that
+reaches a file, and `resolv.conf` is written from two dotted quads. Nothing is
+bound after the lease, NTP and the zone fetch (30 s in): `/proc/net/tcp`,
+`udp`, `raw`, `packet`, `unix` are empty. The sampled SNTP, DNS and zone-header
+paths were re-read against their fuzz targets and stand as before.
+
+Fixed here: a carrier flap on any other link cut every acquisition (it now
+waits out a four second hold-off after a cut); a `/32` lease from a router
+outside its prefix was rolled back for ever (the route is now marked on-link);
+`CONFIG_SYN_COOKIES` was off in `general` (no `tcp_syncookies` at all); and
+`sec_hardened` now refuses ICMP redirects, source routes, TIME-WAIT
+assassination and io_uring at watcher start.
+
+Open, ranked:
+
+1. No 802.11w. `wifi_rsn_ie` carries no MFPC bit and no IGTK is installed, so a
+   deauthentication frame from anyone in radio range ends the association.
+   Needs an RSN group-management cipher, `NL80211_ATTR_USE_MFP` and the IGTK
+   key data in message 3; the `wifi` lane's radio emulation has no AP to test
+   it against, and the box has no hostapd.
+2. The DHCP client is a UDP socket, so `rp_filter` 1 or 2 drops the OFFER
+   (route to the server does not exist yet) and no lease is ever taken:
+   measured, OFFERs sent and no REQUEST. `rp_filter` therefore stays 0 in
+   every tier; an `AF_PACKET` receive path would lift that.
+3. No ARP probe or gratuitous ARP for a leased address (`arp_notify` is 0,
+   `arp_announce` 0, `arp_ignore` 0, `arp_filter` 0): an address in use
+   elsewhere is not noticed.
+4. Unauthenticated SNTP is accepted into any moment between 2026-09-01 and
+   2036-01-01 while the clock is unset, and within 24 hours of it afterwards;
+   an on-path attacker at boot chooses the date the certificate checks run
+   under. Authenticated time (NTS) is not implemented.
+5. Name resolution asks 1.1.1.1 first, in the clear, before the network's own
+   resolver; a source port and a 16-bit id are the only protection (the kernel's
+   port range 32768-60999, no 0x20 encoding).
+6. The general image enables IPv6 with SLAAC and router advertisements
+   accepted (`accept_ra` 1, EUI-64 addresses, `accept_redirects` 1) although
+   none of the tools here speak it; `modern` turns IPv6 off.
+7. Outside the network zone, seen while measuring: `fs.protected_*` 0,
+   `kernel.kptr_restrict` 0, `kernel.dmesg_restrict` 0, unprivileged user
+   namespaces and io_uring on in the default tier.

@@ -4,6 +4,7 @@
 | --- | --- | --- |
 | Network byte order, socket boundaries | `socket` lane on each available architecture | `sh test/run socket` |
 | Netlink source, sequence, attributes; DNS; HTTP; TLS; DHCP | freestanding network checks | `sh test/run net` |
+| Watcher exchange cut by link news; `/32` lease with an off-link router; kernel network defaults of the built image | `net_news_may_cut`, `net_router_onlink` and a kernel `RTNH_F_ONLINK` route on a loopback in `CHECK_net`; the flap and `/32` schedules by hand in a KVM guest with two e1000 on taps and a delayed DHCP server (17.1 s to 8.9 s lease under a 2.5 s flap) | `sh test/run net` (unit half); guest half by hand |
 | UDP replay and DHCP reacquisition authorization | identity mutation, queued prior transaction, exhaustive state cross-product | `sh test/run net machine` |
 | Certificate path semantics | generated chains against OpenSSL | `python3 test/differential.py --harness tls_chains` |
 | Certificate name matching (dNSName wildcards, case, trailing dot, IP, embedded NUL, public-suffix stars) | the lifted `tls_parse_san` against OpenSSL's own hostname check over 51 SAN patterns x 30 hosts, in-memory handshakes; stricter is fine, looser only where named (trailing dot, underscore label under a wildcard) | `python3 test/differential.py --harness tls_hostnames` (via `sh test/run net`) |
