@@ -1253,7 +1253,11 @@ __asm__(
 //
 //       What the actor sees is the C's, call for call: ctx->pos is the
 //       entry's offset before each call, the dirent type is
-//       fs_umode_to_dtype of the mode, the name is the entry's bytes, and a
+//       fs_umode_to_dtype of the mode (written out: the directory types are
+//       the mode's top four bits where the kernel's two tables map them to
+//       themselves, which is 1, 2, 4, 6, 8, 10 and 12, and to unknown for
+//       the rest; the harness checks all sixteen against the tables cut
+//       from fs/fs_dirent.c), the name is the entry's bytes, and a
 //       refusal leaves ctx->pos at the entry refused. The end of the
 //       directory is DIR_OFFSET_EOD, as before. offset_dir_lookup, which
 //       finds where to resume through the maple tree, is called as it was,
@@ -1410,7 +1414,8 @@ __asm__(
     "        # ctx->pos = the entry's offset, then actor(ctx, name, len, pos, ino, fs_umode_to_dtype(mode))\n"
     ".Lit_emit:\n"
     "        mov     (%rbx), %rax\n   mov     %rax, MW_CTX_POS(%r12)\n"
-    "        movzwl  20(%rbx), %edi\n   call    fs_umode_to_dtype\n   movzbl  %al, %r9d\n"
+    "        movzwl  20(%rbx), %r9d\n   shr     $12, %r9d\n   and     $15, %r9d\n   mov     $0x1556, %eax\n"
+    "        bt      %r9d, %eax\n   sbb     %eax, %eax\n   and     %eax, %r9d\n"
     "        mov     8(%rbx), %r8\n   mov     (%rbx), %rcx\n   mov     16(%rbx), %edx\n"
     "        lea     24(%rbx), %rsi\n   mov     %r12, %rdi\n   mov     MW_CTX_ACTOR(%r12), %r11\n"
     "        " MW_CALL_R11
@@ -1525,7 +1530,8 @@ __asm__(
     "        # ctx->pos = the entry's offset, then actor(ctx, name, len, pos, ino, fs_umode_to_dtype(mode))\n"
     ".Lit_emit:\n"
     "        ldr     x8, [x26]\n   str     x8, [x19, #MW_CTX_POS]\n"
-    "        ldrh    w0, [x26, #20]\n   bl      fs_umode_to_dtype\n   and     w5, w0, #0xff\n"
+    "        ldrh    w5, [x26, #20]\n   ubfx    w5, w5, #12, #4\n   mov     w0, #0x1556\n   lsr     w0, w0, w5\n"
+    "        tst     w0, #1\n   csel    w5, w5, wzr, ne\n"
     "        ldr     x4, [x26, #8]\n   ldr     x3, [x26]\n   ldr     w2, [x26, #16]\n"
     "        add     x1, x26, #24\n   mov     x0, x19\n   ldr     x9, [x19, #MW_CTX_ACTOR]\n   blr     x9\n"
     "        tst     w0, #0xff\n   b.eq    .Lit_stop\n"
@@ -1646,7 +1652,8 @@ __asm__(
     "        # ctx->pos = the entry's offset, then actor(ctx, name, len, pos, ino, fs_umode_to_dtype(mode))\n"
     ".Lit_emit:\n"
     "        ld      t0, 0(s6)\n   sd      t0, MW_CTX_POS(s0)\n"
-    "        lhu     a0, 20(s6)\n   call    fs_umode_to_dtype\n   andi    a5, a0, 0xff\n"
+    "        lhu     a5, 20(s6)\n   srli    a5, a5, 12\n   andi    a5, a5, 15\n   li      t0, 0x1556\n"
+    "        srl     t0, t0, a5\n   andi    t0, t0, 1\n   neg     t0, t0\n   and     a5, a5, t0\n"
     "        ld      a4, 8(s6)\n   ld      a3, 0(s6)\n   lw      a2, 16(s6)\n"
     "        addi    a1, s6, 24\n   mv      a0, s0\n   ld      t1, MW_CTX_ACTOR(s0)\n   jalr    t1\n"
     "        andi    a0, a0, 0xff\n   beqz    a0, .Lit_stop\n"

@@ -59362,6 +59362,32 @@ void dput(struct dentry *);
 struct dentry *offset_dir_lookup(struct dentry *parent, loff_t offset);
 """
 
+KERNEL_PORTS_DIRENT_SHIM = r"""
+typedef unsigned short umode_t;
+#define S_IFMT 0170000
+#define S_DT_SHIFT 12
+#define S_DT(mode) (((mode) & S_IFMT) >> S_DT_SHIFT)
+#define DT_UNKNOWN 0
+#define DT_FIFO 1
+#define DT_CHR 2
+#define DT_DIR 4
+#define DT_BLK 6
+#define DT_REG 8
+#define DT_LNK 10
+#define DT_SOCK 12
+#define DT_MAX 16
+#define FT_UNKNOWN 0
+#define FT_REG_FILE 1
+#define FT_DIR 2
+#define FT_CHRDEV 3
+#define FT_BLKDEV 4
+#define FT_FIFO 5
+#define FT_SOCK 6
+#define FT_SYMLINK 7
+#define FT_MAX 8
+#define EXPORT_SYMBOL_GPL(x)
+"""
+
 KERNEL_PORTS_COMMON = r"""
 /* ---- what the two implementations do, recorded ---- */
 struct record {
@@ -59439,11 +59465,6 @@ static struct dentry *(*lf_lookup)(struct dentry *, loff_t);
 void _raw_spin_lock(void *l) { int *p = l; if (*p) LF.bad++; *p = 1; LF.locks++; }
 void _raw_spin_unlock(void *l) { int *p = l; if (!*p) LF.bad++; *p = 0; }
 void dput(struct dentry *d) { LF.dputs++; if (d->d_lockref.count <= 0) LF.bad++; d->d_lockref.count--; }
-unsigned char fs_umode_to_dtype(unsigned short mode)
-{
-        static const unsigned char t[16] = {0, 1, 2, 0, 4, 0, 6, 0, 8, 0, 10, 0, 12, 0, 0, 0};
-        return t[(mode >> 12) & 15];
-}
 struct dentry *offset_dir_lookup(struct dentry *parent, loff_t offset) { return lf_lookup ? lf_lookup(parent, offset) : NULL; }
 
 bool fscrypt_has_encryption_key(const struct inode *inode) { (void)inode; return G.haskey; }
@@ -59808,8 +59829,7 @@ int main(int argc, char **argv)
                         for (int k = 0; k < len; k++) nm[k] = rnd();
                         d->d_name.name = nm; d->d_name.len = len;
                         inodes[i].i_ino = ((u64)rnd() << 32) | rnd();
-                        static const unsigned short modes[] = {0100644, 040755, 0120777, 020600, 060600, 010600, 0140777, 0, 0170000, 030000, 0150000};
-                        inodes[i].i_mode = modes[rnd() % 11];
+                        inodes[i].i_mode = (rnd() % 3 ? (rnd() % 16) << 12 : rnd() & 0xffff) | (rnd() & 0777);   /* every directory type, the four bits that map to nothing too */
                         d->d_inode = rnd() % 7 == 0 ? NULL : &inodes[i];
                         d->d_hash.pprev = rnd() % 10 == 0 ? NULL : &d->d_hash.next;
                         d->d_fsdata = (void *)off; offs[i] = off;
@@ -59904,7 +59924,7 @@ def harness_kernel_ports(argv):
                 return archive.extractfile("linux-%s/%s" % (version, relative)).read().decode()
         return None
 
-    sources = {name: kernel_file(name) for name in ("fs/ext4/namei.c", "fs/ext4/dir.c", "fs/ext4/hash.c", "fs/crypto/fname.c", "fs/libfs.c")}
+    sources = {name: kernel_file(name) for name in ("fs/ext4/namei.c", "fs/ext4/dir.c", "fs/ext4/hash.c", "fs/crypto/fname.c", "fs/libfs.c", "fs/fs_dirent.c")}
     if not all(sources.values()):
         print("kernel ports: NOT RUN -- no kernel source (linux/, KERNEL_SRC or artifacts/linux-%s.tar.xz)" % version)
         return 0
@@ -59924,6 +59944,7 @@ def harness_kernel_ports(argv):
         text = cut(sources["fs/ext4/namei.c"], header, "\n}\n", True)
         return "#define %s %s_c\n%s#undef %s\n" % (name, name, text, name)
 
+    dirent_code = KERNEL_PORTS_DIRENT_SHIM + sources["fs/fs_dirent.c"][sources["fs/fs_dirent.c"].index("static const unsigned char fs_dtype_by_ftype"):]
     libfs_code = "\n".join(cut(sources["fs/libfs.c"], head, "\n}\n", True) for head in (
         "static struct dentry *find_positive_dentry(struct dentry *parent,", "static bool offset_dir_emit(", "static void offset_iterate_dir("))
     libfs_code = KERNEL_PORTS_LIBFS_PRELUDE + libfs_code.replace("static void offset_iterate_dir(", "static void offset_iterate_dir_c(", 1)
@@ -59990,7 +60011,7 @@ def harness_kernel_ports(argv):
             oracle_text, test_text, plain, broken_text = ports[port]
             walk_text = oracle_text.replace(plain, broken_text, 1) if sabotage else oracle_text
             defines = {"x86_64": "-DCONFIG_X86_64", "arm64": "-DCONFIG_ARM64", "riscv64": "-DCONFIG_RISCV"}[arch]
-            (work / "oracle.c").write_text(KERNEL_PORTS_SHIM + hash_code + "\n" + dir_code + "\n" + match_code + "\n" + walk_text + KERNEL_PORTS_COMMON + test_text)
+            (work / "oracle.c").write_text(KERNEL_PORTS_SHIM + hash_code + "\n" + dir_code + "\n" + match_code + "\n" + dirent_code + "\n" + walk_text + KERNEL_PORTS_COMMON + test_text)
             objects = [str(work / "oracle.c"), str(work / "port.c")]
             if arch == "x86_64":
                 (work / "wide.c").write_text(
