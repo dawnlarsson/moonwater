@@ -40503,7 +40503,7 @@ def openssl_workbench(work):
     return openssl, issue
 
 
-def spark_shell_command(cc, output, anchor=None):
+def spark_shell_command(cc, output, anchor=None, defines=()):
     """The cc line that builds programs/shell.c as a spark image does, run from HARNESS_ROOT.
 
     Match freestanding spark builds: pin baseline x86-64 (no BMI2), keep
@@ -40520,6 +40520,7 @@ def spark_shell_command(cc, output, anchor=None):
             "-T", "src/build/spark.ld", "-Wl,-e,_start", "-Wl,--build-id=none",
             "-Wl,--no-warn-rwx-segments",
             *(['-DTLS_BENCH_ANCHOR="%s"' % anchor] if anchor else []),
+            *("-D" + define for define in defines),
             "-o", str(output), "programs/shell.c"]
 
 
@@ -43151,6 +43152,9 @@ typedef const p8 *const_string;
 #define COLD
 #define CONST
 #define PURE
+#define STRICT_SAFE 1
+#define STRICT_TIGHT 2
+#define MOONWATER_STRICT STRICT_SAFE
 #define fn void
 #define address_to *
 #define address_of &
@@ -44359,6 +44363,9 @@ def harness_wget_hostile(argv):
     parser = argparse.ArgumentParser(prog="differential.py --harness wget_hostile")
     parser.add_argument("--cc", default=os.environ.get("CC", "gcc"))
     parser.add_argument("--shell", help="a built shell to use instead of building one")
+    parser.add_argument("--tight-shell", help="a shell built with MOONWATER_STRICT=2")
+    parser.add_argument("--netns", help=argparse.SUPPRESS)
+    parser.add_argument("--tight", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if platform.system() != "Linux":
         print("wget hostile: NOT RUN -- needs Linux")
@@ -44380,13 +44387,13 @@ def harness_wget_hostile(argv):
         return lambda line, port: response.replace(b"PORT", b"%d" % port)
 
     class Server:
-        def __init__(self, script):
+        def __init__(self, script, address="127.0.0.1"):
             self.script = script
             self.lines = []
             self.hosts = []
             self.listener = socket.socket()
             self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.listener.bind(("127.0.0.1", 0))
+            self.listener.bind((address, 0))
             self.listener.listen(8)
             self.port = self.listener.getsockname()[1]
             threading.Thread(target=self.loop, daemon=True).start()
@@ -44493,6 +44500,40 @@ def harness_wget_hostile(argv):
     CASES.append(case("a Location naming 127.1", hop(b"http://127.1:PORT/z"),
                       "http://127.0.0.1:PORT/x", [GET(b"/x"), GET(b"/z")]))
 
+    #   The address policy of the tight tier, in a network namespace of its
+    #   own where 8.8.8.8 and 8.8.4.4 are loopback addresses: a chain that has
+    #   reached public space may not be sent back inside, and a chain that
+    #   never left the inside may go anywhere.  The default follows all of it,
+    #   as GNU wget and curl do.
+    if args.netns:
+        farm = Path(tempfile.mkdtemp(prefix="wget-netns-"))
+        (farm / "wget").symlink_to(args.netns)
+        rows = [
+            ("public to loopback", "8.8.8.8", b"http://127.0.0.1:PORT/z", False),
+            ("public to a legacy spelling of loopback", "8.8.8.8", b"http://2130706433:PORT/z", False),
+            ("public to public", "8.8.8.8", b"http://8.8.4.4:PORT/z", True),
+            ("loopback to loopback", "127.0.0.1", b"http://127.0.0.1:PORT/z", True),
+            ("loopback to public", "127.0.0.1", b"http://8.8.8.8:PORT/z", True),
+        ]
+        failures = 0
+        for name, first, location, follows in rows:
+            server = Server(hop(location), "0.0.0.0")
+            done = subprocess.run([str(farm / "wget"), "-O", "saved",
+                                   "http://%s:%d/x" % (first, server.port)],
+                                  capture_output=True, timeout=60, cwd=str(farm))
+            server.close()
+            want = [GET(b"/x"), GET(b"/z")] if follows or not args.tight else [GET(b"/x")]
+            code = 0 if follows or not args.tight else 1
+            good = server.lines == want and done.returncode == code and (
+                follows or not args.tight or b"not public" in done.stderr)
+            if not good:
+                failures += 1
+                print("FAIL %s %s: lines %r exit %d (%s)" % (
+                    "tight" if args.tight else "default", name, server.lines,
+                    done.returncode, done.stderr[-120:]))
+        print("PASS %d" % (len(rows) - failures))
+        return 1 if failures else 0
+
     checks = Checks()
     with tempfile.TemporaryDirectory(prefix="wget-hostile-") as temporary:
         work = Path(temporary)
@@ -44540,6 +44581,40 @@ def harness_wget_hostile(argv):
                     have = saved.read_bytes() if saved.exists() else None
                     checks(have == one["saved"], "%s: saved %r, wanted %r" % (
                         label, have, one["saved"]))
+        #   The address policy, by the default shell and by a tight-tier build.
+        probe = subprocess.run(["unshare", "-Urn", "sh", "-c",
+                                "ip link set lo up && ip addr add 8.8.8.8/32 dev lo"],
+                               capture_output=True) if shutil.which("unshare") and shutil.which("ip") \
+            else None
+        if probe is None or probe.returncode:
+            print("wget hostile: address policy rows skipped (no unshare -Urn with ip)")
+        else:
+            tight = Path(args.tight_shell) if args.tight_shell else work / "tight"
+            if not args.tight_shell:
+                built = subprocess.run(spark_shell_command(
+                    args.cc, tight, defines=("MOONWATER_STRICT=2",)), cwd=HARNESS_ROOT,
+                    capture_output=True, text=True)
+                checks(built.returncode == 0, "the tight-tier shell did not build: "
+                       + built.stderr[-300:])
+            for level, path in (("default", shell), ("tight", tight)):
+                if not path.exists():
+                    continue
+                inside = subprocess.run(
+                    ["unshare", "-Urn", "sh", "-c",
+                     'ip link set lo up && ip addr add 8.8.8.8/32 dev lo && '
+                     'ip addr add 8.8.4.4/32 dev lo && exec "$0" "$@"',
+                     sys.executable, str(Path(__file__).resolve()), "--harness",
+                     "wget_hostile", "--netns", str(path)] + (
+                         ["--tight"] if level == "tight" else []),
+                    capture_output=True, text=True, timeout=300)
+                for line in inside.stdout.splitlines():
+                    if line.startswith("FAIL"):
+                        checks(False, line)
+                passed = [int(line.split()[1]) for line in inside.stdout.splitlines()
+                          if line.startswith("PASS")]
+                checks(inside.returncode == 0 and passed == [5],
+                       "address policy, %s shell: exit %d, %s" % (
+                           level, inside.returncode, inside.stderr[-300:] or inside.stdout[-300:]))
     return checks.verdict("wget hostile", "wget-hostile")
 
 

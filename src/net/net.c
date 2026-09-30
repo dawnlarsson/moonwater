@@ -8334,6 +8334,9 @@ static bipolar tls_read_until(
 #define HTTP_NOT_YET (-15)
 //      Or that none of its names was the host's.
 #define HTTP_MISMATCH (-16)
+//      STRICT_TIGHT only: a redirect that leaves public address space for
+//      an address that is not public.
+#define HTTP_PRIVATE (-17)
 
 typedef byte_store http_buffer;
 #define http_forget(buffer) byte_store_release(buffer)
@@ -10064,6 +10067,9 @@ static bipolar http_run(string_address start, const http_manners address_to how,
         http_buffer whole = {0};
         positive hop;
         bool secure = false;
+#if MOONWATER_STRICT >= STRICT_TIGHT
+        bool reached_public = false;
+#endif
         bipolar status;
 
         if (string_length(start) >= sizeof url)
@@ -10102,6 +10108,23 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                             how->version_minor, how->agent, address_of used);
                 if (!status && !(ip = http_lookup(host)))
                         status = HTTP_NO_HOST;
+#if MOONWATER_STRICT >= STRICT_TIGHT
+                /* Once a chain has reached public space no later hop may
+                   go back inside: a name that resolves, or a Location that
+                   spells, an address on this host or its network is how a
+                   server it was pointed at reaches what it was never given.
+                   GNU wget and curl follow such a redirect, so it is the
+                   tight tier's; a chain that starts inside may go anywhere,
+                   and the address checked is the one connected to. */
+                if (!status)
+                {
+                        bool outside = http_address_public(ip);
+
+                        if (reached_public && !outside)
+                                status = HTTP_PRIVATE;
+                        reached_public |= outside;
+                }
+#endif
                 if (status)
                         goto done;
 
