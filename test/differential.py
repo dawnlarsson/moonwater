@@ -12066,6 +12066,11 @@ MISC_UTILITIES = (
                       ("F81D4FAE-7DEC-11D0-A765-00A0C91E6BF6",), ("garbage",), ("",), ("f81d4fae-7dec-11d0-a765-00a0c91e6bf6", "garbage",
                       "00000000-0000-0000-0000-000000000000"), ("f81d4fae7dec11d0a76500a0c91e6bf6",),
                       ("{f81d4fae-7dec-11d0-a765-00a0c91e6bf6}",), ("c232ab00-9414-11ec-b3c8-9f6bdeced846",)),
+            # Raw output escapes every byte above 0x7f as well as controls, space and backslash: a
+            # multibyte name is \xc3\xa9 there. The table writes a control or a tab as \x01 and \x09 but
+            # a byte above 0x7f as it is, in every table tool, so no row here puts one in that mode.
+            extra=(("-r", "\u00e9x"), ("-r", "a\x01b"), ("-r", "-o", "TYPE,UUID", "\u00e9x", "a b"),
+                   ("--raw", "-n", "\u00e9\u00e9"), ("a\x01b",), ("-n", "a\tb"), ("-o", "TYPE,UUID", "a\x01b", "x")),
             stdin=("empty",), fixture="misc", stderr="loose"),
 
     Utility("mcookie",

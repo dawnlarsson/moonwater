@@ -8434,198 +8434,6 @@ static fn tools_uuid_record_read(string_address text,
         tools_clock_iso(record->time, seconds, ' ', ',', microseconds);
 }
 
-static const string_address tools_uuid_column_names[] = {
-    (string_address)"UUID", (string_address)"VARIANT",
-    (string_address)"TYPE", (string_address)"TIME",
-};
-
-static bool tools_uuid_columns(string_address text, p8 address_to columns,
-                               positive address_to count)
-{
-        address_to count = 0;
-        return name_list_select(
-            text, tools_uuid_column_names, sizeof(tools_uuid_column_names[0]),
-            array_count(tools_uuid_column_names), columns, count, 32,
-            NAME_LIST_REJECT_TRAILING, null);
-}
-
-static string_address tools_uuid_cell(tools_uuid_record address_to record,
-                                      p8 column)
-{
-        if (column == TOOLS_UUID_COLUMN_UUID)
-                return record->original;
-        if (column == TOOLS_UUID_COLUMN_VARIANT)
-                return record->variant;
-        if (column == TOOLS_UUID_COLUMN_TYPE)
-                return record->type;
-        return record->time;
-}
-
-static fn tools_uuid_safe_cell(string_address value)
-{
-        writer_hex_escaped(text_put, value, string_length(value),
-                           HEX_CONTROL | HEX_TAB | HEX_SPACE | HEX_SLASH);
-}
-
-static const argument_option tools_uuidparse_options[] = {
-    {"json", 'J'},
-    {"noheadings", 'n'},
-    {"output", 'o', ARGUMENT_REQUIRED},
-    {"raw", 'r'},
-    {null},
-};
-
-static b32 tools_uuidparse()
-{
-        file_operands_begin();
-        tools_taking("uuidparse", tools_uuidparse_options,
-                     .operand = file_operand);
-        if (!file_take(address_of taking) || file_operand_failed)
-                return text_done(1);
-
-        bool json = (taking.flags & FILE_FLAG('J')) != 0;
-        bool noheadings = (taking.flags & FILE_FLAG('n')) != 0;
-        bool raw = (taking.flags & FILE_FLAG('r')) != 0;
-        text_refuse(json && raw, "--json and --raw cannot be combined");
-
-        p8 columns[32] = {
-            TOOLS_UUID_COLUMN_UUID, TOOLS_UUID_COLUMN_VARIANT,
-            TOOLS_UUID_COLUMN_TYPE, TOOLS_UUID_COLUMN_TIME,
-        };
-        positive column_count = 4;
-        string_address output = file_option_value(address_of taking, 'o');
-        // util-linux fails an empty list without a word.
-        if (output && !string_get(output))
-                return text_done(1);
-        if (output && !tools_uuid_columns(output, columns, address_of column_count))
-                return text_done(string_diagnostic(&text_diagnostic, 1, output, "unknown or excessive output column"));
-        // Nothing to parse prints nothing, not even the heading -- but
-        // --json still prints the envelope that holds no uuids.
-        if (!file_operand_count)
-        {
-                if (json)
-                        text_put_string("{\n   \"uuids\": [\n\n   ]\n}\n");
-
-                return text_done(0);
-        }
-
-        if (json)
-        {
-                text_put_string("{\n   \"uuids\": [\n");
-                for (positive row = 0; row < file_operand_count; row++)
-                {
-                        tools_uuid_record record;
-                        tools_uuid_record_read(file_operand_at(row),
-                                               address_of record);
-                        text_put_string(row ? ",{\n" : "      {\n");
-                        for (positive at = 0; at < column_count; at++)
-                        {
-                                p8 column = columns[at];
-                                text_put_string("         \"");
-                                string_address key =
-                                    tools_uuid_column_names[column];
-                                while (string_get(key))
-                                        text_put_character(byte_to_lower(
-                                            string_get(key++)));
-                                text_put_string("\": ");
-                                string_address value =
-                                    tools_uuid_cell(address_of record, column);
-                                //      An empty cell is no string at all to
-                                //      the reference's table writer, whatever
-                                //      column it stands in -- the uuid of an
-                                //      empty operand included.
-                                if (!string_get(value))
-                                        text_put_string("null");
-                                else
-                                        writer_json_string(text_put, value);
-                                text_put_string(at + 1 < column_count
-                                                    ? ",\n" : "\n");
-                        }
-                        text_put_string("      }");
-                }
-                text_put_string("\n   ]\n}\n");
-                return text_done(0);
-        }
-
-        positive widths[32];
-        positive filled[32];
-        for (positive at = 0; at < column_count; at++)
-        {
-                widths[at] = noheadings ? 0
-                                        : string_length(
-                                              tools_uuid_column_names[columns[at]]);
-                filled[at] = 0;
-        }
-
-        for (positive row = 0; row < file_operand_count; row++)
-        {
-                tools_uuid_record record;
-                tools_uuid_record_read(file_operand_at(row), address_of record);
-                for (positive at = 0; at < column_count; at++)
-                {
-                        positive length = string_length(tools_uuid_cell(
-                            address_of record, columns[at]));
-
-                        widths[at] = max(widths[at], length);
-                        filled[at] = max(filled[at], length);
-                }
-        }
-
-        /*
-                The reference's table hands each column a width hint and
-                spends the spare room on it -- but only on a column that has
-                something in it. A column every row left empty keeps the
-                width of its heading, or none at all when there is no
-                heading, which is why an all-zero UUID prints TYPE four
-                columns wide and a bad one prints it ten.
-        */
-        if (!raw)
-                for (positive at = 0; at < column_count; at++)
-                {
-                        if (!filled[at])
-                                continue;
-                        if (columns[at] == TOOLS_UUID_COLUMN_UUID)
-                                /* A uuid is thirty-six bytes and the column
-                                   the reference gives it is one wider, which
-                                   is where the second space after it comes
-                                   from. */
-                                widths[at] = max(widths[at], (positive)37);
-                        else if (columns[at] == TOOLS_UUID_COLUMN_VARIANT)
-                                widths[at] = max(widths[at], noheadings
-                                                                ? (positive)9
-                                                                : (positive)7);
-                        else if (columns[at] == TOOLS_UUID_COLUMN_TYPE)
-                                widths[at] = max(widths[at], (positive)10);
-                }
-
-        for (positive row = 0; row < file_operand_count + !noheadings; row++)
-        {
-                bool heading = !noheadings && !row;
-                tools_uuid_record record;
-                if (!heading)
-                        tools_uuid_record_read(file_operand_at(row - !noheadings),
-                                               address_of record);
-                for (positive at = 0; at < column_count; at++)
-                {
-                        if (at)
-                                writer_fill_bulk(text_put, 1, ' ');
-                        string_address value = heading
-                            ? tools_uuid_column_names[columns[at]]
-                            : tools_uuid_cell(address_of record, columns[at]);
-                        positive length = string_length(value);
-                        if (raw)
-                                tools_uuid_safe_cell(value);
-                        else
-                                text_put((p8 address_to)value, length);
-                        if (!raw && at + 1 < column_count)
-                                writer_fill_bulk(text_put, widths[at] - length, ' ');
-                }
-                text_put_character('\n');
-        }
-
-        return text_done(0);
-}
-
 static const argument_option tools_mcookie_options[] = {
     {"file", 'f', ARGUMENT_REQUIRED},
     {"max-size", 'm', ARGUMENT_REQUIRED},
@@ -20694,6 +20502,100 @@ static fn ul_table_print(string_address json_name, address_any rows,
                        array_count(definitions), columns, selected,          \
                        headings, raw, field, layout)
 #define ul_table(...) ul_table_with(0, __VA_ARGS__)
+
+// uuidparse -------------------------------------------------------
+
+static ul_table_column tools_uuid_definitions[] = {
+    {(string_address)"uuid", (string_address)"UUID", 0, false, TABLE_NULL_STRING},
+    {(string_address)"variant", (string_address)"VARIANT", 0, false, TABLE_NULL_STRING},
+    {(string_address)"type", (string_address)"TYPE", 0, false, TABLE_NULL_STRING},
+    {(string_address)"time", (string_address)"TIME", 0, false, TABLE_NULL_STRING},
+};
+
+// The rows are the operand list itself, and a row is read as it is asked for:
+// the cells of one operand come one after another, so the last is kept.
+static b32 address_to tools_uuid_seen;
+static tools_uuid_record tools_uuid_last;
+
+static string_address tools_uuid_field(address_any row, p8 column, p8 address_to scratch)
+{
+        if (row != tools_uuid_seen)
+        {
+                tools_uuid_record_read(program_argument(address_to (b32 address_to)row),
+                                       address_of tools_uuid_last);
+                tools_uuid_seen = row;
+        }
+        tools_uuid_record address_to record = address_of tools_uuid_last;
+
+        return column == TOOLS_UUID_COLUMN_UUID ? record->original
+             : column == TOOLS_UUID_COLUMN_VARIANT ? record->variant
+             : column == TOOLS_UUID_COLUMN_TYPE ? record->type : (string_address)record->time;
+}
+
+static const argument_option tools_uuidparse_options[] = {
+    {"json", 'J'},
+    {"noheadings", 'n'},
+    {"output", 'o', ARGUMENT_REQUIRED},
+    {"raw", 'r'},
+    {null},
+};
+
+static b32 tools_uuidparse()
+{
+        file_operands_begin();
+        tools_taking("uuidparse", tools_uuidparse_options,
+                     .operand = file_operand);
+        if (!file_take(address_of taking) || file_operand_failed)
+                return text_done(1);
+
+        bool json = (taking.flags & FILE_FLAG('J')) != 0;
+        bool noheadings = (taking.flags & FILE_FLAG('n')) != 0;
+        bool raw = (taking.flags & FILE_FLAG('r')) != 0;
+        text_refuse(json && raw, "--json and --raw cannot be combined");
+
+        p8 columns[32] = {
+            TOOLS_UUID_COLUMN_UUID, TOOLS_UUID_COLUMN_VARIANT,
+            TOOLS_UUID_COLUMN_TYPE, TOOLS_UUID_COLUMN_TIME,
+        };
+        positive column_count = 4;
+        string_address output = file_option_value(address_of taking, 'o');
+        // util-linux fails an empty list without a word.
+        if (output && !string_get(output))
+                return text_done(1);
+        column_count = output ? 0 : 4;
+        if (output && !name_list_select(output, tools_uuid_definitions, sizeof(tools_uuid_definitions[0]),
+                                        array_count(tools_uuid_definitions), columns, address_of column_count,
+                                        32, NAME_LIST_REJECT_TRAILING, null))
+                return text_done(string_diagnostic(&text_diagnostic, 1, output, "unknown or excessive output column"));
+
+        /*
+                The reference's table hands each column a width hint and
+                spends the spare room on it -- but only on a column that has
+                something in it. A column every row left empty keeps the
+                width of its heading, or none at all when there is no
+                heading, which is why an all-zero UUID prints TYPE four
+                columns wide and a bad one prints it ten. A uuid is
+                thirty-six bytes and the column the reference gives it is
+                one wider, which is where the second space after it comes
+                from.
+        */
+        static const p8 hint[] = {37, 7, 10, 0};
+
+        for (positive column = 0; column < array_count(tools_uuid_definitions); column++)
+                tools_uuid_definitions[column].width = 0;
+        for (positive row = 0; !raw && !json && row < file_operand_count; row++)
+                for (positive column = 0; column < array_count(tools_uuid_definitions); column++)
+                        if (string_get(tools_uuid_field(file_operand_list + row, (p8)column, null)))
+                                tools_uuid_definitions[column].width = hint[column];
+        if (noheadings && tools_uuid_definitions[TOOLS_UUID_COLUMN_VARIANT].width)
+                tools_uuid_definitions[TOOLS_UUID_COLUMN_VARIANT].width = 9;
+
+        tools_uuid_seen = null;
+        ul_table_with(UL_LAYOUT_DECLARED, json ? "uuids" : null, file_operand_list, file_operand_count,
+                      tools_uuid_definitions, columns, column_count, !noheadings, raw, tools_uuid_field);
+        return text_done(0);
+}
+
 
 // lsclocks --------------------------------------------------------
 
