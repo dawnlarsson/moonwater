@@ -1644,7 +1644,19 @@ static bipolar net_wake_watch = -1;
 static bipolar net_events_watch = -1;
 static bool net_exchange_cut;
 
+//      The second before which nothing asks for a lease again: RFC 2131 has a
+//      client wait at least ten seconds after a DHCPDECLINE, whatever link
+//      news arrives meanwhile.
+#define NET_DECLINE_HOLD_SECONDS 10
+static positive net_decline_until;
+
+//      A link gets twelve seconds; the tight tier's conflict probe takes up
+//      to seven of its own (RFC 5227's spacing) and is given that much more.
+#if MOONWATER_STRICT >= STRICT_TIGHT
+#define NET_DHCP_WATCH_SECONDS 20
+#else
 #define NET_DHCP_WATCH_SECONDS 12
+#endif
 #define NET_DHCP_TIMED_OUT (-10)
 #define NET_DHCP_INTERRUPTED (-11)
 
@@ -1793,6 +1805,7 @@ static COLD bipolar net_dhcp_apart(string_address device, p8 address_to hardware
         if (answer.status != DHCP_OK)
                 return answer.status == DHCP_NO_OFFER ||
                                answer.status == DHCP_REFUSED ||
+                               answer.status == DHCP_CONFLICT ||
                                answer.status == DHCP_NO_RANDOM
                            ? answer.status
                            : DHCP_NO_SOCKET;
@@ -1863,6 +1876,14 @@ static COLD b32 net_auto(b32 handle, net_holding address_to held)
                                 return net_refused((string_address) "link up", status);
                 }
 
+                if (net_seconds() < net_decline_until)
+                {
+                        string_format(net_out,
+                                      "ip: holding off after a declined address\n");
+                        net_flush();
+                        return 1;
+                }
+
                 string_format(net_out, "ip: asking for a lease\n");
                 net_flush();
 
@@ -1889,6 +1910,15 @@ static COLD b32 net_auto(b32 handle, net_holding address_to held)
         {
                 if (status == DHCP_REFUSED)
                         string_format(net_out, "ip: the server refused the request\n");
+                else if (status == DHCP_CONFLICT)
+                {
+                        //      RFC 2131: wait at least ten seconds after a
+                        //      DHCPDECLINE before asking again.
+                        net_decline_until = net_seconds() +
+                                            NET_DECLINE_HOLD_SECONDS;
+                        string_format(net_out,
+                                      "ip: the address offered is in use on this network; declined it\n");
+                }
                 else if (status == DHCP_NO_OFFER)
                         string_format(net_out, "ip: nobody offered a lease\n");
                 else if (status == DHCP_NO_RANDOM)
@@ -1904,6 +1934,9 @@ static COLD b32 net_auto(b32 handle, net_holding address_to held)
         if (net_apply_lease(handle, search.index, search.name,
                             search.hardware, address_of lease, held, true))
                 return 1;
+        //      Tell the neighbours (ARP announcements, RFC 5227 2.3), after the
+        //      address and the route are in and the lease line is out.
+        dhcp_announce(search.name, search.hardware, lease.address);
         /* Counted once the lease is taken, not before the exchange:
            bringing a link up can itself cost a carrier loss -- a PHY that
            starts by dropping the carrier it was registered with -- which
@@ -2342,6 +2375,14 @@ static COLD fn net_kernel_defaults(void)
                           "2\n",
 #endif
                           false);
+        //      ARP: answer only for an address of the interface it came in on,
+        //      announce with the best local address, answer only when the
+        //      route back to the asker is this interface's, and tell the
+        //      neighbours when the interface comes up.
+        net_sysctl_family("/proc/sys/net/ipv4/conf", "arp_ignore", "1\n", false);
+        net_sysctl_family("/proc/sys/net/ipv4/conf", "arp_announce", "2\n", false);
+        net_sysctl_family("/proc/sys/net/ipv4/conf", "arp_filter", "1\n", false);
+        net_sysctl_family("/proc/sys/net/ipv4/conf", "arp_notify", "1\n", false);
         for (positive at = 0; quiet_v6[at]; at++)
                 net_sysctl_family("/proc/sys/net/ipv6/conf", quiet_v6[at],
                                   "0\n", true);
@@ -2441,7 +2482,12 @@ static COLD b32 net_watch(void)
                                 due = net_lease_due_in(address_of held,
                                                        net_seconds());
                         else
+                        {
                                 due = retry_seconds;
+                                if (net_seconds() < net_decline_until &&
+                                    due < net_decline_until - net_seconds())
+                                        due = net_decline_until - net_seconds();
+                        }
 
                         waited[0].descriptor = (b32)events;
                         waited[0].events = SYSTEM_POLL_READ;

@@ -38993,6 +38993,7 @@ typedef int b32;
 #define array_count(a) (sizeof(a) / sizeof((a)[0]))
 #define min(a, b) ((a) < (b) ? (a) : (b))
 #define memory_compare memcmp
+#define memory_fill(at, value, size) memset(at, value, size)
 #define memory_copy memmove
 #define memory_zero(at, size) memset(at, 0, size)
 #define null 0
@@ -39324,6 +39325,45 @@ int main(int argc, char **argv) {
                 else if (frames_bad++ < 5)
                         printf("  FAIL frame %ld (%s): verdict %ld, wanted %d\n", n, names[fault], verdict, valid);
         }
+        /* ARP messages for the conflict probe (dhcp_arp_conflict), as bytes
+           drawn from the fields that matter and a model written from RFC
+           5227: another machine naming the address as its sender, or
+           another probe for it, in a request or a reply of Ethernet and
+           IPv4 shape, in a message of at least twenty-eight bytes. */
+        unsigned long arps = 0, arps_bad = 0;
+        for (long n = 0; n < count / 8; n++) {
+                p8 mine[6] = {2, 0, 0, 0, 0, 1};
+                p32 address = 0x0a4d0032;
+                p32 size = draw(6) ? 28 + draw(8) : draw(28);
+                p8 *message = calloc(size ? size : 1, 1);
+                p8 full[64] = {0};
+                full[1] = draw(9) ? 1 : (p8)draw(3);
+                full[2] = draw(9) ? 8 : (p8)draw(2);
+                full[4] = draw(9) ? 6 : (p8)draw(8);
+                full[5] = draw(9) ? 4 : (p8)draw(8);
+                full[7] = draw(5) ? (draw(2) ? 1 : 2) : (p8)draw(5);
+                for (int i = 0; i < 6; i++) full[8 + i] = draw(3) ? (i == 5 ? 2 : 0) : mine[i];
+                full[8 + 5] = draw(3) ? 2 : 1;
+                p32 pick = draw(4);
+                p32 sender = pick == 0 ? address : pick == 1 ? 0 : pick == 2 ? address + 1 : draw(0);
+                p32 target = draw(2) ? address : draw(0);
+                put32(full + 14, sender);
+                put32(full + 24, target);
+                memcpy(message, full, size < 64 ? size : 64);
+                bool model = size >= 28 && full[0] == 0 && full[1] == 1 && full[2] == 8 && full[3] == 0 &&
+                             full[4] == 6 && full[5] == 4 && full[6] == 0 && (full[7] == 1 || full[7] == 2) &&
+                             memcmp(full + 8, mine, 6) != 0 &&
+                             (sender == address || (full[7] == 1 && sender == 0 && target == address));
+                bool got = dhcp_arp_conflict(message, size, mine, address);
+                free(message);
+                arps++;
+                if (got != model && arps_bad++ < 5)
+                        printf("  FAIL arp %ld: verdict %d, model %d\n", n, got, model);
+        }
+        fprintf(stdout, "  arp messages %lu, wrong %lu\n", arps, arps_bad);
+        whole += arps;
+        agreed += arps - arps_bad;
+        wrong += arps_bad;
         fprintf(stdout, "  frames %lu agreed %lu\n", frames, frames_agreed);
         whole += frames;
         agreed += frames_agreed;
