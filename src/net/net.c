@@ -8527,6 +8527,58 @@ static bool http_web_scheme(string_address url, positive scheme)
                !memory_compare_ascii_case(url, "https", scheme - 1);
 }
 
+/* A URL made fit for a request line the way GNU wget and curl make one: after
+   the authority, a space, a backslash and every byte over 0x7f become %XX,
+   upper case, and every other byte -- '%' included, so an escape already
+   there is never doubled -- goes through as it came.  A server's Location
+   with a space or UTF-8 in it (or a URL typed with one) is a real answer that
+   both fetch, where the parser's refusal of them stays the backstop for any
+   caller that skips this.  The authority is left exactly as written for the
+   parser to judge: url is a whole URL, whose authority follows "scheme://"
+   or, when bare_host, starts it; otherwise it is a reference, whose only
+   authority follows a leading "//".  The text is length bytes and ends in a
+   terminator; into holds the answer whole with its own or it is HTTP_BAD_URL. */
+static bipolar http_url_escape(string_address url, positive length, bool bare_host,
+                               p8 address_to into, positive room)
+{
+        positive scheme = length ? http_scheme_length(url) : 0;
+        positive at = 0;
+        positive used;
+
+        if (scheme && scheme + 2 <= length && url[scheme] == '/' &&
+            url[scheme + 1] == '/')
+                at = scheme + 2;
+        else if (!bare_host && length > 1 && url[0] == '/' && url[1] == '/')
+                at = 2;
+        if (at || bare_host)
+                at += string_span_without_set(url + at, "/?#");
+        if (at >= room)
+                return HTTP_BAD_URL;
+        memory_copy(into, url, at);
+        used = at;
+        for (; at < length; at++)
+        {
+                p8 byte = (p8)url[at];
+
+                if (byte == ' ' || byte == '\\' || byte > 0x7f)
+                {
+                        if (used + 3 >= room)
+                                return HTTP_BAD_URL;
+                        into[used++] = '%';
+                        into[used++] = (p8)"0123456789ABCDEF"[byte >> 4];
+                        into[used++] = (p8)"0123456789ABCDEF"[byte & 15];
+                }
+                else
+                {
+                        if (used + 1 >= room)
+                                return HTTP_BAD_URL;
+                        into[used++] = byte;
+                }
+        }
+        into[used] = end;
+        return HTTP_OK;
+}
+
 /*
         http://host[:port][/path] taken apart.
 
@@ -10243,6 +10295,7 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                     http_response_is_redirect(response.code))
                 {
                         p8 placed[HTTP_URL_MAX];
+                        p8 escaped[HTTP_URL_MAX];
 
                         status = !response.location_length ? HTTP_MALFORMED
                                  : response.location_length >= sizeof placed
@@ -10252,8 +10305,11 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                                 memory_copy(placed, response.location,
                                             response.location_length);
                                 placed[response.location_length] = end;
-                                status = http_absolutize(tls, host, port, path, placed,
-                                                         next, sizeof next);
+                                status = http_url_escape(placed, response.location_length,
+                                                         false, escaped, sizeof escaped);
+                                if (!status)
+                                        status = http_absolutize(tls, host, port, path,
+                                                                 escaped, next, sizeof next);
                                 //      The next hop, or the Location a failure
                                 //      names; both terminate inside a buffer
                                 //      exactly as large as url.
