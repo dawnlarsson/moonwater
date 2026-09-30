@@ -8344,6 +8344,743 @@ static void ns_run(ns_u64 first, ns_u64 count, ns_u64 verbose, int chosen)
 }
 #endif
 
+#elif defined(SHARED_error_body)
+/*
+        The transcript CHECK_error and CHECK_error_reference both print.
+
+        One body, so the two cannot drift: it is written against the names
+        the library gives errno and the POSIX wrappers, and each half says
+        what those names are -- the library's own under CHECK_error, glibc's
+        under CHECK_error_reference -- and how a line and a flush are made:
+        error_trace takes the library's format (%b a bipolar, %p a positive,
+        %s a string), error_flush is the flush perror's ordering needs, and
+        error_sync is sync as an answer. Everything printed with the
+        TRANSCRIPT prefix is the contract and must not be reordered.
+
+        error_test_transcript is the whole of it, in the order both print it.
+*/
+#define ERROR_TEST_DIRECTORY "/tmp/dawning-error-test"
+#define ERROR_TEST_FILE "/tmp/dawning-error-test/one"
+#define ERROR_TEST_LINK "/tmp/dawning-error-test/link"
+#define ERROR_TEST_ABSENT "/tmp/dawning-error-test/absent"
+
+/*
+        A buffer shown byte for byte, so a terminator that is or is not there
+        is visible in the diff.
+
+        The buffer is filled with '@' before the call and this prints two
+        bytes past what was asked for, so a routine that wrote one byte too
+        many shows an overwritten '@' rather than nothing at all. A zero byte
+        prints as '|', which is what glibc's side prints for it too.
+*/
+static fn error_test_shown(p8 address_to into, p8 address_to buffer,
+                           positive count)
+{
+        positive at;
+
+        for (at = 0; at < count; at++)
+                into[at] = buffer[at] == 0 ? '|' : buffer[at];
+
+        into[count] = end;
+}
+
+static fn error_test_strerror_r_line(b32 number, positive size)
+{
+        p8 buffer[128];
+        p8 shown[136];
+        b32 answer;
+
+        memory_fill(buffer, '@', sizeof buffer);
+        answer = strerror_r(number, buffer, size);
+        error_test_shown(shown, buffer, size + 2 < 128 ? size + 2 : 128);
+
+        error_trace("TRANSCRIPT strerror_r %b %p rc=%b [%s]\n",
+                      (bipolar)number, size, (bipolar)answer, shown);
+}
+
+static fn error_test_messages(void)
+{
+        b32 number;
+
+        for (number = 0; number <= 140; number++)
+                error_trace("TRANSCRIPT strerror %b [%s]\n",
+                              (bipolar)number, strerror(number));
+
+        error_trace("TRANSCRIPT strerror %b [%s]\n", (bipolar)-1,
+                      strerror(-1));
+        error_trace("TRANSCRIPT strerror %b [%s]\n", (bipolar)-7,
+                      strerror(-7));
+        error_trace("TRANSCRIPT strerror %b [%s]\n", (bipolar)1000,
+                      strerror(1000));
+
+        //      Every code the table knows and a few either side of it, at
+        //      every size from nothing to past the longest message: the
+        //      bytes written, the terminator, what is left alone, and the
+        //      answer -- EINVAL beating ERANGE in the holes of the numbering.
+        for (number = -8; number <= 141; number++)
+                for (positive size = 0; size <= 64; size++)
+                        error_test_strerror_r_line(number == 141 ? 1000 : number, size);
+}
+
+static fn error_test_perror(void)
+{
+        error_flush();
+        errno = ENOENT;
+        perror((string_address) "TRANSCRIPT perror named");
+
+        error_flush();
+        errno = ENOENT;
+        perror((string_address) "");
+
+        error_flush();
+        errno = ENOENT;
+        perror(null);
+
+        error_flush();
+        errno = 41;
+        perror((string_address) "TRANSCRIPT perror unknown");
+
+        error_flush();
+        errno = 0;
+        perror((string_address) "TRANSCRIPT perror success");
+}
+
+//      Result and errno on one line, which is the whole of what a wrapper
+//      promises and the whole of what the reference prints.
+static fn error_test_said(string_address what, bipolar result)
+{
+        error_trace("TRANSCRIPT call %s -> %b errno %b\n", what, result,
+                      (bipolar)errno);
+}
+
+static fn error_test_wrappers(void)
+{
+        p8 room[64];
+        p8 small[4];
+        b32 pair[2];
+        b32 handle;
+        error_stat one;
+        bipolar got;
+
+        //      A clean slate, without reporting whether the cleaning worked:
+        //      a previous run may have left nothing behind.
+        unlink((string_address)ERROR_TEST_LINK);
+        unlink((string_address)ERROR_TEST_FILE);
+        rmdir((string_address)ERROR_TEST_DIRECTORY);
+
+        errno = 0;
+        error_test_said((string_address) "mkdir",
+                        mkdir((string_address)ERROR_TEST_DIRECTORY, 0755));
+
+        errno = 0;
+        error_test_said((string_address) "mkdir-again",
+                        mkdir((string_address)ERROR_TEST_DIRECTORY, 0755));
+
+        errno = 0;
+        handle = open((string_address)ERROR_TEST_FILE,
+                      O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        error_test_said((string_address) "open-create", (bipolar)(handle >= 0));
+
+        errno = 0;
+        error_test_said((string_address) "write",
+                        write(handle, (address_any) "abcdefgh", 8));
+
+        errno = 0;
+        error_test_said((string_address) "lseek-end",
+                        lseek(handle, 0, SEEK_END));
+
+        errno = 0;
+        error_test_said((string_address) "read-on-write-only",
+                        read(handle, room, 4));
+
+        errno = 0;
+        error_test_said((string_address) "close", close(handle));
+
+        errno = 0;
+        error_test_said((string_address) "close-twice", close(handle));
+
+        errno = 0;
+        error_test_said((string_address) "open-missing",
+                        open((string_address)ERROR_TEST_ABSENT, O_RDONLY));
+
+        errno = 0;
+        error_test_said((string_address) "open-exclusive-existing",
+                        open((string_address)ERROR_TEST_FILE,
+                             O_WRONLY | O_CREAT | O_EXCL, 0644));
+
+        errno = 0;
+        error_test_said((string_address) "open-directory-for-write",
+                        open((string_address)ERROR_TEST_DIRECTORY,
+                             O_WRONLY));
+
+        errno = 0;
+        error_test_said((string_address) "stat",
+                        stat((string_address)ERROR_TEST_FILE, &one));
+
+        error_trace("TRANSCRIPT stat size %b regular %b directory %b\n",
+                      (bipolar)one.st_size,
+                      (bipolar)(S_ISREG(one.st_mode) ? 1 : 0),
+                      (bipolar)(S_ISDIR(one.st_mode) ? 1 : 0));
+
+        error_trace("TRANSCRIPT stat permission %p links %b\n",
+                      (positive)(one.st_mode & 07777),
+                      (bipolar)one.st_nlink);
+
+        errno = 0;
+        error_test_said((string_address) "stat-missing",
+                        stat((string_address)ERROR_TEST_ABSENT, &one));
+
+        errno = 0;
+        error_test_said((string_address) "stat-directory",
+                        stat((string_address)ERROR_TEST_DIRECTORY, &one));
+
+        error_trace("TRANSCRIPT stat directory-bit %b\n",
+                      (bipolar)(S_ISDIR(one.st_mode) ? 1 : 0));
+
+        errno = 0;
+        error_test_said((string_address) "symlink",
+                        symlink((string_address) "one",
+                                (string_address)ERROR_TEST_LINK));
+
+        errno = 0;
+        memory_fill(room, '@', sizeof room);
+        got = readlink((string_address)ERROR_TEST_LINK, room, sizeof room);
+        error_test_said((string_address) "readlink", got);
+
+        errno = 0;
+        error_test_said((string_address) "readlink-not-a-link",
+                        readlink((string_address)ERROR_TEST_FILE, room,
+                                 sizeof room));
+
+        errno = 0;
+        error_test_said((string_address) "lstat-is-link",
+                        lstat((string_address)ERROR_TEST_LINK, &one));
+
+        error_trace("TRANSCRIPT lstat link-bit %b\n",
+                      (bipolar)(S_ISLNK(one.st_mode) ? 1 : 0));
+
+        errno = 0;
+        error_test_said((string_address) "access-existing",
+                        access((string_address)ERROR_TEST_FILE, F_OK));
+
+        errno = 0;
+        error_test_said((string_address) "access-missing",
+                        access((string_address)ERROR_TEST_ABSENT, F_OK));
+
+        errno = 0;
+        error_test_said((string_address) "rmdir-not-empty",
+                        rmdir((string_address)ERROR_TEST_DIRECTORY));
+
+        errno = 0;
+        error_test_said((string_address) "unlink-missing",
+                        unlink((string_address)ERROR_TEST_ABSENT));
+
+        errno = 0;
+        error_test_said((string_address) "rename",
+                        rename((string_address)ERROR_TEST_FILE,
+                               (string_address)ERROR_TEST_ABSENT));
+
+        errno = 0;
+        error_test_said((string_address) "rename-back",
+                        rename((string_address)ERROR_TEST_ABSENT,
+                               (string_address)ERROR_TEST_FILE));
+
+        errno = 0;
+        error_test_said((string_address) "rename-missing",
+                        rename((string_address)ERROR_TEST_ABSENT,
+                               (string_address)ERROR_TEST_LINK));
+
+        errno = 0;
+        error_test_said((string_address) "pipe", pipe(pair));
+
+        errno = 0;
+        error_test_said((string_address) "lseek-on-pipe",
+                        lseek(pair[0], 0, SEEK_SET));
+
+        errno = 0;
+        error_test_said((string_address) "isatty-on-pipe",
+                        (bipolar)isatty(pair[0]));
+
+        errno = 0;
+        error_test_said((string_address) "isatty-bad-handle",
+                        (bipolar)isatty(999));
+
+        errno = 0;
+        error_test_said((string_address) "dup2-onto-self",
+                        dup2(pair[0], pair[0]));
+
+        errno = 0;
+        error_test_said((string_address) "dup2-closed-onto-self",
+                        dup2(900, 900));
+
+        errno = 0;
+        error_test_said((string_address) "close-pipe-read", close(pair[0]));
+
+        errno = 0;
+        error_test_said((string_address) "close-pipe-write", close(pair[1]));
+
+        errno = 0;
+        error_test_said((string_address) "write-bad-handle",
+                        write(999, (address_any) "x", 1));
+
+        errno = 0;
+        error_test_said((string_address) "getcwd-too-small",
+                        (bipolar)(getcwd(small, sizeof small) == null));
+
+        errno = 0;
+        error_test_said((string_address) "getpid-positive",
+                        (bipolar)(getpid() > 0));
+
+        errno = 0;
+        error_test_said((string_address) "chmod",
+                        chmod((string_address)ERROR_TEST_FILE, 0600));
+
+        errno = 0;
+        error_test_said((string_address) "stat-after-chmod",
+                        stat((string_address)ERROR_TEST_FILE, &one));
+
+        error_trace("TRANSCRIPT stat permission %p\n",
+                      (positive)(one.st_mode & 07777));
+
+        errno = 0;
+        error_test_said((string_address) "chmod-missing",
+                        chmod((string_address)ERROR_TEST_ABSENT, 0600));
+
+        errno = 0;
+        error_test_said((string_address) "unlink-link",
+                        unlink((string_address)ERROR_TEST_LINK));
+
+        errno = 0;
+        error_test_said((string_address) "unlink",
+                        unlink((string_address)ERROR_TEST_FILE));
+
+        errno = 0;
+        error_test_said((string_address) "rmdir",
+                        rmdir((string_address)ERROR_TEST_DIRECTORY));
+}
+
+
+#define ERROR_MORE_DIRECTORY "/tmp/dawning-error-more"
+#define ERROR_MORE_FILE "/tmp/dawning-error-more/two"
+#define ERROR_MORE_ABSENT "/tmp/dawning-error-more/absent/deeper"
+
+/*
+        The wrappers the first walk never reached, each on the path that
+        proves its arguments went to the kernel in the right order.
+
+        An error path is the cheap way to do that and not a weak one. A
+        transposed argument in a five argument call does not fail to compile
+        and does not fail to run -- it produces a different errno, and a
+        differential against glibc reads that errno. fchownat with its path
+        and its owner swapped answers EFAULT where the right order answers
+        ENOENT; an *at call handed a descriptor where the flags belong answers
+        EBADF where the right order answers ENOENT. Both show up here as a
+        line that differs.
+
+        A descriptor of -1 is the shape for everything that takes one, a path
+        under a directory that does not exist is the shape for everything that
+        takes a path, and -1 as the directory of an *at call with a relative
+        name is the shape that pins which argument is the directory.
+
+        fork, waitpid and _exit get a real round trip instead, because a wrong
+        clone flag word does not come back as an error -- it comes back as a
+        child that is a thread sharing this stack, and the way that shows is
+        that the parent never sees SIGCHLD and never reaps anything.
+*/
+static fn error_test_more(void)
+{
+        p8 room[64];
+        b32 pair[2];
+        b32 handle;
+        b32 copy;
+        b32 status;
+        b32 child;
+        p32 mask;
+        error_stat one;
+        struct stat tagged;
+        address_any region;
+
+        rmdir((string_address)ERROR_MORE_DIRECTORY);
+
+        errno = 0;
+        error_test_said((string_address) "more-mkdir",
+                        mkdir((string_address)ERROR_MORE_DIRECTORY, 0755));
+
+        errno = 0;
+        handle = creat((string_address)ERROR_MORE_FILE, 0644);
+        error_test_said((string_address) "creat", (bipolar)(handle >= 0));
+
+        errno = 0;
+        error_test_said((string_address) "creat-missing-directory",
+                        creat((string_address)ERROR_MORE_ABSENT, 0644));
+
+        errno = 0;
+        error_test_said((string_address) "pwrite",
+                        pwrite(handle, (address_any) "abcdefgh", 8, 0));
+
+        errno = 0;
+        memory_fill(room, '@', sizeof room);
+        error_test_said((string_address) "pread",
+                        pread(handle, room, 4, 2));
+
+        room[4] = end;
+        error_trace("TRANSCRIPT pread saw [%s]\n", room);
+
+        errno = 0;
+        error_test_said((string_address) "pread-bad-handle",
+                        pread(-1, room, 4, 0));
+
+        errno = 0;
+        error_test_said((string_address) "pwrite-bad-handle",
+                        pwrite(-1, (address_any) "x", 1, 0));
+
+        errno = 0;
+        error_test_said((string_address) "fstat", fstat(handle, &one));
+
+        error_trace("TRANSCRIPT fstat size %b regular %b\n",
+                      (bipolar)one.st_size,
+                      (bipolar)(S_ISREG(one.st_mode) ? 1 : 0));
+
+        //      The tag and the typedef are meant to be the same type, and
+        //      nothing else in this file writes the tag, so it is written
+        //      once here or the promise is never compiled.
+        errno = 0;
+        error_test_said((string_address) "fstat-through-the-tag",
+                        fstat(handle, &tagged));
+
+        error_trace("TRANSCRIPT tagged size %b\n",
+                      (bipolar)tagged.st_size);
+
+        errno = 0;
+        error_test_said((string_address) "fstat-bad-handle", fstat(-1, &one));
+
+        errno = 0;
+        error_test_said((string_address) "fchmod", fchmod(handle, 0600));
+
+        errno = 0;
+        error_test_said((string_address) "fchmod-bad-handle",
+                        fchmod(-1, 0600));
+
+        errno = 0;
+        error_test_said((string_address) "fchown-no-change",
+                        fchown(handle, (p32)-1, (p32)-1));
+
+        errno = 0;
+        error_test_said((string_address) "fchown-bad-handle",
+                        fchown(-1, (p32)-1, (p32)-1));
+
+        errno = 0;
+        error_test_said((string_address) "ftruncate", ftruncate(handle, 4));
+
+        errno = 0;
+        error_test_said((string_address) "ftruncate-bad-handle",
+                        ftruncate(-1, 4));
+
+        errno = 0;
+        error_test_said((string_address) "fsync", fsync(handle));
+
+        errno = 0;
+        error_test_said((string_address) "fsync-bad-handle", fsync(-1));
+
+        errno = 0;
+        error_test_said((string_address) "fdatasync", fdatasync(handle));
+
+        errno = 0;
+        error_test_said((string_address) "fdatasync-bad-handle",
+                        fdatasync(-1));
+
+        errno = 0;
+        error_test_said((string_address) "isatty-on-file",
+                        (bipolar)isatty(handle));
+
+        errno = 0;
+        error_test_said((string_address) "fcntl-getfd",
+                        fcntl(handle, 1, (positive)0));
+
+        errno = 0;
+        error_test_said((string_address) "fcntl-bad-handle",
+                        fcntl(-1, 1, (positive)0));
+
+        errno = 0;
+        error_test_said((string_address) "ioctl-bad-handle",
+                        ioctl(-1, 0x5401, (positive)room));
+
+        errno = 0;
+        error_test_said((string_address) "close-more", close(handle));
+
+        //      Truncate by name, which is the one path-taking size call.
+        errno = 0;
+        error_test_said((string_address) "truncate",
+                        truncate((string_address)ERROR_MORE_FILE, 2));
+
+        errno = 0;
+        error_test_said((string_address) "truncate-missing",
+                        truncate((string_address)ERROR_MORE_ABSENT, 0));
+
+        //      The *at forms, first with the working directory and then with
+        //      a descriptor that is not one, which is what says that the
+        //      first argument is the directory and not something else.
+        errno = 0;
+        handle = openat(AT_FDCWD, (string_address)ERROR_MORE_FILE, O_RDONLY);
+        error_test_said((string_address) "openat", (bipolar)(handle >= 0));
+
+        errno = 0;
+        error_test_said((string_address) "close-openat", close(handle));
+
+        errno = 0;
+        error_test_said((string_address) "openat-bad-directory",
+                        openat(-1, (string_address) "relative-name",
+                               O_RDONLY));
+
+        errno = 0;
+        error_test_said((string_address) "fstatat",
+                        fstatat(AT_FDCWD, (string_address)ERROR_MORE_FILE,
+                                &one, 0));
+
+        errno = 0;
+        error_test_said((string_address) "fstatat-bad-directory",
+                        fstatat(-1, (string_address) "relative-name", &one,
+                                0));
+
+        errno = 0;
+        error_test_said((string_address) "faccessat",
+                        faccessat(AT_FDCWD, (string_address)ERROR_MORE_FILE,
+                                  F_OK, 0));
+
+        errno = 0;
+        error_test_said((string_address) "faccessat-bad-directory",
+                        faccessat(-1, (string_address) "relative-name", F_OK,
+                                  0));
+
+        errno = 0;
+        error_test_said((string_address) "mkdirat-bad-directory",
+                        mkdirat(-1, (string_address) "relative-name", 0755));
+
+        errno = 0;
+        error_test_said((string_address) "unlinkat-bad-directory",
+                        unlinkat(-1, (string_address) "relative-name", 0));
+
+        errno = 0;
+        error_test_said((string_address) "readlinkat-bad-directory",
+                        readlinkat(-1, (string_address) "relative-name", room,
+                                   sizeof room));
+
+        errno = 0;
+        error_test_said((string_address) "renameat-missing",
+                        renameat2(AT_FDCWD,
+                                  (string_address)ERROR_MORE_ABSENT,
+                                  AT_FDCWD,
+                                  (string_address)ERROR_MORE_ABSENT, 0));
+
+        //      link and the two ownership calls by name, whose only reachable
+        //      error without being root is a path that is not there.
+        errno = 0;
+        error_test_said((string_address) "link-missing",
+                        link((string_address)ERROR_MORE_ABSENT,
+                             (string_address)ERROR_MORE_ABSENT));
+
+        errno = 0;
+        error_test_said((string_address) "link",
+                        link((string_address)ERROR_MORE_FILE,
+                             (string_address) "/tmp/dawning-error-more/three"));
+
+        errno = 0;
+        error_test_said((string_address) "unlink-link-two",
+                        unlink((string_address) "/tmp/dawning-error-more/three"));
+
+        errno = 0;
+        error_test_said((string_address) "chown-no-change",
+                        chown((string_address)ERROR_MORE_FILE, (p32)-1,
+                              (p32)-1));
+
+        errno = 0;
+        error_test_said((string_address) "chown-missing",
+                        chown((string_address)ERROR_MORE_ABSENT, (p32)-1,
+                              (p32)-1));
+
+        errno = 0;
+        error_test_said((string_address) "lchown-no-change",
+                        lchown((string_address)ERROR_MORE_FILE, (p32)-1,
+                               (p32)-1));
+
+        errno = 0;
+        error_test_said((string_address) "lchown-missing",
+                        lchown((string_address)ERROR_MORE_ABSENT, (p32)-1,
+                               (p32)-1));
+
+        //      Descriptors: dup, dup3 and pipe2, and the equal-handle case
+        //      dup2 has to keep away from dup3.
+        errno = 0;
+        copy = dup(1);
+        error_test_said((string_address) "dup", (bipolar)(copy >= 3));
+
+        errno = 0;
+        error_test_said((string_address) "close-dup", close(copy));
+
+        errno = 0;
+        error_test_said((string_address) "dup-bad-handle", dup(-1));
+
+        errno = 0;
+        error_test_said((string_address) "dup3", dup3(1, 7, 0));
+
+        errno = 0;
+        error_test_said((string_address) "close-dup3", close(7));
+
+        errno = 0;
+        error_test_said((string_address) "dup3-bad-handle", dup3(-1, 7, 0));
+
+        errno = 0;
+        error_test_said((string_address) "pipe2", pipe2(pair, 0));
+
+        errno = 0;
+        error_test_said((string_address) "close-pipe2-read", close(pair[0]));
+
+        errno = 0;
+        error_test_said((string_address) "close-pipe2-write", close(pair[1]));
+
+        //      chdir and fchdir, put back immediately so nothing after this
+        //      depends on where it is standing.
+        errno = 0;
+        error_test_said((string_address) "chdir",
+                        chdir((string_address)ERROR_MORE_DIRECTORY));
+
+        errno = 0;
+        error_test_said((string_address) "chdir-back",
+                        chdir((string_address) "/tmp"));
+
+        errno = 0;
+        error_test_said((string_address) "chdir-missing",
+                        chdir((string_address)ERROR_MORE_ABSENT));
+
+        errno = 0;
+        error_test_said((string_address) "fchdir-bad-handle", fchdir(-1));
+
+        //      umask, which cannot fail and is checked by what it gives back.
+        umask(0022);
+        mask = umask(0077);
+        error_trace("TRANSCRIPT umask previous %p\n", (positive)mask);
+        umask(mask);
+
+        //      The mapping calls, whose failure is a pointer and not a minus
+        //      one, so they are the only users of the third translation.
+        errno = 0;
+        region = mmap(null, 4096, FILE_PROTECT_READ | FILE_PROTECT_WRITE,
+                      FILE_MAP_PRIVATE | FILE_MAP_ANONYMOUS, -1, 0);
+        error_test_said((string_address) "mmap",
+                        (bipolar)(region != address_bad));
+
+        //      Written to before it is unmapped, because a mapping that is
+        //      not really there fails here rather than in the munmap.
+        memory_fill(region, 0x5a, 4096);
+
+        errno = 0;
+        error_test_said((string_address) "mprotect",
+                        mprotect(region, 4096, FILE_PROTECT_READ));
+
+        errno = 0;
+        error_test_said((string_address) "munmap", munmap(region, 4096));
+
+        errno = 0;
+        error_test_said((string_address) "mmap-zero-length",
+                        (bipolar)(mmap(null, 0, FILE_PROTECT_READ,
+                                       FILE_MAP_PRIVATE | FILE_MAP_ANONYMOUS,
+                                       -1, 0) == address_bad));
+
+        errno = 0;
+        error_test_said((string_address) "munmap-zero-length",
+                        munmap(null, 0));
+
+        //      The identity calls, which cannot fail and are compared as
+        //      values because both programs run as the same user.
+        error_trace("TRANSCRIPT identity ppid-positive %b uid-is-euid %b"
+                           " gid-is-egid %b\n",
+                      (bipolar)(getppid() > 0),
+                      (bipolar)(getuid() == geteuid()),
+                      (bipolar)(getgid() == getegid()));
+
+        errno = 0;
+        error_test_said((string_address) "kill-probe-self",
+                        kill(getpid(), 0));
+
+        errno = 0;
+        error_test_said((string_address) "kill-bad-signal", kill(getpid(),
+                                                                9999));
+
+        errno = 0;
+        error_test_said((string_address) "execve-missing",
+                        execve((string_address) "/nonexistent-dawning-execve",
+                               null, null));
+
+        errno = 0;
+        error_test_said((string_address) "sync", error_sync());
+
+        /*
+                A child, and the three calls that only mean anything together.
+
+                The log is flushed first because the child inherits whatever
+                is still in the buffer, and although _exit does not flush it,
+                a child that ever did would print this run's output twice.
+        */
+        error_flush();
+
+        errno = 0;
+        child = fork();
+
+        if (child == 0)
+                _exit(7);
+
+        status = 0;
+        errno = 0;
+        error_test_said((string_address) "fork-then-waitpid",
+                        (bipolar)(waitpid(child, &status, 0) == child));
+
+        error_trace("TRANSCRIPT child status %b\n", (bipolar)status);
+
+        error_flush();
+
+        errno = 0;
+        child = fork();
+
+        if (child == 0)
+                _Exit(3);
+
+        status = 0;
+        errno = 0;
+        error_test_said((string_address) "fork-then-wait",
+                        (bipolar)(wait(&status) == child));
+
+        error_trace("TRANSCRIPT second child status %b\n",
+                      (bipolar)status);
+
+        errno = 0;
+        error_test_said((string_address) "waitpid-no-children",
+                        waitpid(-1, &status, 0));
+
+        errno = 0;
+        error_test_said((string_address) "wait4-no-children",
+                        wait4(-1, &status, 0, null));
+
+        errno = 0;
+        error_test_said((string_address) "more-unlink",
+                        unlink((string_address)ERROR_MORE_FILE));
+
+        errno = 0;
+        error_test_said((string_address) "more-rmdir",
+                        rmdir((string_address)ERROR_MORE_DIRECTORY));
+}
+
+//      Both halves of the transcript have to arrive on one descriptor in one
+//      order, and perror writes to two.
+static fn error_test_transcript(void)
+{
+        dup2(1, 2);
+
+        error_test_messages();
+        error_test_perror();
+        error_test_wrappers();
+        error_test_more();
+}
+
 #else /* the sections */
 
 #ifdef CHECK_standard
@@ -36216,715 +36953,15 @@ b32 main(void)
 #include "checks.c"
 #undef SHARED_counted
 
-#define ERROR_TEST_DIRECTORY "/tmp/dawning-error-test"
-#define ERROR_TEST_FILE "/tmp/dawning-error-test/one"
-#define ERROR_TEST_LINK "/tmp/dawning-error-test/link"
-#define ERROR_TEST_ABSENT "/tmp/dawning-error-test/absent"
-
-/*
-        A buffer shown byte for byte, so a terminator that is or is not there
-        is visible in the diff.
-
-        The buffer is filled with '@' before the call and this prints two
-        bytes past what was asked for, so a routine that wrote one byte too
-        many shows an overwritten '@' rather than nothing at all. A zero byte
-        prints as '|', which is what glibc's side prints for it too.
-*/
-static fn error_test_shown(p8 address_to into, p8 address_to buffer,
-                           positive count)
-{
-        positive at;
-
-        for (at = 0; at < count; at++)
-                into[at] = buffer[at] == 0 ? '|' : buffer[at];
-
-        into[count] = end;
-}
-
-static fn error_test_strerror_r_line(b32 number, positive size)
-{
-        p8 buffer[128];
-        p8 shown[136];
-        b32 answer;
-
-        memory_fill(buffer, '@', sizeof buffer);
-        answer = strerror_r(number, buffer, size);
-        error_test_shown(shown, buffer, size + 2 < 128 ? size + 2 : 128);
-
-        string_format(log, "TRANSCRIPT strerror_r %b %p rc=%b [%s]\n",
-                      (bipolar)number, size, (bipolar)answer, shown);
-}
-
-static fn error_test_messages(void)
-{
-        b32 number;
-
-        for (number = 0; number <= 140; number++)
-                string_format(log, "TRANSCRIPT strerror %b [%s]\n",
-                              (bipolar)number, strerror(number));
-
-        string_format(log, "TRANSCRIPT strerror %b [%s]\n", (bipolar)-1,
-                      strerror(-1));
-        string_format(log, "TRANSCRIPT strerror %b [%s]\n", (bipolar)-7,
-                      strerror(-7));
-        string_format(log, "TRANSCRIPT strerror %b [%s]\n", (bipolar)1000,
-                      strerror(1000));
-
-        //      Every code the table knows and a few either side of it, at
-        //      every size from nothing to past the longest message: the
-        //      bytes written, the terminator, what is left alone, and the
-        //      answer -- EINVAL beating ERANGE in the holes of the numbering.
-        for (number = -8; number <= 141; number++)
-                for (positive size = 0; size <= 64; size++)
-                        error_test_strerror_r_line(number == 141 ? 1000 : number, size);
-}
-
-static fn error_test_perror(void)
-{
-        log_flush();
-        errno = ENOENT;
-        perror((string_address) "TRANSCRIPT perror named");
-
-        log_flush();
-        errno = ENOENT;
-        perror((string_address) "");
-
-        log_flush();
-        errno = ENOENT;
-        perror(null);
-
-        log_flush();
-        errno = 41;
-        perror((string_address) "TRANSCRIPT perror unknown");
-
-        log_flush();
-        errno = 0;
-        perror((string_address) "TRANSCRIPT perror success");
-}
-
-//      Result and errno on one line, which is the whole of what a wrapper
-//      promises and the whole of what the reference prints.
-static fn error_test_said(string_address what, bipolar result)
-{
-        string_format(log, "TRANSCRIPT call %s -> %b errno %b\n", what, result,
-                      (bipolar)errno);
-}
-
-static fn error_test_wrappers(void)
-{
-        p8 room[64];
-        p8 small[4];
-        b32 pair[2];
-        b32 handle;
-        error_stat one;
-        bipolar got;
-
-        //      A clean slate, without reporting whether the cleaning worked:
-        //      a previous run may have left nothing behind.
-        unlink((string_address)ERROR_TEST_LINK);
-        unlink((string_address)ERROR_TEST_FILE);
-        rmdir((string_address)ERROR_TEST_DIRECTORY);
-
-        errno = 0;
-        error_test_said((string_address) "mkdir",
-                        mkdir((string_address)ERROR_TEST_DIRECTORY, 0755));
-
-        errno = 0;
-        error_test_said((string_address) "mkdir-again",
-                        mkdir((string_address)ERROR_TEST_DIRECTORY, 0755));
-
-        errno = 0;
-        handle = open((string_address)ERROR_TEST_FILE,
-                      O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        error_test_said((string_address) "open-create", (bipolar)(handle >= 0));
-
-        errno = 0;
-        error_test_said((string_address) "write",
-                        write(handle, (address_any) "abcdefgh", 8));
-
-        errno = 0;
-        error_test_said((string_address) "lseek-end",
-                        lseek(handle, 0, SEEK_END));
-
-        errno = 0;
-        error_test_said((string_address) "read-on-write-only",
-                        read(handle, room, 4));
-
-        errno = 0;
-        error_test_said((string_address) "close", close(handle));
-
-        errno = 0;
-        error_test_said((string_address) "close-twice", close(handle));
-
-        errno = 0;
-        error_test_said((string_address) "open-missing",
-                        open((string_address)ERROR_TEST_ABSENT, O_RDONLY));
-
-        errno = 0;
-        error_test_said((string_address) "open-exclusive-existing",
-                        open((string_address)ERROR_TEST_FILE,
-                             O_WRONLY | O_CREAT | O_EXCL, 0644));
-
-        errno = 0;
-        error_test_said((string_address) "open-directory-for-write",
-                        open((string_address)ERROR_TEST_DIRECTORY,
-                             O_WRONLY));
-
-        errno = 0;
-        error_test_said((string_address) "stat",
-                        stat((string_address)ERROR_TEST_FILE, &one));
-
-        string_format(log, "TRANSCRIPT stat size %b regular %b directory %b\n",
-                      (bipolar)one.st_size,
-                      (bipolar)(S_ISREG(one.st_mode) ? 1 : 0),
-                      (bipolar)(S_ISDIR(one.st_mode) ? 1 : 0));
-
-        string_format(log, "TRANSCRIPT stat permission %p links %b\n",
-                      (positive)(one.st_mode & 07777),
-                      (bipolar)one.st_nlink);
-
-        errno = 0;
-        error_test_said((string_address) "stat-missing",
-                        stat((string_address)ERROR_TEST_ABSENT, &one));
-
-        errno = 0;
-        error_test_said((string_address) "stat-directory",
-                        stat((string_address)ERROR_TEST_DIRECTORY, &one));
-
-        string_format(log, "TRANSCRIPT stat directory-bit %b\n",
-                      (bipolar)(S_ISDIR(one.st_mode) ? 1 : 0));
-
-        errno = 0;
-        error_test_said((string_address) "symlink",
-                        symlink((string_address) "one",
-                                (string_address)ERROR_TEST_LINK));
-
-        errno = 0;
-        memory_fill(room, '@', sizeof room);
-        got = readlink((string_address)ERROR_TEST_LINK, room, sizeof room);
-        error_test_said((string_address) "readlink", got);
-
-        errno = 0;
-        error_test_said((string_address) "readlink-not-a-link",
-                        readlink((string_address)ERROR_TEST_FILE, room,
-                                 sizeof room));
-
-        errno = 0;
-        error_test_said((string_address) "lstat-is-link",
-                        lstat((string_address)ERROR_TEST_LINK, &one));
-
-        string_format(log, "TRANSCRIPT lstat link-bit %b\n",
-                      (bipolar)(S_ISLNK(one.st_mode) ? 1 : 0));
-
-        errno = 0;
-        error_test_said((string_address) "access-existing",
-                        access((string_address)ERROR_TEST_FILE, F_OK));
-
-        errno = 0;
-        error_test_said((string_address) "access-missing",
-                        access((string_address)ERROR_TEST_ABSENT, F_OK));
-
-        errno = 0;
-        error_test_said((string_address) "rmdir-not-empty",
-                        rmdir((string_address)ERROR_TEST_DIRECTORY));
-
-        errno = 0;
-        error_test_said((string_address) "unlink-missing",
-                        unlink((string_address)ERROR_TEST_ABSENT));
-
-        errno = 0;
-        error_test_said((string_address) "rename",
-                        rename((string_address)ERROR_TEST_FILE,
-                               (string_address)ERROR_TEST_ABSENT));
-
-        errno = 0;
-        error_test_said((string_address) "rename-back",
-                        rename((string_address)ERROR_TEST_ABSENT,
-                               (string_address)ERROR_TEST_FILE));
-
-        errno = 0;
-        error_test_said((string_address) "rename-missing",
-                        rename((string_address)ERROR_TEST_ABSENT,
-                               (string_address)ERROR_TEST_LINK));
-
-        errno = 0;
-        error_test_said((string_address) "pipe", pipe(pair));
-
-        errno = 0;
-        error_test_said((string_address) "lseek-on-pipe",
-                        lseek(pair[0], 0, SEEK_SET));
-
-        errno = 0;
-        error_test_said((string_address) "isatty-on-pipe",
-                        (bipolar)isatty(pair[0]));
-
-        errno = 0;
-        error_test_said((string_address) "isatty-bad-handle",
-                        (bipolar)isatty(999));
-
-        errno = 0;
-        error_test_said((string_address) "dup2-onto-self",
-                        dup2(pair[0], pair[0]));
-
-        errno = 0;
-        error_test_said((string_address) "dup2-closed-onto-self",
-                        dup2(900, 900));
-
-        errno = 0;
-        error_test_said((string_address) "close-pipe-read", close(pair[0]));
-
-        errno = 0;
-        error_test_said((string_address) "close-pipe-write", close(pair[1]));
-
-        errno = 0;
-        error_test_said((string_address) "write-bad-handle",
-                        write(999, (address_any) "x", 1));
-
-        errno = 0;
-        error_test_said((string_address) "getcwd-too-small",
-                        (bipolar)(getcwd(small, sizeof small) == null));
-
-        errno = 0;
-        error_test_said((string_address) "getpid-positive",
-                        (bipolar)(getpid() > 0));
-
-        errno = 0;
-        error_test_said((string_address) "chmod",
-                        chmod((string_address)ERROR_TEST_FILE, 0600));
-
-        errno = 0;
-        error_test_said((string_address) "stat-after-chmod",
-                        stat((string_address)ERROR_TEST_FILE, &one));
-
-        string_format(log, "TRANSCRIPT stat permission %p\n",
-                      (positive)(one.st_mode & 07777));
-
-        errno = 0;
-        error_test_said((string_address) "chmod-missing",
-                        chmod((string_address)ERROR_TEST_ABSENT, 0600));
-
-        errno = 0;
-        error_test_said((string_address) "unlink-link",
-                        unlink((string_address)ERROR_TEST_LINK));
-
-        errno = 0;
-        error_test_said((string_address) "unlink",
-                        unlink((string_address)ERROR_TEST_FILE));
-
-        errno = 0;
-        error_test_said((string_address) "rmdir",
-                        rmdir((string_address)ERROR_TEST_DIRECTORY));
-}
-
-
-#define ERROR_MORE_DIRECTORY "/tmp/dawning-error-more"
-#define ERROR_MORE_FILE "/tmp/dawning-error-more/two"
-#define ERROR_MORE_ABSENT "/tmp/dawning-error-more/absent/deeper"
-
-/*
-        The wrappers the first walk never reached, each on the path that
-        proves its arguments went to the kernel in the right order.
-
-        An error path is the cheap way to do that and not a weak one. A
-        transposed argument in a five argument call does not fail to compile
-        and does not fail to run -- it produces a different errno, and a
-        differential against glibc reads that errno. fchownat with its path
-        and its owner swapped answers EFAULT where the right order answers
-        ENOENT; an *at call handed a descriptor where the flags belong answers
-        EBADF where the right order answers ENOENT. Both show up here as a
-        line that differs.
-
-        A descriptor of -1 is the shape for everything that takes one, a path
-        under a directory that does not exist is the shape for everything that
-        takes a path, and -1 as the directory of an *at call with a relative
-        name is the shape that pins which argument is the directory.
-
-        fork, waitpid and _exit get a real round trip instead, because a wrong
-        clone flag word does not come back as an error -- it comes back as a
-        child that is a thread sharing this stack, and the way that shows is
-        that the parent never sees SIGCHLD and never reaps anything.
-*/
-static fn error_test_more(void)
-{
-        p8 room[64];
-        b32 pair[2];
-        b32 handle;
-        b32 copy;
-        b32 status;
-        b32 child;
-        p32 mask;
-        error_stat one;
-        struct stat tagged;
-        address_any region;
-
-        rmdir((string_address)ERROR_MORE_DIRECTORY);
-
-        errno = 0;
-        error_test_said((string_address) "more-mkdir",
-                        mkdir((string_address)ERROR_MORE_DIRECTORY, 0755));
-
-        errno = 0;
-        handle = creat((string_address)ERROR_MORE_FILE, 0644);
-        error_test_said((string_address) "creat", (bipolar)(handle >= 0));
-
-        errno = 0;
-        error_test_said((string_address) "creat-missing-directory",
-                        creat((string_address)ERROR_MORE_ABSENT, 0644));
-
-        errno = 0;
-        error_test_said((string_address) "pwrite",
-                        pwrite(handle, (address_any) "abcdefgh", 8, 0));
-
-        errno = 0;
-        memory_fill(room, '@', sizeof room);
-        error_test_said((string_address) "pread",
-                        pread(handle, room, 4, 2));
-
-        room[4] = end;
-        string_format(log, "TRANSCRIPT pread saw [%s]\n", room);
-
-        errno = 0;
-        error_test_said((string_address) "pread-bad-handle",
-                        pread(-1, room, 4, 0));
-
-        errno = 0;
-        error_test_said((string_address) "pwrite-bad-handle",
-                        pwrite(-1, (address_any) "x", 1, 0));
-
-        errno = 0;
-        error_test_said((string_address) "fstat", fstat(handle, &one));
-
-        string_format(log, "TRANSCRIPT fstat size %b regular %b\n",
-                      (bipolar)one.st_size,
-                      (bipolar)(S_ISREG(one.st_mode) ? 1 : 0));
-
-        //      The tag and the typedef are meant to be the same type, and
-        //      nothing else in this file writes the tag, so it is written
-        //      once here or the promise is never compiled.
-        errno = 0;
-        error_test_said((string_address) "fstat-through-the-tag",
-                        fstat(handle, &tagged));
-
-        string_format(log, "TRANSCRIPT tagged size %b\n",
-                      (bipolar)tagged.st_size);
-
-        errno = 0;
-        error_test_said((string_address) "fstat-bad-handle", fstat(-1, &one));
-
-        errno = 0;
-        error_test_said((string_address) "fchmod", fchmod(handle, 0600));
-
-        errno = 0;
-        error_test_said((string_address) "fchmod-bad-handle",
-                        fchmod(-1, 0600));
-
-        errno = 0;
-        error_test_said((string_address) "fchown-no-change",
-                        fchown(handle, (p32)-1, (p32)-1));
-
-        errno = 0;
-        error_test_said((string_address) "fchown-bad-handle",
-                        fchown(-1, (p32)-1, (p32)-1));
-
-        errno = 0;
-        error_test_said((string_address) "ftruncate", ftruncate(handle, 4));
-
-        errno = 0;
-        error_test_said((string_address) "ftruncate-bad-handle",
-                        ftruncate(-1, 4));
-
-        errno = 0;
-        error_test_said((string_address) "fsync", fsync(handle));
-
-        errno = 0;
-        error_test_said((string_address) "fsync-bad-handle", fsync(-1));
-
-        errno = 0;
-        error_test_said((string_address) "fdatasync", fdatasync(handle));
-
-        errno = 0;
-        error_test_said((string_address) "fdatasync-bad-handle",
-                        fdatasync(-1));
-
-        errno = 0;
-        error_test_said((string_address) "isatty-on-file",
-                        (bipolar)isatty(handle));
-
-        errno = 0;
-        error_test_said((string_address) "fcntl-getfd",
-                        fcntl(handle, 1, (positive)0));
-
-        errno = 0;
-        error_test_said((string_address) "fcntl-bad-handle",
-                        fcntl(-1, 1, (positive)0));
-
-        errno = 0;
-        error_test_said((string_address) "ioctl-bad-handle",
-                        ioctl(-1, 0x5401, (positive)room));
-
-        errno = 0;
-        error_test_said((string_address) "close-more", close(handle));
-
-        //      Truncate by name, which is the one path-taking size call.
-        errno = 0;
-        error_test_said((string_address) "truncate",
-                        truncate((string_address)ERROR_MORE_FILE, 2));
-
-        errno = 0;
-        error_test_said((string_address) "truncate-missing",
-                        truncate((string_address)ERROR_MORE_ABSENT, 0));
-
-        //      The *at forms, first with the working directory and then with
-        //      a descriptor that is not one, which is what says that the
-        //      first argument is the directory and not something else.
-        errno = 0;
-        handle = openat(AT_FDCWD, (string_address)ERROR_MORE_FILE, O_RDONLY);
-        error_test_said((string_address) "openat", (bipolar)(handle >= 0));
-
-        errno = 0;
-        error_test_said((string_address) "close-openat", close(handle));
-
-        errno = 0;
-        error_test_said((string_address) "openat-bad-directory",
-                        openat(-1, (string_address) "relative-name",
-                               O_RDONLY));
-
-        errno = 0;
-        error_test_said((string_address) "fstatat",
-                        fstatat(AT_FDCWD, (string_address)ERROR_MORE_FILE,
-                                &one, 0));
-
-        errno = 0;
-        error_test_said((string_address) "fstatat-bad-directory",
-                        fstatat(-1, (string_address) "relative-name", &one,
-                                0));
-
-        errno = 0;
-        error_test_said((string_address) "faccessat",
-                        faccessat(AT_FDCWD, (string_address)ERROR_MORE_FILE,
-                                  F_OK, 0));
-
-        errno = 0;
-        error_test_said((string_address) "faccessat-bad-directory",
-                        faccessat(-1, (string_address) "relative-name", F_OK,
-                                  0));
-
-        errno = 0;
-        error_test_said((string_address) "mkdirat-bad-directory",
-                        mkdirat(-1, (string_address) "relative-name", 0755));
-
-        errno = 0;
-        error_test_said((string_address) "unlinkat-bad-directory",
-                        unlinkat(-1, (string_address) "relative-name", 0));
-
-        errno = 0;
-        error_test_said((string_address) "readlinkat-bad-directory",
-                        readlinkat(-1, (string_address) "relative-name", room,
-                                   sizeof room));
-
-        errno = 0;
-        error_test_said((string_address) "renameat-missing",
-                        renameat2(AT_FDCWD,
-                                  (string_address)ERROR_MORE_ABSENT,
-                                  AT_FDCWD,
-                                  (string_address)ERROR_MORE_ABSENT, 0));
-
-        //      link and the two ownership calls by name, whose only reachable
-        //      error without being root is a path that is not there.
-        errno = 0;
-        error_test_said((string_address) "link-missing",
-                        link((string_address)ERROR_MORE_ABSENT,
-                             (string_address)ERROR_MORE_ABSENT));
-
-        errno = 0;
-        error_test_said((string_address) "link",
-                        link((string_address)ERROR_MORE_FILE,
-                             (string_address) "/tmp/dawning-error-more/three"));
-
-        errno = 0;
-        error_test_said((string_address) "unlink-link-two",
-                        unlink((string_address) "/tmp/dawning-error-more/three"));
-
-        errno = 0;
-        error_test_said((string_address) "chown-no-change",
-                        chown((string_address)ERROR_MORE_FILE, (p32)-1,
-                              (p32)-1));
-
-        errno = 0;
-        error_test_said((string_address) "chown-missing",
-                        chown((string_address)ERROR_MORE_ABSENT, (p32)-1,
-                              (p32)-1));
-
-        errno = 0;
-        error_test_said((string_address) "lchown-no-change",
-                        lchown((string_address)ERROR_MORE_FILE, (p32)-1,
-                               (p32)-1));
-
-        errno = 0;
-        error_test_said((string_address) "lchown-missing",
-                        lchown((string_address)ERROR_MORE_ABSENT, (p32)-1,
-                               (p32)-1));
-
-        //      Descriptors: dup, dup3 and pipe2, and the equal-handle case
-        //      dup2 has to keep away from dup3.
-        errno = 0;
-        copy = dup(1);
-        error_test_said((string_address) "dup", (bipolar)(copy >= 3));
-
-        errno = 0;
-        error_test_said((string_address) "close-dup", close(copy));
-
-        errno = 0;
-        error_test_said((string_address) "dup-bad-handle", dup(-1));
-
-        errno = 0;
-        error_test_said((string_address) "dup3", dup3(1, 7, 0));
-
-        errno = 0;
-        error_test_said((string_address) "close-dup3", close(7));
-
-        errno = 0;
-        error_test_said((string_address) "dup3-bad-handle", dup3(-1, 7, 0));
-
-        errno = 0;
-        error_test_said((string_address) "pipe2", pipe2(pair, 0));
-
-        errno = 0;
-        error_test_said((string_address) "close-pipe2-read", close(pair[0]));
-
-        errno = 0;
-        error_test_said((string_address) "close-pipe2-write", close(pair[1]));
-
-        //      chdir and fchdir, put back immediately so nothing after this
-        //      depends on where it is standing.
-        errno = 0;
-        error_test_said((string_address) "chdir",
-                        chdir((string_address)ERROR_MORE_DIRECTORY));
-
-        errno = 0;
-        error_test_said((string_address) "chdir-back",
-                        chdir((string_address) "/tmp"));
-
-        errno = 0;
-        error_test_said((string_address) "chdir-missing",
-                        chdir((string_address)ERROR_MORE_ABSENT));
-
-        errno = 0;
-        error_test_said((string_address) "fchdir-bad-handle", fchdir(-1));
-
-        //      umask, which cannot fail and is checked by what it gives back.
-        umask(0022);
-        mask = umask(0077);
-        string_format(log, "TRANSCRIPT umask previous %p\n", (positive)mask);
-        umask(mask);
-
-        //      The mapping calls, whose failure is a pointer and not a minus
-        //      one, so they are the only users of the third translation.
-        errno = 0;
-        region = mmap(null, 4096, FILE_PROTECT_READ | FILE_PROTECT_WRITE,
-                      FILE_MAP_PRIVATE | FILE_MAP_ANONYMOUS, -1, 0);
-        error_test_said((string_address) "mmap",
-                        (bipolar)(region != address_bad));
-
-        //      Written to before it is unmapped, because a mapping that is
-        //      not really there fails here rather than in the munmap.
-        memory_fill(region, 0x5a, 4096);
-
-        errno = 0;
-        error_test_said((string_address) "mprotect",
-                        mprotect(region, 4096, FILE_PROTECT_READ));
-
-        errno = 0;
-        error_test_said((string_address) "munmap", munmap(region, 4096));
-
-        errno = 0;
-        error_test_said((string_address) "mmap-zero-length",
-                        (bipolar)(mmap(null, 0, FILE_PROTECT_READ,
-                                       FILE_MAP_PRIVATE | FILE_MAP_ANONYMOUS,
-                                       -1, 0) == address_bad));
-
-        errno = 0;
-        error_test_said((string_address) "munmap-zero-length",
-                        munmap(null, 0));
-
-        //      The identity calls, which cannot fail and are compared as
-        //      values because both programs run as the same user.
-        string_format(log, "TRANSCRIPT identity ppid-positive %b uid-is-euid %b"
-                           " gid-is-egid %b\n",
-                      (bipolar)(getppid() > 0),
-                      (bipolar)(getuid() == geteuid()),
-                      (bipolar)(getgid() == getegid()));
-
-        errno = 0;
-        error_test_said((string_address) "kill-probe-self",
-                        kill(getpid(), 0));
-
-        errno = 0;
-        error_test_said((string_address) "kill-bad-signal", kill(getpid(),
-                                                                9999));
-
-        errno = 0;
-        error_test_said((string_address) "execve-missing",
-                        execve((string_address) "/nonexistent-dawning-execve",
-                               null, null));
-
-        errno = 0;
-        error_test_said((string_address) "sync", sync());
-
-        /*
-                A child, and the three calls that only mean anything together.
-
-                The log is flushed first because the child inherits whatever
-                is still in the buffer, and although _exit does not flush it,
-                a child that ever did would print this run's output twice.
-        */
-        log_flush();
-
-        errno = 0;
-        child = fork();
-
-        if (child == 0)
-                _exit(7);
-
-        status = 0;
-        errno = 0;
-        error_test_said((string_address) "fork-then-waitpid",
-                        (bipolar)(waitpid(child, &status, 0) == child));
-
-        string_format(log, "TRANSCRIPT child status %b\n", (bipolar)status);
-
-        log_flush();
-
-        errno = 0;
-        child = fork();
-
-        if (child == 0)
-                _Exit(3);
-
-        status = 0;
-        errno = 0;
-        error_test_said((string_address) "fork-then-wait",
-                        (bipolar)(wait(&status) == child));
-
-        string_format(log, "TRANSCRIPT second child status %b\n",
-                      (bipolar)status);
-
-        errno = 0;
-        error_test_said((string_address) "waitpid-no-children",
-                        waitpid(-1, &status, 0));
-
-        errno = 0;
-        error_test_said((string_address) "wait4-no-children",
-                        wait4(-1, &status, 0, null));
-
-        errno = 0;
-        error_test_said((string_address) "more-unlink",
-                        unlink((string_address)ERROR_MORE_FILE));
-
-        errno = 0;
-        error_test_said((string_address) "more-rmdir",
-                        rmdir((string_address)ERROR_MORE_DIRECTORY));
-}
+//      What the shared transcript body says a line and a flush with: this
+//      side's log, and the library's own sync, whose answer is compared.
+#define error_trace(...) string_format(log, __VA_ARGS__)
+#define error_flush() log_flush()
+#define error_sync() sync()
+
+#define SHARED_error_body
+#include "checks.c"
+#undef SHARED_error_body
 
 /*
         What a reference cannot show.
@@ -37171,14 +37208,7 @@ static fn error_test_contract(void)
 
 b32 main(void)
 {
-        //      Both halves of the transcript have to arrive on one descriptor
-        //      in one order, and perror writes to two.
-        dup2(1, 2);
-
-        error_test_messages();
-        error_test_perror();
-        error_test_wrappers();
-        error_test_more();
+        error_test_transcript();
         error_test_contract();
 
         return test_report(null);
@@ -37211,6 +37241,7 @@ b32 main(void)
 
 #include <errno.h>
 #include <fcntl.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -37226,546 +37257,70 @@ b32 main(void)
 extern int dup3(int from, int to, int flags);
 extern int pipe2(int pair[2], int flags);
 
-#define ERROR_TEST_DIRECTORY "/tmp/dawning-error-test"
-#define ERROR_TEST_FILE "/tmp/dawning-error-test/one"
-#define ERROR_TEST_LINK "/tmp/dawning-error-test/link"
-#define ERROR_TEST_ABSENT "/tmp/dawning-error-test/absent"
+//      The names the shared body is written in, as glibc has them.
+#define fn void
+#define address_to *
+#define null NULL
+#define end 0
+typedef char p8;
+typedef unsigned int p32;
+typedef int b32;
+typedef long bipolar;
+typedef unsigned long positive;
+typedef const char *string_address;
+typedef void *address_any;
+typedef struct stat error_stat;
+#define memory_fill(block, value, count) memset(block, value, count)
+#define address_bad MAP_FAILED
+#define FILE_PROTECT_READ PROT_READ
+#define FILE_PROTECT_WRITE PROT_WRITE
+#define FILE_MAP_PRIVATE MAP_PRIVATE
+#define FILE_MAP_ANONYMOUS MAP_ANONYMOUS
 
-static void shown(char *into, const char *buffer, size_t count)
+//      renameat rather than renameat2: the freestanding side has to call
+//      renameat2 because riscv64 has no renameat at all, and renameat2 with
+//      no flags is defined to be the same call.
+#define renameat2(from_directory, from, to_directory, to, flags) \
+        renameat(from_directory, from, to_directory, to)
+
+#define error_flush() fflush(stdout)
+#define error_sync() (sync(), 0)
+
+//      The library's format on glibc's printf: %b is a bipolar and %p a
+//      positive, which are long and unsigned long here.
+static void error_trace(const char *format, ...)
 {
-        size_t at;
+        char native[256];
+        size_t at = 0;
+        const char *from = format;
+        va_list arguments;
 
-        for (at = 0; at < count; at++)
-                into[at] = buffer[at] == 0 ? '|' : buffer[at];
+        for (; *from; from++)
+        {
+                if (*from == '%' && (from[1] == 'b' || from[1] == 'p'))
+                {
+                        native[at++] = '%';
+                        native[at++] = 'l';
+                        native[at++] = from[1] == 'b' ? 'd' : 'u';
+                        from++;
+                }
+                else
+                        native[at++] = *from;
+        }
 
-        into[count] = 0;
+        native[at] = 0;
+        va_start(arguments, format);
+        vprintf(native, arguments);
+        va_end(arguments);
 }
 
-static void strerror_r_line(int number, size_t size)
-{
-        char buffer[128];
-        char seen[136];
-        int answer;
-
-        memset(buffer, '@', sizeof buffer);
-        answer = strerror_r(number, buffer, size);
-        shown(seen, buffer, size + 2 < 128 ? size + 2 : 128);
-
-        printf("TRANSCRIPT strerror_r %d %zu rc=%d [%s]\n", number, size,
-               answer, seen);
-}
-
-static void messages(void)
-{
-        int number;
-
-        for (number = 0; number <= 140; number++)
-                printf("TRANSCRIPT strerror %d [%s]\n", number,
-                       strerror(number));
-
-        printf("TRANSCRIPT strerror %d [%s]\n", -1, strerror(-1));
-        printf("TRANSCRIPT strerror %d [%s]\n", -7, strerror(-7));
-        printf("TRANSCRIPT strerror %d [%s]\n", 1000, strerror(1000));
-
-        for (number = -8; number <= 141; number++)
-                for (size_t size = 0; size <= 64; size++)
-                        strerror_r_line(number == 141 ? 1000 : number, size);
-}
-
-static void perror_lines(void)
-{
-        fflush(stdout);
-        errno = ENOENT;
-        perror("TRANSCRIPT perror named");
-
-        fflush(stdout);
-        errno = ENOENT;
-        perror("");
-
-        fflush(stdout);
-        errno = ENOENT;
-        perror(NULL);
-
-        fflush(stdout);
-        errno = 41;
-        perror("TRANSCRIPT perror unknown");
-
-        fflush(stdout);
-        errno = 0;
-        perror("TRANSCRIPT perror success");
-}
-
-static void said(const char *what, long result)
-{
-        printf("TRANSCRIPT call %s -> %ld errno %d\n", what, result, errno);
-}
-
-static void wrappers(void)
-{
-        char room[64];
-        char small[4];
-        int pair[2];
-        int handle;
-        struct stat one;
-        long got;
-
-        unlink(ERROR_TEST_LINK);
-        unlink(ERROR_TEST_FILE);
-        rmdir(ERROR_TEST_DIRECTORY);
-
-        errno = 0;
-        said("mkdir", mkdir(ERROR_TEST_DIRECTORY, 0755));
-
-        errno = 0;
-        said("mkdir-again", mkdir(ERROR_TEST_DIRECTORY, 0755));
-
-        errno = 0;
-        handle = open(ERROR_TEST_FILE, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        said("open-create", handle >= 0);
-
-        errno = 0;
-        said("write", write(handle, "abcdefgh", 8));
-
-        errno = 0;
-        said("lseek-end", lseek(handle, 0, SEEK_END));
-
-        errno = 0;
-        said("read-on-write-only", read(handle, room, 4));
-
-        errno = 0;
-        said("close", close(handle));
-
-        errno = 0;
-        said("close-twice", close(handle));
-
-        errno = 0;
-        said("open-missing", open(ERROR_TEST_ABSENT, O_RDONLY));
-
-        errno = 0;
-        said("open-exclusive-existing",
-             open(ERROR_TEST_FILE, O_WRONLY | O_CREAT | O_EXCL, 0644));
-
-        errno = 0;
-        said("open-directory-for-write", open(ERROR_TEST_DIRECTORY, O_WRONLY));
-
-        errno = 0;
-        said("stat", stat(ERROR_TEST_FILE, &one));
-
-        printf("TRANSCRIPT stat size %ld regular %d directory %d\n",
-               (long)one.st_size, S_ISREG(one.st_mode) ? 1 : 0,
-               S_ISDIR(one.st_mode) ? 1 : 0);
-
-        printf("TRANSCRIPT stat permission %lu links %ld\n",
-               (unsigned long)(one.st_mode & 07777), (long)one.st_nlink);
-
-        errno = 0;
-        said("stat-missing", stat(ERROR_TEST_ABSENT, &one));
-
-        errno = 0;
-        said("stat-directory", stat(ERROR_TEST_DIRECTORY, &one));
-
-        printf("TRANSCRIPT stat directory-bit %d\n",
-               S_ISDIR(one.st_mode) ? 1 : 0);
-
-        errno = 0;
-        said("symlink", symlink("one", ERROR_TEST_LINK));
-
-        errno = 0;
-        memset(room, '@', sizeof room);
-        got = readlink(ERROR_TEST_LINK, room, sizeof room);
-        said("readlink", got);
-
-        errno = 0;
-        said("readlink-not-a-link", readlink(ERROR_TEST_FILE, room, sizeof room));
-
-        errno = 0;
-        said("lstat-is-link", lstat(ERROR_TEST_LINK, &one));
-
-        printf("TRANSCRIPT lstat link-bit %d\n", S_ISLNK(one.st_mode) ? 1 : 0);
-
-        errno = 0;
-        said("access-existing", access(ERROR_TEST_FILE, F_OK));
-
-        errno = 0;
-        said("access-missing", access(ERROR_TEST_ABSENT, F_OK));
-
-        errno = 0;
-        said("rmdir-not-empty", rmdir(ERROR_TEST_DIRECTORY));
-
-        errno = 0;
-        said("unlink-missing", unlink(ERROR_TEST_ABSENT));
-
-        errno = 0;
-        said("rename", rename(ERROR_TEST_FILE, ERROR_TEST_ABSENT));
-
-        errno = 0;
-        said("rename-back", rename(ERROR_TEST_ABSENT, ERROR_TEST_FILE));
-
-        errno = 0;
-        said("rename-missing", rename(ERROR_TEST_ABSENT, ERROR_TEST_LINK));
-
-        errno = 0;
-        said("pipe", pipe(pair));
-
-        errno = 0;
-        said("lseek-on-pipe", lseek(pair[0], 0, SEEK_SET));
-
-        errno = 0;
-        said("isatty-on-pipe", isatty(pair[0]));
-
-        errno = 0;
-        said("isatty-bad-handle", isatty(999));
-
-        errno = 0;
-        said("dup2-onto-self", dup2(pair[0], pair[0]));
-
-        errno = 0;
-        said("dup2-closed-onto-self", dup2(900, 900));
-
-        errno = 0;
-        said("close-pipe-read", close(pair[0]));
-
-        errno = 0;
-        said("close-pipe-write", close(pair[1]));
-
-        errno = 0;
-        said("write-bad-handle", write(999, "x", 1));
-
-        errno = 0;
-        said("getcwd-too-small", getcwd(small, sizeof small) == NULL);
-
-        errno = 0;
-        said("getpid-positive", getpid() > 0);
-
-        errno = 0;
-        said("chmod", chmod(ERROR_TEST_FILE, 0600));
-
-        errno = 0;
-        said("stat-after-chmod", stat(ERROR_TEST_FILE, &one));
-
-        printf("TRANSCRIPT stat permission %lu\n",
-               (unsigned long)(one.st_mode & 07777));
-
-        errno = 0;
-        said("chmod-missing", chmod(ERROR_TEST_ABSENT, 0600));
-
-        errno = 0;
-        said("unlink-link", unlink(ERROR_TEST_LINK));
-
-        errno = 0;
-        said("unlink", unlink(ERROR_TEST_FILE));
-
-        errno = 0;
-        said("rmdir", rmdir(ERROR_TEST_DIRECTORY));
-}
-
-
-#define ERROR_MORE_DIRECTORY "/tmp/dawning-error-more"
-#define ERROR_MORE_FILE "/tmp/dawning-error-more/two"
-#define ERROR_MORE_ABSENT "/tmp/dawning-error-more/absent/deeper"
-
-//      The mirror of error_test_more. renameat rather than renameat2: the
-//      freestanding side has to call renameat2 because riscv64 has no
-//      renameat at all, and renameat2 with no flags is defined to be the
-//      same call.
-static void more(void)
-{
-        char room[64];
-        int pair[2];
-        int handle;
-        int copy;
-        int status;
-        int child;
-        mode_t mask;
-        struct stat one;
-        struct stat tagged;
-        void *region;
-
-        rmdir(ERROR_MORE_DIRECTORY);
-
-        errno = 0;
-        said("more-mkdir", mkdir(ERROR_MORE_DIRECTORY, 0755));
-
-        errno = 0;
-        handle = creat(ERROR_MORE_FILE, 0644);
-        said("creat", handle >= 0);
-
-        errno = 0;
-        said("creat-missing-directory", creat(ERROR_MORE_ABSENT, 0644));
-
-        errno = 0;
-        said("pwrite", pwrite(handle, "abcdefgh", 8, 0));
-
-        errno = 0;
-        memset(room, '@', sizeof room);
-        said("pread", pread(handle, room, 4, 2));
-
-        room[4] = 0;
-        printf("TRANSCRIPT pread saw [%s]\n", room);
-
-        errno = 0;
-        said("pread-bad-handle", pread(-1, room, 4, 0));
-
-        errno = 0;
-        said("pwrite-bad-handle", pwrite(-1, "x", 1, 0));
-
-        errno = 0;
-        said("fstat", fstat(handle, &one));
-
-        printf("TRANSCRIPT fstat size %ld regular %d\n", (long)one.st_size,
-               S_ISREG(one.st_mode) ? 1 : 0);
-
-        errno = 0;
-        said("fstat-through-the-tag", fstat(handle, &tagged));
-
-        printf("TRANSCRIPT tagged size %ld\n", (long)tagged.st_size);
-
-        errno = 0;
-        said("fstat-bad-handle", fstat(-1, &one));
-
-        errno = 0;
-        said("fchmod", fchmod(handle, 0600));
-
-        errno = 0;
-        said("fchmod-bad-handle", fchmod(-1, 0600));
-
-        errno = 0;
-        said("fchown-no-change", fchown(handle, (uid_t)-1, (gid_t)-1));
-
-        errno = 0;
-        said("fchown-bad-handle", fchown(-1, (uid_t)-1, (gid_t)-1));
-
-        errno = 0;
-        said("ftruncate", ftruncate(handle, 4));
-
-        errno = 0;
-        said("ftruncate-bad-handle", ftruncate(-1, 4));
-
-        errno = 0;
-        said("fsync", fsync(handle));
-
-        errno = 0;
-        said("fsync-bad-handle", fsync(-1));
-
-        errno = 0;
-        said("fdatasync", fdatasync(handle));
-
-        errno = 0;
-        said("fdatasync-bad-handle", fdatasync(-1));
-
-        errno = 0;
-        said("isatty-on-file", isatty(handle));
-
-        errno = 0;
-        said("fcntl-getfd", fcntl(handle, F_GETFD, 0L));
-
-        errno = 0;
-        said("fcntl-bad-handle", fcntl(-1, F_GETFD, 0L));
-
-        errno = 0;
-        said("ioctl-bad-handle", ioctl(-1, 0x5401, room));
-
-        errno = 0;
-        said("close-more", close(handle));
-
-        errno = 0;
-        said("truncate", truncate(ERROR_MORE_FILE, 2));
-
-        errno = 0;
-        said("truncate-missing", truncate(ERROR_MORE_ABSENT, 0));
-
-        errno = 0;
-        handle = openat(AT_FDCWD, ERROR_MORE_FILE, O_RDONLY);
-        said("openat", handle >= 0);
-
-        errno = 0;
-        said("close-openat", close(handle));
-
-        errno = 0;
-        said("openat-bad-directory", openat(-1, "relative-name", O_RDONLY));
-
-        errno = 0;
-        said("fstatat", fstatat(AT_FDCWD, ERROR_MORE_FILE, &one, 0));
-
-        errno = 0;
-        said("fstatat-bad-directory", fstatat(-1, "relative-name", &one, 0));
-
-        errno = 0;
-        said("faccessat", faccessat(AT_FDCWD, ERROR_MORE_FILE, F_OK, 0));
-
-        errno = 0;
-        said("faccessat-bad-directory",
-             faccessat(-1, "relative-name", F_OK, 0));
-
-        errno = 0;
-        said("mkdirat-bad-directory", mkdirat(-1, "relative-name", 0755));
-
-        errno = 0;
-        said("unlinkat-bad-directory", unlinkat(-1, "relative-name", 0));
-
-        errno = 0;
-        said("readlinkat-bad-directory",
-             readlinkat(-1, "relative-name", room, sizeof room));
-
-        errno = 0;
-        said("renameat-missing", renameat(AT_FDCWD, ERROR_MORE_ABSENT,
-                                          AT_FDCWD, ERROR_MORE_ABSENT));
-
-        errno = 0;
-        said("link-missing", link(ERROR_MORE_ABSENT, ERROR_MORE_ABSENT));
-
-        errno = 0;
-        said("link", link(ERROR_MORE_FILE, "/tmp/dawning-error-more/three"));
-
-        errno = 0;
-        said("unlink-link-two", unlink("/tmp/dawning-error-more/three"));
-
-        errno = 0;
-        said("chown-no-change", chown(ERROR_MORE_FILE, (uid_t)-1, (gid_t)-1));
-
-        errno = 0;
-        said("chown-missing", chown(ERROR_MORE_ABSENT, (uid_t)-1, (gid_t)-1));
-
-        errno = 0;
-        said("lchown-no-change",
-             lchown(ERROR_MORE_FILE, (uid_t)-1, (gid_t)-1));
-
-        errno = 0;
-        said("lchown-missing", lchown(ERROR_MORE_ABSENT, (uid_t)-1, (gid_t)-1));
-
-        errno = 0;
-        copy = dup(1);
-        said("dup", copy >= 3);
-
-        errno = 0;
-        said("close-dup", close(copy));
-
-        errno = 0;
-        said("dup-bad-handle", dup(-1));
-
-        errno = 0;
-        said("dup3", dup3(1, 7, 0));
-
-        errno = 0;
-        said("close-dup3", close(7));
-
-        errno = 0;
-        said("dup3-bad-handle", dup3(-1, 7, 0));
-
-        errno = 0;
-        said("pipe2", pipe2(pair, 0));
-
-        errno = 0;
-        said("close-pipe2-read", close(pair[0]));
-
-        errno = 0;
-        said("close-pipe2-write", close(pair[1]));
-
-        errno = 0;
-        said("chdir", chdir(ERROR_MORE_DIRECTORY));
-
-        errno = 0;
-        said("chdir-back", chdir("/tmp"));
-
-        errno = 0;
-        said("chdir-missing", chdir(ERROR_MORE_ABSENT));
-
-        errno = 0;
-        said("fchdir-bad-handle", fchdir(-1));
-
-        umask(0022);
-        mask = umask(0077);
-        printf("TRANSCRIPT umask previous %lu\n", (unsigned long)mask);
-        umask(mask);
-
-        errno = 0;
-        region = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
-                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        said("mmap", region != MAP_FAILED);
-
-        memset(region, 0x5a, 4096);
-
-        errno = 0;
-        said("mprotect", mprotect(region, 4096, PROT_READ));
-
-        errno = 0;
-        said("munmap", munmap(region, 4096));
-
-        errno = 0;
-        said("mmap-zero-length",
-             mmap(NULL, 0, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)
-                     == MAP_FAILED);
-
-        errno = 0;
-        said("munmap-zero-length", munmap(NULL, 0));
-
-        printf("TRANSCRIPT identity ppid-positive %d uid-is-euid %d"
-               " gid-is-egid %d\n",
-               getppid() > 0, getuid() == geteuid(), getgid() == getegid());
-
-        errno = 0;
-        said("kill-probe-self", kill(getpid(), 0));
-
-        errno = 0;
-        said("kill-bad-signal", kill(getpid(), 9999));
-
-        errno = 0;
-        said("execve-missing",
-             execve("/nonexistent-dawning-execve", NULL, NULL));
-
-        errno = 0;
-        said("sync", (sync(), 0));
-
-        fflush(stdout);
-
-        errno = 0;
-        child = fork();
-
-        if (child == 0)
-                _exit(7);
-
-        status = 0;
-        errno = 0;
-        said("fork-then-waitpid", waitpid(child, &status, 0) == child);
-
-        printf("TRANSCRIPT child status %d\n", status);
-
-        fflush(stdout);
-
-        errno = 0;
-        child = fork();
-
-        if (child == 0)
-                _Exit(3);
-
-        status = 0;
-        errno = 0;
-        said("fork-then-wait", wait(&status) == child);
-
-        printf("TRANSCRIPT second child status %d\n", status);
-
-        errno = 0;
-        said("waitpid-no-children", waitpid(-1, &status, 0));
-
-        errno = 0;
-        said("wait4-no-children", wait4(-1, &status, 0, NULL));
-
-        errno = 0;
-        said("more-unlink", unlink(ERROR_MORE_FILE));
-
-        errno = 0;
-        said("more-rmdir", rmdir(ERROR_MORE_DIRECTORY));
-}
+#define SHARED_error_body
+#include "checks.c"
+#undef SHARED_error_body
 
 int main(void)
 {
-        dup2(1, 2);
-
-        messages();
-        perror_lines();
-        wrappers();
-        more();
-
+        error_test_transcript();
         fflush(stdout);
         return 0;
 }
