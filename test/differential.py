@@ -47084,6 +47084,211 @@ def public_suffix_probes(tables):
     return sorted(n for n in names if n.count(".") >= 1)
 
 
+def harness_tls_hostnames(argv):
+    """The certificate name check against OpenSSL's, over a grammar of
+    subjectAltNames and hosts, with no network and no sockets.
+
+    Each dNSName or iPAddress pattern (wildcards whole, partial and doubled,
+    other case, trailing dots, empty labels, public-suffix stars, punycode,
+    an embedded NUL, an address spelled as a DNS name) becomes a leaf under
+    one CA, built from raw DER so any bytes reach the SAN, and each host
+    (case, trailing dot, deeper and shallower names, dotted and colon
+    addresses) is handshaken against it by Python's ssl over two MemoryBIOs,
+    which is OpenSSL's chain and name check. The lifted tls_parse_san, which
+    holds the production name rules and the value's framing, is asked the
+    same pairs. It may be stricter than OpenSSL and never looser, except for
+    the two differences named in the code (a trailing dot, an underscore
+    under a wildcard); the counts of what both accept and of what only
+    OpenSSL accepts are printed.
+
+        python3 test/differential.py --harness tls_hostnames
+    """
+    import datetime
+    import ipaddress
+    import platform
+    import ssl
+    import tempfile
+    try:
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+    except ImportError:
+        print("tls hostnames: NOT RUN -- python3 cryptography is missing", file=sys.stderr)
+        return 2
+    if platform.system() != "Linux":
+        print("tls hostnames: NOT RUN -- needs Linux")
+        return 2
+    checks = Checks()
+
+    def der(tag, body):
+        n = len(body)
+        head = bytes([n]) if n < 128 else (b"\x81" + bytes([n]) if n < 256 else b"\x82" + n.to_bytes(2, "big"))
+        return bytes([tag]) + head + body
+
+    def san_value(entries):
+        return der(0x30, b"".join(der(tag, body) for tag, body in entries))
+
+    dns = lambda text: (0x82, text if isinstance(text, bytes) else text.encode())
+    ip = lambda text: (0x87, ipaddress.ip_address(text).packed)
+    patterns = [
+        [dns(n)] for n in (
+            "example.com", "EXAMPLE.COM", "*.example.com", "*.EXAMPLE.com", "example.com.",
+            "*.example.com.", "w*.example.com", "*w.example.com", "*.*.example.com", "*",
+            "*.", "*.com", "*.co.uk", "*.appspot.com", "*.b.example.com", "a.b.example.com",
+            "xn--bcher-kva.example", "*.xn--bcher-kva.example", ".example.com", "example..com",
+            "*..example.com", "ex ample.com", "-a.example.com", "a_b.example.com",
+            "*.a_b.example.com", "127.0.0.1", "::1", "example", "com", "co.uk",
+            "*.example", "b.example.com", "www.example.com", "*.www.example.com",
+            b"example.com\x00.evil.example", b"example.com\x00", b"\x00example.com", "")]
+    patterns += [[ip("127.0.0.1")], [ip("::1")], [ip("2001:db8::1")],
+                 [(0x87, b"\x7f\x00\x00")], [(0x87, bytes(15))], [(0x87, bytes(17))],
+                 [dns("other.test"), dns("example.com")], [dns("other.test"), dns("*.example.com")],
+                 [dns("other.test"), ip("127.0.0.1")], [ip("10.0.0.1"), dns("www.example.com")],
+                 [(0x81, b"example.com")], [(0x86, b"https://example.com/")],
+                 [(0xa4, der(0x30, b""))]]
+    hosts = ["example.com", "EXAMPLE.com", "www.example.com", "a.b.example.com", "b.example.com",
+             "example.com.", "www.example.com.", "example", "com", "co.uk", "a.co.uk",
+             "www.appspot.com", "appspot.com", "xn--bcher-kva.example", "www.xn--bcher-kva.example",
+             "127.0.0.1", "::1", "2001:db8::1", "10.0.0.1", "a_b.example.com", "x.a_b.example.com",
+             "-a.example.com", "other.test", "www.other.test", "a.example", "example.example",
+             "ww.example.com", "wwww.example.com", ".example.com", "1.2.3.4"]
+    # Two named differences, where this client is looser on purpose: an absolute
+    # name's trailing dot is dropped as Chrome drops it, and a wildcard's star
+    # stands for a label with an underscore (DNS carries them, http_host_byte
+    # lets wget and curl reach them, and GnuTLS's own match takes them).
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    ca_key = ec.generate_private_key(ec.SECP256R1())
+    ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "names test root")])
+    ca = (x509.CertificateBuilder().subject_name(ca_name).issuer_name(ca_name)
+          .public_key(ca_key.public_key()).serial_number(1)
+          .not_valid_before(now - datetime.timedelta(days=1))
+          .not_valid_after(now + datetime.timedelta(days=30))
+          .add_extension(x509.BasicConstraints(ca=True, path_length=None), True)
+          .add_extension(x509.KeyUsage(False, False, False, False, False, True, True, False, False), True)
+          .add_extension(x509.SubjectKeyIdentifier.from_public_key(ca_key.public_key()), False)
+          .sign(ca_key, hashes.SHA256()))
+    leaf_key = ec.generate_private_key(ec.SECP256R1())
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    oids, parsers, policy, framing, shim = tls_der_fuzz_lift_parts(net)
+    driver = r"""
+static int unhex(int c) { return c <= '9' ? c - '0' : (c | 32) - 'a' + 10; }
+int main(void)
+{
+        static char line[70000];
+
+        while (fgets(line, sizeof line, stdin))
+        {
+                static p8 value[35000];
+                char *tab = strchr(line, '\t');
+                char *host = tab + 1;
+                bool matched = false;
+                bool ok;
+                size_t length = 0;
+
+                host[strcspn(host, "\n")] = 0;
+                for (char *at = line; at < tab; at += 2)
+                        value[length++] = (p8)(unhex(at[0]) << 4 | unhex(at[1]));
+                ok = tls_parse_san(value, length, (string_address)host, &matched);
+                printf("%d %d\n", ok, ok && matched);
+        }
+        return 0;
+}
+"""
+    with tempfile.TemporaryDirectory(prefix="tls-hostnames-") as temporary:
+        work = Path(temporary)
+        (work / "names.c").write_text(shim + oids + "\n" + parsers + driver)
+        built = subprocess.run([os.environ.get("CC", "cc"), "-O1", "-w", "-fsanitize=address,undefined",
+                                "-o", str(work / "names"), str(work / "names.c")],
+                               capture_output=True, text=True)
+        if built.returncode:
+            print("tls hostnames: FAIL -- the lift does not build:\n" + built.stderr[-2000:])
+            return 1
+        (work / "ca.pem").write_bytes(ca.public_bytes(serialization.Encoding.PEM))
+        (work / "leaf.key").write_bytes(leaf_key.private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption()))
+        client = ssl.create_default_context(cafile=str(work / "ca.pem"))
+        client.verify_flags &= ~ssl.VERIFY_X509_STRICT
+
+        def handshake(server, host):
+            bios = [ssl.MemoryBIO() for _ in range(4)]
+            c = client.wrap_bio(bios[0], bios[1], server_hostname=host)
+            s = server.wrap_bio(bios[2], bios[3], server_side=True)
+            done = [False, False]
+            for _ in range(40):
+                for who, peer, index in ((c, 0, 0), (s, 2, 1)):
+                    if done[index]:
+                        continue
+                    try:
+                        who.do_handshake()
+                        done[index] = True
+                    except ssl.SSLWantReadError:
+                        pass
+                    except ssl.SSLError:
+                        return False
+                    (bios[2] if index == 0 else bios[0]).write(
+                        (bios[1] if index == 0 else bios[3]).read())
+                if all(done):
+                    return True
+            return False
+
+        both = only_openssl = 0
+        for number, entries in enumerate(patterns):
+            value = san_value(entries)
+            leaf = (x509.CertificateBuilder()
+                    .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "leaf")]))
+                    .issuer_name(ca_name).public_key(leaf_key.public_key())
+                    .serial_number(1000 + number)
+                    .not_valid_before(now - datetime.timedelta(days=1))
+                    .not_valid_after(now + datetime.timedelta(days=30))
+                    .add_extension(x509.BasicConstraints(ca=False, path_length=None), True)
+                    .add_extension(x509.KeyUsage(True, False, False, False, False, False, False, False, False), True)
+                    .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), False)
+                    .add_extension(x509.SubjectKeyIdentifier.from_public_key(leaf_key.public_key()), False)
+                    .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()), False)
+                    .add_extension(x509.UnrecognizedExtension(
+                        x509.ObjectIdentifier("2.5.29.17"), value), False)
+                    .sign(ca_key, hashes.SHA256()))
+            (work / "leaf.pem").write_bytes(leaf.public_bytes(serialization.Encoding.PEM))
+            server = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            server.load_cert_chain(str(work / "leaf.pem"), str(work / "leaf.key"))
+            lines = "".join("%s\t%s\n" % (value.hex(), host) for host in hosts)
+            ran = subprocess.run([str(work / "names")], input=lines, capture_output=True,
+                                 text=True, env={"ASAN_OPTIONS": "detect_leaks=0"})
+            answers = ran.stdout.split("\n")
+            checks(ran.returncode == 0 and len(answers) == len(hosts) + 1,
+                   "the lifted tls_parse_san died on pattern %d: %s" % (number, ran.stderr[-300:]))
+            for host, answer in zip(hosts, answers):
+                try:
+                    theirs = handshake(server, host)
+                except (ValueError, UnicodeError):
+                    continue
+                ours = answer.split() == ["1", "1"]
+                what = "%r for %s" % (entries, host)
+                trailing = host.endswith(".") or any(
+                    tag == 0x82 and body.endswith(b".") for tag, body in entries)
+                if ours and not theirs:
+                    underscore = "_" in host and any(
+                        tag == 0x82 and body.startswith(b"*.") for tag, body in entries)
+                    checks(trailing or underscore,
+                           "this client accepts %s and OpenSSL refuses" % what)
+                elif ours:
+                    both += 1
+                    checks(True, what)
+                elif theirs:
+                    only_openssl += 1
+                    print("tls hostnames: only OpenSSL accepts %s" % what)
+                    checks(True, what)
+                else:
+                    checks(True, what)
+    checks(both >= 20, "only %d pairs accepted by both: the grammar reaches nothing" % both)
+    print("tls hostnames: %d patterns, %d hosts, %d pairs both accept, %d only OpenSSL accepts" % (
+        len(patterns), len(hosts), both, only_openssl))
+    return checks.verdict("tls hostnames", "tls-hostnames")
+
+
 def harness_public_suffixes(argv):
     """The wildcard public-suffix tables in src/net/suffixes.inc and the C
     lookup that reads them.
@@ -60864,6 +61069,7 @@ HARNESS_CHECKS = {
     "crypto_fuzz": harness_crypto_fuzz,
     "x509_corpus": harness_x509_corpus,
     "public_suffixes": harness_public_suffixes,
+    "tls_hostnames": harness_tls_hostnames,
     "anchors": harness_anchors,
     "tls_fuzz": harness_tls_fuzz,
     "msan_net": harness_msan_net,
