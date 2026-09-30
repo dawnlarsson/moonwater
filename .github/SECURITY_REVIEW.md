@@ -180,11 +180,9 @@ assassination and io_uring at watcher start.
 
 Open, ranked:
 
-1. No 802.11w. `wifi_rsn_ie` carries no MFPC bit and no IGTK is installed, so a
-   deauthentication frame from anyone in radio range ends the association.
-   Needs an RSN group-management cipher, `NL80211_ATTR_USE_MFP` and the IGTK
-   key data in message 3; the `wifi` lane's radio emulation has no AP to test
-   it against, and the box has no hostapd.
+1. ~~No 802.11w.~~ Closed in the closewifi pass below (66b4e01b): management frame
+   protection is negotiated and tested against spoofed deauthentication on
+   simulated radios with a real access point.
 2. The DHCP client is a UDP socket, so `rp_filter` 1 or 2 drops the OFFER
    (route to the server does not exist yet) and no lease is ever taken:
    measured, OFFERs sent and no REQUEST. `rp_filter` therefore stays 0 in
@@ -271,6 +269,99 @@ The ranked item "REP with a DECSTBM region costs 70 MB of copying" was read
 and not measured: 65,000 cells of REP inside a 134-row region on a 255 x 135
 grid takes 119 microseconds.
 
+## Wi-Fi, saved lists and waterlink (closewifi pass, 2026-09-30)
+
+Attackers: a radio in range (spoofed deauthentication, disassociation, EAPOL),
+an access point by a saved network's name (an evil twin, with or without
+protection or the password), anyone who can read `/root/link.groups`, and a
+sender of handshake initiations. Everything below was run on the box against
+real peers on `mac80211_hwsim` radios in a guest of the built image: wpa_supplicant's
+own access point mode and hostapd 2.11 built from source
+(`MOONWATER_HOSTAPD`, the `rekey` family's binary), a third radio made a
+monitor that sends unprotected management frames in the access point's name
+(`hwsim_radio inject`).
+
+Fixed, each with a test that was red before:
+
+- Management frame protection (66b4e01b). The RSN element carries MFPC and MFPR,
+  the join asks the kernel for protection whenever the access point offers it,
+  PSK-SHA256 is joined (KDF of 802.11-2016, AES-128-CMAC MIC, descriptor version
+  3), the IGTK in message 3 and the group handshake is installed once per key
+  from a frame whose MIC checked, and a network whose access point has offered
+  protection is written to `/root/wifi.pmf`: an access point of that name that
+  does not offer it is never joined, however loud (the twin of a spoofed
+  deauthentication). The STRICT tier refuses a secured network that never
+  offered it; the default keeps joining those. The `pmf` family (12 rows) is
+  red on the PR branch tip (it cannot join an access point that requires
+  protection at all) and green: a spoofed deauthentication or disassociation is
+  ignored by a protected station and believed by an unprotected one, so the
+  frames land. The kernel refuses `NL80211_MFP_OPTIONAL` on a driver with no
+  connect of its own ("Operation not supported", found by the first version of
+  the test), so protection is asked for as required whenever it is offered.
+- TKIP and WPA1 (66b4e01b) stay refused, in words that say why and what to change
+  (`wifi add`, bare `wifi`, `status`); a mixed WPA/WPA2 network with a TKIP
+  group cipher is refused the same way. This is a decision, not a gap: TKIP is
+  broken, and the refusal is now diagnosable.
+- WPA3-Personal (c5f9b131, 61cf5e76). SAE over group 19, both the hunt and
+  hash-to-element, joined through `NL80211_CMD_AUTHENTICATE` and
+  `NL80211_CMD_ASSOCIATE` (a driver of mac80211's kind has no connect of its
+  own for SAE), AKM 00-0F-AC:8, PMF required, anti-clogging tokens, a wrong
+  password refused in 0.1 s with the words. Interop: wpa_supplicant's access
+  point (WPA3 alone, and WPA2+WPA3 with a different PSK so only WPA3 can have
+  joined) and hostapd 2.11 with `sae_pwe` 0, 1 and 2 and a token demanded of
+  every commit, each held to hostapd's own log (SAE "Accepted", `H2E=` as
+  expected, the handshake to its end). Vectors: a reference written from the
+  standard in Python (hunt, SSWU, PT, commit, shared secret, KCK, PMK, PMKID,
+  both confirms) against the shipped functions in `waterlink_service`. Traps
+  found by running it: SAE's key descriptor version is 0, not 3 (hostapd ignored
+  version 3 frames), the PTK KDF and MIC must key on the suite and not on the
+  version, the EAPOL socket must be open before the association, and a WPA3
+  twin whose password is not ours is a candidate now, so the avoid list picks
+  the one given up on longest ago. Not built: password identifiers, groups other
+  than 19 (and the rejected-groups element), SAE-PK, the extended-key suites
+  (AKM 24 and 25).
+- Saved lists (5390ba63). `host_write_file` for every persistent state file writes
+  `NAME.new`, fsyncs, renames over the old file and syncs the directory, so a
+  crash or a signal cannot leave a half or empty `/root/wifi` (RLIMIT_FSIZE 0
+  kills the writer part way in the test: the old code left the list empty);
+  bluetooth add and remove take the radio lock (twelve at once kept one name).
+  `moonwater wifi remove` and `add` wipe the password table on every path
+  (checked by reading: no change).
+- `/root/link.groups` (8adc87b8). The fast salted SHA-256 beside the PBKDF2 key is
+  gone, so a guess costs the 600,000 rounds again for whoever holds the file
+  (a script that joins at every boot says `link join NAMESPACE`); an old file's
+  check is read as zero and dropped by the next write. The secret is taken from
+  standard input (`link join NS -`; the argv form is the shell's closesupply
+  work).
+- The watcher's own log (65ad5065). The wifi lane's "watch leased the station"
+  flake (92 s) was a lost log line: `devkmsg_write` drops what a program writes to
+  `/dev/kmsg` past ten lines in five seconds for each open file, without an
+  error. The lease was 0.02 to 0.17 s after the association every time it was
+  logged. The watcher writes `on` to `kernel.printk_devkmsg`.
+- Handshake flood and MSan on waterlink (65ad5065). 11,999 initiations with a good
+  mac1 from 900 ports over netem: the cookie path engaged (11,098 cookie
+  replies), 0.07 s of listener CPU, +64 kB resident, a paired peer still ran a
+  command through it. `waterlink_pre_fuzz` and `waterlink_fuzz` 300 s each under
+  MSan, `sh test/run msan` 22 of 22, all clean.
+- EAPOL source (e6677642). A frame on the EAPOL socket from any address but the
+  access point's is dropped (wpa_supplicant does the same): a message 1 from
+  another address used to be answered and its ANonce replaced the pending key
+  that message 3 is checked under. An attacker who spoofs both the transmitter
+  and the source address of an unprotected frame during the handshake's
+  window still can; EAPOL before the keys is unauthenticated by design, and once
+  a key is in the kernel drops unprotected EAPOL.
+
+Found sound, and how: the PSK offload path is kept for drivers that have it and
+is never used for SAE; a message 3 resent after a group rekey is answered and
+installs nothing (the IGTK follows the GTK's rule, and `wifi_eapol_fuzz` now
+holds both to "only as the access point made it, never twice", for PSK,
+PSK-SHA256 and SAE frames); constant-time field routines carry the SAE work (the
+hunt runs every pass whole and selects by mask).
+
+Not testable here: real radios and firmware (hwsim has no firmware, no 6 GHz
+regulatory limits and no real rekeys forty minutes in beyond the `rekey`
+family), the PSK/SAE offload paths of a driver that implements them.
+
 ## Open issue ledger
 
 The one list of every known, documented security or hardening issue in the
@@ -299,13 +390,13 @@ downloads, boot disk, argv secrets, terminal fuzz; closeledger = the rest.
 | L10 | netlow #7 | `fs.protected_*`, `kptr_restrict`, `dmesg_restrict`, unprivileged user namespaces and io_uring on in the default tier | in progress (closenet) |
 | L11 | a40bfc9d note | DHCP yiaddr/router sanity (127/8, 224/4, router equal to the address) not refused; rogue-server-only | in progress (closenet) |
 | L12 | d1bcc3eb note | SYN cookies enabled and read back but not measured under a flood | open (closenet) |
-| L13 | netlow #1; nettls | No 802.11w/PMF: `wifi_rsn_ie` has no MFPC bit, no IGTK; a spoofed deauthentication frame ends the association | in progress (closewifi) |
-| L14 | README; netlink2 | No SAE: WPA3-only networks cannot be joined | in progress (closewifi) |
-| L15 | netlink2 | TKIP group cipher unsupported (by design) | open (closewifi, decision candidate) |
-| L16 | netlink2 | `/root/wifi` is rewritten in place (a crash mid-write loses the list); bluetooth add/remove take no radio lock (lost update) | in progress (closewifi) |
-| L17 | netlink2 | Group `check` in `/root/link.groups` is a fast salted SHA-256: whoever holds the file tests guesses at full speed | in progress (closewifi) |
-| L18 | netlink2 | Live waterlink handshake flood under netem not tested; MSan not run on waterlink | in progress (closewifi) |
-| L19 | security-pass-2 #12 | wifi first-message sender unchecked (DoS) | open (closewifi) |
+| L13 | netlow #1; nettls | No 802.11w/PMF: `wifi_rsn_ie` has no MFPC bit, no IGTK; a spoofed deauthentication frame ends the association | closed (66b4e01b): MFPC/MFPR, USE_MFP required whenever offered, PSK-SHA256, IGTK, `/root/wifi.pmf` (no downgrade), STRICT requires it; `pmf` family against spoofed deauthentication and disassociation |
+| L14 | README; netlink2 | No SAE: WPA3-only networks cannot be joined | closed (c5f9b131, 61cf5e76): SAE group 19 by the hunt and by hash-to-element through authenticate/associate; hostapd 2.11 and wpa_supplicant interop; not built: password identifiers, other groups, SAE-PK, AKM 24/25 |
+| L15 | netlink2 | TKIP group cipher unsupported (by design) | closed (66b4e01b): still refused, in words that say why and what to set (decision D10) |
+| L16 | netlink2 | `/root/wifi` is rewritten in place (a crash mid-write loses the list); bluetooth add/remove take no radio lock (lost update) | closed (5390ba63): written beside itself and renamed, directory synced; bluetooth takes the radio lock |
+| L17 | netlink2 | Group `check` in `/root/link.groups` is a fast salted SHA-256: whoever holds the file tests guesses at full speed | closed (8adc87b8): removed; old files read it as zero and drop it on the next write |
+| L18 | netlink2 | Live waterlink handshake flood under netem not tested; MSan not run on waterlink | closed (65ad5065): flood 11,999 initiations, cookie path engaged, 0.07 s CPU; MSan 300 s on `waterlink_pre_fuzz` and `waterlink_fuzz`, clean |
+| L19 | security-pass-2 #12 | wifi first-message sender unchecked (DoS) | closed (e6677642) as far as it can be: EAPOL from any address but the access point's is dropped; a forger of both transmitter and source before the keys is inherent to unauthenticated EAPOL |
 | L20 | security-pass-2 #12 | `moonwater wifi add SSID PASS` puts the password in argv (the `-` stdin form exists) | closed (83d35dd9): the history never keeps the line, a terminal is warned, tight refuses it |
 | L21 | secnet #2; bowl.c | Arch/Debian/ArchARM/RISC-V bootstrap tarballs unpinned and unsigned (TLS to the mirror only) | closed (9643436c): dated copies and commit pins by SHA-256, Arch Linux ARM by a pinned RSA key with a date floor; a row with neither is refused |
 | L22 | secnet #3 | `link join NS SECRET` puts the group secret in argv | closed (83d35dd9): `link join NS -`, the history, scrubbed argv, tight refuses the argv form |
@@ -343,5 +434,6 @@ downloads, boot disk, argv secrets, terminal fuzz; closeledger = the rest.
 | D07 | HEAD not exercised | The client only builds GET |
 | D08 | "Guest is root, not a wall": root is not hardened against itself | Documented policy in `SECURITY.md` |
 | D09 | The data partition is mounted without `nodev` and `nosuid` | It holds the user's `/root`, `/home` and the bowls; a bowl's `sudo` and `su` need setuid, and a device node on it can only have been made by root. Whose disk boot takes without asking is the control (L23), and the user can override |
+| D10 | TKIP and WPA1 networks stay refused | TKIP is broken; the refusal now names what to change at the access point (WPA2 with AES). The user can override |
 | D10 | The default still takes, without asking, the first same-build install on an internal bus when none is the disk the session started from | Reaching it means opening the case and adding a disk, which already gives write access to the unencrypted disk and the machine; asking about every internal disk would put a question on every boot from a live stick. `MOONWATER_STRICT` tight asks, and the user can make that the default |
 | D11 | A response cut inside its status line or a header stays a failure in both tiers | Measured against GNU wget 1.25.0 and curl 8.22.0 from a raw-socket server: cut at byte 8, wget exits 4 and curl 52; at 15, wget exits 0 with nothing written and curl 52; at 24 (inside a header), both exit 0 with nothing written; right after the last header line, wget exits 4 and curl 18. The two references disagree with each other, so no tier is 1:1 with both, and accepting a cut as success turns a download an attacker (or a dropped connection) truncated into an empty success that a script testing the exit status cannot tell from a real empty file. The user can override by changing `STRICTER_THAN_WGET`'s `FIN cuts` rows in `wget_mutation` and the no-reply status |
