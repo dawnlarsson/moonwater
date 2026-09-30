@@ -11433,6 +11433,9 @@ static positive dump_unsigned_field(p8 address_to into, positive value,
 {
         p8 digits[24];
 
+        if (base == 10)
+                return positive_into_padded(into, value, width, pad);
+
         return dump_right(into, digits,
                           positive_into_base(digits, value, base, false), width, pad);
 }
@@ -11446,11 +11449,17 @@ static positive dump_signed_field(p8 address_to into, positive value,
                                                : ((positive)1 << bits) - 1;
         bool negative = (value & sign) != 0;
         positive magnitude = negative ? ((~value + 1) & mask) : value;
-        p8 digits[25] = {'-'};
-        positive length = negative + positive_into_base(digits + negative,
-                                                        magnitude, 10, false);
+        if (!negative)
+                return positive_into_padded(into, magnitude, width, ' ');
 
-        return dump_right(into, digits, length, width, ' ');
+        /* The digits go one place in and the sign into the place before the
+           first of them: the pad's last byte, or the field's first. */
+        positive made = positive_into_padded(into + 1, magnitude,
+                                             width ? width - 1 : 0, ' ');
+
+        into[0] = ' ';
+        into[memory_span_byte(into + 1, ' ', made)] = '-';
+        return made + 1;
 }
 
 static positive dump_value(p8 address_to bytes, positive have, positive size)
