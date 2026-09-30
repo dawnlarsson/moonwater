@@ -120,6 +120,23 @@
                 }                                                             \
         } while (0)
 
+/*
+        BENCH_ONCE defines one timed run: name(params) does count iterations
+        of the body with index counting them and answers the CPU ticks they
+        took. The body is a statement without its closing semicolon, or a
+        block. A benchmark's paired sides are each one of these.
+*/
+#define BENCH_ONCE(name, params, count, index, ...)                           \
+        static p64 name params                                                \
+        {                                                                     \
+                p64 bench_start = get_cpu_time();                             \
+                                                                              \
+                for (positive index = 0; index < (count); index++)            \
+                        __VA_ARGS__;                                          \
+                                                                              \
+                return get_cpu_time() - bench_start;                          \
+        }
+
 #if defined(SHARED_sizes)
 /* Literal arguments exercise compiler-owned specializations. The scan checks
    keep their twenty-size function bands to bound compiler resource use. */
@@ -6046,15 +6063,8 @@ static fn order(positive address_to values, positive count)
 #ifdef BENCH_PAIRED_INDEXED
 typedef positive (*bench_indexed_work)(positive);
 
-static p64 bench_indexed_once(bench_indexed_work run)
-{
-        p64 started = get_cpu_time();
-
-        for (positive round = 0; round < ROUNDS; round++)
-                sink += run(round & (SUBJECTS - 1));
-
-        return get_cpu_time() - started;
-}
+BENCH_ONCE(bench_indexed_once, (bench_indexed_work run), ROUNDS, round,
+           sink += run(round & (SUBJECTS - 1)))
 
 static positive bench_paired_median(bench_indexed_work one,
                                     bench_indexed_work two)
@@ -91296,29 +91306,15 @@ static fn make_values()
         values[7] = positive_max;
 }
 
-static p64 former_once(positive width, p8 prefix)
-{
-        p64 start = get_cpu_time();
+BENCH_ONCE(former_once, (positive width, p8 prefix), ROUNDS, r,
+           former_padded(discard_writer,
+                         values[r & (VALUE_COUNT - 1)], width,
+                         ' ', prefix))
 
-        for (positive r = 0; r < ROUNDS; r++)
-                former_padded(discard_writer,
+BENCH_ONCE(assembly_once, (positive width, p8 prefix), ROUNDS, r,
+           positive_to_padded(discard_writer,
                               values[r & (VALUE_COUNT - 1)], width,
-                              ' ', prefix);
-
-        return get_cpu_time() - start;
-}
-
-static p64 assembly_once(positive width, p8 prefix)
-{
-        p64 start = get_cpu_time();
-
-        for (positive r = 0; r < ROUNDS; r++)
-                positive_to_padded(discard_writer,
-                                   values[r & (VALUE_COUNT - 1)], width,
-                                   ' ', prefix);
-
-        return get_cpu_time() - start;
-}
+                              ' ', prefix))
 
 static fn row(string_address name, positive width, p8 prefix)
 {
@@ -91492,11 +91488,7 @@ static fn make_subjects(positive base, positive maximum)
         }
 }
 
-NOT_INLINED static p64 run_fixed(fixed_parser parser)
-{
-        p64 start = get_cpu_time();
-
-        for (positive round = 0; round < ROUNDS; round++)
+NOT_INLINED BENCH_ONCE(run_fixed, (fixed_parser parser), ROUNDS, round,
         {
                 positive which = round & (SUBJECTS - 1);
                 positive used;
@@ -91504,16 +91496,9 @@ NOT_INLINED static p64 run_fixed(fixed_parser parser)
 
                 value = parser(subjects[which], limits[which], address_of used);
                 sink += value + used;
-        }
+        })
 
-        return get_cpu_time() - start;
-}
-
-NOT_INLINED static p64 run_base(base_parser parser, positive base)
-{
-        p64 start = get_cpu_time();
-
-        for (positive round = 0; round < ROUNDS; round++)
+NOT_INLINED BENCH_ONCE(run_base, (base_parser parser, positive base), ROUNDS, round,
         {
                 positive which = round & (SUBJECTS - 1);
                 positive used;
@@ -91522,10 +91507,7 @@ NOT_INLINED static p64 run_base(base_parser parser, positive base)
                 value = parser(subjects[which], limits[which], base,
                                address_of used);
                 sink += value + used;
-        }
-
-        return get_cpu_time() - start;
-}
+        })
 
 static p64 median(p64 values[TRIES])
 {
@@ -91756,11 +91738,7 @@ static fn make_values()
         values[6] = 999999999;
 }
 
-static p64 former_once(positive width)
-{
-        p64 start = get_cpu_time();
-
-        for (positive r = 0; r < ROUNDS; r++)
+BENCH_ONCE(former_once, (positive width), ROUNDS, r,
         {
                 positive value = values[r & (VALUE_COUNT - 1)];
                 positive length;
@@ -91773,16 +91751,9 @@ static p64 former_once(positive width)
                         length = former_scaled(output, value % 1000000000, 100000000);
 
                 sink += length + output[0] + output[width - 1];
-        }
+        })
 
-        return get_cpu_time() - start;
-}
-
-static p64 assembly_once(positive width)
-{
-        p64 start = get_cpu_time();
-
-        for (positive r = 0; r < ROUNDS; r++)
+BENCH_ONCE(assembly_once, (positive width), ROUNDS, r,
         {
                 positive value = values[r & (VALUE_COUNT - 1)];
                 positive length;
@@ -91804,10 +91775,7 @@ static p64 assembly_once(positive width)
                 }
 
                 sink += length + output[0] + output[width - 1];
-        }
-
-        return get_cpu_time() - start;
-}
+        })
 
 static fn row(string_address name, positive width)
 {
@@ -91980,34 +91948,20 @@ static fn make_values()
         values[3][1] = ((positive)15 << 60) + 1;
 }
 
-static p64 buffer_once(positive shape, bool assembly)
-{
-        p64 start = get_cpu_time();
+BENCH_ONCE(buffer_once, (positive shape, bool assembly), ROUNDS, r,
+           sink += assembly
+                       ? positive_into_human_1024_string(
+                             output, values[shape][r & (VALUE_COUNT - 1)])
+                       : former_human_buffer(
+                             output, values[shape][r & (VALUE_COUNT - 1)]))
 
-        for (positive r = 0; r < ROUNDS; r++)
-                sink += assembly
-                            ? positive_into_human_1024_string(
-                                  output, values[shape][r & (VALUE_COUNT - 1)])
-                            : former_human_buffer(
-                                  output, values[shape][r & (VALUE_COUNT - 1)]);
-
-        return get_cpu_time() - start;
-}
-
-static p64 writer_once(positive shape, bool assembly)
-{
-        p64 start = get_cpu_time();
-
-        for (positive r = 0; r < ROUNDS; r++)
-                if (assembly)
-                        positive_to_human_1024(
-                            discard_writer, values[shape][r & (VALUE_COUNT - 1)]);
-                else
-                        former_human_writer(
-                            discard_writer, values[shape][r & (VALUE_COUNT - 1)]);
-
-        return get_cpu_time() - start;
-}
+BENCH_ONCE(writer_once, (positive shape, bool assembly), ROUNDS, r,
+           if (assembly)
+                   positive_to_human_1024(
+                       discard_writer, values[shape][r & (VALUE_COUNT - 1)]);
+           else
+                   former_human_writer(
+                       discard_writer, values[shape][r & (VALUE_COUNT - 1)]))
 
 static fn row(string_address name, positive shape, bool writer_form)
 {
@@ -92321,29 +92275,15 @@ static positive rounds_for(positive length)
         return rounds;
 }
 
-static p64 run(bool assembly, positive length, positive rounds)
-{
-        p64 start = get_cpu_time();
+BENCH_ONCE(run, (bool assembly, positive length, positive rounds), rounds, round,
+           sink += hash_calls[assembly](block, length))
 
-        for (positive round = 0; round < rounds; round++)
-                sink += hash_calls[assembly](block, length);
-
-        return get_cpu_time() - start;
-}
-
-static p64 run_string(bool assembly, positive rounds)
-{
-        p64 start = get_cpu_time();
-
-        for (positive round = 0; round < rounds; round++)
+BENCH_ONCE(run_string, (bool assembly, positive rounds), rounds, round,
         {
                 positive2 answer = string_hash_calls[assembly]((string_address)block);
 
                 sink += answer.x + answer.y;
-        }
-
-        return get_cpu_time() - start;
-}
+        })
 
 static fn row(positive length)
 {
@@ -93913,13 +93853,9 @@ static fn paths_make_long()
         long_path[at] = end;
 }
 
-static p64 path_run(bool assembly, positive operation,
+BENCH_ONCE(path_run, (bool assembly, positive operation,
                     string_address directory, string_address name,
-                    string_address path, positive rounds)
-{
-        p64 start = get_cpu_time();
-
-        for (positive i = 0; i < rounds; i++)
+                    string_address path, positive rounds), rounds, i,
         {
                 positive length;
 
@@ -93939,10 +93875,7 @@ static p64 path_run(bool assembly, positive operation,
                                      : former_path_head(output, path);
 
                 sink += length + output[0] + output[length ? length - 1 : 0];
-        }
-
-        return get_cpu_time() - start;
-}
+        })
 
 static fn path_row(string_address label, positive operation,
                    string_address directory, string_address name,
@@ -94088,20 +94021,13 @@ static positive rounds_for(positive size)
         return rounds;
 }
 
-static p64 primitive_run(bool assembly, positive size, positive rounds)
-{
-        p64 start = get_cpu_time();
-
-        for (positive i = 0; i < rounds; i++)
+BENCH_ONCE(primitive_run, (bool assembly, positive size, positive rounds), rounds, i,
         {
                 address_any answer = assembly ? memory_reverse(block, size)
                                               : former_memory_reverse(block, size);
 
                 sink += (positive)answer + block[0] + block[size - 1];
-        }
-
-        return get_cpu_time() - start;
-}
+        })
 
 static p64 rev_run(bool folded, positive size, positive rounds)
 {
@@ -94267,21 +94193,14 @@ static p64 raw_once(bool assembly, positive shape, positive width,
         return get_cpu_time() - start;
 }
 
-static p64 string_once(bool assembly, positive shape, positive width,
-                       bool left, positive rounds)
-{
-        p64 start = get_cpu_time();
-
-        for (positive i = 0; i < rounds; i++)
-                if (assembly)
-                        string_to_field(discard_writer, texts[shape], width,
-                                        (b8)0xa5, left);
-                else
-                        former_string_to_field(discard_writer, texts[shape], width,
-                                               (b8)0xa5, left);
-
-        return get_cpu_time() - start;
-}
+BENCH_ONCE(string_once, (bool assembly, positive shape, positive width,
+                       bool left, positive rounds), rounds, i,
+           if (assembly)
+                   string_to_field(discard_writer, texts[shape], width,
+                                   (b8)0xa5, left);
+           else
+                   former_string_to_field(discard_writer, texts[shape], width,
+                                          (b8)0xa5, left))
 
 static fn row(string_address name, bool string_form, positive shape,
               positive width, bool left)
@@ -94542,11 +94461,7 @@ static p64 reserve_once(b32 which)
         return get_cpu_time() - start;
 }
 
-static p64 flush_once(bool assembly)
-{
-        p64 start = get_cpu_time();
-
-        for (positive i = 0; i < SYSCALL_ROUNDS; i++)
+BENCH_ONCE(flush_once, (bool assembly), SYSCALL_ROUNDS, i,
         {
                 b32 success;
                 used = CAPACITY;
@@ -94557,16 +94472,9 @@ static p64 flush_once(bool assembly)
                         success = former_flush(null_handle, output, address_of used);
 
                 sink += used + (positive)success;
-        }
+        })
 
-        return get_cpu_time() - start;
-}
-
-static p64 log_once(positive length, bool assembly)
-{
-        p64 start = get_cpu_time();
-
-        for (positive i = 0; i < BUFFER_ROUNDS; i++)
+BENCH_ONCE(log_once, (positive length, bool assembly), BUFFER_ROUNDS, i,
         {
                 log_writer_buffer_length = 0;
 
@@ -94576,10 +94484,7 @@ static p64 log_once(positive length, bool assembly)
                         former_log(payload, length);
 
                 sink += log_writer_buffer_length + log_writer_buffer[0];
-        }
-
-        return get_cpu_time() - start;
-}
+        })
 
 static fn row(string_address name, positive length, bool hold_equal,
               positive rounds, positive pending, bool byte, bool flush)
@@ -94860,69 +94765,34 @@ NOT_INLINED static positive folded_newline(p8 address_to data, positive length)
         return found ? (positive)(found - data) : length;
 }
 
-static p64 compare_once(bool folded)
-{
-        p64 start = get_cpu_time();
+BENCH_ONCE(compare_once, (bool folded), ROUNDS, round,
+           sink += (positive)(folded ? folded_compare(one, BLOCK, two, BLOCK)
+                                     : former_compare(one, BLOCK, two, BLOCK)))
 
-        for (positive round = 0; round < ROUNDS; round++)
-                sink += (positive)(folded ? folded_compare(one, BLOCK, two, BLOCK)
-                                          : former_compare(one, BLOCK, two, BLOCK));
+BENCH_ONCE(equal_once, (bool folded), ROUNDS, round,
+           sink += folded ? folded_equal_block(one, two, BLOCK)
+                          : former_equal_block(one, two, BLOCK))
 
-        return get_cpu_time() - start;
-}
+BENCH_ONCE(newline_once, (bool folded), ROUNDS, round,
+           sink += folded ? folded_newline(one, BLOCK)
+                          : former_newline(one, BLOCK))
 
-static p64 equal_once(bool folded)
-{
-        p64 start = get_cpu_time();
+BENCH_ONCE(late_once, (bool folded), ROUNDS, round,
+           sink += folded ? folded_late_difference(one, two, BLOCK)
+                          : former_late_difference(one, two, BLOCK))
 
-        for (positive round = 0; round < ROUNDS; round++)
-                sink += folded ? folded_equal_block(one, two, BLOCK)
-                               : former_equal_block(one, two, BLOCK);
+BENCH_ONCE(prefix_once, (bool folded), ROUNDS, round,
+           if (folded)
+                   sink += memory_common_prefix(one, two, BLOCK);
+           else
+           {
+                   positive prefix = 0;
 
-        return get_cpu_time() - start;
-}
+                   while (prefix < BLOCK && one[prefix] == two[prefix])
+                           prefix++;
 
-static p64 newline_once(bool folded)
-{
-        p64 start = get_cpu_time();
-
-        for (positive round = 0; round < ROUNDS; round++)
-                sink += folded ? folded_newline(one, BLOCK)
-                               : former_newline(one, BLOCK);
-
-        return get_cpu_time() - start;
-}
-
-static p64 late_once(bool folded)
-{
-        p64 start = get_cpu_time();
-
-        for (positive round = 0; round < ROUNDS; round++)
-                sink += folded ? folded_late_difference(one, two, BLOCK)
-                               : former_late_difference(one, two, BLOCK);
-
-        return get_cpu_time() - start;
-}
-
-static p64 prefix_once(bool folded)
-{
-        p64 start = get_cpu_time();
-
-        for (positive round = 0; round < ROUNDS; round++)
-                if (folded)
-                        sink += memory_common_prefix(one, two, BLOCK);
-                else
-                {
-                        positive prefix = 0;
-
-                        while (prefix < BLOCK && one[prefix] == two[prefix])
-                                prefix++;
-
-                        sink += prefix;
-                }
-
-        return get_cpu_time() - start;
-}
+                   sink += prefix;
+           })
 
 NOT_INLINED static positive former_alpha(p8 address_to data, positive length)
 {
@@ -95405,18 +95275,11 @@ static positive rounds_for(positive length)
         return rounds;
 }
 
-static p64 run_copy(positive length, positive rounds)
-{
-        p64 start = get_cpu_time();
-
-        for (positive round = 0; round < rounds; round++)
+BENCH_ONCE(run_copy, (positive length, positive rounds), rounds, round,
         {
                 memory_copy_apart(former_block, source_block, length);
                 sink += former_block[0];
-        }
-
-        return get_cpu_time() - start;
-}
+        })
 
 static p64 run(bool assembly, positive length, positive rounds)
 {
@@ -95615,18 +95478,11 @@ static positive rounds_for(positive length)
         return rounds;
 }
 
-static p64 run_copy(positive length, positive rounds)
-{
-        p64 start = get_cpu_time();
-
-        for (positive round = 0; round < rounds; round++)
+BENCH_ONCE(run_copy, (positive length, positive rounds), rounds, round,
         {
                 memory_copy_apart(former_block, source_block, length);
                 sink += former_block[0];
-        }
-
-        return get_cpu_time() - start;
-}
+        })
 
 static p64 run(bool assembly, positive length, positive rounds)
 {
@@ -95761,11 +95617,7 @@ static fn prepare_source(void)
         }
 }
 
-static p64 run(bool assembly, positive length, positive rounds)
-{
-        p64 start = get_cpu_time();
-
-        for (positive round = 0; round < rounds; round++)
+BENCH_ONCE(run, (bool assembly, positive length, positive rounds), rounds, round,
         {
                 positive count = assembly
                                      ? memory_offsets_of_either(assembly_offsets, source_block,
@@ -95779,10 +95631,7 @@ static p64 run(bool assembly, positive length, positive rounds)
                         former_count = count;
 
                 sink += count;
-        }
-
-        return get_cpu_time() - start;
-}
+        })
 
 NOT_INLINED static positive former_outside(p32 address_to positions,
                                            const p8 address_to block, positive size)
@@ -96339,17 +96188,10 @@ static positive rounds_for(positive length)
         return rounds;
 }
 
-static p64 run(bool assembly, positive length, positive rounds)
-{
-        p64 start = get_cpu_time();
-
-        for (positive round = 0; round < rounds; round++)
-                sink += (positive)(assembly
-                                       ? memory_compare_ascii_case(one, two, length)
-                                       : former_compare(one, two, length));
-
-        return get_cpu_time() - start;
-}
+BENCH_ONCE(run, (bool assembly, positive length, positive rounds), rounds, round,
+           sink += (positive)(assembly
+                                  ? memory_compare_ascii_case(one, two, length)
+                                  : former_compare(one, two, length)))
 
 static fn row(string_address name, positive length, bool late)
 {
@@ -96606,17 +96448,10 @@ static positive rounds_for(positive length)
         return rounds;
 }
 
-static p64 run(bool shared, positive length, positive columns, bool wrap,
-               positive rounds)
-{
-        p64 start = get_cpu_time();
-
-        for (positive round = 0; round < rounds; round++)
-                sink += shared ? shared_line_end(text, length, 0, columns, wrap)
-                               : former_line_end(text, length, 0, columns, wrap);
-
-        return get_cpu_time() - start;
-}
+BENCH_ONCE(run, (bool shared, positive length, positive columns, bool wrap,
+               positive rounds), rounds, round,
+           sink += shared ? shared_line_end(text, length, 0, columns, wrap)
+                          : former_line_end(text, length, 0, columns, wrap))
 
 static void row(string_address name, positive length, positive columns, bool wrap,
                 positive space)
@@ -97136,18 +96971,11 @@ NOT_INLINED static address_any former_find(p8 address_to text, positive length,
         return null;
 }
 
-static p64 run(bool assembly, positive length, positive size, positive rounds)
-{
-        p64 start = get_cpu_time();
-
-        for (positive i = 0; i < rounds; i++)
-                sink += (positive)(assembly
-                                       ? memory_search_ascii_case(hay, length,
-                                                                  needle, size)
-                                       : former_find(hay, length, needle, size));
-
-        return get_cpu_time() - start;
-}
+BENCH_ONCE(run, (bool assembly, positive length, positive size, positive rounds), rounds, i,
+           sink += (positive)(assembly
+                                  ? memory_search_ascii_case(hay, length,
+                                                             needle, size)
+                                  : former_find(hay, length, needle, size)))
 
 static fn row(string_address name, positive length, string_address wanted,
               bool late, positive traffic)
@@ -97291,16 +97119,9 @@ static positive scan(bool prepared, positive length,
         return count;
 }
 
-static p64 run(bool prepared, positive length,
-               struct prepared_search address_to search, positive rounds)
-{
-        p64 started = get_cpu_time();
-
-        for (positive round = 0; round < rounds; round++)
-                sink += scan(prepared, length, search);
-
-        return get_cpu_time() - started;
-}
+BENCH_ONCE(run, (bool prepared, positive length,
+               struct prepared_search address_to search, positive rounds), rounds, round,
+           sink += scan(prepared, length, search))
 
 static fn row(string_address name, string_address wanted, bool icase,
               positive traffic)
@@ -97777,20 +97598,13 @@ static positive rounds_for(positive length)
         return rounds;
 }
 
-static p64 run(bool assembly, positive length, positive rounds)
-{
-        p64 start = get_cpu_time();
-
-        for (positive round = 0; round < rounds; round++)
+BENCH_ONCE(run, (bool assembly, positive length, positive rounds), rounds, round,
         {
                 address_any found = assembly
                                         ? memory_last_of(block, (b8)NEEDLE, length)
                                         : former_last(block, (b8)NEEDLE, length);
                 sink += (positive)found;
-        }
-
-        return get_cpu_time() - start;
-}
+        })
 
 static fn row(string_address name, positive length, positive hit)
 {
@@ -97952,20 +97766,13 @@ static positive rounds_for(positive length)
         return rounds;
 }
 
-static p64 run(bool assembly, positive length, positive rounds)
-{
-        p64 start = get_cpu_time();
-
-        for (positive round = 0; round < rounds; round++)
+BENCH_ONCE(run, (bool assembly, positive length, positive rounds), rounds, round,
         {
                 positive2 answer = assembly
                                        ? memory_count_words(block, length, false)
                                        : former_words(block, length, false);
                 sink += answer.x + answer.y;
-        }
-
-        return get_cpu_time() - start;
-}
+        })
 
 static fn row(string_address name, positive length, positive shape)
 {
