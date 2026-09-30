@@ -40888,6 +40888,15 @@ while True:
                   "timeout 20 /tmp/msh -c poweroff >/dev/null 2>&1\n"
                   "echo \"@@kept $(cat /root/clock.good) $(date +%s)\"\n"
                   "rm -f /root/clock.good /run/moonwater/clock.auth\n"
+                  "echo '@@ base'; rm -f /root/clock.good /run/moonwater/clock.auth\n"
+                  "echo $(( $(date +%s) - $(cut -d. -f1 /proc/uptime) - 100 )) > /run/moonwater/clock.base\n"
+                  "timeout 20 /tmp/msh -c poweroff >/dev/null 2>&1\n"
+                  "echo \"@@floor $(cat /root/clock.good) $(date +%s)\"\n"
+                  "rm -f /root/clock.good /run/moonwater/clock.base\n"
+                  "timeout 20 /tmp/msh -c poweroff >/dev/null 2>&1\n"
+                  "echo \"@@nobase $(cat /root/clock.good 2>/dev/null | head -c 12)\"\n"
+                  "echo \"$(( $(date +%s) - 30 )) $(( $(cut -d. -f1 /proc/uptime) - 30 ))\" > /run/moonwater/clock.auth\n"
+                  "rm -f /root/clock.good\n"
                   "ln -s /tmp/victim /root/clock.good; echo untouched > /tmp/victim\n"
                   "echo \"$(( $(date +%s) - 30 )) 0\" > /run/moonwater/clock.auth\n"
                   "timeout 20 /tmp/msh -c poweroff >/dev/null 2>&1\n"
@@ -40896,12 +40905,19 @@ while True:
         for line in lines:
             parts = line.split()
             if line.startswith("@@good "):
-                then, now = (int(parts[1]), int(parts[2])) if len(parts) == 3 else (0, 1)
-                check(now - 10 <= then <= now + 5,
+                then, now = (int(parts[1]), int(parts[2])) if len(parts) == 3 else (None, None)
+                check(then is not None and now - 10 <= then <= now + 5,
                       "poweroff writes the authenticated time plus the uptime to clock.good", line)
             elif line.startswith("@@kept "):
                 check(int(parts[1]) >= int(parts[2]) + 4000,
                       "poweroff never lowers clock.good", line)
+            elif line.startswith("@@floor "):
+                then, now = int(parts[1]), int(parts[2])
+                check(now - 110 <= then <= now - 90,
+                      "without an authenticated answer the floor is the boot's floor plus the uptime, "
+                      "not the wall clock's", line)
+            elif line.startswith("@@nobase "):
+                check(len(parts) == 1, "with no answer and no boot floor nothing is written", line)
             elif line.startswith("@@victim "):
                 check(parts[1] == "untouched",
                       "poweroff does not write through a link planted as clock.good", line)
