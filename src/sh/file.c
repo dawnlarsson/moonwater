@@ -13923,7 +13923,7 @@ static bool find_facts_ready()
                 /* -L follows links that have targets. A dangling link is
                    still an entry and GNU find tests it as a link rather than
                    turning the failed follow into a failed walk. */
-                if (find_facts_follow &&
+                if (find_facts_follow && looked == -ERROR_NO_ENTRY &&
                     file_look(find_parent, find_entry, AT_SYMLINK_NOFOLLOW,
                               find_facts))
                 {
@@ -14023,8 +14023,19 @@ static bool find_empty(file_facts address_to facts)
         if ((facts->mode & MODE_FORMAT) != MODE_DIRECTORY)
                 return (facts->mode & MODE_FORMAT) == MODE_FILE && facts->size == 0;
 
-        return file_directory_empty_same(find_parent, find_entry, facts,
-                                         find_facts_follow ? 0 : O_NOFOLLOW) > 0;
+        bipolar empty = file_directory_empty_same(find_parent, find_entry, facts,
+                                                  find_facts_follow ? 0 : O_NOFOLLOW);
+
+        //      A directory that cannot be read is not known to be empty, and
+        //      is said so, as GNU's opendir failing is.
+        if (empty < 0)
+        {
+                string_format(log_error, "find: '%w': %s\n", writer_terminal_quoted_name,
+                              find_path, file_reason(empty));
+                find_status = 1;
+                return false;
+        }
+        return empty > 0;
 }
 
 // Building the tree -------------------------------------------------
@@ -14817,7 +14828,7 @@ static b32 find_parse_primary(positive depth)
                         if (octal)
                         {
                                 string_format(log_error,
-                                              "find: invalid mode %w\n",
+                                              "find: invalid file mode '%w'\n",
                                               writer_terminal_quoted_name,
                                               given);
                                 goto bad;
@@ -14826,8 +14837,8 @@ static b32 find_parse_primary(positive depth)
                 positive mode;
                 if (!file_mode_of(value, 0, false, address_of mode))
                 {
-                        string_format(log_error, "find: invalid mode %w\n",
-                                      writer_terminal_quoted_name, value);
+                        string_format(log_error, "find: invalid file mode '%w'\n",
+                                      writer_terminal_quoted_name, given);
                         goto bad;
                 }
                 node->number = (b64)mode;
@@ -14894,8 +14905,11 @@ static b32 find_parse_primary(positive depth)
                 bipolar who = file_identity_of(value, group);
                 if (who < 0)
                 {
-                        string_format(log_error, "find: '%w%s", writer_terminal_quoted_name, value,
-                                      group ? (string_address) "' is not the name of a known group\n" : (string_address) "' is not the name of a known user\n");
+                        string_format(log_error, "find: invalid %s name or %s argument to -%s: '%w'\n",
+                                      group ? (string_address) "group" : (string_address) "user",
+                                      group ? (string_address) "GID" : (string_address) "UID",
+                                      group ? (string_address) "group" : (string_address) "user",
+                                      writer_terminal_quoted_name, value);
                         goto bad;
                 }
                 node->number = (b64)who;
@@ -41193,8 +41207,21 @@ static const file_word rm_whens[] = {
    clear it; --interactive=never only changes prompting and leaves the
    previous missing-name policy in place. Last collision cannot see a
    --interactive=always that sat between -f and a later never. */
+static bool rm_all_root_seen;
+
 static bool rm_option_seen(p8 letter, string_address value)
 {
+        //      --preserve-root=all is kept for the rest of the line: a plain
+        //      --preserve-root after it does not take it back.
+        if (letter == 'P' && value)
+        {
+                if (string_compare(value, (string_address) "all"))
+                        return string_report(log_error, false,
+                                             "rm: unrecognized --preserve-root argument: %w\n",
+                                             writer_shell_quoted_name, value);
+                rm_all_root_seen = true;
+                return true;
+        }
         if (letter == 'f')
         {
                 rm_force = true;
@@ -41225,6 +41252,7 @@ static b32 file_rm()
         positive count = (positive)program_argument_count();
         rm_status = 0;
         rm_force = false;
+        rm_all_root_seen = false;
         rm_prompting = 0;
         rm_selected = (rm_selection){};
 
@@ -41247,19 +41275,7 @@ static b32 file_rm()
                 the refusal to walk off the device an argument's parent is
                 on, which is checked with the arguments below.
         */
-        rm_preserve_all = false;
-
-        if (flags & FILE_FLAG('P'))
-        {
-                string_address which = file_option_value(address_of taking, 'P');
-
-                if (which && string_compare(which, (string_address) "all"))
-                        return string_report(log_error, 1,
-                                             "rm: unrecognized --preserve-root argument: %w\n",
-                                             writer_shell_quoted_name, which);
-
-                rm_preserve_all = which != null;
-        }
+        rm_preserve_all = rm_all_root_seen;
 
         //      --interactive=WHEN names one of the three policies; a bare
         //      --interactive is the one -i asks for.
@@ -49040,8 +49056,112 @@ static fn cal_emit_year_title(b64 year, positive width)
         log("\n\n", 2);
 }
 
+// The range options as they were given: the last of -1, -3 and -n decides
+// how many months, and -3 spans them.
+static positive cal_num_months;
+static bool cal_span;
+static bool cal_option_failed;
+
+static p8 cal_exclusive_first;
+
+static string_address cal_exclusive_name(p8 letter)
+{
+        return letter == 'Y' ? (string_address) "--twelve"
+               : letter == 'n' ? (string_address) "--months" : (string_address) "--year";
+}
+
+static bool cal_option_seen(p8 letter, string_address value)
+{
+        //      The year, twelve and months options refuse one another as the
+        //      second is met, before whatever else is wrong further along.
+        if (letter == 'Y' || letter == 'n' || letter == 'y')
+        {
+                if (cal_exclusive_first && cal_exclusive_first != letter)
+                {
+                        cal_option_failed = true;
+                        return string_report(log_error, false, "cal: options %s and %s cannot be combined\n",
+                                             cal_exclusive_name(cal_exclusive_first), cal_exclusive_name(letter));
+                }
+                cal_exclusive_first = letter;
+        }
+        if (letter == 'C' && value && string_get(value) &&
+            !string_equals(value, "never") && !string_equals(value, "auto") &&
+            !string_equals(value, "always") && !string_equals(value, "tty"))
+        {
+                cal_option_failed = true;
+                return string_report(log_error, false, "cal: unsupported color mode: %s\n", value);
+        }
+        if (letter == 'R' && value)
+        {
+                positive number;
+
+                if (!string_equals(value, "gregorian") && !string_equals(value, "iso") &&
+                    !string_equals(value, "julian") && !string_digits_exact(value, address_of number))
+                {
+                        cal_option_failed = true;
+                        return string_report(log_error, false, "cal: invalid --reform value: '%s'\n", value);
+                }
+        }
+        if (letter == '1')
+                cal_num_months = 1;
+        else if (letter == '3')
+        {
+                cal_num_months = 3;
+                cal_span = true;
+        }
+        else if (letter == 'S')
+                cal_span = true;
+        else if (letter == 'n')
+        {
+                positive parsed;
+
+                if (!string_digits_exact(value, address_of parsed) || parsed > 4294967295U)
+                {
+                        cal_option_failed = true;
+                        return string_digits_exact(value, address_of parsed)
+                            ? string_report(log_error, false,
+                                            "cal: invalid month argument: '%s': Numerical result out of range\n", value)
+                            : string_report(log_error, false, "cal: invalid month argument: '%s'\n", value);
+                }
+                cal_num_months = parsed;
+        }
+        return true;
+}
+
+// strtos32_or_err: a number that fits an int, or the reference's complaint.
+static bool cal_number(string_address text, string_address what, b64 address_to out)
+{
+        string_address at = text;
+        bool negative = false;
+        b64 value = 0;
+        bool digits = false;
+        bool range = false;
+
+        if (*at == '-' || *at == '+')
+                negative = *at++ == '-';
+        for (; *at >= '0' && *at <= '9'; at++)
+        {
+                digits = true;
+                if (value <= 4294967296LL)
+                        value = value * 10 + (*at - '0');
+        }
+        if (negative)
+                value = -value;
+        range = digits && !*at && (value > 2147483647LL || value < -2147483648LL);
+        if (!digits || *at)
+                return string_report(log_error, false, "cal: %s: '%s'\n", what, text);
+        if (range)
+                return string_report(log_error, false, "cal: %s: '%s': Numerical result out of range\n", what, text);
+        address_to out = value;
+        return true;
+}
+
 static b32 file_cal()
 {
+        cal_num_months = 0;
+        cal_span = false;
+        cal_option_failed = false;
+        cal_exclusive_first = 0;
         file_operands_begin();
         p8 week_start = 0;
 
@@ -49050,6 +49170,7 @@ static b32 file_cal()
             .options = cal_options,
             .operand = file_operand,
             .selection = address_of week_start,
+            .seen = cal_option_seen,
         };
 
         if (!file_take(address_of taking) || file_operand_failed)
@@ -49070,19 +49191,6 @@ static b32 file_cal()
                         cal_year_months_twelve,
                         array_count(cal_year_months_twelve)))
                         return 1;
-                {
-                        static const argument_exclusive_pair cal_three_span[] = {
-                            {'3', (string_address)"three"},
-                            {'S', (string_address)"span"},
-                        };
-
-                        if (argument_exclusive_refuse(
-                                log_error, (string_address)"cal",
-                                (positive)program_argument_count(),
-                                program_argument_list(), cal_options, true,
-                                cal_three_span, array_count(cal_three_span)))
-                                return 1;
-                }
         }
         if (taking.flags & (FILE_FLAG('w') | FILE_FLAG('v') |
                             FILE_FLAG('c')))
@@ -49098,7 +49206,7 @@ static b32 file_cal()
                     string_equals(color, (string_address)"tty");
 
                 if (!allowed)
-                        return string_report(log_error, 1, "cal: only --color=never is supported\n");
+                        return string_report(log_error, 1, "cal: unsupported color mode: %s\n", color);
         }
 
         bool proleptic = false;
@@ -49112,146 +49220,154 @@ static b32 file_cal()
                         proleptic = true;
                 else if (!string_compare(reform, (string_address)"1752"))
                         proleptic = false;
-                else
+                else if (!string_compare(reform, (string_address)"julian"))
                         return string_report(log_error, 1, "cal: only the 1752 and Gregorian reforms are supported\n");
+                else
+                {
+                        positive year_number;
+
+                        if (!string_digits_exact(reform, address_of year_number))
+                                return string_report(log_error, 1, "cal: invalid --reform value: '%s'\n", reform);
+                        return string_report(log_error, 1, "cal: only the 1752 and Gregorian reforms are supported\n");
+                }
         }
 
         time_t now = (time_t)file_now();
         tm broken;
-        if (!localtime_r(address_of now, address_of broken))
-                return string_report(log_error, 1, "cal: cannot read the current calendar date\n");
-        b64 year = (b64)broken.tm_year + 1900;
-        positive month = (positive)broken.tm_mon + 1;
-        positive selected_day = 1;
+        b64 year;
+        positive month;
+        positive day = 0;
         bool year_only = false;
+        bool yflag = (taking.flags & FILE_FLAG('y')) != 0;
+        positive operands = file_operand_count;
+        string_address word = operands ? file_operand_at(0) : null;
 
-        if (file_operand_count > 3)
-                return string_report(log_error, 1, "cal: bad usage\n");
-        if (file_operand_count == 1)
+        if (operands > 3)
         {
-                string_address word = file_operand_at(0);
+                log_error("cal: bad usage\n", 0);
+                return string_report(log_error, 1, "Try 'cal --help' for more information.\n");
+        }
+
+        //      One word that is not a number is a moment, or else a month
+        //      of this year; two or three are day, month and year.
+        bool moment = false;
+        positive request_month = 0;
+
+        if (operands == 1)
+        {
                 positive number;
-                bipolar named;
-                if (string_digits_exact(word, address_of number))
-                {
-                        if (!number || number > 2147483646U)
-                        {
-                                return string_report(log_error, 1,
-                                                     "cal: illegal year value: use positive integer\n");
-                        }
-                        year = (b64)number;
-                        year_only = true;
-                }
-                else if ((named = cal_month_number(word)) > 0)
-                        month = (positive)named;
-                else
+
+                if (!string_digits_exact(word, address_of number))
                 {
                         b64 stamp;
                         positive nanoseconds;
-                        if (!file_moment_read_exact(word, (b64)now,
-                                                    address_of stamp,
-                                                    address_of nanoseconds))
-                                return string_report(log_error, 1,
-                                              "cal: failed to parse timestamp or unknown month name: %s\n",
-                                              word);
-                        positive hour, minute, second;
-                        file_split_moment(stamp + clock_local_east(stamp),
-                                          address_of year, address_of month,
-                                          address_of selected_day,
-                                          address_of hour, address_of minute,
-                                          address_of second);
+                        bool digit_in_it = false;
+
+                        for (string_address at = word; *at; at++)
+                                digit_in_it |= *at >= '0' && *at <= '9';
+                        if ((digit_in_it || string_equals(word, "now") || string_equals(word, "today") ||
+                             string_equals(word, "yesterday") || string_equals(word, "tomorrow")) &&
+                            file_moment_read_exact(word, (b64)now, address_of stamp,
+                                                   address_of nanoseconds))
+                        {
+                                now = (time_t)stamp;
+                                moment = true;
+                        }
+                        else
+                        {
+                                bipolar named = cal_month_number(word);
+
+                                if (named < 1)
+                                        return string_report(log_error, 1,
+                                                             "cal: failed to parse timestamp or unknown month name: %s\n",
+                                                             word);
+                                request_month = (positive)named;
+                        }
+                        operands = 0;
                 }
         }
-        else if (file_operand_count >= 2)
-        {
-                bipolar named = cal_month_number(
-                    file_operand_at(file_operand_count == 2 ? 0 : 1));
-                positive parsed_year;
-                //      A number outside the twelve is an illegal value; a
-                //      word is a name this does not know, and the reference
-                //      says which of the two it met.
-                if (named < 1)
-                {
-                        string_address written =
-                            file_operand_at(file_operand_count == 2 ? 0 : 1);
-                        positive value;
 
-                        return string_digits_exact(written, address_of value)
-                            ? string_report(log_error, 1,
-                                            "cal: illegal month value: use 1-12\n")
-                            : string_report(log_error, 1,
-                                            "cal: unknown month name: %s\n", written);
-                }
-                if (!string_digits_exact(file_operand_at(file_operand_count - 1),
-                                address_of parsed_year) || !parsed_year ||
-                    parsed_year > 2147483646U)
+        if (!localtime_r(address_of now, address_of broken))
+                return string_report(log_error, 1, "cal: cannot read the current calendar date\n");
+
+        year = (b64)broken.tm_year + 1900;
+        month = request_month ? request_month : (positive)broken.tm_mon + 1;
+
+        if (operands)
+        {
+                b64 value;
+
+                if (operands == 3)
                 {
-                        return string_report(log_error, 1,
-                                             "cal: illegal year value: use positive integer\n");
+                        if (!cal_number(file_operand_at(0), (string_address) "illegal day value", address_of value))
+                                return 1;
+                        if (value < 1 || value > 31)
+                                return string_report(log_error, 1, "cal: illegal day value: use 1-31\n");
+                        day = (positive)value;
                 }
-                month = (positive)named;
-                year = parsed_year;
-                if (file_operand_count == 3 &&
-                    (!string_digits_exact(file_operand_at(0), address_of selected_day) ||
-                     !selected_day ||
-                     selected_day > cal_days_in_month(year, month,
-                                                       proleptic)))
+                if (operands >= 2)
+                {
+                        string_address said = file_operand_at(operands == 3 ? 1 : 0);
+
+                        if (*said >= '0' && *said <= '9')
+                        {
+                                if (!cal_number(said, (string_address) "illegal month value: use 1-12", address_of value))
+                                        return 1;
+                        }
+                        else
+                        {
+                                bipolar named = cal_month_number(said);
+
+                                if (named < 1)
+                                        return string_report(log_error, 1, "cal: unknown month name: %s\n", said);
+                                value = named;
+                        }
+                        if (value < 1 || value > 12)
+                                return string_report(log_error, 1, "cal: illegal month value: use 1-12\n");
+                        month = (positive)value;
+                }
+                if (!cal_number(file_operand_at(operands - 1), (string_address) "illegal year value", address_of value))
+                        return 1;
+                if (value < 1)
+                        return string_report(log_error, 1, "cal: illegal year value: use positive integer\n");
+                year = value;
+                if (day && day > cal_days_in_month(year, month, proleptic))
                 {
                         string_format(log_error, "cal: illegal day value: use 1-");
-                        positive_to_string(log_error,
-                                           cal_days_in_month(year, month,
-                                                             proleptic));
+                        positive_to_string(log_error, cal_days_in_month(year, month, proleptic));
                         log_error("\n", 1);
                         return 1;
                 }
+                if (operands == 1)
+                        year_only = true;
         }
 
         bool monday = week_start == 'm';
         bool julian = (taking.flags & FILE_FLAG('j')) != 0;
-        bool three = (taking.flags & FILE_FLAG('3')) != 0;
         bool twelve = (taking.flags & FILE_FLAG('Y')) != 0;
-        bool whole_year = (taking.flags & FILE_FLAG('y')) != 0;
-        bool one = (taking.flags & FILE_FLAG('1')) != 0;
-        bool span = (taking.flags & FILE_FLAG('S')) != 0;
-        string_address months_text = file_option_value(address_of taking, 'n');
-        positive months = 1;
-        bool months_given = months_text != null;
+        positive months = cal_num_months;
 
-        if (months_given && !string_digits_exact(months_text, address_of months))
-                return string_report(log_error, 1, "cal: invalid month count\n");
-        if (!months)
-                months = 1;
+        //      A bare year is the whole year unless a count was asked for.
+        if (year_only && !months)
+                yflag = true;
+        (void)moment;
         if ((p64)months > 25769803776ULL)
                 return string_report(log_error, 1, "cal: requested calendar range is out of bounds\n");
-        if ((whole_year && (three || months_given || one || twelve)) ||
-            (three && (months_given || twelve)) ||
-            (one && (three || months_given || twelve)) ||
-            (twelve && months_given))
-                return string_report(log_error, 1, "cal: conflicting calendar range options are unsupported\n");
 
-        b64 first = (year - 1) * 12 + (b64)month - 1;
-        bool year_layout = whole_year ||
-                           (year_only && !one && !three && !months_given);
         positive separation = 2;
 
-        if (year_layout)
+        if (yflag || twelve)
         {
-                months = 12;
-                first = (year - 1) * 12;
                 separation = 3;
+                if (!months)
+                        months = 12;
         }
-        else if (three)
-        {
-                months = 3;
-                first--;
-        }
-        else if (twelve)
-        {
-                months = 12;
-                separation = 3;
-        }
+        if (!months)
+                months = 1;
 
-        if (span && months > 1)
+        b64 first = (year - 1) * 12 + (b64)(yflag ? 1 : month) - 1;
+
+        if (cal_span)
                 first -= (b64)(months / 2);
 
         b64 first_year;
@@ -49265,13 +49381,15 @@ static b32 file_cal()
                 return string_report(log_error, 1, "cal: requested calendar range is out of bounds\n");
 
         positive width = julian ? CAL_JULIAN_WIDTH : CAL_NORMAL_WIDTH;
-        if (year_layout)
-                cal_emit_year_title(year, width * 3 + separation * 2);
+        positive across_row = months > 1 ? 3 : 1;
 
-        for (positive shown = 0; shown < months; shown += 3)
+        if (yflag)
+                cal_emit_year_title(year, width * across_row + separation * (across_row - 1));
+
+        for (positive shown = 0; shown < months; shown += across_row)
         {
-                positive across = months - shown < 3 ? months - shown : 3;
-                cal_emit_group(first + (b64)shown, across, !year_layout, monday,
+                positive across = months - shown < across_row ? months - shown : across_row;
+                cal_emit_group(first + (b64)shown, across, !yflag, monday,
                                julian, proleptic, separation);
         }
         log_flush();
@@ -51525,7 +51643,7 @@ static bool xargs_option_seen(p8 letter, string_address value)
         {
                 positive unused = 1;
 
-                if (value && !xargs_count_value(value, 'L', address_of unused))
+                if (value && !xargs_count_value(value, 'l', address_of unused))
                         return false;
 
                 if (xargs_most)
@@ -51595,7 +51713,7 @@ static bool xargs_option_seen(p8 letter, string_address value)
 static positive xargs_environment_bytes()
 {
         string_address address_to environment = file_environment_all();
-        positive bytes = sizeof(string_address);
+        positive bytes = 0;
 
         for (positive at = 0; environment && environment[at]; at++)
                 bytes += string_length(environment[at]) + 1;
@@ -51623,7 +51741,8 @@ static fn xargs_show_limits(positive env_bytes, positive posix, positive usable,
                       "POSIX upper limit on argument length (this system): %p\n"
                       "POSIX smallest allowable upper limit on argument length (all systems): %p\n"
                       "Maximum length of command we could actually use: %p\n"
-                      "Size of command buffer we are actually using: %p\n",
+                      "Size of command buffer we are actually using: %p\n"
+                      "Maximum parallelism (--max-procs must be no greater): 2147483647\n",
                       env_bytes, posix, (positive)4096, usable, using);
 }
 
@@ -51705,6 +51824,11 @@ static b32 file_xargs()
         if (posix > 2048)
                 posix -= 2048;
 
+        //      findutils takes the environment out of the limit it calls
+        //      POSIX's and out of what is left again for the command it will
+        //      build: with twelve bytes of environment 2095092 and 2095080.
+        posix = posix > env_bytes ? posix - env_bytes : 1;
+
         positive usable = posix > env_bytes ? posix - env_bytes : 1;
 
         if (taking.flags & FILE_FLAG('P'))
@@ -51747,10 +51871,10 @@ static b32 file_xargs()
                 string_digits_checked_exact(written, 10, address_of made);
                 if (!made)
                         made = 1;
-                if (made > usable)
+                if (made > posix)
                         string_format(log_error,
                                       "xargs: value %s for -s option should be <= %p\n",
-                                      written, usable);
+                                      written, posix);
                 if (made > XARGS_BATCH_BYTES)
                         made = XARGS_BATCH_BYTES;
                 xargs_most_bytes = made;
