@@ -183,6 +183,12 @@ static COLD b32 net_refused(string_address doing, bipolar status)
         return 1;
 }
 
+//      What a netlink request answered, as ip's status: nothing to say when it worked.
+static COLD b32 net_done(string_address doing, bipolar done)
+{
+        return done < 0 ? net_refused(doing, done) : 0;
+}
+
 /*
         One address written into the caller's bytes as text it can hand to %s.
 
@@ -2282,16 +2288,8 @@ static COLD b32 net_ip(void)
                 {
                         bipolar index = net_index_of((b32)handle, net_word(3));
 
-                        if (index < 0)
-                                status = net_refused((string_address) "link set", index);
-                        else
-                        {
-                                bipolar done = netlink_link_up((b32)handle, (p32)index);
-
-                                if (done < 0)
-                                        status = net_refused((string_address) "link set",
-                                                             done);
-                        }
+                        status = net_done("link set", index < 0 ? index
+                                          : netlink_link_up((b32)handle, (p32)index));
                 }
                 else
                         status = net_ip_refused(
@@ -2314,16 +2312,12 @@ static COLD b32 net_ip(void)
                                               address_of bits))
                                 status = net_ip_refused(
                                     "addr add: not an address");
-                        else if ((index = net_index_of((b32)handle, net_word(5))) < 0)
-                                status = net_refused((string_address) "addr add", index);
                         else
                         {
-                                bipolar done = netlink_address_add((b32)handle, (p32)index,
-                                                                   host, bits);
-
-                                if (done < 0)
-                                        status = net_refused((string_address) "addr add",
-                                                             done);
+                                index = net_index_of((b32)handle, net_word(5));
+                                status = net_done("addr add", index < 0 ? index
+                                    : netlink_address_add((b32)handle, (p32)index,
+                                                          host, bits));
                         }
                 }
                 else
@@ -2348,16 +2342,13 @@ static COLD b32 net_ip(void)
                         if (gateway < 0)
                                 status = net_ip_refused(
                                     "route add: not an address");
-                        else if (net_words() == 8 &&
-                                 (index = net_index_of((b32)handle, net_word(7))) < 0)
-                                status = net_refused((string_address) "route add", index);
                         else
                         {
-                                bipolar done = netlink_route_add(
-                                    (b32)handle, 0, 0, (p32)gateway, (p32)index);
-
-                                if (done < 0)
-                                        status = net_refused((string_address) "route add", done);
+                                if (net_words() == 8)
+                                        index = net_index_of((b32)handle, net_word(7));
+                                status = net_done("route add", index < 0 ? index
+                                    : netlink_route_add((b32)handle, 0, 0,
+                                                        (p32)gateway, (p32)index));
                         }
                 }
                 else
