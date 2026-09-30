@@ -420,6 +420,11 @@ static bool exec_assignment_promote(const_string name, positive length);
 static b32 exec_unset_prefix(const_string name, positive length);
 static PURE bool exec_special_builtin(string_address name);
 static fn exec_special_error_note();
+static fn shell_special_answer(b32 status)
+{
+        exec_special_error_note();
+        shell_answer(status);
+}
 static bool exec_child_process();
 static bool exec_asynchronous;
 static fn shell_child_default(b32 number);
@@ -6964,8 +6969,7 @@ COLD fn shell_exec(writer write, string_address input)
                         {
                                 log_error("exec: -a: option requires an "
                                                  "argument\n", 0);
-                                exec_special_error_note();
-                                return shell_answer(2);
+                                return shell_special_answer(2);
                         }
                 }
                 else
@@ -6973,8 +6977,7 @@ COLD fn shell_exec(writer write, string_address input)
                         shell_letter_refused("exec", which,
                             "exec [-cl] [-a name] [command [argument ...]] "
                             "[redirection ...]");
-                        exec_special_error_note();
-                        return shell_answer(2);
+                        return shell_special_answer(2);
                 }
         }
 
@@ -9004,8 +9007,7 @@ fn shell_shift(writer write, string_address input)
                         }
                         shell_told("shift: Illegal number: %s\n",
                             shell_argv[first]);
-                        exec_special_error_note();
-                        return shell_answer(2);
+                        return shell_special_answer(2);
                 }
 
                 amount = (positive)asked;
@@ -9027,8 +9029,7 @@ fn shell_shift(writer write, string_address input)
                 }
                 shell_diagnostic_where();
                 log_error("shift: can't shift that many\n", 0);
-                exec_special_error_note();
-                return shell_answer(2);
+                return shell_special_answer(2);
         }
 
         shell_parameters_shift(amount);
@@ -9044,8 +9045,7 @@ static bool shell_unset_variable(const_string name, positive length)
         if (env_restricted_name(name, length) || env_bash_readonly_name(name, length))
         {
                 shell_unset_readonly_refused((string_address)name, length);
-                exec_special_error_note();
-                shell_answer(shell_bash_compat ? 1 : 2);
+                shell_special_answer(shell_bash_compat ? 1 : 2);
                 return false;
         }
 
@@ -9114,8 +9114,7 @@ COLD fn shell_unset(writer write, string_address input)
                         // ends the script, as the reference shell's does.
                         shell_letter_refused("unset", letter,
                             "unset [-f] [-v] [-n] [name ...]");
-                        exec_special_error_note();
-                        shell_answer(2);
+                        shell_special_answer(2);
                         return;
                 }
         }
@@ -9179,8 +9178,7 @@ COLD fn shell_unset(writer write, string_address input)
                         if (attributes & SHELL_ARRAY_READONLY)
                         {
                                 shell_unset_readonly_refused(word, word_length);
-                                exec_special_error_note();
-                                shell_answer(shell_bash_compat ? 1 : 2);
+                                shell_special_answer(shell_bash_compat ? 1 : 2);
                                 return;
                         }
 
@@ -9214,8 +9212,7 @@ COLD fn shell_unset(writer write, string_address input)
                                 shell_unset_readonly_refused(
                                     (string_address)resolved.name,
                                     resolved.length);
-                                exec_special_error_note();
-                                shell_answer(shell_bash_compat ? 1 : 2);
+                                shell_special_answer(shell_bash_compat ? 1 : 2);
                                 return;
                         }
 
@@ -9388,8 +9385,7 @@ COLD fn shell_unset(writer write, string_address input)
                                 shell_unset_readonly_refused(
                                     (string_address)resolved.name,
                                     resolved.length);
-                                exec_special_error_note();
-                                shell_answer(shell_bash_compat ? 1 : 2);
+                                shell_special_answer(shell_bash_compat ? 1 : 2);
                                 return;
                         }
 
@@ -10618,8 +10614,7 @@ static inline INLINE fn shell_declare_apply(shell_declare_state address_to state
                                    (state->attributes_set & SHELL_ARRAY_NAMEREF))))
                 {
                         shell_name_refused(shell_argv[0], word, length);
-                        exec_special_error_note();
-                        shell_answer(shell_bash_compat ? 1 : 2);
+                        shell_special_answer(shell_bash_compat ? 1 : 2);
 
                         //      Bash names the word it cannot use and carries
                         //      on down the list, so "declare - v=1" still
@@ -10898,8 +10893,7 @@ static inline INLINE fn shell_declare_apply(shell_declare_state address_to state
                                 {
                                         shell_readonly_refused(shell_argv[0], shell_argv[0], word,
                                                                length);
-                                        exec_special_error_note();
-                                        shell_answer(shell_bash_compat ? 1 : 2);
+                                        shell_special_answer(shell_bash_compat ? 1 : 2);
                                         failed = true;
                                         goto next;
                                 }
@@ -10949,8 +10943,7 @@ static inline INLINE fn shell_declare_apply(shell_declare_state address_to state
                 {
                         shell_readonly_refused(shell_argv[0], shell_argv[0], word,
                                                length);
-                        exec_special_error_note();
-                        shell_answer(shell_bash_compat ? 1 : 2);
+                        shell_special_answer(shell_bash_compat ? 1 : 2);
                         failed = true;
                         goto next;
                 }
@@ -11041,8 +11034,7 @@ static inline INLINE fn shell_declare_apply(shell_declare_state address_to state
                         {
                                 shell_readonly_refused(shell_argv[0], shell_argv[0], word,
                                                        length);
-                                exec_special_error_note();
-                                shell_answer(shell_bash_compat ? 1 : 2);
+                                shell_special_answer(shell_bash_compat ? 1 : 2);
                                 failed = true;
                                 goto next;
                         }
@@ -11668,8 +11660,7 @@ static COLD fn shell_marked(writer write, p8 mark)
                                 env_export_mark(word);
                         address_to cut = append ? '+' : '=';
                         shell_readonly_refused(null, command, word, length);
-                        exec_special_error_note();
-                        shell_answer(shell_bash_compat ? 1 : 2);
+                        shell_special_answer(shell_bash_compat ? 1 : 2);
                         return;
                 }
 
@@ -15499,9 +15490,7 @@ COLD fn shell_times(writer write, string_address input)
                 //      times is a special builtin, so the refusal takes the
                 //      script with it wherever POSIX says it should.
                 shell_letter_refused("times", which, "times");
-                exec_special_error_note();
-
-                return shell_answer(2);
+                return shell_special_answer(2);
         }
 
         memory_fill(address_of clocks, 0, sizeof(clocks));
@@ -16223,6 +16212,7 @@ COLD fn shell_trap(writer write, string_address input)
 
                                 if (shell_posix_on())
                                         exec_special_error_note();
+
 
                                 return shell_answer(2);
                         }
@@ -20289,8 +20279,7 @@ COLD fn shell_dot(writer write, string_address input)
                 /* The executor applies special-builtin fatality only to a
                    direct invocation. That distinction is essential here:
                    `command . missing` must report failure and continue. */
-                exec_special_error_note();
-                shell_answer(shell_bash_compat ? 1 : 2);
+                shell_special_answer(shell_bash_compat ? 1 : 2);
                 if (shell_bash_compat)
                         exec_source_return_trap();
                 return;
@@ -22139,35 +22128,20 @@ static COLD positive bind_keys_bytes(string_address spelling, p8 address_to out,
                 case '0': case '1': case '2': case '3': case '4': case '5':
                 case '6': case '7':
                 {
-                        p32 number = (p32)(value - '0');
+                        positive taken;
 
-                        for (positive digits = 0;
-                             digits < 2 && string_get(spelling) >= '0' &&
-                             string_get(spelling) <= '7';
-                             digits++)
-                                number = number * 8 + (p32)(string_get(spelling++) - '0');
-                        out[used++] = (p8)number;
+                        out[used++] = (p8)string_digits_octal_escape_max(
+                            spelling - 1, 3, address_of taken);
+                        spelling += taken - 1;
                         break;
                 }
                 case 'x':
                 {
-                        p32 number = 0;
+                        positive taken;
 
-                        for (positive digits = 0; digits < 2; digits++)
-                        {
-                                p8 digit = string_get(spelling);
-
-                                if (digit >= '0' && digit <= '9')
-                                        number = number * 16 + (p32)(digit - '0');
-                                else if (digit >= 'a' && digit <= 'f')
-                                        number = number * 16 + (p32)(digit - 'a' + 10);
-                                else if (digit >= 'A' && digit <= 'F')
-                                        number = number * 16 + (p32)(digit - 'A' + 10);
-                                else
-                                        break;
-                                spelling++;
-                        }
-                        out[used++] = (p8)number;
+                        out[used++] = (p8)string_digits_hexadecimal_escape_max(
+                            spelling, 2, address_of taken);
+                        spelling += taken;
                         break;
                 }
                 default:
@@ -23899,27 +23873,20 @@ static bipolar file_exec_path_try(string_address address_to words)
         list is written down once here rather than rebuilt from the parser's
         own tests.
 */
-//      The same names in the order Bash writes them, which is the order
-//      compgen -A keyword offers them in. The table above is sorted for the
-//      lookup; a listing is not a lookup.
+//      In the order Bash writes them, which is the order compgen -A keyword
+//      offers them in; the lookup is a scan and needs no other order.
 static string_address shell_keywords_listed[] = {
     "if",   "then", "else", "elif",  "fi",   "case",   "esac", "for",
     "select", "while", "until", "do", "done", "in",    "function", "time",
     "{",    "}",    "!",    "[[",    "]]",   "coproc", null,
 };
 
-static string_address shell_keywords[] = {
-    "!",    "[[",   "]]",    "case",  "coproc",   "do",   "done", "elif",
-    "else", "esac", "fi",    "for",   "function", "if",   "in",   "select",
-    "then", "time", "until", "while", "{",        "}",    null,
-};
-
-#define SHELL_KEYWORDS (array_count(shell_keywords) - 1)
+#define SHELL_KEYWORDS (array_count(shell_keywords_listed) - 1)
 
 static COLD PURE bool shell_keyword_here(string_address name)
 {
-        return string_table_find(name, shell_keywords,
-                                 sizeof(shell_keywords[0]),
+        return string_table_find(name, shell_keywords_listed,
+                                 sizeof(shell_keywords_listed[0]),
                                  SHELL_KEYWORDS) < SHELL_KEYWORDS;
 }
 
@@ -25340,23 +25307,6 @@ static const string_address comp_signals[] = {
     "SIGRTMAX-5", "SIGRTMAX-4", "SIGRTMAX-3", "SIGRTMAX-2", "SIGRTMAX-1",
     "SIGRTMAX", "DEBUG", "ERR", "RETURN",
     null};
-static const string_address comp_shopts[] = {
-    "array_expand_once", "assoc_expand_once", "autocd",
-    "bash_source_fullpath", "cdable_vars", "cdspell", "checkhash",
-    "checkjobs", "checkwinsize", "cmdhist", "compat31", "compat32",
-    "compat40", "compat41", "compat42", "compat43", "compat44",
-    "complete_fullquote", "direxpand", "dirspell", "dotglob", "execfail",
-    "expand_aliases", "extdebug", "extglob", "extquote", "failglob",
-    "force_fignore", "globasciiranges", "globskipdots", "globstar",
-    "gnu_errfmt", "histappend", "histreedit", "histverify", "hostcomplete",
-    "huponexit", "inherit_errexit", "interactive_comments", "lastpipe",
-    "lithist", "localvar_inherit", "localvar_unset", "login_shell",
-    "mailwarn", "no_empty_cmd_completion", "nocaseglob", "nocasematch",
-    "noexpand_translation", "nullglob", "patsub_replacement", "progcomp",
-    "progcomp_alias", "promptvars", "restricted_shell", "shift_verbose",
-    "sourcepath", "varredir_close", "xpg_echo",
-    null};
-
 //      Bash's builtins, which is what -A builtin writes whatever this shell
 //      keeps besides; enabled and disabled ask the table for the state.
 static const string_address comp_builtins[] = {
@@ -25874,7 +25824,7 @@ static COLD fn compgen_generate(comp_request address_to want,
                                 compgen_offer(shell_setopt_names[at]);
                         break;
                 case COMP_ACTION_SHOPT:
-                        compgen_names(comp_shopts);
+                        compgen_names(shell_shopt_names);
                         break;
                 case COMP_ACTION_SIGNAL:
                         compgen_names(comp_signals);
