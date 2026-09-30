@@ -21730,229 +21730,6 @@ static const struct { string_address keys; string_address function; } bind_defau
     {"\\C-r", "reverse-search-history"},
     {"\\e\\C-r", "revert-line"},
     {"\\er", "revert-line"},
-    {" ", "self-insert"},
-    {"!", "self-insert"},
-    {"\\\"", "self-insert"},
-    {"#", "self-insert"},
-    {"$", "self-insert"},
-    {"%", "self-insert"},
-    {"&", "self-insert"},
-    {"'", "self-insert"},
-    {"(", "self-insert"},
-    {")", "self-insert"},
-    {"*", "self-insert"},
-    {"+", "self-insert"},
-    {",", "self-insert"},
-    {"-", "self-insert"},
-    {".", "self-insert"},
-    {"/", "self-insert"},
-    {"0", "self-insert"},
-    {"1", "self-insert"},
-    {"2", "self-insert"},
-    {"3", "self-insert"},
-    {"4", "self-insert"},
-    {"5", "self-insert"},
-    {"6", "self-insert"},
-    {"7", "self-insert"},
-    {"8", "self-insert"},
-    {"9", "self-insert"},
-    {":", "self-insert"},
-    {";", "self-insert"},
-    {"<", "self-insert"},
-    {"=", "self-insert"},
-    {">", "self-insert"},
-    {"?", "self-insert"},
-    {"@", "self-insert"},
-    {"A", "self-insert"},
-    {"B", "self-insert"},
-    {"C", "self-insert"},
-    {"D", "self-insert"},
-    {"E", "self-insert"},
-    {"F", "self-insert"},
-    {"G", "self-insert"},
-    {"H", "self-insert"},
-    {"I", "self-insert"},
-    {"J", "self-insert"},
-    {"K", "self-insert"},
-    {"L", "self-insert"},
-    {"M", "self-insert"},
-    {"N", "self-insert"},
-    {"O", "self-insert"},
-    {"P", "self-insert"},
-    {"Q", "self-insert"},
-    {"R", "self-insert"},
-    {"S", "self-insert"},
-    {"T", "self-insert"},
-    {"U", "self-insert"},
-    {"V", "self-insert"},
-    {"W", "self-insert"},
-    {"X", "self-insert"},
-    {"Y", "self-insert"},
-    {"Z", "self-insert"},
-    {"[", "self-insert"},
-    {"\\\\", "self-insert"},
-    {"]", "self-insert"},
-    {"^", "self-insert"},
-    {"_", "self-insert"},
-    {"`", "self-insert"},
-    {"a", "self-insert"},
-    {"b", "self-insert"},
-    {"c", "self-insert"},
-    {"d", "self-insert"},
-    {"e", "self-insert"},
-    {"f", "self-insert"},
-    {"g", "self-insert"},
-    {"h", "self-insert"},
-    {"i", "self-insert"},
-    {"j", "self-insert"},
-    {"k", "self-insert"},
-    {"l", "self-insert"},
-    {"m", "self-insert"},
-    {"n", "self-insert"},
-    {"o", "self-insert"},
-    {"p", "self-insert"},
-    {"q", "self-insert"},
-    {"r", "self-insert"},
-    {"s", "self-insert"},
-    {"t", "self-insert"},
-    {"u", "self-insert"},
-    {"v", "self-insert"},
-    {"w", "self-insert"},
-    {"x", "self-insert"},
-    {"y", "self-insert"},
-    {"z", "self-insert"},
-    {"{", "self-insert"},
-    {"|", "self-insert"},
-    {"}", "self-insert"},
-    {"~", "self-insert"},
-    {"\\200", "self-insert"},
-    {"\\201", "self-insert"},
-    {"\\202", "self-insert"},
-    {"\\203", "self-insert"},
-    {"\\204", "self-insert"},
-    {"\\205", "self-insert"},
-    {"\\206", "self-insert"},
-    {"\\207", "self-insert"},
-    {"\\210", "self-insert"},
-    {"\\211", "self-insert"},
-    {"\\212", "self-insert"},
-    {"\\213", "self-insert"},
-    {"\\214", "self-insert"},
-    {"\\215", "self-insert"},
-    {"\\216", "self-insert"},
-    {"\\217", "self-insert"},
-    {"\\220", "self-insert"},
-    {"\\221", "self-insert"},
-    {"\\222", "self-insert"},
-    {"\\223", "self-insert"},
-    {"\\224", "self-insert"},
-    {"\\225", "self-insert"},
-    {"\\226", "self-insert"},
-    {"\\227", "self-insert"},
-    {"\\230", "self-insert"},
-    {"\\231", "self-insert"},
-    {"\\232", "self-insert"},
-    {"\\233", "self-insert"},
-    {"\\234", "self-insert"},
-    {"\\235", "self-insert"},
-    {"\\236", "self-insert"},
-    {"\\237", "self-insert"},
-    {"\\240", "self-insert"},
-    {"\\241", "self-insert"},
-    {"\\242", "self-insert"},
-    {"\\243", "self-insert"},
-    {"\\244", "self-insert"},
-    {"\\245", "self-insert"},
-    {"\\246", "self-insert"},
-    {"\\247", "self-insert"},
-    {"\\250", "self-insert"},
-    {"\\251", "self-insert"},
-    {"\\252", "self-insert"},
-    {"\\253", "self-insert"},
-    {"\\254", "self-insert"},
-    {"\\255", "self-insert"},
-    {"\\256", "self-insert"},
-    {"\\257", "self-insert"},
-    {"\\260", "self-insert"},
-    {"\\261", "self-insert"},
-    {"\\262", "self-insert"},
-    {"\\263", "self-insert"},
-    {"\\264", "self-insert"},
-    {"\\265", "self-insert"},
-    {"\\266", "self-insert"},
-    {"\\267", "self-insert"},
-    {"\\270", "self-insert"},
-    {"\\271", "self-insert"},
-    {"\\272", "self-insert"},
-    {"\\273", "self-insert"},
-    {"\\274", "self-insert"},
-    {"\\275", "self-insert"},
-    {"\\276", "self-insert"},
-    {"\\277", "self-insert"},
-    {"\\300", "self-insert"},
-    {"\\301", "self-insert"},
-    {"\\302", "self-insert"},
-    {"\\303", "self-insert"},
-    {"\\304", "self-insert"},
-    {"\\305", "self-insert"},
-    {"\\306", "self-insert"},
-    {"\\307", "self-insert"},
-    {"\\310", "self-insert"},
-    {"\\311", "self-insert"},
-    {"\\312", "self-insert"},
-    {"\\313", "self-insert"},
-    {"\\314", "self-insert"},
-    {"\\315", "self-insert"},
-    {"\\316", "self-insert"},
-    {"\\317", "self-insert"},
-    {"\\320", "self-insert"},
-    {"\\321", "self-insert"},
-    {"\\322", "self-insert"},
-    {"\\323", "self-insert"},
-    {"\\324", "self-insert"},
-    {"\\325", "self-insert"},
-    {"\\326", "self-insert"},
-    {"\\327", "self-insert"},
-    {"\\330", "self-insert"},
-    {"\\331", "self-insert"},
-    {"\\332", "self-insert"},
-    {"\\333", "self-insert"},
-    {"\\334", "self-insert"},
-    {"\\335", "self-insert"},
-    {"\\336", "self-insert"},
-    {"\\337", "self-insert"},
-    {"\\340", "self-insert"},
-    {"\\341", "self-insert"},
-    {"\\342", "self-insert"},
-    {"\\343", "self-insert"},
-    {"\\344", "self-insert"},
-    {"\\345", "self-insert"},
-    {"\\346", "self-insert"},
-    {"\\347", "self-insert"},
-    {"\\350", "self-insert"},
-    {"\\351", "self-insert"},
-    {"\\352", "self-insert"},
-    {"\\353", "self-insert"},
-    {"\\354", "self-insert"},
-    {"\\355", "self-insert"},
-    {"\\356", "self-insert"},
-    {"\\357", "self-insert"},
-    {"\\360", "self-insert"},
-    {"\\361", "self-insert"},
-    {"\\362", "self-insert"},
-    {"\\363", "self-insert"},
-    {"\\364", "self-insert"},
-    {"\\365", "self-insert"},
-    {"\\366", "self-insert"},
-    {"\\367", "self-insert"},
-    {"\\370", "self-insert"},
-    {"\\371", "self-insert"},
-    {"\\372", "self-insert"},
-    {"\\373", "self-insert"},
-    {"\\374", "self-insert"},
-    {"\\375", "self-insert"},
-    {"\\376", "self-insert"},
-    {"\\377", "self-insert"},
     {"\\C-@", "set-mark"},
     {"\\e ", "set-mark"},
     {"\\e\\C-b", "shell-backward-word"},
@@ -21976,7 +21753,14 @@ static const struct { string_address keys; string_address function; } bind_defau
     {"\\e\\C-y", "yank-nth-arg"},
     {"\\ey", "yank-pop"},
 };
-#define BIND_DEFAULTS array_count(bind_defaults)
+//      Between the rows above and below, in byte order, readline binds every
+//      printable byte and every byte over 0x7f to self-insert: 223 rows
+//      that bind_default_at makes where they belong instead of the table
+//      spelling them out.
+#define BIND_SELF_AT 162
+#define BIND_SELF 223
+#define BIND_DEFAULTS (array_count(bind_defaults) + BIND_SELF)
+static p8 bind_self_keys[BIND_SELF][10];
 
 static const struct { string_address name; string_address value; } bind_variable_defaults[] = {
     {"bind-tty-special-chars", "on"},
@@ -22215,6 +21999,27 @@ static COLD positive bind_keys_spelled(const p8 address_to bytes, positive count
         return used;
 }
 
+//      Row at of the defaults: its keys, spelled as readline does, and its
+//      function.
+static COLD string_address bind_default_at(positive at,
+                                           string_address address_to function)
+{
+        if (at >= BIND_SELF_AT && at < BIND_SELF_AT + BIND_SELF)
+        {
+                positive number = at - BIND_SELF_AT;
+                p8 value = (p8)(number < 95 ? ' ' + number : 33 + number);
+
+                bind_keys_spelled(&value, 1, bind_self_keys[number],
+                                  sizeof(bind_self_keys[number]));
+                address_to function = "self-insert";
+                return bind_self_keys[number];
+        }
+        if (at >= BIND_SELF_AT)
+                at -= BIND_SELF;
+        address_to function = bind_defaults[at].function;
+        return bind_defaults[at].keys;
+}
+
 typedef struct
 {
         p8 bytes[48];
@@ -22249,10 +22054,10 @@ static COLD positive bind_effective(bind_entry address_to entries, bool keymappe
                         if (bind_default_gone[at / 32] >> (at % 32) & 1)
                                 continue;
 
-                        entries[count].keys = bind_defaults[at].keys;
-                        entries[count].function = bind_defaults[at].function;
+                        entries[count].keys =
+                            bind_default_at(at, &entries[count].function);
                         entries[count].length = bind_keys_bytes(
-                            bind_defaults[at].keys, entries[count].bytes,
+                            entries[count].keys, entries[count].bytes,
                             sizeof(entries[count].bytes));
                         count++;
                 }
@@ -22337,8 +22142,9 @@ static COLD fn bind_remove(string_address spelling, positive keymap)
         for (positive at = 0; at < BIND_DEFAULTS; at++)
         {
                 p8 held[48];
-                positive size = bind_keys_bytes(bind_defaults[at].keys, held,
-                                                sizeof(held));
+                string_address function;
+                positive size = bind_keys_bytes(
+                    bind_default_at(at, &function), held, sizeof(held));
 
                 if (size == length && !memory_compare(held, wanted, length))
                         bind_default_gone[at / 32] |= 1u << (at % 32);
