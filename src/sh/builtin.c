@@ -7323,6 +7323,7 @@ fn shell_stop(writer write, positive command)
 {
         // moonwater bind exit: what is to run while every filesystem still writes.
         host_exit_run();
+        host_clock_stop();
 
         write(str("Syncing...\n"));
         log_flush();
