@@ -52025,8 +52025,8 @@ done:
         2 on the client's interface: each must take the server's lease. Needs
         user namespaces; NOT RUN under emulation and where they are refused.
         The exit status of the child is 0x80 when it could not be set up,
-        otherwise one bit per mode that took the lease and the bit 8 when the
-        setup worked.
+        otherwise one bit per case that held and the bit 0x40 when the setup
+        worked.
 */
 static positive net_test_attribute(p8 address_to to, positive at, p16 type,
                                    const void address_to data, positive size)
@@ -52050,7 +52050,7 @@ static bipolar net_test_index(string_address name);
 
 //      The server: every DISCOVER is offered, every REQUEST acknowledged,
 //      10.77.0.50 for 3600 s, answered by broadcast.
-static fn net_test_dhcp_server(string_address device, p32 own)
+static fn net_test_dhcp_server(string_address device, p32 own, b32 control)
 {
         bipolar handle = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
         b32 one = 1;
@@ -52060,6 +52060,8 @@ static fn net_test_dhcp_server(string_address device, p32 own)
             .family = AF_INET, .port = network_order_16(68),
             .host = network_order_32(0xffffffffu)};
         p8 packet[1024];
+        p32 declined = 0;
+        bool conflicting = false;
 
         if (handle < 0 ||
             socket_option_set((b32)handle, SOL_SOCKET, SO_BROADCAST,
@@ -52087,6 +52089,17 @@ static fn net_test_dhcp_server(string_address device, p32 own)
                      i += 2 + packet[i + 1])
                         if (packet[i] == 53)
                                 kind = packet[i + 2];
+                {
+                        p8 flag;
+
+                        //      The test says when the first address offered
+                        //      is one this server also holds.
+                        if (system_call_3(syscall(read), (positive)control,
+                                          (positive)address_of flag, 1) == 1)
+                                conflicting = true;
+                }
+                if (kind == 4)
+                        declined++;
                 if (kind != 1 && kind != 3)
                         continue;
                 memory_fill(reply, 0, sizeof reply);
@@ -52095,7 +52108,8 @@ static fn net_test_dhcp_server(string_address device, p32 own)
                 reply[2] = 6;
                 memory_copy(reply + 4, packet + 4, 4);
                 memory_copy(reply + 10, packet + 10, 2);
-                network_store_32(reply + 16, 0x0a4d0032);
+                network_store_32(reply + 16,
+                                 0x0a4d0032 + (conflicting ? 1 : 0) + declined);
                 memory_copy(reply + 28, packet + 28, 16);
                 network_store_32(reply + 236, 0x63825363);
                 at = 240;
@@ -52158,6 +52172,7 @@ static fn net_test_dhcp_namespaces(positive uid, positive gid)
 {
         static const string_address modes[3] = {"0\n", "1\n", "2\n"};
         b32 ends[2];
+        b32 control[2];
         bipolar server;
         bipolar handle;
         positive result = 0;
@@ -52177,7 +52192,9 @@ static fn net_test_dhcp_namespaces(positive uid, positive gid)
                 system_call_1(syscall(exit_group), 0x80);
 
         //      The server's own network namespace, made by the server.
-        if (system_call_2(syscall(pipe2), (positive)ends, O_CLOEXEC) < 0)
+        if (system_call_2(syscall(pipe2), (positive)ends, O_CLOEXEC) < 0 ||
+            system_call_2(syscall(pipe2), (positive)control,
+                          O_CLOEXEC | 04000 /* O_NONBLOCK */) < 0)
                 system_call_1(syscall(exit_group), 0x80);
         server = system_fork();
         if (server != 0)
@@ -52209,10 +52226,14 @@ static fn net_test_dhcp_namespaces(positive uid, positive gid)
                         log_direct(str("net: test server has no netlink\n"));
                 else if (netlink_link_up(nl, (p32)far) < 0)
                         log_direct(str("net: test server cannot raise dhcps0\n"));
-                else if (netlink_address_add(nl, (p32)far, 0x0a4d0001, 24) < 0)
+                else if (netlink_address_add(nl, (p32)far, 0x0a4d0001, 24) < 0 ||
+                         //      .51, the address a conflict is made of:
+                         //      this kernel answers ARP for it.
+                         netlink_address_add(nl, (p32)far, 0x0a4d0033, 24) < 0)
                         log_direct(str("net: test server cannot address dhcps0\n"));
                 else
-                        net_test_dhcp_server((string_address)"dhcps0", 0x0a4d0001);
+                        net_test_dhcp_server((string_address)"dhcps0", 0x0a4d0001,
+                                             control[0]);
                 system_call_1(syscall(exit_group), 2);
         }
         {
@@ -52237,27 +52258,53 @@ static fn net_test_dhcp_namespaces(positive uid, positive gid)
                 system_call_1(syscall(exit_group), 0x80);
         }
         net_test_sleep(300);
-        for (positive mode = 0; mode < 3; mode++)
+        //      Three modes of reverse-path filtering, each taking the free
+        //      address; then the server starts offering one it holds itself
+        //      (the client must decline it), and the next offer is free.
+        for (positive step = 0; step < 5; step++)
         {
                 b32 status = 0;
                 bipolar exchange;
+                positive wanted_address = step < 3 ? 0x0a4d0032
+                                          : step == 3 ? 0 : 0x0a4d0034;
+                bipolar wanted_status = step == 3 ? DHCP_CONFLICT : DHCP_OK;
 
-                if (net_test_write((string_address)"/proc/sys/net/ipv4/conf/all/rp_filter",
-                                   modes[mode]) < 0 ||
-                    net_test_write((string_address)"/proc/sys/net/ipv4/conf/dhcpc0/rp_filter",
-                                   modes[mode]) < 0)
+                if (step < 3 &&
+                    (net_test_write((string_address)"/proc/sys/net/ipv4/conf/all/rp_filter",
+                                    modes[step]) < 0 ||
+                     net_test_write((string_address)"/proc/sys/net/ipv4/conf/dhcpc0/rp_filter",
+                                    modes[step]) < 0))
                         system_call_1(syscall(exit_group), 0x80);
+                if (step == 3)
+                {
+                        p8 flag = 1;
+
+                        system_call_3(syscall(write), (positive)control[1],
+                                      (positive)address_of flag, 1);
+                }
                 exchange = system_fork();
                 if (exchange == 0)
                 {
                         p8 hardware[6] = {2, 0, 0, 0, 0, 7};
                         dhcp_lease lease = {0};
+                        b32 answer[2];
+                        bipolar asked;
+
+                        //      Confined as the watcher's child is: its
+                        //      descriptors, no_new_privs and the syscall
+                        //      filter (nobody is not mapped in here).
+                        if (system_call_2(syscall(pipe2), (positive)answer,
+                                          O_CLOEXEC) < 0)
+                                system_call_1(syscall(exit_group), 1);
+                        dhcp_apart = answer[1];
+                        dhcp_keep_identity = true;
+                        asked = dhcp_ask((string_address)"dhcpc0", hardware,
+                                         address_of lease);
 
                         system_call_1(syscall(exit_group),
-                                      dhcp_ask((string_address)"dhcpc0", hardware,
-                                               address_of lease) == DHCP_OK &&
-                                              lease.address == 0x0a4d0032 &&
-                                              lease.server == 0x0a4d0001
+                                      asked == wanted_status &&
+                                              (!wanted_address ||
+                                               lease.address == wanted_address)
                                           ? 0 : 1);
                 }
                 //      Nobody answering is a ninety-second schedule: give it
@@ -52280,10 +52327,10 @@ static fn net_test_dhcp_namespaces(positive uid, positive gid)
                         net_test_sleep(50);
                 }
                 if (!status)
-                        result |= 1u << mode;
+                        result |= 1u << step;
         }
         system_call_2(syscall(kill), (positive)server, SIGKILL);
-        system_call_1(syscall(exit_group), 8 | result);
+        system_call_1(syscall(exit_group), 0x40 | result);
 }
 
 static fn dhcp_behind_rp_filter(void)
@@ -52313,10 +52360,13 @@ static fn dhcp_behind_rp_filter(void)
                 log_direct(str("net: DHCP acquisition behind rp_filter NOT RUN -- user or network namespaces unavailable\n"));
                 return;
         }
-        check("the veth fixture for the acquisition came up", (status >> 8) & 8);
+        check("the veth fixture for the acquisition came up", (status >> 8) & 0x40);
         check("a DHCP lease is taken with rp_filter 0", (status >> 8) & 1);
         check("a DHCP lease is taken with rp_filter 1 (strict)", (status >> 8) & 2);
         check("a DHCP lease is taken with rp_filter 2 (loose)", (status >> 8) & 4);
+        check("an offered address another host answers ARP for is declined, not leased",
+              (status >> 8) & 8);
+        check("the next offer, free, is leased", (status >> 8) & 16);
 }
 
 static fn error_frames(void)
@@ -65439,6 +65489,52 @@ static fn leasing(void)
                 check("a DHCP lease names a unicast address, a sane router and a prefix clear of 0/8, 127/8 and 224/3",
                       rows == array_count(addresses) * array_count(masks) * array_count(routers) &&
                           !wrong);
+        }
+        {
+                p8 mine[6] = {2, 0, 0, 0, 0, 1};
+                p8 other[6] = {2, 0, 0, 0, 0, 2};
+                p8 message[28];
+                p32 address = 0x0a4d0032;
+
+                check("an ARP probe is twenty-eight bytes from address zero",
+                      dhcp_arp_build(message, mine, 0, address) == 28 &&
+                          message[1] == 1 && message[2] == 8 && message[4] == 6 &&
+                          message[5] == 4 && message[7] == 1 &&
+                          !memory_compare(message + 8, mine, 6) &&
+                          network_load_32(message + 14) == 0 &&
+                          network_load_32(message + 24) == address);
+                check("an announcement names the address as sender and target",
+                      dhcp_arp_build(message, mine, address, address) == 28 &&
+                          network_load_32(message + 14) == address &&
+                          network_load_32(message + 24) == address);
+                dhcp_arp_build(message, other, address, 0x0a4d0001);
+                check("another host using the address is a conflict",
+                      dhcp_arp_conflict(message, 28, mine, address));
+                message[7] = 2;
+                check("in a reply as well as a request",
+                      dhcp_arp_conflict(message, 28, mine, address));
+                check("but not this machine's own frame",
+                      !dhcp_arp_conflict(message, 28, other, address));
+                message[7] = 1;
+                check("a length that is not twenty-eight is no conflict",
+                      !dhcp_arp_conflict(message, 27, mine, address));
+                dhcp_arp_build(message, other, 0, address);
+                check("another probe for the same address is a conflict",
+                      dhcp_arp_conflict(message, 28, mine, address));
+                dhcp_arp_build(message, other, 0, address + 1);
+                check("a probe for another address is not",
+                      !dhcp_arp_conflict(message, 28, mine, address));
+                dhcp_arp_build(message, other, 0x0a4d0001, address);
+                check("a host asking who has the address is not a conflict",
+                      !dhcp_arp_conflict(message, 28, mine, address));
+                dhcp_arp_build(message, other, address, 0x0a4d0001);
+                message[1] = 6;
+                check("a hardware type that is not Ethernet is ignored",
+                      !dhcp_arp_conflict(message, 28, mine, address));
+                message[1] = 1;
+                message[7] = 3;
+                check("and an operation that is neither request nor reply",
+                      !dhcp_arp_conflict(message, 28, mine, address));
         }
         {
                 dhcp_lease timed = {.seconds = 3600};

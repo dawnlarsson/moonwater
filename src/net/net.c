@@ -10306,8 +10306,10 @@ static bipolar http_fetch_to(string_address start, bipolar dest, bool check_cert
         boot lane structurally cannot check -- it is set because a real
         network needs it, not because a test proved it here.
 
-        ARP conflict probing is not implemented. The network watcher schedules
-        dhcp_reacquire at half the lease lifetime.
+        A new lease is probed before it is used (dhcp_probe: three ARP probes,
+        RFC 5227) and declined with DHCPDECLINE when another host answers for
+        the address, and announced once it is in place (dhcp_announce). The
+        network watcher schedules dhcp_reacquire at half the lease lifetime.
 */
 
 #define DHCP_CLIENT_PORT 68
@@ -10321,6 +10323,7 @@ static bipolar http_fetch_to(string_address start, bipolar dest, bool check_cert
 #define DHCP_REQUEST 3
 #define DHCP_ACK 5
 #define DHCP_NAK 6
+#define DHCP_DECLINE 4
 
 #define DHCP_OPTION_PAD 0
 #define DHCP_OPTION_MASK 1
@@ -10342,6 +10345,7 @@ static bipolar http_fetch_to(string_address start, bipolar dest, bool check_cert
 #define DHCP_NO_OFFER (-2)
 #define DHCP_REFUSED (-3)
 #define DHCP_NO_RANDOM (-4)
+#define DHCP_CONFLICT (-5)
 
 typedef struct
 {
@@ -10853,6 +10857,63 @@ static COLD bipolar dhcp_unframe(const p8 address_to frame, positive size,
 }
 
 /*
+        Address conflict detection (RFC 5227), the reading half.
+
+        Before the client uses an address a server gave it, it asks the wire
+        whether somebody already does: an ARP probe is a request for the
+        address with a sender address of zero, so that it teaches no cache
+        anything. A conflict is any ARP message, request or reply, in which
+        another machine names that address as its own sender, or another
+        probe for the same address, which is two machines about to take it at
+        once. The message arrives without its link header, from a packet
+        socket of type SOCK_DGRAM, as twenty-eight bytes: hardware type,
+        protocol type, the two lengths, the operation, then sender hardware
+        and protocol address and target hardware and protocol address.
+*/
+static COLD bool dhcp_arp_conflict(const p8 address_to message,
+                                         positive size,
+                                         const p8 address_to hardware,
+                                         p32 address)
+{
+        p32 sender;
+        p32 target;
+        p16 operation;
+
+        if (size < 28 || dhcp_load_16(message) != 1 ||
+            dhcp_load_16(message + 2) != 0x0800 || message[4] != 6 ||
+            message[5] != 4)
+                return false;
+        operation = dhcp_load_16(message + 6);
+        if ((operation != 1 && operation != 2) ||
+            !memory_compare(message + 8, hardware, 6))
+                return false;
+        sender = (p32)dhcp_load_16(message + 14) << 16 | dhcp_load_16(message + 16);
+        target = (p32)dhcp_load_16(message + 24) << 16 | dhcp_load_16(message + 26);
+        return sender == address || (operation == 1 && !sender && target == address);
+}
+
+/* An ARP request for `target` from `sender` (zero for a probe, the address
+   itself for an announcement), twenty-eight bytes. */
+static COLD positive dhcp_arp_build(p8 address_to into,
+                                    const p8 address_to hardware, p32 sender,
+                                    p32 target)
+{
+        memory_fill(into, 0, 28);
+        into[1] = 1;
+        into[2] = 8;
+        into[4] = 6;
+        into[5] = 4;
+        into[7] = 1;
+        memory_copy(into + 8, hardware, 6);
+        for (positive i = 0; i < 4; i++)
+        {
+                into[14 + i] = (p8)(sender >> (24 - 8 * i));
+                into[24 + i] = (p8)(target >> (24 - 8 * i));
+        }
+        return 28;
+}
+
+/*
         The exchange, confined.
 
         A reply is parsed as root, and any host on the wire can write one. So
@@ -10872,10 +10933,30 @@ static COLD bipolar dhcp_unframe(const p8 address_to frame, positive size,
 */
 static b32 dhcp_apart = -1;
 
+/* Set only by the check that runs an exchange confined inside a user
+   namespace, where nobody is not mapped and the drop of identity cannot be
+   made: the descriptors, no_new_privs and the syscall filter still are. */
+static bool dhcp_keep_identity;
+
 /* The packet socket an acquisition reads its answers from (see dhcp_unframe),
    or -1 when it has none and reads the UDP socket as a renewal does. It is
    open only while dhcp_ask runs, and dhcp_confine keeps it with the others. */
 static bipolar dhcp_frames = -1;
+
+/* The packet socket the conflict probe speaks ARP on, and the link address it
+   sends to (the interface's broadcast); -1 when there is none. */
+static bipolar dhcp_arp = -1;
+typedef struct
+{
+        p16 family;
+        p16 protocol;
+        b32 index;
+        p16 type;
+        p8 kind;
+        p8 length;
+        p8 address[8];
+} dhcp_link;
+static dhcp_link dhcp_arp_link;
 
 #define DHCP_NOBODY 65534
 
@@ -10909,12 +10990,16 @@ static COLD bool dhcp_confine(b32 handle)
                 p16 count;
                 dhcp_filter_step address_to steps;
         } filter = {0, steps};
-        p32 keep[3] = {(p32)handle, (p32)dhcp_apart, (p32)dhcp_frames};
-        positive kept = dhcp_frames >= 0 ? 3 : 2;
+        p32 keep[4] = {(p32)handle, (p32)dhcp_apart, (p32)dhcp_frames,
+                       (p32)dhcp_arp};
+        positive kept = 2 + (dhcp_frames >= 0) + (dhcp_arp >= 0);
         p32 from = 0;
         positive at = 0;
         bipolar status;
 
+        //      The kept ones first, whichever of them are open.
+        if (dhcp_frames < 0 && dhcp_arp >= 0)
+                keep[2] = keep[3];
         if (dhcp_apart < 0)
                 return true;
         for (positive i = 1; i < kept; i++)
@@ -10936,7 +11021,7 @@ static COLD bool dhcp_confine(b32 handle)
                         from = keep[i] + 1;
         }
 
-        if ((!system_call_1(syscall(getuid), 0) &&
+        if ((!dhcp_keep_identity && !system_call_1(syscall(getuid), 0) &&
              (system_call_2(syscall(setgroups), 0, 0) < 0 ||
               system_call_3(syscall(setresgid), DHCP_NOBODY, DHCP_NOBODY,
                             DHCP_NOBODY) < 0 ||
@@ -11048,6 +11133,158 @@ static COLD fn dhcp_frames_close(void)
         if (dhcp_frames >= 0)
                 socket_close((b32)dhcp_frames);
         dhcp_frames = -1;
+        if (dhcp_arp >= 0)
+                socket_close((b32)dhcp_arp);
+        dhcp_arp = -1;
+}
+
+/*
+        The conflict probe's socket: ARP on one interface, bound while it
+        still has a descriptor table to spare (dhcp_confine leaves no way to
+        do this later). The link address is the interface's broadcast. -1 when
+        the kernel has no packet sockets or the caller may not open one, and
+        the address is then used unprobed, as every client that cannot probe
+        does.
+*/
+#define DHCP_ETH_P_ARP 0x0806
+
+static COLD bipolar dhcp_arp_open(string_address device)
+{
+        struct
+        {
+                p8 name[16];
+                b32 index;
+                p8 rest[20];
+        } request = {{0}, 0, {0}};
+        bipolar handle;
+        dhcp_link link = {AF_PACKET, network_order_16(DHCP_ETH_P_ARP), 0, 0, 0,
+                          6, {255, 255, 255, 255, 255, 255, 0, 0}};
+
+        if (string_length(device) >= sizeof request.name)
+                return -1;
+        handle = socket_new(AF_PACKET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+        if (handle < 0)
+                return -1;
+        memory_copy(request.name, device, string_length(device));
+        if (system_call_3(syscall(ioctl), (positive)handle, DHCP_SIOCGIFINDEX,
+                          (positive)address_of request) < 0)
+                goto failed;
+        link.index = request.index;
+        if (socket_bind((b32)handle, address_of link, sizeof link) < 0)
+                goto failed;
+        dhcp_arp_link = link;
+        return handle;
+
+failed:
+        socket_close((b32)handle);
+        return -1;
+}
+
+/*
+        Is the address free? Three probes and a last look, answered by any
+        ARP message that names it (dhcp_arp_conflict).
+
+        RFC 5227 spaces the probes one to two seconds apart after a wait of up
+        to one, and looks for two more seconds: four to five seconds before an
+        address may be used, which is longer than the rest of a boot's lease
+        takes. The default tier looks for a fifth of a second instead -- up to
+        thirty milliseconds to start, three probes forty to sixty
+        milliseconds apart, eighty to finish -- which is long for a host whose
+        kernel answers ARP (a millisecond or two on a wired LAN) and too
+        short for one that is asleep or slow (a radio's power-save cycle is a
+        hundred milliseconds or more); the tight tier keeps RFC 5227's own
+        numbers.
+*/
+#if MOONWATER_STRICT >= STRICT_TIGHT
+#define DHCP_PROBE_FIRST 1000
+#define DHCP_PROBE_SPACE 1000
+#define DHCP_PROBE_SPREAD 1000
+#define DHCP_PROBE_LAST 2000
+#else
+#define DHCP_PROBE_FIRST 30
+#define DHCP_PROBE_SPACE 40
+#define DHCP_PROBE_SPREAD 20
+#define DHCP_PROBE_LAST 80
+#endif
+
+//      Listens for `milliseconds`; false when an ARP message conflicts.
+static COLD bool dhcp_listen(positive milliseconds, const p8 address_to hardware,
+                             p32 address)
+{
+        network_deadline deadline;
+        p8 message[64];
+
+        if (!network_deadline_begin(address_of deadline, milliseconds / 1000,
+                                    milliseconds % 1000 * 1000000))
+                return true;
+        for (;;)
+        {
+                bipolar got = network_wait_readable_until(dhcp_arp,
+                                                          address_of deadline);
+
+                if (got <= 0)
+                        return true;
+                got = socket_receive((b32)dhcp_arp, message, sizeof message,
+                                     MSG_DONTWAIT, null, null);
+                if (got > 0 && dhcp_arp_conflict(message, (positive)got,
+                                                 hardware, address))
+                        return false;
+        }
+}
+
+//      `random` is the exchange's transaction id, drawn before the child
+//      confined itself (getrandom is not among the calls it may make); the
+//      jitter it gives is for spreading probes, not for secrecy.
+static COLD bool dhcp_probe(const p8 address_to hardware, p32 address,
+                            p32 random)
+{
+        p8 probe[28];
+
+        if (dhcp_arp < 0)
+                return true;
+        dhcp_arp_build(probe, hardware, 0, address);
+        if (!dhcp_listen(random % (DHCP_PROBE_FIRST + 1), hardware, address))
+                return false;
+        for (positive at = 0; at < 3; at++)
+        {
+                //      A probe that cannot leave (no carrier yet) proves
+                //      nothing and costs nothing.
+                (void)socket_send((b32)dhcp_arp, probe, sizeof probe, 0,
+                                  address_of dhcp_arp_link,
+                                  sizeof dhcp_arp_link);
+                if (!dhcp_listen(at < 2 ? DHCP_PROBE_SPACE +
+                                              (random >> (8 * (at + 1))) %
+                                                  (DHCP_PROBE_SPREAD + 1)
+                                        : DHCP_PROBE_LAST,
+                                 hardware, address))
+                        return false;
+        }
+        return true;
+}
+
+/* Two announcements of an address just taken (RFC 5227 2.3): an ARP request
+   for itself from itself, which refreshes every neighbour's cache. RFC 5227
+   spaces them two seconds apart; the watcher does not sleep that long, so
+   the second follows after a tenth of a second. */
+static COLD fn dhcp_announce(string_address device, const p8 address_to hardware,
+                             p32 address)
+{
+        p8 message[28];
+        bipolar handle = dhcp_arp_open(device);
+
+        if (handle < 0)
+                return;
+        dhcp_arp_build(message, hardware, address, address);
+        for (positive at = 0; at < 2; at++)
+        {
+                timespec span = {0, 100000000};
+
+                socket_send((b32)handle, message, sizeof message, 0,
+                            address_of dhcp_arp_link, sizeof dhcp_arp_link);
+                if (!at)
+                        sleep(address_of span);
+        }
+        socket_close((b32)handle);
 }
 
 static COLD bipolar dhcp_open(string_address device, p32 host, bool broadcast)
@@ -11318,6 +11555,7 @@ static bipolar dhcp_ask(string_address device, p8 address_to hardware,
         if (!dhcp_transaction_early(address_of transaction))
                 return DHCP_NO_RANDOM;
         dhcp_frames = dhcp_frames_open(device);
+        dhcp_arp = dhcp_arp_open(device);
         handle = dhcp_open(device, HOST_ANY, true);
 
         if (handle < 0)
@@ -11409,6 +11647,23 @@ static bipolar dhcp_ask(string_address device, p8 address_to hardware,
                             handle, packet, sizeof packet, transaction,
                             hardware, lease, address_of selected_peer, false,
                             address_of deadline);
+                        //      The address is the client's to use once
+                        //      nobody else is on it: an answer to the
+                        //      probe says it is taken, and the server is
+                        //      told so, which is what DHCPDECLINE is for.
+                        if (status == DHCP_OK &&
+                            !dhcp_probe(hardware, lease->address,
+                                        transaction))
+                        {
+                                length = dhcp_build(packet, sizeof packet,
+                                                    DHCP_DECLINE, transaction,
+                                                    hardware, lease->address,
+                                                    lease->server, 0, true);
+                                (void)socket_send((b32)handle, packet, length,
+                                                  0, address_of where,
+                                                  sizeof where);
+                                status = DHCP_CONFLICT;
+                        }
                         if (status != DHCP_NO_OFFER)
                         {
                                 socket_close((b32)handle);
