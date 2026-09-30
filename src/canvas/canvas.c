@@ -519,6 +519,11 @@ static LIST_HEAD(canvas_list);
 static void canvas_thread_start(void);
 static void canvas_thread_stop(void);
 static void canvas_thread_wake(void);
+// Counted for `moonwater canvas`: how often each thing wakes while idle.
+static unsigned int canvas_passes, canvas_ticks;
+// And the CPU latency hold, below with the request it is.
+static _Bool hold_on;
+static unsigned int hold_takes;
 static void canvas_flush_wake(void);
 static _Bool canvas_flush_running(void);
 static void output_free(struct output *output);
@@ -3376,6 +3381,7 @@ static enum hrtimer_restart desktop_frame(struct hrtimer *timer)
                 return HRTIMER_NORESTART;
 
         atomic_set(&desktop.frame_pending, 1);
+        WRITE_ONCE(canvas_ticks, canvas_ticks + 1);
         canvas_thread_wake();
 
         hrtimer_forward_now(timer, ns_to_ktime(canvas_frame_ns()));
@@ -9683,6 +9689,10 @@ static void canvas_state(struct canvas_control *answer)
         rt_mutex_lock(&desktop.lock);
 
         answer->suspended = desktop.suspended;
+        answer->latency_hold = READ_ONCE(hold_on);
+        answer->latency_holds = READ_ONCE(hold_takes);
+        answer->thread_passes = READ_ONCE(canvas_passes);
+        answer->frame_ticks = READ_ONCE(canvas_ticks);
 
         list_for_each_entry(pane, &desktop.windows, link)
                 if (pane->shared)
@@ -9798,11 +9808,57 @@ static _Bool pointer_handler_registered;
 
         The largest cost from a pointer moving to the thread that draws it is
         the processor coming back from an idle state, and the deeper the state
-        the longer that takes. Held for as long as there is a pointer rather
-        than taken per movement: the move that pays the wakeup is the first
-        after a pause, and at that moment the request would not exist yet.
+        the longer that takes. Held while there is input rather than taken per
+        movement, and let go of CANVAS_HOLD_MS after the last of it. A request
+        of zero microseconds keeps every processor out of every idle state,
+        which is a processor polling: to cpufreq it is busy, so with the
+        hardware P-states in control (amd-pstate active) the clock sat at its
+        top for as long as Canvas existed, on a desktop nobody was touching.
+        The move that pays the wakeup is the first after a pause, and it pays
+        it either way: the processor was in its idle state when the interrupt
+        came.
+
+        Owned by the canvas thread alone, which is why it may add and remove
+        the request: neither belongs in an input callback, and the thread is
+        already woken for every event that matters. What counts is what a
+        person did (a movement, a button, a wheel step, a key, a focus
+        change), not a program's commit, so a clock ticking in a window does
+        not keep it. The thread's own sleep is cut short to let go on time.
 */
+#define CANVAS_HOLD_MS 500
 static struct pm_qos_request pointer_qos;
+static u64 hold_until;
+
+static void canvas_hold_touch(void)
+{
+        WRITE_ONCE(hold_until, ktime_get_ns() + (u64)CANVAS_HOLD_MS * NSEC_PER_MSEC);
+        if (hold_on)
+                return;
+        cpu_latency_qos_add_request(&pointer_qos, 0);
+        WRITE_ONCE(hold_on, true);
+        WRITE_ONCE(hold_takes, hold_takes + 1);
+}
+
+static void canvas_hold_drop(void)
+{
+        if (!hold_on)
+                return;
+        cpu_latency_qos_remove_request(&pointer_qos);
+        WRITE_ONCE(hold_on, false);
+}
+
+// Jiffies until the hold is due to go, or the given sleep when nothing is held.
+static long canvas_hold_sleep(long sleep)
+{
+        s64 left;
+
+        if (!hold_on)
+                return sleep;
+        left = (s64)(hold_until - ktime_get_ns());
+        if (left <= 0)
+                return 1;
+        return min_t(long, sleep, nsecs_to_jiffies(left) + 1);
+}
 
 /*
         Acceleration, the way a desktop does it.
@@ -10765,7 +10821,6 @@ static void canvas_thread_stop(void)
         // Only once no key can reach the handler: from here the console's
         // keyboard is the only one again.
         canvas_keyboard_give();
-        cpu_latency_qos_remove_request(&pointer_qos);
 
         rt_mutex_lock(&desktop.lock);
         desktop_set_awake(false);
@@ -10774,6 +10829,7 @@ static void canvas_thread_stop(void)
 
         synchronize_rcu();
         kthread_stop(thread);
+        canvas_hold_drop();
 
         // After the canvas thread, which queues flushes until it stops. A
         // flush in flight finishes before the flusher does.
@@ -10922,6 +10978,8 @@ static int canvas_loop(void *unused)
 {
         while (!kthread_should_stop())
         {
+                _Bool input;
+
                 set_current_state(TASK_IDLE);
 
                 if (!atomic_read(&desktop.motion_pending) &&
@@ -10934,12 +10992,25 @@ static int canvas_loop(void *unused)
                     !atomic_read(&desktop.minimize) &&
                     !atomic_read(&desktop.spawn) &&
                     atomic_read(&desktop.key_head) == atomic_read(&desktop.key_tail))
-                        schedule_timeout(READ_ONCE(desktop.suspended) &&
-                                                 !READ_ONCE(desktop.asleep)
-                                             ? msecs_to_jiffies(CANVAS_SUSPENDED_POLL_MS)
-                                             : MAX_SCHEDULE_TIMEOUT);
+                        schedule_timeout(canvas_hold_sleep(
+                            READ_ONCE(desktop.suspended) && !READ_ONCE(desktop.asleep)
+                                ? msecs_to_jiffies(CANVAS_SUSPENDED_POLL_MS)
+                                : MAX_SCHEDULE_TIMEOUT));
 
                 __set_current_state(TASK_RUNNING);
+                WRITE_ONCE(canvas_passes, canvas_passes + 1);
+
+                // What a person did, read before the pass consumes it.
+                input = atomic_read(&desktop.motion_pending) ||
+                        atomic_read(&desktop.button_changed) ||
+                        atomic_read(&desktop.wheel) ||
+                        atomic_read(&desktop.focus_steps) ||
+                        atomic_read(&desktop.focus_commit) ||
+                        atomic_read(&desktop.minimize) ||
+                        atomic_read(&desktop.key_head) != atomic_read(&desktop.key_tail);
+
+                if (hold_on && !input && ktime_get_ns() >= hold_until)
+                        canvas_hold_drop();
 
                 /*
                         Outside desktop.lock, and before the suspend check.
@@ -10968,6 +11039,12 @@ static int canvas_loop(void *unused)
                         continue;
 
                 pointer_apply();
+
+                // After the movement is applied, so the first event after a
+                // pause is not made to wait for the request; every one after
+                // it inside the window finds it taken.
+                if (input)
+                        canvas_hold_touch();
 
                 if (atomic_read(&desktop.focus_steps) ||
                     atomic_read(&desktop.focus_commit) ||
@@ -11087,9 +11164,6 @@ static void canvas_thread_start(void)
                 WARN_ON_ONCE(sched_setattr_nocheck(flush, &canvas_policy));
                 rcu_assign_pointer(canvas_flusher, flush);
         }
-
-        // 0 microseconds: no idle state whose exit can be measured.
-        cpu_latency_qos_add_request(&pointer_qos, 0);
 
         if (!register_pm_notifier(&canvas_pm_notifier))
                 canvas_pm_registered = true;

@@ -3338,6 +3338,14 @@ static fn host_canvas_write(string_address prefix,
                 string_format(log, "%sanother program holds the display; "
                                    "Canvas ignores input until it lets go\n",
                               prefix);
+
+        string_format(log, "%slow-latency hold: %s, taken %p time%s; "
+                           "canvas thread woke %p, frame timer fired %p\n",
+                      prefix, control->latency_hold ? "held" : "idle",
+                      (positive)control->latency_holds,
+                      control->latency_holds == 1 ? "" : "s",
+                      (positive)control->thread_passes,
+                      (positive)control->frame_ticks);
 }
 
 static fn host_canvas_say(struct canvas_control address_to control)

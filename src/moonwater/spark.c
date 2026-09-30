@@ -411,13 +411,17 @@ struct canvas_control {
         char master_command[16];
         char driver[16];           // the first card's driver
         struct canvas_output_state output[SPARK_CANVAS_OUTPUTS];
+        unsigned int latency_hold;  // 1 while the CPU latency hold is taken
+        unsigned int latency_holds; // times it was taken since Canvas started
+        unsigned int thread_passes; // times the canvas thread woke
+        unsigned int frame_ticks;   // times the frame timer fired
 };
 
 _Static_assert(sizeof(struct canvas_output_state) == 32, "spark canvas output ABI");
-_Static_assert(sizeof(struct canvas_control) == 192, "spark canvas control ABI");
+_Static_assert(sizeof(struct canvas_control) == 208, "spark canvas control ABI");
 
 // _IOWR('s', 10, struct canvas_control)
-#define SPARK_IOCTL_CANVAS 0xc0c0730au
+#define SPARK_IOCTL_CANVAS 0xc0d0730au
 
 /*
         Bindings: what the machine's own events run.

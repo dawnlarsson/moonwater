@@ -30507,6 +30507,96 @@ int main(void) {
                          dict(source_root=str(args.source_root), spans=spans))
 
 
+def harness_canvas_hold(argv):
+    """Drive Canvas's low-latency CPU hold through its production functions.
+
+    The request is a zero-microsecond PM QoS latency, and held for as long as Canvas
+    existed it kept every processor polling in its idle loop. The state machine is
+    taken on input, extended by more input, released by the thread once the window has
+    passed without any, and taken again by the next event; a stub of the PM QoS API
+    refuses a double add and a remove of nothing, as the real one warns on both.
+    """
+    parser = argparse.ArgumentParser(description=harness_canvas_hold.__doc__)
+    parser.add_argument("--source-root", type=Path, default=HARNESS_ROOT)
+    parser.add_argument("--output", type=Path)
+    args = parser.parse_args(argv)
+    spans = []
+    def function(file, name):
+        text = (args.source_root / file).read_text()
+        match = re.search(r"^static [^;{}]*\b" + name + r"\([^;{}]*\)\n\{", text, re.M)
+        if not match:
+            raise ValueError("missing function definition: " + name)
+        start, brace = match.start(), match.end() - 1
+        body = text[start:text.index("\n}", brace) + 2]
+        spans.append(dict(file=file, name=name, line=text[:start].count("\n") + 1,
+                          sha256=hashlib.sha256(body.encode()).hexdigest()))
+        return body + "\n"
+    define = re.search(r"^#define CANVAS_HOLD_MS (\d+)$", (args.source_root / "src/canvas/canvas.c").read_text(), re.M)
+    if not define:
+        raise ValueError("missing CANVAS_HOLD_MS")
+    prefix = r"""
+#include <assert.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+typedef uint64_t u64; typedef int64_t s64;
+#define _Bool bool
+#define WRITE_ONCE(x,v) ((x)=(v))
+#define NSEC_PER_MSEC 1000000ULL
+#define HZ 1000
+#define min_t(t,a,b) ((t)(a) < (t)(b) ? (t)(a) : (t)(b))
+#define CANVAS_HOLD_MS """ + define.group(1) + r"""
+static u64 now_ns;
+static u64 ktime_get_ns(void) { return now_ns; }
+static long nsecs_to_jiffies(u64 ns) { return (long)(ns / 1000000ULL); }
+struct pm_qos_request { int active; };
+static int adds, removes, bad;
+static void cpu_latency_qos_add_request(struct pm_qos_request *r, int v) { if (r->active || v != 0) bad++; r->active = 1; adds++; }
+static void cpu_latency_qos_remove_request(struct pm_qos_request *r) { if (!r->active) bad++; r->active = 0; removes++; }
+static _Bool hold_on; static unsigned int hold_takes;
+"""
+    bodies = "static struct pm_qos_request pointer_qos;\nstatic u64 hold_until;\n" + "".join(
+        function("src/canvas/canvas.c", n) for n in ("canvas_hold_touch", "canvas_hold_drop", "canvas_hold_sleep"))
+    runner = r"""
+static unsigned checks, failures;
+#define check(name, cond) do { checks++; if (!(cond)) { failures++; printf("FAIL %s\n", name); } } while (0)
+int main(void)
+{
+    const long forever = 1L << 60;
+    now_ns = 1000000000ULL;
+    check("nothing held at the start, the sleep is the caller's", !hold_on && canvas_hold_sleep(forever) == forever);
+    canvas_hold_drop();
+    check("letting go of nothing removes nothing", removes == 0 && !bad);
+
+    canvas_hold_touch();
+    check("the first event takes the request once, at zero", hold_on && adds == 1 && hold_takes == 1 && pointer_qos.active && !bad);
+    now_ns += 200ULL * NSEC_PER_MSEC;
+    canvas_hold_touch();
+    check("more input inside the window does not take it again", adds == 1 && hold_takes == 1 && !bad);
+    now_ns += 400ULL * NSEC_PER_MSEC;
+    check("the extension counts from the last event, not the first", hold_until > now_ns && canvas_hold_sleep(forever) >= 99 && canvas_hold_sleep(forever) <= CANVAS_HOLD_MS);
+    check("a shorter sleep stays shorter", canvas_hold_sleep(3) == 3);
+    now_ns += (u64)CANVAS_HOLD_MS * NSEC_PER_MSEC;
+    check("a due hold sleeps one jiffy, to be let go of", canvas_hold_sleep(forever) == 1);
+    canvas_hold_drop();
+    check("the thread's release removes it once", !hold_on && removes == 1 && !pointer_qos.active && !bad);
+    check("after it the thread sleeps without a limit", canvas_hold_sleep(forever) == forever);
+    canvas_hold_drop();
+    check("a second release is nothing", removes == 1 && !bad);
+
+    now_ns += 5000000000ULL;
+    canvas_hold_touch();
+    check("the next event after a pause takes it again, in that one call", hold_on && adds == 2 && hold_takes == 2 && pointer_qos.active && !bad);
+    canvas_hold_drop();
+    check("and teardown drops it once", removes == 2 && !pointer_qos.active && !bad);
+    printf("canvas-hold %u/%u\n", checks - failures, checks);
+    return failures ? 1 : 0;
+}
+"""
+    return run_sanitized("canvas-hold", prefix + bodies + runner, args.output,
+                         dict(source_root=str(args.source_root), spans=spans))
+
+
 def harness_canvas_view(argv):
     """The scrollback view arithmetic in canvas.c's pane section, as properties.
 
@@ -60649,6 +60739,7 @@ HARNESS_CHECKS = {
     "shell_functions": harness_shell_functions,
     "audit_shell_functions": harness_audit_shell_functions,
     "canvas_lifetime": harness_canvas_lifetime,
+    "canvas_hold": harness_canvas_hold,
     "canvas_view": harness_canvas_view,
     "floodlight": harness_floodlight,
     "image_nodes": harness_image_nodes,

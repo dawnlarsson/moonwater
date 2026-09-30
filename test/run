@@ -10990,6 +10990,7 @@ lane_kit()
 kit_failed=0
 python3 test/differential.py --harness core_state || kit_failed=1
 python3 test/differential.py --harness canvas_lifetime || kit_failed=1
+python3 test/differential.py --harness canvas_hold || kit_failed=1
 python3 test/differential.py --harness canvas_view || kit_failed=1
 python3 test/differential.py --harness audit_shell_functions || kit_failed=1
 python3 test/differential.py --harness spark_entry || kit_failed=1
@@ -15260,6 +15261,22 @@ exec /mnt/drmhold "$@"
 open(stick + "/state", "w").write('''moonwater canvas > /tmp/canvas-state 2>&1
 echo "canvas-on-$(grep -c 'Canvas is on' /tmp/canvas-state)-off-$(grep -c 'Canvas is off' /tmp/canvas-state)" > /dev/ttyS0
 ''')
+#       An idle desktop: two readings of `moonwater canvas` eight seconds apart
+#       with nobody touching anything (the three seconds first let the frame
+#       timer's two-second idle tail run out). The hold on the processor's
+#       idle states must be let go of, and neither the canvas thread nor the
+#       frame timer may be waking: a desktop that wakes or holds while nobody
+#       is at it keeps the clock up and the battery going.
+open(stick + "/idlecheck", "w").write(r'''sleep 3
+moonwater canvas > /tmp/idle1 2>&1
+sleep 8
+moonwater canvas > /tmp/idle2 2>&1
+n() { sed -n "s/.*$2 \\([0-9][0-9]*\\).*/\\1/p" "$1" | head -n 1; }
+w=$(( $(n /tmp/idle2 woke) - $(n /tmp/idle1 woke) ))
+t=$(( $(n /tmp/idle2 fired) - $(n /tmp/idle1 fired) ))
+h=$(sed -n 's/.*hold: \([a-z]*\),.*/\1/p' /tmp/idle2)
+echo "idlecheck-$h-$w-$t" > /dev/ttyS0
+''')
 open(stick + "/kcheck", "w").write('''echo "kernel-warnings-$(dmesg | grep -c -E 'WARNING|BUG:|Oops|circular locking|possible recursive')" > /dev/ttyS0
 ''')
 
@@ -15541,6 +15558,13 @@ if switcher and holder:
     time.sleep(3)
     out.append(("and moonwater canvas says it is on",
                 str(serial_count(rb"canvas-on-1-off-0")), "1"))
+    type_text("/shell /mnt/idlecheck\n")
+    time.sleep(16)
+    idle = re.findall(rb"idlecheck-([a-z]*)-(-?\d+)-(-?\d+)", open(work + "/leak-serial", "rb").read())
+    out.append(("an idle desktop holds no low-latency request", idle[-1][0].decode() if idle else "no answer", "idle"))
+    out.append(("and wakes neither its thread nor its frame timer",
+                "yes" if idle and int(idle[-1][1]) <= 40 and int(idle[-1][2]) <= 40 else
+                ("%s thread, %s frame wakes in 8 s" % (idle[-1][1].decode(), idle[-1][2].decode()) if idle else "no answer"), "yes"))
     type_text("/shell /mnt/kcheck\n")
     time.sleep(3)
     warned = re.findall(rb"kernel-warnings-(\d+)", open(work + "/leak-serial", "rb").read())
@@ -15556,6 +15580,8 @@ else:
                        ("with a terminal that has the keyboard", "1"),
                        ("off and on twice more, and a terminal still answers", "1"),
                        ("and moonwater canvas says it is on", "1"),
+                       ("an idle desktop holds no low-latency request", "idle"),
+                       ("and wakes neither its thread nor its frame timer", "yes"),
                        ("and the kernel warned about nothing on the way", "0")):
         out.append((name, "not run: no static cc for the helpers", want))
 
