@@ -35867,8 +35867,6 @@ static fn sort_emit(sort_writer address_to out)
         is open. -T names the directories and they are taken in turn, as GNU
         takes them; without -T it is TMPDIR, and without that /tmp.
 */
-#define SORT_O_TMPFILE (020000000 | O_DIRECTORY)
-
 // EMFILE, and whether the open that met it was allowed to meet it quietly:
 // a merge short of descriptors merges fewer inputs at once instead.
 #define SORT_NO_DESCRIPTOR 24
@@ -35947,13 +35945,12 @@ static bipolar sort_temporary()
         }
 
         bipolar handle = system_open_at_mode(AT_FDCWD, directory,
-                                             FILE_READ_WRITE | SORT_O_TMPFILE |
+                                             FILE_READ_WRITE | O_TMPFILE |
                                                  O_CLOEXEC,
                                              0600);
 
-        // Unsupported by the filesystem, or by a kernel that reads the flag
-        // as a directory opened for writing.
-        if (handle == -95 || handle == -21 || handle == -22)
+        // Unsupported by the filesystem.
+        if (handle == -95 || handle == -22)
                 handle = sort_temporary_named(directory);
 
         if (handle >= 0)
