@@ -968,11 +968,6 @@ static bipolar netlink_link_up(b32 handle, p32 index)
         return netlink_link_flag_up(handle, index, true);
 }
 
-static bipolar netlink_link_down(b32 handle, p32 index)
-{
-        return netlink_link_flag_up(handle, index, false);
-}
-
 /*
         The wired links: Ethernet framing, not loopback and not a wireless
         station. Sixteen is more than a machine has; one past that is not
