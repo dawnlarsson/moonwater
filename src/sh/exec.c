@@ -13470,7 +13470,7 @@ static bool conditional_regex_match(string_address text, string_address pattern,
             &regex_pool, &regex_current, pattern, true, false, false,
             !shell_bash_compat ? REGEX_POLICY_DEFAULT
                                : REGEX_POLICY_EXPR |
-                                     (shell_utf8_on() ? REGEX_UTF8_NAMES : 0));
+                                     (shell_utf8_on() ? REGEX_UTF8_NAMES | REGEX_CHARACTERS : 0));
         if (!address_to valid && shell_bash_compat)
                 shell_told("[[: invalid regular expression `%s': %s\n", pattern,
                            conditional_regex_reason());

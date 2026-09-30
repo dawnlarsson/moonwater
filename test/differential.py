@@ -13686,6 +13686,33 @@ def shell_expand_pattern_replacement_fixed(rng):
         'printf "<%s>\\n" "${x' + operation + '$p/$r}"')
 
 
+def shell_expand_conditional_memo(rng):
+    """[[ ]] run over and over: its words and its compiled pattern are kept
+    between runs, so more patterns than the cache holds, the same pattern
+    after others, an invalid one between valid ones, two locales and several
+    forms must each answer as the first run did, against bash."""
+    patterns = ("^a", "b$", "(x+)(y*)", "[[:digit:]]+", "^(a|b)c?$", "é", ".", "a.c",
+                "(", "a{2}", "[", "^$", "\\.", "x*", "(a)(b)(c)", "*", "a|", "z{1,2}z",
+                "^.$", "^..$", "[^a]")
+    values = ("abc", "xxy", "42", "é", "", "a.c", "bc", "aab", "zz", "a")
+    chosen = rng.sample(patterns, rng.randrange(1, 16))
+    shown = ('printf "%s:%s:<%s><%s>\\n" "$?" "${#BASH_REMATCH[@]}" '
+             '"${BASH_REMATCH[0]-}" "${BASH_REMATCH[1]-}"')
+    lines = ["shopt -s extglob"]
+    for turn in range(rng.randrange(2, 4)):
+        if rng.getrandbits(1):
+            lines.append("export LC_ALL=" + rng.choice(("C", "en_US.UTF-8")))
+        form = rng.choice(("[[ $v =~ $p ]]", "[[ $v =~ $p && $v != q ]]",
+                           "[[ ! $v =~ $p || $v == 'a b' ]]", "[[ $v == a* || $v =~ $p ]]"))
+        lines.append("for r in 1 2; do for p in " + " ".join(shell_quote(x) for x in chosen) +
+                     "; do for v in " + " ".join(shell_quote(x) for x in rng.sample(values, 4)) +
+                     "; do " + form + "; " + shown +
+                     "; " + rng.choice(("", "", "echo abc | sed -E 's/(b)/[\\1]/' >/dev/null; "
+                                        "echo a | awk '/a+/' >/dev/null; q=$(echo hi); ")) +
+                     "done; done; done")
+    return "conditional-memo", ("bash",), shell_program(*lines)
+
+
 def shell_expand_pattern_replacement(rng):
     value = rng.choice(("", "FOOfoo", "aBaB", "éΩé", "aéBΩ", "🌙é🌟", "Ω"))
     pattern = rng.choice(("foo", "a", "B", "?", "[!é]", "[éΩ]", "[a-C]",
@@ -19543,6 +19570,7 @@ SHELL_FAMILIES = (
     shell_expand_substring,
     shell_expand_pattern_replacement_composed,
     shell_expand_pattern_replacement_fixed,
+    shell_expand_conditional_memo,
     shell_expand_brace_substitution,
     shell_expand_sequence_slice,
     shell_expand_array_transform,
