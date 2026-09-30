@@ -10261,6 +10261,7 @@ def files_hostname_set(farm):
     import random
     import shutil
     import socket
+    import struct
     import tempfile
     candidate = Path(farm) / "hostname"
     unshare = shutil.which("unshare")
@@ -42538,6 +42539,17 @@ int main(void)
          b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello", b"hello"),
         ("empty-length", "frame",
          b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n", b""),
+        ("204-clean", "frame",
+         b"HTTP/1.1 204 No Content\r\n\r\n", None),
+        ("204-with-content-length", "frame",
+         b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n", None),
+        ("204-with-transfer-encoding", "frame",
+         b"HTTP/1.1 204 No Content\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+         None),
+        ("205-with-zero-content-length", "frame",
+         b"HTTP/1.1 205 Reset Content\r\nContent-Length: 0\r\n\r\n", None),
+        ("205-with-content-length", "frame",
+         b"HTTP/1.1 205 Reset Content\r\nContent-Length: 5\r\n\r\nhello", None),
         ("bare-lf-headers", "frame",
          b"HTTP/1.1 200 OK\nContent-Length: 0\n\n", None),
         ("chunked-full", "full",
@@ -42706,7 +42718,8 @@ int main(void)
          b"\r\n5\r\nhello\r\n0\r\n\r\n", None),
     ]
     MUST_ACCEPT = {
-        "simple-length", "empty-length", "bare-lf-headers", "chunked-full",
+        "simple-length", "empty-length", "204-clean",
+        "205-with-zero-content-length", "bare-lf-headers", "chunked-full",
         "chunked-extension", "redirect-location",
         "1xx-then-200", "http10-length", "dup-date-ok", "dup-host-ok",
         "close-delimited", "te-chunked-case", "te-chunked-trail-ws",
@@ -42721,6 +42734,12 @@ int main(void)
             "RFC 9112 forbids TE with Content-Length; Moonwater refuses both",
         "duplicate-content-length":
             "duplicate framing fields are refused before a length is chosen",
+        "204-with-content-length":
+            "RFC 9110 forbids Content-Length on 204; its blank line ends the response",
+        "204-with-transfer-encoding":
+            "RFC 9112 forbids Transfer-Encoding on 204; its blank line ends the response",
+        "205-with-content-length":
+            "RFC 9110 permits Content-Length on 205 only when its value is zero",
         "bare-cr-in-location":
             "response field values reject embedded controls (NUL/CR/LF)",
         "obs-fold-location":
@@ -43737,9 +43756,14 @@ def harness_wget_mutation(argv):
     http_fuzz runs the HTTP section over a hosted lift; this runs the whole
     program a person types, file staging and exit paths included, over real
     loopback sockets. The bases are http_fuzz's own exchanges -- every
-    http_response_framing row, redirect chains across hops, chunked bodies --
-    and each run mutates one or more of a chain's responses (a flipped bit, a
-    control byte, an inserted or deleted or doubled run, a cut, a header
+    http_response_framing row, redirect chains across hops and chunked bodies.
+    Before those mutations, deterministic procedures drive valid length and
+    chunked responses one byte at a time and across grammar boundaries, put
+    FIN and RST at incomplete states, run an informational-response storm,
+    and prove that forbidden 204/205 framing is rejected by the real wget
+    path.  Each random run then mutates one or more of a
+    chain's responses (a flipped bit, a control byte, an inserted or deleted
+    or doubled run, a cut, a header
     dropped in, a huge length) and serves it, in pieces, to wget or to fetch.
     A run that ends by a signal, or is still going after eight seconds, fails;
     any exit status the program chooses for itself is an answer. Seeded, so a
@@ -43851,6 +43875,51 @@ def harness_wget_mutation(argv):
         listener.close()
         return code
 
+    def procedure(farm, chunks, reset=False):
+        """One real wget transaction under an exact server write schedule."""
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+
+        def serve():
+            peer = None
+            try:
+                peer, _ = listener.accept()
+                peer.settimeout(2)
+                request = b""
+                while b"\r\n\r\n" not in request and len(request) < 8192:
+                    got = peer.recv(8192 - len(request))
+                    if not got:
+                        return
+                    request += got
+                for chunk in chunks:
+                    peer.sendall(chunk)
+                if reset:
+                    peer.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                                    struct.pack("ii", 1, 0))
+                else:
+                    peer.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+            finally:
+                if peer is not None:
+                    peer.close()
+                listener.close()
+
+        server = threading.Thread(target=serve, daemon=True)
+        server.start()
+        try:
+            ran = subprocess.run(
+                [str(farm / "wget"), "-q", "-O", "-",
+                 "http://127.0.0.1:%d/procedure" % port],
+                capture_output=True, timeout=8, cwd=str(farm),
+                env={"PATH": "/usr/bin:/bin"})
+        except subprocess.TimeoutExpired:
+            ran = None
+        server.join(timeout=3)
+        return None if ran is None else (ran.returncode, ran.stdout)
+
     checks = Checks()
     with tempfile.TemporaryDirectory(prefix="wget-mutation-") as temporary:
         work = Path(temporary)
@@ -43863,6 +43932,84 @@ def harness_wget_mutation(argv):
                 return 1
         for tool in ("wget", "fetch"):
             (work / tool).symlink_to(shell)
+
+        payload = b"procedural body"
+        length = (b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n"
+                  b"Connection: close\r\n\r\n" % len(payload)) + payload
+        chunked = (b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"
+                   b"Connection: close\r\n\r\n4\r\nproc\r\nB\r\nedural body\r\n"
+                   b"0\r\nWitness: yes\r\n\r\n")
+        close_body = (b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n" +
+                      payload)
+        informational = (b"HTTP/1.1 103 Early Hints\r\nLink: </style.css>\r\n\r\n" * 32 +
+                         length)
+        procedures = [
+            ("a length response delivered one byte at a time",
+             [length[at:at + 1] for at in range(len(length))], False, (0, payload)),
+            ("a chunked response delivered one byte at a time",
+             [chunked[at:at + 1] for at in range(len(chunked))], False, (0, payload)),
+            ("the final body byte arriving beside FIN",
+             [length[:-1], length[-1:]], False, (0, payload)),
+            ("RST in an exact-length body is not success",
+             [length[:-1]], True, None),
+            ("close-delimited content ends at FIN",
+             [close_body[:17], close_body[17:-1], close_body[-1:]], False,
+             (0, payload)),
+            ("RST does not terminate close-delimited content cleanly",
+             [close_body], True, None),
+            ("a chunked body without its zero chunk is not success",
+             [chunked[:chunked.rfind(b"0\r\n")]], False, None),
+            ("an informational-response storm completes within the transaction bound",
+             [informational[at:at + 1] for at in range(len(informational))],
+             False, (0, payload)),
+            ("204 with Content-Length is refused end to end",
+             [b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"], False, None),
+            ("204 with Transfer-Encoding is refused end to end",
+             [b"HTTP/1.1 204 No Content\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n"],
+             False, None),
+            ("205 with a zero Content-Length is accepted",
+             [b"HTTP/1.1 205 Reset Content\r\nContent-Length: 0\r\n\r\n"],
+             False, (0, b"")),
+            ("205 with a nonzero Content-Length is refused end to end",
+             [b"HTTP/1.1 205 Reset Content\r\nContent-Length: 5\r\n\r\nhello"],
+             False, None),
+            ("205 with a zero chunk is accepted",
+             [b"HTTP/1.1 205 Reset Content\r\nTransfer-Encoding: chunked\r\n\r\n"
+              b"0\r\nWitness: yes\r\n\r\n"], False, (0, b"")),
+            ("205 with a nonzero chunk is refused before output",
+             [b"HTTP/1.1 205 Reset Content\r\nTransfer-Encoding: chunked\r\n\r\n"
+              b"1\r\nx\r\n0\r\n\r\n"], False, None),
+            ("close-delimited 205 with no content is accepted",
+             [b"HTTP/1.1 205 Reset Content\r\nConnection: close\r\n\r\n"],
+             False, (0, b"")),
+            ("close-delimited 205 content is refused before output",
+             [b"HTTP/1.1 205 Reset Content\r\nConnection: close\r\n\r\nx"],
+             False, None),
+            ("304 metadata may carry the selected representation's length",
+             [b"HTTP/1.1 304 Not Modified\r\nContent-Length: 99\r\n\r\n"],
+             False, (8, b"")),
+        ]
+        # Two writes on either side of every grammar boundary keep coverage
+        # even when a future server helper stops doing the bytewise schedules.
+        # The cut cases put FIN at incomplete status, header, delimiter and
+        # body states; every one has to be a bounded failure.
+        split_points = {1, len(length) - 1}
+        for mark in (b" ", b"\r", b"\n", b":"):
+            split_points.update(at for at, byte in enumerate(length, 1)
+                                if byte == mark[0])
+        for at in sorted(split_points):
+            procedures.append(("a length response split at byte %d" % at,
+                               [length[:at], length[at:]], False, (0, payload)))
+        for at in (1, 8, 15, length.find(b"Content-Length") + 7,
+                   length.find(b"\r\n\r\n") + 2,
+                   length.find(b"\r\n\r\n") + 4, len(length) - 1):
+            procedures.append(("FIN cuts a response at byte %d" % at,
+                               [length[:at]], False, None))
+        for name, chunks, reset, expected in procedures:
+            answer = procedure(work, chunks, reset)
+            checks(answer == expected if expected is not None
+                   else answer is not None and answer[0] != 0,
+                   "%s: got %r" % (name, answer))
         exits = collections.Counter()
         deaths = []
         for number in range(args.runs):

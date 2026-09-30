@@ -53300,6 +53300,21 @@ static fn fetching(void)
                           sizeof(wire) - 1, (p8 address_to)(body),           \
                           sizeof(body) - 1))
 
+                framing_harness("204-clean", true, FRAME,
+                                "HTTP/1.1 204 No Content\r\n\r\n", "");
+                framing_harness("204-with-content-length", false, FRAME,
+                                "HTTP/1.1 204 No Content\r\n"
+                                "Content-Length: 0\r\n\r\n", "");
+                framing_harness("204-with-transfer-encoding", false, FRAME,
+                                "HTTP/1.1 204 No Content\r\n"
+                                "Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+                                "");
+                framing_harness("205-with-zero-content-length", true, FRAME,
+                                "HTTP/1.1 205 Reset Content\r\n"
+                                "Content-Length: 0\r\n\r\n", "");
+                framing_harness("205-with-content-length", false, FRAME,
+                                "HTTP/1.1 205 Reset Content\r\n"
+                                "Content-Length: 5\r\n\r\nhello", "");
                 framing_harness("te-cl-conflict", false, FRAME,
                                 "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"
                                 "Content-Length: 5\r\n\r\n5\r\nhello\r\n0\r\n\r\n",

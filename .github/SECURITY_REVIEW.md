@@ -23,7 +23,7 @@ fuzzing covers TLS only, and HTTP framing has one independent oracle.
 | DNS | exact question/ID binding, compression loops, full RR framing, UDP truncation to TCP | coverage-guided compression/name fuzzing; independent packet oracle; DNSSEC is out of scope |
 | TLS records/handshake | record and handshake fragmentation, transcript/Finished, AEAD limits, state ordering, `tls_hs_fuzz` libFuzzer target | record-layer fuzzing; mandatory fuzz budget in CI |
 | X.509 | strict DER and generated-chain policy matrix against OpenSSL; `tls_der_fuzz` / `tls_verify_fuzz` libFuzzer targets | a second independent path validator; name-constraints breadth |
-| HTTP/URL | sink-side request validation, framing conflicts, split-point and chunk/trailer checks, `http.client` framing oracle, HTTPS downgrade harness | a second response-framing oracle; coverage-guided framing fuzzing; slow-stream scheduling tests |
+| HTTP/URL | sink-side request validation, framing conflicts including 204/205 and 205's zero-content body, split-point and chunk/trailer checks, `http.client` framing oracle, HTTPS downgrade harness, real-wget one-byte/FIN/RST and bounded 1xx-storm schedules | a second response-framing oracle; coverage-guided framing fuzzing; slow-stream scheduling across TLS and redirects |
 | DHCPv4 | peer/xid/MAC binding, option framing/overload, state cross-product, entropy faults | coverage-guided option-stream fuzzing; mandatory namespace/netem retransmission runs |
 | SNTP | nonce and peer binding, ancillary timestamp parsing, arithmetic and selection checks | adversarial scheduling/netem as a mandatory lane; era-boundary integration tests |
 

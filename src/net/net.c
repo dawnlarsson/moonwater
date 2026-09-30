@@ -8823,6 +8823,21 @@ static bipolar http_response_framing_from(p8 address_to bytes, positive size,
                         response->body_kind = HTTP_BODY_LENGTH;
                 }
 
+                /* RFC 9110 15.3.5: a 204 response ends at the blank line;
+                   Content-Length is forbidden, and RFC 9112 6.1 likewise
+                   forbids Transfer-Encoding.  Section 15.3.6 permits a 205
+                   Content-Length only when it is zero. Refuse a declaration
+                   that cannot describe the no-content response instead of
+                   accepting it and silently leaving its bytes unread: an
+                   intermediary which obeys that framing could otherwise see
+                   a different response boundary from this client. */
+                if ((response->code == 204 &&
+                     response->body_kind != HTTP_BODY_CLOSE) ||
+                    (response->code == 205 &&
+                     response->body_kind == HTTP_BODY_LENGTH &&
+                     response->body_length))
+                        return HTTP_MALFORMED;
+
                 /* Informational responses precede, rather than replace, the
                    final response.  They cannot carry message framing, and a
                    protocol switch is outside this connection-close client. */
@@ -9026,7 +9041,7 @@ static bipolar http_response_head(
 
 static bool http_response_has_no_body(b32 code)
 {
-        return code == 204 || code == 205 || code == 304;
+        return code == 204 || code == 304;
 }
 
 typedef struct
@@ -9975,20 +9990,28 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                         status = HTTP_STATUS;
                 else if (!status && !http_response_has_no_body(response.code))
                 {
+                        /* A 205 may describe its zero content with
+                           Content-Length: 0, a zero chunk or the connection
+                           closing after the head.  Unlike 204, its framing is
+                           consumed; give it a zero-capacity store so any
+                           content is refused before it reaches the caller's
+                           output. */
+                        bool reset = response.code == 205;
                         http_body body = {
                             .link = address_of link,
                             .stash = head + header,
                             .stash_used = used - header,
                             .scratch = head,
-                            .store = into ? address_of whole : null,
-                            .store_limit = HTTP_FETCH_MAX,
+                            .store = reset || into ? address_of whole : null,
+                            .store_limit = reset ? 0 : HTTP_FETCH_MAX,
                         };
 
                         status = into &&
                                          response.body_kind == HTTP_BODY_LENGTH &&
                                          response.body_length > HTTP_FETCH_MAX
                                      ? HTTP_MALFORMED
-                                     : http_copy_body(address_of body, dest,
+                                     : http_copy_body(address_of body,
+                                                      reset ? -1 : dest,
                                                       address_of response);
                 }
 
