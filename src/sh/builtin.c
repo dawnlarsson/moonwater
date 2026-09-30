@@ -9756,15 +9756,6 @@ static bool shell_declare_options(shell_declare_state address_to state)
         return true;
 }
 
-//      $'...' with every byte that is not typed back as itself escaped. high
-//      says whether a byte past ASCII is one of those.
-static fn shell_ansi_quoted(writer write, string_address text, bool high)
-{
-        write("$'", 2);
-        writer_spelled(write, text, string_length(text), spelling_ansi(high));
-        write("'", 1);
-}
-
 /*
         $'...' the way bash writes it: a whole character in the locale as
         itself, a byte that is none as an octal escape, a control byte by its
@@ -9803,35 +9794,34 @@ static fn shell_ansi_quoted_shown(writer write, string_address text,
         write("'", 1);
 }
 
-static fn shell_declare_quoted(writer write, string_address value)
+static fn shell_declare_quoted_span(writer write, string_address value,
+                                    positive length)
 {
-        positive length = string_length(value);
-
         //      bash keeps what is a character in its locale inside double
         //      quotes, and takes $'...' only for a control byte or a byte
         //      that is no character.
-        if (shell_bash_compat)
-        {
-                if (shell_bytes_awkward(value, length))
-                        return shell_ansi_quoted_shown(write, value, length);
-        }
-        else if (string_get(value + memory_escape_index(value, length,
-                                                   HEX_CONTROL | HEX_TAB | HEX_HIGH)))
-                return shell_ansi_quoted(write, value, true);
+        if (shell_bash_compat ? shell_bytes_awkward(value, length)
+                              : memory_escape_index(
+                                    value, length,
+                                    HEX_CONTROL | HEX_TAB | HEX_HIGH) < length)
+                return shell_bash_compat
+                           ? shell_ansi_quoted_shown(write, value, length)
+                           : shell_ansi_run(write, value, length, true);
 
         write("\"", 1);
 
-        while (string_get(value))
+        for (positive at = 0; at < length;)
         {
-                positive run = string_span(value, shell_quote_double);
+                positive run = string_span_max(value + at, length - at,
+                                               shell_quote_double);
+                p8 byte;
+
                 if (run)
-                {
-                        write(value, run);
-                        value += run;
-                }
-                if (!string_get(value))
+                        write(value + at, run);
+                at += run;
+                if (at == length)
                         break;
-                p8 byte = string_get(value++);
+                byte = value[at++];
 
                 if (byte == '\\' || byte == '"' || byte == '$' || byte == '`')
                         write("\\", 1);
@@ -9839,6 +9829,11 @@ static fn shell_declare_quoted(writer write, string_address value)
         }
 
         write("\"", 1);
+}
+
+static fn shell_declare_quoted(writer write, string_address value)
+{
+        shell_declare_quoted_span(write, value, string_length(value));
 }
 
 // A subscript is written bare when it could be typed back bare, and quoted
@@ -13048,9 +13043,9 @@ COLD fn printf_reusable(writer write, string_address text)
                 if (shell_bytes_awkward(text, length))
                         return shell_ansi_quoted_shown(write, text, length);
         }
-        else if (string_get(text + memory_escape_index(text, length,
-                                                       HEX_CONTROL | HEX_TAB)))
-                return shell_ansi_quoted(write, text, false);
+        else if (memory_escape_index(text, length, HEX_CONTROL | HEX_TAB) <
+                 length)
+                return shell_ansi_run(write, text, length, false);
 
         for (step = text; string_get(step); step++)
         {

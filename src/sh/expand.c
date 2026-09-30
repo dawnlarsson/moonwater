@@ -6983,50 +6983,12 @@ static fn expand_case_change(expand_reference reference, string_address pattern_
         than against the buffer it will be written back into.
 */
 
-// A byte a single-quoted run cannot carry, which is what decides between the
-// two forms Q may answer with.
-static PURE bool transform_awkward(p8 value)
-{
-        return escape_categories[value] & (HEX_CONTROL | HEX_TAB);
-}
-
-// Immutable scanner sets for the builtin writers, for the quote forms
-// escape_categories has no category for: $, backquote and '.
+// An immutable scanner set for the double-quote writer, for the form
+// escape_categories has no category for: $, backquote and ".
 static const b8 shell_quote_double[STRING_SET_BYTES] = {
         [32 ... 33] = 1, [35] = 1, [37 ... 91] = 1,
         [93 ... 95] = 1, [97 ... 126] = 1
 };
-static const b8 shell_quote_ansi[STRING_SET_BYTES] = {
-        [32 ... 38] = 1, [40 ... 91] = 1, [93 ... 126] = 1
-};
-
-// Shared by ${value@Q}, printf %q and declaration listings. Only declarations
-// also escape high bytes; quote selection and bulk runs stay with the caller.
-static inline INLINE positive shell_ansi_byte(p8 address_to into, p8 value, bool high)
-{
-        static const p8 names[256] = {
-            [7] = 'a', [8] = 'b', [27] = 'E', [12] = 'f',
-            ['\n'] = 'n', ['\r'] = 'r', ['\t'] = 't', [11] = 'v',
-            ['\\'] = '\\', ['\''] = '\''
-        };
-        p8 named = names[value];
-        if (named)
-        {
-                into[0] = '\\';
-                into[1] = named;
-                return 2;
-        }
-        if (transform_awkward(value) || (high && value >= 128))
-        {
-                into[0] = '\\';
-                into[1] = (p8)('0' + (value >> 6));
-                into[2] = (p8)('0' + ((value >> 3) & 7));
-                into[3] = (p8)('0' + (value & 7));
-                return 4;
-        }
-        into[0] = value;
-        return 1;
-}
 
 /*
         How many bytes of a character bash shows as itself start here: a
@@ -7074,94 +7036,7 @@ static inline INLINE bool shell_bytes_awkward(string_address value,
                shell_bytes_unshown((const p8 address_to)value, length);
 }
 
-/*
-        The value as bytes the shell would read back as itself.
-
-        A single-quoted run holds anything but a quote, so that is the answer
-        wherever it can be: 'a b' reads back as a b. A value holding a
-        control byte cannot be written that way at all, so it goes out as
-        $'...' with the escapes -- which is the only form that survives being
-        pasted back into a script.
-*/
-static fn transform_quoted(string_address value, positive length, p8 mark)
-{
-        positive at = 0;
-        // In the C locale a high byte is not a character, so @Q has to spell
-        // it in $'...' the way bash 5.2 does. UTF-8 may keep it inside quotes.
-        bool high = !shell_utf8_on();
-        bool awkward = memory_escape_index(value, length,
-            HEX_CONTROL | HEX_TAB | (high ? HEX_HIGH : 0)) < length ||
-                       (shell_bash_compat &&
-                        shell_bytes_unshown((const p8 address_to)value, length));
-
-        if (!awkward)
-        {
-                expand_push('\'', mark);
-
-                while (at < length)
-                {
-                        positive run = memory_span_without_byte(value + at,
-                                                                '\'', length - at);
-                        if (run)
-                                expand_push_run(value + at, run, mark);
-                        at += run;
-                        // A quote cannot appear inside a quoted run, so the
-                        // run is closed, the quote written escaped, and a
-                        // fresh run opened behind it.
-                        if (at < length)
-                        {
-                                expand_push_run((string_address) "'\\''", 4,
-                                                mark);
-                                at++;
-                        }
-                }
-
-                expand_push('\'', mark);
-
-                return;
-        }
-
-        expand_push_run((string_address) "$'", 2, mark);
-
-        while (at < length)
-        {
-                if (shell_quote_ansi[value[at]])
-                {
-                        positive run = string_span_max(value + at, length - at,
-                                                        shell_quote_ansi);
-                        expand_push_run(value + at, run, mark);
-                        at += run;
-                        continue;
-                }
-                //      bash keeps a whole character and spells a byte
-                //      that is none in octal.
-                if (value[at] >= 0x80 && shell_bash_compat)
-                {
-                        positive shown = shell_shown_character(
-                            (const p8 address_to)value + at, length - at);
-
-                        if (shown)
-                        {
-                                expand_push_run(value + at, shown, mark);
-                                at += shown;
-                                continue;
-                        }
-                        p8 written[4];
-                        expand_push_run(written,
-                                        shell_ansi_byte(written, value[at++],
-                                                        true),
-                                        mark);
-                        continue;
-                }
-                p8 written[4];
-                expand_push_run(written,
-                                shell_ansi_byte(written, value[at++], high), mark);
-        }
-
-        expand_push('\'', mark);
-}
-
-/* Both spellings through a writer, for words that are not expansion output:
+/* Both spellings through a writer: the transforms push through them, and so do
    xtrace and quoted history words. Which one a word needs is the caller's. */
 static COLD fn shell_single_quote_write(writer write, string_address value,
                                         positive length)
@@ -7192,6 +7067,49 @@ static COLD fn shell_ansi_run(writer write, string_address value,
         write("$'", 2);
         writer_spelled(write, value, length, spelling_ansi(high));
         write("'", 1);
+}
+
+static p8 transform_write_mark;
+
+static fn transform_write(address_any data, positive length)
+{
+        if (!length && data)
+                length = string_length(data);
+        if (length)
+                expand_push_run(data, length, transform_write_mark);
+}
+
+// The writers of builtin.c that the transforms below push through.
+static fn shell_ansi_quoted_shown(writer write, string_address text,
+                                  positive length);
+static fn shell_declare_quoted_span(writer write, string_address value,
+                                    positive length);
+
+/*
+        The value as bytes the shell would read back as itself.
+
+        A single-quoted run holds anything but a quote, so that is the answer
+        wherever it can be: 'a b' reads back as a b. A value holding a
+        control byte cannot be written that way at all, so it goes out as
+        $'...' with the escapes -- which is the only form that survives being
+        pasted back into a script.
+*/
+static fn transform_quoted(string_address value, positive length, p8 mark)
+{
+        // In the C locale a high byte is not a character, so @Q has to spell
+        // it in $'...' the way bash 5.2 does. UTF-8 may keep it inside quotes.
+        bool high = !shell_utf8_on();
+
+        transform_write_mark = mark;
+        if (memory_escape_index(value, length,
+                                HEX_CONTROL | HEX_TAB | (high ? HEX_HIGH : 0)) == length &&
+            !(shell_bash_compat &&
+              shell_bytes_unshown((const p8 address_to)value, length)))
+                shell_single_quote_write(transform_write, value, length);
+        else if (shell_bash_compat)
+                shell_ansi_quoted_shown(transform_write, value, length);
+        else
+                shell_ansi_run(transform_write, value, length, high);
 }
 
 static const b8 expand_ansi_plain[STRING_SET_BYTES] = {
@@ -7505,44 +7423,8 @@ static COLD fn transform_attributes(expand_reference reference, p8 mark)
 static COLD fn transform_declare_quoted(string_address value, positive length,
                                         p8 mark)
 {
-        bool control = memory_escape_index(value, length,
-            HEX_CONTROL | HEX_TAB | HEX_HIGH) < length;
-        positive at = 0;
-
-        if (control)
-                expand_push_run((string_address) "$'", 2, mark);
-        else
-                expand_push('"', mark);
-
-        while (at < length)
-        {
-                if ((control ? shell_quote_ansi : shell_quote_double)[value[at]])
-                {
-                        positive run = string_span_max(
-                            value + at, length - at,
-                            control ? shell_quote_ansi : shell_quote_double);
-                        expand_push_run(value + at, run, mark);
-                        at += run;
-                        continue;
-                }
-                p8 byte = value[at++];
-                if (control)
-                {
-                        p8 escaped[4];
-                        expand_push_run(escaped,
-                                        shell_ansi_byte(escaped, byte, true),
-                                        mark);
-                }
-                else
-                {
-                        if (byte == '\\' || byte == '"' || byte == '$' ||
-                            byte == '`')
-                                expand_push('\\', mark);
-                        expand_push(byte, mark);
-                }
-        }
-
-        expand_push(control ? '\'' : '"', mark);
+        transform_write_mark = mark;
+        shell_declare_quoted_span(transform_write, value, length);
 }
 
 static COLD fn transform_declare_key(string_address key, positive length,
@@ -7552,16 +7434,6 @@ static COLD fn transform_declare_key(string_address key, positive length,
                 transform_declare_quoted(key, length, mark);
         else
                 expand_push_run(key, length, mark);
-}
-
-static p8 transform_write_mark;
-
-static fn transform_write(address_any data, positive length)
-{
-        if (!length && data)
-                length = string_length(data);
-        if (length)
-                expand_push_run(data, length, transform_write_mark);
 }
 
 static COLD fn transform_prompt(string_address value, positive length, p8 mark)
