@@ -1023,14 +1023,50 @@ static COLD bipolar system_open_parent_nofollow_checked(
                                        room, true, true, accept, false);
 }
 
-/* A command-line pathname may legitimately contain `..`; opening that
-   component relative to the directory already held preserves its meaning
-   without resolving any later operation through the original pathname. */
+/* A command-line pathname may legitimately contain `..` and links, and is
+   followed as the kernel follows it: the parent is opened by one openat of
+   its whole name, and every later operation goes through that descriptor and
+   the final component, never through the pathname again. That is one call
+   where a walk of one call per component was two per component and the
+   kernel's own forty-link limit reset at each of them. The walk stays for
+   the callers that refuse links or hold each step to a policy. */
 static COLD bipolar system_open_parent_pinned(
     bipolar directory, string_address path, p8 address_to leaf, positive room)
 {
-        return system_open_parent_walk(directory, path, false, 0, leaf, room,
-                                       false, false, 0, false);
+        if (!path || !leaf || !room)
+                return -22;
+
+        positive length = string_length(path);
+        positive at = length;
+
+        while (at && path[at - 1] != '/')
+                at--;
+
+        positive name = length - at;
+
+        if (!name || (name == 1 && path[at] == '.'))
+                return -22;
+        if (name >= room)
+                return -36;
+
+        //      The directory part without the slashes that end it: the root
+        //      for a name in it, the working directory for a name alone.
+        positive keep = at;
+        p8 parent[4096];
+
+        while (keep > 1 && path[keep - 1] == '/')
+                keep--;
+        if (keep >= sizeof(parent))
+                return -36;
+        if (keep)
+                memory_copy_apart(parent, path, keep);
+        else
+                parent[keep++] = '.';
+        parent[keep] = end;
+        memory_copy_apart_end(leaf, path + at, name);
+
+        return system_open_at(directory, parent,
+                              O_PATH | O_DIRECTORY | O_CLOEXEC);
 }
 
 /* Pin a command-line directory without allowing any component to be a
