@@ -2631,7 +2631,6 @@ static fn tar_reset(void)
         runs on the codec's thread once its stream is done.  With no second
         thread the codec reads inline, as it always did.
 */
-#if defined(LIBRARY_THREAD_RUNTIME)
 #define TAR_RING_SPANS 8
 #define TAR_RING_SPAN ((positive)1 << 17)
 #define TAR_RING_QUIT ((b32)-(1 << 20))
@@ -2827,35 +2826,6 @@ static bipolar tar_read_bytes(bipolar handle, p8 address_to into, positive n)
         tar_decoder_failed = got < 0;
         return got;
 }
-#else
-static fn tar_ring_start(const tar_codec address_to codec)
-{
-        (void)codec;
-}
-
-static bool tar_ring_finish(const tar_codec address_to codec)
-{
-        return codec->read_end();
-}
-
-static bipolar tar_read_bytes(bipolar handle, p8 address_to into, positive n)
-{
-        return tar_decoder ? tar_decoder->read(into, n)
-                           : system_read_retry((positive)handle, into, n);
-}
-
-static bipolar tar_view_bytes(bipolar handle, p8 address_to address_to at,
-                              positive n, p8 address_to scratch)
-{
-        address_to at = scratch;
-        return tar_read_bytes(handle, scratch, n > TAR_RECORD ? TAR_RECORD : n);
-}
-
-static fn tar_view_done(positive n)
-{
-        (void)n;
-}
-#endif
 
 static bool tar_write_bytes(bipolar handle, p8 address_to bytes, positive n)
 {

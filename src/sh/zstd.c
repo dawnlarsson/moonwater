@@ -2815,10 +2815,8 @@ static fn zstd_block_header(p8 address_to into, bool last, p8 type, positive siz
 static bool zstd_enc_emit(zstd_encoder address_to e, p8 address_to p, positive n)
 {
         e->emitted += n;
-#if defined(LIBRARY_THREAD_RUNTIME)
         if (e->output)
                 return parallel_write(e->output, p, n);
-#endif
         return zstd_enc_out(p, n);
 }
 
@@ -5782,7 +5780,6 @@ static struct
         p8 failed[ZSTD_JOBS_MAX];
 } zstd_jobs;
 
-#if defined(LIBRARY_THREAD_RUNTIME)
 /* A job encoder's tables and scratch, mapped on its first job and cleared
    for every one after, so no job sees what another job left. */
 static bool zstd_encoder_job_tables(zstd_encoder address_to e,
@@ -6261,32 +6258,6 @@ static b32 zstd_jobs_fd(bipolar in)
                 zstd_jobs.first_round = false;
         }
 }
-#else
-static b32 zstd_jobs_open(const zstd_params address_to p)
-{
-        (void)p;
-        return 0;
-}
-
-static bool zstd_jobs_round(bool final)
-{
-        (void)final;
-        return false;
-}
-
-static b32 zstd_jobs_fd(bipolar in)
-{
-        (void)in;
-        return -1;
-}
-
-static b32 zstd_jobs_file(bipolar in, p64 size)
-{
-        (void)in;
-        (void)size;
-        return -2;
-}
-#endif
 
 /* Where the next input bytes go, and how many fit before work must run. */
 static p8 address_to zstd_encode_space(positive address_to room)
