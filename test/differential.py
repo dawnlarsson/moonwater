@@ -40992,6 +40992,65 @@ def bench_anchor(work):
     return work / "anchor.inc"
 
 
+GO_CHAIN_VERIFIER = r"""
+package main
+
+import (
+	"crypto/x509"
+	"encoding/pem"
+	"fmt"
+	"os"
+)
+
+func load(path string) []*x509.Certificate {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var out []*x509.Certificate
+	for {
+		var block *pem.Block
+		block, data = pem.Decode(data)
+		if block == nil {
+			return out
+		}
+		if block.Type != "CERTIFICATE" {
+			continue
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "parse:", err)
+			os.Exit(3)
+		}
+		out = append(out, cert)
+	}
+}
+
+func main() {
+	roots := x509.NewCertPool()
+	for _, c := range load(os.Args[1]) {
+		roots.AddCert(c)
+	}
+	inter := x509.NewCertPool()
+	for _, c := range load(os.Args[2]) {
+		inter.AddCert(c)
+	}
+	leaf := load(os.Args[3])
+	if len(leaf) != 1 {
+		os.Exit(3)
+	}
+	_, err := leaf[0].Verify(x509.VerifyOptions{
+		Roots: roots, Intermediates: inter, DNSName: os.Args[4],
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+"""
+
+
 def harness_tls_chains(argv):
     """wget's certificate verdict against openssl verify's, chain by chain.
 
@@ -41162,6 +41221,52 @@ def harness_tls_chains(argv):
         ("first intermediate excludes the second's subject", 2, good_leaf,
          {"first_extra": "nameConstraints=critical,excluded;dirName:subtree\n"
                          "[subtree]\nCN=tls chains second\n", "keys": ("P-256",)}),
+        #   Name constraints, breadth: range shapes, an excluded subtree
+        #   winning over a permitted one, case, label boundaries, the same
+        #   name checked against two CAs' constraints, and a leaf with one
+        #   name inside and one outside.
+        ("a one-address range permits the leaf", 2, good_leaf,
+         {"second_extra": "nameConstraints=critical,permitted;IP:127.0.0.1/255.255.255.255\n",
+          "keys": ("P-256",)}),
+        ("a range of everything permits the leaf", 2, good_leaf,
+         {"second_extra": "nameConstraints=critical,permitted;IP:0.0.0.0/0.0.0.0\n",
+          "keys": ("P-256",)}),
+        ("a range of everything excluded refuses the leaf", 2, good_leaf,
+         {"second_extra": "nameConstraints=critical,excluded;IP:0.0.0.0/0.0.0.0\n",
+          "keys": ("P-256",)}),
+        ("an excluded address wins over a permitted range", 2, good_leaf,
+         {"second_extra": "nameConstraints=critical,permitted;IP:127.0.0.0/255.0.0.0,"
+                          "excluded;IP:127.0.0.1/255.255.255.255\n",
+          "keys": ("P-256",)}),
+        ("DNS constraints leave an IP name alone", 2, good_leaf,
+         {"second_extra": "nameConstraints=critical,permitted;DNS:example.com\n",
+          "keys": ("P-256",)}),
+        ("a DNS constraint is compared without case", 2,
+         good_leaf.replace("IP:127.0.0.1", "IP:127.0.0.1,DNS:www.example.com"),
+         {"second_extra": "nameConstraints=critical,permitted;DNS:EXAMPLE.com\n",
+          "keys": ("P-256",)}),
+        ("a DNS constraint ends at a label boundary", 2,
+         good_leaf.replace("IP:127.0.0.1", "IP:127.0.0.1,DNS:www.notexample.com"),
+         {"second_extra": "nameConstraints=critical,permitted;DNS:example.com\n",
+          "keys": ("P-256",)}),
+        ("a leaf with one name inside and one outside", 2,
+         good_leaf.replace("IP:127.0.0.1", "IP:127.0.0.1,DNS:www.example.com,DNS:www.evil.test"),
+         {"second_extra": "nameConstraints=critical,permitted;DNS:example.com\n",
+          "keys": ("P-256",)}),
+        ("two CAs' DNS constraints, the leaf inside both", 2,
+         good_leaf.replace("IP:127.0.0.1", "IP:127.0.0.1,DNS:www.example.com"),
+         {"first_extra": "nameConstraints=critical,permitted;DNS:example.com\n",
+          "second_extra": "nameConstraints=critical,permitted;DNS:www.example.com\n",
+          "keys": ("P-256",)}),
+        ("two CAs' DNS constraints, the leaf outside the second", 2,
+         good_leaf.replace("IP:127.0.0.1", "IP:127.0.0.1,DNS:www.example.com"),
+         {"first_extra": "nameConstraints=critical,permitted;DNS:example.com\n",
+          "second_extra": "nameConstraints=critical,permitted;DNS:evil.test\n",
+          "keys": ("P-256",)}),
+        ("the first CA excludes a name the leaf carries", 2,
+         good_leaf.replace("IP:127.0.0.1", "IP:127.0.0.1,DNS:a.evil.test"),
+         {"first_extra": "nameConstraints=critical,excluded;DNS:evil.test\n",
+          "keys": ("P-256",)}),
         # rsa8192.badssl.com's shape, the largest key browsers take: the
         # leaf and the intermediate that signs it both RSA-8192.
         ("RSA-8192 leaf under an RSA-8192 intermediate", 2, good_leaf,
@@ -41310,6 +41415,17 @@ def harness_tls_chains(argv):
         "RSA-8192 leaf under an RSA-8192 intermediate",
         "a left-out intermediate fetched from the leaf's caIssuers",
         "distrust-after: leaf issued before the date", "distrust-after: leaf issued on the date",
+        "a one-address range permits the leaf", "a range of everything permits the leaf",
+        "DNS constraints leave an IP name alone",
+        "a DNS constraint is compared without case",
+        "two CAs' DNS constraints, the leaf inside both",
+    }
+    #       Where wget accepts what OpenSSL refuses, each with its reason and
+    #       with Go's crypto/x509 on wget's side of it.
+    LOOSER_THAN_OPENSSL = {
+        "DNS constraints leave an IP name alone":
+            "OpenSSL also holds the subject's CN to a DNS constraint; RFC 5280 "
+            "and Go do not, and this client never reads a CN for a name",
     }
 
     checks = Checks()
@@ -41429,6 +41545,22 @@ def harness_tls_chains(argv):
             def log_message(self, *arguments):
                 pass
 
+        go_rows = []
+        go_verifier = None
+        if shutil.which("go"):
+            (work / "gochain.go").write_text(GO_CHAIN_VERIFIER)
+            built = subprocess.run(["go", "build", "-o", str(work / "gochain"),
+                                    str(work / "gochain.go")], cwd=work,
+                                   capture_output=True, text=True,
+                                   env=dict(os.environ, GO111MODULE="off",
+                                            GOFLAGS="", GOCACHE=str(work / ".gocache")))
+            if built.returncode == 0:
+                go_verifier = work / "gochain"
+            else:
+                print("tls chains: Go oracle NOT RUN -- " + built.stderr[-200:])
+        else:
+            print("tls chains: Go oracle NOT RUN -- no go toolchain")
+
         files = http.server.ThreadingHTTPServer(
             ("127.0.0.1", 0), functools.partial(Quiet, directory=str(work)))
         threading.Thread(target=files.serve_forever, daemon=True).start()
@@ -41515,6 +41647,17 @@ def harness_tls_chains(argv):
                     verify += ["-untrusted", "untrusted.pem"]
                 openssl_ok = subprocess.run(verify + ["leaf.pem"], cwd=work,
                                             capture_output=True).returncode == 0
+                if go_verifier:
+                    #   The second path validator: Go's crypto/x509, given
+                    #   the same root, the same untrusted pool and the same
+                    #   name and purpose. Its verdict is recorded against
+                    #   the row; GO_DIFFERS pins where it parts from OpenSSL.
+                    went = subprocess.run(
+                        [str(go_verifier), "root.pem", "untrusted.pem", "leaf.pem",
+                         "127.0.0.1"], cwd=work, capture_output=True)
+                    go_rows.append(("%s with a %s leaf" % (mutation, key_name),
+                                    openssl_ok, went.returncode == 0,
+                                    went.stderr.decode(errors="replace").strip()[:120], None))
 
                 context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
                 context.minimum_version = ssl.TLSVersion.TLSv1_3
@@ -41525,6 +41668,8 @@ def harness_tls_chains(argv):
                     # leaves we still want to verify as refused by wget.
                     ours_ok = False
                     name = "%s with a %s leaf" % (mutation, key_name)
+                    if go_verifier:
+                        go_rows[-1] = go_rows[-1][:4] + (ours_ok,)
                     expected = mutation in MUST_ACCEPT
                     checks(openssl_ok == expected or mutation in DELIBERATE,
                            "%s: the OpenSSL oracle %s a chain the standards matrix says to %s" % (
@@ -41589,6 +41734,8 @@ def harness_tls_chains(argv):
                 fetched12 = fetch(context12)
                 ours_ok = fetched.returncode == 0 and fetched.stdout.startswith(b"truste")
                 name = "%s with a %s leaf" % (mutation, key_name)
+                if go_verifier:
+                    go_rows[-1] = go_rows[-1][:4] + (ours_ok,)
                 checks(ours_ok == (fetched12.returncode == 0 and
                                    fetched12.stdout.startswith(b"truste")),
                        "%s: wget's TLS 1.2 verdict differs from its TLS 1.3 one" % name)
@@ -41614,7 +41761,8 @@ def harness_tls_chains(argv):
                            "%s with a %s leaf: wget does not say '%s' (%s)" % (
                                mutation, key_name, reason, said.strip()[:200]))
                 expected = mutation in MUST_ACCEPT
-                checks(openssl_ok == expected or mutation in DELIBERATE,
+                checks(openssl_ok == expected or mutation in DELIBERATE or
+                       mutation in LOOSER_THAN_OPENSSL,
                        "%s: the OpenSSL oracle %s a chain the standards matrix says to %s" % (
                            name, "accepts" if openssl_ok else "refuses",
                            "accept" if expected else "refuse"))
@@ -41626,12 +41774,41 @@ def harness_tls_chains(argv):
                 if mutation in DELIBERATE and openssl_ok and not ours_ok:
                     checks(True, name)
                     continue
+                if mutation in LOOSER_THAN_OPENSSL and ours_ok and not openssl_ok:
+                    checks(not go_verifier or go_rows[-1][2],
+                           "%s: listed as looser than OpenSSL but Go refuses it too" % name)
+                    continue
                 checks(ours_ok == openssl_ok,
                        "%s: openssl %s it and wget %s it (%s)" % (
                            name, "accepts" if openssl_ok else "refuses",
                            "accepts" if ours_ok else "refuses",
                            fetched.stderr.decode(errors="replace").strip()[:200]))
         files.shutdown()
+    if go_rows:
+        differ = [row for row in go_rows if row[1] != row[2]]
+        print("tls chains: Go crypto/x509 second oracle: %d rows, %d differ from OpenSSL" % (
+            len(go_rows), len(differ)))
+        for name, openssl_said, go_said, why, ours_said in differ:
+            print("    go %s, openssl %s, wget %s: %s  [%s]" % (
+                "accepts" if go_said else "refuses",
+                "accepts" if openssl_said else "refuses",
+                "accepts" if ours_said else "refuses", name, why))
+        #   Where wget is looser than Go it has to be a limit of Go's, named
+        #   here with its reason; anything else is a new disagreement between
+        #   two independent validators and fails the row.
+        go_limits = {
+            "intermediate permits the leaf's subject":
+                "Go does not evaluate directoryName constraints: unhandled critical extension",
+            "a permitted subject compared case-folded":
+                "Go does not evaluate directoryName constraints: unhandled critical extension",
+        }
+        for name, openssl_said, go_said, why, ours_said in go_rows:
+            mutation = name.rsplit(" with a ", 1)[0]
+            if ours_said and not go_said:
+                checks(mutation in go_limits,
+                       "%s: wget accepts what Go's crypto/x509 refuses (%s)" % (name, why))
+            else:
+                checks(True, "%s: no chain Go refuses that wget accepts" % name)
     return checks.verdict("tls chains", "tls-chains")
 
 
