@@ -46345,7 +46345,7 @@ def harness_public_suffixes(argv):
         encoded, runs = public_suffix_encode(tables[0])
         checks(public_suffix_decode(encoded) == tables[0], "the front coding does not decode")
         if args.write and not wrong:
-            lines = [encoded[at:at + 72] for at in range(0, len(encoded), 72)]
+            lines = [encoded[at:at + 194] for at in range(0, len(encoded), 194)]
             path.write_text(
                 "/*\n        Public suffixes a certificate wildcard may not stand on "
                 "(tls_public_suffix).\n\n"
@@ -46363,8 +46363,8 @@ def harness_public_suffixes(argv):
                 "static const p16 tls_public_suffix_runs[] = {\n%s};\n\n%s\n%s" % (
                     PUBLIC_SUFFIX_LIST_SHA256[:16], sum(map(len, tables)), len(encoded),
                     "\n".join('    "%s"' % line for line in lines),
-                    "".join("    %s,\n" % ", ".join(str(r) for r in runs[at:at + 10])
-                            for at in range(0, len(runs), 10)),
+                    "".join("    %s,\n" % ", ".join(str(r) for r in runs[at:at + 30])
+                            for at in range(0, len(runs), 30)),
                     c_list("tls_public_suffix_wildcards", tables[1]),
                     c_list("tls_public_suffix_exceptions", tables[2])))
             print("public suffixes: wrote %s (%d rules, %d bytes, %d runs)" % (
@@ -46430,6 +46430,144 @@ int main(void)
                len(wrong), len(names), " ".join(wrong[:10])))
     print("public suffixes: %d rules, %d names probed" % (sum(map(len, tables)), len(names)))
     return checks.verdict("public suffixes", "public-suffixes")
+
+ANCHOR_COLUMNS = 200
+
+
+def anchor_escape(data):
+    """Bytes as the body of a C string literal: printable ASCII as itself, the rest as three-digit
+    octal (a short one would swallow a digit that follows), and \\ " ? escaped (trigraphs)."""
+    return ['%c' % byte if 0x20 <= byte < 0x7f and chr(byte) not in '\\"?' else '\\%03o' % byte
+            for byte in data]
+
+
+def anchors_render(head, anchors):
+    """anchors.inc from its header comment and (name, cert sha256 prefix, subject hash, key hash,
+    curve, exponent, key) rows: the keys as one string literal, then a row per root."""
+    keys = []
+    for name, fingerprint, _, _, _, _, key in anchors:
+        keys.append("    /* %s, sha256 %s */" % (name, fingerprint))
+        line = '    "'
+        for token in anchor_escape(key):
+            if len(line) + len(token) >= ANCHOR_COLUMNS:
+                keys.append(line + '"')
+                line = '    "'
+            line += token
+        keys.append(line + '"')
+    rows = []
+    at = 0
+    for name, fingerprint, subject, digest, curve, exponent, key in anchors:
+        rows.append("    /* %s, sha256 %s */" % (name, fingerprint))
+        rows.append("    {{%s}, {%s}, %d, %d, %d, %d}," % (
+            ", ".join("0x%02x" % b for b in subject), ", ".join("0x%02x" % b for b in digest),
+            curve, exponent, len(key), at))
+        at += len(key)
+    return "%s\n\nstatic const p8 tls_anchor_keys[%d] __attribute__((nonstring)) =\n%s;\n\nstatic const tls_anchor tls_anchors[] = {\n%s\n};\n" % (
+        head, at, "\n".join(keys), "\n".join(rows))
+
+
+def anchors_parse(text):
+    """The header comment and the rows of an anchors.inc, as anchors_render takes them."""
+    head = text[:text.index("*/") + 2]
+    declared = re.search(r"tls_anchor_keys\[(\d+)\] [^=]*=\n(.*?);\n", text, re.S)
+    literal = re.sub(r"/\*.*?\*/", "", declared.group(2))
+    keys = bytearray()
+    for piece in re.findall(r'"((?:[^"\\]|\\.)*)"', literal):
+        for match in re.finditer(r"\\([0-7]{3}|.)|(.)", piece):
+            keys.append(int(match.group(1), 8) if match.group(1) and match.group(1).isdigit()
+                        and len(match.group(1)) == 3 else ord(match.group(1) or match.group(2)))
+    assert len(keys) == int(declared.group(1))
+    anchors = []
+    for name, fingerprint, subject, digest, curve, exponent, length, at in re.findall(
+            r"/\* (.*?), sha256 ([0-9a-f]{16}) \*/\n    \{\{([^}]*)\}, \{([^}]*)\}, (\d), (\d+), (\d+), (\d+)\},",
+            text[declared.end():]):
+        anchors.append((name, fingerprint, bytes(int(b, 16) for b in subject.split(",")),
+                        bytes(int(b, 16) for b in digest.split(",")), int(curve), int(exponent),
+                        bytes(keys[int(at):int(at) + int(length)])))
+    return head, anchors
+
+
+def anchors_from_bundle(pem):
+    """The roots this client verifies, from a PEM bundle whose certificates each follow a
+    '# label' line: RSA of 2048 to 4096 bits with an odd exponent, and P-256 and P-384,
+    sorted by label."""
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import ec, rsa
+    anchors = []
+    for label, block in re.findall(rb"# ([^\n]*)\n(-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----)",
+                                   pem, re.S):
+        certificate = x509.load_pem_x509_certificate(block)
+        public = certificate.public_key()
+        if isinstance(public, rsa.RSAPublicKey):
+            numbers = public.public_numbers()
+            if not 2048 <= public.key_size <= 4096 or numbers.e % 2 == 0:
+                continue
+            curve, exponent, key = 3, numbers.e, numbers.n.to_bytes((public.key_size + 7) // 8, "big")
+        elif isinstance(public, ec.EllipticCurvePublicKey) and public.curve.name in ("secp256r1", "secp384r1"):
+            numbers, size = public.public_numbers(), (public.key_size + 7) // 8
+            curve, exponent = (1 if public.curve.name == "secp256r1" else 2), 0
+            key = numbers.x.to_bytes(size, "big") + numbers.y.to_bytes(size, "big")
+        else:
+            continue
+        anchors.append((label.decode(), certificate.fingerprint(hashes.SHA256()).hex()[:16],
+                        hashlib.sha256(certificate.subject.public_bytes()).digest()[:8],
+                        hashlib.sha256(key).digest()[:8], curve, exponent, key))
+    return sorted(anchors, key=lambda row: row[0].casefold())
+
+
+def harness_anchors(argv):
+    """The trust anchors in src/net/anchors.inc: 120 rows over one string literal of keys.
+
+    Without --bundle, parses anchors.inc and holds it to what net.c relies on: the declared
+    size is the keys' length, each row's offset is the running sum of the lengths before it,
+    its key is the size its curve (or an RSA modulus of 2048 to 4096 bits) has, and its key
+    hash is the SHA-256 of that key; and that anchors_render writes the file back byte for
+    byte. With --bundle FILE (a PEM bundle, each certificate after a '# label' line; the
+    pinned one is Arch ca-certificates-mozilla 3.127, and a later one changes labels and
+    roots) it lists what the bundle changes against the file, and with --write regenerates
+    the file from it, keeping the header comment.
+
+        python3 test/differential.py --harness anchors
+        python3 test/differential.py --harness anchors --bundle /etc/ssl/certs/ca-certificates.crt [--write]
+    """
+    parser = argparse.ArgumentParser(prog="differential.py --harness anchors")
+    parser.add_argument("--bundle")
+    parser.add_argument("--write", action="store_true")
+    args = parser.parse_args(argv)
+    path = HARNESS_ROOT / "src/net/anchors.inc"
+    text = path.read_text()
+    head, anchors = anchors_parse(text)
+    checks = Checks()
+    at = 0
+    for name, _, _, digest, curve, exponent, key in anchors:
+        checks(len(key) == {1: 64, 2: 96}.get(curve, len(key)) and (curve != 3 or 256 <= len(key) <= 512),
+               "%s: a key of %d bytes for curve %d" % (name, len(key), curve))
+        checks(hashlib.sha256(key).digest()[:8] == digest, "%s: the key hash is not the key's" % name)
+        checks(curve == 3 or exponent == 0, "%s: an exponent on a curve" % name)
+        at += len(key)
+    checks(len(anchors) == 120 and at == 39328, "%d anchors, %d key bytes" % (len(anchors), at))
+    checks([row[0].casefold() for row in anchors] == sorted(row[0].casefold() for row in anchors),
+           "the rows are not sorted by name")
+    checks(anchors_render(head, anchors) == text, "anchors.inc is not what anchors_render writes for it")
+    if args.bundle:
+        fresh = anchors_from_bundle(Path(args.bundle).read_bytes())
+        now = {row[1]: row for row in anchors}
+        new = {row[1]: row for row in fresh}
+        for fingerprint in sorted(now.keys() | new.keys()):
+            row = new.get(fingerprint) or now[fingerprint]
+            if fingerprint not in new:
+                print("  gone: %s %s" % (row[0], fingerprint))
+            elif fingerprint not in now:
+                print("  new:  %s %s" % (row[0], fingerprint))
+            elif now[fingerprint][0] != row[0] or now[fingerprint][2:] != row[2:]:
+                print("  changed: %s %s (%s)" % (now[fingerprint][0], fingerprint, row[0]))
+        if args.write:
+            path.write_text(anchors_render(head, fresh))
+            print("anchors: wrote %s (%d roots, %d key bytes)" % (path, len(fresh), sum(len(r[6]) for r in fresh)))
+    print("anchors: %d roots, %d key bytes" % (len(anchors), at))
+    return checks.verdict("anchors", "anchors")
+
 
 #       Public HTTPS hosts for x509_corpus: the popular sites, CDNs, clouds and
 #       registries, and a deliberate spread of governments, banks and national
@@ -59770,6 +59908,7 @@ HARNESS_CHECKS = {
     "crypto_fuzz": harness_crypto_fuzz,
     "x509_corpus": harness_x509_corpus,
     "public_suffixes": harness_public_suffixes,
+    "anchors": harness_anchors,
     "tls_fuzz": harness_tls_fuzz,
     "msan_net": harness_msan_net,
     "security_hygiene": harness_security_hygiene,

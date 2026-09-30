@@ -3649,7 +3649,8 @@ lane_socket() { freestanding_checks_lane socket socket; }
 #
 #       tls_chains puts wget's certificate verdicts against openssl verify's
 #       over a grammar of generated chains, served from loopback.
-#       public_suffixes holds the wildcard check's lookup to suffixes.inc. tls_peer
+#       public_suffixes holds the wildcard check's lookup to suffixes.inc and
+#       anchors holds anchors.inc to the sizes and hashes net.c relies on. tls_peer
 #       serves a grammar of TLS 1.3 flights and record streams from a
 #       scripted server to wget and to OpenSSL's client, with real crypto.
 #       http_response_framing holds the response parser to a written
@@ -3697,6 +3698,7 @@ lane_net()
         *) net_outcome=1 ;;
         esac
         python3 test/differential.py --harness public_suffixes || net_outcome=1
+        python3 test/differential.py --harness anchors || net_outcome=1
         need_shell || return 1
         python3 test/differential.py --harness tls_peer --shell "$shell_binary"
         case $? in
