@@ -49573,36 +49573,8 @@ static const string_address date_ethiopian_months[13][2] = {
     {"ግንቦት", "ግን"}, {"ሰኔ", "ሰኔ"}, {"ሐምሌ", "ሐም"}, {"ነሐሴ", "ነሐ"},
     {"ጳጉሜን", "ጳጉ"}};
 
-static bipolar date_floor_divide(bipolar a, bipolar b)
-{
-        bipolar q = a / b;
-
-        return (a % b != 0 && ((a < 0) != (b < 0))) ? q - 1 : q;
-}
-
-// The day number of a Gregorian date, the Julian day at noon.
-static bipolar date_day_number(bipolar year, bipolar month, bipolar day)
-{
-        bipolar a = (14 - month) / 12;
-        bipolar y = year + 4800 - a;
-        bipolar m = month + 12 * a - 3;
-
-        return day + (153 * m + 2) / 5 + 365 * y + y / 4 - y / 100 + y / 400 - 32045;
-}
-
-static bipolar date_gregorian_year_of(bipolar number)
-{
-        bipolar a = number + 32044;
-        bipolar b = (4 * a + 3) / 146097;
-        bipolar c = a - 146097 * b / 4;
-        bipolar d = (4 * c + 3) / 1461;
-        bipolar e = c - 1461 * d / 4;
-        bipolar m = (5 * e + 2) / 153;
-
-        return 100 * b + d - 4800 + m / 10;
-}
-
-// The Solar Hijri date of a day number, by the arithmetic of the 33-year
+// The Solar Hijri date of a day number, counted from 1970-01-01 as the clock
+// counts them, by the arithmetic of the 33-year
 // cycle: the day Farvardin the first falls on, and the leap years, of each
 // year the breaks below bound.
 static fn date_persian_of(bipolar number, bipolar address_to year, bipolar address_to month,
@@ -49611,9 +49583,14 @@ static fn date_persian_of(bipolar number, bipolar address_to year, bipolar addre
         static const bipolar breaks[] = {-61, 9, 38, 199, 426, 686, 756, 818, 1111, 1181,
                                          1210, 1635, 2060, 2097, 2192, 2262, 2324, 2394,
                                          2456, 3178};
-        bipolar gregorian = date_gregorian_year_of(number);
-        bipolar jalaali = gregorian - 621;
-        bipolar gy = jalaali + 621;
+        bipolar gy;
+        bipolar unused_month;
+        bipolar unused_day;
+
+        clock_civil_from_days(number, address_of gy, address_of unused_month,
+                              address_of unused_day);
+
+        bipolar jalaali = gy - 621;
         bipolar leap_jalaali = -14;
         bipolar previous = breaks[0];
         bipolar jump = 0;
@@ -49623,30 +49600,30 @@ static fn date_persian_of(bipolar number, bipolar address_to year, bipolar addre
                 jump = breaks[i] - previous;
                 if (jalaali < breaks[i])
                         break;
-                leap_jalaali += date_floor_divide(jump, 33) * 8 +
-                                date_floor_divide(jump % 33, 4);
+                leap_jalaali += clock_floor_divide(jump, 33) * 8 +
+                                clock_floor_divide(jump % 33, 4);
                 previous = breaks[i];
         }
 
         bipolar n = jalaali - previous;
 
-        leap_jalaali += date_floor_divide(n, 33) * 8 + date_floor_divide(n % 33 + 3, 4);
+        leap_jalaali += clock_floor_divide(n, 33) * 8 + clock_floor_divide(n % 33 + 3, 4);
         if (jump % 33 == 4 && jump - n == 4)
                 leap_jalaali++;
 
-        bipolar leap_gregorian = date_floor_divide(gy, 4) -
-                                 date_floor_divide((date_floor_divide(gy, 100) + 1) * 3, 4) - 150;
+        bipolar leap_gregorian = clock_floor_divide(gy, 4) -
+                                 clock_floor_divide((clock_floor_divide(gy, 100) + 1) * 3, 4) - 150;
         bipolar march = 20 + leap_jalaali - leap_gregorian;
 
         if (jump - n < 6)
-                n = n - jump + date_floor_divide(jump + 4, 33) * 33;
+                n = n - jump + clock_floor_divide(jump + 4, 33) * 33;
 
         bipolar leap = ((n + 1) % 33 - 1) % 4;
 
         if (leap == -1)
                 leap = 4;
 
-        bipolar since = number - date_day_number(gy, 3, march);
+        bipolar since = number - clock_days_from_civil(gy, 3, march);
 
         if (since >= 0)
         {
@@ -49674,8 +49651,8 @@ static fn date_persian_of(bipolar number, bipolar address_to year, bipolar addre
 static fn date_ethiopian_of(bipolar number, bipolar address_to year, bipolar address_to month,
                             bipolar address_to day)
 {
-        bipolar since = number - 1723856;
-        bipolar cycle = date_floor_divide(since, 1461);
+        bipolar since = number + 716732;
+        bipolar cycle = clock_floor_divide(since, 1461);
         bipolar r = since - cycle * 1461;
         bipolar n = r % 365 + 365 * (r / 1460);
 
@@ -49705,10 +49682,10 @@ static string_address date_locale_names(string_address format, b64 when)
         p8 numbers[48];
 
         if (calendar == DATE_CALENDAR_PERSIAN)
-                date_persian_of(date_day_number(cal_year, cal_month, cal_day),
+                date_persian_of(clock_days_from_civil(cal_year, cal_month, cal_day),
                                 address_of cal_year, address_of cal_month, address_of cal_day);
         else if (calendar == DATE_CALENDAR_ETHIOPIAN)
-                date_ethiopian_of(date_day_number(cal_year, cal_month, cal_day),
+                date_ethiopian_of(clock_days_from_civil(cal_year, cal_month, cal_day),
                                   address_of cal_year, address_of cal_month, address_of cal_day);
         else if (calendar == DATE_CALENDAR_THAI)
                 cal_year += 543;
