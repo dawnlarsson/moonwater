@@ -12391,6 +12391,9 @@ static inline INLINE HOT bool test_integer_pair(string_address left, string_addr
         return true;
 }
 
+// Set by [[ ]] around its comparison: its < and > order by the locale.
+static bool test_collate_strings;
+
 bool test_compare(positive kind, string_address left, string_address right)
 {
         bipolar first;
@@ -12475,10 +12478,15 @@ bool test_compare(positive kind, string_address left, string_address right)
                        test_modified_fraction(address_of two);
         }
 
-        if (kind == TEST_BEFORE)
-                return string_compare(left, right) < 0;
+        bipolar order = test_collate_strings && collate_ready()
+                            ? collate_compare((p8 address_to)left, string_length(left),
+                                              (p8 address_to)right, string_length(right))
+                            : string_compare(left, right);
 
-        return string_compare(left, right) > 0;
+        if (kind == TEST_BEFORE)
+                return order < 0;
+
+        return order > 0;
 }
 
 bool test_expression();

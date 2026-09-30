@@ -24,6 +24,12 @@ enum
         SORT_PRINTABLE = 4
 };
 
+// Under a locale whose collation this machine has (fr_FR, en_US), every
+// lexical comparison of sort, join and comm is the locale's strcoll, decided
+// once before any thread starts; the C locale never sets it and keeps the
+// radix over bytes, and every other text tool clears it in text_begin.
+static bool sort_collating;
+
 static PURE bipolar sort_compare_bytes(p8 address_to one,
                                        positive one_length,
                                        p8 address_to two,
@@ -1331,6 +1337,7 @@ static bool text_files_next(string_address address_to name);
 static fn text_begin(string_address name)
 {
         /* A shell may run several built-in tools in one process. */
+        sort_collating = false;
         text_out_used = 0;
         text_quiet_read = false;
         text_again_ends = false;
@@ -4182,6 +4189,7 @@ static b32 text_comm()
         };
 
         text_begin("comm");
+        sort_collating = collate_ready();
         comm_delimiter_said = null;
         text_delimiter = '\n';
         utility_arena.used = 0;
@@ -5690,6 +5698,7 @@ static b32 text_join()
         };
 
         text_begin("join");
+        sort_collating = collate_ready();
         join_taking = address_of taking;
         join_prev = JOIN_OPERAND;
         join_pending[0] = join_pending[1] = 0;
@@ -5746,6 +5755,11 @@ static b32 text_join()
                 text_delimiter = '\0';
 
         positive fold = (taking.flags & FILE_FLAG('i')) ? SORT_FOLD : 0;
+
+        //      -i is memcasecmp in every locale: the collation is asked only
+        //      of a join that does not fold.
+        if (fold)
+                sort_collating = false;
         bool header = (taking.flags & FILE_FLAG('H')) != 0;
         string_address empty = file_option_value(address_of taking, 'e');
         text_record_cursor address_to sides =
@@ -33345,6 +33359,62 @@ static positive sort_zero_prefix(p8 address_to text, positive from, positive sto
         return from + memory_span_byte(text + from, '0', stop - from);
 }
 
+/*
+        A number as a locale writes it. GNU's strnumcmp is handed the locale's
+        decimal point and thousands separator: under en_US 1,000 is a thousand
+        and under fr_FR 0,5 is a half and 0.5 is a zero followed by text. The
+        parsers below read the C form, so a key under such a locale is first
+        copied with its separators taken out of the digits and its point made
+        a point, and a point that is not the locale's made a semicolon; only the
+        blanks, the sign, the integer digits and the byte after them are
+        touched. The C locale, where both are what they always were, keeps
+        reading the key where it lies.
+*/
+static p8 sort_point_byte;
+static p8 sort_thousands;
+static bool sort_numeric_local;
+
+enum { SORT_LOCALIZED = 1024 };
+
+// strict is -h's unit scan, where GNU's traverse_raw_number lets one
+// separator sit between two digits and no other: a separator that does not
+// is where the number stopped, and is not a unit.
+static positive sort_number_localize(p8 address_to into, p8 address_to text, positive length,
+                                     bool strict)
+{
+        positive at = 0;
+        positive used = 0;
+
+        while (at < length && used < SORT_LOCALIZED && sort_blanks[text[at]])
+                into[used++] = text[at++];
+        if (at < length && used < SORT_LOCALIZED && text[at] == '-')
+                into[used++] = text[at++];
+        while (at < length && used < SORT_LOCALIZED &&
+               ((p8)(text[at] - '0') < 10 || (sort_thousands && text[at] == sort_thousands)))
+        {
+                bool between = sort_thousands && text[at] == sort_thousands;
+
+                if (strict && between &&
+                    !(used && (p8)(into[used - 1] - '0') < 10 && at + 1 < length &&
+                      (p8)(text[at + 1] - '0') < 10))
+                        break;
+                if (!between)
+                        into[used++] = text[at];
+                at++;
+        }
+        if (at < length && used < SORT_LOCALIZED)
+        {
+                p8 point = sort_point_byte ? sort_point_byte : '.';
+
+                into[used++] = text[at] == point ? '.' : text[at] == '.' ? ';' : text[at];
+                at++;
+        }
+        while (at < length && used < SORT_LOCALIZED)
+                into[used++] = text[at++];
+
+        return used;
+}
+
 typedef struct
 {
         union
@@ -33445,6 +33515,17 @@ static PURE bipolar sort_compare_parsed(sort_number address_to a,
 
 static PURE bipolar sort_compare_number(p8 address_to a, positive la, p8 address_to b, positive lb)
 {
+        p8 local_a[SORT_LOCALIZED];
+        p8 local_b[SORT_LOCALIZED];
+
+        if (sort_numeric_local)
+        {
+                la = sort_number_localize(local_a, a, la, false);
+                lb = sort_number_localize(local_b, b, lb, false);
+                a = local_a;
+                b = local_b;
+        }
+
         sort_number one = sort_number_of(a, la);
         sort_number two = sort_number_of(b, lb);
 
@@ -33520,7 +33601,7 @@ static sort_general sort_general_read(p8 address_to text, positive length,
 
         if (sort_point)
                 for (positive i = 0; i < stop - at; i++)
-                        copy[i] = copy[i] == '.' ? 'x' : copy[i] == sort_point ? '.' : copy[i];
+                        copy[i] = copy[i] == '.' ? ';' : copy[i] == sort_point ? '.' : copy[i];
 
         union
         {
@@ -33644,9 +33725,40 @@ static bool sort_looked_at(p8 character, positive how)
         return true;
 }
 
+static positive sort_translate(p8 address_to into, p8 address_to from, positive length,
+                               positive how);
+
+// A lexical comparison by the locale's collation, after -d, -i and -f have
+// taken out and folded what they do, as GNU translates a key and then hands
+// it to strcoll.
+static bipolar sort_compare_collated(p8 address_to a, positive la, p8 address_to b, positive lb,
+                                     positive how)
+{
+        if (!how)
+                return collate_compare(a, la, b, lb);
+
+        p8 small[4000];
+        p8 address_to room = small;
+
+        if (la + lb > sizeof(small) && !(room = memory_take(la + lb)))
+                return 0;
+
+        positive ta = sort_translate(room, a, la, how);
+        positive tb = sort_translate(room + ta, b, lb, how);
+        bipolar answer = collate_compare(room, ta, room + ta, tb);
+
+        if (room != small)
+                memory_give(room);
+
+        return answer;
+}
+
 static PURE bipolar sort_compare_bytes(p8 address_to a, positive la, p8 address_to b, positive lb,
                                   positive how)
 {
+        if (sort_collating)
+                return sort_compare_collated(a, la, b, lb, how);
+
         if (!how)
         {
                 positive length = min(la, lb);
@@ -33862,6 +33974,14 @@ static bipolar sort_compare_translated(p8 kind, positive how, p8 address_to a, p
 */
 static bipolar sort_human_order(p8 address_to at, positive length)
 {
+        p8 plain[SORT_LOCALIZED];
+
+        if (sort_numeric_local)
+        {
+                length = sort_number_localize(plain, at, length, true);
+                at = plain;
+        }
+
         positive scan = 0;
         bipolar sign = 1;
         bool nonzero = false;
@@ -34286,7 +34406,7 @@ static fn sort_stages_ready()
         {
                 if (stage == sort_key_count)
                 {
-                        sort_stage_kind[stage] = SORT_STAGE_BYTES;
+                        sort_stage_kind[stage] = sort_collating ? SORT_STAGE_COMPARE : SORT_STAGE_BYTES;
                         sort_stage_reverse[stage] = sort_reverse;
                         sort_stage_fold[stage] = false;
                         continue;
@@ -34300,7 +34420,7 @@ static fn sort_stages_ready()
                     order->kind == 'n' || order->kind == 'M' || order->kind == 'g' ||
                             (order->kind == 'R' && !order->how)
                         ? SORT_STAGE_WINDOW
-                    : !order->kind && !(order->how & ~(positive)SORT_FOLD)
+                    : !order->kind && !(order->how & ~(positive)SORT_FOLD) && !sort_collating
                         ? SORT_STAGE_BYTES
                         : SORT_STAGE_COMPARE;
         }
@@ -34400,6 +34520,14 @@ static PURE HOT bipolar sort_compare_views(sort_view address_to a,
         if (answer || sort_unique || sort_stable)
                 return answer;
 
+        // GNU's compare does the same under a hard locale: the whole line
+        // by strcoll, and lines it calls equal keep their order.
+        if (sort_collating)
+        {
+                answer = collate_compare(a->at, a->length, b->at, b->length);
+                return sort_reverse ? -answer : answer;
+        }
+
         // Two masked windows that differ are the answer: a byte past the
         // shorter line reads as zero and can only differ by being larger.
         p64 one = sort_window_load(a->at, a->length);
@@ -34446,6 +34574,14 @@ static inline INLINE p64 sort_window_fold(p64 word)
 static p64 sort_number_window(p8 address_to text, positive length,
                               bool address_to exact)
 {
+        p8 plain[SORT_LOCALIZED];
+
+        if (sort_numeric_local)
+        {
+                length = sort_number_localize(plain, text, length, false);
+                text = plain;
+        }
+
         // A key carries no blanks or a few, and a minus is as common as a
         // digit, so every walk here is a table load a byte: a call to skip
         // nothing was a quarter of sort -rn.
@@ -35727,8 +35863,15 @@ static fn sort_debug_line(sort_writer address_to out, p8 address_to at, positive
 */
 static bool sort_locale_named(string_address name)
 {
-        return !name || !name[0] || string_equals(name, "C") || string_equals(name, "POSIX") ||
-               string_equals(name, "C.UTF-8") || string_equals(name, "C.utf8");
+        return !name || !name[0] || string_equals(name, "C") || string_equals(name, "POSIX");
+}
+
+// A name setlocale takes: C and POSIX, C.UTF-8 which the C library builds in,
+// and any locale this machine has the data of.
+static bool sort_locale_known(string_address name)
+{
+        return sort_locale_named(name) || string_equals(name, "C.UTF-8") ||
+               string_equals(name, "C.utf8") || locale_open(LOCALE_COLLATE) != null;
 }
 
 // Whether setlocale(LC_ALL, "") would take the environment: every category's
@@ -35743,13 +35886,17 @@ static bool sort_locale_set()
         string_address lang = file_environment("LANG");
 
         if (all && all[0])
-                return sort_locale_named(all);
+                return sort_locale_known(all);
 
         for (positive at = 0; at < sizeof(categories) / sizeof(categories[0]); at++)
         {
                 string_address own = file_environment(categories[at]);
 
-                if (!sort_locale_named(own && own[0] ? own : lang))
+                string_address chosen = own && own[0] ? own : lang;
+
+                // A name that is not C is a locale only where this machine
+                // has its data, which the collation file is the proof of.
+                if (!sort_locale_known(chosen))
                         return false;
         }
 
@@ -35772,7 +35919,16 @@ static fn sort_debug_warnings(sort_ordering address_to defaults, b32 count, bool
         if (!sort_locale_set())
                 sort_debug_say("%s: failed to set locale\n", text_name);
 
-        sort_debug_say("%s: text ordering performed using simple byte comparison\n", text_name);
+        // gnulib's hard_locale: anything but C and POSIX, which is the
+        // library's strcoll, and by byte for a locale with no rules of its own.
+        string_address collate_name = locale_environment((string_address) "LC_COLLATE");
+
+        if (sort_locale_set() && !sort_locale_named(collate_name))
+                sort_debug_say(text_locale_utf8() ? "%s: text ordering performed using \xe2\x80\x98%s\xe2\x80\x99 sorting rules\n"
+                                                  : "%s: text ordering performed using '%s' sorting rules\n",
+                               text_name, collate_name);
+        else
+                sort_debug_say("%s: text ordering performed using simple byte comparison\n", text_name);
 
         for (b32 i = 0; i < count; i++)
         {
@@ -39827,6 +39983,13 @@ static b32 text_sort()
                                           ? locale_string(LOCALE_NUMERIC, LOCALE_NUMERIC_DECIMAL) : null;
 
                 sort_point = point && point[0] && !point[1] && point[0] != '.' ? (p8)point[0] : 0;
+
+                string_address group = locale_open(LOCALE_NUMERIC)
+                                          ? locale_string(LOCALE_NUMERIC, LOCALE_NUMERIC_THOUSANDS) : null;
+
+                sort_point_byte = sort_point;
+                sort_thousands = group && group[0] && !group[1] ? (p8)group[0] : 0;
+                sort_numeric_local = sort_point_byte || sort_thousands;
         }
         file_taking taking = {
             .program = (string_address) "sort",
@@ -40077,6 +40240,7 @@ static b32 text_sort()
                 text_delimiter = '\0';
 
         sort_release();
+        sort_collating = collate_ready();
         sort_stages_ready();
         sort_line_cost = sizeof(sort_line) + 2 * sizeof(sort_item) +
                          (sort_keys[0].whole ? 0 : sizeof(sort_span));
@@ -41538,6 +41702,16 @@ static expr_value expr_binary(positive minimum)
                             expr_looks_integer(address_of right))
                                 order = expr_integers_compare(address_of left,
                                                               address_of right);
+                        else if (sort_collating)
+                        {
+                                //      GNU's expr asks strcoll: é before f, a before B
+                                //      under fr_FR, and two spellings of one letter equal.
+                                string_address one = expr_shown(address_of left);
+                                string_address two = expr_shown(address_of right);
+
+                                order = collate_compare((p8 address_to)one, string_length(one),
+                                                        (p8 address_to)two, string_length(two));
+                        }
                         else
                                 order = string_compare(expr_shown(address_of left),
                                                        expr_shown(address_of right));
@@ -41581,6 +41755,7 @@ static b32 text_expr()
         expr_value result;
 
         text_begin("expr");
+        sort_collating = collate_ready();
 
         expr_at = 1;
         expr_count = text_argument_count;

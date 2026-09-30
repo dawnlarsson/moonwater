@@ -334,6 +334,16 @@ coreutils' (`kill -l` takes several names, `-s0` is a signal), because
 coreutils 9.11 does not build `kill` by default. `install` invoked as
 `ginstall` reports itself as `install`.
 
+Locales are read from the machine, not compiled in. Where `/usr/lib/locale`
+(or its `locale-archive`) has a locale's files, `sort`, `ls`, `join`, `comm`,
+`expr` and the shell's globs and `[[ a < b ]]` order text by that locale's
+`LC_COLLATE` exactly as the C library's `strcoll` does, `sort -n -h -g` read the
+locale's decimal point and thousands separator, and `date`, `numfmt` and friends
+read `LC_TIME` and `LC_NUMERIC`. The image ships no locale data, so there every
+locale is C and orders by byte; the C locale never pays for any of this. `uname`
+answers `Moonwater` for `-o` and ends `-a` at the machine: Moonwater is not GNU
+and does not say it is.
+
 To take a single tool or builtin out, add a line to a profile of your own, or
 use menuconfig:
 

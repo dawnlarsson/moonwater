@@ -5941,8 +5941,13 @@ typedef struct
         bool tried;
         bool have;
         positive count;
+        // The name the file was read for, and a number that changes with it:
+        // a shell changes its locale between one command and the next.
         p8 name[64];
+        positive generation;
 } locale_category;
+
+static positive locale_generation;
 
 // LC_NUMERIC's strings.
 #define LOCALE_NUMERIC_DECIMAL 0
@@ -6065,7 +6070,7 @@ static bool locale_archive_read(string_address name, positive category,
 
                         if (system_seek((positive)handle, entry[2] + 4 + 8 * category, 0) < 0 ||
                             system_read_retry((positive)handle, record, 8) != 8 ||
-                            record[1] < 8 || record[1] > (1 << 20))
+                            record[1] < 8 || record[1] > (1 << 25))
                                 break;
                         if (!byte_store_reserve(into, record[1] + 1, 4096) ||
                             system_seek((positive)handle, record[0], 0) < 0 ||
@@ -6096,12 +6101,24 @@ static fn locale_join(p8 address_to into, positive room, string_address a,
 static locale_category address_to locale_open(positive category)
 {
         locale_category address_to one = locale_categories + category;
+        string_address name = locale_named(category);
 
-        if (one->tried)
+        // The file read for a name is the file for that name; another name
+        // is another file, and a shell asks again after every assignment.
+        if (one->tried && string_equals(name ? name : (string_address) "", (string_address)one->name))
                 return one->have ? one : null;
         one->tried = true;
+        one->have = false;
+        one->generation = ++locale_generation;
+        {
+                positive keep = name ? string_length(name) : 0;
 
-        string_address name = locale_named(category);
+                if (keep > sizeof(one->name) - 1)
+                        keep = sizeof(one->name) - 1;
+                if (name)
+                        memory_copy_apart(one->name, name, keep);
+                one->name[keep] = end;
+        }
 
         if (!name)
                 return null;
@@ -6199,6 +6216,479 @@ static string_address locale_string(positive category, positive index)
                 return null;
         one->file.bytes[one->file.used] = end;
         return (string_address)one->file.bytes + at;
+}
+
+/*
+        LC_COLLATE, as the C library's strcoll reads the compiled file of a
+        locale, so that sort, ls, join and comm order names the way the
+        reference does under fr_FR and en_US instead of by byte.
+
+        The file holds NRULES levels of comparison (four in every locale the
+        C library ships: base letters, accents, case, punctuation), one
+        ruleset per weight rule saying which levels run backward (the French
+        accent level) or count position, TABLE, which turns the first byte of
+        a sequence into an index into WEIGHTS or into EXTRA for the sequences
+        that are more than a byte (every UTF-8 character above 0x7f, and the
+        contractions), INDIRECT for ranges of them, and WEIGHTS, a length
+        byte and that many weights for each level in turn.
+
+        This is glibc's string/strcoll_l.c and locale/weight.h for the
+        multibyte tables, which is what a UTF-8 locale uses, kept in its
+        steps (get_next_seq, do_compare, findidx) so that the order agrees
+        with the library's and not with a reading of it; the differences are
+        that a string is a span with an implicit NUL, and that every read of
+        the file is bounded by its size, so a damaged file gives a wrong order
+        and never a wild read. A NUL inside a string is a boundary the way
+        gnulib's memcoll0 treats it: the parts are collated in turn.
+
+        A locale with no rules (C, POSIX, C.UTF-8 in the C library) and one
+        the machine has no file for compare by byte, as before; only a locale
+        whose file is here changes anything, so the image, which ships no
+        locale data, is unchanged and every C-locale fast path is untouched.
+        collate_ready must be called before any thread that compares.
+*/
+enum
+{
+        COLLATE_NRULES,
+        COLLATE_RULESETS,
+        COLLATE_TABLEMB,
+        COLLATE_WEIGHTMB,
+        COLLATE_EXTRAMB,
+        COLLATE_INDIRECTMB,
+        COLLATE_ITEMS,
+        // glibc's coll_sort_rule bits.
+        COLLATE_BACKWARD = 2,
+        COLLATE_POSITION = 4,
+};
+
+typedef struct
+{
+        bool tried;
+        bool active;
+        positive generation;
+        positive nrules;
+        p8 address_to base;
+        positive size;
+        positive rulesets;
+        positive table;
+        positive weights;
+        positive extra;
+        positive indirect;
+} locale_collation;
+
+static locale_collation collation;
+
+static inline INLINE positive collate_u8(positive at)
+{
+        return at < collation.size ? collation.base[at] : 0;
+}
+
+static inline INLINE b32 collate_i32(positive at)
+{
+        return at + 4 <= collation.size ? memory_load_unaligned(b32, collation.base + at) : 0;
+}
+
+static bool collate_ready()
+{
+        locale_category address_to one = locale_open(LOCALE_COLLATE);
+        positive generation = one ? one->generation : 0;
+
+        if (collation.tried && collation.generation == generation)
+                return collation.active;
+        collation.tried = true;
+        collation.active = false;
+        collation.generation = generation;
+
+        if (!one || one->count < COLLATE_ITEMS || one->file.used < 8 + 4 * (positive)one->count)
+                return false;
+
+        p32 address_to head = (p32 address_to)(address_any)one->file.bytes;
+
+        // The magic of a collation file: 0x20051014 xor the category, 3.
+        if (head[0] != (0x20051014u ^ 3u))
+                return false;
+
+        positive at[COLLATE_ITEMS];
+
+        for (positive i = 0; i < COLLATE_ITEMS; i++)
+        {
+                at[i] = head[2 + i];
+                if (at[i] + 4 > one->file.used)
+                        return false;
+        }
+
+        collation.base = one->file.bytes;
+        collation.size = one->file.used;
+        collation.nrules = memory_load_unaligned(p32, collation.base + at[COLLATE_NRULES]);
+        collation.rulesets = at[COLLATE_RULESETS];
+        collation.table = at[COLLATE_TABLEMB];
+        collation.weights = at[COLLATE_WEIGHTMB];
+        collation.extra = at[COLLATE_EXTRAMB];
+        collation.indirect = at[COLLATE_INDIRECTMB];
+
+        // No rules is the library's own answer for strcmp; an absurd count
+        // or a table cut short is a file that is not one.
+        if (!collation.nrules || collation.nrules > 8 || collation.table + 1024 > collation.size)
+                return false;
+
+        collation.active = true;
+        return true;
+}
+
+// The byte of a string at a place, and NUL past its end, which no sequence
+// in the table holds.
+#define collate_at(text, stop, place) ((text) + (place) < (stop) ? (text)[place] : 0)
+
+// weight.h's findidx: the index of the weights for the sequence at the
+// cursor, which moves past it.
+static b32 collate_find(p8 address_to address_to cursor, p8 address_to stop)
+{
+        p8 address_to at = address_to cursor;
+        b32 index = collate_i32(collation.table + 4 * (positive)(address_to at));
+
+        at++;
+        if (index >= 0)
+        {
+                address_to cursor = at;
+                return index;
+        }
+
+        positive cp = collation.extra + (positive)-(bipolar)index;
+
+        for (positive turns = 0; turns < collation.size; turns++)
+        {
+                index = collate_i32(cp);
+                cp += 4;
+
+                positive here = collate_u8(cp++);
+                positive count = 0;
+
+                if (index >= 0)
+                {
+                        // A single character: it is ours if every byte matches.
+                        for (; count < here; count++)
+                                if (collate_u8(cp + count) != collate_at(at, stop, count))
+                                        break;
+                        if (count == here)
+                        {
+                                address_to cursor = at + here;
+                                return index;
+                        }
+                        cp += here;
+                        if (((1 + here) & 3) != 0)
+                                cp += 4 - (1 + here) % 4;
+                        continue;
+                }
+
+                // A range of characters: is the string's next character in it,
+                // and how far from the range's first.
+                positive offset = 0;
+
+                for (; count < here; count++)
+                        if (collate_u8(cp + count) != collate_at(at, stop, count))
+                                break;
+                if (count != here)
+                {
+                        if (collate_u8(cp + count) > collate_at(at, stop, count))
+                        {
+                                cp += 2 * here;
+                                if (((1 + 2 * here) & 3) != 0)
+                                        cp += 4 - (1 + 2 * here) % 4;
+                                continue;
+                        }
+
+                        for (count = 0; count < here; count++)
+                                if (collate_u8(cp + here + count) != collate_at(at, stop, count))
+                                        break;
+                        if (count != here &&
+                            collate_u8(cp + here + count) < collate_at(at, stop, count))
+                        {
+                                cp += 2 * here;
+                                if (((1 + 2 * here) & 3) != 0)
+                                        cp += 4 - (1 + 2 * here) % 4;
+                                continue;
+                        }
+
+                        for (count = 0; count < here &&
+                                        collate_u8(cp + count) == collate_at(at, stop, count);
+                             count++)
+                                ;
+                        do
+                        {
+                                offset <<= 8;
+                                offset += (positive)((bipolar)collate_at(at, stop, count) -
+                                                     (bipolar)collate_u8(cp + count));
+                        } while (++count < here);
+                }
+                address_to cursor = at + here;
+                return collate_i32(collation.indirect + 4 * ((positive)-(bipolar)index + offset));
+        }
+        address_to cursor = at;
+        return 0;
+}
+
+typedef struct
+{
+        bipolar length;
+        positive value;
+        positive index_max;
+        positive index_count;
+        positive backward;
+        positive backward_stop;
+        p8 address_to text;
+        p8 address_to stop;
+        p8 rule;
+        b32 index;
+        b32 saved_index;
+        p8 address_to backward_text;
+} collate_sequence;
+
+// glibc's get_next_seq: the next sequence of the string that has a weight at
+// this level, and how many were skipped to reach it.
+static void collate_next(collate_sequence address_to seq, positive pass)
+{
+        positive value = 0;
+        bipolar length = seq->length;
+        positive backward_stop = seq->backward_stop;
+        positive backward = seq->backward;
+        positive index_count = seq->index_count;
+        positive index_max = seq->index_max;
+        b32 index = seq->index;
+        p8 address_to text = seq->text;
+        p8 address_to stop = seq->stop;
+        positive nrules = collation.nrules;
+
+        seq->value = 0;
+        while (length == 0)
+        {
+                ++value;
+                if (backward_stop != positive_max)
+                {
+                        if (backward == backward_stop)
+                        {
+                                if (index_count < index_max)
+                                {
+                                        index = seq->saved_index;
+                                        backward_stop = positive_max;
+                                }
+                                else
+                                {
+                                        index = 0;
+                                        break;
+                                }
+                        }
+                        else
+                        {
+                                positive walked = backward_stop;
+
+                                text = seq->backward_text;
+                                while (walked < backward)
+                                {
+                                        b32 found = collate_find(address_of text, stop);
+
+                                        index = found & 0xffffff;
+                                        walked++;
+                                }
+                                --backward;
+                                text = seq->text;
+                        }
+                }
+                else
+                {
+                        backward_stop = index_max;
+                        b32 previous = index;
+
+                        while (text < stop)
+                        {
+                                b32 found = collate_find(address_of text, stop);
+                                p8 rule = (p8)((p32)found >> 24);
+
+                                previous = index;
+                                index = found & 0xffffff;
+                                index_count = index_max++;
+                                if (index_count == 0)
+                                        seq->rule = rule;
+                                if ((collate_u8(collation.rulesets + rule * nrules + pass) &
+                                     COLLATE_BACKWARD) == 0)
+                                        break;
+                                ++index_count;
+                        }
+
+                        if (backward_stop >= index_count)
+                        {
+                                if (index_count == index_max || backward_stop > index_count)
+                                        break;
+                                backward_stop = positive_max;
+                        }
+                        else
+                        {
+                                seq->backward_text = seq->text;
+                                seq->text = text;
+                                backward = index_count;
+                                if (index_max > index_count)
+                                {
+                                        backward--;
+                                        seq->saved_index = index;
+                                        index = previous;
+                                }
+                                if (backward > backward_stop)
+                                        backward--;
+                        }
+                }
+
+                length = (bipolar)collate_u8(collation.weights + (positive)index++);
+                for (positive level = 0; level < pass; level++)
+                {
+                        index += (b32)length;
+                        length = (bipolar)collate_u8(collation.weights + (positive)index);
+                        index++;
+                }
+        }
+
+        seq->value = value;
+        seq->length = length;
+        seq->backward_stop = backward_stop;
+        seq->backward = backward;
+        seq->index_count = index_count;
+        seq->index_max = index_max;
+        seq->text = text;
+        seq->index = index;
+}
+
+// glibc's do_compare of two sequences at one level.
+static bipolar collate_step(collate_sequence address_to one, collate_sequence address_to two,
+                            bool position)
+{
+        bipolar length_one = one->length;
+        bipolar length_two = two->length;
+        b32 at_one = one->index;
+        b32 at_two = two->index;
+        bipolar result = 0;
+
+        if (position && one->value != two->value)
+        {
+                result = one->value > two->value ? 1 : -1;
+                goto out;
+        }
+
+        do
+        {
+                positive w1 = collate_u8(collation.weights + (positive)at_one);
+                positive w2 = collate_u8(collation.weights + (positive)at_two);
+
+                if (w1 != w2)
+                {
+                        result = (bipolar)w1 - (bipolar)w2;
+                        goto out;
+                }
+                ++at_one;
+                ++at_two;
+                --length_one;
+                --length_two;
+        } while (length_one > 0 && length_two > 0);
+
+        if (position && length_one != length_two)
+                result = length_one - length_two;
+
+out:
+        one->length = length_one;
+        two->length = length_two;
+        one->index = at_one;
+        two->index = at_two;
+        return result;
+}
+
+// strcoll of two strings with no NUL in them.
+static bipolar collate_span(p8 address_to a, positive la, p8 address_to b, positive lb)
+{
+        if (!la || !lb)
+                return (la != 0) - (lb != 0);
+
+        positive nrules = collation.nrules;
+        bipolar result = 0;
+        positive rule = 0;
+        collate_sequence one;
+        collate_sequence two;
+
+        memory_fill(address_of one, 0, sizeof(one));
+        memory_fill(address_of two, 0, sizeof(two));
+        for (positive pass = 0; pass < nrules; ++pass)
+        {
+                one.index_count = 0;
+                one.index = 0;
+                two.index = 0;
+                one.backward_stop = positive_max;
+                one.backward = positive_max;
+                two.index_count = 0;
+                two.backward_stop = positive_max;
+                two.backward = positive_max;
+                one.text = a;
+                one.stop = a + la;
+                two.text = b;
+                two.stop = b + lb;
+
+                bool position = (collate_u8(collation.rulesets + rule * nrules + pass) &
+                                 COLLATE_POSITION) != 0;
+
+                for (;;)
+                {
+                        collate_next(address_of one, pass);
+                        collate_next(address_of two, pass);
+                        if (one.length == 0 || two.length == 0)
+                        {
+                                if (one.length == two.length)
+                                {
+                                        // Both ended equal at this level: equal bytes need no
+                                        // further level, which is the library's own shortcut.
+                                        if (pass == 0 && la == lb && !memory_compare(a, b, la))
+                                                return result;
+                                        break;
+                                }
+                                return one.length == 0 ? -1 : 1;
+                        }
+                        result = collate_step(address_of one, address_of two, position);
+                        if (result)
+                                return result;
+                }
+                rule = one.rule;
+        }
+        return result;
+}
+
+// memcoll0: two byte strings, NULs and all, by the locale's collation, with
+// equal bytes equal at once. Zero is what strcoll calls equal, which is not
+// the same as identical (an accent written as one character or as two).
+static bipolar collate_compare(p8 address_to a, positive la, p8 address_to b, positive lb)
+{
+        if (la == lb && !memory_compare(a, b, la))
+                return 0;
+
+        positive left = la + 1;
+        positive right = lb + 1;
+
+        for (;;)
+        {
+                positive part_a = 0;
+                positive part_b = 0;
+
+                while (part_a + 1 < left && a[part_a])
+                        part_a++;
+                while (part_b + 1 < right && b[part_b])
+                        part_b++;
+
+                bipolar answer = collate_span(a, part_a, b, part_b);
+
+                if (answer)
+                        return answer < 0 ? -1 : 1;
+                a += part_a + 1;
+                b += part_b + 1;
+                left -= part_a + 1;
+                right -= part_b + 1;
+                if (!left)
+                        return right ? -1 : 0;
+                if (!right)
+                        return 1;
+        }
 }
 
 /*
@@ -9806,6 +10296,23 @@ static bool ls_is_directory_like(ls_entry address_to entry)
         return (entry->mode & MODE_FORMAT) == MODE_DIRECTORY || entry->points_at_directory;
 }
 
+// ls orders names by strcoll, and by byte where the locale has no collation
+// here; set once by ls before its first comparison.
+static bool ls_collating;
+
+static bipolar ls_name_compare(string_address left, string_address right)
+{
+        if (!ls_collating)
+                return string_compare(left, right);
+
+        bipolar answer = collate_compare((p8 address_to)left, string_length(left),
+                                         (p8 address_to)right, string_length(right));
+
+        // What strcoll calls equal ls keeps apart by byte, so the answer does
+        // not depend on where the names were read.
+        return answer ? answer : string_compare(left, right);
+}
+
 static HOT bipolar ls_order(ls_entry address_to left, ls_entry address_to right)
 {
         if (ls_group_directories && ls_sorting != 'U')
@@ -9845,7 +10352,7 @@ static HOT bipolar ls_order(ls_entry address_to left, ls_entry address_to right)
                 answer = ls_version_compare(left_name, right_name);
                 break;
         case 'X':
-                answer = string_compare(ls_extension(left_name), ls_extension(right_name));
+                answer = ls_name_compare(ls_extension(left_name), ls_extension(right_name));
                 break;
         case 'w':
         {
@@ -9859,7 +10366,8 @@ static HOT bipolar ls_order(ls_entry address_to left, ls_entry address_to right)
         }
 
         if (!answer)
-                answer = string_compare(left_name, right_name);
+                answer = ls_sorting == 'v' ? string_compare(left_name, right_name)
+                                           : ls_name_compare(left_name, right_name);
 
         return ls_reversed ? -answer : answer;
 }
@@ -12372,6 +12880,7 @@ static b32 file_ls_as(string_address program, p8 default_format, p8 default_quot
         ls_recursive = (flags & FILE_FLAG('R')) != 0;
         ls_as_itself = (flags & FILE_FLAG('d')) != 0;
         ls_reversed = (flags & FILE_FLAG('r')) != 0;
+        ls_collating = collate_ready();
         ls_group_directories = (flags & FILE_FLAG('O')) != 0;
         ls_ignore_backups = (flags & FILE_FLAG('B')) != 0;
         ls_kibibytes = (flags & FILE_FLAG('k')) != 0;

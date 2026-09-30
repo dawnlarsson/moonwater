@@ -14172,7 +14172,11 @@ static bool conditional_primary(bool invert)
                                 return conditional_integer(kind, left, right);
 
                         test_bad = false;
+                        //      [[ a < b ]] is strcoll's answer, where [ a \< b ]
+                        //      is strcmp's, in bash.
+                        test_collate_strings = true;
                         value = test_compare(kind, left, right);
+                        test_collate_strings = false;
 
                         if (test_bad)
                                 conditional_runtime = true;

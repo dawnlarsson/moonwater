@@ -11057,6 +11057,36 @@ static bool expand_sort_names(string_address address_to names, positive count)
         return true;
 }
 
+// Pathname matches are ordered by the locale's collation, bash's and dash's
+// both: a b C d E under en_US where C sorts A C E b d. A locale whose
+// collation this machine has is asked; any other orders by byte as before.
+static b32 expand_collate_order(string_address left, string_address right)
+{
+        bipolar order = collate_compare((p8 address_to)left, string_length(left),
+                                        (p8 address_to)right, string_length(right));
+
+        return order ? (b32)order : (b32)string_compare(left, right);
+}
+
+static bool expand_sort_matches(string_address address_to names, positive count)
+{
+        if (count < 2)
+                return true;
+        if (!collate_ready())
+                return expand_sort_names(names, count);
+
+        if (!shell_array_room(expand_sort_room, expand_sort_room_count, count))
+                return false;
+
+        string_address address_to source = array_merge_sort(
+            names, expand_sort_room, count, expand_collate_order);
+
+        if (source != names)
+                memory_copy(names, source, count * sizeof(string_address));
+
+        return true;
+}
+
 static inline INLINE string_address expand_keep_bytes(string_address text,
                                                        positive length)
 {
@@ -11234,7 +11264,7 @@ static bool expand_emit(positive at, positive stop, shell_words address_to out)
 
                 if (glob_count)
                 {
-                        if (!expand_sort_names(glob_result, glob_count))
+                        if (!expand_sort_matches(glob_result, glob_count))
                         {
                                 expand_fail_state();
                                 return false;

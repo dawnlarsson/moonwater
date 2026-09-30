@@ -10349,7 +10349,48 @@ def files_uname_identity(farm):
     return passed, total, notes
 
 
-FILES_CHECKS = (files_uname_identity, files_large_inputs, files_column_layout, files_xargs_parallel, files_zones, files_tar,
+def files_collation_ls(farm):
+    """ls under the locales whose collation this machine has: names that rank
+    differently by case, accent, combining mark and punctuation, in every
+    order ls can sort them, against the reference."""
+    import random
+    import shutil
+    import subprocess
+    import tempfile
+
+    locales = collation_locales()
+    if not locales:
+        return 0, 0, []
+    reference = shutil.which("ls", path=os.defpath)
+    if not reference or not (Path(farm) / "ls").exists():
+        return 0, 1, ["ls collation checks need ls on both sides"]
+    passed = total = 0
+    notes = []
+    rnd = random.Random(0x4c53434f)
+    for locale in locales:
+        for size in (30, 200):
+            with tempfile.TemporaryDirectory(prefix="files-collation-") as directory:
+                for _ in range(size):
+                    name = collation_word(rnd)
+                    if name in (".", "..") or name.startswith("-"):
+                        continue
+                    Path(directory, name).touch()
+                for args in (["-1"], ["-1r"], ["-1X"], ["-1S"], ["-1t"], ["-1v"], ["-1U"], ["-1f"], ["-1a"],
+                             ["-1A", "--group-directories-first"], ["-1q"], ["-1b"]):
+                    total += 1
+                    env = dict(os.environ, LC_ALL=locale)
+                    want = subprocess.run([reference, *args], capture_output=True, cwd=directory, env=env)
+                    got = subprocess.run([str(Path(farm) / "ls"), *args], capture_output=True, cwd=directory,
+                                         env=env)
+                    if (want.returncode, want.stdout) == (got.returncode, got.stdout):
+                        passed += 1
+                    elif len(notes) < 12:
+                        notes.append(f"ls {' '.join(args)} under {locale}: {want.stdout[:60]!r} "
+                                     f"against {got.stdout[:60]!r}")
+    return passed, total, notes
+
+
+FILES_CHECKS = (files_uname_identity, files_collation_ls, files_large_inputs, files_column_layout, files_xargs_parallel, files_zones, files_tar,
                 files_tar_formats,
                 files_find_terminal, files_zone_names, files_hostname_set, files_move_across,
                 files_address_cap)
@@ -20310,6 +20351,137 @@ def text_failure_cases():
     return [case for case in cases if (case[0][0], case[1]) not in _TEXT_FAILURE_KNOWN]
 
 
+COLLATION_LOCALES = ("fr_FR.UTF-8", "en_US.UTF-8")
+NUMERIC_LOCALES = COLLATION_LOCALES + ("sv_SE",)
+
+
+def collation_locales(names=COLLATION_LOCALES):
+    """The locales of the collation checks that this machine has: a name the
+    C library cannot set answers 'C', so a locale is here when `locale
+    charmap` says something else."""
+    import subprocess
+
+    have = []
+    for name in names:
+        try:
+            done = subprocess.run(["locale", "charmap"], capture_output=True, timeout=10,
+                                  env=dict(os.environ, LC_ALL=name))
+        except OSError:
+            return []
+        if done.returncode == 0 and done.stdout.strip() not in (b"", b"ANSI_X3.4-1968"):
+            have.append(name)
+    return have
+
+
+def collation_word(rnd):
+    """A word over what collation ranks: both cases, accented characters as
+    one character and as a base with a combining mark, digits, the
+    punctuation that is ignored at the first level and some ligatures."""
+    alpha = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    accented = ["\u00e9", "\u00e8", "\u00ea", "\u00eb", "\u00e0", "\u00e2", "\u00e4", "\u00f4",
+                "\u00f6", "\u00fb", "\u00fc", "\u00e7", "\u00ef", "\u00f1", "\u00c9", "\u00c0",
+                "\u00c7", "\u00d6", "e\u0301", "a\u0300", "u\u0308", "n\u0303", "E\u0301"]
+    marks = list(" _-.,;:!?'()[]{}@#$%^&*+=<>|~`") + ["\u2019", "\u00df", "\u00e6", "\u0153", "ch",
+                                                      "ll", "\u4e2d", "\u20ac"]
+    out = []
+    for _ in range(rnd.choice([1, 2, 3, 4, 5, 6, 8, 12])):
+        pick = rnd.random()
+        out.append(rnd.choice(alpha) if pick < 0.55 else rnd.choice(accented) if pick < 0.8
+                   else rnd.choice(marks))
+    return "".join(out)
+
+
+def text_collation(farm):
+    """sort, comm and join under the locales whose collation this machine
+    has, against the reference: the order glibc's strcoll gives is the
+    contract, so every option that compares text (-f -d -i -r -u -s -b -t,
+    keys, -c, and -n -h -g, which read the locale's decimal point and
+    thousands separator) is walked over seeded lists of words that rank
+    differently by case, accent, combining mark and punctuation. A machine
+    without the locales runs none of it and says nothing."""
+    import random
+    import shutil
+    import subprocess
+    import tempfile
+
+    locales = collation_locales()
+    if not locales:
+        return 0, 0, []
+    tools = {name: shutil.which(name, path=os.defpath) for name in ("sort", "comm", "join")}
+    if not all(tools.values()) or not all((Path(farm) / name).exists() for name in tools):
+        return 0, 1, ["collation checks need sort, comm and join on both sides"]
+
+    def run(binary, args, locale, data=None):
+        try:
+            done = subprocess.run([binary, *args], input=data, capture_output=True, timeout=60,
+                                  env=dict(os.environ, LC_ALL=locale))
+        except subprocess.TimeoutExpired:
+            return (-1, b"timeout")
+        return (done.returncode, done.stdout)
+
+    passed = total = 0
+    notes = []
+    rnd = random.Random(0x434f4c4c)
+
+    def same(tool, args, locale, data=None):
+        nonlocal passed, total
+        total += 1
+        want = run(tools[tool], args, locale, data)
+        got = run(str(Path(farm) / tool), args, locale, data)
+        if want == got:
+            passed += 1
+        elif len(notes) < 12:
+            notes.append(f"{tool} {' '.join(args)} under {locale}: status {want[0]} against {got[0]}, "
+                         f"output {want[1][:60]!r} against {got[1][:60]!r}")
+
+    for locale in locales:
+        for size in (60, 400, 1500):
+            words = [collation_word(rnd) for _ in range(size)]
+            words += rnd.sample(words, size // 5)
+            data = ("\n".join(words) + "\n").encode("utf-8")
+            for args in ([], ["-r"], ["-u"], ["-f"], ["-d"], ["-i"], ["-fu"], ["-k1,1"], ["-t", " ", "-k2"],
+                         ["-s", "-k1,1"], ["-fdr"], ["-b", "-k1"], ["-c"], ["-M"], ["-V"], ["-m"]):
+                same("sort", args, locale, data)
+        with tempfile.TemporaryDirectory(prefix="text-collation-") as directory:
+            words = sorted({collation_word(rnd) for _ in range(300)})
+            ordered = run(tools["sort"], [], locale, ("\n".join(words) + "\n").encode("utf-8"))[1]
+            names = [Path(directory, f"{n}.txt") for n in range(2)]
+            half = ordered.split(b"\n")[:-1]
+            for path in names:
+                keep = [line for line in half if rnd.random() < 0.6]
+                path.write_bytes(b"".join(line + b"\n" for line in keep))
+            for args in ([], ["-1"], ["-3"], ["-12"], ["-23"], ["--check-order"], ["--nocheck-order"]):
+                same("comm", [*args, *map(str, names)], locale)
+            for path, tag in zip(names, (b"1", b"2")):
+                path.write_bytes(b"".join(line.replace(b" ", b"_") + b" " + tag + b"\n"
+                                          for line in path.read_bytes().split(b"\n")[:-1]))
+            for args in ([], ["-i"], ["-a1"], ["-v2"], ["-o", "1.1,2.2"],
+                         ["-e", "X", "-a1", "-a2", "-o", "0,1.2,2.2"]):
+                same("join", [*args, *map(str, names)], locale)
+
+    # A number as the locale writes it: a separator inside the digits
+    # and a decimal point that is a comma, and the other one as text.
+    for locale in collation_locales(NUMERIC_LOCALES):
+        def number():
+            sign = rnd.choice(["", "-", "-", " ", "  "])
+            digits = "".join(rnd.choice("0123456789") for _ in range(rnd.choice([0, 1, 2, 3, 4, 6])))
+            if len(digits) > 3 and rnd.random() < 0.4:
+                digits = digits[:-3] + rnd.choice([",", " ", "\u00a0", ".", "\u202f", "'"]) + digits[-3:]
+            fraction = ""
+            if rnd.random() < 0.4:
+                fraction = rnd.choice([".", ","]) + "".join(rnd.choice("0123456789")
+                                                          for _ in range(rnd.choice([0, 1, 2, 4])))
+            return sign + digits + fraction + rnd.choice(["", "", "", "K", "M", "G", "k", "x", " x", "KiB"])
+
+        encoding = "latin-1" if locale == "sv_SE" else "utf-8"
+        for size in (40, 300):
+            data = ("\n".join(number() for _ in range(size)) + "\n").encode(encoding, errors="replace")
+            for args in (["-n"], ["-nr"], ["-h"], ["-hr"], ["-g"], ["-gr"], ["-n", "-u"], ["-h", "-u"],
+                         ["-k1n"], ["-k1,1h"], ["-nb"]):
+                same("sort", args, locale, data)
+    return passed, total, notes
+
+
 def text_file_failures(farm):
     """Every text tool on a missing name, a directory and a standard input
     that is a directory, over names that need each kind of quoting, against
@@ -20365,7 +20537,7 @@ def text_file_failures(farm):
     return passed, len(cases), notes
 
 
-TEXT_CHECKS = (text_grep_encoding, text_file_failures)
+TEXT_CHECKS = (text_grep_encoding, text_file_failures, text_collation)
 
 _TEXT_GREP_OPERANDS = (
     (), ("a.txt",), ("a.txt", "b.txt"), ("-",), ("missing",), ("dir",), ("tree",),
