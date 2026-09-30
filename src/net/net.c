@@ -4325,8 +4325,11 @@ static bool crypto_rsa_pss_sha256(p8 address_to n_bytes, positive n_length,
    clock, which before the first NTP answer is decades wrong. */
 #define TLS_EXPIRED (-3)
 #define TLS_NOT_YET (-4)
-#define TLS_DATED_EARLY 1
-#define TLS_DATED_LATE 2
+/* Or that no name in it was the host's. */
+#define TLS_MISMATCH (-5)
+#define TLS_FAULT_EARLY 1
+#define TLS_FAULT_LATE 2
+#define TLS_FAULT_NAME 3
 
 #define TLS_CT_CCS 20
 #define TLS_CT_ALERT 21
@@ -4401,10 +4404,10 @@ typedef struct
         bool update_asked;
         bool cert_requested;
         /* The server's Certificate was refused while checking it, and when
-           the reason was the leaf's validity dates against the clock, which
-           side of them the clock is on. */
+           the reason was the leaf's name or its validity dates against the
+           clock (which side of them the clock is on), that reason. */
         bool untrusted;
-        p8 dated;
+        p8 fault;
         /* TLS 1.2 (RFC 5246, 5288, 7627): the suite, the server's random,
            the master secret -- the premaster until the client's flight --
            and the client's key exchange point, made when the server's
@@ -6831,16 +6834,19 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
         tls_keep_leaf(tls, certs);
 
         if (tls->check_cert && !certs[0].san_match)
+        {
+                tls->fault = TLS_FAULT_NAME;
                 return false;
+        }
         if (!tls->check_cert)
                 return true;
 
         if (!tls_date_now(address_of now))
                 return false;
         if (certs[0].not_before > now)
-                tls->dated = TLS_DATED_EARLY;
+                tls->fault = TLS_FAULT_EARLY;
         else if (certs[0].not_after < now)
-                tls->dated = TLS_DATED_LATE;
+                tls->fault = TLS_FAULT_LATE;
         if (!tls_leaf_authorized(certs, now) || tls_spki_is_anchor(certs))
                 return false;
         for (;;)
@@ -8129,8 +8135,9 @@ static COLD bipolar tls_connect(tls_conn address_to tls, bipolar handle,
         if (status)
         {
                 status = !tls->untrusted ? TLS_FAIL
-                         : tls->dated == TLS_DATED_EARLY ? TLS_NOT_YET
-                         : tls->dated == TLS_DATED_LATE ? TLS_EXPIRED
+                         : tls->fault == TLS_FAULT_EARLY ? TLS_NOT_YET
+                         : tls->fault == TLS_FAULT_LATE ? TLS_EXPIRED
+                         : tls->fault == TLS_FAULT_NAME ? TLS_MISMATCH
                                                         : TLS_UNTRUSTED;
                 tls_forget(tls);
         }
@@ -8325,6 +8332,8 @@ static bipolar tls_read_until(
 #define HTTP_UNTRUSTED (-13)
 #define HTTP_EXPIRED (-14)
 #define HTTP_NOT_YET (-15)
+//      Or that none of its names was the host's.
+#define HTTP_MISMATCH (-16)
 
 typedef byte_store http_buffer;
 #define http_forget(buffer) byte_store_release(buffer)
@@ -9034,6 +9043,7 @@ static bipolar http_link_open(http_link address_to link, p32 ip, p16 port,
                         return verdict == TLS_UNTRUSTED ? HTTP_UNTRUSTED
                                : verdict == TLS_EXPIRED ? HTTP_EXPIRED
                                : verdict == TLS_NOT_YET ? HTTP_NOT_YET
+                               : verdict == TLS_MISMATCH ? HTTP_MISMATCH
                                                         : HTTP_TLS;
                 }
                 link->tls = true;
