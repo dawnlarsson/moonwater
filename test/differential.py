@@ -16117,9 +16117,25 @@ def shell_lang_local_listing(rng):
 #       A [[ =~ ]] pattern glibc's regcomp refuses: bash 5.3 names it with
 #       regcomp's reason and answers 2, where this took a leading * or an
 #       unfinished interval for a literal as grep -E does. A ) with nothing
-#       open is a literal to glibc, and [.a.] and [=a=] name a.
+#       open is a literal to glibc, and [.a.] and [=a=] name a. Half the
+#       patterns are the listed ones; the rest are strung from pieces of
+#       every refusal's grammar (brackets and their names and ranges,
+#       intervals, anchors, groups, back references), so the order in which
+#       regcomp meets two faults is compared too.
+REGEX_REFUSAL_PIECES = (
+    "a", "b", "x", "(", ")", "[", "]", "[^", "[a", "[]", "-", "^", "$", ".", "{", "}", ",", "1", "2", "3", "0", "9",
+    "*", "+", "?", "|", "\\", "\\1", "\\2", "[:alpha:]", "[:digit:]", "[:", "[.", "[=", ":]", ".]", "=]", "[.a.]",
+    "[.b.]", "[=a=]", "[.-.]", "[.].]", "[[:alpha:]]", "[a-c]", "[c-a]", "[--a]", "[a-]", "[-a]", "[]-a]", "[^-a]",
+    "[[=a=]-c]", "[a-[.c.]]", "[[.a.]-c]", "[[.a.]-[.c.]]", "{1,2}", "{,3}", "{2,1}", "{1,}", "{a}", "{1a}", "{,}",
+    "32767", "32768", "65536", "\\(", "\\)", "\\{", "\\}", "\\.", "\\*", "\\[", "\\]", "\\w", "\\W", "\\s",
+    "\\b", "\\<", "\\>", "\\B")
+
+
 def shell_lang_regex_refusals(rng):
-    pattern = rng.choice(("'*'", "'+a'", "'^*'", "'a|?'", "'(*a)'", "'{1}'", "'a{1'", "'a{'", "'a{x}'", "'a{2,1}'",
+    if rng.random() < 0.5:
+        pattern = "'" + "".join(rng.choice(REGEX_REFUSAL_PIECES) for _ in range(rng.randint(2, 7))) + "'"
+    else:
+        pattern = rng.choice(("'*'", "'+a'", "'^*'", "'a|?'", "'(*a)'", "'{1}'", "'a{1'", "'a{'", "'a{x}'", "'a{2,1}'",
                           "'a{1,x}'", "'a{99999}'", "'x{,2}'", "'a{,}'", "'a**'", "'['", "'[a'", "'[[:foo:]]'",
                           "'[b-a]'", "'[a-b-c]'", "'[--/]'", "'[]a]'", "'\\'", "'\\1'", "'(a)\\1'", "'(a\\2)(b)'",
                           "'\\b*'", "'$*'", "'a)'", "')'", "'[[.a.]]'", "'[[=a=]]x'", "'[[.ab.]]'", "'()'",
