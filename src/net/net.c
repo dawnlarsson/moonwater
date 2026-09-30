@@ -10692,10 +10692,46 @@ static COLD fn dhcp_lease_merge(dhcp_lease address_to lease,
         }
 }
 
+/* What a server may hand out. The address and the router come from the unicast
+   space: not 0/8 (this network), 127/8 (the machine itself), nor 224/3
+   (multicast, the reserved block and the limited broadcast). A router is the
+   address of another host, so it is not the leased address itself. The prefix
+   the mask implies (an omitted mask is the /24 policy above) must not reach
+   0/8, 127/8 or 224/3 either: a /1 mask on a 10/8 address would route the
+   machine's own loopback and every multicast group onto the wire. On a subnet
+   wider than a /31 the first and last addresses name the subnet and are not
+   hosts. A /32 lease and its off-link router stay legal (the clouds hand
+   them out): only the router's own class is judged. Every server that speaks
+   to this machine can send any of these; none of them is a network. */
+static CONST COLD bool dhcp_address_unicast(p32 address)
+{
+        return (address >> 24) && (address >> 24) != 127 && address < 0xe0000000u;
+}
+
+static CONST COLD bool dhcp_prefix_clear(p32 address, p32 mask)
+{
+        p32 network;
+
+        if (!mask)
+                mask = 0xffffff00u;
+        network = address & mask;
+        if (!((network ^ 0x00000000u) & mask & 0xff000000u) ||
+            !((network ^ 0x7f000000u) & mask & 0xff000000u) ||
+            !((network ^ 0xe0000000u) & mask & 0xe0000000u))
+                return false;
+        return mask >= 0xfffffffeu ||
+               (address != network && address != (network | ~mask));
+}
+
 static COLD bool dhcp_lease_usable(const dhcp_lease address_to lease)
 {
         return lease->address && lease->server && lease->seconds &&
-               dhcp_mask_valid(lease->mask);
+               dhcp_mask_valid(lease->mask) &&
+               dhcp_address_unicast(lease->address) &&
+               dhcp_address_unicast(lease->server) &&
+               (!lease->router || (dhcp_address_unicast(lease->router) &&
+                                   lease->router != lease->address)) &&
+               dhcp_prefix_clear(lease->address, lease->mask);
 }
 
 /* Every ACK starts a new lease interval.  Timer values from the OFFER or the

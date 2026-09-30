@@ -64673,6 +64673,71 @@ static fn leasing(void)
                       !dhcp_lease_usable(address_of usable));
         }
         {
+                //      What a lease may name: an address and a router from
+                //      the unicast space, in a prefix that does not cover the
+                //      machine's own loopback or the multicast and reserved
+                //      ranges. The address is usable exactly when the
+                //      reference rule below says so.
+                static const p32 addresses[] = {
+                    0x0a00020f, 0x0a000000, 0x0a0002ff, 0x00000005, 0x7f000005,
+                    0x7fffffff, 0xe0000001, 0xefffffff, 0xf0000001,
+                    0xffffffff, 0xc0a80105, 0xa9fe0105, 0x64400001, 0x0a000001};
+                static const p32 masks[] = {
+                    0, 0xffffff00, 0xffffffff, 0xfffffffe, 0xff000000,
+                    0xffff0000, 0x80000000, 0xe0000000, 0xf0000000,
+                    0xfe000000, 0xffffffc0, 0xc0000000, 0x00000000};
+                static const p32 routers[] = {
+                    0, 0x0a000001, 0x0a00020f, 0x7f000001, 0xe0000002,
+                    0xf0000001, 0xffffffff, 0x00000001, 0x0a09004d, 0xc0a80101};
+                positive wrong = 0;
+                positive rows = 0;
+
+                for (positive a = 0; a < array_count(addresses); a++)
+                        for (positive m = 0; m < array_count(masks); m++)
+                                for (positive r = 0; r < array_count(routers); r++)
+                                {
+                                        dhcp_lease one = {
+                                            .address = addresses[a],
+                                            .mask = masks[m],
+                                            .router = routers[r],
+                                            .server = 0x0a000202,
+                                            .seconds = 3600};
+                                        p32 network_mask = masks[m] ? masks[m]
+                                                                    : 0xffffff00;
+                                        p32 network = addresses[a] & network_mask;
+                                        bool unicast = addresses[a] >> 24 &&
+                                                       addresses[a] >> 24 != 127 &&
+                                                       addresses[a] < 0xe0000000;
+                                        bool router_ok =
+                                            !routers[r] ||
+                                            (routers[r] >> 24 &&
+                                             routers[r] >> 24 != 127 &&
+                                             routers[r] < 0xe0000000 &&
+                                             routers[r] != addresses[a]);
+                                        //      The prefix may not reach 0/8,
+                                        //      127/8 or 224/3.
+                                        bool covers =
+                                            !((network ^ 0x00000000) & network_mask & 0xff000000) ||
+                                            !((network ^ 0x7f000000) & network_mask & 0xff000000) ||
+                                            !((network ^ 0xe0000000) & network_mask & 0xe0000000);
+                                        //      A subnet's own first and last
+                                        //      address name the subnet, unless
+                                        //      it is a /31 or a /32.
+                                        bool named = network_mask < 0xfffffffe &&
+                                                     (addresses[a] == network ||
+                                                      addresses[a] == (network | ~network_mask));
+                                        bool want = unicast && router_ok &&
+                                                    !covers && !named;
+
+                                        rows++;
+                                        if (dhcp_lease_usable(address_of one) != want)
+                                                wrong++;
+                                }
+                check("a DHCP lease names a unicast address, a sane router and a prefix clear of 0/8, 127/8 and 224/3",
+                      rows == array_count(addresses) * array_count(masks) * array_count(routers) &&
+                          !wrong);
+        }
+        {
                 dhcp_lease timed = {.seconds = 3600};
 
                 check("omitted DHCP timers use RFC defaults",

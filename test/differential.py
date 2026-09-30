@@ -39497,8 +39497,14 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 
         dhcp_lease held = {0x0a00020f, 0xffffff00, 0x0a000202, 0x0a000203,
                            0x0a000202, 3600, 1800, 3150};
-        FUZZ_REQUIRE(dhcp_lease_acknowledge(&held, &lease) && dhcp_lease_usable(&held),
-                     "an acknowledgement made a held lease unusable");
+        bool acknowledged = dhcp_lease_acknowledge(&held, &lease);
+        /* A merged lease is judged like any other (a mask, router, server or
+           address a server names that the unicast rules refuse makes it
+           unusable, and the exchange then refuses the ACK); one that names
+           none of the four cannot take a usable lease from it. */
+        if (!lease.address && !lease.mask && !lease.router && !lease.server)
+                FUZZ_REQUIRE(acknowledged && dhcp_lease_usable(&held),
+                             "an acknowledgement made a held lease unusable");
 
         if (!ordered)
                 return 0;
