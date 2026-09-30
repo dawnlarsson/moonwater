@@ -153,10 +153,14 @@ module_param_named(dirhash_simd, moonwater_dirhash_simd, bool, 0644);
 //       and the directory stream it produces is byte for byte the stock
 //       kernel's: see test/differential.py --harness kernel_dirhash.
 //
-//       Registers: r12 dir_file, r13 dir, r14 hinfo, r15 bh, rbx the entry,
-//       rbp where the entries end. Stack arguments to __ext4_check_dir_entry
-//       are the bottom of the frame. DIRENT_HTREE is passed as the literal
-//       3; the build asserts it, in namei.c, where the enum is.
+//       Registers: r12 dir_file, r13 dir, r14 hinfo, r15 bh, rbx the entry;
+//       where the entries end is in the frame (L_TOP), because rbp is the
+//       frame pointer and stays one -- on x86_64 a body that used it for a
+//       number made the unwinder report a bad frame in a KASAN guest (the
+//       x86_64 body of ext4_find_dest_de below keeps its end in F_TOP for the
+//       same reason). Stack arguments to __ext4_check_dir_entry are the bottom
+//       of the frame. DIRENT_HTREE is passed as the literal 3; the build
+//       asserts it, in namei.c, where the enum is.
 //
 //> arch x86_64 arm64 riscv64
 //> perf x86_64 getdents: 1000 names 92.5 -> 52.5 us (-43%), 100 names -36%, 16 names -19%; 8 names level
@@ -248,12 +252,13 @@ __asm__(
     ".set L_NOFF, 288\n"
     ".set L_LEN, 544\n"
     ".set L_RES, 800\n"
-    ".set L_FRAME, 1320\n"
+    ".set L_TOP, 1320\n"
+    ".set L_FRAME, 1336\n"
 );
 
 __asm__(
     ASM_FUNC(htree_dirblock_to_tree)
-    "        push    %rbp\n   push    %r15\n   push    %r14\n   push    %r13\n"
+    "        push    %rbp\n   mov     %rsp, %rbp\n   push    %r15\n   push    %r14\n   push    %r13\n"
     "        push    %r12\n   push    %rbx\n   sub     $L_FRAME, %rsp\n   mov     %rdi, %r12\n"
     "        mov     %rsi, %r13\n   mov     %rcx, %r14\n   mov     %edx, L_BLOCK(%rsp)\n"
     "        mov     %r8d, L_SHASH(%rsp)\n   mov     %r9d, L_SMINOR(%rsp)\n"
@@ -279,7 +284,7 @@ __asm__(
     "        # top = de + blocksize - ext4_dir_rec_len(0, csum ? NULL : dir): 8, and 8 more where the entries carry hashes\n"
     "        mov     $8, %edi\n   test    %esi, %esi\n   jnz     1f\n"
     "        lea     (%rdi,%rdx,8), %edi\n"
-    "1:      mov     L_END(%rsp), %rbp\n   sub     %rdi, %rbp\n"
+    "1:      mov     L_END(%rsp), %rax\n   sub     %rdi, %rax\n   mov     %rax, L_TOP(%rsp)\n"
 #ifdef CONFIG_FS_ENCRYPTION
     "        testl   $MW_S_ENCRYPTED, MW_INODE_FLAGS(%r13)\n   jz      .Lmw_setup\n"
     "        mov     %r13, %rdi\n   call    __fscrypt_prepare_readdir\n   test    %eax, %eax\n"
@@ -306,7 +311,7 @@ __asm__(
     "        mov     %ecx, L_STATE+12(%rsp)\n"
 
     "        # for (; de < top; de = ext4_next_entry(de, blocksize))\n"
-    ".Lmw_loop:      cmp     %rbp, %rbx\n   jae     .Lmw_done\n"
+    ".Lmw_loop:      cmp     L_TOP(%rsp), %rbx\n   jae     .Lmw_done\n"
     "        # ext4_check_dir_entry: the seven tests for an ordinary entry, in registers\n"
     "        movzwl  4(%rbx), %eax\n   lea     -1(%rax), %ecx\n   cmp     $0xfffe, %ecx\n"
     "        jae     7f\n   mov     %eax, %ecx\n   and     $0xfffc, %eax\n   and     $3, %ecx\n"
@@ -415,7 +420,7 @@ __asm__(
     "        # the batch: find the next live names from the entry in rbx, hash them together\n"
     ".Lmw_refill:      movl    $0, L_MCOUNT(%rsp)\n   movl    $0, L_MNEXT(%rsp)\n"
     "        xor     %r10d, %r10d\n   mov     %rbx, %r11\n"
-    ".Lmw_fl:      cmp     %rbp, %r11\n   jae     .Lmw_fe\n   cmp     $64, %r10d\n"
+    ".Lmw_fl:      cmp     L_TOP(%rsp), %r11\n   jae     .Lmw_fe\n   cmp     $64, %r10d\n"
     "        jae     .Lmw_fe\n   lea     12(%r11), %rax\n   cmp     L_END(%rsp), %rax\n"
     "        ja      .Lmw_fe\n   movzwl  4(%r11), %r8d\n   lea     -1(%r8), %ecx\n"
     "        cmp     $0xfffe, %ecx\n   jae     7f\n   mov     %r8d, %ecx\n   and     $0xfffc, %r8d\n"
@@ -886,12 +891,13 @@ __asm__(
     ".set F_HID8, 56\n"
     ".set F_HIDF, 60\n"
     ".set F_BLKSZ, 64\n"
-    ".set F_FRAME, 72\n"
+    ".set F_TOP, 72\n"
+    ".set F_FRAME, 88\n"
 );
 
 __asm__(
     ASM_FUNC(ext4_find_dest_de)
-    "        push    %rbp\n   push    %r15\n   push    %r14\n   push    %r13\n"
+    "        push    %rbp\n   mov     %rsp, %rbp\n   push    %r15\n   push    %r14\n   push    %r13\n"
     "        push    %r12\n   push    %rbx\n   sub     $F_FRAME, %rsp\n   mov     %rdi, %r12\n"
     "        mov     %rsi, %r13\n   mov     %rdx, %r14\n   mov     %r8, %r15\n"
     "        mov     %r9, F_DEST(%rsp)\n   mov     %ecx, F_BUFSZ(%rsp)\n"
@@ -904,13 +910,13 @@ __asm__(
     "        # reclen = ext4_dir_rec_len(fname_len(fname), dir), an unsigned short; top = buf + buf_size - reclen\n"
     "        mov     MW_FN_LEN(%r15), %edx\n   add     $11, %edx\n   and     $-4, %edx\n"
     "        add     %eax, %edx\n   movzwl  %dx, %edx\n   mov     %edx, F_RECLEN(%rsp)\n"
-    "        movslq  F_BUFSZ(%rsp), %rcx\n   lea     (%r14,%rcx), %rbp\n   sub     %rdx, %rbp\n"
+    "        movslq  F_BUFSZ(%rsp), %rcx\n   lea     (%r14,%rcx), %rax\n   sub     %rdx, %rax\n   mov     %rax, F_TOP(%rsp)\n"
     "        mov     MW_INODE_SB(%r12), %rax\n   mov     MW_SB_BLOCKSIZE(%rax), %ecx\n"
     "        mov     %ecx, F_BLKSZ(%rsp)\n   mov     MW_SB_FS_INFO(%rax), %rax\n"
     "        mov     MW_SBI_ES(%rax), %rax\n   mov     MW_ES_INODES(%rax), %esi\n"
     "        mov     %esi, F_INODES(%rsp)\n   mov     %r14, %rbx\n"
     "        # while (de <= top)\n"
-    ".Lfd_loop:      cmp     %rbp, %rbx\n   ja      .Lfd_after\n"
+    ".Lfd_loop:      cmp     F_TOP(%rsp), %rbx\n   ja      .Lfd_after\n"
     "        # ext4_check_dir_entry: the seven tests for an ordinary entry, in registers\n"
     "        movzwl  4(%rbx), %eax\n   lea     -1(%rax), %ecx\n   cmp     $0xfffe, %ecx\n"
     "        jae     7f\n   mov     %eax, %ecx\n   and     $0xfffc, %eax\n   and     $3, %ecx\n"
@@ -974,7 +980,7 @@ __asm__(
     "8:      mov     %ecx, %edx\n   sub     %eax, %edx\n   cmp     F_RECLEN(%rsp), %edx\n"
     "        jge     .Lfd_after\n   add     %rcx, %rbx\n   add     %ecx, F_OFF(%rsp)\n"
     "        jmp     .Lfd_loop\n"
-    ".Lfd_after:      cmp     %rbp, %rbx\n   ja      .Lfd_nospc\n   mov     F_DEST(%rsp), %rax\n"
+    ".Lfd_after:      cmp     F_TOP(%rsp), %rbx\n   ja      .Lfd_nospc\n   mov     F_DEST(%rsp), %rax\n"
     "        mov     %rbx, (%rax)\n   xor     %eax, %eax\n   jmp     .Lfd_out\n"
     ".Lfd_nospc:      mov     $-MW_ENOSPC, %eax\n   jmp     .Lfd_out\n"
     ".Lfd_exist:      mov     $-MW_EEXIST, %eax\n   jmp     .Lfd_out\n"
