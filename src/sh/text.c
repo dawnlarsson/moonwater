@@ -12345,6 +12345,13 @@ static p32 text_tab_specials[TEXT_TAB_SPECIALS];
 // one none, and a byte that is no character is one.
 static bool text_tab_utf8;
 
+// What a decoded character comes to in columns: a C1 control has no width in
+// wcwidth's sense and is a column, as GNU gives it.
+static positive text_char_columns(p32 code)
+{
+        return code >= 0x80 && code < 0xa0 ? 1 : unicode_width(code, UNICODE_WIDTH_WCWIDTH);
+}
+
 static positive text_tab_width(const p8 address_to bytes, positive run)
 {
         if (!text_tab_utf8)
@@ -12370,10 +12377,7 @@ static positive text_tab_width(const p8 address_to bytes, positive run)
                     wc_utf8_decode(bytes + at, run - at, address_of code,
                                    address_of got) == WC_VALID)
                 {
-                        // A character with no width in wcwidth's sense, a C1
-                        // control, is a column, as GNU gives it.
-                        width += code >= 0x80 && code < 0xa0 ? 1
-                                                             : unicode_width(code, UNICODE_WIDTH_WCWIDTH);
+                        width += text_char_columns(code);
                         at += got;
                 }
                 else
@@ -12718,9 +12722,7 @@ static fn text_tab_transform(bool unexpand, bool initial_only)
                                                                       data + at - 1, left - (at - 1),
                                                                       address_of code,
                                                                       address_of got) == WC_VALID
-                                                                      ? (code >= 0x80 && code < 0xa0
-                                                                             ? 1
-                                                                             : unicode_width(code, UNICODE_WIDTH_WCWIDTH))
+                                                                      ? text_char_columns(code)
                                                                       : 1;
                                                 }
                                         }
@@ -14615,32 +14617,20 @@ static bipolar pr_text_width(string_address text, positive length)
         for (positive at = 0; at < length;)
         {
                 p8 c = (p8)text[at];
+                p32 code;
+                positive size;
 
-                if (c < 0x80 || !utf8)
+                if (utf8 && c >= 0x80 &&
+                    wc_utf8_decode((const p8 address_to)text + at, length - at,
+                                   address_of code, address_of size) == WC_VALID)
                 {
-                        at++;
-                        if (c >= 0x20 && c < 0x7f)
-                                width++;
-                        else if (c >= 0x80)
-                                width += 1;
+                        width += unicode_width(code, UNICODE_WIDTH_WCWIDTH);
+                        at += size;
                         continue;
                 }
 
-                positive size = memory_utf8_span(text + at, length - at, 1).x;
-
-                if (!size || memory_utf8_span(text + at, size, 1).y != size)
-                {
-                        at++;
-                        width++;
-                        continue;
-                }
-
-                p32 code = c & (size == 2 ? 0x1f : size == 3 ? 0x0f : 0x07);
-
-                for (positive k = 1; k < size; k++)
-                        code = (code << 6) | ((p8)text[at + k] & 0x3f);
-                width += unicode_width(code, UNICODE_WIDTH_WCWIDTH);
-                at += size;
+                at++;
+                width += c >= 0x80 || (c >= 0x20 && c < 0x7f);
         }
         return width;
 }

@@ -22082,7 +22082,11 @@ TEXT_UTILITIES = (
                    ("-2", "-m", "a.txt"), ("-a", "-m", "a.txt"), ("-w", "3", "-9"), ("-1", "-2", "-t", "pr_many"),
                    ("-1", "-t", "-2", "pr_many"), ("-t", "-S::", "--sep-string", "-3", "pr_many"),
                    ("-t", "-c", "controls"), ("-t", "-v", "controls"), ("-t", "-3", "-c", "controls"),
-                   ("-t", "-f", "-3", "-b", "pr_ff"), ("-t", "-b", "-3", "pr_ff"))),
+                   ("-t", "-f", "-3", "-b", "pr_ff"), ("-t", "-b", "-3", "pr_ff"),
+                   #   A header is centred by its width in columns: a wide character
+                   #   is two, a C1 control one, and a byte no character is one.
+                   *({"argv": ("-D", "X", "-h", header, "a.txt"), "env": (("LC_ALL", "C.UTF-8"),)}
+                     for header in ("\u00e9", "\u65e5\u672c", "\u00e9\u65e5\u672cx", "x\u0085y", "ab")))),
     Utility("ptx",
             options=(Option("-A"), Option("--auto-reference"), Option("-G"), Option("--traditional"),
                      Option("-F", ("++", "", "/"), None), Option("--flag-truncation", ("++",), True),
