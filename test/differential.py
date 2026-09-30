@@ -12622,23 +12622,21 @@ def shell_exec_composed_status(rng):
                         rng.randrange(2, 7))
     function_number = 0
     for layer in layers:
-        if layer == "group":
-            body = "{\n" + body + "\n}"
-        elif layer == "subshell":
-            body = "(\n" + body + "\n)"
+        body_by_layer = {
+            "group": "{\n" + body + "\n}",
+            "subshell": "(\n" + body + "\n)",
+            "if": "if\n" + body +
+                  "\nthen\n  printf 'then\\n'\nelse\n  printf 'else\\n'\nfi",
+            "andor": "{\n" + body + "\n} || printf 'caught\\n'",
+            "not": "! {\n" + body + "\n}",
+            "pipeline": "{\n" + body + "\n} | cat",
+        }
+        if layer in body_by_layer:
+            body = body_by_layer[layer]
         elif layer == "function":
             function_number += 1
             name = f"generated_f{function_number}"
             body = f"{name}() {{\n{body}\n}}\n{name}"
-        elif layer == "if":
-            body = ("if\n" + body +
-                    "\nthen\n  printf 'then\\n'\nelse\n  printf 'else\\n'\nfi")
-        elif layer == "andor":
-            body = "{\n" + body + "\n} || printf 'caught\\n'"
-        elif layer == "not":
-            body = "! {\n" + body + "\n}"
-        elif layer == "pipeline":
-            body = "{\n" + body + "\n} | cat"
         else:
             body = "{\n" + body + "\n} > generated.deep"
     policy = rng.randrange(4)
@@ -12705,21 +12703,19 @@ def shell_exec_long_construct(rng):
     fail = rng.randrange(4) == 0
     if fail:
         body[rng.randrange(len(body))] = rng.choice((")", "fi", "done", "esac", "then", ";;", "}"))
-    if shape == "function":
-        text = ["f() {"] + body + ["}", "f"]
+    text_by_shape = {
+        "function": ["f() {"] + body + ["}", "f"],
+        "while": ["n=0", "while [ $n -lt 2 ]; do", "n=$((n + 1))"] + body + ["done"],
+        "for": ["for n in 1 2; do"] + body + ["done"],
+        "case": ["case a in", "a)"] + body + [";;", "*) echo no;;", "esac"],
+        "group": ["{"] + body + ["}"],
+        "subshell": ["("] + body + ["echo \"sub=$x\"", ")"],
+    }
+    if shape in text_by_shape:
+        text = text_by_shape[shape]
     elif shape == "if":
         cut = rng.randrange(len(body))
         text = ["if true; then"] + body[:cut] + ["else"] + body[cut:] + ["fi"]
-    elif shape == "while":
-        text = ["n=0", "while [ $n -lt 2 ]; do", "n=$((n + 1))"] + body + ["done"]
-    elif shape == "for":
-        text = ["for n in 1 2; do"] + body + ["done"]
-    elif shape == "case":
-        text = ["case a in", "a)"] + body + [";;", "*) echo no;;", "esac"]
-    elif shape == "group":
-        text = ["{"] + body + ["}"]
-    elif shape == "subshell":
-        text = ["("] + body + ["echo \"sub=$x\"", ")"]
     else:
         cut = rng.randrange(len(body))
         text = (["g() {", "for n in 1; do", "if true; then"] + body[:cut] +
@@ -14750,18 +14746,16 @@ def shell_lang_dollar_single(rng):
     body = "".join(rng.choice(escapes) for _ in range(rng.randrange(1, 4)))
     body = rng.choice(("", "pre")) + body + rng.choice(("", "post"))
     site = rng.choice(("word", "adjacent", "quoted", "assignment", "case", "heredoc", "substitution"))
-    if site == "word":
-        script = "printf '%s' $'" + body + "' | od -An -tu1"
-    elif site == "adjacent":
-        script = "printf '%s' before$'" + body + "'after | od -An -tu1"
-    elif site == "quoted":
-        script = "printf '%s' \"$'" + body + "'\" | od -An -tu1"
-    elif site == "assignment":
-        script = "v=$'" + body + "'; printf '%s' \"$v\" | od -An -tu1; echo \"${#v}\""
-    elif site == "case":
-        script = "case $'" + body + "' in $'" + body + "') echo same;; *) echo other;; esac"
-    elif site == "heredoc":
-        script = "cat <<EOF | od -An -tu1\n$'" + body + "'\nEOF"
+    script_by_site = {
+        "word": "printf '%s' $'" + body + "' | od -An -tu1",
+        "adjacent": "printf '%s' before$'" + body + "'after | od -An -tu1",
+        "quoted": "printf '%s' \"$'" + body + "'\" | od -An -tu1",
+        "assignment": "v=$'" + body + "'; printf '%s' \"$v\" | od -An -tu1; echo \"${#v}\"",
+        "case": "case $'" + body + "' in $'" + body + "') echo same;; *) echo other;; esac",
+        "heredoc": "cat <<EOF | od -An -tu1\n$'" + body + "'\nEOF",
+    }
+    if site in script_by_site:
+        script = script_by_site[site]
     else:
         script = "printf '%s' \"$(printf %s $'" + body + "')\" | od -An -tu1"
     return "dollar-single-" + site, shell_BASH, shell_program(script)
@@ -14860,22 +14854,19 @@ def shell_lang_transforms(rng):
 def shell_lang_indirection(rng):
     shape = rng.choice(("name", "prefix-star", "prefix-at", "keys", "positional", "special", "nested", "operator",
                         "invalid", "unset-target"))
-    if shape == "name":
-        script = "target=value; x=target; printf '<%s>' \"${!x}\" \"${!x-def}\" \"${!x:2}\"; echo"
+    script_by_shape = {
+        "name": "target=value; x=target; printf '<%s>' \"${!x}\" \"${!x-def}\" \"${!x:2}\"; echo",
+        "prefix-at": "pre_b=1 pre_a=2; printf '<%s>' \"${!pre_@}\" \"X${!pre_@}Y\" \"${!none_@}\"; echo",
+        "keys": "a=([3]=x [7]=y); declare -A m; m[k]=v m[j]=w; printf '<%s>' \"${!a[@]}\" \"${#a[@]}\"; echo; for k in \"${!m[@]}\"; do :; done; echo \"${#m[@]}\"",
+        "positional": "set -- one two; x=2; printf '<%s>' \"${!1}\" \"${!x}\" \"${!#}\"; echo",
+        "special": "set -- one two; false; printf '<%s>' \"${!?}\" \"${!#}\" \"${!@}\" \"${!*}\"; echo",
+        "nested": "x=y; y=z; z=deep; printf '<%s>' \"${!x}\" \"${!${x}}\"; echo",
+        "operator": "x=y; y=abcabc; printf '<%s>' \"${!x#a}\" \"${!x/b/X}\" \"${!x:2:3}\" \"${!x^^}\"; echo",
+    }
+    if shape in script_by_shape:
+        script = script_by_shape[shape]
     elif shape == "prefix-star":
         script = "pre_b=1 pre_a=2 pre__=3 pre_9=4; IFS=" + shell_quote(rng.choice((":", "", " "))) + "; printf '<%s>' \"${!pre_*}\" ${!pre_*}; echo"
-    elif shape == "prefix-at":
-        script = "pre_b=1 pre_a=2; printf '<%s>' \"${!pre_@}\" \"X${!pre_@}Y\" \"${!none_@}\"; echo"
-    elif shape == "keys":
-        script = "a=([3]=x [7]=y); declare -A m; m[k]=v m[j]=w; printf '<%s>' \"${!a[@]}\" \"${#a[@]}\"; echo; for k in \"${!m[@]}\"; do :; done; echo \"${#m[@]}\""
-    elif shape == "positional":
-        script = "set -- one two; x=2; printf '<%s>' \"${!1}\" \"${!x}\" \"${!#}\"; echo"
-    elif shape == "special":
-        script = "set -- one two; false; printf '<%s>' \"${!?}\" \"${!#}\" \"${!@}\" \"${!*}\"; echo"
-    elif shape == "nested":
-        script = "x=y; y=z; z=deep; printf '<%s>' \"${!x}\" \"${!${x}}\"; echo"
-    elif shape == "operator":
-        script = "x=y; y=abcabc; printf '<%s>' \"${!x#a}\" \"${!x/b/X}\" \"${!x:2:3}\" \"${!x^^}\"; echo"
     elif shape == "invalid":
         script = "x=" + rng.choice(("bad-name", "1bad", "", "a b")) + "; printf before; printf '<%s>' \"${!x}\"; echo after"
     else:
@@ -15027,18 +15018,16 @@ def shell_lang_pathname_expansion(rng):
             options.append("shopt -" + rng.choice(("s", "u")) + " " + option)
     noglob = rng.choice(("", "", "set -f", "set -o noglob"))
     context = rng.choice(("observe", "for", "redirect", "case", "assign", "ls-count", "array"))
-    if context == "observe":
-        use = "observe " + pattern
-    elif context == "for":
-        use = "for f in " + pattern + "; do printf '<%s>' \"$f\"; done; echo"
-    elif context == "redirect":
-        use = "echo data > " + pattern + " 2>/dev/null; echo \"redirect=$?\"; ls | LC_ALL=C sort | wc -l"
-    elif context == "case":
-        use = "case a.txt in " + pattern + ") echo match;; *) echo none;; esac"
-    elif context == "assign":
-        use = "v=" + pattern + "; printf '<%s>\\n' \"$v\"; printf '<%s>' $v; echo"
-    elif context == "ls-count":
-        use = "set -- " + pattern + "; echo \"$#\""
+    use_by_context = {
+        "observe": "observe " + pattern,
+        "for": "for f in " + pattern + "; do printf '<%s>' \"$f\"; done; echo",
+        "redirect": "echo data > " + pattern + " 2>/dev/null; echo \"redirect=$?\"; ls | LC_ALL=C sort | wc -l",
+        "case": "case a.txt in " + pattern + ") echo match;; *) echo none;; esac",
+        "assign": "v=" + pattern + "; printf '<%s>\\n' \"$v\"; printf '<%s>' $v; echo",
+        "ls-count": "set -- " + pattern + "; echo \"$#\"",
+    }
+    if context in use_by_context:
+        use = use_by_context[context]
     else:
         use = "a=(" + pattern + "); printf '<%s>' \"${a[@]}\"; echo \"${#a[@]}\""
     bash_only = options or context == "array" or any(t in pattern for t in ("@(", "!(", "+(", "*(", "?(", "**"))
@@ -15141,20 +15130,17 @@ def shell_lang_case_in_substitution(rng):
     separator = rng.choice((";; ", ";;\n", " ;; "))
     command = "case " + subject + " in " + separator.join(arms) + rng.choice((";; esac", "\nesac", " ;;\nesac"))
     place = rng.choice(("word", "assign", "quoted", "nested", "in-if", "in-loop", "function", "inner-case"))
-    if place == "word":
-        line = "echo $(" + command + ") tail"
-    elif place == "assign":
-        line = "v=$(" + command + "); echo \"[$v]\""
-    elif place == "quoted":
-        line = "echo \"$(" + command + ")\""
-    elif place == "nested":
-        line = "echo $(echo $(" + command + "))"
-    elif place == "in-if":
-        line = "echo $(if true; then " + command + "; fi)"
-    elif place == "in-loop":
-        line = "echo $(for k in 1 2; do " + command + "; done)"
-    elif place == "function":
-        line = "f() { echo $(" + command + "); }; f; f"
+    line_by_place = {
+        "word": "echo $(" + command + ") tail",
+        "assign": "v=$(" + command + "); echo \"[$v]\"",
+        "quoted": "echo \"$(" + command + ")\"",
+        "nested": "echo $(echo $(" + command + "))",
+        "in-if": "echo $(if true; then " + command + "; fi)",
+        "in-loop": "echo $(for k in 1 2; do " + command + "; done)",
+        "function": "f() { echo $(" + command + "); }; f; f",
+    }
+    if place in line_by_place:
+        line = line_by_place[place]
     else:
         line = "echo $(case q in q) " + command + ";; esac)"
     return "case-in-substitution-" + style, shell_ALL, shell_program("x=a", line, "echo \"end=$?\"")
@@ -15222,22 +15208,18 @@ def shell_lang_nul_bytes(rng):
     payload = "printf '" + rng.choice(shell_NUL_PAYLOADS) + "'"
     consumer = rng.choice(("substitution", "quoted-substitution", "backquote", "read", "read-raw", "read-two",
                            "read-delimiter", "read-count", "fields"))
-    if consumer == "substitution":
-        line = "v=$(" + payload + "); echo \"<$v> ${#v}\""
-    elif consumer == "quoted-substitution":
-        line = "echo \"<$(" + payload + ")>\""
-    elif consumer == "backquote":
-        line = "echo \"<`" + payload + "`>\""
-    elif consumer == "read":
-        line = payload + " | { read v; echo \"<$v> ${#v} $?\"; }"
-    elif consumer == "read-raw":
-        line = payload + " | { read -r v; echo \"<$v> ${#v}\"; }"
-    elif consumer == "read-two":
-        line = payload + " | { read a b; echo \"<$a|$b>\"; }"
-    elif consumer == "read-delimiter":
-        line = payload + " | { while read -d '' v; do echo \"<$v>\"; done; echo \"<$v>\"; }"
-    elif consumer == "read-count":
-        line = payload + " | { read -n 2 v; echo \"<$v> ${#v}\"; }"
+    line_by_consumer = {
+        "substitution": "v=$(" + payload + "); echo \"<$v> ${#v}\"",
+        "quoted-substitution": "echo \"<$(" + payload + ")>\"",
+        "backquote": "echo \"<`" + payload + "`>\"",
+        "read": payload + " | { read v; echo \"<$v> ${#v} $?\"; }",
+        "read-raw": payload + " | { read -r v; echo \"<$v> ${#v}\"; }",
+        "read-two": payload + " | { read a b; echo \"<$a|$b>\"; }",
+        "read-delimiter": payload + " | { while read -d '' v; do echo \"<$v>\"; done; echo \"<$v>\"; }",
+        "read-count": payload + " | { read -n 2 v; echo \"<$v> ${#v}\"; }",
+    }
+    if consumer in line_by_consumer:
+        line = line_by_consumer[consumer]
     else:
         line = "set -- $(" + payload + "); echo \"$#:$*\""
     modes = shell_BASH if consumer in ("read-delimiter", "read-count") else shell_ALL
@@ -15257,24 +15239,19 @@ def shell_lang_command_lookup(rng):
     shape = rng.choice(("dir-first", "dir-only", "nonexec", "nonexec-then-exec", "stale-hash", "slash-dir",
                         "slash-nonexec", "slash-missing", "query", "prefix-path"))
     order = rng.choice(("$PWD/early:$PWD/late", "$PWD/late:$PWD/early", "$PWD/noexec:$PWD/plain:$PWD/late"))
-    if shape == "dir-first":
-        line = "PATH=\"$PWD/early:$PWD/late:$PATH\"; cmd; echo \"s=$?\"; cmd; echo \"s=$?\""
-    elif shape == "dir-only":
-        line = "PATH=\"$PWD/noexec:$PATH\"; cmd2; echo \"s=$?\""
-    elif shape == "nonexec":
-        line = "PATH=\"$PWD/plain:$PATH\"; cmd2; echo \"s=$?\""
-    elif shape == "nonexec-then-exec":
-        line = "chmod +x plain/cmd2; PATH=\"" + order + ":$PATH\"; cmd2; echo \"s=$?\"; cmd; echo \"s=$?\""
-    elif shape == "stale-hash":
-        line = "PATH=\"$PWD/late:$PATH\"\ngone\nrm late/gone\ngone\necho \"s=$?\""
-    elif shape == "slash-dir":
-        line = "./dir; echo \"s=$?\""
-    elif shape == "slash-nonexec":
-        line = "./nx; echo \"s=$?\"; \"$PWD/nx\"; echo \"s=$?\""
-    elif shape == "slash-missing":
-        line = "./missing; echo \"s=$?\""
-    elif shape == "query":
-        line = "PATH=\"" + order + ":$PATH\"; command -v cmd >/dev/null; echo \"v=$?\"; type cmd >/dev/null; echo \"t=$?\""
+    line_by_shape = {
+        "dir-first": "PATH=\"$PWD/early:$PWD/late:$PATH\"; cmd; echo \"s=$?\"; cmd; echo \"s=$?\"",
+        "dir-only": "PATH=\"$PWD/noexec:$PATH\"; cmd2; echo \"s=$?\"",
+        "nonexec": "PATH=\"$PWD/plain:$PATH\"; cmd2; echo \"s=$?\"",
+        "nonexec-then-exec": "chmod +x plain/cmd2; PATH=\"" + order + ":$PATH\"; cmd2; echo \"s=$?\"; cmd; echo \"s=$?\"",
+        "stale-hash": "PATH=\"$PWD/late:$PATH\"\ngone\nrm late/gone\ngone\necho \"s=$?\"",
+        "slash-dir": "./dir; echo \"s=$?\"",
+        "slash-nonexec": "./nx; echo \"s=$?\"; \"$PWD/nx\"; echo \"s=$?\"",
+        "slash-missing": "./missing; echo \"s=$?\"",
+        "query": "PATH=\"" + order + ":$PATH\"; command -v cmd >/dev/null; echo \"v=$?\"; type cmd >/dev/null; echo \"t=$?\"",
+    }
+    if shape in line_by_shape:
+        line = line_by_shape[shape]
     else:
         line = "PATH=\"" + order + ":$PATH\" cmd; echo \"s=$?\""
     return "command-lookup-" + shape, shell_ALL, shell_program(setup, "{ " + line + "\n} 2>&1 | sed \"s|$PWD|DIR|g; s|^[^ ]*: line [0-9]*: ||; s|^[^ ]*: [0-9]*: ||\"")
@@ -16475,40 +16452,27 @@ def shell_lang_bracket_caret(rng):
 def shell_lang_process_substitution(rng):
     shape = rng.choice(("cat", "two", "while-read", "wc", "path", "joined", "digit", "nested", "in-subst", "diff",
                         "function", "for", "pipeline", "if", "exec-keep", "unopened", "writer", "many"))
-    if shape == "cat":
-        script = "cat <(echo x)"
-    elif shape == "two":
-        script = "cat <(echo x) <(echo y)"
-    elif shape == "while-read":
-        script = "while read -r l; do echo \"<$l>\"; done < <(printf 'a\\nb\\n')"
-    elif shape == "wc":
-        script = "wc -l < <(printf 'a\\nb\\nc\\n')"
-    elif shape == "path":
-        script = "echo <(true) | sed 's#/dev/fd/[0-9]*#FD#'"
-    elif shape == "joined":
-        script = "echo a<(echo b) | sed 's#/dev/fd/[0-9]*#FD#'"
-    elif shape == "digit":
-        script = "echo 2>(cat) | sed 's#/dev/fd/[0-9]*#FD#'; sleep 0.1"
-    elif shape == "nested":
-        script = "cat <(cat <(echo deep))"
-    elif shape == "in-subst":
-        script = "v=$(cat <(echo x)); echo \"$v\""
-    elif shape == "diff":
-        script = "diff <(echo a) <(echo b); echo \"$?\""
-    elif shape == "function":
-        script = "f() { cat \"$1\"; }; f <(echo via-function)"
-    elif shape == "for":
-        script = "for f in <(echo a) <(echo b); do cat \"$f\"; done"
-    elif shape == "pipeline":
-        script = "cat <(echo x) | tr x y"
-    elif shape == "if":
-        script = "if grep -q x <(echo x); then echo found; fi"
-    elif shape == "exec-keep":
-        script = "exec 3< /dev/null; cat <(echo keep) <&3; exec 3<&-"
-    elif shape == "unopened":
-        script = ": <(echo never); echo \"$?\""
-    elif shape == "writer":
-        script = "echo z > >(cat > written); sleep 0.3; cat written"
+    script_by_shape = {
+        "cat": "cat <(echo x)",
+        "two": "cat <(echo x) <(echo y)",
+        "while-read": "while read -r l; do echo \"<$l>\"; done < <(printf 'a\\nb\\n')",
+        "wc": "wc -l < <(printf 'a\\nb\\nc\\n')",
+        "path": "echo <(true) | sed 's#/dev/fd/[0-9]*#FD#'",
+        "joined": "echo a<(echo b) | sed 's#/dev/fd/[0-9]*#FD#'",
+        "digit": "echo 2>(cat) | sed 's#/dev/fd/[0-9]*#FD#'; sleep 0.1",
+        "nested": "cat <(cat <(echo deep))",
+        "in-subst": "v=$(cat <(echo x)); echo \"$v\"",
+        "diff": "diff <(echo a) <(echo b); echo \"$?\"",
+        "function": "f() { cat \"$1\"; }; f <(echo via-function)",
+        "for": "for f in <(echo a) <(echo b); do cat \"$f\"; done",
+        "pipeline": "cat <(echo x) | tr x y",
+        "if": "if grep -q x <(echo x); then echo found; fi",
+        "exec-keep": "exec 3< /dev/null; cat <(echo keep) <&3; exec 3<&-",
+        "unopened": ": <(echo never); echo \"$?\"",
+        "writer": "echo z > >(cat > written); sleep 0.3; cat written",
+    }
+    if shape in script_by_shape:
+        script = script_by_shape[shape]
     else:
         script = "for i in $(seq 1 40); do cat <(echo $i); done | wc -l"
     return "process-substitution", shell_BASH, shell_program(script + " 2>/dev/null", "echo \"status=$?\"")
@@ -16517,38 +16481,27 @@ def shell_lang_process_substitution(rng):
 def shell_lang_coproc(rng):
     shape = rng.choice(("named", "default", "simple", "vars", "pid", "wait", "exit", "function", "two", "bare-name",
                         "bare", "redirect", "many-lines", "jobs-named", "jobs-default", "jobs-simple"))
-    if shape == "named":
-        script = "coproc C { read x; echo got $x; }; echo hi >&${C[1]}; read y <&${C[0]}; echo $y; wait $C_PID"
-    elif shape == "default":
-        script = "coproc { read x; echo got $x; }; echo hi >&${COPROC[1]}; read y <&${COPROC[0]}; echo $y; wait"
-    elif shape == "simple":
-        script = "coproc tr a-z A-Z; echo abc >&${COPROC[1]}; exec {COPROC[1]}>&-; read y <&${COPROC[0]}; echo $y; wait"
-    elif shape == "vars":
-        script = "coproc C { cat; }; echo ${#C[@]}; declare -p C | sed 's/[0-9][0-9]*/N/g'; exec {C[1]}>&-; wait"
-    elif shape == "pid":
-        script = "coproc C { cat; }; [ \"$C_PID\" -gt 1 ] && echo pid; exec {C[1]}>&-; wait; echo \"$?\""
-    elif shape == "wait":
-        script = "coproc C { exit 3; }; wait \"$C_PID\"; echo \"$?\""
-    elif shape == "exit":
-        script = "coproc C { exit 5; }; sleep 0.1; wait $C_PID; echo $?"
-    elif shape == "function":
-        script = "f() { coproc C { echo inner; }; read y <&${C[0]}; echo \"$y\"; wait; }; f"
-    elif shape == "two":
-        script = "coproc A { echo a; }; coproc B { echo b; }; read x <&${A[0]}; read y <&${B[0]}; echo \"$x$y\"; wait"
-    elif shape == "bare-name":
-        script = "coproc C; echo \"$?\""
-    elif shape == "bare":
-        script = "coproc; echo \"$?\""
-    elif shape == "redirect":
-        script = "coproc C { echo out; echo err >&2; } 2>/dev/null; read y <&${C[0]}; echo \"$y\"; wait"
-    #   What jobs calls a coprocess: coproc, its name unless it is the
-    #   default, and its body -- not the line it was written on.
-    elif shape == "jobs-named":
-        script = "coproc C { sleep 2; }; jobs; kill %1; wait"
-    elif shape == "jobs-default":
-        script = "coproc { sleep 2; }; jobs; kill %1; wait"
-    elif shape == "jobs-simple":
-        script = "coproc sleep 2; jobs; kill %1; wait"
+    script_by_shape = {
+        "named": "coproc C { read x; echo got $x; }; echo hi >&${C[1]}; read y <&${C[0]}; echo $y; wait $C_PID",
+        "default": "coproc { read x; echo got $x; }; echo hi >&${COPROC[1]}; read y <&${COPROC[0]}; echo $y; wait",
+        "simple": "coproc tr a-z A-Z; echo abc >&${COPROC[1]}; exec {COPROC[1]}>&-; read y <&${COPROC[0]}; echo $y; wait",
+        "vars": "coproc C { cat; }; echo ${#C[@]}; declare -p C | sed 's/[0-9][0-9]*/N/g'; exec {C[1]}>&-; wait",
+        "pid": "coproc C { cat; }; [ \"$C_PID\" -gt 1 ] && echo pid; exec {C[1]}>&-; wait; echo \"$?\"",
+        "wait": "coproc C { exit 3; }; wait \"$C_PID\"; echo \"$?\"",
+        "exit": "coproc C { exit 5; }; sleep 0.1; wait $C_PID; echo $?",
+        "function": "f() { coproc C { echo inner; }; read y <&${C[0]}; echo \"$y\"; wait; }; f",
+        "two": "coproc A { echo a; }; coproc B { echo b; }; read x <&${A[0]}; read y <&${B[0]}; echo \"$x$y\"; wait",
+        "bare-name": "coproc C; echo \"$?\"",
+        "bare": "coproc; echo \"$?\"",
+        "redirect": "coproc C { echo out; echo err >&2; } 2>/dev/null; read y <&${C[0]}; echo \"$y\"; wait",
+        #   What jobs calls a coprocess: coproc, its name unless it is the
+        #   default, and its body -- not the line it was written on.
+        "jobs-named": "coproc C { sleep 2; }; jobs; kill %1; wait",
+        "jobs-default": "coproc { sleep 2; }; jobs; kill %1; wait",
+        "jobs-simple": "coproc sleep 2; jobs; kill %1; wait",
+    }
+    if shape in script_by_shape:
+        script = script_by_shape[shape]
     else:
         script = "coproc C { seq 1 5; }; exec 3<&${C[0]}; while read -r l <&3; do printf '%s ' \"$l\"; done; echo; wait"
     return "coproc", shell_BASH, shell_program(script + " 2>/dev/null", "echo \"status=$?\"")
@@ -16570,24 +16523,19 @@ def shell_lang_heredoc(rng):
     operator = "<<-" if strip else "<<"
     site = rng.choice(("plain", "pipe", "function", "loop", "case", "subst", "two", "with-redirect", "and-or", "if"))
     heredoc = "cat " + operator + delimiter + "\n" + body + tab_prefix + end_word + "\n"
-    if site == "pipe":
-        heredoc = "cat " + operator + delimiter + " | tr a-z A-Z\n" + body + tab_prefix + end_word + "\n"
-    elif site == "function":
-        heredoc = "f() {\n" + heredoc + "}\nf\nf\n"
-    elif site == "loop":
-        heredoc = "for i in 1 2; do\n" + heredoc + "done\n"
-    elif site == "case":
-        heredoc = "case y in y)\n" + heredoc + ";; esac\n"
-    elif site == "subst":
-        heredoc = "v=$(\n" + heredoc + ")\nprintf '<%s>\\n' \"$v\"\n"
-    elif site == "two":
-        heredoc = "cat " + operator + delimiter + "; cat <<B\n" + body + tab_prefix + end_word + "\nsecond\nB\n"
-    elif site == "with-redirect":
-        heredoc = "cat " + operator + delimiter + " > out; cat out\n" + body + tab_prefix + end_word + "\n"
-    elif site == "and-or":
-        heredoc = "false || cat " + operator + delimiter + " && echo and\n" + body + tab_prefix + end_word + "\n"
-    elif site == "if":
-        heredoc = "if cat " + operator + delimiter + "\n" + body + tab_prefix + end_word + "\nthen echo then; fi\n"
+    heredoc_by_site = {
+        "pipe": "cat " + operator + delimiter + " | tr a-z A-Z\n" + body + tab_prefix + end_word + "\n",
+        "function": "f() {\n" + heredoc + "}\nf\nf\n",
+        "loop": "for i in 1 2; do\n" + heredoc + "done\n",
+        "case": "case y in y)\n" + heredoc + ";; esac\n",
+        "subst": "v=$(\n" + heredoc + ")\nprintf '<%s>\\n' \"$v\"\n",
+        "two": "cat " + operator + delimiter + "; cat <<B\n" + body + tab_prefix + end_word + "\nsecond\nB\n",
+        "with-redirect": "cat " + operator + delimiter + " > out; cat out\n" + body + tab_prefix + end_word + "\n",
+        "and-or": "false || cat " + operator + delimiter + " && echo and\n" + body + tab_prefix + end_word + "\n",
+        "if": "if cat " + operator + delimiter + "\n" + body + tab_prefix + end_word + "\nthen echo then; fi\n",
+    }
+    if site in heredoc_by_site:
+        heredoc = heredoc_by_site[site]
     return "heredoc", shell_ALL, "x=VALUE; set -- p1\n" + heredoc + "echo \"status=$?\"\n"
 
 
@@ -16640,34 +16588,24 @@ def shell_lang_redirection_persistence(rng):
     shape = rng.choice(("exec-out", "exec-in", "exec-dup", "exec-close", "loop-redirect", "function-redirect",
                         "compound-redirect", "nested-groups", "closed-stdin", "fd-var", "many", "noclobber-exec",
                         "read-from-fd", "write-to-closed", "order-swap"))
-    if shape == "exec-out":
-        script = "exec 3>out; echo one >&3; echo two >&3; exec 3>&-; cat out; echo three >&3 2>/dev/null; echo \"closed=$?\""
-    elif shape == "exec-in":
-        script = "printf 'a\\nb\\n' > in; exec 4<in; read x <&4; read y <&4; read z <&4; echo \"$x$y[$z]$?\"; exec 4<&-"
-    elif shape == "exec-dup":
-        script = "exec 5>&1; echo via5 >&5; exec 1>out; echo captured; exec 1>&5 5>&-; cat out"
-    elif shape == "exec-close":
-        script = "exec 2>&-; echo err >&2; echo \"status=$?\"; exec 2>&1"
-    elif shape == "loop-redirect":
-        script = "for i in 1 2; do echo $i; done > out; while read -r l; do echo \"<$l>\"; done < out"
-    elif shape == "function-redirect":
-        script = "f() { echo body; echo err >&2; } > out 2>&1; f; f; cat out"
-    elif shape == "compound-redirect":
-        script = "{ echo a; { echo b; } > inner; echo c; } > outer; cat outer inner"
-    elif shape == "nested-groups":
-        script = "{ { echo x >&3; } 3>&1; } > out; cat out"
-    elif shape == "closed-stdin":
-        script = "exec 0<&-; read v; echo \"read=$?\"; cat; echo \"cat=$?\""
-    elif shape == "fd-var":
-        script = "exec {fd}>out; echo via-var >&$fd; echo \"fd>2:$(( fd > 2 ))\"; exec {fd}>&-; cat out"
-    elif shape == "many":
-        script = "true 3>a 4>b 5>c 6>d 7>e 8>f 9>g; ls | wc -l"
-    elif shape == "noclobber-exec":
-        script = ": > out; set -C; exec 3>out; echo \"status=$?\"; exec 3>|out; echo \"forced=$?\""
-    elif shape == "read-from-fd":
-        script = "read v 3<<EOF <&3\nfrom-three\nEOF\necho \"$v\""
-    elif shape == "write-to-closed":
-        script = "echo x >&7; echo \"status=$?\""
+    script_by_shape = {
+        "exec-out": "exec 3>out; echo one >&3; echo two >&3; exec 3>&-; cat out; echo three >&3 2>/dev/null; echo \"closed=$?\"",
+        "exec-in": "printf 'a\\nb\\n' > in; exec 4<in; read x <&4; read y <&4; read z <&4; echo \"$x$y[$z]$?\"; exec 4<&-",
+        "exec-dup": "exec 5>&1; echo via5 >&5; exec 1>out; echo captured; exec 1>&5 5>&-; cat out",
+        "exec-close": "exec 2>&-; echo err >&2; echo \"status=$?\"; exec 2>&1",
+        "loop-redirect": "for i in 1 2; do echo $i; done > out; while read -r l; do echo \"<$l>\"; done < out",
+        "function-redirect": "f() { echo body; echo err >&2; } > out 2>&1; f; f; cat out",
+        "compound-redirect": "{ echo a; { echo b; } > inner; echo c; } > outer; cat outer inner",
+        "nested-groups": "{ { echo x >&3; } 3>&1; } > out; cat out",
+        "closed-stdin": "exec 0<&-; read v; echo \"read=$?\"; cat; echo \"cat=$?\"",
+        "fd-var": "exec {fd}>out; echo via-var >&$fd; echo \"fd>2:$(( fd > 2 ))\"; exec {fd}>&-; cat out",
+        "many": "true 3>a 4>b 5>c 6>d 7>e 8>f 9>g; ls | wc -l",
+        "noclobber-exec": ": > out; set -C; exec 3>out; echo \"status=$?\"; exec 3>|out; echo \"forced=$?\"",
+        "read-from-fd": "read v 3<<EOF <&3\nfrom-three\nEOF\necho \"$v\"",
+        "write-to-closed": "echo x >&7; echo \"status=$?\"",
+    }
+    if shape in script_by_shape:
+        script = script_by_shape[shape]
     else:
         script = "{ echo out; echo err >&2; } 2>&1 >out | sed 's/^/pipe:/'; cat out"
     modes = shell_BASH if shape in ("fd-var",) else shell_ALL
@@ -16730,22 +16668,23 @@ def shell_lang_compound_commands(rng):
                         "case-multi", "case-fallthrough", "case-test-next", "case-pattern", "group", "subshell", "for-arith",
                         "select", "while-read", "break-levels", "continue-levels", "loop-redirect", "loop-status"))
     n = rng.randrange(1, 5)
-    if shape == "if-elif":
-        script = "x=%d; if [ $x -eq 1 ]; then echo one; elif [ $x -eq 2 ]; then echo two; elif false; then echo never; else echo other; fi" % n
-    elif shape == "while-break":
-        script = "i=0; while [ $i -lt 10 ]; do i=$((i+1)); [ $i -eq %d ] && break; done; echo $i" % n
-    elif shape == "until-continue":
-        script = "i=0; until [ $i -ge %d ]; do i=$((i+1)); [ $i -eq 2 ] && continue; printf '%%s ' $i; done; echo" % (n + 2)
-    elif shape == "for-list":
-        script = "for v in a 'b c' \"$x\" $x '' *; do printf '<%s>' \"$v\"; done; echo"
-    elif shape == "for-empty":
-        script = "for v in; do echo never; done; echo \"$?\"; for v in $empty; do echo never; done; echo done"
-    elif shape == "for-positional":
-        script = "set -- p 'q r' ''; for v; do printf '<%s>' \"$v\"; done; for v do printf '[%s]' \"$v\"; done; echo"
-    elif shape == "nested-loops":
-        script = "for a in 1 2; do for b in x y; do printf '%s%s ' $a $b; done; done; echo"
-    elif shape == "case-multi":
-        script = "for w in a b c ab '' '*'; do case $w in a|b) printf A;; a*) printf P;; '') printf E;; \\*) printf S;; *) printf O;; esac; done; echo"
+    script_by_shape = {
+        "if-elif": "x=%d; if [ $x -eq 1 ]; then echo one; elif [ $x -eq 2 ]; then echo two; elif false; then echo never; else echo other; fi" % n,
+        "while-break": "i=0; while [ $i -lt 10 ]; do i=$((i+1)); [ $i -eq %d ] && break; done; echo $i" % n,
+        "until-continue": "i=0; until [ $i -ge %d ]; do i=$((i+1)); [ $i -eq 2 ] && continue; printf '%%s ' $i; done; echo" % (n + 2),
+        "for-list": "for v in a 'b c' \"$x\" $x '' *; do printf '<%s>' \"$v\"; done; echo",
+        "for-empty": "for v in; do echo never; done; echo \"$?\"; for v in $empty; do echo never; done; echo done",
+        "for-positional": "set -- p 'q r' ''; for v; do printf '<%s>' \"$v\"; done; for v do printf '[%s]' \"$v\"; done; echo",
+        "nested-loops": "for a in 1 2; do for b in x y; do printf '%s%s ' $a $b; done; done; echo",
+        "case-multi": "for w in a b c ab '' '*'; do case $w in a|b) printf A;; a*) printf P;; '') printf E;; \\*) printf S;; *) printf O;; esac; done; echo",
+        "group": "{ echo a; echo b; } | wc -l; { x=1; }; echo $x; { echo c; } > out; cat out",
+        "subshell": "x=out; (x=in; cd /; echo $x $PWD); echo $x $(pwd | wc -c)",
+        "for-arith": "for ((i = 0; i < %d; i++)); do printf '%%s ' $i; done; echo; for ((;;)); do echo once; break; done" % n,
+        "while-read": "printf 'a b\\nc\\n' | while read -r a b; do printf '<%s|%s>' \"$a\" \"$b\"; done; echo",
+        "loop-redirect": "for i in 1 2; do echo $i; done > out < /dev/null; cat out; while read -r l; do echo \"<$l>\"; done < out",
+    }
+    if shape in script_by_shape:
+        script = script_by_shape[shape]
     elif shape == "case-fallthrough":
         script = "case %s in 1) echo one;& 2) echo two;; 3) echo three;& *) echo star;; esac" % rng.choice(("1", "2", "3", "4"))
     elif shape == "case-test-next":
@@ -16753,22 +16692,12 @@ def shell_lang_compound_commands(rng):
     elif shape == "case-pattern":
         pattern = rng.choice(("[[:digit:]]*", "[!a]*", "a\\*b", "\"$p\"", "$p", "'a*'", "*.txt", "?", "??*", "[a-c]", "@(a|b)", "a|b|c"))
         script = "p='a*'; for w in a ab a*b 1x '*' 'a b'; do case $w in " + pattern + ") printf Y;; *) printf N;; esac; done; echo"
-    elif shape == "group":
-        script = "{ echo a; echo b; } | wc -l; { x=1; }; echo $x; { echo c; } > out; cat out"
-    elif shape == "subshell":
-        script = "x=out; (x=in; cd /; echo $x $PWD); echo $x $(pwd | wc -c)"
-    elif shape == "for-arith":
-        script = "for ((i = 0; i < %d; i++)); do printf '%%s ' $i; done; echo; for ((;;)); do echo once; break; done" % n
     elif shape == "select":
         script = "select v in a b 'c d'; do echo \"<$v:$REPLY>\"; break; done <<EOF\n%s\nEOF\necho \"$?\"" % rng.choice(("1", "2", "3", "4", "x", "", " 2 "))
-    elif shape == "while-read":
-        script = "printf 'a b\\nc\\n' | while read -r a b; do printf '<%s|%s>' \"$a\" \"$b\"; done; echo"
     elif shape == "break-levels":
         script = "for a in 1 2; do for b in 1 2; do echo $a$b; break %d; done; done; echo \"$?\"" % rng.choice((1, 2, 3, 0))
     elif shape == "continue-levels":
         script = "for a in 1 2; do for b in 1 2; do echo $a$b; continue %d; done; echo inner-end; done" % rng.choice((1, 2))
-    elif shape == "loop-redirect":
-        script = "for i in 1 2; do echo $i; done > out < /dev/null; cat out; while read -r l; do echo \"<$l>\"; done < out"
     else:
         script = "for i in 1; do (exit 3); done; echo $?; while false; do :; done; echo $?; until true; do :; done; echo $?"
     bash_only = shape in ("case-fallthrough", "case-test-next", "for-arith", "select") or (shape == "case-pattern" and "@(" in script)
@@ -16837,59 +16766,42 @@ def shell_lang_functions(rng):
                         "positional", "shift-inside", "unset-f", "redefine", "redirect-def", "redirect-call", "funcname",
                         "caller", "nested-def", "reserved-name", "return-outside", "return-sourced", "local-outside",
                         "declare-f", "export-f", "readonly-f", "name-dash", "body-subshell", "body-group-oneline"))
-    if shape == "posix":
-        script = "f() { echo body $1; return 3; }; f arg; echo $?"
-    elif shape == "keyword":
-        script = "function f { echo body $1; }; f arg"
-    elif shape == "keyword-parens":
-        script = "function f() { echo body; }; f"
-    elif shape == "newline-body":
-        script = "f()\n{\n  echo body\n}\nf"
+    script_by_shape = {
+        "posix": "f() { echo body $1; return 3; }; f arg; echo $?",
+        "keyword": "function f { echo body $1; }; f arg",
+        "keyword-parens": "function f() { echo body; }; f",
+        "newline-body": "f()\n{\n  echo body\n}\nf",
+        "local-dynamic": "g() { echo \"g:$x\"; x=g; }; f() { local x=f; g; echo \"f:$x\"; }; x=outer; f; echo \"outer:$x\"",
+        "positional": "f() { echo \"$#:$1:$2:$*\"; set -- new; echo \"$#:$1\"; }; set -- outer o2; f a 'b c'; echo \"$#:$1\"",
+        "shift-inside": "f() { shift; echo \"$#:$1\"; shift 5; echo \"$?\"; }; f a b c; echo \"$#\"",
+        "unset-f": "f() { echo body; }; f; unset -f f; f 2>/dev/null; echo \"$?\"; unset -f missing; echo \"$?\"",
+        "redefine": "f() { echo one; }; f; f() { echo two; }; f; f() { f() { echo three; }; echo two-again; }; f; f",
+        "redirect-def": "f() { echo body; echo err >&2; } > out 2>&1; f; cat out",
+        "redirect-call": "f() { echo body; cat; }; echo in | f > out; cat out",
+        "funcname": "g() { echo \"${FUNCNAME[*]}:${#BASH_SOURCE[@]}:${#BASH_LINENO[@]}\"; }; f() { g; }; f; echo \"${FUNCNAME-none}\"",
+        "caller": "f() { caller; caller 0 | cut -d' ' -f1; }; f; caller; echo \"$?\"",
+        "nested-def": "outer() { inner() { echo inner; }; }; outer; inner; type inner | head -1",
+        "return-outside": "return 3; echo after; echo \"$?\"",
+        "return-sourced": "printf 'echo in; return 7; echo never\\n' > src; . ./src; echo \"$?\"; f() { . ./src; echo tail; }; f; echo \"$?\"",
+        "local-outside": "local v=1; echo \"$?\"",
+        "declare-f": "f() { echo a; }; declare -F f; declare -f f | head -1; declare -F missing; echo \"$?\"",
+        "export-f": "f() { echo exported; }; export -f f; bash -c f; /bin/sh -c 'f 2>/dev/null || echo none'",
+        "readonly-f": "f() { echo a; }; readonly -f f; unset -f f 2>/dev/null; echo \"$?\"; f() { echo b; } 2>/dev/null; echo \"$?\"; f",
+        "body-subshell": "f() ( x=in; echo $x ); x=out; f; echo $x",
+    }
+    if shape in script_by_shape:
+        script = script_by_shape[shape]
     elif shape == "recursion":
         depth = rng.choice((3, 20, 100, 300))
         script = "f() { local n=$1; [ \"$n\" -eq 0 ] && return 0; f $((n - 1)); }; f %d; echo \"deep=$?\"" % depth
-    elif shape == "local-dynamic":
-        script = "g() { echo \"g:$x\"; x=g; }; f() { local x=f; g; echo \"f:$x\"; }; x=outer; f; echo \"outer:$x\""
     elif shape == "return-codes":
         code = rng.choice(("0", "1", "255", "256", "300", "-1", "bad", "", "1 2", "--", "-- 3", "+7", " 3 ", "9999999999"))
         script = "f() { return " + code + "; echo tail; }; f; echo \"status=$?\""
-    elif shape == "positional":
-        script = "f() { echo \"$#:$1:$2:$*\"; set -- new; echo \"$#:$1\"; }; set -- outer o2; f a 'b c'; echo \"$#:$1\""
-    elif shape == "shift-inside":
-        script = "f() { shift; echo \"$#:$1\"; shift 5; echo \"$?\"; }; f a b c; echo \"$#\""
-    elif shape == "unset-f":
-        script = "f() { echo body; }; f; unset -f f; f 2>/dev/null; echo \"$?\"; unset -f missing; echo \"$?\""
-    elif shape == "redefine":
-        script = "f() { echo one; }; f; f() { echo two; }; f; f() { f() { echo three; }; echo two-again; }; f; f"
-    elif shape == "redirect-def":
-        script = "f() { echo body; echo err >&2; } > out 2>&1; f; cat out"
-    elif shape == "redirect-call":
-        script = "f() { echo body; cat; }; echo in | f > out; cat out"
-    elif shape == "funcname":
-        script = "g() { echo \"${FUNCNAME[*]}:${#BASH_SOURCE[@]}:${#BASH_LINENO[@]}\"; }; f() { g; }; f; echo \"${FUNCNAME-none}\""
-    elif shape == "caller":
-        script = "f() { caller; caller 0 | cut -d' ' -f1; }; f; caller; echo \"$?\""
-    elif shape == "nested-def":
-        script = "outer() { inner() { echo inner; }; }; outer; inner; type inner | head -1"
     elif shape == "reserved-name":
         name = rng.choice(("if", "for", "done", "in", "then", "{", "!", "[[", "time", "select", "function"))
         script = name + "() { echo body; }; echo \"def=$?\""
-    elif shape == "return-outside":
-        script = "return 3; echo after; echo \"$?\""
-    elif shape == "return-sourced":
-        script = "printf 'echo in; return 7; echo never\\n' > src; . ./src; echo \"$?\"; f() { . ./src; echo tail; }; f; echo \"$?\""
-    elif shape == "local-outside":
-        script = "local v=1; echo \"$?\""
-    elif shape == "declare-f":
-        script = "f() { echo a; }; declare -F f; declare -f f | head -1; declare -F missing; echo \"$?\""
-    elif shape == "export-f":
-        script = "f() { echo exported; }; export -f f; bash -c f; /bin/sh -c 'f 2>/dev/null || echo none'"
-    elif shape == "readonly-f":
-        script = "f() { echo a; }; readonly -f f; unset -f f 2>/dev/null; echo \"$?\"; f() { echo b; } 2>/dev/null; echo \"$?\"; f"
     elif shape == "name-dash":
         script = rng.choice(("f-g", "f.g", "f:g", "_f", "f2", "1f", "f=g", "a/b")) + "() { echo body; }; echo \"def=$?\""
-    elif shape == "body-subshell":
-        script = "f() ( x=in; echo $x ); x=out; f; echo $x"
     else:
         script = "f() { echo a; }; f; f() { :; }; f; echo $?"
     bash_only = shape in ("keyword", "keyword-parens", "funcname", "caller", "declare-f", "export-f", "readonly-f",
@@ -16987,39 +16899,29 @@ def shell_lang_subshells(rng):
     shape = rng.choice(("var-isolation", "cd-isolation", "exit-status", "pid", "bashpid", "trap-inherit", "errexit",
                         "nested", "positional", "option-isolation", "function-isolation", "umask", "fd-isolation",
                         "command-subst-side", "background-subshell", "exit-in-subst", "subshell-level"))
-    if shape == "var-isolation":
-        script = "x=out; (x=in; echo $x); echo $x; (unset x); echo ${x-unset}"
-    elif shape == "cd-isolation":
-        script = "(cd / && pwd); pwd | wc -c"
+    script_by_shape = {
+        "var-isolation": "x=out; (x=in; echo $x); echo $x; (unset x); echo ${x-unset}",
+        "cd-isolation": "(cd / && pwd); pwd | wc -c",
+        "pid": "a=$$; b=$( echo $$ ); c=$( ( echo $$ ) ); [ \"$a\" = \"$b\" ] && [ \"$a\" = \"$c\" ] && echo same",
+        "bashpid": "[ \"$BASHPID\" = \"$$\" ] && echo same; ( [ \"$BASHPID\" != \"$$\" ] && echo differs ); echo $BASH_SUBSHELL; (echo $BASH_SUBSHELL; (echo $BASH_SUBSHELL))",
+        "trap-inherit": "trap 'echo exit-trap' EXIT; (echo sub); (trap 'echo sub-exit' EXIT; :); echo main",
+        "errexit": "set -e; (false; echo never); echo after",
+        "positional": "set -- a b; (set -- c; echo $#); echo $#",
+        "option-isolation": "(set -e; set -f; echo \"$-\"); echo \"$-\"",
+        "function-isolation": "(f() { echo in; }; f); f 2>/dev/null; echo \"$?\"",
+        "umask": "umask 022; (umask 077; umask); umask",
+        "fd-isolation": "(exec 3>out; echo x >&3); echo y >&3 2>/dev/null; echo \"$?\"; cat out",
+        "command-subst-side": "x=1; v=$(x=2; echo $x); echo \"$x $v\"; y=$(cd /; pwd); echo \"$y\" | wc -c",
+        "background-subshell": "(sleep 0.1; echo bg) & wait; echo done",
+        "exit-in-subst": "v=$(echo out; exit 7); echo \"$? <$v>\"",
+    }
+    if shape in script_by_shape:
+        script = script_by_shape[shape]
     elif shape == "exit-status":
         script = "(exit %d); echo $?; (false); echo $?; (true; false); echo $?; ( : ); echo $?" % rng.randrange(0, 300)
-    elif shape == "pid":
-        script = "a=$$; b=$( echo $$ ); c=$( ( echo $$ ) ); [ \"$a\" = \"$b\" ] && [ \"$a\" = \"$c\" ] && echo same"
-    elif shape == "bashpid":
-        script = "[ \"$BASHPID\" = \"$$\" ] && echo same; ( [ \"$BASHPID\" != \"$$\" ] && echo differs ); echo $BASH_SUBSHELL; (echo $BASH_SUBSHELL; (echo $BASH_SUBSHELL))"
-    elif shape == "trap-inherit":
-        script = "trap 'echo exit-trap' EXIT; (echo sub); (trap 'echo sub-exit' EXIT; :); echo main"
-    elif shape == "errexit":
-        script = "set -e; (false; echo never); echo after"
     elif shape == "nested":
         depth = rng.randrange(1, 6)
         script = "( " * depth + "echo deep; exit 3" + " )" * depth + "; echo $?"
-    elif shape == "positional":
-        script = "set -- a b; (set -- c; echo $#); echo $#"
-    elif shape == "option-isolation":
-        script = "(set -e; set -f; echo \"$-\"); echo \"$-\""
-    elif shape == "function-isolation":
-        script = "(f() { echo in; }; f); f 2>/dev/null; echo \"$?\""
-    elif shape == "umask":
-        script = "umask 022; (umask 077; umask); umask"
-    elif shape == "fd-isolation":
-        script = "(exec 3>out; echo x >&3); echo y >&3 2>/dev/null; echo \"$?\"; cat out"
-    elif shape == "command-subst-side":
-        script = "x=1; v=$(x=2; echo $x); echo \"$x $v\"; y=$(cd /; pwd); echo \"$y\" | wc -c"
-    elif shape == "background-subshell":
-        script = "(sleep 0.1; echo bg) & wait; echo done"
-    elif shape == "exit-in-subst":
-        script = "v=$(echo out; exit 7); echo \"$? <$v>\""
     else:
         script = "echo ${BASH_SUBSHELL-none}; (echo ${BASH_SUBSHELL-none}); echo $(echo ${BASH_SUBSHELL-none})"
     bash_only = shape in ("bashpid", "subshell-level")
@@ -17031,56 +16933,35 @@ def shell_lang_background_wait(rng):
                         "wait-table", "wait-invalid", "stdin-devnull", "stdin-override", "ignores-int", "pipeline-status",
                         "pipeline-pipefail", "signal-status", "interrupted-wait", "wait-n", "wait-n-ids", "wait-f", "wait-p", "monitor-flag",
                         "dollar-bang", "nounset-bang", "many-jobs", "wait-job-spec", "kill-job-spec"))
-    if shape == "wait-all":
-        script = "true & false & wait; echo \"$?\""
-    elif shape == "wait-pid":
-        script = "(exit 7) & wait $!; echo \"$?\""
-    elif shape == "pid-numeric":
-        script = "sleep 0 & p=$!; case $p in ''|*[!0-9]*) echo bad;; *) echo pid;; esac; wait \"$p\"; echo \"$?\""
-    elif shape == "retained-status":
-        script = "(exit 7) & p=$!; sleep 0.1; wait \"$p\"; echo \"$?\""
-    elif shape == "wait-many":
-        script = "(exit 3) & a=$!; (exit 7) & b=$!; wait \"$a\" \"$b\"; echo \"$?\"; wait \"$b\" \"$a\"; echo \"$?\""
-    elif shape == "wait-unknown":
-        script = "wait 999999; echo \"$?\"; wait nope; echo \"$?\"; wait -1; echo \"$?\""
-    elif shape == "wait-consumed":
-        script = "(exit 0) & p=$!; wait \"$p\"; wait \"$p\"; echo \"$?\""
-    elif shape == "wait-table":
-        script = "sleep 0.1 & p=$!; (wait \"$p\"; echo sub:$?); wait \"$p\"; echo parent:$?"
-    elif shape == "wait-invalid":
-        script = "sleep 0.05 & p=$!; wait \"$p\" bad 2>/dev/null; echo \"first:$?\"; wait \"$p\"; echo \"second:$?\""
-    elif shape == "stdin-devnull":
-        script = "read stolen &\np=$!\nwait \"$p\"\necho \"read:$?\"\necho after"
-    elif shape == "stdin-override":
-        script = "printf 'given\\n' > in; read v < in & wait $!; echo \"$?\""
-    elif shape == "ignores-int":
-        script = "for s in INT QUIT; do (sleep 0.1; echo \"$s-survived\") & p=$!; sleep 0.02; kill -$s $p; wait $p; echo \"$?\"; done"
-    elif shape == "pipeline-status":
-        script = "false | (exit 7) & p=$!; wait \"$p\"; echo \"$?\""
-    elif shape == "pipeline-pipefail":
-        script = "set -o pipefail; false | true & p=$!; wait \"$p\"; echo \"$?\""
-    elif shape == "signal-status":
-        script = "sh -c 'kill -TERM $$' & p=$!; sleep 0.1; wait \"$p\"; echo \"$?\"; sleep 1 & kill -KILL $!; wait $!; echo \"$?\""
-    elif shape == "interrupted-wait":
-        script = "trap 'echo usr1' USR1; (sleep 0.1; kill -USR1 $$) & sleep 0.5 & t=$!; wait \"$t\"; echo \"w=$?\"; wait; echo done"
-    elif shape == "wait-n":
-        script = "(exit 3) & (exit 5) & wait -n; echo \"n=$?\"; wait -n; echo \"n=$?\"; wait -n; echo \"n=$?\""
-    elif shape == "wait-n-ids":
-        script = "(sleep 0.2; exit 3) & s=$!; (exit 5) & wait -n \"$s\"; echo \"n=$?\""
-    elif shape == "wait-f":
-        script = "sleep 0.2 & p=$!; wait -f \"$p\"; echo \"$?\""
-    elif shape == "wait-p":
-        script = "(exit 4) & wait -n -p named; echo \"$?:${named:+set}\""
-    elif shape == "monitor-flag":
-        script = "case $- in *m*) echo on;; *) echo off;; esac; set -m; case $- in *m*) echo on;; *) echo off;; esac; set +m"
-    elif shape == "dollar-bang":
-        script = "echo \"[$!]\"; true & echo \"${!:+set}\"; wait; echo \"${!:+set}\""
-    elif shape == "nounset-bang":
-        script = "set -u; echo \"[$!]\"; echo \"$?\""
-    elif shape == "many-jobs":
-        script = "for i in 1 2 3 4 5 6 7 8; do (exit $i) & done; wait; echo \"$?\"; wait; echo \"$?\""
-    elif shape == "wait-job-spec":
-        script = "set -m; sleep 0.2 & wait %1; echo \"$?\"; wait %9 2>/dev/null; echo \"$?\""
+    script_by_shape = {
+        "wait-all": "true & false & wait; echo \"$?\"",
+        "wait-pid": "(exit 7) & wait $!; echo \"$?\"",
+        "pid-numeric": "sleep 0 & p=$!; case $p in ''|*[!0-9]*) echo bad;; *) echo pid;; esac; wait \"$p\"; echo \"$?\"",
+        "retained-status": "(exit 7) & p=$!; sleep 0.1; wait \"$p\"; echo \"$?\"",
+        "wait-many": "(exit 3) & a=$!; (exit 7) & b=$!; wait \"$a\" \"$b\"; echo \"$?\"; wait \"$b\" \"$a\"; echo \"$?\"",
+        "wait-unknown": "wait 999999; echo \"$?\"; wait nope; echo \"$?\"; wait -1; echo \"$?\"",
+        "wait-consumed": "(exit 0) & p=$!; wait \"$p\"; wait \"$p\"; echo \"$?\"",
+        "wait-table": "sleep 0.1 & p=$!; (wait \"$p\"; echo sub:$?); wait \"$p\"; echo parent:$?",
+        "wait-invalid": "sleep 0.05 & p=$!; wait \"$p\" bad 2>/dev/null; echo \"first:$?\"; wait \"$p\"; echo \"second:$?\"",
+        "stdin-devnull": "read stolen &\np=$!\nwait \"$p\"\necho \"read:$?\"\necho after",
+        "stdin-override": "printf 'given\\n' > in; read v < in & wait $!; echo \"$?\"",
+        "ignores-int": "for s in INT QUIT; do (sleep 0.1; echo \"$s-survived\") & p=$!; sleep 0.02; kill -$s $p; wait $p; echo \"$?\"; done",
+        "pipeline-status": "false | (exit 7) & p=$!; wait \"$p\"; echo \"$?\"",
+        "pipeline-pipefail": "set -o pipefail; false | true & p=$!; wait \"$p\"; echo \"$?\"",
+        "signal-status": "sh -c 'kill -TERM $$' & p=$!; sleep 0.1; wait \"$p\"; echo \"$?\"; sleep 1 & kill -KILL $!; wait $!; echo \"$?\"",
+        "interrupted-wait": "trap 'echo usr1' USR1; (sleep 0.1; kill -USR1 $$) & sleep 0.5 & t=$!; wait \"$t\"; echo \"w=$?\"; wait; echo done",
+        "wait-n": "(exit 3) & (exit 5) & wait -n; echo \"n=$?\"; wait -n; echo \"n=$?\"; wait -n; echo \"n=$?\"",
+        "wait-n-ids": "(sleep 0.2; exit 3) & s=$!; (exit 5) & wait -n \"$s\"; echo \"n=$?\"",
+        "wait-f": "sleep 0.2 & p=$!; wait -f \"$p\"; echo \"$?\"",
+        "wait-p": "(exit 4) & wait -n -p named; echo \"$?:${named:+set}\"",
+        "monitor-flag": "case $- in *m*) echo on;; *) echo off;; esac; set -m; case $- in *m*) echo on;; *) echo off;; esac; set +m",
+        "dollar-bang": "echo \"[$!]\"; true & echo \"${!:+set}\"; wait; echo \"${!:+set}\"",
+        "nounset-bang": "set -u; echo \"[$!]\"; echo \"$?\"",
+        "many-jobs": "for i in 1 2 3 4 5 6 7 8; do (exit $i) & done; wait; echo \"$?\"; wait; echo \"$?\"",
+        "wait-job-spec": "set -m; sleep 0.2 & wait %1; echo \"$?\"; wait %9 2>/dev/null; echo \"$?\"",
+    }
+    if shape in script_by_shape:
+        script = script_by_shape[shape]
     else:
         script = "set -m; sleep 2 & kill %1; wait %1; echo \"$?\"; sleep 2 & kill -s TERM %1; wait $!; echo \"$?\""
     bash_only = shape in ("wait-n", "wait-n-ids", "wait-f", "wait-p", "pipeline-pipefail")
@@ -17141,54 +17022,35 @@ def shell_lang_errexit_contexts(rng):
                           "loop-body", "elif", "last-in-and"))
     options = rng.choice(("set -e", "set -e", "set -e -o pipefail", "set -e; shopt -s inherit_errexit", "set +e", "set -eE"))
     body = failing
-    if context == "if-cond":
-        body = "if " + failing + "; then echo T; else echo F; fi"
-    elif context == "while-cond":
-        body = "while " + failing + "; do echo W; break; done"
-    elif context == "until-cond":
-        body = "until " + failing + "; do echo U; break; done"
-    elif context == "and-left":
-        body = failing + " && echo and"
-    elif context == "and-right":
-        body = "true && " + failing
-    elif context == "or-left":
-        body = failing + " || echo or"
-    elif context == "or-right":
-        body = "false || " + failing
-    elif context == "negated":
-        body = "! " + failing
-    elif context == "pipeline-left":
-        body = failing + " | cat"
-    elif context == "pipeline-right":
-        body = "echo x | " + failing
-    elif context == "function-body":
-        body = "g() { " + failing + "; echo in-g; }; g"
-    elif context == "function-tested":
-        body = "g() { " + failing + "; echo in-g; }; g || echo caught; if g; then :; fi"
-    elif context == "subshell":
-        body = "( " + failing + "; echo in-sub )"
-    elif context == "subshell-tested":
-        body = "( " + failing + "; echo in-sub ) || echo caught"
-    elif context == "group":
-        body = "{ " + failing + "; echo in-group; }"
-    elif context == "group-tested":
-        body = "{ " + failing + "; echo in-group; } || echo caught"
-    elif context == "subst-assign":
-        body = "v=$(" + failing + "; echo sub); echo \"v=$v\""
-    elif context == "subst-word":
-        body = "echo \"[$(" + failing + "; echo sub)]\""
-    elif context == "case-word":
-        body = "case $(" + failing + "; echo w) in w) echo w;; esac"
-    elif context == "for-word":
-        body = "for i in $(" + failing + "; echo a b); do echo $i; done"
+    body_by_context = {
+        "if-cond": "if " + failing + "; then echo T; else echo F; fi",
+        "while-cond": "while " + failing + "; do echo W; break; done",
+        "until-cond": "until " + failing + "; do echo U; break; done",
+        "and-left": failing + " && echo and",
+        "and-right": "true && " + failing,
+        "or-left": failing + " || echo or",
+        "or-right": "false || " + failing,
+        "negated": "! " + failing,
+        "pipeline-left": failing + " | cat",
+        "pipeline-right": "echo x | " + failing,
+        "function-body": "g() { " + failing + "; echo in-g; }; g",
+        "function-tested": "g() { " + failing + "; echo in-g; }; g || echo caught; if g; then :; fi",
+        "subshell": "( " + failing + "; echo in-sub )",
+        "subshell-tested": "( " + failing + "; echo in-sub ) || echo caught",
+        "group": "{ " + failing + "; echo in-group; }",
+        "group-tested": "{ " + failing + "; echo in-group; } || echo caught",
+        "subst-assign": "v=$(" + failing + "; echo sub); echo \"v=$v\"",
+        "subst-word": "echo \"[$(" + failing + "; echo sub)]\"",
+        "case-word": "case $(" + failing + "; echo w) in w) echo w;; esac",
+        "for-word": "for i in $(" + failing + "; echo a b); do echo $i; done",
+        "trap-exit": "trap 'echo \"exit:$?\"' EXIT; " + failing,
+        "loop-body": "for i in 1 2; do " + failing + "; echo body-$i; done",
+        "elif": "if false; then :; elif " + failing + "; then echo T; else echo F; fi",
+    }
+    if context in body_by_context:
+        body = body_by_context[context]
     elif context == "eval":
         body = "eval " + shell_quote(failing)
-    elif context == "trap-exit":
-        body = "trap 'echo \"exit:$?\"' EXIT; " + failing
-    elif context == "loop-body":
-        body = "for i in 1 2; do " + failing + "; echo body-$i; done"
-    elif context == "elif":
-        body = "if false; then :; elif " + failing + "; then echo T; else echo F; fi"
     else:
         body = "true && " + failing + " && echo last"
     bash_only = "shopt" in options or "pipefail" in options or "-eE" in options or failing in ("local x=$(false)", "declare x=$(false)", "let 0", "(( 0 ))", "[[ a == b ]]")
@@ -17273,28 +17135,22 @@ def shell_lang_nounset_forms(rng):
     context = rng.choice(("echo", "assign", "case", "for", "redirect", "heredoc", "arith", "dbl", "test", "function",
                           "subshell", "substitution"))
     setup = rng.choice(("unset x", "x=", "x=abc", "unset x; a=()", "unset x; a=(one)", "set -- p1"))
-    if context == "echo":
-        use = "echo \"[" + form + "]\""
-    elif context == "assign":
-        use = "v=" + form + "; echo \"[$v]\""
-    elif context == "case":
-        use = "case " + form + " in '') echo empty;; *) echo other;; esac"
-    elif context == "for":
-        use = "for i in " + form + "; do echo \"<$i>\"; done"
+    use_by_context = {
+        "echo": "echo \"[" + form + "]\"",
+        "assign": "v=" + form + "; echo \"[$v]\"",
+        "case": "case " + form + " in '') echo empty;; *) echo other;; esac",
+        "for": "for i in " + form + "; do echo \"<$i>\"; done",
+        "heredoc": "cat <<EOF\n[" + form + "]\nEOF",
+        "arith": "echo $(( ${x:-0} + 1 ))",
+        "dbl": "[[ -z " + form + " ]]; echo \"dbl=$?\"",
+        "test": "[ -z \"" + form + "\" ]; echo \"test=$?\"",
+        "subshell": "(echo \"[" + form + "]\"); echo \"sub=$?\"",
+        "substitution": "v=$(echo \"[" + form + "]\"); echo \"[$v] after=$?\"",
+    }
+    if context in use_by_context:
+        use = use_by_context[context]
     elif context == "redirect":
         use = "echo out > \"out" + form.replace("/", "_").replace("*", "s").replace("@", "a").replace("#", "n").replace("$", "d").replace("!", "b").replace(" ", "_") + "\" 2>/dev/null; ls | wc -l"
-    elif context == "heredoc":
-        use = "cat <<EOF\n[" + form + "]\nEOF"
-    elif context == "arith":
-        use = "echo $(( ${x:-0} + 1 ))"
-    elif context == "dbl":
-        use = "[[ -z " + form + " ]]; echo \"dbl=$?\""
-    elif context == "test":
-        use = "[ -z \"" + form + "\" ]; echo \"test=$?\""
-    elif context == "subshell":
-        use = "(echo \"[" + form + "]\"); echo \"sub=$?\""
-    elif context == "substitution":
-        use = "v=$(echo \"[" + form + "]\"); echo \"[$v] after=$?\""
     else:
         use = "g() { echo \"[" + form + "]\"; }; g; echo tail"
     #       The operators only bash has run under every personality: dash
@@ -17325,36 +17181,25 @@ def shell_lang_noclobber(rng):
 def shell_lang_allexport_noglob(rng):
     shape = rng.choice(("assign", "for", "read", "local", "arith", "default", "prefix", "special", "getopts", "unset-export",
                         "noglob-word", "noglob-quoted", "noglob-set-f", "noglob-toggle", "noglob-case", "noglob-redirect"))
-    if shape == "assign":
-        script = "set -a; v=1; /bin/sh -c 'echo \"${v-unset}\"'; set +a; w=2; /bin/sh -c 'echo \"${w-unset}\"'"
-    elif shape == "for":
-        script = "set -a; for i in x; do :; done; /bin/sh -c 'echo \"${i-unset}\"'"
-    elif shape == "read":
-        script = "set -a; echo val | { read r; /bin/sh -c 'echo \"${r-unset}\"'; }; echo val | read r2; /bin/sh -c 'echo \"${r2-unset}\"'"
-    elif shape == "local":
-        script = "set -a; f() { local l=1; /bin/sh -c 'echo \"${l-unset}\"'; }; f; /bin/sh -c 'echo \"${l-unset}\"'"
-    elif shape == "arith":
-        script = "set -a; : $((n = 7)); /bin/sh -c 'echo \"${n-unset}\"'"
-    elif shape == "default":
-        script = "set -a; unset d; : \"${d:=made}\"; /bin/sh -c 'echo \"${d-unset}\"'"
-    elif shape == "prefix":
-        script = "set -a; t=1 :; /bin/sh -c 'echo \"${t-unset}\"'; t2=1 true; /bin/sh -c 'echo \"${t2-unset}\"'"
-    elif shape == "special":
-        script = "set -a; IFS=:; export -p | grep -c IFS; PS1=x; export -p | grep -c PS1"
-    elif shape == "getopts":
-        script = "set -a; set -- -x; getopts x o; /bin/sh -c 'echo \"${o-unset}:${OPTIND-unset}\"'"
-    elif shape == "unset-export":
-        script = "set -a; v=1; unset v; v=2; export -p | grep -c ' v='"
-    elif shape == "noglob-word":
-        script = "set -f; echo *.txt a.tx?; set +f; echo *.txt"
-    elif shape == "noglob-quoted":
-        script = "set -o noglob; x='*.txt'; echo $x \"$x\"; set +o noglob; echo $x"
-    elif shape == "noglob-set-f":
-        script = "set -f; set -- *; echo \"$#\"; for f in *; do echo \"<$f>\"; done"
-    elif shape == "noglob-toggle":
-        script = "set -f; echo \"$-\"; set +f; echo \"$-\" | tr -d 'hBs'"
-    elif shape == "noglob-case":
-        script = "set -f; case a.txt in *.txt) echo match;; esac; case '*' in a*) echo a;; \\*) echo star;; esac"
+    script_by_shape = {
+        "assign": "set -a; v=1; /bin/sh -c 'echo \"${v-unset}\"'; set +a; w=2; /bin/sh -c 'echo \"${w-unset}\"'",
+        "for": "set -a; for i in x; do :; done; /bin/sh -c 'echo \"${i-unset}\"'",
+        "read": "set -a; echo val | { read r; /bin/sh -c 'echo \"${r-unset}\"'; }; echo val | read r2; /bin/sh -c 'echo \"${r2-unset}\"'",
+        "local": "set -a; f() { local l=1; /bin/sh -c 'echo \"${l-unset}\"'; }; f; /bin/sh -c 'echo \"${l-unset}\"'",
+        "arith": "set -a; : $((n = 7)); /bin/sh -c 'echo \"${n-unset}\"'",
+        "default": "set -a; unset d; : \"${d:=made}\"; /bin/sh -c 'echo \"${d-unset}\"'",
+        "prefix": "set -a; t=1 :; /bin/sh -c 'echo \"${t-unset}\"'; t2=1 true; /bin/sh -c 'echo \"${t2-unset}\"'",
+        "special": "set -a; IFS=:; export -p | grep -c IFS; PS1=x; export -p | grep -c PS1",
+        "getopts": "set -a; set -- -x; getopts x o; /bin/sh -c 'echo \"${o-unset}:${OPTIND-unset}\"'",
+        "unset-export": "set -a; v=1; unset v; v=2; export -p | grep -c ' v='",
+        "noglob-word": "set -f; echo *.txt a.tx?; set +f; echo *.txt",
+        "noglob-quoted": "set -o noglob; x='*.txt'; echo $x \"$x\"; set +o noglob; echo $x",
+        "noglob-set-f": "set -f; set -- *; echo \"$#\"; for f in *; do echo \"<$f>\"; done",
+        "noglob-toggle": "set -f; echo \"$-\"; set +f; echo \"$-\" | tr -d 'hBs'",
+        "noglob-case": "set -f; case a.txt in *.txt) echo match;; esac; case '*' in a*) echo a;; \\*) echo star;; esac",
+    }
+    if shape in script_by_shape:
+        script = script_by_shape[shape]
     else:
         script = "set -f; echo x > *.new; ls | grep -c new"
     return "allexport-noglob", shell_ALL, shell_program(": > a.txt; : > b.txt", script + " 2>/dev/null", "echo \"end=$?\"")
@@ -17406,36 +17251,26 @@ def shell_lang_special_parameters(rng):
         script = ("printf '<%s>' \"${" + name + ":+set}\"; " + name + "=changed 2>/dev/null; echo \"assign=$?\"; unset " + name +
                   " 2>/dev/null; echo \"unset=$?\"; printf '<%s>' \"${" + name + ":+set}\"; echo; readonly -p | grep -c \" " + name + "=\"")
         return "special-parameters-" + shape, shell_BASH, shell_program(script, "echo \"end=$?\"")
-    if shape == "status":
-        script = "true; echo $?; false; echo $?; (exit 255); echo $?; echo $(exit 2)$?; echo $?; { exit 0; }"
-    elif shape == "flags":
-        script = "printf '<%s>' \"$-\"; set -euxC; printf '<%s>' \"$-\"; set +exC; printf '<%s>' \"$-\"; echo"
-    elif shape == "count":
-        script = "echo $#; set -- a 'b c' ''; echo $# ${#} \"${#*}\" \"${#@}\""
-    elif shape == "zero":
-        script = "echo \"${0##*/}\" | sed 's/^-//'; (echo \"${0##*/}\" | sed 's/^-//'); f() { echo \"${0##*/}\" | sed 's/^-//'; }; f"
-    elif shape == "underscore":
-        script = "echo a b; echo \"$_\"; : x y; echo \"$_\"; echo \"${_-unset}\""
-    elif shape == "pid-stable":
-        script = "a=$$; (b=$$; [ \"$a\" = \"$b\" ] && echo same); c=$(echo $$); [ \"$a\" = \"$c\" ] && echo same2; [ \"$$\" -gt 1 ] && echo positive"
-    elif shape == "bang":
-        script = "echo \"[$!]\"; true & p=$!; wait; echo \"[${!:+set}]\"; [ \"$p\" -gt 1 ] && echo pid"
+    script_by_shape = {
+        "status": "true; echo $?; false; echo $?; (exit 255); echo $?; echo $(exit 2)$?; echo $?; { exit 0; }",
+        "flags": "printf '<%s>' \"$-\"; set -euxC; printf '<%s>' \"$-\"; set +exC; printf '<%s>' \"$-\"; echo",
+        "count": "echo $#; set -- a 'b c' ''; echo $# ${#} \"${#*}\" \"${#@}\"",
+        "zero": "echo \"${0##*/}\" | sed 's/^-//'; (echo \"${0##*/}\" | sed 's/^-//'); f() { echo \"${0##*/}\" | sed 's/^-//'; }; f",
+        "underscore": "echo a b; echo \"$_\"; : x y; echo \"$_\"; echo \"${_-unset}\"",
+        "pid-stable": "a=$$; (b=$$; [ \"$a\" = \"$b\" ] && echo same); c=$(echo $$); [ \"$a\" = \"$c\" ] && echo same2; [ \"$$\" -gt 1 ] && echo positive",
+        "bang": "echo \"[$!]\"; true & p=$!; wait; echo \"[${!:+set}]\"; [ \"$p\" -gt 1 ] && echo pid",
+        "at-empty": "set --; printf '<%s>' \"$@\" \"${@}\" \"$*\" \"${@-none}\" \"${*-none}\" \"${@:-none}\"; echo; for x in \"$@\"; do echo never; done",
+        "at-splice": "set -- '' x; for v in pre\"$@\"post; do printf '<%s>' \"$v\"; done; echo; set --; for v in pre\"$@\"post; do printf '<%s>' \"$v\"; done; echo",
+        "shift-forms": "set -- a b c d; shift; echo $1; shift 2; echo $1 $#; shift 5; echo \"$?\"; shift 0; echo \"$?\"; shift -1; echo \"$?\"; shift bad; echo \"$?\"",
+        "set-dash": "set -- -x -y; echo $1 $2; set -- ; echo $#; set --; set -- -- a; echo $1 $2",
+        "set-forms": "set a b; echo $#; set -; echo $#; set -- \"\" ; echo $#; set +e -- q; echo $# $1",
+        "positional-high": "set -- 1 2 3 4 5 6 7 8 9 10 11 12; echo ${10} ${11} $10 ${12} ${13-none} \"${#}\"",
+        "count-after-set": "f() { echo $#; set -- x y z; echo $#; }; set -- a; f b c; echo $#",
+    }
+    if shape in script_by_shape:
+        script = script_by_shape[shape]
     elif shape == "star-ifs":
         script = "set -- a 'b c' d; IFS=" + shell_quote(rng.choice(("-", "", ":", " ", "xy"))) + "; printf '<%s>' \"$*\" $* \"$@\"; echo; unset IFS; printf '<%s>' \"$*\"; echo"
-    elif shape == "at-empty":
-        script = "set --; printf '<%s>' \"$@\" \"${@}\" \"$*\" \"${@-none}\" \"${*-none}\" \"${@:-none}\"; echo; for x in \"$@\"; do echo never; done"
-    elif shape == "at-splice":
-        script = "set -- '' x; for v in pre\"$@\"post; do printf '<%s>' \"$v\"; done; echo; set --; for v in pre\"$@\"post; do printf '<%s>' \"$v\"; done; echo"
-    elif shape == "shift-forms":
-        script = "set -- a b c d; shift; echo $1; shift 2; echo $1 $#; shift 5; echo \"$?\"; shift 0; echo \"$?\"; shift -1; echo \"$?\"; shift bad; echo \"$?\""
-    elif shape == "set-dash":
-        script = "set -- -x -y; echo $1 $2; set -- ; echo $#; set --; set -- -- a; echo $1 $2"
-    elif shape == "set-forms":
-        script = "set a b; echo $#; set -; echo $#; set -- \"\" ; echo $#; set +e -- q; echo $# $1"
-    elif shape == "positional-high":
-        script = "set -- 1 2 3 4 5 6 7 8 9 10 11 12; echo ${10} ${11} $10 ${12} ${13-none} \"${#}\""
-    elif shape == "count-after-set":
-        script = "f() { echo $#; set -- x y z; echo $#; }; set -- a; f b c; echo $#"
     else:
         script = "set -o | grep -c ' on' > /dev/null; set -- ; echo \"$-\" | wc -c"
     return "special-parameters-" + shape, shell_BASH if shape == "underscore" else shell_ALL, shell_program(script + " 2>/dev/null", "echo \"end=$?\"")
@@ -17569,26 +17404,22 @@ def shell_lang_reserved_words(rng):
                        "function", "select", "time", "[[", "]]", "coproc", "&&", ";;", "((", "))"))
     position = rng.choice(("argument", "assignment-value", "quoted-command", "escaped-command", "case-pattern", "for-name", "function-name",
                            "after-pipe", "after-semicolon", "heredoc-body", "alias-target", "variable-name"))
-    if position == "argument":
-        script = "echo " + word + " x"
-    elif position == "assignment-value":
-        script = "x=" + word + "; echo \"$x\""
-    elif position == "quoted-command":
-        script = "'" + word + "' 2>/dev/null; echo \"$?\""
+    script_by_position = {
+        "argument": "echo " + word + " x",
+        "assignment-value": "x=" + word + "; echo \"$x\"",
+        "quoted-command": "'" + word + "' 2>/dev/null; echo \"$?\"",
+        "for-name": "for " + word + " in a; do echo body; done",
+        "function-name": word + "() { echo body; }; echo \"def=$?\"",
+        "after-pipe": "echo x | " + word + " 2>/dev/null; echo \"$?\"",
+        "after-semicolon": "echo a; " + word + " 2>/dev/null; echo \"$?\"",
+        "heredoc-body": "cat <<EOF\n" + word + "\nEOF",
+    }
+    if position in script_by_position:
+        script = script_by_position[position]
     elif position == "escaped-command":
         script = "\\" + word[0] + word[1:] + " 2>/dev/null; echo \"$?\""
     elif position == "case-pattern":
         script = "case " + word + " in " + word.replace("(", "\\(").replace(")", "\\)").replace("[", "\\[").replace("|", "\\|") + ") echo match;; *) echo no;; esac"
-    elif position == "for-name":
-        script = "for " + word + " in a; do echo body; done"
-    elif position == "function-name":
-        script = word + "() { echo body; }; echo \"def=$?\""
-    elif position == "after-pipe":
-        script = "echo x | " + word + " 2>/dev/null; echo \"$?\""
-    elif position == "after-semicolon":
-        script = "echo a; " + word + " 2>/dev/null; echo \"$?\""
-    elif position == "heredoc-body":
-        script = "cat <<EOF\n" + word + "\nEOF"
     elif position == "alias-target":
         script = "alias w=" + shell_quote(word) + "; echo defined"
     else:
@@ -17601,17 +17432,24 @@ def shell_lang_reader_boundaries(rng):
     shape = rng.choice(("long-line", "many-lines", "no-final-newline", "crlf", "nul", "deep-parens", "deep-braces", "long-pipeline",
                         "many-redirects", "backslash-eof", "quote-eof", "heredoc-eof", "long-word", "long-heredoc", "many-heredocs",
                         "long-comment", "boundary-4096", "boundary-65536", "empty-lines", "only-comment", "trailing-spaces"))
-    if shape == "long-line":
+    script_by_shape = {
+        "crlf": "echo one\r\necho two\r",
+        "nul": "printf 'echo one\\necho \\0two\\necho three\\n' > nul.sh; sh ./nul.sh; echo \"file=$?\"",
+        "long-word": "printf '%s\\n' " + "w" * 50000 + " | wc -c",
+        "long-comment": "# " + "c" * 70000 + "\necho after",
+        "boundary-65536": "echo start\n: " + "b" * 65530 + "\necho after",
+        "empty-lines": "\n\n\necho one\n\n\n\necho two\n\n",
+        "only-comment": "# nothing here",
+    }
+    if shape in script_by_shape:
+        script = script_by_shape[shape]
+    elif shape == "long-line":
         n = rng.choice((4000, 4096, 4097, 8191, 70000))
         script = "x=" + "a" * n + "; echo ${#x}"
     elif shape == "many-lines":
         script = "\n".join("i=%d" % k for k in range(rng.choice((500, 2000)))) + "\necho $i"
     elif shape == "no-final-newline":
         return "reader-no-final-newline", shell_ALL, "echo one\necho two"
-    elif shape == "crlf":
-        script = "echo one\r\necho two\r"
-    elif shape == "nul":
-        script = "printf 'echo one\\necho \\0two\\necho three\\n' > nul.sh; sh ./nul.sh; echo \"file=$?\""
     elif shape == "deep-parens":
         depth = rng.choice((10, 50, 150))
         script = "echo " + "$(" * depth + "echo deep" + ")" * depth
@@ -17633,25 +17471,15 @@ def shell_lang_reader_boundaries(rng):
         return "reader-quote-eof", shell_ALL, "echo one\necho \"open"
     elif shape == "heredoc-eof":
         return "reader-heredoc-eof", shell_ALL, "echo one\ncat <<EOF\nbody\n"
-    elif shape == "long-word":
-        script = "printf '%s\\n' " + "w" * 50000 + " | wc -c"
     elif shape == "long-heredoc":
         lines = rng.choice((1000, 1800, 4000))
         script = "cat <<EOF | wc -l\n" + "\n".join("line %d" % k for k in range(lines)) + "\nEOF"
     elif shape == "many-heredocs":
         count = rng.choice((9, 40))
         script = " ".join("cat <<E%d;" % k for k in range(count)) + " :\n" + "".join("body%d\nE%d\n" % (k, k) for k in range(count))
-    elif shape == "long-comment":
-        script = "# " + "c" * 70000 + "\necho after"
     elif shape == "boundary-4096":
         pad = 4096 - len("echo start\n") - len("echo ") - 1
         script = "echo start\necho " + "b" * pad + "\necho after"
-    elif shape == "boundary-65536":
-        script = "echo start\n: " + "b" * 65530 + "\necho after"
-    elif shape == "empty-lines":
-        script = "\n\n\necho one\n\n\n\necho two\n\n"
-    elif shape == "only-comment":
-        script = "# nothing here"
     else:
         script = "echo one   \necho two\t\t\n   \n\t\necho three"
     modes = shell_BASH if "PIPESTATUS" in script else shell_ALL
@@ -17663,44 +17491,29 @@ def shell_lang_dot_source(rng):
                         "cwd-fallback", "sourcepath-off", "nested", "set-persists", "shift-inside", "syntax-error", "source-word",
                         "no-operand", "option-end", "dev-stdin", "relative-dot", "unreadable"))
     files = "printf 'echo in:$#:${1-none}; v=set\\n' > f; printf 'return 7; echo never\\n' > r; printf 'set -- replaced\\n' > s; mkdir -p d; printf 'echo pathfile\\n' > d/p; printf 'echo local\\n' > p; printf 'echo \"unclosed\\n' > bad"
-    if shape == "plain":
-        script = ". ./f; echo \"$v\""
-    elif shape == "args":
-        script = "set -- outer; . ./f a 'b c'; echo \"$#:$1\""
-    elif shape == "return":
-        script = ". ./r; echo \"$?\""
-    elif shape == "return-in-function":
-        script = "g() { . ./r; echo tail; }; g; echo \"$?\""
-    elif shape == "break-in-loop":
-        script = "printf 'break\\n' > b; for i in 1 2; do . ./b; echo never; done; echo \"$?\""
-    elif shape == "missing":
-        script = ". ./missing; echo after"
-    elif shape == "missing-command":
-        script = "command . ./missing; echo \"after:$?\""
-    elif shape == "path-search":
-        script = "PATH=$PWD/d:$PATH; . p; echo \"$?\""
-    elif shape == "cwd-fallback":
-        script = "PATH=/nonexistent; . p 2>/dev/null; echo \"$?\"; . ./p"
-    elif shape == "sourcepath-off":
-        script = "shopt -u sourcepath; PATH=$PWD/d:$PATH; . p; echo \"$?\""
-    elif shape == "nested":
-        script = "printf '. ./f nested\\n' > n; . ./n outer; echo \"$#\""
-    elif shape == "set-persists":
-        script = "set -- a b; . ./s; echo \"$#:$1\""
-    elif shape == "shift-inside":
-        script = "printf 'shift\\n' > sh1; set -- a b c; . ./sh1; echo \"$#:$1\""
-    elif shape == "syntax-error":
-        script = ". ./bad; echo \"after:$?\""
-    elif shape == "source-word":
-        script = "source ./f x; echo \"$v\""
-    elif shape == "no-operand":
-        script = ".; echo \"status:$?\""
-    elif shape == "option-end":
-        script = ". -- ./f; echo \"$?\"; . -x ./f; echo \"$?\""
-    elif shape == "dev-stdin":
-        script = "printf 'echo from-stdin\\n' | { . /dev/stdin; echo \"$?\"; }"
-    elif shape == "relative-dot":
-        script = "cd d && . ./p; echo \"$?\""
+    script_by_shape = {
+        "plain": ". ./f; echo \"$v\"",
+        "args": "set -- outer; . ./f a 'b c'; echo \"$#:$1\"",
+        "return": ". ./r; echo \"$?\"",
+        "return-in-function": "g() { . ./r; echo tail; }; g; echo \"$?\"",
+        "break-in-loop": "printf 'break\\n' > b; for i in 1 2; do . ./b; echo never; done; echo \"$?\"",
+        "missing": ". ./missing; echo after",
+        "missing-command": "command . ./missing; echo \"after:$?\"",
+        "path-search": "PATH=$PWD/d:$PATH; . p; echo \"$?\"",
+        "cwd-fallback": "PATH=/nonexistent; . p 2>/dev/null; echo \"$?\"; . ./p",
+        "sourcepath-off": "shopt -u sourcepath; PATH=$PWD/d:$PATH; . p; echo \"$?\"",
+        "nested": "printf '. ./f nested\\n' > n; . ./n outer; echo \"$#\"",
+        "set-persists": "set -- a b; . ./s; echo \"$#:$1\"",
+        "shift-inside": "printf 'shift\\n' > sh1; set -- a b c; . ./sh1; echo \"$#:$1\"",
+        "syntax-error": ". ./bad; echo \"after:$?\"",
+        "source-word": "source ./f x; echo \"$v\"",
+        "no-operand": ".; echo \"status:$?\"",
+        "option-end": ". -- ./f; echo \"$?\"; . -x ./f; echo \"$?\"",
+        "dev-stdin": "printf 'echo from-stdin\\n' | { . /dev/stdin; echo \"$?\"; }",
+        "relative-dot": "cd d && . ./p; echo \"$?\"",
+    }
+    if shape in script_by_shape:
+        script = script_by_shape[shape]
     else:
         script = "chmod 000 f; . ./f; echo \"after:$?\"; chmod 644 f"
     modes = shell_BASH if shape in ("sourcepath-off", "source-word") else shell_ALL
@@ -17711,44 +17524,29 @@ def shell_lang_eval_exec(rng):
     shape = rng.choice(("eval-join", "eval-quotes", "eval-status", "eval-syntax", "eval-empty", "eval-multiline", "eval-nested",
                         "exec-redirect", "exec-command", "exec-missing", "exec-nonexec", "exec-in-subshell", "exec-a", "exec-l",
                         "exec-c", "exec-with-assign", "exec-builtin", "exec-function", "exec-empty", "exec-dir"))
-    if shape == "eval-join":
-        script = "eval echo a b; eval 'echo' 'c d'; v='echo $x'; x=X; eval \"$v\""
-    elif shape == "eval-quotes":
-        script = "eval 'echo \"a  b\"'; eval \"echo 'c  d'\"; eval echo \\\"e f\\\""
-    elif shape == "eval-status":
-        script = "eval false; echo $?; eval 'exit 3' ; echo never"
-    elif shape == "eval-syntax":
-        script = "eval 'echo \"unclosed'; echo \"after:$?\""
-    elif shape == "eval-empty":
-        script = "false; eval; echo $?; eval ''; echo $?"
-    elif shape == "eval-multiline":
-        script = "eval 'echo one\necho two'"
-    elif shape == "eval-nested":
-        script = "eval eval eval echo deep; eval 'eval \"echo \\$x\"'"
-    elif shape == "exec-redirect":
-        script = "exec > out; echo captured; exec >&2 2>/dev/null; cat out 2>/dev/null"
-    elif shape == "exec-command":
-        script = "exec echo replaced; echo never"
-    elif shape == "exec-missing":
-        script = "exec nosuchcommand_xyz; echo never"
-    elif shape == "exec-nonexec":
-        script = "printf 'echo x\\n' > ne; chmod 600 ne; exec ./ne; echo never"
-    elif shape == "exec-in-subshell":
-        script = "(exec echo sub); echo after"
-    elif shape == "exec-a":
-        script = "exec -a named /bin/sh -c 'echo \"$0\"'"
-    elif shape == "exec-l":
-        script = "exec -l /bin/sh -c 'echo \"$0\"' | sed 's/^-//'"
-    elif shape == "exec-c":
-        script = "x=1; export x; exec -c /usr/bin/env | wc -l"
-    elif shape == "exec-with-assign":
-        script = "v=1 exec /bin/sh -c 'echo \"${v-unset}\"'"
-    elif shape == "exec-builtin":
-        script = "exec echo builtin-word; echo never"
-    elif shape == "exec-function":
-        script = "f() { echo fn; }; exec f; echo after"
-    elif shape == "exec-empty":
-        script = "exec; echo \"$?\"; exec ''; echo \"$?\""
+    script_by_shape = {
+        "eval-join": "eval echo a b; eval 'echo' 'c d'; v='echo $x'; x=X; eval \"$v\"",
+        "eval-quotes": "eval 'echo \"a  b\"'; eval \"echo 'c  d'\"; eval echo \\\"e f\\\"",
+        "eval-status": "eval false; echo $?; eval 'exit 3' ; echo never",
+        "eval-syntax": "eval 'echo \"unclosed'; echo \"after:$?\"",
+        "eval-empty": "false; eval; echo $?; eval ''; echo $?",
+        "eval-multiline": "eval 'echo one\necho two'",
+        "eval-nested": "eval eval eval echo deep; eval 'eval \"echo \\$x\"'",
+        "exec-redirect": "exec > out; echo captured; exec >&2 2>/dev/null; cat out 2>/dev/null",
+        "exec-command": "exec echo replaced; echo never",
+        "exec-missing": "exec nosuchcommand_xyz; echo never",
+        "exec-nonexec": "printf 'echo x\\n' > ne; chmod 600 ne; exec ./ne; echo never",
+        "exec-in-subshell": "(exec echo sub); echo after",
+        "exec-a": "exec -a named /bin/sh -c 'echo \"$0\"'",
+        "exec-l": "exec -l /bin/sh -c 'echo \"$0\"' | sed 's/^-//'",
+        "exec-c": "x=1; export x; exec -c /usr/bin/env | wc -l",
+        "exec-with-assign": "v=1 exec /bin/sh -c 'echo \"${v-unset}\"'",
+        "exec-builtin": "exec echo builtin-word; echo never",
+        "exec-function": "f() { echo fn; }; exec f; echo after",
+        "exec-empty": "exec; echo \"$?\"; exec ''; echo \"$?\"",
+    }
+    if shape in script_by_shape:
+        script = script_by_shape[shape]
     else:
         script = "exec /tmp; echo never"
     modes = shell_BASH if shape in ("exec-a", "exec-l", "exec-c") else shell_ALL
@@ -17759,24 +17557,19 @@ def shell_lang_exit_forms(rng):
     operand = rng.choice(("", "0", "1", "3", "255", "256", "257", "300", "-1", "+7", " 3 ", "9223372036854775807", "9223372036854775808",
                           "-9223372036854775808", "bad", "1 2", "bad 2", "--", "-- 7", "0x10", "010", "1.5", "''", "\"\""))
     where = rng.choice(("top", "subshell", "function", "subst", "pipeline", "trap", "group", "and-or", "after-false", "command"))
-    if where == "top":
-        script = "exit " + operand + "; echo never"
-    elif where == "subshell":
-        script = "(exit " + operand + "); echo \"$?\""
-    elif where == "function":
-        script = "f() { exit " + operand + "; }; f; echo never"
-    elif where == "subst":
-        script = "v=$(exit " + operand + "); echo \"$?\""
-    elif where == "pipeline":
-        script = "exit " + operand + " | cat; echo \"$?\""
-    elif where == "trap":
-        script = "trap 'echo \"trap:$?\"' EXIT; exit " + operand
-    elif where == "group":
-        script = "{ exit " + operand + "; }; echo never"
-    elif where == "and-or":
-        script = "false || exit " + operand + "; echo never"
-    elif where == "after-false":
-        script = "false; exit " + operand
+    script_by_where = {
+        "top": "exit " + operand + "; echo never",
+        "subshell": "(exit " + operand + "); echo \"$?\"",
+        "function": "f() { exit " + operand + "; }; f; echo never",
+        "subst": "v=$(exit " + operand + "); echo \"$?\"",
+        "pipeline": "exit " + operand + " | cat; echo \"$?\"",
+        "trap": "trap 'echo \"trap:$?\"' EXIT; exit " + operand,
+        "group": "{ exit " + operand + "; }; echo never",
+        "and-or": "false || exit " + operand + "; echo never",
+        "after-false": "false; exit " + operand,
+    }
+    if where in script_by_where:
+        script = script_by_where[where]
     else:
         script = "command exit " + operand + "; echo \"after:$?\""
     return "exit-forms", shell_ALL, script + " 2>/dev/null\necho \"end=$?\"\n"
@@ -17786,42 +17579,33 @@ def shell_lang_select_time(rng):
     shape = rng.choice(("select-basic", "select-blank", "select-invalid", "select-eof", "select-ps3", "select-positional", "select-empty",
                         "select-continue", "select-layout", "time-format", "time-p", "time-status", "time-pipeline", "time-negate",
                         "time-background", "time-word", "time-empty-format", "time-nested"))
-    if shape == "select-basic":
+    script_by_shape = {
+        "select-blank": "select v in a b; do echo \"<$v>\"; break; done <<EOF\n\n2\nEOF",
+        "select-eof": "select v in a; do echo never; done < /dev/null; echo \"$?\"",
+        "select-ps3": "PS3='pick> '; select v in a; do break; done <<EOF\n1\nEOF",
+        "select-positional": "set -- x y; select v; do echo \"<$v>\"; break; done <<EOF\n2\nEOF",
+        "select-empty": "select v in; do echo never; done; echo \"$?\"; select v in $empty; do echo never; done; echo \"$?\"",
+        "select-continue": "select v in a b; do echo \"<$v>\"; [ \"$v\" = b ] && break; continue; done <<EOF\n1\n2\nEOF",
+        "time-p": "{ time -p true; } 2>&1 | sed 's/[0-9.]*$/N/'",
+        "time-status": "TIMEFORMAT=%0R; { time false; } 2>&1; echo \"$?\"; { time (exit 3); } 2>&1; echo \"$?\"",
+        "time-pipeline": "TIMEFORMAT=%0R; { time echo a | cat; } 2>&1",
+        "time-negate": "TIMEFORMAT=%0R; { ! time false; } 2>&1; echo \"$?\"; { time ! false; } 2>&1; echo \"$?\"",
+        "time-background": "TIMEFORMAT=%0R; { time :& } 2>&1; wait",
+        "time-word": "echo time; time=5; echo $time; for time in a; do echo $time; done",
+        "time-empty-format": "TIMEFORMAT=; { time :; } 2>&1 | wc -l",
+    }
+    if shape in script_by_shape:
+        script = script_by_shape[shape]
+    elif shape == "select-basic":
         script = "select v in a b 'c d'; do echo \"<$v:$REPLY>\"; break; done <<EOF\n%s\nEOF" % rng.choice(("1", "2", "3"))
-    elif shape == "select-blank":
-        script = "select v in a b; do echo \"<$v>\"; break; done <<EOF\n\n2\nEOF"
     elif shape == "select-invalid":
         script = "select v in a b; do echo \"<${v:-none}:$REPLY>\"; break; done <<EOF\n%s\nEOF" % rng.choice(("9", "q", " +2 ", "0", "-1"))
-    elif shape == "select-eof":
-        script = "select v in a; do echo never; done < /dev/null; echo \"$?\""
-    elif shape == "select-ps3":
-        script = "PS3='pick> '; select v in a; do break; done <<EOF\n1\nEOF"
-    elif shape == "select-positional":
-        script = "set -- x y; select v; do echo \"<$v>\"; break; done <<EOF\n2\nEOF"
-    elif shape == "select-empty":
-        script = "select v in; do echo never; done; echo \"$?\"; select v in $empty; do echo never; done; echo \"$?\""
-    elif shape == "select-continue":
-        script = "select v in a b; do echo \"<$v>\"; [ \"$v\" = b ] && break; continue; done <<EOF\n1\n2\nEOF"
     elif shape == "select-layout":
         items = " ".join("item%d" % k for k in range(rng.choice((3, 6, 10, 30))))
         script = "COLUMNS=%d; select v in %s; do break; done <<EOF\n1\nEOF" % (rng.choice((20, 80)), items)
     elif shape == "time-format":
         fmt = rng.choice(("%0R", "[%0R][%0U][%0S]", "%%", "end%", "x", "%0lR", "%2P", "a%%b", "%0R %0U %0S"))
         script = "TIMEFORMAT=" + shell_quote(fmt) + "; { time :; } 2>&1"
-    elif shape == "time-p":
-        script = "{ time -p true; } 2>&1 | sed 's/[0-9.]*$/N/'"
-    elif shape == "time-status":
-        script = "TIMEFORMAT=%0R; { time false; } 2>&1; echo \"$?\"; { time (exit 3); } 2>&1; echo \"$?\""
-    elif shape == "time-pipeline":
-        script = "TIMEFORMAT=%0R; { time echo a | cat; } 2>&1"
-    elif shape == "time-negate":
-        script = "TIMEFORMAT=%0R; { ! time false; } 2>&1; echo \"$?\"; { time ! false; } 2>&1; echo \"$?\""
-    elif shape == "time-background":
-        script = "TIMEFORMAT=%0R; { time :& } 2>&1; wait"
-    elif shape == "time-word":
-        script = "echo time; time=5; echo $time; for time in a; do echo $time; done"
-    elif shape == "time-empty-format":
-        script = "TIMEFORMAT=; { time :; } 2>&1 | wc -l"
     else:
         script = "TIMEFORMAT=%0R; { time time :; } 2>&1"
     return "select-time", shell_BASH, shell_program("empty=", script + " 2>/dev/null", "echo \"end=$?\"")
@@ -17834,64 +17618,39 @@ def shell_lang_lastpipe_pipestatus(rng):
                         "unset", "readonly-absent", "readonly-existing", "readonly-pipeline", "declare-p", "redirect-fail",
                         "final-redirect", "left-redirect", "lastpipe-redirect", "lastpipe-readonly", "three-stages", "negated"))
     pre = "set +m; shopt -s lastpipe; "
-    if shape == "builtin-final":
-        script = pre + "value=old; printf 'new\\n' | read value; printf '%s:%s:%s\\n' \"$value\" \"$?\" \"${PIPESTATUS[*]}\""
-    elif shape == "function-final":
-        script = pre + "f() { read value; mark=function; return 7; }; printf z | f; printf '%s:%s:%s:%s\\n' \"$value\" \"$mark\" \"$?\" \"${PIPESTATUS[*]}\""
-    elif shape == "group-pipefail":
-        script = pre + "set -o pipefail; false | { mark=group; true; }; printf '%s:%s:%s\\n' \"$mark\" \"$?\" \"${PIPESTATUS[*]}\""
-    elif shape == "bang":
-        script = pre + "! false | { mark=yes; false; }; printf '%s:%s:%s\\n' \"$mark\" \"$?\" \"${PIPESTATUS[*]}\""
-    elif shape == "monitor-disables":
-        script = "set -m; shopt -s lastpipe; value=old; printf 'new\\n' | read value; set +m; echo \"$value\""
-    elif shape == "background-disables":
-        script = pre + "value=old; printf 'new\\n' | read value & wait; echo \"$value\""
-    elif shape == "descriptor-restore":
-        script = pre + "printf x | { read x; echo \"$x\"; } > p; read y <<EOF\nstdin\nEOF\ncat p; echo \"$y\""
-    elif shape == "break-reaches":
-        script = pre + "for i in 1 2; do printf x | { read x; break; }; echo bad; done; echo break-ok"
-    elif shape == "errexit-final":
-        script = pre + "set -e; true | { false; echo forbidden; }; echo after"
-    elif shape == "tested-final":
-        script = pre + "set -e; true | { false; echo allowed; } || echo caught; echo after"
-    elif shape == "err-trap-final":
-        script = pre + "trap 'echo ERR:$?' ERR; true | { false; echo after-false; }; echo done"
-    elif shape == "exit-trap":
-        script = pre + "trap 'printf \"EXIT:%s:%s\\n\" \"$?\" \"${PIPESTATUS[*]}\"' EXIT; set -e; true | false"
-    elif shape == "closed-stdin":
-        script = pre + "exec 0<&-; printf x | read value; read after 2>/dev/null; if [ \"$?\" -ne 0 ]; then echo \"closed:$value\"; fi"
-    elif shape == "ordinary":
-        script = "false | true; printf '%s:%s:%s\\n' \"$?\" \"${PIPESTATUS[0]}\" \"${PIPESTATUS[1]}\""
-    elif shape == "external-final":
-        script = pre + "/bin/false | /bin/true; printf '%s:%s\\n' \"$?\" \"${PIPESTATUS[*]}\""
-    elif shape == "initial":
-        script = "printf '%s:%s:%s\\n' \"$PIPESTATUS\" \"${PIPESTATUS[*]}\" \"${#PIPESTATUS[@]}\""
-    elif shape == "simple-updates":
-        script = "false; printf '%s:%s:%s\\n' \"$?\" \"${PIPESTATUS[*]}\" \"${#PIPESTATUS[@]}\""
-    elif shape == "reset-by-assign":
-        script = "set -o pipefail; (exit 3) | (exit 7) | true; s=$?; printf '%s:%s:%s:%s\\n' \"$s\" \"${PIPESTATUS[0]}\" \"${PIPESTATUS[1]}\" \"${PIPESTATUS[2]}\""
-    elif shape == "collapse":
-        script = "false | true; :; printf '%s:%s:%s\\n' \"${!PIPESTATUS[*]}\" \"${PIPESTATUS[*]}\" \"${#PIPESTATUS[@]}\""
-    elif shape == "unset":
-        script = "unset PIPESTATUS; printf '%s:%s\\n' \"${PIPESTATUS[*]}\" \"${#PIPESTATUS[@]}\""
-    elif shape == "readonly-absent":
-        script = "readonly PIPESTATUS; false; printf '%s:%s\\n' \"${PIPESTATUS[*]}\" \"${#PIPESTATUS[@]}\""
-    elif shape == "readonly-existing":
-        script = "false | true; readonly PIPESTATUS; false; printf '%s:%s:%s\\n' \"${!PIPESTATUS[*]}\" \"${PIPESTATUS[*]}\" \"${#PIPESTATUS[@]}\""
-    elif shape == "readonly-pipeline":
-        script = "false; readonly PIPESTATUS; (exit 3) | (exit 7); printf '%s:%s\\n' \"${!PIPESTATUS[*]}\" \"${PIPESTATUS[*]}\""
-    elif shape == "declare-p":
-        script = "false | true; saved=$?; declare -p PIPESTATUS"
-    elif shape == "redirect-fail":
-        script = ": >/no/such/target 2>/dev/null; printf '%s\\n' \"$?\""
-    elif shape == "final-redirect":
-        script = "set -o pipefail; true | cat < /no/such/input 2>/dev/null; printf '%s:%s:%s\\n' \"$?\" \"${PIPESTATUS[0]}\" \"${PIPESTATUS[1]}\""
-    elif shape == "left-redirect":
-        script = "set -o pipefail; cat < /no/such/input 2>/dev/null | true; printf '%s:%s:%s\\n' \"$?\" \"${PIPESTATUS[0]}\" \"${PIPESTATUS[1]}\""
-    elif shape == "lastpipe-redirect":
-        script = pre + "value=old; true | read value < /no/such/input 2>/dev/null; printf '%s:%s:%s\\n' \"$?\" \"$value\" \"${PIPESTATUS[*]}\""
-    elif shape == "lastpipe-readonly":
-        script = pre + "readonly value=old; (trap '' PIPE; printf new 2>/dev/null; :) | read value 2>/dev/null; printf '%s:%s:%s\\n' \"$?\" \"$value\" \"${PIPESTATUS[*]}\""
+    script_by_shape = {
+        "builtin-final": pre + "value=old; printf 'new\\n' | read value; printf '%s:%s:%s\\n' \"$value\" \"$?\" \"${PIPESTATUS[*]}\"",
+        "function-final": pre + "f() { read value; mark=function; return 7; }; printf z | f; printf '%s:%s:%s:%s\\n' \"$value\" \"$mark\" \"$?\" \"${PIPESTATUS[*]}\"",
+        "group-pipefail": pre + "set -o pipefail; false | { mark=group; true; }; printf '%s:%s:%s\\n' \"$mark\" \"$?\" \"${PIPESTATUS[*]}\"",
+        "bang": pre + "! false | { mark=yes; false; }; printf '%s:%s:%s\\n' \"$mark\" \"$?\" \"${PIPESTATUS[*]}\"",
+        "monitor-disables": "set -m; shopt -s lastpipe; value=old; printf 'new\\n' | read value; set +m; echo \"$value\"",
+        "background-disables": pre + "value=old; printf 'new\\n' | read value & wait; echo \"$value\"",
+        "descriptor-restore": pre + "printf x | { read x; echo \"$x\"; } > p; read y <<EOF\nstdin\nEOF\ncat p; echo \"$y\"",
+        "break-reaches": pre + "for i in 1 2; do printf x | { read x; break; }; echo bad; done; echo break-ok",
+        "errexit-final": pre + "set -e; true | { false; echo forbidden; }; echo after",
+        "tested-final": pre + "set -e; true | { false; echo allowed; } || echo caught; echo after",
+        "err-trap-final": pre + "trap 'echo ERR:$?' ERR; true | { false; echo after-false; }; echo done",
+        "exit-trap": pre + "trap 'printf \"EXIT:%s:%s\\n\" \"$?\" \"${PIPESTATUS[*]}\"' EXIT; set -e; true | false",
+        "closed-stdin": pre + "exec 0<&-; printf x | read value; read after 2>/dev/null; if [ \"$?\" -ne 0 ]; then echo \"closed:$value\"; fi",
+        "ordinary": "false | true; printf '%s:%s:%s\\n' \"$?\" \"${PIPESTATUS[0]}\" \"${PIPESTATUS[1]}\"",
+        "external-final": pre + "/bin/false | /bin/true; printf '%s:%s\\n' \"$?\" \"${PIPESTATUS[*]}\"",
+        "initial": "printf '%s:%s:%s\\n' \"$PIPESTATUS\" \"${PIPESTATUS[*]}\" \"${#PIPESTATUS[@]}\"",
+        "simple-updates": "false; printf '%s:%s:%s\\n' \"$?\" \"${PIPESTATUS[*]}\" \"${#PIPESTATUS[@]}\"",
+        "reset-by-assign": "set -o pipefail; (exit 3) | (exit 7) | true; s=$?; printf '%s:%s:%s:%s\\n' \"$s\" \"${PIPESTATUS[0]}\" \"${PIPESTATUS[1]}\" \"${PIPESTATUS[2]}\"",
+        "collapse": "false | true; :; printf '%s:%s:%s\\n' \"${!PIPESTATUS[*]}\" \"${PIPESTATUS[*]}\" \"${#PIPESTATUS[@]}\"",
+        "unset": "unset PIPESTATUS; printf '%s:%s\\n' \"${PIPESTATUS[*]}\" \"${#PIPESTATUS[@]}\"",
+        "readonly-absent": "readonly PIPESTATUS; false; printf '%s:%s\\n' \"${PIPESTATUS[*]}\" \"${#PIPESTATUS[@]}\"",
+        "readonly-existing": "false | true; readonly PIPESTATUS; false; printf '%s:%s:%s\\n' \"${!PIPESTATUS[*]}\" \"${PIPESTATUS[*]}\" \"${#PIPESTATUS[@]}\"",
+        "readonly-pipeline": "false; readonly PIPESTATUS; (exit 3) | (exit 7); printf '%s:%s\\n' \"${!PIPESTATUS[*]}\" \"${PIPESTATUS[*]}\"",
+        "declare-p": "false | true; saved=$?; declare -p PIPESTATUS",
+        "redirect-fail": ": >/no/such/target 2>/dev/null; printf '%s\\n' \"$?\"",
+        "final-redirect": "set -o pipefail; true | cat < /no/such/input 2>/dev/null; printf '%s:%s:%s\\n' \"$?\" \"${PIPESTATUS[0]}\" \"${PIPESTATUS[1]}\"",
+        "left-redirect": "set -o pipefail; cat < /no/such/input 2>/dev/null | true; printf '%s:%s:%s\\n' \"$?\" \"${PIPESTATUS[0]}\" \"${PIPESTATUS[1]}\"",
+        "lastpipe-redirect": pre + "value=old; true | read value < /no/such/input 2>/dev/null; printf '%s:%s:%s\\n' \"$?\" \"$value\" \"${PIPESTATUS[*]}\"",
+        "lastpipe-readonly": pre + "readonly value=old; (trap '' PIPE; printf new 2>/dev/null; :) | read value 2>/dev/null; printf '%s:%s:%s\\n' \"$?\" \"$value\" \"${PIPESTATUS[*]}\"",
+    }
+    if shape in script_by_shape:
+        script = script_by_shape[shape]
     elif shape == "three-stages":
         script = "(exit %d) | (exit %d) | (exit %d); printf '%%s:%%s\\n' \"$?\" \"${PIPESTATUS[*]}\"" % (rng.randrange(8), rng.randrange(8), rng.randrange(8))
     else:
@@ -17905,60 +17664,37 @@ def shell_lang_directory_policy(rng):
                         "readonly-oldpwd", "missing", "home-absent", "oldpwd-absent", "empty-operand", "extra-operand", "pwd-bad-option",
                         "symlink-loop", "overlong", "deleted-cwd", "deleted-cwd-e", "pwd-env", "cd-to-file", "cd-no-permission", "scan-refill"))
     tree = "mkdir -p real/child search; ln -sfn real/child link; ln -sfn ../real/child search/place; ln -sfn loop loop"
-    if shape == "physical-letter":
-        script = "set -P; case $- in *P*) echo on;; *) echo off;; esac; set +P; case $- in *P*) echo bad;; *) echo off;; esac"
-    elif shape == "physical-named":
-        script = "set -o physical; case $- in *P*) echo on;; esac; set +o physical; case $- in *P*) echo bad;; *) echo off;; esac"
-    elif shape == "onecmd-state":
-        script = "set -o onecmd; case $- in *t*) echo on;; esac; set +t; case $- in *t*) echo bad;; *) echo off;; esac"
-    elif shape == "logical-symlink":
-        script = "cd link; printf '%s:%s:%s\\n' \"${PWD#$ROOT}\" \"$(pwd | sed \"s#$ROOT##\")\" \"$(pwd -P | sed \"s#$ROOT##\")\""
-    elif shape == "logical-dotdot":
-        script = "cd link; cd ..; printf '%s:%s\\n' \"${PWD#$ROOT}\" \"$(pwd -P | sed \"s#$ROOT##\")\""
-    elif shape == "physical-symlink":
-        script = "set -P; cd link; printf '%s:%s\\n' \"${PWD#$ROOT}\" \"$(pwd | sed \"s#$ROOT##\")\""
-    elif shape == "physical-dotdot":
-        script = "set -P; cd link/..; printf '%s:%s\\n' \"${PWD#$ROOT}\" \"$(pwd -P | sed \"s#$ROOT##\")\""
-    elif shape == "explicit-P":
-        script = "set +P; cd -P link; printf '%s:%s\\n' \"${PWD#$ROOT}\" \"$(pwd -L | sed \"s#$ROOT##\")\""
-    elif shape == "explicit-L":
-        script = "set -P; cd -L link; printf '%s:%s:%s\\n' \"${PWD#$ROOT}\" \"$(pwd -L | sed \"s#$ROOT##\")\" \"$(pwd -P | sed \"s#$ROOT##\")\""
-    elif shape == "pwd-options":
-        script = "cd -L link; printf '%s:%s\\n' \"$(pwd -LP | sed \"s#$ROOT##\")\" \"$(pwd -PL | sed \"s#$ROOT##\")\"; set -P; printf '%s\\n' \"$(pwd | sed \"s#$ROOT##\")\""
-    elif shape == "cdpath-logical":
-        script = "CDPATH=$ROOT/search; cd place; printf 'PWD=%s\\n' \"${PWD#$ROOT}\""
-    elif shape == "cdpath-physical":
-        script = "set -P; CDPATH=$ROOT/search; cd place; printf 'PWD=%s\\n' \"${PWD#$ROOT}\""
-    elif shape == "cd-dash":
-        script = "cd real; cd - | sed \"s#$ROOT##\"; echo \"${OLDPWD#$ROOT}\""
-    elif shape == "readonly-oldpwd":
-        script = "readonly OLDPWD; cd real 2>/dev/null; printf '%s:%s:%s\\n' \"$?\" \"${PWD#$ROOT}\" \"${OLDPWD#$ROOT}\""
-    elif shape == "missing":
-        script = "cd \"$ROOT/missing\" 2>/dev/null; echo $?"
-    elif shape == "home-absent":
-        script = "unset HOME; cd 2>/dev/null; echo $?; HOME=; cd 2>/dev/null; echo $?"
-    elif shape == "oldpwd-absent":
-        script = "unset OLDPWD; cd - 2>/dev/null; echo $?"
-    elif shape == "empty-operand":
-        script = "cd '' 2>/dev/null; echo $?; pwd | sed \"s#$ROOT##\""
-    elif shape == "extra-operand":
-        script = "cd \"$ROOT\" \"$ROOT/real\" 2>/dev/null; echo $?"
-    elif shape == "pwd-bad-option":
-        script = "pwd -x >/dev/null 2>&1; echo $?; cd -x 2>/dev/null; echo $?"
-    elif shape == "symlink-loop":
-        script = "cd \"$ROOT/loop\" 2>/dev/null; echo $?"
-    elif shape == "overlong":
-        script = "name=$(awk 'BEGIN { for (i = 0; i < 5000; i++) printf \"a\" }'); cd \"$name\" 2>/dev/null; echo $?"
-    elif shape == "deleted-cwd":
-        script = "d=$ROOT/gone; mkdir \"$d\"; cd \"$d\"; rmdir \"$d\"; cd -P . 2>/dev/null; printf '%s:%s\\n' \"$?\" \"${PWD#$ROOT}\""
-    elif shape == "deleted-cwd-e":
-        script = "d=$ROOT/gone; mkdir \"$d\"; cd \"$d\"; rmdir \"$d\"; cd -Pe . 2>/dev/null; printf '%s:%s\\n' \"$?\" \"${PWD#$ROOT}\""
-    elif shape == "pwd-env":
-        script = "PWD=/nonexistent; pwd | sed \"s#$ROOT##\"; cd real; echo \"${PWD#$ROOT}\""
-    elif shape == "cd-to-file":
-        script = ": > file; cd file 2>/dev/null; echo $?"
-    elif shape == "cd-no-permission":
-        script = "mkdir locked; chmod 000 locked; cd locked 2>/dev/null; echo $?; chmod 755 locked"
+    script_by_shape = {
+        "physical-letter": "set -P; case $- in *P*) echo on;; *) echo off;; esac; set +P; case $- in *P*) echo bad;; *) echo off;; esac",
+        "physical-named": "set -o physical; case $- in *P*) echo on;; esac; set +o physical; case $- in *P*) echo bad;; *) echo off;; esac",
+        "onecmd-state": "set -o onecmd; case $- in *t*) echo on;; esac; set +t; case $- in *t*) echo bad;; *) echo off;; esac",
+        "logical-symlink": "cd link; printf '%s:%s:%s\\n' \"${PWD#$ROOT}\" \"$(pwd | sed \"s#$ROOT##\")\" \"$(pwd -P | sed \"s#$ROOT##\")\"",
+        "logical-dotdot": "cd link; cd ..; printf '%s:%s\\n' \"${PWD#$ROOT}\" \"$(pwd -P | sed \"s#$ROOT##\")\"",
+        "physical-symlink": "set -P; cd link; printf '%s:%s\\n' \"${PWD#$ROOT}\" \"$(pwd | sed \"s#$ROOT##\")\"",
+        "physical-dotdot": "set -P; cd link/..; printf '%s:%s\\n' \"${PWD#$ROOT}\" \"$(pwd -P | sed \"s#$ROOT##\")\"",
+        "explicit-P": "set +P; cd -P link; printf '%s:%s\\n' \"${PWD#$ROOT}\" \"$(pwd -L | sed \"s#$ROOT##\")\"",
+        "explicit-L": "set -P; cd -L link; printf '%s:%s:%s\\n' \"${PWD#$ROOT}\" \"$(pwd -L | sed \"s#$ROOT##\")\" \"$(pwd -P | sed \"s#$ROOT##\")\"",
+        "pwd-options": "cd -L link; printf '%s:%s\\n' \"$(pwd -LP | sed \"s#$ROOT##\")\" \"$(pwd -PL | sed \"s#$ROOT##\")\"; set -P; printf '%s\\n' \"$(pwd | sed \"s#$ROOT##\")\"",
+        "cdpath-logical": "CDPATH=$ROOT/search; cd place; printf 'PWD=%s\\n' \"${PWD#$ROOT}\"",
+        "cdpath-physical": "set -P; CDPATH=$ROOT/search; cd place; printf 'PWD=%s\\n' \"${PWD#$ROOT}\"",
+        "cd-dash": "cd real; cd - | sed \"s#$ROOT##\"; echo \"${OLDPWD#$ROOT}\"",
+        "readonly-oldpwd": "readonly OLDPWD; cd real 2>/dev/null; printf '%s:%s:%s\\n' \"$?\" \"${PWD#$ROOT}\" \"${OLDPWD#$ROOT}\"",
+        "missing": "cd \"$ROOT/missing\" 2>/dev/null; echo $?",
+        "home-absent": "unset HOME; cd 2>/dev/null; echo $?; HOME=; cd 2>/dev/null; echo $?",
+        "oldpwd-absent": "unset OLDPWD; cd - 2>/dev/null; echo $?",
+        "empty-operand": "cd '' 2>/dev/null; echo $?; pwd | sed \"s#$ROOT##\"",
+        "extra-operand": "cd \"$ROOT\" \"$ROOT/real\" 2>/dev/null; echo $?",
+        "pwd-bad-option": "pwd -x >/dev/null 2>&1; echo $?; cd -x 2>/dev/null; echo $?",
+        "symlink-loop": "cd \"$ROOT/loop\" 2>/dev/null; echo $?",
+        "overlong": "name=$(awk 'BEGIN { for (i = 0; i < 5000; i++) printf \"a\" }'); cd \"$name\" 2>/dev/null; echo $?",
+        "deleted-cwd": "d=$ROOT/gone; mkdir \"$d\"; cd \"$d\"; rmdir \"$d\"; cd -P . 2>/dev/null; printf '%s:%s\\n' \"$?\" \"${PWD#$ROOT}\"",
+        "deleted-cwd-e": "d=$ROOT/gone; mkdir \"$d\"; cd \"$d\"; rmdir \"$d\"; cd -Pe . 2>/dev/null; printf '%s:%s\\n' \"$?\" \"${PWD#$ROOT}\"",
+        "pwd-env": "PWD=/nonexistent; pwd | sed \"s#$ROOT##\"; cd real; echo \"${PWD#$ROOT}\"",
+        "cd-to-file": ": > file; cd file 2>/dev/null; echo $?",
+        "cd-no-permission": "mkdir locked; chmod 000 locked; cd locked 2>/dev/null; echo $?; chmod 755 locked",
+    }
+    if shape in script_by_shape:
+        script = script_by_shape[shape]
     else:
         script = ("mkdir scan; cd scan; i=0; while [ $i -lt 160 ]; do : > mw_file$i; mkdir mw_dir$i; : > mw_dir$i/inside; i=$((i+1)); done; "
                   "set -- mw_*; printf '%s:%s\\n' \"$#\" \"$1\"; set -- mw_dir*/inside; printf '%s:%s\\n' \"$#\" \"$1\"")
@@ -17976,20 +17712,17 @@ def shell_lang_special_builtin_fatality(rng):
                           "unset -f -v x", "set -e -Z", "trap", "eval 'echo \"unclosed'", "command"))
     wrapper = rng.choice(("direct", "command", "function", "subshell", "group", "same-line", "next-line", "eval"))
     posix = rng.choice(("", "set -o posix"))
-    if wrapper == "direct":
-        body = builtin + "; echo AFTER"
-    elif wrapper == "command":
-        body = "command " + builtin + "; echo \"after:$?\""
-    elif wrapper == "function":
-        body = "f() { " + builtin + "; echo INNER; }; f; echo \"after:$?\""
-    elif wrapper == "subshell":
-        body = "( " + builtin + "; echo INNER ); echo \"after:$?\""
-    elif wrapper == "group":
-        body = "{ " + builtin + "; echo INNER; }; echo \"after:$?\""
-    elif wrapper == "same-line":
-        body = "f() { " + builtin + "; echo INNER; }; f; echo SAME"
-    elif wrapper == "next-line":
-        body = "f() {\n" + builtin + "; echo INNER\n}\nf\necho \"outer:$?\""
+    body_by_wrapper = {
+        "direct": builtin + "; echo AFTER",
+        "command": "command " + builtin + "; echo \"after:$?\"",
+        "function": "f() { " + builtin + "; echo INNER; }; f; echo \"after:$?\"",
+        "subshell": "( " + builtin + "; echo INNER ); echo \"after:$?\"",
+        "group": "{ " + builtin + "; echo INNER; }; echo \"after:$?\"",
+        "same-line": "f() { " + builtin + "; echo INNER; }; f; echo SAME",
+        "next-line": "f() {\n" + builtin + "; echo INNER\n}\nf\necho \"outer:$?\"",
+    }
+    if wrapper in body_by_wrapper:
+        body = body_by_wrapper[wrapper]
     else:
         body = "eval " + shell_quote(builtin + "; echo INNER") + "; echo \"after:$?\""
     modes = shell_BASH if posix or "times" in builtin else shell_ALL
@@ -18001,54 +17734,35 @@ def shell_lang_assignment_words(rng):
                         "assignment-only-status", "not-assignment", "after-command", "dollar-name", "array-word", "append", "keyword-k",
                         "tilde-in-assign", "no-split", "no-glob", "declaration-command", "empty-value", "many-prefix", "subst-status",
                         "readonly-prefix", "export-prefix", "exported-restored", "local-prefix", "env-view"))
-    if shape == "plain-not-exported":
-        script = "x=1; /bin/sh -c 'echo \"${x-unset}\"'"
-    elif shape == "prefix-temporary":
-        script = "x=old; x=new true; echo \"$x\"; x=new /bin/sh -c 'echo \"$x\"'; echo \"$x\""
-    elif shape == "prefix-special":
-        script = "x=old; x=new :; echo \"$x\"; y=old; y=new export z=1; echo \"$y\"; w=old; w=new eval :; echo \"$w\""
-    elif shape == "prefix-function":
-        script = "f() { echo \"in:$x\"; x=body; }; x=old; x=new f; echo \"out:$x\""
-    elif shape == "prefix-command":
-        script = "x=old; x=new command :; echo \"$x\"; x=new command export y=1; echo \"$x\""
-    elif shape == "left-to-right":
-        script = "a=one b=$a c=${b}2; echo \"$a $b $c\"; d=1 e=$d /bin/sh -c 'echo \"$d $e\"'"
-    elif shape == "assignment-only-status":
-        script = "false; x=1; echo $?; x=$(false); echo $?; x=$(true) y=$(exit 3); echo $?"
-    elif shape == "not-assignment":
-        script = "echo a=b; 'x=1' 2>/dev/null; echo \"$?\"; \\x=1 2>/dev/null; echo \"$?\"; echo \"${x-unset}\""
-    elif shape == "after-command":
-        script = "echo x=1 y=2; echo \"${x-unset}\""
-    elif shape == "dollar-name":
-        script = "n=x; $n=1 2>/dev/null; echo \"$?:${x-unset}\"; eval \"$n=2\"; echo \"$x\""
-    elif shape == "array-word":
-        script = "a[0]=1; echo \"${a[0]}\"; a[1+1]=2; echo \"${a[2]}\"; 'a[0]=3' 2>/dev/null; echo \"$?\""
-    elif shape == "append":
-        script = "x=a; x+=b; echo \"$x\"; unset y; y+=c; echo \"$y\"; z+=; echo \"[$z]\""
-    elif shape == "keyword-k":
-        script = "set -k; x=old; echo a x=new b; echo \"$x\"; /bin/sh -c 'echo \"${y-unset}\"' q y=set"
-    elif shape == "tilde-in-assign":
-        script = "HOME=/hh; x=~; y=~/p:~; z=a:~; w=\"~\"; echo \"$x $y $z $w\""
-    elif shape == "no-split":
-        script = "v='a  b *'; x=$v; y=$v$v; printf '<%s>\\n' \"$x\" \"$y\""
-    elif shape == "no-glob":
-        script = ": > a.txt; x=*.txt; echo \"$x\"; echo $x"
-    elif shape == "declaration-command":
-        script = "v='g h'; export D=$v; command export E=$v; command export P=*; echo \"$D|$E|$P\"; f() { command local L=$v; echo \"[$L]\"; }; f"
-    elif shape == "empty-value":
-        script = "x=; echo \"[$x]\"; x= ; echo \"[${x+set}]\"; y= true; echo \"[${y-unset}]\""
+    script_by_shape = {
+        "plain-not-exported": "x=1; /bin/sh -c 'echo \"${x-unset}\"'",
+        "prefix-temporary": "x=old; x=new true; echo \"$x\"; x=new /bin/sh -c 'echo \"$x\"'; echo \"$x\"",
+        "prefix-special": "x=old; x=new :; echo \"$x\"; y=old; y=new export z=1; echo \"$y\"; w=old; w=new eval :; echo \"$w\"",
+        "prefix-function": "f() { echo \"in:$x\"; x=body; }; x=old; x=new f; echo \"out:$x\"",
+        "prefix-command": "x=old; x=new command :; echo \"$x\"; x=new command export y=1; echo \"$x\"",
+        "left-to-right": "a=one b=$a c=${b}2; echo \"$a $b $c\"; d=1 e=$d /bin/sh -c 'echo \"$d $e\"'",
+        "assignment-only-status": "false; x=1; echo $?; x=$(false); echo $?; x=$(true) y=$(exit 3); echo $?",
+        "not-assignment": "echo a=b; 'x=1' 2>/dev/null; echo \"$?\"; \\x=1 2>/dev/null; echo \"$?\"; echo \"${x-unset}\"",
+        "after-command": "echo x=1 y=2; echo \"${x-unset}\"",
+        "dollar-name": "n=x; $n=1 2>/dev/null; echo \"$?:${x-unset}\"; eval \"$n=2\"; echo \"$x\"",
+        "array-word": "a[0]=1; echo \"${a[0]}\"; a[1+1]=2; echo \"${a[2]}\"; 'a[0]=3' 2>/dev/null; echo \"$?\"",
+        "append": "x=a; x+=b; echo \"$x\"; unset y; y+=c; echo \"$y\"; z+=; echo \"[$z]\"",
+        "keyword-k": "set -k; x=old; echo a x=new b; echo \"$x\"; /bin/sh -c 'echo \"${y-unset}\"' q y=set",
+        "tilde-in-assign": "HOME=/hh; x=~; y=~/p:~; z=a:~; w=\"~\"; echo \"$x $y $z $w\"",
+        "no-split": "v='a  b *'; x=$v; y=$v$v; printf '<%s>\\n' \"$x\" \"$y\"",
+        "no-glob": ": > a.txt; x=*.txt; echo \"$x\"; echo $x",
+        "declaration-command": "v='g h'; export D=$v; command export E=$v; command export P=*; echo \"$D|$E|$P\"; f() { command local L=$v; echo \"[$L]\"; }; f",
+        "empty-value": "x=; echo \"[$x]\"; x= ; echo \"[${x+set}]\"; y= true; echo \"[${y-unset}]\"",
+        "subst-status": "true; a=$(exit 3) b=$?; echo \"$b:$?\"",
+        "readonly-prefix": "readonly r=old; r=new true 2>/dev/null; echo \"$?:$r\"; r=new /bin/sh -c 'echo \"$r\"' 2>/dev/null; echo \"$?\"",
+        "export-prefix": "x=1 export y=2; echo \"${x-unset}:$y\"; /bin/sh -c 'echo \"${x-unset}:${y-unset}\"'",
+        "exported-restored": "export x=old; x=new /bin/sh -c 'echo \"$x\"'; /bin/sh -c 'echo \"$x\"'; f() { x=in; }; x=pre f; echo \"$x\"; /bin/sh -c 'echo \"$x\"'",
+        "local-prefix": "f() { local x=in; x=pre g; echo \"f:$x\"; }; g() { echo \"g:$x\"; }; x=out; f; echo \"out:$x\"",
+    }
+    if shape in script_by_shape:
+        script = script_by_shape[shape]
     elif shape == "many-prefix":
         script = " ".join("A%02d=%d" % (k, k) for k in range(20)) + " /bin/sh -c 'echo \"$A00 $A19\"'; echo \"${A00-unset}\""
-    elif shape == "subst-status":
-        script = "true; a=$(exit 3) b=$?; echo \"$b:$?\""
-    elif shape == "readonly-prefix":
-        script = "readonly r=old; r=new true 2>/dev/null; echo \"$?:$r\"; r=new /bin/sh -c 'echo \"$r\"' 2>/dev/null; echo \"$?\""
-    elif shape == "export-prefix":
-        script = "x=1 export y=2; echo \"${x-unset}:$y\"; /bin/sh -c 'echo \"${x-unset}:${y-unset}\"'"
-    elif shape == "exported-restored":
-        script = "export x=old; x=new /bin/sh -c 'echo \"$x\"'; /bin/sh -c 'echo \"$x\"'; f() { x=in; }; x=pre f; echo \"$x\"; /bin/sh -c 'echo \"$x\"'"
-    elif shape == "local-prefix":
-        script = "f() { local x=in; x=pre g; echo \"f:$x\"; }; g() { echo \"g:$x\"; }; x=out; f; echo \"out:$x\""
     else:
         script = "x=1; env | grep -c '^x='; export x; env | grep -c '^x='; unset x; env | grep -c '^x='; x=2 env | grep -c '^x='"
     modes = shell_BASH if shape in ("array-word", "append", "keyword-k") else shell_ALL
@@ -18062,64 +17776,41 @@ def shell_lang_job_control_script(rng):
                         "pipestatus-monitored", "subshell-jobs", "without-monitor", "job-number-reuse", "jobs-after-exit",
                         "wait-stopped", "suspend"))
     pre = "set -m; "
-    if shape == "jobs-running":
-        script = pre + "sleep 0.3 & jobs; wait"
-    elif shape == "jobs-markers":
-        script = pre + "sleep 0.3 & sleep 0.3 & jobs; wait"
-    elif shape == "jobs-done-once":
-        script = pre + "sleep 0.05 & sleep 0.2; jobs; jobs; wait"
-    elif shape == "waited-forgotten":
-        script = pre + "sleep 0.05 & wait $!; jobs; echo \"[$?]\""
-    elif shape == "jobs-p":
-        script = pre + "sleep 0.3 & p=$!; [ \"$(jobs -p)\" = \"$p\" ] && echo same; wait"
-    elif shape == "jobs-l":
-        script = pre + "sleep 0.3 & p=$!; jobs -l | sed \"s/$p/PID/\"; wait"
-    elif shape == "jobs-r-s":
-        script = pre + "sleep 0.3 & sleep 0.3 & kill -STOP %1; sleep 0.05; jobs -r; jobs -s; kill -CONT %1; wait"
-    elif shape == "jobs-n":
-        script = pre + "sleep 0.3 & jobs -n; jobs -n; wait"
-    elif shape == "pipeline-one-job":
-        script = pre + "sleep 0.3 | cat & jobs; wait"
-    elif shape == "stopped":
-        script = pre + "sleep 2 & kill -STOP %1; sleep 0.05; jobs; kill -KILL %1; wait %1; echo \"$?\""
-    elif shape == "killed":
-        script = pre + "sleep 5 & kill -KILL %1; sleep 0.05; jobs; jobs; wait"
-    elif shape == "exit-status-line":
-        script = pre + "(exit 7) & sleep 0.1; jobs; wait"
-    elif shape == "bg-announce":
-        script = pre + "sleep 5 & kill -STOP %1; sleep 0.05; bg; sleep 0.05; jobs; kill %1; wait"
-    elif shape == "fg-status":
-        script = pre + "sleep 0.1 & fg %1; echo \"st=$?\""
+    script_by_shape = {
+        "jobs-running": pre + "sleep 0.3 & jobs; wait",
+        "jobs-markers": pre + "sleep 0.3 & sleep 0.3 & jobs; wait",
+        "jobs-done-once": pre + "sleep 0.05 & sleep 0.2; jobs; jobs; wait",
+        "waited-forgotten": pre + "sleep 0.05 & wait $!; jobs; echo \"[$?]\"",
+        "jobs-p": pre + "sleep 0.3 & p=$!; [ \"$(jobs -p)\" = \"$p\" ] && echo same; wait",
+        "jobs-l": pre + "sleep 0.3 & p=$!; jobs -l | sed \"s/$p/PID/\"; wait",
+        "jobs-r-s": pre + "sleep 0.3 & sleep 0.3 & kill -STOP %1; sleep 0.05; jobs -r; jobs -s; kill -CONT %1; wait",
+        "jobs-n": pre + "sleep 0.3 & jobs -n; jobs -n; wait",
+        "pipeline-one-job": pre + "sleep 0.3 | cat & jobs; wait",
+        "stopped": pre + "sleep 2 & kill -STOP %1; sleep 0.05; jobs; kill -KILL %1; wait %1; echo \"$?\"",
+        "killed": pre + "sleep 5 & kill -KILL %1; sleep 0.05; jobs; jobs; wait",
+        "exit-status-line": pre + "(exit 7) & sleep 0.1; jobs; wait",
+        "bg-announce": pre + "sleep 5 & kill -STOP %1; sleep 0.05; bg; sleep 0.05; jobs; kill %1; wait",
+        "fg-status": pre + "sleep 0.1 & fg %1; echo \"st=$?\"",
+        "fg-ambiguous": pre + "sleep 0.2 & sleep 0.2 & fg %sl 2>/dev/null; echo \"$?\"; wait",
+        "disown": pre + "sleep 0.2 & disown; jobs | wc -l; wait; echo \"$?\"",
+        "disown-h": pre + "sleep 0.2 & disown -h %1; jobs | wc -l; wait",
+        "disown-a": pre + "sleep 0.2 & sleep 0.2 & disown -a; jobs | wc -l",
+        "kill-pipeline": pre + "sleep 5 | sleep 5 & kill %1; wait; echo \"$?\"; jobs",
+        "wait-stopped": pre + "sleep 5 & kill -TSTP %1; wait %1; echo \"$?\"; kill -KILL %1",
+        "wait-f-stopped": pre + "sleep 0.3 & p=$!; kill -STOP $p; (sleep 0.1; kill -CONT $p) & wait -f $p; echo \"$?\"",
+        "wait-n": pre + "(exit 3) & wait -n; echo \"$?\"; wait -n -p named 2>/dev/null; echo \"$?\"",
+        "suspend": pre + "suspend 2>/dev/null; echo \"$?\"",
+        "pipestatus-monitored": pre + "false | true; echo \"${PIPESTATUS[*]}\"; echo a | cat",
+        "subshell-jobs": pre + "sleep 0.3 & (jobs | wc -l); jobs | wc -l; wait",
+        "without-monitor": "sleep 0.1 & jobs; fg 2>/dev/null; echo \"fg=$?\"; bg 2>/dev/null; echo \"bg=$?\"; wait",
+        "job-number-reuse": pre + "sleep 0.3 & (exit 7) & sleep 0.1; jobs; sleep 0.3 | cat & jobs; kill -TERM %2; wait; jobs",
+    }
+    if shape in script_by_shape:
+        script = script_by_shape[shape]
     elif shape == "fg-spec":
         script = pre + "sleep 0.1 & fg " + rng.choice(("%1", "%sleep", "%?eep", "%%", "%+", "%-", "")) + "; echo \"st=$?\""
-    elif shape == "fg-ambiguous":
-        script = pre + "sleep 0.2 & sleep 0.2 & fg %sl 2>/dev/null; echo \"$?\"; wait"
-    elif shape == "disown":
-        script = pre + "sleep 0.2 & disown; jobs | wc -l; wait; echo \"$?\""
-    elif shape == "disown-h":
-        script = pre + "sleep 0.2 & disown -h %1; jobs | wc -l; wait"
-    elif shape == "disown-a":
-        script = pre + "sleep 0.2 & sleep 0.2 & disown -a; jobs | wc -l"
     elif shape == "kill-spec":
         script = pre + "sleep 2 & kill " + rng.choice(("%1", "-s TERM %1", "-TERM %1", "-15 %1", "%sleep", "%%", "%9")) + " 2>/dev/null; echo \"$?\"; kill -TERM %1 2>/dev/null; wait %1 2>/dev/null; echo \"$?\""
-    elif shape == "kill-pipeline":
-        script = pre + "sleep 5 | sleep 5 & kill %1; wait; echo \"$?\"; jobs"
-    elif shape == "wait-stopped":
-        script = pre + "sleep 5 & kill -TSTP %1; wait %1; echo \"$?\"; kill -KILL %1"
-    elif shape == "wait-f-stopped":
-        script = pre + "sleep 0.3 & p=$!; kill -STOP $p; (sleep 0.1; kill -CONT $p) & wait -f $p; echo \"$?\""
-    elif shape == "wait-n":
-        script = pre + "(exit 3) & wait -n; echo \"$?\"; wait -n -p named 2>/dev/null; echo \"$?\""
-    elif shape == "suspend":
-        script = pre + "suspend 2>/dev/null; echo \"$?\""
-    elif shape == "pipestatus-monitored":
-        script = pre + "false | true; echo \"${PIPESTATUS[*]}\"; echo a | cat"
-    elif shape == "subshell-jobs":
-        script = pre + "sleep 0.3 & (jobs | wc -l); jobs | wc -l; wait"
-    elif shape == "without-monitor":
-        script = "sleep 0.1 & jobs; fg 2>/dev/null; echo \"fg=$?\"; bg 2>/dev/null; echo \"bg=$?\"; wait"
-    elif shape == "job-number-reuse":
-        script = pre + "sleep 0.3 & (exit 7) & sleep 0.1; jobs; sleep 0.3 | cat & jobs; kill -TERM %2; wait; jobs"
     else:
         script = pre + "sleep 0.3 & exit 0"
     # Listings follow bash's layout under every name; against dash that is
@@ -18262,40 +17953,29 @@ def shell_lang_trap_in_pipeline(rng):
         "signal-in-stage", "function-stage", "last-stage-status", "err-in-stage",
         "nested-subshell", "trap-and-exit-code", "loop-stage", "both-ends",
         "subst-in-stage", "ignored-inherited", "trap-p-in-stage", "exit-trap-order"))
-    if shape == "exit-in-stage":
-        body = ("( trap 'echo SUB-EXIT' EXIT; echo body ) | cat", "echo \"status=$?\"")
-    elif shape == "inherited-exit":
-        body = ("trap 'echo TOP-EXIT' EXIT", "( echo body ) | cat", "echo mid")
-    elif shape == "reset-in-stage":
-        body = ("trap 'echo TOP' EXIT", "( trap - EXIT; echo body ) | cat", "echo mid")
-    elif shape == "signal-to-self":
-        body = ("trap 'echo CAUGHT-USR1' USR1", "( kill -USR1 $$; echo after-kill ) | cat",
-                "echo \"status=$?\"")
-    elif shape == "signal-in-stage":
-        body = ("( trap 'echo STAGE-USR1' USR1; kill -USR1 $$; echo after ) | cat",
-                "echo \"status=$?\"")
-    elif shape == "function-stage":
-        body = ("f() { trap 'echo F-EXIT' EXIT; echo in-f; }", "f | cat", "echo after")
-    elif shape == "last-stage-status":
-        body = ("echo feed | ( trap 'echo STAGE-EXIT' EXIT; cat; exit 4 )", "echo \"status=$?\"")
-    elif shape == "err-in-stage":
-        body = ("set -E", "trap 'echo ERR-TRAP' ERR", "( false; echo after ) | cat",
-                "echo \"status=$?\"")
-    elif shape == "nested-subshell":
-        body = ("( ( trap 'echo INNER' EXIT; echo deep ) ; echo outer ) | cat",)
-    elif shape == "trap-and-exit-code":
-        body = ("( trap 'echo T; exit 9' EXIT; exit 3 ) | cat", "echo \"status=$?\"")
-    elif shape == "loop-stage":
-        body = ("printf 'a\\nb\\n' | while read -r l; do trap 'echo W-EXIT' EXIT; echo \"<$l>\"; done",
-                "echo after")
-    elif shape == "both-ends":
-        body = ("( trap 'echo LEFT' EXIT; echo x ) | ( trap 'echo RIGHT' EXIT; cat )",)
-    elif shape == "subst-in-stage":
-        body = ("v=$( trap 'echo SUBST-EXIT' EXIT; echo value )", "printf '<%s>\\n' \"$v\"")
-    elif shape == "ignored-inherited":
-        body = ("trap '' USR1", "( kill -USR1 $$; echo survived ) | cat", "echo \"status=$?\"")
-    elif shape == "trap-p-in-stage":
-        body = ("trap 'echo TOP' USR1", "( trap; echo --; trap -- '' USR2; trap ) | cat")
+    body_by_shape = {
+        "exit-in-stage": ("( trap 'echo SUB-EXIT' EXIT; echo body ) | cat", "echo \"status=$?\""),
+        "inherited-exit": ("trap 'echo TOP-EXIT' EXIT", "( echo body ) | cat", "echo mid"),
+        "reset-in-stage": ("trap 'echo TOP' EXIT", "( trap - EXIT; echo body ) | cat", "echo mid"),
+        "signal-to-self": ("trap 'echo CAUGHT-USR1' USR1", "( kill -USR1 $$; echo after-kill ) | cat",
+                           "echo \"status=$?\""),
+        "signal-in-stage": ("( trap 'echo STAGE-USR1' USR1; kill -USR1 $$; echo after ) | cat",
+                            "echo \"status=$?\""),
+        "function-stage": ("f() { trap 'echo F-EXIT' EXIT; echo in-f; }", "f | cat", "echo after"),
+        "last-stage-status": ("echo feed | ( trap 'echo STAGE-EXIT' EXIT; cat; exit 4 )", "echo \"status=$?\""),
+        "err-in-stage": ("set -E", "trap 'echo ERR-TRAP' ERR", "( false; echo after ) | cat",
+                         "echo \"status=$?\""),
+        "nested-subshell": ("( ( trap 'echo INNER' EXIT; echo deep ) ; echo outer ) | cat",),
+        "trap-and-exit-code": ("( trap 'echo T; exit 9' EXIT; exit 3 ) | cat", "echo \"status=$?\""),
+        "loop-stage": ("printf 'a\\nb\\n' | while read -r l; do trap 'echo W-EXIT' EXIT; echo \"<$l>\"; done",
+                       "echo after"),
+        "both-ends": ("( trap 'echo LEFT' EXIT; echo x ) | ( trap 'echo RIGHT' EXIT; cat )",),
+        "subst-in-stage": ("v=$( trap 'echo SUBST-EXIT' EXIT; echo value )", "printf '<%s>\\n' \"$v\""),
+        "ignored-inherited": ("trap '' USR1", "( kill -USR1 $$; echo survived ) | cat", "echo \"status=$?\""),
+        "trap-p-in-stage": ("trap 'echo TOP' USR1", "( trap; echo --; trap -- '' USR2; trap ) | cat"),
+    }
+    if shape in body_by_shape:
+        body = body_by_shape[shape]
     else:
         body = ("trap 'echo OUTER-EXIT' EXIT",
                 "( trap 'echo INNER-EXIT' EXIT; echo one ) | ( cat; echo two )", "echo three")
@@ -18317,32 +17997,23 @@ def shell_lang_errexit_functions(rng):
                        "nested-call", "condition-of-or"))
     body = body.replace("BAD", failing)
     call = "f"
-    if site == "or":
-        call = "f || echo OR-CAUGHT"
-    elif site == "and":
-        call = "f && echo AND-RAN"
-    elif site == "not":
-        call = "! f; echo \"not=$?\""
-    elif site == "if":
-        call = "if f; then echo THEN; else echo ELSE; fi"
-    elif site == "while":
-        call = "while f; do echo LOOP; break; done; echo \"while=$?\""
-    elif site == "until":
-        call = "until f; do echo LOOP; break; done; echo \"until=$?\""
-    elif site == "subshell":
-        call = "( f ); echo \"sub=$?\""
-    elif site == "substitution":
-        call = "v=$(f); printf 'v=[%s]\\n' \"$v\""
-    elif site == "assignment":
-        call = "v=$(f) || echo ASSIGN-CAUGHT; printf 'v=[%s]\\n' \"$v\""
-    elif site == "pipeline-left":
-        call = "f | cat; echo \"pipe=$?\""
-    elif site == "pipeline-right":
-        call = "echo feed | f; echo \"pipe=$?\""
-    elif site == "nested-call":
-        call = "h() { f; echo after-f-in-h; }; h || echo H-CAUGHT"
-    elif site == "condition-of-or":
-        call = "{ f; } || echo GROUP-CAUGHT"
+    call_by_site = {
+        "or": "f || echo OR-CAUGHT",
+        "and": "f && echo AND-RAN",
+        "not": "! f; echo \"not=$?\"",
+        "if": "if f; then echo THEN; else echo ELSE; fi",
+        "while": "while f; do echo LOOP; break; done; echo \"while=$?\"",
+        "until": "until f; do echo LOOP; break; done; echo \"until=$?\"",
+        "subshell": "( f ); echo \"sub=$?\"",
+        "substitution": "v=$(f); printf 'v=[%s]\\n' \"$v\"",
+        "assignment": "v=$(f) || echo ASSIGN-CAUGHT; printf 'v=[%s]\\n' \"$v\"",
+        "pipeline-left": "f | cat; echo \"pipe=$?\"",
+        "pipeline-right": "echo feed | f; echo \"pipe=$?\"",
+        "nested-call": "h() { f; echo after-f-in-h; }; h || echo H-CAUGHT",
+        "condition-of-or": "{ f; } || echo GROUP-CAUGHT",
+    }
+    if site in call_by_site:
+        call = call_by_site[site]
     lines = ("g() { return 1; }", "set -e", "f() { " + body + "; }", call,
              "echo \"end=$?\"", "echo REACHED")
     modes = shell_ALL if "local" not in body else shell_BASH
@@ -18377,18 +18048,16 @@ def shell_lang_heredoc_expansion(rng):
     end = delimiter.replace("'", "").replace('"', "").replace("\\", "")
     body = piece + "\n"
     doc = "cat <<" + delimiter + "\n" + body + end + "\n"
-    if site == "quoted-word":
-        doc = "printf '[%s]\\n' \"$(cat <<" + delimiter + "\n" + body + end + "\n)\"\n"
-    elif site == "substitution":
-        doc = "v=$(cat <<" + delimiter + "\n" + body + end + "\n)\nprintf '<%s>\\n' \"$v\"\n"
-    elif site == "pipe":
-        doc = "cat <<" + delimiter + " | tr a-z A-Z\n" + body + end + "\n"
-    elif site == "assignment":
-        doc = "cat <<" + delimiter + " > held\n" + body + end + "\ncat held\n"
-    elif site == "two-in-a-row":
-        doc = ("cat <<" + delimiter + " <<B\n" + body + end + "\nsecond $x\nB\n")
-    elif site == "with-redirect":
-        doc = "cat 3<<" + delimiter + " <&3\n" + body + end + "\n"
+    doc_by_site = {
+        "quoted-word": "printf '[%s]\\n' \"$(cat <<" + delimiter + "\n" + body + end + "\n)\"\n",
+        "substitution": "v=$(cat <<" + delimiter + "\n" + body + end + "\n)\nprintf '<%s>\\n' \"$v\"\n",
+        "pipe": "cat <<" + delimiter + " | tr a-z A-Z\n" + body + end + "\n",
+        "assignment": "cat <<" + delimiter + " > held\n" + body + end + "\ncat held\n",
+        "two-in-a-row": "cat <<" + delimiter + " <<B\n" + body + end + "\nsecond $x\nB\n",
+        "with-redirect": "cat 3<<" + delimiter + " <&3\n" + body + end + "\n",
+    }
+    if site in doc_by_site:
+        doc = doc_by_site[site]
     prelude = "x='X Y'\nEOF=EOF\nset -- one two\n"
     modes = shell_BASH if ("$'" in piece or "${!" in piece) else shell_ALL
     label = "heredoc-expansion-quoted" if quoted else "heredoc-expansion"
@@ -18643,29 +18312,22 @@ def shell_lang_shopt_readers(rng):
     ))
     on = rng.choice((True, False))
     toggle = "shopt -" + ("s" if on else "u") + " " + name
-    if name == "globstar":
-        observe = "mkdir -p d/s; : > d/s/f; : > d/top; printf '<%s>\\n' d/**"
-    elif name == "failglob":
-        observe = "echo nosuch_glob_pattern_xyz*; echo after=$?"
-    elif name == "lastpipe":
-        observe = "set +m; value=old; printf 'new\\n' | read value; printf 'v=<%s>\\n' \"${value-unset}\""
-    elif name == "inherit_errexit":
-        observe = "set -e; v=$(false; echo inner); echo \"v=<${v-unset}> after=$?\""
-    elif name == "sourcepath":
-        observe = ("mkdir -p d; printf 'echo pathfile\\n' > d/p; printf 'echo local\\n' > p; "
-                   "PATH=$PWD/d:$PATH; . p; echo $?")
-    elif name == "execfail":
-        observe = "exec /etc/hosts; echo after=$?"
-    elif name == "patsub_replacement":
-        observe = "x=foo; printf '<%s>\\n' \"${x/o/&X}\""
-    elif name == "xpg_echo":
-        observe = "echo 'a\\tb'"
-    elif name == "nullglob":
-        observe = "set -- nosuch_glob_pattern_xyz*; echo \"$#:$*\""
-    elif name == "dotglob":
-        observe = ": > .hidden; set -- *; printf '<%s>\\n' \"$@\""
-    elif name == "nocaseglob":
-        observe = ": > A.TXT; set -- *.txt; printf '<%s>\\n' \"$@\""
+    observe_by_name = {
+        "globstar": "mkdir -p d/s; : > d/s/f; : > d/top; printf '<%s>\\n' d/**",
+        "failglob": "echo nosuch_glob_pattern_xyz*; echo after=$?",
+        "lastpipe": "set +m; value=old; printf 'new\\n' | read value; printf 'v=<%s>\\n' \"${value-unset}\"",
+        "inherit_errexit": "set -e; v=$(false; echo inner); echo \"v=<${v-unset}> after=$?\"",
+        "sourcepath": "mkdir -p d; printf 'echo pathfile\\n' > d/p; printf 'echo local\\n' > p; "
+                      "PATH=$PWD/d:$PATH; . p; echo $?",
+        "execfail": "exec /etc/hosts; echo after=$?",
+        "patsub_replacement": "x=foo; printf '<%s>\\n' \"${x/o/&X}\"",
+        "xpg_echo": "echo 'a\\tb'",
+        "nullglob": "set -- nosuch_glob_pattern_xyz*; echo \"$#:$*\"",
+        "dotglob": ": > .hidden; set -- *; printf '<%s>\\n' \"$@\"",
+        "nocaseglob": ": > A.TXT; set -- *.txt; printf '<%s>\\n' \"$@\"",
+    }
+    if name in observe_by_name:
+        observe = observe_by_name[name]
     else:
         observe = ": > .hidden; set -- .*; printf '<%s>\\n' \"$@\""
     return ("shopt-readers-" + name + ("-on" if on else "-off"), shell_BASH,
