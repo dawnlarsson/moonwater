@@ -44030,6 +44030,177 @@ def harness_wget_mutation(argv):
 
 
 
+def harness_wget_hostile(argv):
+    """The built shell's wget against scripted servers, request line by request
+    line, with the real GNU wget and curl beside it wherever the claim is
+    "as they do".
+
+    wget_mutation asks whether hostile bytes can kill the program; this asks
+    whether the program does the right thing with them.  Each case is a server
+    script (what it answers to each request it gets), a URL the way a person
+    types it, and what must be true: the exit status, the request lines the
+    server saw, the file saved, a word in the message.  A case marked "with"
+    also runs GNU wget and/or curl (when installed) and holds them to the same
+    request lines, so a claim that a reference does something is checked and
+    not remembered: it once was wrong for %2e dot segments, which wget sends
+    on as written and curl resolves.  DELIBERATE names the cases where this
+    client refuses what both fetch, and the reason.
+
+        python3 test/differential.py --harness wget_hostile [--shell PATH]
+    """
+    import shutil
+    import socket
+    import tempfile
+    import threading
+    parser = argparse.ArgumentParser(prog="differential.py --harness wget_hostile")
+    parser.add_argument("--cc", default=os.environ.get("CC", "gcc"))
+    parser.add_argument("--shell", help="a built shell to use instead of building one")
+    args = parser.parse_args(argv)
+    if platform.system() != "Linux":
+        print("wget hostile: NOT RUN -- needs Linux")
+        return 2
+
+    def ok(body=b"hi"):
+        return b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n" % len(body) + body
+
+    def redirect(location, code=302):
+        return b"HTTP/1.1 %d Found\r\nLocation: " % code + location + \
+            b"\r\nContent-Length: 0\r\n\r\n"
+
+    def hop(location):
+        """/x redirects to location; anything else is the answer."""
+        return lambda line, port: (redirect(location.replace(b"PORT", b"%d" % port))
+                                   if line.startswith(b"GET /x ") else ok())
+
+    def answer(response):
+        return lambda line, port: response.replace(b"PORT", b"%d" % port)
+
+    class Server:
+        def __init__(self, script):
+            self.script = script
+            self.lines = []
+            self.hosts = []
+            self.listener = socket.socket()
+            self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.listener.bind(("127.0.0.1", 0))
+            self.listener.listen(8)
+            self.port = self.listener.getsockname()[1]
+            threading.Thread(target=self.loop, daemon=True).start()
+
+        def loop(self):
+            while True:
+                try:
+                    peer, _ = self.listener.accept()
+                except OSError:
+                    return
+                threading.Thread(target=self.serve, args=(peer,), daemon=True).start()
+
+        def serve(self, peer):
+            try:
+                peer.settimeout(5)
+                head = b""
+                while b"\r\n\r\n" not in head:
+                    more = peer.recv(4096)
+                    if not more:
+                        return
+                    head += more
+                line = head.split(b"\r\n")[0]
+                self.lines.append(line.rsplit(b" ", 1)[0])
+                for field in head.split(b"\r\n")[1:]:
+                    if field.lower().startswith(b"host:"):
+                        self.hosts.append(field[5:].strip())
+                reply = self.script(line, self.port)
+                for at in range(0, len(reply), 4096):
+                    peer.sendall(reply[at:at + 4096])
+            except OSError:
+                pass
+            finally:
+                peer.close()
+
+        def close(self):
+            self.listener.close()
+
+    def clients(farm):
+        found = {"mw": [str(farm / "wget"), "-O", "saved"]}
+        if shutil.which("wget"):
+            found["wget"] = [shutil.which("wget"), "-q", "--tries=1", "-O", "saved"]
+        if shutil.which("curl"):
+            found["curl"] = [shutil.which("curl"), "-s", "-L", "--max-redirs", "20",
+                             "-o", "saved"]
+        return found
+
+    #   name, script, url (PORT and HOST filled in), expected request lines,
+    #   expected exit for mw, references that must show the same lines, note
+    def case(name, script, url, lines, code=0, refs=("wget", "curl"), host=None,
+             saved=b"hi", message=None):
+        return dict(name=name, script=script, url=url, lines=lines, code=code,
+                    refs=refs, host=host, saved=saved, message=message)
+
+    GET = lambda target: b"GET " + target
+    CASES = [
+        case("a redirect loop stops", answer(redirect(b"/x")),
+             "http://127.0.0.1:PORT/x", [GET(b"/x")] * 21, code=8, refs=(), saved=None,
+             message=b"redirections exceeded"),
+        #   The stricter side: what this client refuses that both fetch.
+        case("DELIBERATE: userinfo in a Location is refused", hop(b"http://u:p@127.0.0.1:PORT/z"),
+             "http://127.0.0.1:PORT/x", [GET(b"/x")], code=1, refs=(), saved=None),
+        case("DELIBERATE: a backslash in the authority is refused",
+             hop(b"http://127.0.0.1:PORT\\@evil.example/z"),
+             "http://127.0.0.1:PORT/x", [GET(b"/x")], code=1, refs=(), saved=None),
+        case("DELIBERATE: a %00 in a Location is refused", hop(b"/a%00b"),
+             "http://127.0.0.1:PORT/x", [GET(b"/x")], code=1, refs=(), saved=None),
+    ]
+
+    checks = Checks()
+    with tempfile.TemporaryDirectory(prefix="wget-hostile-") as temporary:
+        work = Path(temporary)
+        shell = Path(args.shell) if args.shell else work / "shell"
+        if not args.shell:
+            built = subprocess.run(spark_shell_command(args.cc, shell), cwd=HARNESS_ROOT,
+                                   capture_output=True, text=True)
+            if built.returncode:
+                print(built.stderr[-3000:])
+                return 1
+        (work / "wget").symlink_to(shell)
+        found = clients(work)
+        for one in CASES:
+            for who, command in found.items():
+                if who != "mw" and who not in one["refs"]:
+                    continue
+                server = Server(one["script"])
+                folder = Path(tempfile.mkdtemp(dir=work))
+                url = one["url"].replace("PORT", str(server.port))
+                try:
+                    done = subprocess.run(command + [url], capture_output=True,
+                                          timeout=60, cwd=str(folder),
+                                          env={"PATH": "/usr/bin:/bin"})
+                except subprocess.TimeoutExpired:
+                    done = None
+                server.close()
+                label = "%s: %s" % (who, one["name"])
+                if done is None:
+                    checks(False, label + ": did not finish")
+                    continue
+                wire = [line for line in server.lines]
+                checks(wire == one["lines"], "%s: request lines %r, wanted %r" % (
+                    label, wire, one["lines"]))
+                if who == "mw":
+                    checks(done.returncode == one["code"], "%s: exit %d, wanted %d (%s)" % (
+                        label, done.returncode, one["code"], done.stderr[-160:]))
+                    if one["host"]:
+                        want = one["host"] + b":%d" % server.port
+                        checks(server.hosts == [want] * len(server.hosts) and server.hosts,
+                               "%s: Host %r, wanted %r" % (label, server.hosts[:2], want))
+                    if one["message"]:
+                        checks(one["message"] in done.stderr, "%s: message %r lacks %r" % (
+                            label, done.stderr[-200:], one["message"]))
+                    saved = folder / "saved"
+                    have = saved.read_bytes() if saved.exists() else None
+                    checks(have == one["saved"], "%s: saved %r, wanted %r" % (
+                        label, have, one["saved"]))
+    return checks.verdict("wget hostile", "wget-hostile")
+
+
 def harness_http_urls(argv):
     """http_split_into and http_absolutize against Python's urllib.parse.
 
@@ -44295,6 +44466,7 @@ int main(void)
                        % (base, reference, got, joined))
         for key, why in DELIBERATE.items():
             checks(seen[key] > 0, "DELIBERATE %s never generated (%s)" % (key, why))
+
     return checks.verdict("http urls", "http-urls")
 
 
@@ -51854,7 +52026,7 @@ def harness_security_hygiene(argv):
                 "tls_der_fuzz", "tls_hs_fuzz", "tls_fuzz", "msan_net", "pathname_race",
                 "dhcp_fuzz", "sntp_fuzz", "dns_fuzz", "netlink_fuzz", "tls_peer",
                 "http_fuzz", "http_urls", "wifi_eapol_fuzz", "wifi_scan_fuzz",
-                "wget_mutation")
+                "wget_mutation", "wget_hostile")
     for name in security + ("tls_verify_fuzz",):
         checks(name in HARNESS_CHECKS, "differential.py: %s is not registered" % name)
     table = re.search(r"^HARNESS_CHECKS = \{$(.*?)^\}$", source, re.M | re.S)
@@ -60498,6 +60670,7 @@ HARNESS_CHECKS = {
     "wifi_eapol_fuzz": harness_wifi_eapol_fuzz,
     "wifi_scan_fuzz": harness_wifi_scan_fuzz,
     "wget_mutation": harness_wget_mutation,
+    "wget_hostile": harness_wget_hostile,
     "dns_fuzz": harness_dns_fuzz,
     "netlink_fuzz": harness_netlink_fuzz,
     "crypto_vectors": harness_crypto_vectors,
