@@ -20417,6 +20417,79 @@ fn check_span_max()
 }
 
 /*
+        string_span_max's vector body against the loop it answers for: bounds
+        from 0 to 200, every start residue, the breaking byte at every place
+        (and nowhere), a set of random members that holds bytes above 127 as
+        the two halves of the table are told apart there, and a window that
+        ends exactly at the page edge so that a load that runs past the bound
+        is a fault. On x86_64 with the vector body on and off.
+*/
+fn check_span_max_wide()
+{
+        p8 address_to pages = guard_pages("string_span_max");
+
+        if (!pages)
+                return;
+        static b8 set[256];
+        p64 seed = 0x9e3779b97f4a7c15ull;
+#if X64
+        p8 vbmi = cpu_has_avx512_vbmi;
+        positive tiers = 2;
+#else
+        positive tiers = 1;
+#endif
+        for (positive tier = 0; tier < tiers; tier++)
+        {
+#if X64
+                cpu_has_avx512_vbmi = tier < 1 ? vbmi : 0;
+#endif
+                for (positive kind = 0; kind < 3; kind++)
+                {
+                        // Members: every byte, or about seven in eight at random.
+                        for (positive v = 0; v < 256; v++)
+                        {
+                                XORSHIFT64(seed);
+                                set[v] = kind == 0 ? 1 : (b8)((seed >> 20) % 8 != 0);
+                        }
+                        set[0x80] = kind == 2 ? 0 : 1;
+                        set[0xff] = 1;
+                        set['a'] = 1;
+                        positive breaker = 0;
+                        for (positive v = 255; v; v--)
+                                if (!set[v])
+                                        breaker = v;
+                        for (positive bound = 0; bound <= 200; bound++)
+                                for (positive place = 0; place < 4; place++)
+                                {
+                                        positive offset = place == 3 ? 4096 - bound : place * 21;
+                                        p8 address_to subject = pages + 4096 + offset;
+
+                                        for (positive stop = 0; stop <= bound + 1; stop += stop < 70 || stop > bound - 3 ? 1 : 13)
+                                        {
+                                                for (positive i = 0; i < bound; i++)
+                                                {
+                                                        XORSHIFT64(seed);
+                                                        p8 pick = (p8)(seed >> 24);
+                                                        while (!set[pick])
+                                                                pick = (p8)(pick + 1);
+                                                        subject[i] = kind == 1 && (i & 1) ? (p8)('a') : pick;
+                                                }
+                                                if (breaker && stop < bound)
+                                                        subject[stop] = (p8)breaker;
+                                                same("string_span_max", "wide against the loop",
+                                                     string_span_max(subject, bound, set),
+                                                     reference_span_max(subject, bound, set));
+                                        }
+                                }
+                }
+        }
+#if X64
+        cpu_has_avx512_vbmi = vbmi;
+#endif
+        memory_free(pages, 3 * 4096);
+}
+
+/*
         The digit run.
 
         The buffer is digits from end to end and the run is a window inside it
@@ -27255,6 +27328,7 @@ b32 main()
         check_table_find_page_edge();
         check_hostile_neighbours();
         check_span_max();
+        check_span_max_wide();
         check_digits();
         check_signed_digits_and_width();
         check_digits_base();

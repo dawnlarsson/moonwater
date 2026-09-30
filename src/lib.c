@@ -19938,6 +19938,39 @@ ASM_FUNC(positive_to_string)
     // runs while four are left and the leftovers go a byte at a time, which is
     // the same shape string_span has with the fence folded into it.
     ASM_FUNC(string_span_max)
+#ifndef KERNEL_MODE
+    // rdi bytes, rsi bound, rdx table of 256 bytes; the run of bytes the table holds, at most bound
+    "cmp $8, %rsi\n   jb .Lstring_span_max_x64_scalar\n"
+    ASM_NARROW("cpu_has_avx512_vbmi", ".Lstring_span_max_x64_scalar")
+    "movzbl (%rdi), %ecx\n   cmpb $0, (%rdx,%rcx)\n   je 5f\n"
+    "movzbl 1(%rdi), %ecx\n   cmpb $0, (%rdx,%rcx)\n   je 6f\n"
+    "movzbl 2(%rdi), %ecx\n   cmpb $0, (%rdx,%rcx)\n   je 7f\n"
+    "movzbl 3(%rdi), %ecx\n   cmpb $0, (%rdx,%rcx)\n   je 8f\n"
+    "vmovdqu64 (%rdx), %zmm1\n   vmovdqu64 64(%rdx), %zmm2\n"
+    "vmovdqu64 128(%rdx), %zmm3\n   vmovdqu64 192(%rdx), %zmm4\n"
+    "mov $4, %eax\n   jmp .Lstring_span_max_x64_loop\n"
+    "8:  mov $3, %eax\n"
+    ASM_RET
+    "7:  mov $2, %eax\n"
+    ASM_RET
+    "6:  mov $1, %eax\n"
+    ASM_RET
+    "5:  xor %eax, %eax\n"
+    ASM_RET
+    ".balign 16\n.Lstring_span_max_x64_loop:\n"
+    "mov %rsi, %rcx\n   sub %rax, %rcx\n   mov $-1, %r8\n   cmp $64, %rcx\n   jae 1f\n   bzhi %rcx, %r8, %r8\n"
+    "1:  kmovq %r8, %k1\n   vmovdqu8 (%rdi,%rax), %zmm0{%k1}{z}\n"
+    "vmovdqa64 %zmm1, %zmm5\n   vpermt2b %zmm2, %zmm0, %zmm5\n"
+    "vmovdqa64 %zmm3, %zmm6\n   vpermt2b %zmm4, %zmm0, %zmm6\n"
+    "vpmovb2m %zmm0, %k2\n   vmovdqu8 %zmm6, %zmm5{%k2}\n"
+    "vptestnmb %zmm5, %zmm5, %k3{%k1}\n   kmovq %k3, %r9\n   test %r9, %r9\n   jnz 2f\n"
+    "add $64, %rax\n   cmp %rsi, %rax\n   jb .Lstring_span_max_x64_loop\n"
+    "mov %rsi, %rax\n   vzeroupper\n"
+    ASM_RET
+    "2:  tzcnt %r9, %r9\n   add %r9, %rax\n   vzeroupper\n"
+    ASM_RET
+    ".Lstring_span_max_x64_scalar:\n"
+#endif
     "xor %eax, %eax\n"
     //
     //       The bound less four, wrapping. A bound under four borrows and the
