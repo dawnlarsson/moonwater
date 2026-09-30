@@ -26147,14 +26147,26 @@ static bool grep_binary_holes(const grep_binary address_to binary,
 
 /*
         What the graph may spend on one line while a machine that reads every
-        byte once is standing by. Generous on purpose: a pattern that was
-        going to answer has never needed a thousandth of this, and the one
-        that will not answer gives up here instead of at a hundred million.
+        byte once is standing by: about what the machine itself would cost
+        (a graph step is thirty instructions, the machine's byte is eight
+        cycles), so a line the graph cannot settle for the price of reading
+        it once goes to the machine, and the machine's answer is exact. A
+        cheap shape never reaches this; an expensive one used to spend
+        twenty-five to two hundred and fifty times the machine's price first
+        (measured: 5.8x, 7.7x, 7.2x and 1.75x on four shapes).
+
+        A machine that has been asked first is put back behind the graph
+        when a probe every GREP_MACHINE_PROBE lines finds the graph answering
+        for a quarter of the machine's price, so a file whose first line was
+        dear and whose others are cheap does not pay the machine's
+        whole-line read for all of them; a line that is dear again latches
+        it again.
 */
 enum
 {
-        GREP_GRAPH_YIELD = 1u << 16,
-        GREP_GRAPH_YIELD_BYTE = 1u << 12
+        GREP_GRAPH_YIELD = 64,
+        GREP_GRAPH_YIELD_BYTE = 1,
+        GREP_MACHINE_PROBE = 64
 };
 
 typedef struct
@@ -26203,6 +26215,7 @@ typedef struct
         // The graph gave a line up and the machine answered it, so every
         // later line asks the machine first.
         bool machine_first;
+        p8 machine_lines;
         bool done;
         // A line selected to be printed and kept from the output.
         bool unprintable;
@@ -26297,12 +26310,19 @@ static bool grep_line_matches(const grep_plan address_to plan,
                 already trusted with that same line here, and with whole
                 spans above.
         */
+        bool probing = false;
+
         if (state->machine_first && plan->dfa && !plan->dfa->failed)
         {
-                string_address hit = rx_dfa_scan(plan->dfa, line, line + length + 1);
+                if (++state->machine_lines % GREP_MACHINE_PROBE)
+                {
+                        string_address hit = rx_dfa_scan(plan->dfa, line, line + length + 1);
 
-                if (hit || !plan->dfa->failed)
-                        return hit != null;
+                        if (hit || !plan->dfa->failed)
+                                return hit != null;
+                }
+                else
+                        probing = true;
         }
 
         /*
@@ -26313,7 +26333,8 @@ static bool grep_line_matches(const grep_plan address_to plan,
                 it. Where the machine is standing by, the graph gets what a
                 line this long could honestly need and the machine gets the
                 rest -- and the first line that hits the cap latches the
-                machine ahead of the graph for the rest of the file.
+                machine ahead of the graph until a probe finds the graph
+                cheap again.
         */
         bool yielding = plan->dfa && !plan->dfa->failed;
 
@@ -26324,6 +26345,12 @@ static bool grep_line_matches(const grep_plan address_to plan,
                             line, length, 0);
 
         state->match->work_yield = 0;
+
+        // The graph answered a probe for less than a quarter of what the
+        // machine would have read: it is cheap here again.
+        if (probing && result != RX_COMPLEX &&
+            state->match->work_used * 4 <= length)
+                state->machine_first = false;
 
         if (result == RX_COMPLEX && plan->dfa && !plan->dfa->failed)
         {

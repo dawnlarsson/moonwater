@@ -20461,7 +20461,117 @@ def text_file_failures(farm):
     return passed, len(cases), notes
 
 
-TEXT_CHECKS = (text_grep_encoding, text_file_failures, text_collation)
+#       What grep asks its engines, over a log-shaped file whose first line is
+#       dear for the graph and whose others are cheap: the graph gives up on the
+#       first, the machine is put ahead of it, and a probe puts it back some
+#       lines later. Shapes are the ones the machine, the graph and the required
+#       string each answer, in every output mode, against GNU; a policy that
+#       moved a line between engines and changed an answer is red here.
+_TEXT_ENGINE_PATTERNS = (
+    r'^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+ .*" 500 ', r'^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+ .*" [5]00 ',
+    r'[0-9]{3} [0-9]{4,5} "[a-z]+ (error|info)', r'error|warning.*timeout', r'[z]{3}',
+    r'user session [a-z]+ cache', r'timeout [a-z]+ refused', r'slow query.*fast',
+    r'orders/[0-9]+ HTTP', r'GET /api/v1/(users|orders/[0-9]+) HTTP/1\.1" (404|500)',
+    r'[0-9]+ [0-9]+ "[a-z ]+(east|west)$', r'\.[0-9]+ - - \[1[0-9]/Sep',
+    r'orders/[0-9]+ .*" 404', r'timeout [a-z ]+ refused', r'(orders|users)/[0-9]+ (HTTP|ftp)',
+    r'"[a-z]+ (error|info)"?$', r'^$', r'x*', r'(a+)+b', r'[0-9]+.*[0-9]+.*"$',
+)
+_TEXT_ENGINE_MODES = (("-c",), ("-n",), ("-v", "-c"), (), ("-o",), ("-v",), ("-l",),
+                      ("-w", "-c"), ("-x", "-c"), ("-i", "-c"), ("-ow",), ("-vn",))
+
+
+def text_engine_file():
+    words = ("error", "info", "warning", "timeout", "east", "west", "refused", "cache")
+    lines = ["orders/1 " * 400]
+    for i in range(3000):
+        lines.append(f'10.0.{i % 256}.{i % 97} - - [1{i % 9}/Sep/2026:10:{i % 60:02d}:00] '
+                     f'"GET /api/v1/{("users", "orders")[i % 2]}/{i} HTTP/1.1" {(200, 404, 500, 500, 302)[i % 5]} '
+                     f'{i * 7 % 9999} "{words[i % 8]} {words[(i * 3) % 8]}" {"slow query fast" if i % 41 == 0 else "user session x cache"} '
+                     f'{"timeout ab refused" if i % 53 == 0 else ""}{"zzz" if i % 211 == 0 else ""}')
+        if i == 1500:
+            lines.append("timeout " * 300)
+    return ("\n".join(lines) + "\n").encode()
+
+
+def text_grep_engine(farm):
+    import shutil
+    import subprocess
+    import tempfile
+    from concurrent.futures import ThreadPoolExecutor
+
+    reference = shutil.which("grep", path=os.defpath)
+    candidate = Path(farm) / "grep"
+    if not reference or not candidate.exists():
+        return 0, 1, ["the engine cells need both a reference and a candidate grep"]
+    environment = dict(os.environ, LC_ALL="C")
+    with tempfile.TemporaryDirectory(prefix="grep-engine-") as temporary:
+        log = text_engine_file()
+        (Path(temporary) / "log").write_bytes(log)
+        (Path(temporary) / "log2").write_bytes(log[len(log) // 3:])
+        (Path(temporary) / "logz").write_bytes(log.replace(b"\n", b"\0"))
+        (Path(temporary) / "nonl").write_bytes(log.rstrip(b"\n"))
+        #       Two letters, and patterns whose machine has thousands of states:
+        #       the cache is emptied and begun again under the four walks of a
+        #       span, each of which starts over at its own record.
+        state, lines = 12345, []
+        for _ in range(500):
+            row = []
+            for _ in range(20 + state % 240):
+                state = (state * 1103515245 + 12345) & 0x7FFFFFFF
+                row.append("ab"[state >> 16 & 1])
+            lines.append("".join(row))
+        (Path(temporary) / "ab").write_text("\n".join(lines) + "\n")
+        cases = [(("-E", *mode, "-e", pattern, "log"), None)
+                 for pattern in _TEXT_ENGINE_PATTERNS for mode in _TEXT_ENGINE_MODES]
+        cases += [(("-E", *mode, "-e", pattern, "ab"), None)
+                  for pattern in ("(a|b)*a(a|b){12}b", "^(a|b)*a(a|b){11}b", "a(a|b){13}$")
+                  for mode in (("-c",), ("-n",), ("-v", "-c"), ("-o",), ("-x", "-c"))]
+        #       What the blocks of a span hand the printer, in every way the
+        #       printer asks for them: a limit, an offset, context, two files, a
+        #       colour, the other delimiter, no last newline, and a pipe.
+        for pattern in (r'^[0-9.]+ .*" [5]00 ', r'error|warning.*timeout', r'[0-9]{3} [0-9]{4,5} "[a-z]+ (error|info)'):
+            for extra, name, source in (
+                (("-m", "2"), "log", None), (("-c", "-m", "3"), "log", None),
+                (("-v", "-m", "3"), "log", None), (("-b",), "log", None), (("-bo",), "log", None),
+                (("-A1",), "log", None), (("-B1",), "log", None), (("-C1", "-n"), "log", None),
+                (("-H", "-c"), "log2", "log"), (("--color=always", "-o"), "log", None),
+                (("-z", "-c"), "logz", None), (("-z", "-v", "-c"), "logz", None), ((), "nonl", None),
+                (("-c",), "nonl", None), (("-v", "-c"), "nonl", None), (("-c",), None, "log"),
+                (("-n",), None, "log"), (("-l",), "log", None), (("-q",), "log", None),
+            ):
+                operands = [name] if name else []
+                if source and name:
+                    operands.insert(0, source)
+                cases.append((("-E", *extra, "-e", pattern, *operands), source if not name else None))
+
+        def run(case):
+            argv, source = case
+            answers = []
+            for binary in (reference, candidate):
+                stdin = open(Path(temporary) / source, "rb") if source else subprocess.DEVNULL
+                try:
+                    result = subprocess.run(["grep", *argv], executable=str(binary), cwd=temporary,
+                                            env=environment, stdin=stdin, stdout=subprocess.PIPE,
+                                            stderr=subprocess.PIPE, timeout=20)
+                finally:
+                    if source:
+                        stdin.close()
+                answers.append((result.returncode, result.stdout, result.stderr))
+            return argv, answers
+
+        passed, notes = 0, []
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for argv, answers in pool.map(run, cases):
+                if answers[0] == answers[1]:
+                    passed += 1
+                elif len(notes) < 40:
+                    notes.append(f"grep {shlex.join(argv)}: reference={answers[0][:2]!r}"
+                                 f" ({len(answers[0][1])} bytes), candidate={answers[1][:2]!r}"
+                                 f" ({len(answers[1][1])} bytes)")
+    return passed, len(cases), notes
+
+
+TEXT_CHECKS = (text_grep_encoding, text_grep_engine, text_file_failures, text_collation)
 
 _TEXT_GREP_OPERANDS = (
     (), ("a.txt",), ("a.txt", "b.txt"), ("-",), ("missing",), ("dir",), ("tree",),
