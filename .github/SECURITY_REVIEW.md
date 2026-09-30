@@ -23,7 +23,7 @@ fuzzing covers TLS only, and HTTP framing has one independent oracle.
 | DNS | exact question/ID binding, compression loops, full RR framing, UDP truncation to TCP | coverage-guided compression/name fuzzing; independent packet oracle; DNSSEC is out of scope |
 | TLS records/handshake | record and handshake fragmentation, transcript/Finished, AEAD limits, state ordering, `tls_hs_fuzz` libFuzzer target | record-layer fuzzing; mandatory fuzz budget in CI |
 | X.509 | strict DER and generated-chain policy matrix against OpenSSL; `tls_der_fuzz` / `tls_verify_fuzz` libFuzzer targets | a second independent path validator; name-constraints breadth |
-| HTTP/URL | sink-side request validation, framing conflicts including 204/205 and 205's zero-content body, split-point and chunk/trailer checks, `http.client` framing oracle, HTTPS downgrade harness, real-wget one-byte/FIN/RST and bounded 1xx-storm schedules | a second response-framing oracle; coverage-guided framing fuzzing; slow-stream scheduling across TLS and redirects |
+| HTTP/URL | sink-side request validation, framing conflicts, 204/205/304 as wget and curl take them (the tight tier, `MOONWATER_STRICT` 2, holds them to RFC 9110), split-point and chunk/trailer checks, `http.client` and curl framing oracles, HTTPS downgrade harness, GNU wget and curl as live oracles for byte-at-a-time, split, FIN, RST, 1xx-storm and pipelined-bytes schedules (`wget_mutation`) | coverage-guided framing fuzzing that models the tight tier; slow-stream scheduling across TLS and redirects; open decision: the default refuses an identical duplicate `Content-Length` (and a list `3, 3`), an obs-fold line and a control byte in the reason phrase, all of which wget and curl accept |
 | DHCPv4 | peer/xid/MAC binding, option framing/overload, state cross-product, entropy faults | coverage-guided option-stream fuzzing; mandatory namespace/netem retransmission runs |
 | SNTP | nonce and peer binding, ancillary timestamp parsing, arithmetic and selection checks | adversarial scheduling/netem as a mandatory lane; era-boundary integration tests |
 
@@ -46,8 +46,10 @@ does not convert those protocols into authenticated ones.
 3. Keep MSan (`sh test/run msan`) separate from UBSan and widen it from hosted
    lifts toward a full freestanding `CHECK_net`; today it is exercised on
    aarch64 Linux clang only.
-4. Add a second mature implementation beside `http.client` to the response
-   framing harness and pin Moonwater's policy for every disagreement.
+4. Response framing has `http.client` and curl beside the written matrix, and
+   `wget_mutation` runs GNU wget and curl over the same delivery schedules;
+   keep pinning Moonwater's policy for every disagreement (`DELIBERATE`,
+   `TIGHT_REFUSES`, `STRICTER_THAN_WGET`).
 
 ### P1 — resource and state-machine assurance
 
@@ -59,9 +61,10 @@ does not convert those protocols into authenticated ones.
    extend the rest to SNTP.
 3. Make ARM64 and RISC-V network lanes required, including sanitizer-capable
    hosted builds where available. “Not run” is not evidence.
-4. Add deterministic hostile scheduling for TCP/TLS/HTTP: one-byte delivery,
-   long pauses on every boundary, early FIN/RST, simultaneous timeout, and
-   response bytes arriving with close.
+4. Deterministic hostile scheduling for TCP/TLS/HTTP exists for plain HTTP
+   (`wget_mutation`: one-byte delivery, splits at every grammar boundary,
+   early FIN/RST, 1xx storms, bytes arriving with close); long pauses,
+   simultaneous timeout and the TLS and redirect legs are still to do.
 
 ### P2 — independent and operational assurance
 

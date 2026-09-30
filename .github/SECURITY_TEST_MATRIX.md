@@ -13,7 +13,7 @@
 | Real-server chains | `tls_verify_chain` against `openssl verify` over 643 public hosts, caIssuers fetched for both; needs the network | `python3 test/differential.py --harness x509_corpus --work DIR` (by hand) |
 | TLS 1.3 record layer and state machine with real crypto | a scripted TLS 1.3 server (tickets, KeyUpdate, CCS placements, padding and 2^14 edges, bad tags, alerts, truncation, unasked EncryptedExtensions, CertificateRequest, each key-share group) served to wget and to OpenSSL's client; RFC 8446 column with named deliberate and lenient disagreements | `python3 test/differential.py --harness tls_peer` (via `sh test/run net`) |
 | HTTPS→HTTP redirect downgrade | TLS loopback 302 Location shapes under wget manners (9 checks: plain/`http://` sticky+nested, authority-only; uppercase/`//` stay HTTPS; credentialed/`http:///` refuse without silent fetch; no Refresh/meta path) | `python3 test/differential.py --harness https_downgrade` |
-| HTTP response framing and delivery (chunked, TE/CL, headers, trailers) | written MUST_ACCEPT/MUST_REFUSE matrix with `http.client` and curl oracles; real wget receives length and chunked bodies one byte at a time and across every grammar boundary, clean/cut FIN and RST, a 32-response 1xx storm, forbidden 204/205 framing, and zero/nonzero chunked and close-delimited 205 content | `python3 test/differential.py --harness http_response_framing`; `python3 test/differential.py --harness wget_mutation` |
+| HTTP response framing and delivery (chunked, TE/CL, headers, trailers, 204/205/304) | written MUST_ACCEPT/MUST_REFUSE matrix (97 cases, both `MOONWATER_STRICT` tiers) with `http.client` and curl oracles; `wget_mutation` serves 59 exact write schedules (one byte at a time with Nagle off and each write acked, splits at grammar boundaries, clean and cut FIN, RST, 1xx storms before 200/204/205, 204/205/304 with every framing, bytes pipelined after a 204, dup/conflicting Content-Length, obs-fold, control bytes in the reason phrase) to the built shell's wget, GNU wget and curl and requires the answers to agree unless the row is named stricter | `python3 test/differential.py --harness http_response_framing`; `python3 test/differential.py --harness wget_mutation` (both in `sh test/run net`); the tight tier's `CHECK_net` is the `net-tight-<host arch>` tally |
 | Uninitialized wire / ABI padding (MSan) | pad proves (wire + nlattr-shaped) + hosted lifts (`dns_copy_name`, TLS record header, HTTP header/chunk, `dhcp_walk`, `netlink_find_span`, TLS ext/cert without fuzzer) on initialized hostile buffers with per-surface uninit catches + thin CHECK_net-equivalent probes + TLS DER/HS seed smoke under MemorySanitizer; not full CHECK_net; NOT RUN without clang MSan; not CI push | `sh test/run msan` |
 | SNTP nonce, ancillary timestamps, timing arithmetic, server selection | machine checks | `sh test/run machine` |
 | Shell parsing, expansion, environment, status and effects | generated Bash/Dash comparison | `sh test/run shell builtins` |
@@ -178,9 +178,12 @@ Extension policy is exercised at both leaves and intermediates. Deliberately
 stricter Moonwater policy is named at the individual case.
 
 HTTP response framing (`--harness http_response_framing`) is the same shape
-for the response parser: a written MUST_ACCEPT / MUST_REFUSE matrix (54 cases /
-136 checks at tip) held against the in-tree framing and chunk decoder, with
-`http.client` as a second oracle. Rows where Moonwater refuses (or accepts a
+for the response parser: a written MUST_ACCEPT / MUST_REFUSE matrix (97 cases,
+452 checks at tip, run once per `MOONWATER_STRICT` tier) held against the
+in-tree framing and chunk decoder, with `http.client` and curl as oracles.
+204 and 205 are accepted as wget and curl take them (both ignore a 204's
+declared body and print a 205's); the tight tier (`TIGHT_REFUSES`) refuses a
+204 that declares any body framing and a 205 with a non-zero length. Rows where Moonwater refuses (or accepts a
 different body) while `http.client` is looser — TE/CL conflicts, duplicate
 framing fields, obs-fold, embedded controls, non-chunked TE, trailer and
 chunk-extension grammar, informational framing, leftover after the final
