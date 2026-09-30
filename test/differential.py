@@ -5615,6 +5615,48 @@ def builtins_read_limit_state(rng):
     return "builtins-read-limit-state", ("bash", "posix"), script
 
 
+def builtins_read_stream_state(rng):
+    """read over files, pipes, here-documents and retained fds, then what a
+    following command sees: a file is read a block at a time and put back,
+    a pipe byte for byte, and neither may lose or repeat a byte."""
+    ifs = rng.choice(("", "IFS=: ", "IFS=' :' ", "IFS=' ' ", "IFS= "))
+    option = rng.choice(("-r", "", "-r", "-rn 3", "-rn 1", "-rN 5", "-rd :", "-rd ''", "-rn 4096",
+                         "-rN 4100", "-ra arr"))
+    line_a = rng.choice(("a:b:c", "one two  three", "x\\ty:z", "", "  lead trail  ",
+                         "w" * rng.choice((1, 4095, 4096, 4097, 9000)) + ":end"))
+    lines = [line_a, "second: line", "3rd\\", "cont", "last-no-newline"]
+    text = "\n".join(lines) + rng.choice(("", "\n"))
+    if rng.getrandbits(1):
+        text = text.replace("\n", "\r\n", 1)
+    count = rng.choice((1, 2, 3, 5))
+    source = rng.randrange(5)
+    if "-ra" in option:
+        show = "printf '<%s|%s|%s>' \"$s\" \"${arr[0]-}\" \"${arr[1]-}\""
+        names = ""
+    else:
+        show = "printf '<%s|%s|%s>' \"$s\" \"$f1\" \"$f2\""
+        names = " f1 f2"
+    loop = ("i=0; while [ $i -lt " + str(count) + " ]; do " + ifs + "read " + option + names +
+            "; s=$?; " + show + "; i=$((i+1)); done; echo\n")
+    after = rng.choice(("cat; echo '|'", "head -c 7; echo '|'",
+                        "read -r rest; printf '<%s>' \"$rest\"; echo", "wc -c", ":"))
+    quoted = shlex.quote(text)
+    if source == 0:
+        script = "printf '%s' " + quoted + " > feed\n{ " + loop + after + "\n} < feed\n"
+    elif source == 1:
+        script = "printf '%s' " + quoted + " | { " + loop + after + "\n}\n"
+    elif source == 2:
+        script = "{ " + loop + after + "\n} <<'EOT'\n" + text.replace("\r", "") + "\nEOT\n"
+    elif source == 3:
+        script = ("printf '%s' " + quoted + " > feed\nexec 3<feed\n{ " +
+                  loop.replace("read ", "read -u3 ") + after + "\n} <&3\nexec 3<&-\n")
+    else:
+        script = ("printf '%s' " + quoted + " > feed\n{ " + loop + "} < feed\n"
+                  "{ " + loop + "} < feed\n")
+    modes = ("bash", "posix") if option in ("-r", "") else ("bash",)
+    return "builtins-read-stream-state", modes, script
+
+
 def builtins_read_array_state(rng):
     separator = rng.choice((":", ",", " ", " :"))
     text = rng.choice(("a:b::c", ":a:b:", " a  b c ", "one,two,,four"))
@@ -6116,7 +6158,7 @@ BUILTINS_FAMILIES = (
     builtins_printf_star_range,
     builtins_listing, builtins_query_namespaces, builtins_declaration_lifecycle,
     builtins_inventory_state, builtins_read_fields, builtins_read_ifs_snapshot,
-    builtins_read_limit_state, builtins_read_array_state, builtins_printf_formats,
+    builtins_read_limit_state, builtins_read_stream_state, builtins_read_array_state, builtins_printf_formats,
     builtins_printf_hex_roundtrip, builtins_printf_dynamic_fields,
     builtins_printf_escapes, builtins_printf_collectors, builtins_option_walk,
     builtins_mapfile_records, builtins_getopts_state, builtins_getopts_reset,

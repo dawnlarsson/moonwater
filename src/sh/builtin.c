@@ -13984,9 +13984,9 @@ static p8 address_to read_line;
 static positive read_line_room;
 static p8 address_to read_literal;
 static positive read_literal_room;
-static p8 address_to read_ifs;
-static positive read_ifs_room;
 static positive read_length;
+// The descriptor read last found unseekable, or -1.
+static bipolar read_pipe_fd = -1;
 
 // The bytes and their quotedness move together, but no pointer into either is
 // retained while they grow. Keep both mappings for the next call: a shell that
@@ -13998,24 +13998,21 @@ static positive read_length;
 
 // Whether a byte splits a field. The two questions are different: every byte
 // in IFS ends a field, but only the blanks among them are allowed to run
-// together and to be thrown away at the ends.
-PURE bool read_separates(string_address ifs, positive at)
-{
-        if (read_literal[at])
-                return false;
+// together and to be thrown away at the ends. IFS is taken apart once per
+// read into a 256-bit set, so each byte is one bit test instead of a scan.
+static p64 read_ifs_bits[4];
+static p64 read_blank_bits[4];
 
-        return string_first_of(ifs, read_line[at]) != null;
+#define read_bit(set, byte) (((set)[(byte) >> 6] >> ((byte) & 63)) & 1)
+
+PURE bool read_separates(positive at)
+{
+        return !read_literal[at] && read_bit(read_ifs_bits, (p8)read_line[at]);
 }
 
-PURE bool read_blank(string_address ifs, positive at)
+PURE bool read_blank(positive at)
 {
-        if (read_literal[at])
-                return false;
-
-        if (read_line[at] != ' ' && read_line[at] != '\t' && read_line[at] != '\n')
-                return false;
-
-        return string_first_of(ifs, read_line[at]) != null;
+        return !read_literal[at] && read_bit(read_blank_bits, (p8)read_line[at]);
 }
 
 /*
@@ -14198,11 +14195,10 @@ static positive read_words_room;
 
 /* One IFS boundary for read's array and scalar destinations. The final
    scalar keeps the unsplit remainder, except a lone terminal delimiter. */
-static string_address read_field(string_address ifs, positive address_to cursor,
-                                  bool remainder)
+static string_address read_field(positive address_to cursor, bool remainder)
 {
         positive at = *cursor;
-        while (at < read_length && read_blank(ifs, at))
+        while (at < read_length && read_blank(at))
                 at++;
         *cursor = read_length;
         if (at == read_length)
@@ -14211,7 +14207,7 @@ static string_address read_field(string_address ifs, positive address_to cursor,
         if (remainder)
         {
                 positive stop = read_length;
-                while (stop > begin && read_blank(ifs, stop - 1))
+                while (stop > begin && read_blank(stop - 1))
                         stop--;
 
                 /*
@@ -14222,16 +14218,16 @@ static string_address read_field(string_address ifs, positive address_to cursor,
                         more and the rest stands whole: "a b :" and "y::".
                 */
                 positive word_end = begin;
-                while (word_end < stop && !read_separates(ifs, word_end))
+                while (word_end < stop && !read_separates(word_end))
                         word_end++;
                 positive after = word_end;
-                while (after < stop && read_blank(ifs, after))
+                while (after < stop && read_blank(after))
                         after++;
-                if (after < stop && read_separates(ifs, after) &&
-                    !read_blank(ifs, after))
+                if (after < stop && read_separates(after) &&
+                    !read_blank(after))
                 {
                         after++;
-                        while (after < stop && read_blank(ifs, after))
+                        while (after < stop && read_blank(after))
                                 after++;
                 }
                 if (word_end < stop && after == stop)
@@ -14240,15 +14236,15 @@ static string_address read_field(string_address ifs, positive address_to cursor,
         }
         else
         {
-                while (at < read_length && !read_separates(ifs, at))
+                while (at < read_length && !read_separates(at))
                         at++;
                 positive after = at;
-                while (after < read_length && read_blank(ifs, after))
+                while (after < read_length && read_blank(after))
                         after++;
-                if (after < read_length && read_separates(ifs, after))
+                if (after < read_length && read_separates(after))
                 {
                         after++;
-                        while (after < read_length && read_blank(ifs, after))
+                        while (after < read_length && read_blank(after))
                                 after++;
                 }
                 // Classify the separator before replacing it with NUL.
@@ -14280,7 +14276,6 @@ COLD fn shell_read(writer write, string_address input)
         terminal_modes quiet_held;
         b32 descriptor = 0;
         string_address prompt = null;
-        string_address ifs;
         p8 ifs_default[] = " \t\n";
 
         read_length = 0;
@@ -14450,12 +14445,37 @@ COLD fn shell_read(writer write, string_address input)
         memory_utf8_state read_utf8 = {0};
         positive read_chars = 0;
         bool escaped = false;
+        /* A file can be read a block at a time and have its offset put back
+           to the first byte the line did not use, which is what Bash does:
+           the bytes a following command reads are the same and the calls
+           are one per line instead of one per byte. A pipe or a terminal
+           cannot be put back, so it stays byte for byte, as does a timed
+           read, which waits before every byte. */
+        p8 block[4096];
+        positive block_at = 0;
+        positive block_used = 0;
+        bool seekable = false;
+
+        //      A descriptor that answered ESPIPE is asked no more until a
+        //      redirection puts something else there (exec_save_fd): a stale
+        //      answer can only keep the byte at a time path, never make a
+        //      pipe be read a block at a time.
+        if (!timed && (bipolar)descriptor != read_pipe_fd)
+        {
+                bipolar where = system_seek(descriptor, 0, FILE_SEEK_CUR);
+
+                seekable = where >= 0;
+                if (where == -ERROR_ILLEGAL_SEEK)
+                        read_pipe_fd = (bipolar)descriptor;
+        }
         while (!(limited && (utf8_n ? read_chars >= limit : read_length >= limit)))
         {
                 p8 value;
 
                 if (read_length == positive_max || !read_reserve(read_length + 2))
                 {
+                        if (block_used > block_at)
+                                system_seek(descriptor, (positive)(-(bipolar)(block_used - block_at)), FILE_SEEK_CUR);
                         if (quieted)
                                 system_control(descriptor, PTY_TCSETS,
                                                address_of quiet_held);
@@ -14477,7 +14497,24 @@ COLD fn shell_read(writer write, string_address input)
                         }
                 }
 
-                bipolar got = system_read_once(descriptor, address_of value, 1);
+                bipolar got = 1;
+
+                if (!seekable)
+                        got = system_read_once(descriptor, address_of value, 1);
+                else
+                {
+                        if (block_at == block_used)
+                        {
+                                got = system_read_once(descriptor, block, sizeof block);
+                                block_at = 0;
+                                block_used = got > 0 ? (positive)got : 0;
+                        }
+                        if (block_used > block_at)
+                        {
+                                value = block[block_at++];
+                                got = 1;
+                        }
+                }
 
                 if (got != 1)
                 {
@@ -14529,6 +14566,9 @@ COLD fn shell_read(writer write, string_address input)
                                 read_chars++;
                 }
         }
+
+        if (block_used > block_at)
+                system_seek(descriptor, (positive)(-(bipolar)(block_used - block_at)), FILE_SEEK_CUR);
 
         bool missing = ended &&
                        (!limited ||
@@ -14597,35 +14637,28 @@ COLD fn shell_read(writer write, string_address input)
         }
 
         {
+                // The set is built from IFS at once, so nothing below points
+                // into env_storage, which the first name assigned is free to
+                // compact.
                 string_address value = env_get("IFS");
 
-                // On a copy: IFS points into env_storage, and the first name
-                // assigned below is free to compact the block out from under
-                // it.
-                if (value)
-                {
-                        positive length = string_length(value);
-
-                        if (length == positive_max ||
-                            !shell_array_room(read_ifs, read_ifs_room, length + 1))
-                        {
-                                return shell_answered(2, "%s: no room\n", "read");
-                        }
-
-                        memory_copy(read_ifs, value, length + 1);
-                        ifs = read_ifs;
-                }
-                else
-                {
-                        ifs = ifs_default;
-                }
+                memory_fill(read_ifs_bits, 0, sizeof read_ifs_bits);
+                for (string_address walk = value ? value : ifs_default;
+                     string_get(walk); walk++)
+                        read_ifs_bits[(p8)*walk >> 6] |= (p64)1 << ((p8)*walk & 63);
+                for (positive blank = 0; blank < 4; blank++)
+                        read_blank_bits[blank] = 0;
+                for (string_address walk = " \t\n"; string_get(walk); walk++)
+                        read_blank_bits[(p8)*walk >> 6] |=
+                            read_ifs_bits[(p8)*walk >> 6] &
+                            ((p64)1 << ((p8)*walk & 63));
         }
 
         if (array_name)
         {
                 positive count = 0;
                 string_address field;
-                while ((field = read_field(ifs, address_of at, false)))
+                while ((field = read_field(address_of at, false)))
                 {
                         if (!shell_array_room(read_words, read_words_room, count + 1))
                                 return shell_answered(2, "%s: no room\n", "read");
@@ -14638,7 +14671,7 @@ COLD fn shell_read(writer write, string_address input)
         else
                 while (names < shell_argc)
                 {
-                        string_address field = read_field(ifs, address_of at,
+                        string_address field = read_field(address_of at,
                                                            names + 1 == shell_argc);
                         if (!(env_assign_name(shell_argv[names], field ? field : (string_address)"")
                             || shell_read_refused(shell_argv[names])))

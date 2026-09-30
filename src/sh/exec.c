@@ -6467,6 +6467,9 @@ static bool exec_save_fd(b32 fd, parse_node address_to node)
         bipolar saved;
         bool closed = false;
 
+        if ((bipolar)fd == read_pipe_fd)
+                read_pipe_fd = -1;
+
         if (fd == spawn_device)
                 exec_spawn_device_preserve(node);
 
