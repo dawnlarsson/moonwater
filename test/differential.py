@@ -59498,6 +59498,7 @@ void _raw_spin_unlock(void *l) { int *p = l; if (!*p) LF.bad++; *p = 0; }
 void dput(struct dentry *d) { LF.dputs++; if (d->d_lockref.count <= 0) LF.bad++; d->d_lockref.count--; }
 struct dentry *offset_dir_lookup(struct dentry *parent, loff_t offset) { return lf_lookup ? lf_lookup(parent, offset) : NULL; }
 char *mw_user_lo, *mw_user_hi;
+int copy_to_user_nofault(void *to, const void *from, unsigned long n);
 static struct task_struct mw_task;
 struct task_struct *current_task = &mw_task;
 unsigned long _copy_to_user(void *to, const void *from, unsigned long n)
@@ -59509,6 +59510,7 @@ unsigned long _copy_to_user(void *to, const void *from, unsigned long n)
         memcpy(t, from, ok);
         return n - ok;
 }
+int copy_to_user_nofault(void *to, const void *from, unsigned long n) { return _copy_to_user(to, from, n) ? -EFAULT : 0; }
 
 bool fscrypt_has_encryption_key(const struct inode *inode) { (void)inode; return G.haskey; }
 int generic_ci_match(const struct inode *parent, const struct qstr *name, const struct qstr *folded_name, const u8 *de_name, u32 de_name_len)
@@ -60070,7 +60072,8 @@ def harness_kernel_ports(argv):
     def macros(arch):
         kind = "%function" if arch == "arm64" else "@function"
         config = {"x86_64": "CONFIG_X86_64", "arm64": "CONFIG_ARM64", "riscv64": "CONFIG_RISCV"}[arch]
-        return ("#define %s 1\n#define CONFIG_FS_ENCRYPTION 1\n#define __stringify_1(x...) #x\n#define __stringify(x...) __stringify_1(x)\n"
+        return (("#define MW_GET_CURRENT \"adrp x8, current_task\\n   ldr x8, [x8, :lo12:current_task]\\n\"\n" if arch == "arm64" else "") +
+                "#define %s 1\n#define CONFIG_FS_ENCRYPTION 1\n#define __stringify_1(x...) #x\n#define __stringify(x...) __stringify_1(x)\n"
                 "#define module_param_named(a, b, c, d)\n#define ASM_RET \"ret\\n\"\n"
                 '#define ASM_FUNC(name) ".globl " #name "\\n.type " #name ", %s\\n" #name ":\\n"\n'
                 '#define ASM_END(name) ".size " #name ", .-" #name "\\n"\n') % (config, kind)

@@ -1364,7 +1364,7 @@ __asm__(
 //       fs/readdir.c; the signal bits and the thread flags word are the
 //       compiler's.
 //
-//> arch x86_64
+//> arch x86_64 arm64 riscv64
 //> unstatic fs/readdir.c filldir64
 //> assert fs/readdir.c offsetof(struct getdents_callback64, current_dir) == 24
 //> assert fs/readdir.c offsetof(struct getdents_callback64, prev_reclen) == 32
@@ -1591,6 +1591,9 @@ __asm__(
 #endif // CONFIG_X86_64
 
 #ifdef CONFIG_ARM64
+#ifndef MW_GET_CURRENT
+#define MW_GET_CURRENT "mrs x8, sp_el0\n"
+#endif
 #ifdef CONFIG_DEBUG_LOCK_ALLOC
 #define MW_LOCK_CHILD "mov w1, #MW_LOCK_NESTED\n   bl _raw_spin_lock_nested\n"
 #else
@@ -1612,15 +1615,32 @@ __asm__(
     MWSET(MW_CTX_POS)
     MWSET(MW_POS_EOD)
     MWSET(MW_LOCK_NESTED)
+    MWSET(MW_CTX_COUNT)
+    MWSET(MW_TASK_TIF)
+    MWSET(MW_TIF_SIG)
+    ".set GB_CUR, 24\n"
+    ".set GB_PREV, 32\n"
+    ".set GB_ERR, 36\n"
     ".set I_FIRST, 0\n"
     ".set I_EOD, 4\n"
     ".set I_N, 8\n"
     ".set I_LAST, 16\n"
-    ".set I_BUF, 32\n"
+    ".set I_CUR, 24\n"
+    ".set I_PR, 32\n"
+    ".set I_M, 36\n"
+    ".set I_STOP, 40\n"
+    ".set I_TOTAL, 44\n"
+    ".set I_SIG, 48\n"
+    ".set I_BAD, 52\n"
+    ".set I_LASTREC, 56\n"
+    ".set I_OFF0, 64\n"
+    ".set I_POS, 72\n"
+    ".set I_BUF, 96\n"
     ".set I_BUFSZ, 2048\n"
+    ".set I_IMG, 2144\n"
     ".set I_BATCH, 16\n"
     ".set I_NAMEMAX, 1024\n"
-    ".set I_FRAME, 2080\n"
+    ".set I_FRAME, 4208\n"
 );
 
 __asm__(
@@ -1628,7 +1648,7 @@ __asm__(
     "        stp     x29, x30, [sp, #-96]!\n   mov     x29, sp\n   stp     x19, x20, [sp, #16]\n"
     "        stp     x21, x22, [sp, #32]\n   stp     x23, x24, [sp, #48]\n"
     "        stp     x25, x26, [sp, #64]\n   stp     x27, x28, [sp, #80]\n"
-    "        sub     sp, sp, #I_FRAME\n   mov     x19, x1\n   ldr     x20, [x0, #MW_FILE_DENTRY]\n"
+    "        sub     sp, sp, #(I_FRAME/2)\n   sub     sp, sp, #(I_FRAME/2)\n   mov     x19, x1\n   ldr     x20, [x0, #MW_FILE_DENTRY]\n"
     "        # dentry = offset_dir_lookup(dir, ctx->pos); none means the end\n"
     "        ldr     x1, [x19, #MW_CTX_POS]\n   mov     x0, x20\n   bl      offset_dir_lookup\n"
     "        mov     x21, x0\n   cbz     x0, .Lit_eod\n   mov     w8, #1\n   str     w8, [sp, #I_FIRST]\n"
@@ -1679,6 +1699,73 @@ __asm__(
     "        cbz     x21, 2f\n   mov     x0, x21\n   bl      dput\n"
     "2:      mov     x21, xzr\n   ldr     w8, [sp, #I_EOD]\n   cbnz    w8, 3f\n   ldr     x21, [sp, #I_LAST]\n"
     "3:      add     x26, sp, #I_BUF\n   ldr     w25, [sp, #I_N]\n   cbz     w25, .Lit_emitted\n"
+    "        adrp    x0, filldir64\n   add     x0, x0, :lo12:filldir64\n   ldr     x1, [x19, #MW_CTX_ACTOR]\n   cmp     x0, x1\n   b.ne    .Lit_emit\n"
+    "        # the actor is filldir64: one image of dirents for the batch, written with one copy and a patch of the\n"
+    "        # previous dirent's d_off, the state committed only when both went through (see the x86_64 body)\n"
+    "        ldr     x8, [x19, #GB_CUR]\n   str     x8, [sp, #I_CUR]\n   ldr     w8, [x19, #GB_PREV]\n   str     w8, [sp, #I_PR]\n"
+    "        str     wzr, [sp, #I_TOTAL]\n   " MW_GET_CURRENT "   ldr     x9, [x8, #MW_TASK_TIF]\n   mov     x10, #MW_TIF_SIG\n"
+    "        tst     x9, x10\n   cset    w9, ne\n   str     w9, [sp, #I_SIG]\n"
+    "        # verify_dirent_name for every record: the first with an empty name or a slash in it, a word at a time\n"
+    "        mov     w9, #-1\n   str     w9, [sp, #I_BAD]\n   mov     x10, #0x0101010101010101\n   mov     x11, #0x8080808080808080\n"
+    "        mov     x12, #0x2f\n   mul     x12, x12, x10\n   mov     x13, x26\n   mov     w24, #0\n"
+    ".Lf_check:\n"
+    "        ldr     w2, [x13, #16]\n   cbz     w2, .Lf_slash\n   add     x3, x13, #24\n"
+    "1:      ldr     x4, [x3]\n   eor     x4, x4, x12\n   cmp     w2, #8\n   b.lo    2f\n"
+    "        sub     x5, x4, x10\n   bic     x5, x5, x4\n   tst     x5, x11\n   b.ne    .Lf_slash\n"
+    "        add     x3, x3, #8\n   subs    w2, w2, #8\n   b.ne    1b\n   b       .Lf_clean\n"
+    "2:      lsl     w5, w2, #3\n   mov     x6, #-1\n   lsl     x6, x6, x5\n   orr     x4, x4, x6\n"
+    "        sub     x5, x4, x10\n   bic     x5, x5, x4\n   tst     x5, x11\n   b.ne    .Lf_slash\n"
+    ".Lf_clean:\n"
+    "        ldr     w8, [x13, #16]\n   add     w8, w8, #31\n   and     w8, w8, #0xfffffff8\n   add     x13, x13, x8\n"
+    "        add     w24, w24, #1\n   cmp     w24, w25\n   b.lo    .Lf_check\n   b       .Lf_checked\n"
+    ".Lf_slash:\n"
+    "        str     w24, [sp, #I_BAD]\n"
+    ".Lf_checked:\n"
+    "        # the image: filldir64's checks in its order for each record (name, room, signal), then the dirent\n"
+    "        ldr     w28, [x19, #MW_CTX_COUNT]\n   add     x23, sp, #I_IMG\n   mov     w24, #0\n   str     wzr, [sp, #I_STOP]\n"
+    ".Lf_build:\n"
+    "        ldr     x8, [x26]\n   str     x8, [sp, #I_POS]\n"
+    "        ldr     w9, [sp, #I_BAD]\n   cmp     w24, w9\n   b.eq    .Lf_eio\n"
+    "        ldr     w2, [x26, #16]\n   add     w13, w2, #27\n   and     w13, w13, #0xfffffff8\n"
+    "        cmp     w28, w13\n   b.lt    .Lf_einval\n"
+    "        ldr     w9, [sp, #I_SIG]\n   cbz     w9, 1f\n   cbnz    w24, .Lf_einval\n   ldr     w9, [sp, #I_PR]\n   cbnz    w9, .Lf_einval\n"
+    "1:      ldr     x8, [x26, #8]\n   str     x8, [x23]\n   strh    w13, [x23, #16]\n"
+    "        ldrh    w8, [x26, #20]\n   ubfx    w8, w8, #12, #4\n   mov     w9, #0x1556\n   lsr     w9, w9, w8\n"
+    "        tst     w9, #1\n   csel    w8, w8, wzr, ne\n   strb    w8, [x23, #18]\n"
+    "        ldr     x8, [x26]\n   cbz     w24, 2f\n   ldr     w9, [sp, #I_LASTREC]\n   sub     x9, x23, x9\n   str     x8, [x9, #8]\n   b       3f\n"
+    "2:      str     x8, [sp, #I_OFF0]\n"
+    "3:      str     xzr, [x23, #8]\n"
+    "        add     x3, x26, #24\n   add     x4, x23, #19\n   lsr     w5, w2, #3\n   cbz     w5, 5f\n"
+    "4:      ldr     x6, [x3], #8\n   str     x6, [x4], #8\n   subs    w5, w5, #1\n   b.ne    4b\n"
+    "5:      ldr     x6, [x3]\n   and     w2, w2, #7\n   lsl     w5, w2, #3\n   mov     x7, #-1\n   lsl     x7, x7, x5\n"
+    "        bic     x6, x6, x7\n   str     x6, [x4]\n   str     xzr, [x4, #8]\n"
+    "        str     w13, [sp, #I_LASTREC]\n   add     x23, x23, w13, uxtw\n   sub     w28, w28, w13\n   add     w24, w24, #1\n"
+    "        ldr     w8, [x26, #16]\n   add     w8, w8, #31\n   and     w8, w8, #0xfffffff8\n   add     x26, x26, x8\n"
+    "        subs    w25, w25, #1\n   b.ne    .Lf_build\n   b       .Lf_built\n"
+    ".Lf_einval:\n"
+    "        mov     w8, #1\n   str     w8, [sp, #I_STOP]\n   b       .Lf_built\n"
+    ".Lf_eio:\n"
+    "        mov     w8, #2\n   str     w8, [sp, #I_STOP]\n"
+    ".Lf_built:\n"
+    "        str     w24, [sp, #I_M]\n   cbz     w24, .Lf_commit\n"
+    "        add     x1, sp, #I_IMG\n   sub     x2, x23, x1\n   str     w2, [sp, #I_TOTAL]\n"
+    "        ldr     w9, [sp, #I_PR]\n   cbz     w9, 1f\n"
+    "        ldr     x0, [sp, #I_CUR]\n   sub     x0, x0, x9\n   add     x0, x0, #8\n   add     x1, sp, #I_OFF0\n   mov     x2, #8\n"
+    "        bl      copy_to_user_nofault\n   cbnz    w0, .Lit_generic\n"
+    "1:      ldr     x0, [sp, #I_CUR]\n   add     x1, sp, #I_IMG\n   ldr     w2, [sp, #I_TOTAL]\n   bl      copy_to_user_nofault\n"
+    "        cbnz    w0, .Lit_generic\n"
+    ".Lf_commit:\n"
+    "        ldr     x8, [sp, #I_CUR]\n   ldr     w9, [sp, #I_TOTAL]\n   add     x8, x8, x9\n   str     x8, [x19, #GB_CUR]\n"
+    "        ldr     w10, [x19, #MW_CTX_COUNT]\n   sub     w10, w10, w9\n   str     w10, [x19, #MW_CTX_COUNT]\n"
+    "        ldr     w8, [sp, #I_M]\n   cbz     w8, 1f\n   ldr     w9, [sp, #I_LASTREC]\n   str     w9, [x19, #GB_PREV]\n"
+    "1:      ldr     w9, [sp, #I_STOP]\n   mov     w10, #-22\n   cmp     w9, #2\n   b.ne    2f\n   mov     w10, #-5\n   b       3f\n"
+    "2:      cbnz    w8, 3f\n   cbz     w9, 4f\n"
+    "3:      str     w10, [x19, #GB_ERR]\n"
+    "4:      ldr     x8, [sp, #I_POS]\n   str     x8, [x19, #MW_CTX_POS]\n"
+    "        ldr     w9, [sp, #I_STOP]\n   cbnz    w9, .Lit_stop\n   b       .Lit_emitted\n"
+    "        # any other actor, or a copy that did not go through: one call for each record, as the C does\n"
+    ".Lit_generic:\n"
+    "        add     x26, sp, #I_BUF\n   ldr     w25, [sp, #I_N]\n"
     "        # ctx->pos = the entry's offset, then actor(ctx, name, len, pos, ino, fs_umode_to_dtype(mode))\n"
     ".Lit_emit:\n"
     "        ldr     x8, [x26]\n   str     x8, [x19, #MW_CTX_POS]\n"
@@ -1698,7 +1785,7 @@ __asm__(
     ".Lit_eod:\n"
     "        mov     x8, #MW_POS_EOD\n   str     x8, [x19, #MW_CTX_POS]\n"
     ".Lit_out:\n"
-    "        add     sp, sp, #I_FRAME\n   ldp     x27, x28, [sp, #80]\n"
+    "        add     sp, sp, #(I_FRAME/2)\n   add     sp, sp, #(I_FRAME/2)\n   ldp     x27, x28, [sp, #80]\n"
     "        ldp     x25, x26, [sp, #64]\n   ldp     x23, x24, [sp, #48]\n"
     "        ldp     x21, x22, [sp, #32]\n   ldp     x19, x20, [sp, #16]\n"
     "        ldp     x29, x30, [sp], #96\n"
@@ -1729,6 +1816,9 @@ __asm__(
     MWSET(MW_CTX_POS)
     MWSET(MW_POS_EOD)
     MWSET(MW_LOCK_NESTED)
+    MWSET(MW_CTX_COUNT)
+    MWSET(MW_TASK_TIF)
+    MWSET(MW_TIF_SIG)
     ".set I_FIRST, 0\n"
     ".set I_EOD, 4\n"
     ".set I_N, 8\n"
