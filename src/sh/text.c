@@ -25435,41 +25435,6 @@ static bool grep_glob_add(grep_glob address_to address_to list,
 
         memory_copy_apart_end(room, value, length);
 
-        /*
-                GNU matches these with fnmatch, where a bracket expression
-                opened by [^ is the complement just as one opened by [! is.
-                The shell's matcher reads only the exclamation mark, so a
-                bracket's leading caret becomes one here, and only there: a
-                caret anywhere else in a bracket, or outside one, stays itself.
-        */
-        for (positive at = 0; at < length; at++)
-        {
-                if (room[at] == '\\')
-                {
-                        at++;
-                        continue;
-                }
-
-                if (room[at] != '[')
-                        continue;
-
-                positive close = at + 1;
-
-                if (close < length && (room[close] == '^' || room[close] == '!'))
-                        close++;
-                if (close < length && room[close] == ']')
-                        close++;
-                close += memory_span_without_byte(room + close, ']', length - close);
-
-                if (close == length)
-                        continue;
-
-                if (room[at + 1] == '^')
-                        room[at + 1] = '!';
-
-                at = close;
-        }
-
         made->value = (string_address)room;
         made->include = include;
         made->wild = false;
