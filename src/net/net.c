@@ -10482,6 +10482,7 @@ static bipolar http_fetch_to(string_address start, bipolar dest, bool check_cert
 #define DHCP_ACK 5
 #define DHCP_NAK 6
 #define DHCP_DECLINE 4
+#define DHCP_RELEASE 7
 
 #define DHCP_OPTION_PAD 0
 #define DHCP_OPTION_MASK 1
@@ -10504,6 +10505,12 @@ static bipolar http_fetch_to(string_address start, bipolar dest, bool check_cert
 #define DHCP_REFUSED (-3)
 #define DHCP_NO_RANDOM (-4)
 #define DHCP_CONFLICT (-5)
+//      Not an outcome: what the confined child writes down the answer pipe
+//      once its REQUEST is out, so that whoever waits for the exchange knows
+//      a server holds an address for this client (see dhcp_answer).
+#define DHCP_REQUESTED (-20)
+//      The same, once the ACK is in and the address is being probed.
+#define DHCP_PROBING (-21)
 
 typedef struct
 {
@@ -10516,6 +10523,15 @@ typedef struct
         p32 renewal;
         p32 rebinding;
 } dhcp_lease;
+
+/* What the exchange's child writes to its parent: the outcome and the lease,
+   once; and before that, when its REQUEST has gone out, the same record with
+   DHCP_REQUESTED and the offer the REQUEST names. */
+typedef struct
+{
+        bipolar status;
+        dhcp_lease lease;
+} dhcp_answer;
 
 /* A transaction id is visible beside the client's public hardware address and
    is the only unpredictable field an off-path reply must guess. Prefer the
@@ -11445,6 +11461,36 @@ static COLD fn dhcp_announce(string_address device, const p8 address_to hardware
         socket_close((b32)handle);
 }
 
+static COLD bipolar dhcp_open(string_address device, p32 host, bool broadcast);
+
+/* The exchange was cut after its REQUEST went out and before any answer: the
+   server holds the offered address for this client and nothing here will
+   use it. Given back with a DHCPRELEASE from the process that cut it (which
+   is not confined), by broadcast because no address is configured. */
+static COLD fn dhcp_release(string_address device, const p8 address_to hardware,
+                            const dhcp_lease address_to lease)
+{
+        p8 packet[300];
+        p32 transaction;
+        bipolar handle;
+        socket_address_internet where = {
+            .family = AF_INET, .port = network_order_16(DHCP_SERVER_PORT),
+            .host = network_order_32(HOST_BROADCAST)};
+
+        if (!lease->address || !lease->server ||
+            !dhcp_transaction_early(address_of transaction))
+                return;
+        handle = dhcp_open(device, HOST_ANY, true);
+        if (handle < 0)
+                return;
+        dhcp_build(packet, sizeof packet, DHCP_RELEASE, transaction,
+                   (p8 address_to)hardware, 0, lease->server, lease->address,
+                   true);
+        (void)socket_send((b32)handle, packet, 300, 0, address_of where,
+                          sizeof where);
+        socket_close((b32)handle);
+}
+
 static COLD bipolar dhcp_open(string_address device, p32 host, bool broadcast)
 {
         bipolar handle = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
@@ -11795,20 +11841,65 @@ static bipolar dhcp_ask(string_address device, p8 address_to hardware,
                                    an answer that cannot exist. */
                                 break;
 
-                        //      An ACK is given at least the usual quarter.
-                        if (!network_deadline_begin(
-                                address_of deadline, wait / 1000,
-                                (wait < 250 ? 250 : wait % 1000) * 1000000))
-                                break;
+                        //      A server now holds the offered address
+                        //      for this client. Say so to whoever waits
+                        //      for this exchange, which may be cut by link
+                        //      news and is to let the ACK come first.
+                        if (dhcp_apart >= 0)
+                        {
+                                dhcp_answer interim = {DHCP_REQUESTED, *lease};
+
+                                system_write_all((positive)dhcp_apart,
+                                                 address_of interim,
+                                                 sizeof interim);
+                        }
+
+                        //      An ACK is given at least the usual quarter and
+                        //      at most two seconds: what is waited for is
+                        //      one round trip, and the watcher's grace for a
+                        //      cut exchange is as long.
+                        {
+                                positive ack = wait < 250 ? 250
+                                               : wait > 2000 ? 2000 : wait;
+
+                                if (!network_deadline_begin(
+                                        address_of deadline, ack / 1000,
+                                        ack % 1000 * 1000000))
+                                        break;
+                        }
 
                         status = dhcp_complete(
                             handle, packet, sizeof packet, transaction,
                             hardware, lease, address_of selected_peer, false,
                             address_of deadline);
+                        //      No answer to the REQUEST: the server may
+                        //      have bound the address and the ACK been
+                        //      lost, and what is not going to be used is
+                        //      given back (DHCPRELEASE, RFC 2131 4.4.6),
+                        //      by broadcast since there is no address to
+                        //      send from.
+                        if (status == DHCP_NO_OFFER)
+                        {
+                                length = dhcp_build(packet, sizeof packet,
+                                                    DHCP_RELEASE, transaction,
+                                                    hardware, 0, lease->server,
+                                                    lease->address, true);
+                                (void)socket_send((b32)handle, packet, length,
+                                                  0, address_of where,
+                                                  sizeof where);
+                        }
                         //      The address is the client's to use once
                         //      nobody else is on it: an answer to the
                         //      probe says it is taken, and the server is
                         //      told so, which is what DHCPDECLINE is for.
+                        if (status == DHCP_OK && dhcp_apart >= 0)
+                        {
+                                dhcp_answer interim = {DHCP_PROBING, *lease};
+
+                                system_write_all((positive)dhcp_apart,
+                                                 address_of interim,
+                                                 sizeof interim);
+                        }
                         if (status == DHCP_OK &&
                             !dhcp_probe(hardware, lease->address,
                                         transaction))

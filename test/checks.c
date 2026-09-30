@@ -52024,8 +52024,8 @@ done:
         as between two machines), and dhcp_ask is run with rp_filter 0, 1 and
         2 on the client's interface: each must take the server's lease. Needs
         user namespaces; NOT RUN under emulation and where they are refused.
-        The exit status of the child is 0x80 when it could not be set up,
-        otherwise one bit per case that held and the bit 0x40 when the setup
+        The exit status of the child is 0x7f when it could not be set up,
+        otherwise one bit per case that held and the bit 0x80 when the setup
         worked.
 */
 static positive net_test_attribute(p8 address_to to, positive at, p16 type,
@@ -52097,7 +52097,8 @@ static bipolar net_test_index(string_address name)
 
 //      The server: every DISCOVER is offered, every REQUEST acknowledged,
 //      10.77.0.50 for 3600 s, answered by broadcast.
-static fn net_test_dhcp_server(string_address device, p32 own, b32 control)
+static fn net_test_dhcp_server(string_address device, p32 own, b32 control,
+                               b32 released)
 {
         bipolar handle = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
         b32 one = 1;
@@ -52109,6 +52110,7 @@ static fn net_test_dhcp_server(string_address device, p32 own, b32 control)
         p8 packet[1024];
         p32 declined = 0;
         bool conflicting = false;
+        bool withholding = false;
 
         if (handle < 0 ||
             socket_option_set((b32)handle, SOL_SOCKET, SO_BROADCAST,
@@ -52143,10 +52145,26 @@ static fn net_test_dhcp_server(string_address device, p32 own, b32 control)
                         //      is one this server also holds.
                         if (system_call_3(syscall(read), (positive)control,
                                           (positive)address_of flag, 1) == 1)
-                                conflicting = true;
+                        {
+                                if (flag == 2)
+                                        withholding = true;
+                                else
+                                        conflicting = true;
+                        }
                 }
                 if (kind == 4)
                         declined++;
+                if (kind == 7)
+                {
+                        p8 one = 1;
+
+                        system_call_3(syscall(write), (positive)released,
+                                      (positive)address_of one, 1);
+                        continue;
+                }
+                //      The ACK that never comes.
+                if (kind == 3 && withholding)
+                        continue;
                 if (kind != 1 && kind != 3)
                         continue;
                 memory_fill(reply, 0, sizeof reply);
@@ -52220,6 +52238,7 @@ static fn net_test_dhcp_namespaces(positive uid, positive gid)
         static const string_address modes[3] = {"0\n", "1\n", "2\n"};
         b32 ends[2];
         b32 control[2];
+        b32 released[2];
         bipolar server;
         bipolar handle;
         positive result = 0;
@@ -52227,22 +52246,24 @@ static fn net_test_dhcp_namespaces(positive uid, positive gid)
         bipolar near;
 
         if (system_call_1(syscall(unshare), 0x10000000 | 0x40000000) < 0)
-                system_call_1(syscall(exit_group), 0x80);
+                system_call_1(syscall(exit_group), 0x7f);
         if (net_test_write((string_address)"/proc/self/setgroups",
                            (string_address)"deny\n") < 0)
-                system_call_1(syscall(exit_group), 0x80);
+                system_call_1(syscall(exit_group), 0x7f);
         net_test_map(line, gid);
         if (net_test_write((string_address)"/proc/self/gid_map", (string_address)line) < 0)
-                system_call_1(syscall(exit_group), 0x80);
+                system_call_1(syscall(exit_group), 0x7f);
         net_test_map(line, uid);
         if (net_test_write((string_address)"/proc/self/uid_map", (string_address)line) < 0)
-                system_call_1(syscall(exit_group), 0x80);
+                system_call_1(syscall(exit_group), 0x7f);
 
         //      The server's own network namespace, made by the server.
         if (system_call_2(syscall(pipe2), (positive)ends, O_CLOEXEC) < 0 ||
             system_call_2(syscall(pipe2), (positive)control,
+                          O_CLOEXEC | 04000 /* O_NONBLOCK */) < 0 ||
+            system_call_2(syscall(pipe2), (positive)released,
                           O_CLOEXEC | 04000 /* O_NONBLOCK */) < 0)
-                system_call_1(syscall(exit_group), 0x80);
+                system_call_1(syscall(exit_group), 0x7f);
         server = system_fork();
         if (server != 0)
                 system_close((positive)ends[1]);
@@ -52280,7 +52301,7 @@ static fn net_test_dhcp_namespaces(positive uid, positive gid)
                         log_direct(str("net: test server cannot address dhcps0\n"));
                 else
                         net_test_dhcp_server((string_address)"dhcps0", 0x0a4d0001,
-                                             control[0]);
+                                             control[0], released[1]);
                 system_call_1(syscall(exit_group), 2);
         }
         {
@@ -52288,7 +52309,7 @@ static fn net_test_dhcp_namespaces(positive uid, positive gid)
 
                 system_read_retry((positive)ends[0], address_of ready, 1);
                 if (!ready)
-                        system_call_1(syscall(exit_group), 0x80);
+                        system_call_1(syscall(exit_group), 0x7f);
         }
         handle = netlink_open_groups(0);
         if (handle < 0 ||
@@ -52296,13 +52317,13 @@ static fn net_test_dhcp_namespaces(positive uid, positive gid)
                           (string_address)"dhcps0", (p32)server) < 0)
         {
                 log_direct(str("net: test veth pair refused\n"));
-                system_call_1(syscall(exit_group), 0x80);
+                system_call_1(syscall(exit_group), 0x7f);
         }
         near = net_test_index((string_address)"dhcpc0");
         if (near <= 0 || netlink_link_up((b32)handle, (p32)near) < 0)
         {
                 log_direct(str("net: test client has no dhcpc0\n"));
-                system_call_1(syscall(exit_group), 0x80);
+                system_call_1(syscall(exit_group), 0x7f);
         }
         net_test_sleep(300);
         //      Three modes of reverse-path filtering, each taking the free
@@ -52311,6 +52332,7 @@ static fn net_test_dhcp_namespaces(positive uid, positive gid)
         for (positive step = 0; step < 5; step++)
         {
                 b32 status = 0;
+                b32 pipe_ends[2];
                 bipolar exchange;
                 positive wanted_address = step < 3 ? 0x0a4d0032
                                           : step == 3 ? 0 : 0x0a4d0034;
@@ -52321,7 +52343,7 @@ static fn net_test_dhcp_namespaces(positive uid, positive gid)
                                     modes[step]) < 0 ||
                      net_test_write((string_address)"/proc/sys/net/ipv4/conf/dhcpc0/rp_filter",
                                     modes[step]) < 0))
-                        system_call_1(syscall(exit_group), 0x80);
+                        system_call_1(syscall(exit_group), 0x7f);
                 if (step == 3)
                 {
                         p8 flag = 1;
@@ -52329,21 +52351,22 @@ static fn net_test_dhcp_namespaces(positive uid, positive gid)
                         system_call_3(syscall(write), (positive)control[1],
                                       (positive)address_of flag, 1);
                 }
+                if (system_call_2(syscall(pipe2), (positive)pipe_ends,
+                                  O_CLOEXEC) < 0)
+                        system_call_1(syscall(exit_group), 0x7f);
                 exchange = system_fork();
                 if (exchange == 0)
                 {
                         p8 hardware[6] = {2, 0, 0, 0, 0, 7};
                         dhcp_lease lease = {0};
-                        b32 answer[2];
                         bipolar asked;
 
                         //      Confined as the watcher's child is: its
                         //      descriptors, no_new_privs and the syscall
-                        //      filter (nobody is not mapped in here).
-                        if (system_call_2(syscall(pipe2), (positive)answer,
-                                          O_CLOEXEC) < 0)
-                                system_call_1(syscall(exit_group), 1);
-                        dhcp_apart = answer[1];
+                        //      filter (nobody is not mapped in here). The
+                        //      answer pipe's reader is this test, as the
+                        //      watcher is the real child's.
+                        dhcp_apart = pipe_ends[1];
                         dhcp_keep_identity = true;
                         asked = dhcp_ask((string_address)"dhcpc0", hardware,
                                          address_of lease);
@@ -52373,11 +52396,57 @@ static fn net_test_dhcp_namespaces(positive uid, positive gid)
                         }
                         net_test_sleep(50);
                 }
+                system_close((positive)pipe_ends[0]);
+                system_close((positive)pipe_ends[1]);
                 if (!status)
                         result |= 1u << step;
         }
+        //      The server stops acknowledging. The client's REQUEST is out, so
+        //      it says so down its answer pipe (DHCP_REQUESTED, with the
+        //      offer), and when no ACK comes it gives the address back with a
+        //      DHCPRELEASE, which the server counts.
+        {
+                b32 answer[2];
+                bipolar exchange;
+                b32 status = 0;
+                p8 flag = 2;
+                dhcp_answer interim = {0};
+                p8 count = 0;
+
+                system_call_3(syscall(write), (positive)control[1],
+                              (positive)address_of flag, 1);
+                if (system_call_2(syscall(pipe2), (positive)answer,
+                                  O_CLOEXEC | 04000) < 0)
+                        system_call_1(syscall(exit_group), 0x7f);
+                exchange = system_fork();
+                if (exchange == 0)
+                {
+                        p8 hardware[6] = {2, 0, 0, 0, 0, 7};
+                        dhcp_lease lease = {0};
+
+                        dhcp_apart = answer[1];
+                        dhcp_keep_identity = true;
+                        dhcp_ask((string_address)"dhcpc0", hardware,
+                                 address_of lease);
+                        system_call_1(syscall(exit_group), 0);
+                }
+                net_test_sleep(1500);
+                system_call_2(syscall(kill), (positive)exchange, SIGKILL);
+                system_call_4(syscall(wait4), (positive)exchange,
+                              (positive)address_of status, 0, 0);
+                if (system_call_3(syscall(read), (positive)answer[0],
+                                  (positive)address_of interim,
+                                  sizeof interim) == (bipolar)sizeof interim &&
+                    interim.status == DHCP_REQUESTED &&
+                    interim.lease.server == 0x0a4d0001 &&
+                    interim.lease.address >= 0x0a4d0034)
+                        result |= 32;
+                if (system_call_3(syscall(read), (positive)released[0],
+                                  (positive)address_of count, 1) == 1)
+                        result |= 64;
+        }
         system_call_2(syscall(kill), (positive)server, SIGKILL);
-        system_call_1(syscall(exit_group), 0x40 | result);
+        system_call_1(syscall(exit_group), 0x80 | result);
 }
 
 static fn dhcp_behind_rp_filter(void)
@@ -52402,18 +52471,22 @@ static fn dhcp_behind_rp_filter(void)
                 log_direct(str("net: DHCP acquisition behind rp_filter NOT RUN -- no fork\n"));
                 return;
         }
-        if (status >> 8 == 0x80)
+        if (status >> 8 == 0x7f)
         {
                 log_direct(str("net: DHCP acquisition behind rp_filter NOT RUN -- user or network namespaces unavailable\n"));
                 return;
         }
-        check("the veth fixture for the acquisition came up", (status >> 8) & 0x40);
+        check("the veth fixture for the acquisition came up", (status >> 8) & 0x80);
         check("a DHCP lease is taken with rp_filter 0", (status >> 8) & 1);
         check("a DHCP lease is taken with rp_filter 1 (strict)", (status >> 8) & 2);
         check("a DHCP lease is taken with rp_filter 2 (loose)", (status >> 8) & 4);
         check("an offered address another host answers ARP for is declined, not leased",
               (status >> 8) & 8);
         check("the next offer, free, is leased", (status >> 8) & 16);
+        check("a REQUEST in flight is reported down the answer pipe with the offer it names",
+              (status >> 8) & 32);
+        check("a REQUEST that is never acknowledged is given back with a DHCPRELEASE",
+              (status >> 8) & 64);
 }
 
 static fn error_frames(void)

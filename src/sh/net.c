@@ -1620,11 +1620,7 @@ static COLD p8 net_internet_prefer(void)
         server could have. A child that says nothing within the exchange's
         own schedule is killed rather than waited for.
 */
-typedef struct
-{
-        bipolar status;
-        dhcp_lease lease;
-} net_dhcp_answer;
+typedef dhcp_answer net_dhcp_answer;
 
 /*
         The watcher's exchange is not allowed to be deaf.
@@ -1656,6 +1652,14 @@ static positive net_decline_until;
 #define NET_DHCP_WATCH_SECONDS 20
 #else
 #define NET_DHCP_WATCH_SECONDS 12
+#endif
+#define NET_DHCP_ACK_GRACE_SECONDS 2
+//      Once the ACK is in, the address is probed (dhcp_probe): a fifth of a
+//      second by default, up to seven in the tight tier.
+#if MOONWATER_STRICT >= STRICT_TIGHT
+#define NET_DHCP_PROBE_GRACE_SECONDS 8
+#else
+#define NET_DHCP_PROBE_GRACE_SECONDS 1
 #endif
 #define NET_DHCP_TIMED_OUT (-10)
 #define NET_DHCP_INTERRUPTED (-11)
@@ -1773,16 +1777,78 @@ static COLD bipolar net_dhcp_apart(string_address device, p8 address_to hardware
         bool watching = !renew && net_wake_watch >= 0;
         bipolar waited = -1;
 
-        heard = child > 0 &&
-                network_deadline_begin(address_of deadline,
-                                       renew ? wait + 5
-                                             : watching ? NET_DHCP_WATCH_SECONDS
-                                                        : 180, 0) &&
-                (watching
-                     ? (waited = net_exchange_wait(ends[0], address_of deadline))
-                     : network_wait_readable_until(ends[0], address_of deadline)) > 0 &&
-                system_read_retry((positive)ends[0], address_of answer,
-                                  sizeof answer) == (bipolar)sizeof answer;
+        //      The child says once that its REQUEST is out (DHCP_REQUESTED, with
+        //      the offer) and then what came of it. Link news or the wake pipe
+        //      that arrives after the first does not kill the exchange: a
+        //      server holds an address for this client, and the ACK is one
+        //      round trip away, so it is given NET_DHCP_ACK_GRACE_SECONDS more
+        //      (and then, if it still has not come, the address is handed
+        //      back with a DHCPRELEASE below). News that came in the meantime
+        //      is still unread and is acted on when the loop reads it.
+        bool pending = false;
+        bool probing = false;
+        bool cut_seen = false;
+        dhcp_lease requested = *lease;
+
+        heard = false;
+        if (child > 0 &&
+            network_deadline_begin(address_of deadline,
+                                   renew ? wait + 5
+                                         : watching ? NET_DHCP_WATCH_SECONDS
+                                                    : 180, 0))
+                for (;;)
+                {
+                        bipolar ready;
+
+                        if (cut_seen)
+                        {
+                                network_deadline grace;
+
+                                ready = network_deadline_begin(
+                                            address_of grace,
+                                            probing ? NET_DHCP_PROBE_GRACE_SECONDS
+                                                    : NET_DHCP_ACK_GRACE_SECONDS,
+                                            0)
+                                            ? network_wait_readable_until(
+                                                  ends[0], address_of grace)
+                                            : 0;
+                                if (ready <= 0)
+                                {
+                                        waited = -2;
+                                        break;
+                                }
+                        }
+                        else
+                        {
+                                ready = watching
+                                    ? (waited = net_exchange_wait(
+                                           ends[0], address_of deadline))
+                                    : network_wait_readable_until(
+                                          ends[0], address_of deadline);
+                                if (ready == -2 && pending)
+                                {
+                                        cut_seen = true;
+                                        continue;
+                                }
+                                if (ready <= 0)
+                                        break;
+                        }
+                        if (system_read_retry((positive)ends[0],
+                                              address_of answer,
+                                              sizeof answer) !=
+                            (bipolar)sizeof answer)
+                                break;
+                        if (answer.status == DHCP_REQUESTED ||
+                            answer.status == DHCP_PROBING)
+                        {
+                                pending = true;
+                                probing = answer.status == DHCP_PROBING;
+                                requested = answer.lease;
+                                continue;
+                        }
+                        heard = true;
+                        break;
+                }
         if (child > 0)
         {
                 system_call_2(syscall(kill), (positive)child, SIGKILL);
@@ -1790,6 +1856,8 @@ static COLD bipolar net_dhcp_apart(string_address device, p8 address_to hardware
         }
         system_close(ends[0]);
 
+        if (!heard && pending)
+                dhcp_release(device, hardware, address_of requested);
         if (!heard)
         {
                 if (watching && waited == -2)
