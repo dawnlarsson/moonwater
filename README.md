@@ -63,7 +63,7 @@ moonwater link                         on or off, this machine's key, peers, wha
 moonwater link on|off                  listen on udp 22348, kept across boots [off]
 moonwater link key                     this machine's public key
 moonwater link pair NAME KEY [HOST[:PORT]]
-moonwater link join NAMESPACE [SECRET] [allow GRANT...]
+moonwater link join NAMESPACE [SECRET|-] [allow GRANT...]
 moonwater link leave NAMESPACE [forget]
 moonwater link forget NAME
 moonwater link allow|deny NAME GRANT...  run shell files log screen channels verbs
@@ -138,7 +138,11 @@ on the others. Members on the same local network find each other over mDNS
 (`_waterlink._udp`) and pair themselves, under the grants their join line gave.
 Machines announce only a port, under random labels; only the secret's
 600,000-round PBKDF2 result is stored. Join on the live stick before
-`install` and the machine is in the group from its first boot.
+`install` and the machine is in the group from its first boot. A secret on the
+command line is seen by `ps` and kept by nothing else here (the shell leaves
+the line out of its history); `moonwater link join office -` reads it from
+standard input instead, and so does `moonwater wifi add SSID -`. A build at
+`MOONWATER_STRICT=2` refuses both passwords and secrets on the command line.
 
 ## The machine script
 

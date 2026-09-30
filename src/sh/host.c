@@ -6971,7 +6971,8 @@ static bool radio_last_get(p8 address_to ssid, positive room, bipolar address_to
 #define RADIO_TERMINAL_SET 0x5402
 
 static bipolar radio_password_read(p8 address_to into, positive room,
-                                   string_address ssid, bool only_asked)
+                                   string_address ssid, bool only_asked,
+                                   bool group)
 {
         p8 saved[64];
         p8 quiet[64];
@@ -6995,8 +6996,11 @@ static bipolar radio_password_read(p8 address_to into, positive room,
                 quiet[17 + 6] = 1; // VMIN
                 quiet[17 + 5] = 0; // VTIME
                 radio_display(shown, sizeof(shown), ssid, string_length(ssid));
-                host_say(log_error, host_label "password for %s (empty for an open network): ",
-                         shown);
+                if (group)
+                        host_say(log_error, host_label "secret for %s: ", shown);
+                else
+                        host_say(log_error, host_label "password for %s (empty for an open network): ",
+                                 shown);
                 system_call_3(syscall(ioctl), 0, RADIO_TERMINAL_SET, (positive)quiet);
         }
 
@@ -7942,11 +7946,36 @@ static b32 host_radio(string_address address_to arguments, positive count)
                             string_equals(arguments[4], (string_address) "-"))
                         {
                                 if (radio_password_read(pass, sizeof(pass), arguments[3],
-                                                        count == 4) < 0)
+                                                        count == 4, false) < 0)
                                         return host_refuse("nothing saved%s\n", "");
                         }
                         else
                         {
+                                /*      The word is on the command line, where
+                                        ps, the shell's history and whatever
+                                        logs commands see it. Kept out of
+                                        the history by the reader, and scrubbed
+                                        from argv once read (below); the tight tier refuses it, as
+                                        the form that cannot be made safe. */
+                                if (MOONWATER_STRICT >= STRICT_TIGHT)
+                                        return host_refuse("a password on the command "
+                                                           "line is refused: give it on "
+                                                           "standard input with -%s\n",
+                                                           "");
+                                {
+                                        p8 mode[64];
+
+                                        //      Said to a person at a terminal,
+                                        //      where a script's output and
+                                        //      its status stay what they were.
+                                        if (system_call_3(syscall(ioctl), 2,
+                                                          RADIO_TERMINAL_GET,
+                                                          (positive)mode) >= 0)
+                                                host_say(log_error,
+                                                         host_label "a password on the command "
+                                                         "line is seen by ps; - or no word reads "
+                                                         "it without that\n");
+                                }
                                 length = string_length(arguments[4]);
                                 if (length >= sizeof(pass))
                                         return host_refuse("that password is too long%s\n",

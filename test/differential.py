@@ -40409,6 +40409,23 @@ while True:
                              "wipe empties /home and /root and keeps the settings, the link's "
                              "key and switch, and the bowls",
                              line)
+        # A group's secret is read from standard input with "-", and never
+        # taken for the word "-" itself.
+        lines, finished = session(
+            "rm -f /root/link.groups\n"
+            "echo '@@ empty'; /tmp/moonwater link join grp - < /dev/null 2>&1; echo \"@@status $?\"\n"
+            "echo '@@ piped'; printf 'a long enough secret for a group\\n' | "
+            "/tmp/moonwater link join grp - 2>&1; echo \"@@status $?\"\n")
+        seen = answers(lines)
+        check(finished and seen.get("empty", {}).get("status") == 1 and
+              any("nothing saved" in line for line in seen["empty"]["out"]),
+              "link join NAME - with nothing on standard input saves nothing", repr(seen.get("empty")))
+        check(seen.get("piped", {}).get("status") == 0 and
+              any(line.startswith("moonwater: in grp") or " in grp;" in line
+                  for line in seen["piped"]["out"]) and
+              not any("guessed" in line for line in seen["piped"]["out"]),
+              "link join NAME - takes the secret from standard input, not the word -",
+              repr(seen.get("piped")))
     return checks.verdict("moonwater cli", "moonwater-cli")
 
 

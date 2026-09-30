@@ -4750,6 +4750,101 @@ no_room:
 }
 
 /*
+        Whether a line carries a secret on its command line, for the two
+        moonwater verbs that took one there: wifi add SSID PASSWORD and link
+        join NAME SECRET. The history is the one place a tool's own care
+        cannot reach (the tool runs in a child, and the line is kept before
+        it starts), so the line is judged here and never kept. Words are
+        cut as the shell cuts them, quotes and a backslash holding a blank
+        in a word, and a command ends at ; & | or a newline. "-" (standard
+        input) is not a secret, and neither is "allow" after a namespace.
+*/
+#define HISTORY_SECRET_WORDS 5
+#define HISTORY_SECRET_ROOM 48
+
+static bool history_secret_words(p8 word[][HISTORY_SECRET_ROOM], positive count)
+{
+        positive length;
+        bool moonwater;
+
+        if (count < HISTORY_SECRET_WORDS)
+                return false;
+
+        length = string_length((string_address)word[0]);
+        moonwater = string_equals((string_address)word[0], "moonwater") ||
+                    (length > 10 &&
+                     string_equals((string_address)word[0] + length - 10,
+                                   "/moonwater"));
+
+        return moonwater &&
+               !string_equals((string_address)word[4], "-") &&
+               ((string_equals((string_address)word[1], "wifi") &&
+                 string_equals((string_address)word[2], "add")) ||
+                (string_equals((string_address)word[1], "link") &&
+                 string_equals((string_address)word[2], "join") &&
+                 !string_equals((string_address)word[4], "allow")));
+}
+
+static bool history_secret_line(string_address text, positive length)
+{
+        p8 word[HISTORY_SECRET_WORDS][HISTORY_SECRET_ROOM];
+        positive count = 0;
+        positive at = 0;
+
+        for (;;)
+        {
+                positive used = 0;
+                p8 mark = 0;
+
+                while (at < length && (text[at] == ' ' || text[at] == '\t'))
+                        at++;
+
+                if (at >= length || text[at] == ';' || text[at] == '&' ||
+                    text[at] == '|' || text[at] == '\n')
+                {
+                        if (history_secret_words(word, count))
+                                return true;
+                        if (at >= length)
+                                return false;
+                        count = 0;
+                        at++;
+                        continue;
+                }
+
+                for (; at < length; at++)
+                {
+                        p8 byte = (p8)text[at];
+
+                        if (mark)
+                        {
+                                if (byte == mark)
+                                {
+                                        mark = 0;
+                                        continue;
+                                }
+                        }
+                        else if (byte == '\'' || byte == '"')
+                        {
+                                mark = byte;
+                                continue;
+                        }
+                        else if (byte == '\\' && at + 1 < length)
+                                byte = (p8)text[++at];
+                        else if (byte == ' ' || byte == '\t' || byte == ';' ||
+                                 byte == '&' || byte == '|' || byte == '\n')
+                                break;
+
+                        if (count < HISTORY_SECRET_WORDS &&
+                            used + 1 < HISTORY_SECRET_ROOM)
+                                word[count][used++] = byte;
+                }
+                if (count < HISTORY_SECRET_WORDS)
+                        word[count][used] = end;
+                count++;
+        }
+}
+
+/*
         Whether a line is worth remembering, which is not the shell's opinion.
 
         HISTCONTROL and HISTIGNORE are how a person says what their own
@@ -4766,7 +4861,7 @@ static bool history_wanted(string_address text, positive length)
         bool dedupe = false;
         bool erase = false;
 
-        if (!length)
+        if (!length || history_secret_line(text, length))
                 return false;
 
         for (string_address at = control; at && string_get(at);)
