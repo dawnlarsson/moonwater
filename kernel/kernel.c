@@ -1293,16 +1293,20 @@ __asm__(
 //       and the port 23,445 and 8,401, 0.39 and 0.14 -- for the first 18%; the
 //       type written out took the second 5%; the image took the rest, 40%.
 //
-//       The arm64 and riscv64 bodies are the batches and the written-out type:
-//       held to the C by test/differential.py --harness kernel_ports under
-//       qemu-user, and neither has been booted or timed. The harness plants the
-//       names that are not inline at the end of a page with an unmapped page
-//       after it, so a read past a name's last byte is a fault; it hands the
-//       batches to the real filldir64, cut from fs/readdir.c, over a window
-//       of memory that ends where the test says, and every return value, every
-//       field of the callback and every dirent written has to agree with the C
-//       at buffers that end mid-dirent, counts that run out, signals that are
-//       pending and names with a slash.
+//       The arm64 body is the batches, the written-out type and the image; the
+//       riscv64 body the first two. All are held to the C by
+//       test/differential.py --harness kernel_ports under qemu-user, and an
+//       arm64 kernel of each (the image, and the batches only) booted under
+//       qemu's TCG listed the same directory, at every buffer size and every
+//       buffer edge, as each other and as the x86_64 kernel with the C;
+//       neither arm64 body has been timed, and riscv64 has not been booted.
+//       The harness plants the names that are not inline at the end of a page
+//       with an unmapped page after it, so a read past a name's last byte is a
+//       fault; it hands the batches to the real filldir64, cut from
+//       fs/readdir.c, over a window of memory that ends where the test says,
+//       and every return value, every field of the callback and every dirent
+//       written has to agree with the C at buffers that end mid-dirent, counts
+//       that run out, signals that are pending and names with a slash.
 //
 //       Registers (x86_64): r12 ctx, r13 the directory (kept in the frame while
 //       the image is made), r14 the reference held (the last entry copied, or
@@ -1340,8 +1344,9 @@ __asm__(
 //> offset MW_CTX_POS dir_context pos
 //> const MW_POS_EOD S32_MAX
 //> const MW_LOCK_NESTED DENTRY_D_LOCK_NESTED
-//       THE x86_64 EMIT. When the actor is filldir64, which is what getdents64
-//       passes, the batch is not handed over a record at a time. filldir64
+//       THE IMAGE EMIT, x86_64 and arm64. When the actor is filldir64, which is
+//       what getdents64 passes, the batch is not handed over a record at a
+//       time. filldir64
 //       does, for each name, a memchr for a slash, a user-access window (stac,
 //       the stores, clac) and a call through the actor; here the records are
 //       checked for a slash a word at a time, laid out as one image of dirents
@@ -1359,6 +1364,16 @@ __asm__(
 //       always has. One difference, and it is the padding: the zeros after a
 //       name's NUL are written where the C leaves whatever the buffer held, and
 //       the kernel promises nothing about those bytes.
+//
+//       x86_64 writes with _copy_to_user; arm64 has no out of line one (it
+//       inlines it) and writes with copy_to_user_nofault, which gives up on a
+//       page that has to be faulted in and so sends that batch to filldir64,
+//       which faults it in; the next batch finds it there. The signal bits
+//       are read from current (%gs:current_task on x86_64, sp_el0 on arm64).
+//       riscv64 has the batches and the written-out type and not the image: a
+//       dirent's name starts three bytes into an eight, and a word store there
+//       is a misaligned access on cores that trap on one, which the image
+//       would have to be shifted around.
 //
 //       The layout of the callback structure is asserted where it is, in
 //       fs/readdir.c; the signal bits and the thread flags word are the

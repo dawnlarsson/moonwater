@@ -212,9 +212,14 @@ frame, checked with `filldir64`'s own checks in its own order, and written with 
 a VM, not of a program's run time, and it says nothing about directories on disk. One
 thing is different from the C and it is a choice: the zeros after a name's NUL, up to
 the next eight bytes of a dirent, are written where the C leaves whatever the buffer
-held; the kernel promises nothing about those bytes. The arm64 and riscv64 bodies
-have the batches and the written-out type, not the image; they are checked against
-the C under qemu-user and have not been booted or timed.
+held; the kernel promises nothing about those bytes. arm64 has the image too
+(through `copy_to_user_nofault`, which sends a batch whose page is not resident to
+`filldir64`); riscv64 has the batches and the written-out type only, because a dirent's
+name starts three bytes into an eight and riscv cores may trap on the word store. The
+arm64 and riscv64 bodies are checked against the C under qemu-user; the two arm64
+kernels (image, and batches only) were booted under qemu TCG and listed the directory
+the same as each other and as the x86_64 kernel with the C, at every buffer size and
+edge. Neither has been timed, and riscv64 has not been booted.
 
 **A measurement note.** The first runs of this, on a box that had 40 forgotten
 guests from earlier sessions running, read 60 microseconds a pass and showed no
