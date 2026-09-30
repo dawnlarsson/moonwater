@@ -64753,6 +64753,23 @@ static bool crypto_vector_run(p8 address_to kind, positive kind_length,
                                                           CL(1), CV(2), CL(2),
                                                           CV(3), CV(4)));
         }
+        if (KIND("ecdsader256") || KIND("ecdsader384"))
+        {
+                //      A CertificateVerify's ECDSA as the handshake takes it:
+                //      the DER signature parsed, the digest the scheme's own.
+                static tls_conn tls;
+                positive size = KIND("ecdsader256") ? 32 : 48;
+
+                if (CL(2) != size || CL(3) != size)
+                        return false;
+                memory_fill(address_of tls, 0, sizeof tls);
+                tls.leaf_curve = size == 32 ? 1 : 2;
+                memory_copy(tls.leaf_qx + 48 - size, CV(2), size);
+                memory_copy(tls.leaf_qy + 48 - size, CV(3), size);
+                return expect == tls_signature_valid(address_of tls,
+                                                     size == 32 ? 0x0403 : 0x0503,
+                                                     CV(0), CL(0), CV(1), CL(1));
+        }
         if (KIND("pkcs256") || KIND("pkcs384"))
         {
                 positive size = KIND("pkcs256") ? 32 : 48;
