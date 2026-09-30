@@ -1367,21 +1367,10 @@ static fn text_begin(string_address name)
 }
 
 /*
-        Regular expressions.
-
-        A backtracking machine over a compiled program, which is what makes
-        one engine answer both grep and sed: basic and extended syntax differ
-        only in which characters need a backslash to mean something, so the
-        parser takes a flag and the machine below never learns there were two
-        dialects.
-
-        The one thing worth saying about the shape: a quantified single
-        character -- a*, [0-9]\{2,4\}, .* -- compiles to REPEAT rather than to
-        a split and a jump. A split recurses once per repetition, so .* over a
-        four thousand character line is four thousand stack frames; REPEAT
-        consumes greedily in a loop and gives back one at a time, and the
-        stack stays one deep. Groups still split, because a group can capture
-        and a loop cannot say what it captured.
+        Regular expressions: one engine (regex_graph.c, below) answers grep,
+        sed and awk. Basic and extended syntax differ only in which characters
+        need a backslash to mean something, so the parser takes a flag and the
+        matcher never learns there were two dialects.
 
         Boolean callers stop at the first success. Callers that need a span
         keep the longest success in the same traversal, retaining the first
