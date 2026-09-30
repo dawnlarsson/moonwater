@@ -55803,9 +55803,9 @@ try:
     there("ip", "addr", "add", "10.88.0.2/24", "dev", "cb")
     there("ip", "link", "set", "cb", "up")
     if netem_on:
-        #   DHCP retransmits, so it gets loss too. SNTP spends one ten second
-        #   budget across its five samples and a lost datagram eats the rest
-        #   of it (the drop2 row below pins that), so its netem has none.
+        #   DHCP retransmits, so it gets loss too; SNTP's netem has none, since
+        #   its samples would only be fewer (the drop2 row drops requests
+        #   itself, and each sample has its own wait).
         profile = ["delay", "20ms", "10ms"] + (["loss", "25%"] if kind == "dhcp" else []) + [
                    "duplicate", "10%", "reorder", "25%", "50%", "seed", "7"]
         for one in (run("tc", "qdisc", "add", "dev", "eth0", "root", "netem", *profile),
@@ -55881,15 +55881,7 @@ try:
         #   answered = the sample passed every check and reached the clock,
         #   which an unprivileged namespace then refuses to set.
         answered = "answered, but the clock could not be set" in text or "synchronised" in text
-        if mode == "drop2":
-            #   Known open (closeclock): the five samples share one ten
-            #   second deadline, so a datagram that is lost first spends all
-            #   of it and the rest are sent with no time to wait. When this
-            #   row starts to fail because an answer is taken, the weakness
-            #   is fixed: move drop2 in with the modes that must answer.
-            say(not answered, "%s: KNOWN OPEN, two lost requests end the exchange with no answer (%s)" % (
-                label, text.strip().replace("\n", " | ")[:100]))
-        elif mode in ("skewed", "kod"):
+        if mode in ("skewed", "kod"):
             say(not answered, "%s: a lone far-off or rate-limit answer is not believed (%s)" % (
                 label, text.strip().replace("\n", " | ")[:120]))
         else:

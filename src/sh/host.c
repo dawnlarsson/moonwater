@@ -11759,11 +11759,6 @@ static COLD bipolar sntp_query_at(p32 server, bool filter, bool tight,
         if (!sntp_math_ok())
                 return SNTP_MALFORMED;
 
-        if (!network_deadline_begin(address_of deadline,
-                                    SNTP_SECONDS * (filter ? SNTP_SAMPLES : 1),
-                                    0))
-                return SNTP_NO_REPLY;
-
         handle = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
         if (handle < 0)
                 return SNTP_NO_SERVER;
@@ -11781,6 +11776,14 @@ static COLD bipolar sntp_query_at(p32 server, bool filter, bool tight,
         memory_zero(row, sizeof(row));
         for (at = 0; at < want; at++)
         {
+                //      Each sample has its own wait. They used to share one
+                //      of SNTP_SECONDS times the count, so a datagram lost
+                //      first spent all of it and the samples after it were
+                //      sent with no time to be answered in: one lost packet
+                //      in four ended a query with no answer.
+                if (!network_deadline_begin(address_of deadline, SNTP_SECONDS,
+                                            0))
+                        break;
                 failed = sntp_exchange((b32)handle, address_of deadline, tight,
                                        address_of sequence, row + at);
                 if (failed == SNTP_BAD_SERVER || failed == SNTP_RATE_LIMITED)
