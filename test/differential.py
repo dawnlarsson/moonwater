@@ -23805,6 +23805,23 @@ import types
 import unittest
 from unittest.mock import patch
 
+def src_slice(text, first, following, where="a harness"):
+    """text from first up to the next following after it, or ValueError naming where and the anchor.
+
+    A harness cuts production source by string anchors, and an anchor that
+    moved or now matches twice slices the wrong function or nothing without a
+    word. first has to occur once and following after it.
+    """
+    at = text.find(first)
+    if at < 0 or text.count(first) > 1:
+        raise ValueError("%s: anchor %r is %s" % (
+            where, first[:60], "gone" if at < 0 else "no longer unique"))
+    stop = text.find(following, at)
+    if stop <= at:
+        raise ValueError("%s: anchor %r is gone after %r" % (where, following[:60], first[:40]))
+    return text[at:stop]
+
+
 def canvas_part(canvas, name):
     """One named section of src/canvas/canvas.c, the way it used to be a file.
 
@@ -24328,8 +24345,7 @@ def harness_core_state(argv):
     assert shipped_machine.isascii(), "the machine script is ASCII"
 
 
-    def section(source, first, following):
-        return source[source.index(first):source.index(following)]
+    section = lambda source, first, following: src_slice(source, first, following, "core_state")
 
 
     def canvas_sources(work, arch):
@@ -24364,7 +24380,7 @@ def harness_core_state(argv):
                      "int *y,int *side)\n"
                      "{ (void)p;(void)x;(void)y;(void)side; return 0; }\n"
                      "static const unsigned char close_bits[8] = {0};\n")
-        geometry += section(compose, "struct pane_bar_geometry", "/*\n        The desktop, everywhere")
+        geometry += section(compose, "struct pane_bar_geometry\n", "/*\n        The desktop, everywhere")
         geometry += "#undef compose_cells\n"
         geometry += section(drag, "static void bar_move", "/*\n        Filling the screen")
         (work / "canvas-pane.inc").write_text(geometry)
@@ -24477,7 +24493,7 @@ static unsigned int hash_crc32(unsigned int crc, const void *data, unsigned long
 '''
     source += spark.replace('#include "../platform/spark.inc"',
                             (root / "src/platform/spark.inc").read_text())
-    source += section(spark, "struct snapshot_builder", "static HOT void snapshot_system")
+    source += section(spark, "struct snapshot_builder\n", "static HOT void snapshot_system")
     source += r'''
 static void snapshot_system(struct snapshot_header *header) { header->memory_total=42; }
 static void snapshot_cpus(struct snapshot_builder *build, struct snapshot_header *header) {
@@ -24632,7 +24648,7 @@ struct pid; struct cred; struct pane;
 #endif
 #define refcount_dec_and_test(p) (--*(p) == 0)
 '''
-    source += section(core, "struct spawn_strings",
+    source += section(core, "struct spawn_strings\n",
                       "#ifdef CONFIG_MOONWATER_CANVAS\n#include \"../canvas/canvas.c\"")
     # The real request path, not a stub: one opcode now carries every launch,
     # so what used to be decided by the opcode number -- interpretation policy
@@ -24696,7 +24712,7 @@ static long stat_task_ns, stat_spawns;
 #define user_mode_thread(fn, arg, sig) \
         ((void)(sig), spawn_handed=(arg), spawn_entered++, spawn_pid)
 '''
-    source += section(spark, "struct spawn_work", "/*\n        Starts one program")
+    source += section(spark, "struct spawn_work\n", "/*\n        Starts one program")
     source += section(spark, "static bool spawn_keeps", "static void spawn_default_signals")
     source += section(spark, "static int copy_strings", "static long do_spawn")
     source += section(spark, "static long do_spawn", "static long report_stats")
@@ -24715,7 +24731,7 @@ static void *memdup_user(const void *from, unsigned long bytes) {
     # ioctl numbers, struct machine_control, the overlay and the script,
     # then the script scanner itself -- the real lexer, not a mock, because
     # the overlay lines a bind row reads come out of it.
-    source += section(moonwater, "#define MOONWATER_ATTACH",
+    source += section(moonwater, "#define MOONWATER_ATTACH 0u",
                       "#if defined(STANDARD_MODERN_C_KERNEL) || defined(MOONWATER_SCAN)")
     source += section(moonwater, "#define SCRIPT_WORD 64", "#endif /* scan */")
     source += "static long report_bind(struct bind_control *out);\n"
@@ -37606,8 +37622,7 @@ def harness_console_queue(argv):
     import tempfile
     seeds = int(argv[0]) if argv else 64
     text = (HARNESS_ROOT / "src/canvas/canvas.c").read_text()
-    start = text.index("#define CONSOLE_QUEUE")
-    cut = text[start:text.index("// Every record the ring holds into the emulator", start)]
+    cut = src_slice(text, "#define CONSOLE_QUEUE", "// Every record the ring holds into the emulator", "console_queue")
     cut = cut.replace("static char console_record[CONSOLE_RECORD];",
                       "static struct { char record[CONSOLE_RECORD]; unsigned char guard[65536]; }"
                       " console_guarded;\n#define console_record console_guarded.record")
@@ -37785,9 +37800,7 @@ def harness_pane_restride(argv):
     seeds = int(argv[0]) if argv else 4000
     text = (HARNESS_ROOT / "src/canvas/canvas.c").read_text()
 
-    def cut(first, following):
-        start = text.index(first)
-        return text[start:text.index(following, start)]
+    cut = lambda first, following: src_slice(text, first, following, "pane_restride")
 
     body = (cut("#define pane_say(", "/*\n        How much of the machine every window may hold")
             if "#define pane_say(" in text else "")
@@ -38052,9 +38065,7 @@ def harness_pane_pages(argv):
     import tempfile
     text = (HARNESS_ROOT / "src/canvas/canvas.c").read_text()
 
-    def cut(first, following):
-        start = text.index(first)
-        return text[start:text.index(following, start)]
+    cut = lambda first, following: src_slice(text, first, following, "pane_pages")
 
     body = (cut("#define pane_say(", "/*\n        How much of the machine every window may hold")
             if "#define pane_say(" in text else "")
@@ -39068,7 +39079,7 @@ def harness_dhcp_fuzz(argv):
     del argv
     shim, head, walk = dhcp_lift()
     shell = (HARNESS_ROOT / "src/sh/net.c").read_text()
-    clock = tls_fuzz_sec(shell, "/*\n        What this machine is holding, and since when.",
+    clock = src_slice(shell, "/*\n        What this machine is holding, and since when.",
                          "static COLD fn net_rollback_record(")
     source = shim + r"""
 #define IFNAME_SIZE 16
@@ -44453,7 +44464,7 @@ def byte_reader_source():
     carries this ahead of the parser, so the fuzzer runs the production
     cursor and not a stand-in."""
     text = (HARNESS_ROOT / "src/lib.util.c").read_text()
-    return tls_fuzz_sec(
+    return src_slice(
         text, "typedef struct\n{\n        const p8 address_to bytes;\n"
               "        positive left;",
         "/* Stable storage owns its mapping outside these mechanisms.")
@@ -44465,7 +44476,7 @@ def byte_store_source():
     bounded sink beside byte_reader's bounded source. Needs the shim's
     min, memory_copy_apart and the p8/positive types."""
     text = (HARNESS_ROOT / "src/lib.util.c").read_text()
-    return tls_fuzz_sec(
+    return src_slice(
         text, "typedef struct\n{\n        p8 address_to bytes;\n        positive room;\n"
               "        positive used;\n} byte_store;",
         "/*\n        The read side of byte_store")
@@ -44537,12 +44548,6 @@ def tls_fuzz_run(label, corpus, source, max_len, extra=()):
         return 0
 
 
-def tls_fuzz_sec(text, first, following):
-    """Slice net.c from the first occurrence of first through before following."""
-    i = text.index(first)
-    return text[i:text.index(following, i)]
-
-
 def tls_der_fuzz_lift_parts(net):
     """OIDs, ASN.1/cert parsers, pure path-policy helpers, list framing, shim.
 
@@ -44550,7 +44555,7 @@ def tls_der_fuzz_lift_parts(net):
     Shared by tls_der_fuzz and tls_verify_fuzz so both stay on the same
     production slices.
     """
-    oids = tls_fuzz_sec(net, "static const p8 tls_oid_ec[7] = {",
+    oids = src_slice(net, "static const p8 tls_oid_ec[7] = {",
                         "typedef struct\n{\n        bipolar handle;")
     #   net.c includes suffixes.inc beside anchors.inc; the lift has no
     #   include path, so the table comes in as text, and so do the RSA
@@ -44561,22 +44566,22 @@ def tls_der_fuzz_lift_parts(net):
         raise ValueError("CRYPTO_RSA_LIMBS / CRYPTO_RSA_BYTES")
     oids = limits.group(0) + (HARNESS_ROOT / "src/net/suffixes.inc").read_text() + \
         oids[:oids.rfind("};\n") + 3]
-    parsers = tls_fuzz_sec(
+    parsers = src_slice(
         net,
         "static COLD bipolar tls_asn1_length(p8 address_to bytes, positive size,",
         "/* An anchor's key laid out the way tls_parse_cert lays out a served one. */")
     # Pure Name compare; skip tls_verify_one crypto.
-    policy = tls_fuzz_sec(
+    policy = src_slice(
         net,
         "static COLD bool tls_certificate_names_chain(const tls_cert address_to child,",
         "static COLD bool tls_verify_one(tls_cert address_to child, tls_cert address_to issuer)")
     # Date/path-length/EKU authorization without tls_date_now / keep_leaf.
-    policy += "\n" + tls_fuzz_sec(
+    policy += "\n" + src_slice(
         net,
         "static COLD bool tls_cert_current(tls_cert address_to cert, p64 now)",
         "// A TLS handshake length: three bytes, most significant first.\n"
         "static PURE positive tls_load_24")
-    framing = tls_fuzz_sec(
+    framing = src_slice(
         net,
         "// A TLS handshake length: three bytes, most significant first.\n"
         "static PURE positive tls_load_24",
@@ -45139,7 +45144,7 @@ def tls_verify_hosted_source(net, checks, driver):
     WR2 and GTS Root R1 certificates. Raises ValueError when a slice is gone
     and RuntimeError when a field fast path survived the cut."""
     oids, parsers, policy, framing, shim = tls_der_fuzz_lift_parts(net)
-    ecdsa = tls_fuzz_sec(
+    ecdsa = src_slice(
         net, "#define CRYPTO_FE_MAX 6\n",
         "static bool crypto_scalar_reduce_be(p8 address_to out, const p8 address_to bytes,")
     for field_op in ("add", "subtract"):
@@ -45152,17 +45157,17 @@ def tls_verify_hosted_source(net, checks, driver):
             r"if \(f == address_of crypto_p256_field\)\s*p256_%s\(%s\);\s*"
             r"else if \(f == address_of crypto_p384_field\)\s*p384_%s\(%s\);\s*"
             r"else\s*" % (field_op, args, field_op, args), "", ecdsa)
-    rsa = tls_fuzz_sec(
+    rsa = src_slice(
         net,
         "/* x = 2x mod m for x below m.  Public moduli only: the reduction branches. */\n"
         "static fn crypto_rsa_double",
         "static fn crypto_mgf1_sha256")
-    montgomery = tls_fuzz_sec(checks, "#elif defined(SHARED_montgomery_reference)",
+    montgomery = src_slice(checks, "#elif defined(SHARED_montgomery_reference)",
                               "#elif defined(SHARED_unicode_width_reference)")
     montgomery = montgomery.split("\n", 1)[1]
     montgomery = montgomery[:montgomery.rfind("#endif") + len("#endif")].replace(
         "montgomery_reference_multiply", "montgomery_multiply")
-    verify_one = tls_fuzz_sec(
+    verify_one = src_slice(
         net,
         "static COLD bool tls_verify_one(tls_cert address_to child, tls_cert address_to issuer)",
         "/* The last certificate served names its issuer.")
@@ -45493,7 +45498,7 @@ def harness_tls_hs_fuzz(argv):
     """
     del argv
     net = (HARNESS_ROOT / "src/net/net.c").read_text()
-    sec = tls_fuzz_sec
+    sec = src_slice
 
     defines = sec(net, "/* RFC 8446 5.1 and 5.4: a record carries at most 2^14",
                   "/* One trust anchor from anchors.inc")
@@ -46150,19 +46155,19 @@ def tls_verify_chain_lift(net, now=None, aia=None):
     Appended to tls_verify_hosted_source's program; a TLS_BENCH_ANCHOR
     defined before it is used as net.c uses it. Raises ValueError when a
     slice is gone."""
-    anchor_types = tls_fuzz_sec(net, "typedef struct\n{\n        p8 name[8];",
+    anchor_types = src_slice(net, "typedef struct\n{\n        p8 name[8];",
                                 '#include "anchors.inc"')
-    anchor_code = tls_fuzz_sec(
+    anchor_code = src_slice(
         net, "/* An anchor's key laid out the way tls_parse_cert lays out a served one. */",
         "static COLD bool tls_certificate_names_chain(").replace(
         "#include TLS_BENCH_ANCHOR\n", "")
-    anchor_code += tls_fuzz_sec(net, "/* The last certificate served names its issuer.",
+    anchor_code += src_slice(net, "/* The last certificate served names its issuer.",
                                 "static COLD bool tls_date_now(p64 address_to value)")
     if now:
         date = ("static bool tls_date_now(p64 address_to value)\n"
                 "{\n        address_to value = %s;\n        return true;\n}\n" % now)
     else:
-        date = "#include <time.h>\ntypedef struct tm tm;\n" + tls_fuzz_sec(
+        date = "#include <time.h>\ntypedef struct tm tm;\n" + src_slice(
             net, "static COLD bool tls_date_now(p64 address_to value)",
             "static COLD bool tls_cert_current(")
     return (r"""
@@ -46182,7 +46187,7 @@ typedef struct
             "                                   p8 address_to into, positive room)\n{\n" +
             (aia or "        (void)url;\n        (void)length;\n        (void)into;\n"
                     "        (void)room;\n        return 0;\n") + "}\n" +
-            tls_fuzz_sec(net, "static COLD bool tls_verify_chain(p8 address_to body",
+            src_slice(net, "static COLD bool tls_verify_chain(p8 address_to body",
                          "static COLD bool tls_hello_append("))
 
 
@@ -47330,7 +47335,7 @@ def sntp_fuzz_seeds():
 def sntp_fuzz_source(host):
     """host.c's SNTP parse, selection and discipline arithmetic, lifted whole
     by the literal anchors below, behind SNTP_FUZZ_SHIM."""
-    sec = tls_fuzz_sec
+    sec = src_slice
     parts = (
         sec(host, "#define SNTP_PORT 123", "static inline INLINE bipolar sntp_now_ns(void)"),
         sec(host, "static inline INLINE PURE bipolar sntp_load_stamp",
@@ -47728,19 +47733,10 @@ static bipolar file_slurp(string_address path, p8 *into, positive capacity)
 """
 
 
-def net_zone_fuzz_slice(text, first, following):
-    """text from first up to following, or ValueError naming the anchor."""
-    at = text.find(first)
-    stop = text.find(following, at + 1) if at >= 0 else -1
-    if at < 0 or stop < 0:
-        raise ValueError("anchor moved: %r .. %r" % (first[:40], following[:40]))
-    return text[at:stop]
-
-
 def net_zone_fuzz_wait():
     """wait.c's deadlines, stream helpers and transaction ids, whole."""
     wait = (HARNESS_ROOT / "src/net/wait.c").read_text()
-    return net_zone_fuzz_slice(wait, "#define NETWORK_INTERRUPTED", "\n#endif")
+    return src_slice(wait, "#define NETWORK_INTERRUPTED", "\n#endif")
 
 
 def dns_fuzz_seed_name(name):
@@ -47883,7 +47879,7 @@ def harness_dns_fuzz(argv):
     del argv
     net = (HARNESS_ROOT / "src/net/net.c").read_text()
     try:
-        dns = net_zone_fuzz_slice(net, "#define DNS_PORT 53",
+        dns = src_slice(net, "#define DNS_PORT 53",
                                   "#endif // STANDARD_MODERN_C_NET_DNS")
         wait = net_zone_fuzz_wait()
     except ValueError as error:
@@ -48079,12 +48075,12 @@ def harness_netlink_fuzz(argv):
     net = (HARNESS_ROOT / "src/net/net.c").read_text()
     shell = (HARNESS_ROOT / "src/sh/net.c").read_text()
     try:
-        netlink = net_zone_fuzz_slice(net, "#define NETLINK_HEADER 16",
+        netlink = src_slice(net, "#define NETLINK_HEADER 16",
                                       "#endif // STANDARD_MODERN_C_NET_NETLINK")
         wait = net_zone_fuzz_wait()
-        printers = (net_zone_fuzz_slice(shell, "static COLD string_address net_host_text(",
+        printers = (src_slice(shell, "static COLD string_address net_host_text(",
                                         "/*\n        A.B.C.D/N split") +
-                    net_zone_fuzz_slice(shell, "// The flags of a link, in the shape",
+                    src_slice(shell, "// The flags of a link, in the shape",
                                         "//      The index of the link the user named."))
     except ValueError as error:
         print("  FAIL netlink fuzz lift: " + str(error))
@@ -50006,7 +50002,7 @@ def crypto_fuzz_source(net, checks, oracle, lifted=False):
     the program) and otherwise the C crypto.c ran before it, from
     SHARED_x25519_reference. Raises ValueError when a slice is gone and
     RuntimeError when a lib.c call survives."""
-    crypto = tls_fuzz_sec(net, "typedef unsigned __int128 crypto_wide;",
+    crypto = src_slice(net, "typedef unsigned __int128 crypto_wide;",
                           "#endif\n#include \"wait.c\"")
     for field_op in ("add", "subtract"):
         crypto = re.sub(
@@ -50018,7 +50014,7 @@ def crypto_fuzz_source(net, checks, oracle, lifted=False):
             r"if \(f == address_of crypto_p256_field\)\s*p256_%s\(%s\);\s*"
             r"else if \(f == address_of crypto_p384_field\)\s*p384_%s\(%s\);\s*"
             r"else\s*" % (field_op, args, field_op, args), "", crypto)
-    montgomery = tls_fuzz_sec(checks, "#elif defined(SHARED_montgomery_reference)",
+    montgomery = src_slice(checks, "#elif defined(SHARED_montgomery_reference)",
                               "#elif defined(SHARED_unicode_width_reference)")
     montgomery = montgomery.split("\n", 1)[1]
     montgomery = montgomery[:montgomery.rfind("#endif") + len("#endif")].replace(
@@ -50026,7 +50022,7 @@ def crypto_fuzz_source(net, checks, oracle, lifted=False):
     if lifted:
         curve = CRYPTO_FUZZ_X25519_LIFTED_C
     else:
-        curve = tls_fuzz_sec(checks, "#elif defined(SHARED_x25519_reference)",
+        curve = src_slice(checks, "#elif defined(SHARED_x25519_reference)",
                              "#elif defined(SHARED_number_stream)")
         curve = curve.split("\n", 1)[1]
         curve = curve[:curve.rfind("#endif") + len("#endif")]
@@ -52010,8 +52006,7 @@ def harness_machine_scan(argv):
     spark = (root / "src/moonwater/spark.c").read_text()
     machine = (root / "src/moonwater/moonwater.c").read_text()
 
-    def section(source, first, following):
-        return source[source.index(first):source.index(following, source.index(first))]
+    section = lambda source, first, following: src_slice(source, first, following, "machine_scan")
 
     source = ("#include <stdio.h>\n#include <stdlib.h>\n#define MOONWATER_SCAN\n" +
               section(spark, "#define SPARK_BIND_NAME_MAX", "#define SPARK_BIND_GET") +
@@ -54124,11 +54119,11 @@ def wifi_eapol_fuzz_source(net, host, checks):
     if CRYPTO_FUZZ_DRIVER_C not in crypto:
         raise ValueError("crypto_fuzz_source no longer ends in its driver")
     crypto = crypto.replace(CRYPTO_FUZZ_DRIVER_C, "")
-    derive = net_zone_fuzz_slice(host, "static COLD fn wifi_hmac_sha1(",
+    derive = src_slice(host, "static COLD fn wifi_hmac_sha1(",
                                  "static COLD bool nl80211_ext_bit(")
-    link = net_zone_fuzz_slice(host, "#define WIFI_KEY_PAIRWISE",
+    link = src_slice(host, "#define WIFI_KEY_PAIRWISE",
                                "/* The replay counter and keys for a driver")
-    step = net_zone_fuzz_slice(host, "/*\n        One EAPOL-Key frame from the access point",
+    step = src_slice(host, "/*\n        One EAPOL-Key frame from the access point",
                                "/* The link's news on the mlme socket")
     return "\n".join((crypto, "#include <ctype.h>", WIFI_EAPOL_FUZZ_SHIM, derive, link,
                       "static void wifi_rekey_offload(wifi_link *link);", step,
@@ -54488,10 +54483,10 @@ def harness_wifi_scan_fuzz(argv):
     net = (HARNESS_ROOT / "src/net/net.c").read_text()
     host = (HARNESS_ROOT / "src/sh/host.c").read_text()
     try:
-        netlink = net_zone_fuzz_slice(net, "#define NETLINK_HEADER 16",
+        netlink = src_slice(net, "#define NETLINK_HEADER 16",
                                       "#endif // STANDARD_MODERN_C_NET_NETLINK")
         wait = net_zone_fuzz_wait()
-        scan = net_zone_fuzz_slice(host, "#define NL80211_CMD_NEW_SCAN_RESULTS 34",
+        scan = src_slice(host, "#define NL80211_CMD_NEW_SCAN_RESULTS 34",
                                    "/* Whether the station the machine is associated through is authorized")
     except ValueError as error:
         print("  FAIL wifi scan fuzz lift: " + str(error))
@@ -58084,7 +58079,7 @@ def waterlink_lift_cursors():
     return ("#ifndef min\n#define min(a, b) ((a) < (b) ? (a) : (b))\n#endif\n"
             "#ifndef memory_copy_apart\n#define memory_copy_apart memcpy\n#endif\n" +
             byte_store_source() + byte_reader_source() +
-            tls_fuzz_sec(net, "//      A reader on the message, at a name or a record",
+            src_slice(net, "//      A reader on the message, at a name or a record",
                          "/* Find an address only along the name that was asked for"))
 
 
@@ -58628,9 +58623,9 @@ def waterlink_script_scan(shim):
     import tempfile
     command = (HARNESS_ROOT / "src/waterlink/command.c").read_text()
     host = (HARNESS_ROOT / "src/sh/host.c").read_text()
-    scan = tls_fuzz_sec(command, "static bool link_script_names_secret(",
+    scan = src_slice(command, "static bool link_script_names_secret(",
                         "static b32 link_status(void)")
-    starts = tls_fuzz_sec(host, "static bool host_starts(", "static fn host_pause(")
+    starts = src_slice(host, "static bool host_starts(", "static fn host_pause(")
     driver = shim + r"""
 static b32 string_compare_max(const void *one, const void *two, positive size)
 {
