@@ -49752,6 +49752,151 @@ def sntp_fuzz_source(host):
     return SNTP_FUZZ_SHIM + "\n".join(parts) + SNTP_FUZZ_DRIVER
 
 
+SNTP_ERA_DRIVER = r"""
+static void era_put(p8 *at, long long unix_seconds, unsigned long long nanoseconds)
+{
+        network_store_32(at, (p32)((unix_seconds + 2208988800ll) & 0xffffffffll));
+        network_store_32(at + 4, (p32)((nanoseconds << 32) / 1000000000ull));
+}
+
+/* stdin: client-seconds server-seconds tight; one answer a line: the
+   verdict of sntp_reply_sample and what it measured. The client sends at
+   its second, hears 2 ms later; the server stamps one ms in, so the true
+   offset is exactly server minus client and the delay is 2 ms. */
+int main(void)
+{
+        long long client;
+        long long server;
+        int tight;
+
+        if (!sntp_math_ok())
+        {
+                fprintf(stderr, "sntp_era: the lifted self-test fails\n");
+                return 1;
+        }
+        while (scanf("%lld %lld %d", &client, &server, &tight) == 3)
+        {
+                p8 request[SNTP_PACKET] = {0};
+                p8 reply[SNTP_PACKET] = {0};
+                sntp_sample sample = {0};
+                bipolar verdict;
+
+                request[0] = SNTP_LI_VN_MODE;
+                memcpy(request + 40, "eraNONCE", 8);
+                reply[0] = 0x24;
+                reply[1] = 2;
+                reply[2] = 6;
+                reply[3] = 0xec;
+                network_store_32(reply + 4, 0x100);
+                network_store_32(reply + 8, 0x100);
+                era_put(reply + 16, server - 10, 0);
+                memcpy(reply + 24, request + 40, 8);
+                era_put(reply + 32, server, 1000000);
+                era_put(reply + 40, server, 1000000);
+                verdict = sntp_reply_sample(
+                    reply, request, sntp_timespec_ns((p64)client, 0),
+                    sntp_timespec_ns((p64)client, 2000000), tight, &sample);
+                printf("%lld %lld %ld %ld %ld\n", client, server, (long)verdict,
+                       verdict == SNTP_OK ? (long)sample.offset_ns : 0,
+                       verdict == SNTP_OK ? (long)sample.delay_ns : 0);
+        }
+        return 0;
+}
+"""
+
+
+def harness_sntp_era(argv):
+    """host.c's SNTP sample arithmetic across the NTP era boundary, 2036
+    and 2038 and 2104.
+
+    sntp_reply_sample, lifted with the fuzz target's anchors, is asked about
+    exchanges whose true offset is known to the nanosecond: the client's
+    clock and the server's at an instant around 2036-02-07 06:28:16 UTC
+    (where the 32-bit NTP seconds wrap), 2038-01-19 03:14:08 (where a signed
+    32-bit time_t does), 2100 and the end of era 1, each with the server
+    equal, an hour ahead and an hour behind. Run twice. At the window the
+    source ships (SNTP_WALL_LEAST..SNTP_WALL_MOST, read from host.c) a
+    sample is taken exactly inside it, and with the answer right. Then again
+    with the window's far edge moved to the end of era 1, the edit the
+    source comment says is the only one the date needs: every instant the
+    wrap could break must give the true offset, so nothing about the era
+    depends on the window staying where it is.
+
+        python3 test/differential.py --harness sntp_era
+    """
+    del argv
+    import datetime
+    import shutil
+    import subprocess
+    import tempfile
+    compiler = shutil.which("clang") or shutil.which("gcc") or shutil.which("cc")
+    if not compiler:
+        print("sntp era: NOT RUN -- no C compiler")
+        return 2
+    host = (HARNESS_ROOT / "src/sh/host.c").read_text()
+    try:
+        source = sntp_fuzz_source(host).replace(SNTP_FUZZ_DRIVER, SNTP_ERA_DRIVER)
+    except ValueError as exc:
+        print("  FAIL sntp era: an anchor moved: " + str(exc))
+        return 1
+    if SNTP_ERA_DRIVER not in source:
+        print("  FAIL sntp era: the fuzz driver's text moved")
+        return 1
+    least = int(re.search(r"#define SNTP_WALL_LEAST (\d+)ll", host).group(1))
+    most = int(re.search(r"#define SNTP_WALL_MOST (\d+)ll", host).group(1))
+    era_end = (1 << 33) - 2208988800
+    moved = "#define SNTP_WALL_MOST %dll" % (era_end - 86400)
+    instants = []
+    for text in ("2026-09-30 12:00:00", "2035-12-31 23:59:59", "2036-01-01 00:00:00",
+                 "2036-02-07 06:28:14", "2036-02-07 06:28:15", "2036-02-07 06:28:16",
+                 "2036-02-07 06:28:17", "2037-06-01 00:00:00", "2038-01-19 03:14:07",
+                 "2038-01-19 03:14:08", "2040-01-01 00:00:00", "2100-01-01 00:00:00",
+                 "2104-02-25 00:00:00"):
+        instants.append(int(datetime.datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+                            .replace(tzinfo=datetime.timezone.utc).timestamp()))
+    checks = Checks()
+    with tempfile.TemporaryDirectory(prefix="sntp-era-") as temporary:
+        work = Path(temporary)
+        for label, window, edit in (("the shipped window", (least, most), None),
+                                    ("the window moved to the end of era 1",
+                                     (least, era_end - 86400), moved)):
+            text = source if edit is None else re.sub(
+                r"#define SNTP_WALL_MOST \d+ll", edit, source)
+            (work / "era.c").write_text(text)
+            built = subprocess.run([compiler, "-O1", "-g", "-std=gnu11", "-Wno-unused-function",
+                                    "-fsanitize=address,undefined", "-fno-sanitize-recover=all",
+                                    str(work / "era.c"), "-o", str(work / "era")],
+                                   capture_output=True, text=True)
+            if built.returncode:
+                print("  FAIL sntp era: the lift does not build:\n" + built.stderr[-2000:])
+                write_tally("sntp-era", 0, 1)
+                return 1
+            #   A synchronised clock (tight) takes only a small offset.
+            rows = [(at, at + shift, tight) for at in instants
+                    for shift in (0, 3600, -3600) for tight in (0, 1)
+                    if not (tight and shift)]
+            ran = subprocess.run([str(work / "era")], capture_output=True, text=True,
+                                 input="".join("%d %d %d\n" % row for row in rows), timeout=120)
+            checks(ran.returncode == 0 and not ran.stderr.strip(),
+                   "%s: the probe ran (%s)" % (label, ran.stderr[-300:]))
+            answers = [line.split() for line in ran.stdout.splitlines()]
+            checks(len(answers) == len(rows), "%s: one answer a row" % label)
+            for (client, server, tight), answer in zip(rows, answers):
+                verdict, offset, delay = int(answer[2]), int(answer[3]), int(answer[4])
+                when = datetime.datetime.fromtimestamp(client, datetime.timezone.utc)
+                name = "%s: client %s, server %+d s, tight %d" % (
+                    label, when.strftime("%Y-%m-%d %H:%M:%S"), server - client, tight)
+                inside = window[0] <= client < window[1] and window[0] <= server < window[1]
+                if inside:
+                    checks(verdict == 0 and abs(offset - (server - client) * 10**9) <= 2 and
+                           abs(delay - 2000000) <= 2,
+                           "%s: taken with the true offset (verdict %d, offset %d ns, delay %d ns)" % (
+                               name, verdict, offset, delay))
+                else:
+                    checks(verdict != 0, "%s: outside the window and refused" % name)
+    return checks.verdict("sntp era", "sntp-era")
+
+
 def harness_sntp_fuzz(argv):
     """libFuzzer over host.c's SNTP reply path: sntp_reply_sample (header,
     kiss codes, the four stamps and their window), sntp_choose over three
@@ -53831,7 +53976,7 @@ def harness_security_hygiene(argv):
                 "dhcp_fuzz", "sntp_fuzz", "dns_fuzz", "netlink_fuzz", "tls_peer",
                 "http_fuzz", "http_fuzz_tight", "http_urls", "wifi_eapol_fuzz",
                 "wifi_scan_fuzz",
-                "wget_mutation", "wget_hostile")
+                "wget_mutation", "wget_hostile", "sntp_era")
     for name in security + ("tls_verify_fuzz",):
         checks(name in HARNESS_CHECKS, "differential.py: %s is not registered" % name)
     table = re.search(r"^HARNESS_CHECKS = \{$(.*?)^\}$", source, re.M | re.S)
@@ -62875,6 +63020,7 @@ HARNESS_CHECKS = {
     "http_response_framing": harness_http_response_framing,
     "http_fuzz": harness_http_fuzz,
     "http_fuzz_tight": harness_http_fuzz_tight,
+    "sntp_era": harness_sntp_era,
     "http_urls": harness_http_urls,
     "tls_der_fuzz": harness_tls_der_fuzz,
     "tls_hs_fuzz": harness_tls_hs_fuzz,
