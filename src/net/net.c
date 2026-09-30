@@ -9897,6 +9897,66 @@ static bool http_transport_allowed(bool address_to secure, bool tls)
         return true;
 }
 
+/* inet_aton's spellings of an address, which GNU wget and curl connect to
+   as they connect to a dotted quad: one to four parts joined by '.', each
+   decimal, 0x hex or 0 octal, the last filling every byte left ("127.1",
+   "0x7f.1", "0177.0.0.1", "2130706433").  Nothing that is not such a spelling
+   is one -- a trailing '.', an empty part, an 8 or 9 in an octal part, a part
+   past its share of the address -- and it is then a name for the resolver.
+   The address is in host order, as http_address_public reads it, so a policy
+   on the address a name reached holds for these spellings too. */
+static bool http_ipv4_legacy(string_address host, p32 address_to ip)
+{
+        p64 part[4];
+        positive count = 0;
+        p64 address = 0;
+
+        for (;;)
+        {
+                positive base = 10;
+                positive digits = 0;
+                p64 value = 0;
+
+                if (count == 4)
+                        return false;
+                if (host[0] == '0' && (host[1] | 0x20) == 'x')
+                {
+                        base = 16;
+                        host += 2;
+                }
+                else if (host[0] == '0' && byte_is_digit(host[1]))
+                {
+                        base = 8;
+                        host++;
+                }
+                for (; digit_known(string_get(host), base) < base; host++, digits++)
+                {
+                        value = value * base + digit_known(string_get(host), base);
+                        if (value > 0xffffffff)
+                                return false;
+                }
+                if (!digits)
+                        return false;
+                part[count++] = value;
+                if (!string_get(host))
+                        break;
+                if (string_get(host) != '.')
+                        return false;
+                host++;
+        }
+        for (positive at = 0; at + 1 < count; at++)
+        {
+                if (part[at] > 255)
+                        return false;
+                address = address << 8 | part[at];
+        }
+        if (part[count - 1] >> (8 * (5 - count)))
+                return false;
+        address = address << (8 * (5 - count)) | part[count - 1];
+        address_to ip = (p32)address;
+        return true;
+}
+
 static bipolar http_status_code(p8 address_to bytes, positive size, b32 address_to code)
 {
         if (size < 13)
@@ -9921,6 +9981,8 @@ static p32 http_lookup(string_address host)
 
         if (server >= 0)
                 return (p32)server;
+        if (http_ipv4_legacy(host, address_of ip))
+                return ip;
         if (dns_resolve_any((string_address) "/etc/resolv.conf", host, address_of ip,
                             3) != DNS_OK)
                 return 0;

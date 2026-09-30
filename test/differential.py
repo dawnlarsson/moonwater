@@ -43887,7 +43887,8 @@ int main(void)
 
 def http_fuzz_source(net, util, driver):
     """The whole HTTP section of net.c from "#define HTTP_PORT 80" to the
-    section's #endif, less http_lookup, over a hosted shim whose transport is
+    section's #endif, less http_lookup and the AIA fetch (http_address_public
+    stays), over a hosted shim whose transport is
     a script: each connection serves the next segment of the input, cut into
     reads (and TLS records) whose sizes a seeded generator picks. Lent TLS
     spans live in a buffer freed at the next receive, so a span kept past its
@@ -43899,7 +43900,9 @@ def http_fuzz_source(net, util, driver):
     lookup = net.index("static p32 http_lookup(string_address host)")
     leaf = net.index("static fn http_url_leaf(")
     finish = net.index("#endif // STANDARD_MODERN_C_NET_HTTP")
-    http = net[begin:lookup] + net[leaf:finish]
+    public = net.index("static bool http_address_public(p32 ip)")
+    aia = net.index("#define TLS_AIA_SECONDS")
+    http = net[begin:lookup] + net[public:aia] + net[leaf:finish]
     known = util[util.index("static inline INLINE b32 known_is_digit(b32 value)"):
                  util.index("static inline INLINE b32 known_is_ascii(b32 value)")]
     digits = util[util.index("static inline INLINE positive digit_known(p8 character, "
@@ -45241,6 +45244,13 @@ def harness_wget_hostile(argv):
         case("DELIBERATE: a %00 in a Location is refused", hop(b"/a%00b"),
              "http://127.0.0.1:PORT/x", [GET(b"/x")], code=1, refs=(), saved=None),
     ]
+    for spelling in ("127.1", "0x7f.1", "0177.0.0.1", "2130706433", "0x7f000001",
+                     "127.0.1", "0177.1"):
+        CASES.append(case("the address %s is 127.0.0.1" % spelling, answer(ok()),
+                          "http://%s:PORT/" % spelling, [GET(b"/")],
+                          host=spelling.encode()))
+    CASES.append(case("a Location naming 127.1", hop(b"http://127.1:PORT/z"),
+                      "http://127.0.0.1:PORT/x", [GET(b"/x"), GET(b"/z")]))
 
     #   The address policy of the tight tier, in a network namespace of its
     #   own where 8.8.8.8 and 8.8.4.4 are loopback addresses: a chain that has
@@ -45439,6 +45449,12 @@ int main(void)
                 p8 *url = unhex(strcmp(first, "-") ? first : "");
                 if (mode[0] == 'S') {
                         answer(url);
+                } else if (mode[0] == 'I') {
+                        p32 ip = 0;
+                        if (http_ipv4_legacy((string_address)url, &ip))
+                                printf("OK\t%u\t%d\n", ip, (int)http_address_public(ip));
+                        else
+                                printf("BAD\n");
                 } else if (scanf("%8191s", second) == 1) {
                         p8 *ref = unhex(strcmp(second, "-") ? second : "");
                         p8 host[256];
@@ -45625,6 +45641,57 @@ int main(void)
         for key, why in DELIBERATE.items():
             checks(seen[key] > 0, "DELIBERATE %s never generated (%s)" % (key, why))
 
+        #   http_ipv4_legacy: inet_aton's spellings, judged by inet_aton (glibc's,
+        #   through Python), and http_address_public on what they name.
+        import ipaddress
+        import socket
+        private = [ipaddress.ip_network(net) for net in (
+            "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16",
+            "172.16.0.0/12", "192.168.0.0/16", "192.0.0.0/24", "198.18.0.0/15",
+            "224.0.0.0/3")]
+        random_hosts = random.Random(20260930)
+        tokens = ["0", "1", "7", "127", "255", "256", "0x7f", "0X7F", "0xff", "0x", "0177",
+                  "08", "0400", "65535", "65536", "16777215", "16777216", "2130706433",
+                  "4294967295", "4294967296", "0xffffffff", "0x100000000", "a", "ff", "",
+                  "010", "0x0", "00", "192", "168", "10", "8"]
+        hosts = {"127.1", "0x7f.1", "0177.0.0.1", "2130706433", "0x7f000001", "127.0.1",
+                 "10.1", "172.16.1", "0xac.0x10.1", "192.168.1", "169.254.1", "100.64.1",
+                 "224.1", "8.8.8.8", "8.8.8", "8.8", "134744072", "1.2.3.4.5", "1.2.3.",
+                 ".1", "1..2", "0x7f.", "1.2.3.4"}
+        for _ in range(3000):
+            hosts.add(".".join(random_hosts.choice(tokens)
+                               for _ in range(random_hosts.randint(1, 5))))
+        hosts = sorted(host for host in hosts if not host.startswith("0x") or host != "0x")
+        ran = subprocess.run([str(work / "http_urls")],
+                             input="\n".join("I %s" % encode(host) for host in hosts) + "\n",
+                             capture_output=True, text=True, timeout=120,
+                             env=dict(os.environ, ASAN_OPTIONS="detect_leaks=0"))
+        answers = ran.stdout.splitlines()
+        if ran.returncode or len(answers) != len(hosts):
+            print("  FAIL the address lift stopped:\n" + ran.stderr[-3000:])
+            write_tally("http-urls", 0, 1)
+            return 1
+        for host, got in zip(hosts, answers):
+            #   glibc reads a bare "0x" (or "0x" then a dot) as zero; nothing writes
+            #   an address so, and this client leaves such a host to the resolver.
+            if re.search(r"(^|\.)0[xX](\.|$)", host):
+                continue
+            try:
+                want = int.from_bytes(socket.inet_aton(host), "big")
+            except OSError:
+                want = None
+            if want is None:
+                checks(got == "BAD", "%r: taken for an address (%s) where inet_aton refuses"
+                       % (host, got))
+                continue
+            fields = got.split("\t")
+            checks(fields[0] == "OK" and int(fields[1]) == want,
+                   "%r: %r, inet_aton %d" % (host, got, want))
+            if fields[0] == "OK":
+                public = not any(ipaddress.ip_address(want) in net for net in private)
+                checks(fields[2] == str(int(public)),
+                       "%r (%s): public %s, wanted %s" % (host, ipaddress.ip_address(want),
+                                                           fields[2], public))
     return checks.verdict("http urls", "http-urls")
 
 
