@@ -12,20 +12,28 @@ The stack has strong hand-written boundary checks and unusually broad
 deterministic regression coverage. Local lanes now exist for coverage-guided
 TLS fuzzing under ASan/UBSan (`sh test/run fuzz`), MSan over hosted parser
 lifts (`sh test/run msan`), resource-exhaustion and mid-path fault sweeps, and
-`http.client`, curl and GNU wget oracles for HTTP framing and delivery. It is **not yet release-grade
-evidence for memory safety or parser completeness** because those lanes are
-not mandatory (the CI `security` job is parked, `workflow_dispatch` only),
-fuzzing covers TLS, DER, DHCP, SNTP, Wi-Fi, DNS, netlink, crypto and the HTTP section (a default-tier model) but not continuously.
+`http.client`, curl and GNU wget oracles for HTTP framing and delivery, and a
+`netem` lane that runs the DHCP and SNTP clients against an adversarial server
+in namespaces. Fuzzing covers TLS, DER, DHCP, SNTP, Wi-Fi, DNS, netlink, crypto
+and the HTTP section at both `MOONWATER_STRICT` tiers (`http_fuzz`,
+`http_fuzz_tight`), each at a bounded budget in the lanes and for ten minutes a
+target by hand (clean). The net lane and the fuzz lane run on every push and
+pull request that touches the network stack
+(`.github/workflows/security.yml`, free on a public repository, 90 minute cap,
+no schedule); a nightly long run is proposed below, not enabled. The rating
+stays **strong deterministic and differential coverage, not a release-grade
+proof of memory safety or parser completeness**: the gaps that remain are
+listed in the ledger at the end of this file.
 
 | Area | Evidence present | Important remaining gap |
 | --- | --- | --- |
-| Netlink | sender PID, sequence, length/alignment, multipart and truncation checks | persistent fuzzing of nested attributes; mandatory namespace runs |
-| DNS | exact question/ID binding, compression loops, full RR framing, UDP truncation to TCP | coverage-guided compression/name fuzzing; independent packet oracle; DNSSEC is out of scope |
-| TLS records/handshake | record and handshake fragmentation, transcript/Finished, AEAD limits, state ordering, `tls_hs_fuzz` libFuzzer target | record-layer fuzzing; mandatory fuzz budget in CI |
-| X.509 | strict DER and generated-chain policy matrix against OpenSSL; `tls_der_fuzz` / `tls_verify_fuzz` libFuzzer targets; DNS-name and IP matching against OpenSSL's own check (`tls_hostnames`); Wycheproof's vectors under the crypto (`crypto_vectors --wycheproof`); wget's status 5 and wording for every refused chain | a second independent path validator; name-constraints breadth; Mozilla `distrust-after` dates and per-anchor constraints (the anchor table is key-only); revocation |
-| HTTP/URL | sink-side request validation, framing conflicts, 204/205/304 as wget and curl take them (the tight tier, `MOONWATER_STRICT` 2, holds them to RFC 9110), split-point and chunk/trailer checks, `http.client` and curl framing oracles, HTTPS downgrade harness, GNU wget and curl as live oracles for byte-at-a-time, split, FIN, RST, 1xx-storm and pipelined-bytes schedules (`wget_mutation`) and for request lines, redirects, saved files and exit statuses against scripted servers (`wget_hostile`), URL splitting and Location resolution against `urllib` (`http_urls`) | coverage-guided framing fuzzing that models the tight tier; slow-stream scheduling across TLS and redirects; open decision: the default refuses an identical duplicate `Content-Length` (and a list `3, 3`), an obs-fold line and a control byte in the reason phrase, all of which wget and curl accept |
-| DHCPv4 | peer/xid/MAC binding, option framing/overload, state cross-product, entropy faults | coverage-guided option-stream fuzzing; mandatory namespace/netem retransmission runs |
-| SNTP | nonce and peer binding, ancillary timestamp parsing, arithmetic and selection checks | adversarial scheduling/netem as a mandatory lane; era-boundary integration tests |
+| Netlink | sender PID, sequence, length/alignment, multipart and truncation checks | persistent fuzzing of nested attributes beyond the bounded target |
+| DNS | exact question/ID binding, compression loops, full RR framing, UDP truncation to TCP | independent packet oracle; DNSSEC is out of scope (decision D03) |
+| TLS records/handshake | record and handshake fragmentation, transcript/Finished, AEAD limits, state ordering, `tls_hs_fuzz` libFuzzer target over the whole record layer and handshake state machine (95 seeds, 10 minutes clean); the fuzz budget runs in CI | a corpus beyond the generated seeds is not kept in the tree (seed files in the tree fail `security_hygiene`; the generators are the corpus) |
+| X.509 | strict DER and generated-chain policy matrix against OpenSSL; `tls_der_fuzz` / `tls_verify_fuzz` libFuzzer targets; DNS-name and IP matching against OpenSSL's own check (`tls_hostnames`); Wycheproof's vectors under the crypto (`crypto_vectors --wycheproof`); wget's status 5 and wording for every refused chain; a second independent path validator (Go's `crypto/x509`, every row of `tls_chains`) and name-constraints breadth (range shapes, excluded over permitted, case, label boundary, two CAs, mixed leaf names) | Mozilla `distrust-after` dates and per-anchor constraints (the anchor table is key-only); revocation (decision D01) |
+| HTTP/URL | sink-side request validation, framing conflicts, 204/205/304 as wget and curl take them (the tight tier, `MOONWATER_STRICT` 2, holds them to RFC 9110), split-point and chunk/trailer checks, `http.client` and curl framing oracles, HTTPS downgrade harness, GNU wget and curl as live oracles for byte-at-a-time, split, FIN, RST, 1xx-storm and pipelined-bytes schedules (`wget_mutation`) and for request lines, redirects, saved files and exit statuses against scripted servers (`wget_hostile`), URL splitting and Location resolution against `urllib` (`http_urls`) | slow-stream scheduling across TLS and redirects. The default takes what wget and curl both take (an identical duplicate `Content-Length`, `3, 3`, a fold after an ordinary field, any reason-phrase byte but NUL and a bare CR) and the tight tier refuses it; a generated-heads model holds both tiers, `http_fuzz_tight` fuzzes the tight one. A truncated head stays a failure on purpose (decision D09) |
+| DHCPv4 | peer/xid/MAC binding, option framing/overload, state cross-product, entropy faults | DHCP under the `netem` lane: clean, tripled, forged, late, dropped and NAKed answers, plain and under loss, duplication and reordering, at rp_filter 0, 1 and 2; `dhcp_fuzz` is the coverage-guided option-stream target (reference model, 33 seeds, 10 minutes clean) | the exchange is slow on a link with a round trip over a quarter second (L41) |
+| SNTP | nonce and peer binding, ancillary timestamp parsing, arithmetic and selection checks | the `netem` lane (forged, tripled, late, dropped answers) and `sntp_era` (the 2036 wrap, 2038 and 2104 at the shipped window and at the window moved to the end of era 1) | one lost datagram spends the whole sample budget (L42) |
 
 ### TLS trust policy (decided, not gaps)
 
@@ -59,14 +67,21 @@ does not convert those protocols into authenticated ones.
 
 ### P0 — evidence needed before a high-assurance claim
 
-1. Extend persistent fuzzing beyond TLS (DER, certificate lists and
-   handshake fragmentation are covered by `sh test/run fuzz`) to DNS names/RRs,
-   HTTP response framing/chunks, DHCP option streams, and SNTP control
-   messages. Seed them from the unit corpus and run ASan+UBSan.
-2. Make x86-64 ASan+UBSan and native namespace/netem runs required CI jobs.
-   `MOONWATER_FUZZ_REPORT=… sh test/run fuzz` already records compiler and sanitizer
-   versions, seed counts, budgets and exits; it has to run on every release,
-   not by hand.
+1. Persistent fuzzing: done for TLS (DER, certificate lists, handshake and
+   record layer), DNS names and RRs, HTTP response framing and chunks at both
+   tiers, DHCP option streams, SNTP replies and control messages, netlink,
+   Wi-Fi, crypto and waterlink, seeded from generators (the tree keeps no seed
+   files by rule) and run under ASan+UBSan; 10 minutes a target by hand is
+   recorded clean for http_fuzz, http_fuzz_tight, dhcp_fuzz, tls_hs_fuzz and
+   sntp_fuzz.
+2. CI: `.github/workflows/security.yml` runs the net lane (which includes
+   the sanitizer fuzz smoke at 5 s a target) and `sh test/run fuzz` with
+   `MOONWATER_FUZZ_REPORT`, uploading the report, on every push and pull
+   request touching the stack. Native namespace/netem runs are the `netem`
+   lane (`sh test/run netem`), NOT RUN where a runner lacks `--map-auto`,
+   veth or netem. Proposed, not enabled: a nightly `schedule:` with
+   `MOONWATER_FUZZ_SECONDS=600`; it costs nothing on a public repository but
+   is the owner's to switch on.
 3. Keep MSan (`sh test/run msan`) separate from UBSan and widen it from hosted
    lifts toward a full freestanding `CHECK_net`; today it is exercised on
    aarch64 Linux clang only.
@@ -106,11 +121,15 @@ then not yet valid.
 
 ### P2 — independent and operational assurance
 
-1. Add a second X.509 path-building oracle and a durable corpus of real and
-   synthetic certificates, including name constraints and unusual but valid
-   chains.
-2. Run namespace tests with loss, duplication, reordering, delay, MTU changes,
-   stale queued datagrams, and source-address changes at every protocol phase.
+1. Second X.509 path-building oracle: done, Go's `crypto/x509` beside OpenSSL
+   over every generated chain (`tls_chains`), with the two places wget is
+   looser than Go named (directoryName constraints Go cannot evaluate) and the
+   one place it is looser than OpenSSL named (OpenSSL holds the subject CN to a
+   DNS constraint). The corpus is the generator plus the 642 live chains of
+   `x509_corpus` (by hand, needs the network).
+2. Namespace tests with loss, duplication, reordering, delay and forged or
+   late answers: done for DHCP and SNTP (`netem` lane); MTU changes and
+   source-address changes at every protocol phase are still to do.
 3. Add static-analysis and compiler-hardening reports to releases, with every
    suppression reviewed. Static analysis is supporting evidence, not a proof.
 4. Commission an independent review after the P0 lanes are reproducible; an
@@ -130,8 +149,9 @@ A networking security change is complete only when all of these are recorded:
 7. resource ceiling and portability implications; and
 8. residual risk which the change does not address.
 
-Until the P0 queue is complete, the honest rating is **strong deterministic
-unit/integration coverage, incomplete high-assurance evidence**. More isolated
+While the ledger below has open rows, the honest rating is **strong
+deterministic and differential coverage, incomplete high-assurance
+evidence**. More isolated
 unit cases may still fix real bugs, but they do not move that rating by
 themselves.
 

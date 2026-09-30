@@ -1,0 +1,85 @@
+name: Security
+
+# The network security lanes on every push and pull request that touches the
+# network stack or its tests: the net lane (CHECK_net on x86_64, arm64 and
+# riscv64, the differential harnesses, wget and curl as oracles, the bounded
+# fuzz targets under ASan and UBSan) and the fuzz lane at its bounded budget,
+# with the toolchain report attached.
+#
+# Costs nothing: the repository is public, so runner minutes are free, and
+# the job is capped at 90 minutes (ci.yml's full suite ran to the six hour
+# limit, which is why that one stays parked). There is deliberately no
+# `schedule:` key; a nightly long fuzz run is proposed in
+# SECURITY_REVIEW.md, not enabled.
+#
+# Lanes that need what a hosted runner may lack say NOT RUN and do not fail
+# the job (unprivileged user namespaces, veth and netem for the netem lane);
+# the net and fuzz tallies below are what a green run is held to.
+#
+# By hand, on any Linux box with the same packages:
+#   MW_JOBS=8 sh test/run net
+#   MOONWATER_FUZZ_REPORT=artifacts/fuzz-report.txt sh test/run fuzz
+on:
+  pull_request:
+    paths:
+      - "src/net/**"
+      - "src/sh/host.c"
+      - "src/sh/net.c"
+      - "src/lib.util.c"
+      - "test/**"
+      - ".github/workflows/security.yml"
+  push:
+    branches: [main]
+    paths:
+      - "src/net/**"
+      - "src/sh/host.c"
+      - "src/sh/net.c"
+      - "src/lib.util.c"
+      - "test/**"
+      - ".github/workflows/security.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  net:
+    name: Net lane
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install what the lanes need
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dash qemu-user clang wget curl iproute2 \
+            gcc-aarch64-linux-gnu gcc-riscv64-linux-gnu openssl \
+            python3-cryptography
+
+      - name: Net lane
+        run: |
+          set -o pipefail
+          MW_JOBS=4 sh test/run net | tee "$RUNNER_TEMP/net.log"
+          for arch in x86_64 arm64 riscv64; do
+            grep -E "^  net-${arch}[[:space:]]+[0-9]+ of [0-9]+$" "$RUNNER_TEMP/net.log" ||
+              { echo "required tally missing: net-${arch}"; exit 1; }
+          done
+
+      - name: Fuzz lane at its bounded budget, with the report
+        run: |
+          mkdir -p artifacts
+          MOONWATER_FUZZ_REPORT=artifacts/fuzz-report.txt sh test/run fuzz
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: security-${{ github.run_id }}
+          path: |
+            artifacts/fuzz-report.txt
+            ${{ runner.temp }}/net.log
+          if-no-files-found: ignore
