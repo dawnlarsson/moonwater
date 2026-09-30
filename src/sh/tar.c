@@ -2559,42 +2559,6 @@ static fn tar_ring_produce(address_any context, positive index)
         ring->end_ok = ring->codec->read_end();
 }
 
-/* Up to n decoded bytes, waiting for spans as a read waits for a pipe;
-   the end or a failure answers once nothing is left before it. */
-static bipolar tar_ring_read(tar_ring address_to ring, p8 address_to into,
-                             positive n)
-{
-        positive copied = 0;
-
-        while (copied < n)
-        {
-                bipolar length;
-                positive take;
-
-                while (atomic_load(address_of ring->count) == 0)
-                        thread_wait(address_of ring->count, 0);
-                length = ring->length[ring->tail];
-                if (length <= 0)
-                        return copied ? (bipolar)copied : length;
-                take = (positive)length - ring->taken;
-                if (take > n - copied)
-                        take = n - copied;
-                memory_copy_apart(into + copied,
-                                  ring->storage + ring->tail * TAR_RING_SPAN + ring->taken,
-                                  take);
-                copied += take;
-                ring->taken += take;
-                if (ring->taken == (positive)length)
-                {
-                        ring->taken = 0;
-                        ring->tail = (ring->tail + 1) % TAR_RING_SPANS;
-                        if (atomic_sub(address_of ring->count, 1) == TAR_RING_SPANS)
-                                thread_wake(address_of ring->count, 1);
-                }
-        }
-        return (bipolar)copied;
-}
-
 /* The codec's read_end, from whichever thread ran it: a producer still
    decoding is told to quit and joined first. */
 static bool tar_ring_finish(const tar_codec address_to codec)
@@ -2666,6 +2630,27 @@ static fn tar_ring_consume(tar_ring address_to ring, positive n)
         ring->tail = (ring->tail + 1) % TAR_RING_SPANS;
         if (atomic_sub(address_of ring->count, 1) == TAR_RING_SPANS)
                 thread_wake(address_of ring->count, 1);
+}
+
+/* Up to n decoded bytes, waiting for spans as a read waits for a pipe;
+   the end or a failure answers once nothing is left before it. */
+static bipolar tar_ring_read(tar_ring address_to ring, p8 address_to into,
+                             positive n)
+{
+        positive copied = 0;
+
+        while (copied < n)
+        {
+                p8 address_to at;
+                bipolar take = tar_ring_view(ring, address_of at, n - copied);
+
+                if (take <= 0)
+                        return copied ? (bipolar)copied : take;
+                memory_copy_apart(into + copied, at, (positive)take);
+                copied += (positive)take;
+                tar_ring_consume(ring, (positive)take);
+        }
+        return (bipolar)copied;
 }
 
 static bipolar tar_read_bytes(bipolar handle, p8 address_to into, positive n);
@@ -6296,20 +6281,10 @@ static bipolar tar_scan_end(bipolar handle)
 
                         if (have_long)
                                 string_copy_bounded((char address_to)name, (string_address)long_name, sizeof(name));
-                        else
-                        {
-                                positive at = 0;
-
-                                if (!memory_compare(block + 257, "ustar", 5) && block[345])
-                                {
-                                        for (positive i = 0; i < 155 && block[345 + i]; i++)
-                                                name[at++] = block[345 + i];
-                                        name[at++] = '/';
-                                }
-                                for (positive i = 0; i < 100 && block[i] && at < sizeof(name) - 1; i++)
-                                        name[at++] = block[i];
-                                name[at] = end;
-                        }
+                        else if (tar_header_gnu_old(block))
+                                tar_field_text(block, TAR_NAME, name, sizeof(name));
+                        else if (!tar_join_name(block + 345, block, name, sizeof(name)))
+                                name[0] = end;
                         if (!tar_archived_note((string_address)name, time))
                                 return -1;
                 }
