@@ -37248,6 +37248,7 @@ static fn cp_pair(string_address source, string_address destination)
         bipolar source_directory = file_parent_open_named(source, source_leaf);
         bipolar destination_directory = file_parent_open_named(
             destination, destination_leaf);
+        bipolar source_pinned = -1;
 
         if (source_directory < 0 || destination_directory < 0)
         {
@@ -37297,12 +37298,8 @@ static fn cp_pair(string_address source, string_address destination)
                                               writer_shell_quoted_name, given_name,
                                               file_reason(destination_directory));
                 }
-                if (source_directory >= 0)
-                        system_close(source_directory);
-                if (destination_directory >= 0)
-                        system_close(destination_directory);
                 cp_status = 1;
-                return;
+                goto finish;
         }
 
         /* A missing source and a destination which is the same inode are
@@ -37325,20 +37322,16 @@ static fn cp_pair(string_address source, string_address destination)
         {
                 string_format(log_error, "cp: cannot stat %w: %s\n", writer_shell_quoted_name,
                               source, file_reason(source_looked));
-                system_close(source_directory);
-                system_close(destination_directory);
                 cp_status = 1;
-                return;
+                goto finish;
         }
         positive kind = source_facts.mode & MODE_FORMAT;
         if (kind == MODE_DIRECTORY && !cp_recursive)
         {
                 string_format(log_error, "cp: -r not specified; omitting directory '%w'\n",
                               writer_terminal_quoted_name, source);
-                system_close(source_directory);
-                system_close(destination_directory);
                 cp_status = 1;
-                return;
+                goto finish;
         }
         /* GNU copy.c's src_info: a non-directory named twice among the
            sources is copied once, with a warning, when no backup would
@@ -37372,9 +37365,7 @@ static fn cp_pair(string_address source, string_address destination)
                         string_format(log_error,
                                       "cp: warning: source file %w specified more than once\n",
                                       writer_shell_quoted_name, source);
-                        system_close(source_directory);
-                        system_close(destination_directory);
-                        return;
+                        goto finish;
                 }
                 file_set_record(address_of file_given_buckets, given_key,
                                 address_of source_facts);
@@ -37390,9 +37381,7 @@ static fn cp_pair(string_address source, string_address destination)
                         string_format(log_error,
                                       "cp: warning: source directory %w specified more than once\n",
                                       writer_shell_quoted_name, source);
-                        system_close(source_directory);
-                        system_close(destination_directory);
-                        return;
+                        goto finish;
                 }
                 file_set_record(address_of file_given_buckets, destination_leaf,
                                 address_of source_facts);
@@ -37401,10 +37390,8 @@ static fn cp_pair(string_address source, string_address destination)
             !cp_slash_allowed(source, given, kind, destination_directory,
                               destination_leaf))
         {
-                system_close(source_directory);
-                system_close(destination_directory);
                 cp_status = 1;
-                return;
+                goto finish;
         }
 
         /* GNU cp.c: cp --force --backup F F, one regular file named as both,
@@ -37445,7 +37432,7 @@ static fn cp_pair(string_address source, string_address destination)
                       : FILE_READ | (kind == MODE_FILE ? O_NONBLOCK : 0);
         if (!follow)
                 source_flags |= O_NOFOLLOW;
-        bipolar source_pinned = file_open_same(
+        source_pinned = file_open_same(
             source_directory, source_leaf, address_of source_facts,
             source_flags);
         //      A directory that will not open is still made, empty, with the
@@ -37474,10 +37461,8 @@ static fn cp_pair(string_address source, string_address destination)
                                           : "cp: cannot stat '%w': %s\n",
                                       writer_terminal_quoted_name, source,
                                       file_reason(source_pinned));
-                system_close(source_directory);
-                system_close(destination_directory);
                 cp_status = 1;
-                return;
+                goto finish;
         }
         // As file_copy_one looks, so the decision and the copy agree.
         positive destination_length = string_length(destination);
@@ -37514,11 +37499,8 @@ static fn cp_pair(string_address source, string_address destination)
                         string_format(log_error, "cp: %w and %w are the same file\n",
                                       writer_shell_quoted_name, source, writer_shell_quoted_name,
                                       destination);
-                        system_close(source_directory);
-                        system_close(destination_directory);
-                        system_close(source_pinned);
                         cp_status = 1;
-                        return;
+                        goto finish;
                 }
                 //      Already there -- a hard link onto its own inode --
                 //      but GNU still weighs -u and asks -i first, and a no
@@ -37559,10 +37541,7 @@ static fn cp_pair(string_address source, string_address destination)
         }
         if (already)
         {
-                system_close(source_directory);
-                system_close(destination_directory);
-                system_close(source_pinned);
-                return;
+                goto finish;
         }
 
         /* GNU copy.c: a name this run already made from an earlier
@@ -37578,11 +37557,8 @@ static fn cp_pair(string_address source, string_address destination)
                               "cp: will not overwrite just-created %w with %w\n",
                               writer_shell_quoted_name, destination,
                               writer_shell_quoted_name, source);
-                system_close(source_directory);
-                system_close(destination_directory);
-                system_close(source_pinned);
                 cp_status = 1;
-                return;
+                goto finish;
         }
         if (!file_backup_kind && entry_exists &&
             (destination_entry.mode & MODE_FORMAT) == MODE_LINK &&
@@ -37592,11 +37568,8 @@ static fn cp_pair(string_address source, string_address destination)
                               "cp: will not copy %w through just-created symlink %w\n",
                               writer_shell_quoted_name, source,
                               writer_shell_quoted_name, destination);
-                system_close(source_directory);
-                system_close(destination_directory);
-                system_close(source_pinned);
                 cp_status = 1;
-                return;
+                goto finish;
         }
 
         file_backup_source = source;
@@ -37608,11 +37581,8 @@ static fn cp_pair(string_address source, string_address destination)
                                  entry_exists ? address_of destination_entry
                                               : null))
         {
-                system_close(source_directory);
-                system_close(destination_directory);
-                system_close(source_pinned);
                 cp_status = 1;
-                return;
+                goto finish;
         }
 
         cp_destination_decided = true;
@@ -37641,6 +37611,7 @@ static fn cp_pair(string_address source, string_address destination)
                 cp_status = 1;
         file_made_now(destination_directory, destination_leaf);
         file_backup_kind = saved_backup_kind;
+finish:
         system_close(source_pinned);
         system_close(source_directory);
         system_close(destination_directory);
