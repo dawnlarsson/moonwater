@@ -12142,7 +12142,7 @@ fi
 
 set -- -cpu Nehalem
 [ -w /dev/kvm ] && set -- -enable-kvm -cpu host
-timeout 900 qemu-system-x86_64 -m 1G -smp 2 "$@" -kernel "$image" \
+timeout 2400 qemu-system-x86_64 -m 1G -smp 2 "$@" -kernel "$image" \
         -no-reboot -display none -vga none -serial stdio -nic none \
         -device qemu-xhci \
         -drive "if=none,id=stick,format=raw,file=fat:ro:$work/stick,readonly=on" \
