@@ -57923,10 +57923,13 @@ def harness_wifi_air(argv):
     # every commit; its own log is what says how far the exchange went.
     if hostapd:
         lines.append("H=\"$L /mnt/stick/hostapd\"")
-        for at, (pwe_mode, channel, token) in enumerate(((0, 11, False), (2, 1, False), (0, 6, True))):
+        for at, (pwe_mode, channel, token) in enumerate(((0, 11, False), (2, 1, False), (0, 6, True),
+                                                         (1, 3, False), (1, 8, True))):
             tag = "sh%d" % at
             word = "hostapd-sae-%d" % at
             what = "sae_pwe=%d%s" % (pwe_mode, ", anti-clogging token" if token else "")
+            #       An access point that says it takes hash-to-element (sae_pwe 1 and 2)
+            #       gets it, and one that does not (0) gets the hunt.
             lines.append("/mnt/stick/hwsim_radio new > /dev/null; r=$(station $S); "
                          "%sm=$(cat /sys/class/net/$r/address); %si=$(/mnt/stick/hwsim_radio move $NS $r)" % (tag, tag))
             conf = ["driver=nl80211", "ssid2=%s" % ("saeh%d" % at).encode().hex(), "hw_mode=g",
@@ -57942,6 +57945,8 @@ def harness_wifi_air(argv):
             lines.append("$A /mnt/stick/hwsim_radio power $%si 14" % tag)
             lines.append("printf '%%s\\n' %s | moonwater wifi add saeh%d - > /tmp/sc.got 2>&1; scen_status 'sae hostapd, %s' 0 $?" % (q(word), at, what))
             lines.append("scen_count 'sae hostapd %d, joined' 1 \"$(joined saeh%d)\"" % (at, at))
+            lines.append("scen_count 'sae hostapd %d used %s' 1 \"$(grep -c 'SAE: Derive keys - H2E=%d' /tmp/%s.log | awk '{ print ($1 > 0) }')\""
+                         % (at, "hash-to-element" if pwe_mode else "the hunt", 1 if pwe_mode else 0, tag))
             lines.append("sleep 1; scen_count 'sae hostapd %d took the exchange to Accepted and the handshake to its end' 1 "
                          "\"$(grep -c -e 'SAE: State Confirmed -> Accepted' -e 'EAPOL-4WAY-HS-COMPLETED' /tmp/%s.log | awk '{ print ($1 > 1) }')\"" % (at, tag))
             if token:
