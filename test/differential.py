@@ -27497,6 +27497,11 @@ int main(void) {
                 "\t\t\t      struct ext4_dir_entry_2 *de)\n{\n\tif (!de->inode)\n\t\treturn false;\n\treturn true;\n}\n\n"
                 "int ext4_find_dest_de(struct inode *dir, struct buffer_head *bh,\n\t\t      void *buf, int buf_size,\n"
                 "\t\t      struct ext4_filename *fname,\n\t\t      struct ext4_dir_entry_2 **dest_de)\n{\n\tint nlen = 0;\n\treturn nlen;\n}\n",
+            "linux/fs/libfs.c":
+                "enum {\n\tDIR_OFFSET_FIRST\t= 2,\n\tDIR_OFFSET_EOD\t\t= S32_MAX,\n};\n\n"
+                "static noinline_for_stack struct dentry *\noffset_dir_lookup(struct dentry *parent, loff_t offset)\n{\n\treturn NULL;\n}\n\n"
+                "static bool offset_dir_emit(struct dir_context *ctx, struct dentry *dentry)\n{\n\treturn true;\n}\n\n"
+                "static void offset_iterate_dir(struct file *file, struct dir_context *ctx)\n{\n\tctx->pos = DIR_OFFSET_EOD;\n}\n",
             "linux/arch/x86/kernel/asm-offsets.c":
                 "#include <linux/kbuild.h>\n\nstatic void __used common(void)\n{\n}\n",
             "linux/kernel/sched/fair.c":
@@ -27530,6 +27535,7 @@ int main(void) {
         def functions_placed(tree):
             namei = (tree / "linux/fs/ext4/namei.c").read_text()
             offsets = (tree / "linux/arch/x86/kernel/asm-offsets.c").read_text()
+            libfs = (tree / "linux/fs/libfs.c").read_text()
             return ("/* Moonwater: htree_dirblock_to_tree is in kernel/kernel.c */\nint htree_dirblock_to_tree("
                     in namei and "__u32 start_hash, __u32 start_minor_hash);\n" in namei and
                     "int count = 0;" not in namei and "int nlen = 0;" not in namei and
@@ -27538,6 +27544,11 @@ int main(void) {
                     "\nstruct buffer_head *__ext4_read_dirblock(" in namei and
                     "static struct buffer_head *__ext4_read_dirblock(" not in namei and
                     "_Static_assert(DIRENT_HTREE == 3," in namei and
+                    "/* Moonwater: offset_iterate_dir is in kernel/kernel.c */\nvoid offset_iterate_dir(" in libfs and
+                    "static void offset_iterate_dir" not in libfs and "\nbool offset_dir_emit(" in libfs and
+                    "static bool offset_dir_emit(" not in libfs and "static noinline_for_stack struct dentry *\noffset_dir_lookup" not in libfs and
+                    "noinline_for_stack struct dentry *\noffset_dir_lookup(struct dentry *parent, loff_t offset);\n" in libfs and
+                    "_Static_assert(DIR_OFFSET_EOD == S32_MAX," in libfs and
                     "void moonwater_offsets(void)" in offsets and
                     "OFFSET(MW_INODE_SB, inode, i_sb);" in offsets and
                     "DEFINE(MW_AVX2_BIT, (X86_FEATURE_AVX2 & 31));" in offsets)
@@ -59228,9 +59239,10 @@ static inline u32 get_unaligned_be32(const void *p)
 #define IS_ERR(p) ((unsigned long)(p) >= (unsigned long)-4095)
 #define PTR_ERR(p) ((long)(p))
 struct super_block { unsigned long s_blocksize; void *s_fs_info; };
-struct inode { struct super_block *i_sb; unsigned int i_flags; unsigned char i_blkbits; };
+struct inode { struct super_block *i_sb; unsigned int i_flags; unsigned char i_blkbits; unsigned short i_mode; unsigned long i_ino; };
 struct buffer_head { char *b_data; size_t b_size; unsigned long b_blocknr; };
-struct file { void *private_data; };
+struct dentry;
+struct file { void *private_data; struct { void *mnt; struct dentry *dentry; } f_path; };
 struct ext4_super_block { u32 s_inodes_count; u32 s_feature_ro_compat; };
 struct ext4_sb_info { struct ext4_super_block *s_es; };
 struct dx_hash_info { u32 hash; u32 minor_hash; int hash_version; u32 *seed; };
@@ -59298,6 +59310,56 @@ int fscrypt_fname_alloc_buffer(u32 max_encrypted_len, struct fscrypt_str *crypto
 void fscrypt_fname_free_buffer(struct fscrypt_str *crypto_str);
 int fscrypt_fname_disk_to_usr(const struct inode *inode, u32 hash, u32 minor_hash, const struct fscrypt_str *iname, struct fscrypt_str *oname);
 static inline int fscrypt_prepare_readdir(struct inode *dir) { if (IS_ENCRYPTED(dir)) return __fscrypt_prepare_readdir(dir); return 0; }
+
+#define S32_MAX 2147483647
+enum { DENTRY_D_LOCK_NORMAL, DENTRY_D_LOCK_NESTED };
+enum { DIR_OFFSET_FIRST = 2, DIR_OFFSET_MIN = 3, DIR_OFFSET_EOD = S32_MAX };
+#define S_DT_MASK 15
+struct hlist_node { struct hlist_node *next, **pprev; };
+struct hlist_head { struct hlist_node *first; };
+struct hlist_bl_node { struct hlist_bl_node *next, **pprev; };
+struct dentry {
+        unsigned int d_flags;
+        struct hlist_bl_node d_hash;
+        struct dentry *d_parent;
+        struct qstr d_name;
+        struct inode *d_inode;
+        unsigned char d_shortname[40];
+        void *d_fsdata;
+        struct { int lock; int count; } d_lockref;
+        struct hlist_node d_sib;
+        struct hlist_head d_children;
+};
+#define d_lock d_lockref.lock
+struct dir_context;
+typedef bool (*filldir_t)(struct dir_context *, const char *, int, loff_t, u64, unsigned);
+struct dir_context { filldir_t actor; loff_t pos; int count; unsigned int dt_flags_mask; };
+"""
+
+KERNEL_PORTS_LIBFS_PRELUDE = r"""
+/* what fs/libfs.c's readdir code reads of the kernel, as plain C over the shim */
+#define container_of(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
+#define hlist_entry_safe(ptr, type, member) ({ typeof(ptr) ____ptr = (ptr); ____ptr ? container_of(____ptr, type, member) : NULL; })
+#define hlist_for_each_entry_from(pos, member) for (; pos; pos = hlist_entry_safe((pos)->member.next, typeof(*pos), member))
+static inline struct dentry *d_first_child(const struct dentry *d) { return hlist_entry_safe(d->d_children.first, struct dentry, d_sib); }
+static inline struct dentry *d_next_sibling(const struct dentry *d) { return hlist_entry_safe(d->d_sib.next, struct dentry, d_sib); }
+#define d_inode(d) ((d)->d_inode)
+static inline bool simple_positive(const struct dentry *d) { return d->d_inode && d->d_hash.pprev; }
+static inline struct dentry *dget_dlock(struct dentry *d) { d->d_lockref.count++; return d; }
+static inline long dentry2offset(struct dentry *d) { return (long)d->d_fsdata; }
+void _raw_spin_lock(void *);
+void _raw_spin_unlock(void *);
+#define spin_lock(l) _raw_spin_lock(l)
+#define spin_lock_nested(l, c) _raw_spin_lock(l)
+#define spin_unlock(l) _raw_spin_unlock(l)
+unsigned char fs_umode_to_dtype(unsigned short mode);
+static inline bool dir_emit(struct dir_context *ctx, const char *name, int namelen, u64 ino, unsigned type)
+{
+        unsigned int dt_mask = S_DT_MASK | ctx->dt_flags_mask;
+        return ctx->actor(ctx, name, namelen, ctx->pos, ino, type & dt_mask);
+}
+void dput(struct dentry *);
+struct dentry *offset_dir_lookup(struct dentry *parent, loff_t offset);
 """
 
 KERNEL_PORTS_COMMON = r"""
@@ -59370,6 +59432,19 @@ int fscrypt_fname_disk_to_usr(const struct inode *inode, u32 hash, u32 minor, co
         return 0;
 }
 
+
+/* the dcache calls of the libfs port: present in every build of kernel.c, used by the libfs test */
+static struct { long bad, locks, dputs; } LF;
+static struct dentry *(*lf_lookup)(struct dentry *, loff_t);
+void _raw_spin_lock(void *l) { int *p = l; if (*p) LF.bad++; *p = 1; LF.locks++; }
+void _raw_spin_unlock(void *l) { int *p = l; if (!*p) LF.bad++; *p = 0; }
+void dput(struct dentry *d) { LF.dputs++; if (d->d_lockref.count <= 0) LF.bad++; d->d_lockref.count--; }
+unsigned char fs_umode_to_dtype(unsigned short mode)
+{
+        static const unsigned char t[16] = {0, 1, 2, 0, 4, 0, 6, 0, 8, 0, 10, 0, 12, 0, 0, 0};
+        return t[(mode >> 12) & 15];
+}
+struct dentry *offset_dir_lookup(struct dentry *parent, loff_t offset) { return lf_lookup ? lf_lookup(parent, offset) : NULL; }
 
 bool fscrypt_has_encryption_key(const struct inode *inode) { (void)inode; return G.haskey; }
 int generic_ci_match(const struct inode *parent, const struct qstr *name, const struct qstr *folded_name, const u8 *de_name, u32 de_name_len)
@@ -59677,6 +59752,117 @@ int main(int argc, char **argv)
 }
 """
 
+KERNEL_PORTS_LIBFS_TEST = r"""
+#include <sys/mman.h>
+void offset_iterate_dir(struct file *file, struct dir_context *ctx);
+
+static struct dentry *lf_find(struct dentry *parent, loff_t offset)
+{
+        struct dentry *child = NULL, *d;
+        if (offset == DIR_OFFSET_FIRST)
+                return find_positive_dentry(parent, NULL, false);
+        for (d = d_first_child(parent); d; d = d_next_sibling(d))       /* the maple tree holds every child: the last at or below offset */
+                if ((long)d->d_fsdata <= offset && (!child || (long)d->d_fsdata > (long)child->d_fsdata)) child = d;
+        return find_positive_dentry(parent, child, false);
+}
+
+static struct { int n; struct { char name[256]; int len; long off; u64 ino; unsigned type; long pos; } e[400]; int limit; } EM;
+static struct dentry *lf_dir, *lf_kids;
+static int lf_nkids;
+
+static bool lf_actor(struct dir_context *ctx, const char *name, int namelen, loff_t offset, u64 ino, unsigned type)
+{
+        if (EM.n < 400) {
+                memcpy(EM.e[EM.n].name, name, namelen);
+                EM.e[EM.n].len = namelen; EM.e[EM.n].off = offset; EM.e[EM.n].ino = ino; EM.e[EM.n].type = type; EM.e[EM.n].pos = ctx->pos;
+        }
+        if (offset != ctx->pos) LF.bad++;
+        if (lf_dir->d_lock) LF.bad++;                                   /* the actor writes to user memory: no spinlock may be held */
+        for (int i = 0; i < lf_nkids; i++) if (lf_kids[i].d_lock) LF.bad++;
+        EM.n++;
+        return !(EM.limit && EM.n >= EM.limit);
+}
+
+int main(int argc, char **argv)
+{
+        long iters = argc > 1 ? atol(argv[1]) : 3000, bad = 0, emitted = 0, locks_c = 0, locks_p = 0, puts_c = 0, puts_p = 0;
+        lf_lookup = lf_find;
+        for (long it = 0; it < iters; it++) {
+                int sizes[] = {0, 1, 2, 15, 16, 17, 31, 32, 33, 1 + rnd() % 70, 1 + rnd() % 70, 1 + rnd() % 70};
+                int n = sizes[rnd() % 12];
+                struct dentry dir; memset(&dir, 0, sizeof dir);
+                struct inode dir_inode; memset(&dir_inode, 0, sizeof dir_inode);
+                struct dentry *kids = calloc(n + 1, sizeof *kids);
+                struct inode *inodes = calloc(n + 1, sizeof *inodes);
+                long *offs = calloc(n + 1, sizeof *offs);
+                unsigned char *region = mmap(NULL, (2 * n + 2) * 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                dir.d_inode = &dir_inode; dir.d_lockref.count = 1;
+                long off = DIR_OFFSET_MIN + rnd() % 3;
+                for (int i = 0; i < n; i++) {
+                        int len = rnd() % 3 == 0 ? 1 + rnd() % 255 : 1 + rnd() % 40;
+                        if (rnd() % 7 == 0) len = 1 + rnd() % 9;
+                        struct dentry *d = &kids[i];
+                        unsigned char *nm;
+                        if (len < 40 && rnd() % 2) nm = d->d_shortname;
+                        else { nm = region + (2 * i + 1) * 4096 - len; mprotect(region + (2 * i + 1) * 4096, 4096, PROT_NONE); }
+                        for (int k = 0; k < len; k++) nm[k] = rnd();
+                        d->d_name.name = nm; d->d_name.len = len;
+                        inodes[i].i_ino = ((u64)rnd() << 32) | rnd();
+                        static const unsigned short modes[] = {0100644, 040755, 0120777, 020600, 060600, 010600, 0140777, 0, 0170000, 030000, 0150000};
+                        inodes[i].i_mode = modes[rnd() % 11];
+                        d->d_inode = rnd() % 7 == 0 ? NULL : &inodes[i];
+                        d->d_hash.pprev = rnd() % 10 == 0 ? NULL : &d->d_hash.next;
+                        d->d_fsdata = (void *)off; offs[i] = off;
+                        off += 1 + (rnd() % 4 == 0 ? rnd() % 5 : 0);
+                        d->d_lockref.count = 1; d->d_parent = &dir;
+                        if (i) kids[i - 1].d_sib.next = &d->d_sib; else dir.d_children.first = &d->d_sib;
+                }
+                lf_dir = &dir; lf_kids = kids; lf_nkids = n;
+                struct file file; memset(&file, 0, sizeof file); file.f_path.dentry = &dir;
+                long pos = rnd() % 3 == 0 ? DIR_OFFSET_FIRST : n && rnd() % 2 ? offs[rnd() % n] + (rnd() % 3 == 0 ? 1 : 0) : DIR_OFFSET_MIN + rnd() % 100;
+                for (int round = 0; round < 8; round++) {
+                        int limit = rnd() % 3 == 0 ? 0 : 1 + rnd() % 40;
+                        int counts[n + 1];
+                        for (int i = 0; i < n; i++) counts[i] = kids[i].d_lockref.count;
+                        int dir_count = dir.d_lockref.count;
+                        struct dir_context ca = { lf_actor, pos, 0, 0 }, cb = ca;
+                        memset(&EM, 0, sizeof EM); EM.limit = limit; memset(&LF, 0, sizeof LF);
+                        offset_iterate_dir_c(&file, &ca);
+                        typeof(EM) ea = EM; long la = LF.locks, da = LF.dputs, ba = LF.bad;
+                        int ra[n + 1], da_count = dir.d_lockref.count;
+                        for (int i = 0; i < n; i++) { ra[i] = kids[i].d_lockref.count; kids[i].d_lockref.count = counts[i]; }
+                        dir.d_lockref.count = dir_count;
+                        memset(&EM, 0, sizeof EM); EM.limit = limit; memset(&LF, 0, sizeof LF);
+                        offset_iterate_dir(&file, &cb);
+                        char why[200] = "";
+                        if (ea.n != EM.n) sprintf(why, "emitted %d vs %d", ea.n, EM.n);
+                        for (int i = 0; !*why && i < ea.n && i < 400; i++)
+                                if (ea.e[i].len != EM.e[i].len || memcmp(ea.e[i].name, EM.e[i].name, ea.e[i].len) || ea.e[i].off != EM.e[i].off
+                                    || ea.e[i].ino != EM.e[i].ino || ea.e[i].type != EM.e[i].type || ea.e[i].pos != EM.e[i].pos)
+                                        sprintf(why, "entry %d differs (len %d vs %d, off %ld vs %ld, type %u vs %u)", i, ea.e[i].len, EM.e[i].len, ea.e[i].off, EM.e[i].off, ea.e[i].type, EM.e[i].type);
+                        if (!*why && ca.pos != cb.pos) sprintf(why, "pos %ld vs %ld", (long)ca.pos, (long)cb.pos);
+                        if (!*why && da_count != dir.d_lockref.count) sprintf(why, "dir count %d vs %d", da_count, dir.d_lockref.count);
+                        for (int i = 0; !*why && i < n; i++)
+                                if (ra[i] != kids[i].d_lockref.count) sprintf(why, "count of %d: %d vs %d", i, ra[i], kids[i].d_lockref.count);
+                        if (!*why && (ba || LF.bad)) sprintf(why, "lock or count misuse %ld vs %ld", ba, LF.bad);
+                        if (!*why && (dir.d_lock || lf_dir->d_lock)) sprintf(why, "a lock is still held");
+                        for (int i = 0; !*why && i < n; i++) if (kids[i].d_lock) sprintf(why, "a child lock is still held");
+                        locks_c += la; locks_p += LF.locks; puts_c += da; puts_p += LF.dputs; emitted += ea.n;
+                        if (*why) { if (bad++ < 5) printf("case %ld round %d differs: %s (n %d pos %ld limit %d)\n", it, round, why, n, pos, limit); break; }
+                        pos = ca.pos;
+                        if (pos == DIR_OFFSET_EOD) break;
+                        for (int i = 0; i < n; i++) kids[i].d_lockref.count = counts[i];
+                        dir.d_lockref.count = dir_count;
+                }
+                munmap(region, (2 * n + 2) * 4096);
+                free(kids); free(inodes); free(offs);
+        }
+        printf("locks taken: C %ld, port %ld; dput calls: C %ld, port %ld; over %ld entries\n", locks_c, locks_p, puts_c, puts_p, emitted);
+        printf("cases %ld differ %ld stores %ld\n", iters, bad, emitted);
+        return bad != 0;
+}
+"""
+
 
 def harness_kernel_ports(argv):
     """The kernel functions in kernel/kernel.c against Linux's own C, call for call.
@@ -59718,7 +59904,7 @@ def harness_kernel_ports(argv):
                 return archive.extractfile("linux-%s/%s" % (version, relative)).read().decode()
         return None
 
-    sources = {name: kernel_file(name) for name in ("fs/ext4/namei.c", "fs/ext4/dir.c", "fs/ext4/hash.c", "fs/crypto/fname.c")}
+    sources = {name: kernel_file(name) for name in ("fs/ext4/namei.c", "fs/ext4/dir.c", "fs/ext4/hash.c", "fs/crypto/fname.c", "fs/libfs.c")}
     if not all(sources.values()):
         print("kernel ports: NOT RUN -- no kernel source (linux/, KERNEL_SRC or artifacts/linux-%s.tar.xz)" % version)
         return 0
@@ -59738,7 +59924,11 @@ def harness_kernel_ports(argv):
         text = cut(sources["fs/ext4/namei.c"], header, "\n}\n", True)
         return "#define %s %s_c\n%s#undef %s\n" % (name, name, text, name)
 
+    libfs_code = "\n".join(cut(sources["fs/libfs.c"], head, "\n}\n", True) for head in (
+        "static struct dentry *find_positive_dentry(struct dentry *parent,", "static bool offset_dir_emit(", "static void offset_iterate_dir("))
+    libfs_code = KERNEL_PORTS_LIBFS_PRELUDE + libfs_code.replace("static void offset_iterate_dir(", "static void offset_iterate_dir_c(", 1)
     ports = {
+        "offset_iterate_dir": (libfs_code, KERNEL_PORTS_LIBFS_TEST, "ctx->pos = DIR_OFFSET_EOD;", "ctx->pos = DIR_OFFSET_EOD - 1;"),
         "htree_dirblock_to_tree": (oracle_of("htree_dirblock_to_tree", "static int htree_dirblock_to_tree(struct file *dir_file,"),
                                    KERNEL_PORTS_HTREE_TEST, "count++;", "count += 2;"),
         "ext4_find_dest_de": (oracle_of("ext4_find_dest_de", "int ext4_find_dest_de(struct inode *dir, struct buffer_head *bh,"),
@@ -59819,7 +60009,7 @@ def harness_kernel_ports(argv):
                 print("  no answer from %s: %s" % (arch, (ran.stdout + ran.stderr)[-500:]))
                 return None
             for line in ran.stdout.splitlines():
-                if line.startswith("case ") and not sabotage:
+                if line.startswith(("case ", "locks taken")) and not sabotage:
                     print("    " + line)
             return tuple(int(x) for x in found.groups())
 

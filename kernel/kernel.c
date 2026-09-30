@@ -46,8 +46,9 @@
 //    ----------------------  --------------------------------------  ------- ------- ------- --------
 //    htree_dirblock_to_tree  fs/ext4/namei.c htree_dirblock_to_tree  yes     yes     yes     x86_64 getdents: 1000 names 92.5 -> 52.5 us (-43%), 100 names -36%, 16 names -19%; 8 names level
 //    ext4_find_dest_de       fs/ext4/namei.c ext4_find_dest_de       yes     yes     yes     full 4 KiB block, 134 entries: 590 -> 350 ns (1.7x); guest create+unlink -2.7% (noise floor 4%)
+//    offset_iterate_dir      fs/libfs.c offset_iterate_dir           yes     yes     yes     x86_64 tmpfs getdents: 1000 entries 20.6 -> 16.9 us (-18%); locked operations per entry 2.1 -> 0.39
 //
-//    2 routines.
+//    3 routines.
 //  (index end)
 */
 
@@ -1222,6 +1223,451 @@ __asm__(
 );
 #endif // CONFIG_RISCV
 
+//
+//       offset_iterate_dir -- fs/libfs.c
+//
+//       void offset_iterate_dir(struct file *file, struct dir_context *ctx)
+//
+//       The getdents of tmpfs, and of every directory that keeps its entries
+//       in offset order (simple_offset_dir_operations): the root filesystem of
+//       the live image is one. The C walks the entries one at a time and pays
+//       for each one three times over in locked instructions: the parent's
+//       d_lock to find the next sibling, the sibling's own d_lock to take a
+//       reference on it, and a cmpxchg in dput to give the previous entry's
+//       reference back.
+//
+//       The directory cannot change while this runs -- the caller holds its
+//       i_rwsem, shared, and every create, unlink and rename takes it
+//       exclusive, which is what offset_readdir's own comment says it is for
+//       -- so the entries are read in batches. With the parent's d_lock held
+//       once, up to sixteen positive siblings are copied out (offset, inode
+//       number, mode, name) into a buffer on the stack; the lock is let go,
+//       and only then are they handed to the actor, which writes to user
+//       memory and may fault. An entry of a batch is not referenced while it
+//       is read: what holds the parent's d_lock cannot be killed, for
+//       __dentry_kill needs that lock to take it off the list. One reference
+//       is kept from batch to batch, on the last entry copied, taken as
+//       dget_dlock takes it (the child's d_lock, nested) and given back with
+//       dput, and it is what the next batch starts after, exactly as the C
+//       keeps one reference on the entry it is standing at.
+//
+//       What the actor sees is the C's, call for call: ctx->pos is the
+//       entry's offset before each call, the dirent type is
+//       fs_umode_to_dtype of the mode, the name is the entry's bytes, and a
+//       refusal leaves ctx->pos at the entry refused. The end of the
+//       directory is DIR_OFFSET_EOD, as before. offset_dir_lookup, which
+//       finds where to resume through the maple tree, is called as it was,
+//       and loses its static to be.
+//
+//       A name is copied exactly as long as it is, eight bytes at a time and
+//       an overlapping tail, because a long name is an external_name
+//       allocation with nothing after it to read.
+//
+//       MEASURED (x86_64). One getdents64 pass over a tmpfs directory of a
+//       thousand names of 40 characters, nanoseconds per pass, in a KVM guest
+//       on a Ryzen 9 9950X (Zen 5), minimum over 1200 bursts of 50 passes,
+//       the two images booted in turn, four rounds each:
+//
+//           this kernel with the C        20576  20506  20676  21429
+//           this kernel with this port    16878  16884  16987  16859
+//
+//       which is 20.6 -> 16.9 us, 18% off the pass, and 20.6 -> 16.9 ns an
+//       entry. What moved is the locked operations: over the harness's 60,000
+//       entries the C takes 126,578 spinlocks and 60,289 dput calls, 2.1 and
+//       1.0 an entry, and this takes 23,445 and 8,401, 0.39 and 0.14. What did
+//       not move is the actor: the same filldir64, the same user-access window
+//       for every entry, is most of what is left. The arm64 and riscv64 bodies
+//       are the same algorithm, held to the C by test/differential.py
+//       --harness kernel_ports under qemu-user, and neither has been booted or
+//       timed. The harness plants the names that are not inline at the end
+//       of a page with an unmapped page after it, so a read past a name's
+//       last byte is a fault.
+//
+//       Registers: r12 ctx, r13 the directory, r14 the reference held (the
+//       last entry copied, or the one offset_dir_lookup gave), rbx the entry
+//       being read and then the record being emitted, rbp where the next
+//       record goes, r15 the records left to emit. The indirect call to the
+//       actor goes through the retpoline thunk when the kernel has one.
+//
+//> arch x86_64 arm64 riscv64
+//> perf x86_64 tmpfs getdents: 1000 entries 20.6 -> 16.9 us (-18%); locked operations per entry 2.1 -> 0.39
+//> replace fs/libfs.c offset_iterate_dir
+//> unstatic fs/libfs.c offset_dir_lookup
+//> unstatic fs/libfs.c offset_dir_emit
+//> assert fs/libfs.c DIR_OFFSET_EOD == S32_MAX
+//> include <linux/fs.h>
+//> include <linux/dcache.h>
+//> offset MW_FILE_DENTRY file f_path.dentry
+//> offset MW_D_LOCK dentry d_lockref.lock
+//> offset MW_D_COUNT dentry d_lockref.count
+//> offset MW_D_INODE dentry d_inode
+//> offset MW_D_PPRV dentry d_hash.pprev
+//> offset MW_D_NLEN dentry d_name.len
+//> offset MW_D_NPTR dentry d_name.name
+//> offset MW_D_SIB dentry d_sib
+//> offset MW_D_FSDATA dentry d_fsdata
+//> offset MW_I_INO inode i_ino
+//> offset MW_I_MODE inode i_mode
+//> offset MW_CTX_ACTOR dir_context actor
+//> offset MW_CTX_POS dir_context pos
+//> const MW_POS_EOD S32_MAX
+//> const MW_LOCK_NESTED DENTRY_D_LOCK_NESTED
+#ifdef CONFIG_X86_64
+#if defined(CONFIG_MITIGATION_RETPOLINE) || defined(CONFIG_RETPOLINE)
+#define MW_CALL_R11 "call __x86_indirect_thunk_r11\n"
+#else
+#define MW_CALL_R11 "call *%r11\n"
+#endif
+#ifdef CONFIG_DEBUG_LOCK_ALLOC
+#define MW_LOCK_CHILD "mov $MW_LOCK_NESTED, %esi\n   call _raw_spin_lock_nested\n"
+#else
+#define MW_LOCK_CHILD "call _raw_spin_lock\n"
+#endif
+__asm__(
+    MWSET(MW_FILE_DENTRY)
+    MWSET(MW_D_LOCK)
+    MWSET(MW_D_COUNT)
+    MWSET(MW_D_INODE)
+    MWSET(MW_D_PPRV)
+    MWSET(MW_D_NLEN)
+    MWSET(MW_D_NPTR)
+    MWSET(MW_D_SIB)
+    MWSET(MW_D_FSDATA)
+    MWSET(MW_I_INO)
+    MWSET(MW_I_MODE)
+    MWSET(MW_CTX_ACTOR)
+    MWSET(MW_CTX_POS)
+    MWSET(MW_POS_EOD)
+    MWSET(MW_LOCK_NESTED)
+    ".set I_FIRST, 0\n"
+    ".set I_EOD, 4\n"
+    ".set I_N, 8\n"
+    ".set I_LAST, 16\n"
+    ".set I_BUF, 32\n"
+    ".set I_BUFSZ, 2048\n"
+    ".set I_BATCH, 16\n"
+    ".set I_NAMEMAX, 1024\n"
+    ".set I_FRAME, 2088\n"
+);
+
+__asm__(
+    ASM_FUNC(offset_iterate_dir)
+    "        push    %rbp\n   push    %r15\n   push    %r14\n   push    %r13\n"
+    "        push    %r12\n   push    %rbx\n   sub     $I_FRAME, %rsp\n   mov     %rsi, %r12\n"
+    "        mov     MW_FILE_DENTRY(%rdi), %r13\n"
+    "        # dentry = offset_dir_lookup(dir, ctx->pos); none means the end\n"
+    "        mov     MW_CTX_POS(%r12), %rsi\n   mov     %r13, %rdi\n   call    offset_dir_lookup\n"
+    "        mov     %rax, %r14\n   test    %rax, %rax\n   jz      .Lit_eod\n"
+    "        movl    $1, I_FIRST(%rsp)\n"
+    "        # one batch: the parent's d_lock once, the entries from r14 on (after it, past the first) copied out\n"
+    ".Lit_batch:\n"
+    "        lea     MW_D_LOCK(%r13), %rdi\n   call    _raw_spin_lock\n"
+    "        movl    $0, I_N(%rsp)\n   movl    $0, I_EOD(%rsp)\n   movq    $0, I_LAST(%rsp)\n"
+    "        lea     I_BUF(%rsp), %rbp\n   mov     %r14, %rbx\n"
+    "        cmpl    $0, I_FIRST(%rsp)\n   je      .Lit_next\n"
+    "        # simple_positive: an inode, and still hashed. The record: offset, inode number, length, mode, name\n"
+    ".Lit_entry:\n"
+    "        mov     MW_D_INODE(%rbx), %rcx\n   test    %rcx, %rcx\n   jz      .Lit_next\n"
+    "        cmpq    $0, MW_D_PPRV(%rbx)\n   je      .Lit_next\n"
+    "        mov     MW_D_NLEN(%rbx), %edx\n   cmp     $I_NAMEMAX, %edx\n   ja      .Lit_end\n"
+    "        lea     31(%rdx), %r10d\n   and     $-8, %r10d\n   lea     (%rbp,%r10), %rsi\n"
+    "        lea     I_BUF+I_BUFSZ(%rsp), %r8\n   cmp     %r8, %rsi\n   ja      .Lit_full\n"
+    "        mov     MW_D_FSDATA(%rbx), %r8\n   mov     %r8, (%rbp)\n"
+    "        mov     MW_I_INO(%rcx), %r8\n   mov     %r8, 8(%rbp)\n"
+    "        movzwl  MW_I_MODE(%rcx), %r8d\n   mov     %edx, 16(%rbp)\n   mov     %r8d, 20(%rbp)\n"
+    "        mov     MW_D_NPTR(%rbx), %rsi\n   lea     24(%rbp), %rdi\n   mov     %edx, %ecx\n"
+    "        cmp     $8, %ecx\n   jb      .Lit_small\n"
+    "        lea     -8(%rsi,%rcx), %r8\n   lea     -8(%rdi,%rcx), %r9\n"
+    "1:      mov     (%rsi), %rax\n   mov     %rax, (%rdi)\n   add     $8, %rsi\n   add     $8, %rdi\n"
+    "        sub     $8, %ecx\n   cmp     $8, %ecx\n   jae     1b\n"
+    "        mov     (%r8), %rax\n   mov     %rax, (%r9)\n   jmp     .Lit_copied\n"
+    ".Lit_small:\n"
+    "        cmp     $4, %ecx\n   jb      2f\n"
+    "        mov     (%rsi), %eax\n   mov     -4(%rsi,%rcx), %r8d\n   mov     %eax, (%rdi)\n"
+    "        mov     %r8d, -4(%rdi,%rcx)\n   jmp     .Lit_copied\n"
+    "2:      test    %ecx, %ecx\n   jz      .Lit_copied\n"
+    "        movzbl  (%rsi), %eax\n   movzbl  -1(%rsi,%rcx), %r8d\n   mov     %al, (%rdi)\n"
+    "        mov     %r8b, -1(%rdi,%rcx)\n   cmp     $3, %ecx\n   jne     .Lit_copied\n"
+    "        movzbl  1(%rsi), %eax\n   mov     %al, 1(%rdi)\n"
+    ".Lit_copied:\n"
+    "        add     %r10, %rbp\n   mov     %rbx, I_LAST(%rsp)\n   incl    I_N(%rsp)\n"
+    "        cmpl    $I_BATCH, I_N(%rsp)\n   jae     .Lit_full\n"
+    ".Lit_next:\n"
+    "        mov     MW_D_SIB(%rbx), %rax\n   test    %rax, %rax\n   jz      .Lit_end\n"
+    "        lea     -MW_D_SIB(%rax), %rbx\n   jmp     .Lit_entry\n"
+    ".Lit_end:\n"
+    "        movl    $1, I_EOD(%rsp)\n"
+    "        # more may follow: a reference on the last entry copied, as dget_dlock takes it, to start the next batch after\n"
+    ".Lit_full:\n"
+    "        mov     I_LAST(%rsp), %rbx\n   cmpl    $0, I_EOD(%rsp)\n   jne     1f\n   test    %rbx, %rbx\n   jz      1f\n"
+    "        lea     MW_D_LOCK(%rbx), %rdi\n   " MW_LOCK_CHILD
+    "        incl    MW_D_COUNT(%rbx)\n   lea     MW_D_LOCK(%rbx), %rdi\n   call    _raw_spin_unlock\n"
+    "1:      lea     MW_D_LOCK(%r13), %rdi\n   call    _raw_spin_unlock\n"
+    "        # the reference this batch started from is given back; the last entry's, if taken, is the one held now\n"
+    "        test    %r14, %r14\n   jz      2f\n   mov     %r14, %rdi\n   call    dput\n"
+    "2:      xor     %r14d, %r14d\n   cmpl    $0, I_EOD(%rsp)\n   jne     3f\n   mov     I_LAST(%rsp), %r14\n"
+    "3:      lea     I_BUF(%rsp), %rbx\n   mov     I_N(%rsp), %r15d\n   test    %r15d, %r15d\n   jz      .Lit_emitted\n"
+    "        # ctx->pos = the entry's offset, then actor(ctx, name, len, pos, ino, fs_umode_to_dtype(mode))\n"
+    ".Lit_emit:\n"
+    "        mov     (%rbx), %rax\n   mov     %rax, MW_CTX_POS(%r12)\n"
+    "        movzwl  20(%rbx), %edi\n   call    fs_umode_to_dtype\n   movzbl  %al, %r9d\n"
+    "        mov     8(%rbx), %r8\n   mov     (%rbx), %rcx\n   mov     16(%rbx), %edx\n"
+    "        lea     24(%rbx), %rsi\n   mov     %r12, %rdi\n   mov     MW_CTX_ACTOR(%r12), %r11\n"
+    "        " MW_CALL_R11
+    "        test    %al, %al\n   jz      .Lit_stop\n"
+    "        mov     16(%rbx), %eax\n   add     $31, %eax\n   and     $-8, %eax\n   add     %rax, %rbx\n"
+    "        dec     %r15d\n   jnz     .Lit_emit\n"
+    "        # every record taken: on to the next batch, or the end of the directory where none is held\n"
+    ".Lit_emitted:\n"
+    "        test    %r14, %r14\n   jz      .Lit_eod\n   movl    $0, I_FIRST(%rsp)\n   jmp     .Lit_batch\n"
+    "        # refused: ctx->pos stays at the entry, and the held reference goes back\n"
+    ".Lit_stop:\n"
+    "        test    %r14, %r14\n   jz      .Lit_out\n   mov     %r14, %rdi\n   call    dput\n   jmp     .Lit_out\n"
+    ".Lit_eod:\n"
+    "        movq    $MW_POS_EOD, MW_CTX_POS(%r12)\n"
+    ".Lit_out:\n"
+    "        add     $I_FRAME, %rsp\n   pop     %rbx\n   pop     %r12\n   pop     %r13\n   pop     %r14\n"
+    "        pop     %r15\n   pop     %rbp\n"
+    "        " ASM_RET
+    ASM_END(offset_iterate_dir)
+);
+#endif // CONFIG_X86_64
+
+#ifdef CONFIG_ARM64
+#ifdef CONFIG_DEBUG_LOCK_ALLOC
+#define MW_LOCK_CHILD "mov w1, #MW_LOCK_NESTED\n   bl _raw_spin_lock_nested\n"
+#else
+#define MW_LOCK_CHILD "bl _raw_spin_lock\n"
+#endif
+__asm__(
+    MWSET(MW_FILE_DENTRY)
+    MWSET(MW_D_LOCK)
+    MWSET(MW_D_COUNT)
+    MWSET(MW_D_INODE)
+    MWSET(MW_D_PPRV)
+    MWSET(MW_D_NLEN)
+    MWSET(MW_D_NPTR)
+    MWSET(MW_D_SIB)
+    MWSET(MW_D_FSDATA)
+    MWSET(MW_I_INO)
+    MWSET(MW_I_MODE)
+    MWSET(MW_CTX_ACTOR)
+    MWSET(MW_CTX_POS)
+    MWSET(MW_POS_EOD)
+    MWSET(MW_LOCK_NESTED)
+    ".set I_FIRST, 0\n"
+    ".set I_EOD, 4\n"
+    ".set I_N, 8\n"
+    ".set I_LAST, 16\n"
+    ".set I_BUF, 32\n"
+    ".set I_BUFSZ, 2048\n"
+    ".set I_BATCH, 16\n"
+    ".set I_NAMEMAX, 1024\n"
+    ".set I_FRAME, 2080\n"
+);
+
+__asm__(
+    ASM_FUNC(offset_iterate_dir)
+    "        stp     x29, x30, [sp, #-96]!\n   mov     x29, sp\n   stp     x19, x20, [sp, #16]\n"
+    "        stp     x21, x22, [sp, #32]\n   stp     x23, x24, [sp, #48]\n"
+    "        stp     x25, x26, [sp, #64]\n   stp     x27, x28, [sp, #80]\n"
+    "        sub     sp, sp, #I_FRAME\n   mov     x19, x1\n   ldr     x20, [x0, #MW_FILE_DENTRY]\n"
+    "        # dentry = offset_dir_lookup(dir, ctx->pos); none means the end\n"
+    "        ldr     x1, [x19, #MW_CTX_POS]\n   mov     x0, x20\n   bl      offset_dir_lookup\n"
+    "        mov     x21, x0\n   cbz     x0, .Lit_eod\n   mov     w8, #1\n   str     w8, [sp, #I_FIRST]\n"
+    "        # one batch: the parent's d_lock once, the entries from x21 on (after it, past the first) copied out\n"
+    ".Lit_batch:\n"
+    "        add     x0, x20, #MW_D_LOCK\n   bl      _raw_spin_lock\n"
+    "        str     wzr, [sp, #I_N]\n   str     wzr, [sp, #I_EOD]\n   str     xzr, [sp, #I_LAST]\n"
+    "        add     x24, sp, #I_BUF\n   mov     x23, x21\n"
+    "        ldr     w8, [sp, #I_FIRST]\n   cbz     w8, .Lit_next\n"
+    "        # simple_positive: an inode, and still hashed. The record: offset, inode number, length, mode, name\n"
+    ".Lit_entry:\n"
+    "        ldr     x9, [x23, #MW_D_INODE]\n   cbz     x9, .Lit_next\n"
+    "        ldr     x8, [x23, #MW_D_PPRV]\n   cbz     x8, .Lit_next\n"
+    "        ldr     w2, [x23, #MW_D_NLEN]\n   cmp     w2, #I_NAMEMAX\n   b.hi    .Lit_end\n"
+    "        add     w10, w2, #31\n   and     w10, w10, #0xfffffff8\n   add     x11, x24, x10\n"
+    "        add     x12, sp, #(I_BUF+I_BUFSZ)\n   cmp     x11, x12\n   b.hi    .Lit_full\n"
+    "        ldr     x8, [x23, #MW_D_FSDATA]\n   str     x8, [x24]\n"
+    "        ldr     x8, [x9, #MW_I_INO]\n   str     x8, [x24, #8]\n"
+    "        ldrh    w8, [x9, #MW_I_MODE]\n   str     w2, [x24, #16]\n   str     w8, [x24, #20]\n"
+    "        ldr     x1, [x23, #MW_D_NPTR]\n   add     x0, x24, #24\n   mov     w3, w2\n"
+    "        cmp     w3, #8\n   b.lo    .Lit_small\n"
+    "        add     x4, x1, x3\n   sub     x4, x4, #8\n   add     x5, x0, x3\n   sub     x5, x5, #8\n"
+    "1:      ldr     x6, [x1], #8\n   str     x6, [x0], #8\n   sub     w3, w3, #8\n   cmp     w3, #8\n   b.hs    1b\n"
+    "        ldr     x6, [x4]\n   str     x6, [x5]\n   b       .Lit_copied\n"
+    ".Lit_small:\n"
+    "        cmp     w3, #4\n   b.lo    2f\n"
+    "        ldr     w6, [x1]\n   add     x4, x1, x3\n   ldur    w7, [x4, #-4]\n   str     w6, [x0]\n"
+    "        add     x5, x0, x3\n   stur    w7, [x5, #-4]\n   b       .Lit_copied\n"
+    "2:      cbz     w3, .Lit_copied\n"
+    "        ldrb    w6, [x1]\n   add     x4, x1, x3\n   ldurb   w7, [x4, #-1]\n   strb    w6, [x0]\n"
+    "        add     x5, x0, x3\n   sturb   w7, [x5, #-1]\n   cmp     w3, #3\n   b.ne    .Lit_copied\n"
+    "        ldrb    w6, [x1, #1]\n   strb    w6, [x0, #1]\n"
+    ".Lit_copied:\n"
+    "        add     x24, x24, x10\n   str     x23, [sp, #I_LAST]\n   ldr     w8, [sp, #I_N]\n   add     w8, w8, #1\n"
+    "        str     w8, [sp, #I_N]\n   cmp     w8, #I_BATCH\n   b.hs    .Lit_full\n"
+    ".Lit_next:\n"
+    "        ldr     x8, [x23, #MW_D_SIB]\n   cbz     x8, .Lit_end\n   sub     x23, x8, #MW_D_SIB\n   b       .Lit_entry\n"
+    ".Lit_end:\n"
+    "        mov     w8, #1\n   str     w8, [sp, #I_EOD]\n"
+    "        # more may follow: a reference on the last entry copied, as dget_dlock takes it, to start the next batch after\n"
+    ".Lit_full:\n"
+    "        ldr     x22, [sp, #I_LAST]\n   ldr     w8, [sp, #I_EOD]\n   cbnz    w8, 1f\n   cbz     x22, 1f\n"
+    "        add     x0, x22, #MW_D_LOCK\n   " MW_LOCK_CHILD
+    "        ldr     w8, [x22, #MW_D_COUNT]\n   add     w8, w8, #1\n   str     w8, [x22, #MW_D_COUNT]\n"
+    "        add     x0, x22, #MW_D_LOCK\n   bl      _raw_spin_unlock\n"
+    "1:      add     x0, x20, #MW_D_LOCK\n   bl      _raw_spin_unlock\n"
+    "        # the reference this batch started from is given back; the last entry's, if taken, is the one held now\n"
+    "        cbz     x21, 2f\n   mov     x0, x21\n   bl      dput\n"
+    "2:      mov     x21, xzr\n   ldr     w8, [sp, #I_EOD]\n   cbnz    w8, 3f\n   ldr     x21, [sp, #I_LAST]\n"
+    "3:      add     x26, sp, #I_BUF\n   ldr     w25, [sp, #I_N]\n   cbz     w25, .Lit_emitted\n"
+    "        # ctx->pos = the entry's offset, then actor(ctx, name, len, pos, ino, fs_umode_to_dtype(mode))\n"
+    ".Lit_emit:\n"
+    "        ldr     x8, [x26]\n   str     x8, [x19, #MW_CTX_POS]\n"
+    "        ldrh    w0, [x26, #20]\n   bl      fs_umode_to_dtype\n   and     w5, w0, #0xff\n"
+    "        ldr     x4, [x26, #8]\n   ldr     x3, [x26]\n   ldr     w2, [x26, #16]\n"
+    "        add     x1, x26, #24\n   mov     x0, x19\n   ldr     x9, [x19, #MW_CTX_ACTOR]\n   blr     x9\n"
+    "        tst     w0, #0xff\n   b.eq    .Lit_stop\n"
+    "        ldr     w8, [x26, #16]\n   add     w8, w8, #31\n   and     w8, w8, #0xfffffff8\n   add     x26, x26, x8\n"
+    "        subs    w25, w25, #1\n   b.ne    .Lit_emit\n"
+    "        # every record taken: on to the next batch, or the end of the directory where none is held\n"
+    ".Lit_emitted:\n"
+    "        cbz     x21, .Lit_eod\n   str     wzr, [sp, #I_FIRST]\n   b       .Lit_batch\n"
+    "        # refused: ctx->pos stays at the entry, and the held reference goes back\n"
+    ".Lit_stop:\n"
+    "        cbz     x21, .Lit_out\n   mov     x0, x21\n   bl      dput\n   b       .Lit_out\n"
+    ".Lit_eod:\n"
+    "        mov     x8, #MW_POS_EOD\n   str     x8, [x19, #MW_CTX_POS]\n"
+    ".Lit_out:\n"
+    "        add     sp, sp, #I_FRAME\n   ldp     x27, x28, [sp, #80]\n"
+    "        ldp     x25, x26, [sp, #64]\n   ldp     x23, x24, [sp, #48]\n"
+    "        ldp     x21, x22, [sp, #32]\n   ldp     x19, x20, [sp, #16]\n"
+    "        ldp     x29, x30, [sp], #96\n"
+    "        " ASM_RET
+    ASM_END(offset_iterate_dir)
+);
+#endif // CONFIG_ARM64
+
+#ifdef CONFIG_RISCV
+#ifdef CONFIG_DEBUG_LOCK_ALLOC
+#define MW_LOCK_CHILD "li a1, MW_LOCK_NESTED\n   call _raw_spin_lock_nested\n"
+#else
+#define MW_LOCK_CHILD "call _raw_spin_lock\n"
+#endif
+__asm__(
+    MWSET(MW_FILE_DENTRY)
+    MWSET(MW_D_LOCK)
+    MWSET(MW_D_COUNT)
+    MWSET(MW_D_INODE)
+    MWSET(MW_D_PPRV)
+    MWSET(MW_D_NLEN)
+    MWSET(MW_D_NPTR)
+    MWSET(MW_D_SIB)
+    MWSET(MW_D_FSDATA)
+    MWSET(MW_I_INO)
+    MWSET(MW_I_MODE)
+    MWSET(MW_CTX_ACTOR)
+    MWSET(MW_CTX_POS)
+    MWSET(MW_POS_EOD)
+    MWSET(MW_LOCK_NESTED)
+    ".set I_FIRST, 0\n"
+    ".set I_EOD, 4\n"
+    ".set I_N, 8\n"
+    ".set I_LAST, 16\n"
+    ".set I_RA, 32\n"
+    ".set I_S0, 40\n"
+    ".set I_S1, 48\n"
+    ".set I_S2, 56\n"
+    ".set I_S3, 64\n"
+    ".set I_S4, 72\n"
+    ".set I_S5, 80\n"
+    ".set I_S6, 88\n"
+    ".set I_S7, 96\n"
+    ".set I_BUF, 112\n"
+    ".set I_BUFSZ, 1792\n"
+    ".set I_BATCH, 16\n"
+    ".set I_NAMEMAX, 1024\n"
+    ".set I_FRAME, 1904\n"
+);
+
+__asm__(
+    ASM_FUNC(offset_iterate_dir)
+    "        addi    sp, sp, -I_FRAME\n   sd      ra, I_RA(sp)\n   sd      s0, I_S0(sp)\n   sd      s1, I_S1(sp)\n"
+    "        sd      s2, I_S2(sp)\n   sd      s3, I_S3(sp)\n   sd      s4, I_S4(sp)\n   sd      s5, I_S5(sp)\n"
+    "        sd      s6, I_S6(sp)\n   sd      s7, I_S7(sp)\n   mv      s0, a1\n   ld      s1, MW_FILE_DENTRY(a0)\n"
+    "        # dentry = offset_dir_lookup(dir, ctx->pos); none means the end\n"
+    "        ld      a1, MW_CTX_POS(s0)\n   mv      a0, s1\n   call    offset_dir_lookup\n"
+    "        mv      s2, a0\n   beqz    a0, .Lit_eod\n   li      t0, 1\n   sw      t0, I_FIRST(sp)\n"
+    "        # one batch: the parent's d_lock once, the entries from s2 on (after it, past the first) copied out\n"
+    ".Lit_batch:\n"
+    "        addi    a0, s1, MW_D_LOCK\n   call    _raw_spin_lock\n"
+    "        sw      zero, I_N(sp)\n   sw      zero, I_EOD(sp)\n   sd      zero, I_LAST(sp)\n"
+    "        addi    s4, sp, I_BUF\n   mv      s3, s2\n"
+    "        lw      t0, I_FIRST(sp)\n   beqz    t0, .Lit_next\n"
+    "        # simple_positive: an inode, and still hashed. The record: offset, inode number, length, mode, name\n"
+    ".Lit_entry:\n"
+    "        ld      t1, MW_D_INODE(s3)\n   beqz    t1, .Lit_next\n"
+    "        ld      t0, MW_D_PPRV(s3)\n   beqz    t0, .Lit_next\n"
+    "        lwu     a2, MW_D_NLEN(s3)\n   li      t0, I_NAMEMAX\n   bgtu    a2, t0, .Lit_end\n"
+    "        addi    t2, a2, 31\n   andi    t2, t2, -8\n   add     t3, s4, t2\n"
+    "        addi    t4, sp, I_BUF+I_BUFSZ\n   bgtu    t3, t4, .Lit_full\n"
+    "        ld      t0, MW_D_FSDATA(s3)\n   sd      t0, 0(s4)\n"
+    "        ld      t0, MW_I_INO(t1)\n   sd      t0, 8(s4)\n"
+    "        lhu     t0, MW_I_MODE(t1)\n   sw      a2, 16(s4)\n   sw      t0, 20(s4)\n"
+    "        ld      a1, MW_D_NPTR(s3)\n   addi    a0, s4, 24\n   mv      a3, a2\n"
+    "        # words while the source is aligned and eight bytes remain, bytes for the rest\n"
+    "        andi    t0, a1, 7\n   bnez    t0, .Lit_bytes\n"
+    "1:      li      t0, 8\n   bltu    a3, t0, .Lit_bytes\n"
+    "        ld      t0, 0(a1)\n   sd      t0, 0(a0)\n   addi    a1, a1, 8\n   addi    a0, a0, 8\n"
+    "        addi    a3, a3, -8\n   j       1b\n"
+    ".Lit_bytes:\n"
+    "        beqz    a3, .Lit_copied\n"
+    "2:      lbu     t0, 0(a1)\n   sb      t0, 0(a0)\n   addi    a1, a1, 1\n   addi    a0, a0, 1\n"
+    "        addi    a3, a3, -1\n   bnez    a3, 2b\n"
+    ".Lit_copied:\n"
+    "        add     s4, s4, t2\n   sd      s3, I_LAST(sp)\n   lw      t0, I_N(sp)\n   addi    t0, t0, 1\n"
+    "        sw      t0, I_N(sp)\n   li      t1, I_BATCH\n   bgeu    t0, t1, .Lit_full\n"
+    ".Lit_next:\n"
+    "        ld      t0, MW_D_SIB(s3)\n   beqz    t0, .Lit_end\n   addi    s3, t0, -MW_D_SIB\n   j       .Lit_entry\n"
+    ".Lit_end:\n"
+    "        li      t0, 1\n   sw      t0, I_EOD(sp)\n"
+    "        # more may follow: a reference on the last entry copied, as dget_dlock takes it, to start the next batch after\n"
+    ".Lit_full:\n"
+    "        ld      s7, I_LAST(sp)\n   lw      t0, I_EOD(sp)\n   bnez    t0, 1f\n   beqz    s7, 1f\n"
+    "        addi    a0, s7, MW_D_LOCK\n   " MW_LOCK_CHILD
+    "        lw      t0, MW_D_COUNT(s7)\n   addiw   t0, t0, 1\n   sw      t0, MW_D_COUNT(s7)\n"
+    "        addi    a0, s7, MW_D_LOCK\n   call    _raw_spin_unlock\n"
+    "1:      addi    a0, s1, MW_D_LOCK\n   call    _raw_spin_unlock\n"
+    "        # the reference this batch started from is given back; the last entry's, if taken, is the one held now\n"
+    "        beqz    s2, 2f\n   mv      a0, s2\n   call    dput\n"
+    "2:      li      s2, 0\n   lw      t0, I_EOD(sp)\n   bnez    t0, 3f\n   ld      s2, I_LAST(sp)\n"
+    "3:      addi    s6, sp, I_BUF\n   lw      s5, I_N(sp)\n   beqz    s5, .Lit_emitted\n"
+    "        # ctx->pos = the entry's offset, then actor(ctx, name, len, pos, ino, fs_umode_to_dtype(mode))\n"
+    ".Lit_emit:\n"
+    "        ld      t0, 0(s6)\n   sd      t0, MW_CTX_POS(s0)\n"
+    "        lhu     a0, 20(s6)\n   call    fs_umode_to_dtype\n   andi    a5, a0, 0xff\n"
+    "        ld      a4, 8(s6)\n   ld      a3, 0(s6)\n   lw      a2, 16(s6)\n"
+    "        addi    a1, s6, 24\n   mv      a0, s0\n   ld      t1, MW_CTX_ACTOR(s0)\n   jalr    t1\n"
+    "        andi    a0, a0, 0xff\n   beqz    a0, .Lit_stop\n"
+    "        lw      t0, 16(s6)\n   addi    t0, t0, 31\n   andi    t0, t0, -8\n   add     s6, s6, t0\n"
+    "        addi    s5, s5, -1\n   bnez    s5, .Lit_emit\n"
+    "        # every record taken: on to the next batch, or the end of the directory where none is held\n"
+    ".Lit_emitted:\n"
+    "        beqz    s2, .Lit_eod\n   sw      zero, I_FIRST(sp)\n   j       .Lit_batch\n"
+    "        # refused: ctx->pos stays at the entry, and the held reference goes back\n"
+    ".Lit_stop:\n"
+    "        beqz    s2, .Lit_out\n   mv      a0, s2\n   call    dput\n   j       .Lit_out\n"
+    ".Lit_eod:\n"
+    "        li      t0, MW_POS_EOD\n   sd      t0, MW_CTX_POS(s0)\n"
+    ".Lit_out:\n"
+    "        ld      ra, I_RA(sp)\n   ld      s0, I_S0(sp)\n   ld      s1, I_S1(sp)\n   ld      s2, I_S2(sp)\n"
+    "        ld      s3, I_S3(sp)\n   ld      s4, I_S4(sp)\n   ld      s5, I_S5(sp)\n   ld      s6, I_S6(sp)\n"
+    "        ld      s7, I_S7(sp)\n   addi    sp, sp, I_FRAME\n"
+    "        " ASM_RET
+    ASM_END(offset_iterate_dir)
+);
+#endif // CONFIG_RISCV
+
 
 #endif // KERNEL_KERNEL_C
-

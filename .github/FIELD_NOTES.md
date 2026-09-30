@@ -164,3 +164,42 @@ listed the same directories the same way. On the calls the port does not touch
 (`open`, `stat`, `read`, `write`, `create`, `unlink`, `rename`) the 7.2.8 image is
 1% to 5% faster than the 7.2.6 one, uniformly; the two differ in more than the
 version, so that is a drift to watch and not something to claim.
+
+---
+
+## 2026-09-30 · listing a tmpfs directory (`offset_iterate_dir`)
+
+`getdents` on tmpfs, and on every directory that keeps its entries in offset order
+(the live image's root is one), walks the entries one at a time. Each step takes the
+parent's lock to find the next sibling, the sibling's own lock to take a reference
+on it, and a compare-and-swap to give the previous entry's reference back: about
+two locked operations and one reference drop per name. The directory cannot change
+while it is being listed (the caller holds its `i_rwsem` shared, and every create,
+unlink and rename takes it exclusive), so `kernel/kernel.c` reads the entries in
+batches: one lock, up to sixteen names copied to the stack, the lock let go, and
+only then the copies handed to the same `filldir64` as before. One reference is
+kept from batch to batch, as the C keeps one on the entry it stands at.
+
+- **In a guest, same kernel with and without it:** one `getdents64` pass over a
+  thousand names, minimum over 1200 bursts, four rounds with the images booted in
+  turn: 20.6 -> 16.9 microseconds (-18%, 20.6 -> 16.9 ns a name).
+- **Why:** locked operations an entry, counted by the harness over 60,000 entries:
+  spinlocks 2.1 -> 0.39, `dput` calls 1.0 -> 0.14.
+- **Checked against the kernel's own C** (`test/differential.py --harness
+  kernel_ports`, x86_64, arm64 and riscv64 under qemu-user, names planted at the
+  end of a page so a read past a name is a fault): same entries, same offsets,
+  same stopping point, same reference counts, no lock held across a call to the
+  actor. In the guest, both kernels list the same 484-entry directory byte for
+  byte at ten buffer sizes, resumed every third entry, and stop the same way with
+  the buffer ending one to six hundred bytes before an unmapped page.
+
+**What it does not show.** The 18% is of one call over a warm directory of short
+names in a VM, not of a program's run time; it says nothing about directories on
+disk. Most of what is left is the per-entry user-access window in `filldir64`, which
+this leaves alone. The arm64 and riscv64 bodies are checked against the C under
+qemu-user and have not been booted or timed.
+
+**A measurement note.** The first runs of this, on a box that had 40 forgotten
+guests from earlier sessions running, read 60 microseconds a pass and showed no
+change. With them killed, the same images read 20.6 and 16.9. A timing taken under
+load is a timing of the load.

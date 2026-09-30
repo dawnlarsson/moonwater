@@ -247,13 +247,19 @@ unstatic() {
         function=$2
         [ -f "$file" ] || die "unstatic: no $file"
 
+        #       The definition may put its type on one line and its name at the
+        #       start of the next, as offset_dir_lookup does; the header then
+        #       begins on the line with the type.
         awk -v fname="$function" '
                 { line[NR] = $0 }
                 END {
                         for (i = 1; i <= NR && !head; i++) {
-                                if (line[i] !~ "^(static )?[A-Za-z_][^(;]*[ *]" fname "\\(") continue
-                                for (j = i; j <= NR; j++) {
-                                        if (line[j] == "{") { head = i; break }
+                                start = 0
+                                if (line[i] ~ "^(static )?[A-Za-z_][^(;]*[ *]" fname "\\(") start = i
+                                else if (i > 1 && line[i] ~ "^" fname "\\(" && line[i - 1] ~ /^(static )?[A-Za-z_][^(;]*[ *]$/) start = i - 1
+                                if (!start) continue
+                                for (j = start; j <= NR; j++) {
+                                        if (line[j] == "{") { head = start; break }
                                         if (line[j] ~ /;[ \t]*$/) break
                                 }
                         }
