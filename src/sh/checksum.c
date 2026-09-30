@@ -272,31 +272,19 @@ static b32 checksum_refuse_modes(string_address command, bool checking,
 */
 static string_address checksum_decimal(string_address text, positive address_to value)
 {
-        positive total = 0;
-        bool negative = false, digits = false;
-
         if (!text)
                 return (string_address) "";
 
-        while (string_get(text) == ' ' ||
-               ((p8)string_get(text) >= '\t' && (p8)string_get(text) <= '\r'))
-                text++;
-        if (string_get(text) == '+' || string_get(text) == '-')
-                negative = string_get(text++) == '-';
+        text += string_span(text, string_set_space);
 
-        for (; string_get(text); text++)
-        {
-                positive digit = (positive)(p8)string_get(text) - '0';
+        bool negative = string_is(text, '-');
 
-                if (digit > 9)
-                        return (string_address) "";
-                digits = true;
-                total = total > ((positive)bipolar_max - digit) / 10
-                            ? (positive)bipolar_max
-                            : total * 10 + digit;
-        }
+        text += negative || string_is(text, '+');
 
-        if (!digits)
+        string_address digits = text;
+        positive total = string_decimal_saturated(address_of text, (positive)bipolar_max, null);
+
+        if (text == digits || string_get(text))
                 return (string_address) "";
         if (negative && total)
                 return (string_address) ": Value too large for defined data type";

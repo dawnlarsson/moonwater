@@ -219,6 +219,33 @@ static inline bool string_digits_checked_exact(string_address text,
         return true;
 }
 
+/* The cold reader of a decimal option word: the digits at *text, every one of
+   them, as the number they make, or LIMIT when they make more, with OVER (null
+   when the caller does not ask) saying which. The cursor moves past the run
+   and stays put when there is none, so a caller tells "no digits" by the cursor.
+   The hot readers -- sort keys, awk and seq numbers -- keep their own loops. */
+static inline positive string_decimal_saturated(string_address address_to text,
+                                                positive limit,
+                                                bool address_to over)
+{
+        string_address at = address_to text;
+        positive got = 0;
+        bool past = false;
+
+        for (positive digit; (digit = digit_known(string_get(at), 10)) < 10; at++)
+                if (past || __builtin_mul_overflow(got, 10, address_of got) ||
+                    __builtin_add_overflow(got, digit, address_of got) || got > limit)
+                {
+                        past = true;
+                        got = limit;
+                }
+
+        if (over)
+                address_to over = past;
+        address_to text = at;
+        return got;
+}
+
 /* Variable-length integers, seven bits a byte, low first, the top bit saying
    another follows: xz's multibyte integers and waterlink's frame numbers.
    Reading takes one spelling only -- a last byte of zero after the first is

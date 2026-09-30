@@ -1256,23 +1256,14 @@ static bool text_xnum(string_address said, bipolar floor, bipolar ceiling,
 {
         string_address at = said + string_span(said, string_set_space);
         bool negative = at[0] == '-';
-        bool invalid = negative && !(flags & TEXT_XNUM_SIGNED);
-        bool overflow = false;
-        positive made = 0;
+        bool overflow;
 
         at += at[0] == '+' || negative;
-        invalid = invalid || !byte_is_digit(at[0]);
 
-        for (; !invalid && byte_is_digit(at[0]); at++)
-        {
-                positive digit = (positive)(at[0] - '0');
-
-                if (made > ((positive)bipolar_max + negative - digit) / 10)
-                        overflow = true;
-                else if (!overflow)
-                        made = made * 10 + digit;
-        }
-        invalid = invalid || at[0];
+        string_address digits = at;
+        positive made = string_decimal_saturated(address_of at, (positive)bipolar_max + negative,
+                                                 address_of overflow);
+        bool invalid = (negative && !(flags & TEXT_XNUM_SIGNED)) || at == digits || at[0];
 
         //      The side a number falls out on; -0 is zero.
         bipolar number = negative ? (bipolar)(0 - made) : (bipolar)made;
@@ -3724,21 +3715,12 @@ static bool encoding_option_seen(p8 letter, string_address value)
         if (negative || at[0] == '+')
                 at++;
 
-        bool good = byte_is_digit(at[0]);
-        positive made = 0;
-        bool over = false;
+        string_address digits = at;
+        bool over;
+        positive made = string_decimal_saturated(address_of at, positive_max >> 1,
+                                                 address_of over);
 
-        for (; good && byte_is_digit(at[0]); at++)
-        {
-                positive digit = (positive)(at[0] - '0');
-
-                if (made > ((positive_max >> 1) - digit) / 10)
-                        over = true;
-                else
-                        made = made * 10 + digit;
-        }
-
-        if (!good || at[0] || (negative && (made || over)))
+        if (at == digits || at[0] || (negative && made))
         {
                 text_flush();
                 string_format(writer_stderr, "%s: invalid wrap size: '%w'\n",
@@ -9406,8 +9388,7 @@ static bool tail_debug;
 
 // gnulib's words for a value it refused, with the reason it gives a number
 // written below the floor of a signed or bounded reading.
-static positive head_tail_old_count(string_address digits, positive length,
-                                    positive by);
+static positive head_tail_old_count(string_address digits, positive by);
 
 static bool tail_value_refused(string_address what, string_address said,
                                bool too_large)
@@ -9489,7 +9470,7 @@ static bool tail_whole(string_address said, positive address_to value,
         if (negative)
                 return tail_value_refused(what, said, !ceiling);
 
-        address_to value = head_tail_old_count(at, digits, 1);
+        address_to value = head_tail_old_count(at, 1);
 
         if (ceiling && address_to value > ceiling)
                 return tail_value_refused(what, said, true);
@@ -9587,14 +9568,9 @@ typedef struct
 
 // A count's digits, saturating, then scaled by what its letter multiplies
 // by: GNU's string_to_integer quietly answers its maximum for either.
-static positive head_tail_old_count(string_address digits, positive length,
-                                    positive by)
+static positive head_tail_old_count(string_address digits, positive by)
 {
-        positive total = 0;
-
-        for (positive i = 0; i < length; i++)
-                total = total > (positive_max - 9) / 10 ? positive_max
-                                                        : total * 10 + (positive)(digits[i] - '0');
+        positive total = string_decimal_saturated(address_of digits, positive_max, null);
 
         return total > positive_max / by ? positive_max : total * by;
 }
@@ -9639,7 +9615,7 @@ static b32 head_obsolete(head_tail_old address_to old)
                                                           letter, true);
         }
 
-        old->count = head_tail_old_count(word + 1, length, by);
+        old->count = head_tail_old_count(word + 1, by);
         return 1;
 }
 
@@ -9666,7 +9642,7 @@ static bipolar tail_posix_version()
         if (at[digits])
                 return 200809;
 
-        positive value = head_tail_old_count(at, digits, 1);
+        positive value = head_tail_old_count(at, 1);
         bipolar ceiling = 0x7fffffff;
 
         if (value > (positive)ceiling)
@@ -9710,7 +9686,7 @@ static b32 tail_obsolete(head_tail_old address_to old)
                 return 0;
 
         positive length = string_span(at, string_set_digits);
-        positive count = length ? head_tail_old_count(at, length, 1) : 10;
+        positive count = length ? head_tail_old_count(at, 1) : 10;
         bool by_bytes = false;
 
         at += length;
@@ -14056,21 +14032,11 @@ static p8 pr_unsigned(string_address text, string_address address_to stop,
         if (!byte_is_digit(at[0]))
                 return PR_NUMBER_INVALID;
 
-        positive made = 0;
-        bool over = false;
-
-        for (; byte_is_digit(at[0]); at++)
-        {
-                positive digit = (positive)(at[0] - '0');
-
-                if (made > (positive_max - digit) / 10)
-                        over = true;
-                else
-                        made = made * 10 + digit;
-        }
+        bool over;
+        address_to value = string_decimal_saturated(address_of at, positive_max,
+                                                    address_of over);
 
         address_to stop = at;
-        address_to value = over ? positive_max : made;
         if (at[0])
                 return over ? PR_NUMBER_SUFFIX_OVERFLOW : PR_NUMBER_SUFFIX;
         return over ? PR_NUMBER_OVERFLOW : PR_NUMBER_OK;
@@ -14141,52 +14107,14 @@ static bool pr_first_last_page(bool pages, string_address text)
 static bipolar pr_number_option(string_address text, bipolar floor,
                                 string_address what)
 {
-        string_address at = text + string_span(text, string_set_space);
-        bool negative = at[0] == '-';
-        bool invalid = false;
-        bool over = false;
-        positive made = 0;
+        bipolar value;
 
-        if (negative || at[0] == '+')
-                at++;
-        if (!byte_is_digit(at[0]))
-                invalid = true;
-        for (; !invalid && byte_is_digit(at[0]); at++)
-        {
-                positive digit = (positive)(at[0] - '0');
+        if (!text_xnum(text, floor, b32_max,
+                       TEXT_XNUM_SIGNED | (floor > 0 ? TEXT_XNUM_MIN_RANGE : 0), what,
+                       address_of value))
+                exit(text_done(1));
 
-                if (made > (positive_max - digit) / 10)
-                        over = true;
-                else
-                        made = made * 10 + digit;
-        }
-        if (at[0])
-                invalid = true;
-
-        string_address reason = null;
-        bipolar value = 0;
-
-        if (!invalid)
-        {
-                if (over || made > (negative ? ((positive)1 << 63) : (positive)b32_max))
-                        value = negative ? b64_min : b64_max;
-                else
-                        value = negative ? -(bipolar)made : (bipolar)made;
-
-                if (value < floor)
-                        reason = floor > 0 ? (string_address) ": Numerical result out of range"
-                                           : (string_address) ": Value too large for defined data type";
-                else if (value > b32_max)
-                        reason = ": Value too large for defined data type";
-                else
-                        return value;
-        }
-
-        text_flush();
-        string_format(writer_stderr, "%s: %s: '%w'%s\n", text_name, what,
-                      writer_terminal_quoted_name, text, reason ? reason : (string_address) "");
-        exit(text_done(1));
-        return 0;
+        return value;
 }
 
 // usage(EXIT_FAILURE): the pointer at --help, and out.
@@ -14220,25 +14148,14 @@ static fn pr_option_argument(string_address text, p8 letter,
 
         string_address at = text + string_span(text, string_set_space);
         bool negative = at[0] == '-';
-        bool over = false;
-        bool invalid = false;
-        positive made = 0;
+        bool over;
 
         if (negative || at[0] == '+')
                 at++;
-        if (!byte_is_digit(at[0]))
-                invalid = true;
-        for (; !invalid && byte_is_digit(at[0]); at++)
-        {
-                positive digit = (positive)(at[0] - '0');
 
-                if (made > (positive_max - digit) / 10)
-                        over = true;
-                else
-                        made = made * 10 + digit;
-        }
-        if (!invalid && at[0])
-                invalid = true;
+        string_address digits = at;
+        positive made = string_decimal_saturated(address_of at, positive_max, address_of over);
+        bool invalid = at == digits || at[0];
         // xstrtol's own overflow is past a long; INT_MAX is getoptarg's.
         if (!over && made > (negative ? ((positive)1 << 63) : (positive)b64_max))
                 over = true;
@@ -24318,7 +24235,7 @@ static fn uniq_operand(b32 which)
 
                 if (digits && !at[digits])
                 {
-                        uniq_characters = head_tail_old_count(at, digits, 1);
+                        uniq_characters = head_tail_old_count(at, 1);
                         return;
                 }
         }
@@ -30137,10 +30054,8 @@ static bool tar_transform_add(string_address expression)
                         extended = true;
                 else if (byte_is_digit(*at))
                 {
-                        positive number = 0;
+                        positive number = string_decimal_saturated(address_of at, positive_max, null);
 
-                        while (byte_is_digit(*at))
-                                number = number * 10 + (positive)(*at++ - '0');
                         at--;
                         one->which = number ? number : 1;
                 }
@@ -38594,26 +38509,14 @@ static positive sort_key_flags(sort_key address_to key, string_address spec,
 
 static positive sort_field_count(string_address spec, positive address_to taken)
 {
-        positive value = 0;
-        positive at = string_span(spec, string_set_space);
+        string_address at = spec + string_span(spec, string_set_space);
 
-        at += spec[at] == '+';
+        at += string_is(at, '+');
 
-        if (!byte_is_digit(spec[at]))
-        {
-                address_to taken = 0;
-                return 0;
-        }
+        string_address digits = at;
+        positive value = string_decimal_saturated(address_of at, SORT_FIELD_MAX, null);
 
-        for (; byte_is_digit(spec[at]); at++)
-        {
-                positive digit = (positive)(spec[at] - '0');
-
-                value = value > (SORT_FIELD_MAX - digit) / 10 ? SORT_FIELD_MAX
-                                                               : value * 10 + digit;
-        }
-
-        address_to taken = at;
+        address_to taken = at == digits ? 0 : (positive)(at - spec);
         return value;
 }
 
@@ -39267,8 +39170,8 @@ static bool sort_key_seen(p8 letter, string_address value)
         if (letter == 'B')
         {
                 string_address at = value + string_span(value, string_set_space);
-                positive number = 0;
-                bool over = false;
+                positive number;
+                bool over;
                 positive limits[2];
                 b32 most = (b32)((system_call_4(syscall(prlimit64), 0, 7, 0,
                                                 (positive)limits) >= 0
@@ -39287,12 +39190,7 @@ static bool sort_key_seen(p8 letter, string_address value)
                                              text_name, value);
                 }
 
-                for (; byte_is_digit(at[0]); at++)
-                {
-                        if (number > (positive_max - 9) / 10)
-                                over = true;
-                        number = over ? positive_max : number * 10 + (positive)(at[0] - '0');
-                }
+                number = string_decimal_saturated(address_of at, positive_max, address_of over);
 
                 if (at[0])
                 {
@@ -40760,19 +40658,15 @@ static bool expr_integer(expr_value address_to value, bipolar address_to out)
 
         string_address at = value->text;
         bool negative = at[0] == '-';
-        positive made = 0;
+        bool over;
 
         at += negative;
-        for (; *at; at++)
-        {
-                positive digit = (positive)(*at - '0');
 
-                if (made > ((positive)1 << 63) / 10 ||
-                    made * 10 + digit < made * 10 ||
-                    made * 10 + digit > ((positive)1 << 63) - !negative)
-                        return false;
-                made = made * 10 + digit;
-        }
+        positive made = string_decimal_saturated(address_of at, ((positive)1 << 63) - !negative,
+                                                 address_of over);
+
+        if (over)
+                return false;
 
         address_to out = negative ? (bipolar)(0 - made) : (bipolar)made;
         return true;
