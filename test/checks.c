@@ -137,6 +137,29 @@
                 return get_cpu_time() - bench_start;                          \
         }
 
+/*
+        The command line of a benchmark that can run one piece of its work on
+        its own (for perf or a trace): BENCH_NAME is one entry of the lookup a
+        section's named function is made of, and BENCH_RUN_NAMED runs what an
+        argument names and leaves, or leaves with 2 when it names nothing.
+*/
+#define BENCH_NAME(name, literal, work)                                       \
+        if (string_compare(name, (string_address)literal) == 0)               \
+                return work
+#define BENCH_RUN_NAMED(named)                                                \
+        do {                                                                  \
+                if (program_argument_count() > 1)                             \
+                {                                                             \
+                        bench_work work = named(program_argument(1));         \
+                                                                              \
+                        if (is_null(work))                                    \
+                                return 2;                                     \
+                                                                              \
+                        work();                                               \
+                        return 0;                                             \
+                }                                                             \
+        } while (0)
+
 #if defined(SHARED_sizes)
 /* Literal arguments exercise compiler-owned specializations. The scan checks
    keep their twenty-size function bands to bound compiler resource use. */
@@ -97949,22 +97972,14 @@ static fn clock_bench_report(string_address name, bench_work work,
 
 static bench_work clock_bench_named(string_address name)
 {
-        if (string_compare(name, (string_address)"copy-floor") == 0)
-                return clock_bench_copy;
-        if (string_compare(name, (string_address)"compare-floor") == 0)
-                return clock_bench_compare;
-        if (string_compare(name, (string_address)"scan-floor") == 0)
-                return clock_bench_scan_floor;
-        if (string_compare(name, (string_address)"format-literal") == 0)
-                return clock_bench_format_literal;
-        if (string_compare(name, (string_address)"format-directives") == 0)
-                return clock_bench_format_directives;
-        if (string_compare(name, (string_address)"scan-literal") == 0)
-                return clock_bench_scan_literal;
-        if (string_compare(name, (string_address)"scan-directives") == 0)
-                return clock_bench_scan_directives;
-        if (string_compare(name, (string_address)"asctime") == 0)
-                return clock_bench_asctime_work;
+        BENCH_NAME(name, "copy-floor", clock_bench_copy);
+        BENCH_NAME(name, "compare-floor", clock_bench_compare);
+        BENCH_NAME(name, "scan-floor", clock_bench_scan_floor);
+        BENCH_NAME(name, "format-literal", clock_bench_format_literal);
+        BENCH_NAME(name, "format-directives", clock_bench_format_directives);
+        BENCH_NAME(name, "scan-literal", clock_bench_scan_literal);
+        BENCH_NAME(name, "scan-directives", clock_bench_scan_directives);
+        BENCH_NAME(name, "asctime", clock_bench_asctime_work);
 
         return null;
 }
@@ -97988,17 +98003,7 @@ b32 main(void)
         clock_bench_broken.tm_yday = 229;
         clock_bench_broken.tm_zone = "UTC";
 
-        if (program_argument_count() > 1)
-        {
-                bench_work work =
-                        clock_bench_named(program_argument(1));
-
-                if (is_null(work))
-                        return 2;
-
-                work();
-                return 0;
-        }
+        BENCH_RUN_NAMED(clock_bench_named);
 
         string_format(log, "clock text, best of %p (%p rounds)\n",
                       (positive)CLOCK_BENCH_TRIES,
@@ -98094,12 +98099,9 @@ static fn scan_literal_report(string_address name, bench_work work,
 
 static bench_work scan_literal_named(string_address name)
 {
-        if (string_compare(name, (string_address)"control") == 0)
-                return scan_literal_control;
-        if (string_compare(name, (string_address)"floor") == 0)
-                return scan_literal_floor;
-        if (string_compare(name, (string_address)"subject") == 0)
-                return scan_literal_subject;
+        BENCH_NAME(name, "control", scan_literal_control);
+        BENCH_NAME(name, "floor", scan_literal_floor);
+        BENCH_NAME(name, "subject", scan_literal_subject);
 
         return null;
 }
@@ -98111,17 +98113,7 @@ b32 main(void)
         memory_copy_apart(scan_literal_input,
                           (address_any)scan_literal_format, bytes + 1);
 
-        if (program_argument_count() > 1)
-        {
-                bench_work work =
-                        scan_literal_named(program_argument(1));
-
-                if (is_null(work))
-                        return 2;
-
-                work();
-                return 0;
-        }
+        BENCH_RUN_NAMED(scan_literal_named);
 
         string_format(log, "sscanf literal, best of %p (%p rounds, %p bytes)\n",
                       (positive)SCAN_LITERAL_TRIES,
@@ -98211,12 +98203,9 @@ static fn random_bench_report(string_address name, bench_work work)
 
 static bench_work random_bench_named(string_address name)
 {
-        if (string_compare(name, (string_address)"control") == 0)
-                return random_bench_control;
-        if (string_compare(name, (string_address)"floor") == 0)
-                return random_bench_floor;
-        if (string_compare(name, (string_address)"subject") == 0)
-                return random_bench_subject;
+        BENCH_NAME(name, "control", random_bench_control);
+        BENCH_NAME(name, "floor", random_bench_floor);
+        BENCH_NAME(name, "subject", random_bench_subject);
 
         return null;
 }
@@ -98228,16 +98217,7 @@ b32 main(void)
 
         srandom(1);
 
-        if (program_argument_count() > 1)
-        {
-                bench_work work = random_bench_named(program_argument(1));
-
-                if (is_null(work))
-                        return 2;
-
-                work();
-                return 0;
-        }
+        BENCH_RUN_NAMED(random_bench_named);
 
         string_format(log, "random draw, best of %p (%p rounds)\n",
                       (positive)RANDOM_BENCH_TRIES,
@@ -99230,12 +99210,9 @@ static fn allocator_bench_report(string_address name, bench_work work)
 
 static bench_work allocator_bench_named(string_address name)
 {
-        if (string_compare(name, (string_address)"control") == 0)
-                return allocator_bench_control;
-        if (string_compare(name, (string_address)"floor") == 0)
-                return allocator_bench_floor;
-        if (string_compare(name, (string_address)"subject") == 0)
-                return allocator_bench_subject;
+        BENCH_NAME(name, "control", allocator_bench_control);
+        BENCH_NAME(name, "floor", allocator_bench_floor);
+        BENCH_NAME(name, "subject", allocator_bench_subject);
 
         return null;
 }
@@ -99253,17 +99230,7 @@ b32 main(void)
         address_any warm = malloc(ALLOCATOR_BENCH_SIZE);
         free(warm);
 
-        if (program_argument_count() > 1)
-        {
-                bench_work work =
-                        allocator_bench_named(program_argument(1));
-
-                if (is_null(work))
-                        return 2;
-
-                work();
-                return 0;
-        }
+        BENCH_RUN_NAMED(allocator_bench_named);
 
         string_format(log, "malloc/free class fast path, best of %p (%p pairs)\n",
                       (positive)ALLOCATOR_BENCH_TRIES,
@@ -100219,24 +100186,15 @@ static fn compare_max_report(string_address name, bench_work work)
 
 static bench_work compare_max_named(string_address name)
 {
-        if (string_compare(name, (string_address)"control-first") == 0)
-                return compare_max_control_first;
-        if (string_compare(name, (string_address)"floor-first") == 0)
-                return compare_max_floor_first;
-        if (string_compare(name, (string_address)"subject-first") == 0)
-                return compare_max_subject_first;
-        if (string_compare(name, (string_address)"floor-equal") == 0)
-                return compare_max_floor_equal;
-        if (string_compare(name, (string_address)"subject-equal") == 0)
-                return compare_max_subject_equal;
-        if (string_compare(name, (string_address)"floor-short-equal") == 0)
-                return compare_max_floor_short_equal;
-        if (string_compare(name, (string_address)"subject-short-equal") == 0)
-                return compare_max_subject_short_equal;
-        if (string_compare(name, (string_address)"floor-late") == 0)
-                return compare_max_floor_late;
-        if (string_compare(name, (string_address)"subject-late") == 0)
-                return compare_max_subject_late;
+        BENCH_NAME(name, "control-first", compare_max_control_first);
+        BENCH_NAME(name, "floor-first", compare_max_floor_first);
+        BENCH_NAME(name, "subject-first", compare_max_subject_first);
+        BENCH_NAME(name, "floor-equal", compare_max_floor_equal);
+        BENCH_NAME(name, "subject-equal", compare_max_subject_equal);
+        BENCH_NAME(name, "floor-short-equal", compare_max_floor_short_equal);
+        BENCH_NAME(name, "subject-short-equal", compare_max_subject_short_equal);
+        BENCH_NAME(name, "floor-late", compare_max_floor_late);
+        BENCH_NAME(name, "subject-late", compare_max_subject_late);
         return null;
 }
 
@@ -100417,14 +100375,10 @@ static fn copy_bench_report(string_address name, copy_bench_work work,
 
 static copy_bench_work copy_bench_named(string_address name)
 {
-        if (string_compare(name, (string_address)"control") == 0)
-                return copy_bench_control;
-        if (string_compare(name, (string_address)"floor") == 0)
-                return copy_bench_floor;
-        if (string_compare(name, (string_address)"scalar") == 0)
-                return copy_bench_scalar_floor;
-        if (string_compare(name, (string_address)"subject") == 0)
-                return copy_bench_subject;
+        BENCH_NAME(name, "control", copy_bench_control);
+        BENCH_NAME(name, "floor", copy_bench_floor);
+        BENCH_NAME(name, "scalar", copy_bench_scalar_floor);
+        BENCH_NAME(name, "subject", copy_bench_subject);
         return null;
 }
 
@@ -100567,12 +100521,9 @@ static fn stream_get_report(string_address name, bench_work work)
 
 static bench_work stream_get_named(string_address name)
 {
-        if (string_compare(name, (string_address)"control") == 0)
-                return stream_get_control;
-        if (string_compare(name, (string_address)"floor") == 0)
-                return stream_get_floor_work;
-        if (string_compare(name, (string_address)"subject") == 0)
-                return stream_get_subject;
+        BENCH_NAME(name, "control", stream_get_control);
+        BENCH_NAME(name, "floor", stream_get_floor_work);
+        BENCH_NAME(name, "subject", stream_get_subject);
         return null;
 }
 
@@ -100781,18 +100732,12 @@ static fn stream_write_report(string_address name, bench_work work)
 
 static bench_work stream_write_named(string_address name)
 {
-        if (string_compare(name, (string_address)"floor-resident") == 0)
-                return stream_write_floor_work;
-        if (string_compare(name, (string_address)"floor-running") == 0)
-                return stream_write_floor_running_work;
-        if (string_compare(name, (string_address)"subject-put") == 0)
-                return stream_put_bytes_subject;
-        if (string_compare(name, (string_address)"subject-one") == 0)
-                return stream_write_subject_one;
-        if (string_compare(name, (string_address)"subject-items") == 0)
-                return stream_write_subject_items;
-        if (string_compare(name, (string_address)"subject-line") == 0)
-                return stream_put_bytes_line;
+        BENCH_NAME(name, "floor-resident", stream_write_floor_work);
+        BENCH_NAME(name, "floor-running", stream_write_floor_running_work);
+        BENCH_NAME(name, "subject-put", stream_put_bytes_subject);
+        BENCH_NAME(name, "subject-one", stream_write_subject_one);
+        BENCH_NAME(name, "subject-items", stream_write_subject_items);
+        BENCH_NAME(name, "subject-line", stream_put_bytes_line);
         return null;
 }
 
@@ -100807,15 +100752,7 @@ b32 main(void)
         stream_write_handle.buffer_size = STREAM_WRITE_BUFFER;
         stream_write_handle.write_used = 1;
 
-        if (program_argument_count() > 1)
-        {
-                bench_work work =
-                        stream_write_named(program_argument(1));
-                if (is_null(work))
-                        return 2;
-                work();
-                return 0;
-        }
+        BENCH_RUN_NAMED(stream_write_named);
 
         string_format(log,
                       "stream_write buffered resident path, best of %p "
@@ -101088,33 +101025,18 @@ static fn startup_report(string_address name, bench_work work)
 
 static bench_work startup_named(string_address name)
 {
-        if (string_compare(name, (string_address)"cpu") == 0)
-                return startup_cpu_work;
-        if (string_compare(name, (string_address)"cpu-floor") == 0)
-                return startup_cpu_floor_work;
-        if (string_compare(name, (string_address)"identity") == 0)
-                return startup_identity_work;
-        if (string_compare(name, (string_address)"initial-identity") == 0)
-                return startup_initial_identity_work;
-        if (string_compare(name, (string_address)"environment") == 0)
-                return startup_environment_work;
-        if (string_compare(name, (string_address)"begin") == 0)
-                return startup_begin_work;
+        BENCH_NAME(name, "cpu", startup_cpu_work);
+        BENCH_NAME(name, "cpu-floor", startup_cpu_floor_work);
+        BENCH_NAME(name, "identity", startup_identity_work);
+        BENCH_NAME(name, "initial-identity", startup_initial_identity_work);
+        BENCH_NAME(name, "environment", startup_environment_work);
+        BENCH_NAME(name, "begin", startup_begin_work);
         return null;
 }
 
 b32 main(void)
 {
-        if (program_argument_count() > 1)
-        {
-                bench_work work = startup_named(program_argument(1));
-
-                if (is_null(work))
-                        return 2;
-
-                work();
-                return 0;
-        }
+        BENCH_RUN_NAMED(startup_named);
 
         string_format(log, "runtime startup components, best of %p (%p calls)\n",
                       (positive)STARTUP_TRIES, (positive)STARTUP_ROUNDS);
