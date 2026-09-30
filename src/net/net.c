@@ -8644,7 +8644,14 @@ static bool http_token_byte(p8 byte)
 /* One line of a head or of a trailer, its line end gone.  A status line is
    text with no control but tab; a field is a token, a colon, and a value
    held to the same.  The token also refuses obs-fold, whitespace before the
-   colon, and an empty field name. */
+   colon, and an empty field name.
+
+   The default does what GNU wget and curl do with a reason phrase: it is
+   never read, printed or stored here (only the code is), both tools accept
+   any byte in it, and curl refuses only a NUL or a bare CR, so those two
+   stay refused.  STRICT_TIGHT holds the whole status line to "no control
+   but tab".  (Plain C, not #if, so that a lift that forgets to define the
+   tier fails to build instead of running as the wrong one.) */
 static bool http_line_valid(p8 address_to line, positive stop, bool field)
 {
         positive at = 0;
@@ -8657,15 +8664,49 @@ static bool http_line_valid(p8 address_to line, positive stop, bool field)
                         return false;
         }
         for (; at < stop; at++)
-                if (byte_is_control(line[at]) && line[at] != '\t')
+                if (byte_is_control(line[at]) && line[at] != '\t' &&
+                    (MOONWATER_STRICT >= STRICT_TIGHT || field ||
+                     !line[at] || line[at] == '\r'))
                         return false;
         return true;
+}
+
+//      Whether a head line is the field called name (lower case, no colon).
+static bool http_line_is(p8 address_to line, positive stop, string_address name)
+{
+        positive want = string_length(name);
+
+        return stop > want && line[want] == ':' &&
+               !memory_compare_ascii_case(line, name, want);
+}
+
+/* A line that begins with a blank continues the field before it (RFC 9112
+   5.2, obsolete line folding).  GNU wget and curl read one after an ordinary
+   field, so the default does; it refuses one after Content-Length,
+   Transfer-Encoding or Location, where two readers that fold differently
+   would frame or redirect differently (curl refuses a folded Content-Length
+   too), and STRICT_TIGHT refuses every one.  The value of a field here is
+   its first line either way: http_header never joins. */
+static bool http_fold_allowed(p8 address_to bytes, positive previous,
+                              positive previous_stop, bool have)
+{
+        return MOONWATER_STRICT < STRICT_TIGHT &&
+               !(have &&
+                 (http_line_is(bytes + previous, previous_stop - previous,
+                               (string_address)"content-length") ||
+                  http_line_is(bytes + previous, previous_stop - previous,
+                               (string_address)"transfer-encoding") ||
+                  http_line_is(bytes + previous, previous_stop - previous,
+                               (string_address)"location")));
 }
 
 static bool http_header_block_valid(p8 address_to bytes, positive size)
 {
         positive at = 0;
+        positive previous = 0;
+        positive previous_stop = 0;
         bool status = true;
+        bool have = false;
 
         while (at < size)
         {
@@ -8681,8 +8722,25 @@ static bool http_header_block_valid(p8 address_to bytes, positive size)
 
                 if (stop == line)
                         return !status && at == size;
+                if (!status && byte_is_blank(bytes[line]))
+                {
+                        if (!http_fold_allowed(bytes, previous, previous_stop,
+                                               have))
+                                return false;
+                        for (positive index = line; index < stop; index++)
+                                if (byte_is_control(bytes[index]) &&
+                                    bytes[index] != '\t')
+                                        return false;
+                        continue;
+                }
                 if (!http_line_valid(bytes + line, stop - line, !status))
                         return false;
+                if (!status)
+                {
+                        previous = line;
+                        previous_stop = stop;
+                        have = true;
+                }
                 status = false;
         }
 
@@ -8876,6 +8934,68 @@ static bool http_response_is_success(b32 code)
         return code >= 200 && code < 300;
 }
 
+/* Every Content-Length field of a head, each a comma list of decimal values,
+   and all of them the same number: wget and curl take "3", "3, 3" and two
+   fields that say 3, and curl refuses a pair that disagrees (wget reads the
+   first), so the default accepts the agreeing shapes and refuses the rest.
+   first_size is how long the first value is, for the caller's own parse.
+   STRICT_TIGHT never asks: there a repeated field is refused outright. */
+static bool http_length_agree(p8 address_to bytes, positive size,
+                              positive address_to first_size)
+{
+        positive at = 0;
+        positive agreed = 0;
+        bool have = false;
+
+        while (at < size)
+        {
+                positive line = at;
+                positive stop = at + memory_span_without_byte(
+                    bytes + at, '\n', size - at);
+                positive from = line + 15;
+
+                at = stop + (stop < size);
+                if (stop > line && bytes[stop - 1] == '\r')
+                        stop--;
+                if (!http_line_is(bytes + line, stop - line,
+                                  (string_address)"content-length"))
+                        continue;
+
+                for (;;)
+                {
+                        positive value_end = from + memory_span_without_byte(
+                            bytes + from, ',', stop - from);
+                        positive comma = value_end;
+                        string_address cursor;
+                        positive value = 0;
+
+                        while (from < value_end && byte_is_blank(bytes[from]))
+                                from++;
+                        while (value_end > from && byte_is_blank(bytes[value_end - 1]))
+                                value_end--;
+                        cursor = (string_address)(bytes + from);
+                        if (from == value_end ||
+                            !string_digits_checked(address_of cursor, 10,
+                                                   address_of value) ||
+                            cursor != (string_address)(bytes + value_end))
+                                return false;
+                        if (!have)
+                        {
+                                agreed = value;
+                                have = true;
+                                address_to first_size = value_end - from;
+                        }
+                        else if (value != agreed)
+                                return false;
+                        if (comma >= stop)
+                                break;
+                        from = comma + 1;
+                }
+        }
+
+        return have;
+}
+
 /* Status and body framing have one interpretation in both clients.  This
    rejects duplicate or conflicting declarations before either the buffered
    or streaming body path acts on them. */
@@ -8931,8 +9051,19 @@ static bipolar http_response_framing_from(p8 address_to bytes, positive size,
                     bytes + at, (positive)header,
                     (string_address)"content-length",
                     address_of content_length_size, address_of length_repeated);
-                if (transfer_repeated || length_repeated ||
-                    (transfer && content_length))
+                if (transfer_repeated || (transfer && content_length))
+                        return HTTP_MALFORMED;
+                /* The default reads a Content-Length that repeats or lists
+                   one number (the four shapes wget and curl both take);
+                   STRICT_TIGHT refuses any repeat. */
+                if (content_length &&
+                    (MOONWATER_STRICT >= STRICT_TIGHT
+                         ? length_repeated
+                         : (length_repeated ||
+                            memory_first_of(content_length, ',',
+                                            content_length_size)) &&
+                               !http_length_agree(bytes + at, (positive)header,
+                                                  address_of content_length_size)))
                         return HTTP_MALFORMED;
 
                 if (transfer)

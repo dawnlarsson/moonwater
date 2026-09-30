@@ -54096,6 +54096,11 @@ static fn fetching(void)
                 p8 value[] = "HTTP/1.1 200 OK\r\nX: x\r\n\r\n";
                 p8 status[] = "HTTP/1.1 200 x\r\nX: value\r\n\r\n";
                 bool text = (byte >= 0x20 || byte == '\t') && byte != 0x7f;
+                /* The default takes any byte in the reason phrase but NUL,
+                   CR and LF, as wget and curl do (only the code is read);
+                   the tight tier holds it to text. */
+                bool reason = text || (MOONWATER_STRICT < STRICT_TIGHT &&
+                                       byte && byte != '\r' && byte != '\n');
 
                 name[19] = (p8)byte;
                 value[20] = (p8)byte;
@@ -54107,7 +54112,7 @@ static fn fetching(void)
                 check("every HTTP field-value byte has its text classification",
                       http_header_block_valid(value, sizeof value - 1) == text);
                 check("every HTTP reason byte has its text classification",
-                      http_header_block_valid(status, sizeof status - 1) == text);
+                      http_header_block_valid(status, sizeof status - 1) == reason);
         }
 
         for (b32 status = 299; status <= 309; status++)
@@ -54211,6 +54216,45 @@ static fn fetching(void)
                                 "HTTP/1.1 200 OK\r\nContent-Length: 1\r\n"
                                 "Content-Length: 2\r\n\r\nx",
                                 "");
+                /* What wget and curl both accept: the default reads these,
+                   the tight tier refuses them.  What curl refuses stays
+                   refused in both. */
+                framing_harness("content-length-equal-twice",
+                                MOONWATER_STRICT < STRICT_TIGHT, FRAME,
+                                "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n"
+                                "Content-Length: 3\r\n\r\nabc", "abc");
+                framing_harness("cl-list-same",
+                                MOONWATER_STRICT < STRICT_TIGHT, FRAME,
+                                "HTTP/1.1 200 OK\r\nContent-Length: 5, 5\r\n\r\nhello",
+                                "hello");
+                framing_harness("cl-field-and-list-same",
+                                MOONWATER_STRICT < STRICT_TIGHT, FRAME,
+                                "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n"
+                                "Content-Length: 5 ,05\r\n\r\nhello", "hello");
+                framing_harness("cl-list-then-different-field", false, FRAME,
+                                "HTTP/1.1 200 OK\r\nContent-Length: 5, 5\r\n"
+                                "Content-Length: 6\r\n\r\nhello!", "");
+                framing_harness("cl-list-trailing-comma", false, FRAME,
+                                "HTTP/1.1 200 OK\r\nContent-Length: 5,\r\n\r\nhello",
+                                "");
+                framing_harness("cl-list-different", false, FRAME,
+                                "HTTP/1.1 200 OK\r\nContent-Length: 5, 6\r\n\r\nhello!",
+                                "");
+                framing_harness("obs-fold-date",
+                                MOONWATER_STRICT < STRICT_TIGHT, FRAME,
+                                "HTTP/1.1 200 OK\r\nDate: Mon,\r\n 01 Jan\r\n"
+                                "Content-Length: 0\r\n\r\n", "");
+                framing_harness("obs-fold-after-cl-chain", false, FRAME,
+                                "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n a\r\n b\r\n\r\n",
+                                "");
+                framing_harness("obs-fold-te", false, FRAME,
+                                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"
+                                " , gzip\r\n\r\n0\r\n\r\n", "");
+                framing_harness("reason-phrase-control",
+                                MOONWATER_STRICT < STRICT_TIGHT, FRAME,
+                                "HTTP/1.1 200 O\x01K\r\nContent-Length: 0\r\n\r\n", "");
+                framing_harness("reason-phrase-nul", false, FRAME,
+                                "HTTP/1.1 200 O\x00K\r\nContent-Length: 0\r\n\r\n", "");
                 framing_harness("bare-cr-in-location", false, FRAME,
                                 "HTTP/1.1 302 Found\r\n"
                                 "Location: /safe\rhidden\r\n\r\n",
@@ -63834,7 +63878,7 @@ static fn fetching_for_real(void)
                                     "short";
                 p8 answer_repeated[] = "HTTP/1.0 200 OK\r\n"
                                        "Content-Length: 5\r\n"
-                                       "content-LENGTH: 5\r\n"
+                                       "content-LENGTH: 6\r\n"
                                        "\r\n"
                                        "hello";
                 p8 answer_conflicting[] = "HTTP/1.0 200 OK\r\n"
@@ -64069,7 +64113,7 @@ static fn fetching_for_real(void)
                       status == HTTP_MALFORMED);
 
                 status = http_get(url, address_of body, address_of code);
-                check("case-insensitive repeated lengths are refused",
+                check("case-insensitive repeated lengths that disagree are refused",
                       status == HTTP_MALFORMED);
 
                 status = http_get(url, address_of body, address_of code);
