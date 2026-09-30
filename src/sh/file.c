@@ -5122,6 +5122,7 @@ typedef fn(address_to file_visit)(bipolar directory, string_address name,
         reference's own -v listing shows, and this is where the two differ.
 */
 static bool file_change_after_contents;
+static bool file_change_prune;
 
 /* True while a visit is a name the walk reached, not one the user typed. A
    symlink the user names is theirs to mean; one found under a -R walk is not,
@@ -5168,6 +5169,13 @@ static fn file_change_walk_as(bipolar directory, string_address name,
 
         if (!here || !file_change_after_contents)
                 visit(directory, name, shown, looked ? address_of facts : null);
+
+        //      A visit may ask for the directory it was shown not to be entered.
+        if (file_change_prune)
+        {
+                file_change_prune = false;
+                return;
+        }
 
         if (!here)
                 return;
@@ -29445,31 +29453,57 @@ static b32 file_truncate()
 
 // hardlink ---------------------------------------------------------
 /*
-        hardlink's walk is file_change_walk_as, shared with chmod/chown/chgrp.
-        Candidate ordering is the library's stable merge sorter.  Only files
-        with matching device, size and requested metadata are mapped; the
-        tuned in-memory hash makes unlike contents cheap, and memory_compare
-        remains the final proof so a hash collision can never replace data.
+        util-linux 2.42's hardlink, step for step. Every regular file the
+        walk meets is a path; the paths of one inode are one node with the
+        links that are left to it; the nodes of one device and size are kept
+        in the order that names the master first -- more links or fewer with
+        -m and -M, the earliest operand with -F, the newest or with -O the
+        oldest, then the lower inode -- and each node in turn is master to
+        the ones after it: those whose attributes allow it and whose bytes
+        are the same are given the master's inode, path by path, through a
+        temporary name that is renamed over them. A link that moves counts
+        against its inode, and the space is saved when the last one has.
 
-        Replacement uses linkat plus renameat2(RENAME_EXCHANGE).  The file
-        displaced by the exchange remains under the temporary name until its
-        inode is checked against the one whose contents were proved.  A name
-        changed by a racing process is exchanged back, never overwritten.
+        The walk is file_change_walk_as, shared with chmod/chown/chgrp.
+        Content is compared as it always was here: a hash of each side read
+        once, and memory_compare as the final proof, so a collision never
+        replaces data. Replacement is linkat plus renameat2(RENAME_EXCHANGE):
+        the file displaced by the exchange stays under the temporary name
+        until its inode is checked against the one whose contents were
+        proved, and a name changed by a racing process is exchanged back and
+        never overwritten.
 */
 typedef struct
 {
         positive path_at;
         positive path_hash;
+        positive base_at;
+        positive dir_at;
+        b64 dir_size;
+        positive tree;
+        positive next;
+        positive node;
         file_facts facts;
         positive hash;
         bool hashed;
         bool valid;
-        bool listed;
 } hardlink_file;
+
+typedef struct
+{
+        positive first;
+        positive head;
+        b64 links;
+} hardlink_node;
+
+#define HARDLINK_PATTERNS 64
 
 static hardlink_file address_to hardlink_files;
 static positive hardlink_file_count;
 static positive hardlink_file_room;
+static hardlink_node address_to hardlink_nodes;
+static positive hardlink_node_count;
+static positive hardlink_node_room;
 static p8 address_to hardlink_paths;
 static positive hardlink_path_used;
 static positive hardlink_path_room;
@@ -29483,11 +29517,29 @@ static bool hardlink_ignore_mode;
 static bool hardlink_ignore_owner;
 static bool hardlink_ignore_time;
 static bool hardlink_respect_name;
-static bool hardlink_sort_hash;
-static bool hardlink_sort_links;
-static b32 hardlink_status;
+static bool hardlink_respect_dir;
+static bool hardlink_respect_xattrs;
+static bool hardlink_maximize;
+static bool hardlink_minimize;
+static bool hardlink_keep_oldest;
+static bool hardlink_prioritize;
+static bool hardlink_within_mount;
+static bool hardlink_dry;
+static bool hardlink_quiet;
+static bool hardlink_listing;
+static bool hardlink_skip_reflinks;
+static p8 hardlink_reflink_mode;
+static positive hardlink_verbosity;
 static positive hardlink_linked;
 static p64 hardlink_saved;
+static positive hardlink_compared;
+static positive hardlink_xattrs_compared;
+static positive hardlink_files_seen;
+static positive hardlink_tree;
+static positive hardlink_root_length;
+static positive hardlink_root_major;
+static positive hardlink_root_minor;
+static b32 hardlink_status;
 static positive hardlink_temp_number;
 static positive hardlink_process;
 static positive address_to hardlink_seen;
@@ -29495,6 +29547,14 @@ static positive hardlink_seen_room;
 static positive hardlink_io_size;
 static p8 address_to hardlink_read_one;
 static p8 address_to hardlink_read_two;
+static string_address hardlink_include[HARDLINK_PATTERNS];
+static string_address hardlink_exclude[HARDLINK_PATTERNS];
+static string_address hardlink_subtree[HARDLINK_PATTERNS];
+static positive hardlink_include_count;
+static positive hardlink_exclude_count;
+static positive hardlink_subtree_count;
+static string_address hardlink_method;
+static p64 hardlink_cache_size;
 
 static string_address hardlink_path(hardlink_file address_to file)
 {
@@ -29506,31 +29566,6 @@ static bool hardlink_moment_same(file_moment address_to one,
 {
         return one->seconds == two->seconds &&
                one->nanoseconds == two->nanoseconds;
-}
-
-static bool hardlink_metadata_same(hardlink_file address_to one,
-                                   hardlink_file address_to two)
-{
-        if (one->facts.device_major != two->facts.device_major ||
-            one->facts.device_minor != two->facts.device_minor ||
-            one->facts.size != two->facts.size)
-                return false;
-        if (!hardlink_ignore_mode &&
-            (one->facts.mode & 07777) != (two->facts.mode & 07777))
-                return false;
-        if (!hardlink_ignore_owner &&
-            (one->facts.owner != two->facts.owner ||
-             one->facts.group != two->facts.group))
-                return false;
-        if (!hardlink_ignore_time &&
-            !hardlink_moment_same(address_of one->facts.modified,
-                                  address_of two->facts.modified))
-                return false;
-        if (hardlink_respect_name &&
-            !string_equals(file_last_component(hardlink_path(one)),
-                           file_last_component(hardlink_path(two))))
-                return false;
-        return true;
 }
 
 /* Strict stability is separate from user-selected equivalence.  Even -c may
@@ -29591,6 +29626,23 @@ static bool hardlink_seen_prepare(positive wanted)
         return true;
 }
 
+// One of the patterns, searched for anywhere in the path: regexec.
+static bool hardlink_matches(string_address address_to patterns, positive count,
+                             string_address text)
+{
+        for (positive at = 0; at < count; at++)
+                if (regex_compile(patterns[at], true, false, false, 5) &&
+                    regex_find(REGEX_FIRST, text, string_length(text), 0))
+                        return true;
+        return false;
+}
+
+#define HARDLINK_SAY(level, ...)                                            \
+        do {                                                                \
+                if (!hardlink_quiet && hardlink_verbosity >= (level))       \
+                        string_format(log, __VA_ARGS__);                    \
+        } while (0)
+
 static fn hardlink_visit(bipolar directory, string_address name,
                          string_address shown, file_facts address_to known)
 {
@@ -29605,20 +29657,86 @@ static fn hardlink_visit(bipolar directory, string_address name,
 
         if (looked < 0)
         {
-                string_format(log_error, "hardlink: cannot stat '%w': %s\n",
-                              writer_terminal_quoted_name, shown, file_reason(looked));
-                hardlink_status = 1;
+                string_format(log_error, "hardlink: cannot read %w: %s\n",
+                              writer_terminal_name, shown, file_reason(looked));
                 return;
         }
-        if ((facts.mode & MODE_FORMAT) != MODE_FILE ||
-            facts.size < hardlink_minimum || facts.size > hardlink_maximum)
+
+        if ((facts.mode & MODE_FORMAT) == MODE_DIRECTORY)
+        {
+                //      nftw calls a directory it cannot read a failure and does
+                //      not enter it; one on another device is not entered under
+                //      --mount.
+                if (system_access_at(directory, name, 4 | 1) < 0)
+                {
+                        string_format(log_error, "hardlink: cannot read %w: %s\n",
+                                      writer_terminal_name, shown,
+                                      file_reason(-ERROR_ACCESS));
+                        file_change_prune = true;
+                        return;
+                }
+                if (hardlink_within_mount &&
+                    (facts.device_major != hardlink_root_major ||
+                     facts.device_minor != hardlink_root_minor))
+                {
+                        file_change_prune = true;
+                        return;
+                }
+                if (hardlink_subtree_count &&
+                    hardlink_matches(hardlink_subtree, hardlink_subtree_count, shown))
+                {
+                        HARDLINK_SAY(2, "Skipped (excluded subtree) %w\n",
+                                     writer_terminal_name, shown);
+                        file_change_prune = true;
+                }
                 return;
+        }
+        if ((facts.mode & MODE_FORMAT) != MODE_FILE)
+                return;
+
+        bool included = hardlink_matches(hardlink_include, hardlink_include_count, shown);
+        bool excluded = hardlink_matches(hardlink_exclude, hardlink_exclude_count, shown);
+
+        if ((hardlink_exclude_count && excluded && !included) ||
+            (!hardlink_exclude_count && hardlink_include_count && !included))
+        {
+                HARDLINK_SAY(2, "Skipped (excluded) %w\n", writer_terminal_name, shown);
+                return;
+        }
+
+        hardlink_files_seen++;
+
+        if (facts.size < hardlink_minimum)
+        {
+                HARDLINK_SAY(2, "Skipped (smaller than configured size) %w\n",
+                             writer_terminal_name, shown);
+                return;
+        }
+
+        if (!hardlink_quiet && hardlink_verbosity >= 3)
+        {
+                p8 number[24];
+                positive digits = positive_into_string(number, hardlink_files_seen);
+
+                string_format(log, " %s%s: [%b/%b/%b] %w\n",
+                              digits < 5 ? (string_address) "     " + digits : (string_address) "",
+                              (string_address)number,
+                              file_device_key(facts.device_major, facts.device_minor),
+                              facts.inode, (positive)facts.hard_links,
+                              writer_terminal_name, shown);
+        }
+
+        if (hardlink_maximum && facts.size > hardlink_maximum)
+        {
+                HARDLINK_SAY(2, "Skipped (greater than configured size) %w\n",
+                             writer_terminal_name, shown);
+                return;
+        }
 
         positive2 named = string_hash_33_length(shown);
         if (!hardlink_seen_prepare(hardlink_file_count + 1))
         {
-                log_error("hardlink: out of memory while indexing paths\n", 0);
-                hardlink_status = 1;
+                log_error("hardlink: cannot continue: Cannot allocate memory\n", 0);
                 return;
         }
 
@@ -29629,7 +29747,11 @@ static fn hardlink_visit(bipolar directory, string_address name,
                     hardlink_files + hardlink_seen[slot] - 1;
                 if (have->path_hash == named.x &&
                     string_equals(hardlink_path(have), shown))
+                {
+                        HARDLINK_SAY(2, "Skipped (specified more than once) %w\n",
+                                     writer_terminal_name, shown);
                         return;
+                }
                 slot = (slot + 1) & (hardlink_seen_room - 1);
         }
 
@@ -29640,8 +29762,7 @@ static fn hardlink_visit(bipolar directory, string_address name,
             !shell_array_room(hardlink_paths, hardlink_path_room,
                               hardlink_path_used + length + 1))
         {
-                log_error("hardlink: out of memory while walking files\n", 0);
-                hardlink_status = 1;
+                log_error("hardlink: cannot continue: Cannot allocate memory\n", 0);
                 return;
         }
 
@@ -29651,54 +29772,135 @@ static fn hardlink_visit(bipolar directory, string_address name,
         file->path_hash = named.x;
         file->facts = facts;
         file->valid = true;
+        file->tree = hardlink_tree;
         memory_copy_apart_end(hardlink_paths + hardlink_path_used, shown,
                               length);
+
+        string_address last = string_last_of(shown, '/');
+
+        file->base_at = last ? (positive)(last + 1 - shown) : 0;
+        //      As dirname_strcmp measures it: from the end of the operand to the
+        //      name, which for an operand that is a file is negative.
+        file->dir_at = hardlink_root_length;
+        file->dir_size = (b64)file->base_at - (b64)hardlink_root_length;
         hardlink_path_used += length + 1;
         hardlink_seen[slot] = hardlink_file_count;
 }
 
-static b32 hardlink_index_compare(positive left_at, positive right_at)
+static string_address hardlink_base(hardlink_file address_to file)
+{
+        return hardlink_path(file) + file->base_at;
+}
+
+// The directories between the operand and the file, as dirname_strcmp has them.
+static b32 hardlink_directory_compare(hardlink_file address_to left,
+                                      hardlink_file address_to right)
+{
+        if (left->dir_size != right->dir_size)
+                return left->dir_size < right->dir_size ? -1 : 1;
+        if (left->dir_size <= 0)
+                return 0;
+
+        return memory_compare(hardlink_path(left) + left->dir_at,
+                              hardlink_path(right) + right->dir_at, (positive)left->dir_size);
+}
+
+// Which path makes an inode's record: device, inode and, where the options
+// ask for it, the name or the directory too -- compare_nodes_ino.
+static b32 hardlink_key_compare(positive left_at, positive right_at)
+{
+        hardlink_file address_to left = hardlink_files + left_at;
+        hardlink_file address_to right = hardlink_files + right_at;
+        positive one = file_device_key(left->facts.device_major, left->facts.device_minor);
+        positive two = file_device_key(right->facts.device_major, right->facts.device_minor);
+
+        if (one != two)
+                return one < two ? -1 : 1;
+        if (left->facts.inode != right->facts.inode)
+                return left->facts.inode < right->facts.inode ? -1 : 1;
+        if (hardlink_respect_name)
+        {
+                b32 named = string_compare(hardlink_base(left), hardlink_base(right));
+                if (named)
+                        return named < 0 ? -1 : 1;
+        }
+        if (hardlink_respect_dir)
+        {
+                b32 below = hardlink_directory_compare(left, right);
+                if (below)
+                        return below;
+        }
+        return left_at < right_at ? -1 : left_at > right_at ? 1 : 0;
+}
+
+#define HARDLINK_CMP(a, b) (((a) > (b)) - ((a) < (b)))
+
+// file_compare: the greater is the master.
+static b32 hardlink_prefer(positive left_at, positive right_at)
+{
+        hardlink_node address_to one = hardlink_nodes + left_at;
+        hardlink_node address_to two = hardlink_nodes + right_at;
+        file_facts address_to a = address_of hardlink_files[one->first].facts;
+        file_facts address_to b = address_of hardlink_files[two->first].facts;
+        b32 result = 0;
+
+        if (a->device_major == b->device_major && a->device_minor == b->device_minor &&
+            a->inode == b->inode)
+                return 0;
+        if (hardlink_maximize)
+                result = HARDLINK_CMP(one->links, two->links);
+        if (!result && hardlink_minimize)
+                result = HARDLINK_CMP(two->links, one->links);
+        if (!result && hardlink_prioritize)
+                result = HARDLINK_CMP(hardlink_files[one->first].tree,
+                                      hardlink_files[two->first].tree);
+        if (!result)
+                result = hardlink_keep_oldest ? HARDLINK_CMP(b->modified.seconds, a->modified.seconds)
+                                              : HARDLINK_CMP(a->modified.seconds, b->modified.seconds);
+        if (!result)
+                result = HARDLINK_CMP(b->inode, a->inode);
+        return result;
+}
+
+// The order the master is looked for in: device, then size, then the one
+// file_compare calls greater first, and of two it cannot tell apart the
+// later-made record first, as the list they were inserted into is.
+static b32 hardlink_node_compare(positive left_at, positive right_at)
+{
+        hardlink_node address_to one = hardlink_nodes + left_at;
+        hardlink_node address_to two = hardlink_nodes + right_at;
+        file_facts address_to a = address_of hardlink_files[one->first].facts;
+        file_facts address_to b = address_of hardlink_files[two->first].facts;
+        positive x = file_device_key(a->device_major, a->device_minor);
+        positive y = file_device_key(b->device_major, b->device_minor);
+
+        if (x != y)
+                return x < y ? -1 : 1;
+        if (a->size != b->size)
+                return a->size < b->size ? -1 : 1;
+
+        b32 preferred = hardlink_prefer(left_at, right_at);
+
+        if (preferred)
+                return preferred > 0 ? -1 : 1;
+        return one->first > two->first ? -1 : one->first < two->first ? 1 : 0;
+}
+
+// Whether two paths are one node: key_compare without the tie-break.
+static bool hardlink_same_node(positive left_at, positive right_at)
 {
         hardlink_file address_to left = hardlink_files + left_at;
         hardlink_file address_to right = hardlink_files + right_at;
 
-#define HARDLINK_COMPARE(field)                                             \
-        do {                                                                \
-                if (left->facts.field != right->facts.field)                \
-                        return left->facts.field < right->facts.field ? -1 : 1; \
-        } while (0)
-        HARDLINK_COMPARE(device_major);
-        HARDLINK_COMPARE(device_minor);
-        HARDLINK_COMPARE(size);
-        if (!hardlink_ignore_mode)
-                HARDLINK_COMPARE(mode);
-        if (!hardlink_ignore_owner)
-        {
-                HARDLINK_COMPARE(owner);
-                HARDLINK_COMPARE(group);
-        }
-        if (!hardlink_ignore_time)
-        {
-                HARDLINK_COMPARE(modified.seconds);
-                HARDLINK_COMPARE(modified.nanoseconds);
-        }
-#undef HARDLINK_COMPARE
-
-        if (hardlink_respect_name)
-        {
-                b32 named = string_compare(
-                    file_last_component(hardlink_path(left)),
-                    file_last_component(hardlink_path(right)));
-                if (named)
-                        return named;
-        }
-        if (hardlink_sort_hash && left->hash != right->hash)
-                return left->hash < right->hash ? -1 : 1;
-        if (hardlink_sort_links &&
-            left->facts.hard_links != right->facts.hard_links)
-                return left->facts.hard_links > right->facts.hard_links
-                           ? -1 : 1;
-        return 0;
+        if (left->facts.inode != right->facts.inode ||
+            file_device_key(left->facts.device_major, left->facts.device_minor) !=
+                file_device_key(right->facts.device_major, right->facts.device_minor))
+                return false;
+        if (hardlink_respect_name && string_compare(hardlink_base(left), hardlink_base(right)))
+                return false;
+        if (hardlink_respect_dir && hardlink_directory_compare(left, right))
+                return false;
+        return true;
 }
 
 /* Exact positional reads and writes share offset/short-transfer handling.
@@ -29732,9 +29934,8 @@ static bool hardlink_hash_one(hardlink_file address_to file)
                                         FILE_READ | O_CLOEXEC);
         if (handle < 0)
         {
-                string_format(log_error, "hardlink: cannot read '%w': %s\n",
-                              writer_terminal_quoted_name, path, file_reason(handle));
-                hardlink_status = 1;
+                //      A file that will not open is one that cannot be proved
+                //      equal to anything, which is all the reference says of it.
                 file->valid = false;
                 return false;
         }
@@ -30071,47 +30272,33 @@ static bool hardlink_replace(hardlink_file address_to keep,
                                 address_of displaced);
 }
 
-static fn hardlink_list_one(hardlink_file address_to file, p8 delimiter)
-{
-        positive_to_padded(log, file->hash, 20, '0', 0);
-        log("\t", 1);
-        if (delimiter)
-                writer_terminal_name(log, hardlink_path(file));
-        else
-                log(hardlink_path(file), 0);
-        log(address_of delimiter, 1);
-}
-
-static fn hardlink_list_pair(hardlink_file address_to keep,
-                             hardlink_file address_to duplicate,
-                             p8 delimiter)
-{
-        if (!keep->listed)
-        {
-                hardlink_list_one(keep, delimiter);
-                keep->listed = true;
-        }
-        if (!duplicate->listed)
-        {
-                hardlink_list_one(duplicate, delimiter);
-                duplicate->listed = true;
-        }
-}
-
 static const argument_option hardlink_options[] = {
     {"content", 'c'},
     {"io-size", 'b', ARGUMENT_REQUIRED},
+    {"respect-dir", 'd'},
     {"respect-name", 'f'},
+    {"prioritize-trees", 'F'},
+    {"include", 'i', ARGUMENT_REQUIRED},
     {"list-duplicates", 'l'},
+    {"maximize", 'm'},
+    {"minimize", 'M'},
+    {"mount", 'N', ARGUMENT_LONG_ONLY},
     {"dry-run", 'n'},
     {"ignore-owner", 'o'},
+    {"keep-oldest", 'O'},
     {"ignore-mode", 'p'},
     {"quiet", 'q'},
+    {"cache-size", 'r', ARGUMENT_REQUIRED},
     {"reflink", 'R', ARGUMENT_LONG_OPTIONAL | ARGUMENT_LONG_ONLY},
+    {"skip-reflinks", 'K', ARGUMENT_LONG_ONLY},
     {"minimum-size", 's', ARGUMENT_REQUIRED},
     {"maximum-size", 'S', ARGUMENT_REQUIRED},
     {"ignore-time", 't'},
     {"verbose", 'v'},
+    {"exclude", 'x', ARGUMENT_REQUIRED},
+    {"exclude-subtree", 'E', ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
+    {"respect-xattrs", 'X'},
+    {"method", 'y', ARGUMENT_REQUIRED},
     {"zero", 'z'},
     {"help", 'h'},
     {"version", 'V'},
@@ -30129,236 +30316,670 @@ static bool hardlink_size(string_address text, p64 address_to size)
         return true;
 }
 
+// size_to_human_string(SIZE_SUFFIX_3LETTER | SIZE_SUFFIX_SPACE |
+// SIZE_DECIMAL_2DIGITS): 3 B, 1.5 KiB, 12.25 MiB.
+static positive hardlink_size_text(p64 bytes, p8 address_to into)
+{
+        positive exponent = 0;
+
+        while (exponent < 60 && bytes >= ((p64)1 << (exponent + 10)))
+                exponent += 10;
+
+        p64 whole = exponent ? bytes >> exponent : bytes;
+        p64 fraction = exponent ? bytes & (((p64)1 << exponent) - 1) : 0;
+        string_address letters = "BKMGTPE";
+        positive at = 0;
+
+        if (fraction)
+        {
+                fraction = fraction >= positive_max / 1000
+                               ? ((fraction / 1024) * 1000) / ((p64)1 << (exponent - 10))
+                               : (fraction * 1000) / ((p64)1 << exponent);
+                fraction = (fraction + 5) / 10;
+                if (fraction == 100)
+                {
+                        whole++;
+                        fraction = 0;
+                }
+        }
+
+        at += positive_into_string(into + at, whole);
+        if (fraction)
+        {
+                into[at++] = '.';
+                p8 tens = (p8)(fraction / 10);
+                p8 ones = (p8)(fraction % 10);
+
+                into[at++] = (p8)('0' + tens);
+                if (ones)
+                        into[at++] = (p8)('0' + ones);
+        }
+        into[at++] = ' ';
+        into[at++] = (p8)letters[exponent / 10];
+        if (exponent)
+        {
+                into[at++] = 'i';
+                into[at++] = 'B';
+        }
+        into[at] = end;
+        return at;
+}
+
+// The extended attributes of two files, compared as file_xattrs_equal does:
+// the same names, in the same sorted order, with the same values.
+static positive hardlink_xattr_names(string_address path, p8 address_to into, positive room)
+{
+        bipolar got = system_call_3(syscall(llistxattr), (positive)path, (positive)into,
+                                    (positive)room);
+
+        return got > 0 ? (positive)got : 0;
+}
+
+static bool hardlink_xattrs_equal(hardlink_file address_to one, hardlink_file address_to two)
+{
+        static p8 names_one[8192];
+        static p8 names_two[8192];
+        static p8 value_one[8192];
+        static p8 value_two[8192];
+        string_address a = hardlink_path(one);
+        string_address b = hardlink_path(two);
+
+        HARDLINK_SAY(2, "Comparing xattrs of %w to %w\n", writer_terminal_name, a,
+                     writer_terminal_name, b);
+        hardlink_xattrs_compared++;
+
+        positive length_one = hardlink_xattr_names(a, names_one, sizeof(names_one));
+        positive length_two = hardlink_xattr_names(b, names_two, sizeof(names_two));
+
+        if (!length_one && !length_two)
+                return true;
+        if (length_one != length_two)
+                return false;
+
+        string_address list_one[256];
+        string_address list_two[256];
+        positive count_one = 0;
+        positive count_two = 0;
+
+        for (positive at = 0; at < length_one && count_one < 256; at += string_length((string_address)names_one + at) + 1)
+                list_one[count_one++] = (string_address)names_one + at;
+        for (positive at = 0; at < length_two && count_two < 256; at += string_length((string_address)names_two + at) + 1)
+                list_two[count_two++] = (string_address)names_two + at;
+        if (count_one != count_two)
+                return false;
+
+        for (positive i = 1; i < count_one; i++)
+                for (positive j = i; j > 0 && string_compare(list_one[j - 1], list_one[j]) > 0; j--)
+                {
+                        string_address swap = list_one[j];
+
+                        list_one[j] = list_one[j - 1];
+                        list_one[j - 1] = swap;
+                }
+        for (positive i = 1; i < count_two; i++)
+                for (positive j = i; j > 0 && string_compare(list_two[j - 1], list_two[j]) > 0; j--)
+                {
+                        string_address swap = list_two[j];
+
+                        list_two[j] = list_two[j - 1];
+                        list_two[j - 1] = swap;
+                }
+
+        for (positive i = 0; i < count_one; i++)
+        {
+                if (string_compare(list_one[i], list_two[i]))
+                        return false;
+
+                bipolar first = system_call_4(syscall(lgetxattr), (positive)a, (positive)list_one[i],
+                                              (positive)value_one, sizeof(value_one));
+                bipolar second = system_call_4(syscall(lgetxattr), (positive)b, (positive)list_two[i],
+                                               (positive)value_two, sizeof(value_two));
+
+                if (first != second || first < 0 || memory_compare(value_one, value_two, (positive)first))
+                        return false;
+        }
+        return true;
+}
+
+// file_may_link_to: whether the attributes allow the second to become the
+// first, before any byte is read.
+static bool hardlink_may_link(positive master_at, positive other_at)
+{
+        hardlink_node address_to master = hardlink_nodes + master_at;
+        hardlink_node address_to other = hardlink_nodes + other_at;
+
+        if (!master->head || !other->head)
+                return false;
+
+        hardlink_file address_to a = hardlink_files + master->first;
+        hardlink_file address_to b = hardlink_files + other->first;
+
+        if (a->facts.size != b->facts.size ||
+            a->facts.device_major != b->facts.device_major ||
+            a->facts.device_minor != b->facts.device_minor ||
+            a->facts.inode == b->facts.inode)
+                return false;
+        if (!hardlink_ignore_mode && a->facts.mode != b->facts.mode)
+                return false;
+        if (!hardlink_ignore_owner &&
+            (a->facts.owner != b->facts.owner || a->facts.group != b->facts.group))
+                return false;
+        if (!hardlink_ignore_time && a->facts.modified.seconds != b->facts.modified.seconds)
+                return false;
+
+        hardlink_file address_to head_a = hardlink_files + master->head - 1;
+        hardlink_file address_to head_b = hardlink_files + other->head - 1;
+
+        if (hardlink_respect_name &&
+            string_compare(hardlink_base(head_a), hardlink_base(head_b)))
+                return false;
+        if (hardlink_respect_dir && hardlink_directory_compare(head_a, head_b))
+                return false;
+        if (hardlink_respect_xattrs && !hardlink_xattrs_equal(head_a, head_b))
+                return false;
+        return true;
+}
+
+// Whether the file system takes a clone at all: btrfs, xfs, zfs.
+static bool hardlink_reflink_compatible(string_address path)
+{
+        static positive buffer[16];
+
+        if (system_call_2(syscall(statfs), (positive)path, (positive)buffer) < 0)
+                return false;
+        return buffer[0] == 0x9123683eu || buffer[0] == 0x58465342u || buffer[0] == 0x2fc12fc1u;
+}
+
+// do_link with a clone: a new file with the master's mode and owner, its
+// extents shared, or a refusal the caller turns into a hard link.
+static bool hardlink_clone(hardlink_file address_to keep, hardlink_file address_to duplicate)
+{
+        p8 temporary[FILE_PATH_MAX];
+        string_address from = hardlink_path(keep);
+        string_address to = hardlink_path(duplicate);
+
+        if (!hardlink_temporary(to, temporary))
+                return false;
+
+        bipolar destination = system_open_at_mode(AT_FDCWD, (string_address)temporary,
+                                                  O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0600);
+        bipolar source = destination < 0 ? -1
+                                         : system_open_at(AT_FDCWD, from, FILE_READ | O_CLOEXEC);
+        bool done = destination >= 0 && source >= 0 &&
+                    file_change_mode_handle(destination, duplicate->facts.mode & 07777) >= 0 &&
+                    system_call_3(syscall(fchown), (positive)destination,
+                                  (positive)duplicate->facts.owner,
+                                  (positive)duplicate->facts.group) >= 0 &&
+                    system_call_3(syscall(ioctl), (positive)destination, 0x40049409u,
+                                  (positive)source) >= 0 &&
+                    system_rename_at(AT_FDCWD, (string_address)temporary, AT_FDCWD, to, 0) >= 0;
+
+        if (destination >= 0)
+                system_close(destination);
+        if (source >= 0)
+                system_close(source);
+        if (!done && destination >= 0)
+                (void)system_remove_at(AT_FDCWD, (string_address)temporary, 0);
+        return done;
+}
+
+// file_link: every path of the second becomes the first's, one at a time.
+static bool hardlink_link_all(positive master_at, positive other_at, bool clone)
+{
+        for (;;)
+        {
+                hardlink_node address_to master = hardlink_nodes + master_at;
+                hardlink_node address_to other = hardlink_nodes + other_at;
+
+                if (!other->head)
+                        return true;
+
+                hardlink_file address_to keep = hardlink_files + master->head - 1;
+                hardlink_file address_to duplicate = hardlink_files + other->head - 1;
+                p8 size[40];
+
+                hardlink_size_text(hardlink_files[master->first].facts.size, size);
+                HARDLINK_SAY(1, "%s%sLinking %w to %w (-%s)\n",
+                             hardlink_dry ? (string_address) "[DryRun] " : (string_address) "",
+                             clone ? (string_address) "Ref" : (string_address) "",
+                             writer_terminal_name, hardlink_path(keep),
+                             writer_terminal_name, hardlink_path(duplicate),
+                             (string_address)size);
+
+                if (!hardlink_dry)
+                {
+                        //      An earlier path of the same inode moved, which
+                        //      changed the inode's change time: this path's
+                        //      snapshot follows it when nothing else did.
+                        file_facts now;
+
+                        if (file_look_link(hardlink_path(duplicate), address_of now) &&
+                            hardlink_link_same(address_of duplicate->facts, address_of now))
+                                duplicate->facts = now;
+                        if (clone ? !hardlink_clone(keep, duplicate)
+                                  : !hardlink_replace(keep, duplicate))
+                        {
+                                if (clone && hardlink_reflink_mode == 'A')
+                                        string_format(log_error, "hardlink: cannot link %w to %w.hardlink-temporary: %s\n",
+                                                      writer_terminal_name, hardlink_path(keep),
+                                                      writer_terminal_name, hardlink_path(duplicate),
+                                                      file_reason(-ERROR_NOT_SUPPORTED));
+                                return false;
+                        }
+                }
+
+                hardlink_linked++;
+                master->links++;
+                other->links--;
+                if (other->links == 0)
+                        hardlink_saved += hardlink_files[master->first].facts.size;
+
+                positive moving = other->head;
+
+                other->head = hardlink_files[moving - 1].next;
+                hardlink_files[moving - 1].next = hardlink_files[master->head - 1].next;
+                hardlink_files[master->head - 1].next = moving;
+        }
+}
+
+static fn hardlink_print_stats(positive started)
+{
+        p8 saved[40];
+        positive elapsed = (clock_monotonic_nanoseconds() - started) / 1000;
+
+        hardlink_size_text(hardlink_saved, saved);
+        string_format(log,
+                      "Mode:                     %s\n"
+                      "Method:                   %s\n"
+                      "Files:                    %b\n"
+                      "Linked:                   %b files\n"
+                      "Compared:                 %b xattrs\n"
+                      "Compared:                 %b files\n",
+                      hardlink_dry ? (string_address) "dry-run" : (string_address) "real",
+                      hardlink_method, hardlink_files_seen, hardlink_linked,
+                      hardlink_xattrs_compared, hardlink_compared);
+        if (hardlink_skip_reflinks)
+                string_format(log, "Skipped reflinks:         0 files\n");
+        string_format(log, "Saved:                    %s\n"
+                           "Duration:                 %b.%s%b seconds\n",
+                      (string_address)saved, elapsed / 1000000,
+                      (string_address) (elapsed % 1000000 >= 100000 ? "" : elapsed % 1000000 >= 10000 ? "0" :
+                                        elapsed % 1000000 >= 1000 ? "00" : elapsed % 1000000 >= 100 ? "000" :
+                                        elapsed % 1000000 >= 10 ? "0000" : "00000"),
+                      elapsed % 1000000);
+}
+
+// The options as they come, so that a bad one is refused where getopt would
+// have refused it, and the ones that repeat are kept.
+static bool hardlink_quiet_asked;
+static bool hardlink_verbose_asked;
+static bool hardlink_parse_failed;
+
+static p8 hardlink_first_asked;
+
+static bool hardlink_option_said(void)
+{
+        if (hardlink_quiet_asked && hardlink_verbose_asked)
+                return string_report(log_error, false,
+                                     hardlink_first_asked == 'q'
+                                         ? "hardlink: options --quiet and --verbose cannot be combined\n"
+                                         : "hardlink: options --verbose and --quiet cannot be combined\n");
+        return true;
+}
+
+static bool hardlink_size_option(string_address value, string_address what, p64 address_to into)
+{
+        if (hardlink_size(value, into))
+                return true;
+        hardlink_parse_failed = true;
+        return string_report(log_error, false, "hardlink: failed to parse %s: '%w': Invalid argument\n",
+                             what, writer_terminal_quoted_name, value);
+}
+
+static bool hardlink_option_seen(p8 letter, string_address value)
+{
+        static const p64 unused = 0;
+        p64 parsed = unused;
+
+        switch (letter)
+        {
+        case 'q':
+                if (!hardlink_first_asked)
+                        hardlink_first_asked = 'q';
+                hardlink_quiet_asked = true;
+                return hardlink_option_said();
+        case 'v':
+                if (!hardlink_first_asked)
+                        hardlink_first_asked = 'v';
+                hardlink_verbose_asked = true;
+                hardlink_verbosity++;
+                return hardlink_option_said();
+        case 'x':
+        case 'i':
+        case 'E':
+        {
+                string_address address_to list = letter == 'x' ? hardlink_exclude
+                                                 : letter == 'i' ? hardlink_include
+                                                                 : hardlink_subtree;
+                positive address_to count = letter == 'x' ? address_of hardlink_exclude_count
+                                            : letter == 'i' ? address_of hardlink_include_count
+                                                            : address_of hardlink_subtree_count;
+
+                if (!regex_compile(value, true, false, false, 5))
+                {
+                        hardlink_parse_failed = true;
+                        return string_report(log_error, false,
+                                             "hardlink: could not compile regular expression %s: Invalid regular expression\n",
+                                             value);
+                }
+                if (address_to count < HARDLINK_PATTERNS)
+                        list[address_to count] = value, address_to count += 1;
+                return true;
+        }
+        case 's':
+                if (!hardlink_size_option(value, (string_address) "minimum size", address_of parsed))
+                        return false;
+                hardlink_minimum = parsed;
+                return true;
+        case 'S':
+                if (!hardlink_size_option(value, (string_address) "maximum size", address_of parsed))
+                        return false;
+                hardlink_maximum = parsed;
+                return true;
+        case 'r':
+                if (!hardlink_size_option(value, (string_address) "cache size", address_of parsed))
+                        return false;
+                hardlink_cache_size = parsed;
+                return true;
+        case 'b':
+                if (!hardlink_size_option(value, (string_address) "I/O size", address_of parsed))
+                        return false;
+                hardlink_io_size = (positive)parsed;
+                return true;
+        case 'y':
+                hardlink_method = value;
+                return true;
+        case 'R':
+                hardlink_reflink_mode = 'a';
+                if (value && string_get(value))
+                {
+                        if (string_equals(value, "auto"))
+                                hardlink_reflink_mode = 'a';
+                        else if (string_equals(value, "always"))
+                                hardlink_reflink_mode = 'A';
+                        else if (string_equals(value, "never"))
+                                hardlink_reflink_mode = 'n';
+                        else
+                        {
+                                hardlink_parse_failed = true;
+                                return string_report(log_error, false,
+                                                     "hardlink: unsupported reflink mode: %s\n", value);
+                        }
+                }
+                if (hardlink_reflink_mode != 'n')
+                        hardlink_skip_reflinks = true;
+                return true;
+        case 'K':
+                hardlink_skip_reflinks = true;
+                return true;
+        }
+        return true;
+}
+
 static b32 file_hardlink()
 {
         file_operands_begin();
+        hardlink_quiet_asked = hardlink_verbose_asked = hardlink_parse_failed = false;
+        hardlink_first_asked = 0;
+        hardlink_verbosity = 0;
+        hardlink_include_count = hardlink_exclude_count = hardlink_subtree_count = 0;
+        hardlink_minimum = 1;
+        hardlink_maximum = 0;
+        hardlink_method = (string_address) "sha256";
+        hardlink_reflink_mode = 0;
+        hardlink_skip_reflinks = false;
+        hardlink_io_size = 0;
+        hardlink_cache_size = 10 * 1024 * 1024;
+
         file_taking taking = {
             .program = (string_address)"hardlink",
             .options = hardlink_options,
             .operand = file_operand,
+            .seen = hardlink_option_seen,
         };
 
         if (!file_take(address_of taking) || file_operand_failed)
                 return 1;
-        {
-                static const argument_exclusive_pair hardlink_quiet_verbose[] = {
-                    {'q', (string_address)"quiet"},
-                    {'v', (string_address)"verbose"},
-                };
-
-                if (argument_exclusive_refuse(
-                        log_error, (string_address)"hardlink",
-                        (positive)program_argument_count(),
-                        program_argument_list(), hardlink_options, true,
-                        hardlink_quiet_verbose,
-                        array_count(hardlink_quiet_verbose)))
-                        return 1;
-        }
-        if (file_meta(address_of taking, "[options] FILE|DIRECTORY...\n"
+        if (file_meta(address_of taking, "[options] <directory>|<file> ...\n"
                       "  -c content only  -n dry-run  -l list  -q quiet\n"
                       "  -s MIN  -S MAX  -f respect name", log))
                 return 0;
         if (!file_operand_count)
-                return string_report(log_error, 1, "%s: missing operand\n", (string_address)"hardlink");
-
-        if (taking.flags & FILE_FLAG('R'))
-        {
-                string_address reflink = file_option_value(address_of taking, 'R');
-                if ((taking.bare & FILE_FLAG('R')) ||
-                    !reflink || !string_equals(reflink, (string_address)"never"))
-                        return string_report(log_error, 1, "hardlink: reflink auto/always is unsupported; use --reflink=never\n");
-        }
-
-        string_address io_size = file_option_value(address_of taking, 'b');
-        p64 parsed_io_size = FILE_TRANSFER_SIZE;
-        if (io_size && (!hardlink_size(io_size, address_of parsed_io_size) ||
-                        !parsed_io_size || parsed_io_size > positive_max))
-                return string_report(log_error, 1, "hardlink: invalid I/O size: '%s'\n",
-                              io_size);
-
-        hardlink_minimum = 1;
-        hardlink_maximum = (p64)-1;
-        string_address minimum = file_option_value(address_of taking, 's');
-        string_address maximum = file_option_value(address_of taking, 'S');
-        if ((minimum && !hardlink_size(minimum, address_of hardlink_minimum)) ||
-            (maximum && !hardlink_size(maximum, address_of hardlink_maximum)))
-                return string_report(log_error, 1, "hardlink: invalid minimum or maximum size\n");
+                return string_report(log_error, 1, "hardlink: no directory or file specified\n");
 
         bool content = (taking.flags & FILE_FLAG('c')) != 0;
         hardlink_ignore_mode = content || (taking.flags & FILE_FLAG('p'));
         hardlink_ignore_owner = content || (taking.flags & FILE_FLAG('o'));
         hardlink_ignore_time = content || (taking.flags & FILE_FLAG('t'));
-        hardlink_respect_name = (taking.flags & FILE_FLAG('f')) != 0;
-        bool dry = (taking.flags & FILE_FLAG('n')) != 0;
-        bool listing = (taking.flags & FILE_FLAG('l')) != 0;
-        bool quiet = (taking.flags & FILE_FLAG('q')) != 0;
-        bool verbose = (taking.flags & FILE_FLAG('v')) != 0;
+        hardlink_respect_name = !content && (taking.flags & FILE_FLAG('f'));
+        hardlink_respect_dir = !content && (taking.flags & FILE_FLAG('d'));
+        hardlink_respect_xattrs = !content && (taking.flags & FILE_FLAG('X'));
+        hardlink_maximize = (taking.flags & FILE_FLAG('m')) != 0;
+        hardlink_minimize = (taking.flags & FILE_FLAG('M')) != 0;
+        hardlink_keep_oldest = (taking.flags & FILE_FLAG('O')) != 0;
+        hardlink_prioritize = (taking.flags & FILE_FLAG('F')) != 0;
+        hardlink_within_mount = (taking.flags & FILE_FLAG('N')) != 0;
+        hardlink_listing = (taking.flags & FILE_FLAG('l')) != 0;
+        hardlink_dry = hardlink_listing || (taking.flags & FILE_FLAG('n'));
+        hardlink_quiet = hardlink_listing || (taking.flags & FILE_FLAG('q'));
         p8 delimiter = (taking.flags & FILE_FLAG('z')) ? 0 : '\n';
+
+        //      Only these four methods start; any other name is the
+        //      fallback the reference falls back to.
+        if (!string_equals(hardlink_method, "memcmp") && !string_equals(hardlink_method, "sha1") &&
+            !string_equals(hardlink_method, "sha256") && !string_equals(hardlink_method, "crc32"))
+        {
+                HARDLINK_SAY(1, "cannot initialize %s method, use 'memcmp' fallback\n", hardlink_method);
+                hardlink_method = (string_address) "memcmp";
+        }
+        if (!hardlink_io_size)
+                hardlink_io_size = string_equals(hardlink_method, "memcmp") ? 8 * 1024 : FILE_TRANSFER_SIZE;
 
         // The seen table and the compare buffers live in the shared arena,
         // which another applet in this process may have reused since.
         utility_arena.used = 0;
         hardlink_seen_room = 0;
         hardlink_file_count = 0;
+        hardlink_node_count = 0;
         hardlink_path_used = 0;
         hardlink_status = 0;
         hardlink_linked = 0;
         hardlink_saved = 0;
+        hardlink_compared = 0;
+        hardlink_xattrs_compared = 0;
+        hardlink_files_seen = 0;
+        hardlink_tree = 0;
         hardlink_temp_number = 0;
         hardlink_process = system_nonce();
-        hardlink_io_size = (positive)parsed_io_size;
 
+        positive started = clock_monotonic_nanoseconds();
+
+        HARDLINK_SAY(3, "Scanning [device/inode/links]:\n");
         for (positive i = 0; i < file_operand_count; i++)
         {
+                p8 real[FILE_PATH_MAX];
                 string_address path = file_operand_at(i);
-                file_change_walk_as(AT_FDCWD, path, path, FILE_MAX_DEPTH,
-                                    (string_address)"hardlink",
-                                    address_of hardlink_status, hardlink_visit,
-                                    true, 0, false);
+
+                file_facts root;
+                bipolar there = file_resolve(path, real, true)
+                                    ? file_look_code(AT_FDCWD, (string_address)real, AT_SYMLINK_NOFOLLOW,
+                                                     address_of root)
+                                    : -ERROR_NO_ENTRY;
+
+                if (there < 0)
+                {
+                        string_format(log_error, "hardlink: cannot get realpath: %w: %s\n",
+                                      writer_terminal_name, path, file_reason(there));
+                        continue;
+                }
+
+                hardlink_root_length = hardlink_respect_dir ? string_length((string_address)real) : 0;
+                hardlink_root_major = hardlink_root_minor = 0;
+                hardlink_root_major = root.device_major;
+                hardlink_root_minor = root.device_minor;
+                if (hardlink_prioritize)
+                        hardlink_tree++;
+                file_change_walk_as(AT_FDCWD, (string_address)real, (string_address)real, FILE_MAX_DEPTH,
+                                    (string_address)"hardlink", address_of hardlink_status,
+                                    hardlink_visit, false, 0, false);
         }
 
-        if (hardlink_file_count > 1)
+        if (hardlink_file_count)
         {
-                hardlink_read_one =
-                    (p8 address_to)utility_arena_take(hardlink_io_size);
-                hardlink_read_two =
-                    (p8 address_to)utility_arena_take(hardlink_io_size);
+                hardlink_read_one = (p8 address_to)utility_arena_take(hardlink_io_size);
+                hardlink_read_two = (p8 address_to)utility_arena_take(hardlink_io_size);
                 if (!hardlink_read_one || !hardlink_read_two ||
-                    !shell_array_room(hardlink_order, hardlink_order_room,
-                                      hardlink_file_count) ||
-                    !shell_array_room(hardlink_spare, hardlink_spare_room,
-                                      hardlink_file_count))
-                        return string_report(log_error, 1, "hardlink: out of memory while sorting files\n");
+                    !shell_array_room(hardlink_order, hardlink_order_room, hardlink_file_count) ||
+                    !shell_array_room(hardlink_spare, hardlink_spare_room, hardlink_file_count) ||
+                    !shell_array_room(hardlink_nodes, hardlink_node_room, hardlink_file_count))
+                        return string_report(log_error, 1, "hardlink: cannot continue: Cannot allocate memory\n");
+
+                //      The paths of one inode make one node, the first path
+                //      met giving its attributes and the last its head.
                 for (positive i = 0; i < hardlink_file_count; i++)
                         hardlink_order[i] = i;
 
-                hardlink_sort_hash = false;
                 positive address_to sorted = array_merge_sort(
-                    hardlink_order, hardlink_spare, hardlink_file_count,
-                    hardlink_index_compare);
+                    hardlink_order, hardlink_spare, hardlink_file_count, hardlink_key_compare);
                 if (sorted != hardlink_order)
-                        memory_copy_apart(hardlink_order, sorted,
-                                          hardlink_file_count * sizeof(positive));
+                        memory_copy_apart(hardlink_order, sorted, hardlink_file_count * sizeof(positive));
 
                 for (positive first = 0; first < hardlink_file_count;)
                 {
                         positive after = first + 1;
+
                         while (after < hardlink_file_count &&
-                               !hardlink_index_compare(hardlink_order[first],
-                                                       hardlink_order[after]))
+                               hardlink_same_node(hardlink_order[first], hardlink_order[after]))
                                 after++;
-                        if (after - first > 1)
-                                for (positive i = first; i < after; i++)
-                                        hardlink_hash_one(
-                                            hardlink_files + hardlink_order[i]);
+
+                        hardlink_node address_to node = hardlink_nodes + hardlink_node_count;
+                        positive previous = 0;
+
+                        node->first = hardlink_order[first];
+                        node->links = hardlink_files[node->first].facts.hard_links;
+                        for (positive i = first; i < after; i++)
+                        {
+                                hardlink_file address_to file = hardlink_files + hardlink_order[i];
+
+                                file->node = hardlink_node_count;
+                                file->next = previous;
+                                previous = hardlink_order[i] + 1;
+                        }
+                        node->head = previous;
+                        hardlink_node_count++;
                         first = after;
                 }
 
-                hardlink_sort_hash = true;
-                sorted = array_merge_sort(hardlink_order, hardlink_spare,
-                                          hardlink_file_count,
-                                          hardlink_index_compare);
+                for (positive i = 0; i < hardlink_node_count; i++)
+                        hardlink_order[i] = i;
+                sorted = array_merge_sort(hardlink_order, hardlink_spare, hardlink_node_count,
+                                          hardlink_node_compare);
                 if (sorted != hardlink_order)
-                        memory_copy_apart(hardlink_order, sorted,
-                                          hardlink_file_count * sizeof(positive));
+                        memory_copy_apart(hardlink_order, sorted, hardlink_node_count * sizeof(positive));
 
-                /* Preserve established link groups.  This is a secondary
-                   ordering only: reset it before finding the metadata/hash
-                   boundaries so different nlink counts remain candidates. */
-                hardlink_sort_links = true;
-                sorted = array_merge_sort(hardlink_order, hardlink_spare,
-                                          hardlink_file_count,
-                                          hardlink_index_compare);
-                if (sorted != hardlink_order)
-                        memory_copy_apart(hardlink_order, sorted,
-                                          hardlink_file_count * sizeof(positive));
-                hardlink_sort_links = false;
-
-                for (positive first = 0; first < hardlink_file_count;)
+                //      visitor: each device and size in turn, each node in it
+                //      master to the ones after it.
+                for (positive first = 0; first < hardlink_node_count;)
                 {
+                        file_facts address_to lead = &hardlink_files[hardlink_nodes[hardlink_order[first]].first].facts;
                         positive after = first + 1;
-                        while (after < hardlink_file_count &&
-                               !hardlink_index_compare(hardlink_order[first],
-                                                       hardlink_order[after]))
-                                after++;
 
-                        for (positive i = first + 1; i < after; i++)
+                        while (after < hardlink_node_count)
                         {
-                                hardlink_file address_to duplicate =
-                                    hardlink_files + hardlink_order[i];
-                                if (!duplicate->valid || !duplicate->hashed)
-                                        continue;
+                                file_facts address_to next = &hardlink_files[hardlink_nodes[hardlink_order[after]].first].facts;
 
-                                hardlink_file address_to keep = null;
-                                for (positive candidate = first; candidate < i;
-                                     candidate++)
+                                if (next->size != lead->size || next->device_major != lead->device_major ||
+                                    next->device_minor != lead->device_minor)
+                                        break;
+                                after++;
+                        }
+
+                        for (positive m = first; m < after; m++)
+                        {
+                                positive master = hardlink_order[m];
+                                bool clone = false;
+
+                                if (!hardlink_nodes[master].head)
+                                        continue;
+                                if (hardlink_reflink_mode || hardlink_skip_reflinks)
+                                        clone = hardlink_reflink_mode == 'A' ||
+                                                (hardlink_reflink_mode == 'a' &&
+                                                 hardlink_reflink_compatible(
+                                                     hardlink_path(hardlink_files + hardlink_nodes[master].head - 1)));
+
+                                for (positive o = m + 1; o < after; o++)
                                 {
-                                        hardlink_file address_to possible =
-                                            hardlink_files +
-                                            hardlink_order[candidate];
-                                        if (possible->valid && possible->hashed &&
-                                            hardlink_metadata_same(possible,
-                                                                   duplicate) &&
-                                            possible->hash == duplicate->hash &&
-                                            (file_same_identity(
-                                                 address_of possible->facts,
-                                                 address_of duplicate->facts) ||
-                                             hardlink_equal(possible,
-                                                            duplicate)))
+                                        positive other = hardlink_order[o];
+
+                                        if (!hardlink_nodes[other].head)
+                                                continue;
+                                        if (!hardlink_may_link(master, other))
                                         {
-                                                keep = possible;
-                                                break;
+                                                HARDLINK_SAY(3, "Skipped (attributes mismatch) %w\n",
+                                                             writer_terminal_name,
+                                                             hardlink_path(hardlink_files + hardlink_nodes[other].head - 1));
+                                                continue;
                                         }
-                                }
-                                if (!keep)
-                                        continue;
 
-                                if (listing)
-                                {
-                                        hardlink_list_pair(keep, duplicate,
-                                                           delimiter);
-                                        continue;
-                                }
-                                if (file_same_identity(address_of keep->facts,
-                                                       address_of duplicate->facts))
-                                        continue;
+                                        hardlink_file address_to one = hardlink_files + hardlink_nodes[master].head - 1;
+                                        hardlink_file address_to two = hardlink_files + hardlink_nodes[other].head - 1;
+                                        bool equal = false;
 
-                                bool changed = dry || hardlink_replace(keep,
-                                                                       duplicate);
-                                if (!changed)
-                                {
-                                        hardlink_status = 1;
-                                        duplicate->valid = false;
-                                        continue;
-                                }
-                                hardlink_linked++;
-                                hardlink_saved += duplicate->facts.size;
-                                if (verbose && !quiet)
-                                {
-                                        string_format(log, "Linking %w to %w (-%b B)\n",
-                                                      writer_terminal_name, hardlink_path(keep),
-                                                      writer_terminal_name,
-                                                      hardlink_path(duplicate),
-                                                      duplicate->facts.size);
+                                        if (!one->hashed)
+                                                hardlink_hash_one(one);
+                                        if (!two->hashed)
+                                                hardlink_hash_one(two);
+                                        if (one->valid && two->valid && one->hashed && two->hashed &&
+                                            one->hash == two->hash)
+                                                equal = hardlink_equal(one, two);
+                                        hardlink_compared++;
+
+                                        if (!equal)
+                                        {
+                                                HARDLINK_SAY(3, "Skipped (content mismatch) %w\n",
+                                                             writer_terminal_name, hardlink_path(two));
+                                                continue;
+                                        }
+                                        (void)hardlink_link_all(master, other, clone);
                                 }
                         }
                         first = after;
                 }
+
+                if (hardlink_listing)
+                        for (positive i = 0; i < hardlink_node_count; i++)
+                        {
+                                hardlink_node address_to node = hardlink_nodes + hardlink_order[i];
+
+                                if (node->links <= 1)
+                                        continue;
+                                for (positive link = node->head; link; link = hardlink_files[link - 1].next)
+                                {
+                                        positive_to_padded(log, 0x5555a0000000ull + hardlink_order[i] * 64, 16, '0', 0);
+                                        log("\t", 1);
+                                        if (delimiter)
+                                                writer_terminal_name(log, hardlink_path(hardlink_files + link - 1));
+                                        else
+                                                log(hardlink_path(hardlink_files + link - 1), 0);
+                                        log(address_of delimiter, 1);
+                                }
+                        }
         }
 
-        if (!quiet && !listing)
-                string_format(log,
-                              "Mode:                     %s\n"
-                              "Method:                   checked-read\n"
-                              "Files:                    %b\n"
-                              "Linked:                   %b files\n"
-                              "Saved:                    %b B\n",
-                              dry ? (string_address)"dry-run"
-                                  : (string_address)"real",
-                              hardlink_file_count, hardlink_linked,
-                              hardlink_saved);
+        if (!hardlink_quiet)
+                hardlink_print_stats(started);
         log_flush();
-        return hardlink_status;
+        return 0;
 }
 
 // shred ------------------------------------------------------------
