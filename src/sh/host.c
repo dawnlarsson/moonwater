@@ -180,6 +180,14 @@ static fn locale_recover(void);
 static unsigned int locale_wake_ms(unsigned int most);
 static b32 host_wipe(void);
 
+// A line to the writer, then the buffer out: the two calls every report ends on.
+#define host_say(...) \
+        do \
+        { \
+                string_format(__VA_ARGS__); \
+                log_flush(); \
+        } while (0)
+
 // The root check the commands that change the machine open with.
 #define host_need_root(what) \
         do \
@@ -191,15 +199,13 @@ static b32 host_wipe(void);
 static b32 host_refuse(string_address text, string_address name)
 {
         string_format(log_error, host_label);
-        string_format(log_error, text, name);
-        log_flush();
+        host_say(log_error, text, name);
         return 1;
 }
 
 static b32 host_fail(string_address what, bipolar error)
 {
-        string_format(log_error, host_label "%s: %s\n", what, file_reason(error));
-        log_flush();
+        host_say(log_error, host_label "%s: %s\n", what, file_reason(error));
         return 1;
 }
 
@@ -1214,9 +1220,8 @@ static b32 host_update(host_install address_to install)
                 return host_fail(install->system, mounted);
         }
 
-        string_format(log, host_label "writing this build to %s, from %s\n",
-                      install->system, search.name);
-        log_flush();
+        host_say(log, host_label "writing this build to %s, from %s\n",
+                 install->system, search.name);
 
         /*      An update keeps the disk's settings: they are that machine's,
                 and the stick is only carrying a build. An image from before
@@ -1246,9 +1251,8 @@ static b32 host_update(host_install address_to install)
                                 host_settings_keep(address_of session);
                         }
 
-                        string_format(log, host_label "%s keeps its own settings\n",
-                                      install->disk);
-                        log_flush();
+                        host_say(log, host_label "%s keeps its own settings\n",
+                                 install->disk);
                 }
         }
 
@@ -1301,9 +1305,8 @@ static b32 host_take(host_install address_to install, bool update)
                 return 1;
 
         host_verdict_set("disk ", install->disk);
-        string_format(log, host_label "%s, /root and /home are kept on %s\n",
-                      BOWL_ROOT_DIRECTORY, install->disk);
-        log_flush();
+        host_say(log, host_label "%s, /root and /home are kept on %s\n",
+                 BOWL_ROOT_DIRECTORY, install->disk);
         radio_restore();
         locale_restore();
         tune_restore();
@@ -1337,9 +1340,8 @@ static b32 host_boot(void)
         {
                 host_write_text(HOST_HINT, "");
                 host_verdict_set("live", "");
-                string_format(log, host_label "init mount is off: nothing on this machine's "
-                                              "disks is mounted this session\n");
-                log_flush();
+                host_say(log, host_label "init mount is off: nothing on this machine's "
+                                         "disks is mounted this session\n");
                 host_events_boot(address_of settings);
                 return 0;
         }
@@ -1394,10 +1396,9 @@ static b32 host_boot(void)
                 {
                         host_write_text(HOST_HINT, "");
                         host_verdict_set("live", "");
-                        string_format(log, host_label "init mount is off: %s is not mounted "
-                                                      "this session\n",
-                                      chosen->disk);
-                        log_flush();
+                        host_say(log, host_label "init mount is off: %s is not mounted "
+                                                 "this session\n",
+                                 chosen->disk);
                         host_events_boot(address_of settings);
                         return 0;
                 }
@@ -1416,11 +1417,10 @@ static b32 host_boot(void)
         chosen = census.found;
         host_write_text(HOST_QUESTION, "");
         host_verdict_set("ask ", chosen->disk);
-        string_format(log, host_label "%s has Moonwater installed from another build.\n"
-                           host_label "A terminal will ask what to do with it, or "
-                           "moonwater use, update or live answers from a shell.\n",
-                      chosen->disk);
-        log_flush();
+        host_say(log, host_label "%s has Moonwater installed from another build.\n"
+                      host_label "A terminal will ask what to do with it, or "
+                      "moonwater use, update or live answers from a shell.\n",
+                 chosen->disk);
         host_events_boot(known ? address_of settings : null);
         return 0;
 }
@@ -1461,8 +1461,7 @@ static fn host_question(string_address disk)
 
         for (;;)
         {
-                string_format(log, host_label "1, 2 or 3? [1] ");
-                log_flush();
+                host_say(log, host_label "1, 2 or 3? [1] ");
 
                 if (host_read_line(answer, sizeof(answer)) < 0)
                         break;
@@ -1478,9 +1477,8 @@ static fn host_question(string_address disk)
                 if (string_equals(answer, "3"))
                 {
                         host_verdict_set("live", "");
-                        string_format(log, host_label "%s is left alone, and nothing "
-                                                      "is kept this session\n", disk);
-                        log_flush();
+                        host_say(log, host_label "%s is left alone, and nothing "
+                                                 "is kept this session\n", disk);
                         return;
                 }
         }
@@ -1511,9 +1509,8 @@ fn host_terminal_opening(void)
 
                 if (!said && uptime >= HOST_LOOKING_NS)
                 {
-                        string_format(log, host_label "looking for Moonwater on "
-                                                      "this machine's disks\n");
-                        log_flush();
+                        host_say(log, host_label "looking for Moonwater on "
+                                                 "this machine's disks\n");
                         said = true;
                 }
 
@@ -1528,11 +1525,10 @@ fn host_terminal_opening(void)
                  system_rename_at(AT_FDCWD, HOST_HINT, AT_FDCWD, HOST_HINT_TAKEN,
                                   0) >= 0)
         {
-                string_format(log, host_label "This is a live session: nothing is kept "
-                                              "after power off.\n"
-                                   host_label "moonwater install DISK puts Moonwater "
-                                              "on a disk.\n");
-                log_flush();
+                host_say(log, host_label "This is a live session: nothing is kept "
+                                         "after power off.\n"
+                              host_label "moonwater install DISK puts Moonwater "
+                                         "on a disk.\n");
         }
 }
 
@@ -1721,18 +1717,16 @@ static b32 host_install_disk(string_address asked, bool removable)
                 string_copy(text, "a disk");
         host_plain_line(text);
 
-        string_format(log, host_label "Installing erases everything on %s: %s, %p GiB.\n"
-                           host_label "Type %s to go on: ",
-                      name, text, bytes >> 30, name);
-        log_flush();
+        host_say(log, host_label "Installing erases everything on %s: %s, %p GiB.\n"
+                      host_label "Type %s to go on: ",
+                 name, text, bytes >> 30, name);
 
         if (host_read_line(answer, sizeof(answer)) < 0 ||
             !string_equals(answer, name))
         {
                 system_close(handle);
                 host_unmount(HOST_MEDIUM);
-                string_format(log, host_label "nothing written\n");
-                log_flush();
+                host_say(log, host_label "nothing written\n");
                 return 1;
         }
 
@@ -1769,8 +1763,7 @@ static b32 host_install_disk(string_address asked, bool removable)
 
         if (!failed)
         {
-                string_format(log, host_label "partitioning and formatting %s\n", name);
-                log_flush();
+                host_say(log, host_label "partitioning and formatting %s\n", name);
 
                 failed = storage_format_zero(handle, 0, HOST_ALIGN_BYTES);
         }
@@ -1825,10 +1818,9 @@ static b32 host_install_disk(string_address asked, bool removable)
                 return host_fail(target.system, failed);
         }
 
-        string_format(log, host_label "writing this build to %s, from %s, with this "
-                                      "session's settings\n",
-                      target.system, search.name);
-        log_flush();
+        host_say(log, host_label "writing this build to %s, from %s, with this "
+                                 "session's settings\n",
+                 target.system, search.name);
 
         failed = host_place_image(HOST_SYSTEM, running, address_of carry);
         host_unmount(HOST_SYSTEM);
@@ -1854,8 +1846,7 @@ static b32 host_install_disk(string_address asked, bool removable)
                 if (system_access_at(AT_FDCWD, host_kept[at].path, 0) < 0)
                         continue;
 
-                string_format(log, host_label "copying %s\n", host_kept[at].path);
-                log_flush();
+                host_say(log, host_label "copying %s\n", host_kept[at].path);
 
                 if (host_run(argv))
                 {
@@ -1868,10 +1859,9 @@ static b32 host_install_disk(string_address asked, bool removable)
         if (host_take(address_of target, false))
                 return 1;
 
-        string_format(log, host_label "Moonwater is installed on %s. Power off and take "
-                                      "the stick out, and the machine starts from %s.\n",
-                      name, name);
-        log_flush();
+        host_say(log, host_label "Moonwater is installed on %s. Power off and take "
+                                 "the stick out, and the machine starts from %s.\n",
+                 name, name);
         return 0;
 }
 
@@ -2773,8 +2763,7 @@ static b32 host_settings_refused(string_address verb, string_address why,
                 string_format(log_error, " (%p of %p bytes); remove an entry first",
                               (positive)settings->length,
                               (positive)SPARK_SETTINGS_PAYLOAD);
-        string_format(log_error, "\n");
-        log_flush();
+        host_say(log_error, "\n");
         return HOST_SETTINGS_REFUSED;
 }
 
@@ -2834,10 +2823,9 @@ static b32 host_settings_apply(host_settings address_to settings,
 
                 if (count == 3)
                 {
-                        string_format(log, host_label "%s %s %s\n", verb,
-                                      host_switches[at].word,
-                                      settings->flags & flag ? "off" : "on");
-                        log_flush();
+                        host_say(log, host_label "%s %s %s\n", verb,
+                                 host_switches[at].word,
+                                 settings->flags & flag ? "off" : "on");
                         return HOST_SETTINGS_SHOWN;
                 }
 
@@ -2884,9 +2872,8 @@ static b32 host_settings_apply(host_settings address_to settings,
 
                 if (!host_settings_find(settings, list, text, address_of setting))
                 {
-                        string_format(log_error, host_label "%s has no entry %s\n", verb,
-                                      text);
-                        log_flush();
+                        host_say(log_error, host_label "%s has no entry %s\n", verb,
+                                 text);
                         return HOST_SETTINGS_REFUSED;
                 }
 
@@ -2940,11 +2927,10 @@ static fn host_settings_note(host_settings address_to settings,
             !(settings->flags & SPARK_SETTINGS_MOUNT_OFF))
                 return;
 
-        string_format(log, host_label "%s is read when the entry runs and is not kept "
-                                      "after power off; moonwater bind %s add \"$(cat %s)\" "
-                                      "keeps the script itself\n",
-                      path, verb, path);
-        log_flush();
+        host_say(log, host_label "%s is read when the entry runs and is not kept "
+                                 "after power off; moonwater bind %s add \"$(cat %s)\" "
+                                 "keeps the script itself\n",
+                 path, verb, path);
 }
 
 static b32 host_settings_command(string_address address_to arguments, positive count)
@@ -3285,15 +3271,13 @@ fn host_exit_run(void)
 
                 if (spent >= HOST_EXIT_ALL_NS)
                 {
-                        string_format(log_error, host_label "exit: thirty seconds are spent, "
-                                                            "and the rest do not run\n");
-                        log_flush();
+                        host_say(log_error, host_label "exit: thirty seconds are spent, "
+                                                       "and the rest do not run\n");
                         break;
                 }
 
                 host_settings_text(text, address_of setting);
-                string_format(log, host_label "exit %p: %s\n", (positive)setting.entry.id, text);
-                log_flush();
+                host_say(log, host_label "exit %p: %s\n", (positive)setting.entry.id, text);
 
                 //      The environment init's entries get, not the stopping
                 //      shell's: a bound poweroff has almost none.
@@ -3460,10 +3444,9 @@ static b32 host_canvas(string_address address_to arguments, positive count)
 
         if (string_equals(arguments[2], "off"))
         {
-                string_format(log, host_label "Canvas off: every window closes, this one too. "
-                                              "On the text console, moonwater canvas on "
-                                              "brings the desktop back.\n");
-                log_flush();
+                host_say(log, host_label "Canvas off: every window closes, this one too. "
+                                         "On the text console, moonwater canvas on "
+                                         "brings the desktop back.\n");
 
                 system_signal_install(1, 1, 0, 0, null);
 
@@ -3669,8 +3652,7 @@ static b32 host_bios(string_address address_to arguments, positive count)
         if (host_bios_set())
                 return 1;
 
-        string_format(log, host_label "restarting into the firmware's setup\n");
-        log_flush();
+        host_say(log, host_label "restarting into the firmware's setup\n");
         shell_stop(log, REBOOT_RESTART);
 
         //      Only reached when the machine did not stop.
@@ -7002,9 +6984,8 @@ static bipolar radio_password_read(p8 address_to into, positive room,
                 quiet[17 + 6] = 1; // VMIN
                 quiet[17 + 5] = 0; // VTIME
                 radio_display(shown, sizeof(shown), ssid, string_length(ssid));
-                string_format(log_error, host_label "password for %s (empty for an open network): ",
-                              shown);
-                log_flush();
+                host_say(log_error, host_label "password for %s (empty for an open network): ",
+                         shown);
                 system_call_3(syscall(ioctl), 0, RADIO_TERMINAL_SET, (positive)quiet);
         }
 
@@ -7053,8 +7034,7 @@ static bipolar radio_password_read(p8 address_to into, positive room,
         if (terminal)
         {
                 system_call_3(syscall(ioctl), 0, RADIO_TERMINAL_SET, (positive)saved);
-                string_format(log_error, "\n");
-                log_flush();
+                host_say(log_error, "\n");
         }
         into[used] = end;
         crypto_forget(quiet, sizeof(quiet));
@@ -7147,11 +7127,8 @@ static b32 radio_wifi_bring(bool say)
                 {
                         joined = true;
                         if (say)
-                        {
-                                string_format(log, host_label "wifi joined %s\n",
-                                              (string_address)networks[at].ssid);
-                                log_flush();
-                        }
+                                host_say(log, host_label "wifi joined %s\n",
+                                         (string_address)networks[at].ssid);
                         break;
                 }
                 if (failed == -19)
@@ -7164,10 +7141,7 @@ static b32 radio_wifi_bring(bool say)
         if (!count)
         {
                 if (say)
-                {
-                        string_format(log, host_label "wifi on\n");
-                        log_flush();
-                }
+                        host_say(log, host_label "wifi on\n");
                 return 0;
         }
 
@@ -7214,10 +7188,7 @@ static b32 radio_wifi_off(bool say)
         radio_net_wake();
         radio_unlock(lock);
         if (say)
-        {
-                string_format(log, host_label "wifi off\n");
-                log_flush();
-        }
+                host_say(log, host_label "wifi off\n");
         return 0;
 }
 
@@ -7353,8 +7324,7 @@ static b32 radio_wifi_add(string_address ssid, string_address pass)
                         crypto_forget((address_any)pass, string_length(pass));
         }
 
-        string_format(log, host_label "wifi joined %s\n", ssid);
-        log_flush();
+        host_say(log, host_label "wifi joined %s\n", ssid);
         return 0;
 }
 
@@ -7432,9 +7402,8 @@ static b32 radio_wifi_remove(string_address ssid)
         radio_unlock(lock);
         radio_net_wake();
 
-        string_format(log, host_label "wifi forgot %s%s\n", ssid,
-                      was_joined ? " and left it" : "");
-        log_flush();
+        host_say(log, host_label "wifi forgot %s%s\n", ssid,
+                 was_joined ? " and left it" : "");
         return 0;
 }
 
@@ -7479,9 +7448,8 @@ static b32 radio_wired_set(bool on)
 
         if (failed < 0)
                 return host_fail("wired", failed);
-        string_format(log, host_label "wired %s%s\n", on ? "on" : "off",
-                      wired.count ? "" : " (this machine has no wired link)");
-        log_flush();
+        host_say(log, host_label "wired %s%s\n", on ? "on" : "off",
+                 wired.count ? "" : " (this machine has no wired link)");
         return 0;
 }
 
@@ -7531,10 +7499,9 @@ static b32 radio_wifi_status(void)
         if (radio_wifi_why(why, sizeof(why)) ||
             !radio_air_take(address_of air, RADIO_AIR_STALE))
         {
-                string_format(log, host_label "wifi: %s\n",
-                              why[0] ? (string_address)why
-                                     : (string_address) "no wireless interface");
-                log_flush();
+                host_say(log, host_label "wifi: %s\n",
+                         why[0] ? (string_address)why
+                                : (string_address) "no wireless interface");
                 crypto_forget(networks, sizeof(networks));
                 return 0;
         }
@@ -7608,9 +7575,8 @@ static b32 radio_wifi_status(void)
                 }
         }
 
-        string_format(log, host_label "* joined  + saved  "
-                                      "moonwater wifi add SSID asks for its password\n");
-        log_flush();
+        host_say(log, host_label "* joined  + saved  "
+                                 "moonwater wifi add SSID asks for its password\n");
         crypto_forget(networks, sizeof(networks));
         return 0;
 }
@@ -7624,10 +7590,7 @@ static b32 radio_bluetooth_power(bool on, bool say)
         radio_write_word(NET_BLUETOOTH_POWER, word);
         radio_rfkill(RADIO_RFKILL_BLUETOOTH, !on);
         if (say)
-        {
-                string_format(log, host_label "bluetooth %s\n", word);
-                log_flush();
-        }
+                host_say(log, host_label "bluetooth %s\n", word);
         return 0;
 }
 
@@ -7667,8 +7630,7 @@ static b32 radio_bluetooth_add(string_address identity)
         }
 
         radio_bluetooth_power(true, false);
-        string_format(log, host_label "bluetooth remembered %s\n", identity);
-        log_flush();
+        host_say(log, host_label "bluetooth remembered %s\n", identity);
         return 0;
 }
 
@@ -7709,8 +7671,7 @@ static b32 radio_bluetooth_remove(string_address identity)
 
         if (!found || host_write_file(NET_BLUETOOTH_LIST, kept, used, 0644, true) < 0)
                 return host_fail("bluetooth", -1);
-        string_format(log, host_label "bluetooth forgot %s\n", identity);
-        log_flush();
+        host_say(log, host_label "bluetooth forgot %s\n", identity);
         return 0;
 }
 
@@ -7774,16 +7735,14 @@ static b32 radio_internet_set(string_address which)
                 return host_fail("internet", -1);
         radio_net_wake();
 
-        string_format(log, host_label "internet prefers %s\n", which);
-        log_flush();
+        host_say(log, host_label "internet prefers %s\n", which);
         return 0;
 }
 
 static b32 radio_internet_status(void)
 {
-        string_format(log, host_label "internet prefers %s\n",
-                      radio_internet_word());
-        log_flush();
+        host_say(log, host_label "internet prefers %s\n",
+                 radio_internet_word());
         return 0;
 }
 
@@ -8249,9 +8208,8 @@ static b32 tune_airplane(string_address address_to arguments, positive count)
 
         if (count == 2)
         {
-                string_format(log, host_label "airplane %s\n",
-                              wifi_off && bluetooth_off ? "on" : "off");
-                log_flush();
+                host_say(log, host_label "airplane %s\n",
+                         wifi_off && bluetooth_off ? "on" : "off");
                 return 0;
         }
         if (count != 3 || (!string_equals(arguments[2], "on") && !string_equals(arguments[2], "off")))
@@ -8271,8 +8229,7 @@ static b32 tune_airplane(string_address address_to arguments, positive count)
                 (void)radio_wifi_on(false);
                 (void)radio_bluetooth_power(true, false);
         }
-        string_format(log, host_label "airplane %s\n", arguments[2]);
-        log_flush();
+        host_say(log, host_label "airplane %s\n", arguments[2]);
         return 0;
 }
 
@@ -8301,9 +8258,8 @@ static b32 tune_brightness(string_address address_to arguments, positive count)
 
         if (count == 2)
         {
-                string_format(log, host_label "brightness %p%% (%p of %p)\n",
-                              (current * 100 + maximum / 2) / maximum, current, maximum);
-                log_flush();
+                host_say(log, host_label "brightness %p%% (%p of %p)\n",
+                         (current * 100 + maximum / 2) / maximum, current, maximum);
                 return 0;
         }
         if (!tune_percent(arguments[2], address_of relative, address_of lower,
@@ -8328,8 +8284,7 @@ static b32 tune_brightness(string_address address_to arguments, positive count)
                 failed = tune_write_number(current_path, value);
                 if (failed < 0)
                         return host_fail("brightness", failed);
-                string_format(log, host_label "brightness %p%%\n", target);
-                log_flush();
+                host_say(log, host_label "brightness %p%%\n", target);
         }
         return 0;
 }
@@ -8426,8 +8381,7 @@ static b32 tune_charge(string_address address_to arguments, positive count)
                         //      A limit of a full charge is the default: nothing to bring back.
                         (void)tune_keep("charge.limit", number == 100 ? (string_address)"" : (string_address)text);
                 }
-                string_format(log, host_label "charging stops at %p%%\n", number);
-                log_flush();
+                host_say(log, host_label "charging stops at %p%%\n", number);
                 return 0;
         }
         return host_usage();
@@ -8521,8 +8475,7 @@ static b32 tune_power(string_address address_to arguments, positive count)
                         string_format(log, "; governor %s", (string_address)governor);
                 if (preference[0])
                         string_format(log, "; preference %s", (string_address)preference);
-                string_format(log, "\n");
-                log_flush();
+                host_say(log, "\n");
                 return 0;
         }
         if (count != 3 || (!string_equals(arguments[2], "performance") &&
@@ -8533,8 +8486,7 @@ static b32 tune_power(string_address address_to arguments, positive count)
         if (!tune_power_apply(arguments[2]))
                 return host_refuse("this machine has no power profile to set%s\n", "");
         (void)tune_keep("power", arguments[2]);
-        string_format(log, host_label "power %s\n", arguments[2]);
-        log_flush();
+        host_say(log, host_label "power %s\n", arguments[2]);
         return 0;
 }
 
@@ -8599,8 +8551,7 @@ static b32 tune_cpu(string_address address_to arguments, positive count)
                         string_format(log, "; boost %s", boost[0] == '1' ? "on" : "off");
                 if (smt[0])
                         string_format(log, "; smt %s", (string_address)smt);
-                string_format(log, "\n");
-                log_flush();
+                host_say(log, "\n");
                 return 0;
         }
         if (count == 4 && (string_equals(arguments[2], "boost") || string_equals(arguments[2], "smt")) &&
@@ -8615,8 +8566,7 @@ static b32 tune_cpu(string_address address_to arguments, positive count)
                                                  : "this machine has no SMT switch%s\n", "");
                 //      Both default to on: nothing to bring back then.
                 (void)tune_keep(boost ? "cpu.boost" : "cpu.smt", on ? "" : "off");
-                string_format(log, host_label "cpu %s %s\n", arguments[2], arguments[3]);
-                log_flush();
+                host_say(log, host_label "cpu %s %s\n", arguments[2], arguments[3]);
                 return 0;
         }
         if (count == 4 && (string_equals(arguments[2], "online") || string_equals(arguments[2], "offline")) &&
@@ -8636,8 +8586,7 @@ static b32 tune_cpu(string_address address_to arguments, positive count)
                 if (!tune_path(path, sizeof(path), TUNE_SYS_CPU "/cpu", (string_address)text, "/online") ||
                     tune_write(path, string_equals(arguments[2], "online") ? "1" : "0") < 0)
                         return host_refuse("that cpu cannot be switched%s\n", "");
-                string_format(log, host_label "cpu %s %p\n", arguments[2], number);
-                log_flush();
+                host_say(log, host_label "cpu %s %p\n", arguments[2], number);
                 return 0;
         }
         return host_usage();
@@ -8693,9 +8642,8 @@ static fn tune_suspend_failure(void)
         if (!tune_word(TUNE_SYS_POWER "/suspend_stats/last_failed_step", step, sizeof(step)))
                 step[0] = 0;
         (void)tune_number(TUNE_SYS_POWER "/suspend_stats/last_failed_errno", address_of errno_value);
-        string_format(log, host_label "the kernel stopped at %s (%s), last error %d\n",
-                      (string_address)device, (string_address)step, (b32)errno_value);
-        log_flush();
+        host_say(log, host_label "the kernel stopped at %s (%s), last error %d\n",
+                 (string_address)device, (string_address)step, (b32)errno_value);
 }
 
 /* moonwater sleep and moonwater hibernate: the kernel's own suspend and hibernate. */
@@ -8717,10 +8665,7 @@ static b32 tune_suspend(string_address verb, string_address state)
 
                 //      Which kind of sleep, as the kernel spells it: [s2idle] deep.
                 if (tune_word(TUNE_SYS_POWER "/mem_sleep", mode, sizeof(mode)))
-                {
-                        string_format(log, host_label "sleeping, mem_sleep %s\n", (string_address)mode);
-                        log_flush();
-                }
+                        host_say(log, host_label "sleeping, mem_sleep %s\n", (string_address)mode);
         }
         system_call(syscall(sync));
         {
@@ -8733,8 +8678,7 @@ static b32 tune_suspend(string_address verb, string_address state)
                 }
         }
         //      Reached again once the machine has woken.
-        string_format(log, host_label "awake again\n");
-        log_flush();
+        host_say(log, host_label "awake again\n");
         return 0;
 }
 
@@ -10363,10 +10307,9 @@ static b32 locale_zone_list(void)
         string_format(log, "  offsets  +1  -5  +5:30  UTC+2"
                            TERM_DIM "   +1 is an hour ahead of UTC,"
                            " with no daylight saving" TERM_RESET "\n");
-        string_format(log, "  auto     " TERM_DIM "the zone Cloudflare places "
-                           "this network in, asked once per network"
-                           TERM_RESET "\n");
-        log_flush();
+        host_say(log, "  auto     " TERM_DIM "the zone Cloudflare places "
+                      "this network in, asked once per network"
+                      TERM_RESET "\n");
         return 0;
 }
 
@@ -10471,8 +10414,7 @@ static b32 locale_zone_status(void)
         locale_zone_moment(when, sizeof(when));
         string_format(log, host_label "timezone %s " TERM_DIM "%s" TERM_RESET
                                       "\n", title, how);
-        string_format(log, "  local %s\n", when);
-        log_flush();
+        host_say(log, "  local %s\n", when);
         return 0;
 }
 
@@ -11056,13 +10998,12 @@ static b32 locale_zone_auto(void)
         {
                 locale_auto_asked(null);
                 locale_word(LOCALE_ZONE_PATH, zone, sizeof(zone));
-                string_format(log_error, host_label "timezone auto: Cloudflare "
-                                         "could not be asked (%s); keeping %s "
-                                         "until the network answers\n",
-                              locale_auto_reason(status),
-                              zone[0] ? (string_address)zone
-                                      : (string_address) "UTC");
-                log_flush();
+                host_say(log_error, host_label "timezone auto: Cloudflare "
+                                    "could not be asked (%s); keeping %s "
+                                    "until the network answers\n",
+                         locale_auto_reason(status),
+                         zone[0] ? (string_address)zone
+                                 : (string_address) "UTC");
                 return 1;
         }
         if (locale_auto_take(address_of answer, true) < 0)
@@ -11145,10 +11086,9 @@ static b32 locale_time_status(void)
         gmtime_r(address_of stamp, address_of broken);
         strftime(when, sizeof(when), "%Y-%m-%d %H:%M:%S", address_of broken);
         string_format(log, "  utc   %s\n", when);
-        string_format(log, "  ntp %s, %s\n",
-                      locale_ntp_wanted() ? "on" : "off",
-                      locale_clock_synced() ? "synchronised" : "waiting");
-        log_flush();
+        host_say(log, "  ntp %s, %s\n",
+                 locale_ntp_wanted() ? "on" : "off",
+                 locale_clock_synced() ? "synchronised" : "waiting");
         return 0;
 }
 
@@ -11668,19 +11608,17 @@ static b32 locale_ntp_status(void)
         if (!server[0])
                 string_copy_bounded(server, LOCALE_NTP_DEFAULT_SERVER,
                                     sizeof(server));
-        string_format(log, host_label "ntp %s, %s, sampling %s, %s\n",
-                      wanted ? "on" : "off", server,
-                      locale_ntp_sampling_wanted() ? "on" : "off",
-                      synced ? "synchronised" : "waiting");
-        log_flush();
+        host_say(log, host_label "ntp %s, %s, sampling %s, %s\n",
+                 wanted ? "on" : "off", server,
+                 locale_ntp_sampling_wanted() ? "on" : "off",
+                 synced ? "synchronised" : "waiting");
         return 0;
 }
 
 static b32 locale_ntp_sampling_status(void)
 {
-        string_format(log, host_label "ntp sampling %s\n",
-                      locale_ntp_sampling_wanted() ? "on" : "off");
-        log_flush();
+        host_say(log, host_label "ntp sampling %s\n",
+                 locale_ntp_sampling_wanted() ? "on" : "off");
         return 0;
 }
 
@@ -11699,9 +11637,8 @@ static b32 locale_ntp_set(bool sampling, string_address word)
                 if (locale_ntp_apply() < 0)
                         word = "on, waiting for a reply";
         }
-        string_format(log, host_label "ntp %s%s\n", sampling ? "sampling " : "",
-                      word);
-        log_flush();
+        host_say(log, host_label "ntp %s%s\n", sampling ? "sampling " : "",
+                 word);
         return 0;
 }
 
@@ -11753,8 +11690,7 @@ static b32 locale_keyboard_status(void)
         if (host_spark_once(SPARK_IOCTL_CANVAS, address_of control, FILE_READ) >= 0 &&
             control.master_command[0])
                 string_copy_bounded(name, control.master_command, sizeof(name));
-        string_format(log, host_label "keyboard %s\n", name);
-        log_flush();
+        host_say(log, host_label "keyboard %s\n", name);
         return 0;
 }
 
@@ -11764,10 +11700,9 @@ static b32 locale_keyboard_list(void)
         for (positive at = 0; at < array_count(locale_keyboards); at++)
                 string_format(log, " %s",
                               (string_address)locale_keyboards[at].name);
-        string_format(log, "\n" TERM_DIM "  a layout's code is its country's,"
-                           " so moonwater timezone takes it too" TERM_RESET
-                           "\n");
-        log_flush();
+        host_say(log, "\n" TERM_DIM "  a layout's code is its country's,"
+                      " so moonwater timezone takes it too" TERM_RESET
+                      "\n");
         return 0;
 }
 
@@ -11780,8 +11715,7 @@ static b32 locale_keyboard_set(string_address name)
         if (radio_write_word(LOCALE_KEYBOARD_PATH, name) < 0)
                 return host_fail("keyboard", -1);
         (void)locale_keyboard_live(name);
-        string_format(log, host_label "keyboard %s\n", name);
-        log_flush();
+        host_say(log, host_label "keyboard %s\n", name);
         return 0;
 }
 
@@ -12045,8 +11979,7 @@ static b32 host_wipe(void)
         if (failed < 0)
                 return host_fail("/root", failed);
 
-        string_format(log, host_label "userspace forgotten\n");
-        log_flush();
+        host_say(log, host_label "userspace forgotten\n");
         return 0;
 }
 
@@ -12183,9 +12116,8 @@ static b32 host_bind_events(void)
         if (failed < 0)
                 return host_fail(SPARK_DEVICE, failed);
 
-        string_format(log, "  reset is the keyboard's reset/restart key; "
-                           "a case reset button cannot be bound\n");
-        log_flush();
+        host_say(log, "  reset is the keyboard's reset/restart key; "
+                      "a case reset button cannot be bound\n");
         return 0;
 }
 
@@ -12307,8 +12239,7 @@ static b32 host_bind(string_address address_to arguments, positive count)
                         string_format(log_error, host_label "%s is not a bound event; the events are ",
                                       arguments[2]);
                 host_bind_names(log_error);
-                string_format(log_error, "\n");
-                log_flush();
+                host_say(log_error, "\n");
                 return 1;
         }
 
@@ -12347,85 +12278,84 @@ static fn host_title(writer out)
 */
 static fn host_usage_write(writer out)
 {
-        string_format(out,
-                      TERM_BOLD "  status" TERM_RESET
-                      "                      " TERM_DIM "this picture" TERM_RESET "\n"
-                      TERM_BOLD "  install DISK [--removable]" TERM_RESET
-                      "  " TERM_DIM "put Moonwater on a disk" TERM_RESET "\n"
-                      TERM_BOLD "  use [DISK]" TERM_RESET
-                      "                  " TERM_DIM "keep that disk this session" TERM_RESET "\n"
-                      TERM_BOLD "  update [DISK]" TERM_RESET
-                      "               " TERM_DIM "write this build onto a disk" TERM_RESET "\n"
-                      TERM_BOLD "  live" TERM_RESET
-                      "                        " TERM_DIM "leave the disks alone" TERM_RESET "\n"
-                      TERM_BOLD "  bind" TERM_RESET
-                      "                        " TERM_DIM "what the machine's events run" TERM_RESET "\n"
-                      TERM_BOLD "  bind EVENT [COMMAND]" TERM_RESET
-                      "        " TERM_DIM "one event; empty puts the default back" TERM_RESET "\n"
-                      TERM_BOLD "  bind init [add|remove ...]" TERM_RESET
-                      "  " TERM_DIM "what runs at boot" TERM_RESET "\n"
-                      TERM_BOLD "  bind init mount [on|off]" TERM_RESET
-                      "    " TERM_DIM "mount kept disks at boot" TERM_RESET "\n"
-                      TERM_BOLD "  bind exit [add|remove ...]" TERM_RESET
-                      "  " TERM_DIM "what runs when the machine stops" TERM_RESET "\n"
-                      TERM_BOLD "  canvas [on|off]" TERM_RESET
-                      "             " TERM_DIM "the desktop" TERM_RESET "\n"
-                      TERM_BOLD "  canvas log|terminal" TERM_RESET
-                      "         " TERM_DIM "open the kernel log or a terminal" TERM_RESET "\n"
-                      TERM_BOLD "  airplane [on|off]" TERM_RESET
-                      "          " TERM_DIM "every radio at once" TERM_RESET "\n"
-                      TERM_BOLD "  brightness [N%|+N|-N]" TERM_RESET
-                      "      " TERM_DIM "the screen backlight" TERM_RESET "\n"
-                      TERM_BOLD "  power [performance|balanced|powersave]" TERM_RESET
-                      " " TERM_DIM "profile and CPU governor" TERM_RESET "\n"
-                      TERM_BOLD "  cpu [boost|smt on|off] [online|offline N]" TERM_RESET
-                      " " TERM_DIM "turbo, SMT and hotplug" TERM_RESET "\n"
-                      TERM_BOLD "  charge [limit N|off]" TERM_RESET
-                      "       " TERM_DIM "where the battery stops charging" TERM_RESET "\n"
-                      TERM_BOLD "  sleep" TERM_RESET " | " TERM_BOLD "hibernate" TERM_RESET
-                      "           " TERM_DIM "suspend to RAM or to disk" TERM_RESET "\n"
-                      TERM_BOLD "  bios [reboot]" TERM_RESET
-                      "               " TERM_DIM "restart into the firmware's setup screen" TERM_RESET "\n"
-                      TERM_BOLD "  wired [on|off]" TERM_RESET
-                      "              " TERM_DIM "the wired links: no lease is asked on one when off" TERM_RESET "\n"
-                      TERM_BOLD "  wifi [on|off]" TERM_RESET
-                      "               " TERM_DIM "the wireless radio" TERM_RESET "\n"
-                      TERM_BOLD "  wifi add SSID [PASSWORD|-]" TERM_RESET
-                      "  " TERM_DIM "remember a network and join it; asks for" TERM_RESET "\n"
-                      "                              " TERM_DIM "the password, - reads it from stdin" TERM_RESET "\n"
-                      TERM_BOLD "  wifi remove SSID" TERM_RESET
-                      "            " TERM_DIM "forget a saved network, and leave it" TERM_RESET "\n"
-                      TERM_BOLD "  bluetooth [on|off]" TERM_RESET
-                      "          " TERM_DIM "the bluetooth radio" TERM_RESET "\n"
-                      TERM_BOLD "  bluetooth add NAME" TERM_RESET
-                      "          " TERM_DIM "remember a bluetooth device" TERM_RESET "\n"
-                      TERM_BOLD "  bluetooth remove NAME" TERM_RESET
-                      "       " TERM_DIM "forget a bluetooth device" TERM_RESET "\n"
-                      TERM_BOLD "  priority internet [wired|wifi]" TERM_RESET
-                      " " TERM_DIM "which link when both are up [wired]" TERM_RESET "\n"
-                      TERM_BOLD "  time [sync]" TERM_RESET
-                      "                 " TERM_DIM "the clock; sync sets it and the zone now" TERM_RESET "\n"
-                      TERM_BOLD "  timezone [ZONE|se|+1|list]" TERM_RESET
-                      " " TERM_DIM "the clock's zone; setting one makes it manual" TERM_RESET "\n"
-                      TERM_BOLD "  timezone auto" TERM_RESET
-                      "               " TERM_DIM "from the network [auto]: one Cloudflare" TERM_RESET "\n"
-                      "                              " TERM_DIM "request per network joined" TERM_RESET "\n"
-                      TERM_BOLD "  ntp [on|off]" TERM_RESET
-                      "                " TERM_DIM "set the clock from the network [on]" TERM_RESET "\n"
-                      TERM_BOLD "  ntp sampling [on|off]" TERM_RESET
-                      "       " TERM_DIM "keep the lowest-delay sample of five [on]" TERM_RESET "\n"
-                      TERM_BOLD "  link [on|off|help]" TERM_RESET
-                      "         " TERM_DIM "shell and run on paired machines, by key" TERM_RESET "\n"
-                      TERM_BOLD "  keyboard [LAYOUT|list]" TERM_RESET
-                      "      " TERM_DIM "Canvas keys: us uk de se no dk fi fr es it" TERM_RESET "\n"
-                      TERM_BOLD "  wipe" TERM_RESET
-                      "                        " TERM_DIM "forget /home and /root, keep the machine" TERM_RESET "\n"
-                      "\n"
-                      TERM_DIM                       "  Settings stay in the image this session started from.\n"
-                      "  install takes this session's; update keeps the disk's.\n"
-                      "  The machine script overwrites bind, init and exit.\n"
-                      "  " HOST_MACHINE_SCRIPT " overlays the kernel builtin.\n" TERM_RESET);
-        log_flush();
+        host_say(out,
+                 TERM_BOLD "  status" TERM_RESET
+                 "                      " TERM_DIM "this picture" TERM_RESET "\n"
+                 TERM_BOLD "  install DISK [--removable]" TERM_RESET
+                 "  " TERM_DIM "put Moonwater on a disk" TERM_RESET "\n"
+                 TERM_BOLD "  use [DISK]" TERM_RESET
+                 "                  " TERM_DIM "keep that disk this session" TERM_RESET "\n"
+                 TERM_BOLD "  update [DISK]" TERM_RESET
+                 "               " TERM_DIM "write this build onto a disk" TERM_RESET "\n"
+                 TERM_BOLD "  live" TERM_RESET
+                 "                        " TERM_DIM "leave the disks alone" TERM_RESET "\n"
+                 TERM_BOLD "  bind" TERM_RESET
+                 "                        " TERM_DIM "what the machine's events run" TERM_RESET "\n"
+                 TERM_BOLD "  bind EVENT [COMMAND]" TERM_RESET
+                 "        " TERM_DIM "one event; empty puts the default back" TERM_RESET "\n"
+                 TERM_BOLD "  bind init [add|remove ...]" TERM_RESET
+                 "  " TERM_DIM "what runs at boot" TERM_RESET "\n"
+                 TERM_BOLD "  bind init mount [on|off]" TERM_RESET
+                 "    " TERM_DIM "mount kept disks at boot" TERM_RESET "\n"
+                 TERM_BOLD "  bind exit [add|remove ...]" TERM_RESET
+                 "  " TERM_DIM "what runs when the machine stops" TERM_RESET "\n"
+                 TERM_BOLD "  canvas [on|off]" TERM_RESET
+                 "             " TERM_DIM "the desktop" TERM_RESET "\n"
+                 TERM_BOLD "  canvas log|terminal" TERM_RESET
+                 "         " TERM_DIM "open the kernel log or a terminal" TERM_RESET "\n"
+                 TERM_BOLD "  airplane [on|off]" TERM_RESET
+                 "          " TERM_DIM "every radio at once" TERM_RESET "\n"
+                 TERM_BOLD "  brightness [N%|+N|-N]" TERM_RESET
+                 "      " TERM_DIM "the screen backlight" TERM_RESET "\n"
+                 TERM_BOLD "  power [performance|balanced|powersave]" TERM_RESET
+                 " " TERM_DIM "profile and CPU governor" TERM_RESET "\n"
+                 TERM_BOLD "  cpu [boost|smt on|off] [online|offline N]" TERM_RESET
+                 " " TERM_DIM "turbo, SMT and hotplug" TERM_RESET "\n"
+                 TERM_BOLD "  charge [limit N|off]" TERM_RESET
+                 "       " TERM_DIM "where the battery stops charging" TERM_RESET "\n"
+                 TERM_BOLD "  sleep" TERM_RESET " | " TERM_BOLD "hibernate" TERM_RESET
+                 "           " TERM_DIM "suspend to RAM or to disk" TERM_RESET "\n"
+                 TERM_BOLD "  bios [reboot]" TERM_RESET
+                 "               " TERM_DIM "restart into the firmware's setup screen" TERM_RESET "\n"
+                 TERM_BOLD "  wired [on|off]" TERM_RESET
+                 "              " TERM_DIM "the wired links: no lease is asked on one when off" TERM_RESET "\n"
+                 TERM_BOLD "  wifi [on|off]" TERM_RESET
+                 "               " TERM_DIM "the wireless radio" TERM_RESET "\n"
+                 TERM_BOLD "  wifi add SSID [PASSWORD|-]" TERM_RESET
+                 "  " TERM_DIM "remember a network and join it; asks for" TERM_RESET "\n"
+                 "                              " TERM_DIM "the password, - reads it from stdin" TERM_RESET "\n"
+                 TERM_BOLD "  wifi remove SSID" TERM_RESET
+                 "            " TERM_DIM "forget a saved network, and leave it" TERM_RESET "\n"
+                 TERM_BOLD "  bluetooth [on|off]" TERM_RESET
+                 "          " TERM_DIM "the bluetooth radio" TERM_RESET "\n"
+                 TERM_BOLD "  bluetooth add NAME" TERM_RESET
+                 "          " TERM_DIM "remember a bluetooth device" TERM_RESET "\n"
+                 TERM_BOLD "  bluetooth remove NAME" TERM_RESET
+                 "       " TERM_DIM "forget a bluetooth device" TERM_RESET "\n"
+                 TERM_BOLD "  priority internet [wired|wifi]" TERM_RESET
+                 " " TERM_DIM "which link when both are up [wired]" TERM_RESET "\n"
+                 TERM_BOLD "  time [sync]" TERM_RESET
+                 "                 " TERM_DIM "the clock; sync sets it and the zone now" TERM_RESET "\n"
+                 TERM_BOLD "  timezone [ZONE|se|+1|list]" TERM_RESET
+                 " " TERM_DIM "the clock's zone; setting one makes it manual" TERM_RESET "\n"
+                 TERM_BOLD "  timezone auto" TERM_RESET
+                 "               " TERM_DIM "from the network [auto]: one Cloudflare" TERM_RESET "\n"
+                 "                              " TERM_DIM "request per network joined" TERM_RESET "\n"
+                 TERM_BOLD "  ntp [on|off]" TERM_RESET
+                 "                " TERM_DIM "set the clock from the network [on]" TERM_RESET "\n"
+                 TERM_BOLD "  ntp sampling [on|off]" TERM_RESET
+                 "       " TERM_DIM "keep the lowest-delay sample of five [on]" TERM_RESET "\n"
+                 TERM_BOLD "  link [on|off|help]" TERM_RESET
+                 "         " TERM_DIM "shell and run on paired machines, by key" TERM_RESET "\n"
+                 TERM_BOLD "  keyboard [LAYOUT|list]" TERM_RESET
+                 "      " TERM_DIM "Canvas keys: us uk de se no dk fi fr es it" TERM_RESET "\n"
+                 TERM_BOLD "  wipe" TERM_RESET
+                 "                        " TERM_DIM "forget /home and /root, keep the machine" TERM_RESET "\n"
+                 "\n"
+                 TERM_DIM                       "  Settings stay in the image this session started from.\n"
+                 "  install takes this session's; update keeps the disk's.\n"
+                 "  The machine script overwrites bind, init and exit.\n"
+                 "  " HOST_MACHINE_SCRIPT " overlays the kernel builtin.\n" TERM_RESET);
 }
 
 static b32 host_usage(void)
@@ -12603,8 +12533,7 @@ static b32 host_answer(bool update, string_address disk)
                                                      verdict + 5);
                 }
 
-                string_format(log, host_label "already kept on %s\n", verdict + 5);
-                log_flush();
+                host_say(log, host_label "already kept on %s\n", verdict + 5);
                 return 0;
         }
 
@@ -12725,8 +12654,7 @@ static b32 host_main()
         {
                 system_remove_at(AT_FDCWD, HOST_QUESTION, 0);
                 host_verdict_set("live", "");
-                string_format(log, host_label "the disks are left alone this session\n");
-                log_flush();
+                host_say(log, host_label "the disks are left alone this session\n");
                 return 0;
         }
 
