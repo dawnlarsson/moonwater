@@ -2314,6 +2314,21 @@ static awk_text address_to awk_sprintf(string_address format, positive length,
 
                 string_address fields_at = format + at;
                 conversion_spec parsed = conversion_spec_take_max(&fields_at, length - at);
+
+                // The ' flag asks for the locale's digit grouping. Digits are
+                // written ungrouped whatever LC_NUMERIC says, as in the C
+                // locale, so the flag is read among the others and means
+                // nothing more: %'d and %-'8d are %d and %-8d.
+                while (parsed.fields == 1 && !parsed.field[0] && !parsed.stars &&
+                       (positive)(fields_at - format) < length && fields_at[0] == '\'')
+                {
+                        p32 flags = parsed.flags;
+
+                        fields_at++;
+                        parsed = conversion_spec_take_max(&fields_at,
+                                                          length - (positive)(fields_at - format));
+                        parsed.flags |= flags;
+                }
                 //      An overflowed field is not a width. Nothing below
                 //      guarded it, so a count past what the field holds
                 //      arrived as whatever it wrapped to and was padded out.
