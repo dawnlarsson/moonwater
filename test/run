@@ -183,6 +183,22 @@ note()
         printf '  %s\n' "$*"
 }
 
+#       One check counted once: run the test, then call this on its status.
+#       The message is a single-quoted string that is expanded only when the
+#       check failed, so it may read what the failure left behind; VAR, or -
+#       for none, is set to 1 on a failure.
+verdict()
+{
+        verdict_status=$?
+        if [ "$verdict_status" = 0 ]; then
+                tally "$1" 1 1
+        else
+                tally "$1" 0 1
+                [ -z "${3:-}" ] || eval "note \"$3\""
+                [ "$2" = - ] || eval "$2=1"
+        fi
+}
+
 #       Section and failure accounting shared by the shell-driven lanes. A
 #       lane sets the counters up before its first section; section writes
 #       each finished section's count to the tally the verdict is added up
@@ -4090,13 +4106,8 @@ lane_audit()
         freestanding_checks_lane audit-builtin audit_builtin_regressions ||
                 failed=1
         freestanding_checks_lane path-stage path_stage || failed=1
-        if secure_creation_regressions; then
-                tally secure-creation 1 1
-        else
-                tally secure-creation 0 1
-                note "secure creation mode, parent or symlink regression"
-                failed=1
-        fi
+        secure_creation_regressions
+        verdict secure-creation failed 'secure creation mode, parent or symlink regression'
         return "$failed"
 }
 
@@ -4846,15 +4857,10 @@ floodlight_hardened()
                 PATH="$work/hardened-bin:/usr/bin:/bin" HB="$work/hardened-bin" \
                         /bin/sh -c "$hardened_command" > "$work/hardened.out" 2>&1
                 hardened_got=$?
-                if [ "$hardened_got" = "$hardened_want" ] &&
+                [ "$hardened_got" = "$hardened_want" ] &&
                         { [ -z "$hardened_needle" ] ||
-                          grep -q -- "$hardened_needle" "$work/hardened.out"; }; then
-                        tally "floodlight-hardened-$hardened_case" 1 1
-                else
-                        tally "floodlight-hardened-$hardened_case" 0 1
-                        note "floodlight hardened $hardened_case: status $hardened_got, want $hardened_want: $(head -c 200 "$work/hardened.out")"
-                        hardened_failed=1
-                fi
+                          grep -q -- "$hardened_needle" "$work/hardened.out"; }
+                verdict "floodlight-hardened-$hardened_case" hardened_failed 'floodlight hardened $hardened_case: status $hardened_got, want $hardened_want: $(head -c 200 "$work/hardened.out")'
         done <<'HARDENED'
 find-exec|126|flag refused|find /dev/null -exec true {} ';'
 find-execdir|126|flag refused|find /dev/null -execdir true {} ';'
@@ -5493,13 +5499,8 @@ lane_files()
                 cp_mode_status=$?
                 cp_mode_got=$(stat -c %a "$cp_mode_target" 2>/dev/null ||
                         printf missing)
-                if [ "$cp_mode_status:$cp_mode_got" = "0:$cp_mode_want" ]; then
-                        tally "$cp_mode_label" 1 1
-                else
-                        tally "$cp_mode_label" 0 1
-                        note "$cp_mode_label returned $cp_mode_status with mode $cp_mode_got"
-                        files_failed=1
-                fi
+                [ "$cp_mode_status:$cp_mode_got" = "0:$cp_mode_want" ]
+                verdict "$cp_mode_label" files_failed '$cp_mode_label returned $cp_mode_status with mode $cp_mode_got'
         }
 
         printf 'set-id source\n' > "$work/cp-mode-regression/source"
@@ -5537,13 +5538,8 @@ lane_files()
         staged_output_mode=$(stat -c %a \
                 "$work/cp-mode-regression/staged-output" 2>/dev/null ||
                 printf missing)
-        if [ "$staged_output_status:$staged_output_mode" = '0:755' ]; then
-                tally staged-output-clears-set-id 1 1
-        else
-                tally staged-output-clears-set-id 0 1
-                note "generic staged output returned $staged_output_status with mode $staged_output_mode"
-                files_failed=1
-        fi
+        [ "$staged_output_status:$staged_output_mode" = '0:755' ]
+        verdict staged-output-clears-set-id files_failed 'generic staged output returned $staged_output_status with mode $staged_output_mode'
 
         printf 'symlink victim\n' > "$work/cp-mode-regression/victim"
         printf 'copy source\n' > "$work/cp-mode-regression/link-source"
@@ -5552,29 +5548,19 @@ lane_files()
                 "$work/cp-mode-regression/link-target" \
                 > /dev/null 2> "$work/cp-mode-regression/link.err"
         cp_link_status=$?
-        if [ "$cp_link_status:$(test -L "$work/cp-mode-regression/link-target"; echo $?):$(cat "$work/cp-mode-regression/link-target" 2>/dev/null):$(cat "$work/cp-mode-regression/victim")" = \
-                '0:1:copy source:symlink victim' ]; then
-                tally cp-final-symlink-replaced 1 1
-        else
-                tally cp-final-symlink-replaced 0 1
-                note "cp live dest symlink returned $cp_link_status with victim [$(cat "$work/cp-mode-regression/victim" 2>/dev/null)]"
-                files_failed=1
-        fi
+        [ "$cp_link_status:$(test -L "$work/cp-mode-regression/link-target"; echo $?):$(cat "$work/cp-mode-regression/link-target" 2>/dev/null):$(cat "$work/cp-mode-regression/victim")" = \
+                '0:1:copy source:symlink victim' ]
+        verdict cp-final-symlink-replaced files_failed 'cp live dest symlink returned $cp_link_status with victim [$(cat "$work/cp-mode-regression/victim" 2>/dev/null)]'
 
         ln -sf missing "$work/cp-mode-regression/dangling"
         "$farm/cp" "$work/cp-mode-regression/link-source" \
                 "$work/cp-mode-regression/dangling" \
                 > /dev/null 2> "$work/cp-mode-regression/dangling.err"
         cp_dangling_status=$?
-        if [ "$cp_dangling_status:$(readlink "$work/cp-mode-regression/dangling" 2>/dev/null)" = \
+        [ "$cp_dangling_status:$(readlink "$work/cp-mode-regression/dangling" 2>/dev/null)" = \
                 '1:missing' ] &&
-                grep -q 'dangling symlink' "$work/cp-mode-regression/dangling.err"; then
-                tally cp-dangling-symlink-refused 1 1
-        else
-                tally cp-dangling-symlink-refused 0 1
-                note "cp dangling dest symlink returned $cp_dangling_status"
-                files_failed=1
-        fi
+                grep -q 'dangling symlink' "$work/cp-mode-regression/dangling.err"
+        verdict cp-dangling-symlink-refused files_failed 'cp dangling dest symlink returned $cp_dangling_status'
 
         mkdir -p "$work/cp-mode-regression/src/sub" \
                 "$work/cp-mode-regression/hollow"
@@ -5584,14 +5570,9 @@ lane_files()
                 "$farm/cp" --parents src/sub/deep hollow
         )
         cp_parents_status=$?
-        if [ "$cp_parents_status:$(cat "$work/cp-mode-regression/hollow/src/sub/deep" 2>/dev/null)" = \
-                '0:parents body' ]; then
-                tally cp-parents-keeps-source-path 1 1
-        else
-                tally cp-parents-keeps-source-path 0 1
-                note "cp --parents returned $cp_parents_status or dest layout"
-                files_failed=1
-        fi
+        [ "$cp_parents_status:$(cat "$work/cp-mode-regression/hollow/src/sub/deep" 2>/dev/null)" = \
+                '0:parents body' ]
+        verdict cp-parents-keeps-source-path files_failed 'cp --parents returned $cp_parents_status or dest layout'
 
         printf 'symlink victim\n' > "$work/cp-mode-regression/victim"
         ln -sf victim "$work/cp-mode-regression/link-target"
@@ -5599,29 +5580,19 @@ lane_files()
         "$farm/cp" -f "$work/cp-mode-regression/link-source" \
                 "$work/cp-mode-regression/link-target"
         cp_force_link_status=$?
-        if [ "$cp_force_link_status:$(test -L "$work/cp-mode-regression/link-target"; echo $?):$(cat "$work/cp-mode-regression/link-target")" = \
+        [ "$cp_force_link_status:$(test -L "$work/cp-mode-regression/link-target"; echo $?):$(cat "$work/cp-mode-regression/link-target")" = \
                 '0:1:copy source' ] &&
-                [ "$(cat "$work/cp-mode-regression/victim")" = 'symlink victim' ]; then
-                tally cp-final-symlink-explicit-replacement 1 1
-        else
-                tally cp-final-symlink-explicit-replacement 0 1
-                note "cp -f final symlink returned $cp_force_link_status or changed its victim"
-                files_failed=1
-        fi
+                [ "$(cat "$work/cp-mode-regression/victim")" = 'symlink victim' ]
+        verdict cp-final-symlink-explicit-replacement files_failed 'cp -f final symlink returned $cp_force_link_status or changed its victim'
 
         ln -sf victim "$work/cp-mode-regression/stream-link"
         printf 'stream replacement\n' | "$farm/shuf" -o \
                 "$work/cp-mode-regression/stream-link" \
                 > /dev/null 2> "$work/cp-mode-regression/stream-link.err"
         stream_link_status=$?
-        if [ "$stream_link_status:$(test -L "$work/cp-mode-regression/stream-link"; echo $?):$(cat "$work/cp-mode-regression/stream-link"):$(cat "$work/cp-mode-regression/victim")" = \
-                '0:1:stream replacement:symlink victim' ]; then
-                tally staged-stream-final-symlink-replaced 1 1
-        else
-                tally staged-stream-final-symlink-replaced 0 1
-                note "staged stream symlink returned $stream_link_status or followed its victim"
-                files_failed=1
-        fi
+        [ "$stream_link_status:$(test -L "$work/cp-mode-regression/stream-link"; echo $?):$(cat "$work/cp-mode-regression/stream-link"):$(cat "$work/cp-mode-regression/victim")" = \
+                '0:1:stream replacement:symlink victim' ]
+        verdict staged-stream-final-symlink-replaced files_failed 'staged stream symlink returned $stream_link_status or followed its victim'
 
         printf 'codec input\n' > "$work/cp-mode-regression/codec"
         printf 'old executable\n' > "$work/cp-mode-regression/codec.gz"
@@ -5630,13 +5601,8 @@ lane_files()
         codec_status=$?
         codec_mode=$(stat -c %a "$work/cp-mode-regression/codec.gz" \
                 2>/dev/null || printf missing)
-        if [ "$codec_status:$codec_mode" = '0:755' ]; then
-                tally codec-replacement-clears-set-id 1 1
-        else
-                tally codec-replacement-clears-set-id 0 1
-                note "codec replacement returned $codec_status with mode $codec_mode"
-                files_failed=1
-        fi
+        [ "$codec_status:$codec_mode" = '0:755' ]
+        verdict codec-replacement-clears-set-id files_failed 'codec replacement returned $codec_status with mode $codec_mode'
 
         printf 'archive member\n' > "$work/cp-mode-regression/member"
         printf 'old executable\n' > "$work/cp-mode-regression/archive.tar"
@@ -5648,13 +5614,8 @@ lane_files()
         archive_status=$?
         archive_mode=$(stat -c %a "$work/cp-mode-regression/archive.tar" \
                 2>/dev/null || printf missing)
-        if [ "$archive_status:$archive_mode" = '0:755' ]; then
-                tally tar-replacement-clears-set-id 1 1
-        else
-                tally tar-replacement-clears-set-id 0 1
-                note "tar replacement returned $archive_status with mode $archive_mode"
-                files_failed=1
-        fi
+        [ "$archive_status:$archive_mode" = '0:755' ]
+        verdict tar-replacement-clears-set-id files_failed 'tar replacement returned $archive_status with mode $archive_mode'
 
         #       A member that cannot be written says why -- a full bowl root
         #       said "Input/output error" and then "invalid header checksum" --
@@ -5674,14 +5635,9 @@ lane_files()
         write_status=$?
         write_said=$(cat "$write_place/error")
         write_small=$(cat "$write_place/out/small" 2>/dev/null || printf missing)
-        if [ "$write_status" != 0 ] && [ "$write_said" = 'tar: big: File too large' ] &&
-                [ "$write_small" = 'small member' ] && [ ! -e "$write_place/out/big" ]; then
-                tally tar-write-failure-says-why 1 1
-        else
-                tally tar-write-failure-says-why 0 1
-                note "tar under a write limit returned $write_status, said [$write_said], small [$write_small]"
-                files_failed=1
-        fi
+        [ "$write_status" != 0 ] && [ "$write_said" = 'tar: big: File too large' ] &&
+                [ "$write_small" = 'small member' ] && [ ! -e "$write_place/out/big" ]
+        verdict tar-write-failure-says-why files_failed 'tar under a write limit returned $write_status, said [$write_said], small [$write_small]'
 
         #       seq to a last number nobody could read, into a device that
         #       refuses every write and to a closed descriptor: GNU's stops at
@@ -5690,13 +5646,8 @@ lane_files()
         seq_full=$?
         timeout 10 "$farm/seq" 1 1000000000000000000 2> /dev/null >&-
         seq_closed=$?
-        if [ "$seq_full:$seq_closed" = 1:1 ]; then
-                tally seq-stops-at-refused-write 1 1
-        else
-                tally seq-stops-at-refused-write 0 1
-                note "seq into /dev/full returned $seq_full, to a closed descriptor $seq_closed"
-                files_failed=1
-        fi
+        [ "$seq_full:$seq_closed" = 1:1 ]
+        verdict seq-stops-at-refused-write files_failed 'seq into /dev/full returned $seq_full, to a closed descriptor $seq_closed'
 
         printf 'old text\n' > "$work/cp-mode-regression/sed"
         chmod 4755 "$work/cp-mode-regression/sed"
@@ -5704,13 +5655,8 @@ lane_files()
         sed_status=$?
         sed_mode=$(stat -c %a "$work/cp-mode-regression/sed" \
                 2>/dev/null || printf missing)
-        if [ "$sed_status:$sed_mode" = '0:755' ]; then
-                tally sed-replacement-clears-set-id 1 1
-        else
-                tally sed-replacement-clears-set-id 0 1
-                note "sed replacement returned $sed_status with mode $sed_mode"
-                files_failed=1
-        fi
+        [ "$sed_status:$sed_mode" = '0:755' ]
+        verdict sed-replacement-clears-set-id files_failed 'sed replacement returned $sed_status with mode $sed_mode'
 
         differential_domain files || files_failed=1
         return "$files_failed"
@@ -5726,26 +5672,16 @@ lane_misc()
         #       because its external parent cannot be proved to be a protected
         #       shell. Under our own shell that policy still lets it run the
         #       modes that start nothing.
-        if "$farm/script" --version > /dev/null 2>&1; then
-                tally script-direct-default 1 1
-        else
-                tally script-direct-default 0 1
-                note "direct script --version failed with nothing configured"
-                misc_failed=1
-        fi
+        "$farm/script" --version > /dev/null 2>&1
+        verdict script-direct-default misc_failed 'direct script --version failed with nothing configured'
 
         "$work/hardened-bin/script" --version > /dev/null \
                 2> "$work/script-direct-policy.err"
         script_direct=$?
-        if [ "$script_direct" = 126 ] &&
+        [ "$script_direct" = 126 ] &&
                 grep -q 'parent protection unavailable; refusing launch' \
-                        "$work/script-direct-policy.err"; then
-                tally script-direct-policy-refusal 1 1
-        else
-                tally script-direct-policy-refusal 0 1
-                note "direct hardened script did not preserve its parent-contract refusal"
-                misc_failed=1
-        fi
+                        "$work/script-direct-policy.err"
+        verdict script-direct-policy-refusal misc_failed 'direct hardened script did not preserve its parent-contract refusal'
 
         if "$work/hardened-bin/bash" -c 'script --version >/dev/null' \
                 > /dev/null 2>&1; then
@@ -5773,27 +5709,17 @@ lane_misc()
                 stdbuf -i0 -oL -e4K "$work/stdio-buffer" > "$work/stdbuf.want" 2>&1
                 "$farm/stdbuf" -i0 -oL -e4K "$work/stdio-buffer" \
                         > "$work/stdbuf.got" 2>&1
-                if cmp -s "$work/stdbuf.want" "$work/stdbuf.got"; then
-                        tally stdbuf-changes-streams 1 1
-                else
-                        tally stdbuf-changes-streams 0 1
-                        note "stdbuf left the streams at $(cat "$work/stdbuf.got"), GNU at $(cat "$work/stdbuf.want")"
-                        misc_failed=1
-                fi
+                cmp -s "$work/stdbuf.want" "$work/stdbuf.got"
+                verdict stdbuf-changes-streams misc_failed 'stdbuf left the streams at $(cat "$work/stdbuf.got"), GNU at $(cat "$work/stdbuf.want")'
 
                 stdbuf -o0 "$work/stdio-buffer-static" \
                         > "$work/stdbuf.static.want" 2>&1
                 "$farm/stdbuf" -o0 "$work/stdio-buffer-static" \
                         > "$work/stdbuf.static" 2>&1
                 static_status=$?
-                if [ "$static_status" = 0 ] &&
-                        cmp -s "$work/stdbuf.static.want" "$work/stdbuf.static"; then
-                        tally stdbuf-static-runs 1 1
-                else
-                        tally stdbuf-static-runs 0 1
-                        note "stdbuf on a static target: status $static_status, $(cat "$work/stdbuf.static"), GNU $(cat "$work/stdbuf.static.want")"
-                        misc_failed=1
-                fi
+                [ "$static_status" = 0 ] &&
+                        cmp -s "$work/stdbuf.static.want" "$work/stdbuf.static"
+                verdict stdbuf-static-runs misc_failed 'stdbuf on a static target: status $static_status, $(cat "$work/stdbuf.static"), GNU $(cat "$work/stdbuf.static.want")'
 
                 #       upstream misc/responsive: under stdbuf -oL a line
                 #       into a pipe comes out while the writer still holds
@@ -5830,13 +5756,8 @@ lane_misc()
                 kill -KILL "$pdeath_timeout"
                 wait "$pdeath_timeout" 2>/dev/null
                 sleep 1
-                if [ "$(cat "$work/pdeath.got" 2>/dev/null)" = got ]; then
-                        tally timeout-death-signal 1 1
-                else
-                        tally timeout-death-signal 0 1
-                        note "a timeout killed by SIGKILL left its command without the USR1 it was to send"
-                        misc_failed=1
-                fi
+                [ "$(cat "$work/pdeath.got" 2>/dev/null)" = got ]
+                verdict timeout-death-signal misc_failed 'a timeout killed by SIGKILL left its command without the USR1 it was to send'
         else
                 note "stdbuf: the glibc stream probe did not build"
                 sed 's/^/    /' "$work/stdio-buffer.err" | head -10
@@ -5851,14 +5772,9 @@ lane_misc()
         timeout 10 "$farm/hexdump" -v /dev/zero > /dev/full \
                 2> "$work/hexdump-full.err"
         hexdump_status=$?
-        if [ "$hexdump_status" = 1 ] &&
-                [ "$(cat "$work/hexdump-full.err")" = "hexdump: write error: No space left on device" ]; then
-                tally hexdump-stops-at-refused-write 1 1
-        else
-                tally hexdump-stops-at-refused-write 0 1
-                note "hexdump -v /dev/zero > /dev/full: status $hexdump_status, $(head -c 200 "$work/hexdump-full.err")"
-                misc_failed=1
-        fi
+        [ "$hexdump_status" = 1 ] &&
+                [ "$(cat "$work/hexdump-full.err")" = "hexdump: write error: No space left on device" ]
+        verdict hexdump-stops-at-refused-write misc_failed 'hexdump -v /dev/zero > /dev/full: status $hexdump_status, $(head -c 200 "$work/hexdump-full.err")'
 
         floodlight_masked_proc || misc_failed=1
         floodlight_hardened || misc_failed=1
@@ -5905,13 +5821,8 @@ floodlight_masked_proc()
                 masked_got=$(PATH="$farm:/usr/bin:/bin" unshare -rm \
                         "$([ "$masked_shell" = bash ] && echo "$farm/bash" || echo /bin/dash)" \
                         -c "$floodlight_masked_proc_script" 2>&1; echo "status $?")
-                if [ "$masked_got" = "$masked_want" ]; then
-                        tally "floodlight-masked-proc-$masked_shell" 1 1
-                else
-                        tally "floodlight-masked-proc-$masked_shell" 0 1
-                        note "floodlight masked /proc under $masked_shell: got [$masked_got] want [$masked_want]"
-                        masked_failed=1
-                fi
+                [ "$masked_got" = "$masked_want" ]
+                verdict "floodlight-masked-proc-$masked_shell" masked_failed 'floodlight masked /proc under $masked_shell: got [$masked_got] want [$masked_want]'
         done
         return "$masked_failed"
 }
@@ -5921,26 +5832,16 @@ lane_util_linux()
         need_hardened_shell || return 1
         util_linux_failed=0
 
-        if "$farm/setarch" --show > /dev/null 2>&1; then
-                tally setarch-direct-default 1 1
-        else
-                tally setarch-direct-default 0 1
-                note "direct setarch --show failed with nothing configured"
-                util_linux_failed=1
-        fi
+        "$farm/setarch" --show > /dev/null 2>&1
+        verdict setarch-direct-default util_linux_failed 'direct setarch --show failed with nothing configured'
 
         "$work/hardened-bin/setarch" --show > /dev/null \
                 2> "$work/setarch-direct-policy.err"
         setarch_direct=$?
-        if [ "$setarch_direct" = 126 ] &&
+        [ "$setarch_direct" = 126 ] &&
                 grep -q 'parent protection unavailable; refusing launch' \
-                        "$work/setarch-direct-policy.err"; then
-                tally setarch-direct-policy-refusal 1 1
-        else
-                tally setarch-direct-policy-refusal 0 1
-                note "direct hardened setarch did not preserve its parent-contract refusal"
-                util_linux_failed=1
-        fi
+                        "$work/setarch-direct-policy.err"
+        verdict setarch-direct-policy-refusal util_linux_failed 'direct hardened setarch did not preserve its parent-contract refusal'
 
         if "$work/hardened-bin/bash" -c 'setarch --show >/dev/null' \
                 > /dev/null 2>&1; then
@@ -5964,23 +5865,13 @@ lane_shell()
         shell_failed=0
         freestanding_checks_lane lexer_spans lexer_spans || shell_failed=1
         python3 test/differential.py --harness shell_functions --shell "$shell_binary" || shell_failed=1
-        if [ "$(env PS4='+ ' SHELLOPTS=xtrace "$farm/bash" -c : 2>&1)" = '+ :' ]; then
-                tally shell-literal-inherited-options 1 1
-        else
-                tally shell-literal-inherited-options 0 1
-                note "bash literal fast path ignored inherited SHELLOPTS"
-                shell_failed=1
-        fi
-        if process_limited=$(
+        [ "$(env PS4='+ ' SHELLOPTS=xtrace "$farm/bash" -c : 2>&1)" = '+ :' ]
+        verdict shell-literal-inherited-options shell_failed 'bash literal fast path ignored inherited SHELLOPTS'
+        process_limited=$(
                 ulimit -n 32 || exit 1
                 "$farm/bash" -c 'cat <(printf inherited)'
-        ) && [ "$process_limited" = inherited ]; then
-                tally shell-process-substitution-low-fd 1 1
-        else
-                tally shell-process-substitution-low-fd 0 1
-                note "process substitution lost its descriptor below fd 60"
-                shell_failed=1
-        fi
+        ) && [ "$process_limited" = inherited ]
+        verdict shell-process-substitution-low-fd shell_failed 'process substitution lost its descriptor below fd 60'
 
         # ppoll reports POLLNVAL as a ready row. A zero-timeout read probe
         # must distinguish that condition from readable input instead of
@@ -5988,13 +5879,8 @@ lane_shell()
         read_invalid_status=$(
                 "$farm/bash" -c 'read -t 0 -u 99 value; printf "%s" "$?"'
         )
-        if [ "$read_invalid_status" = 1 ]; then
-                tally shell-read-timeout-invalid-fd 1 1
-        else
-                tally shell-read-timeout-invalid-fd 0 1
-                note "zero-timeout read accepted invalid fd 99 with status [$read_invalid_status]"
-                shell_failed=1
-        fi
+        [ "$read_invalid_status" = 1 ]
+        verdict shell-read-timeout-invalid-fd shell_failed 'zero-timeout read accepted invalid fd 99 with status [$read_invalid_status]'
 
         # POSIX disconnects an asynchronous command from the shell's input
         # only while job control is off.  Make fd 0 itself available before
@@ -6065,12 +5951,8 @@ PROBES
         coproc_job_result=$(echo "$monitor_results" | sed -n 4p)
         if [ -z "$monitor_results" ]; then
                 note "background input policy under job control: NOT RUN -- needs a tty and there is no script(1)"
-                if [ "$async_null_result" = 1: ]; then
-                        tally shell-background-input-policy 1 1
-                else
-                        tally shell-background-input-policy 0 1
-                        shell_failed=1
-                fi
+                [ "$async_null_result" = 1: ]
+                verdict shell-background-input-policy shell_failed
         elif [ "$async_null_result" = 1: ] &&
                 [ "$monitor_input_result" = 0:X ] &&
                 [ "$monitor_signal_result" = 130 ] &&
@@ -6116,21 +5998,11 @@ REGULAR_SCRIPT
         done
         "$parser_shell" "$parser_regular_script" >/dev/null 2>&1 || :
 
-        if [ "$(cat "$parser_regular_compatible" 2>/dev/null)" = ready ]; then
-                tally shell-parser-regular-compatible 1 1
-        else
-                tally shell-parser-regular-compatible 0 1
-                note "an unrestricted command stopped working in a streamed regular script"
-                shell_failed=1
-        fi
-        if [ "$(cat "$parser_regular_ran" 2>/dev/null)" = ready ] &&
-                [ ! -e "$parser_regular_target" ]; then
-                tally shell-parser-regular-mutation 1 1
-        else
-                tally shell-parser-regular-mutation 0 1
-                note "a restricted applet did not run safely against a sealed regular-script tail"
-                shell_failed=1
-        fi
+        [ "$(cat "$parser_regular_compatible" 2>/dev/null)" = ready ]
+        verdict shell-parser-regular-compatible shell_failed 'an unrestricted command stopped working in a streamed regular script'
+        [ "$(cat "$parser_regular_ran" 2>/dev/null)" = ready ] &&
+                [ ! -e "$parser_regular_target" ]
+        verdict shell-parser-regular-mutation shell_failed 'a restricted applet did not run safely against a sealed regular-script tail'
 
         # -c and dot/source both execute a complete memory snapshot. They have
         # no live source descriptor for a child to feed and remain compatible
@@ -6139,13 +6011,8 @@ REGULAR_SCRIPT
         "$parser_shell" -c \
                 "awk 'BEGIN { print \"ready\" > \"$parser_command_marker\" }'" \
                 >/dev/null 2>&1 || :
-        if [ "$(cat "$parser_command_marker" 2>/dev/null)" = ready ]; then
-                tally shell-parser-command-memory 1 1
-        else
-                tally shell-parser-command-memory 0 1
-                note "a memory-backed -c command was treated as a live mutable source"
-                shell_failed=1
-        fi
+        [ "$(cat "$parser_command_marker" 2>/dev/null)" = ready ]
+        verdict shell-parser-command-memory shell_failed 'a memory-backed -c command was treated as a live mutable source'
 
         # Noninteractive Bash reads BASH_ENV before its main stdin program.
         # Publish stdin's pipe identity first, or restricted startup awk can
@@ -6158,14 +6025,9 @@ awk 'BEGIN { if ((getline line < "/dev/stdin") > 0) print line > "$parser_startu
 STARTUP_ENV
         printf 'printf ready > "%s"\n' "$parser_startup_main" |
                 BASH_ENV="$parser_startup_env" "$parser_shell" >/dev/null 2>&1 || :
-        if [ "$(cat "$parser_startup_main" 2>/dev/null)" = ready ] &&
-                [ ! -e "$parser_startup_stolen" ]; then
-                tally shell-parser-startup-stdin 1 1
-        else
-                tally shell-parser-startup-stdin 0 1
-                note "BASH_ENV consumed or suppressed the main stdin program"
-                shell_failed=1
-        fi
+        [ "$(cat "$parser_startup_main" 2>/dev/null)" = ready ] &&
+                [ ! -e "$parser_startup_stolen" ]
+        verdict shell-parser-startup-stdin shell_failed 'BASH_ENV consumed or suppressed the main stdin program'
 
         # A restricted startup applet can remain alive after BASH_ENV and
         # change any pathname it was given. The shell must refuse both a main
@@ -6338,13 +6200,8 @@ PY
 awk 'BEGIN { print "ready" > "$parser_dot_marker" }'
 DOT_SOURCE
         "$parser_shell" -c ". '$parser_dot_file'" >/dev/null 2>&1 || :
-        if [ "$(cat "$parser_dot_marker" 2>/dev/null)" = ready ]; then
-                tally shell-parser-dot-memory 1 1
-        else
-                tally shell-parser-dot-memory 0 1
-                note "a fully loaded dot/source file was treated as a live mutable source"
-                shell_failed=1
-        fi
+        [ "$(cat "$parser_dot_marker" 2>/dev/null)" = ready ]
+        verdict shell-parser-dot-memory shell_failed 'a fully loaded dot/source file was treated as a live mutable source'
 
         # A full-duplex socket lets a cooperating peer reflect a child write
         # into the parent's next parser read. Spawn-only confinement therefore
@@ -6402,13 +6259,8 @@ safe = not escaped and not os.path.exists(target_path) and process.returncode ==
 print("%d:%d" % (compatible, safe))
 PY
         )
-        if [ "$parser_socket_result" = 1:1 ]; then
-                tally shell-parser-socket-injection 1 1
-        else
-                tally shell-parser-socket-injection 0 1
-                note "socket parser compatibility/security answered [$parser_socket_result]"
-                shell_failed=1
-        fi
+        [ "$parser_socket_result" = 1:1 ]
+        verdict shell-parser-socket-injection shell_failed 'socket parser compatibility/security answered [$parser_socket_result]'
 
         # A terminal source is controlled by a paired PTY master with a
         # different inode, and that master may live in an outside same-UID
@@ -6453,13 +6305,8 @@ safe = (not os.path.exists(restricted_path) and process.returncode == 0)
 print("%d:%d" % (compatible, safe))
 PY
         )
-        if [ "$parser_pty_result" = 1:1 ]; then
-                tally shell-parser-pty-source 1 1
-        else
-                tally shell-parser-pty-source 0 1
-                note "PTY parser compatibility/security answered [$parser_pty_result]"
-                shell_failed=1
-        fi
+        [ "$parser_pty_result" = 1:1 ]
+        verdict shell-parser-pty-source shell_failed 'PTY parser compatibility/security answered [$parser_pty_result]'
 
         # An exec target cannot reap a here-document writer inherited from the
         # shell. Small input is synchronously placed in a pipe and input over
@@ -6521,13 +6368,8 @@ ok = (all(status == 0 and out == expected
 print("1" if ok else "0:%r:%d:%r" % (answers, fd_status, fd_out))
 PY
         )
-        if [ "$exec_here_result" = 1 ]; then
-                tally shell-exec-heredoc-childless 1 1
-        else
-                tally shell-exec-heredoc-childless 0 1
-                note "explicit exec heredoc lifecycle answered [$exec_here_result]"
-                shell_failed=1
-        fi
+        [ "$exec_here_result" = 1 ]
+        verdict shell-exec-heredoc-childless shell_failed 'explicit exec heredoc lifecycle answered [$exec_here_result]'
 
         # A completed background job may remain as a JOB_FINISHED row for a
         # later jobs notification. It is no longer a descendant and must not
@@ -6579,13 +6421,8 @@ trapped_ok = bool(trapped.returncode == 7 and trapped.stdout == "exit:7\n")
 print("%d:%d:%d" % (finished_ok, disowned_ok, trapped_ok))
 PY
         )
-        if [ "$descendant_result" = 1:1:1 ]; then
-                tally shell-exec-descendant-liveness 1 1
-        else
-                tally shell-exec-descendant-liveness 0 1
-                note "completed/disowned descendant exec checks answered [$descendant_result]"
-                shell_failed=1
-        fi
+        [ "$descendant_result" = 1:1:1 ]
+        verdict shell-exec-descendant-liveness shell_failed 'completed/disowned descendant exec checks answered [$descendant_result]'
 
         # Lazy confinement must not make a stock shell a child subreaper.
         # An ordinary double-fork daemon should be reparented past the shell,
@@ -6633,13 +6470,8 @@ time.sleep(5)
           "0:%d:%d:%s" % (process.returncode, process.pid, answer))
 PY
         )
-        if [ "$stock_daemon_result" = 1 ]; then
-                tally shell-stock-daemon-parent 1 1
-        else
-                tally shell-stock-daemon-parent 0 1
-                note "stock double-fork parent answered [$stock_daemon_result]"
-                shell_failed=1
-        fi
+        [ "$stock_daemon_result" = 1 ]
+        verdict shell-stock-daemon-parent shell_failed 'stock double-fork parent answered [$stock_daemon_result]'
 
         differential_domain shell || shell_failed=1
         return "$shell_failed"
@@ -6672,13 +6504,8 @@ fc -e fc_editor 1
                 fc_masked_status=$?
         fi
 
-        if [ "$fc_masked_status:$fc_masked" = '0:edited' ]; then
-                tally fc-private-umask 1 1
-        else
-                tally fc-private-umask 0 1
-                note "fc under umask 0777 returned $fc_masked_status [$fc_masked]"
-                builtins_failed=1
-        fi
+        [ "$fc_masked_status:$fc_masked" = '0:edited' ]
+        verdict fc-private-umask builtins_failed 'fc under umask 0777 returned $fc_masked_status [$fc_masked]'
 
         history_command='history -c; history -s replacement; history -w "$1"'
         history_append_command='history -c; history -s appended; history -a "$1"'
@@ -6695,14 +6522,9 @@ fc -e fc_editor 1
                 printf unknown)
         history_owner_after=$(stat -c %u:%g \
                 "$work/history-regression/history" 2>/dev/null || printf unknown)
-        if [ "$history_status:$(cat "$work/history-regression/history"):$history_mode:$history_owner_after" = \
-                "0:replacement:751:$history_owner" ]; then
-                tally history-transaction-success 1 1
-        else
-                tally history-transaction-success 0 1
-                note "history rewrite returned $history_status, mode $history_mode, owner $history_owner_after, content [$(cat "$work/history-regression/history")]"
-                builtins_failed=1
-        fi
+        [ "$history_status:$(cat "$work/history-regression/history"):$history_mode:$history_owner_after" = \
+                "0:replacement:751:$history_owner" ]
+        verdict history-transaction-success builtins_failed 'history rewrite returned $history_status, mode $history_mode, owner $history_owner_after, content [$(cat "$work/history-regression/history")]'
 
         printf 'old history\n' > "$work/history-regression/preserved"
         (
@@ -6715,14 +6537,9 @@ fc -e fc_editor 1
         history_limit_status=$?
         history_temps=$(find "$work/history-regression" -maxdepth 1 \
                 -name '.moonwater-stage-*' -print | wc -l | tr -d '[:space:]')
-        if [ "$history_limit_status:$(cat "$work/history-regression/preserved"):$history_temps" = \
-                '1:old history:0' ]; then
-                tally history-transaction-write-error 1 1
-        else
-                tally history-transaction-write-error 0 1
-                note "limited history rewrite returned $history_limit_status, retained [$(cat "$work/history-regression/preserved")], stages $history_temps"
-                builtins_failed=1
-        fi
+        [ "$history_limit_status:$(cat "$work/history-regression/preserved"):$history_temps" = \
+                '1:old history:0' ]
+        verdict history-transaction-write-error builtins_failed 'limited history rewrite returned $history_limit_status, retained [$(cat "$work/history-regression/preserved")], stages $history_temps'
 
         printf 'link victim\n' > "$work/history-regression/victim"
         ln -sf victim "$work/history-regression/link"
@@ -6731,16 +6548,11 @@ fc -e fc_editor 1
                 > "$work/history-regression/link.out" \
                 2> "$work/history-regression/link.err"
         history_link_status=$?
-        if [ "$history_link_status:$(readlink "$work/history-regression/link"):$(cat "$work/history-regression/victim")" = \
+        [ "$history_link_status:$(readlink "$work/history-regression/link"):$(cat "$work/history-regression/victim")" = \
                 '1:victim:link victim' ] &&
                 grep -q 'Too many levels of symbolic links' \
-                        "$work/history-regression/link.err"; then
-                tally history-symlink-fails-closed 1 1
-        else
-                tally history-symlink-fails-closed 0 1
-                note "history symlink rewrite returned $history_link_status with link [$(readlink "$work/history-regression/link" 2>/dev/null)] and victim [$(cat "$work/history-regression/victim" 2>/dev/null)]"
-                builtins_failed=1
-        fi
+                        "$work/history-regression/link.err"
+        verdict history-symlink-fails-closed builtins_failed 'history symlink rewrite returned $history_link_status with link [$(readlink "$work/history-regression/link" 2>/dev/null)] and victim [$(cat "$work/history-regression/victim" 2>/dev/null)]'
 
         printf 'append victim\n' > "$work/history-regression/append-victim"
         ln -sf append-victim "$work/history-regression/append-link"
@@ -6749,30 +6561,20 @@ fc -e fc_editor 1
                 > "$work/history-regression/append-link.out" \
                 2> "$work/history-regression/append-link.err"
         history_append_link_status=$?
-        if [ "$history_append_link_status:$(readlink "$work/history-regression/append-link"):$(cat "$work/history-regression/append-victim")" = \
+        [ "$history_append_link_status:$(readlink "$work/history-regression/append-link"):$(cat "$work/history-regression/append-victim")" = \
                 '1:append-victim:append victim' ] &&
                 grep -q 'Too many levels of symbolic links' \
-                        "$work/history-regression/append-link.err"; then
-                tally history-append-symlink-fails-closed 1 1
-        else
-                tally history-append-symlink-fails-closed 0 1
-                note "history append symlink returned $history_append_link_status with victim [$(cat "$work/history-regression/append-victim" 2>/dev/null)]"
-                builtins_failed=1
-        fi
+                        "$work/history-regression/append-link.err"
+        verdict history-append-symlink-fails-closed builtins_failed 'history append symlink returned $history_append_link_status with victim [$(cat "$work/history-regression/append-victim" 2>/dev/null)]'
 
         if [ -c /dev/full ]; then
                 "$history_shell" -c "$history_command" history /dev/full \
                         > /dev/null 2> "$work/history-regression/full.err"
                 history_full_status=$?
-                if [ "$history_full_status" = 1 ] && [ -c /dev/full ] &&
+                [ "$history_full_status" = 1 ] && [ -c /dev/full ] &&
                         grep -q 'No space left on device' \
-                                "$work/history-regression/full.err"; then
-                        tally history-special-write-error 1 1
-                else
-                        tally history-special-write-error 0 1
-                        note "history /dev/full returned $history_full_status or changed the device"
-                        builtins_failed=1
-                fi
+                                "$work/history-regression/full.err"
+                verdict history-special-write-error builtins_failed 'history /dev/full returned $history_full_status or changed the device'
         else
                 note "history special-file regression: NOT RUN -- no /dev/full"
         fi
@@ -6798,16 +6600,11 @@ fc -e fc_editor 1
                         printf unknown)
                 history_temps=$(find "$work/history-regression" -maxdepth 1 \
                         -name '.moonwater-stage-*' -print | wc -l | tr -d '[:space:]')
-                if [ "$history_metadata_status:$(cat "$work/history-regression/metadata-error"):$history_metadata_mode:$history_metadata_owner_after:$history_temps" = \
+                [ "$history_metadata_status:$(cat "$work/history-regression/metadata-error"):$history_metadata_mode:$history_metadata_owner_after:$history_temps" = \
                         "1:metadata preserved:6751:$history_metadata_owner:0" ] &&
                         grep -q 'Operation not permitted' \
-                                "$work/history-regression/metadata-error.err"; then
-                        tally history-transaction-metadata-error 1 1
-                else
-                        tally history-transaction-metadata-error 0 1
-                        note "injected metadata failure returned $history_metadata_status, mode $history_metadata_mode, owner $history_metadata_owner_after, retained [$(cat "$work/history-regression/metadata-error")], stages $history_temps"
-                        builtins_failed=1
-                fi
+                                "$work/history-regression/metadata-error.err"
+                verdict history-transaction-metadata-error builtins_failed 'injected metadata failure returned $history_metadata_status, mode $history_metadata_mode, owner $history_metadata_owner_after, retained [$(cat "$work/history-regression/metadata-error")], stages $history_temps'
 
                 printf 'trace baseline\n' > "$work/history-regression/close"
                 timeout 10 strace -qq -yy \
@@ -6838,14 +6635,9 @@ fc -e fc_editor 1
                 fi
                 history_temps=$(find "$work/history-regression" -maxdepth 1 \
                         -name '.moonwater-stage-*' -print | wc -l | tr -d '[:space:]')
-                if [ "$history_close_status:$(cat "$work/history-regression/close"):$history_temps" = \
-                        '1:close preserved:0' ]; then
-                        tally history-transaction-close-error 1 1
-                else
-                        tally history-transaction-close-error 0 1
-                        note "injected close returned $history_close_status, retained [$(cat "$work/history-regression/close")], stages $history_temps"
-                        builtins_failed=1
-                fi
+                [ "$history_close_status:$(cat "$work/history-regression/close"):$history_temps" = \
+                        '1:close preserved:0' ]
+                verdict history-transaction-close-error builtins_failed 'injected close returned $history_close_status, retained [$(cat "$work/history-regression/close")], stages $history_temps'
         else
                 note "history close-error regression: NOT RUN -- no strace"
         fi
@@ -6858,15 +6650,10 @@ FORGED/leaf"
         redirect_status=$?
         redirect_lines=$(wc -l < "$work/history-regression/redirect.err" |
                 tr -d '[:space:]')
-        if [ "$redirect_status:$redirect_lines" = '1:1' ] &&
+        [ "$redirect_status:$redirect_lines" = '1:1' ] &&
                 grep -Fq 'redirect-missing\x0aFORGED/leaf' \
-                        "$work/history-regression/redirect.err"; then
-                tally redirect-terminal-safe-name 1 1
-        else
-                tally redirect-terminal-safe-name 0 1
-                note "newline redirect returned $redirect_status across $redirect_lines diagnostic lines"
-                builtins_failed=1
-        fi
+                        "$work/history-regression/redirect.err"
+        verdict redirect-terminal-safe-name builtins_failed 'newline redirect returned $redirect_status across $redirect_lines diagnostic lines'
 
         cat > "$work/fetch-write-server.py" <<'PY'
 import socket
@@ -6913,15 +6700,10 @@ PY
                 kill "$fetch_server" 2>/dev/null || :
         fi
         wait "$fetch_server" 2>/dev/null || :
-        if [ "$fetch_status" = 1 ] &&
+        [ "$fetch_status" = 1 ] &&
                 grep -q 'fetch: write error on standard output' \
-                        "$work/fetch-write.err"; then
-                tally fetch-stdout-write-error 1 1
-        else
-                tally fetch-stdout-write-error 0 1
-                note "fetch to /dev/full returned $fetch_status without the write diagnostic"
-                builtins_failed=1
-        fi
+                        "$work/fetch-write.err"
+        verdict fetch-stdout-write-error builtins_failed 'fetch to /dev/full returned $fetch_status without the write diagnostic'
 
         #       wget names a body it could not write as GNU wget does and
         #       exits 3, GNU's file I/O status, where a full disk said "no
@@ -6996,26 +6778,16 @@ PY
         wget_expected="3 3
 Cannot write to '-' (No space left on device).
 Cannot write to 'out' (File too large)."
-        if [ "$wget_ours" = "$wget_expected" ] &&
-                [ -z "$(ls -A "$wget_place/ours")" ]; then
-                tally wget-write-failure-says-why 1 1
-        else
-                tally wget-write-failure-says-why 0 1
-                note "wget onto a full disk said [$wget_ours], left [$(ls -A "$wget_place/ours")]"
-                builtins_failed=1
-        fi
+        [ "$wget_ours" = "$wget_expected" ] &&
+                [ -z "$(ls -A "$wget_place/ours")" ]
+        verdict wget-write-failure-says-why builtins_failed 'wget onto a full disk said [$wget_ours], left [$(ls -A "$wget_place/ours")]'
         wget_gnu=$(PATH=/usr/local/bin:/usr/bin:/bin command -v wget)
         if [ -n "$wget_gnu" ] && [ -s "$wget_place/port" ] &&
                 "$wget_gnu" --version 2>/dev/null | head -n 1 | grep -q '^GNU Wget'; then
                 wget_gnu_said=$(wget_run "$wget_gnu" "$wget_place/gnu" gnu \
                         --no-config --no-proxy --no-hsts)
-                if [ "$wget_gnu_said" = "$wget_ours" ]; then
-                        tally wget-write-failure-matches-gnu 1 1
-                else
-                        tally wget-write-failure-matches-gnu 0 1
-                        note "GNU wget said [$wget_gnu_said] where ours said [$wget_ours]"
-                        builtins_failed=1
-                fi
+                [ "$wget_gnu_said" = "$wget_ours" ]
+                verdict wget-write-failure-matches-gnu builtins_failed 'GNU wget said [$wget_gnu_said] where ours said [$wget_ours]'
         else
                 note "wget write failure against GNU wget: NOT RUN -- no GNU wget"
         fi
@@ -7050,13 +6822,8 @@ Cannot write to 'out' (File too large)."
         else
                 wget_stream_ours=server-failed
         fi
-        if [ "$wget_stream_ours" = "0 0 1048576 fifo" ]; then
-                tally wget-into-device-and-fifo 1 1
-        else
-                tally wget-into-device-and-fifo 0 1
-                note "wget -O /dev/null, -O fifo said [$wget_stream_ours], want [0 0 1048576 fifo]"
-                builtins_failed=1
-        fi
+        [ "$wget_stream_ours" = "0 0 1048576 fifo" ]
+        verdict wget-into-device-and-fifo builtins_failed 'wget -O /dev/null, -O fifo said [$wget_stream_ours], want [0 0 1048576 fifo]'
         #       A symlink planted at the -O name is replaced, never written
         #       through (where GNU wget follows it): the download lands in a
         #       regular file of that name and the link's target keeps its
@@ -7065,15 +6832,10 @@ Cannot write to 'out' (File too large)."
         ln -sf "$wget_place/victim" "$wget_place/stream-ours/link"
         timeout 10 "$farm/wget" -q -O "$wget_place/stream-ours/link" "$wget_url"
         wget_link_status=$?
-        if [ "$wget_link_status" = 0 ] && [ ! -L "$wget_place/stream-ours/link" ] &&
+        [ "$wget_link_status" = 0 ] && [ ! -L "$wget_place/stream-ours/link" ] &&
                 [ "$(cat "$wget_place/victim")" = keep ] &&
-                [ "$(wc -c < "$wget_place/stream-ours/link")" -eq 1048576 ]; then
-                tally wget-output-link-replaced 1 1
-        else
-                tally wget-output-link-replaced 0 1
-                note "wget -O onto a symlink: status $wget_link_status, victim [$(cat "$wget_place/victim")]"
-                builtins_failed=1
-        fi
+                [ "$(wc -c < "$wget_place/stream-ours/link")" -eq 1048576 ]
+        verdict wget-output-link-replaced builtins_failed 'wget -O onto a symlink: status $wget_link_status, victim [$(cat "$wget_place/victim")]'
         #       A link to a FIFO -- /dev/stdout onto a pipe is one -- is
         #       followed into the FIFO, as GNU wget follows it, and stays.
         wget_fifo_dir=$wget_place/stream-ours
@@ -7086,25 +6848,15 @@ Cannot write to 'out' (File too large)."
         timeout 10 "$farm/wget" -q -O "$wget_fifo_dir/fifo-link" "$wget_url"
         wget_link_status=$?
         wait "$wget_reader"
-        if [ "$wget_link_status" = 0 ] && [ -L "$wget_fifo_dir/fifo-link" ] &&
-                [ "$(tr -d ' ' < "$wget_fifo_dir/linked-count")" = 1048576 ]; then
-                tally wget-output-link-to-fifo 1 1
-        else
-                tally wget-output-link-to-fifo 0 1
-                note "wget -O onto a link to a FIFO: status $wget_link_status, read [$(cat "$wget_fifo_dir/linked-count")]"
-                builtins_failed=1
-        fi
+        [ "$wget_link_status" = 0 ] && [ -L "$wget_fifo_dir/fifo-link" ] &&
+                [ "$(tr -d ' ' < "$wget_fifo_dir/linked-count")" = 1048576 ]
+        verdict wget-output-link-to-fifo builtins_failed 'wget -O onto a link to a FIFO: status $wget_link_status, read [$(cat "$wget_fifo_dir/linked-count")]'
         if [ -n "$wget_gnu" ] && [ -s "$wget_place/port" ] &&
                 "$wget_gnu" --version 2>/dev/null | head -n 1 | grep -q '^GNU Wget'; then
                 wget_stream_gnu=$(wget_stream_run "$wget_gnu" "$wget_place/stream-gnu" \
                         --no-config --no-proxy --no-hsts)
-                if [ "$wget_stream_gnu" = "$wget_stream_ours" ]; then
-                        tally wget-into-device-and-fifo-matches-gnu 1 1
-                else
-                        tally wget-into-device-and-fifo-matches-gnu 0 1
-                        note "GNU wget said [$wget_stream_gnu] where ours said [$wget_stream_ours]"
-                        builtins_failed=1
-                fi
+                [ "$wget_stream_gnu" = "$wget_stream_ours" ]
+                verdict wget-into-device-and-fifo-matches-gnu builtins_failed 'GNU wget said [$wget_stream_gnu] where ours said [$wget_stream_ours]'
         fi
         kill "$wget_server" 2>/dev/null || :
         wait "$wget_server" 2>/dev/null || :
@@ -7334,23 +7086,13 @@ lane_awk()
                                 grep -q 'parent protection unavailable; refusing launch' \
                                         "$awk_direct_error"
                 fi
-                if [ "$?" = 0 ]; then
-                        tally "awk-direct-parser-$awk_mode" 1 1
-                else
-                        tally "awk-direct-parser-$awk_mode" 0 1
-                        note "direct $awk_mode awk under a foreign bash reading a pipe: status $(cat "$awk_direct_status" 2>/dev/null)"
-                        awk_failed=1
-                fi
+                [ "$?" = 0 ]
+                verdict "awk-direct-parser-$awk_mode" awk_failed 'direct $awk_mode awk under a foreign bash reading a pipe: status $(cat "$awk_direct_status" 2>/dev/null)'
 
-                if [ "$(printf 'alpha beta\n' |
+                [ "$(printf 'alpha beta\n' |
                         "$awk_bin/bash" -c 'awk '\''{ print }'\'' 2>/dev/null')" = \
-                        'alpha beta' ]; then
-                        tally "awk-integrated-$awk_mode" 1 1
-                else
-                        tally "awk-integrated-$awk_mode" 0 1
-                        note "$awk_mode awk failed under our shell with a memory parser"
-                        awk_failed=1
-                fi
+                        'alpha beta' ]
+                verdict "awk-integrated-$awk_mode" awk_failed '$awk_mode awk failed under our shell with a memory parser'
 
                 #       system() and "cmd" | getline: by default they run, as
                 #       gawk's do; under the policy the filter refuses them and
