@@ -39989,6 +39989,85 @@ int main(void)
         return ran.returncode
 
 
+def openssl_workbench(work):
+    """openssl(*args), which runs in work, and issue(): a leaf or intermediate a CA key signs.
+
+    OpenSSL 3.4 added x509 -not_before/-not_after. The supported ca command
+    has always exposed -startdate/-enddate, so older hosts use a fresh
+    throwaway CA database for each generated certificate. A security oracle
+    must not disappear merely because the host's CLI predates the convenience
+    spelling.
+    """
+    def openssl(*arguments):
+        subprocess.run(["openssl", *arguments], check=True, cwd=work,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    x509_help = subprocess.run(["openssl", "x509", "-help"], cwd=work,
+                               capture_output=True, text=True)
+    x509_can_set_dates = "-not_before" in (x509_help.stdout + x509_help.stderr)
+    (work / "ca.conf").write_text(
+        "[ca]\ndefault_ca=local\n[local]\ndatabase=index\n"
+        "new_certs_dir=.\nserial=serial\ndefault_md=sha384\n"
+        "policy=names\nunique_subject=no\n[names]\ncommonName=supplied\n")
+
+    def when(days):
+        moment = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=days)
+        return moment.strftime("%Y%m%d%H%M%SZ")
+
+    def issue(name, key, subject, issuer, extensions, dates=(-1, 90), digest="sha384"):
+        (work / (name + ".ext")).write_text("[extensions]\n" + extensions)
+        openssl("req", "-new", *key, "-nodes", "-keyout", name + ".key", "-out",
+                name + ".csr", "-subj", subject)
+        if x509_can_set_dates:
+            openssl("x509", "-req", "-in", name + ".csr", "-CA", issuer + ".pem",
+                    "-CAkey", issuer + ".key", "-set_serial",
+                    str(abs(hash(name)) % (1 << 62)), "-not_before", when(dates[0]),
+                    "-not_after", when(dates[1]), "-out", name + ".pem", "-" + digest,
+                    "-extfile", name + ".ext", "-extensions", "extensions")
+        else:
+            (work / "index").write_text("")
+            (work / "serial").write_text("01\n")
+            openssl("ca", "-batch", "-config", "ca.conf", "-in", name + ".csr",
+                    "-cert", issuer + ".pem", "-keyfile", issuer + ".key",
+                    "-startdate", when(dates[0]), "-enddate", when(dates[1]),
+                    "-out", name + ".pem", "-notext", "-md", digest,
+                    "-extfile", name + ".ext", "-extensions", "extensions")
+
+    return openssl, issue
+
+
+def spark_shell_command(cc, output, anchor=None):
+    """The cc line that builds programs/shell.c as a spark image does, run from HARNESS_ROOT.
+
+    Match freestanding spark builds: pin baseline x86-64 (no BMI2), keep
+    AArch64 atomics inline without libgcc, and keep RISC-V at the IMAFD
+    floor. Hard-coding -march=x86-64 silently disabled the oracles on every
+    non-x86 host. anchor is a TLS_BENCH_ANCHOR include, if the shell is to
+    trust a root the harness made.
+    """
+    arch_flags = {"x86_64": ["-march=x86-64"], "amd64": ["-march=x86-64"],
+                  "aarch64": ["-mno-outline-atomics"], "arm64": ["-mno-outline-atomics"],
+                  "riscv64": ["-march=rv64imafd_zicsr_zicntr", "-mabi=lp64d"]}
+    return [cc, "-O2", "-static", "-nostdlib", "-nostartfiles", "-fno-stack-protector",
+            "-fno-builtin", *arch_flags.get(platform.machine().lower(), []), "-w",
+            "-T", "src/build/spark.ld", "-Wl,-e,_start", "-Wl,--build-id=none",
+            "-Wl,--no-warn-rwx-segments",
+            *(['-DTLS_BENCH_ANCHOR="%s"' % anchor] if anchor else []),
+            "-o", str(output), "programs/shell.c"]
+
+
+def bench_anchor(work):
+    """work/anchor.inc: the P-384 point of work/root.key, as a shell's trust anchor."""
+    spki = subprocess.run(["openssl", "pkey", "-in", str(work / "root.key"), "-pubout",
+                           "-outform", "DER"], check=True, capture_output=True).stdout
+    point = spki[-97:]
+    (work / "anchor.inc").write_text("".join(
+        "static const p8 tls_bench_anchor_%s[48] = {%s};\n" % (
+            axis, ", ".join("0x%02x" % b for b in coordinate))
+        for axis, coordinate in (("x", point[1:49]), ("y", point[49:97]))))
+    return work / "anchor.inc"
+
+
 def harness_tls_chains(argv):
     """wget's certificate verdict against openssl verify's, chain by chain.
 
@@ -40003,7 +40082,6 @@ def harness_tls_chains(argv):
     purpose. The two verdicts have to agree, except where this tree refuses
     by policy what openssl accepts, which DELIBERATE names with its reason.
     """
-    import datetime
     import shutil
     import socket
     import ssl
@@ -40289,46 +40367,7 @@ def harness_tls_chains(argv):
     with tempfile.TemporaryDirectory(prefix="tls-chains-") as temporary:
         work = Path(temporary)
 
-        def openssl(*arguments):
-            subprocess.run(["openssl", *arguments], check=True, cwd=work,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-        x509_help = subprocess.run(["openssl", "x509", "-help"], cwd=work,
-                                   capture_output=True, text=True)
-        x509_can_set_dates = "-not_before" in (x509_help.stdout + x509_help.stderr)
-
-        # OpenSSL 3.4 added x509 -not_before/-not_after.  The supported ca
-        # command has always exposed -startdate/-enddate, so older hosts use
-        # a fresh throwaway CA database for each generated certificate.  A
-        # security oracle must not disappear merely because the host's CLI
-        # predates the convenience spelling.
-        (work / "ca.conf").write_text(
-            "[ca]\ndefault_ca=local\n[local]\ndatabase=index\n"
-            "new_certs_dir=.\nserial=serial\ndefault_md=sha384\n"
-            "policy=names\nunique_subject=no\n[names]\ncommonName=supplied\n")
-
-        def when(days):
-            moment = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=days)
-            return moment.strftime("%Y%m%d%H%M%SZ")
-
-        def issue(name, key, subject, issuer, extensions, dates=(-1, 90), digest="sha384"):
-            (work / (name + ".ext")).write_text("[extensions]\n" + extensions)
-            openssl("req", "-new", *key, "-nodes", "-keyout", name + ".key", "-out",
-                    name + ".csr", "-subj", subject)
-            if x509_can_set_dates:
-                openssl("x509", "-req", "-in", name + ".csr", "-CA", issuer + ".pem",
-                        "-CAkey", issuer + ".key", "-set_serial",
-                        str(abs(hash(name)) % (1 << 62)), "-not_before", when(dates[0]),
-                        "-not_after", when(dates[1]), "-out", name + ".pem", "-" + digest,
-                        "-extfile", name + ".ext", "-extensions", "extensions")
-            else:
-                (work / "index").write_text("")
-                (work / "serial").write_text("01\n")
-                openssl("ca", "-batch", "-config", "ca.conf", "-in", name + ".csr",
-                        "-cert", issuer + ".pem", "-keyfile", issuer + ".key",
-                        "-startdate", when(dates[0]), "-enddate", when(dates[1]),
-                        "-out", name + ".pem", "-notext", "-md", digest,
-                        "-extfile", name + ".ext", "-extensions", "extensions")
+        openssl, issue = openssl_workbench(work)
 
         def asn1_length(size):
             if size < 0x80:
@@ -40416,32 +40455,8 @@ def harness_tls_chains(argv):
             print("tls chains: a SHA-1 legacy root served too: NOT RUN -- "
                   "openssl will not sign with SHA-1 here")
             mutations = tuple(m for m in mutations if m[3].get("extra") != "legacy")
-        spki = subprocess.run(["openssl", "pkey", "-in", str(work / "root.key"), "-pubout",
-                               "-outform", "DER"], check=True, capture_output=True).stdout
-        point = spki[-97:]
-        (work / "anchor.inc").write_text("".join(
-            "static const p8 tls_bench_anchor_%s[48] = {%s};\n" % (
-                axis, ", ".join("0x%02x" % b for b in coordinate))
-            for axis, coordinate in (("x", point[1:49]), ("y", point[49:97]))))
-        # Match freestanding spark builds: pin baseline x86-64 (no BMI2), keep
-        # AArch64 atomics inline without libgcc, and keep RISC-V at the IMAFD
-        # floor. Hard-coding -march=x86-64 silently disabled this oracle on
-        # every non-x86 host.
-        host = platform.machine().lower()
-        if host in ("x86_64", "amd64"):
-            arch_flags = ["-march=x86-64"]
-        elif host in ("aarch64", "arm64"):
-            arch_flags = ["-mno-outline-atomics"]
-        elif host == "riscv64":
-            arch_flags = ["-march=rv64imafd_zicsr_zicntr", "-mabi=lp64d"]
-        else:
-            arch_flags = []
-        built = subprocess.run(
-            [args.cc, "-O2", "-static", "-nostdlib", "-nostartfiles", "-fno-stack-protector",
-             "-fno-builtin", *arch_flags, "-w", "-T", "src/build/spark.ld", "-Wl,-e,_start",
-             "-Wl,--build-id=none", "-Wl,--no-warn-rwx-segments",
-             '-DTLS_BENCH_ANCHOR="%s"' % (work / "anchor.inc"), "-o", str(work / "shell"),
-             "programs/shell.c"], cwd=HARNESS_ROOT, capture_output=True, text=True)
+        built = subprocess.run(spark_shell_command(args.cc, work / "shell", bench_anchor(work)),
+                               cwd=HARNESS_ROOT, capture_output=True, text=True)
         if built.returncode:
             print(built.stderr[-3000:])
             return 1
@@ -40758,10 +40773,9 @@ def harness_tls_peer(argv):
         if mutation["rng"] is not None and kind in (8, 11, 13, 15, 4, 24) and \
                 mutation["rng"].random() < 0.6:
             body = mutated(body)
-        return bytes([kind]) + len(body).to_bytes(3, "big") + body
+        return tls_seed_message(kind, body)
 
-    def record(kind, body):
-        return bytes([kind, 3, 3]) + len(body).to_bytes(2, "big") + body
+    record = tls_seed_record
 
     class Direction:
         """One side's traffic keys: seal writes, open reads, update rekeys."""
@@ -41388,17 +41402,8 @@ def harness_tls_peer(argv):
         work = Path(temporary)
         shell = Path(args.shell) if args.shell else work / "shell"
         if not args.shell:
-            host = platform.machine().lower()
-            arch_flags = {"x86_64": ["-march=x86-64"], "amd64": ["-march=x86-64"],
-                          "aarch64": ["-mno-outline-atomics"],
-                          "arm64": ["-mno-outline-atomics"],
-                          "riscv64": ["-march=rv64imafd_zicsr_zicntr", "-mabi=lp64d"]}
-            built = subprocess.run(
-                [args.cc, "-O2", "-static", "-nostdlib", "-nostartfiles",
-                 "-fno-stack-protector", "-fno-builtin", *arch_flags.get(host, []), "-w",
-                 "-T", "src/build/spark.ld", "-Wl,-e,_start", "-Wl,--build-id=none",
-                 "-Wl,--no-warn-rwx-segments", "-o", str(shell), "programs/shell.c"],
-                cwd=HARNESS_ROOT, capture_output=True, text=True)
+            built = subprocess.run(spark_shell_command(args.cc, shell), cwd=HARNESS_ROOT,
+                                   capture_output=True, text=True)
             if built.returncode:
                 print(built.stderr[-3000:])
                 return 1
@@ -41563,7 +41568,6 @@ def harness_https_downgrade(argv):
 
         python3 test/differential.py --harness https_downgrade
     """
-    import datetime
     import shutil
     import socket
     import ssl
@@ -41582,9 +41586,7 @@ def harness_https_downgrade(argv):
     with tempfile.TemporaryDirectory(prefix="https-downgrade-") as temporary:
         work = Path(temporary)
 
-        def openssl(*arguments):
-            subprocess.run(["openssl", *arguments], check=True, cwd=work,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        openssl, issue = openssl_workbench(work)
 
         openssl("req", "-x509", "-newkey", "ec",
                 "-pkeyopt", "ec_paramgen_curve:secp384r1", "-nodes",
@@ -41592,74 +41594,14 @@ def harness_https_downgrade(argv):
                 "-sha384", "-subj", "/CN=https downgrade root",
                 "-addext", "basicConstraints=critical,CA:TRUE",
                 "-addext", "keyUsage=critical,keyCertSign,cRLSign")
-        (work / "leaf.ext").write_text(
-            "[extensions]\n"
-            "basicConstraints=critical,CA:FALSE\n"
-            "keyUsage=critical,digitalSignature\n"
-            "extendedKeyUsage=serverAuth\n"
-            "subjectAltName=IP:127.0.0.1\n")
-        openssl("req", "-new", "-newkey", "ec",
-                "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes",
-                "-keyout", "leaf.key", "-out", "leaf.csr",
-                "-subj", "/CN=127.0.0.1")
-        # Prefer x509 -not_before when present; else ca -startdate (tls_chains).
-        x509_help = subprocess.run(["openssl", "x509", "-help"], cwd=work,
-                                   capture_output=True, text=True)
-        if "-not_before" in (x509_help.stdout + x509_help.stderr):
-            now = datetime.datetime.now(datetime.timezone.utc)
-            openssl("x509", "-req", "-in", "leaf.csr", "-CA", "root.pem",
-                    "-CAkey", "root.key", "-set_serial", "1",
-                    "-not_before", (now - datetime.timedelta(days=1)).strftime(
-                        "%Y%m%d%H%M%SZ"),
-                    "-not_after", (now + datetime.timedelta(days=90)).strftime(
-                        "%Y%m%d%H%M%SZ"),
-                    "-out", "leaf.pem", "-sha384",
-                    "-extfile", "leaf.ext", "-extensions", "extensions")
-        else:
-            (work / "ca.conf").write_text(
-                "[ca]\ndefault_ca=local\n[local]\ndatabase=index\n"
-                "new_certs_dir=.\nserial=serial\ndefault_md=sha384\n"
-                "policy=names\nunique_subject=no\n[names]\ncommonName=supplied\n")
-            (work / "index").write_text("")
-            (work / "serial").write_text("01\n")
-            now = datetime.datetime.now(datetime.timezone.utc)
-            openssl("ca", "-batch", "-config", "ca.conf", "-in", "leaf.csr",
-                    "-cert", "root.pem", "-keyfile", "root.key",
-                    "-startdate", (now - datetime.timedelta(days=1)).strftime(
-                        "%Y%m%d%H%M%SZ"),
-                    "-enddate", (now + datetime.timedelta(days=90)).strftime(
-                        "%Y%m%d%H%M%SZ"),
-                    "-out", "leaf.pem", "-notext", "-md", "sha384",
-                    "-extfile", "leaf.ext", "-extensions", "extensions")
+        issue("leaf", ("-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1"), "/CN=127.0.0.1",
+              "root", "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\n"
+              "extendedKeyUsage=serverAuth\nsubjectAltName=IP:127.0.0.1\n")
         (work / "chain.pem").write_text(
             (work / "leaf.pem").read_text() + (work / "root.pem").read_text())
 
-        spki = subprocess.run(
-            ["openssl", "pkey", "-in", str(work / "root.key"), "-pubout",
-             "-outform", "DER"], check=True, capture_output=True).stdout
-        point = spki[-97:]
-        (work / "anchor.inc").write_text("".join(
-            "static const p8 tls_bench_anchor_%s[48] = {%s};\n" % (
-                axis, ", ".join("0x%02x" % b for b in coordinate))
-            for axis, coordinate in (("x", point[1:49]), ("y", point[49:97]))))
-
-        host = platform.machine().lower()
-        if host in ("x86_64", "amd64"):
-            arch_flags = ["-march=x86-64"]
-        elif host in ("aarch64", "arm64"):
-            arch_flags = ["-mno-outline-atomics"]
-        elif host == "riscv64":
-            arch_flags = ["-march=rv64imafd_zicsr_zicntr", "-mabi=lp64d"]
-        else:
-            arch_flags = []
-        built = subprocess.run(
-            [args.cc, "-O2", "-static", "-nostdlib", "-nostartfiles",
-             "-fno-stack-protector", "-fno-builtin", *arch_flags, "-w",
-             "-T", "src/build/spark.ld", "-Wl,-e,_start",
-             "-Wl,--build-id=none", "-Wl,--no-warn-rwx-segments",
-             '-DTLS_BENCH_ANCHOR="%s"' % (work / "anchor.inc"),
-             "-o", str(work / "shell"), "programs/shell.c"],
-            cwd=HARNESS_ROOT, capture_output=True, text=True)
+        built = subprocess.run(spark_shell_command(args.cc, work / "shell", bench_anchor(work)),
+                               cwd=HARNESS_ROOT, capture_output=True, text=True)
         if built.returncode:
             print(built.stderr[-3000:])
             return 1
@@ -43518,17 +43460,8 @@ def harness_wget_mutation(argv):
         work = Path(temporary)
         shell = Path(args.shell) if args.shell else work / "shell"
         if not args.shell:
-            host = platform.machine().lower()
-            arch_flags = {"x86_64": ["-march=x86-64"], "amd64": ["-march=x86-64"],
-                          "aarch64": ["-mno-outline-atomics"],
-                          "arm64": ["-mno-outline-atomics"],
-                          "riscv64": ["-march=rv64imafd_zicsr_zicntr", "-mabi=lp64d"]}
-            built = subprocess.run(
-                [args.cc, "-O2", "-static", "-nostdlib", "-nostartfiles",
-                 "-fno-stack-protector", "-fno-builtin", *arch_flags.get(host, []), "-w",
-                 "-T", "src/build/spark.ld", "-Wl,-e,_start", "-Wl,--build-id=none",
-                 "-Wl,--no-warn-rwx-segments", "-o", str(shell), "programs/shell.c"],
-                cwd=HARNESS_ROOT, capture_output=True, text=True)
+            built = subprocess.run(spark_shell_command(args.cc, shell), cwd=HARNESS_ROOT,
+                                   capture_output=True, text=True)
             if built.returncode:
                 print(built.stderr[-3000:])
                 return 1
