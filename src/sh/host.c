@@ -6242,7 +6242,7 @@ static bool radio_bss_read(netlink_header address_to header, radio_heard address
         p8 address_to elements;
         p8 address_to value;
         byte_reader ies;
-        bool rsn = false, wpa = false;
+        bool rsn = false, wpa = false, named = false;
         p16 capability = 0;
 
         if (header->length < NETLINK_HEADER + GENL_HEADER ||
@@ -6298,10 +6298,18 @@ static bool radio_bss_read(netlink_header address_to header, radio_heard address
 
                 if (!byte_reader_ok(&ies))
                         break;
-                if (id == 0 && span <= RADIO_SSID_MOST && !one->ssid_length)
+                //      The first name element is the access point's name, the one
+                //      the kernel joins by: a later one is a beacon built to be
+                //      read differently, and an empty or over-long first leaves
+                //      it nameless.
+                if (id == 0 && !named)
                 {
-                        memory_copy(one->ssid, byte_reader_here(&data), span);
-                        one->ssid_length = (p8)span;
+                        named = true;
+                        if (span <= RADIO_SSID_MOST)
+                        {
+                                memory_copy(one->ssid, byte_reader_here(&data), span);
+                                one->ssid_length = (p8)span;
+                        }
                 }
                 else if (id == 48 && !rsn)
                 {
