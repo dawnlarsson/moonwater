@@ -180,6 +180,14 @@ static fn locale_recover(void);
 static unsigned int locale_wake_ms(unsigned int most);
 static b32 host_wipe(void);
 
+// The root check the commands that change the machine open with.
+#define host_need_root(what) \
+        do \
+        { \
+                if (!bowl_is_root()) \
+                        return host_refuse("%s needs root\n", what); \
+        } while (0)
+
 static b32 host_refuse(string_address text, string_address name)
 {
         string_format(log_error, host_label);
@@ -2946,8 +2954,7 @@ static b32 host_settings_command(string_address address_to arguments, positive c
         positive length = 0;
         b32 outcome;
 
-        if (!bowl_is_root())
-                return host_refuse("%s needs root\n", "moonwater");
+        host_need_root("moonwater");
 
         host_state_ready();
         host_settings_session(address_of settings);
@@ -3650,8 +3657,7 @@ static b32 host_bios(string_address address_to arguments, positive count)
                 return 0;
         }
 
-        if (!bowl_is_root())
-                return host_refuse("%s needs root\n", "moonwater bios reboot");
+        host_need_root("moonwater bios reboot");
         if (offered == -ENODEV)
                 return host_refuse("this machine did not start from UEFI firmware, so "
                                    "there is no setup to restart into%s\n", "");
@@ -7925,8 +7931,7 @@ static b32 host_radio(string_address address_to arguments, positive count)
                         return radio_internet_status();
                 if (count != 4)
                         return host_usage();
-                if (!bowl_is_root())
-                        return host_refuse("%s needs root\n", "moonwater");
+                host_need_root("moonwater");
                 return radio_internet_set(arguments[3]);
         }
 
@@ -8251,8 +8256,7 @@ static b32 tune_airplane(string_address address_to arguments, positive count)
         }
         if (count != 3 || (!string_equals(arguments[2], "on") && !string_equals(arguments[2], "off")))
                 return host_usage();
-        if (!bowl_is_root())
-                return host_refuse("%s needs root\n", "moonwater airplane");
+        host_need_root("moonwater airplane");
 
         if (string_equals(arguments[2], "on"))
         {
@@ -8305,8 +8309,7 @@ static b32 tune_brightness(string_address address_to arguments, positive count)
         if (!tune_percent(arguments[2], address_of relative, address_of lower,
                           address_of percent))
                 return host_usage();
-        if (!bowl_is_root())
-                return host_refuse("%s needs root\n", "moonwater brightness");
+        host_need_root("moonwater brightness");
 
         {
                 positive now = (current * 100 + maximum / 2) / maximum;
@@ -8398,8 +8401,7 @@ static b32 tune_charge(string_address address_to arguments, positive count)
                 positive number = 100;
                 bipolar failed;
 
-                if (!bowl_is_root())
-                        return host_refuse("%s needs root\n", "moonwater charge");
+                host_need_root("moonwater charge");
                 if (!string_equals(arguments[3], "off"))
                 {
                         positive at = 0;
@@ -8527,8 +8529,7 @@ static b32 tune_power(string_address address_to arguments, positive count)
                            !string_equals(arguments[2], "balanced") &&
                            !string_equals(arguments[2], "powersave")))
                 return host_usage();
-        if (!bowl_is_root())
-                return host_refuse("%s needs root\n", "moonwater power");
+        host_need_root("moonwater power");
         if (!tune_power_apply(arguments[2]))
                 return host_refuse("this machine has no power profile to set%s\n", "");
         (void)tune_keep("power", arguments[2]);
@@ -8608,8 +8609,7 @@ static b32 tune_cpu(string_address address_to arguments, positive count)
                 bool on = string_equals(arguments[3], "on");
                 bool boost = string_equals(arguments[2], "boost");
 
-                if (!bowl_is_root())
-                        return host_refuse("%s needs root\n", "moonwater cpu");
+                host_need_root("moonwater cpu");
                 if (!(boost ? tune_cpu_boost(on) : tune_cpu_smt(on)))
                         return host_refuse(boost ? "this machine has no boost switch%s\n"
                                                  : "this machine has no SMT switch%s\n", "");
@@ -8627,8 +8627,7 @@ static b32 tune_cpu(string_address address_to arguments, positive count)
                 positive at = 0;
                 p8 text[8];
 
-                if (!bowl_is_root())
-                        return host_refuse("%s needs root\n", "moonwater cpu");
+                host_need_root("moonwater cpu");
                 while (byte_is_digit(arguments[3][at]) && at < 5)
                         number = number * 10 + (arguments[3][at++] - '0');
                 if (arguments[3][at] || number == 0)
@@ -8706,9 +8705,7 @@ static b32 tune_suspend(string_address verb, string_address state)
                 return host_refuse(string_equals(state, "mem")
                                        ? "this kernel does not offer sleep%s\n"
                                        : "this kernel does not offer hibernate%s\n", "");
-        if (!bowl_is_root())
-                return host_refuse("%s needs root\n", string_equals(state, "mem") ? "moonwater sleep"
-                                                                                 : "moonwater hibernate");
+        host_need_root(string_equals(state, "mem") ? "moonwater sleep" : "moonwater hibernate");
         //      So a sleep that never wakes leaves the device it stopped at in the log.
         (void)tune_write(TUNE_SYS_POWER "/pm_debug_messages", "1");
         (void)tune_write(TUNE_SYS_POWER "/pm_print_times", "1");
@@ -11942,8 +11939,7 @@ static b32 host_locale(string_address address_to arguments, positive count)
                         return locale_time_status();
                 if (count != 3 || !string_equals(word, "sync"))
                         return host_usage();
-                if (!bowl_is_root())
-                        return host_refuse("%s needs root\n", "moonwater");
+                host_need_root("moonwater");
                 return locale_time_sync();
         }
 
@@ -11955,8 +11951,7 @@ static b32 host_locale(string_address address_to arguments, positive count)
                         return host_usage();
                 if (string_equals(word, "list"))
                         return locale_zone_list();
-                if (!bowl_is_root())
-                        return host_refuse("%s needs root\n", "moonwater");
+                host_need_root("moonwater");
                 if (string_equals(word, "auto"))
                         return locale_zone_auto();
                 return locale_zone_set(word);
@@ -11972,14 +11967,12 @@ static b32 host_locale(string_address address_to arguments, positive count)
                                 return locale_ntp_sampling_status();
                         if (count != 4)
                                 return host_usage();
-                        if (!bowl_is_root())
-                                return host_refuse("%s needs root\n", "moonwater");
+                        host_need_root("moonwater");
                         return locale_ntp_set(true, arguments[3]);
                 }
                 if (count != 3)
                         return host_usage();
-                if (!bowl_is_root())
-                        return host_refuse("%s needs root\n", "moonwater");
+                host_need_root("moonwater");
                 return locale_ntp_set(false, word);
         }
 
@@ -11989,8 +11982,7 @@ static b32 host_locale(string_address address_to arguments, positive count)
                 return host_usage();
         if (string_equals(word, "list"))
                 return locale_keyboard_list();
-        if (!bowl_is_root())
-                return host_refuse("%s needs root\n", "moonwater");
+        host_need_root("moonwater");
         return locale_keyboard_set(word);
 }
 
@@ -12035,8 +12027,7 @@ static b32 host_wipe(void)
 {
         bipolar failed;
 
-        if (!bowl_is_root())
-                return host_refuse("%s needs root\n", "moonwater wipe");
+        host_need_root("moonwater wipe");
 
         failed = bowl_reset_walk("/home", 0);
         if (failed < 0)
@@ -12700,8 +12691,7 @@ static b32 host_main()
             !string_equals(verb, "boot") && !string_equals(verb, "ask"))
                 return host_usage();
 
-        if (!bowl_is_root())
-                return host_refuse("%s needs root\n", "moonwater");
+        host_need_root("moonwater");
 
         host_state_ready();
 
