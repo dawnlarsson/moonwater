@@ -47644,6 +47644,102 @@ int main(void)
     return checks.verdict("tls hostnames", "tls-hostnames")
 
 
+def harness_tls_dates(argv):
+    """tls_date_value, the reader of a certificate's validity times, against
+    RFC 5280 4.1.2.5 written out in Python: UTCTime is YYMMDDHHMMSSZ with the
+    years 50-99 as 19xx and 00-49 as 20xx, GeneralizedTime is YYYYMMDDHHMMSSZ
+    and (this client's rule, since 1950-2049 has one canonical spelling) only
+    from 2050, no fraction, no offset, no missing seconds, second 60 refused,
+    the calendar exact (leap years by the Gregorian rule, 1900, 2100 and 2400
+    included), year 0 refused. Every month's day edges, every hour, minute and
+    second edge, both tags and their wrong-length, wrong-letter and wrong-tag
+    neighbours, at the century and epoch edges.
+
+        python3 test/differential.py --harness tls_dates
+    """
+    import calendar
+    checks = Checks()
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    oids, parsers, policy, framing, shim = tls_der_fuzz_lift_parts(net)
+    driver = r"""
+int main(void)
+{
+        char line[128];
+
+        while (fgets(line, sizeof line, stdin))
+        {
+                p64 value = 0;
+                int tag = (unsigned char)line[0];
+                size_t length = strcspn(line + 1, "\n");
+                bool ok = tls_date_value((p8)tag, (p8 *)line + 1, length, &value);
+
+                printf("%d %llu\n", ok, (unsigned long long)(ok ? value : 0));
+        }
+        return 0;
+}
+"""
+
+    def reference(tag, text):
+        digits = 2 if tag == 0x17 else 4 if tag == 0x18 else None
+        if digits is None or len(text) != digits + 11 or not text.endswith("Z") \
+                or not text[:-1].isascii() or not text[:-1].isdigit():
+            return None
+        year = int(text[:digits])
+        if digits == 2:
+            year += 1900 if year >= 50 else 2000
+        elif year < 2050:
+            return None
+        month, day, hour, minute, second = (int(text[digits + at:digits + at + 2])
+                                            for at in range(0, 10, 2))
+        if not year or not 1 <= month <= 12 or hour > 23 or minute > 59 or second > 59:
+            return None
+        if not 1 <= day <= calendar.monthrange(year, month)[1]:
+            return None
+        return int("%04d%02d%02d%02d%02d%02d" % (year, month, day, hour, minute, second))
+
+    samples = []
+    years2 = ["00", "01", "24", "48", "49", "50", "51", "99"]
+    years4 = ["0000", "0001", "1949", "1950", "1999", "2000", "2049", "2050", "2051",
+              "2099", "2100", "2400", "9999"]
+    for tag, years in ((0x17, years2), (0x18, years4)):
+        for year in years:
+            for month in (0, 1, 2, 4, 12, 13):
+                for day in (0, 1, 28, 29, 30, 31, 32):
+                    samples.append((tag, "%s%02d%02d000000Z" % (year, month, day)))
+            for hour, minute, second in ((23, 59, 59), (24, 0, 0), (0, 60, 0), (0, 0, 60), (0, 0, 0)):
+                samples.append((tag, "%s0101%02d%02d%02dZ" % (year, hour, minute, second)))
+            base = "%s0615123456Z" % year
+            samples += [(tag, base[:-1]), (tag, base + "Z"), (tag, base[:-1] + "z"),
+                        (tag, base[:-1] + "+"), (tag, base[:-1] + "0"),
+                        (tag, base.replace("3", "x", 1)), (tag, base[:4] + " " + base[5:]),
+                        (tag, base[:-3] + "Z"), (tag, base[:-1] + ".0Z"),
+                        (tag, base[:-1] + "+0000"), (tag, ""), (0x16, base), (0x18 if tag == 0x17 else 0x17, base)]
+    samples = [(tag, text) for tag, text in samples if "\n" not in text]
+    with tempfile.TemporaryDirectory(prefix="tls-dates-") as temporary:
+        work = Path(temporary)
+        (work / "dates.c").write_text(shim + oids + "\n" + parsers + driver)
+        built = subprocess.run([os.environ.get("CC", "cc"), "-O1", "-w", "-fsanitize=address,undefined",
+                                "-o", str(work / "dates"), str(work / "dates.c")],
+                               capture_output=True, text=True)
+        if built.returncode:
+            print("tls dates: FAIL -- the lift does not build:\n" + built.stderr[-2000:])
+            return 1
+        ran = subprocess.run([str(work / "dates")], capture_output=True, text=True,
+                             input="".join(chr(tag) + text + "\n" for tag, text in samples))
+    answers = ran.stdout.split("\n")
+    checks(ran.returncode == 0 and len(answers) == len(samples) + 1,
+           "the lift died: %s" % ran.stderr[-300:])
+    accepted = 0
+    for (tag, text), answer in zip(samples, answers):
+        want = reference(tag, text)
+        accepted += want is not None
+        checks(answer == ("0 0" if want is None else "1 %d" % want),
+               "tag %#x %r: this client says %r, RFC 5280 says %s" % (tag, text, answer, want))
+    checks(accepted > 200, "only %d of %d samples are valid: the grammar reaches little" % (
+        accepted, len(samples)))
+    return checks.verdict("tls dates", "tls-dates")
+
+
 def harness_public_suffixes(argv):
     """The wildcard public-suffix tables in src/net/suffixes.inc and the C
     lookup that reads them.
@@ -61478,6 +61574,7 @@ HARNESS_CHECKS = {
     "x509_corpus": harness_x509_corpus,
     "public_suffixes": harness_public_suffixes,
     "tls_hostnames": harness_tls_hostnames,
+    "tls_dates": harness_tls_dates,
     "anchors": harness_anchors,
     "tls_fuzz": harness_tls_fuzz,
     "msan_net": harness_msan_net,
