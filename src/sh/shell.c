@@ -850,6 +850,8 @@ static positive shell_syntax_generation;
 
 #define SHELL_PARSER_MFD_CLOEXEC 1
 #define SHELL_PARSER_MFD_ALLOW_SEALING 2
+// Linux 6.3's MFD_NOEXEC_SEAL: the file can never be mapped executable or run.
+#define SHELL_PARSER_MFD_NOEXEC_SEAL 8
 #define SHELL_PARSER_F_GETFD 1
 #define SHELL_PARSER_F_ADD_SEALS 1033
 #define SHELL_PARSER_F_GET_SEALS 1034
@@ -933,7 +935,8 @@ static bool shell_parser_snapshot_make(
         remaining = original->size - (p64)offset;
         snapshot = system_call_2(
             syscall(memfd_create), (positive)(string_address)"shell-parser",
-            SHELL_PARSER_MFD_CLOEXEC | SHELL_PARSER_MFD_ALLOW_SEALING);
+            SHELL_PARSER_MFD_CLOEXEC | SHELL_PARSER_MFD_ALLOW_SEALING |
+                SHELL_PARSER_MFD_NOEXEC_SEAL);
         if (snapshot < 0 || snapshot == handle)
                 goto finished;
 

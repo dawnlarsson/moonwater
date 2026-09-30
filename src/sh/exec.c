@@ -6788,7 +6788,8 @@ static bipolar exec_here_file(string_address body, positive length)
         bipolar handle = system_call_2(
             syscall(memfd_create),
             (positive)(string_address)"shell-here",
-            SHELL_PARSER_MFD_CLOEXEC | SHELL_PARSER_MFD_ALLOW_SEALING);
+            SHELL_PARSER_MFD_CLOEXEC | SHELL_PARSER_MFD_ALLOW_SEALING |
+                SHELL_PARSER_MFD_NOEXEC_SEAL);
 
         if (handle < 0 ||
             system_write_all((positive)handle, body, length) != length ||
@@ -9280,7 +9281,7 @@ bipolar shell_funsub_run(string_address text, bool value_form,
 {
         bipolar handle = system_call_2(
             syscall(memfd_create), (positive)(string_address) "shell-funsub",
-            SHELL_PARSER_MFD_CLOEXEC);
+            SHELL_PARSER_MFD_CLOEXEC | SHELL_PARSER_MFD_NOEXEC_SEAL);
         bipolar saved = -1;
         string_address held_reply = null;
         bool had_reply = false;
