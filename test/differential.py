@@ -56014,6 +56014,9 @@ def harness_wifi_air(argv):
              is not joined, there and in moonwater status
       watch  ip watch leases the station and never the radio's monitor
              (hwsim0) or an access point in the machine's own namespace
+      twin   a stronger twin of a saved WPA2 network, open or WPA3 alone: the
+             machine stays off it with the real one gone and joins the real
+             one, never the twin, when it is back
       reassoc the link held while idle; the access point gone and back,
              joined again; a twin by the same name taking over when the
              first goes, and the first again after it
@@ -56287,6 +56290,51 @@ def harness_wifi_air(argv):
     lines.append("scen_count 'air none in range' 1 \"$(moonwater wifi 2>&1 | scen_strip | grep -c -x 'not joined: no saved network is in range')\"")
     lines.append("rm -f /root/wifi /run/moonwater/wifi.last")
     family("air", lines)
+
+    # ---- twin: an evil twin of a saved WPA2 network. Its name is the real
+    # one's, it beacons far stronger, and it offers what the saved network
+    # does not: nothing at all (open), or WPA3 alone. With the real access
+    # point gone the machine must stay off both; with it back the machine
+    # must join it and never the twin, with no more than a handshake's
+    # wait for the trouble the twin is.
+    lines = []
+    lines.append("rm -f /root/wifi /run/moonwater/wifi.avoid /run/moonwater/wifi.last")
+    lines.append("printf '%%s\\n' %s | moonwater wifi add \"$ap0\" - > /tmp/sc.got 2>&1; scen_status 'twin saved network joined' 0 $?" % q(good["password"]))
+    lines.append("$A /mnt/stick/hwsim_radio power $i0 5")
+    lines.append("rm0=$(dmesg | grep -a \"$S: authenticate with\" | tail -1 | sed 's/.*authenticate with \\([0-9a-f:]*\\).*/\\1/'); h0=$(dmesg | grep -c 4WAY_HANDSHAKE_TIMEOUT)")
+    channel = 6 if good["channel"] != 6 else 11
+    for at, (kind, power) in enumerate((("open", 20), ("wpa3", 19))):
+        body = ["network={", "ssid=%s" % good["ssid"].hex(), "mode=2",
+                "frequency=%d" % (2407 + 5 * channel)]
+        if kind == "open":
+            body.append("key_mgmt=NONE")
+        else:
+            body += ["proto=RSN", "pairwise=CCMP", "group=CCMP", "key_mgmt=SAE", "ieee80211w=2",
+                     "sae_password=\"%s\"" % good["password"]]
+        body.append("}")
+        lines.append("/mnt/stick/hwsim_radio new > /dev/null; tn=$(station $S); tm%d=$(cat /sys/class/net/$tn/address); "
+                     "it%d=$(/mnt/stick/hwsim_radio move $NS $tn)" % (at, at))
+        lines.append("printf '%%s\\n' %s > /tmp/twin%d.conf" % (" ".join(q(line) for line in body), at))
+        lines.append("$A $W -B -i $it%d -c /tmp/twin%d.conf -D nl80211 -f /tmp/twin%d.log -P /tmp/twin%d.pid" % (at, at, at, at))
+        lines.append("for i in $(seq 40); do grep -q AP-ENABLED /tmp/twin%d.log 2>/dev/null && break; sleep 0.25; done" % at)
+        lines.append("$A /mnt/stick/hwsim_radio power $it%d %d" % (at, power))
+    lines.append("kill $(cat /tmp/ap0.pid)")
+    lines.append("for i in $(seq 60); do [ \"$(joined \"$ap0\")\" = 0 ] && break; sleep 0.5; done")
+    lines.append("scen_count 'twin real access point gone' 0 \"$(joined \"$ap0\")\"")
+    lines.append("n0=$(dmesg | grep -c \"$S: associated\"); sleep 30")
+    lines.append("scen_count 'twin with only the twins in range, not joined' 0 \"$(joined \"$ap0\")\"")
+    lines.append("scen_count 'twin no association with either twin' 0 \"$(( $(dmesg | grep -c \"$S: associated\") - n0 ))\"")
+    lines.append("$A $W -B -i $i0 -c /tmp/ap0.conf -D nl80211 -f /tmp/ap0.log -P /tmp/ap0.pid; t0=$(uptime_now)")
+    lines.append("for i in $(seq 240); do [ \"$(joined \"$ap0\")\" = 1 ] && break; sleep 0.25; done; echo \"wifi-time twin-back $(took $t0)\"")
+    lines.append("scen_count 'twin real access point back, joined' 1 \"$(joined \"$ap0\")\"")
+    lines.append("scen_count 'twin joined through the real one' 1 \"$([ \"$(dmesg | grep -a \"$S: authenticate with\" | tail -1 | sed 's/.*authenticate with \\([0-9a-f:]*\\).*/\\1/')\" = \"$rm0\" ] && echo 1 || echo 0)\"")
+    lines.append("scen_count 'twin no four-way timeout' \"$h0\" \"$(dmesg | grep -c 4WAY_HANDSHAKE_TIMEOUT)\"")
+    # The twins are louder and are the ones the kernel will not join: the
+    # real one is picked ahead of them, not after a join has waited them out.
+    lines.append("scen_count 'twin real one joined within 20 s of its return' 1 \"$(awk -v t=\"$(took $t0)\" 'BEGIN { print (t < 20) }')\"")
+    lines.append("dmesg | grep -a -e \"$S:\" | tail -40 | sed 's/^/twin-log /'")
+    lines.append("kill $(cat /tmp/twin0.pid) $(cat /tmp/twin1.pid); rm -f /root/wifi")
+    family("twin", lines)
 
     # ---- rekey: hostapd, whose control socket starts rekeys on demand.
     # Two access points by one name, the first much the stronger, each

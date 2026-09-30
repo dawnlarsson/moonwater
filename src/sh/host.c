@@ -5253,7 +5253,7 @@ static COLD bool nl80211_associated(void)
 }
 
 static COLD bipolar radio_bss_choose(nl80211 address_to session, p32 index,
-                                     p8 address_to ssid, positive ssid_length,
+                                     p8 address_to ssid, positive ssid_length, bool secured,
                                      p8 address_to bssid, p32 address_to frequency);
 
 static COLD bool wifi_mac_set(p8 address_to mac)
@@ -5306,7 +5306,7 @@ static COLD bipolar nl80211_join(p8 address_to ssid, positive ssid_length, p8 ad
                 wifi_link_mac((string_address)iface.name, link->sta);
 
         picked = radio_bss_choose(address_of link->session, iface.index, ssid, ssid_length,
-                                  chosen, address_of frequency);
+                                  pmk != null, chosen, address_of frequency);
         if (!picked)
         {
                 wifi_link_close(link);
@@ -6704,6 +6704,8 @@ typedef struct
         radio_heard best;
         bool found;
         bool avoided;
+        bool secured;
+        bool fits;
 } radio_pick;
 
 /* The strongest the kernel still lists by the name, one given up on only
@@ -6713,6 +6715,7 @@ static bool radio_pick_seen(netlink_header address_to header, address_any contex
         radio_pick address_to pick = (radio_pick address_to)context;
         radio_heard one;
         bool avoided = false;
+        bool fits;
 
         if (!radio_bss_read(header, address_of one) || one.seen > RADIO_AIR_STALE_MS ||
             !wifi_mac_set(one.bssid) || one.ssid_length != pick->ssid_length ||
@@ -6720,12 +6723,22 @@ static bool radio_pick_seen(netlink_header address_to header, address_any contex
                 return true;
         for (positive at = 0; at < pick->avoid_count; at++)
                 avoided |= !memory_compare(pick->avoid[at].bssid, one.bssid, 6);
-        if (pick->found && (avoided > pick->avoided ||
-                            (avoided == pick->avoided && one.mbm <= pick->best.mbm)))
+        //      What the saved network asks of an access point: WPA2 for one
+        //      with a password, nothing for one without. A twin by the same
+        //      name that offers anything else, and beacons louder than the
+        //      real one, is the last resort and not the first: the kernel
+        //      will not join it, and asking cost a join its whole timeout.
+        fits = pick->secured ? one.security == RADIO_WPA2 || one.security == RADIO_WPA23
+                             : one.security == RADIO_OPEN;
+        if (pick->found && (fits < pick->fits ||
+                            (fits == pick->fits &&
+                             (avoided > pick->avoided ||
+                              (avoided == pick->avoided && one.mbm <= pick->best.mbm)))))
                 return true;
         pick->best = one;
         pick->found = true;
         pick->avoided = avoided;
+        pick->fits = fits;
         return true;
 }
 
@@ -6741,16 +6754,17 @@ static bool radio_pick_seen(netlink_header address_to header, address_any contex
         name, -1 when no scan could be had: the join then goes by name.
 */
 static COLD bipolar radio_bss_choose(nl80211 address_to session, p32 index,
-                                     p8 address_to ssid, positive ssid_length,
+                                     p8 address_to ssid, positive ssid_length, bool secured,
                                      p8 address_to bssid, p32 address_to frequency)
 {
         radio_avoid avoid[RADIO_AVOID_MOST];
-        radio_pick pick = {.ssid = ssid, .ssid_length = ssid_length, .avoid = avoid};
+        radio_pick pick = {
+            .ssid = ssid, .ssid_length = ssid_length, .avoid = avoid, .secured = secured};
         bipolar heard = 1;
 
         pick.avoid_count = radio_avoid_load(avoid);
         radio_air_dump(session, index, radio_pick_seen, address_of pick);
-        if (!pick.found || pick.avoided)
+        if (!pick.found || pick.avoided || !pick.fits)
         {
                 heard = radio_air_scan(session, index, ssid, ssid_length, true) ? 1 : -1;
                 pick.found = false;
