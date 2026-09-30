@@ -186,6 +186,71 @@ Open, ranked:
    `kernel.kptr_restrict` 0, `kernel.dmesg_restrict` 0, unprivileged user
    namespaces and io_uring on in the default tier.
 
+## Supply chain, secrets and the terminal (closesupply pass, 2026-09-30)
+
+Every place code fetches bytes and then runs, installs or trusts them, and what
+checks it. "Pinned" means a digest or a signature that is in this repository
+and is refused on a mismatch; the bump procedure for each is written beside
+the pin.
+
+| Fetch | Checked by | State |
+| --- | --- | --- |
+| bowl: Arch x86_64 bootstrap | `archive.archlinux.org/iso/2026.09.01` (a dated copy), SHA-256 from its `sha256sums.txt`, also checked with gpg against Pierre Schmitz's signature | pinned (was `iso/latest` on TLS alone) |
+| bowl: Arch Linux RISC-V | `archriscv-2026-08-27.tar.zst`, SHA-256 | pinned (was `-latest`) |
+| bowl: Debian, three arches | the file at one `docker-debian-artifacts` commit per arch, SHA-256 (the branch the old URL followed moves daily; GitHub still serves commits from June that the branch has left) | pinned |
+| bowl: Arch Linux ARM | only a `latest` exists, so its build system's RSA-4096 signature (`bowl_signature_ok`: OpenPGP v4, RSA, SHA-256/512, issuer fingerprint and creation time from the hashed area, PKCS#1 through `crypto_rsa_pkcs1`) against a key pinned as numbers and as a fingerprint recomputed on every use, with a floor on the signature date so an older signed archive is refused | signed, pinned key and floor |
+| bowl: Alpine, Fedora, Nix | SHA-256 of one release each | pinned (already) |
+| bowl: a row with no digest and no key | refused (`bowl_archive_digest_ok` used to take any file) | refused |
+| bowl: what the package managers inside a bowl fetch | each distribution's own keyring and index signatures (the keyrings arrive in the pinned archive); pacman's databases are `DatabaseOptional` upstream, `dnf` keeps Fedora's `repo_gpgcheck` default, nix trusts its channel over TLS and its binary cache by key | as each distribution ships it, left; not this tree's to change |
+| build: the kernel tarball | a detached PGP signature pinned in `build.c` (the signer's fingerprint is inside it); the tarball that is extracted is the one `gpg --verify` read; the keys are located over WKD, which cannot make the pinned signature verify other bytes | sound, unchanged |
+| build: linux-firmware, and the Raspberry Pi firmware | a pinned commit and a pinned digest per file (`kernel/firmware/apply`, `kernel/profile/post/rpi.sh`); a mismatch stops the build | sound, unchanged |
+| CI: shellcheck, the actions | the tarball was piped into `tar` with no check and `actions/checkout` was the moving tag `v4`; now a pinned SHA-256 (`sha256sum -c`) and a commit SHA | fixed (`security_hygiene` keeps it) |
+| `moonwater update`, `install` | no network path: the image is copied from the medium the session started from | n/a |
+| Cloudflare auto-zone header, AIA fetch, NTP | the clock and network streams (closeclock, closenet) | their rows |
+
+A pinned digest ages: Arch's dated bootstrap is about a month old when this
+ships, so a first `pacman -Syu` after it may need `archlinux-keyring` first, as
+any stale Arch install does, and a dropped mirror copy or a commit GitHub stops
+serving is a refused download that means "move the pin".
+
+Secrets on a command line: `moonwater wifi add SSID PASSWORD` and
+`moonwater link join NAME SECRET` put the secret in `ps` and in the shell's
+history. The history reader now never keeps a line that carries one
+(`history_secret_line`), `link join NAME -` reads the secret from standard input
+as `wifi add SSID -` reads a password, both warn a person at a terminal, and
+`MOONWATER_STRICT` tight refuses the argv forms. A machine script's
+`link join NAME SECRET` is the script's own text (the status page says so) and
+reads the secret from a file with `-` if that matters.
+
+Boot and a plugged-in disk: boot ran `/root/main.moonwater.sh` as root from
+the first attached disk that looked like an install of the same build, and every
+copy of a public release says that build. It now chooses in two passes
+(`host_census_pick`): the install whose image carries this session's medium
+identity (the disk the session started from) first, wherever it enumerates;
+failing that the first on a bus nothing is plugged into (`host_disk_external`:
+USB or Thunderbolt in the sysfs path, `removable` on the block device, or
+`removable` on any device above it, which is how a USB4 enclosure that looks
+like any NVMe disk is told). Anything else with the same build is asked about,
+with "on a disk that is not this one" in the question; `MOONWATER_STRICT` tight
+takes only the first kind. A second disk carrying a copied partition identity
+can no longer be resolved in place of the one the census found
+(`host_install_refresh` holds the disk). What is not closed: an internal-bus
+disk that is not this session's, which the default still takes (D10). Measured:
+in a KVM guest an install on a USB disk is found only when its enumeration beats
+the census (it did not, at 1.27 s against a 1.0 s floor), so the plug-in case is
+racy on the wire and was not reproduced in QEMU; the install lane (117 rows)
+still takes the internal NVMe install without asking and asks about another
+build. The data partition is mounted without `nodev`/`nosuid` (D09).
+
+The terminal: `edit` wrote a file's bytes and name to the terminal raw (an escape
+cleared the screen, a title was set, a bell rang); they are question marks
+now (an `edit` lane section with eleven rows, red before). The emulator
+(`src/canvas/term.c`) has a coverage-guided target (`term_fuzz`, ASan/UBSan,
+720 s clean) and so does bowl's JSON reader (`bowl_json_fuzz`, 620 s clean).
+The ranked item "REP with a DECSTBM region costs 70 MB of copying" was read
+and not measured: 65,000 cells of REP inside a 134-row region on a 255 x 135
+grid takes 119 microseconds.
+
 ## Open issue ledger
 
 The one list of every known, documented security or hardening issue in the
@@ -221,13 +286,13 @@ downloads, boot disk, argv secrets, terminal fuzz; closeledger = the rest.
 | L17 | netlink2 | Group `check` in `/root/link.groups` is a fast salted SHA-256: whoever holds the file tests guesses at full speed | in progress (closewifi) |
 | L18 | netlink2 | Live waterlink handshake flood under netem not tested; MSan not run on waterlink | in progress (closewifi) |
 | L19 | security-pass-2 #12 | wifi first-message sender unchecked (DoS) | open (closewifi) |
-| L20 | security-pass-2 #12 | `moonwater wifi add SSID PASS` puts the password in argv (the `-` stdin form exists) | open (closesupply) |
-| L21 | secnet #2; bowl.c | Arch/Debian/ArchARM/RISC-V bootstrap tarballs unpinned and unsigned (TLS to the mirror only) | in progress (closesupply) |
-| L22 | secnet #3 | `link join NS SECRET` puts the group secret in argv | in progress (closesupply) |
-| L23 | security-pass-2 #1 | Boot takes any attached disk that looks like an install and runs its `main.moonwater.sh` as root (evil-maid); data partition mounted without nodev/nosuid | in progress (closesupply) |
-| L24 | security-pass-2 #2 | `SPARK_IOCTL_BIND` GET / `MOONWATER_SCRIPT_GET` readable by anyone while settings GET is CAP_SYS_ADMIN | in progress (closesupply) |
-| L25 | security-pass-2 #3, #6 | `edit` draws file bytes and names raw to the terminal; `term.c` REP with a DECSTBM region costs ~70 MB of copying per printk on a 4K console | in progress (closesupply) |
-| L26 | secnet #4 | bowl JSON has no fuzz target (input is pinned-digest data) | open (closesupply) |
+| L20 | security-pass-2 #12 | `moonwater wifi add SSID PASS` puts the password in argv (the `-` stdin form exists) | closed (83d35dd9): the history never keeps the line, a terminal is warned, tight refuses it |
+| L21 | secnet #2; bowl.c | Arch/Debian/ArchARM/RISC-V bootstrap tarballs unpinned and unsigned (TLS to the mirror only) | closed (9643436c): dated copies and commit pins by SHA-256, Arch Linux ARM by a pinned RSA key with a date floor; a row with neither is refused |
+| L22 | secnet #3 | `link join NS SECRET` puts the group secret in argv | closed (83d35dd9): `link join NS -`, the history, scrubbed argv, tight refuses the argv form |
+| L23 | security-pass-2 #1 | Boot takes any attached disk that looks like an install and runs its `main.moonwater.sh` as root (evil-maid); data partition mounted without nodev/nosuid | plug-in media: closed (b5df0b3d), not reproduced in a guest (USB enumerates after the census floor), unit-tested (`boot_links`, `boot_choice`); an internal same-build disk that is not this session's is still taken by default (D10), tight asks; nodev/nosuid is D09 |
+| L24 | security-pass-2 #2 | `SPARK_IOCTL_BIND` GET / `MOONWATER_SCRIPT_GET` readable by anyone while settings GET is CAP_SYS_ADMIN | closed (75d016d0, already on this branch: the script text needs CAP_SYS_ADMIN, a bound line reads empty without it; `core_state` rows) |
+| L25 | security-pass-2 #3, #6 | `edit` draws file bytes and names raw to the terminal; `term.c` REP with a DECSTBM region costs ~70 MB of copying per printk on a 4K console | closed (d53f353b, a99c369b): `edit` draws controls as `?` and sends no stray byte (fifteen rows, red before); the REP cost was not real, 119 microseconds measured |
+| L26 | secnet #4 | bowl JSON has no fuzz target (input is pinned-digest data) | closed (dd3e7319): `bowl_json_fuzz`; every bootstrap is pinned now, so the input is the release's own bytes |
 | L27 | PR 16 body; `STRICTER_THAN_WGET` | Default refuses an identical duplicate `Content-Length`, `Content-Length: 3, 3`, obs-fold lines and a control byte in the reason phrase; wget 1.25.0 and curl 8.22.0 accept all four (a conflicting pair stays refused, as curl does) | in progress (closeledger) |
 | L28 | PR 16 body | Truncated head (FIN inside the status line or a header): wget exits 0 with nothing written, this client fails | in progress (closeledger; decision) |
 | L29 | PR 16 body; matrix | The tight tier is not fuzzed: `http_fuzz` models the default only; `http_fuzz` was red at 90aefe55 (205 seed, fixed 25eea8af) | in progress (closeledger) |
@@ -255,3 +320,5 @@ downloads, boot disk, argv secrets, terminal fuzz; closeledger = the rest.
 | D06 | A body dripped one byte per 29 s runs forever; no Content-Length pre-check for disk fill | Each read has its own 30 s timeout as GNU wget; GNU has no pre-check either |
 | D07 | HEAD not exercised | The client only builds GET |
 | D08 | "Guest is root, not a wall": root is not hardened against itself | Documented policy in `SECURITY.md` |
+| D09 | The data partition is mounted without `nodev` and `nosuid` | It holds the user's `/root`, `/home` and the bowls; a bowl's `sudo` and `su` need setuid, and a device node on it can only have been made by root. Whose disk boot takes without asking is the control (L23), and the user can override |
+| D10 | The default still takes, without asking, the first same-build install on an internal bus when none is the disk the session started from | Reaching it means opening the case and adding a disk, which already gives write access to the unencrypted disk and the machine; asking about every internal disk would put a question on every boot from a live stick. `MOONWATER_STRICT` tight asks, and the user can make that the default |
