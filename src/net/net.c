@@ -10297,9 +10297,20 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                         p8 placed[HTTP_URL_MAX];
                         p8 escaped[HTTP_URL_MAX];
 
-                        status = !response.location_length ? HTTP_MALFORMED
+                        /* A redirect with nothing to follow is the server's
+                           answer, a status like any other: GNU wget exits 8
+                           on it and curl hands the body over. */
+                        status = !response.location_length ? HTTP_STATUS
                                  : response.location_length >= sizeof placed
                                      ? HTTP_BAD_URL : HTTP_OK;
+                        if (status == HTTP_BAD_URL)
+                        {
+                                /* The URL a failure names is the Location
+                                   that was too long, as far as it goes, and
+                                   not the page that sent it. */
+                                memory_copy(url, response.location, sizeof url - 1);
+                                url[sizeof url - 1] = end;
+                        }
                         if (!status)
                         {
                                 memory_copy(placed, response.location,
