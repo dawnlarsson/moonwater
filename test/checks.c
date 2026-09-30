@@ -72393,7 +72393,7 @@ static fn distros(void)
 
                 check("Every setup row is a bowl with a marker, a URL and a manager",
                       bowl_named_root(row->root) && row->marker[0] == '/' &&
-                          !row->refuse && row->url &&
+                          row->url &&
                           !string_compare_max(row->url, "https://", 8) &&
                           row->store && row->expose && row->expose[0] &&
                           row->archive_bytes && row->tree_bytes && row->next);

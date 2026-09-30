@@ -58,12 +58,6 @@ struct bowl_mount_point
         positive flags;
 };
 
-struct bowl_layer
-{
-        string_address path;
-        bool required;
-};
-
 /*
         Filesystems expected by a complete isolated root.
 
@@ -112,22 +106,22 @@ static struct bowl_mount_point bowl_isolated_mounts[] = {
         and libraries by /nix/store paths, so without it a program from
         a Nix profile runs only in the isolated view.
 */
-static struct bowl_layer bowl_fast_layers[] = {
-    {"/lib", false},
-    {"/lib64", false},
-    {"/usr/lib", false},
-    {"/usr/lib64", false},
-    {"/usr/share", false},
-    {"/usr/share/terminfo", false},
-    {"/usr/libexec", false},
-    {"/usr/local/lib", false},
-    {"/usr/local/share", false},
-    {"/etc/xdg", false},
-    {"/etc/fonts", false},
-    {"/etc/ssl", false},
-    {"/etc/pki", false},
-    {"/nix", false},
-    {null, false},
+static string_address bowl_fast_layers[] = {
+    "/lib",
+    "/lib64",
+    "/usr/lib",
+    "/usr/lib64",
+    "/usr/share",
+    "/usr/share/terminfo",
+    "/usr/libexec",
+    "/usr/local/lib",
+    "/usr/local/share",
+    "/etc/xdg",
+    "/etc/fonts",
+    "/etc/ssl",
+    "/etc/pki",
+    "/nix",
+    null,
 };
 
 static bipolar bowl_open_directory(string_address path, bool create,
@@ -1035,26 +1029,21 @@ static bipolar bowl_fast_enter(string_address root)
         p8 source[BOWL_PATH_LIMIT];
         bipolar failed;
 
-        for (positive i = 0; bowl_fast_layers[i].path; i++)
+        for (positive i = 0; bowl_fast_layers[i]; i++)
         {
-                struct bowl_layer address_to layer = bowl_fast_layers + i;
+                string_address layer = bowl_fast_layers[i];
 
-                if (!bowl_root_path(source, sizeof(source), root, layer->path))
+                if (!bowl_root_path(source, sizeof(source), root, layer))
                         return -ENAMETOOLONG;
 
-                failed = system_access_at(AT_FDCWD, source, 0);
-                if (failed < 0)
-                {
-                        if (layer->required)
-                                return failed;
+                if (system_access_at(AT_FDCWD, source, 0) < 0)
                         continue;
-                }
 
-                failed = bowl_mkdir_parents(layer->path);
+                failed = bowl_mkdir_parents(layer);
                 if (failed < 0)
                         return failed;
 
-                failed = bowl_bind_ro(source, layer->path);
+                failed = bowl_bind_ro(source, layer);
                 if (failed)
                         return failed;
         }
@@ -4092,7 +4081,6 @@ struct bowl_distro
         string_address url;
         string_address marker;
         string_address next;
-        string_address refuse;
         p64 floor;
         // What the download and the tree it unpacks to took, measured.
         p64 archive_bytes;
@@ -4456,24 +4444,24 @@ static string_address bowl_nix_expose[] = {
 static const struct bowl_distro bowl_distros[] = {
     {"arch", BOWL_ARCH_LABEL, BOWL_ROOT_PREFIX "arch",
      BOWL_ROOT_PREFIX BOWL_ARCH_STORE, BOWL_ARCH_URL,
-     "/usr/bin/pacman", "pacman -Syu", null, (p64)32 * 1024 * 1024,
+     "/usr/bin/pacman", "pacman -Syu", (p64)32 * 1024 * 1024,
      BOWL_ARCH_BYTES, BOWL_PRIME_ARCH, bowl_arch_expose, null, null},
     {"alpine", "Alpine", BOWL_ROOT_PREFIX "alpine",
      BOWL_ROOT_PREFIX BOWL_ALPINE_STORE, BOWL_ALPINE_URL, "/sbin/apk",
-     "apk update", null, (p64)1024 * 1024, BOWL_ALPINE_BYTES, BOWL_PRIME_NONE,
+     "apk update", (p64)1024 * 1024, BOWL_ALPINE_BYTES, BOWL_PRIME_NONE,
      bowl_alpine_expose, BOWL_ALPINE_SHA256, null},
     {"debian", "Debian", BOWL_ROOT_PREFIX "debian",
      BOWL_ROOT_PREFIX BOWL_DEBIAN_STORE, BOWL_DEBIAN_URL, "/usr/bin/apt-get",
-     "apt-get update", null, (p64)8 * 1024 * 1024, BOWL_DEBIAN_BYTES,
+     "apt-get update", (p64)8 * 1024 * 1024, BOWL_DEBIAN_BYTES,
      BOWL_PRIME_NONE, bowl_debian_expose, null, null},
     {"fedora", "Fedora", BOWL_ROOT_PREFIX "fedora",
      BOWL_ROOT_PREFIX BOWL_FEDORA_STORE, BOWL_FEDORA_URL,
-     "/usr/bin/dnf", "dnf makecache", null, (p64)32 * 1024 * 1024,
+     "/usr/bin/dnf", "dnf makecache", (p64)32 * 1024 * 1024,
      BOWL_FEDORA_BYTES, BOWL_PRIME_NONE, bowl_fedora_expose,
      BOWL_FEDORA_SHA256, bowl_extract_oci},
     {"nix", "Nix", BOWL_ROOT_PREFIX "nix",
      BOWL_ROOT_PREFIX BOWL_NIX_STORE, BOWL_NIX_URL, "/nix/.reginfo",
-     "nix-channel --update, or nix run nixpkgs#hello", null,
+     "nix-channel --update, or nix run nixpkgs#hello",
      (p64)8 * 1024 * 1024, BOWL_NIX_BYTES, BOWL_PRIME_NIX,
      bowl_nix_expose, BOWL_NIX_SHA256, bowl_extract_nix},
 };
@@ -4617,9 +4605,6 @@ static b32 bowl_setup(positive count, string_address address_to arguments)
         distro = bowl_find_distro(arguments[2]);
         if (!distro)
                 return bowl_refuse("known setups: arch alpine debian fedora nix\n");
-
-        if (distro->refuse)
-                return bowl_refuse(distro->refuse);
 
         if (bowl_setup_become_root(distro->name))
                 return 1;
