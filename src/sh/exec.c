@@ -13189,9 +13189,18 @@ static bool conditional_bad;
 static bool conditional_runtime;
 static bool conditional_active;
 
+//      Where in the text each word began, for the tokenizer's memo.
+#define CONDITIONAL_MEMO_WORDS 12
+static string_address conditional_source;
+static positive conditional_from[CONDITIONAL_MEMO_WORDS];
+
 static bool conditional_add(string_address text, positive length)
 {
         string_address kept;
+
+        if (conditional_word_count < CONDITIONAL_MEMO_WORDS)
+                conditional_from[conditional_word_count] =
+                    (positive)(text - conditional_source);
 
         if (length == positive_max || conditional_word_count == positive_max ||
             !shell_array_room(conditional_word, conditional_word_room, conditional_word_count + 1))
@@ -13206,11 +13215,12 @@ static bool conditional_add(string_address text, positive length)
         return true;
 }
 
-static bool conditional_tokenize(string_address text)
+static bool conditional_scan(string_address text)
 {
         string_address at = text;
 
         conditional_word_count = 0;
+        conditional_source = text;
 
         while (string_get(at))
         {
@@ -13322,6 +13332,79 @@ static bool conditional_tokenize(string_address text)
                 if (at == start ||
                     !conditional_add(start, (positive)(at - start)))
                         return false;
+        }
+
+        return true;
+}
+
+/*
+        The words of a [[ ]] depend on its text and on the personality, and on
+        nothing a run changes, so one that has been cut once is cut from what
+        was recorded: where each word began and how long it was. A hit costs
+        the compare of the text and a copy of each word, where a miss costs
+        the scan, which reads every byte through the quote and group
+        walkers. The text is held in the entry, so a buffer that is reused for
+        another command is a miss and not a wrong answer, and a text that
+        would not scan, or that scanned while the lexer had counted a failure
+        of its own, is never held or used.
+*/
+#define CONDITIONAL_MEMO_TEXT 160
+#define CONDITIONAL_MEMO_SLOTS 16
+typedef struct
+{
+        positive length;
+        positive count;
+        positive from[CONDITIONAL_MEMO_WORDS];
+        positive size[CONDITIONAL_MEMO_WORDS];
+        p8 personality;
+        p8 text[CONDITIONAL_MEMO_TEXT];
+} conditional_memo_entry;
+//      Mapped on the first [[ ]], not reserved in every process's bss.
+static conditional_memo_entry (address_to conditional_memo_held)[CONDITIONAL_MEMO_SLOTS];
+#define conditional_memo UTILITY_HELD(conditional_memo)
+
+static bool conditional_tokenize(string_address text)
+{
+        positive length = string_length(text);
+        conditional_memo_entry address_to memo = conditional_memo +
+            (((positive)text >> 4) & (CONDITIONAL_MEMO_SLOTS - 1));
+        //      What the lexer's walkers read besides the text. Once it has
+        //      counted a failed scan it stops asking about the next, which
+        //      cuts a group differently, so a memo is neither made nor used
+        //      then.
+        p8 personality = (shell_bash_compat ? 2 : 0) | (shell_dash_compat ? 1 : 0);
+        bool clean = !lex_scan_failed;
+
+        if (clean && length < CONDITIONAL_MEMO_TEXT && memo->count &&
+            memo->length == length && memo->personality == personality &&
+            !memory_compare(memo->text, text, length + 1))
+        {
+                conditional_word_count = 0;
+
+                for (positive word = 0; word < memo->count; word++)
+                        if (!conditional_add(text + memo->from[word],
+                                             memo->size[word]))
+                                return false;
+
+                return true;
+        }
+
+        if (!conditional_scan(text))
+                return false;
+
+        if (clean && length < CONDITIONAL_MEMO_TEXT && !lex_scan_failed &&
+            conditional_word_count && conditional_word_count <= CONDITIONAL_MEMO_WORDS)
+        {
+                memo->count = 0;
+                memo->length = length;
+                memo->personality = personality;
+                memory_copy(memo->text, text, length + 1);
+                for (positive word = 0; word < conditional_word_count; word++)
+                {
+                        memo->from[word] = conditional_from[word];
+                        memo->size[word] = string_length(conditional_word[word]);
+                }
+                memo->count = conditional_word_count;
         }
 
         return true;
