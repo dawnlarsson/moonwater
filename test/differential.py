@@ -56553,6 +56553,13 @@ static bool fz_made_by_ap(p8 idx, const p8 *key)
 }
 static p8 fz_sta_tk[16], fz_sta_gtk[4][16];
 static bool fz_sta_tk_set, fz_sta_gtk_set[4], fz_authorized;
+/* The group management key, for a model access point that protects its
+   management frames: the ones it made, and the ones the station put in. */
+static p8 fz_ap_igtk[16], fz_ap_igtk_id, fz_ap_ipn[6];
+static p8 fz_igtk_made[32][17];
+static positive fz_igtk_made_count;
+static p8 fz_sta_igtk[2][16];
+static bool fz_sta_igtk_set[2];
 
 static bipolar socket_send(b32 handle, const void *data, positive size, b32 flags,
                            const void *to, positive to_size)
@@ -56602,6 +56609,23 @@ static bipolar nl80211_new_key(nl80211 *session, p32 index, p8 idx, p32 type, p8
         fz_sta_gtk_set[idx] = true;
         return 0;
 }
+/* A group management key goes in only as the access point made it (with
+   the key id and packet number it gave), and never twice the same. */
+static bipolar nl80211_new_igtk(nl80211 *session, p32 index, p8 idx, p8 *key, p8 *seq)
+{
+        bool made = false;
+
+        (void)session, (void)index, (void)seq;
+        if (idx != 4 && idx != 5)
+                abort();
+        for (positive at = 0; at < fz_igtk_made_count; at++)
+                made |= fz_igtk_made[at][0] == idx && !memcmp(fz_igtk_made[at] + 1, key, 16);
+        if (!made || (fz_sta_igtk_set[idx - 4] && !memcmp(key, fz_sta_igtk[idx - 4], 16)))
+                abort();
+        memcpy(fz_sta_igtk[idx - 4], key, 16);
+        fz_sta_igtk_set[idx - 4] = true;
+        return 0;
+}
 static bipolar nl80211_authorize(nl80211 *session, p32 index, p8 *mac)
 {
         (void)session, (void)index, (void)mac;
@@ -56644,6 +56668,20 @@ static p8 fz_pmk[32], fz_anonce[32], fz_ptk[64], fz_pending[64], fz_rsc[8];
 static const p8 fz_ap[6] = {2, 0, 0, 0, 1, 0}, fz_sta[6] = {2, 0, 0, 0, 2, 0};
 static p64 fz_replay, fz_verified;
 static bool fz_pending_set, fz_ptk_set, fz_clean;
+/* Mode 1: a network with PSK-SHA256 and management frame protection, whose
+   key frames are descriptor version 3 (AES-128-CMAC) and whose message 3
+   and group message 1 carry an IGTK; mode 0 is WPA2-PSK as it always was. */
+static int fz_mode;
+static void fz_mic(const p8 *kck, p8 *frame, positive n, p8 *out)
+{
+        p8 hash[32];
+
+        if (fz_mode)
+                wifi_cmac((p8 *)kck, frame, n, hash);
+        else
+                wifi_hmac_sha1((p8 *)kck, 16, frame, n, hash);
+        memcpy(out, hash, 16);
+}
 /* A replayed, bent or raw frame the station answered leaves it where the
    model cannot follow; the rules on installs still hold, the expectations
    of each answer no longer do. */
@@ -56662,7 +56700,7 @@ static positive fz_frame(p8 *f, p16 info, const p8 *nonce, const p8 *data, posit
         f[1] = 3;
         network_store_16(f + 2, (p16)(95 + n));
         f[4] = 2;
-        network_store_16(f + 5, info);
+        network_store_16(f + 5, (p16)((info & ~7) | (fz_mode ? 3 : 2)));
         network_store_16(f + 7, 16);
         network_store_64(f + 9, fz_replay);
         if (nonce)
@@ -56672,12 +56710,7 @@ static positive fz_frame(p8 *f, p16 info, const p8 *nonce, const p8 *data, posit
         if (n)
                 memcpy(f + 99, data, n);
         if (kck)
-        {
-                p8 hash[20];
-
-                wifi_hmac_sha1((p8 *)kck, 16, f, 99 + n, hash);
-                memcpy(f + 81, hash, 16);
-        }
+                fz_mic(kck, f, 99 + n, f + 81);
         return 99 + n;
 }
 
@@ -56703,14 +56736,15 @@ static bipolar fz_deliver(const p8 *frame, positive length)
    it answers and a MIC under kck. */
 static void fz_answer(p16 info, const p8 *kck)
 {
-        p8 copy[512], hash[20];
+        p8 copy[512], hash[16];
 
+        info = (p16)((info & ~7) | (fz_mode ? 3 : 2));
         if (fz_sends != 1 || fz_sent_length < 99 || network_load_16(fz_sent + 5) != info ||
             network_load_64(fz_sent + 9) != fz_replay)
                 abort();
         memcpy(copy, fz_sent, fz_sent_length);
         memset(copy + 81, 0, 16);
-        wifi_hmac_sha1((p8 *)kck, 16, copy, fz_sent_length, hash);
+        fz_mic(kck, copy, fz_sent_length, hash);
         if (memcmp(hash, fz_sent + 81, 16))
                 abort();
 }
@@ -56719,19 +56753,29 @@ static void fz_answer(p16 info, const p8 *kck)
    1, padded and wrapped under the KEK. */
 static positive fz_key_data(p8 *out, const p8 *kek, bool rsn)
 {
-        p8 plain[64];
+        p8 plain[128];
         positive n = 0;
 
         if (rsn)
         {
-                memcpy(plain, wifi_rsn_ie, sizeof wifi_rsn_ie);
-                n = sizeof wifi_rsn_ie;
+                memcpy(plain, fz_link.rsn, fz_link.rsn_length);
+                n = fz_link.rsn_length;
         }
         plain[n++] = 0xdd, plain[n++] = 22;
         plain[n++] = 0, plain[n++] = 0x0f, plain[n++] = 0xac, plain[n++] = 1;
         plain[n++] = fz_ap_gtk_idx, plain[n++] = 0;
         memcpy(plain + n, fz_ap_gtk, 16);
         n += 16;
+        if (fz_mode)
+        {
+                plain[n++] = 0xdd, plain[n++] = 28;
+                plain[n++] = 0, plain[n++] = 0x0f, plain[n++] = 0xac, plain[n++] = 9;
+                plain[n++] = fz_ap_igtk_id, plain[n++] = 0;
+                memcpy(plain + n, fz_ap_ipn, 6);
+                n += 6;
+                memcpy(plain + n, fz_ap_igtk, 16);
+                n += 16;
+        }
         if (n % 8)
         {
                 plain[n++] = 0xdd;
@@ -56751,6 +56795,15 @@ static void fz_new_gtk(void)
         fz_ap_gtk[1] ^= 0x5a;
         fz_ap_gtk_idx = fz_ap_gtk_idx == 1 ? 2 : 1;
         fz_made_add(fz_ap_gtk_idx, fz_ap_gtk);
+        fz_take(fz_ap_igtk, 16);
+        fz_ap_igtk[0] ^= turn;
+        fz_take(fz_ap_ipn, 6);
+        fz_ap_igtk_id = fz_ap_igtk_id == 4 ? 5 : 4;
+        if (fz_igtk_made_count < 32)
+        {
+                fz_igtk_made[fz_igtk_made_count][0] = fz_ap_igtk_id;
+                memcpy(fz_igtk_made[fz_igtk_made_count++] + 1, fz_ap_igtk, 16);
+        }
 }
 
 int LLVMFuzzerTestOneInput(const p8 *data, positive size)
@@ -56758,6 +56811,13 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
         fz_at = data, fz_left = size;
         memset(&fz_link, 0, sizeof fz_link);
         fz_link.eapol = 3, fz_link.session.handle = 4, fz_link.index = 7;
+        fz_mode = fz_byte() & 1;
+        fz_link.akm = fz_mode ? 6 : 2;
+        fz_link.version = wifi_key_version(fz_link.akm);
+        fz_link.rsn_length = (p8)wifi_rsn_build(fz_link.rsn, fz_link.akm, fz_mode ? 3 : 0);
+        fz_igtk_made_count = 0;
+        fz_ap_igtk_id = 4;
+        memset(fz_sta_igtk_set, 0, sizeof fz_sta_igtk_set);
         memcpy(fz_link.sta, fz_sta, 6);
         memcpy(fz_link.bssid, fz_ap, 6);
         fz_take(fz_pmk, 32);
@@ -56777,7 +56837,7 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
         for (int ops = 0; fz_left && ops < 24; ops++)
         {
                 p8 op = fz_byte() % 8;
-                p8 frame[512], wrapped[80];
+                p8 frame[512], wrapped[160];
                 positive n;
                 bipolar step;
 
@@ -56788,11 +56848,11 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                         fz_replay++;
                         step = fz_deliver(frame, fz_frame(frame, 0x008a, fz_anonce, 0, 0, 0));
                         if (step != 0 || fz_sends != 1 ||
-                            network_load_16(fz_sent + 97) != sizeof wifi_rsn_ie ||
-                            memcmp(fz_sent + 99, wifi_rsn_ie, sizeof wifi_rsn_ie))
+                            network_load_16(fz_sent + 97) != fz_link.rsn_length ||
+                            memcmp(fz_sent + 99, fz_link.rsn, fz_link.rsn_length))
                                 abort();
                         wifi_ptk(fz_pmk, (p8 *)fz_ap, (p8 *)fz_sta, fz_anonce, fz_sent + 17,
-                                 fz_pending);
+                                 fz_pending, fz_link.akm);
                         fz_answer(0x010a, fz_pending);
                         fz_pending_set = true;
                         fz_clean = !fz_lost;
@@ -56849,12 +56909,7 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                                 network_store_64(fz_m3 + 9, fz_replay);
                                 memcpy(frame, fz_m3, n);
                                 memset(frame + 81, 0, 16);
-                                {
-                                        p8 hash[20];
-
-                                        wifi_hmac_sha1(fz_ptk, 16, frame, n, hash);
-                                        memcpy(frame + 81, hash, 16);
-                                }
+                                fz_mic(fz_ptk, frame, n, frame + 81);
                         }
                         else
                         {
@@ -57085,6 +57140,53 @@ static p8 rsn_model(const p8 *element, positive length)
                : owe ? RADIO_OWE : eap ? RADIO_EAP : RADIO_WPA2;
 }
 
+/* The same element's ciphers, suites and protection bits, counted the long way. */
+static void caps_model(const p8 *e, positive length, wifi_rsn_caps *caps)
+{
+        positive at = 8;
+        positive count;
+
+        memset(caps, 0, sizeof *caps);
+        if (length < 6)
+                return;
+        caps->group = (e[2] != 0x00 || e[3] != 0x0f || e[4] != 0xac) ? WIFI_CIPHER_OTHER
+                      : e[5] == 4 ? WIFI_CIPHER_CCMP : e[5] == 2 ? WIFI_CIPHER_TKIP : WIFI_CIPHER_OTHER;
+        if (length < 8)
+                return;
+        count = e[6] | (e[7] << 8);
+        if (length < at + 4 * count)
+                return;
+        for (positive which = 0; which < count; which++, at += 4)
+                caps->pairwise |= (e[at] != 0x00 || e[at + 1] != 0x0f || e[at + 2] != 0xac)
+                                      ? WIFI_CIPHER_OTHER
+                                  : e[at + 3] == 4 ? WIFI_CIPHER_CCMP
+                                  : e[at + 3] == 2 ? WIFI_CIPHER_TKIP : WIFI_CIPHER_OTHER;
+        if (length < at + 2)
+                return;
+        count = e[at] | (e[at + 1] << 8);
+        at += 2;
+        for (positive which = 0; which < count && at + 4 <= length; which++, at += 4)
+        {
+                p8 suite = e[at + 3];
+                if (e[at] != 0x00 || e[at + 1] != 0x0f || e[at + 2] != 0xac)
+                        caps->akms |= WIFI_AKM_OTHER;
+                else if (suite == 2)
+                        caps->akms |= WIFI_AKM_PSK;
+                else if (suite == 6)
+                        caps->akms |= WIFI_AKM_PSK_SHA256;
+                else if (suite == 8)
+                        caps->akms |= WIFI_AKM_SAE;
+                else if (suite != 18)
+                        caps->akms |= WIFI_AKM_OTHER;
+        }
+        if (at + 2 <= length)
+        {
+                unsigned capabilities = e[at] | (e[at + 1] << 8);
+                caps->pmf = (p8)((capabilities & 0x80 ? WIFI_PMF_CAPABLE : 0) |
+                                 (capabilities & 0x40 ? WIFI_PMF_REQUIRED : 0));
+        }
+}
+
 /* What a beacon's elements say, counted the long way: the first name element
    (the one the kernel joins by: a later one is not this access point's name,
    and one over 32 bytes or empty leaves it with none), the first RSN element, a WPA vendor
@@ -57188,9 +57290,17 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                 /* An RSN element alone, against the model. */
                 p8 *copy = malloc(size ? size : 1);
                 memcpy(copy, data, size);
-                if (radio_rsn_security(copy, size) != rsn_model(copy, size))
+                wifi_rsn_caps got, want;
+
+                if (radio_rsn_security(copy, size, &got) != rsn_model(copy, size))
                 {
                         fprintf(stderr, "radio_rsn_security disagrees with the model\n");
+                        abort();
+                }
+                caps_model(copy, size, &want);
+                if (memcmp(&got, &want, sizeof got))
+                {
+                        fprintf(stderr, "the RSN element's capabilities disagree with the model\n");
                         abort();
                 }
                 free(copy);
@@ -57297,13 +57407,15 @@ def harness_wifi_scan_fuzz(argv):
         wait = net_zone_fuzz_wait()
         scan = src_slice(host, "#define NL80211_CMD_NEW_SCAN_RESULTS 34",
                                    "/* Whether the station the machine is associated through is authorized")
+        caps = src_slice(host, "/*\n        What an access point's RSN element offers",
+                               "/* The RSN element a station offers")
     except ValueError as error:
         print("  FAIL wifi scan fuzz lift: " + str(error))
         write_tally("wifi-scan-fuzz", 0, 1)
         return 1
     return tls_fuzz_run("wifi scan", wifi_scan_fuzz_seeds(),
                         NET_ZONE_FUZZ_SHIM + byte_reader_source() + wait + netlink +
-                        WIFI_SCAN_FUZZ_PRELUDE + scan + WIFI_SCAN_FUZZ_DRIVER, 4096)
+                        WIFI_SCAN_FUZZ_PRELUDE + caps + scan + WIFI_SCAN_FUZZ_DRIVER, 4096)
 
 
 
@@ -57664,6 +57776,99 @@ def harness_wifi_air(argv):
     lines.append("dmesg | grep -a -e \"$S:\" | tail -40 | sed 's/^/twin-log /'")
     lines.append("kill $(cat /tmp/twin0.pid) $(cat /tmp/twin1.pid); rm -f /root/wifi")
     family("twin", lines)
+
+    # ---- pmf: management frame protection (802.11w). A radio in range that
+    # knows no key sends deauthentication and disassociation frames in the
+    # access point's name (hwsim_radio inject): an access point that requires
+    # protection and a station that negotiated it must ignore them, and one
+    # that offers none must be believed, which shows the frames land. A saved
+    # network that once required protection is never joined through a twin
+    # that does not; TKIP and WPA1 are refused in words that say what to fix.
+    lines = []
+    pm_word = "pmf-password-1"
+    chan = {"req": 1, "opt": 6, "off": 11}
+
+    def pmf_ap(tag, ssid, channel, extra):
+        body = ["network={", "ssid=%s" % ssid.encode().hex(), "mode=2",
+                "frequency=%d" % (2407 + 5 * channel), "proto=RSN", "key_mgmt=WPA-PSK",
+                "psk=\"%s\"" % pm_word] + extra + ["}"]
+        return [
+            "/mnt/stick/hwsim_radio new > /dev/null; tn=$(station $S); %sm=$(cat /sys/class/net/$tn/address); "
+            "%si=$(/mnt/stick/hwsim_radio move $NS $tn)" % (tag, tag),
+            "printf '%%s\\n' %s > /tmp/%s.conf" % (" ".join(q(line) for line in body), tag),
+            "$A $W -B -i $%si -c /tmp/%s.conf -D nl80211 -f /tmp/%s.log -P /tmp/%s.pid" % (tag, tag, tag, tag),
+            "for i in $(seq 40); do grep -q AP-ENABLED /tmp/%s.log 2>/dev/null && break; sleep 0.25; done" % tag,
+            "$A /mnt/stick/hwsim_radio power $%si 12" % tag,
+        ]
+
+    def spoof(tag, kind, times, channel):
+        return ("$A /mnt/stick/hwsim_radio inject $ai %d %s $sta $%sm $%sm 7 %d"
+                % (2407 + 5 * channel, kind, tag, tag, times))
+
+    def dm(text):
+        return "$(dmesg | grep -c \"%s\")" % text
+
+    def join_word(name):
+        return "printf '%%s\\n' %s | moonwater wifi add %s - > /tmp/sc.got 2>&1" % (q(pm_word), name)
+
+    lines.append("rm -f /root/wifi /root/wifi.pmf /run/moonwater/wifi.avoid /run/moonwater/wifi.last")
+    lines.append("/mnt/stick/hwsim_radio new > /dev/null; tn=$(station $S); ai=$(/mnt/stick/hwsim_radio move $NS $tn); "
+                 "$A /mnt/stick/hwsim_radio power $ai 20")
+    lines.append("sta=$(cat /sys/class/net/$S/address)")
+    # The contrast first: no protection offered, a spoofed deauthentication believed.
+    lines += pmf_ap("pa", "pmfoff", chan["off"], ["ieee80211w=0", "pairwise=CCMP", "group=CCMP"])
+    lines.append(join_word("pmfoff") + "; scen_status 'pmf join, none offered' 0 $?")
+    lines.append("scen_count 'pmf none offered, joined' 1 \"$(joined pmfoff)\"")
+    lines.append("d0=%s; a0=%s" % (dm("$S: deauthenticated from $pam"), dm("$S: authenticate with $pam")))
+    lines.append(spoof("pa", "deauth", 3, chan["off"]))
+    lines.append("for i in $(seq 40); do [ \"%s\" -gt \"$d0\" ] && break; sleep 0.25; done" % dm("$S: deauthenticated from $pam"))
+    lines.append("scen_count 'pmf none offered, a spoofed deauthentication is believed' 1 \"$([ \"%s\" -gt \"$d0\" ] && echo 1 || echo 0)\"" % dm("$S: deauthenticated from $pam"))
+    lines.append("for i in $(seq 120); do [ \"$(joined pmfoff)\" = 1 ] && [ \"%s\" -gt \"$a0\" ] && break; sleep 0.5; done" % dm("$S: authenticate with $pam"))
+    lines.append("scen_count 'pmf none offered, joined again after it' 1 \"$(joined pmfoff)\"")
+    lines.append("kill $(cat /tmp/pa.pid); rm -f /root/wifi")
+    # Required by the access point.
+    lines += pmf_ap("pb", "pmfreq", chan["req"], ["ieee80211w=2", "pairwise=CCMP", "group=CCMP"])
+    lines.append(join_word("pmfreq") + "; scen_status 'pmf join, required' 0 $?")
+    lines.append("scen_count 'pmf required, joined' 1 \"$(joined pmfreq)\"")
+    lines.append("scen_count 'pmf required, the network is remembered as offering it' 1 \"$(grep -c -x pmfreq /root/wifi.pmf)\"")
+    lines.append("d0=%s; a0=%s" % (dm("$S: deauthenticated from $pbm"), dm("$S: authenticate with $pbm")))
+    lines.append(spoof("pb", "deauth", 5, chan["req"]))
+    lines.append(spoof("pb", "disassoc", 5, chan["req"]))
+    lines.append("sleep 3")
+    lines.append("scen_count 'pmf required, spoofed deauthentication ignored' 0 \"$(( %s - d0 ))\"" % dm("$S: deauthenticated from $pbm"))
+    lines.append("scen_count 'pmf required, spoofed disassociation ignored' 0 \"%s\"" % dm("$S: disassociated from $pbm"))
+    lines.append("scen_count 'pmf required, still joined' 1 \"$(joined pmfreq)\"")
+    lines.append("scen_count 'pmf required, never left the access point' 0 \"$(( %s - a0 ))\"" % dm("$S: authenticate with $pbm"))
+    # A twin of the same name that offers no protection is never joined.
+    lines.append("kill $(cat /tmp/pb.pid)")
+    lines.append("for i in $(seq 60); do [ \"$(joined pmfreq)\" = 0 ] && break; sleep 0.5; done")
+    lines += pmf_ap("pc", "pmfreq", chan["off"], ["ieee80211w=0", "pairwise=CCMP", "group=CCMP"])
+    lines.append("$A /mnt/stick/hwsim_radio power $pci 19; n0=%s; sleep 25" % dm("$S: associated"))
+    lines.append("scen_count 'pmf downgrade twin never joined' 0 \"$(( %s - n0 ))\"" % dm("$S: associated"))
+    lines.append("scen_count 'pmf downgrade twin, not joined' 0 \"$(joined pmfreq)\"")
+    lines.append("scen_count 'pmf downgrade twin, bare wifi says why' 1 \"$(moonwater wifi 2>&1 | scen_strip | grep -c 'no longer offers management frame protection')\"")
+    lines.append("kill $(cat /tmp/pc.pid)")
+    lines += pmf_ap("pb", "pmfreq", chan["req"], ["ieee80211w=2", "pairwise=CCMP", "group=CCMP"])
+    lines.append("for i in $(seq 120); do [ \"$(joined pmfreq)\" = 1 ] && break; sleep 0.5; done")
+    lines.append("scen_count 'pmf real access point back, joined' 1 \"$(joined pmfreq)\"")
+    lines.append("kill $(cat /tmp/pb.pid); rm -f /root/wifi /root/wifi.pmf")
+    # Optional: negotiated when both offer it.
+    lines += pmf_ap("pd", "pmfopt", chan["opt"], ["ieee80211w=1", "pairwise=CCMP", "group=CCMP"])
+    lines.append(join_word("pmfopt") + "; scen_status 'pmf join, optional' 0 $?")
+    lines.append("d0=%s" % dm("$S: deauthenticated from $pdm"))
+    lines.append(spoof("pd", "deauth", 5, chan["opt"]))
+    lines.append("sleep 3")
+    lines.append("scen_count 'pmf optional, spoofed deauthentication ignored' 0 \"$(( %s - d0 ))\"" % dm("$S: deauthenticated from $pdm"))
+    lines.append("scen_count 'pmf optional, still joined' 1 \"$(joined pmfopt)\"")
+    lines.append("scen_count 'pmf optional, the network is remembered as offering it' 1 \"$(grep -c -x pmfopt /root/wifi.pmf 2>/dev/null)\"")
+    lines.append("kill $(cat /tmp/pd.pid); rm -f /root/wifi")
+    # TKIP is refused with words that say what to change.
+    lines += pmf_ap("pe", "pmftkip", chan["off"], ["pairwise=TKIP CCMP", "group=TKIP"])
+    lines.append(join_word("pmftkip") + "; scen_status 'pmf TKIP group refused' 1 $?")
+    lines.append("scen_count 'pmf TKIP group says so' 1 \"$(grep -c 'uses TKIP (WPA1), which is broken and never joined; set the access point to WPA2 with AES (CCMP)' /tmp/sc.got)\"")
+    lines.append("kill $(cat /tmp/pe.pid); rm -f /root/wifi /root/wifi.pmf")
+    family("pmf", lines)
+
 
     # ---- rekey: hostapd, whose control socket starts rekeys on demand.
     # Two access points by one name, the first much the stronger, each
