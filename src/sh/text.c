@@ -29639,6 +29639,36 @@ static positive tar_transform_count_now(void)
         return tar_transform_count;
 }
 
+// One delimited part of the expression: an escaped delimiter is the delimiter
+// itself and any other escape is kept whole. False when it does not fit or
+// the delimiter never comes.
+static bool tar_transform_part(string_address address_to from, p8 delimiter,
+                               p8 address_to into, positive room)
+{
+        string_address at = address_to from;
+        positive have = 0;
+
+        for (; *at && *at != (char)delimiter; at++)
+        {
+                if (*at == '\\' && at[1] == (char)delimiter)
+                        at++;
+                else if (*at == '\\' && at[1])
+                {
+                        if (have + 2 >= room)
+                                return false;
+                        into[have++] = (p8)*at++;
+                }
+                if (have + 1 >= room)
+                        return false;
+                into[have++] = (p8)*at;
+        }
+        if (!*at)
+                return false;
+        into[have] = end;
+        address_to from = at + 1;
+        return true;
+}
+
 static bool tar_transform_add(string_address expression)
 {
         if (tar_transform_count >= TAR_TRANSFORMS_MAX || expression[0] != 's' || !expression[1])
@@ -29648,47 +29678,11 @@ static bool tar_transform_add(string_address expression)
         p8 pattern[256];
         tar_transform address_to one = tar_transforms + tar_transform_count;
         string_address at = expression + 2;
-        positive have = 0;
 
-        for (; *at && *at != (char)delimiter; at++)
-        {
-                if (*at == '\\' && at[1] == (char)delimiter)
-                        at++;
-                else if (*at == '\\' && at[1])
-                {
-                        if (have + 2 >= sizeof(pattern))
-                                return false;
-                        pattern[have++] = (p8)*at++;
-                }
-                if (have + 1 >= sizeof(pattern))
-                        return false;
-                pattern[have++] = (p8)*at;
-        }
-        if (!*at)
+        if (!tar_transform_part(address_of at, delimiter, pattern, sizeof(pattern)) ||
+            !tar_transform_part(address_of at, delimiter, one->replacement,
+                                sizeof(one->replacement)))
                 return false;
-        pattern[have] = end;
-        at++;
-
-        positive length = 0;
-
-        for (; *at && *at != (char)delimiter; at++)
-        {
-                if (*at == '\\' && at[1] == (char)delimiter)
-                        at++;
-                else if (*at == '\\' && at[1])
-                {
-                        if (length + 2 >= sizeof(one->replacement))
-                                return false;
-                        one->replacement[length++] = (p8)*at++;
-                }
-                if (length + 1 >= sizeof(one->replacement))
-                        return false;
-                one->replacement[length++] = (p8)*at;
-        }
-        if (!*at)
-                return false;
-        one->replacement[length] = end;
-        at++;
 
         bool extended = false;
         bool icase = false;
