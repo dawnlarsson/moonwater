@@ -53025,6 +53025,12 @@ def harness_msan_net(argv):
 
     # Shared hosted typedefs/macros for freestanding net.c lifts.
     base_shim = r"""
+#define STRICT_REFERENCE 0
+#define STRICT_SAFE 1
+#define STRICT_TIGHT 2
+#ifndef MOONWATER_STRICT
+#define MOONWATER_STRICT STRICT_SAFE
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -53347,10 +53353,26 @@ int main(void)
                 failures++;
         }
 
+        /* A fold after an ordinary field is read at the default tier (as
+           wget and curl do) and refused at the tight one; after a framing
+           field it is refused at both. */
         hend = http_header_end((p8 *)fold, (positive)strlen(fold));
-        if (hend < 0 || http_header_block_valid((p8 *)fold, (positive)hend)) {
-                fprintf(stderr, "msan http: FAIL obs-fold must refuse\n");
+        if (hend < 0 ||
+            http_header_block_valid((p8 *)fold, (positive)hend) !=
+                (MOONWATER_STRICT < STRICT_TIGHT)) {
+                fprintf(stderr, "msan http: FAIL obs-fold after an ordinary field\n");
                 failures++;
+        }
+        {
+                const char *framed =
+                        "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n 4\r\n\r\n";
+
+                hend = http_header_end((p8 *)framed, (positive)strlen(framed));
+                if (hend < 0 ||
+                    http_header_block_valid((p8 *)framed, (positive)hend)) {
+                        fprintf(stderr, "msan http: FAIL obs-fold after Content-Length must refuse\n");
+                        failures++;
+                }
         }
 
         /* NUL in field name: walk still bounded; validity refuses. */
