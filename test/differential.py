@@ -56466,6 +56466,107 @@ say(b"_waterlink" in heard, "the network carries waterlink announcements")
 say(all(word not in heard for word in (b"lab", b"box-a", b"box-b", b"box-c", secret.encode())),
     "and not the group, the machine names or the secret")
 
+#       A handshake flood. Anyone who knows the listener's public key can make
+#       an initiation that passes mac1, and a listener that did the curve for
+#       each would be kept busy by a sender with a few thousand source ports.
+#       Four seconds of them, about 3,000 a second from 900 ports, over a
+#       link with delay, jitter and loss: the listener has to go to asking for
+#       mac2 (cookie replies reach the flooder), stay within a fraction of
+#       one core and a few megabytes, and still answer a paired peer, during
+#       the flood and after it.
+import re, socket, threading, hmac as hmac_module
+status, out, err = on("b", moon + " link on")
+match = re.search(rb"udp (\d+)", out)
+status, key_b, err = on("b", moon + " link key")
+listener = None
+candidates = []
+for entry in os.listdir("/proc"):
+    try:
+        if entry.isdigit() and os.readlink("/proc/%s/ns/net" % entry) == os.readlink(netns):
+            words = open("/proc/%s/cmdline" % entry, "rb").read().split(b"\0")
+            candidates.append((int(entry), [w.decode(errors="replace") for w in words[:5]]))
+            if b"link" in words and (b"serve" in words or b"on" in words):
+                listener = int(entry)
+    except OSError:
+        continue
+say(match is not None and listener is not None and len(key_b.strip()) == 44,
+    "flood: the listener's port, pid and key are found (%r %r %r)" % (match and match.group(1), listener, candidates[:8]))
+if match is not None and listener is not None and len(names) == 2:
+    port_b = int(match.group(1))
+    far_name = names["a"]
+    public_b = base64.b64decode(key_b.strip())
+    gate = hashlib.sha256(b"mac1----" + public_b).digest()
+
+    def cpu_seconds(pid):
+        fields = open("/proc/%d/stat" % pid).read().rsplit(")", 1)[1].split()
+        return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
+
+    def rss_kb(pid):
+        for line in open("/proc/%d/status" % pid):
+            if line.startswith("VmRSS:"):
+                return int(line.split()[1])
+        return 0
+
+    outcome = {"sent": 0, "cookies": 0}
+
+    def flood(seconds, ports=900, per_second=3000):
+        sockets = []
+        for _ in range(ports):
+            one = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            one.bind(("10.77.0.1", 0))
+            one.setblocking(False)
+            sockets.append(one)
+        head = struct.pack("<IIQ", 1, 0, 0)
+        began = time.time()
+        turn = 0
+        while time.time() - began < seconds:
+            due = int((time.time() - began) * per_second) - outcome["sent"]
+            for _ in range(min(max(due, 0), 200)):
+                body = head + os.urandom(140)
+                datagram = body + hmac_module.new(gate, body, hashlib.sha256).digest()[:16] + bytes(16)
+                datagram += bytes(1200 - len(datagram))
+                sockets[turn % ports].sendto(datagram, ("10.77.0.2", port_b))
+                turn += 1
+                outcome["sent"] += 1
+            ready, _, _ = select.select(sockets, [], [], 0.002)
+            for one in ready:
+                try:
+                    reply = one.recv(2048)
+                except BlockingIOError:
+                    continue
+                if len(reply) == 72 and struct.unpack("<I", reply[:4])[0] == 5:
+                    outcome["cookies"] += 1
+        for one in sockets:
+            one.close()
+
+    subprocess.run(["tc", "qdisc", "add", "dev", "wb0", "root", "netem", "delay", "4ms", "2ms", "loss", "3%"], check=True)
+    subprocess.run(["nsenter", "--net=" + netns, "tc", "qdisc", "add", "dev", "wb", "root", "netem", "delay", "4ms", "2ms", "loss", "3%"], check=True)
+    on("a", moon + " link run %s true" % far_name, timeout=60)
+    cpu0, rss0, began = cpu_seconds(listener), rss_kb(listener), time.time()
+    flooder = threading.Thread(target=flood, args=(4.0,))
+    flooder.start()
+    time.sleep(1.0)
+    began_run = time.time()
+    status, out, err = on("a", moon + " link run %s 'echo through-the-flood'" % far_name, timeout=60)
+    during = time.time() - began_run
+    flooder.join()
+    cpu1, rss1 = cpu_seconds(listener), rss_kb(listener)
+    for dev, where in (("wb0", None), ("wb", netns)):
+        subprocess.run((["nsenter", "--net=" + where] if where else []) +
+                       ["tc", "qdisc", "del", "dev", dev, "root"], check=True)
+    print("  flood: %d initiations sent, %d cookie replies, listener CPU %.2f s, resident +%d kB, "
+          "a paired run took %.1f s during it" % (outcome["sent"], outcome["cookies"], cpu1 - cpu0,
+                                                   rss1 - rss0, during), flush=True)
+    say(outcome["sent"] > 8000, "flood: %d initiations with a good mac1 were sent" % outcome["sent"])
+    say(outcome["cookies"] >= 100, "flood: the listener asked for mac2 (%d cookie replies reached the flooder)" % outcome["cookies"])
+    say(cpu1 - cpu0 < 2.0, "flood: the listener spent %.2f s of CPU on %d initiations in 4 s" % (cpu1 - cpu0, outcome["sent"]))
+    say(rss1 - rss0 < 4096, "flood: and its resident memory grew by %d kB" % (rss1 - rss0))
+    say(status == 0 and out == b"through-the-flood\n", "flood: a paired peer still ran a command during it (%.1f s, %r)" % (during, err[-80:]))
+    began_run = time.time()
+    status, out, err = on("a", moon + " link run %s 'echo after-the-flood'" % far_name, timeout=60)
+    say(status == 0 and out == b"after-the-flood\n" and time.time() - began_run < 5,
+        "flood: and the first after it took %.1f s" % (time.time() - began_run))
+
 status, out, err = on("a", moon + " link leave lab forget")
 say(status == 0 and b"forgot the 1 machines" in out, "leave with forget drops what the group paired")
 status, out, err = on("a", moon + " link")
@@ -58142,6 +58243,9 @@ def harness_wifi_air(argv):
         seed = int(argv[argv.index("--seed") + 1])
     rng = random.Random(seed)
     hostapd = "--hostapd" in argv
+    #       --only late,watch runs those families (after the setup every one
+    #       needs) and no others, for the ones a run is repeated for.
+    only = set(argv[argv.index("--only") + 1].split(",")) if "--only" in argv else None
     out = []
     expects = []
 
@@ -58152,6 +58256,8 @@ def harness_wifi_air(argv):
         return "".join("\\%03o" % b for b in data)
 
     def family(name, lines):
+        if only is not None and name not in only:
+            return
         asked = sum(line.count(call) for line in lines
                     for call in ("scen_status ", "scen_count ", "scen_same "))
         out.append("# ---- %s" % name)
@@ -58262,6 +58368,11 @@ def harness_wifi_air(argv):
             prep.append("$A $W -B -i $i%d -c /tmp/ap%d.conf -D nl80211 -f /tmp/ap%d.log -P /tmp/ap%d.pid"
                         % (at, at, at, at))
     prep.append("for i in $(seq 40); do n=$(cat /tmp/ap*.log 2>/dev/null | grep -c AP-ENABLED); [ \"$n\" = %d ] && break; sleep 0.25; done" % len(aps))
+    #       The access point K was a station for the moments between its radio's
+    #       making and wpa_supplicant's switching it to AP mode, and the watcher
+    #       may take it then, as it takes any new station; what it must never
+    #       do is take it as an access point, counted from here.
+    prep.append("k0=$(dmesg | grep -c \"ip: using $K\\$\")")
     for at, ap in enumerate(aps):
         prep.append("%s/mnt/stick/hwsim_radio power $i%d %d" % ("" if at == 3 else "$A ", at, ap["power"]))
     prep.append("$A /mnt/stick/hwsim_radio dhcp $i0 40 > /tmp/dhcp0.log 2>&1 &")
@@ -58293,8 +58404,17 @@ def harness_wifi_air(argv):
     lines.append("S=$(station); echo \"station $S\"")
     lines.append("for i in $(seq 120); do dmesg | grep -q \"ip: 192.168.77.100/24 on $S\" && break; sleep 0.5; done")
     lines.append("scen_count 'watch leased the station' 1 \"$(dmesg | grep -c \"ip: 192.168.77.100/24 on $S\")\"")
+    #       The kernel drops what a program writes to /dev/kmsg past ten lines in
+    #       five seconds for each open file, silently. The watcher says several
+    #       lines for every attempt, so the line that says it has an address was
+    #       sometimes the one dropped, and the row above timed out on a lease that
+    #       had been taken (its 92 s was when a later acquisition said it again).
+    lines.append("scen_count 'watch turned the kernel log rate limit off' 1 \"$(grep -c '^on' /proc/sys/kernel/printk_devkmsg)\"")
+    lines.append("( i=0; while [ $i -lt 60 ]; do echo \"<6>kmsg-burst-$i\"; i=$((i + 1)); done ) > /dev/kmsg; sleep 1")
+    lines.append("scen_count 'watch every line of a burst through one open file reaches the log' 60 \"$(dmesg | grep -c 'kmsg-burst-')\"")
     lines.append("scen_count 'watch never took the radio monitor' 0 \"$(dmesg | grep -c 'ip: using hwsim0')\"")
-    lines.append("scen_count 'watch never took an access point' 0 \"$(dmesg | grep -c \"ip: using $K\\$\")\"")
+    lines.append("scen_count 'watch never took an access point, once it was one' 0 \"$(( $(dmesg | grep -c \"ip: using $K\\$\") - k0 ))\"")
+    lines.append("echo \"wifi-time lease-after-association $(awk -v a=\"$(associated_at)\" -v l=\"$(dmesg | grep \"ip: 192.168.77.100/24 on $S\" | head -1 | sed 's/^\\[ *\\([0-9.]*\\)\\].*/\\1/')\" 'BEGIN { printf \"%.2f\\n\", l - a }')\"")
     family("watch", lines)
 
     # ---- reassoc: joined, the machine keeps the association while idle;
