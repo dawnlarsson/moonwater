@@ -3159,8 +3159,7 @@ fn shell_kill(writer write, string_address input)
                            lima says "No such process" rather than killing. */
                         if (!numbered)
                         {
-                                shell_diagnostic_where();
-                                answer = string_report(log_error, 2,
+                                answer = shell_reported(2,
                                     "kill: No such job: %s\n", word);
                                 continue;
                         }
@@ -3175,9 +3174,8 @@ fn shell_kill(writer write, string_address input)
                                 continue;
                         }
 
-                        shell_diagnostic_where();
-                        answer = string_report(log_error, 2,
-                                               "kill: No such job: %s\n", word);
+                        answer = shell_reported(2,
+                                                "kill: No such job: %s\n", word);
                         continue;
                 }
 
@@ -3187,9 +3185,8 @@ fn shell_kill(writer write, string_address input)
                    0.5.x. A spec nobody has stays "No such job" above. */
                 if (!shell_bash_compat && !job_monitor())
                 {
-                        shell_diagnostic_where();
-                        answer = string_report(log_error, 1,
-                                               "kill: No such process\n");
+                        answer = shell_reported(1,
+                                                "kill: No such process\n");
                         continue;
                 }
 
@@ -9138,11 +9135,9 @@ static b32 exec_call(positive slot)
                 if (nest && string_digits_exact(nest, address_of limit) &&
                     limit && exec_function_depth >= limit)
                 {
-                        shell_diagnostic_where();
-                        string_format(log_error,
-                                      "%s: maximum function nesting level "
-                                      "exceeded (%p)\n",
-                                      shell_argv[0], limit);
+                        shell_told("%s: maximum function nesting level "
+                                   "exceeded (%p)\n",
+                                   shell_argv[0], limit);
                         expand_discard_whole(1);
                         return 1;
                 }
@@ -9153,11 +9148,9 @@ static b32 exec_call(positive slot)
 
         if (unlikely((positive)address_of held_function_line < exec_stack_floor))
         {
-                shell_diagnostic_where();
-                string_format(log_error,
-                              "%s: maximum function nesting level exceeded "
-                              "(%p)\n",
-                              shell_argv[0], exec_function_depth);
+                shell_told("%s: maximum function nesting level exceeded "
+                           "(%p)\n",
+                           shell_argv[0], exec_function_depth);
                 expand_discard_whole(1);
                 return 1;
         }
@@ -10065,8 +10058,7 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
              SHELL_ARRAY_NAMEREF) &&
             !shell_nameref_target(name, name_length))
         {
-                shell_diagnostic_where();
-                string_format(log_error, "warning: ");
+                shell_told("warning: ");
                 log_error(name, name_length);
                 string_format(log_error, ": removing nameref attribute\n");
                 shell_variable_attribute_set(name, name_length, 0,
@@ -10504,10 +10496,8 @@ static bool exec_assign_value(string_address word, positive name_length,
                 if (shell_bash_compat && name_length &&
                     word[name_length - 1] == ']')
                 {
-                        shell_diagnostic_where();
-                        string_format(log_error,
-                                      "%s: cannot assign list to array member\n",
-                                      word);
+                        shell_told("%s: cannot assign list to array member\n",
+                                   word);
                         *name_end = append ? '+' : '=';
                         exec_assignment_discard();
                         return false;
@@ -11476,11 +11466,10 @@ static b32 exec_dispatch(b32 command_word)
                             (facts.mode & MODE_FORMAT) == MODE_DIRECTORY;
 
                         shell_status = shell_bash_compat || slash ? 126 : 127;
-                        shell_diagnostic_where();
-                        string_format(log_error, "%s: %s\n",
-                                      shell_bash_compat ? (string_address)found
+                        shell_told("%s: %s\n",
+                                   shell_bash_compat ? (string_address)found
                                                         : name,
-                                      shell_bash_compat && directory
+                                   shell_bash_compat && directory
                                           ? (string_address) "Is a directory"
                                           : (string_address) "Permission denied");
                         return shell_status;
@@ -12060,9 +12049,7 @@ static b32 exec_simple(b32 index)
 
                                 memory_copy_apart(shown, (address_any)word, kept);
                                 shown[kept] = 0;
-                                shell_diagnostic_where();
-                                string_format(log_error,
-                                    "`%s': not a valid identifier\n", shown);
+                                shell_told("`%s': not a valid identifier\n", shown);
                         }
                         if (!exec_assignment_error(exec_assignment_error_status(false, shell_argv[first])))
                                 break;
@@ -12793,9 +12780,8 @@ static b32 exec_for(b32 index, bool selecting)
         if (shell_bash_compat &&
             !shell_valid_name(name, string_length(name)))
         {
-                shell_diagnostic_where();
-                string_format(log_error, "`%s': not a valid identifier\n",
-                              name);
+                shell_told("`%s': not a valid identifier\n",
+                           name);
                 //      Under posix mode it ends the shell, with 2.
                 if (shell_posix_on())
                 {

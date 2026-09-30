@@ -4293,10 +4293,9 @@ static bool shell_declare_target_valid(const_string value)
 {
         if (!shell_reference_valid(value, string_length(env_reading(value))))
         {
-                shell_diagnostic_where();
-                return string_report(log_error, false,
-                                     "%s: `%s': invalid variable name for name reference\n",
-                                     shell_argv[0], value);
+                return shell_reported(false,
+                                      "%s: `%s': invalid variable name for name reference\n",
+                                      shell_argv[0], value);
         }
         return true;
 }
@@ -10662,10 +10661,8 @@ static inline INLINE fn shell_declare_apply(shell_declare_state address_to state
                      ((state->attributes_set | state->attributes_clear) &
                       SHELL_ARRAY_NAMEREF)))
                 {
-                        shell_diagnostic_where();
-                        string_format(log_error,
-                                      "%s: %s: readonly variable\n",
-                                      shell_argv[0], word);
+                        shell_told("%s: %s: readonly variable\n",
+                                   shell_argv[0], word);
                         if (local_mode)
                         {
                                 if (name_end)
@@ -10733,9 +10730,8 @@ static inline INLINE fn shell_declare_apply(shell_declare_state address_to state
                 if ((state->attributes_set & SHELL_ARRAY_NAMEREF) &&
                     (held_attributes & SHELL_ARRAY_EITHER))
                 {
-                        shell_diagnostic_where();
-                        string_format(log_error, "%s: %s: reference variable cannot be an array\n",
-                                      shell_argv[0], word);
+                        shell_told("%s: %s: reference variable cannot be an array\n",
+                                   shell_argv[0], word);
                         failed = true;
                         goto next;
                 }
@@ -10762,9 +10758,8 @@ static inline INLINE fn shell_declare_apply(shell_declare_state address_to state
                 if (saved_scalar && ((state->set & DECLARE_READONLY) ||
                     ((state->clear & DECLARE_READONLY) && readonly) || (mark && readonly)))
                 {
-                        shell_diagnostic_where();
-                        string_format(log_error, "%s: %s: readonly variable\n",
-                                      shell_argv[0], word);
+                        shell_told("%s: %s: readonly variable\n",
+                                   shell_argv[0], word);
                         failed = true;
                         goto next;
                 }
@@ -10810,11 +10805,9 @@ static inline INLINE fn shell_declare_apply(shell_declare_state address_to state
                 if ((set & SHELL_ARRAY_NAMEREF) && mark && !append &&
                     string_get(mark + 1) && !string_compare(mark + 1, word))
                 {
-                        shell_diagnostic_where();
-                        string_format(log_error,
-                                      "%s: %s: nameref variable self "
-                                      "references not allowed\n",
-                                      shell_argv[0], word);
+                        shell_told("%s: %s: nameref variable self "
+                                   "references not allowed\n",
+                                   shell_argv[0], word);
                         failed = true;
                         goto next;
                 }
@@ -10839,9 +10832,8 @@ static inline INLINE fn shell_declare_apply(shell_declare_state address_to state
                 {
                         if (scoped)
                         {
-                                shell_diagnostic_where();
-                                string_format(log_error, "%s: %s: reference variable cannot be an array\n",
-                                              shell_argv[0], word);
+                                shell_told("%s: %s: reference variable cannot be an array\n",
+                                           shell_argv[0], word);
                                 failed = true;
                         }
 
@@ -10989,8 +10981,7 @@ static inline INLINE fn shell_declare_apply(shell_declare_state address_to state
                         size += inner;
                         shown[size++] = ']';
                         shown[size] = end;
-                        shell_diagnostic_where();
-                        string_format(log_error, "%s: cannot assign list to array member\n", shown);
+                        shell_told("%s: cannot assign list to array member\n", shown);
                         address_to name_end = delimiter;
                         shell_compound_prepare_drop();
                         return expand_fatal_status(1);
@@ -11013,8 +11004,7 @@ static inline INLINE fn shell_declare_apply(shell_declare_state address_to state
                 {
                         if (!saved_global && !global_element && (state->set & DECLARE_READONLY))
                         {
-                                shell_diagnostic_where();
-                                string_format(log_error, "%s: readonly variable\n", word);
+                                shell_told("%s: readonly variable\n", word);
                                 stored = true;
                         }
                         else
@@ -11204,9 +11194,7 @@ COLD fn shell_local(writer write, string_address input)
                             !shell_declare_print_one(write, name, length,
                                                      state.set))
                         {
-                                shell_diagnostic_where();
-                                string_format(log_error,
-                                              "local: %s: not found\n", name);
+                                shell_told("local: %s: not found\n", name);
                                 failed = true;
                         }
                 }
@@ -11332,10 +11320,8 @@ static fn shell_declare(writer write, string_address input)
                                         state.set |
                                             ((b32)state.attributes_set << 8)))
                                 {
-                                        shell_diagnostic_where();
-                                        string_format(log_error,
-                                                      "%s: %s: not found\n",
-                                                      shell_argv[0], name);
+                                        shell_told("%s: %s: not found\n",
+                                                   shell_argv[0], name);
                                         failed = true;
                                 }
                         }
@@ -16563,8 +16549,7 @@ COLD fn shell_alias(writer write, string_address input)
                         }
                         else
                         {
-                                shell_diagnostic_where();
-                                answer = string_report(log_error, 1,
+                                answer = shell_reported(1,
                                                        "alias: %s: not found\n",
                                                        word);
                         }
@@ -16641,8 +16626,7 @@ COLD fn shell_unalias(writer write, string_address input)
                 // for and did not get, which POSIX has this say so.
                 if (at >= alias_count)
                 {
-                        shell_diagnostic_where();
-                        status = string_report(log_error, 1,
+                        status = shell_reported(1,
                                                "unalias: %s: not found\n", word);
                 }
 

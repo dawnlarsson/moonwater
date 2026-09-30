@@ -1442,10 +1442,9 @@ DEAD_END fn shell_thread_instance_mode(bool preserve_ignored)
                     (facts.mode & MODE_FORMAT) == MODE_DIRECTORY)
                         why = (string_address) "Is a directory";
 
-                shell_diagnostic_where();
-                string_format(log_error, "%s: %s\n",
-                              shell_bash_compat ? path : shell_argv[0],
-                              !shell_bash_compat && code == ERROR_NO_ENTRY
+                shell_told("%s: %s\n",
+                           shell_bash_compat ? path : shell_argv[0],
+                           !shell_bash_compat && code == ERROR_NO_ENTRY
                                   ? (string_address) "not found"
                                   : why);
                 log_flush();
