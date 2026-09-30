@@ -338,6 +338,130 @@ coverage_guest()
         coverage_serial="-serial file:$2"
 }
 
+#       The driver the canvas, plane and power guests share: qemu started with
+#       its QMP and monitor sockets, and the keys, pointer and screen it is
+#       driven and read through. Written where the lane's work is, and found
+#       through PYTHONPATH.
+qmp_guest_module()
+{
+        cat > "$1/qmp_guest.py" <<'PY'
+import json, os, socket, subprocess, time
+
+#       The guest's screen: seventy percent of the preferred mode, so the EDID
+#       has to prefer 3658x1543. QEMU's default EDID gives 640x480, where the
+#       log fills the width and no window is found.
+W, H = 2560, 1080
+current = None
+
+def desktop(image):
+    """The machine every compositor guest starts from, as qemu arguments."""
+    processor = ["-cpu", "Nehalem"]
+    if os.access("/dev/kvm", os.R_OK | os.W_OK):
+        # The floor is covered by boot.sh. Here the widest host path matters:
+        # compositor copies to a trapped device mapping have failed only when
+        # a real processor selected the AVX-512 body that KVM then had to
+        # emulate.
+        processor = ["-cpu", "host", "-enable-kvm"]
+    return ["qemu-system-x86_64", "-m", "2G", "-smp", "2"] + processor + [
+        "-kernel", image, "-vga", "none", "-device", "virtio-gpu-pci,xres=3658,yres=1543",
+        "-device", "qemu-xhci", "-device", "usb-tablet", "-device", "usb-kbd"]
+
+class Guest(subprocess.Popen):
+    """A qemu with its QMP socket and, if it has one, its human monitor; the newest is the one the functions below drive."""
+
+    def __init__(self, arguments, qmp, mon=None, work=None, sockets=(), wait=0.2):
+        global current
+        arguments = arguments + ["-qmp", "unix:" + qmp + ",server,nowait"]
+        if mon:
+            arguments += ["-monitor", "unix:" + mon + ",server,nowait"]
+        super().__init__(arguments, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.work = work
+        for _ in range(200):
+            if all(os.path.exists(path) for path in (qmp, mon or qmp) + tuple(sockets)):
+                break
+            time.sleep(wait)
+        self.qmp = socket.socket(socket.AF_UNIX)
+        self.qmp.connect(qmp)
+        self.qmp.settimeout(20)
+        self.qf = self.qmp.makefile("rwb")
+        self.qf.readline()
+        current = self
+        qcmd({"execute": "qmp_capabilities"})
+        self.hf = None
+        if mon:
+            hs = socket.socket(socket.AF_UNIX)
+            hs.connect(mon)
+            self.hf = hs.makefile("rwb")
+
+    def quit(self):
+        self.hf.write(b"quit\n")
+        self.hf.flush()
+
+def qcmd(obj):
+    qf = current.qf
+    qf.write((json.dumps(obj) + "\n").encode())
+    qf.flush()
+    while True:
+        line = qf.readline()
+        if not line:
+            return {}
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            continue
+        if "event" not in msg:
+            return msg
+
+def send(events):
+    qcmd({"execute": "input-send-event", "arguments": {"events": events}})
+
+def monitor(line):
+    return qcmd({"execute": "human-monitor-command",
+                 "arguments": {"command-line": line}}).get("return", "")
+
+def press(code, down):
+    return {"type": "key", "data": {"down": down, "key": {"type": "qcode", "data": code}}}
+
+def key(code):
+    # A real keyboard event, not bytes slipped into the serial console. The
+    # window server, terminal, pty and interactive shell all have to carry it.
+    send([press(code, True), press(code, False)])
+    time.sleep(0.02)
+
+def chord(*codes):
+    send([press(c, True) for c in codes] + [press(c, False) for c in reversed(codes)])
+    time.sleep(0.2)
+
+def type_text(value):
+    names = {" ": "spc", ".": "dot", "/": "slash", "-": "minus", "\n": "ret"}
+    for character in value:
+        key(names.get(character, character))
+
+def moveto(x, y):
+    send([{"type": "abs", "data": {"axis": "x", "value": int(x * 32767 / W)}},
+          {"type": "abs", "data": {"axis": "y", "value": int(y * 32767 / H)}}])
+    time.sleep(0.1)
+
+def shot(name, settle=2):
+    current.hf.write(("screendump %s/%s.ppm\n" % (current.work, name)).encode())
+    current.hf.flush()
+    time.sleep(settle)
+
+def load(name):
+    d = open("%s/%s.ppm" % (current.work, name), "rb").read()
+    i, vals = 2, []
+    while len(vals) < 3:
+        while d[i:i + 1].isspace():
+            i += 1
+        j = i
+        while not d[j:j + 1].isspace():
+            j += 1
+        vals.append(int(d[i:j]))
+        i = j
+    return vals[0], vals[1], d[i + 1:]
+PY
+}
+
 #       A commands file with the dump put in front of its closing poweroff.
 coverage_guest_commands()
 {
@@ -13072,14 +13196,16 @@ esac
 
 if [ -n "$power_machine" ] && command -v python3 > /dev/null 2>&1; then
         coverage_guest "$image" "$work/coverage-power"
-        MOONWATER_POWER_COVERAGE=${coverage_serial#-serial file:} \
+        qmp_guest_module "$work"
+        PYTHONPATH=$work MOONWATER_POWER_COVERAGE=${coverage_serial#-serial file:} \
                 MOONWATER_POWER_DUMP=$coverage_dump \
                 MOONWATER_BOOT_WORK=$work MOONWATER_POWER_EMULATOR=$boot_emulator \
                 MOONWATER_POWER_MACHINE=$power_machine MOONWATER_POWER_CONSOLE=$power_console \
                 MOONWATER_POWER_CC=$power_cc MOONWATER_POWER_SLOW=$power_slow \
                 MOONWATER_POWER_BUTTON=$power_button \
                 python3 - "$image" > "$work/power-answers" 2> "$work/power-why" <<'PY'
-import json, os, socket, subprocess, sys, time
+import os, socket, subprocess, sys, time
+from qmp_guest import Guest, qcmd
 
 image = sys.argv[1]
 work = os.environ["MOONWATER_BOOT_WORK"]
@@ -13125,7 +13251,7 @@ try:
 except OSError:
     capboot = False
 
-guest = subprocess.Popen([
+guest = Guest([
     os.environ["MOONWATER_POWER_EMULATOR"], "-m", "1G", "-smp", "2"] +
     os.environ["MOONWATER_POWER_MACHINE"].split() + [
     "-kernel", image, "-no-reboot", "-display", "none",
@@ -13136,14 +13262,8 @@ guest = subprocess.Popen([
     "-serial", "chardev:console"] +
     (["-serial", "file:" + os.environ["MOONWATER_POWER_COVERAGE"]]
      if os.environ.get("MOONWATER_POWER_COVERAGE") else []) + [
-    "-qmp", "unix:" + qmp + ",server,nowait",
     "-append", "console=" + tty + " drm_client_lib.active="],
-    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-for _ in range(200):
-    if os.path.exists(qmp) and os.path.exists(console):
-        break
-    time.sleep(0.1)
+    qmp, None, work, (console,), 0.1)
 
 serial = socket.socket(socket.AF_UNIX)
 serial.connect(console)
@@ -13171,28 +13291,6 @@ def wait_for(marker, seconds):
 
 def say(line):
     serial.sendall(line.encode() + b"\n")
-
-qs = socket.socket(socket.AF_UNIX)
-qs.connect(qmp)
-qs.settimeout(20)
-qf = qs.makefile("rwb")
-qf.readline()
-
-def qcmd(obj):
-    qf.write((json.dumps(obj) + "\n").encode())
-    qf.flush()
-    while True:
-        line = qf.readline()
-        if not line:
-            return {}
-        try:
-            msg = json.loads(line)
-        except ValueError:
-            continue
-        if "event" not in msg:
-            return msg
-
-qcmd({"execute": "qmp_capabilities"})
 
 def press():
     qcmd({"execute": "system_powerdown"})
@@ -14286,48 +14384,16 @@ export MOONWATER_CANVAS_WORK
 coverage_guest "$image" "$work/coverage-canvas"
 MOONWATER_CANVAS_COVERAGE=${coverage_serial#-serial file:}
 export MOONWATER_CANVAS_COVERAGE
+qmp_guest_module "$work"
 
-python3 - "$image" > "$work/answers" 2>"$work/why" <<'PY'
-import json, os, re, socket, subprocess, sys, time
+PYTHONPATH=$work python3 - "$image" > "$work/answers" 2>"$work/why" <<'PY'
+import os, re, subprocess, sys, time
+from qmp_guest import *
 
 image = sys.argv[1]
 work = os.environ["MOONWATER_CANVAS_WORK"]
-qmp = work + "/qmp"
-mon = work + "/mon"
-W, H = 2560, 1080
 
-def shot(name, settle=2):
-    hf.write(("screendump %s/%s.ppm\n" % (work, name)).encode())
-    hf.flush()
-    time.sleep(settle)
-
-def load(name):
-    d = open("%s/%s.ppm" % (work, name), "rb").read()
-    i, vals = 2, []
-    while len(vals) < 3:
-        while d[i:i + 1].isspace():
-            i += 1
-        j = i
-        while not d[j:j + 1].isspace():
-            j += 1
-        vals.append(int(d[i:j]))
-        i = j
-    return vals[0], vals[1], d[i + 1:]
-
-processor = ["-cpu", "Nehalem"]
-if os.access("/dev/kvm", os.R_OK | os.W_OK):
-    # The floor is covered by boot.sh.  Here the widest host path matters:
-    # compositor copies to a trapped device mapping have failed only when a
-    # real processor selected the AVX-512 body that KVM then had to emulate.
-    processor = ["-cpu", "host", "-enable-kvm"]
-
-guest = subprocess.Popen([
-    "qemu-system-x86_64", "-m", "2G", "-smp", "2"] + processor + [
-    # W and H above are the guest's screen: seventy percent of the preferred
-    # mode, so the EDID has to prefer 3658x1543. QEMU's default EDID gives
-    # 640x480, where the log fills the width and no window is found.
-    "-kernel", image, "-vga", "none", "-device", "virtio-gpu-pci,xres=3658,yres=1543",
-    "-device", "qemu-xhci", "-device", "usb-tablet", "-device", "usb-kbd",
+guest = Guest(desktop(image) + [
     # A relative mouse on each kind of controller a desktop has. The tablet
     # proves absolute motion; a real mouse is REL_X and REL_Y through usbhid,
     # and on a Haswell desktop the USB 2 ports hang off EHCI, not xHCI.
@@ -14336,80 +14402,13 @@ guest = subprocess.Popen([
     "-no-reboot", "-display", "none", "-serial", "file:" + work + "/serial"] +
     (["-serial", "file:" + os.environ["MOONWATER_CANVAS_COVERAGE"]]
      if os.environ.get("MOONWATER_CANVAS_COVERAGE") else []) + [
-    "-qmp", "unix:" + qmp + ",server,nowait",
-    "-monitor", "unix:" + mon + ",server,nowait",
     # CANVAS_APPEND adds to the guest's command line: a profiling run wants
     # nokaslr so the samples map onto System.map. The cursor plane is off here
     # because QEMU's screendump has no cursor plane in it, and the pixel checks
     # below count the cursor's pixels; the plane boot after this one covers it.
     "-append", "console=ttyS0 drm_client_lib.active= moonwater.cursor_plane=0 " + os.environ.get("CANVAS_APPEND", "")],
-    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-for _ in range(200):
-    if os.path.exists(qmp) and os.path.exists(mon):
-        break
-    time.sleep(0.2)
-
-qs = socket.socket(socket.AF_UNIX)
-qs.connect(qmp)
-qs.settimeout(20)
-qf = qs.makefile("rwb")
-qf.readline()
-
-def qcmd(obj):
-    qf.write((json.dumps(obj) + "\n").encode())
-    qf.flush()
-    while True:
-        line = qf.readline()
-        if not line:
-            return {}
-        try:
-            msg = json.loads(line)
-        except ValueError:
-            continue
-        if "event" not in msg:
-            return msg
-
-qcmd({"execute": "qmp_capabilities"})
-
-hs = socket.socket(socket.AF_UNIX)
-hs.connect(mon)
-hf = hs.makefile("rwb")
+    work + "/qmp", work + "/mon", work)
 time.sleep(0.5)
-
-def send(events):
-    qcmd({"execute": "input-send-event", "arguments": {"events": events}})
-
-def key(code):
-    # A real keyboard event, not bytes slipped into the serial console.  The
-    # window server, terminal, pty and interactive shell all have to carry it.
-    send([{"type": "key", "data": {"down": True,
-                                      "key": {"type": "qcode", "data": code}}},
-          {"type": "key", "data": {"down": False,
-                                      "key": {"type": "qcode", "data": code}}}])
-    time.sleep(0.02)
-
-def chord(*codes):
-    events = []
-    for code in codes:
-        events.append({"type": "key", "data": {
-            "down": True, "key": {"type": "qcode", "data": code}}})
-    for code in reversed(codes):
-        events.append({"type": "key", "data": {
-            "down": False, "key": {"type": "qcode", "data": code}}})
-    send(events)
-    time.sleep(0.2)
-
-def type_text(value):
-    names = {" ": "spc", ".": "dot", "/": "slash", "-": "minus",
-             "\n": "ret"}
-    for character in value:
-        key(names.get(character, character))
-
-def moveto(x, y):
-    send([{"type": "abs", "data": {"axis": "x", "value": int(x * 32767 / W)}},
-          {"type": "abs", "data": {"axis": "y", "value": int(y * 32767 / H)}}])
-    time.sleep(0.1)
 
 #       Long enough for the desktop, the shell and the boot log replay. The
 #       serial transcript is not what is being read, but a machine that never
@@ -15286,10 +15285,6 @@ if len(runs) >= 1:
                    for px in range(max(x, 0), min(x + 16, width))
                    if pixel(data, width, px, py) == b"\xff\xff\xff")
 
-    def monitor(line):
-        return qcmd({"execute": "human-monitor-command",
-                     "arguments": {"command-line": line}}).get("return", "")
-
     def mouse_rel(dx, dy, steps):
         for step in range(steps):
             send([{"type": "rel", "data": {"axis": "x", "value": dx}},
@@ -15403,8 +15398,7 @@ if os.environ.get("MOONWATER_CANVAS_COVERAGE"):
             pass
         time.sleep(0.5)
 
-hf.write(b"quit\n")
-hf.flush()
+guest.quit()
 time.sleep(1)
 guest.terminate()
 try:
@@ -15554,36 +15548,14 @@ echo "canvas-on-$(grep -c 'Canvas is on' /tmp/canvas-state)-off-$(grep -c 'Canva
 open(stick + "/kcheck", "w").write('''echo "kernel-warnings-$(dmesg | grep -c -E 'WARNING|BUG:|Oops|circular locking|possible recursive')" > /dev/ttyS0
 ''')
 
-leak_qmp = work + "/leak-qmp"
-leak_mon = work + "/leak-mon"
-leak_guest = subprocess.Popen([
-    "qemu-system-x86_64", "-m", "2G", "-smp", "2"] + processor + [
-    "-kernel", image, "-vga", "none", "-device", "virtio-gpu-pci,xres=3658,yres=1543",
-    "-device", "qemu-xhci", "-device", "usb-tablet", "-device", "usb-kbd",
+leak_guest = Guest(desktop(image) + [
     "-drive", "if=none,id=stick,format=raw,file=fat:ro:" + stick + ",readonly=on",
     "-device", "usb-storage,drive=stick,removable=on",
     "-no-reboot", "-display", "none", "-serial", "file:" + work + "/leak-serial",
-    "-qmp", "unix:" + leak_qmp + ",server,nowait",
-    "-monitor", "unix:" + leak_mon + ",server,nowait",
     # The cursor plane is off here too: this guest counts the cursor's pixels in
     # a screendump, and QEMU's screendump has no cursor plane in it.
     "-append", "drm_client_lib.active= moonwater.cursor_plane=0 " + os.environ.get("CANVAS_APPEND", "")],
-    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-for _ in range(200):
-    if os.path.exists(leak_qmp) and os.path.exists(leak_mon):
-        break
-    time.sleep(0.2)
-
-qs = socket.socket(socket.AF_UNIX)
-qs.connect(leak_qmp)
-qs.settimeout(20)
-qf = qs.makefile("rwb")
-qf.readline()
-qcmd({"execute": "qmp_capabilities"})
-hs = socket.socket(socket.AF_UNIX)
-hs.connect(leak_mon)
-hf = hs.makefile("rwb")
+    work + "/leak-qmp", work + "/leak-mon", work)
 
 time.sleep(25)
 type_text("echo leak-")
@@ -15883,8 +15855,7 @@ except Exception:
 out.append(("the power button powers off with Canvas up", powered, "yes"))
 
 if leak_guest.poll() is None:
-    hf.write(b"quit\n")
-    hf.flush()
+    leak_guest.quit()
     time.sleep(1)
     leak_guest.terminate()
     try:
@@ -15919,78 +15890,19 @@ done < "$work/answers"
 #       none of those updates fails, and that after a titlebar drag -- the
 #       path that arms planes ahead of the window's repaint -- the last move
 #       is armed exactly where the tablet put the pointer.
-python3 - "$image" > "$work/plane-answers" 2>"$work/plane-why" <<'PY'
-import os, re, socket, subprocess, sys, time
+PYTHONPATH=$work python3 - "$image" > "$work/plane-answers" 2>"$work/plane-why" <<'PY'
+import os, re, sys, time
+from qmp_guest import *
 
 image = sys.argv[1]
 work = os.environ["MOONWATER_CANVAS_WORK"] + "/plane"
 os.makedirs(work, exist_ok=True)
-W, H = 2560, 1080
 
-processor = ["-cpu", "Nehalem"]
-if os.access("/dev/kvm", os.R_OK | os.W_OK):
-    processor = ["-cpu", "host", "-enable-kvm"]
-
-guest = subprocess.Popen([
-    "qemu-system-x86_64", "-m", "2G", "-smp", "2"] + processor + [
-    "-kernel", image, "-vga", "none", "-device", "virtio-gpu-pci,xres=3658,yres=1543",
-    "-device", "qemu-xhci", "-device", "usb-tablet", "-device", "usb-kbd",
+guest = Guest(desktop(image) + [
     "-device", "usb-mouse,id=xhcimouse",
     "-no-reboot", "-display", "none", "-serial", "file:" + work + "/serial",
-    "-qmp", "unix:" + work + "/qmp,server,nowait",
-    "-monitor", "unix:" + work + "/mon,server,nowait",
     "-append", "console=ttyS0 drm_client_lib.active= " + os.environ.get("CANVAS_APPEND", "")],
-    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-for _ in range(200):
-    if os.path.exists(work + "/qmp") and os.path.exists(work + "/mon"):
-        break
-    time.sleep(0.2)
-
-qs = socket.socket(socket.AF_UNIX)
-qs.connect(work + "/qmp")
-qs.settimeout(20)
-qf = qs.makefile("rwb")
-qf.readline()
-
-def qcmd(obj):
-    import json
-    qf.write((json.dumps(obj) + "\n").encode())
-    qf.flush()
-    while True:
-        line = qf.readline()
-        if not line:
-            return {}
-        try:
-            msg = json.loads(line)
-        except ValueError:
-            continue
-        if "event" not in msg:
-            return msg
-
-qcmd({"execute": "qmp_capabilities"})
-hs = socket.socket(socket.AF_UNIX)
-hs.connect(work + "/mon")
-hf = hs.makefile("rwb")
-
-def send(events):
-    qcmd({"execute": "input-send-event", "arguments": {"events": events}})
-
-def press(code, down):
-    return {"type": "key", "data": {"down": down, "key": {"type": "qcode", "data": code}}}
-
-def key(code):
-    send([press(code, True), press(code, False)])
-    time.sleep(0.02)
-
-def chord(*codes):
-    send([press(c, True) for c in codes] + [press(c, False) for c in reversed(codes)])
-    time.sleep(0.2)
-
-def type_text(value):
-    names = {" ": "spc", ".": "dot", "/": "slash", "-": "minus", "\n": "ret"}
-    for character in value:
-        key(names.get(character, character))
+    work + "/qmp", work + "/mon", work)
 
 # What the tablet reports for a point, and where pointer.c puts the pointer
 # for that report: offset * size / span, span 32767 on QEMU's tablet.
@@ -16000,18 +15912,9 @@ def report(v, size):
 def placed(v, size):
     return report(v, size) * size // 32767
 
-def moveto(x, y):
-    send([{"type": "abs", "data": {"axis": "x", "value": report(x, W)}},
-          {"type": "abs", "data": {"axis": "y", "value": report(y, H)}}])
-    time.sleep(0.1)
-
 def button(down):
     send([{"type": "btn", "data": {"down": down, "button": "left"}}])
     time.sleep(0.08)
-
-def monitor(line):
-    return qcmd({"execute": "human-monitor-command",
-                 "arguments": {"command-line": line}}).get("return", "")
 
 def sample():
     type_text("pointer ")
@@ -16041,20 +15944,8 @@ for index in mice:
 sample()
 
 # The terminal, found as the lane above finds it, and dragged by its titlebar.
-hf.write(("screendump %s/drag.ppm\n" % work).encode())
-hf.flush()
-time.sleep(2)
-d = open(work + "/drag.ppm", "rb").read()
-i, vals = 2, []
-while len(vals) < 3:
-    while d[i:i + 1].isspace():
-        i += 1
-    j = i
-    while not d[j:j + 1].isspace():
-        j += 1
-    vals.append(int(d[i:j]))
-    i = j
-w, h, px = vals[0], vals[1], d[i + 1:]
+shot("drag")
+w, h, px = load("drag")
 
 def at(x, y):
     o = (y * w + x) * 3
@@ -16110,8 +16001,7 @@ else:
             else "sync %s/%s armed %s wanted %s" % (sync[-1][0], sync[-1][1], armed, wanted))
 out.append(("a drag leaves the plane armed under the pointer", drag, "yes"))
 
-hf.write(b"quit\n")
-hf.flush()
+guest.quit()
 time.sleep(1)
 guest.terminate()
 try:
