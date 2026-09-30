@@ -2035,15 +2035,22 @@ static bool shell_check_only;
 static COLD bool shell_substitution_parses(string_address body,
                                            positive length, bool backquoted)
 {
-        p8 address_to copy = null;
+        // Most bodies are a few words: a copy on the stack costs nothing,
+        // where a mapping and its release cost more than the parse.
+        p8 small[256];
+        p8 address_to copy = small;
         positive room = 0;
         positive used = 0;
         positive syntax = shell_syntax_generation;
         bool held = shell_check_only;
         lex_frame frame;
 
-        if (!shell_array_room(copy, room, length + 1))
-                return true;
+        if (length >= sizeof small)
+        {
+                copy = null;
+                if (!shell_array_room(copy, room, length + 1))
+                        return true;
+        }
         for (positive at = 0; at < length; at++)
         {
                 //      Inside backquotes a backslash keeps only $, ` and \.
@@ -2066,7 +2073,8 @@ static COLD bool shell_substitution_parses(string_address body,
         shell_check_only = held;
         shell_more = more;
         exec_current_line = current;
-        memory_free(copy, room);
+        if (room)
+                memory_free(copy, room);
 
         return shell_syntax_generation == syntax;
 }

@@ -140,10 +140,21 @@ fn lex_take_physical_newline()
         lex_line_newline = true;
 }
 
+// The token table of the last nest to leave, kept for the next to enter: a
+// script with a command substitution on every line entered and left a nest
+// per line, and each one mapped a table and gave it back.
+static lex_token address_to lex_spare;
+static positive lex_spare_room;
+#define LEX_SPARE_LIMIT 256
+
 static fn lex_nest_enter(lex_frame address_to frame)
 {
         address_to frame = lex_context;
         lex_context = (lex_frame){0};
+        lex_tokens = lex_spare;
+        lex_token_room = lex_spare_room;
+        lex_spare = null;
+        lex_spare_room = 0;
 
         parse_nest_enter();
 }
@@ -152,7 +163,12 @@ static fn lex_nest_leave(lex_frame address_to frame)
 {
         parse_nest_leave();
 
-        if (lex_tokens)
+        if (lex_tokens && !lex_spare && lex_token_room <= LEX_SPARE_LIMIT)
+        {
+                lex_spare = lex_tokens;
+                lex_spare_room = lex_token_room;
+        }
+        else if (lex_tokens)
                 memory_free(lex_tokens, lex_token_room * sizeof(lex_token));
 
         lex_context = address_to frame;
