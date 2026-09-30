@@ -76278,18 +76278,26 @@ b32 main(void)
                 }
         }
         seq_format sequence;
-        check("seq shared conversion fields retain literals, flags and default precision",
-              seq_format_read("%%[%+-08Lf]%%", &sequence) && sequence.directive == 3 &&
-              sequence.after == 10 && sequence.width == 8 && sequence.precision == 6 &&
+        //      seq_format_read answers with why a format is refused and
+        //      SEQ_FORMAT_GOOD (nought) for one it takes, where it once
+        //      answered true, and it no longer cuts a width or a precision
+        //      at a million and nine: GNU takes any size up to what an int
+        //      holds and fails when it writes, which the differential asks.
+        check("seq shared conversion fields retain literals and flags and leave the precision unsaid",
+              seq_format_read("%%[%+-08Lf]%%", &sequence) == SEQ_FORMAT_GOOD && sequence.directive == 3 &&
+              sequence.after == 10 && sequence.width == 8 && !sequence.precise &&
               sequence.flags == (CONVERSION_FLAG_LEFT | CONVERSION_FLAG_PLUS | CONVERSION_FLAG_ZERO));
-        check("seq preserves the pre-digit field limit",
-              seq_format_read("%1000009.1000009f", &sequence) &&
-              !seq_format_read("%1000010f", &sequence) &&
-              !seq_format_read("%.1000010f", &sequence));
-        check("seq rejects stars, overflow and multiple conversions",
-              !seq_format_read("%*.2f", &sequence) && !seq_format_read("%1.*f", &sequence) &&
-              !seq_format_read("%18446744073709551616f", &sequence) &&
-              !seq_format_read("%f%%f%f", &sequence));
+        check("seq reads a width and a precision of any size an int holds",
+              seq_format_read("%1000009.1000009f", &sequence) == SEQ_FORMAT_GOOD &&
+              sequence.width == 1000009 && sequence.precision == 1000009 &&
+              seq_format_read("%1000010f", &sequence) == SEQ_FORMAT_GOOD && sequence.width == 1000010 &&
+              seq_format_read("%.1000010f", &sequence) == SEQ_FORMAT_GOOD && sequence.precision == 1000010);
+        check("seq rejects stars, saturates overflow and refuses multiple conversions",
+              seq_format_read("%*.2f", &sequence) == SEQ_FORMAT_UNKNOWN &&
+              seq_format_read("%1.*f", &sequence) == SEQ_FORMAT_UNKNOWN &&
+              seq_format_read("%18446744073709551616f", &sequence) == SEQ_FORMAT_GOOD &&
+              sequence.width > SEQ_INT_MAX &&
+              seq_format_read("%f%%f%f", &sequence) == SEQ_FORMAT_MANY);
         reuse_arguments();
         reuse_bulk_output();
         reuse_stable_arena();
