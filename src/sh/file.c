@@ -7953,6 +7953,24 @@ static bipolar file_replace_decided_at(
         return result;
 }
 
+/* Whether a name is still the object a descriptor was proved to be, when
+   what the descriptor is has already been read from it (file_open_same says
+   an open matched the facts it was given): one look, at the name, where
+   system_path_same_opened_at looks at both. */
+static bipolar file_same_known_at(file_facts address_to known,
+                                  bipolar directory, string_address name)
+{
+        file_facts named;
+        bipolar found = file_look_code(directory, name, AT_SYMLINK_NOFOLLOW,
+                                       address_of named);
+
+        return found < 0 ? found
+               : file_same_identity(known, address_of named) &&
+                         (known->mode & MODE_FORMAT) ==
+                             (named.mode & MODE_FORMAT)
+                     ? 0 : -ERROR_AGAIN;
+}
+
 static bipolar file_rename_decided_at(
     bipolar source_directory, string_address source,
     bipolar destination_directory, string_address destination,
@@ -7971,8 +7989,9 @@ static bipolar file_rename_decided_at(
         if (!file_name_stable(source_directory, source_facts))
                 return -ERROR_ACCESS;
 
-        bipolar same = system_path_same_opened_at(
-            source_handle, source_directory, source);
+        bipolar same = file_same_known_at(
+            source_facts, source_directory, source);
+        (void)source_handle;
         return same < 0 ? same : system_rename_at(
             source_directory, source, destination_directory, destination,
             no_clobber ? FILE_RENAME_NOREPLACE : 0);
@@ -33732,6 +33751,8 @@ static p8 cp_reflink_policy;
 static b32 cp_status;
 static bool cp_destination_decided;
 static bool cp_destination_existed;
+//      Neither look at the destination found anything but "no such name".
+static bool cp_destination_absent;
 static bool cp_destination_entry_existed;
 static file_facts cp_destination_facts;
 static file_facts cp_destination_entry_facts;
@@ -36196,8 +36217,14 @@ static bool file_copy_one(bipolar source_directory, string_address source,
         }
 #endif
 
-        if (fresh)
+        if (fresh ||
+            (!moving && named && cp_destination_decided && !through &&
+             cp_destination_absent))
         {
+                //      A name cp_pair has just looked for and did not find is
+                //      not looked for again before the copy: what settles it
+                //      is the link or rename that publishes the copy, which
+                //      refuses a name that is there by then.
                 memory_fill(address_of there, 0, sizeof(there));
                 memory_fill(address_of destination_entry, 0,
                             sizeof(destination_entry));
@@ -37460,9 +37487,12 @@ static fn cp_pair(string_address source, string_address destination)
                       : FILE_READ | (kind == MODE_FILE ? O_NONBLOCK : 0);
         if (!follow)
                 source_flags |= O_NOFOLLOW;
-        source_pinned = file_open_same(
+        //      What the descriptor says of itself, read once by the open that
+        //      proved it is the name's inode, is what the copy is told.
+        file_facts pinned_facts;
+        source_pinned = file_open_same_facts(
             source_directory, source_leaf, address_of source_facts,
-            source_flags);
+            source_flags, address_of pinned_facts);
         //      A directory that will not open is still made, empty, with the
         //      mode it had: file_copy_one opens it again and says so.
         bool blind = kind == MODE_DIRECTORY && source_pinned == -ERROR_ACCESS;
@@ -37503,13 +37533,15 @@ static fn cp_pair(string_address source, string_address destination)
         //      Three looks that are two, or one: a name looked at the same way
         //      twice one after the other has the same answer.
         positive same_flags = cp_same_file_look(kind) ? AT_SYMLINK_NOFOLLOW : 0;
-        bool destination_exists = file_look(
+        bipolar destination_code = file_look_code(
             destination_directory, destination_leaf, destination_flags,
             address_of destination_facts);
-        bool entry_exists = destination_flags == AT_SYMLINK_NOFOLLOW
-            ? destination_exists
-            : file_look(destination_directory, destination_leaf,
-                        AT_SYMLINK_NOFOLLOW, address_of destination_entry);
+        bool destination_exists = destination_code == 0;
+        bipolar entry_code = destination_flags == AT_SYMLINK_NOFOLLOW
+            ? destination_code
+            : file_look_code(destination_directory, destination_leaf,
+                             AT_SYMLINK_NOFOLLOW, address_of destination_entry);
+        bool entry_exists = entry_code == 0;
         if (destination_flags == AT_SYMLINK_NOFOLLOW)
                 destination_entry = destination_facts;
         file_facts same_there;
@@ -37626,6 +37658,8 @@ static fn cp_pair(string_address source, string_address destination)
         }
 
         cp_destination_decided = true;
+        cp_destination_absent = destination_code == -ERROR_NO_ENTRY &&
+                                entry_code == -ERROR_NO_ENTRY;
         cp_destination_existed = destination_exists;
         cp_destination_entry_existed = entry_exists;
         if (destination_exists)
@@ -37645,9 +37679,13 @@ static fn cp_pair(string_address source, string_address destination)
         if (!file_copy_one(source_directory, source_leaf, source,
                            destination_directory, destination_leaf,
                            destination, FILE_MAX_DEPTH, true, false, false,
-                           blind ? null : address_of source_facts,
+                           blind ? null : source_pinned >= 0
+                               ? address_of pinned_facts
+                               : address_of source_facts,
                            blind ? -1 : source_pinned,
-                           destination_slashed ? FILE_COPY_SLASHED : 0))
+                           (destination_slashed ? FILE_COPY_SLASHED : 0) |
+                               (!blind && source_pinned >= 0
+                                    ? FILE_COPY_FACTS_HELD : 0)))
                 cp_status = 1;
         file_made_now(destination_directory, destination_leaf);
         file_backup_kind = saved_backup_kind;
