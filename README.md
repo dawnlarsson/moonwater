@@ -81,8 +81,9 @@ Commands given to `moonwater` run as root through the shell, as if typed.
 
 **Settings.** Binds, init and exit live in the boot image: set them on a live
 stick and `install` carries them to the disk, while `update` keeps the disk's
-own. Wifi, internet preference, timezone, NTP, keyboard and link settings live
-in `/root` on the data partition, so `update` and `wipe` keep them.
+own. Wifi, wired, bluetooth, internet preference, power and charge settings,
+timezone, NTP, keyboard and link settings live in `/root` on the data
+partition, so `update` and `wipe` keep them.
 
 **Events.** Besides the power button and Canvas, `bind` covers `reset`, `mute`,
 `micmute`, `volume_up`/`down`, `brightness_up`/`down`, `lid_close`/`open`,

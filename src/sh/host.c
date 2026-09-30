@@ -3441,6 +3441,17 @@ static b32 host_canvas(string_address address_to arguments, positive count)
 
         if (string_equals(arguments[2], "off"))
         {
+                //      The banner is for a desktop about to close: said over a
+                //      text console, without the right to close one, or with no
+                //      Canvas in the kernel, it made the refusal after it a lie.
+                if (!bowl_is_root())
+                        return host_refuse("turning Canvas off needs root (CAP_SYS_ADMIN)%s\n", "");
+                failed = host_canvas_request(SPARK_CANVAS_STATUS, address_of control);
+                if (failed < 0)
+                        return host_fail(SPARK_DEVICE, failed);
+                if (!control.running)
+                        return host_refuse("Canvas is already off%s\n", "");
+
                 host_say(log, host_label "Canvas off: every window closes, this one too. "
                                          "On the text console, moonwater canvas on "
                                          "brings the desktop back.\n");
@@ -7000,7 +7011,11 @@ static bipolar radio_password_read(p8 address_to into, positive room,
                         continue;
                 if (got <= 0)
                 {
-                        if (terminal && !used)
+                        //      The end of input with nothing before it is no
+                        //      answer: a pass or a pipe that failed would
+                        //      otherwise save the network as an open one.
+                        //      An empty line is the answer for an open one.
+                        if (!used)
                                 result = -1;
                         break;
                 }
@@ -12164,9 +12179,11 @@ static string_address host_wipe_keep[] = {
     "main.moonwater.sh",
     "wifi",
     "wifi.power",
+    "wired.power",
     "bluetooth",
     "bluetooth.power",
     "internet",
+    "tune",
     "timezone",
     "timezone.mode",
     "ntp",
@@ -12527,11 +12544,11 @@ static fn host_usage_write(writer out)
                  HOST_ROW("bind exit [add|remove ...]", "  ", "what runs when the machine stops")
                  HOST_ROW("canvas [on|off]", "             ", "the desktop")
                  HOST_ROW("canvas log|terminal", "         ", "open the kernel log or a terminal")
-                 HOST_ROW("airplane [on|off]", "          ", "every radio at once")
-                 HOST_ROW("brightness [N%|+N|-N]", "      ", "the screen backlight")
+                 HOST_ROW("airplane [on|off]", "           ", "every radio at once")
+                 HOST_ROW("brightness [N%%|+N|-N]", "       ", "the screen backlight")
                  HOST_ROW("power [performance|balanced|powersave]", " ", "profile and CPU governor")
                  HOST_ROW("cpu [boost|smt on|off] [online|offline N]", " ", "turbo, SMT and hotplug")
-                 HOST_ROW("charge [limit N|off]", "       ", "where the battery stops charging")
+                 HOST_ROW("charge [limit N|off]", "        ", "where the battery stops charging")
                  TERM_BOLD "  sleep" TERM_RESET " | " TERM_BOLD "hibernate" TERM_RESET
                  "           " TERM_DIM "suspend to RAM or to disk" TERM_RESET "\n"
                  HOST_ROW("bios [reboot]", "               ", "restart into the firmware's setup screen")
@@ -12545,12 +12562,12 @@ static fn host_usage_write(writer out)
                  HOST_ROW("bluetooth remove NAME", "       ", "forget a bluetooth device")
                  HOST_ROW("priority internet [wired|wifi]", " ", "which link when both are up [wired]")
                  HOST_ROW("time [sync]", "                 ", "the clock; sync sets it and the zone now")
-                 HOST_ROW("timezone [ZONE|se|+1|list]", " ", "the clock's zone; setting one makes it manual")
+                 HOST_ROW("timezone [ZONE|se|+1|list]", "  ", "the clock's zone; setting one makes it manual")
                  HOST_ROW("timezone auto", "               ", "from the network [auto]: one Cloudflare")
                  "                              " TERM_DIM "request per network joined" TERM_RESET "\n"
                  HOST_ROW("ntp [on|off]", "                ", "set the clock from the network [on]")
                  HOST_ROW("ntp sampling [on|off]", "       ", "keep the lowest-delay sample of five [on]")
-                 HOST_ROW("link [on|off|help]", "         ", "shell and run on paired machines, by key")
+                 HOST_ROW("link [on|off|help]", "          ", "shell and run on paired machines, by key")
                  HOST_ROW("keyboard [LAYOUT|list]", "      ", "Canvas keys: us uk de se no dk fi fr es it")
                  HOST_ROW("wipe", "                        ", "forget /home and /root, keep the machine")
                  "\n"

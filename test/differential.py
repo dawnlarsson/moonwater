@@ -40689,6 +40689,7 @@ while True:
         script += say("ntp off") + "echo \"@@ntp $(cat /root/ntp)\"\n"
         script += say("ntp on") + "echo \"@@ntp $(cat /root/ntp)\"\n"
         script += say("link key") + say("link off") + "printf g > /root/link.groups\n"
+        script += "echo off > /root/wired.power; printf 'power powersave\\n' > /root/tune\n"
         script += ("mkdir -p /home/u/deep && echo x > /home/u/deep/f && echo y > /root/junk && "
                    "mkdir -p /root/dir && echo z > /bowls/one/kept\n" + say("wipe") +
                    "echo \"@@after $(ls -A /home | wc -l) $(ls /root | tr '\\n' ,) "
@@ -40712,11 +40713,167 @@ while True:
                 kept = set(filter(None, parts[2].split(",")))
                 check(parts[1] == "0" and "junk" not in kept and "dir" not in kept and
                              {"keyboard", "ntp", "timezone", "link", "link.key",
-                              "link.groups"} <= kept and
+                              "link.groups", "wired.power", "tune"} <= kept and
                              parts[3] == "z",
-                             "wipe empties /home and /root and keeps the settings, the link's "
-                             "key and switch, and the bowls",
+                             "wipe empties /home and /root and keeps the settings (wired and the "
+                             "power and charge ones too), the link's key and switch, and the bowls",
                              line)
+
+        # The switches and lists the command keeps in /root, drawn as runs of
+        # verbs against a model of what each leaves: the words of wifi,
+        # wired and bluetooth, the internet preference, ntp and its sampling,
+        # the keyboard, the bluetooth and wifi lists. Every step's status and
+        # the state after it are held to the model, for good words, bad
+        # words, a thing done twice and a thing removed that is not there.
+        layout_words = layouts[:4] or ["us"]
+        names = ["kbd1", "mouse2", "a b", "pad3"]
+        ssids = ["net-a", "net-b", "net-c"]
+        model = {"wifi.power": None, "wired.power": None, "bluetooth.power": None,
+                 "internet": None, "ntp": None, "ntp.sampling": None, "keyboard": None}
+        bluetooth, wifi_list = [], []
+
+        def step():
+            kind = rng.randrange(12)
+            if kind == 0:
+                word = rng.choice(["on", "off"])
+                model["wired.power"] = word
+                return f"wired {word}", 0
+            if kind == 1:
+                word = rng.choice(["on", "off"])
+                model["bluetooth.power"] = word
+                return f"bluetooth {word}", 0
+            if kind == 2:
+                word = rng.choice(["on", "off"])
+                model["wifi.power"] = word
+                # On with saved networks and no radio: the join has nowhere to go.
+                return f"wifi {word}", 1 if word == "on" and wifi_list else 0
+            if kind == 3:
+                word = rng.choice(["wired", "wifi"])
+                model["internet"] = word
+                return f"priority internet {word}", 0
+            if kind == 4:
+                word = rng.choice(["on", "off"])
+                model["ntp"] = word
+                return f"ntp {word}", 0
+            if kind == 5:
+                word = rng.choice(["on", "off"])
+                model["ntp.sampling"] = word
+                return f"ntp sampling {word}", 0
+            if kind == 6:
+                word = rng.choice(layout_words)
+                model["keyboard"] = word
+                return f"keyboard {word}", 0
+            if kind == 7:
+                name = rng.choice(names)
+                if name not in bluetooth:
+                    bluetooth.append(name)
+                model["bluetooth.power"] = "on"
+                return f"bluetooth add {shlex.quote(name)}", 0
+            if kind == 8:
+                name = rng.choice(names)
+                present = name in bluetooth
+                if present:
+                    bluetooth.remove(name)
+                return f"bluetooth remove {shlex.quote(name)}", 0 if present else 1
+            if kind == 9:
+                ssid = rng.choice(ssids)
+                password = "pass" + str(rng.randrange(10 ** 6, 10 ** 7))
+                entry = [e for e in wifi_list if e[0] == ssid]
+                if entry:
+                    entry[0][1] = password
+                else:
+                    wifi_list.append([ssid, password])
+                model["wifi.power"] = "on"
+                # No radio in the sandbox: saved, and said not joined.
+                return f"wifi add {ssid} {password}", 1
+            if kind == 10:
+                ssid = rng.choice(ssids)
+                present = any(e[0] == ssid for e in wifi_list)
+                wifi_list[:] = [e for e in wifi_list if e[0] != ssid]
+                return f"wifi remove {ssid}", 0 if present else 1
+            return rng.choice(["wired sideways", "ntp maybe", "priority internet cable",
+                               "keyboard xx", "bluetooth add", "wired on off",
+                               "wifi add", "ntp sampling x y"]), None
+
+        steps = []
+        script = "rm -f /root/wifi* /root/wired* /root/bluetooth* /root/internet /root/ntp* /root/keyboard\n"
+        for number in range(160):
+            command, want = step()
+            steps.append((command, want, dict(model), list(bluetooth), [list(e) for e in wifi_list]))
+            script += (f"timeout 20 /tmp/moonwater {command} >/dev/null 2>&1; echo \"@@s{number} $?\"\n"
+                       "for f in wifi.power wired.power bluetooth.power internet ntp ntp.sampling keyboard; do "
+                       "echo \"@@f $f $(cat /root/$f 2>/dev/null)\"; done\n"
+                       "echo \"@@b $(tr '\\n' '|' < /root/bluetooth 2>/dev/null)\"\n"
+                       "echo \"@@w $(tr '\\n' '|' < /root/wifi 2>/dev/null)\"\n")
+        lines, finished = session(script)
+        check(finished, "the state model run finished", "")
+        at = 0
+        for number, (command, want, state, bt, wl) in enumerate(steps):
+            while at < len(lines) and not lines[at].startswith(f"@@s{number} "):
+                at += 1
+            if at + 10 > len(lines):
+                check(False, f"the state model has an answer for {command}", "")
+                break
+            status = int(lines[at].split()[1])
+            seen = {}
+            for line in lines[at + 1:at + 8]:
+                parts = line.split(" ", 2)
+                seen[parts[1]] = parts[2].strip() if len(parts) > 2 else ""
+            bluetooth_now = lines[at + 8][len("@@b "):].strip()
+            wifi_now = lines[at + 9][len("@@w "):].strip()
+            at += 10
+            want_status = want if want is not None else status
+            check(want is not None and status == want or want is None and status in (1, 2),
+                  f"{command} answers {want if want is not None else '1 or 2'}", status)
+            check(all(seen[key] == (value or "") for key, value in state.items()),
+                  f"after {command} the words are the model's",
+                  {key: (seen[key], value) for key, value in state.items() if seen[key] != (value or "")})
+            check(bluetooth_now == "".join(name + "|" for name in bt),
+                  f"after {command} the bluetooth list is the model's", bluetooth_now)
+            check(wifi_now == "".join(e[0] + "|" + e[1] + "|" for e in wl),
+                  f"after {command} the wifi list is the model's", wifi_now)
+
+        # A password from standard input: an empty line is an open network,
+        # and the end of input with nothing before it is no answer, so a pass
+        # or a pipe that failed does not save the network as an open one.
+        lines, finished = session(
+            "rm -f /root/wifi\n" +
+            "echo '@@ eof'; timeout 20 /tmp/moonwater wifi add eofnet - </dev/null 2>&1; echo \"@@status $?\"\n"
+            "echo '@@ saved-eof'; cat /root/wifi 2>/dev/null; echo '@@end'\n"
+            "echo '@@ open'; echo | timeout 20 /tmp/moonwater wifi add opennet - 2>&1; echo \"@@status $?\"\n"
+            "echo '@@ pw'; echo hunter2hunter | timeout 20 /tmp/moonwater wifi add pwnet - 2>&1; echo \"@@status $?\"\n"
+            "echo '@@ saved'; cat /root/wifi; echo '@@end'\n")
+        seen = answers(lines)
+        check(seen.get("eof", {}).get("status") == 1 and
+              any("nothing saved" in line for line in seen.get("eof", {}).get("out", [])),
+              "wifi add NAME - with no input at all saves nothing", repr(seen.get("eof")))
+        check(block("saved-eof") == [], "and leaves no network on the list", repr(block("saved-eof")))
+        check(block("saved") == ["opennet", "", "pwnet", "hunter2hunter"],
+              "an empty line saves an open network, a line a password", repr(block("saved")))
+
+        # The usage is one table: a description starts in one column for every
+        # row whose command leaves room, and the brightness row keeps its
+        # percent sign, which a format string once swallowed.
+        lines, finished = session("/tmp/moonwater -h 2>&1\n")
+        rows = [line for line in lines if line.startswith("  ") and not line.startswith("   ")]
+        starts = set()
+        for line in rows:
+            gap = re.search(r"\S( {2,})\S", line[2:])
+            if gap:
+                starts.add(2 + gap.end() - 1)
+        check(finished and starts == {30}, "every usage row starts its description in column 30", sorted(starts))
+        check(any(line.strip().startswith("brightness [N%|+N|-N]") for line in rows),
+              "the brightness row shows N%|+N|-N", [line for line in rows if "brightness" in line])
+
+        # Canvas with no kernel desktop to ask: off and on say why and say
+        # nothing about windows closing.
+        lines, finished = session(say("canvas off") + say("canvas on") + say("canvas"))
+        seen = answers(lines)
+        check(finished and all(seen.get(f"canvas {w}".strip(), {}).get("status") == 1 for w in ("off", "on", "")),
+              "canvas, on and off with no Canvas to ask fail with 1", repr(seen))
+        check(not any("every window closes" in line for line in lines),
+              "canvas off without a Canvas does not announce closing windows", lines[:6])
+
     return checks.verdict("moonwater cli", "moonwater-cli")
 
 
