@@ -18998,7 +18998,7 @@ def shell_reference_walk(farm, cases):
     root = Path(tempfile.mkdtemp(prefix="shell-reference-walk-"))
     names = root / "names"
     names.mkdir()
-    for name in ("bash", "dash"):
+    for name in {"bash", "dash"} | {mode[2] for mode in SHELL_MODES.values()}:
         (names / name).symlink_to(binary)
 
     def one(argv, script, timeout, normalize, at):
@@ -19068,7 +19068,7 @@ def shell_signal_dispositions(farm):
     """
     cases = []
     for mode in sorted(shell_ALL):
-        reference, flags, name = SHELL_MODES[mode]
+        reference, flags, name, *_own = SHELL_MODES[mode]
         for shape in shell_SIGNAL_SHAPES:
             for entry in shell_SIGNAL_ENTRIES:
                 for trap in shell_SIGNAL_TRAPS:
