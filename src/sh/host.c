@@ -8667,16 +8667,19 @@ static positive tune_wake_counts(positive address_to counts)
         return n;
 }
 
-/* The wakeup sources that fired since the counts were taken, said and kept in /root/sleep.log. */
-static fn tune_wake_report(positive address_to before, positive n)
+#define TUNE_LOG_LINES 60
+#define TUNE_LOG_WIDTH 160
+#define TUNE_LOG_ROOM (TUNE_LOG_LINES * TUNE_LOG_WIDTH + 512)
+
+/* The wakeup sources that fired since the counts were taken, said and put first in text for /root/sleep.log. */
+static fn tune_wake_report(positive address_to before, positive n, p8 address_to text)
 {
-        p8 text[512];
         p8 name[48];
         positive after[TUNE_WAKE_MOST];
         positive seen = tune_wake_counts(after);
         bool any = false;
 
-        string_copy_bounded(text, "woken by:", sizeof(text));
+        string_copy_bounded(text, "woken by:", TUNE_LOG_ROOM);
         for (positive at = 0; at < n && at < seen && tune_entry(TUNE_WAKE_CLASS, at, name, sizeof(name)); at++)
         {
                 p8 path[160];
@@ -8687,15 +8690,14 @@ static fn tune_wake_report(positive address_to before, positive n)
                 if (!tune_path(path, sizeof(path), TUNE_WAKE_CLASS "/", (string_address)name, "/name") ||
                     !tune_word(path, label, sizeof(label)))
                         string_copy_bounded(label, name, sizeof(label));
-                string_append_bounded(text, " ", sizeof(text));
-                string_append_bounded(text, (string_address)label, sizeof(text));
+                string_append_bounded(text, " ", TUNE_LOG_ROOM);
+                string_append_bounded(text, (string_address)label, TUNE_LOG_ROOM);
                 any = true;
         }
         if (!any)
-                string_append_bounded(text, " nothing the kernel counted", sizeof(text));
+                string_append_bounded(text, " nothing the kernel counted", TUNE_LOG_ROOM);
         host_say(log, host_label "%s\n", (string_address)text);
-        string_append_bounded(text, "\n", sizeof(text));
-        (void)host_write_text("/root/sleep.log", (string_address)text);
+        string_append_bounded(text, "\n", TUNE_LOG_ROOM);
 }
 
 /* What the kernel says went wrong, when it says anything: the device, the step and the error. */
@@ -8714,10 +8716,146 @@ static fn tune_suspend_failure(void)
                  (string_address)device, (string_address)step, (b32)errno_value);
 }
 
+/*
+        The last kernel lines about the card, the suspend and Canvas, put after
+        the wake in /root/sleep.log: the next report from a machine whose
+        screen did not come back names the step that failed without anyone
+        having to run dmesg on a machine that shows nothing.
+*/
+static fn tune_kernel_lines(p8 address_to text)
+{
+        static const string_address wanted[] = {
+            (string_address) "moonwater canvas", (string_address) "PM:", (string_address) "amdgpu",
+            (string_address) "drm", (string_address) "backlight"};
+        p8 record[2048];
+        p8 ring[TUNE_LOG_LINES][TUNE_LOG_WIDTH];
+        positive count = 0;
+        bipolar handle = system_open_at(AT_FDCWD, "/dev/kmsg", FILE_READ | O_NONBLOCK | O_CLOEXEC);
+
+        if (handle < 0)
+                return;
+        for (;;)
+        {
+                bipolar got = system_read_once(handle, record, sizeof(record) - 1);
+                string_address line;
+                bool keep = false;
+
+                // Interrupted, or a record overwritten before it was read.
+                if (got == -4 || got == -32)
+                        continue;
+                if (got <= 0)
+                        break;
+                record[got] = end;
+                line = string_find(record, (string_address) ";");
+                if (!line)
+                        continue;
+                line++;
+                ((p8 address_to)line)[string_first_of_or_end(line, '\n') - line] = end;
+                for (positive at = 0; at < sizeof(wanted) / sizeof(wanted[0]); at++)
+                        keep |= string_find(line, wanted[at]) != null;
+                if (keep)
+                        string_copy_bounded(ring[count++ % TUNE_LOG_LINES], line, TUNE_LOG_WIDTH);
+        }
+        system_close((positive)handle);
+        string_append_bounded(text, "kernel log lines:\n", TUNE_LOG_ROOM);
+        for (positive at = count > TUNE_LOG_LINES ? count - TUNE_LOG_LINES : 0; at < count; at++)
+        {
+                string_append_bounded(text, (string_address)ring[at % TUNE_LOG_LINES], TUNE_LOG_ROOM);
+                string_append_bounded(text, "\n", TUNE_LOG_ROOM);
+        }
+}
+
+/*
+        How the sleep went as the kernel counts it: whether the platform ever
+        reached its deepest state (last_hw_sleep is microseconds in it, and a
+        fan that spins through a sleep is usually a nought there) and how many
+        suspends failed.
+*/
+static fn tune_sleep_stats(p8 address_to text)
+{
+        static const string_address names[] = {
+            (string_address) "success", (string_address) "fail", (string_address) "last_hw_sleep",
+            (string_address) "total_hw_sleep", (string_address) "max_hw_sleep"};
+
+        string_append_bounded(text, "suspend_stats:", TUNE_LOG_ROOM);
+        for (positive at = 0; at < sizeof(names) / sizeof(names[0]); at++)
+        {
+                p8 path[96];
+                p8 number[24];
+                positive value = 0;
+
+                if (!tune_path(path, sizeof(path), TUNE_SYS_POWER "/suspend_stats/", names[at], "") ||
+                    !tune_number(path, address_of value))
+                        continue;
+                positive_into_string(number, value);
+                string_append_bounded(text, " ", TUNE_LOG_ROOM);
+                string_append_bounded(text, names[at], TUNE_LOG_ROOM);
+                string_append_bounded(text, "=", TUNE_LOG_ROOM);
+                string_append_bounded(text, (string_address)number, TUNE_LOG_ROOM);
+        }
+        string_append_bounded(text, "\n", TUNE_LOG_ROOM);
+}
+
+#define TUNE_BACKLIGHTS 4
+#define TUNE_NO_LEVEL ((positive)-1)
+
+/* Each backlight's level, in directory order, before the machine sleeps. */
+static positive tune_backlight_save(positive address_to levels)
+{
+        p8 name[64];
+        positive n = 0;
+
+        for (positive at = 0; n < TUNE_BACKLIGHTS && tune_entry(TUNE_SYS_BACKLIGHT, at, name, sizeof(name)); at++)
+        {
+                p8 path[160];
+                positive level = TUNE_NO_LEVEL;
+
+                if (!tune_path(path, sizeof(path), TUNE_SYS_BACKLIGHT "/", (string_address)name, "/brightness") ||
+                    !tune_number(path, address_of level))
+                        level = TUNE_NO_LEVEL;
+                levels[n++] = level;
+        }
+        return n;
+}
+
+/*
+        And put back after it. The panel's own driver keeps its level across a
+        suspend on the machines where that works, and a wake that left the
+        backlight off or at nought (bl_power still blanked, or a level the
+        firmware picked) is a screen that is on and dark. The level is written
+        back whatever the file says: it is what the class device last stored,
+        and after a wake the panel may not be doing it.
+*/
+static fn tune_backlight_restore(positive address_to levels, positive n)
+{
+        p8 name[64];
+
+        for (positive at = 0; at < n && tune_entry(TUNE_SYS_BACKLIGHT, at, name, sizeof(name)); at++)
+        {
+                p8 path[160];
+                positive blank = 0;
+
+                if (tune_path(path, sizeof(path), TUNE_SYS_BACKLIGHT "/", (string_address)name, "/bl_power") &&
+                    tune_number(path, address_of blank) && blank &&
+                    tune_write(path, "0") >= 0)
+                        host_say(log, host_label "backlight %s was blanked, unblanked\n", (string_address)name);
+                if (levels[at] == TUNE_NO_LEVEL ||
+                    !tune_path(path, sizeof(path), TUNE_SYS_BACKLIGHT "/", (string_address)name, "/brightness"))
+                        continue;
+                //      Written even when the file already says so: it is the value
+                //      the class device last stored, not what the panel is doing.
+                if (tune_write_number(path, levels[at]) >= 0)
+                        host_say(log, host_label "backlight %s set to %p\n", (string_address)name, levels[at]);
+        }
+}
+
 /* moonwater sleep and moonwater hibernate: the kernel's own suspend and hibernate. */
 static b32 tune_suspend(string_address verb, string_address state)
 {
         positive before[TUNE_WAKE_MOST];
+        positive levels[TUNE_BACKLIGHTS];
+        p8 text[TUNE_LOG_ROOM];
+        positive lights;
         positive sources;
 
         if (!tune_lists(TUNE_SYS_POWER "/state", state))
@@ -8739,6 +8877,7 @@ static b32 tune_suspend(string_address verb, string_address state)
                         host_say(log, host_label "sleeping, mem_sleep %s\n", (string_address)mode);
         }
         sources = tune_wake_counts(before);
+        lights = tune_backlight_save(levels);
         system_call(syscall(sync));
         {
                 bipolar failed = tune_write(TUNE_SYS_POWER "/state", state);
@@ -8746,12 +8885,26 @@ static b32 tune_suspend(string_address verb, string_address state)
                 if (failed < 0)
                 {
                         tune_suspend_failure();
+                        text[0] = end;
+                        tune_sleep_stats(text);
+                        tune_kernel_lines(text);
+                        (void)host_write_text("/root/sleep.log", (string_address)text);
                         return host_fail(verb, failed);
                 }
         }
         //      Reached again once the machine has woken.
-        tune_wake_report(before, sources);
+        tune_wake_report(before, sources, text);
         host_say(log, host_label "awake again\n");
+        //      What a sleep can leave behind: the panel's level, the link (the
+        //      watcher is asked to look again, since a carrier that came back
+        //      before it was listening is news it never heard), and the
+        //      settings the machine put in place at boot.
+        tune_backlight_restore(levels, lights);
+        radio_net_wake();
+        tune_restore();
+        tune_sleep_stats(text);
+        tune_kernel_lines(text);
+        (void)host_write_text("/root/sleep.log", (string_address)text);
         return 0;
 }
 
