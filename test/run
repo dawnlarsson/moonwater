@@ -4009,7 +4009,18 @@ lane_fuzz() { python3 test/differential.py --harness tls_fuzz; }
 #       netlink_fuzz runs. Needs Linux clang's -fsanitize=memory; NOT RUN
 #       without it.
 lane_msan() { MOONWATER_MSAN=1 python3 test/differential.py --harness msan_net; }
-lane_bowl() { freestanding_checks_lane bowl bowl; }
+lane_bowl()
+{
+        bowl_outcome=0
+        freestanding_checks_lane bowl bowl || bowl_outcome=$?
+        python3 test/differential.py --harness bowl_json_fuzz
+        case $? in
+        0) ;;
+        2) note "bowl_json_fuzz: skipped (soft) -- does not downgrade bowl" ;;
+        *) bowl_outcome=1 ;;
+        esac
+        return "$bowl_outcome"
+}
 #       Freestanding CHECK_tar (paths, pax, magics), then a continuous
 #       file↔directory↔symlink-to-dir pathname race against tar extract
 #       (shallow + deep trees, private-edit / noclobber / install probes).
@@ -8895,6 +8906,18 @@ if [ -z "${TEST_RUNNER:-}" ] && command -v python3 > /dev/null 2>&1; then
         else
                 lost 'generated streams' "$(grep -v '^term streams' "$work/streams.out" | head -3 | tr '\n' ' ')"
         fi
+fi
+
+#       And the same emulator under libFuzzer with ASan/UBSan: what no grammar
+#       names. Five seconds here; MOONWATER_FUZZ_SECONDS lengthens it. Not
+#       run without clang, libFuzzer and objcopy, which is not a failure.
+if [ -z "${TEST_RUNNER:-}" ] && command -v python3 > /dev/null 2>&1; then
+        python3 test/differential.py --harness term_fuzz > "$work/fuzz.out" 2>&1
+        case $? in
+        0) won ;;
+        2) note "term_fuzz: skipped (soft) -- does not downgrade term" ;;
+        *) lost 'coverage-guided fuzz' "$(head -3 "$work/fuzz.out" | tr '\n' ' ')" ;;
+        esac
 fi
 
 section ""

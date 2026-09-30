@@ -5100,7 +5100,7 @@ static inline INLINE bool decimal_short_placed(string_address input,
             : [at] "=&r"(at), [val] "=&r"(value), [frac] "=&r"(fraction),
               [byte] "=&r"(byte), [start] "=&r"(start), [pow] "=&r"(power),
               [table] "=&r"(table), [made] "=&x"(made)
-            : [in] "r"(input), [seen] "m"(*(const p8 (address_to)[])input)
+            : [in] "r"(input), [seen] "m"(*(const p8 (address_to)[4096])input)
             : "cc");
 
         if (!at)
