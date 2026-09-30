@@ -52335,6 +52335,14 @@ static fn talking(void)
                 check("a refused replacement default route was never installed",
                       netlink_route_delete((b32)handle, 0, 0,
                                            0x0a090802, 1) < 0);
+                //      A router outside the address's prefix is refused until the
+                //      route says it is on the link (a /32 lease, the clouds').
+                check("a gateway no prefix covers is accepted when marked on-link",
+                      netlink_route_add_lease((b32)handle, 0xc0000201, 1, true) == 0);
+                check("and that route can be removed",
+                      netlink_route_delete((b32)handle, 0, 0, 0xc0000201, 1) == 0);
+                check("the same gateway unmarked is still refused",
+                      netlink_route_add_lease((b32)handle, 0xc0000201, 1, false) != 0);
                 check("the configured address can be removed",
                       address_added == 0 &&
                           netlink_address_delete((b32)handle, 1, mine, 24) == 0);
@@ -79871,6 +79879,15 @@ static fn storage_test_link_state(void)
                   held.lost);
         check("new interface can retry after configuration failure",
               net_link_news(13, 0, address_of held));
+        check("a router inside the /24 is on the link",
+              !net_router_onlink(0x0a00020f, 0xffffff00, 0x0a000201));
+        check("a /32 lease with a router outside it needs the on-link route",
+              net_router_onlink(0x0a00020f, 0xffffffff, 0x0a000201));
+        check("a /24 lease with a router in another /24 needs it too",
+              net_router_onlink(0x0a00020f, 0xffffff00, 0x0a000301));
+        check("no mask reads as a /24", !net_router_onlink(0x0a00020f, 0, 0x0a0002fe) &&
+              net_router_onlink(0x0a00020f, 0, 0x0a0003fe));
+        check("no router needs no route", !net_router_onlink(0x0a00020f, 0xffffffff, 0));
         /* A flapping second link must not cut every exchange as it starts:
            after a cut the news waits out the hold-off, then cuts again. */
         check("link news may cut an exchange nothing has cut", net_news_may_cut(100));
