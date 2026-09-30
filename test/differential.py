@@ -11886,6 +11886,8 @@ MISC_UTILITIES = (
                    ("--field=-,1", "--to=si"), ("--field", "1,,2"), ("--field", " 1"), ("--field", "1 "),
                    ("--field", "1\t2", "--to=si"), ("--field", "1", "--field", "1"),
                    ("--field=-", "--field=1-"), ("--field", "1,2", "--field", "bad"),
+                   ("--field", ""), ("--field", "0"), ("--field", "3-1"), ("--field", "x"), ("--field", "1,y"),
+                   ("--field", "99999999999999999999"), ("--field", "1-0"), ("--field", ","),
                    #   GNU's format grammar: blank, ' and 0 flags in any order,
                    #   strtoimax's width and strtol's precision, a raw prefix
                    #   that counts %% as one byte, a raw suffix, and its

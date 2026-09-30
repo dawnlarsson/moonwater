@@ -6157,117 +6157,6 @@ static bool numfmt_word_refuse(string_address option, string_address value,
 }
 
 /*
-        A field list the reference will not read, named as its set_fields
-        names it, walking the list the same way: a second dash in one piece
-        is an invalid range, a dash after a zero or a lone zero is a field
-        numbered from 0, a range that runs backwards is decreasing, a number
-        that reaches the largest there is is too large (the digits it began
-        with), and any other byte is an invalid value from that byte on.
-*/
-static bool numfmt_fields_refuse(string_address value)
-{
-        string_address at = value;
-        positive number = 0;
-        positive start = 1;
-        bool left = false, right = false, dash = false, digits = false;
-        string_address digits_from = value;
-
-        if (string_equals(value, "-"))
-                return true;
-
-        text_flush();
-        for (;;)
-        {
-                p8 byte = *at;
-
-                if (byte == '-')
-                {
-                        digits = false;
-                        if (dash)
-                        {
-                                writer_stderr("numfmt: invalid field range\n", 0);
-                                return numfmt_hint();
-                        }
-                        dash = true;
-                        at++;
-                        if (left && !number)
-                        {
-                                writer_stderr("numfmt: fields are numbered from 1\n", 0);
-                                return numfmt_hint();
-                        }
-                        start = left ? number : 1;
-                        number = 0;
-                }
-                else if (byte == ',' || byte == ' ' || byte == '\t' || !byte)
-                {
-                        digits = false;
-                        if (dash)
-                        {
-                                dash = false;
-                                if (right && number < start)
-                                {
-                                        writer_stderr("numfmt: invalid decreasing range\n", 0);
-                                        return numfmt_hint();
-                                }
-                        }
-                        else if (!number)
-                        {
-                                writer_stderr("numfmt: fields are numbered from 1\n", 0);
-                                return numfmt_hint();
-                        }
-                        number = 0;
-                        if (!byte)
-                                break;
-                        at++;
-                        left = right = false;
-                }
-                else if (byte_is_digit(byte))
-                {
-                        if (!digits)
-                                digits_from = at;
-                        digits = true;
-                        if (dash)
-                                right = true;
-                        else
-                                left = true;
-
-                        positive digit = (positive)(byte - '0');
-
-                        if (number > (positive_max - digit) / 10 ||
-                            number * 10 + digit == positive_max)
-                        {
-                                positive length = string_span_max(digits_from,
-                                                                  string_length(digits_from),
-                                                                  string_set_digits);
-                                p8 shown[64];
-
-                                length = min(length, sizeof(shown) - 1);
-                                memory_copy(shown, digits_from, length);
-                                shown[length] = end;
-                                string_format(writer_stderr,
-                                              "numfmt: field number '%w' is too large\n",
-                                              writer_terminal_quoted_name, shown);
-                                return numfmt_hint();
-                        }
-                        number = number * 10 + digit;
-                        at++;
-                }
-                else
-                {
-                        string_format(writer_stderr, "numfmt: invalid field value '%w'\n",
-                                      writer_terminal_quoted_name, at);
-                        return numfmt_hint();
-                }
-        }
-
-        //      Nothing the reference refuses: the list reader's own
-        //      complaint stands in.
-        string_format(writer_stderr, "numfmt: invalid field value '%w'\n",
-                      writer_terminal_quoted_name, value);
-        return numfmt_hint();
-}
-
-/*
         Every value but --format is read where it is written, because that
         is where the reference reads it: two bad values are then reported in
         the order they were typed. --format is the one it stores and looks
@@ -6388,7 +6277,10 @@ static bool numfmt_option_seen(p8 letter, string_address value)
                 text_list_dash_all = false;
 
                 if (!parsed)
-                        return numfmt_fields_refuse(value);
+                {
+                        (void)text_list_trouble();
+                        return false;
+                }
                 numfmt.fields_given = true;
         }
         return true;
