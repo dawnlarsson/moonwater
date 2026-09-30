@@ -3989,6 +3989,12 @@ lane_net()
         2) note "http_fuzz: skipped (soft) -- does not downgrade net" ;;
         *) net_outcome=1 ;;
         esac
+        python3 test/differential.py --harness http_fuzz_tight
+        case $? in
+        0) ;;
+        2) note "http_fuzz_tight: skipped (soft) -- does not downgrade net" ;;
+        *) net_outcome=1 ;;
+        esac
         python3 test/differential.py --harness sntp_era
         case $? in
         0) ;;

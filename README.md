@@ -325,7 +325,7 @@ coreutils does:
 | `cp -r` | makes the new directory where it goes and fills it | builds it in a private stage and publishes it whole |
 | `install` | leaves the copy in place, mode 0600, when the owner asked for is refused | takes the copy away and says it was not published |
 | `pinky -l` | copies each user's `~/.project` and `~/.plan` to the terminal as they are | leaves them out |
-| `wget`, `fetch` and every other HTTP client in the tree | accept a `204` that declares `Content-Length` or `Transfer-Encoding` (its body is never read; the connection closes after the one response) and read a `205`'s content like any other body, as wget and curl do | refuse a `204` that declares any body framing and a `205` with a non-zero length, chunked or close-delimited content (RFC 9110 15.3.5, 15.3.6, RFC 9112 6.1) |
+| `wget`, `fetch` and every other HTTP client in the tree | accept a `204` that declares `Content-Length` or `Transfer-Encoding` (its body is never read; the connection closes after the one response), read a `205`'s content like any other body, and take an identical duplicate `Content-Length` (also `3, 3`), an obsolete folded line after an ordinary field and any byte but NUL and a bare CR in the reason phrase, as wget and curl do | refuse a `204` that declares any body framing, a `205` with a non-zero length, chunked or close-delimited content (RFC 9110 15.3.5, 15.3.6, RFC 9112 6.1), a repeated or listed `Content-Length`, any folded line and a control byte in the reason phrase |
 
 Every row but the HTTP one has a check in `floodlight_hardened` (`test/run`),
 run against a shell built from `kernel/profile/sec_hardened`'s configuration;
