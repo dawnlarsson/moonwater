@@ -727,6 +727,7 @@ static COLD bipolar net_staged_name_publish(file_staged_name address_to stage)
 #define WGET_USAGE 2
 #define WGET_FILE 3
 #define WGET_NETWORK 4
+#define WGET_SSL 5
 #define WGET_AUTH 6
 #define WGET_SERVER 8
 
@@ -808,6 +809,27 @@ static COLD b32 net_wget_failed(bipolar status, b32 code, p8 address_to where,
         case HTTP_TLS:
                 return string_report(log_error, WGET_NETWORK,
                                      "wget: TLS handshake with %w failed\n",
+                                     writer_terminal_quoted_name, host);
+        //      GNU wget's status 5, its line, and its hint for the way out.
+        //      A certificate outside its dates is what a clock decades wrong
+        //      makes of every server, so that reason names the clock.
+        case HTTP_UNTRUSTED:
+                return string_report(log_error, WGET_SSL,
+                                     "ERROR: The certificate of '%w' is not trusted.\n"
+                                     "To connect to %w insecurely, use "
+                                     "`--no-check-certificate'.\n",
+                                     writer_terminal_quoted_name, host,
+                                     writer_terminal_quoted_name, host);
+        case HTTP_EXPIRED:
+        case HTTP_NOT_YET:
+                return string_report(log_error, WGET_SSL,
+                                     "ERROR: The certificate of '%w' %s.\n"
+                                     "The system clock may be wrong: check "
+                                     "`date'. To connect to %w insecurely, use "
+                                     "`--no-check-certificate'.\n",
+                                     writer_terminal_quoted_name, host,
+                                     status == HTTP_EXPIRED
+                                         ? "has expired" : "is not yet activated",
                                      writer_terminal_quoted_name, host);
         case HTTP_PRIVATE:
                 return string_report(log_error, WGET_GENERIC,
