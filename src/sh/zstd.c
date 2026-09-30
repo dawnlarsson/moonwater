@@ -3,12 +3,15 @@
 
         Decode is the existing frame walker: content checksum is hash_xxh64,
         match copies are memory_copy_match, backward bitstreams are
-        zstd_bits_open. Encode uses a two-candidate 16-bit hash, 128 KiB
-        history, lazy matching, repeat offsets and predefined sequence FSE.
-        Literals use four Huffman streams with direct or FSE-coded weights;
-        raw literals/blocks win when entropy coding would grow. Match lengths
-        are memory_common_prefix. Dictionaries are refused. Concatenated
-        frames and skippable frames are accepted the way zstd -d accepts them.
+        zstd_bits_open. Encode runs libzstd's levels from --fast to 22: hash
+        chain, row hash and binary tree match finders under the fast, double
+        fast, lazy and price-driven parsers, repeat offsets and sequence FSE
+        tables. Literals use four Huffman streams with
+        direct or FSE-coded weights; raw literals/blocks win when entropy
+        coding would grow. Match lengths are memory_common_prefix. A large
+        input is cut into jobs the pool encodes at once. Dictionaries are
+        read (-D) and trained (--train). Concatenated frames and skippable
+        frames are accepted the way zstd -d accepts them.
 */
 
 #define ZSTD_MAGIC 0xFD2FB528u

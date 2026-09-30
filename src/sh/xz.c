@@ -8,7 +8,9 @@
         dictionaries that each start fresh (see the encoder below).
         Checksums are hash_crc32/hash_crc64. Concatenated streams are
         accepted the way xz -d accepts them. Decode also takes SHA-256
-        checks; there is no BCJ.
+        checks. The branch converters (x86, PowerPC, IA-64, ARM, ARM Thumb,
+        ARM64, SPARC, RISC-V) and delta run as filter chains in both
+        directions, built from the --x86 and --lzma2 words.
 */
 
 
