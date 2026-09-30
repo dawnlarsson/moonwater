@@ -43,6 +43,7 @@ moonwater cpu [boost|smt on|off]       turbo and SMT, kept across boots; cpu onl
 moonwater charge [limit N|off]         where the battery stops charging (20 to 100); kept across boots
 moonwater sleep | hibernate            suspend to RAM or to disk
 moonwater keyboard [LAYOUT]            us uk de se no dk fi fr es it [us]
+moonwater dns [plain|tls|tls-only]     wget and host over TLS to 1.1.1.1 and 9.9.9.9 (853); tls falls back to UDP, tls-only does not [plain]
 
 moonwater wired [on|off]                the wired links, and which have carrier; off keeps them down across a reboot
 moonwater wifi                         the radio, saved networks and networks in range, or why there are none
@@ -82,7 +83,7 @@ Commands given to `moonwater` run as root through the shell, as if typed.
 **Settings.** Binds, init and exit live in the boot image: set them on a live
 stick and `install` carries them to the disk, while `update` keeps the disk's
 own. Wifi, wired, bluetooth, internet preference, power and charge settings,
-timezone, NTP, keyboard and link settings live in `/root` on the data
+timezone, NTP, keyboard, DNS and link settings live in `/root` on the data
 partition, so `update` and `wipe` keep them.
 
 **Events.** Besides the power button and Canvas, `bind` covers `reset`, `mute`,

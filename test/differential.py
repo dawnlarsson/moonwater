@@ -40364,7 +40364,8 @@ def harness_moonwater_cli(argv):
                 'timezone ""', "timezone a b", "time", "time sync", "time bogus",
                 "time sync extra", "ntp", "ntp on", "ntp off", "ntp sampling", "ntp sampling on",
                 "ntp sampling off", "ntp sampling maybe", "ntp sampling on extra", "ntp a b",
-                "keyboard", "keyboard xx", "keyboard a b", "canvas", "canvas on", "canvas off",
+                "keyboard", "keyboard xx", "keyboard a b", "dns", "dns bogus", "dns plain extra",
+                "canvas", "canvas on", "canvas off",
                 "canvas bogus", "bind", "bind init", "bind exit", "bind bogus", "wifi",
                 "wifi off", "wifi on", "wifi add", "wifi remove", "wifi remove nobody",
                 "wifi remove a b", 'wifi remove ""', "wired", "wired on", "wired off",
@@ -40400,7 +40401,7 @@ def harness_moonwater_cli(argv):
         #       Neither "reboot" nor "bios" carries a reboot into these words: bios
         #       reboot sets a bit in the firmware, and a run as real root would
         #       leave it set on the machine that ran the lane.
-        verbs = ["", "status", "timezone", "time", "ntp", "keyboard", "canvas", "bind",
+        verbs = ["", "status", "timezone", "time", "ntp", "keyboard", "dns", "canvas", "bind",
                  "wifi", "wired", "bluetooth", "priority", "brightness", "power", "cpu",
                  "charge", "-h"]
         fuzzed = []
@@ -40757,6 +40758,11 @@ while True:
         script = "".join(say(f"keyboard {layout}") + "echo \"@@kept $(cat /root/keyboard)\"\n"
                          for layout in layouts)
         script += say("keyboard xx") + "echo \"@@kept $(cat /root/keyboard)\"\n"
+        #       dns: the three settings written and read back, an unknown one
+        #       refused and the file left as it was.
+        script += "".join(say(f"dns {mode}") + "echo \"@@dns $(cat /root/dns)\"\n"
+                          for mode in ("tls", "tls-only", "plain"))
+        script += say("dns banana") + "echo \"@@dns $(cat /root/dns)\"\n"
         script += say("ntp off") + "echo \"@@ntp $(cat /root/ntp)\"\n"
         script += say("ntp on") + "echo \"@@ntp $(cat /root/ntp)\"\n"
         script += say("link key") + say("link off") + "printf g > /root/link.groups\n"
@@ -40777,13 +40783,18 @@ while True:
                              f"keyboard {layout} leaves /root/keyboard right", line)
             elif line.startswith("@@status ") and current == "keyboard xx":
                 check(line != "@@status 0", "an unknown layout is refused", line)
+            elif line.startswith("@@dns "):
+                want = "plain" if current == "dns banana" else current.split()[1]
+                check(line.split()[1:] == [want], f"{current} leaves /root/dns right", line)
+            elif line.startswith("@@status ") and current == "dns banana":
+                check(line != "@@status 0", "an unknown dns mode is refused", line)
             elif line.startswith("@@ntp "):
                 check(line.split()[1] == current.split()[1], f"{current} is written", line)
             elif line.startswith("@@after "):
                 parts = line.split()
                 kept = set(filter(None, parts[2].split(",")))
                 check(parts[1] == "0" and "junk" not in kept and "dir" not in kept and
-                             {"keyboard", "ntp", "timezone", "link", "link.key",
+                             {"keyboard", "dns", "ntp", "timezone", "link", "link.key",
                               "link.groups", "wired.power", "tune"} <= kept and
                              parts[3] == "z",
                              "wipe empties /home and /root and keeps the settings (wired and the "
@@ -44668,6 +44679,210 @@ def http_fuzz_seeds():
             ("long", b"http://h/" + b"a" * 2100, b"b" * 2100)):
         seeds["url_%s.bin" % name] = b"\x03\x00" + url + b"\x00" + location
     return seeds
+
+
+DNS_TLS_SERVER = r"""
+import socket, ssl, struct, sys, threading
+cert, key, plain_port, tls_port, log = sys.argv[1:6]
+ADDRESS = {"udp": bytes([192, 0, 2, 17]), "tls": bytes([192, 0, 2, 53])}
+out = open(log, "a", buffering=1)
+
+def answer(query, kind):
+    i = 12
+    while query[i]:
+        i += 1 + query[i]
+    question = query[12:i + 5]
+    return (query[:2] + struct.pack(">HHHHH", 0x8180, 1, 1, 0, 0) + question +
+            b"\xc0\x0c" + struct.pack(">HHIH", 1, 1, 0, 4) + ADDRESS[kind])
+
+def udp():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.bind(("1.1.1.1", int(plain_port)))
+    while True:
+        data, peer = s.recvfrom(4096)
+        out.write("udp query\n")
+        s.sendto(answer(data, "udp"), peer)
+
+def tls():
+    if tls_port == "0":
+        return
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(cert, key)
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("1.1.1.1", int(tls_port)))
+    s.listen(8)
+    while True:
+        raw, _ = s.accept()
+        try:
+            conn = context.wrap_socket(raw, server_side=True)
+        except Exception as error:
+            out.write("tls handshake refused by the client\n")
+            raw.close()
+            continue
+        try:
+            head = conn.recv(2)
+            (length,) = struct.unpack(">H", head)
+            query = b""
+            while len(query) < length:
+                query += conn.recv(length - len(query))
+            out.write("tls query\n")
+            reply = answer(query, "tls")
+            conn.sendall(struct.pack(">H", len(reply)) + reply)
+        except Exception as error:
+            out.write("tls error %s\n" % error)
+        conn.close()
+
+threading.Thread(target=udp, daemon=True).start()
+tls()
+threading.Event().wait()
+"""
+
+
+def harness_dns_tls(argv):
+    """The resolver's DNS over TLS mode, against a server of its own.
+
+    Builds a shell that trusts a root the harness made (TLS_BENCH_ANCHOR, as
+    https_bench does) and, in user, mount and network namespaces of its own,
+    gives loopback the address 1.1.1.1, where a script answers DNS on UDP 53
+    with 192.0.2.17 and, over TLS on 853 with a leaf the chosen way (good,
+    for another address, expired, absent), with 192.0.2.53, so which path
+    answered is the address that comes back. /root/dns and /etc/resolv.conf
+    are made in the namespace. Nine cases: plain asks UDP; tls asks TLS and
+    gets the TLS answer; tls with a leaf for another address, an expired
+    leaf, and nothing listening on 853, each asks TLS, refuses it and is
+    answered by UDP; tls-only with a good leaf is answered over TLS, with a
+    bad or expired leaf gets no answer and sends nothing over UDP, and with a
+    resolver that is not one of the four (10.0.0.1) asks nothing at all; a
+    garbage setting is plain.
+
+        python3 test/differential.py --harness dns_tls
+    """
+    import datetime
+    import shutil
+    import tempfile
+    del argv
+    if platform.system() != "Linux":
+        print("dns tls: NOT RUN -- needs Linux")
+        return 2
+    for tool in ("unshare", "ip", "openssl"):
+        if not shutil.which(tool):
+            print("dns tls: NOT RUN -- no " + tool)
+            return 2
+    try:
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.x509.oid import NameOID
+        import ipaddress
+    except ImportError:
+        print("dns tls: NOT RUN -- no cryptography package")
+        return 2
+    probe = subprocess.run(["unshare", "-Urmn", "true"], capture_output=True)
+    if probe.returncode:
+        print("dns tls: NOT RUN -- user, mount and network namespaces are refused")
+        return 2
+    checks = Checks()
+    with tempfile.TemporaryDirectory(prefix="dns-tls-") as temporary:
+        work = Path(temporary)
+        now = datetime.datetime.now(datetime.timezone.utc)
+        root_key = ec.generate_private_key(ec.SECP384R1())
+        (work / "root.key").write_bytes(root_key.private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption()))
+        root_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "dns tls root")])
+        root = (x509.CertificateBuilder().subject_name(root_name).issuer_name(root_name)
+                .public_key(root_key.public_key()).serial_number(1)
+                .not_valid_before(now - datetime.timedelta(days=1))
+                .not_valid_after(now + datetime.timedelta(days=30))
+                .add_extension(x509.BasicConstraints(ca=True, path_length=None), True)
+                .add_extension(x509.KeyUsage(True, False, False, False, False, True, False, False, False), True)
+                .sign(root_key, hashes.SHA384()))
+        leaf_key = ec.generate_private_key(ec.SECP256R1())
+        (work / "leaf.key").write_bytes(leaf_key.private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption()))
+
+        def leaf(address, name, expired=False):
+            begin = now - datetime.timedelta(days=(10 if expired else 1))
+            end = now - datetime.timedelta(days=(5 if expired else -10))
+            certificate = (x509.CertificateBuilder()
+                           .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "resolver")]))
+                           .issuer_name(root_name).public_key(leaf_key.public_key())
+                           .serial_number(2).not_valid_before(begin).not_valid_after(end)
+                           .add_extension(x509.SubjectAlternativeName(
+                               [x509.IPAddress(ipaddress.ip_address(address))]), False)
+                           .add_extension(x509.BasicConstraints(ca=False, path_length=None), True)
+                           .add_extension(x509.ExtendedKeyUsage([x509.oid.ExtendedKeyUsageOID.SERVER_AUTH]), False)
+                           .sign(root_key, hashes.SHA384()))
+            (work / name).write_bytes(certificate.public_bytes(serialization.Encoding.PEM) +
+                                      root.public_bytes(serialization.Encoding.PEM))
+
+        leaf("1.1.1.1", "good.pem")
+        leaf("1.1.1.2", "other.pem")
+        leaf("1.1.1.1", "expired.pem", expired=True)
+        anchor = bench_anchor(work)
+        (work / "server.py").write_text(DNS_TLS_SERVER)
+        built = subprocess.run(spark_shell_command(os.environ.get("CC", "gcc"), work / "shell", anchor),
+                               cwd=HARNESS_ROOT, capture_output=True, text=True)
+        if built.returncode:
+            print("  FAIL the shell did not build:\n" + built.stderr[-3000:])
+            return 1
+        (work / "host").symlink_to(work / "shell")
+
+        def case(setting, certificate, resolver="1.1.1.1", tls_port="853"):
+            """(answer text, server log lines) for one `host` run."""
+            log = work / "server.log"
+            log.write_text("")
+            (work / "resolv.conf").write_text("nameserver %s\n" % resolver)
+            script = (
+                "ip link set lo up && ip addr add 1.1.1.1/32 dev lo && "
+                "mount -t tmpfs none /root && printf '%%s\\n' '%s' > /root/dns && "
+                "mount --bind %s /etc/resolv.conf && "
+                "python3 %s %s %s 53 %s %s > /dev/null 2>&1 & S=$!; "
+                "sleep 1; %s example.test; echo rc=$?; kill $S" % (
+                    setting, work / "resolv.conf", work / "server.py",
+                    work / certificate, work / "leaf.key", tls_port, log,
+                    work / "host"))
+            ran = subprocess.run(["unshare", "-Urmn", "sh", "-c", script],
+                                 capture_output=True, text=True, timeout=60)
+            return ran.stdout + ran.stderr, log.read_text().splitlines()
+
+        def address(text):
+            return "192.0.2.53" if "192.0.2.53" in text or "has address 192.0.2.53" in text else (
+                "192.0.2.17" if "192.0.2.17" in text else None)
+
+        text, log = case("plain", "good.pem")
+        checks(address(text) == "192.0.2.17" and "tls query" not in log and "udp query" in log,
+               "plain is answered over UDP: %r %r" % (text[-200:], log))
+        text, log = case("tls", "good.pem")
+        checks(address(text) == "192.0.2.53" and "tls query" in log and "udp query" not in log,
+               "tls is answered over TLS with no UDP query: %r %r" % (text[-200:], log))
+        text, log = case("tls", "other.pem")
+        checks(address(text) == "192.0.2.17" and "tls query" not in log and "udp query" in log,
+               "tls with a leaf for another address refuses it and falls back to UDP: %r %r" % (text[-200:], log))
+        text, log = case("tls", "expired.pem")
+        checks(address(text) == "192.0.2.17" and "tls query" not in log,
+               "tls with an expired leaf falls back to UDP: %r %r" % (text[-200:], log))
+        text, log = case("tls", "good.pem", tls_port="0")
+        checks(address(text) == "192.0.2.17" and "udp query" in log,
+               "tls with nothing on 853 falls back to UDP: %r %r" % (text[-200:], log))
+        text, log = case("tls-only", "good.pem")
+        checks(address(text) == "192.0.2.53" and "udp query" not in log,
+               "tls-only with a good leaf is answered over TLS: %r %r" % (text[-200:], log))
+        text, log = case("tls-only", "other.pem")
+        checks(address(text) is None and "udp query" not in log,
+               "tls-only with a leaf for another address gets no answer and sends no UDP: %r %r" % (text[-200:], log))
+        text, log = case("tls-only", "expired.pem")
+        checks(address(text) is None and "udp query" not in log,
+               "tls-only with an expired leaf gets no answer and sends no UDP: %r %r" % (text[-200:], log))
+        text, log = case("tls-only", "good.pem", resolver="10.0.0.1")
+        checks(address(text) is None and not log,
+               "tls-only asks no resolver that is not one of the four: %r %r" % (text[-200:], log))
+        text, log = case("banana", "good.pem")
+        checks(address(text) == "192.0.2.17" and "tls query" not in log,
+               "an unknown setting is plain: %r %r" % (text[-200:], log))
+    return checks.verdict("dns tls:", "dns-tls")
 
 
 def harness_wget_mutation(argv):
@@ -53677,7 +53892,7 @@ def harness_security_hygiene(argv):
                 "tls_der_fuzz", "tls_hs_fuzz", "tls_fuzz", "msan_net", "pathname_race",
                 "dhcp_fuzz", "sntp_fuzz", "dns_fuzz", "netlink_fuzz", "tls_peer",
                 "http_fuzz", "http_urls", "wifi_eapol_fuzz", "wifi_scan_fuzz",
-                "wget_mutation", "wget_hostile", "sntp_era", "net_netem")
+                "wget_mutation", "wget_hostile", "sntp_era", "net_netem", "dns_tls")
     for name in security + ("tls_verify_fuzz",):
         checks(name in HARNESS_CHECKS, "differential.py: %s is not registered" % name)
     table = re.search(r"^HARNESS_CHECKS = \{$(.*?)^\}$", source, re.M | re.S)
@@ -63139,6 +63354,7 @@ HARNESS_CHECKS = {
     "wifi_eapol_fuzz": harness_wifi_eapol_fuzz,
     "wifi_scan_fuzz": harness_wifi_scan_fuzz,
     "wget_mutation": harness_wget_mutation,
+    "dns_tls": harness_dns_tls,
     "wget_hostile": harness_wget_hostile,
     "dns_fuzz": harness_dns_fuzz,
     "netlink_fuzz": harness_netlink_fuzz,
