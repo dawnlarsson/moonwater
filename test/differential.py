@@ -27502,6 +27502,10 @@ int main(void) {
                 "static noinline_for_stack struct dentry *\noffset_dir_lookup(struct dentry *parent, loff_t offset)\n{\n\treturn NULL;\n}\n\n"
                 "static bool offset_dir_emit(struct dir_context *ctx, struct dentry *dentry)\n{\n\treturn true;\n}\n\n"
                 "static void offset_iterate_dir(struct file *file, struct dir_context *ctx)\n{\n\tctx->pos = DIR_OFFSET_EOD;\n}\n",
+            "linux/fs/readdir.c":
+                "struct getdents_callback64 {\n\tstruct dir_context ctx;\n};\n\n"
+                "static bool filldir64(struct dir_context *ctx, const char *name, int namlen,\n"
+                "\t\t     loff_t offset, u64 ino, unsigned int d_type)\n{\n\treturn true;\n}\n",
             "linux/arch/x86/kernel/asm-offsets.c":
                 "#include <linux/kbuild.h>\n\nstatic void __used common(void)\n{\n}\n",
             "linux/kernel/sched/fair.c":
@@ -27536,6 +27540,7 @@ int main(void) {
             namei = (tree / "linux/fs/ext4/namei.c").read_text()
             offsets = (tree / "linux/arch/x86/kernel/asm-offsets.c").read_text()
             libfs = (tree / "linux/fs/libfs.c").read_text()
+            readdir = (tree / "linux/fs/readdir.c").read_text()
             return ("/* Moonwater: htree_dirblock_to_tree is in kernel/kernel.c */\nint htree_dirblock_to_tree("
                     in namei and "__u32 start_hash, __u32 start_minor_hash);\n" in namei and
                     "int count = 0;" not in namei and "int nlen = 0;" not in namei and
@@ -27549,6 +27554,8 @@ int main(void) {
                     "static bool offset_dir_emit(" not in libfs and "static noinline_for_stack struct dentry *\noffset_dir_lookup" not in libfs and
                     "noinline_for_stack struct dentry *\noffset_dir_lookup(struct dentry *parent, loff_t offset);\n" in libfs and
                     "_Static_assert(DIR_OFFSET_EOD == S32_MAX," in libfs and
+                    "\nbool filldir64(" in readdir and "static bool filldir64(" not in readdir and
+                    "_Static_assert(offsetof(struct getdents_callback64, current_dir) == 24," in readdir and
                     "void moonwater_offsets(void)" in offsets and
                     "OFFSET(MW_INODE_SB, inode, i_sb);" in offsets and
                     "DEFINE(MW_AVX2_BIT, (X86_FEATURE_AVX2 & 31));" in offsets)
@@ -59315,6 +59322,10 @@ static inline int fscrypt_prepare_readdir(struct inode *dir) { if (IS_ENCRYPTED(
 enum { DENTRY_D_LOCK_NORMAL, DENTRY_D_LOCK_NESTED };
 enum { DIR_OFFSET_FIRST = 2, DIR_OFFSET_MIN = 3, DIR_OFFSET_EOD = S32_MAX };
 #define S_DT_MASK 15
+#define TIF_SIGPENDING 1
+#define TIF_NOTIFY_SIGNAL 2
+#define EFAULT 14
+struct task_struct { struct { unsigned long flags; } thread_info; };
 struct hlist_node { struct hlist_node *next, **pprev; };
 struct hlist_head { struct hlist_node *first; };
 struct hlist_bl_node { struct hlist_bl_node *next, **pprev; };
@@ -59360,6 +59371,26 @@ static inline bool dir_emit(struct dir_context *ctx, const char *name, int namel
 }
 void dput(struct dentry *);
 struct dentry *offset_dir_lookup(struct dentry *parent, loff_t offset);
+/* fs/readdir.c's filldir64, which is cut in whole, over a user buffer that is a window of this process's memory */
+#define __user
+typedef int64_t s64;
+struct linux_dirent64 { u64 d_ino; s64 d_off; unsigned short d_reclen; unsigned char d_type; char d_name[]; };
+#define dirent_size(dirent, len) offsetof(typeof(*(dirent)), d_name[len])
+#define ALIGN(x, a) (((x) + (a) - 1) & ~((a) - 1))
+#define BUILD_BUG_ON(x)
+#define FILLDIR_FLAG_NOINTR 0x1000
+#define PATH_MAX 4096
+extern struct task_struct *current_task;
+#define current current_task
+#define signal_pending(p) (((p)->thread_info.flags & ((1UL << TIF_SIGPENDING) | (1UL << TIF_NOTIFY_SIGNAL))) != 0)
+extern char *mw_user_lo, *mw_user_hi;
+static inline bool mw_uok(const void *p, unsigned long n) { return (const char *)p >= mw_user_lo && (const char *)p + n <= mw_user_hi; }
+#define scoped_user_write_access_size(p, n, l) if (!mw_uok((p), (n))) goto l; else
+#define unsafe_put_user(x, ptr, l) do { if (!mw_uok((ptr), sizeof(*(ptr)))) goto l; *(ptr) = (x); } while (0)
+#define unsafe_copy_to_user(d, s, n, l) do { if (!mw_uok((d), (n))) goto l; memcpy((d), (s), (n)); } while (0)
+#define unsafe_copy_dirent_name(_dst, _src, _len, label) do { \
+        char __user *dst = (_dst); const char *src = (_src); size_t len = (_len); \
+        unsafe_put_user(0, dst+len, label); unsafe_copy_to_user(dst, src, len, label); } while (0)
 """
 
 KERNEL_PORTS_DIRENT_SHIM = r"""
@@ -59466,6 +59497,18 @@ void _raw_spin_lock(void *l) { int *p = l; if (*p) LF.bad++; *p = 1; LF.locks++;
 void _raw_spin_unlock(void *l) { int *p = l; if (!*p) LF.bad++; *p = 0; }
 void dput(struct dentry *d) { LF.dputs++; if (d->d_lockref.count <= 0) LF.bad++; d->d_lockref.count--; }
 struct dentry *offset_dir_lookup(struct dentry *parent, loff_t offset) { return lf_lookup ? lf_lookup(parent, offset) : NULL; }
+char *mw_user_lo, *mw_user_hi;
+static struct task_struct mw_task;
+struct task_struct *current_task = &mw_task;
+unsigned long _copy_to_user(void *to, const void *from, unsigned long n)
+{
+        char *t = to;
+        unsigned long ok;
+        if (t < mw_user_lo || t >= mw_user_hi) return n;
+        ok = t + n <= mw_user_hi ? n : (unsigned long)(mw_user_hi - t);
+        memcpy(t, from, ok);
+        return n - ok;
+}
 
 bool fscrypt_has_encryption_key(const struct inode *inode) { (void)inode; return G.haskey; }
 int generic_ci_match(const struct inode *parent, const struct qstr *name, const struct qstr *folded_name, const u8 *de_name, u32 de_name_len)
@@ -59845,18 +59888,66 @@ int main(int argc, char **argv)
                         int counts[n + 1];
                         for (int i = 0; i < n; i++) counts[i] = kids[i].d_lockref.count;
                         int dir_count = dir.d_lockref.count;
-                        struct dir_context ca = { lf_actor, pos, 0, 0 }, cb = ca;
+                        int real = rnd() % 2;              /* filldir64 over a user window, or the recording actor */
+                        int usize = 64 + rnd() % 6000, count = rnd() % 4 == 0 ? rnd() % 400 : rnd() % (usize + 300) + (rnd() % 6 == 0 ? 0 : usize);
+                        if (rnd() % 11 == 0) count = 0x7fffffff;
+                        mw_task.thread_info.flags = rnd() % 7 == 0 ? (1UL << TIF_SIGPENDING) : rnd() % 13 == 0 ? (1UL << TIF_NOTIFY_SIGNAL) : 0;
+                        unsigned char *ua = malloc(usize + 16), *ub = malloc(usize + 16);
+                        memset(ua, 0xAA, usize + 16); memset(ub, 0xAA, usize + 16);
+                        int window = rnd() % 4 == 0 ? usize - rnd() % (usize / 2) : usize;   /* a window that ends short of the buffer: a fault in the middle */
+                        if (rnd() % 9 == 0) {                       /* a name with a slash, or an empty one, for verify_dirent_name */
+                                int at = rnd() % (n ? n : 1);
+                                if (n && kids[at].d_name.name != kids[at].d_shortname) ((unsigned char *)kids[at].d_name.name)[rnd() % kids[at].d_name.len] = '/';
+                                else if (n) { ((unsigned char *)kids[at].d_shortname)[0] = '/'; }
+                        }
+                        struct getdents_callback64 ga, gb;
+                        memset(&ga, 0, sizeof ga);
+                        ga.ctx.actor = real ? filldir64 : lf_actor; ga.ctx.pos = pos; ga.ctx.count = count; ga.ctx.dt_flags_mask = FILLDIR_FLAG_NOINTR;
+                        ga.current_dir = (struct linux_dirent64 *)ua;
+                        gb = ga; gb.current_dir = (struct linux_dirent64 *)ub;
                         memset(&EM, 0, sizeof EM); EM.limit = limit; memset(&LF, 0, sizeof LF);
-                        offset_iterate_dir_c(&file, &ca);
+                        mw_user_lo = (char *)ua; mw_user_hi = (char *)ua + window;
+                        offset_iterate_dir_c(&file, &ga.ctx);
                         typeof(EM) ea = EM; long la = LF.locks, da = LF.dputs, ba = LF.bad;
                         int ra[n + 1], da_count = dir.d_lockref.count;
                         for (int i = 0; i < n; i++) { ra[i] = kids[i].d_lockref.count; kids[i].d_lockref.count = counts[i]; }
                         dir.d_lockref.count = dir_count;
                         memset(&EM, 0, sizeof EM); EM.limit = limit; memset(&LF, 0, sizeof LF);
-                        offset_iterate_dir(&file, &cb);
+                        mw_user_lo = (char *)ub; mw_user_hi = (char *)ub + window;
+                        offset_iterate_dir(&file, &gb.ctx);
                         char why[200] = "";
-                        if (ea.n != EM.n) sprintf(why, "emitted %d vs %d", ea.n, EM.n);
-                        for (int i = 0; !*why && i < ea.n && i < 400; i++)
+                        struct dir_context ca = ga.ctx, cb = gb.ctx;
+                        if (real) {
+                                /* what getdents64 does next, for each: d_off of the last dirent from ctx.pos, and what it returns */
+                                long res[2]; struct getdents_callback64 *g[2] = { &ga, &gb }; unsigned char *u[2] = { ua, ub };
+                                for (int k = 0; k < 2; k++) {
+                                        mw_user_lo = (char *)u[k]; mw_user_hi = (char *)u[k] + window;
+                                        res[k] = g[k]->error;
+                                        if (g[k]->prev_reclen) {
+                                                struct linux_dirent64 *last = (void *)((char *)g[k]->current_dir - g[k]->prev_reclen);
+                                                if (!mw_uok(&last->d_off, 8)) res[k] = -EFAULT; else { last->d_off = g[k]->ctx.pos; res[k] = count - g[k]->ctx.count; }
+                                        }
+                                }
+                                long ea = (char *)ga.current_dir - (char *)ua, eb = (char *)gb.current_dir - (char *)ub;
+                                if (res[0] != res[1]) sprintf(why, "returns %ld vs %ld", res[0], res[1]);
+                                else if (ea != eb || ga.prev_reclen != gb.prev_reclen || ga.error != gb.error || ga.ctx.count != gb.ctx.count)
+                                        sprintf(why, "state: end %ld/%ld prev %d/%d error %d/%d count %d/%d", ea, eb, ga.prev_reclen, gb.prev_reclen, ga.error, gb.error, ga.ctx.count, gb.ctx.count);
+                                else {
+                                        long at = 0;
+                                        while (!*why && at < ea) {       /* the dirents written, field by field: the zeros after a name are not the kernel's to promise */
+                                                struct linux_dirent64 *da = (void *)(ua + at), *db = (void *)(ub + at);
+                                                if (da->d_ino != db->d_ino || da->d_off != db->d_off || da->d_reclen != db->d_reclen || da->d_type != db->d_type
+                                                    || strcmp(da->d_name, db->d_name)) sprintf(why, "dirent at %ld differs (ino %lu/%lu off %ld/%ld reclen %u/%u type %u/%u)", at, (unsigned long)da->d_ino, (unsigned long)db->d_ino, (long)da->d_off, (long)db->d_off, da->d_reclen, db->d_reclen, da->d_type, db->d_type);
+                                                if (da->d_reclen < 20) break;
+                                                at += da->d_reclen;
+                                        }
+                                        if (!*why && ga.error != -EFAULT && memcmp(ua + ea, ub + eb, usize + 16 - ea)) sprintf(why, "bytes past the end differ");
+                                }
+                                emitted += ea ? 1 : 0;
+                        }
+                        free(ua); free(ub);
+                        if (!real && ea.n != EM.n) sprintf(why, "emitted %d vs %d", ea.n, EM.n);
+                        for (int i = 0; !*why && !real && i < ea.n && i < 400; i++)
                                 if (ea.e[i].len != EM.e[i].len || memcmp(ea.e[i].name, EM.e[i].name, ea.e[i].len) || ea.e[i].off != EM.e[i].off
                                     || ea.e[i].ino != EM.e[i].ino || ea.e[i].type != EM.e[i].type || ea.e[i].pos != EM.e[i].pos)
                                         sprintf(why, "entry %d differs (len %d vs %d, off %ld vs %ld, type %u vs %u)", i, ea.e[i].len, EM.e[i].len, ea.e[i].off, EM.e[i].off, ea.e[i].type, EM.e[i].type);
@@ -59924,7 +60015,7 @@ def harness_kernel_ports(argv):
                 return archive.extractfile("linux-%s/%s" % (version, relative)).read().decode()
         return None
 
-    sources = {name: kernel_file(name) for name in ("fs/ext4/namei.c", "fs/ext4/dir.c", "fs/ext4/hash.c", "fs/crypto/fname.c", "fs/libfs.c", "fs/fs_dirent.c")}
+    sources = {name: kernel_file(name) for name in ("fs/ext4/namei.c", "fs/ext4/dir.c", "fs/ext4/hash.c", "fs/crypto/fname.c", "fs/libfs.c", "fs/fs_dirent.c", "fs/readdir.c")}
     if not all(sources.values()):
         print("kernel ports: NOT RUN -- no kernel source (linux/, KERNEL_SRC or artifacts/linux-%s.tar.xz)" % version)
         return 0
@@ -59947,7 +60038,9 @@ def harness_kernel_ports(argv):
     dirent_code = KERNEL_PORTS_DIRENT_SHIM + sources["fs/fs_dirent.c"][sources["fs/fs_dirent.c"].index("static const unsigned char fs_dtype_by_ftype"):]
     libfs_code = "\n".join(cut(sources["fs/libfs.c"], head, "\n}\n", True) for head in (
         "static struct dentry *find_positive_dentry(struct dentry *parent,", "static bool offset_dir_emit(", "static void offset_iterate_dir("))
-    libfs_code = KERNEL_PORTS_LIBFS_PRELUDE + libfs_code.replace("static void offset_iterate_dir(", "static void offset_iterate_dir_c(", 1)
+    readdir_code = "\n".join(cut(sources["fs/readdir.c"], head, tail, True) for head, tail in (
+        ("struct getdents_callback64 {", "};"), ("static int verify_dirent_name(", "\n}\n"), ("static bool filldir64(", "\n}\n")))
+    libfs_code = KERNEL_PORTS_LIBFS_PRELUDE + readdir_code.replace("static bool filldir64(", "bool filldir64(", 1) + "\n" + libfs_code.replace("static void offset_iterate_dir(", "static void offset_iterate_dir_c(", 1)
     ports = {
         "offset_iterate_dir": (libfs_code, KERNEL_PORTS_LIBFS_TEST, "ctx->pos = DIR_OFFSET_EOD;", "ctx->pos = DIR_OFFSET_EOD - 1;"),
         "htree_dirblock_to_tree": (oracle_of("htree_dirblock_to_tree", "static int htree_dirblock_to_tree(struct file *dir_file,"),
@@ -59986,6 +60079,9 @@ def harness_kernel_ports(argv):
     head = library.index("#ifdef KERNEL_MODE\n#if X64\n__asm__(\n    ASM_SIMD_SECTION\n    ASM_FUNC(hash_half_md4_wide)")
     wide_region = library[head:library.index("#endif // KERNEL_MODE\n", head) + len("#endif // KERNEL_MODE\n")]
 
+    # every build of kernel.c on x86_64 links the readdir port, which names filldir64 to know its caller
+    stub_actor = "bool filldir64(void *c, const char *n, int l, long long o, unsigned long long i, unsigned t) { return false; }\n"
+
     def run(arch, compiler, runner, cflags, count, sabotage, port):
         with tempfile.TemporaryDirectory() as directory:
             work = Path(directory)
@@ -60011,7 +60107,7 @@ def harness_kernel_ports(argv):
             oracle_text, test_text, plain, broken_text = ports[port]
             walk_text = oracle_text.replace(plain, broken_text, 1) if sabotage else oracle_text
             defines = {"x86_64": "-DCONFIG_X86_64", "arm64": "-DCONFIG_ARM64", "riscv64": "-DCONFIG_RISCV"}[arch]
-            (work / "oracle.c").write_text(KERNEL_PORTS_SHIM + hash_code + "\n" + dir_code + "\n" + match_code + "\n" + dirent_code + "\n" + walk_text + KERNEL_PORTS_COMMON + test_text)
+            (work / "oracle.c").write_text(KERNEL_PORTS_SHIM + hash_code + "\n" + dir_code + "\n" + match_code + "\n" + dirent_code + "\n" + walk_text + (stub_actor if port != "offset_iterate_dir" else "") + KERNEL_PORTS_COMMON + test_text)
             objects = [str(work / "oracle.c"), str(work / "port.c")]
             if arch == "x86_64":
                 (work / "wide.c").write_text(

@@ -46,7 +46,7 @@
 //    ----------------------  --------------------------------------  ------- ------- ------- --------
 //    htree_dirblock_to_tree  fs/ext4/namei.c htree_dirblock_to_tree  yes     yes     yes     x86_64 getdents: 1000 names 92.5 -> 52.5 us (-43%), 100 names -36%, 16 names -19%; 8 names level
 //    ext4_find_dest_de       fs/ext4/namei.c ext4_find_dest_de       yes     yes     yes     full 4 KiB block, 134 entries: 590 -> 350 ns (1.7x); guest create+unlink -2.7% (noise floor 4%)
-//    offset_iterate_dir      fs/libfs.c offset_iterate_dir           yes     yes     yes     x86_64 tmpfs getdents: 1000 entries 20.6 -> 16.9 us (-18%); locked operations per entry 2.1 -> 0.39
+//    offset_iterate_dir      fs/libfs.c offset_iterate_dir           yes     yes     yes     x86_64 tmpfs getdents: 1000 entries 20.4 -> 9.1 us (-55%, 2.2x); locked operations per entry 2.1 -> 0.39
 //
 //    3 routines.
 //  (index end)
@@ -1270,31 +1270,43 @@ __asm__(
 //       MEASURED (x86_64). One getdents64 pass over a tmpfs directory of a
 //       thousand names of 40 characters, nanoseconds per pass, in a KVM guest
 //       on a Ryzen 9 9950X (Zen 5), minimum over 1200 bursts of 50 passes,
-//       the two images booted in turn, four rounds each:
+//       four images booted in turn, three rounds each:
 //
-//           this kernel with the C        20576  20506  20676  21429
-//           this kernel with this port    16878  16884  16987  16859
+//                                                 round 1  round 2  round 3
+//           the C                                   20201    20370    20694
+//           batches, a call to the actor a record   16710    16628    16537
+//           and the dirent type written out         15566    15509    15773
+//           and filldir64's dirents as one image     9110     9066     9280
 //
-//       which is 20.6 -> 16.9 us, 18% off the pass, and 20.6 -> 16.9 ns an
-//       entry. What moved is the locked operations: over the harness's 60,000
-//       entries the C takes 126,578 spinlocks and 60,289 dput calls, 2.1 and
-//       1.0 an entry, and this takes 23,445 and 8,401, 0.39 and 0.14. What did
-//       not move is the actor: the same filldir64, the same user-access window
-//       for every entry, is most of what is left. The arm64 and riscv64 bodies
-//       are the same algorithm, held to the C by test/differential.py
-//       --harness kernel_ports under qemu-user, and neither has been booted or
-//       timed. The harness plants the names that are not inline at the end
-//       of a page with an unmapped page after it, so a read past a name's
-//       last byte is a fault.
+//       which is 20.4 -> 9.1 us, 2.2x, and 20.4 -> 9.1 ns an entry. Where it
+//       comes from, in a guest profile of the second row: filldir64 40% of the
+//       cycles, the memchr it makes for a slash 18%, fs_umode_to_dtype 14%, the
+//       walk 24%, and the locked operations under 2%. The batches took the
+//       locked operations away -- over the harness's 60,000 entries the C
+//       takes 126,578 spinlocks and 60,289 dput calls, 2.1 and 1.0 an entry,
+//       and the port 23,445 and 8,401, 0.39 and 0.14 -- for the first 18%; the
+//       type written out took the second 5%; the image took the rest, 40%.
 //
-//       Registers: r12 ctx, r13 the directory, r14 the reference held (the
-//       last entry copied, or the one offset_dir_lookup gave), rbx the entry
-//       being read and then the record being emitted, rbp where the next
-//       record goes, r15 the records left to emit. The indirect call to the
-//       actor goes through the retpoline thunk when the kernel has one.
+//       The arm64 and riscv64 bodies are the batches and the written-out type:
+//       held to the C by test/differential.py --harness kernel_ports under
+//       qemu-user, and neither has been booted or timed. The harness plants the
+//       names that are not inline at the end of a page with an unmapped page
+//       after it, so a read past a name's last byte is a fault; it hands the
+//       batches to the real filldir64, cut from fs/readdir.c, over a window
+//       of memory that ends where the test says, and every return value, every
+//       field of the callback and every dirent written has to agree with the C
+//       at buffers that end mid-dirent, counts that run out, signals that are
+//       pending and names with a slash.
+//
+//       Registers: r12 ctx, r13 the directory (kept in the frame while the
+//       image is made), r14 the reference held (the last entry copied, or the
+//       one offset_dir_lookup gave), rbx the entry being read and then the
+//       record being emitted, rbp where the next record goes, r15 the records
+//       left to emit. The indirect call to the actor goes through the
+//       retpoline thunk when the kernel has one.
 //
 //> arch x86_64 arm64 riscv64
-//> perf x86_64 tmpfs getdents: 1000 entries 20.6 -> 16.9 us (-18%); locked operations per entry 2.1 -> 0.39
+//> perf x86_64 tmpfs getdents: 1000 entries 20.4 -> 9.1 us (-55%, 2.2x); locked operations per entry 2.1 -> 0.39
 //> replace fs/libfs.c offset_iterate_dir
 //> unstatic fs/libfs.c offset_dir_lookup
 //> unstatic fs/libfs.c offset_dir_emit
@@ -1316,6 +1328,41 @@ __asm__(
 //> offset MW_CTX_POS dir_context pos
 //> const MW_POS_EOD S32_MAX
 //> const MW_LOCK_NESTED DENTRY_D_LOCK_NESTED
+//       THE x86_64 EMIT. When the actor is filldir64, which is what getdents64
+//       passes, the batch is not handed over a record at a time. filldir64
+//       does, for each name, a memchr for a slash, a user-access window (stac,
+//       the stores, clac) and a call through the actor; here the records are
+//       checked for a slash a word at a time, laid out as one image of dirents
+//       in the frame, and copied to the user's buffer with two calls to
+//       _copy_to_user, one for the previous dirent's d_off and one for the
+//       image. The checks are filldir64's and in its order for each record: the
+//       name (-EIO), room (-EINVAL), a pending signal (-EINVAL, not before the
+//       first dirent of the call); the first to fail ends the image, the
+//       dirents before it are written, and ctx->pos, ctx->count and the
+//       callback's current_dir, prev_reclen and error are left as the calls one
+//       at a time would leave them. A copy that does not go through -- the
+//       buffer ends where a dirent does not -- is not an answer: nothing has
+//       been committed, and the batch is handed to filldir64 a record at a
+//       time, which finds the fault at the record it is at and reports it as it
+//       always has. One difference, and it is the padding: the zeros after a
+//       name's NUL are written where the C leaves whatever the buffer held, and
+//       the kernel promises nothing about those bytes.
+//
+//       The layout of the callback structure is asserted where it is, in
+//       fs/readdir.c; the signal bits and the thread flags word are the
+//       compiler's.
+//
+//> arch x86_64
+//> unstatic fs/readdir.c filldir64
+//> assert fs/readdir.c offsetof(struct getdents_callback64, current_dir) == 24
+//> assert fs/readdir.c offsetof(struct getdents_callback64, prev_reclen) == 32
+//> assert fs/readdir.c offsetof(struct getdents_callback64, error) == 36
+//> assert fs/readdir.c offsetof(struct linux_dirent64, d_name) == 19
+//> include <linux/sched.h>
+//> include <asm/thread_info.h>
+//> offset MW_CTX_COUNT dir_context count
+//> offset MW_TASK_TIF task_struct thread_info.flags
+//> const MW_TIF_SIG ((1UL << TIF_SIGPENDING) | (1UL << TIF_NOTIFY_SIGNAL))
 #ifdef CONFIG_X86_64
 #if defined(CONFIG_MITIGATION_RETPOLINE) || defined(CONFIG_RETPOLINE)
 #define MW_CALL_R11 "call __x86_indirect_thunk_r11\n"
@@ -1343,15 +1390,33 @@ __asm__(
     MWSET(MW_CTX_POS)
     MWSET(MW_POS_EOD)
     MWSET(MW_LOCK_NESTED)
+    MWSET(MW_CTX_COUNT)
+    MWSET(MW_TASK_TIF)
+    MWSET(MW_TIF_SIG)
+    ".set GB_CUR, 24\n"
+    ".set GB_PREV, 32\n"
+    ".set GB_ERR, 36\n"
     ".set I_FIRST, 0\n"
     ".set I_EOD, 4\n"
     ".set I_N, 8\n"
     ".set I_LAST, 16\n"
-    ".set I_BUF, 32\n"
+    ".set I_CUR, 24\n"
+    ".set I_PR, 32\n"
+    ".set I_M, 36\n"
+    ".set I_STOP, 40\n"
+    ".set I_TOTAL, 44\n"
+    ".set I_SIG, 48\n"
+    ".set I_BAD, 52\n"
+    ".set I_LASTREC, 56\n"
+    ".set I_OFF0, 64\n"
+    ".set I_POS, 72\n"
+    ".set I_DIR, 80\n"
+    ".set I_BUF, 96\n"
     ".set I_BUFSZ, 2048\n"
+    ".set I_IMG, 2144\n"
     ".set I_BATCH, 16\n"
     ".set I_NAMEMAX, 1024\n"
-    ".set I_FRAME, 2088\n"
+    ".set I_FRAME, 4216\n"
 );
 
 __asm__(
@@ -1411,6 +1476,79 @@ __asm__(
     "        test    %r14, %r14\n   jz      2f\n   mov     %r14, %rdi\n   call    dput\n"
     "2:      xor     %r14d, %r14d\n   cmpl    $0, I_EOD(%rsp)\n   jne     3f\n   mov     I_LAST(%rsp), %r14\n"
     "3:      lea     I_BUF(%rsp), %rbx\n   mov     I_N(%rsp), %r15d\n   test    %r15d, %r15d\n   jz      .Lit_emitted\n"
+    "        mov     %r13, I_DIR(%rsp)\n   lea     filldir64(%rip), %rax\n   cmp     %rax, MW_CTX_ACTOR(%r12)\n   jne     .Lit_emit\n"
+    "        # the actor is filldir64: the records become one image of dirents in this frame, which goes to the\n"
+    "        # user's buffer in two copies -- the previous entry's d_off, and the image -- instead of a user-access\n"
+    "        # window for every entry; the state is written back only when both copies went through\n"
+    "        mov     GB_CUR(%r12), %rax\n   mov     %rax, I_CUR(%rsp)\n   mov     GB_PREV(%r12), %eax\n   mov     %eax, I_PR(%rsp)\n"
+    "        mov     MW_CTX_COUNT(%r12), %r10d\n   movl    $0, I_TOTAL(%rsp)\n"
+    "        # signal_pending(current), read once for the batch\n"
+    "        mov     %gs:current_task(%rip), %rax\n   xor     %ecx, %ecx\n   testq   $MW_TIF_SIG, MW_TASK_TIF(%rax)\n"
+    "        setnz   %cl\n   mov     %ecx, I_SIG(%rsp)\n"
+    "        # verify_dirent_name for every record: the first with an empty name or a slash in it, a word at a time\n"
+    "        movl    $-1, I_BAD(%rsp)\n   movabs  $0x0101010101010101, %rbp\n   mov     %rbp, %r13\n   shl     $7, %r13\n"
+    "        imul    $0x2f, %rbp, %r11\n   mov     %rbx, %rsi\n   xor     %r9d, %r9d\n"
+    ".Lf_check:\n"
+    "        mov     16(%rsi), %edx\n   test    %edx, %edx\n   jz      .Lf_slash\n   lea     24(%rsi), %rdi\n"
+    "1:      mov     (%rdi), %rax\n   xor     %r11, %rax\n   cmp     $8, %edx\n   jb      2f\n"
+    "        mov     %rax, %rcx\n   sub     %rbp, %rcx\n   not     %rax\n   and     %rax, %rcx\n   test    %r13, %rcx\n"
+    "        jnz     .Lf_slash\n   add     $8, %rdi\n   sub     $8, %edx\n   jnz     1b\n   jmp     .Lf_clean\n"
+    "2:      lea     (,%rdx,8), %ecx\n   mov     $-1, %r8\n   shl     %cl, %r8\n   or      %r8, %rax\n"
+    "        mov     %rax, %rcx\n   sub     %rbp, %rcx\n   not     %rax\n   and     %rax, %rcx\n   test    %r13, %rcx\n"
+    "        jnz     .Lf_slash\n"
+    ".Lf_clean:\n"
+    "        mov     16(%rsi), %eax\n   add     $31, %eax\n   and     $-8, %eax\n   add     %rax, %rsi\n   inc     %r9d\n"
+    "        cmp     %r15d, %r9d\n   jb      .Lf_check\n   jmp     .Lf_checked\n"
+    ".Lf_slash:\n"
+    "        mov     %r9d, I_BAD(%rsp)\n"
+    ".Lf_checked:\n"
+    "        # the image: filldir64's checks in its order for each record (name, room, signal), then the dirent --\n"
+    "        # d_ino, the previous dirent's d_off, d_reclen, d_type, the name, a NUL and zeros up to the next eight\n"
+    "        lea     I_IMG(%rsp), %rdi\n   xor     %r8d, %r8d\n   xor     %r9d, %r9d\n   movl    $0, I_STOP(%rsp)\n"
+    ".Lf_build:\n"
+    "        mov     (%rbx), %rax\n   mov     %rax, I_POS(%rsp)\n"
+    "        cmp     I_BAD(%rsp), %r9d\n   je      .Lf_eio\n"
+    "        mov     16(%rbx), %edx\n   lea     27(%rdx), %r13d\n   and     $-8, %r13d\n"
+    "        cmp     %r13d, %r10d\n   jl      .Lf_einval\n"
+    "        cmpl    $0, I_SIG(%rsp)\n   je      1f\n   test    %r9d, %r9d\n   jnz     .Lf_einval\n"
+    "        cmpl    $0, I_PR(%rsp)\n   jne     .Lf_einval\n"
+    "1:      mov     8(%rbx), %rax\n   mov     %rax, (%rdi)\n   mov     %r13w, 16(%rdi)\n"
+    "        movzwl  20(%rbx), %eax\n   shr     $12, %eax\n   and     $15, %eax\n   mov     $0x1556, %ecx\n"
+    "        bt      %eax, %ecx\n   sbb     %ecx, %ecx\n   and     %ecx, %eax\n   mov     %al, 18(%rdi)\n"
+    "        mov     (%rbx), %rax\n   test    %r8, %r8\n   jz      2f\n   mov     %rax, 8(%r8)\n   jmp     3f\n"
+    "2:      mov     %rax, I_OFF0(%rsp)\n"
+    "3:      movq    $0, 8(%rdi)\n"
+    "        lea     24(%rbx), %rsi\n   lea     19(%rdi), %rax\n   mov     %edx, %ebp\n   shr     $3, %ebp\n   jz      5f\n"
+    "4:      mov     (%rsi), %r11\n   mov     %r11, (%rax)\n   add     $8, %rsi\n   add     $8, %rax\n   dec     %ebp\n   jnz     4b\n"
+    "5:      mov     (%rsi), %r11\n   and     $7, %edx\n   lea     (,%rdx,8), %ecx\n   mov     $-1, %rbp\n   shl     %cl, %rbp\n"
+    "        not     %rbp\n   and     %rbp, %r11\n   mov     %r11, (%rax)\n   movq    $0, 8(%rax)\n"
+    "        mov     %rdi, %r8\n   mov     %r13d, %eax\n   add     %rax, %rdi\n   sub     %r13d, %r10d\n   mov     %r13d, I_LASTREC(%rsp)\n"
+    "        inc     %r9d\n   mov     16(%rbx), %eax\n   add     $31, %eax\n   and     $-8, %eax\n   add     %rax, %rbx\n"
+    "        dec     %r15d\n   jnz     .Lf_build\n   jmp     .Lf_built\n"
+    ".Lf_einval:\n"
+    "        movl    $1, I_STOP(%rsp)\n   jmp     .Lf_built\n"
+    ".Lf_eio:\n"
+    "        movl    $2, I_STOP(%rsp)\n"
+    ".Lf_built:\n"
+    "        mov     %r9d, I_M(%rsp)\n   test    %r9d, %r9d\n   jz      .Lf_commit\n"
+    "        lea     I_IMG(%rsp), %rsi\n   mov     %rdi, %rdx\n   sub     %rsi, %rdx\n   mov     %edx, I_TOTAL(%rsp)\n"
+    "        mov     I_PR(%rsp), %eax\n   test    %eax, %eax\n   jz      1f\n"
+    "        mov     I_CUR(%rsp), %rdi\n   sub     %rax, %rdi\n   add     $8, %rdi\n   lea     I_OFF0(%rsp), %rsi\n   mov     $8, %edx\n"
+    "        call    _copy_to_user\n   test    %rax, %rax\n   jnz     .Lit_generic\n"
+    "1:      mov     I_CUR(%rsp), %rdi\n   lea     I_IMG(%rsp), %rsi\n   mov     I_TOTAL(%rsp), %edx\n   call    _copy_to_user\n"
+    "        test    %rax, %rax\n   jnz     .Lit_generic\n"
+    ".Lf_commit:\n"
+    "        mov     I_CUR(%rsp), %rax\n   mov     I_TOTAL(%rsp), %ecx\n   add     %rcx, %rax\n   mov     %rax, GB_CUR(%r12)\n"
+    "        sub     %ecx, MW_CTX_COUNT(%r12)\n"
+    "        cmpl    $0, I_M(%rsp)\n   je      1f\n   mov     I_LASTREC(%rsp), %eax\n   mov     %eax, GB_PREV(%r12)\n"
+    "1:      mov     I_STOP(%rsp), %eax\n   mov     $-22, %ecx\n   cmp     $2, %eax\n   jne     2f\n   mov     $-5, %ecx\n   jmp     3f\n"
+    "2:      cmpl    $0, I_M(%rsp)\n   jne     3f\n   test    %eax, %eax\n   jz      4f\n"
+    "3:      mov     %ecx, GB_ERR(%r12)\n"
+    "4:      mov     I_POS(%rsp), %rax\n   mov     %rax, MW_CTX_POS(%r12)\n"
+    "        cmpl    $0, I_STOP(%rsp)\n   jne     .Lit_stop\n   jmp     .Lit_emitted\n"
+    "        # any other actor, or a copy that did not go through: one call for each record, as the C does\n"
+    ".Lit_generic:\n"
+    "        lea     I_BUF(%rsp), %rbx\n   mov     I_N(%rsp), %r15d\n"
     "        # ctx->pos = the entry's offset, then actor(ctx, name, len, pos, ino, fs_umode_to_dtype(mode))\n"
     ".Lit_emit:\n"
     "        mov     (%rbx), %rax\n   mov     %rax, MW_CTX_POS(%r12)\n"
@@ -1424,7 +1562,7 @@ __asm__(
     "        dec     %r15d\n   jnz     .Lit_emit\n"
     "        # every record taken: on to the next batch, or the end of the directory where none is held\n"
     ".Lit_emitted:\n"
-    "        test    %r14, %r14\n   jz      .Lit_eod\n   movl    $0, I_FIRST(%rsp)\n   jmp     .Lit_batch\n"
+    "        test    %r14, %r14\n   jz      .Lit_eod\n   mov     I_DIR(%rsp), %r13\n   movl    $0, I_FIRST(%rsp)\n   jmp     .Lit_batch\n"
     "        # refused: ctx->pos stays at the entry, and the held reference goes back\n"
     ".Lit_stop:\n"
     "        test    %r14, %r14\n   jz      .Lit_out\n   mov     %r14, %rdi\n   call    dput\n   jmp     .Lit_out\n"

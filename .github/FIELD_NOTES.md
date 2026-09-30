@@ -173,31 +173,48 @@ version, so that is a drift to watch and not something to claim.
 (the live image's root is one), walks the entries one at a time. Each step takes the
 parent's lock to find the next sibling, the sibling's own lock to take a reference
 on it, and a compare-and-swap to give the previous entry's reference back: about
-two locked operations and one reference drop per name. The directory cannot change
-while it is being listed (the caller holds its `i_rwsem` shared, and every create,
-unlink and rename takes it exclusive), so `kernel/kernel.c` reads the entries in
-batches: one lock, up to sixteen names copied to the stack, the lock let go, and
-only then the copies handed to the same `filldir64` as before. One reference is
-kept from batch to batch, as the C keeps one on the entry it stands at.
+two locked operations and one reference drop per name; then it calls `filldir64`,
+which checks the name for a slash, opens a user-access window (stac, the stores,
+clac) and closes it, per name. The directory cannot change while it is being listed
+(the caller holds its `i_rwsem` shared, and every create, unlink and rename takes
+it exclusive), so `kernel/kernel.c` reads the entries in batches: one lock, up to
+sixteen names copied to the stack, the lock let go. One reference is kept from
+batch to batch, as the C keeps one on the entry it stands at. On x86_64, when the
+caller is `getdents64`, the batch is then made into one image of dirents in the
+frame, checked with `filldir64`'s own checks in its own order, and written with two
+`_copy_to_user` calls; anything that does not go through that way is handed to
+`filldir64` a name at a time, as before.
 
-- **In a guest, same kernel with and without it:** one `getdents64` pass over a
-  thousand names, minimum over 1200 bursts, four rounds with the images booted in
-  turn: 20.6 -> 16.9 microseconds (-18%, 20.6 -> 16.9 ns a name).
-- **Why:** locked operations an entry, counted by the harness over 60,000 entries:
-  spinlocks 2.1 -> 0.39, `dput` calls 1.0 -> 0.14.
+- **In a guest, same kernel, four builds booted in turn:** one `getdents64` pass
+  over a thousand names, minimum over 1200 bursts, three rounds. The C 20.2 to 20.7
+  microseconds; batches 16.5 to 16.7 (-18%); with the directory type written out
+  15.5 to 15.8 (-24%); with the dirent image 9.1 to 9.3 (-55%, 2.2x, 20.4 -> 9.1 ns
+  a name).
+- **Why, in a guest profile of the batches build:** `filldir64` 40% of the cycles,
+  its `memchr` 18%, `fs_umode_to_dtype` 14%, the walk 24%; the locked operations,
+  2.1 spinlocks and 1.0 `dput` a name in the C against 0.39 and 0.14, were the
+  first 18% and under 2% after.
 - **Checked against the kernel's own C** (`test/differential.py --harness
-  kernel_ports`, x86_64, arm64 and riscv64 under qemu-user, names planted at the
-  end of a page so a read past a name is a fault): same entries, same offsets,
-  same stopping point, same reference counts, no lock held across a call to the
-  actor. In the guest, both kernels list the same 484-entry directory byte for
-  byte at ten buffer sizes, resumed every third entry, and stop the same way with
-  the buffer ending one to six hundred bytes before an unmapped page.
+  kernel_ports`, x86_64 native, arm64 and riscv64 under qemu-user): the oracle is cut
+  from `fs/libfs.c`, `fs/readdir.c` and `fs/fs_dirent.c` of the pinned tarball at run
+  time, names are planted at the end of a page with an unmapped page after, and the
+  buffer the dirents go to ends wherever the test says. Return values, `ctx->pos`,
+  `ctx->count`, the callback's `current_dir`, `prev_reclen` and `error`, every field
+  of every dirent, and the reference count of every entry agree at buffers that end
+  in the middle of a dirent, counts that run out, signals pending and names with a
+  slash; four planted bugs in the x86_64 image code (a record length, an error
+  code, the signal rule, the slash test) were each caught. In the guest, both
+  kernels list the same 484-entry directory byte for byte at ten buffer sizes,
+  resumed every third entry, and return the same lengths and the same dirents with
+  the buffer ending 1 to 600 bytes before an unmapped page.
 
-**What it does not show.** The 18% is of one call over a warm directory of short
-names in a VM, not of a program's run time; it says nothing about directories on
-disk. Most of what is left is the per-entry user-access window in `filldir64`, which
-this leaves alone. The arm64 and riscv64 bodies are checked against the C under
-qemu-user and have not been booted or timed.
+**What it does not show.** 55% is of one call over a warm directory of short names in
+a VM, not of a program's run time, and it says nothing about directories on disk. One
+thing is different from the C and it is a choice: the zeros after a name's NUL, up to
+the next eight bytes of a dirent, are written where the C leaves whatever the buffer
+held; the kernel promises nothing about those bytes. The arm64 and riscv64 bodies
+have the batches and the written-out type, not the image; they are checked against
+the C under qemu-user and have not been booted or timed.
 
 **A measurement note.** The first runs of this, on a box that had 40 forgotten
 guests from earlier sessions running, read 60 microseconds a pass and showed no
