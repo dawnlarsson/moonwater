@@ -175,6 +175,29 @@
                         sink += expression;                                   \
         }
 
+/*
+        BENCH_BEST_ONCE defines a timed run that keeps the best of tries
+        repetitions of BENCH_ONCE's loop, the run least disturbed by whatever
+        else the machine was doing.
+*/
+#define BENCH_BEST_ONCE(name, params, tries, count, index, ...)               \
+        static p64 name params                                                \
+        {                                                                     \
+                p64 best = positive_max;                                      \
+                                                                              \
+                for (positive attempt = 0; attempt < (tries); attempt++)      \
+                {                                                             \
+                        p64 bench_start = get_cpu_time();                     \
+                        for (positive index = 0; index < (count); index++)    \
+                                __VA_ARGS__;                                  \
+                        p64 took = get_cpu_time() - bench_start;              \
+                        if (took < best)                                      \
+                                best = took;                                  \
+                }                                                             \
+                                                                              \
+                return best;                                                  \
+        }
+
 #if defined(SHARED_sizes)
 /* Literal arguments exercise compiler-owned specializations. The scan checks
    keep their twenty-size function bands to bound compiler resource use. */
@@ -90045,58 +90068,16 @@ static fn make_values()
         wide_values[1] = 10000000000000000000ull;
 }
 
-static p64 scalar_run(positive address_to values)
-{
-        p64 best = positive_max;
+BENCH_BEST_ONCE(scalar_run, (positive address_to values), TRIES, ROUNDS, r,
+                sink += scalar_into(output, values[r & (VALUE_COUNT - 1)]))
 
-        for (positive t = 0; t < TRIES; t++)
-        {
-                p64 start = get_cpu_time();
-                for (positive r = 0; r < ROUNDS; r++)
-                        sink += scalar_into(output, values[r & (VALUE_COUNT - 1)]);
-                p64 took = get_cpu_time() - start;
-                if (took < best)
-                        best = took;
-        }
+BENCH_BEST_ONCE(assembly_run, (positive address_to values), TRIES, ROUNDS, r,
+                sink += positive_into(output,
+                                      values[r & (VALUE_COUNT - 1)]))
 
-        return best;
-}
-
-static p64 assembly_run(positive address_to values)
-{
-        p64 best = positive_max;
-
-        for (positive t = 0; t < TRIES; t++)
-        {
-                p64 start = get_cpu_time();
-                for (positive r = 0; r < ROUNDS; r++)
-                        sink += positive_into(output,
-                                              values[r & (VALUE_COUNT - 1)]);
-                p64 took = get_cpu_time() - start;
-                if (took < best)
-                        best = took;
-        }
-
-        return best;
-}
-
-static p64 writer_run(positive address_to values)
-{
-        p64 best = positive_max;
-
-        for (positive t = 0; t < TRIES; t++)
-        {
-                p64 start = get_cpu_time();
-                for (positive r = 0; r < ROUNDS; r++)
-                        positive_to_string(discard_writer,
-                                           values[r & (VALUE_COUNT - 1)]);
-                p64 took = get_cpu_time() - start;
-                if (took < best)
-                        best = took;
-        }
-
-        return best;
-}
+BENCH_BEST_ONCE(writer_run, (positive address_to values), TRIES, ROUNDS, r,
+                positive_to_string(discard_writer,
+                                   values[r & (VALUE_COUNT - 1)]))
 
 static fn row(string_address name, positive address_to values)
 {
@@ -90192,42 +90173,14 @@ static fn make_values()
         values[6] = ~(positive)0;
 }
 
-static p64 scalar_run(positive base, bool upper)
-{
-        p64 best = ~(positive)0;
+BENCH_BEST_ONCE(scalar_run, (positive base, bool upper), TRIES, ROUNDS, r,
+                sink += scalar_base(output,
+                                    values[r & (VALUE_COUNT - 1)],
+                                    base, upper))
 
-        for (positive t = 0; t < TRIES; t++)
-        {
-                p64 start = get_cpu_time();
-                for (positive r = 0; r < ROUNDS; r++)
-                        sink += scalar_base(output,
-                                            values[r & (VALUE_COUNT - 1)],
-                                            base, upper);
-                p64 took = get_cpu_time() - start;
-                if (took < best)
-                        best = took;
-        }
-
-        return best;
-}
-
-static p64 assembly_run(positive base, bool upper)
-{
-        p64 best = ~(positive)0;
-
-        for (positive t = 0; t < TRIES; t++)
-        {
-                p64 start = get_cpu_time();
-                for (positive r = 0; r < ROUNDS; r++)
-                        sink += positive_into_base(
-                            output, values[r & (VALUE_COUNT - 1)], base, upper);
-                p64 took = get_cpu_time() - start;
-                if (took < best)
-                        best = took;
-        }
-
-        return best;
-}
+BENCH_BEST_ONCE(assembly_run, (positive base, bool upper), TRIES, ROUNDS, r,
+                sink += positive_into_base(
+                    output, values[r & (VALUE_COUNT - 1)], base, upper))
 
 static fn row(string_address name, positive base, bool upper)
 {
