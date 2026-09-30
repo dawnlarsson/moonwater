@@ -1298,12 +1298,18 @@ __asm__(
 //       at buffers that end mid-dirent, counts that run out, signals that are
 //       pending and names with a slash.
 //
-//       Registers: r12 ctx, r13 the directory (kept in the frame while the
-//       image is made), r14 the reference held (the last entry copied, or the
-//       one offset_dir_lookup gave), rbx the entry being read and then the
-//       record being emitted, rbp where the next record goes, r15 the records
-//       left to emit. The indirect call to the actor goes through the
-//       retpoline thunk when the kernel has one.
+//       Registers (x86_64): r12 ctx, r13 the directory (kept in the frame while
+//       the image is made), r14 the reference held (the last entry copied, or
+//       the one offset_dir_lookup gave), rbx the entry being read and then the
+//       record being emitted, r15 where the next record goes and then the
+//       records left to emit. rbp is the frame pointer from the first
+//       instruction to the last and never a number (s0 on riscv64, x29 on
+//       arm64): a stack trace taken in a callee -- KASAN saving where an
+//       allocation was made, lockdep -- walks the frame pointers through this
+//       frame, and an earlier version of this body that used rbp as a register
+//       made the unwinder report a bad frame in a KASAN and lockdep guest. The
+//       indirect call to the actor goes through the retpoline thunk when the
+//       kernel has one.
 //
 //> arch x86_64 arm64 riscv64
 //> perf x86_64 tmpfs getdents: 1000 entries 20.4 -> 9.1 us (-55%, 2.2x); locked operations per entry 2.1 -> 0.39
@@ -1421,7 +1427,7 @@ __asm__(
 
 __asm__(
     ASM_FUNC(offset_iterate_dir)
-    "        push    %rbp\n   push    %r15\n   push    %r14\n   push    %r13\n"
+    "        push    %rbp\n   mov     %rsp, %rbp\n   push    %r15\n   push    %r14\n   push    %r13\n"
     "        push    %r12\n   push    %rbx\n   sub     $I_FRAME, %rsp\n   mov     %rsi, %r12\n"
     "        mov     MW_FILE_DENTRY(%rdi), %r13\n"
     "        # dentry = offset_dir_lookup(dir, ctx->pos); none means the end\n"
@@ -1432,19 +1438,19 @@ __asm__(
     ".Lit_batch:\n"
     "        lea     MW_D_LOCK(%r13), %rdi\n   call    _raw_spin_lock\n"
     "        movl    $0, I_N(%rsp)\n   movl    $0, I_EOD(%rsp)\n   movq    $0, I_LAST(%rsp)\n"
-    "        lea     I_BUF(%rsp), %rbp\n   mov     %r14, %rbx\n"
+    "        lea     I_BUF(%rsp), %r15\n   mov     %r14, %rbx\n"
     "        cmpl    $0, I_FIRST(%rsp)\n   je      .Lit_next\n"
     "        # simple_positive: an inode, and still hashed. The record: offset, inode number, length, mode, name\n"
     ".Lit_entry:\n"
     "        mov     MW_D_INODE(%rbx), %rcx\n   test    %rcx, %rcx\n   jz      .Lit_next\n"
     "        cmpq    $0, MW_D_PPRV(%rbx)\n   je      .Lit_next\n"
     "        mov     MW_D_NLEN(%rbx), %edx\n   cmp     $I_NAMEMAX, %edx\n   ja      .Lit_end\n"
-    "        lea     31(%rdx), %r10d\n   and     $-8, %r10d\n   lea     (%rbp,%r10), %rsi\n"
+    "        lea     31(%rdx), %r10d\n   and     $-8, %r10d\n   lea     (%r15,%r10), %rsi\n"
     "        lea     I_BUF+I_BUFSZ(%rsp), %r8\n   cmp     %r8, %rsi\n   ja      .Lit_full\n"
-    "        mov     MW_D_FSDATA(%rbx), %r8\n   mov     %r8, (%rbp)\n"
-    "        mov     MW_I_INO(%rcx), %r8\n   mov     %r8, 8(%rbp)\n"
-    "        movzwl  MW_I_MODE(%rcx), %r8d\n   mov     %edx, 16(%rbp)\n   mov     %r8d, 20(%rbp)\n"
-    "        mov     MW_D_NPTR(%rbx), %rsi\n   lea     24(%rbp), %rdi\n   mov     %edx, %ecx\n"
+    "        mov     MW_D_FSDATA(%rbx), %r8\n   mov     %r8, (%r15)\n"
+    "        mov     MW_I_INO(%rcx), %r8\n   mov     %r8, 8(%r15)\n"
+    "        movzwl  MW_I_MODE(%rcx), %r8d\n   mov     %edx, 16(%r15)\n   mov     %r8d, 20(%r15)\n"
+    "        mov     MW_D_NPTR(%rbx), %rsi\n   lea     24(%r15), %rdi\n   mov     %edx, %ecx\n"
     "        cmp     $8, %ecx\n   jb      .Lit_small\n"
     "        lea     -8(%rsi,%rcx), %r8\n   lea     -8(%rdi,%rcx), %r9\n"
     "1:      mov     (%rsi), %rax\n   mov     %rax, (%rdi)\n   add     $8, %rsi\n   add     $8, %rdi\n"
@@ -1459,7 +1465,7 @@ __asm__(
     "        mov     %r8b, -1(%rdi,%rcx)\n   cmp     $3, %ecx\n   jne     .Lit_copied\n"
     "        movzbl  1(%rsi), %eax\n   mov     %al, 1(%rdi)\n"
     ".Lit_copied:\n"
-    "        add     %r10, %rbp\n   mov     %rbx, I_LAST(%rsp)\n   incl    I_N(%rsp)\n"
+    "        add     %r10, %r15\n   mov     %rbx, I_LAST(%rsp)\n   incl    I_N(%rsp)\n"
     "        cmpl    $I_BATCH, I_N(%rsp)\n   jae     .Lit_full\n"
     ".Lit_next:\n"
     "        mov     MW_D_SIB(%rbx), %rax\n   test    %rax, %rax\n   jz      .Lit_end\n"
@@ -1481,20 +1487,20 @@ __asm__(
     "        # user's buffer in two copies -- the previous entry's d_off, and the image -- instead of a user-access\n"
     "        # window for every entry; the state is written back only when both copies went through\n"
     "        mov     GB_CUR(%r12), %rax\n   mov     %rax, I_CUR(%rsp)\n   mov     GB_PREV(%r12), %eax\n   mov     %eax, I_PR(%rsp)\n"
-    "        mov     MW_CTX_COUNT(%r12), %r10d\n   movl    $0, I_TOTAL(%rsp)\n"
+    "        movl    $0, I_TOTAL(%rsp)\n"
     "        # signal_pending(current), read once for the batch\n"
     "        mov     %gs:current_task(%rip), %rax\n   xor     %ecx, %ecx\n   testq   $MW_TIF_SIG, MW_TASK_TIF(%rax)\n"
     "        setnz   %cl\n   mov     %ecx, I_SIG(%rsp)\n"
     "        # verify_dirent_name for every record: the first with an empty name or a slash in it, a word at a time\n"
-    "        movl    $-1, I_BAD(%rsp)\n   movabs  $0x0101010101010101, %rbp\n   mov     %rbp, %r13\n   shl     $7, %r13\n"
-    "        imul    $0x2f, %rbp, %r11\n   mov     %rbx, %rsi\n   xor     %r9d, %r9d\n"
+    "        movl    $-1, I_BAD(%rsp)\n   movabs  $0x0101010101010101, %r10\n   mov     %r10, %r13\n   shl     $7, %r13\n"
+    "        imul    $0x2f, %r10, %r11\n   mov     %rbx, %rsi\n   xor     %r9d, %r9d\n"
     ".Lf_check:\n"
     "        mov     16(%rsi), %edx\n   test    %edx, %edx\n   jz      .Lf_slash\n   lea     24(%rsi), %rdi\n"
     "1:      mov     (%rdi), %rax\n   xor     %r11, %rax\n   cmp     $8, %edx\n   jb      2f\n"
-    "        mov     %rax, %rcx\n   sub     %rbp, %rcx\n   not     %rax\n   and     %rax, %rcx\n   test    %r13, %rcx\n"
+    "        mov     %rax, %rcx\n   sub     %r10, %rcx\n   not     %rax\n   and     %rax, %rcx\n   test    %r13, %rcx\n"
     "        jnz     .Lf_slash\n   add     $8, %rdi\n   sub     $8, %edx\n   jnz     1b\n   jmp     .Lf_clean\n"
     "2:      lea     (,%rdx,8), %ecx\n   mov     $-1, %r8\n   shl     %cl, %r8\n   or      %r8, %rax\n"
-    "        mov     %rax, %rcx\n   sub     %rbp, %rcx\n   not     %rax\n   and     %rax, %rcx\n   test    %r13, %rcx\n"
+    "        mov     %rax, %rcx\n   sub     %r10, %rcx\n   not     %rax\n   and     %rax, %rcx\n   test    %r13, %rcx\n"
     "        jnz     .Lf_slash\n"
     ".Lf_clean:\n"
     "        mov     16(%rsi), %eax\n   add     $31, %eax\n   and     $-8, %eax\n   add     %rax, %rsi\n   inc     %r9d\n"
@@ -1502,9 +1508,10 @@ __asm__(
     ".Lf_slash:\n"
     "        mov     %r9d, I_BAD(%rsp)\n"
     ".Lf_checked:\n"
+    "        mov     MW_CTX_COUNT(%r12), %r10d\n"
     "        # the image: filldir64's checks in its order for each record (name, room, signal), then the dirent --\n"
     "        # d_ino, the previous dirent's d_off, d_reclen, d_type, the name, a NUL and zeros up to the next eight\n"
-    "        lea     I_IMG(%rsp), %rdi\n   xor     %r8d, %r8d\n   xor     %r9d, %r9d\n   movl    $0, I_STOP(%rsp)\n"
+    "        lea     I_IMG(%rsp), %rdi\n   xor     %r9d, %r9d\n   movl    $0, I_STOP(%rsp)\n"
     ".Lf_build:\n"
     "        mov     (%rbx), %rax\n   mov     %rax, I_POS(%rsp)\n"
     "        cmp     I_BAD(%rsp), %r9d\n   je      .Lf_eio\n"
@@ -1515,14 +1522,15 @@ __asm__(
     "1:      mov     8(%rbx), %rax\n   mov     %rax, (%rdi)\n   mov     %r13w, 16(%rdi)\n"
     "        movzwl  20(%rbx), %eax\n   shr     $12, %eax\n   and     $15, %eax\n   mov     $0x1556, %ecx\n"
     "        bt      %eax, %ecx\n   sbb     %ecx, %ecx\n   and     %ecx, %eax\n   mov     %al, 18(%rdi)\n"
-    "        mov     (%rbx), %rax\n   test    %r8, %r8\n   jz      2f\n   mov     %rax, 8(%r8)\n   jmp     3f\n"
+    "        mov     (%rbx), %rax\n   test    %r9d, %r9d\n   jz      2f\n   mov     I_LASTREC(%rsp), %esi\n   neg     %rsi\n"
+    "        mov     %rax, 8(%rdi,%rsi)\n   jmp     3f\n"
     "2:      mov     %rax, I_OFF0(%rsp)\n"
     "3:      movq    $0, 8(%rdi)\n"
-    "        lea     24(%rbx), %rsi\n   lea     19(%rdi), %rax\n   mov     %edx, %ebp\n   shr     $3, %ebp\n   jz      5f\n"
-    "4:      mov     (%rsi), %r11\n   mov     %r11, (%rax)\n   add     $8, %rsi\n   add     $8, %rax\n   dec     %ebp\n   jnz     4b\n"
-    "5:      mov     (%rsi), %r11\n   and     $7, %edx\n   lea     (,%rdx,8), %ecx\n   mov     $-1, %rbp\n   shl     %cl, %rbp\n"
-    "        not     %rbp\n   and     %rbp, %r11\n   mov     %r11, (%rax)\n   movq    $0, 8(%rax)\n"
-    "        mov     %rdi, %r8\n   mov     %r13d, %eax\n   add     %rax, %rdi\n   sub     %r13d, %r10d\n   mov     %r13d, I_LASTREC(%rsp)\n"
+    "        lea     24(%rbx), %rsi\n   lea     19(%rdi), %rax\n   mov     %edx, %r8d\n   shr     $3, %r8d\n   jz      5f\n"
+    "4:      mov     (%rsi), %r11\n   mov     %r11, (%rax)\n   add     $8, %rsi\n   add     $8, %rax\n   dec     %r8d\n   jnz     4b\n"
+    "5:      mov     (%rsi), %r11\n   and     $7, %edx\n   lea     (,%rdx,8), %ecx\n   mov     $-1, %r8\n   shl     %cl, %r8\n"
+    "        not     %r8\n   and     %r8, %r11\n   mov     %r11, (%rax)\n   movq    $0, 8(%rax)\n"
+    "        mov     %r13d, %eax\n   add     %rax, %rdi\n   sub     %r13d, %r10d\n   mov     %r13d, I_LASTREC(%rsp)\n"
     "        inc     %r9d\n   mov     16(%rbx), %eax\n   add     $31, %eax\n   and     $-8, %eax\n   add     %rax, %rbx\n"
     "        dec     %r15d\n   jnz     .Lf_build\n   jmp     .Lf_built\n"
     ".Lf_einval:\n"
@@ -1728,6 +1736,7 @@ __asm__(
     ".set I_S5, 80\n"
     ".set I_S6, 88\n"
     ".set I_S7, 96\n"
+    ".set I_S8, 104\n"
     ".set I_BUF, 112\n"
     ".set I_BUFSZ, 1792\n"
     ".set I_BATCH, 16\n"
@@ -1737,11 +1746,11 @@ __asm__(
 
 __asm__(
     ASM_FUNC(offset_iterate_dir)
-    "        addi    sp, sp, -I_FRAME\n   sd      ra, I_RA(sp)\n   sd      s0, I_S0(sp)\n   sd      s1, I_S1(sp)\n"
+    "        addi    sp, sp, -I_FRAME\n   sd      ra, I_RA(sp)\n   sd      s0, I_S0(sp)\n   addi    s0, sp, I_FRAME\n   sd      s1, I_S1(sp)\n"
     "        sd      s2, I_S2(sp)\n   sd      s3, I_S3(sp)\n   sd      s4, I_S4(sp)\n   sd      s5, I_S5(sp)\n"
-    "        sd      s6, I_S6(sp)\n   sd      s7, I_S7(sp)\n   mv      s0, a1\n   ld      s1, MW_FILE_DENTRY(a0)\n"
+    "        sd      s6, I_S6(sp)\n   sd      s7, I_S7(sp)\n   sd      s8, I_S8(sp)\n   mv      s8, a1\n   ld      s1, MW_FILE_DENTRY(a0)\n"
     "        # dentry = offset_dir_lookup(dir, ctx->pos); none means the end\n"
-    "        ld      a1, MW_CTX_POS(s0)\n   mv      a0, s1\n   call    offset_dir_lookup\n"
+    "        ld      a1, MW_CTX_POS(s8)\n   mv      a0, s1\n   call    offset_dir_lookup\n"
     "        mv      s2, a0\n   beqz    a0, .Lit_eod\n   li      t0, 1\n   sw      t0, I_FIRST(sp)\n"
     "        # one batch: the parent's d_lock once, the entries from s2 on (after it, past the first) copied out\n"
     ".Lit_batch:\n"
@@ -1789,11 +1798,11 @@ __asm__(
     "3:      addi    s6, sp, I_BUF\n   lw      s5, I_N(sp)\n   beqz    s5, .Lit_emitted\n"
     "        # ctx->pos = the entry's offset, then actor(ctx, name, len, pos, ino, fs_umode_to_dtype(mode))\n"
     ".Lit_emit:\n"
-    "        ld      t0, 0(s6)\n   sd      t0, MW_CTX_POS(s0)\n"
+    "        ld      t0, 0(s6)\n   sd      t0, MW_CTX_POS(s8)\n"
     "        lhu     a5, 20(s6)\n   srli    a5, a5, 12\n   andi    a5, a5, 15\n   li      t0, 0x1556\n"
     "        srl     t0, t0, a5\n   andi    t0, t0, 1\n   neg     t0, t0\n   and     a5, a5, t0\n"
     "        ld      a4, 8(s6)\n   ld      a3, 0(s6)\n   lw      a2, 16(s6)\n"
-    "        addi    a1, s6, 24\n   mv      a0, s0\n   ld      t1, MW_CTX_ACTOR(s0)\n   jalr    t1\n"
+    "        addi    a1, s6, 24\n   mv      a0, s8\n   ld      t1, MW_CTX_ACTOR(s8)\n   jalr    t1\n"
     "        andi    a0, a0, 0xff\n   beqz    a0, .Lit_stop\n"
     "        lw      t0, 16(s6)\n   addi    t0, t0, 31\n   andi    t0, t0, -8\n   add     s6, s6, t0\n"
     "        addi    s5, s5, -1\n   bnez    s5, .Lit_emit\n"
@@ -1804,11 +1813,11 @@ __asm__(
     ".Lit_stop:\n"
     "        beqz    s2, .Lit_out\n   mv      a0, s2\n   call    dput\n   j       .Lit_out\n"
     ".Lit_eod:\n"
-    "        li      t0, MW_POS_EOD\n   sd      t0, MW_CTX_POS(s0)\n"
+    "        li      t0, MW_POS_EOD\n   sd      t0, MW_CTX_POS(s8)\n"
     ".Lit_out:\n"
     "        ld      ra, I_RA(sp)\n   ld      s0, I_S0(sp)\n   ld      s1, I_S1(sp)\n   ld      s2, I_S2(sp)\n"
     "        ld      s3, I_S3(sp)\n   ld      s4, I_S4(sp)\n   ld      s5, I_S5(sp)\n   ld      s6, I_S6(sp)\n"
-    "        ld      s7, I_S7(sp)\n   addi    sp, sp, I_FRAME\n"
+    "        ld      s7, I_S7(sp)\n   ld      s8, I_S8(sp)\n   addi    sp, sp, I_FRAME\n"
     "        " ASM_RET
     ASM_END(offset_iterate_dir)
 );
