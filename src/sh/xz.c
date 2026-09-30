@@ -4527,6 +4527,11 @@ static bool xz_cli_extreme;
 /* 1 keeps encoding on the calling thread; set by the command line only. */
 static bool xz_serial;
 
+/* -T N / --threads=N as xz spells them: 0 is every CPU the process may run
+   on, 1 keeps the codec on the calling thread. Only whether work may spread
+   is taken from it; the bytes never depend on it. */
+static positive xz_threads;
+
 static bool xz_writer_emit(p8 address_to bytes, positive n)
 {
         if (xz_writer.failed)
@@ -5410,7 +5415,7 @@ static b32 xz_stream_cli(bipolar in, bipolar out, bool decode, p8 level)
         bool ok;
 
         xz_status = 0;
-        xz_serial = file_codec_threads == 1;
+        xz_serial = xz_threads == 1;
         //      One CPU gains nothing from blocks decoded side by side, and the
         //      batch held whole blocks of output: 148 MB where streaming
         //      through the dictionary holds 13.
@@ -5484,29 +5489,12 @@ static bool xz_cli_say(string_address one, string_address two, string_address th
         return false;
 }
 
-static positive xz_cli_decimal(p8 address_to into, p64 value)
-{
-        p8 digits[20];
-        positive n = 0;
-        positive at = 0;
-
-        do
-                digits[n++] = (p8)('0' + value % 10);
-        while (value /= 10);
-        while (n)
-                into[at++] = digits[--n];
-        into[at] = 0;
-        return at;
-}
-
 /* xz's str_to_uint64: blanks, "max", decimal digits, a k/m/g suffix with
    Ki, KiB, KB or B after it, and a range. */
 static bool xz_cli_number(string_address name, string_address value, p64 min, p64 max,
                           p64 address_to out)
 {
         p64 result = 0;
-        p8 low[24];
-        p8 high[24];
 
         while (*value == ' ' || *value == '\t')
                 value++;
@@ -5565,11 +5553,22 @@ static bool xz_cli_number(string_address name, string_address value, p64 min, p6
         return true;
 
 range:
-        xz_cli_decimal(low, min);
-        xz_cli_decimal(high, max);
-        string_format(log_error, "xz: Value of the option '%s' must be in the range [%s, %s]\n",
-                      name, low, high);
+        string_format(log_error, "xz: Value of the option '%s' must be in the range [%p, %p]\n",
+                      name, min, max);
         return false;
+}
+
+/* xz steps over one + before a thread count and before no other number. */
+static bool xz_cli_threads(string_address text)
+{
+        p64 count;
+
+        if (text[0] == '+')
+                text++;
+        if (!xz_cli_number("threads", text, 0, 16384, address_of count))
+                return false;
+        xz_threads = (positive)count;
+        return true;
 }
 
 typedef struct
@@ -5777,6 +5776,13 @@ static bool xz_cli_check(string_address word)
         return false;
 }
 
+static bipolar xz_cli_missing(string_address one, string_address name, string_address three)
+{
+        xz_cli_say(one, name, three);
+        string_format(log_error, "xz: Try 'xz --help' for more information.\n");
+        return -1;
+}
+
 /* A setting from the chain of words: the value of --word=VALUE, or the next
    argument for --word VALUE. */
 static bipolar xz_cli_value(file_codec_cli address_to codec, string_address at,
@@ -5794,12 +5800,7 @@ static bipolar xz_cli_value(file_codec_cli address_to codec, string_address at,
                 if (!at[2 + n])
                 {
                         if (!codec->next_argument)
-                        {
-                                string_format(log_error,
-                                              "xz: option '--%s' requires an argument\n"
-                                              "xz: Try 'xz --help' for more information.\n", name);
-                                return -1;
-                        }
+                                return xz_cli_missing("option '--", name, "' requires an argument");
                         codec->took_next = true;
                         address_to value = codec->next_argument;
                         return 1;
@@ -5834,19 +5835,18 @@ static bipolar xz_cli_option(file_codec_cli address_to codec, string_address at,
                         xz_cli_count = 0;
                         return 1;
                 }
-                if (*at != 'C')
+                if (*at != 'C' && *at != 'T')
                         return 0;
-                if (at[1])
-                        return xz_cli_check(at + 1) ? (bipolar)string_length(at) : -1;
-                if (!codec->next_argument)
-                {
-                        string_format(log_error,
-                                      "xz: option requires an argument -- 'C'\n"
-                                      "xz: Try 'xz --help' for more information.\n");
+
+                string_address value = at[1] ? at + 1 : codec->next_argument;
+                p8 letter[2] = {*at, 0};
+
+                if (!value)
+                        return xz_cli_missing("option requires an argument -- '", (string_address)letter, "'");
+                codec->took_next = !at[1];
+                if (!(*at == 'C' ? xz_cli_check(value) : xz_cli_threads(value)))
                         return -1;
-                }
-                codec->took_next = true;
-                return xz_cli_check(codec->next_argument) ? 1 : -1;
+                return at[1] ? (bipolar)string_length(at) : 1;
         }
         if (string_equals(at, "--extreme"))
         {
@@ -5878,23 +5878,15 @@ static bipolar xz_cli_option(file_codec_cli address_to codec, string_address at,
                         return 1;
                 }
         }
-        if (string_has_prefix(at, "--check="))
-                return xz_cli_check(at + 8) ? 1 : -1;
-        if (string_equals(at, "--check"))
-        {
-                if (!codec->next_argument)
-                {
-                        string_format(log_error,
-                                      "xz: option '--check' requires an argument\n"
-                                      "xz: Try 'xz --help' for more information.\n");
-                        return -1;
-                }
-                codec->took_next = true;
-                return xz_cli_check(codec->next_argument) ? 1 : -1;
-        }
-
         string_address text = null;
-        bipolar got = xz_cli_value(codec, at, "block-size", address_of text);
+        bipolar got = xz_cli_value(codec, at, "check", address_of text);
+
+        if (got)
+                return got < 0 ? got : xz_cli_check(text) ? 1 : -1;
+        got = xz_cli_value(codec, at, "threads", address_of text);
+        if (got)
+                return got < 0 ? got : xz_cli_threads(text) ? 1 : -1;
+        got = xz_cli_value(codec, at, "block-size", address_of text);
 
         if (got <= 0)
                 return got;
@@ -5934,7 +5926,7 @@ static bool xz_cli_setup(void)
         //      first, and names the chain when it finds none or a start
         //      offset it cannot use; a chain that is only badly ordered is
         //      what the encoder itself refuses.
-        string_address why = file_codec_threads != 1 && (!has_lzma2 || bad_start)
+        string_address why = xz_threads != 1 && (!has_lzma2 || bad_start)
                                  ? "Unsupported options in filter chain 0"
                                  : "Unsupported filter chain or filter options";
 
@@ -5969,7 +5961,7 @@ static b32 file_xz(void)
             .suffixes = xz_suffixes, .suffix_count = array_count(xz_suffixes),
             .decode_suffix_error = "unknown suffix; use -c",
             .encode_suffix_error = "cannot guess output name",
-            .features = FILE_CODEC_LEVEL_ZERO | FILE_CODEC_THREADS,
+            .features = FILE_CODEC_LEVEL_ZERO,
             .remove_source = true, .level = 6,
             .run = xz_stream_cli, .option = xz_cli_option};
         return file_codec_main(address_of codec);

@@ -34583,6 +34583,7 @@ def harness_compression(argv):
                             --lzma2=nice=2|--lzma2=nice=273,mode=normal,depth=1|--lzma2=lc=0,lp=4,pb=4|--sparc --lzma2=preset=1|
                             --powerpc --ia64 --lzma2=preset=0|--riscv --arm64 --armthumb --lzma2=preset=0|--fast|--best|-0 --x86|
                             --block-size=1MiB|--block-size 100KiB|--block-size=|--block-size=abc|--block-size=1x|--block-size|
+                            -T 5k|-T20000|-T 1x|-T +5|-T max|-Tmax|-T|--threads|--threads=|--threads=+5|--threads=1x|--threads 4|-T 0x1|-C|-C bogus|--check|--check=bogus|-T 16384|-T 16385|-T 16KiB|-T 4GiB|
                             -e -6|-6 -e|--extreme --best|--fast --extreme""".replace('\n', '').split('|')
                         sample = code[:60000]
                         for word in words:

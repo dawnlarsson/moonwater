@@ -1415,88 +1415,10 @@ static bipolar file_staged_name_finish(file_staged_name address_to stage,
 #define FILE_CODEC_NO_NAME 32
 #define FILE_CODEC_SHORT_VERSION 64
 #define FILE_CODEC_LEVEL_ZERO 128
-#define FILE_CODEC_THREADS 256
 
 /* The name a codec's messages call its input: the operand as written, or
    stdin for none or "-", as gzip says it. Set before every run. */
 static string_address file_codec_display;
-
-/* -T N / --threads=N as xz spells them: 0 is every CPU the process may run
-   on, 1 keeps the codec on the calling thread. Only whether work may spread
-   is taken from it; the bytes never depend on it. */
-static positive file_codec_threads;
-
-#define FILE_CODEC_THREADS_MOST 16384
-
-/*
-        Read as xz's str_to_uint64 reads it, after the + xz 5.4 steps over:
-        blanks, then max or decimal digits and a k, M or G (either case)
-        standing for a power of 1024 with an optional i, iB or B after it; then the range,
-        0 to 16384. This took only digits and anything up to ten million, so
-        -T 5k, -T +5 and -T ' 3' were refused and -T 20000 taken, where xz
-        takes the first three and refuses the last -- with status 1 and its
-        own words, which these are.
-*/
-static bool file_codec_thread_count(string_address name, string_address text)
-{
-        positive value;
-        positive used;
-
-        if (!text)
-                text = (string_address) "";
-        if (text[0] == '+')
-                text++;
-        text += string_span_of_set(text, " \t");
-
-        if (string_equals(text, "max"))
-        {
-                file_codec_threads = FILE_CODEC_THREADS_MOST;
-                return true;
-        }
-
-        if (!byte_is_digit(text[0]))
-                return string_format(log_error,
-                                     "%s: %s: Value is not a non-negative decimal integer\n",
-                                     name, text),
-                       false;
-
-        value = string_digits(text, address_of used);
-        text += used;
-
-        if (used > 19)
-                goto range;
-
-        if (text[0])
-        {
-                p8 letter = byte_to_lower(text[0]);
-                positive shift = letter == 'k' ? 10 : letter == 'm' ? 20
-                               : letter == 'g' ? 30 : 0;
-
-                if (!shift || (text[1] && !string_equals(text + 1, "i") &&
-                               !string_equals(text + 1, "iB") &&
-                               !string_equals(text + 1, "B")))
-                        return string_format(log_error,
-                                             "%s: %s: Invalid multiplier suffix\n"
-                                             "%s: Valid suffixes are `KiB' (2^10), `MiB' (2^20), and `GiB' (2^30).\n",
-                                             name, text, name),
-                               false;
-                if (value > FILE_CODEC_THREADS_MOST >> shift)
-                        goto range;
-                value <<= shift;
-        }
-
-        if (value > FILE_CODEC_THREADS_MOST)
-                goto range;
-
-        file_codec_threads = value;
-        return true;
-
-range:
-        string_format(log_error,
-                      "%s: Value of the option `threads' must be in the range [0, 16384]\n",
-                      name);
-        return false;
-}
 
 static fn file_codec_print(string_address text)
 {
@@ -1596,15 +1518,6 @@ static bool file_codec_parse(file_codec_cli address_to codec,
                                   FILE_CODEC_OUTPUT_OPTION) &&
                                  string_has_prefix(word, "--output="))
                                 codec->output_path = word + 9;
-                        else if ((codec->features & FILE_CODEC_THREADS) &&
-                                 string_has_prefix(word, "--threads="))
-                        {
-                                if (!file_codec_thread_count(codec->name, word + 10))
-                                {
-                                        *result = 1;
-                                        return false;
-                                }
-                        }
                         else
                         {
                                 string_format(log_error,
@@ -1684,22 +1597,6 @@ static bool file_codec_parse(file_codec_cli address_to codec,
                                 file_codec_print(codec->usage);
                                 *result = 0;
                                 return false;
-                        }
-                        else if (*letter == 'T' &&
-                                 (codec->features & FILE_CODEC_THREADS))
-                        {
-                                string_address count = letter[1]
-                                        ? letter + 1
-                                        : *first + 1 < (positive)program_argument_count()
-                                        ? program_argument((b32)++*first)
-                                        : null;
-
-                                if (!file_codec_thread_count(codec->name, count))
-                                {
-                                        *result = 1;
-                                        return false;
-                                }
-                                break;
                         }
                         else if (*letter == 'o' &&
                                  (codec->features & FILE_CODEC_OUTPUT_OPTION))
