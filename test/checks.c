@@ -65,6 +65,18 @@
                 }                                                             \
         } while (0)
 
+/*
+        The xorshift step every seeded check draws with, as a statement:
+        XORSHIFT64(seed) is Marsaglia's 13, 7, 17 on a 64-bit state and
+        XORSHIFT32(seed) his 13, 17, 5 on a 32-bit one. The draw is the state
+        afterwards; the macro is the same three shifts each check used to
+        spell out, so every seed produces the sequence it always did.
+*/
+#define XORSHIFT64(state) \
+        ((state) ^= (state) << 13, (state) ^= (state) >> 7, (state) ^= (state) << 17)
+#define XORSHIFT32(state) \
+        ((state) ^= (state) << 13, (state) ^= (state) >> 17, (state) ^= (state) << 5)
+
 #if defined(SHARED_sizes)
 /* Literal arguments exercise compiler-owned specializations. The scan checks
    keep their twenty-size function bands to bound compiler resource use. */
@@ -6940,9 +6952,7 @@ static u64 seed = NATIVE_SEED;
 
 static u64 next(void)
 {
-        seed ^= seed << 13;
-        seed ^= seed >> 7;
-        seed ^= seed << 17;
+        XORSHIFT64(seed);
         return seed;
 }
 #endif
@@ -10444,16 +10454,12 @@ test(string_to_number_fuzz)
         {
                 positive length;
 
-                state ^= state << 13;
-                state ^= state >> 7;
-                state ^= state << 17;
+                XORSHIFT64(state);
                 length = state % 20;
 
                 for (positive at = 0; at < length; at++)
                 {
-                        state ^= state << 13;
-                        state ^= state >> 7;
-                        state ^= state << 17;
+                        XORSHIFT64(state);
                         parse_scratch[at] = alphabet[state % (sizeof(alphabet) - 1)];
                 }
 
@@ -10524,9 +10530,7 @@ positive bit_test_seed = 0x123456789abcdefULL;
 
 positive bit_test_random()
 {
-        bit_test_seed ^= bit_test_seed << 13;
-        bit_test_seed ^= bit_test_seed >> 7;
-        bit_test_seed ^= bit_test_seed << 17;
+        XORSHIFT64(bit_test_seed);
         return bit_test_seed;
 }
 
@@ -12537,9 +12541,7 @@ static positive seed = 0x2545F4914F6CDD1Dull;
 
 positive next()
 {
-        seed ^= seed << 13;
-        seed ^= seed >> 7;
-        seed ^= seed << 17;
+        XORSHIFT64(seed);
         return seed;
 }
 
@@ -13265,9 +13267,7 @@ static p64 cells_ascii_random(p64 address_to state)
 {
         p64 x = address_to state;
 
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
+        XORSHIFT64(x);
         address_to state = x;
         return x;
 }
@@ -13493,9 +13493,7 @@ fn check_delete_bytes()
                                                               ? 4096 - size : residue;
                                         for (positive i = 0; i < 256; i++)
                                         {
-                                                seed ^= seed << 13;
-                                                seed ^= seed >> 7;
-                                                seed ^= seed << 17;
+                                                XORSHIFT64(seed);
                                                 p8 mark = (p8)(seed >> 24) | 1;
                                                 bool marked = density == 3 ? (seed & 15) != 0
                                                               : density == 2 ? (seed & 1) != 0
@@ -13505,9 +13503,7 @@ fn check_delete_bytes()
                                         }
                                         for (positive i = 0; i < 4096; i++)
                                         {
-                                                seed ^= seed << 13;
-                                                seed ^= seed >> 7;
-                                                seed ^= seed << 17;
+                                                XORSHIFT64(seed);
                                                 got[i] = want[i] = (p8)seed;
                                         }
                                         positive kept = 0;
@@ -13588,9 +13584,7 @@ fn check_squeeze_bytes()
                                                               ? 4096 - size : residue;
                                         for (positive i = 0; i < 256; i++)
                                         {
-                                                seed ^= seed << 13;
-                                                seed ^= seed >> 7;
-                                                seed ^= seed << 17;
+                                                XORSHIFT64(seed);
                                                 p8 mark = (p8)(seed >> 24) | 1;
                                                 bool marked = density == 3 ? (seed & 15) != 0
                                                               : density == 2 ? (seed & 1) != 0
@@ -13601,9 +13595,7 @@ fn check_squeeze_bytes()
                                         static const p8 alphabet[4] = {'a', 'b', ' ', 0xf1};
                                         for (positive i = 0; i < 4096; i++)
                                         {
-                                                seed ^= seed << 13;
-                                                seed ^= seed >> 7;
-                                                seed ^= seed << 17;
+                                                XORSHIFT64(seed);
                                                 got[i] = want[i] = (seed >> 40) % 5 ? alphabet[(seed >> 20) & 3]
                                                                                     : (p8)seed;
                                         }
@@ -13693,9 +13685,7 @@ fn check_offsets_of_either()
 
                                         for (positive i = 0; i < 4096; i++)
                                         {
-                                                seed ^= seed << 13;
-                                                seed ^= seed >> 7;
-                                                seed ^= seed << 17;
+                                                XORSHIFT64(seed);
                                                 positive pick = (positive)(seed % 16);
                                                 bytes[i] = density == 0 ? (p8)('a' + pick % 8)
                                                            : density == 3 ? (pick < 12 ? 'x' : '\n')
@@ -14104,9 +14094,7 @@ static p64 dirty_seed = 0x6a09e667f3bcc909ull;
 
 static positive dirty_random(void)
 {
-        dirty_seed ^= dirty_seed << 13;
-        dirty_seed ^= dirty_seed >> 7;
-        dirty_seed ^= dirty_seed << 17;
+        XORSHIFT64(dirty_seed);
         return (positive)dirty_seed;
 }
 
@@ -16016,9 +16004,7 @@ fn check_offsets_range()
 #endif
         for (positive i = 0; i < sizeof(bytes); i++)
         {
-                seed ^= seed << 13;
-                seed ^= seed >> 7;
-                seed ^= seed << 17;
+                XORSHIFT64(seed);
                 bytes[i] = (seed & 3) ? (p8)('a' + (seed >> 8) % 40) : (p8)(seed >> 16);
         }
         for (positive tier = 0; tier < tiers; tier++)
@@ -16076,9 +16062,7 @@ fn check_offsets_range()
                         sets[0][i] = 0;
                         sets[1][i] = i == '\n';
                         sets[2][i] = i < 9 || (i > 10 && i < 32) || i > 126;
-                        seed ^= seed << 13;
-                        seed ^= seed >> 7;
-                        seed ^= seed << 17;
+                        XORSHIFT64(seed);
                         sets[3][i] = (b8)(seed & 1);
                 }
                 for (positive t = 0; t < 4; t++)
@@ -28484,9 +28468,7 @@ b32 main(void)
 
         for (positive i = 0; i < sizeof(room); i++)
         {
-                seed ^= seed << 13;
-                seed ^= seed >> 7;
-                seed ^= seed << 17;
+                XORSHIFT64(seed);
                 room[i] = (seed & 3) ? pieces[3 + (seed >> 8) % 5] : pieces[(seed >> 8) % 3];
         }
 
@@ -28582,9 +28564,7 @@ static p64 shell_asm_seed = 0x243f6a8885a308d3ull;
 
 static p64 shell_asm_next(void)
 {
-        shell_asm_seed ^= shell_asm_seed << 13;
-        shell_asm_seed ^= shell_asm_seed >> 7;
-        shell_asm_seed ^= shell_asm_seed << 17;
+        XORSHIFT64(shell_asm_seed);
         return shell_asm_seed;
 }
 
@@ -33530,9 +33510,7 @@ static p64 spelled_seed = 0x243f6a8885a308d3ull;
 
 static p64 spelled_random(void)
 {
-        spelled_seed ^= spelled_seed << 13;
-        spelled_seed ^= spelled_seed >> 7;
-        spelled_seed ^= spelled_seed << 17;
+        XORSHIFT64(spelled_seed);
         return spelled_seed;
 }
 
@@ -34021,9 +33999,7 @@ static p64 vli_seed = 0x9e3779b97f4a7c15ull;
 
 static p64 vli_random(void)
 {
-        vli_seed ^= vli_seed << 13;
-        vli_seed ^= vli_seed >> 7;
-        vli_seed ^= vli_seed << 17;
+        XORSHIFT64(vli_seed);
         return vli_seed;
 }
 
@@ -35484,9 +35460,7 @@ static fn table_tree_checks(void)
                 memory_zero(devices, sizeof(devices));
                 for (positive i = 0; i < count; i++)
                 {
-                        random ^= random << 13;
-                        random ^= random >> 7;
-                        random ^= random << 17;
+                        XORSHIFT64(random);
                         devices[i].parent = i && (random & 3)
                             ? devices + random % i : null;
                         order[i] = devices + i;
@@ -35914,9 +35888,7 @@ static positive table_generated_random = 0x2545f4914f6cdd1dull;
 
 static positive table_generated_next(void)
 {
-        table_generated_random ^= table_generated_random << 13;
-        table_generated_random ^= table_generated_random >> 7;
-        table_generated_random ^= table_generated_random << 17;
+        XORSHIFT64(table_generated_random);
         return table_generated_random;
 }
 
@@ -48769,9 +48741,7 @@ static fn lock_churn_thread(address_any argument)
                 positive slot;
                 positive size;
 
-                seed ^= seed << 13;
-                seed ^= seed >> 7;
-                seed ^= seed << 17;
+                XORSHIFT64(seed);
 
                 slot = seed % LOCK_CHURN_LIVE;
                 size = (seed >> 8) % 4000 + 1;
@@ -59119,9 +59089,7 @@ static fn byte_reader_rows(void)
 
                         for (positive i = 0; i < length; i++)
                         {
-                                random ^= random << 13;
-                                random ^= random >> 7;
-                                random ^= random << 17;
+                                XORSHIFT64(random);
                                 bytes[i] = (p8)random;
                         }
                         reader = byte_reader_open(bytes, length);
@@ -59135,9 +59103,7 @@ static fn byte_reader_rows(void)
                                 p64 got = 0;
                                 bool fits;
 
-                                random ^= random << 13;
-                                random ^= random >> 7;
-                                random ^= random << 17;
+                                XORSHIFT64(random);
                                 operation = random % 12;
                                 count = random >> 8 & 15;
                                 //      Operations 0-3 read a number of that
@@ -59463,9 +59429,7 @@ static fn crypto_private_scalar_probe(
 
         for (positive i = 0; i < limbs; i++)
         {
-                random ^= random << 13;
-                random ^= random >> 7;
-                random ^= random << 17;
+                XORSHIFT64(random);
                 scalar[i] = random;
                 complement[i] = ~random;
         }
@@ -59598,9 +59562,7 @@ static fn crypto_comb_probe(positive limbs, const crypto_field address_to field,
                 {
                         for (positive i = 0; i < limbs; i++)
                         {
-                                random ^= random << 13;
-                                random ^= random >> 7;
-                                random ^= random << 17;
+                                XORSHIFT64(random);
                                 k[i] = random;
                         }
                         //      Below the order: the top bit off is enough
@@ -59745,9 +59707,7 @@ static p64 ghash_check_seed = 0x9e3779b97f4a7c15ull;
 
 static p8 ghash_check_byte(void)
 {
-        ghash_check_seed ^= ghash_check_seed << 13;
-        ghash_check_seed ^= ghash_check_seed >> 7;
-        ghash_check_seed ^= ghash_check_seed << 17;
+        XORSHIFT64(ghash_check_seed);
         return (p8)(ghash_check_seed >> 29);
 }
 
@@ -60218,9 +60178,7 @@ static p64 x25519_check_seed = 0x6a09e667f3bcc909ull;
 
 static p64 x25519_check_next(void)
 {
-        x25519_check_seed ^= x25519_check_seed << 13;
-        x25519_check_seed ^= x25519_check_seed >> 7;
-        x25519_check_seed ^= x25519_check_seed << 17;
+        XORSHIFT64(x25519_check_seed);
         return x25519_check_seed;
 }
 
@@ -60666,9 +60624,7 @@ static p64 field_check_seed = 0x9e3779b97f4a7c15ull;
 
 static p64 field_check_next(void)
 {
-        field_check_seed ^= field_check_seed << 13;
-        field_check_seed ^= field_check_seed >> 7;
-        field_check_seed ^= field_check_seed << 17;
+        XORSHIFT64(field_check_seed);
         return field_check_seed;
 }
 
@@ -60986,9 +60942,7 @@ static p64 montgomery_check_seed = 0x2545f4914f6cdd1dull;
 
 static p64 montgomery_check_next(void)
 {
-        montgomery_check_seed ^= montgomery_check_seed << 13;
-        montgomery_check_seed ^= montgomery_check_seed >> 7;
-        montgomery_check_seed ^= montgomery_check_seed << 17;
+        XORSHIFT64(montgomery_check_seed);
         return montgomery_check_seed;
 }
 
@@ -66502,9 +66456,7 @@ static struct waterlink_link fill_one, fill_two;
 
 static p64 fill_next(p64 address_to state)
 {
-        address_to state ^= address_to state << 13;
-        address_to state ^= address_to state >> 7;
-        address_to state ^= address_to state << 17;
+        XORSHIFT64(address_to state);
         return address_to state;
 }
 
@@ -67429,9 +67381,7 @@ static fn sealed_generated(void)
 
                         for (positive i = 0; i < 16; i++)
                         {
-                                seed ^= seed << 13;
-                                seed ^= seed >> 7;
-                                seed ^= seed << 17;
+                                XORSHIFT64(seed);
                                 raw[i] = (p8)seed;
                         }
                         cpu_has_vaes = pass ? 0 : vaes;
@@ -67534,9 +67484,7 @@ static fn sealed_small(void)
 
                 for (positive i = 0; i < 16; i++)
                 {
-                        seed ^= seed << 13;
-                        seed ^= seed >> 7;
-                        seed ^= seed << 17;
+                        XORSHIFT64(seed);
                         raw[i] = (p8)seed;
                 }
                 cpu_has_pclmul = pass ? 0 : pclmul;
@@ -67645,9 +67593,7 @@ static p64 traffic_state;
 
 static p64 traffic_next(void)
 {
-        traffic_state ^= traffic_state << 13;
-        traffic_state ^= traffic_state >> 7;
-        traffic_state ^= traffic_state << 17;
+        XORSHIFT64(traffic_state);
         return traffic_state;
 }
 
@@ -68223,9 +68169,7 @@ static p64 sim_rng;
 
 static p64 sim_next(void)
 {
-        sim_rng ^= sim_rng << 13;
-        sim_rng ^= sim_rng >> 7;
-        sim_rng ^= sim_rng << 17;
+        XORSHIFT64(sim_rng);
         return sim_rng;
 }
 
@@ -74017,9 +73961,7 @@ static fn bits_model(void)
 
                                 for (positive i = 0; i < size; i++)
                                 {
-                                        random ^= random << 13;
-                                        random ^= random >> 17;
-                                        random ^= random << 5;
+                                        XORSHIFT32(random);
                                         src[i] = (p8)(random >> 11);
                                 }
                                 if (!src[size - 1] && (random & 7))
@@ -74034,9 +73976,7 @@ static fn bits_model(void)
                                 streams++;
                                 for (positive step = 0; step < 96; step++)
                                 {
-                                        random ^= random << 13;
-                                        random ^= random >> 17;
-                                        random ^= random << 5;
+                                        XORSHIFT32(random);
                                         if (random & 3)
                                         {
                                                 positive const n = (random >> 8) % 17;
@@ -74137,9 +74077,7 @@ static fn huffman_exact_end(void)
 
         for (positive i = 0; i < sizeof(src); i++)
         {
-                random ^= random << 13;
-                random ^= random >> 17;
-                random ^= random << 5;
+                XORSHIFT32(random);
                 src[i] = (random & 3) ? (p8)('a' + (random >> 8) % 16)
                                       : (p8)(random >> 16);
         }
@@ -74267,9 +74205,7 @@ static fn literal_codebooks(void)
                         p32 random = 0x97346112u;
                         for (positive i = 0; i < n; i++)
                         {
-                                random ^= random << 13;
-                                random ^= random >> 17;
-                                random ^= random << 5;
+                                XORSHIFT32(random);
                                 src[i] = (random & 7) ? (random >> 8) % 8
                                                      : (random >> 16) % (alphabets[a] + 1);
                         }
@@ -74380,9 +74316,7 @@ static fn job_widths(void)
 
         for (positive i = 0; i < sizeof(src); i++)
         {
-                random ^= random << 13;
-                random ^= random >> 17;
-                random ^= random << 5;
+                XORSHIFT32(random);
                 src[i] = i >= 3000 && (random & 3) ? src[i - 3000 + (random >> 20) % 8]
                                                    : (p8)('a' + (random >> 8) % 20);
         }
@@ -74690,9 +74624,7 @@ static fn every_level(void)
         {
                 for (positive i = 0; i < sizeof(src); i++)
                 {
-                        random ^= random << 13;
-                        random ^= random >> 17;
-                        random ^= random << 5;
+                        XORSHIFT32(random);
                         src[i] = kind ? (p8)random
                                       : (i > 300 && (random & 7) < 6) ? src[i - 1 - (random >> 8) % 250]
                                                                        : (p8)('a' + (random >> 20) % 12);
@@ -74723,9 +74655,7 @@ static fn threaded(positive level)
 
         for (positive i = 0; i < sizeof(src); i++)
         {
-                random ^= random << 13;
-                random ^= random >> 17;
-                random ^= random << 5;
+                XORSHIFT32(random);
                 src[i] = (i / 4096) % 3 ? (p8)(random & 7) : (p8)random;
         }
         for (positive w = 0; w < array_count(widths); w++)
@@ -74965,9 +74895,7 @@ static fn threaded(void)
 
         for (positive i = 0; i < sizeof(src); i++)
         {
-                random ^= random << 13;
-                random ^= random >> 17;
-                random ^= random << 5;
+                XORSHIFT32(random);
                 src[i] = (i / 4096) % 3 ? (p8)(random & 7) : (p8)random;
         }
         for (positive w = 0; w < array_count(widths); w++)
@@ -74997,9 +74925,7 @@ static fn xz_fixture(p8 address_to src, positive n, p32 seed)
 
         for (positive i = 0; i < n; i++)
         {
-                random ^= random << 13;
-                random ^= random >> 17;
-                random ^= random << 5;
+                XORSHIFT32(random);
                 src[i] = (i / 4096) % 3 ? (p8)(random & 7) : (p8)random;
         }
 }
@@ -75248,9 +75174,7 @@ static fn filters_split(void)
 
         for (positive i = 0; i < sizeof(plain); i++)
         {
-                random ^= random << 13;
-                random ^= random >> 17;
-                random ^= random << 5;
+                XORSHIFT32(random);
                 plain[i] = (p8)random;
                 if ((random >> 24) % 9 == 0 && i + 8 < sizeof(plain))
                 {
@@ -75302,9 +75226,7 @@ static fn filters_split(void)
                         memory_copy_apart(rebuilt + made, head, got);
                         made += got;
                         from += n;
-                        random ^= random << 13;
-                        random ^= random >> 17;
-                        random ^= random << 5;
+                        XORSHIFT32(random);
                         step = 1 + random % (from & 1 ? 40 : 9000);
                 }
 
@@ -75748,7 +75670,7 @@ static fn reuse_masks(void)
         {
                 for (positive i = 0; i < 8; i++)
                 {
-                        seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17;
+                        XORSHIFT64(seed);
                         set[i] = shape == 0 ? 0 : shape == 1 ? positive_max : seed;
                 }
                 for (positive bytes = 0; bytes <= 64; bytes++)
@@ -80102,9 +80024,7 @@ static fn format_layouts(void)
 
         for (positive round = 0; round < 4096; round++)
         {
-                random ^= random << 13;
-                random ^= random >> 7;
-                random ^= random << 17;
+                XORSHIFT64(random);
                 format_layout_holds(STORAGE_EXT4_FEWEST +
                                     random % (STORAGE_EXT4_MOST -
                                               STORAGE_EXT4_FEWEST + 1));
@@ -81511,9 +81431,7 @@ static p64 sensors_state = 0x9e3779b97f4a7c15ull;
 
 static positive sensors_next(positive below)
 {
-        sensors_state ^= sensors_state << 13;
-        sensors_state ^= sensors_state >> 7;
-        sensors_state ^= sensors_state << 17;
+        XORSHIFT64(sensors_state);
         return below ? (positive)(sensors_state % below) : 0;
 }
 
@@ -82784,9 +82702,7 @@ static p64 hash_check_seed = 0x9e3779b97f4a7c15ull;
 
 static p8 hash_check_byte(void)
 {
-        hash_check_seed ^= hash_check_seed << 13;
-        hash_check_seed ^= hash_check_seed >> 7;
-        hash_check_seed ^= hash_check_seed << 17;
+        XORSHIFT64(hash_check_seed);
         return (p8)(hash_check_seed >> 29);
 }
 
@@ -83100,14 +83016,10 @@ static fn crc_check_all(p8 address_to bytes)
         p32 random = 0x2545f491u;
         for (positive draw = 0; draw < 400; draw++)
         {
-                random ^= random << 13;
-                random ^= random >> 17;
-                random ^= random << 5;
+                XORSHIFT32(random);
                 positive offset = random % 64;
                 p32 seed = random;
-                random ^= random << 13;
-                random ^= random >> 17;
-                random ^= random << 5;
+                XORSHIFT32(random);
                 positive size = random % (8192 - offset + 1);
                 draws += crc_check_case(bytes + offset, size, seed,
                                         (random >> 7) % (size + 1));
@@ -83217,14 +83129,10 @@ static fn crc32c_check_all(p8 address_to bytes)
         p32 random = 0x2545f491u ^ sink;
         for (positive draw = 0; draw < 400; draw++)
         {
-                random ^= random << 13;
-                random ^= random >> 17;
-                random ^= random << 5;
+                XORSHIFT32(random);
                 positive offset = random % 64;
                 p32 seed = random;
-                random ^= random << 13;
-                random ^= random >> 17;
-                random ^= random << 5;
+                XORSHIFT32(random);
                 positive size = random % (8192 - offset + 1);
                 draws += crc32c_check_case(bytes + offset, size, seed,
                                            (random >> 7) % (size + 1));
@@ -83843,9 +83751,7 @@ b32 main(void)
 
         for (positive at = 0; at < sizeof(digests_bench_data); at++)
         {
-                random ^= random << 13;
-                random ^= random >> 17;
-                random ^= random << 5;
+                XORSHIFT32(random);
                 digests_bench_data[at] = (p8)random;
         }
         keccak_blocks(digests_bench_lanes, digests_bench_data, 1, 136);
@@ -84455,9 +84361,7 @@ b32 main(void)
 
         for (positive at = 0; at < sizeof(cksum_bench_block); at++)
         {
-                random ^= random << 13;
-                random ^= random >> 17;
-                random ^= random << 5;
+                XORSHIFT32(random);
                 cksum_bench_block[at] = (p8)random;
         }
 
@@ -84677,18 +84581,14 @@ static fn width_bench_fill(const struct width_bench_stream address_to stream)
 
         for (positive at = 0; at < WIDTH_BENCH_CODES; at++)
         {
-                random ^= random << 13;
-                random ^= random >> 17;
-                random ^= random << 5;
+                XORSHIFT32(random);
                 positive pick = random % total;
                 positive which = 0;
 
                 while (pick >= stream->ranges[which].weight)
                         pick -= stream->ranges[which++].weight;
 
-                random ^= random << 13;
-                random ^= random >> 17;
-                random ^= random << 5;
+                XORSHIFT32(random);
                 width_bench_codes[at] = stream->ranges[which].first +
                                         random % stream->ranges[which].count;
         }
@@ -90523,9 +90423,7 @@ static fn make_values()
                         base *= 10;
                 mixed_values[i] = base + (i * 7919u) % base;
 
-                state ^= state << 13;
-                state ^= state >> 7;
-                state ^= state << 17;
+                XORSHIFT64(state);
                 wide_values[i] = state | (1ull << 63);
         }
 
@@ -90684,9 +90582,7 @@ static fn make_values()
 
         for (positive i = 0; i < VALUE_COUNT; i++)
         {
-                state ^= state << 13;
-                state ^= state >> 7;
-                state ^= state << 17;
+                XORSHIFT64(state);
                 values[i] = state;
         }
 
@@ -91083,9 +90979,7 @@ b32 main(void)
                         positive size = sizes[row], ratios[TRIES];
                         for (positive at = 0; at < size; at++)
                         {
-                                seed ^= seed << 13;
-                                seed ^= seed >> 7;
-                                seed ^= seed << 17;
+                                XORSHIFT64(seed);
                                 input[at] = shape == 2 ? (p8)seed
                                             : shape == 1 && seed % 23 == 0 ? (p8)(seed >> 8)
                                                                            : (p8)(' ' + (seed >> 16) % 95);
@@ -91366,9 +91260,7 @@ static fn make_values()
 
         for (positive i = 0; i < VALUE_COUNT; i++)
         {
-                state ^= state << 13;
-                state ^= state >> 7;
-                state ^= state << 17;
+                XORSHIFT64(state);
                 values[i] = i < 32 ? i * 313u : state;
         }
 
@@ -91841,9 +91733,7 @@ static fn make_values()
 
         for (positive i = 0; i < VALUE_COUNT; i++)
         {
-                state ^= state << 13;
-                state ^= state >> 7;
-                state ^= state << 17;
+                XORSHIFT64(state);
                 values[i] = state;
         }
 
@@ -92072,9 +91962,7 @@ static fn make_values()
 
         for (positive i = 0; i < VALUE_COUNT; i++)
         {
-                state ^= state << 13;
-                state ^= state >> 7;
-                state ^= state << 17;
+                XORSHIFT64(state);
 
                 values[0][i] = state & 1023;
                 values[1][i] = 1024 + state % (8 * 1024);
@@ -92287,9 +92175,7 @@ static fn make_values()
                 positive base = binary ? 1024 : 1000;
                 for (positive i = 0; i < VALUE_COUNT; i++)
                 {
-                        state ^= state << 13;
-                        state ^= state >> 7;
-                        state ^= state << 17;
+                        XORSHIFT64(state);
                         values[binary][0][i] = state % base;
                         values[binary][1][i] = base + state % (8 * base);
                         values[binary][2][i] = state;
@@ -93416,9 +93302,7 @@ static p64 random_state = 0x2545f4914f6cdd1d;
 
 static p64 random_next(void)
 {
-        random_state ^= random_state << 13;
-        random_state ^= random_state >> 7;
-        random_state ^= random_state << 17;
+        XORSHIFT64(random_state);
         return random_state;
 }
 
@@ -95595,9 +95479,7 @@ static fn prepare_source(void)
 
         for (positive at = 0; at < MAXIMUM; at++)
         {
-                seed ^= seed << 13;
-                seed ^= seed >> 7;
-                seed ^= seed << 17;
+                XORSHIFT64(seed);
 
                 positive pick = (positive)(seed % 40);
 
@@ -95813,9 +95695,7 @@ static fn prepare_source(void)
 
         for (positive at = 0; at < MAXIMUM; at++)
         {
-                seed ^= seed << 13;
-                seed ^= seed >> 7;
-                seed ^= seed << 17;
+                XORSHIFT64(seed);
 
                 positive pick = (positive)(seed % 40);
 
@@ -95976,9 +95856,7 @@ static fn prepare_source(void)
 
         for (positive at = 0; at < MAXIMUM; at++)
         {
-                seed ^= seed << 13;
-                seed ^= seed >> 7;
-                seed ^= seed << 17;
+                XORSHIFT64(seed);
 
                 positive pick = (positive)(seed % 8);
 
@@ -96187,9 +96065,7 @@ static fn prepare_text(void)
         lines = 0;
         while (at < BLOCK - 128)
         {
-                seed ^= seed << 13;
-                seed ^= seed >> 7;
-                seed ^= seed << 17;
+                XORSHIFT64(seed);
                 if (at - line > 30 + (seed >> 40) % 20)
                 {
                         text[at++] = '\n';
@@ -98852,9 +98728,7 @@ static p8 montgomery_bench_p384[48 * 5];
 
 static p64 montgomery_bench_draw(p64 address_to state)
 {
-        address_to state ^= address_to state << 13;
-        address_to state ^= address_to state >> 7;
-        address_to state ^= address_to state << 17;
+        XORSHIFT64(address_to state);
         return address_to state;
 }
 
@@ -99525,9 +99399,7 @@ static fn limbs_bench_operands(positive n)
 
         for (positive i = 0; i < 256; i++)
         {
-                state ^= state << 13;
-                state ^= state >> 7;
-                state ^= state << 17;
+                XORSHIFT64(state);
                 if (i < 128)
                 {
                         limbs_bench_a[i] = state | (p64)1 << 63;
@@ -100094,9 +99966,7 @@ static fn ordered_heavy_job(address_any context, positive index,
                 {
                         positive word;
 
-                        state ^= state << 13;
-                        state ^= state >> 7;
-                        state ^= state << 17;
+                        XORSHIFT64(state);
                         memory_copy(address_of word, span + at, 8);
                         word = pass ? word ^ state : state;
                         memory_copy(span + at, address_of word, 8);
@@ -102602,7 +102472,7 @@ static fn floor_range(void)
         xz_range_state e = a; e.next = expected; e.limit = expected + sizeof(expected);
         for (positive i = 0; i < 512; i++)
         {
-                random ^= random << 13; random ^= random >> 17; random ^= random << 5;
+                XORSHIFT32(random);
                 positive count = i % 12;
                 modes[i] = i % 3 == 0 ? 8 | 512 | ((positive)(random & 255) << 16)
                             : i % 3 == 1 && count ? count | 256 : count;
@@ -102832,7 +102702,7 @@ static fn floor_deflate_codes(void)
                 positive held = 0, bytes = 0, bits = 0, made = 0, tokens = 0;
                 while (made < target && bytes + 8 < 24 * FLOOR_PAGE)
                 {
-                        random ^= random << 13; random ^= random >> 17; random ^= random << 5;
+                        XORSHIFT32(random);
                         positive mode = (trial >> 1) % 4;
                         bool literal = mode == 0 ? (random & 7) != 0 : mode == 1 ? (random & 7) == 0 : (random & 1);
                         if (literal)
@@ -102845,7 +102715,7 @@ static fn floor_deflate_codes(void)
                         {
                                 positive ls = (random >> 8) % 29, ds = (random >> 16) % 30;
                                 if (mode == 3) ds %= 4;
-                                random ^= random << 13; random ^= random >> 17; random ^= random << 5;
+                                XORSHIFT32(random);
                                 positive le = random & ((1u << gzip_len_extra[ls]) - 1);
                                 positive de = (random >> 8) & ((1u << gzip_dist_extra[ds]) - 1);
                                 positive length = gzip_len_base[ls] + le, distance = gzip_dist_base[ds] + de;
@@ -103186,7 +103056,7 @@ static fn floor_lzma_span(void)
                                          e->chunk + sizeof(e->chunk), 0};
                 while (at < plain_n)
                 {
-                        random ^= random << 13; random ^= random >> 17; random ^= random << 5;
+                        XORSHIFT32(random);
                         positive n = 1;
 
                         if (far && at >= 20)
@@ -103317,7 +103187,7 @@ static fn floor_lzma_span(void)
                                 job.in_stop = bytes + packed - (XZ_PACKET_IN - 1);
                         job.out_end = job.out + (goal - produced);
                         job.out_stop = top < job.out_end ? top : job.out_end;
-                        random ^= random << 13; random ^= random >> 17; random ^= random << 5;
+                        XORSHIFT32(random);
                         if ((trial & 1) && job.out_stop > job.out + 1 + random % 300)
                                 job.out_stop = job.out + 1 + random % 300;
                         job.copy_end = dict + cap - XZ_COPY_SLACK;
@@ -103969,7 +103839,7 @@ b32 main(void)
         p32 random = 0x7433291u;
         for (positive i = 0; i < sizeof(compression_input); i++)
         {
-                random ^= random << 13; random ^= random >> 17; random ^= random << 5;
+                XORSHIFT32(random);
                 compression_input[i] = (p8)random;
         }
         for (positive i = 0; i < 256; i++) compression_codes[i] = (8 << 16) | i;
@@ -106409,7 +106279,7 @@ static __thread unsigned long long rs;
 static unsigned long long rnd(void)
 {
         unsigned long long x = rs ? rs : (rs = rng_state ^ (unsigned long long)(uintptr_t)&rs);
-        x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+        XORSHIFT64(x);
         return rs = x;
 }
 static unsigned below(unsigned n) { return n ? (unsigned)(rnd() % n) : 0; }
