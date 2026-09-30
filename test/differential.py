@@ -13660,6 +13660,32 @@ def shell_expand_pattern_replacement_composed(rng):
         'z=${x' + operation + '$p}; printf "%s\\n" "${#z}"')
 
 
+def shell_expand_pattern_replacement_fixed(rng):
+    """${x/pat/r} with a pattern of no star and no group: it can match only
+    at one size, and the search asks about that size and no other. Every unit
+    a pattern is made of, both anchors, both operators, nocasematch and a
+    value that is or is not ASCII, in a UTF-8 and the C locale."""
+    units = ("a", "b", "B", "?", "[ab]", "[!a]", "[[:alpha:]]", "\\?", "\\a", "[a-b]", "[]a]",
+             "[", ".", "é", "[é]", "Ω")
+    pattern = "".join(rng.choice(units) for _ in range(rng.randrange(1, 4)))
+    #   Left out, both found and not fixed: a pattern that ends in a lone
+    #   backslash (bash matches it nowhere), and [[:alpha:]] over non-ASCII
+    #   letters, which a UTF-8 locale counts and this glob does not.
+    alphabet = ("a", "b", "B", "c", "?", "]", ".", "\\") + (
+        ("é", "Ω") if rng.getrandbits(1) and "[[:alpha:]]" not in pattern else ())
+    value = "".join(rng.choice(alphabet) for _ in range(rng.randrange(0, 14)))
+    anchor = rng.choice(("", "", "#", "%"))
+    operation = rng.choice(("/", "//"))
+    replacement = rng.choice(("X", "", "[&]", "xy"))
+    fold = rng.choice(("-s", "-u"))
+    locale = rng.choice(("C", "en_US.UTF-8"))
+    return "pattern-replacement-fixed", ("bash",), shell_program(
+        "export LC_ALL=" + locale, f"shopt {fold} nocasematch",
+        "x=" + shell_quote(value), "p=" + shell_quote(anchor + pattern),
+        "r=" + shell_quote(replacement),
+        'printf "<%s>\\n" "${x' + operation + '$p/$r}"')
+
+
 def shell_expand_pattern_replacement(rng):
     value = rng.choice(("", "FOOfoo", "aBaB", "éΩé", "aéBΩ", "🌙é🌟", "Ω"))
     pattern = rng.choice(("foo", "a", "B", "?", "[!é]", "[éΩ]", "[a-C]",
@@ -19516,6 +19542,7 @@ SHELL_FAMILIES = (
     shell_expand_indirect_special,
     shell_expand_substring,
     shell_expand_pattern_replacement_composed,
+    shell_expand_pattern_replacement_fixed,
     shell_expand_brace_substitution,
     shell_expand_sequence_slice,
     shell_expand_array_transform,

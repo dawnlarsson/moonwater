@@ -6085,6 +6085,30 @@ static PURE string_address expand_replace_separator(string_address at)
         return null;
 }
 
+// How many bytes an ASCII value gives to a pattern that has no star and no
+// group in it: each byte, ?, \x and [set] matches exactly one, so the pattern
+// can match nowhere but at that size. Zero when the pattern is anything else.
+static PURE positive expand_pattern_width(string_address pattern)
+{
+        positive width = 0;
+
+        for (string_address at = pattern; string_get(at); width++)
+        {
+                string_address close;
+
+                if (string_is(at, '*') || string_is(at, '('))
+                        return 0;
+                if (string_is(at, '[') && (close = expand_set_end(at)))
+                        at = close + 1;
+                else if (string_is(at, '\\') && string_get(at + 1))
+                        at += 2;
+                else
+                        at++;
+        }
+
+        return width;
+}
+
 //      Whether pattern matches exactly size bytes at source + at. The source
 //      is our private copy, so terminating one candidate in place avoids a
 //      fresh allocation for every possible match.
@@ -6323,6 +6347,9 @@ static fn expand_replace_value(p8 address_to source, positive length,
                 2 ms. A pattern ending in a lone backslash would have the
                 star read as a literal one, so it goes the long way.
         */
+        bool utf8 = shell_utf8_on();
+        positive fixed = !utf8 || expand_bytes_ascii(source, length)
+            ? expand_pattern_width(pattern) : 0;
         positive pattern_length = string_length(pattern);
         positive slashes = 0;
 
@@ -6332,7 +6359,7 @@ static fn expand_replace_value(p8 address_to source, positive length,
 
         string_address starred = null;
 
-        if (!(slashes & 1))
+        if (!fixed && !(slashes & 1))
         {
                 p8 address_to built = shell_store_take(address_of expand_store,
                                                        pattern_length + 3);
@@ -6357,7 +6384,6 @@ static fn expand_replace_value(p8 address_to source, positive length,
                 }
         }
 
-        bool utf8 = shell_utf8_on();
         // Bash's multibyte suffix search includes the terminal empty span;
         // its byte/ASCII search does not. Keep that observable distinction
         // without imposing a scan on unanchored or literal replacements.
@@ -6372,7 +6398,25 @@ static fn expand_replace_value(p8 address_to source, positive length,
                 if (anchor == '#')
                         begin = 0;
 
-                for (; begin < starts;)
+                if (fixed)
+                {
+                        // One size to ask about at each start, and no start
+                        // that leaves less than that.
+                        size = fixed;
+                        if (anchor == '%')
+                                begin = length >= fixed ? length - fixed : length + 1;
+                        for (; begin + fixed <= length; begin++)
+                                if (expand_replace_match(source, begin, fixed,
+                                                         pattern, fold))
+                                {
+                                        found = true;
+                                        break;
+                                }
+                                else if (anchor)
+                                        break;
+                }
+
+                for (; !fixed && begin < starts;)
                 {
                         positive largest = length - begin;
                         bool may = anchor == '%' || !starred ||
