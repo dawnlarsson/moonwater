@@ -4759,30 +4759,68 @@ no_room:
         in a word, and a command ends at ; & | or a newline. "-" (standard
         input) is not a secret, and neither is "allow" after a namespace.
 */
-#define HISTORY_SECRET_WORDS 5
+#define HISTORY_SECRET_WORDS 12
 #define HISTORY_SECRET_ROOM 48
+
+// Words that run the next word: the moonwater behind them is what is asked.
+static bool history_secret_wrapper(const p8 address_to word)
+{
+        static const string_address wrappers[] = {
+            "sudo", "doas", "env", "command", "exec", "nohup", "time",
+            "builtin", "nice", "ionice", "setsid", "chrt", "taskset",
+            "stdbuf", "timeout", "unbuffer", "xargs", "busybox", "strace"};
+
+        for (positive at = 0; at < array_count(wrappers); at++)
+                if (string_equals((string_address)word, wrappers[at]))
+                        return true;
+        return false;
+}
+
+// NAME=value, which a command line may begin with.
+static bool history_secret_assignment(const p8 address_to word)
+{
+        positive at = 0;
+
+        if (!(byte_is_alpha(word[0]) || word[0] == '_'))
+                return false;
+        while (word[at] && (byte_is_alnum(word[at]) || word[at] == '_'))
+                at++;
+        return word[at] == '=';
+}
 
 static bool history_secret_words(p8 word[][HISTORY_SECRET_ROOM], positive count)
 {
+        positive first = 0;
         positive length;
-        bool moonwater;
 
-        if (count < HISTORY_SECRET_WORDS)
+        if (count > HISTORY_SECRET_WORDS)
+                count = HISTORY_SECRET_WORDS;
+
+        //      Assignments, wrappers and their options come first: sudo
+        //      moonwater wifi add h pass is the same line.
+        while (first < count &&
+               (history_secret_assignment(word[first]) ||
+                history_secret_wrapper(word[first]) ||
+                (first && (word[first][0] == '-' ||
+                           (word[first][0] >= '0' && word[first][0] <= '9')))))
+                first++;
+
+        if (first >= count || count - first < 5)
                 return false;
 
-        length = string_length((string_address)word[0]);
-        moonwater = string_equals((string_address)word[0], "moonwater") ||
-                    (length > 10 &&
-                     string_equals((string_address)word[0] + length - 10,
-                                   "/moonwater"));
+        length = string_length((string_address)word[first]);
+        if (!(string_equals((string_address)word[first], "moonwater") ||
+              (length > 10 &&
+               string_equals((string_address)word[first] + length - 10,
+                             "/moonwater"))))
+                return false;
 
-        return moonwater &&
-               !string_equals((string_address)word[4], "-") &&
-               ((string_equals((string_address)word[1], "wifi") &&
-                 string_equals((string_address)word[2], "add")) ||
-                (string_equals((string_address)word[1], "link") &&
-                 string_equals((string_address)word[2], "join") &&
-                 !string_equals((string_address)word[4], "allow")));
+        return !string_equals((string_address)word[first + 4], "-") &&
+               ((string_equals((string_address)word[first + 1], "wifi") &&
+                 string_equals((string_address)word[first + 2], "add")) ||
+                (string_equals((string_address)word[first + 1], "link") &&
+                 string_equals((string_address)word[first + 2], "join") &&
+                 !string_equals((string_address)word[first + 4], "allow")));
 }
 
 static bool history_secret_line(string_address text, positive length)
