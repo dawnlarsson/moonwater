@@ -4541,6 +4541,7 @@ typedef struct
         p8 pmf;
         p8 group;
         p8 pairwise;
+        p8 h2e; // the RSNXE says SAE hash-to-element
 } wifi_rsn_caps;
 
 /* The RSN element a station offers, in the association request and again
@@ -5070,6 +5071,207 @@ static COLD fn wifi_sae_confirm(p8 address_to kck, p8 address_to counter, p8 add
         memory_copy(block + 98, other_scalar, 32);
         memory_copy(block + 130, other_element, 64);
         crypto_hmac_sha256(kck, 32, block, sizeof(block), out);
+}
+
+/*
+        Hash-to-element (802.11-2020 12.4.4.2.3), the password element that
+        a password keeps the same cost for to find: the password and the
+        network's name make a point PT once, by two simplified SWU maps
+        (RFC 9380's, with the sign of y taken from u), and the element of
+        a pair of stations is PT times a number their two addresses make. No
+        hunt, so nothing about the password is in how long anything takes.
+*/
+
+/* (p + 1) / 4, the exponent that takes a square root of this field's
+   quadratic residues (p is 3 mod 4). */
+static COLD fn wifi_sae_root_exponent(p64 address_to exponent)
+{
+        p64 carry = 1;
+
+        for (positive i = 0; i < 4; i++)
+                exponent[i] = (crypto_p256_p[i] >> 2) | (i < 3 ? crypto_p256_p[i + 1] << 62 : 0);
+        for (positive i = 0; i < 4; i++)
+        {
+                p64 sum = exponent[i] + carry;
+
+                carry = sum < carry;
+                exponent[i] = sum;
+        }
+}
+
+/* A small number in Montgomery form. */
+static COLD fn wifi_sae_small(p64 address_to out, p64 value)
+{
+        memory_fill(out, 0, 4 * sizeof(p64));
+        out[0] = value;
+        crypto_fe_mul(out, out, crypto_p256_field.square, &crypto_p256_field);
+}
+
+/* Forty-eight big-endian bytes modulo p, as a plain integer: the high
+   sixteen times 2^256 (which is the conversion to Montgomery form) plus
+   the low thirty-two, brought under p once. */
+static COLD fn wifi_sae_reduce(p64 address_to out, p8 address_to bytes)
+{
+        p64 high[CRYPTO_FE_MAX], low[CRYPTO_FE_MAX], under[CRYPTO_FE_MAX];
+        p64 less;
+
+        memory_fill(high, 0, sizeof(high));
+        high[0] = network_load_64(bytes + 8);
+        high[1] = network_load_64(bytes);
+        crypto_fe_load_be(low, bytes + 16, 4);
+        less = crypto_fe_subtract_raw(under, low, crypto_p256_p, 4);
+        crypto_fe_select(low, under, low, 4, less);
+        crypto_fe_mul(high, high, crypto_p256_field.square, &crypto_p256_field);
+        crypto_fe_add(out, high, low, &crypto_p256_field);
+}
+
+/* The simplified SWU map of u, a plain integer under p, to a point of the
+   curve, as plain x and y. */
+static COLD fn wifi_sae_sswu(p64 address_to x_out, p64 address_to y_out, const p64 address_to u)
+{
+        const crypto_field address_to f = &crypto_p256_field;
+        p64 um[4], u2[4], t1[4], t2[4], m[4], t[4], z[4], a[4], b[4], zero[4], one[4];
+        p64 x1a[4], x1b[4], x1[4], x2[4], gx1[4], gx2[4], y1[4], v[4], x[4], y[4], ny[4];
+        p64 exponent[4];
+        p8 b_bytes[32];
+        p64 is_zero, is_square, odd;
+
+        wifi_sae_root_exponent(exponent);
+        memory_fill(zero, 0, sizeof(zero));
+        memory_copy(one, f->one, sizeof(one));
+        wifi_sae_small(t1, 10);
+        crypto_fe_sub(z, zero, t1, f);
+        wifi_sae_small(t1, 3);
+        crypto_fe_sub(a, zero, t1, f);
+        memory_copy(b_bytes, crypto_p256_b_be, 32);
+        crypto_fe_load_be(b, b_bytes, 4);
+        crypto_fe_mul(b, b, f->square, f);
+
+        crypto_fe_mul(um, u, f->square, f);
+        //      m = z^2 u^4 + z u^2, t = 1 / m (zero for zero).
+        crypto_fe_sqr(u2, um, f);
+        crypto_fe_mul(t1, z, u2, f);
+        crypto_fe_sqr(t2, t1, f);
+        crypto_fe_add(m, t1, t2, f);
+        crypto_fe_inv(t, m, f);
+        //      x1 = b / (z a) when m is zero, else (-b / a) (1 + t).
+        crypto_fe_mul(t1, z, a, f);
+        crypto_fe_inv(t1, t1, f);
+        crypto_fe_mul(x1a, b, t1, f);
+        crypto_fe_sub(t1, zero, b, f);
+        crypto_fe_inv(t2, a, f);
+        crypto_fe_mul(t1, t1, t2, f);
+        crypto_fe_add(t2, one, t, f);
+        crypto_fe_mul(x1b, t1, t2, f);
+        is_zero = crypto_fe_zero_bit(m, 4);
+        crypto_fe_select(x1, x1b, x1a, 4, is_zero);
+        //      gx1 = x1^3 + a x1 + b; x2 = z u^2 x1; gx2 likewise.
+        crypto_fe_sqr(t1, x1, f);
+        crypto_fe_mul(t1, t1, x1, f);
+        crypto_fe_mul(t2, a, x1, f);
+        crypto_fe_add(t1, t1, t2, f);
+        crypto_fe_add(gx1, t1, b, f);
+        crypto_fe_mul(t1, z, u2, f);
+        crypto_fe_mul(x2, t1, x1, f);
+        crypto_fe_sqr(t1, x2, f);
+        crypto_fe_mul(t1, t1, x2, f);
+        crypto_fe_mul(t2, a, x2, f);
+        crypto_fe_add(t1, t1, t2, f);
+        crypto_fe_add(gx2, t1, b, f);
+        //      Whichever of gx1 and gx2 is a square gives the point.
+        wifi_sae_power(y1, gx1, exponent);
+        crypto_fe_sqr(t1, y1, f);
+        crypto_fe_sub(t1, t1, gx1, f);
+        is_square = crypto_fe_zero_bit(t1, 4);
+        crypto_fe_select(v, gx2, gx1, 4, is_square);
+        crypto_fe_select(x, x2, x1, 4, is_square);
+        wifi_sae_power(y, v, exponent);
+        //      The y whose low bit is u's.
+        crypto_fe_mul(t1, y, crypto_unit, f);
+        odd = t1[0] & 1;
+        crypto_fe_sub(ny, zero, y, f);
+        crypto_fe_select(y, y, ny, 4, odd ^ (u[0] & 1));
+        crypto_fe_mul(x_out, x, crypto_unit, f);
+        crypto_fe_mul(y_out, y, crypto_unit, f);
+}
+
+/* PT for a network's name and a password: HKDF-Extract of the password by
+   the name, two HKDF-Expands to 48 bytes each, the map of each reduced by
+   p, and the sum of the two points, as x then y. */
+static COLD bool wifi_sae_pt(p8 address_to ssid, positive ssid_length, p8 address_to password,
+                             positive password_length, p8 address_to pt)
+{
+        p8 seed[32];
+        p8 value[48];
+        p64 u[CRYPTO_FE_MAX], x[2][CRYPTO_FE_MAX], y[2][CRYPTO_FE_MAX];
+        crypto_point point[2], total;
+        bool good = true;
+
+        crypto_hkdf_extract(ssid, ssid_length, password, password_length, seed);
+        for (positive which = 0; which < 2; which++)
+        {
+                string_address label = which ? (string_address) "SAE Hash to Element u2 P2"
+                                             : (string_address) "SAE Hash to Element u1 P1";
+
+                good &= crypto_hkdf_expand(seed, (p8 address_to)label, 25, value, 48);
+                wifi_sae_reduce(u, value);
+                wifi_sae_sswu(x[which], y[which], u);
+                crypto_point_set_xy(&point[which], x[which], y[which], &crypto_p256_field);
+        }
+        crypto_point_add(&total, &point[0], &point[1]);
+        good &= !crypto_fe_is_zero(total.z, 4);
+        crypto_point_affine(&total);
+        crypto_fe_store_be(pt, total.x, 4);
+        crypto_fe_store_be(pt + 32, total.y, 4);
+        crypto_forget(seed, sizeof(seed));
+        crypto_forget(value, sizeof(value));
+        crypto_forget(u, sizeof(u));
+        return good;
+}
+
+/* The element of two stations from PT: PT times H(0^32, the higher address
+   then the lower) reduced to 1 .. r - 1. */
+static COLD bool wifi_sae_pwe_from_pt(p8 address_to pt, p8 address_to first, p8 address_to second,
+                                      p8 address_to pwe)
+{
+        p8 key[12];
+        p8 zeros[32];
+        p8 val[32];
+        p64 v[CRYPTO_FE_MAX], below[CRYPTO_FE_MAX], one[CRYPTO_FE_MAX], diff[CRYPTO_FE_MAX];
+        p64 less;
+
+        if (memory_compare(first, second, 6) > 0)
+        {
+                memory_copy(key, first, 6);
+                memory_copy(key + 6, second, 6);
+        }
+        else
+        {
+                memory_copy(key, second, 6);
+                memory_copy(key + 6, first, 6);
+        }
+        memory_fill(zeros, 0, sizeof(zeros));
+        crypto_hkdf_extract(zeros, 32, key, 12, val);
+        //      val mod (r - 1) + 1. A hash is under twice r - 1, so one subtraction does it.
+        crypto_fe_load_be(v, val, 4);
+        memory_fill(one, 0, sizeof(one));
+        one[0] = 1;
+        crypto_fe_subtract_raw(below, crypto_p256_n, one, 4);
+        less = crypto_fe_subtract_raw(diff, v, below, 4);
+        crypto_fe_select(v, diff, v, 4, less);
+        {
+                p64 carry = 1;
+
+                for (positive i = 0; i < 4; i++)
+                {
+                        p64 sum = v[i] + carry;
+
+                        carry = sum < carry;
+                        v[i] = sum;
+                }
+        }
+        crypto_fe_store_be(val, v, 4);
+        return wifi_sae_multiply(pwe, val, pt);
 }
 
 static COLD bipolar nl80211_authorize(nl80211 address_to session, p32 index,
@@ -6008,6 +6210,8 @@ static COLD bipolar nl80211_connect(nl80211 address_to session, p32 index,
 #define WLAN_AKM_SAE 0x000fac08u
 #define WIFI_SAE_SECONDS 10
 #define WIFI_SAE_TOKEN_MOST 64
+#define WIFI_SAE_H2E_STATUS 126
+#define WIFI_SAE_TOKEN_EXTENSION 93
 
 static COLD bipolar nl80211_authenticate(nl80211 address_to session, p32 index,
                                          p8 address_to ssid, positive ssid_length,
@@ -6042,21 +6246,32 @@ static COLD bipolar nl80211_authenticate(nl80211 address_to session, p32 index,
    (or 126 when the exchange uses hash-to-element), the group, the token an
    access point asked for, the scalar and the element. */
 static COLD positive wifi_sae_commit_body(wifi_sae address_to sae, p8 address_to token,
-                                          positive token_length, p8 address_to out)
+                                          positive token_length, p8 address_to out, bool h2e)
 {
         positive at = 0;
 
         out[at++] = 1, out[at++] = 0;
-        out[at++] = 0, out[at++] = 0;
+        out[at++] = h2e ? WIFI_SAE_H2E_STATUS : 0, out[at++] = 0;
         out[at++] = WIFI_SAE_GROUP, out[at++] = 0;
-        if (token_length)
+        //      A token goes before the scalar, or, for hash-to-element, after
+        //      the element in a container element of its own.
+        if (token_length && !h2e)
         {
                 memory_copy(out + at, token, token_length);
                 at += token_length;
         }
         memory_copy(out + at, sae->scalar, 32);
         memory_copy(out + at + 32, sae->element, 64);
-        return at + 96;
+        at += 96;
+        if (token_length && h2e)
+        {
+                out[at++] = 255;
+                out[at++] = (p8)(1 + token_length);
+                out[at++] = WIFI_SAE_TOKEN_EXTENSION;
+                memory_copy(out + at, token, token_length);
+                at += token_length;
+        }
+        return at;
 }
 
 /*
@@ -6068,9 +6283,9 @@ static COLD positive wifi_sae_commit_body(wifi_sae address_to sae, p8 address_to
 */
 static COLD bipolar wifi_sae_exchange(nl80211 address_to session, p32 index, p8 address_to ssid,
                                       positive ssid_length, p8 address_to bssid,
-                                      p32 frequency, wifi_sae address_to sae)
+                                      p32 frequency, wifi_sae address_to sae, bool h2e)
 {
-        p8 body[2 + 2 + 2 + WIFI_SAE_TOKEN_MOST + 96];
+        p8 body[2 + 2 + 2 + WIFI_SAE_TOKEN_MOST + 96 + 3];
         p8 token[WIFI_SAE_TOKEN_MOST];
         positive token_length = 0;
         network_deadline deadline;
@@ -6079,7 +6294,7 @@ static COLD bipolar wifi_sae_exchange(nl80211 address_to session, p32 index, p8 
         bipolar failed;
 
         failed = nl80211_authenticate(session, index, ssid, ssid_length, bssid, frequency, body,
-                                      wifi_sae_commit_body(sae, null, 0, body));
+                                      wifi_sae_commit_body(sae, null, 0, body, h2e));
         if (failed < 0 || !network_deadline_begin(address_of deadline, WIFI_SAE_SECONDS, 0))
                 return failed < 0 ? failed : -1;
 
@@ -6149,22 +6364,36 @@ static COLD bipolar wifi_sae_exchange(nl80211 address_to session, p32 index, p8 
                         if (transaction == 1 && status == 76)
                         {
                                 //      Anti-clogging: the same commit again with
-                                //      the token it asked for.
+                                //      the token it asked for, which is the rest
+                                //      of the frame after the group, or for
+                                //      hash-to-element the contents of a
+                                //      container element there.
                                 positive room = size - 30 >= 2 ? size - 32 : 0;
+                                p8 address_to start = frame + 32;
 
+                                if (room >= 3 && start[0] == 255 && start[1] >= 1 &&
+                                    start[1] + 2u <= room && start[2] == WIFI_SAE_TOKEN_EXTENSION)
+                                {
+                                        room = (positive)start[1] - 1;
+                                        start += 3;
+                                }
                                 if (token_length || !room || room > WIFI_SAE_TOKEN_MOST)
                                 {
                                         netlink_forget(address_of reply);
                                         return -111;
                                 }
-                                memory_copy(token, frame + 32, room);
+                                memory_copy(token, start, room);
                                 token_length = room;
                                 nl80211_authenticate(session, index, ssid, ssid_length, bssid,
                                                      frequency, body,
-                                                     wifi_sae_commit_body(sae, token, token_length, body));
+                                                     wifi_sae_commit_body(sae, token, token_length,
+                                                                          body, h2e));
                                 continue;
                         }
-                        if (status)
+                        //      A commit that says hash-to-element is answered
+                        //      in kind, and is the one status that is not a
+                        //      refusal.
+                        if (status && !(h2e && transaction == 1 && status == WIFI_SAE_H2E_STATUS))
                         {
                                 netlink_forget(address_of reply);
                                 return sent_confirm ? -13 : -111;
@@ -6476,15 +6705,44 @@ static COLD bipolar nl80211_join(p8 address_to ssid, positive ssid_length, p8 ad
                         nl80211_disconnect(address_of link->session, iface.index);
                         memory_fill(link->bssid, 0, 6);
                         memory_fill(exchange, 0, sizeof(*exchange));
-                        failed = wifi_sae_pwe(pass, pass_length, link->sta, chosen, exchange->pwe) &&
-                                         wifi_sae_commit(exchange)
+                        //      Hash-to-element when the access point's RSN extension
+                                //      element says it takes it (and always then: one set
+                                //      to hash-to-element only turns the hunt away),
+                                //      the hunt for the element otherwise.
+                        if (caps.h2e)
+                        {
+                                p8 point[64];
+
+                                failed = wifi_sae_pt(ssid, ssid_length, pass, pass_length, point) &&
+                                                 wifi_sae_pwe_from_pt(point, link->sta, chosen,
+                                                                      exchange->pwe)
+                                             ? 0
+                                             : -1;
+                                crypto_forget(point, sizeof(point));
+                        }
+                        else
+                                failed = wifi_sae_pwe(pass, pass_length, link->sta, chosen,
+                                                      exchange->pwe)
+                                             ? 0
+                                             : -1;
+                        failed = !failed && wifi_sae_commit(exchange)
                                      ? wifi_sae_exchange(address_of link->session, iface.index, ssid,
-                                                         ssid_length, chosen, frequency, exchange)
+                                                         ssid_length, chosen, frequency, exchange,
+                                                         caps.h2e != 0)
                                      : -1;
                         if (!failed)
                         {
                                 memory_copy(link->pmk, exchange->pmk, 32);
                                 link->rsn_length = (p8)wifi_rsn_build(link->rsn, 8, pmf, exchange->pmkid);
+                                if (caps.h2e)
+                                {
+                                        //      The RSN extension element, in the
+                                        //      association request and in message 2
+                                        //      alike: bit 5, hash-to-element.
+                                        link->rsn[link->rsn_length++] = 244;
+                                        link->rsn[link->rsn_length++] = 1;
+                                        link->rsn[link->rsn_length++] = 0x20;
+                                }
                                 failed = nl80211_associate(address_of link->session, iface.index, ssid,
                                                            ssid_length, chosen, frequency, link->rsn,
                                                            link->rsn_length);
@@ -7489,7 +7747,7 @@ static bool radio_bss_read(netlink_header address_to header, radio_heard address
         p8 address_to elements;
         p8 address_to value;
         byte_reader ies;
-        bool rsn = false, wpa = false, named = false;
+        bool rsn = false, wpa = false, named = false, rsnx_h2e = false;
         p16 capability = 0;
 
         if (header->length < NETLINK_HEADER + GENL_HEADER ||
@@ -7565,10 +7823,16 @@ static bool radio_bss_read(netlink_header address_to header, radio_heard address
                             (p8 address_to)byte_reader_here(&data), span,
                             address_of one->rsn);
                 }
+                else if (id == 244 && span >= 1)
+                        //      The RSN extension element: bit 5 of its first
+                        //      byte says the access point takes SAE's
+                        //      hash-to-element.
+                        rsnx_h2e = (byte_reader_u8(&data) & 0x20) != 0;
                 else if (id == 221 && span >= 4 &&
                          byte_reader_u32(&data) == 0x0050f201)
                         wpa = true;
         }
+        one->rsn.h2e = rsnx_h2e;
         if (!rsn)
                 one->security = wpa ? RADIO_WPA : (capability & 0x10) ? RADIO_WEP : RADIO_OPEN;
         return true;
