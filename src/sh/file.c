@@ -35544,7 +35544,9 @@ static bool cp_tree_file(bipolar source, bipolar copy, string_address name)
         of it refused the lot.
 */
 static bool cp_created_valid;
-#define CP_CREATED_MAX 32
+//      GNU's table has no bound; this one holds a directory for each source a
+//      command line could name at any realistic length.
+#define CP_CREATED_MAX 4096
 static p64 cp_created_inode[CP_CREATED_MAX];
 static p32 cp_created_major[CP_CREATED_MAX];
 static p32 cp_created_minor[CP_CREATED_MAX];
