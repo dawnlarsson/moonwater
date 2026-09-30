@@ -25270,12 +25270,10 @@ static fn grep_color_line(string_address line, positive length, bool context,
         what -R undoes. The one named on the command line is followed either
         way -- opening it is how it was found at all.
 */
-#define GREP_PATHS_MAX (1 << 20)
-
 static string_address address_to grep_paths;
 static positive grep_path_count;
 // Which of grep_paths are directories for grep_tree to walk when their turn
-// comes; null where every walk has already put its files on the list.
+// comes; null when nothing is walked.
 static p8 address_to grep_path_walks;
 static positive grep_paths_room;
 static bool grep_recursive;
@@ -25407,11 +25405,6 @@ static PURE bool grep_wanted_name(string_address name, bool operand)
         return true;
 }
 
-static PURE bool grep_wanted_file(string_address path)
-{
-        return grep_wanted_name(file_last_component(path), false);
-}
-
 // A directory is held to --exclude-dir alone, whether a walk met it or it
 // was named, and never to --include or --exclude.
 static PURE bool grep_wanted_directory(string_address path, bool operand)
@@ -25444,260 +25437,32 @@ static bool grep_path_add(string_address path)
         return true;
 }
 
-// An empty prefix is grep -r with nothing named, where GNU walks the working
-// directory and prints what it finds without a ./ in front of it.
-static string_address grep_path_join(string_address directory, string_address name)
+// What an entry is once getdents has had its say, where it says anything: a
+// filesystem that does not know answers DT_UNKNOWN, and a link is asked of the
+// name it points at. A directory and a file are themselves and anything else
+// is DT_FIFO, a thing a walk does not read; nothing at all is a name that
+// cannot be asked, 0, which the caller passes over.
+static p8 grep_entry_kind(bipolar directory, string_address name, p8 kind)
 {
-        positive have = directory ? string_length(directory) : 0;
-        positive extra = string_length(name);
-
-        have -= path_trailing_slashes(directory, have);
-
-        if (have == 1 && directory[0] == '/')
-                have = 0;
-
-        p8 address_to room = (p8 address_to)utility_arena_take(have + extra + 2);
-
-        if (!room)
-                return null;
-
-        memory_copy(room, directory, have);
-
-        if (have || (directory && directory[0] == '/'))
-                room[have++] = '/';
-
-        memory_copy_apart_end(room + have, name, extra);
-
-        return (string_address)room;
-}
-
-// What getdents says an entry is, where it says anything: a filesystem that
-// does not know answers DIRENT_UNKNOWN and the answer is taken from a stat.
-enum
-{
-        DIRENT_UNKNOWN = 0,
-        DIRENT_OTHER = 1,
-        DIRENT_DIRECTORY = 4,
-        DIRENT_FILE = 8,
-        DIRENT_LINK = 10
-};
-
-#define GREP_DIRENT_BYTES 2048
-// A symlink that points at a directory above it is a walk with no end, and -R
-// follows symlinks. The device and node of everything currently being walked
-// through stops that where it starts, and the depth stops what the pair
-// cannot -- a mount arranged to be its own child. GNU has no such bound and
-// finds a file 300 directories down, so the bound sits where a frame of this
-// recursion per level still fits a default stack many times over.
-#define GREP_DEPTH_MAX 8192
-
-static positive grep_seen_device[GREP_DEPTH_MAX + 1];
-static positive grep_seen_node[GREP_DEPTH_MAX + 1];
-// Out of room for names: the one failure that ends every level of a walk.
-static bool grep_walk_halted;
-
-// A directory's records are all read before anything below it is walked, so
-// one buffer serves every level and stays out of the recursion's frames.
-static p8 grep_dirents[GREP_DIRENT_BYTES];
-
-/*
-        The names every directory on the way down is still to walk, as one
-        stack: a level puts its names on top, reads them back by offset -- the
-        stack moves when it grows -- and cuts back to where it found it. One
-        allocation for the whole walk, as deep as the path and never wider,
-        rather than one per directory for the allocator to keep.
-*/
-static p8 address_to grep_walk_names;
-static positive grep_walk_names_used;
-static positive grep_walk_names_room;
-
-static bool grep_walk(string_address path, b32 depth, bool quietly)
-{
-        bipolar handle;
-        p8 address_to entries = grep_dirents;
-        bool fine = true;
-
-        // Too deep is nothing more down here rather than a failure: GNU says
-        // it found a loop and carries on with what is beside it.
-        if (depth > GREP_DEPTH_MAX)
-                return true;
-
-        handle = text_open_handle(path && path[0] ? path : (string_address) ".",
-                                  FILE_READ, 0);
-
-        /*
-                A directory that will not open is searched like a file, so
-                the read that fails the same way reports it where it falls
-                among the files around it, as GNU's message does, and the
-                walk goes on beside it.
-        */
-        if (handle < 0 && path && path[0])
-        {
-                if (!grep_path_add(path))
-                        grep_walk_halted = true;
-
-                return !grep_walk_halted;
-        }
-
-        if (handle < 0)
-        {
-                if (!quietly)
-                        string_diagnostic(&text_diagnostic, 0, path, file_reason(handle));
-                return false;
-        }
-
         file_facts facts;
 
-        if (text_handle_facts((positive)handle, address_of facts))
-        {
-                positive device = file_device_key(facts.device_major,
-                                                  facts.device_minor);
-                positive node = facts.inode;
+        if (kind != DT_UNKNOWN && kind != DT_LNK)
+                return kind;
 
-                for (b32 up = 0; up < depth; up++)
-                        if (grep_seen_device[up] == device &&
-                            grep_seen_node[up] == node)
-                        {
-                                system_close(handle);
-                                return true;
-                        }
+        if (!file_look(directory, name, 0, address_of facts))
+                return 0;
 
-                grep_seen_device[depth] = device;
-                grep_seen_node[depth] = node;
-        }
+        p32 mode = facts.mode & MODE_FORMAT;
 
-        positive have = 0, at = 0;
-        bipolar error = 0;
-        struct linux_dirent64 address_to entry;
-        positive base = grep_walk_names_used;
-
-        /*
-                The names are read out and the directory closed before any of
-                them is walked, so a walk holds one descriptor however deep it
-                goes -- GNU's fts finds a file 300 directories down under a
-                limit of 256 -- and the names are still taken in readdir order.
-                They wait on the names stack as a kind byte and the name, and
-                become paths only when their turn comes, as they did when the
-                walk went down mid-read.
-        */
-        while ((entry = file_directory_next(handle, entries, GREP_DIRENT_BYTES,
-                                            address_of have, address_of at,
-                                            address_of error)))
-        {
-                string_address name = (string_address)entry->d_name;
-                p8 kind = entry->d_type;
-
-                if (file_is_dot(name))
-                        continue;
-
-                if (kind == DIRENT_LINK && !grep_dereference)
-                        continue;
-
-                positive length = string_length(name) + 1;
-                positive used = grep_walk_names_used;
-
-                if (grep_walk_names_room - used < 1 + length)
-                {
-                        positive room = grep_walk_names_room ? grep_walk_names_room : 65536;
-
-                        while (room - used < 1 + length)
-                                room *= 2;
-
-                        p8 address_to grown = memory_resize(grep_walk_names, room);
-
-                        if (!grown)
-                        {
-                                grep_walk_halted = true;
-                                fine = false;
-                                break;
-                        }
-
-                        grep_walk_names = grown;
-                        grep_walk_names_room = room;
-                }
-
-                grep_walk_names[used] = kind;
-                memory_copy(grep_walk_names + used + 1, name, length);
-                grep_walk_names_used = used + 1 + length;
-        }
-
-        system_close(handle);
-
-        positive top = grep_walk_names_used;
-
-        // A directory below that cannot be read is reported and passed, as
-        // GNU does, and what is beside it is still walked; only running out
-        // of room for names stops the whole walk.
-        for (positive from = base; from < top && !grep_walk_halted;)
-        {
-                p8 kind = grep_walk_names[from];
-                string_address full = grep_path_join(
-                    path, (string_address)(grep_walk_names + from + 1));
-
-                from += 1 + string_length((string_address)(grep_walk_names + from + 1)) + 1;
-
-                if (!full)
-                {
-                        grep_walk_halted = true;
-                        fine = false;
-                        break;
-                }
-
-                // Asked of the name, not of an open: a directory nobody may
-                // read is still a directory, and is reported when it fails.
-                if (kind == DIRENT_UNKNOWN || kind == DIRENT_LINK)
-                {
-                        file_facts facts;
-
-                        if (!file_look(AT_FDCWD, full, 0, address_of facts))
-                                continue;
-
-                        p32 mode = facts.mode & MODE_FORMAT;
-
-                        kind = mode == MODE_DIRECTORY ? DIRENT_DIRECTORY
-                             : mode == MODE_FILE      ? DIRENT_FILE
-                                                      : DIRENT_OTHER;
-                }
-
-                if (kind == DIRENT_DIRECTORY)
-                {
-                        if (grep_wanted_directory(full, false) &&
-                            !grep_walk(full, depth + 1, quietly))
-                                fine = false;
-
-                        continue;
-                }
-
-                // Anything that is not a plain file is a device, and a
-                // walk does not read devices.
-                if (kind != DIRENT_FILE)
-                        continue;
-
-                if (grep_wanted_file(full) && !grep_path_add(full))
-                {
-                        grep_walk_halted = true;
-                        fine = false;
-                }
-        }
-
-        grep_walk_names_used = base;
-
-        if (!depth && grep_walk_names)
-        {
-                memory_give(grep_walk_names);
-                grep_walk_names = null;
-                grep_walk_names_room = 0;
-        }
-
-        if (error < 0)
-        {
-                if (!quietly)
-                        string_diagnostic(&text_diagnostic, 0, path, file_reason(error));
-                fine = false;
-        }
-
-        return fine;
+        return mode == MODE_DIRECTORY ? DT_DIR : mode == MODE_FILE ? DT_REG : DT_FIFO;
 }
+
+// A symlink that points at a directory above it is a walk with no end, and -R
+// follows symlinks. The device and node of everything on the way down stops
+// that where it starts, and the depth stops what the pair cannot -- a mount
+// arranged to be its own child. GNU has no such bound and finds a file 300
+// directories down, so the bound sits far past any tree.
+#define GREP_DEPTH_MAX 8192
 
 /*
         The long spellings grep answers to.
@@ -27144,6 +26909,8 @@ typedef struct
         bool never, icase, invert, counting, listing, listing_without, quiet,
              quietly, whole_line, whole_word, only, null_data, literal_proves,
              literal_set, machine, grouped, discarded, refuse_output;
+        // Every file of a walk is handed back to the line loop, unread.
+        bool serial;
         bool found_any, shown_any;
         // -q has its answer, and nothing more is read.
         bool quit;
@@ -28475,7 +28242,7 @@ static bool grep_pieces_search(grep_pieces address_to task)
 
 /*
         One more file in the leaf being filled while a directory is read, its
-        path the way grep_path_join makes it: the leaf is made and grown by
+        path joined to its directory's: the leaf is made and grown by
         the job reading, and is the caller's to free once handed over.
 */
 static bool grep_leaf_add(grep_node address_to directory,
@@ -28538,7 +28305,7 @@ static bool grep_leaf_add(grep_node address_to directory,
         return true;
 }
 
-// A child's path the way grep_path_join makes it.
+// A child's path, joined to its directory's the way a leaf's are.
 static grep_node address_to grep_node_new(grep_node address_to parent,
                                          string_address name,
                                          positive name_length)
@@ -29005,7 +28772,8 @@ static fn grep_tree_leaf(address_any context, address_any node_address,
                 if (!parallel_reserve(into, sizeof(record)))
                         return;
 
-                bipolar handle = scratch && scratch->buffer
+                bipolar handle = scratch && scratch->buffer &&
+                                         !((grep_run address_to)context)->serial
                                      ? system_open_at(directory, path + name_at,
                                                       FILE_READ | O_CLOEXEC)
                                      : -1;
@@ -29117,29 +28885,20 @@ static fn grep_tree_enter(address_any context, address_any node_address,
                 if (file_is_dot(name))
                         continue;
 
-                if (kind == DIRENT_LINK && !grep_dereference)
+                if (kind == DT_LNK && !grep_dereference)
                         continue;
 
-                if (kind == DIRENT_UNKNOWN || kind == DIRENT_LINK)
-                {
-                        file_facts look;
+                kind = grep_entry_kind(directory, name, kind);
 
-                        if (!file_look(directory, name, 0, address_of look))
-                                continue;
+                if (!kind)
+                        continue;
 
-                        p32 mode = look.mode & MODE_FORMAT;
-
-                        kind = mode == MODE_DIRECTORY ? DIRENT_DIRECTORY
-                             : mode == MODE_FILE      ? DIRENT_FILE
-                                                      : DIRENT_OTHER;
-                }
-
-                bool below = kind == DIRENT_DIRECTORY;
+                bool below = kind == DT_DIR;
 
                 // Too deep is nothing more down there, and a device is not read.
                 if (below ? node->depth >= GREP_DEPTH_MAX ||
                                 !grep_wanted_directory(name, false)
-                          : kind != DIRENT_FILE || !grep_wanted_name(name, false))
+                          : kind != DT_REG || !grep_wanted_name(name, false))
                         continue;
 
                 positive name_length = string_length(name);
@@ -29359,7 +29118,6 @@ static b32 text_grep()
         grep_directories_last = 0;
         grep_binary_files = GREP_BINARY_DETECT;
         grep_utf8 = text_locale_utf8();
-        grep_walk_halted = false;
         grep_path_count = 0;
         grep_path_walks = null;
         grep_expanded = false;
@@ -29612,26 +29370,21 @@ static b32 text_grep()
         bool refuse_output = output_regular && !counting && !quiet &&
                              !listing && !listing_without && !limit_negative &&
                              limit > 1;
-        b32 trouble = 0;
-
         /*
-                Where every file a walk finds is read the way the span loop
-                reads it, the walk is grep_tree's, on every core, and each
-                directory named waits its turn on the list whole. Context, -o
-                and colour on a printed line are the line loop's, and that walk
-                is the one before it, a file at a time.
+                A walk is grep_tree's, on every core, and each directory named
+                waits its turn on the list whole. Where every file it finds is
+                read the way the span loop reads it, the jobs read them;
+                context, -o and colour on a printed line are the line loop's,
+                and there the jobs hand every file back to it, a file at a
+                time, in the order the walk found them.
         */
         bool walk_printing = !counting && !listing && !listing_without && !quiet &&
                              !discarded;
-        bool threaded = grep_recursive && !never &&
-                        ((!grouped && !only && !grep_coloring) || !walk_printing);
+        bool serial = never || (walk_printing && (grouped || only || grep_coloring));
 
-        // Room for what was named, and for a walk's worth of names when -r
-        // asked for one: nothing at all when the input is standard input,
-        // which is the arena never being touched by the usual grep.
-        grep_paths_room = grep_recursive && !threaded
-                              ? GREP_PATHS_MAX
-                              : (positive)text_files_count + (grep_recursive ? 1 : 0);
+        // Room for what was named: nothing at all when the input is standard
+        // input, which is the arena never being touched by the usual grep.
+        grep_paths_room = (positive)text_files_count + (grep_recursive ? 1 : 0);
 
         if (grep_paths_room)
         {
@@ -29642,7 +29395,7 @@ static b32 text_grep()
                         return text_done(2);
         }
 
-        if (threaded)
+        if (grep_recursive)
         {
                 grep_path_walks = (p8 address_to)utility_arena_take(grep_paths_room);
 
@@ -29656,10 +29409,7 @@ static b32 text_grep()
         {
                 grep_expanded = true;
 
-                if (threaded)
-                        grep_path_walk((string_address) "");
-                else if (!grep_walk((string_address) "", 0, quietly))
-                        trouble = 2;
+                grep_path_walk((string_address) "");
         }
 
         for (b32 i = 0; i < text_files_count; i++)
@@ -29717,11 +29467,7 @@ static b32 text_grep()
                 {
                         grep_expanded = true;
 
-                        if (threaded)
-                                grep_path_walk(name);
-                        else if (!grep_walk(name, 0, quietly))
-                                trouble = 2;
-
+                        grep_path_walk(name);
                         continue;
                 }
 
@@ -29761,7 +29507,7 @@ static b32 text_grep()
             .grouped = grouped,
             .discarded = discarded,
             .refuse_output = refuse_output,
-            .trouble = trouble,
+            .serial = serial,
         };
 
         for (b32 i = 0; i < inputs; i++)
