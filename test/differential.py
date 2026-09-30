@@ -23824,6 +23824,48 @@ def canvas_part(canvas, name):
 HARNESS_ROOT = Path(__file__).resolve().parents[1]
 
 
+def ustar_header(name, size, typeflag=b"0", linkname=b"", mode=0o644):
+    block = bytearray(512)
+
+    def put(off, width, data):
+        data = data[:width]
+        block[off:off + len(data)] = data
+
+    def octal(off, width, value):
+        put(off, width,
+            ("%0*o" % (width - 1, value)).encode("ascii") + b"\0")
+
+    put(0, 100, name if isinstance(name, bytes) else name.encode())
+    octal(100, 8, mode)
+    octal(108, 8, 0)
+    octal(116, 8, 0)
+    octal(124, 12, size)
+    octal(136, 12, 0)
+    block[156:157] = (typeflag if isinstance(typeflag, bytes)
+                      else bytes([ord(typeflag)]))
+    put(157, 100,
+        linkname if isinstance(linkname, bytes) else linkname.encode())
+    put(257, 6, b"ustar\0")
+    put(263, 2, b"00")
+    put(148, 8, b"        ")
+    put(148, 8, ("%06o" % sum(block)).encode("ascii") + b"\0 ")
+    return bytes(block)
+
+
+def ustar_padded(payload):
+    return payload + bytes((512 - (len(payload) % 512)) % 512)
+
+
+def ustar_archive(members):
+    return b"".join(members) + bytes(1024)
+
+
+def ustar_member(name, typeflag, data=b"", link=b""):
+    flag = typeflag.encode() if isinstance(typeflag, str) else typeflag
+    return (ustar_header(name, len(data), typeflag=flag, linkname=link) +
+            ustar_padded(data))
+
+
 def write_tally(label, passed, total):
     """One row of the verdict test/run adds up, when test/run is the one asking."""
     if os.environ.get("TEST_TALLY"):
@@ -35111,30 +35153,6 @@ def harness_compression(argv):
                   streamed.stderr.decode(errors='replace') +
                   listed.stderr.decode(errors='replace'))
 
-        def ustar_header(name, size, typeflag=b'0', linkname=b'', mode=0o644):
-            block = bytearray(512)
-
-            def put(off, width, data):
-                data = data[:width]
-                block[off:off + len(data)] = data
-
-            def octal(off, width, value):
-                put(off, width, ('%0*o' % (width - 1, value)).encode('ascii') + b'\0')
-
-            put(0, 100, name if isinstance(name, bytes) else name.encode())
-            octal(100, 8, mode)
-            octal(108, 8, 0)
-            octal(116, 8, 0)
-            octal(124, 12, size)
-            octal(136, 12, 0)
-            block[156:157] = typeflag if isinstance(typeflag, bytes) else bytes([ord(typeflag)])
-            put(157, 100, linkname if isinstance(linkname, bytes) else linkname.encode())
-            put(257, 6, b'ustar\0')
-            put(263, 2, b'00')
-            put(148, 8, b'        ')
-            put(148, 8, ('%06o' % sum(block)).encode('ascii') + b'\0 ')
-            return bytes(block)
-
         def pax_record(key, value):
             key_b = key.encode() if isinstance(key, str) else key
             val_b = value if isinstance(value, (bytes, bytearray)) else value.encode()
@@ -35145,28 +35163,18 @@ def harness_compression(argv):
                     return digits + b' ' + key_b + b'=' + val_b + b'\n'
             raise ValueError('pax record')
 
-        def padded(payload):
-            return payload + bytes((512 - (len(payload) % 512)) % 512)
-
-        def ustar_archive(members):
-            return b''.join(members) + bytes(1024)
-
-        def member(name, typeflag, data=b'', link=b''):
-            flag = typeflag.encode() if isinstance(typeflag, str) else typeflag
-            return ustar_header(name, len(data), typeflag=flag, linkname=link) + padded(data)
-
         def emit_type(typeflag, payload=b'hello\n'):
             if typeflag in ('0', '\0', '7'):
-                return ustar_archive([member('a.txt', typeflag, payload)])
+                return ustar_archive([ustar_member('a.txt', typeflag, payload)])
             if typeflag == '1':
                 return ustar_archive([
-                    member('a.txt', '0', payload),
-                    member('b.txt', '1', link=b'a.txt'),
+                    ustar_member('a.txt', '0', payload),
+                    ustar_member('b.txt', '1', link=b'a.txt'),
                 ])
             if typeflag == '2':
-                return ustar_archive([member('link', '2', link=b'target')])
+                return ustar_archive([ustar_member('link', '2', link=b'target')])
             if typeflag == '5':
-                return ustar_archive([member('dir/', '5')])
+                return ustar_archive([ustar_member('dir/', '5')])
             if typeflag == 'S':
                 archive = scratch_base / 'sparse.tar'
                 if not archive.is_file():
@@ -35186,10 +35194,10 @@ def harness_compression(argv):
 
         def emit_pax(hdr, key, value, payload=b'hello\n'):
             body = pax_record(key, value)
-            members = [member('PaxHeaders.0/a', hdr, body),
-                       member('a.txt', '0', payload)]
+            members = [ustar_member('PaxHeaders.0/a', hdr, body),
+                       ustar_member('a.txt', '0', payload)]
             if hdr == 'g':
-                members.append(member('b.txt', '0', b'B\n'))
+                members.append(ustar_member('b.txt', '0', b'B\n'))
             return ustar_archive(members)
 
         def wrap_codec(data, codec):
@@ -35266,7 +35274,7 @@ def harness_compression(argv):
             scratch_base = root / ('grammar-' + label)
             scratch_base.mkdir()
 
-            security_raw = ustar_archive([member('safe.txt', '0', b'safe\n')])
+            security_raw = ustar_archive([ustar_member('safe.txt', '0', b'safe\n')])
             for codec in ('gz', 'xz', 'zst'):
                 incomplete = scratch_base / ('incomplete-end.' + codec)
                 incomplete.write_bytes(wrap_codec(bytes(512), codec))
@@ -51631,82 +51639,44 @@ def harness_pathname_race(argv):
     ESCAPE_NEST = b"ESCAPE_THROUGH_NEST\n"
     ESCAPE_DEEP = b"ESCAPE_THROUGH_DEEP\n"
 
-    def ustar_header(name, size, typeflag=b"0", linkname=b"", mode=0o644):
-        block = bytearray(512)
-
-        def put(off, width, data):
-            data = data[:width]
-            block[off:off + len(data)] = data
-
-        def octal(off, width, value):
-            put(off, width,
-                ("%0*o" % (width - 1, value)).encode("ascii") + b"\0")
-
-        put(0, 100, name if isinstance(name, bytes) else name.encode())
-        octal(100, 8, mode)
-        octal(108, 8, 0)
-        octal(116, 8, 0)
-        octal(124, 12, size)
-        octal(136, 12, 0)
-        block[156:157] = (typeflag if isinstance(typeflag, bytes)
-                          else bytes([ord(typeflag)]))
-        put(157, 100,
-            linkname if isinstance(linkname, bytes) else linkname.encode())
-        put(257, 6, b"ustar\0")
-        put(263, 2, b"00")
-        put(148, 8, b"        ")
-        put(148, 8, ("%06o" % sum(block)).encode("ascii") + b"\0 ")
-        return bytes(block)
-
-    def padded(payload):
-        return payload + bytes((512 - (len(payload) % 512)) % 512)
-
-    def ustar_archive(members):
-        return b"".join(members) + bytes(1024)
-
-    def member(name, typeflag, data=b"", link=b""):
-        flag = typeflag.encode() if isinstance(typeflag, str) else typeflag
-        return (ustar_header(name, len(data), typeflag=flag, linkname=link) +
-                padded(data))
-
     def archive_leaf(name):
-        return ustar_archive([member(name, "0", ESCAPE_LEAF)])
+        return ustar_archive([ustar_member(name, "0", ESCAPE_LEAF)])
 
     def archive_nested(name):
         return ustar_archive([
-            member(name + "/", "5"),
-            member(name + "/nested", "0", ESCAPE_NEST),
+            ustar_member(name + "/", "5"),
+            ustar_member(name + "/nested", "0", ESCAPE_NEST),
         ])
 
     # Several small members under a raced parent keep extract in the walk
     # while the scheduler flips the parent form. Keep the count modest so
     # clearing the directory between exchanges stays cheap.
     def archive_burst(name, count=16):
-        parts = [member(name + "/", "5")]
+        parts = [ustar_member(name + "/", "5")]
         for i in range(count):
-            parts.append(member("%s/m%02d" % (name, i), "0",
+            parts.append(ustar_member("%s/m%02d" % (name, i), "0",
                                 ("burst-%02d\n" % i).encode()))
         return ustar_archive(parts)
 
     # Deep tree under the raced parent: dir↔symlink-to-dir swaps must not
     # let mid-walk creation escape through the swapped component.
     def archive_deep(name, depth=5):
-        parts = [member(name + "/", "5")]
+        parts = [ustar_member(name + "/", "5")]
         prefix = name
         for level in range(depth):
             prefix = "%s/d%d" % (prefix, level)
-            parts.append(member(prefix + "/", "5"))
-        parts.append(member(prefix + "/payload", "0", ESCAPE_DEEP))
+            parts.append(ustar_member(prefix + "/", "5"))
+        parts.append(ustar_member(prefix + "/payload", "0", ESCAPE_DEEP))
         return ustar_archive(parts)
 
     def archive_deep_burst(name, depth=4, count=8):
-        parts = [member(name + "/", "5")]
+        parts = [ustar_member(name + "/", "5")]
         prefix = name
         for level in range(depth):
             prefix = "%s/l%d" % (prefix, level)
-            parts.append(member(prefix + "/", "5"))
+            parts.append(ustar_member(prefix + "/", "5"))
         for i in range(count):
-            parts.append(member("%s/b%02d" % (prefix, i), "0",
+            parts.append(ustar_member("%s/b%02d" % (prefix, i), "0",
                                 ("deep-burst-%02d\n" % i).encode()))
         return ustar_archive(parts)
 
