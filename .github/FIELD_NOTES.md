@@ -225,3 +225,32 @@ edge. Neither has been timed, and riscv64 has not been booted.
 guests from earlier sessions running, read 60 microseconds a pass and showed no
 change. With them killed, the same images read 20.6 and 16.9. A timing taken under
 load is a timing of the load.
+
+---
+
+## 2026-09-30 · listing an ext4 directory (`call_filldir`)
+
+ext4 reads a directory in hash order: it builds an rb-tree of the entries and hands them
+to `filldir64` one node at a time. In a guest profile of a thousand-name directory the
+handing over (`filldir64`, its slash check, `call_filldir`, `rb_next`, `kfree`) was 44%
+of the pass and building the tree the other 50%. `kernel/kernel.c` now takes the handing
+over in batches, through the same image of dirents the tmpfs port uses: it walks the
+nodes and their collision chains itself, sixteen entries at a time, and leaves
+`ext4_dx_readdir`'s state as the node-at-a-time calls would (the entry refused, its
+node and its hashes, or the last node handed over).
+
+- **In a guest, stock kernel against the port, booted in turn, three rounds, minimum over
+  800 bursts:** one `getdents64` pass over a thousand names, 51.1 -> 40.8 microseconds
+  (-20%).
+- **Checked against the kernel's own C** (`kernel_ports`, x86_64, arm64 and riscv64 under
+  qemu-user): a tree with collision chains, from the first node, the middle, and a
+  refused chain member, in 32- and 64-bit position modes, with and without file types,
+  handed to the recording actor and to the real `filldir64` over a window that ends
+  where the test says: same entries, positions, resume state and dirents. In the guest
+  the same 484-entry directory lists the same as the stock kernel's at every buffer size
+  and edge.
+
+**What it does not show.** The other half of an ext4 directory read, the hash and the
+allocation of every entry, is untouched by this. The arm64 and riscv64 bodies have not
+been booted or timed.
+
