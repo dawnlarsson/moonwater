@@ -14761,9 +14761,7 @@ fn check_squeeze_bytes()
 */
 fn check_offsets_of_either()
 {
-        static const positive sizes[] = {
-            0, 1, 2, 15, 16, 17, 31, 63, 64, 65, 127, 128, 129, 200, 1000, 4096,
-        };
+        static const positive sizes[] = {1000, 4096};
         static p32 got[4200], want[4200];
         p8 address_to pages = guard_pages("memory_offsets_of_either");
 
@@ -14785,17 +14783,25 @@ fn check_offsets_of_either()
 #endif
                 same("memory_offsets_of_either", "no room",
                      (memory_offsets_of_either)(got, bytes, 16, 'a', 'b', 0), 0);
-                for (positive s = 0; s < array_count(sizes); s++)
-                        for (positive residue = 0; residue <= 64; residue += residue < 4 ? 1 : 15)
+                // Every size to 200, so that each short block, each wide loop
+                // tail (a record over 63 bytes must not be scanned twice) and
+                // the masked block that answers them is met at every length.
+                for (positive s = 0; s < 201 + array_count(sizes); s++)
+                        for (positive residue = 0; residue <= 64; residue++)
                                 for (positive density = 0; density < 4; density++)
                                 {
-                                        positive size = sizes[s];
+                                        positive size = s <= 200 ? s : sizes[s - 201];
                                         positive offset = residue == 64 || size + residue > 4096
                                                               ? 4096 - size : residue;
                                         p8 first = density == 3 ? 'x' : ',';
                                         p8 second = density == 2 ? ',' : '\n';
 
-                                        for (positive i = 0; i < 4096; i++)
+                                        // Only the window and the sixty four bytes round it are
+                                        // drawn afresh, so that every residue costs what its size does.
+                                        positive from = offset > 64 ? offset - 64 : 0;
+                                        positive to = offset + size + 64 < 4096 ? offset + size + 64 : 4096;
+
+                                        for (positive i = from; i < to; i++)
                                         {
                                                 XORSHIFT64(seed);
                                                 positive pick = (positive)(seed % 16);
@@ -14809,7 +14815,7 @@ fn check_offsets_of_either()
                                                 if (bytes[offset + i] == first || bytes[offset + i] == second)
                                                         want[count++] = (p32)i;
 
-                                        static const positive limits[] = {1, 2, 7, 16, 63, 64, 65, 5000};
+                                        static const positive limits[] = {1, 2, 7, 16, 63, 64, 65, 256, 5000};
                                         for (positive l = 0; l < array_count(limits); l++)
                                         {
                                                 positive limit = limits[l];

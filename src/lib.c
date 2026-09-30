@@ -12825,7 +12825,7 @@ __asm__(
     ASM_FUNC(memory_offsets_of_either)
     "xor %eax, %eax\n   xor %r10d, %r10d\n   test %r9, %r9\n   jz .Lmemory_offsets_x64_done\n"
 #ifndef KERNEL_MODE
-    "cmp $64, %rdx\n   jb .Lmemory_offsets_x64_narrow\n"
+    "cmp $64, %rdx\n   jb .Lmemory_offsets_x64_short\n"
     ASM_NARROW("cpu_has_avx512", ".Lmemory_offsets_x64_narrow")
     "vpbroadcastb %ecx, %zmm1\n   movzbl %r8b, %r11d\n   vpbroadcastb %r11d, %zmm2\n"
     // With VBMI2 the block's hits are packed as byte offsets with
@@ -12877,6 +12877,32 @@ __asm__(
     ".Lmemory_offsets_x64_iota:\n   .long 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15\n"
     ".Lmemory_offsets_x64_bytes:\n   .byte 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63\n"
     ".popsection\n"
+#endif
+#ifndef KERNEL_MODE
+    ".Lmemory_offsets_x64_short:\n"
+    // r10 bytes are done and rax offsets written; fewer than 64 bytes remain (the top of the routine, or the wide loop's tail)
+    ASM_NARROW("cpu_has_avx512", ".Lmemory_offsets_x64_narrow")
+    "mov %r9, %r11\n   sub %rax, %r11\n   cmp $64, %r11\n   jb .Lmemory_offsets_x64_narrow\n"
+    "movzbl cpu_has_avx512_vbmi2(%rip), %r11d\n   test %r11d, %r11d\n   jnz 2f\n"
+    "push %rbx\n   push %rcx\n   push %rdx\n   mov $7, %eax\n   xor %ecx, %ecx\n   cpuid\n"
+    "shr $6, %ecx\n   and $1, %ecx\n   inc %ecx\n   mov %cl, cpu_has_avx512_vbmi2(%rip)\n"
+    "mov %ecx, %r11d\n   pop %rdx\n   pop %rcx\n   pop %rbx\n   xor %eax, %eax\n"
+    "2:  cmp $2, %r11d\n   jne .Lmemory_offsets_x64_narrow\n"
+    "mov %rdx, %r11\n   sub %r10, %r11\n   jbe 3f\n"
+    "vpbroadcastb %ecx, %zmm1\n   movzbl %r8b, %edx\n   vpbroadcastb %edx, %zmm2\n"
+    "mov $-1, %rdx\n   bzhi %r11, %rdx, %rdx\n   kmovq %rdx, %k1\n"
+    "vmovdqu8 (%rsi,%r10), %zmm0{%k1}{z}\n"
+    "vpcmpeqb %zmm1, %zmm0, %k2{%k1}\n   vpcmpeqb %zmm2, %zmm0, %k3{%k1}\n   korq %k3, %k2, %k2\n"
+    "kmovq %k2, %rdx\n   popcnt %rdx, %r11\n   jz 3f\n"
+    "vmovdqu64 .Lmemory_offsets_x64_bytes(%rip), %zmm3\n   vpcompressb %zmm3, %zmm7{%k2}{z}\n"
+    "vpbroadcastd %r10d, %zmm4\n"
+    "vpmovzxbd %xmm7, %zmm8\n   vpaddd %zmm4, %zmm8, %zmm8\n   vmovdqu32 %zmm8, (%rdi,%rax,4)\n   cmp $16, %r11\n   jbe 4f\n"
+    "vextracti32x4 $1, %zmm7, %xmm9\n   vpmovzxbd %xmm9, %zmm8\n   vpaddd %zmm4, %zmm8, %zmm8\n   vmovdqu32 %zmm8, 64(%rdi,%rax,4)\n   cmp $32, %r11\n   jbe 4f\n"
+    "vextracti32x4 $2, %zmm7, %xmm9\n   vpmovzxbd %xmm9, %zmm8\n   vpaddd %zmm4, %zmm8, %zmm8\n   vmovdqu32 %zmm8, 128(%rdi,%rax,4)\n   cmp $48, %r11\n   jbe 4f\n"
+    "vextracti32x4 $3, %zmm7, %xmm9\n   vpmovzxbd %xmm9, %zmm8\n   vpaddd %zmm4, %zmm8, %zmm8\n   vmovdqu32 %zmm8, 192(%rdi,%rax,4)\n"
+    "4:  add %r11, %rax\n"
+    "3:  vzeroupper\n"
+    ASM_RET
 #endif
     ".Lmemory_offsets_x64_narrow:\n   push %rbx\n"
     ".balign 16\n.Lmemory_offsets_x64_one:\n"
