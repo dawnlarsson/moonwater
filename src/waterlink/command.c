@@ -575,13 +575,12 @@ static p32 link_grants_of(string_address address_to words, positive count,
 }
 
 /*
-        join NAMESPACE [SECRET] [allow GRANT...]
+        join NAMESPACE [SECRET|-] [allow GRANT...]
 
         With a secret, this machine is in the group from now on and across
         boots, install and wipe; the secret itself is never kept, only what
-        PBKDF2 makes of it and a salted hash that lets a machine script
-        joining every boot skip the derivation when nothing changed. Without
-        one, the group already joined is joined again, or a new group gets a
+        PBKDF2 makes of it. "-" reads the secret from standard input, which
+        keeps it out of argv. Without one, the group already joined is joined again, or a new group gets a
         secret of 160 random bits, printed once for the other machines.
         Members get the grants named here, and the verbs when none are. The
         link is switched on.
@@ -644,9 +643,12 @@ static b32 link_join(string_address address_to words, positive count)
                 may = link_grants_of(words + at + 1, count - at - 1,
                                      address_of good);
                 if (!good)
+                {
+                        crypto_forget(typed, sizeof typed);
                         return host_refuse("a grant is one of run shell files "
                                            "log screen channels verbs%s\n",
                                            "");
+                }
                 granted = true;
         }
 
@@ -678,6 +680,7 @@ static b32 link_join(string_address address_to words, positive count)
                 if (groups.count >= LINK_GROUPS_MAX)
                 {
                         crypto_forget(made, sizeof made);
+                        crypto_forget(typed, sizeof typed);
                         crypto_forget(address_of groups, sizeof groups);
                         return host_refuse("this machine is in %s groups "
                                            "already\n",
@@ -691,21 +694,18 @@ static b32 link_join(string_address address_to words, positive count)
 
         if (secret)
         {
-                p8 check[32];
-
-                link_group_check(namespace, (p8 address_to)secret,
-                                 string_length(secret), check);
-                //      The slow part, once: a script that joins at every boot
-                //      with the same secret does not pay it again.
-                if (!crypto_same(check, record->check, 32))
-                {
-                        waterlink_group_derive(namespace, (p8 address_to)secret,
-                                               string_length(secret),
-                                               WATERLINK_GROUP_ROUNDS,
-                                               record->key);
-                        memory_copy(record->check, check, 32);
-                }
-                crypto_forget(check, sizeof check);
+                //      The slow part, every time. A salted hash of the secret
+                //      used to sit beside the key so that a script joining at
+                //      every boot could skip it, and that hash was a guessing
+                //      oracle at SHA-256 speed for anyone who could read the
+                //      file, which holds the slow key to check a guess
+                //      against only if the guess is made slowly. A script
+                //      that joins at every boot says `link join NAMESPACE`
+                //      and keeps the group it has.
+                waterlink_group_derive(namespace, (p8 address_to)secret,
+                                       string_length(secret),
+                                       WATERLINK_GROUP_ROUNDS, record->key);
+                memory_zero(record->check, sizeof record->check);
         }
         if (granted)
                 record->may = may;
@@ -713,6 +713,7 @@ static b32 link_join(string_address address_to words, positive count)
         if (link_groups_save(address_of groups) < 0)
         {
                 crypto_forget(made, sizeof made);
+                crypto_forget(typed, sizeof typed);
                 crypto_forget(address_of groups, sizeof groups);
                 return host_refuse("%s could not be written\n", LINK_GROUPS_PATH);
         }
@@ -723,9 +724,9 @@ static b32 link_join(string_address address_to words, positive count)
         if (generated)
                 string_format(log,
                               host_label "the secret is %s -- on each other "
-                                         "machine: moonwater link join %s %s\n",
-                              (string_address)made, namespace,
-                              (string_address)made);
+                                         "machine, with it on standard input: "
+                                         "moonwater link join %s -\n",
+                              (string_address)made, namespace);
         else if (secret && string_length(secret) < 20)
                 string_format(log, host_label "a secret this short can be "
                                               "guessed offline by anyone on "

@@ -56398,6 +56398,34 @@ say(os.stat(top + "/a/root/link.groups").st_mode & 0o777 == 0o600,
     "the group file is root's alone")
 say(secret.encode() not in open(top + "/a/root/link.groups", "rb").read(),
     "and does not hold the secret")
+groups_file = open(top + "/a/root/link.groups", "rb").read()
+say(len(groups_file) % 128 == 0 and groups_file != b"" and
+    all(not any(groups_file[at + 64:at + 96]) for at in range(0, len(groups_file), 128)),
+    "no hash of the secret sits beside the key, where it would let a guess skip the slow derivation")
+#       A record from before: a SHA-256 of the secret in the check field. It is
+#       read as nothing and the next write of the file drops it.
+import hashlib
+old_record = bytearray(groups_file[:128])
+old_record[64:96] = hashlib.sha256(b"waterlink check lab " + secret.encode()).digest()
+open(top + "/a/root/link.groups", "wb").write(bytes(old_record))
+os.chmod(top + "/a/root/link.groups", 0o600)
+status, out, err = on("a", moon + " link join lab")
+say(status == 0, "a group file with the old check still joins (%r)" % (err[-200:],))
+say(not any(open(top + "/a/root/link.groups", "rb").read()[64:96]),
+    "and the file written after it has no check")
+#       The secret on standard input: never in argv, and the same key as when
+#       it was typed there.
+before_key = open(top + "/a/root/link.groups", "rb").read()[32:64]
+status, out, err = on("a", moon + " link join lab -", stdin=(secret + "\n").encode())
+say(status == 0 and open(top + "/a/root/link.groups", "rb").read()[32:64] == before_key,
+    "a secret on standard input makes the same key as one in argv (%r)" % (err[-200:],))
+status, out, err = on("a", moon + " link join lab -", stdin=b"")
+say(status != 0 and b"nothing saved" in (out + err),
+    "and no line on standard input is refused, not taken for an empty secret")
+status, out, err = on("a", moon + " link join fresh-lab allow run")
+say(status == 0 and b"link join fresh-lab -" in out,
+    "a made secret is told with the form that keeps it out of argv (%r)" % (out[-200:],))
+on("a", moon + " link leave fresh-lab")
 
 names = {}
 began = time.time()
