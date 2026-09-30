@@ -13538,6 +13538,28 @@ static COLD string_address conditional_regex_reason()
                    : regex_failure_reason();
 }
 
+/*
+        A pattern compiled for [[ =~ ]] is kept, as the utilities keep theirs:
+        the program stays in the pool below regex_retained, so the next use
+        of the same pattern under the same policy is a compare of its text
+        where a compile was 5,800 instructions. Eight are kept, and a ninth
+        is compiled and given back as before. The slots and their programs
+        are private to this file until the regex stream gives the pool a
+        cache of its own.
+*/
+#define CONDITIONAL_REGEX_SLOTS 8
+#define CONDITIONAL_REGEX_TEXT 120
+typedef struct
+{
+        regex_program program;
+        positive length;
+        p8 policy;
+        p8 text[CONDITIONAL_REGEX_TEXT];
+} conditional_regex_entry;
+static conditional_regex_entry (address_to conditional_regex_cache_held)[CONDITIONAL_REGEX_SLOTS];
+#define conditional_regex_cache UTILITY_HELD(conditional_regex_cache)
+static positive conditional_regex_held;
+
 static bool conditional_regex_match(string_address text, string_address pattern,
                                     bool address_to valid)
 {
@@ -13545,15 +13567,58 @@ static bool conditional_regex_match(string_address text, string_address pattern,
         rx_mark mark = regex_pool.used;
         positive slots[RX_SLOT_MAX];
         bool matched = false;
+        p8 policy = !shell_bash_compat ? REGEX_POLICY_DEFAULT
+                                       : REGEX_POLICY_EXPR |
+                                             (shell_utf8_on() ? REGEX_UTF8_NAMES | REGEX_CHARACTERS : 0);
+        positive length = string_length(pattern);
+        conditional_regex_entry address_to entry = null;
+        bool kept = false;
 
         memory_copy_apart(slots, regex_slots, sizeof(slots));
-        /* Compile above any live transient program; rewind only our own work.
-           bash 5.3 names a pattern regcomp refuses, and answers 2. */
-        address_to valid = rx_compile(
-            &regex_pool, &regex_current, pattern, true, false, false,
-            !shell_bash_compat ? REGEX_POLICY_DEFAULT
-                               : REGEX_POLICY_EXPR |
-                                     (shell_utf8_on() ? REGEX_UTF8_NAMES | REGEX_CHARACTERS : 0));
+
+        for (positive at = 0; at < conditional_regex_held; at++)
+                if (conditional_regex_cache[at].length == length &&
+                    conditional_regex_cache[at].policy == policy &&
+                    !memory_compare(conditional_regex_cache[at].text, pattern,
+                                    length))
+                {
+                        entry = conditional_regex_cache + at;
+                        break;
+                }
+
+        if (entry)
+        {
+                regex_current = entry->program;
+                address_to valid = true;
+        }
+        else
+        {
+                /* Compile above any live transient program; rewind only our
+                   own work. bash 5.3 names a pattern regcomp refuses, and
+                   answers 2. */
+                address_to valid = rx_compile(
+                    &regex_pool, &regex_current, pattern, true, false, false,
+                    policy);
+
+                //      Kept when this compile began at the retained mark, so
+                //      that nothing live sits between it and what is kept.
+                if (address_to valid &&
+                    conditional_regex_held < CONDITIONAL_REGEX_SLOTS &&
+                    length < CONDITIONAL_REGEX_TEXT &&
+                    !memory_compare(address_of mark, address_of regex_retained,
+                                    sizeof mark))
+                {
+                        entry = conditional_regex_cache +
+                                conditional_regex_held++;
+                        entry->program = regex_current;
+                        entry->length = length;
+                        entry->policy = policy;
+                        memory_copy(entry->text, pattern, length);
+                        regex_retained = regex_pool.used;
+                        kept = true;
+                }
+        }
+
         if (!address_to valid && shell_bash_compat)
                 shell_told("[[: invalid regular expression `%s': %s\n", pattern,
                            conditional_regex_reason());
@@ -13571,7 +13636,8 @@ static bool conditional_regex_match(string_address text, string_address pattern,
                         shell_array_words("BASH_REMATCH", 12, none, 0);
                 }
         }
-        regex_pool.used = mark;
+        if (!kept)
+                regex_pool.used = mark;
         regex_current = saved;
         memory_copy_apart(regex_slots, slots, sizeof(slots));
         return matched;
