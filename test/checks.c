@@ -160,6 +160,21 @@
                 }                                                             \
         } while (0)
 
+/*
+        HARDWARE_WORK is one body of the hosted floor benchmarks: rounds calls
+        of an expression whose answer goes into sink, after any setup the body
+        needs. BENCH_hardware_floor and BENCH_libc_audit are each a table of
+        these.
+*/
+#define HARDWARE_WORK(name, setup, expression)                                \
+        static void name(unsigned long size, unsigned long rounds)            \
+        {                                                                     \
+                unsigned long i;                                              \
+                setup                                                         \
+                for (i = 0; i < rounds; i++)                                  \
+                        sink += expression;                                   \
+        }
+
 #if defined(SHARED_sizes)
 /* Literal arguments exercise compiler-owned specializations. The scan checks
    keep their twenty-size function bands to bound compiler resource use. */
@@ -103282,17 +103297,6 @@ static void row(const char *name, const char *shape, const char *klass,
                klass, size, ours_ns, floor_ns, ratio);
 }
 
-//      One timed body: rounds calls of an expression whose answer goes into
-//      sink, with any setup the body needs first.
-#define HARDWARE_WORK(name, setup, expression)                                \
-        static void name(unsigned long size, unsigned long rounds)            \
-        {                                                                     \
-                unsigned long i;                                              \
-                setup                                                         \
-                for (i = 0; i < rounds; i++)                                  \
-                        sink += expression;                                   \
-        }
-
 HARDWARE_WORK(floor_one_w, , floor_read(src, size))
 HARDWARE_WORK(floor_two_w, , floor_read_two(src, src2, size))
 HARDWARE_WORK(floor_copy_w, , floor_copy(dst, src, size))
@@ -104167,103 +104171,20 @@ static unsigned long rounds_for(unsigned long guess_ns)
         return rounds;
 }
 
-static void memcpy_w(unsigned long size, unsigned long rounds)
-{
-        unsigned long i;
-        for (i = 0; i < rounds; i++)
-                sink += (unsigned long)COPY(dst, src, size);
-}
-
-static void memmove_w(unsigned long size, unsigned long rounds)
-{
-        unsigned long i;
-        for (i = 0; i < rounds; i++)
-                sink += (unsigned long)MOVE(dst, src, size);
-}
-
-static void memset_w(unsigned long size, unsigned long rounds)
-{
-        unsigned long i;
-        for (i = 0; i < rounds; i++)
-                sink += (unsigned long)FILL(dst, 0xa5, size);
-}
-
-static void strlen_w(unsigned long size, unsigned long rounds)
-{
-        unsigned long i;
-        for (i = 0; i < rounds; i++)
-                sink += LEN((char *)src);
-}
-
-static void strnlen_w(unsigned long size, unsigned long rounds)
-{
-        unsigned long i;
-        for (i = 0; i < rounds; i++)
-                sink += LENMAX((char *)src, size);
-}
-
-static void memcmp_w(unsigned long size, unsigned long rounds)
-{
-        unsigned long i;
-        for (i = 0; i < rounds; i++)
-                sink += (unsigned)CMP(src, src2, size);
-}
-
-static void memchr_w(unsigned long size, unsigned long rounds)
-{
-        unsigned long i;
-        for (i = 0; i < rounds; i++)
-                sink += (unsigned long)CHR(src, 'Z', size);
-}
-
-static void strcmp_w(unsigned long size, unsigned long rounds)
-{
-        unsigned long i;
-        for (i = 0; i < rounds; i++)
-                sink += (unsigned)SCMP((char *)src, (char *)src2);
-}
-
-static void strncmp_w(unsigned long size, unsigned long rounds)
-{
-        unsigned long i;
-        for (i = 0; i < rounds; i++)
-                sink += (unsigned)SCMPMAX((char *)src, (char *)src2, size);
-}
-
-static void strchr_w(unsigned long size, unsigned long rounds)
-{
-        unsigned long i;
-        for (i = 0; i < rounds; i++)
-                sink += (unsigned long)SCHR((char *)src, 'Z');
-}
-
-static void strrchr_w(unsigned long size, unsigned long rounds)
-{
-        unsigned long i;
-        for (i = 0; i < rounds; i++)
-                sink += (unsigned long)SRCHR((char *)src, 'Z');
-}
-
-static void strcpy_w(unsigned long size, unsigned long rounds)
-{
-        unsigned long i;
-        for (i = 0; i < rounds; i++)
-                sink += (unsigned long)SCOPY((char *)dst, (char *)src);
-}
-
-static void strstr_w(unsigned long size, unsigned long rounds)
-{
-        unsigned long i;
-        for (i = 0; i < rounds; i++)
-                sink += (unsigned long)SSTR((char *)src, (char *)src2);
-}
-
-static void memmem_w(unsigned long size, unsigned long rounds)
-{
-        unsigned long i;
-        for (i = 0; i < rounds; i++)
-                sink += (unsigned long)MMEM(src, size, src2, 3);
-}
+HARDWARE_WORK(memcpy_w, , (unsigned long)COPY(dst, src, size))
+HARDWARE_WORK(memmove_w, , (unsigned long)MOVE(dst, src, size))
+HARDWARE_WORK(memset_w, , (unsigned long)FILL(dst, 0xa5, size))
+HARDWARE_WORK(strlen_w, , LEN((char *)src))
+HARDWARE_WORK(strnlen_w, , LENMAX((char *)src, size))
+HARDWARE_WORK(memcmp_w, , (unsigned)CMP(src, src2, size))
+HARDWARE_WORK(memchr_w, , (unsigned long)CHR(src, 'Z', size))
+HARDWARE_WORK(strcmp_w, , (unsigned)SCMP((char *)src, (char *)src2))
+HARDWARE_WORK(strncmp_w, , (unsigned)SCMPMAX((char *)src, (char *)src2, size))
+HARDWARE_WORK(strchr_w, , (unsigned long)SCHR((char *)src, 'Z'))
+HARDWARE_WORK(strrchr_w, , (unsigned long)SRCHR((char *)src, 'Z'))
+HARDWARE_WORK(strcpy_w, , (unsigned long)SCOPY((char *)dst, (char *)src))
+HARDWARE_WORK(strstr_w, , (unsigned long)SSTR((char *)src, (char *)src2))
+HARDWARE_WORK(memmem_w, , (unsigned long)MMEM(src, size, src2, 3))
 
 static void row(const char *name, const char *shape, unsigned long size,
                 void (*work)(unsigned long, unsigned long), unsigned long guess)
