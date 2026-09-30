@@ -35544,17 +35544,39 @@ static bool cp_tree_file(bipolar source, bipolar copy, string_address name)
         of it refused the lot.
 */
 static bool cp_created_valid;
-static p64 cp_created_inode;
-static p32 cp_created_major;
-static p32 cp_created_minor;
+#define CP_CREATED_MAX 32
+static p64 cp_created_inode[CP_CREATED_MAX];
+static p32 cp_created_major[CP_CREATED_MAX];
+static p32 cp_created_minor[CP_CREATED_MAX];
+static positive cp_created_count;
 static string_address cp_top_source;
 static string_address cp_top_destination;
+//      Set when a directory was said to be copied into itself: GNU stops
+//      reading the names of every directory above it, which is what ends
+//      the chain of copies of the copy that the first directory made would
+//      otherwise be the only stop for.
+static bool cp_into_self;
 
+//      GNU's table outlives the command-line source that filled it: what one
+//      source made first is a name to be left alone in the walk of the next,
+//      so cp -r a dir dir stops at dir/a, which the copy of a made, when it
+//      meets it in the walk of dir.
 static bool cp_created_holds(file_facts address_to facts)
 {
-        return cp_created_valid && cp_created_inode == facts->inode &&
-               cp_created_major == facts->device_major &&
-               cp_created_minor == facts->device_minor;
+        for (positive at = 0; at < cp_created_count; at++)
+                if (cp_created_inode[at] == facts->inode &&
+                    cp_created_major[at] == facts->device_major &&
+                    cp_created_minor[at] == facts->device_minor)
+                        return true;
+        return false;
+}
+
+static bool cp_created_names(positive inode)
+{
+        for (positive at = 0; at < cp_created_count; at++)
+                if (cp_created_inode[at] == inode)
+                        return true;
+        return false;
 }
 
 static fn cp_tree_enter(address_any context, address_any node_address,
@@ -35637,8 +35659,7 @@ static fn cp_tree_enter(address_any context, address_any node_address,
                                 said = cp_tree_put(output, CP_TREE_FILE, 0, node,
                                                    name, name_length);
                 }
-                else if (record->d_type == DT_DIR && cp_created_valid &&
-                         record->d_ino == cp_created_inode)
+                else if (record->d_type == DT_DIR && cp_created_names(record->d_ino))
                 {
                         //      Maybe the directory being made: the serial walk
                         //      looks it up by identity and says so.
@@ -37023,10 +37044,18 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                               writer_shell_quoted_name, source_shown);
         }
         if (!moving && !named && cp_created_holds(address_of facts))
+        {
+                //      Said once: the walks that read a directory's names
+                //      apart from the copy can meet it again before they
+                //      stop.
+                if (cp_into_self)
+                        return false;
+                cp_into_self = true;
                 return string_report(log_error, false,
                                      "cp: cannot copy a directory, %w, into itself, %w\n",
                                      writer_shell_quoted_name, cp_top_source,
                                      writer_shell_quoted_name, cp_top_destination);
+        }
         if (!moving && cp_ancestor_holds(address_of facts))
                 return string_report(log_error, false,
                                      "cp: cannot copy cyclic symbolic link %w\n",
@@ -37108,9 +37137,13 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                                    address_of made_facts) >= 0)
                 {
                         cp_created_valid = true;
-                        cp_created_inode = made_facts.inode;
-                        cp_created_major = made_facts.device_major;
-                        cp_created_minor = made_facts.device_minor;
+                        if (cp_created_count < CP_CREATED_MAX)
+                        {
+                                cp_created_inode[cp_created_count] = made_facts.inode;
+                                cp_created_major[cp_created_count] = made_facts.device_major;
+                                cp_created_minor[cp_created_count] = made_facts.device_minor;
+                                cp_created_count++;
+                        }
                 }
         }
 
@@ -37173,6 +37206,13 @@ static bool file_copy_one(bipolar source_directory, string_address source,
         if ((moving || serial_walk) && !unreadable)
                 listed = file_listing_by_inode(address_of walk,
                                                address_of listed_count);
+        //      GNU hands each name of a directory the flag as the directory
+        //      itself had it (copy_dir's first_dir_created), so every name
+        //      below a directory that was not made here is a first: what is
+        //      recorded is the topmost directory made along each branch, and
+        //      what a directory hands its parent is whether any name did.
+        bool created_in = cp_created_valid;
+        bool created_out = false;
         while (!unreadable &&
                !((staged || in_place) && !moving && !cp_hard && !cp_symbolic && !cp_attributes_only &&
                  !file_debug && cp_reflink_policy != 'A' && !cp_memory_bounded()) &&
@@ -37184,6 +37224,8 @@ static bool file_copy_one(bipolar source_directory, string_address source,
 
                 p8 from[FILE_PATH_MAX];
                 p8 to[FILE_PATH_MAX];
+
+                cp_created_valid = created_in;
 
                 if (!file_path_join(from, source_shown, child->d_name) ||
                     !file_path_join(to, destination_shown, child->d_name))
@@ -37233,7 +37275,16 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                                    held,
                                    (staged || fresh || in_place ? FILE_COPY_FRESH : 0) |
                                        (held >= 0 ? FILE_COPY_FACTS_HELD : 0)))
+                {
                         complete = false;
+                        if (cp_into_self && !moving)
+                        {
+                                if (held >= 0)
+                                        system_close(held);
+                                break;
+                        }
+                }
+                created_out = created_out || cp_created_valid;
 
                 if (held >= 0)
                         system_close(held);
@@ -37241,6 +37292,8 @@ static bool file_copy_one(bipolar source_directory, string_address source,
 
         if (pushed)
                 cp_ancestor_count--;
+        if (!unreadable && !moving && serial_walk)
+                cp_created_valid = created_out;
 
         /* The names of files with other names that the walk remembered
            were taken from the arena after the listing: it is given back
@@ -37460,6 +37513,7 @@ static bool cp_slash_allowed(string_address source, string_address given,
 static fn cp_pair(string_address source, string_address destination)
 {
         cp_created_valid = false;
+        cp_into_self = false;
         static p8 source_leaf[FILE_PATH_MAX];
         static p8 destination_leaf[FILE_PATH_MAX];
         static p8 stripped[FILE_PATH_MAX];
@@ -38297,6 +38351,7 @@ static b32 file_cp()
 
         file_join_source_path = (flags & FILE_FLAG('e')) != 0;
 
+        cp_created_count = 0;
         if (!file_source_destination((string_address) "cp", first, count, into,
                                      (flags & FILE_FLAG('T')) != 0, cp_pair))
                 return 1;

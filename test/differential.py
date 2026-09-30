@@ -10365,6 +10365,65 @@ def files_uname_identity(farm):
     return passed, total, notes
 
 
+def files_cp_into_self(farm):
+    """cp -r into itself, run to its end and stopped where the reference stops.
+
+    GNU keeps the first directory it made along each branch of a source and
+    reads no more names of a directory once one is said to be copied into
+    itself; what a copy of a directory into its own tree makes therefore
+    depends on which of two names the file system lists first, by inode.
+    The same commands run with the free inodes left where each order comes
+    from (a directory made and removed before or after the ones the copies
+    reuse), against the reference, on the messages, the statuses and the
+    tree left behind; a copy that does not end is a failure of its own."""
+    import shutil
+    import subprocess
+    import tempfile
+
+    reference = shutil.which("cp", path=os.defpath)
+    candidate = Path(farm) / "cp"
+    if not reference or not candidate.exists():
+        return 0, 1, ["cp into itself needs cp on both sides"]
+    commands = ("-R dir dir", "-rl dir dir", "-rl a dir dir", "-rl a dir dir", "-R a dir dir",
+                "-Rv a dir dir", "-R dir dir/dir", "-Ra a dir dir")
+    passed = total = 0
+    notes = []
+    for shape in ("plain", "low", "low-high", "high"):
+        answers = []
+        for program in (reference, str(candidate)):
+            root = Path(tempfile.mkdtemp(prefix="cp-into-self-"))
+            try:
+                if shape in ("low", "low-high"):
+                    (root / "t1").mkdir()
+                for name in ("a", "dir"):
+                    (root / name).mkdir()
+                said = []
+                for command in commands[:2]:
+                    subprocess.run([program, *command.split()], cwd=root, capture_output=True, timeout=10)
+                if shape in ("low-high", "high"):
+                    (root / "t3").mkdir()
+                for name in ("t1", "t3"):
+                    if (root / name).exists():
+                        (root / name).rmdir()
+                for command in commands[2:]:
+                    try:
+                        done = subprocess.run([program, *command.split()], cwd=root, capture_output=True,
+                                              timeout=10)
+                        said.append((command, done.returncode, done.stdout, done.stderr))
+                    except subprocess.TimeoutExpired:
+                        said.append((command, "timeout", b"", b""))
+                tree = sorted(str(path.relative_to(root)) for path in root.rglob("*"))
+                answers.append((said, tree))
+            finally:
+                shutil.rmtree(root, ignore_errors=True)
+        total += 1
+        if answers[0] == answers[1]:
+            passed += 1
+        else:
+            notes.append(f"cp into itself, {shape}: reference {answers[0][0]!r}, candidate {answers[1][0]!r}")
+    return passed, total, notes
+
+
 def files_collation_ls(farm):
     """ls under the locales whose collation this machine has: names that rank
     differently by case, accent, combining mark and punctuation, in every
@@ -10406,7 +10465,7 @@ def files_collation_ls(farm):
     return passed, total, notes
 
 
-FILES_CHECKS = (files_uname_identity, files_collation_ls, files_large_inputs, files_column_layout, files_xargs_parallel, files_zones, files_tar,
+FILES_CHECKS = (files_uname_identity, files_cp_into_self, files_collation_ls, files_large_inputs, files_column_layout, files_xargs_parallel, files_zones, files_tar,
                 files_tar_formats,
                 files_find_terminal, files_zone_names, files_hostname_set, files_move_across,
                 files_address_cap)
@@ -62266,7 +62325,7 @@ PINNED = r"""
 {"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":1,"stdout":"4b0f21ab428c2c15559b93fb4ac9010ebc36a537058f000c2b176964af62c1f7"},"case":{"argv":["-i","--target-directory=dir","--verbose","--recursive","--reflink","--debug","b.txt","twin"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"files_no","tier":"random","utility":"cp"},"domain":"files","id":"c718d5bdbe24dd0b","kind":"deliberate","list":"ledger","reason":"GNU opens an existing destination for writing before it asks for a clone that the file system cannot make, so cp --reflink or --reflink=always leaves it empty when the clone fails; this one fails before it touches the destination.","reference":{"effects":"64cdca09e2dd49c5784379ec6bf663f675246e306bbe365c51146b7fee469dfc","status":1,"stdout":"4b0f21ab428c2c15559b93fb4ac9010ebc36a537058f000c2b176964af62c1f7"},"utility":"cp"},
 {"candidate":{"effects":"cf00599f0ee4d1acdb4bbc050a0ea0d3466f5ea4b1ef2553c216ceaa7d9d69c6","status":0,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["--backup=numbered","-a","sl","d/sl"],"domain":"files","family":null,"fixture":"files_self","input_kind":"command","mode":null,"stdin":"files_yes","tier":"pinned","utility":"cp"},"domain":"files","id":"cf8951b9ad2b03c0","kind":"deliberate","list":"ledger","reason":"cp pins its source before it removes or backs up the destination, so a destination that is the source under another spelling (d/f through d -> ., the source link itself) is copied from the pinned inode; the reference reopens the source by name after removing it and fails with the name gone, losing a link it was asked to copy","reference":{"effects":"f44c708a8a5259935c3b29ad292e0c7043a158821509b875716bb9d8d1abfade","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"cp"},
 {"candidate":{"effects":"314ea113eaf4e4eb9b08a53d67ce9da150c222b925e97884aa47c6ca8b913e6b","status":0,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["--parents","--update=none-fail","-p","-d","--preserve=mode,timestamps","-R","dir/.","hollow"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"files_yes","tier":"random","utility":"cp"},"domain":"files","id":"d833e00673cd92fe","kind":"deliberate","list":"ledger","reason":"A corner of GNU's own bookkeeping that a script does not depend on (its wording for a hard link to a directory, its --debug line on a copy that fails, -u -v removing a name, a path over PATH_MAX); the effect on the tree is the same or safer here.","reference":{"effects":"2e6799e5fd85064310e02b979b1f4ce3ca2149c2ee88287296c5132fe9b6d138","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"cp"},
-{"candidate":{"effects":"e3f83c1c213e83700deadf0a9222de5d61fbd8af3f7ed3f8fda96a6ecb5e17e7","status":1,"stdout":"ea4c277c65e736eedb4a795cf3c4bda7a53633cdea6170aee52f5adf02374863"},"case":{"argv":["--parents","--force","--target-directory=hollow","--debug","-Z","-r","dir/.","hollow"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"files_no","tier":"random","utility":"cp"},"domain":"files","id":"f223ca4dff276ff3","kind":"deliberate","list":"ledger","reason":"A corner of GNU's own bookkeeping that a script does not depend on (its wording for a hard link to a directory, its --debug line on a copy that fails, -u -v removing a name, a path over PATH_MAX); the effect on the tree is the same or safer here.","reference":{"effects":"cee79172e383c08bef6afb5b4020a7d6726c52930b41abee4b80939b9f900b5b","status":1,"stdout":"8d367b2cf8073b210dc5d8700bd5e6741670951aa7decd69668316dc8fe7c6a2"},"utility":"cp"},
+{"candidate":{"effects":"b6b81b07066e2137c64f806b4da5aaba10e5fbecf0489408442306566bc2170f","status":1,"stdout":"48b900c2c5655f61b52a4d2d75843098ed726eda4141ad76cd6fa98c4e7efdbe"},"case":{"argv":["--parents","--force","--target-directory=hollow","--debug","-Z","-r","dir/.","hollow"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"files_no","tier":"random","utility":"cp"},"domain":"files","id":"f223ca4dff276ff3","kind":"deliberate","list":"ledger","reason":"A corner of GNU's own bookkeeping that a script does not depend on (its wording for a hard link to a directory, its --debug line on a copy that fails, -u -v removing a name, a path over PATH_MAX); the effect on the tree is the same or safer here.","reason_unverified":"the answer moved after a change elsewhere; this reason was not re-checked against it","reference":{"effects":"cee79172e383c08bef6afb5b4020a7d6726c52930b41abee4b80939b9f900b5b","status":1,"stdout":"8d367b2cf8073b210dc5d8700bd5e6741670951aa7decd69668316dc8fe7c6a2"},"utility":"cp"},
 {"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":1,"stdout":"d585b9d7f3d1c598d535e25ce77689ab120cebde11496d33779d6c16d35a4c5e"},"case":{"argv":["--dereference","-u","-H","--debug","-Z","--one-file-system","a.txt","dangling"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"files_yes","tier":"random","utility":"cp"},"domain":"files","id":"fada493af8ebab72","kind":"deliberate","list":"ledger","reason":"A corner of GNU's own bookkeeping that a script does not depend on (its wording for a hard link to a directory, its --debug line on a copy that fails, -u -v removing a name, a path over PATH_MAX); the effect on the tree is the same or safer here.","reference":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":1,"stdout":"34b1888b08e8732217b1e4b0270f1e3ec1780a4c43c67619774164770f904cdc"},"utility":"cp"},
 {"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-b","--target-directory=dir","--reflink","--context=x","-x","--recursive","new\nline","copy"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"files_yes","tier":"random","utility":"cp"},"domain":"files","id":"fba88f0f15d17d04","kind":"deliberate","list":"ledger","reason":"GNU opens an existing destination for writing before it asks for a clone that the file system cannot make, so cp --reflink or --reflink=always leaves it empty when the clone fails; this one fails before it touches the destination.","reference":{"effects":"64cdca09e2dd49c5784379ec6bf663f675246e306bbe365c51146b7fee469dfc","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"cp"},
 {"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":0,"stdout":"4f8a99ed0c16119c8fa1efa29781c2a0da32035321867c078573676dbc50ddaa"},"case":{"argv":["--file-type"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"empty","tier":"singles","utility":"dir"},"domain":"files","id":"25dc8df95d82301b","kind":"bug","list":"ledger","reason_id":"r324","reference":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":0,"stdout":"e96d555d024146db7480d9cd2c593796efb676d7ac3fd0a5130aaac38c293b08"},"utility":"dir"},
