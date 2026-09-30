@@ -380,15 +380,37 @@ static bool bowl_named_root(string_address root)
         return !string_equals(name, "bin") && bowl_name(name, false);
 }
 
+/* /bowls/NAME/PROGRAM: the named root copied into root, and where PROGRAM
+   begins, or null when it is not that shape or does not fit. */
+static string_address bowl_split_root(string_address path, p8 address_to root,
+                                      positive room)
+{
+        positive prefix = sizeof(BOWL_ROOT_PREFIX) - 1;
+        string_address program;
+        positive root_length;
+
+        if (!path || string_compare_max(path, BOWL_ROOT_PREFIX, prefix))
+                return null;
+
+        program = string_first_of(path + prefix, '/');
+        if (!program || !program[1])
+                return null;
+
+        root_length = (positive)(program - path);
+        if (root_length >= room)
+                return null;
+
+        memory_copy(root, path, root_length);
+        root[root_length] = end;
+        return bowl_named_root(root) ? program : null;
+}
+
 /* Parse @/bowls/NAME/PROGRAM from a shebang invocation. */
 static bool bowl_launcher(string_address encoded, p8 address_to root,
                           positive room,
                           string_address address_to program_out)
 {
-        positive prefix = sizeof(BOWL_ROOT_PREFIX) - 1;
-        string_address target;
         string_address program;
-        positive root_length;
 
         if (!encoded || encoded[0] != '@')
                 return false;
@@ -401,25 +423,8 @@ static bool bowl_launcher(string_address encoded, p8 address_to root,
                         break;
                 }
 
-        target = encoded + 1;
-        if (string_compare_max(target, BOWL_ROOT_PREFIX, prefix))
-                return false;
-
-        program = string_first_of(target + prefix, '/');
-        if (!program || !program[1])
-                return false;
-
-        root_length = (positive)(program - target);
-        if (root_length >= room)
-                return false;
-
-        memory_copy(root, target, root_length);
-        root[root_length] = end;
-
-        if (!bowl_named_root(root))
-                return false;
-
-        if (bowl_path_steps(program))
+        program = bowl_split_root(encoded + 1, root, room);
+        if (!program || bowl_path_steps(program))
                 return false;
 
         address_to program_out = program;
@@ -593,15 +598,14 @@ static b32 bowl_expose_program(string_address root, string_address program,
                 else
                         line[0] = end;
 
-                if (bowl_shebang_target(line, existing_root,
-                                        sizeof(existing_root),
-                                        address_of existing_program) &&
-                    string_equals(existing_root, root))
+                bool ours = bowl_shebang_target(line, existing_root,
+                                                sizeof(existing_root),
+                                                address_of existing_program);
+
+                if (ours && string_equals(existing_root, root))
                         return 0;
 
-                if (bowl_shebang_target(line, existing_root,
-                                        sizeof(existing_root),
-                                        address_of existing_program) &&
+                if (ours &&
                     bowl_root_path(guest, sizeof(guest), existing_root,
                                    existing_program) &&
                     system_access_at(AT_FDCWD, guest, BOWL_ACCESS_EXECUTE) >=
@@ -673,29 +677,12 @@ static bool bowl_split_guest_path(string_address path, p8 address_to root,
                                   positive root_room, p8 address_to program,
                                   positive program_room)
 {
-        positive prefix = sizeof(BOWL_ROOT_PREFIX) - 1;
-        string_address rest;
-        positive root_length;
-        positive program_length;
+        string_address rest = bowl_split_root(path, root, root_room);
 
-        if (!path || string_compare_max(path, BOWL_ROOT_PREFIX, prefix))
+        if (!rest || string_length(rest) >= program_room)
                 return false;
 
-        rest = string_first_of(path + prefix, '/');
-        if (!rest || !rest[1])
-                return false;
-
-        root_length = (positive)(rest - path);
-        program_length = string_length(rest);
-        if (root_length >= root_room || program_length >= program_room)
-                return false;
-
-        memory_copy(root, path, root_length);
-        root[root_length] = end;
-        if (!bowl_named_root(root))
-                return false;
-
-        memory_copy(program, rest, program_length + 1);
+        memory_copy(program, rest, string_length(rest) + 1);
         return true;
 }
 
@@ -708,6 +695,20 @@ static bool bowl_file_elf(string_address path)
                head[2] == 'L' && head[3] == 'F';
 }
 
+/* The next bowl under /bowls, as its root; false at the end. The named-root
+   test is what passes over ., .. and bin. */
+static bool bowl_next_root(file_walk address_to walk, p8 address_to root)
+{
+        struct linux_dirent64 address_to entry;
+
+        while ((entry = file_walk_next(walk)))
+                if (path_join(root, BOWL_PATH_LIMIT, BOWL_ROOT_DIRECTORY,
+                              entry->d_name) &&
+                    bowl_named_root(root))
+                        return true;
+        return false;
+}
+
 /*
         A bare name the PATH did not hold: look under each bowl's usual
         command directories, expose it, and hand back the launcher so the
@@ -717,7 +718,6 @@ static bool bowl_fill_command(string_address name, p8 address_to into,
                              positive room)
 {
         file_walk walk;
-        struct linux_dirent64 address_to entry;
         p8 root[BOWL_PATH_LIMIT];
         p8 rel[256];
         p8 installed[BOWL_PATH_LIMIT];
@@ -733,17 +733,8 @@ static bool bowl_fill_command(string_address name, p8 address_to into,
         if (!file_walk_open(address_of walk, AT_FDCWD, BOWL_ROOT_DIRECTORY))
                 return false;
 
-        while (!found && (entry = file_walk_next(address_of walk)))
+        while (!found && bowl_next_root(address_of walk, root))
         {
-                if (file_is_dot(entry->d_name) ||
-                    string_equals(entry->d_name, "bin"))
-                        continue;
-
-                if (!path_join(root, sizeof(root), BOWL_ROOT_DIRECTORY,
-                               entry->d_name) ||
-                    !bowl_named_root(root))
-                        continue;
-
                 for (positive at = 0; bowl_guest_bins[at]; at++)
                 {
                         if (string_length(bowl_guest_bins[at]) + 1 +
@@ -2523,20 +2514,14 @@ static b32 bowl_write_localtime_host(void)
 static positive bowl_write_localtime_all(positive address_to refused)
 {
         file_walk walk;
-        struct linux_dirent64 address_to entry;
         p8 root[BOWL_PATH_LIMIT];
         positive written = 0;
 
         if (!file_walk_open(address_of walk, AT_FDCWD, BOWL_ROOT_DIRECTORY))
                 return 0;
-        while ((entry = file_walk_next(address_of walk)))
+        while (bowl_next_root(address_of walk, root))
         {
-                if (file_is_dot(entry->d_name) ||
-                    string_equals(entry->d_name, "bin"))
-                        continue;
-                if (!path_join(root, sizeof(root), BOWL_ROOT_DIRECTORY,
-                               entry->d_name) ||
-                    !bowl_named_root(root) || !bowl_has(root, "/etc"))
+                if (!bowl_has(root, "/etc"))
                         continue;
                 if (!bowl_write_localtime(root))
                         written++;
