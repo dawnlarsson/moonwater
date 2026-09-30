@@ -890,13 +890,31 @@ static inline bool stream_is_terminal(b32 descriptor)
                       (positive)(path), (positive)(flags))
 
 #if !defined(KERNEL_MODE) && !defined(STANDARD_NO_PLATFORM)
+/* What a command that goes file by file asks the kernel once and holds for
+   its length: who it runs as, and the mask its files are created under. A
+   command that holds them says so before its first file and lets go after
+   its last; nothing else in the process can change either in between. */
+static bool system_state_held;
+static p32 system_state_user;
+static positive system_state_mask;
+
+static p32 system_effective_user(void)
+{
+        return system_state_held ? system_state_user
+                                 : (p32)system_call(syscall(geteuid));
+}
+
 /* Some private workspaces must have an exact owner mode even under a caller's
    restrictive umask.  The shell is single-threaded while builtins run, and
    its signal handlers only record state, so the process mask can be restored
-   immediately around the one creation syscall. */
+   immediately around the one creation syscall. A mask held by the command
+   that says it does not touch the mode is not asked for again. */
 static COLD bipolar system_make_directory_exact_at(
     bipolar directory, string_address path, positive mode)
 {
+        if (system_state_held && !(system_state_mask & mode))
+                return system_make_directory_at(directory, path, mode);
+
         bipolar mask = system_call_1(syscall(umask), 0);
 
         if (mask < 0)
@@ -1220,7 +1238,7 @@ static bipolar system_path_same_opened_at(
 static bool system_path_parent_cleanup_safe(bipolar directory)
 {
         system_path_identity parent;
-        p32 user = (p32)system_call(syscall(geteuid));
+        p32 user = system_effective_user();
         bipolar found = system_path_identity_at(
             directory, (string_address)"",
             SYSTEM_PATH_AT_EMPTY_PATH | SYSTEM_PATH_AT_NO_AUTOMOUNT,
@@ -1257,7 +1275,7 @@ static bipolar system_path_private_directory_valid(
 
         if (found < 0)
                 return found;
-        return opened.user == (p32)system_call(syscall(geteuid)) &&
+        return opened.user == system_effective_user() &&
                        (opened.mode & 0177777) == 0040700
                    ? 0 : -13;
 }
@@ -1327,7 +1345,7 @@ static COLD bipolar system_path_private_directory_open_at(
                     SYSTEM_PATH_STATX_IDENTITY | SYSTEM_PATH_STATX_UID,
                     address_of opened);
         if (valid >= 0 &&
-            (opened.user != (p32)system_call(syscall(geteuid)) ||
+            (opened.user != system_effective_user() ||
              (opened.mode & 0170000) != 0040000))
                 valid = -13;
         bool change_mode = valid >= 0 && (opened.mode & 07777) != 0700;

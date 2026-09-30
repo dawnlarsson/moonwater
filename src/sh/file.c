@@ -6597,7 +6597,7 @@ static string_address file_environment_override(string_address name,
                                          string_address fallback)
 {
         positive user = (positive)system_call(syscall(getuid));
-        positive effective_user = (positive)system_call(syscall(geteuid));
+        positive effective_user = (positive)system_effective_user();
         positive group = (positive)system_call(syscall(getgid));
         positive effective_group = (positive)system_call(syscall(getegid));
 
@@ -7742,7 +7742,7 @@ static bool file_name_stable(bipolar directory,
                              file_facts address_to entry)
 {
         file_facts parent;
-        p32 effective = (p32)system_call(syscall(geteuid));
+        p32 effective = system_effective_user();
 
         if (!entry || (entry->mask & STATX_BASIC) != STATX_BASIC ||
             !file_look(directory, (string_address)"", AT_EMPTY_PATH,
@@ -7766,7 +7766,7 @@ static bool file_name_stable(bipolar directory,
 static bool file_direct_endpoint_authorized(
     bipolar directory, file_facts address_to entry)
 {
-        p32 effective = (p32)system_call(syscall(geteuid));
+        p32 effective = system_effective_user();
 
         return entry && (entry->mask & STATX_BASIC) == STATX_BASIC &&
                (entry->owner == effective || entry->owner == 0) &&
@@ -8717,6 +8717,11 @@ static bool file_source_destination(string_address program, positive first,
 
         file_into_mode = true;
         file_made_on = after - first >= 2;
+        //      Every operand asks the kernel the same two things: who this is,
+        //      and what mask it makes files under.
+        system_state_user = system_effective_user();
+        system_state_mask = file_umask();
+        system_state_held = true;
         while (first < after)
         {
                 string_address source = file_operand_at(first++);
@@ -8733,6 +8738,7 @@ static bool file_source_destination(string_address program, positive first,
                 pair(source, destination);
                 file_parents_reprotect();
         }
+        system_state_held = false;
 
         log_flush();
 
@@ -21081,7 +21087,7 @@ static fn chmod_tree(string_address path)
         bool looked = file_look(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW, address_of facts);
         bool here = looked && (facts.mode & MODE_FORMAT) == MODE_DIRECTORY;
 
-        file_change_user = (p32)system_call(syscall(geteuid));
+        file_change_user = system_effective_user();
         file_change_descended = false;
         file_change_trusted = false;
         chmod_one(AT_FDCWD, path, path, looked ? address_of facts : null);
@@ -21926,7 +21932,7 @@ static fn chown_tree(string_address path)
                 looked = file_look(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW,
                                    address_of facts);
 
-        file_change_user = (p32)system_call(syscall(geteuid));
+        file_change_user = system_effective_user();
         file_change_descended = false;
         file_change_trusted = false;
 
@@ -34132,7 +34138,7 @@ static bipolar file_change_owner_kept(bipolar destination, bipolar directory,
         if (owned >= 0 ||
             (owned != -ERROR_NOT_PERMITTED && owned != -ERROR_INVALID &&
              owned != -ERROR_ACCESS) ||
-            system_call(syscall(geteuid)) == 0)
+            system_effective_user() == 0)
                 return owned;
         (void)(named ? system_change_owner_at(
                            directory, name, -1, facts->group,
@@ -34324,7 +34330,7 @@ static bipolar file_xattrs_copy(bipolar from, bipolar to,
    to set a user. attribute, so copies them first. */
 static bool file_xattrs_after_owner(void)
 {
-        return system_call(syscall(geteuid)) == 0;
+        return system_effective_user() == 0;
 }
 
 /* The attributes file_keeps names, given to what was copied. made says
@@ -34560,7 +34566,7 @@ static bool file_overwrite_allowed(string_address program, string_address shown,
            mode, as GNU's overwrite_ok asks: mv and a cp that will remove
            it to replace it, one that will try anyway. */
         if (ask && (there->mode & MODE_FORMAT) != MODE_LINK &&
-            system_call(syscall(geteuid)) != 0 &&
+            system_effective_user() != 0 &&
             system_call_4(syscall(faccessat2), (positive)AT_FDCWD,
                           (positive)shown, 2, AT_EACCESS) < 0)
         {
@@ -38036,7 +38042,7 @@ static bool install_strip_result_ours(bipolar handle)
         return file_look_code(handle, (string_address) "", AT_EMPTY_PATH,
                               address_of facts) >= 0 &&
                (facts.mode & MODE_FORMAT) == MODE_FILE && facts.hard_links == 1 &&
-               facts.owner == (p32)system_call(syscall(geteuid));
+               facts.owner == system_effective_user();
 }
 
 //      A directory's owner and mode come from gnulib's mkdir-p, which has
@@ -40617,7 +40623,7 @@ static fn rm_tree_parallel(string_address root, file_facts address_to facts)
                                     : file_look_code(opened, (string_address)"",
                                                      AT_EMPTY_PATH, address_of inside);
 
-        rm_user = (p32)system_call(syscall(geteuid));
+        rm_user = system_effective_user();
 
         if (looked >= 0 &&
             (!file_same_identity(facts, address_of inside) ||
@@ -45540,7 +45546,7 @@ static b32 file_id()
         }
 
         positive user = (positive)system_call(syscall(getuid));
-        positive effective_user = (positive)system_call(syscall(geteuid));
+        positive effective_user = (positive)system_effective_user();
         positive group = (positive)system_call(syscall(getgid));
         positive effective_group = (positive)system_call(syscall(getegid));
 
@@ -45656,7 +45662,7 @@ static b32 file_whoami()
         if (left)
                 return left;
 
-        positive user = (positive)system_call(syscall(geteuid));
+        positive user = (positive)system_effective_user();
         p8 name[FILE_NAME_MAX];
 
         if (!file_user_name(user, name, FILE_NAME_MAX))
