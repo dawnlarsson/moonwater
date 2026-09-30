@@ -1835,10 +1835,6 @@ static bipolar tar_stack_parent(string_address path, p8 address_to leaf,
         return held;
 }
 
-#define TAR_RESOLVE_NO_MAGICLINKS 0x02
-#define TAR_RESOLVE_NO_SYMLINKS 0x04
-#define TAR_RESOLVE_BENEATH 0x08
-
 /* Reopen a name this run made.  openat2 resolves it below the extraction
    root in one call and refuses a symlink anywhere on the way, which is
    the component walk's promise without a descriptor per component; an
@@ -1852,17 +1848,10 @@ static bipolar tar_open_beneath(string_address path, positive flags)
                 if (root < 0)
                         return root;
 
-                struct
-                {
-                        p64 flags;
-                        p64 mode;
-                        p64 resolve;
-                } how = {flags | O_NOFOLLOW | O_CLOEXEC, 0,
-                         TAR_RESOLVE_BENEATH | TAR_RESOLVE_NO_SYMLINKS |
-                             TAR_RESOLVE_NO_MAGICLINKS};
-                bipolar opened = system_call_4(
-                    syscall(openat2), (positive)root, (positive)path,
-                    (positive)address_of how, sizeof(how));
+                bipolar opened = system_open_resolved(
+                    root, path, flags | O_NOFOLLOW | O_CLOEXEC,
+                    SYSTEM_RESOLVE_BENEATH | SYSTEM_RESOLVE_NO_SYMLINKS |
+                        SYSTEM_RESOLVE_NO_MAGICLINKS);
                 if (opened != -ERROR_NO_SYSTEM_CALL &&
                     opened != -ERROR_AGAIN)
                         return opened;

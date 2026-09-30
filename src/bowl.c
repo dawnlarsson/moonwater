@@ -254,9 +254,6 @@ static bipolar bowl_mkdir_parents(string_address path)
         return bowl_mkdir_parents_made(path, BOWL_MAKE_CHAIN, null);
 }
 
-#define BOWL_RESOLVE_NO_MAGICLINKS 0x02
-#define BOWL_RESOLVE_IN_ROOT 0x10
-
 /*
         Open a path as though root were /. Absolute symlinks therefore remain
         inside the bowl, and relative symlinks cannot climb above it. This is
@@ -266,25 +263,15 @@ static bipolar bowl_mkdir_parents(string_address path)
 static bipolar bowl_open_in_root(string_address root, string_address path,
                                  positive flags)
 {
-        struct
-        {
-                p64 flags;
-                p64 mode;
-                p64 resolve;
-        } how = {
-            flags,
-            0,
-            BOWL_RESOLVE_IN_ROOT | BOWL_RESOLVE_NO_MAGICLINKS,
-        };
         bipolar root_handle = bowl_open_directory(root, false, null);
         bipolar opened;
 
         if (root_handle < 0)
                 return root_handle;
 
-        opened = system_call_4(syscall(openat2), (positive)root_handle,
-                               (positive)path, (positive)address_of how,
-                               sizeof(how));
+        opened = system_open_resolved(root_handle, path, flags,
+                                      SYSTEM_RESOLVE_IN_ROOT |
+                                          SYSTEM_RESOLVE_NO_MAGICLINKS);
         system_close(root_handle);
         return opened;
 }
@@ -1864,16 +1851,6 @@ static bool bowl_has(string_address root, string_address path)
 static bool bowl_has_below(string_address root, string_address child,
                            string_address path)
 {
-        struct
-        {
-                p64 flags;
-                p64 mode;
-                p64 resolve;
-        } how = {
-            O_PATH | O_CLOEXEC,
-            0,
-            BOWL_RESOLVE_IN_ROOT | BOWL_RESOLVE_NO_MAGICLINKS,
-        };
         bipolar root_handle;
         bipolar child_handle;
         bipolar found;
@@ -1892,9 +1869,9 @@ static bool bowl_has_below(string_address root, string_address child,
         if (child_handle < 0)
                 return false;
 
-        found = system_call_4(syscall(openat2), (positive)child_handle,
-                              (positive)path, (positive)address_of how,
-                              sizeof(how));
+        found = system_open_resolved(child_handle, path, O_PATH | O_CLOEXEC,
+                                     SYSTEM_RESOLVE_IN_ROOT |
+                                         SYSTEM_RESOLVE_NO_MAGICLINKS);
         system_close(child_handle);
         if (found < 0)
                 return false;
@@ -2748,8 +2725,6 @@ static b32 bowl_write_pacman(string_address root)
 /* ---- Digests: the download a setup pins, and every blob an OCI layout names. ---- */
 
 #define BOWL_DIGEST_HEX 64
-#define BOWL_RESOLVE_NO_SYMLINKS 0x04
-#define BOWL_RESOLVE_BENEATH 0x08
 
 static bool bowl_hex_digest(string_address text, positive length)
 {
@@ -3157,13 +3132,6 @@ static b32 bowl_oci_blob(string_address layout, string_address descriptor,
         p8 rel[128];
         p64 want = 0;
         p64 size = 0;
-        struct
-        {
-                p64 flags;
-                p64 mode;
-                p64 resolve;
-        } how = {FILE_READ | O_CLOEXEC, 0,
-                 BOWL_RESOLVE_BENEATH | BOWL_RESOLVE_NO_SYMLINKS};
         bipolar directory;
         bipolar handle;
         bool same;
@@ -3186,9 +3154,9 @@ static b32 bowl_oci_blob(string_address layout, string_address descriptor,
                                        O_CLOEXEC);
         if (directory < 0)
                 return bowl_fail(layout, directory);
-        handle = system_call_4(syscall(openat2), (positive)directory,
-                               (positive)rel, (positive)address_of how,
-                               sizeof(how));
+        handle = system_open_resolved(directory, rel, FILE_READ | O_CLOEXEC,
+                                      SYSTEM_RESOLVE_BENEATH |
+                                          SYSTEM_RESOLVE_NO_SYMLINKS);
         system_close(directory);
         if (handle < 0)
                 return bowl_fail(path, handle);

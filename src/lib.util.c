@@ -1017,6 +1017,29 @@ static COLD bipolar system_open_directory_nofollow(
                                        true, false, 0, true);
 }
 
+/* openat2 of path below directory, resolved as the RESOLVE_ bits in
+   resolve say: no magic links, no symlinks at all, no leaving directory
+   (beneath), or directory as the root a link or .. cannot climb above. */
+enum {
+        SYSTEM_RESOLVE_NO_MAGICLINKS = 0x02, SYSTEM_RESOLVE_NO_SYMLINKS = 0x04,
+        SYSTEM_RESOLVE_BENEATH = 0x08, SYSTEM_RESOLVE_IN_ROOT = 0x10,
+};
+
+static COLD bipolar system_open_resolved(bipolar directory, string_address path,
+                                         positive flags, positive resolve)
+{
+        struct
+        {
+                p64 flags;
+                p64 mode;
+                p64 resolve;
+        } how = {flags, 0, resolve};
+
+        return system_call_4(syscall(openat2), (positive)directory,
+                             (positive)path, (positive)address_of how,
+                             sizeof(how));
+}
+
 /* Make an unpredictable sibling name while preserving any directory prefix
    carried by path.  O_EXCL or RENAME_NOREPLACE must claim the result. */
 static COLD bool system_temporary_name(
