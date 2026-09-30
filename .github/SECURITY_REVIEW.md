@@ -75,6 +75,20 @@ does not convert those protocols into authenticated ones.
    keep pinning Moonwater's policy for every disagreement (`DELIBERATE`,
    `TIGHT_REFUSES`, `STRICTER_THAN_WGET`).
 
+Application layer (HTTP client, wget, URL handling), checked against GNU wget
+1.25.0 and curl 8.22.0 with scripted servers (`wget_hostile`): default behaviour
+follows them, and what this client refuses that both fetch is deliberate and
+named: userinfo in a URL, `%00`/`%0d`/`%0a` in a request target, a backslash
+in an authority, a head over 16 KiB, a URL of 2,048 bytes or more, an IDN host
+(no IDNA mapping is built, so `http://münchen.de/` is refused, not guessed at),
+an HTTPS-to-HTTP redirect, and the saved file's escaped rather than decoded name.
+The tight tier (`MOONWATER_STRICT` 2) adds the refusal of a redirect from public
+address space to one that is not public. Not built, proposed: a floor under the
+clock the certificate dates are judged by (`tls_date_now` takes `time()` as it
+is, so a rolled-back clock makes an expired certificate current); no floor is
+needed to fail closed on a clock that starts at 1970, since every certificate is
+then not yet valid.
+
 ### P1 — resource and state-machine assurance
 
 1. Byte, item and recursion ceilings are recorded and hit-tested
