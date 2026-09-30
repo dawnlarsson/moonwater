@@ -2306,15 +2306,16 @@ static awk_text address_to awk_sprintf(string_address format, positive length,
                 string_address fields_at = format + at;
                 conversion_spec parsed = conversion_spec_take_max(&fields_at, length - at);
 
-                // The ' flag asks for the locale's digit grouping. Digits are
-                // written ungrouped whatever LC_NUMERIC says, as in the C
-                // locale, so the flag is read among the others and means
-                // nothing more: %'d and %-'8d are %d and %-8d.
+                // The ' flag is read among the others, in any order and any
+                // number, and asks for the locale's digit grouping.
+                bool group = false;
+
                 while (parsed.fields == 1 && !parsed.field[0] && !parsed.stars &&
                        (positive)(fields_at - format) < length && fields_at[0] == '\'')
                 {
                         p32 flags = parsed.flags;
 
+                        group = true;
                         fields_at++;
                         parsed = conversion_spec_take_max(&fields_at,
                                                           length - (positive)(fields_at - format));
@@ -2648,6 +2649,32 @@ static awk_text address_to awk_sprintf(string_address format, positive length,
                         continue;
                 }
 
+                /*
+                        The ' flag: the locale's decimal point and, for the
+                        conversions C groups (d i u f F g G), its thousands
+                        separator. A precision counts the localized bytes, a
+                        separator's included, and so does an integer's width; a
+                        float's width counts its characters, as glibc's do.
+                */
+                p8 address_to spread = null;
+
+                if (group && !from_string && body &&
+                    string_first_of((string_address) "diufFgGeE", conversion))
+                {
+                        positive room_spread = body * 4 + 16;
+
+                        text_number_locale();
+                        spread = (p8 address_to)awk_take(room_spread);
+                        body = text_number_localize((const p8 address_to)body_at, body,
+                                                    conversion != 'e' && conversion != 'E',
+                                                    spread, room_spread);
+                        body_at = spread;
+
+                        if (!string_first_of((string_address) "diu", conversion) &&
+                            awk_wide((string_address)body_at, body))
+                                shown = awk_characters((string_address)body_at, body);
+                }
+
                 // A precision on an integer is a minimum number of digits,
                 // and it takes the zero flag out of the argument.
                 positive zeros = 0;
@@ -2666,6 +2693,7 @@ static awk_text address_to awk_sprintf(string_address format, positive length,
                 // padded with spaces, as the reference awk pads them.
                 if (from_string || conversion == 'c')
                         zero = false;
+
                 positive total = awk_size_add(awk_size_add(prefixed, zeros),
                                               shown == (positive)-1 ? body : shown);
                 positive padding = width > total ? width - total : 0;
@@ -2683,6 +2711,8 @@ static awk_text address_to awk_sprintf(string_address format, positive length,
                 awk_builder_put(address_of build, body_at, body);
                 if (grown)
                         memory_give(grown);
+                if (spread)
+                        memory_give(spread);
 
                 if (padding && left)
                         awk_builder_fill(address_of build, ' ', padding);

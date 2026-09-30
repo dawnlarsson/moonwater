@@ -5017,20 +5017,11 @@ static bool numfmt_format_read(string_address text,
         the characters iswblank calls blank and widths are columns, so a
         separator of three bytes takes one.
 */
-static string_address numfmt_point = ".";
-static string_address numfmt_thousands = "";
-static string_address numfmt_rule = "";
 static bool numfmt_multibyte;
 
 static fn numfmt_locale()
 {
-        string_address point = locale_string(LOCALE_NUMERIC, LOCALE_NUMERIC_DECIMAL);
-        string_address thousands = locale_string(LOCALE_NUMERIC, LOCALE_NUMERIC_THOUSANDS);
-        string_address rule = locale_string(LOCALE_NUMERIC, LOCALE_NUMERIC_GROUPING);
-
-        numfmt_point = point && point[0] ? point : (string_address) ".";
-        numfmt_thousands = thousands ? thousands : (string_address) "";
-        numfmt_rule = rule ? rule : (string_address) "";
+        text_number_locale();
         numfmt_multibyte = text_locale_utf8();
 }
 
@@ -5145,88 +5136,13 @@ static positive numfmt_columns_or_bytes(const p8 address_to bytes, positive leng
         return columns < 0 ? length : (positive)columns;
 }
 
-// The number as printf's conversion writes it under the locale: its point,
-// and with grouping asked for the separator every group the rule names.
-static positive numfmt_localize(const p8 address_to number, positive length,
-                                bool group, p8 address_to into, positive room)
-{
-        positive digits_end = 0;
-        positive start = length && number[0] == '-';
-
-        while (start + digits_end < length && byte_is_digit(number[start + digits_end]))
-                digits_end++;
-
-        positive integer_end = start + digits_end;
-        positive made = 0;
-        positive point_length = string_length(numfmt_point);
-        positive separator_length = string_length(numfmt_thousands);
-
-        if (room < length * 4 + 8)
-                return 0;
-        if (start)
-                into[made++] = '-';
-
-        //      Group sizes from the right: the rule's bytes in turn, the
-        //      last one repeating, and a byte of CHAR_MAX or more, or none,
-        //      ending the grouping.
-        positive rule_at = 0;
-        positive size = numfmt_rule[0] ? (p8)numfmt_rule[0] : 0;
-        positive cuts[64];
-        positive cut_count = 0;
-
-        if (group && separator_length && size && size < 127)
-        {
-                for (positive taken = 0; taken + size < digits_end && cut_count < 64;)
-                {
-                        taken += size;
-                        cuts[cut_count++] = taken;
-                        if (numfmt_rule[rule_at + 1])
-                        {
-                                rule_at++;
-                                size = (p8)numfmt_rule[rule_at];
-                                if (!size || size >= 127)
-                                        break;
-                        }
-                }
-        }
-
-        for (positive i = 0; i < digits_end; i++)
-        {
-                positive remaining = digits_end - i;
-                bool cut = false;
-
-                for (positive k = 0; k < cut_count; k++)
-                        if (cuts[k] == remaining)
-                                cut = true;
-                if (cut)
-                {
-                        memory_copy(into + made, numfmt_thousands, separator_length);
-                        made += separator_length;
-                }
-                into[made++] = number[start + i];
-        }
-
-        for (positive at = integer_end; at < length; at++)
-        {
-                if (number[at] == '.')
-                {
-                        memory_copy(into + made, numfmt_point, point_length);
-                        made += point_length;
-                }
-                else
-                        into[made++] = number[at];
-        }
-
-        into[made] = end;
-        return made;
-}
 
 static fn numfmt_body_out(p8 address_to number, positive number_length,
                           p8 address_to unit, positive unit_length,
                           positive automatic_width)
 {
         p8 localized[512];
-        positive localized_length = numfmt_localize(
+        positive localized_length = text_number_localize(
             number, number_length,
             numfmt.grouping || (numfmt.have_format && numfmt.format.grouping),
             localized, sizeof(localized));
@@ -5722,8 +5638,8 @@ static bool numfmt_convert(p8 address_to bytes, positive length,
         positive at = 0;
         positive count = 0;
         bool found = false;
-        positive point_length = string_length(numfmt_point);
-        positive thousands_length = string_length(numfmt_thousands);
+        positive point_length = string_length(text_number_point);
+        positive thousands_length = string_length(text_number_thousands);
         positive fraction_from = 0;
         positive fraction_bytes = 0;
 
@@ -5755,7 +5671,7 @@ static bool numfmt_convert(p8 address_to bytes, positive length,
                         }
                         canon[canon_length++] = bytes[at++];
                         if (thousands_length && at + thousands_length < stop &&
-                            !memory_compare(bytes + at, numfmt_thousands, thousands_length) &&
+                            !memory_compare(bytes + at, text_number_thousands, thousands_length) &&
                             byte_is_digit(bytes[at + thousands_length]))
                                 at += thousands_length;
                 }
@@ -5763,7 +5679,7 @@ static bool numfmt_convert(p8 address_to bytes, positive length,
                         break;
 
                 bool at_point = point_length <= stop - at &&
-                                !memory_compare(bytes + at, numfmt_point, point_length);
+                                !memory_compare(bytes + at, text_number_point, point_length);
 
                 if (!found && !at_point)
                 {
@@ -6458,7 +6374,7 @@ static b32 tools_numfmt()
         }
 
         /* Grouping is the locale's separator, and the C locale has none. */
-        if (numfmt.debug && !numfmt_thousands[0] &&
+        if (numfmt.debug && !text_number_thousands[0] &&
             (numfmt.grouping || (numfmt.have_format && numfmt.format.grouping)))
         {
                 text_flush();

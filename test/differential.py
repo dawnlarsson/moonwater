@@ -4008,6 +4008,14 @@ def awk_audit():
         ("BEGIN { printf \"[%*d]\\n\", -5, 42 }",),
         ("BEGIN { printf \"[%'d][%'10d][%-'8d][%'-8d][%'08d][%+'d][%'.3f][%'x][%'5c]\\n\", 1234567, 1234567, 55, 55, 55, 5, 1234.5678, 255, 65 }",),
         ("BEGIN { printf \"[%'\", 1 }",), ("BEGIN { printf \"[%'-'5d][%''d]\\n\", 1, 2 }",),
+        #   The ' flag groups digits by the locale's rule and writes its point: a
+        #   precision counts bytes, an integer's width bytes and a float's width characters.
+        *({"argv": ("BEGIN { printf \"" + fmt + "\\n\", " + values + " }",), "env": (("LC_ALL", locale),)}
+          for locale in ("en_US.UTF-8", "fr_FR.UTF-8")
+          for fmt, values in (
+              ("[%'d][%'i][%'u][%'10d][%-'12d|][%'012d][%'+d][%' d][%'.8d][%'x]", "1234567, -1234567, 1234567, 1000, 1234567, 1000, 5, 1000, 1234, 65535"),
+              ("[%'f][%'.2f][%'12.3f][%'-12.3f|][%'012.3f][%'+.1f][%'.0f][%'#.0f]", "1234567.891, 1234567.891, 1234.5, -1234.5, 1234.5, 1234.5, 1234567.5, 1234"),
+              ("[%'g][%'G][%'.10g][%'e][%'12.4G][%'*d][%'.*f]", "1234567.5, 1e10, 1234567.891, 1234567.5, 1234.5, 12, 1234567, 2, 1234.5678"))),
         ("BEGIN { printf \"[%.0f][%.0f][%.0f][%.0f]\\n\", 999999999, 1000000000, 1000000001, 1e100 }",),
         ("BEGIN { printf \"[%x][%o][%u][%d][%.3x][%10x][%-10x][%#x]\\n\", -1e30, -1e30, -1e30, -1e30, -1e30, -1e30, -1e30, -1e30 }",),
         ("BEGIN { x = -0.0; printf \"[%f][%.0f][%g][%e][%d][%5.1f][%05.1f][%+f]\\n\", x, x, x, x, x, x, x, x; print x, x \"\" }",),
