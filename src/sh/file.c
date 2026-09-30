@@ -34259,30 +34259,13 @@ static bool file_xattr_is_acl(string_address name)
                string_equals(name, (string_address) "system.posix_acl_default");
 }
 
-/* A name inside a directory held open, as a path the l* calls can take
-   without following the name itself. */
-static bool file_xattr_path(p8 address_to into, bipolar directory,
-                            string_address name)
+//      struct xattr_args, which the *at calls take for a value.
+typedef struct
 {
-        static const p8 head[] = "/proc/self/fd/";
-        positive length = sizeof(head) - 1;
-        positive named = string_length(name);
-
-        if (directory == AT_FDCWD)
-        {
-                if (named >= FILE_PATH_MAX)
-                        return false;
-                memory_copy_apart_end(into, name, named);
-                return true;
-        }
-        memory_copy_apart(into, head, length);
-        length += positive_into_string(into + length, (positive)directory);
-        if (length + 1 + named >= FILE_PATH_MAX)
-                return false;
-        into[length++] = '/';
-        memory_copy_apart_end(into + length, name, named);
-        return true;
-}
+        p64 value;
+        p32 size;
+        p32 flags;
+} file_xattr_args;
 
 /* With room for them passed in, so a pool job can use its own; one whose
    room is too small answers ERANGE and leaves the name to the serial copy,
@@ -34303,22 +34286,20 @@ static bipolar file_xattrs_copy_in(bipolar from, string_address from_name,
                                    p8 address_to value, positive value_room)
 {
         positive keeps = file_keeps;
-        p8 from_path[FILE_PATH_MAX];
-        p8 to_path[FILE_PATH_MAX];
         bool by_name = from_name != null;
 
         if (!(keeps & (FILE_KEEP_MODE | FILE_KEEP_XATTR)) || from < 0 || to < 0)
                 return 0;
-        if (by_name && (!file_xattr_path(from_path, from, from_name) ||
-                        !file_xattr_path(to_path, to, to_name)))
-                return 0;
 
-        bipolar listed = by_name
-                             ? system_call_3(syscall(llistxattr),
-                                             (positive)from_path,
-                                             (positive)names, names_room)
-                             : system_call_3(syscall(flistxattr), (positive)from,
-                                             (positive)names, names_room);
+        //      The *at calls take the descriptor itself with an empty name, or
+        //      a name in a directory that is not followed, so neither is a
+        //      path built through /proc/self/fd.
+        positive by = by_name ? AT_SYMLINK_NOFOLLOW : AT_EMPTY_PATH;
+        string_address from_at = by_name ? from_name : (string_address) "";
+        string_address to_at = by_name ? to_name : (string_address) "";
+        bipolar listed = system_call_5(syscall(listxattrat), (positive)from,
+                                       (positive)from_at, by, (positive)names,
+                                       names_room);
         if (listed == -ERROR_OUT_OF_RANGE)
                 return listed;
         if (listed <= 0)
@@ -34344,31 +34325,19 @@ static bipolar file_xattrs_copy_in(bipolar from, string_address from_name,
                               string_equals(name, (string_address) "security.evm"))
                         continue;
 
-                bipolar size = by_name
-                                   ? system_call_4(syscall(lgetxattr),
-                                                   (positive)from_path,
-                                                   (positive)name,
-                                                   (positive)value, value_room)
-                                   : system_call_4(syscall(fgetxattr),
-                                                   (positive)from,
-                                                   (positive)name,
-                                                   (positive)value, value_room);
+                file_xattr_args args = {(p64)(positive)value, (p32)value_room, 0};
+                bipolar size = system_call_6(syscall(getxattrat), (positive)from,
+                                             (positive)from_at, by, (positive)name,
+                                             (positive)address_of args, sizeof(args));
                 if (size == -ERROR_OUT_OF_RANGE)
                         return size;
                 if (size < 0)
                         continue;
 
-                bipolar set = by_name
-                                  ? system_call_5(syscall(lsetxattr),
-                                                  (positive)to_path,
-                                                  (positive)name,
-                                                  (positive)value,
-                                                  (positive)size, 0)
-                                  : system_call_5(syscall(fsetxattr),
-                                                  (positive)to,
-                                                  (positive)name,
-                                                  (positive)value,
-                                                  (positive)size, 0);
+                args.size = (p32)size;
+                bipolar set = system_call_6(syscall(setxattrat), (positive)to,
+                                            (positive)to_at, by, (positive)name,
+                                            (positive)address_of args, sizeof(args));
                 if (set >= 0)
                         continue;
 
