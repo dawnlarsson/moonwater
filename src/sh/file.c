@@ -27592,108 +27592,42 @@ static bool csplit_suffix_valid(string_address format)
 }
 
 // The suffix for file number, into out; its length, or positive_max when
-// it would not fit.
+// it would not fit. The conversion is printf's, by the library's own
+// integer field; the ' flag asks for a grouping this locale does not have.
 static positive csplit_suffix_format(string_address format, positive number,
                                      p8 address_to out, positive room)
 {
-        positive used = 0;
+        format_sink sink = {0};
+
+        sink.buffer = out;
+        sink.capacity = room;
 
         for (string_address at = format; *at; at++)
         {
                 if (*at != '%' || at[1] == '%')
                 {
-                        if (used >= room)
-                                return positive_max;
-                        out[used++] = *at;
+                        format_emit(address_of sink, at, 1);
                         at += *at == '%';
                         continue;
                 }
-                at++;
 
-                bool left = false, zero = false, alternative = false;
-                positive width = 0, precision = 0;
-                bool precise = false;
+                format_spec spec = {.precision = -1};
 
-                for (;; at++)
-                        if (*at == '-')
-                                left = true;
-                        else if (*at == '0')
-                                zero = true;
-                        else if (*at == '#')
-                                alternative = true;
-                        else if (*at != '\'')
-                                break;
+                for (at++; *at == '-' || *at == '0' || *at == '#' || *at == '\''; at++)
+                        spec.flags |= *at == '-' ? FORMAT_FLAG_LEFT : *at == '0' ? FORMAT_FLAG_ZERO
+                                      : *at == '#' ? FORMAT_FLAG_ALTERNATE : 0;
                 for (; byte_is_digit(*at); at++)
-                {
-                        positive grown = width * 10 + (positive)(*at - '0');
-
-                        width = grown < FILE_PATH_MAX ? grown : FILE_PATH_MAX;
-                }
+                        spec.width = min(spec.width * 10 + (positive)(*at - '0'), FILE_PATH_MAX);
                 if (*at == '.')
-                {
-                        precise = true;
-                        while (byte_is_digit(*++at))
-                        {
-                                positive grown = precision * 10 + (positive)(*at - '0');
+                        for (spec.precision = 0; byte_is_digit(*++at);)
+                                spec.precision = min(spec.precision * 10 + (*at - '0'), FILE_PATH_MAX);
 
-                                precision = grown < FILE_PATH_MAX ? grown : FILE_PATH_MAX;
-                        }
-                }
-
-                p8 kind = *at;
-                positive base = kind == 'o' ? 8 : kind == 'x' || kind == 'X' ? 16 : 10;
-                p8 digits[32];
-                positive count = 0;
-
-                // printf writes no digit for 0 at a precision of 0.
-                if (!(precise && !precision && !number))
-                {
-                        positive value = number;
-
-                        do
-                        {
-                                p8 digit = (p8)(value % base);
-
-                                digits[count++] = (p8)(digit < 10 ? '0' + digit
-                                                                  : (kind == 'X' ? 'A' : 'a') + digit - 10);
-                                value /= base;
-                        } while (value);
-                }
-
-                string_address prefix = (string_address)"";
-                positive zeros = precise && precision > count ? precision - count : 0;
-
-                if (alternative && kind == 'o' && !zeros && (!count || digits[count - 1] != '0'))
-                        zeros = 1;
-                if (alternative && number && base == 16)
-                        prefix = kind == 'X' ? (string_address)"0X" : (string_address)"0x";
-
-                positive prefix_length = string_length(prefix);
-                positive body = prefix_length + zeros + count;
-
-                if (zero && !left && !precise && width > body)
-                {
-                        zeros += width - body;
-                        body = width;
-                }
-
-                positive pad = width > body ? width - body : 0;
-
-                if (used + pad + body > room)
-                        return positive_max;
-                if (!left)
-                        for (; pad; pad--)
-                                out[used++] = ' ';
-                memory_copy_apart(out + used, prefix, prefix_length);
-                used += prefix_length;
-                memory_fill(out + used, '0', zeros);
-                used += zeros;
-                while (count)
-                        out[used++] = digits[--count];
-                for (; pad; pad--)
-                        out[used++] = ' ';
+                spec.conversion = *at;
+                format_integer(address_of sink, number,
+                               *at == 'o' ? 8 : *at == 'x' || *at == 'X' ? 16 : 10, false,
+                               address_of spec);
         }
-        return used;
+        return sink.counted > room ? positive_max : sink.used;
 }
 
 static bool csplit_name(csplit_state address_to state, positive number)
