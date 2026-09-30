@@ -92973,8 +92973,14 @@ b32 main(void)
 }
 #endif /* BENCH_cells_ascii */
 
-#ifdef BENCH_fill_u32
-/* 32-bit span fill: the shared Canvas/window primitive against its two floors. */
+#if defined(BENCH_fill_u32) || defined(BENCH_fill_u64)
+/*
+        A span fill against its scalar and bulk-store floors: the 32-bit
+        primitive the Canvas and windows share (BENCH_fill_u32) and the
+        naturally aligned 64-bit pattern fill (BENCH_fill_u64). Each section
+        names its subject, pattern and sizes and writes its two floors; the
+        correctness pass, the paired trials and the report are one.
+*/
 #include "../src/lib.util.c"
 #define SHARED_bench_measure
 #include "checks.c"
@@ -92984,7 +92990,17 @@ b32 main(void)
 #define TARGET_BYTES (1u << 26)
 #define MAXIMUM 4096
 
-static unsigned int block[MAXIMUM + 2] __attribute__((aligned(64)));
+#ifdef BENCH_fill_u32
+#define FILL_NAME "memory_fill_u32"
+#define FILL_SUBJECT memory_fill_u32
+#define FILL_PATTERN 0x13579bdfu
+#define FILL_JUNK 0xa5a5a5a5u
+#define FILL_SIZES                                                            \
+        1, 2, 3, 4, 8, 16, 32, 64, 96, 128, 160, 192, 200, 208, 216, 224,     \
+        232, 240, 248, 256, 320, 384, 512, 1024, 4096
+
+typedef unsigned int fill_word;
+static fill_word block[MAXIMUM + 2] __attribute__((aligned(64)));
 
 /* REP pays setup; the scalar body pays a back edge per four words. */
 __asm__(
@@ -93036,112 +93052,17 @@ typedef fn (*fill_call)(address_any, positive, unsigned int);
 static fill_call volatile calls[] = {
     memory_fill_u32, fill_u32_scalar_floor, fill_u32_bulk_floor,
 };
+#else
+#define FILL_NAME "memory_fill_u64_aligned"
+#define FILL_SUBJECT memory_fill_u64_aligned
+#define FILL_PATTERN 0x13579bdf2468ace0ull
+#define FILL_JUNK 0xa5a5a5a5a5a5a5a5ull
+#define FILL_SIZES                                                            \
+        1, 2, 3, 4, 8, 16, 32, 48, 64, 80, 88, 96, 100, 104, 108, 112, 120,   \
+        128, 160, 192, 256, 512, 1024, 4096
 
-static bool correctness(void)
-{
-        for (positive offset = 0; offset < 2; offset++)
-                for (positive count = 0; count <= MAXIMUM; count++)
-                {
-                        memory_fill(block, 0xa5, sizeof(block));
-                        memory_fill_u32(block + offset, count, 0x13579bdfu);
-
-                        for (positive i = 0; i < MAXIMUM + 2; i++)
-                        {
-                                unsigned int expected =
-                                    i >= offset && i < offset + count
-                                        ? 0x13579bdfu
-                                        : 0xa5a5a5a5u;
-
-                                if (block[i] != expected)
-                                        return false;
-                        }
-                }
-
-        return true;
-}
-
-static p64 run(unsigned int which, positive count, positive rounds,
-               positive offset)
-{
-        p64 started = get_cpu_time();
-
-        while (rounds--)
-                calls[which](block + offset, count, 0x13579bdfu);
-
-        return get_cpu_time() - started;
-}
-
-static fn row(positive count, positive offset)
-{
-        positive scalar[TRIES], bulk[TRIES];
-        positive rounds = TARGET_BYTES / max(count * sizeof(*block), 1ul);
-
-        if (rounds < 32)
-                rounds = 32;
-
-        for (positive trial = 0; trial < TRIES; trial++)
-        {
-                p64 ours, floor;
-
-                BENCH_ALTERNATE(trial, ours, run(0, count, rounds, offset),
-                                floor, run(1, count, rounds, offset));
-
-                scalar[trial] = (positive)(ours * 10000 / max(floor, 1ull));
-                BENCH_ALTERNATE(trial, ours, run(0, count, rounds, offset),
-                                floor, run(2, count, rounds, offset));
-                bulk[trial] = (positive)(ours * 10000 / max(floor, 1ull));
-        }
-
-        order(scalar, TRIES);
-        order(bulk, TRIES);
-        string_format(log,
-                      "  %p words +%p  current/scalar %p.%p%%  current/bulk %p.%p%%\n",
-                      count, offset, scalar[TRIES / 2] / 100,
-                      scalar[TRIES / 2] % 100, bulk[TRIES / 2] / 100,
-                      bulk[TRIES / 2] % 100);
-}
-
-b32 main(void)
-{
-        static const positive sizes[] = {
-            1, 2, 3, 4, 8, 16, 32, 64, 96, 128, 160, 192,
-            200, 208, 216, 224, 232, 240, 248, 256,
-            320, 384, 512, 1024, 4096,
-        };
-
-        if (!correctness())
-        {
-                string_format(log, "memory_fill_u32 correctness failed\n");
-                log_flush();
-                return 1;
-        }
-
-        string_format(log, "memory_fill_u32, paired median of %p\n",
-                      (positive)TRIES);
-
-        for (positive i = 0; i < sizeof(sizes) / sizeof(*sizes); i++)
-        {
-                row(sizes[i], 0);
-                row(sizes[i], 1);
-        }
-
-        log_flush();
-        return 0;
-}
-#endif /* BENCH_fill_u32 */
-
-#ifdef BENCH_fill_u64
-/* Naturally aligned 64-bit pattern fill against scalar and bulk-store floors. */
-#include "../src/lib.util.c"
-#define SHARED_bench_measure
-#include "checks.c"
-#undef SHARED_bench_measure
-
-#define TRIES 9
-#define TARGET_BYTES (1u << 26)
-#define MAXIMUM 4096
-
-static positive block[MAXIMUM + 2] __attribute__((aligned(64)));
+typedef positive fill_word;
+static fill_word block[MAXIMUM + 2] __attribute__((aligned(64)));
 
 __asm__(
     ".text\n"
@@ -93190,6 +93111,7 @@ typedef fn (*fill_call)(address_any, positive, positive);
 static fill_call volatile calls[] = {
     memory_fill_u64_aligned, fill_u64_scalar_floor, fill_u64_bulk_floor,
 };
+#endif
 
 static bool correctness(void)
 {
@@ -93197,15 +93119,14 @@ static bool correctness(void)
                 for (positive count = 0; count <= MAXIMUM; count++)
                 {
                         memory_fill(block, 0xa5, sizeof(block));
-                        memory_fill_u64_aligned(block + offset, count,
-                                                0x13579bdf2468ace0ull);
+                        FILL_SUBJECT(block + offset, count, FILL_PATTERN);
 
                         for (positive i = 0; i < MAXIMUM + 2; i++)
                         {
-                                positive expected =
+                                fill_word expected =
                                     i >= offset && i < offset + count
-                                        ? 0x13579bdf2468ace0ull
-                                        : 0xa5a5a5a5a5a5a5a5ull;
+                                        ? FILL_PATTERN
+                                        : FILL_JUNK;
 
                                 if (block[i] != expected)
                                         return false;
@@ -93221,7 +93142,7 @@ static p64 run(unsigned int which, positive count, positive rounds,
         p64 started = get_cpu_time();
 
         while (rounds--)
-                calls[which](block + offset, count, 0x13579bdf2468ace0ull);
+                calls[which](block + offset, count, FILL_PATTERN);
 
         return get_cpu_time() - started;
 }
@@ -93242,10 +93163,8 @@ static fn row(positive count, positive offset)
                                 floor, run(1, count, rounds, offset));
 
                 scalar[trial] = (positive)(ours * 10000 / max(floor, 1ull));
-
                 BENCH_ALTERNATE(trial, ours, run(0, count, rounds, offset),
                                 floor, run(2, count, rounds, offset));
-
                 bulk[trial] = (positive)(ours * 10000 / max(floor, 1ull));
         }
 
@@ -93260,19 +93179,16 @@ static fn row(positive count, positive offset)
 
 b32 main(void)
 {
-        static const positive sizes[] = {
-            1, 2, 3, 4, 8, 16, 32, 48, 64, 80, 88, 96, 100, 104,
-            108, 112, 120, 128, 160, 192, 256, 512, 1024, 4096,
-        };
+        static const positive sizes[] = {FILL_SIZES};
 
         if (!correctness())
         {
-                string_format(log, "memory_fill_u64_aligned correctness failed\n");
+                string_format(log, FILL_NAME " correctness failed\n");
                 log_flush();
                 return 1;
         }
 
-        string_format(log, "memory_fill_u64_aligned, paired median of %p\n",
+        string_format(log, FILL_NAME ", paired median of %p\n",
                       (positive)TRIES);
 
         for (positive i = 0; i < sizeof(sizes) / sizeof(*sizes); i++)
@@ -93284,7 +93200,7 @@ b32 main(void)
         log_flush();
         return 0;
 }
-#endif /* BENCH_fill_u64 */
+#endif /* BENCH_fill_u32 || BENCH_fill_u64 */
 
 #ifdef BENCH_paths
 /* Former path C bodies against the shared three-architecture ASM paths. */
@@ -94735,10 +94651,15 @@ b32 main(void)
 }
 #endif /* BENCH_translate */
 
-#ifdef BENCH_delete
-/* In-place byte deletion by table: tr's former scalar loop against library
-   assembly. Each round restores the block first, because a deletion shrinks
-   it; that copy is timed on its own and taken out of both sides. */
+#if defined(BENCH_delete) || defined(BENCH_squeeze)
+/*
+        tr's in-place table compaction, its former byte loop against library
+        assembly: deletion (BENCH_delete) and squeezing of repeats
+        (BENCH_squeeze), over text-shaped bytes. Each round restores the block
+        first, because both shrink it; that copy is timed on its own and taken
+        out of both sides. Each section writes its former loop, its source
+        text and its mark sets; the trials and the report are one.
+*/
 #include "../src/lib.util.c"
 #define SHARED_bench_measure
 #include "checks.c"
@@ -94756,6 +94677,11 @@ static p8 marks[256];
 static positive former_kept;
 static positive assembly_kept;
 static volatile positive sink;
+
+#ifdef BENCH_delete
+#define SUBJECT "memory_delete_bytes"
+#define SUBJECT_KEPT(block, length) memory_delete_bytes(block, length, marks)
+#define FORMER_KEPT(block, length) former_delete(block, length, marks)
 
 NOT_INLINED static positive former_delete(address_any block, positive length,
                                           address_any table_address)
@@ -94807,157 +94733,10 @@ static fn choose_marks(positive set)
         if (set == 1)
                 marks[' '] = 1;
 }
-
-static positive rounds_for(positive length)
-{
-        positive rounds = TARGET_BYTES / length;
-
-        if (rounds < 8)
-                rounds = 8;
-        if (rounds > (1u << 20))
-                rounds = 1u << 20;
-        return rounds;
-}
-
-BENCH_ONCE(run_copy, (positive length, positive rounds), rounds, round,
-        {
-                memory_copy_apart(former_block, source_block, length);
-                sink += former_block[0];
-        })
-
-static p64 run(bool assembly, positive length, positive rounds)
-{
-        p8 address_to block = assembly ? assembly_block : former_block;
-        p64 start = get_cpu_time();
-
-        for (positive round = 0; round < rounds; round++)
-        {
-                memory_copy_apart(block, source_block, length);
-
-                positive kept = assembly ? memory_delete_bytes(block, length, marks)
-                                         : former_delete(block, length, marks);
-
-                if (assembly)
-                        assembly_kept = kept;
-                else
-                        former_kept = kept;
-
-                sink += kept + block[0];
-        }
-
-        return get_cpu_time() - start;
-}
-
-static bool row(positive length, positive set)
-{
-        positive rounds = rounds_for(length);
-        positive ratios[TRIES];
-
-        choose_marks(set);
-
-        for (positive trial = 0; trial < TRIES; trial++)
-        {
-                p64 copy = run_copy(length, rounds);
-                p64 former;
-                p64 assembly;
-
-                BENCH_BOTH_ORDERS(trial, assembly, former, length, rounds);
-
-                if (former_kept != assembly_kept ||
-                    memory_compare(former_block, assembly_block, former_kept))
-                        return false;
-
-                p64 former_work = former > copy ? former - copy : 1;
-                p64 assembly_work = assembly > copy ? assembly - copy : 0;
-
-                ratios[trial] = (positive)(assembly_work * 10000 / former_work);
-        }
-
-        order(ratios, TRIES);
-        string_format(log, "  %p bytes, set %p  median asm/C %p.%p%%\n", length,
-                      set, ratios[TRIES / 2] / 100, ratios[TRIES / 2] % 100);
-        return true;
-}
-
-static bool boundaries(void)
-{
-        p8 guarded[264];
-        p8 expected[264];
-
-        choose_marks(2);
-
-        for (positive length = 0; length <= 257; length++)
-        {
-                for (positive at = 0; at < sizeof(guarded); at++)
-                        guarded[at] = expected[at] = source_block[at * 7 + length];
-
-                positive kept = 0;
-
-                for (positive at = 0; at < length; at++)
-                        if (!marks[expected[3 + at]])
-                                expected[3 + kept++] = expected[3 + at];
-
-                if (memory_delete_bytes(guarded + 3, length, marks) != kept ||
-                    memory_compare(guarded, expected, 3 + kept) ||
-                    memory_compare(guarded + 3 + length, expected + 3 + length,
-                                   sizeof(guarded) - 3 - length))
-                        return false;
-        }
-
-        return true;
-}
-
-b32 main(void)
-{
-        static const positive sizes[] = {64, 4096, MAXIMUM};
-
-        prepare_source();
-
-        if (!boundaries())
-        {
-                string_format(log, "memory_delete_bytes boundary check failed\n");
-                log_flush();
-                return 1;
-        }
-
-        string_format(log, "memory_delete_bytes, paired median of %p, restoring copy taken out\n",
-                      (positive)TRIES);
-
-        for (positive at = 0; at < sizeof(sizes) / sizeof(sizes[0]); at++)
-                for (positive set = 0; set < 3; set++)
-                        if (!row(sizes[at], set))
-                        {
-                                string_format(log, "memory_delete_bytes result mismatch\n");
-                                log_flush();
-                                return 1;
-                        }
-
-        log_flush();
-        return 0;
-}
-#endif /* BENCH_delete */
-
-#ifdef BENCH_squeeze
-/* In-place squeezing of repeats by table: tr's former byte loop against
-   library assembly, over text-shaped bytes. Each round restores the block
-   first, and that copy is timed on its own and taken out of both sides. */
-#include "../src/lib.util.c"
-#define SHARED_bench_measure
-#include "checks.c"
-#undef SHARED_bench_measure
-
-#define NOT_INLINED __attribute__((noinline, noclone))
-#define TRIES 9
-#define MAXIMUM (1u << 20)
-#define TARGET_BYTES (1u << 26)
-
-static p8 source_block[MAXIMUM];
-static p8 former_block[MAXIMUM];
-static p8 assembly_block[MAXIMUM];
-static p8 marks[256];
-static positive former_kept;
-static positive assembly_kept;
-static volatile positive sink;
+#else
+#define SUBJECT "memory_squeeze_bytes"
+#define SUBJECT_KEPT(block, length) memory_squeeze_bytes(block, length, marks, 256)
+#define FORMER_KEPT(block, length) former_squeeze(block, length, marks)
 
 // The loop tr -s ran before the library had this: a byte at a time, the run
 // after a marked byte skipped with the hardware span.
@@ -95010,6 +94789,7 @@ static fn choose_marks(positive set)
         if (set == 0)
                 marks[' '] = 1;
 }
+#endif
 
 static positive rounds_for(positive length)
 {
@@ -95037,8 +94817,8 @@ static p64 run(bool assembly, positive length, positive rounds)
         {
                 memory_copy_apart(block, source_block, length);
 
-                positive kept = assembly ? memory_squeeze_bytes(block, length, marks, 256)
-                                         : former_squeeze(block, length, marks);
+                positive kept = assembly ? SUBJECT_KEPT(block, length)
+                                         : FORMER_KEPT(block, length);
 
                 if (assembly)
                         assembly_kept = kept;
@@ -95082,19 +94862,58 @@ static bool row(positive length, positive set)
         return true;
 }
 
+#ifdef BENCH_delete
+static bool boundaries(void)
+{
+        p8 guarded[264];
+        p8 expected[264];
+
+        choose_marks(2);
+
+        for (positive length = 0; length <= 257; length++)
+        {
+                for (positive at = 0; at < sizeof(guarded); at++)
+                        guarded[at] = expected[at] = source_block[at * 7 + length];
+
+                positive kept = 0;
+
+                for (positive at = 0; at < length; at++)
+                        if (!marks[expected[3 + at]])
+                                expected[3 + kept++] = expected[3 + at];
+
+                if (memory_delete_bytes(guarded + 3, length, marks) != kept ||
+                    memory_compare(guarded, expected, 3 + kept) ||
+                    memory_compare(guarded + 3 + length, expected + 3 + length,
+                                   sizeof(guarded) - 3 - length))
+                        return false;
+        }
+
+        return true;
+}
+#endif
+
 b32 main(void)
 {
         static const positive sizes[] = {64, 4096, MAXIMUM};
 
         prepare_source();
-        string_format(log, "memory_squeeze_bytes, paired median of %p, restoring copy taken out\n",
+#ifdef BENCH_delete
+        if (!boundaries())
+        {
+                string_format(log, SUBJECT " boundary check failed\n");
+                log_flush();
+                return 1;
+        }
+#endif
+
+        string_format(log, SUBJECT ", paired median of %p, restoring copy taken out\n",
                       (positive)TRIES);
 
         for (positive at = 0; at < sizeof(sizes) / sizeof(sizes[0]); at++)
                 for (positive set = 0; set < 3; set++)
                         if (!row(sizes[at], set))
                         {
-                                string_format(log, "memory_squeeze_bytes result mismatch\n");
+                                string_format(log, SUBJECT " result mismatch\n");
                                 log_flush();
                                 return 1;
                         }
@@ -95102,7 +94921,7 @@ b32 main(void)
         log_flush();
         return 0;
 }
-#endif /* BENCH_squeeze */
+#endif /* BENCH_delete || BENCH_squeeze */
 
 #ifdef BENCH_offsets
 /* Every delimiter and line end of a read as offsets: a byte loop in C
