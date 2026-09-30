@@ -51687,8 +51687,8 @@ def harness_pathname_race(argv):
 
     While moonwater tar extracts into a staged tree, sibling threads rapidly
     cycle every contested pathname through regular file, empty directory, and
-    symlink-to-outside-dir forms (renameat2 RENAME_EXCHANGE when available,
-    else a rename dance). Contested names include shallow leaves and parents
+    symlink-to-outside-dir forms (renameat2 RENAME_EXCHANGE, and a rename
+    dance when the exchange is refused). Contested names include shallow leaves and parents
     of deeper extract trees so dir↔symlink-to-dir swaps hit mid-walk pins.
     Effect-based fail-closed checks: an outside victim's bytes stay unchanged,
     the outside keep/ dir stays empty (no nested/deep escape), and private-edit
@@ -51700,7 +51700,7 @@ def harness_pathname_race(argv):
         MOONWATER_PATHNAME_RACE_SECONDS=30 MOONWATER_PATHNAME_RACE_ROUNDS=800 \\
             python3 test/differential.py --harness pathname_race --binary ours=PATH
 
-    Returns 2 (NOT RUN) when threads or rename primitives are unavailable.
+    Returns 2 (NOT RUN) when threads or renameat2 are unavailable.
     """
     import argparse
     import ctypes
@@ -51743,22 +51743,22 @@ def harness_pathname_race(argv):
     RENAME_EXCHANGE = 2
     libc = ctypes.CDLL(None, use_errno=True)
     renameat2 = getattr(libc, "renameat2", None)
-    if renameat2 is not None:
-        renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p,
-                              ctypes.c_int, ctypes.c_char_p,
-                              ctypes.c_uint]
-        renameat2.restype = ctypes.c_int
+    if renameat2 is None:
+        print("pathname race: NOT RUN -- no renameat2")
+        return 2
+    renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p,
+                          ctypes.c_int, ctypes.c_char_p,
+                          ctypes.c_uint]
+    renameat2.restype = ctypes.c_int
 
     def exchange_names(directory, left, right):
-        """Swap two directory entries via renameat2 or a rename dance."""
+        """Swap two directory entries with renameat2, or a rename dance if it refuses."""
         left_b = os.fsencode(left)
         right_b = os.fsencode(right)
         dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
         try:
-            if renameat2 is not None:
-                if renameat2(dir_fd, left_b, dir_fd, right_b,
-                             RENAME_EXCHANGE) == 0:
-                    return True
+            if renameat2(dir_fd, left_b, dir_fd, right_b, RENAME_EXCHANGE) == 0:
+                return True
             hold = right + ".hold"
             try:
                 os.rename(left, hold, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
