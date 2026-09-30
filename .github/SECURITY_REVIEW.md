@@ -22,10 +22,34 @@ fuzzing covers TLS only, and HTTP framing has one independent oracle.
 | Netlink | sender PID, sequence, length/alignment, multipart and truncation checks | persistent fuzzing of nested attributes; mandatory namespace runs |
 | DNS | exact question/ID binding, compression loops, full RR framing, UDP truncation to TCP | coverage-guided compression/name fuzzing; independent packet oracle; DNSSEC is out of scope |
 | TLS records/handshake | record and handshake fragmentation, transcript/Finished, AEAD limits, state ordering, `tls_hs_fuzz` libFuzzer target | record-layer fuzzing; mandatory fuzz budget in CI |
-| X.509 | strict DER and generated-chain policy matrix against OpenSSL; `tls_der_fuzz` / `tls_verify_fuzz` libFuzzer targets | a second independent path validator; name-constraints breadth |
+| X.509 | strict DER and generated-chain policy matrix against OpenSSL; `tls_der_fuzz` / `tls_verify_fuzz` libFuzzer targets; DNS-name and IP matching against OpenSSL's own check (`tls_hostnames`); Wycheproof's vectors under the crypto (`crypto_vectors --wycheproof`); wget's status 5 and wording for every refused chain | a second independent path validator; name-constraints breadth; Mozilla `distrust-after` dates and per-anchor constraints (the anchor table is key-only); revocation |
 | HTTP/URL | sink-side request validation, framing conflicts, 204/205/304 as wget and curl take them (the tight tier, `MOONWATER_STRICT` 2, holds them to RFC 9110), split-point and chunk/trailer checks, `http.client` and curl framing oracles, HTTPS downgrade harness, GNU wget and curl as live oracles for byte-at-a-time, split, FIN, RST, 1xx-storm and pipelined-bytes schedules (`wget_mutation`) | coverage-guided framing fuzzing that models the tight tier; slow-stream scheduling across TLS and redirects; open decision: the default refuses an identical duplicate `Content-Length` (and a list `3, 3`), an obs-fold line and a control byte in the reason phrase, all of which wget and curl accept |
 | DHCPv4 | peer/xid/MAC binding, option framing/overload, state cross-product, entropy faults | coverage-guided option-stream fuzzing; mandatory namespace/netem retransmission runs |
 | SNTP | nonce and peer binding, ancillary timestamp parsing, arithmetic and selection checks | adversarial scheduling/netem as a mandatory lane; era-boundary integration tests |
+
+### TLS trust policy (decided, not gaps)
+
+- **Revocation and transparency: none.** No OCSP, CRL or CRLite, and no
+  Certificate Transparency check, as with the default `wget` and `curl`; the
+  client verifies a chain to a Mozilla root and nothing more. A revoked
+  certificate stays valid until it expires.
+- **Names: SAN only.** A leaf without a matching subjectAltName is refused; the
+  common-name fallback that GnuTLS-based `wget` still has is deliberately not
+  implemented (Chrome has none). A wildcard's star is one whole label, never on
+  a public suffix, and may stand for an underscore label.
+- **Anchors are keys.** `anchors.inc` holds 120 Mozilla server roots as keys
+  (regenerated and cross-checked with `--harness anchors --bundle`, last
+  against ca-certificates-mozilla 3.129, one label changed, no root added or
+  dropped). Anchor validity dates and Mozilla's `distrust-after` dates are not
+  enforced: Izenpe.com is in the table and carries a server distrust-after of
+  2026-04-15 upstream. None of the 120 carries NameConstraints or expires
+  within two years. A tier that enforces the dates would need a per-anchor date.
+- **The clock is trusted.** A certificate outside its dates is refused; a clock
+  decades wrong (before the first SNTP answer) makes every server look not yet
+  activated, and wget now says so and names the clock. SNTP is unauthenticated,
+  so an on-path attacker who moves the clock moves certificate validity with it.
+- **Not in ring 0.** No `crypto_`, `tls_` or X.509 code is in the include graph
+  of `src/moonwater/core.c`; `net.c` is compiled into userspace programs only.
 
 The unauthenticated-protocol limits in `SECURITY.md` remain fundamental: an
 on-path attacker can forge DHCPv4, ordinary DNS, and SNTP. Parser hardening
