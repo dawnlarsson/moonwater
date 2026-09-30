@@ -5674,6 +5674,31 @@ static bool file_operands_take(file_taking address_to taking)
 }
 
 /*
+        The last of a program's output, written so that a refusal is said:
+        coreutils' close_stdout names it -- "date: write error: No space left
+        on device" -- where the shared writer only notes that one happened,
+        and the tool answered 1 without a word. What is still buffered goes
+        out in one checked write; an earlier flush that failed has left no
+        reason behind, and is the full device it almost always is.
+*/
+static bool file_output_told(string_address program)
+{
+        system_write_result wrote = {0, 0};
+
+        if (log_writer_buffer_length)
+                wrote = system_write_all_checked(1, log_writer_buffer,
+                                                 log_writer_buffer_length);
+        log_writer_buffer_length = 0;
+
+        if (!wrote.error && !log_failed())
+                return true;
+
+        string_format(log_error, "%s: write error: %s\n", program,
+                      file_reason(wrote.error ? wrote.error : -28));
+        return false;
+}
+
+/*
         For the tools that read options and no names: the scan, then a
         complaint about the first name left over. Zero says go on; anything
         else is the status to leave with.
@@ -12962,8 +12987,7 @@ static b32 file_ls_as(string_address program, p8 default_format, p8 default_quot
 
                 ls_color_finish();
                 ls_dired_finish();
-                log_flush();
-                return ls_status;
+                return file_output_told(program) ? ls_status : 2;
         }
 
         // Everything that is not a directory is listed first, together, and
@@ -12993,8 +13017,7 @@ static b32 file_ls_as(string_address program, p8 default_format, p8 default_quot
 
         if (ls_broken)
         {
-                log_flush();
-                return ls_status;
+                return file_output_told(program) ? ls_status : 2;
         }
 
         // The directories come out of the group once the widths are known;
@@ -13055,8 +13078,7 @@ static b32 file_ls_as(string_address program, p8 default_format, p8 default_quot
                                            kept + length + 1, 4096))
                 {
                         ls_limit((string_address) "too many directory operands");
-                        log_flush();
-                        return ls_status;
+                        return file_output_told(program) ? ls_status : 2;
                 }
 
                 names = ls_operand_names;
@@ -13076,9 +13098,7 @@ static b32 file_ls_as(string_address program, p8 default_format, p8 default_quot
 
         ls_color_finish();
         ls_dired_finish();
-        log_flush();
-
-        return ls_status;
+        return file_output_told(program) ? ls_status : 2;
 }
 
 static b32 file_ls()
@@ -19302,8 +19322,6 @@ static bool du_files_from(string_address list)
                 system_close((positive)handle);
         return true;
 }
-
-static bool file_output_told(string_address program);
 
 static b32 file_du()
 {
@@ -26312,8 +26330,6 @@ static bool split_materialized(bipolar in, file_facts address_to facts,
         utility_arena.used = 0;
         return answer;
 }
-
-static bool file_output_told(string_address program);
 
 /* What -n K/N and -n l/K/N and r/K/N send to standard output, said in GNU's
    words when it cannot be written: "-: reason" for a byte range, "write
@@ -45334,8 +45350,6 @@ static b32 file_env()
 }
 
 // printenv -------------------------------------------------------
-static bool file_output_told(string_address program);
-
 static const argument_option printenv_options[] = {
     {"null", '0'},
     {null},
@@ -45602,31 +45616,6 @@ static fn id_written(positive user, positive group, p32 address_to members,
         }
 
         log("\n", 1);
-}
-
-/*
-        The last of a program's output, written so that a refusal is said:
-        coreutils' close_stdout names it -- "date: write error: No space left
-        on device" -- where the shared writer only notes that one happened,
-        and the tool answered 1 without a word. What is still buffered goes
-        out in one checked write; an earlier flush that failed has left no
-        reason behind, and is the full device it almost always is.
-*/
-static bool file_output_told(string_address program)
-{
-        system_write_result wrote = {0, 0};
-
-        if (log_writer_buffer_length)
-                wrote = system_write_all_checked(1, log_writer_buffer,
-                                                 log_writer_buffer_length);
-        log_writer_buffer_length = 0;
-
-        if (!wrote.error && !log_failed())
-                return true;
-
-        string_format(log_error, "%s: write error: %s\n", program,
-                      file_reason(wrote.error ? wrote.error : -28));
-        return false;
 }
 
 static b32 file_id()

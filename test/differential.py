@@ -21430,7 +21430,7 @@ _TEXT_META_CASES = tuple(
     ("sort", "-", "-k", "1", "--help"), ("sort", "-", "-o", "--help"),
     ("date", "-", "-d", "--help"), ("date", "-", "+%s", "--version"),
     ("ls", "-", "-w", "--help"), ("ls", "-", "-w80", "--help"),
-    ("ls", "-", "-d", "--help"), ("ls", "-", "-A", "--help"),
+    ("ls", "-", "-d", "--help"), ("ls", "-", "-A", "--help"), ("ls", "-", "-I", "--help"),
     ("date", "-", "-I", "--help"), ("join", "-", "-i", "--help"), ("join", "-", "-1", "--help"),
     ("stat", "-", "-t", "--help"), ("stat", "-", "-c", "--help"), ("od", "-", "-w", "--help"),
     ("od", "-", "-N", "--help"), ("pr", "-", "-e", "--help"), ("pr", "-", "-n", "--help"),
