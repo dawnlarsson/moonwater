@@ -1321,6 +1321,11 @@ static COLD bipolar netlink_leases_on(b32 handle,
 /* Internal result: a validated UDP response asks for the same transaction to
    continue over TCP.  It is never returned to a caller. */
 #define DNS_TRY_TCP (-8)
+//      Inside one query, not answers: the server sent the question back in
+//      lower case (it does not keep the case the query was written in), or
+//      answered the EDNS0 option with FORMERR or NOTIMP.
+#define DNS_CASE_FOLDED (-9)
+#define DNS_FORMAT_ERROR (-10)
 
 /*
         The name, as labels.
@@ -1844,6 +1849,92 @@ static COLD bipolar dns_server_at(string_address path, positive wanted)
 }
 
 /*
+        Hardening a stub resolver can do on its own.
+
+        A reply is believed when its transaction id and its echoed question
+        match, and an attacker who cannot see the query has sixteen bits of id
+        and the source port to guess. Three things add to that without any
+        server's help, each with the fallback a server that cannot do it needs:
+
+        The source port is drawn from the CSPRNG over 1024 to 65535 and bound
+        explicitly (a few tries if taken, then the kernel's own pick), not
+        left to the kernel's 32768 to 60999. Every query is its own socket,
+        so every query has its own port.
+
+        The question is sent in mixed case (draft-vixie-dnsext-dns0x20): each
+        letter of the name takes a random case, every server that keeps the
+        question as it was sent echoes it so, and a forged reply has to
+        guess that too, a bit a letter. A server that answers in lower case
+        (some forwarders do) is noticed when its reply matches in every
+        respect but case, and the query is asked again once in the case it
+        was typed.
+
+        EDNS0 (RFC 6891) advertises 1232 bytes, the size the 2020 DNS flag day
+        settled on because it survives an IPv6 minimum MTU without
+        fragmentation, so an answer of 513 to 1232 bytes arrives by UDP and
+        not by the TCP retry that 512 forces. A server that answers the option
+        with FORMERR or NOTIMP is asked again without it (RFC 6891 7).
+*/
+#define DNS_EDNS_SIZE 1232
+#define DNS_EDNS_LENGTH 11
+
+//      The name's letters in random case. False when randomness is refused,
+//      and then the name is left as written.
+static COLD bool dns_mix_case(p8 address_to name, positive length)
+{
+        p8 bits[32];
+
+        for (positive at = 0; at < sizeof bits; at += 8)
+                if (!network_transaction_secure(bits + at, 8))
+                        return false;
+        for (positive at = 0; at < length; at++)
+        {
+                p8 letter = name[at] | 0x20;
+
+                if (letter >= 'a' && letter <= 'z' && (bits[at / 8 % 32] >> (at % 8) & 1))
+                        name[at] ^= 0x20;
+        }
+        return true;
+}
+
+//      An unconnected socket bound to a random port (1024..65535), or the
+//      caller's own if none can be had.
+static COLD fn dns_bind_random_port(b32 handle)
+{
+        for (positive tries = 0; tries < 8; tries++)
+        {
+                p16 draw;
+                socket_address_internet here = {.family = AF_INET};
+
+                if (!network_transaction_secure(address_of draw, sizeof draw))
+                        return;
+                here.port = network_order_16((p16)(1024 + draw % 64512));
+                if (socket_bind(handle, address_of here, sizeof here) >= 0)
+                        return;
+        }
+}
+
+//      The reply matches what was sent except in case: the same id, one
+//      question, the same bytes under ASCII case folding.
+static COLD bool dns_reply_identity_folded(
+    p8 address_to reply, positive size, p16 id,
+    p8 address_to request, positive question_length)
+{
+        byte_reader reader = byte_reader_open(reply, size);
+        p16 asked = byte_reader_u16(&reader);
+        p16 questions;
+        const p8 address_to question;
+
+        (void)byte_reader_skip(&reader, 2);
+        questions = byte_reader_u16(&reader);
+        (void)byte_reader_skip(&reader, 6);
+        question = byte_reader_take(&reader, question_length);
+        return byte_reader_ok(&reader) && asked == id && questions == 1 &&
+               !memory_compare_ascii_case(question, request + DNS_HEADER,
+                                          question_length);
+}
+
+/*
         One question asked, and the first address in the answer.
 
         The reply is read with a deadline rather than blocked on forever: a
@@ -1852,8 +1943,10 @@ static COLD bipolar dns_server_at(string_address path, positive wanted)
         gives up and says so. The wait is a poll on the socket rather than a
         receive timeout, which keeps a timeval out of the assembly graph.
 */
-static COLD bipolar dns_resolve_at(p32 server, p16 port, string_address name,
-                              p32 address_to found, positive seconds)
+static COLD bipolar dns_query_once(p32 server, p16 port, string_address name,
+                                   p32 address_to found, bool mixed,
+                                   bool edns,
+                                   const network_deadline address_to budget)
 {
         p8 request[DNS_MAX_MESSAGE];
         p8 reply[DNS_MAX_MESSAGE];
@@ -1863,8 +1956,9 @@ static COLD bipolar dns_resolve_at(p32 server, p16 port, string_address name,
         bipolar got;
         bipolar failure = DNS_NO_REPLY;
         positive question_length;
+        positive request_length;
         positive left[2];
-        network_deadline deadline;
+        network_deadline deadline = *budget;
 
         /*
                 A machine with no RDRAND and no virtio-rng seeds the kernel's
@@ -1881,10 +1975,15 @@ static COLD bipolar dns_resolve_at(p32 server, p16 port, string_address name,
                 return DNS_NO_RANDOM;
 
         written = dns_write_name(request + DNS_HEADER,
-                                 sizeof(request) - DNS_HEADER - 4, name);
+                                 sizeof(request) - DNS_HEADER - 4 -
+                                     DNS_EDNS_LENGTH,
+                                 name);
 
         if (written < 0)
                 return DNS_MALFORMED;
+
+        if (mixed)
+                mixed = dns_mix_case(request + DNS_HEADER, (positive)written);
 
         memory_fill(request, 0, DNS_HEADER);
         network_store_16(request, id);
@@ -1895,16 +1994,27 @@ static COLD bipolar dns_resolve_at(p32 server, p16 port, string_address name,
         network_store_16(request + DNS_HEADER + written + 2, DNS_CLASS_IN);
 
         question_length = (positive)written + 4;
+        request_length = DNS_HEADER + question_length;
 
-        /* TCP fallback spends only what the original UDP transaction leaves.
-           Start the one monotonic budget before any socket operation. */
-        if (!network_deadline_begin(address_of deadline, seconds, 0))
-                return DNS_NO_REPLY;
+        if (edns)
+        {
+                p8 address_to option = request + request_length;
+
+                network_store_16(request + 10, 1);
+                option[0] = 0;                        // the root as owner
+                network_store_16(option + 1, 41);     // OPT
+                network_store_16(option + 3, DNS_EDNS_SIZE);
+                network_store_32(option + 5, 0);      // version 0, no flags
+                network_store_16(option + 9, 0);
+                request_length += DNS_EDNS_LENGTH;
+        }
 
         handle = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
 
         if (handle < 0)
                 return DNS_NO_SERVER;
+
+        dns_bind_random_port((b32)handle);
 
         socket_address_internet where = {
             .family = AF_INET, .port = network_order_16(port),
@@ -1919,8 +2029,8 @@ static COLD bipolar dns_resolve_at(p32 server, p16 port, string_address name,
         /* A signal before the datagram left is not the server's silence:
            send it again, within the same budget. */
         do
-                written = socket_send((b32)handle, request,
-                                      DNS_HEADER + question_length, 0, 0, 0);
+                written = socket_send((b32)handle, request, request_length, 0,
+                                      0, 0);
         while (written == NETWORK_INTERRUPTED &&
                network_deadline_left(address_of deadline, left, left + 1));
         if (written < 0)
@@ -1956,7 +2066,19 @@ static COLD bipolar dns_resolve_at(p32 server, p16 port, string_address name,
                     ? sizeof reply : (positive)got;
                 if (!dns_reply_identity(reply, available, id, request,
                                         question_length))
+                {
+                        //      Right id, the question in another case: a
+                        //      server that does not keep the case it is
+                        //      sent. Say so; the caller asks once more.
+                        if (mixed && dns_reply_identity_folded(
+                                         reply, available, id, request,
+                                         question_length))
+                        {
+                                failure = DNS_CASE_FOLDED;
+                                goto failed;
+                        }
                         continue;
+                }
 
                 break;
         }
@@ -1965,9 +2087,13 @@ static COLD bipolar dns_resolve_at(p32 server, p16 port, string_address name,
 
         failure = dns_reply_result(reply, (positive)got, id, request,
                                    question_length, found);
+        if (failure == DNS_REFUSED && edns &&
+            ((network_load_16(reply + 2) & DNS_CODE_MASK) == 1 ||
+             (network_load_16(reply + 2) & DNS_CODE_MASK) == 4))
+                return DNS_FORMAT_ERROR;
         if (failure == DNS_TRY_TCP)
                 return dns_retry_tcp(address_of where, request,
-                                     DNS_HEADER + question_length, id,
+                                     request_length, id,
                                      question_length, found,
                                      address_of deadline);
         return failure;
@@ -1975,6 +2101,37 @@ static COLD bipolar dns_resolve_at(p32 server, p16 port, string_address name,
 failed:
         socket_close((b32)handle);
         return failure;
+}
+
+/* The query, with its two fallbacks: once without the case mixing when the
+   server folded the question, once without EDNS0 when the server did not
+   understand the option. Both share the one budget. */
+static COLD bipolar dns_resolve_at(p32 server, p16 port, string_address name,
+                                   p32 address_to found, positive seconds)
+{
+        network_deadline budget;
+        bool mixed = true;
+        bool edns = true;
+        bipolar status = DNS_NO_REPLY;
+
+        /* TCP fallback spends only what the original UDP transaction leaves.
+           Start the one monotonic budget before any socket operation. */
+        if (!network_deadline_begin(address_of budget, seconds, 0))
+                return DNS_NO_REPLY;
+
+        for (positive attempt = 0; attempt < 3; attempt++)
+        {
+                status = dns_query_once(server, port, name, found, mixed, edns,
+                                        address_of budget);
+                if (status == DNS_CASE_FOLDED && mixed)
+                        mixed = false;
+                else if (status == DNS_FORMAT_ERROR && edns)
+                        edns = false;
+                else
+                        break;
+        }
+        return status == DNS_CASE_FOLDED ? DNS_NO_REPLY
+               : status == DNS_FORMAT_ERROR ? DNS_REFUSED : status;
 }
 
 /*

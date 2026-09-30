@@ -52232,6 +52232,25 @@ static fn net_test_sleep(positive milliseconds)
         system_call_2(syscall(nanosleep), (positive)address_of span, 0);
 }
 
+//      The caller's own user and network namespaces, with root mapped to the
+//      caller: what a test needs to bind port 53 or make a veth pair.
+static bool net_test_enter_namespaces(positive uid, positive gid)
+{
+        p8 line[32];
+
+        if (system_call_1(syscall(unshare), 0x10000000 | 0x40000000) < 0 ||
+            net_test_write((string_address)"/proc/self/setgroups",
+                           (string_address)"deny\n") < 0)
+                return false;
+        net_test_map(line, gid);
+        if (net_test_write((string_address)"/proc/self/gid_map",
+                           (string_address)line) < 0)
+                return false;
+        net_test_map(line, uid);
+        return net_test_write((string_address)"/proc/self/uid_map",
+                              (string_address)line) >= 0;
+}
+
 //      The child of dhcp_behind_rp_filter: the status is the exit code.
 static fn net_test_dhcp_namespaces(positive uid, positive gid)
 {
@@ -52245,16 +52264,7 @@ static fn net_test_dhcp_namespaces(positive uid, positive gid)
         p8 line[32];
         bipolar near;
 
-        if (system_call_1(syscall(unshare), 0x10000000 | 0x40000000) < 0)
-                system_call_1(syscall(exit_group), 0x7f);
-        if (net_test_write((string_address)"/proc/self/setgroups",
-                           (string_address)"deny\n") < 0)
-                system_call_1(syscall(exit_group), 0x7f);
-        net_test_map(line, gid);
-        if (net_test_write((string_address)"/proc/self/gid_map", (string_address)line) < 0)
-                system_call_1(syscall(exit_group), 0x7f);
-        net_test_map(line, uid);
-        if (net_test_write((string_address)"/proc/self/uid_map", (string_address)line) < 0)
+        if (!net_test_enter_namespaces(uid, gid))
                 system_call_1(syscall(exit_group), 0x7f);
 
         //      The server's own network namespace, made by the server.
@@ -53425,11 +53435,20 @@ static fn dns_tcp_test_server(bipolar datagram, bipolar listening,
                                      address_of fixture_deadline))
                 system_call_1(syscall(exit_group), 1);
 
+        //      The question, without the EDNS0 option a query now carries.
+        {
+                positive at = DNS_HEADER;
+
+                while (at < request_length && request[at])
+                        at += 1 + request[at];
+                request_length = at + 1 + 4;
+        }
         memory_copy(reply, request, request_length);
         network_store_16(reply + 2,
                          (network_load_16(request + 2) |
                           DNS_FLAG_RESPONSE) & ~DNS_FLAG_TRUNCATED);
         network_store_16(reply + 6, 1);
+        network_store_16(reply + 10, 0);
         positive length = request_length;
         reply[length++] = 0xc0;
         reply[length++] = DNS_HEADER;
@@ -53568,6 +53587,176 @@ static fn resolving_truncated(void)
               dns_tcp_loopback_case(DNS_TCP_DEADLINE, null,
                                      address_of elapsed) == DNS_NO_REPLY &&
                   elapsed < NETWORK_NANOSECONDS + NETWORK_NANOSECONDS / 2);
+}
+
+/*
+        The resolver's own hardening, against a server that reports what it
+        saw: the source port of every query, whether the question came in
+        mixed case, whether it carried the EDNS0 option; and that misbehaves
+        as asked: folds the question's case in its reply (mode 1), or answers
+        an EDNS0 query with FORMERR (mode 2).
+*/
+static fn dns_policy_server(bipolar datagram, positive mode, b32 report,
+                            positive count)
+{
+        for (positive served = 0; served < count; served++)
+        {
+                p8 request[DNS_MAX_MESSAGE];
+                p8 reply[DNS_MAX_MESSAGE];
+                socket_address_internet client;
+                p32 client_size = sizeof client;
+                network_deadline fixture_deadline;
+                bipolar got;
+                positive at = DNS_HEADER;
+                positive length;
+                p8 note[3] = {0, 0, 0};
+
+                if (!network_deadline_begin(address_of fixture_deadline, 5, 0) ||
+                    network_wait_readable_until(datagram,
+                                                address_of fixture_deadline) <= 0)
+                        system_call_1(syscall(exit_group), 1);
+                got = socket_receive((b32)datagram, request, sizeof request, 0,
+                                     address_of client, address_of client_size);
+                if (got < DNS_HEADER + 5)
+                        system_call_1(syscall(exit_group), 1);
+                while (at < (positive)got && request[at])
+                {
+                        for (positive i = 1; i <= request[at]; i++)
+                                if (request[at + i] >= 'A' && request[at + i] <= 'Z')
+                                        note[0] |= 1;
+                        at += 1 + request[at];
+                }
+                length = at + 1 + 4;
+                if (network_load_16(request + 10))
+                        note[0] |= 2;
+                note[1] = (p8)(network_order_16(client.port) >> 8);
+                note[2] = (p8)network_order_16(client.port);
+                system_call_3(syscall(write), (positive)report,
+                              (positive)address_of note, 3);
+
+                memory_copy(reply, request, length);
+                network_store_16(reply + 2, DNS_FLAG_RESPONSE | DNS_FLAG_RECURSE);
+                network_store_16(reply + 4, 1);
+                network_store_16(reply + 6, 0);
+                network_store_16(reply + 8, 0);
+                network_store_16(reply + 10, 0);
+                if (mode == 2 && (note[0] & 2))
+                        network_store_16(reply + 2, DNS_FLAG_RESPONSE | 1);
+                else
+                {
+                        network_store_16(reply + 6, 1);
+                        reply[length++] = 0xc0;
+                        reply[length++] = DNS_HEADER;
+                        network_store_16(reply + length, DNS_TYPE_A);
+                        network_store_16(reply + length + 2, DNS_CLASS_IN);
+                        network_store_32(reply + length + 4, 0);
+                        network_store_16(reply + length + 8, 4);
+                        network_store_32(reply + length + 10, 0xc0000207);
+                        length += 14;
+                }
+                if (mode == 1)
+                        for (positive i = DNS_HEADER; i < at; i++)
+                                if (reply[i] >= 'A' && reply[i] <= 'Z')
+                                        reply[i] |= 0x20;
+                socket_send((b32)datagram, reply, length, 0, address_of client,
+                            client_size);
+        }
+        system_call_1(syscall(exit_group), 0);
+}
+
+//      Asks `count` times what one server in `mode` answers; the notes it
+//      took, three bytes a query, come back in `notes`. The last query's
+//      status is the result.
+static bipolar dns_policy_case(positive mode, positive queries,
+                               positive served, string_address name,
+                               p8 address_to notes, p32 address_to found)
+{
+        socket_address_internet where = {
+            .family = AF_INET, .host = network_order_32(HOST_LOOPBACK)};
+        p32 size = sizeof where;
+        bipolar datagram = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+        b32 pipes[2];
+        bipolar child;
+        bipolar status = DNS_NO_SERVER;
+        positive raw = 0;
+
+        if (datagram < 0 ||
+            system_call_2(syscall(pipe2), (positive)pipes, O_CLOEXEC) < 0 ||
+            socket_bind((b32)datagram, address_of where, sizeof where) < 0 ||
+            socket_name((b32)datagram, address_of where, address_of size) < 0 ||
+            !where.port)
+                return DNS_NO_SERVER;
+        child = system_call_2(syscall(clone), SIGCHLD, 0);
+        if (child < 0)
+                return DNS_NO_SERVER;
+        if (!child)
+                dns_policy_server(datagram, mode, pipes[1], served);
+        socket_close((b32)datagram);
+        system_close((positive)pipes[1]);
+        for (positive query = 0; query < queries; query++)
+                status = dns_resolve_at(HOST_LOOPBACK,
+                                        network_order_16(where.port), name,
+                                        found, 2);
+        if (system_wait4_retry((b32)child, address_of raw, 0, null) != child ||
+            wait_status_code(raw) != 0)
+                status = DNS_NO_SERVER;
+        system_read_retry((positive)pipes[0], notes, 3 * served);
+        system_close((positive)pipes[0]);
+        return status;
+}
+
+static fn resolving_policy(void)
+{
+        static p8 notes[3 * 128];
+        p32 found = 0;
+        positive mixed = 0;
+        positive edns = 0;
+        positive below = 0;
+        positive distinct = 0;
+        positive answered = 0;
+
+        memory_fill(notes, 0, sizeof notes);
+        check("a query against a plain server is answered",
+              dns_policy_case(0, 96, 96, (string_address)"policy.example.com",
+                              notes, address_of found) == DNS_OK &&
+                  found == 0xc0000207);
+        for (positive query = 0; query < 96; query++)
+        {
+                p16 port = (p16)(notes[3 * query + 1] << 8 | notes[3 * query + 2]);
+
+                answered++;
+                mixed += notes[3 * query] & 1;
+                edns += (notes[3 * query] >> 1) & 1;
+                below += port < 32768;
+                for (positive other = 0; other < query; other++)
+                        if ((p16)(notes[3 * other + 1] << 8 | notes[3 * other + 2]) == port)
+                                goto repeated;
+                distinct++;
+        repeated:;
+        }
+        check("every question is sent in mixed case (draft-vixie-dnsext-dns0x20)",
+              answered == 96 && mixed == 96);
+        check("every query advertises EDNS0", edns == 96);
+        check("every query has a source port of its own (96 queries, at most 2 repeats)",
+              distinct >= 94);
+        check("source ports come from the whole unprivileged range, not the kernel's 32768 to 60999",
+              below >= 20);
+
+        memory_fill(notes, 0, sizeof notes);
+        check("a server that folds the question to lower case is still answered",
+              dns_policy_case(1, 1, 2, (string_address)"folded.example.com",
+                              notes, address_of found) == DNS_OK &&
+                  found == 0xc0000207);
+        check("the first query was mixed case and the second as typed",
+              (notes[0] & 1) && !(notes[3] & 1));
+
+        memory_fill(notes, 0, sizeof notes);
+        check("a server that answers EDNS0 with FORMERR is asked again without it",
+              dns_policy_case(2, 1, 2, (string_address)"formerr.example.com",
+                              notes, address_of found) == DNS_OK &&
+                  found == 0xc0000207);
+        check("the first query had the option and the second not",
+              (notes[0] & 2) && !(notes[3] & 2));
 }
 
 /*
@@ -65652,6 +65841,7 @@ b32 main(void)
         resolving();
         resolving_edges();
         resolving_truncated();
+        resolving_policy();
         resolving_servers();
         fetching();
         streaming_chunk_boundaries();
@@ -81282,7 +81472,6 @@ static fn storage_test_net_files(void)
         check("resolver writes are complete and ordered",
               got == sizeof(wanted) - 1 &&
                   !memory_compare(bytes, wanted, sizeof(wanted) - 1));
-
         p8 unsafe[] = {'h', 'o', 's', 't', 27, 0};
         storage_test_output_used = 0;
         string_format(storage_test_capture, "bad %w\n",

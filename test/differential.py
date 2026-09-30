@@ -50005,6 +50005,13 @@ static void network_store_16(p8 *at, p16 value)
         at[0] = (p8)(value >> 8);
         at[1] = (p8)value;
 }
+static void network_store_32(p8 *at, p32 value)
+{
+        at[0] = (p8)(value >> 24);
+        at[1] = (p8)(value >> 16);
+        at[2] = (p8)(value >> 8);
+        at[3] = (p8)value;
+}
 static b32 memory_compare_ascii_case(const void *one, const void *two,
                                      positive size)
 {
