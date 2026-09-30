@@ -1044,33 +1044,6 @@ typedef struct
         positive attr_length;
 } tar_member_meta;
 
-/* Records found by path: fixed-width records that each begin with a
-   path_table_key, their paths in one arena, and an index of record numbers
-   plus one, open addressed and kept under half full, so remembering or
-   finding a path is not a walk over every one remembered before (an
-   archive of a million directories was a trillion comparisons).  Indexes
-   survive growth of the array and the arena, and the spelling comparison
-   remains the proof after the hash rejects unlike paths. */
-typedef struct
-{
-        positive path_at;
-        positive path_hash;
-} path_table_key;
-
-typedef struct
-{
-        p8 address_to records;
-        positive stride;
-        positive count;
-        positive room;
-        p8 address_to paths;
-        positive paths_used;
-        positive paths_room;
-        positive address_to index;
-        positive slots;
-        positive index_room;
-} path_table;
-
 typedef struct
 {
         path_table_key key;
@@ -1409,92 +1382,6 @@ static bool tar_refuse_pack(p8 pack)
         }
 
         return false;
-}
-
-#define path_table_record(table, at)                                        \
-        ((path_table_key address_to)((table)->records + (at) * (table)->stride))
-
-static bool path_table_prepare(path_table address_to table, positive wanted)
-{
-        positive larger = table->slots ? table->slots : 64;
-
-        if (table->slots && wanted <= table->slots / 2)
-                return true;
-        while (wanted > larger / 2)
-        {
-                if (larger > positive_max / 2)
-                        return false;
-                larger *= 2;
-        }
-        if (!shell_array_room(table->index, table->index_room, larger))
-                return false;
-        memory_fill(table->index, 0, larger * sizeof(table->index[0]));
-        for (positive at = 0; at < table->count; at++)
-        {
-                positive slot = path_table_record(table, at)->path_hash &
-                                (larger - 1);
-
-                while (table->index[slot])
-                        slot = (slot + 1) & (larger - 1);
-                table->index[slot] = at + 1;
-        }
-        table->slots = larger;
-        return true;
-}
-
-static p8 address_to path_table_find(path_table address_to table,
-                                     string_address path, positive hash)
-{
-        if (!table->slots)
-                return null;
-        for (positive slot = hash & (table->slots - 1); table->index[slot];
-             slot = (slot + 1) & (table->slots - 1))
-        {
-                path_table_key address_to kept =
-                    path_table_record(table, table->index[slot] - 1);
-
-                if (kept->path_hash == hash &&
-                    string_equals(table->paths + kept->path_at, path))
-                        return (p8 address_to)kept;
-        }
-        return null;
-}
-
-/* A zeroed record for a path not yet held, or null when memory is short. */
-static p8 address_to path_table_add(path_table address_to table,
-                                    string_address path, positive2 named)
-{
-        positive length = named.y + 1;
-
-        if (named.y == positive_max ||
-            length > positive_max - table->paths_used ||
-            !path_table_prepare(table, table->count + 1) ||
-            !shell_room((address_any address_to)address_of table->records,
-                        address_of table->room, table->count + 1,
-                        table->stride) ||
-            !shell_array_room(table->paths, table->paths_room,
-                              table->paths_used + length))
-                return null;
-
-        path_table_key address_to kept = path_table_record(table, table->count);
-        positive slot = named.x & (table->slots - 1);
-
-        memory_fill(kept, 0, table->stride);
-        kept->path_at = table->paths_used;
-        kept->path_hash = named.x;
-        memory_copy(table->paths + table->paths_used, path, length);
-        table->paths_used += length;
-        while (table->index[slot])
-                slot = (slot + 1) & (table->slots - 1);
-        table->index[slot] = ++table->count;
-        return (p8 address_to)kept;
-}
-
-static fn path_table_clear(path_table address_to table)
-{
-        table->count = 0;
-        table->paths_used = 0;
-        table->slots = 0;
 }
 
 static tar_materialized_file address_to tar_materialized_find(

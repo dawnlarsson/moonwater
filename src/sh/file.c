@@ -29114,6 +29114,120 @@ static b32 file_truncate()
         return status;
 }
 
+/* Records found by path: fixed-width records that each begin with a
+   path_table_key, their paths in one arena, and an index of record numbers
+   plus one, open addressed and kept under half full, so remembering or
+   finding a path is not a walk over every one remembered before (an
+   archive of a million directories was a trillion comparisons).  Indexes
+   survive growth of the array and the arena, and the spelling comparison
+   remains the proof after the hash rejects unlike paths. */
+typedef struct
+{
+        positive path_at;
+        positive path_hash;
+} path_table_key;
+
+typedef struct
+{
+        p8 address_to records;
+        positive stride;
+        positive count;
+        positive room;
+        p8 address_to paths;
+        positive paths_used;
+        positive paths_room;
+        positive address_to index;
+        positive slots;
+        positive index_room;
+} path_table;
+
+
+#define path_table_record(table, at)                                        \
+        ((path_table_key address_to)((table)->records + (at) * (table)->stride))
+
+static bool path_table_prepare(path_table address_to table, positive wanted)
+{
+        positive larger = table->slots ? table->slots : 64;
+
+        if (table->slots && wanted <= table->slots / 2)
+                return true;
+        while (wanted > larger / 2)
+        {
+                if (larger > positive_max / 2)
+                        return false;
+                larger *= 2;
+        }
+        if (!shell_array_room(table->index, table->index_room, larger))
+                return false;
+        memory_fill(table->index, 0, larger * sizeof(table->index[0]));
+        for (positive at = 0; at < table->count; at++)
+        {
+                positive slot = path_table_record(table, at)->path_hash &
+                                (larger - 1);
+
+                while (table->index[slot])
+                        slot = (slot + 1) & (larger - 1);
+                table->index[slot] = at + 1;
+        }
+        table->slots = larger;
+        return true;
+}
+
+static p8 address_to path_table_find(path_table address_to table,
+                                     string_address path, positive hash)
+{
+        if (!table->slots)
+                return null;
+        for (positive slot = hash & (table->slots - 1); table->index[slot];
+             slot = (slot + 1) & (table->slots - 1))
+        {
+                path_table_key address_to kept =
+                    path_table_record(table, table->index[slot] - 1);
+
+                if (kept->path_hash == hash &&
+                    string_equals(table->paths + kept->path_at, path))
+                        return (p8 address_to)kept;
+        }
+        return null;
+}
+
+/* A zeroed record for a path not yet held, or null when memory is short. */
+static p8 address_to path_table_add(path_table address_to table,
+                                    string_address path, positive2 named)
+{
+        positive length = named.y + 1;
+
+        if (named.y == positive_max ||
+            length > positive_max - table->paths_used ||
+            !path_table_prepare(table, table->count + 1) ||
+            !shell_room((address_any address_to)address_of table->records,
+                        address_of table->room, table->count + 1,
+                        table->stride) ||
+            !shell_array_room(table->paths, table->paths_room,
+                              table->paths_used + length))
+                return null;
+
+        path_table_key address_to kept = path_table_record(table, table->count);
+        positive slot = named.x & (table->slots - 1);
+
+        memory_fill(kept, 0, table->stride);
+        kept->path_at = table->paths_used;
+        kept->path_hash = named.x;
+        memory_copy(table->paths + table->paths_used, path, length);
+        table->paths_used += length;
+        while (table->index[slot])
+                slot = (slot + 1) & (table->slots - 1);
+        table->index[slot] = ++table->count;
+        return (p8 address_to)kept;
+}
+
+static fn path_table_clear(path_table address_to table)
+{
+        table->count = 0;
+        table->paths_used = 0;
+        table->slots = 0;
+}
+
 // hardlink ---------------------------------------------------------
 /*
         util-linux 2.42's hardlink, step for step. Every regular file the
@@ -29137,8 +29251,7 @@ static b32 file_truncate()
 */
 typedef struct
 {
-        positive path_at;
-        positive path_hash;
+        path_table_key key;
         positive base_at;
         positive dir_at;
         b64 dir_size;
@@ -29160,15 +29273,13 @@ typedef struct
 
 #define HARDLINK_PATTERNS 64
 
-static hardlink_file address_to hardlink_files;
-static positive hardlink_file_count;
-static positive hardlink_file_room;
+//      Every regular file the walk meets, by path.
+static path_table hardlink_table = {.stride = sizeof(hardlink_file)};
+#define hardlink_files ((hardlink_file address_to)hardlink_table.records)
+#define hardlink_file_count hardlink_table.count
 static hardlink_node address_to hardlink_nodes;
 static positive hardlink_node_count;
 static positive hardlink_node_room;
-static p8 address_to hardlink_paths;
-static positive hardlink_path_used;
-static positive hardlink_path_room;
 static positive address_to hardlink_order;
 static positive address_to hardlink_spare;
 static positive hardlink_order_room;
@@ -29206,8 +29317,6 @@ static b32 hardlink_status;
 static bool hardlink_prune;
 static positive hardlink_temp_number;
 static positive hardlink_process;
-static positive address_to hardlink_seen;
-static positive hardlink_seen_room;
 static positive hardlink_io_size;
 static p8 address_to hardlink_read_one;
 static p8 address_to hardlink_read_two;
@@ -29222,7 +29331,7 @@ static p64 hardlink_cache_size;
 
 static string_address hardlink_path(hardlink_file address_to file)
 {
-        return hardlink_paths + file->path_at;
+        return hardlink_table.paths + file->key.path_at;
 }
 
 static bool hardlink_moment_same(file_moment address_to one,
@@ -29251,43 +29360,6 @@ static bool hardlink_snapshot_same(file_facts address_to old,
         return hardlink_link_same(old, now) &&
                hardlink_moment_same(address_of old->changed,
                                     address_of now->changed);
-}
-
-/* A load below one half makes repeated or overlapping input trees O(n).
-   Offsets, not pointers, survive growth of the shared path arena. */
-static bool hardlink_seen_prepare(positive wanted)
-{
-        if (wanted <= hardlink_seen_room / 2)
-                return true;
-
-        positive larger = hardlink_seen_room ? hardlink_seen_room : 256;
-
-        while (wanted > larger / 2)
-        {
-                if (larger > positive_max / 2)
-                        return false;
-                larger *= 2;
-        }
-        if (larger > positive_max / sizeof(positive))
-                return false;
-
-        positive address_to table =
-            (positive address_to)utility_arena_take(larger * sizeof(positive));
-        if (!table)
-                return false;
-        memory_fill(table, 0, larger * sizeof(positive));
-
-        for (positive i = 0; i < hardlink_file_count; i++)
-        {
-                positive slot = hardlink_files[i].path_hash & (larger - 1);
-                while (table[slot])
-                        slot = (slot + 1) & (larger - 1);
-                table[slot] = i + 1;
-        }
-
-        hardlink_seen = table;
-        hardlink_seen_room = larger;
-        return true;
 }
 
 // One of the patterns, searched for anywhere in the path: regexec.
@@ -29396,47 +29468,26 @@ static fn hardlink_visit(bipolar directory, string_address name,
         }
 
         positive2 named = string_hash_33_length(shown);
-        if (!hardlink_seen_prepare(hardlink_file_count + 1))
+
+        if (path_table_find(address_of hardlink_table, shown, named.x))
+        {
+                HARDLINK_SAY(2, "Skipped (specified more than once) %w\n",
+                             writer_terminal_name, shown);
+                return;
+        }
+
+        hardlink_file address_to file = (hardlink_file address_to)path_table_add(
+            address_of hardlink_table, shown, named);
+
+        if (!file)
         {
                 log_error("hardlink: cannot continue: Cannot allocate memory\n", 0);
                 return;
         }
 
-        positive slot = named.x & (hardlink_seen_room - 1);
-        while (hardlink_seen[slot])
-        {
-                hardlink_file address_to have =
-                    hardlink_files + hardlink_seen[slot] - 1;
-                if (have->path_hash == named.x &&
-                    string_equals(hardlink_path(have), shown))
-                {
-                        HARDLINK_SAY(2, "Skipped (specified more than once) %w\n",
-                                     writer_terminal_name, shown);
-                        return;
-                }
-                slot = (slot + 1) & (hardlink_seen_room - 1);
-        }
-
-        positive length = named.y;
-
-        if (!shell_array_room(hardlink_files, hardlink_file_room,
-                              hardlink_file_count + 1) ||
-            !shell_array_room(hardlink_paths, hardlink_path_room,
-                              hardlink_path_used + length + 1))
-        {
-                log_error("hardlink: cannot continue: Cannot allocate memory\n", 0);
-                return;
-        }
-
-        hardlink_file address_to file = hardlink_files + hardlink_file_count++;
-        memory_fill(file, 0, sizeof(*file));
-        file->path_at = hardlink_path_used;
-        file->path_hash = named.x;
         file->facts = facts;
         file->valid = true;
         file->tree = hardlink_tree;
-        memory_copy_apart_end(hardlink_paths + hardlink_path_used, shown,
-                              length);
 
         string_address last = string_last_of(shown, '/');
 
@@ -29445,8 +29496,6 @@ static fn hardlink_visit(bipolar directory, string_address name,
         //      name, which for an operand that is a file is negative.
         file->dir_at = hardlink_root_length;
         file->dir_size = (b64)file->base_at - (b64)hardlink_root_length;
-        hardlink_path_used += length + 1;
-        hardlink_seen[slot] = hardlink_file_count;
 }
 
 static fn hardlink_walk(bipolar directory, string_address name,
@@ -30521,13 +30570,11 @@ static b32 file_hardlink()
         if (!hardlink_io_size)
                 hardlink_io_size = string_equals(hardlink_method, "memcmp") ? 8 * 1024 : FILE_TRANSFER_SIZE;
 
-        // The seen table and the compare buffers live in the shared arena,
-        // which another applet in this process may have reused since.
+        // The compare buffers live in the shared arena, which another applet
+        // in this process may have reused since.
         utility_arena.used = 0;
-        hardlink_seen_room = 0;
-        hardlink_file_count = 0;
+        path_table_clear(address_of hardlink_table);
         hardlink_node_count = 0;
-        hardlink_path_used = 0;
         hardlink_status = 0;
         hardlink_linked = 0;
         hardlink_saved = 0;
