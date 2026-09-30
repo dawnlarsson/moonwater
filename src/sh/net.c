@@ -1567,6 +1567,75 @@ typedef struct
         dhcp_lease lease;
 } net_dhcp_answer;
 
+/*
+        The watcher's exchange is not allowed to be deaf.
+
+        dhcp_ask is a twenty-attempt schedule, about seventy-six seconds when
+        nobody answers, and the watcher sat in it: a boot whose first pass
+        found a wired port with no cable, or a wifi station not yet joined,
+        heard nothing of the join, the cable, or any moonwater command until
+        the schedule ran out, so the internet came up at exactly seventy-six
+        seconds whatever the machine had ready sooner. While the watcher runs,
+        an acquisition therefore waits on the exchange, the wake pipe and the
+        link news together, gives a link twelve seconds to answer, and is cut
+        the moment either of the others has something to say; the loop reads
+        that at once and asks again.
+*/
+static bipolar net_wake_watch = -1;
+static bipolar net_events_watch = -1;
+static bool net_exchange_cut;
+
+#define NET_DHCP_WATCH_SECONDS 12
+#define NET_DHCP_TIMED_OUT (-10)
+#define NET_DHCP_INTERRUPTED (-11)
+
+/* 1 when the exchange spoke, 0 when the budget ran out, -2 when the wake
+   pipe or the link news did, negative for a broken descriptor. */
+static COLD bipolar net_exchange_wait(bipolar answer,
+                                      const network_deadline address_to deadline)
+{
+        for (;;)
+        {
+                positive seconds;
+                positive nanoseconds;
+                timespec limit;
+                system_poll_descriptor waited[3];
+                positive count = 1;
+                bipolar ready;
+
+                if (!network_deadline_left(deadline, address_of seconds,
+                                           address_of nanoseconds))
+                        return 0;
+                limit.tv_sec = (b64)seconds;
+                limit.tv_nsec = (b64)nanoseconds;
+                waited[0].descriptor = (b32)answer;
+                waited[0].events = SYSTEM_POLL_READ;
+                waited[0].returned = 0;
+                if (net_wake_watch >= 0)
+                {
+                        waited[count].descriptor = (b32)net_wake_watch;
+                        waited[count].events = SYSTEM_POLL_READ;
+                        waited[count++].returned = 0;
+                }
+                if (net_events_watch >= 0)
+                {
+                        waited[count].descriptor = (b32)net_events_watch;
+                        waited[count].events = SYSTEM_POLL_READ;
+                        waited[count++].returned = 0;
+                }
+                ready = system_poll_wait(waited, count, address_of limit, null);
+                if (ready == NETWORK_INTERRUPTED)
+                        continue;
+                if (ready <= 0)
+                        return ready;
+                if (waited[0].returned & SYSTEM_POLL_INVALID)
+                        return -9;
+                if (waited[0].returned)
+                        return 1;
+                return -2;
+        }
+}
+
 static COLD bipolar net_dhcp_apart(string_address device, p8 address_to hardware,
                                    dhcp_lease address_to lease, bool renew,
                                    bool rebinding, positive wait)
@@ -1598,10 +1667,17 @@ static COLD bipolar net_dhcp_apart(string_address device, p8 address_to hardware
         //      dhcp_ask's twenty attempts can each wait out a DISCOVER
         //      and a REQUEST, 150 s in all, after a CSPRNG that may take
         //      a second; a renewal is its own wait.
+        bool watching = !renew && net_wake_watch >= 0;
+        bipolar waited = -1;
+
         heard = child > 0 &&
                 network_deadline_begin(address_of deadline,
-                                       renew ? wait + 5 : 180, 0) &&
-                network_wait_readable_until(ends[0], address_of deadline) > 0 &&
+                                       renew ? wait + 5
+                                             : watching ? NET_DHCP_WATCH_SECONDS
+                                                        : 180, 0) &&
+                (watching
+                     ? (waited = net_exchange_wait(ends[0], address_of deadline))
+                     : network_wait_readable_until(ends[0], address_of deadline)) > 0 &&
                 system_read_retry((positive)ends[0], address_of answer,
                                   sizeof answer) == (bipolar)sizeof answer;
         if (child > 0)
@@ -1612,7 +1688,15 @@ static COLD bipolar net_dhcp_apart(string_address device, p8 address_to hardware
         system_close(ends[0]);
 
         if (!heard)
-                return DHCP_NO_SOCKET;
+        {
+                if (watching && waited == -2)
+                {
+                        net_exchange_cut = true;
+                        return NET_DHCP_INTERRUPTED;
+                }
+                return watching && waited == 0 ? NET_DHCP_TIMED_OUT
+                                               : DHCP_NO_SOCKET;
+        }
         if (answer.status != DHCP_OK)
                 return answer.status == DHCP_NO_OFFER ||
                                answer.status == DHCP_REFUSED ||
@@ -1634,6 +1718,7 @@ static COLD b32 net_auto(b32 handle, net_holding address_to held)
         netlink_search search;
         dhcp_lease lease;
         bipolar status;
+        positive tried;
 
         memory_fill(address_of search, 0, sizeof search);
         search.skip_loopback = true;
@@ -1641,39 +1726,71 @@ static COLD b32 net_auto(b32 handle, net_holding address_to held)
         search.skip_wired = net_wired_off();
         radio_links_unleased(address_of search);
 
-        if (netlink_link_find(handle, address_of search) < 0)
+        /*
+                The best link first, and when it stays silent the next one.
+
+                A wired port with no cable, or one whose switch never answers,
+                is the best link by preference and a dead end: without this
+                the wifi that had joined was never asked while the port kept
+                its place. Only the watcher does it (held is its state); `ip
+                auto` asks the one link, as it always has. Each failed link is
+                added to the skip list for the rest of this pass, and the
+                next pass starts over with all of them.
+        */
+        for (tried = 0;; tried++)
         {
-                string_format(net_out, "ip: no interface to configure\n");
+                if (netlink_link_find(handle, address_of search) < 0)
+                {
+                        if (tried)
+                                return 1;
+                        string_format(net_out, "ip: no interface to configure\n");
+                        net_flush();
+                        return 1;
+                }
+
+                if (held && held->index == search.index && !held->lost)
+                        return 0;
+
+                if (!search.has_hardware)
+                {
+                        string_format(net_out, "ip: %w has no hardware address\n",
+                                      writer_terminal_quoted_name, search.name);
+                        net_flush();
+                        return 1;
+                }
+
+                string_format(net_out, "ip: using %w\n", writer_terminal_quoted_name,
+                              search.name);
+
+                if (!(search.flags & IFF_UP))
+                {
+                        status = netlink_link_up(handle, search.index);
+
+                        if (status < 0)
+                                return net_refused((string_address) "link up", status);
+                }
+
+                string_format(net_out, "ip: asking for a lease\n");
                 net_flush();
-                return 1;
+
+                status = net_dhcp_apart(search.name, search.hardware,
+                                        address_of lease, false, false, 0);
+
+                if (status == NET_DHCP_INTERRUPTED)
+                        return 1;
+                if (status == NET_DHCP_TIMED_OUT && held && tried < 3 &&
+                    search.skip_count < 8)
+                {
+                        string_format(net_out, "ip: nobody answered on %w\n",
+                                      writer_terminal_quoted_name, search.name);
+                        net_flush();
+                        search.skip[search.skip_count++] = search.index;
+                        continue;
+                }
+                if (status == NET_DHCP_TIMED_OUT)
+                        status = DHCP_NO_OFFER;
+                break;
         }
-
-        if (held && held->index == search.index && !held->lost)
-                return 0;
-
-        if (!search.has_hardware)
-        {
-                string_format(net_out, "ip: %w has no hardware address\n",
-                              writer_terminal_quoted_name, search.name);
-                net_flush();
-                return 1;
-        }
-
-        string_format(net_out, "ip: using %w\n", writer_terminal_quoted_name, search.name);
-
-        if (!(search.flags & IFF_UP))
-        {
-                status = netlink_link_up(handle, search.index);
-
-                if (status < 0)
-                        return net_refused((string_address) "link up", status);
-        }
-
-        string_format(net_out, "ip: asking for a lease\n");
-        net_flush();
-
-        status = net_dhcp_apart(search.name, search.hardware, address_of lease,
-                                false, false, 0);
 
         if (status != DHCP_OK)
         {
@@ -2029,6 +2146,9 @@ static COLD b32 net_watch(void)
         }
 
         wake = net_wake_listen();
+        net_wake_watch = wake;
+        net_events_watch = events;
+        net_exchange_cut = false;
 
         //      Configure whatever is already plugged in before waiting for
         //      anything to change, or a machine that boots with its cable in
@@ -2215,8 +2335,18 @@ static COLD b32 net_watch(void)
                         retry_seconds = 4;
                         net_reconfigure_fresh(address_of held);
                 }
+                else if (net_exchange_cut)
+                {
+                        /* An exchange was cut for news that turned out to
+                           matter to nobody: it asks again at once, not after
+                           the idle wait. */
+                        net_exchange_cut = false;
+                        net_reconfigure_fresh(address_of held);
+                }
         }
 
+        net_wake_watch = -1;
+        net_events_watch = -1;
         netlink_forget(address_of message);
         socket_close((b32)events);
         if (wake >= 0)
