@@ -25247,50 +25247,23 @@ static const string_address comp_helptopics[] = {
     "ulimit", "umask", "unalias", "unset", "until", "variables", "wait",
     "while", "{ ... }",
     null};
-static const string_address comp_bindings[] = {
-    "abort", "accept-line", "arrow-key-prefix", "backward-byte",
-    "backward-char", "backward-delete-char", "backward-kill-line",
-    "backward-kill-word", "backward-word", "beginning-of-history",
-    "beginning-of-line", "bracketed-paste-begin", "call-last-kbd-macro",
-    "capitalize-word", "character-search", "character-search-backward",
-    "clear-display", "clear-screen", "complete", "copy-backward-word",
-    "copy-forward-word", "copy-region-as-kill", "delete-char",
-    "delete-char-or-list", "delete-horizontal-space", "digit-argument",
-    "do-lowercase-version", "downcase-word", "dump-functions",
-    "dump-macros", "dump-variables", "emacs-editing-mode", "end-kbd-macro",
-    "end-of-history", "end-of-line", "exchange-point-and-mark",
-    "execute-named-command", "export-completions", "fetch-history",
-    "forward-backward-delete-char", "forward-byte", "forward-char",
-    "forward-search-history", "forward-word", "history-search-backward",
-    "history-search-forward", "history-substring-search-backward",
-    "history-substring-search-forward", "insert-comment",
-    "insert-completions", "kill-line", "kill-region", "kill-whole-line",
-    "kill-word", "menu-complete", "menu-complete-backward", "next-history",
-    "next-screen-line", "non-incremental-forward-search-history",
-    "non-incremental-forward-search-history-again",
-    "non-incremental-reverse-search-history",
-    "non-incremental-reverse-search-history-again", "old-menu-complete",
-    "operate-and-get-next", "overwrite-mode", "possible-completions",
-    "previous-history", "previous-screen-line", "print-last-kbd-macro",
-    "quoted-insert", "re-read-init-file", "redraw-current-line",
-    "reverse-search-history", "revert-line", "self-insert", "set-mark",
-    "skip-csi-sequence", "start-kbd-macro", "tab-insert", "tilde-expand",
-    "transpose-chars", "transpose-words", "tty-status", "undo",
-    "universal-argument", "unix-filename-rubout", "unix-line-discard",
-    "unix-word-rubout", "upcase-word", "vi-append-eol", "vi-append-mode",
-    "vi-arg-digit", "vi-bWord", "vi-back-to-indent", "vi-backward-bigword",
-    "vi-backward-word", "vi-bword", "vi-change-case", "vi-change-char",
-    "vi-change-to", "vi-char-search", "vi-column", "vi-complete",
-    "vi-delete", "vi-delete-to", "vi-eWord", "vi-editing-mode",
-    "vi-end-bigword", "vi-end-word", "vi-eof-maybe", "vi-eword", "vi-fWord",
-    "vi-fetch-history", "vi-first-print", "vi-forward-bigword",
-    "vi-forward-word", "vi-fword", "vi-goto-mark", "vi-insert-beg",
-    "vi-insertion-mode", "vi-match", "vi-movement-mode", "vi-next-word",
-    "vi-overstrike", "vi-overstrike-delete", "vi-prev-word", "vi-put",
-    "vi-redo", "vi-replace", "vi-rubout", "vi-search", "vi-search-again",
-    "vi-set-mark", "vi-subst", "vi-tilde-expand", "vi-undo",
-    "vi-unix-word-rubout", "vi-yank-arg", "vi-yank-pop", "vi-yank-to",
-    "yank", "yank-last-arg", "yank-nth-arg", "yank-pop",
+//      What bash adds to readline's own functions when it starts one:
+//      bind -l names them, and compgen -A binding, in a shell that never
+//      did, does not.
+static const string_address comp_bash_added[] = {
+    "alias-expand-line", "bash-vi-complete", "complete-command",
+    "complete-filename", "complete-hostname", "complete-into-braces",
+    "complete-username", "complete-variable", "dabbrev-expand",
+    "display-shell-version", "dynamic-complete-history",
+    "edit-and-execute-command", "glob-complete-word", "glob-expand-word",
+    "glob-list-expansions", "history-and-alias-expand-line",
+    "history-expand-line", "insert-last-argument", "magic-space",
+    "possible-command-completions", "possible-filename-completions",
+    "possible-hostname-completions", "possible-username-completions",
+    "possible-variable-completions", "shell-backward-kill-word",
+    "shell-backward-word", "shell-expand-line", "shell-forward-word",
+    "shell-kill-word", "shell-transpose-words", "spell-correct-word",
+    "vi-edit-and-execute-command",
     null};
 static const string_address comp_signals[] = {
     "EXIT", "SIGHUP", "SIGINT", "SIGQUIT", "SIGILL", "SIGTRAP", "SIGABRT",
@@ -25738,7 +25711,13 @@ static COLD fn compgen_generate(comp_request address_to want,
                         shell_inventory_sorted(null, 0, compgen_arrays, false, false);
                         break;
                 case COMP_ACTION_BINDING:
-                        compgen_names(comp_bindings);
+                        for (positive at = 0; at < BIND_FUNCTIONS; at++)
+                                if (string_table_find(
+                                        bind_functions[at], comp_bash_added,
+                                        sizeof(comp_bash_added[0]),
+                                        array_count(comp_bash_added) - 1) ==
+                                    array_count(comp_bash_added) - 1)
+                                        compgen_offer(bind_functions[at]);
                         break;
                 case COMP_ACTION_BUILTIN:
                         compgen_builtins(0);
