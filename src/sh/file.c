@@ -8796,12 +8796,9 @@ static bool file_source_destination(string_address program, positive first,
 {
         file_into_mode = false;
         file_made_on = false;
-        if (into && alone)
-                return string_report(
-                    log_error, false,
-                    "%s: cannot combine --target-directory (-t) and --no-target-directory (-T)\n",
-                    program);
 
+        // GNU's order: what is missing first, then the two options that
+        // cannot be together.
         if (first >= count)
         {
                 string_format(log_error, "%s: missing file operand\n", program);
@@ -8814,6 +8811,12 @@ static bool file_source_destination(string_address program, positive first,
                               program, writer_shell_quoted_name, file_operand_at(first));
                 return file_try_help(program);
         }
+
+        if (into && alone)
+                return string_report(
+                    log_error, false,
+                    "%s: cannot combine --target-directory (-t) and --no-target-directory (-T)\n",
+                    program);
 
         string_address last = into ? into : file_operand_at(count - 1);
         positive after = into ? count : count - 1;
@@ -8830,6 +8833,16 @@ static bool file_source_destination(string_address program, positive first,
                         string_format(log_error, "%s: extra operand '%w'\n", program,
                                       writer_terminal_quoted_name,
                                       file_operand_at(first + 2));
+                        return file_try_help(program);
+                }
+
+                //      GNU says so after the operands have been counted and the
+                //      target looked at, where the destination turned out not
+                //      to be a directory.
+                if (file_join_source_path)
+                {
+                        string_format(log_error, "%s: with --parents, the destination must be a directory\n",
+                                      program);
                         return file_try_help(program);
                 }
 
@@ -22758,8 +22771,7 @@ static bool ln_make(string_address target, string_address name)
         {
                 if (!ln_relative_text(target, name, relative))
                 {
-                        return string_report(log_error, false, "ln: cannot make relative target %w: File name too long\n",
-                                      writer_shell_quoted_name, target);
+                        return string_report(log_error, false, "ln: generating relative path: File name too long\n");
                 }
 
                 target = relative;
@@ -22860,6 +22872,20 @@ static bool ln_make(string_address target, string_address name)
                         destination_directory = looked < 0 ? looked
                                                            : -ERROR_EXISTS;
                 }
+                else if ((ln_selected.collision == 'f' || ln_selected.collision == 'i' ||
+                          file_backup_kind) &&
+                         destination_directory != -ERROR_NO_ENTRY)
+                {
+                        //      With -f, -i or a backup GNU looks at the name
+                        //      before it retries the link, and a look that
+                        //      fails for any reason but the name being
+                        //      missing is what it reports.
+                        if (source_handle >= 0)
+                                system_close(source_handle);
+                        return string_report(log_error, false, "ln: failed to access %w: %s\n",
+                                             writer_shell_quoted_name, name,
+                                             file_reason(destination_directory));
+                }
                 if (source_handle >= 0)
                         system_close(source_handle);
                 return ln_failed(target, name, destination_directory);
@@ -22870,6 +22896,18 @@ static bool ln_make(string_address target, string_address name)
             destination_directory, destination_leaf, AT_SYMLINK_NOFOLLOW,
             address_of destination);
         bool destination_exists = destination_look >= 0;
+
+        //      With -f, -i or a backup GNU looks at the name once its first
+        //      attempt has failed, and says so when the look does.
+        if (destination_look < 0 && destination_look != -ERROR_NO_ENTRY &&
+            (ln_selected.collision == 'f' || ln_selected.collision == 'i' || file_backup_kind))
+        {
+                system_close(destination_directory);
+                if (source_handle >= 0)
+                        system_close(source_handle);
+                return string_report(log_error, false, "ln: failed to access %w: %s\n",
+                                     writer_shell_quoted_name, name, file_reason(destination_look));
+        }
 
         // GNU do_link: a destination directory is refused before -i or
         // backup only when -f/-i/backup will replace it. A symbolic link
@@ -23133,9 +23171,6 @@ static b32 file_ln()
         taking.first = 0;
         count = file_operand_count;
 
-        if (!file_backup_taken(address_of taking, (string_address) "ln"))
-                return 1;
-
         if (!file_targets_told((string_address) "ln", (taking.repeated & FILE_FLAG('t')) != 0))
                 return 1;
 
@@ -23147,10 +23182,6 @@ static b32 file_ln()
         ln_loud = (flags & FILE_FLAG('v')) != 0;
         ln_relative = (flags & FILE_FLAG('r')) != 0;
 
-        if (ln_relative && !ln_symbolic)
-        {
-                return string_report(log_error, 1, "ln: cannot do --relative without --symbolic\n");
-        }
 
         // -L makes a hard link to what a symbolic target points at rather
         // than to the link, which is the one thing -L and -P are about.
@@ -23158,7 +23189,13 @@ static b32 file_ln()
 
         if (first >= count)
         {
-                return string_report(log_error, 1, "ln: missing file operand\n");
+                log_error("ln: missing file operand\n", 0);
+                return string_report(log_error, 1, "Try 'ln --help' for more information.\n");
+        }
+
+        if (ln_relative && !ln_symbolic)
+        {
+                return string_report(log_error, 1, "ln: cannot do --relative without --symbolic\n");
         }
 
         string_address into = file_option_value(address_of taking, 't');
@@ -23188,6 +23225,9 @@ static b32 file_ln()
                                       "Try 'ln --help' for more information.\n");
                 }
 
+                if (!file_backup_taken(address_of taking, (string_address) "ln"))
+                        return 1;
+
                 return ln_make(file_operand_at(first),
                                file_operand_at(first + 1))
                            ? 0
@@ -23211,6 +23251,9 @@ static b32 file_ln()
                 name[0] = '.';
                 name[1] = '/';
                 path_tail_copy(name + 2, FILE_PATH_MAX - 2, target);
+
+                if (!file_backup_taken(address_of taking, (string_address) "ln"))
+                        return 1;
 
                 return ln_make(target, name) ? 0 : 1;
         }
@@ -23259,8 +23302,29 @@ static b32 file_ln()
                                       file_reason(looked < 0 ? looked : -ERROR_NOT_DIRECTORY));
                 }
 
+                if (!file_backup_taken(address_of taking, (string_address) "ln"))
+                {
+                        //      GNU has made the one link it was asked for by
+                        //      now, without a backup, before it reads the word.
+                        if (after - first == 1 && !into)
+                        {
+                                if (ln_symbolic)
+                                {
+                                        if (!ln_relative)
+                                                (void)system_symbolic_link_at(file_operand_at(first), AT_FDCWD, last);
+                                }
+                                else
+                                        (void)system_link_at(AT_FDCWD, file_operand_at(first), AT_FDCWD, last,
+                                                             ln_through ? AT_SYMLINK_FOLLOW : 0);
+                        }
+                        return 1;
+                }
+
                 return ln_make(file_operand_at(first), last) ? 0 : 1;
         }
+
+        if (!file_backup_taken(address_of taking, (string_address) "ln"))
+                return 1;
 
         b32 status = 0;
 
@@ -34297,8 +34361,11 @@ static bool cp_link_here(string_address destination)
 
         length -= path_trailing_slashes(parent, length);
         parent[length ? length : 1] = end;
-        return file_look(AT_FDCWD, parent, 0, address_of there) &&
-               file_look(AT_FDCWD, (string_address) ".", 0, address_of here) &&
+        //      A look that fails is not an answer: GNU says the name is in
+        //      the current directory and lets the link itself fail with the
+        //      real reason.
+        return !file_look(AT_FDCWD, parent, 0, address_of there) ||
+               !file_look(AT_FDCWD, (string_address) ".", 0, address_of here) ||
                file_same_identity(address_of there, address_of here);
 }
 
@@ -34388,6 +34455,17 @@ static bool cp_linked(bipolar source_directory, string_address source,
                     writer_terminal_quoted_name, destination_shown,
                     writer_terminal_quoted_name, source_shown,
                     file_reason(done));
+        }
+
+        //      cp -p -s gives the new link the times of what it is a link
+        //      to, as GNU's copy does for every kind it makes.
+        if (cp_symbolic && (file_keeps & FILE_KEEP_TIMES))
+        {
+                p64 times[4];
+
+                file_times_of(facts, times);
+                (void)system_update_times_at(destination_directory, destination, times,
+                                             AT_SYMLINK_NOFOLLOW);
         }
 
         return true;
@@ -34821,6 +34899,29 @@ static bool cp_tree_file(bipolar source, bipolar copy, string_address name)
         return true;
 }
 
+/*
+        The first directory a command-line source makes, by identity, as GNU's
+        copy_internal records it (remember_copied on the first directory it
+        creates for each source): a source directory met below that is that
+        one is the copy being made inside itself, and is said and left alone
+        while its neighbours are copied. cp -r . dest and cp -r dir dir/sub/x
+        make what they can and name the rest, where a check made before any
+        of it refused the lot.
+*/
+static bool cp_created_valid;
+static p64 cp_created_inode;
+static p32 cp_created_major;
+static p32 cp_created_minor;
+static string_address cp_top_source;
+static string_address cp_top_destination;
+
+static bool cp_created_holds(file_facts address_to facts)
+{
+        return cp_created_valid && cp_created_inode == facts->inode &&
+               cp_created_major == facts->device_major &&
+               cp_created_minor == facts->device_minor;
+}
+
 static fn cp_tree_enter(address_any context, address_any node_address,
                         bipolar directory, parallel_output address_to output)
 {
@@ -34900,6 +35001,15 @@ static fn cp_tree_enter(address_any context, address_any node_address,
                         else if (cp_loud)
                                 said = cp_tree_put(output, CP_TREE_FILE, 0, node,
                                                    name, name_length);
+                }
+                else if (record->d_type == DT_DIR && cp_created_valid &&
+                         record->d_ino == cp_created_inode)
+                {
+                        //      Maybe the directory being made: the serial walk
+                        //      looks it up by identity and says so.
+                        node->deferred = true;
+                        said = cp_tree_put(output, CP_TREE_SERIAL, 0, node, name,
+                                           name_length);
                 }
                 else if (record->d_type == DT_DIR &&
                          system_access_at(directory, name, 5) == 0)
@@ -35081,6 +35191,28 @@ static fn cp_tree_serial_close(void)
         cp_tree_serial.length = 0;
 }
 
+/*
+        The directories a copy is inside, by identity. A link followed back to
+        one of them would be copied inside itself without end; GNU's
+        is_ancestor names the link and goes on with its neighbours.
+*/
+#define CP_ANCESTORS_MAX 4096
+static p64 cp_ancestor_inode[CP_ANCESTORS_MAX];
+static p32 cp_ancestor_major[CP_ANCESTORS_MAX];
+static p32 cp_ancestor_minor[CP_ANCESTORS_MAX];
+static positive cp_ancestor_count;
+
+static bool cp_ancestor_holds(file_facts address_to facts)
+{
+        for (positive at = 0; at < cp_ancestor_count; at++)
+                if (cp_ancestor_inode[at] == facts->inode &&
+                    cp_ancestor_major[at] == facts->device_major &&
+                    cp_ancestor_minor[at] == facts->device_minor)
+                        return true;
+
+        return false;
+}
+
 static bool cp_tree_serial_copy(string_address path, positive name_at, positive level)
 {
         positive parent_length = name_at ? name_at - 1 : 0;
@@ -35118,10 +35250,42 @@ static bool cp_tree_serial_copy(string_address path, positive name_at, positive 
                                               : cp_tree_serial.destination));
         }
         else
+        {
+                //      The directories above this name were walked by the pool,
+                //      which keeps no ancestor list: under -L a link met here
+                //      can lead back into one of them, and is a cycle at the
+                //      first turn, as GNU's is_ancestor has it.
+                positive kept = cp_ancestor_count;
+
+                if (cp_dereference == 1 && name_at)
+                        for (positive cut = 1; cut < name_at && cp_ancestor_count < CP_ANCESTORS_MAX; cut++)
+                        {
+                                if (path[cut] != '/')
+                                        continue;
+
+                                p8 prefix[FILE_PATH_MAX];
+                                file_facts above;
+
+                                if (cut >= sizeof(prefix))
+                                        break;
+                                memory_copy(prefix, path, cut);
+                                prefix[cut] = end;
+                                if (file_look_code(cp_tree_source_root, (string_address)prefix, 0,
+                                                   address_of above) >= 0 &&
+                                    (above.mode & MODE_FORMAT) == MODE_DIRECTORY)
+                                {
+                                        cp_ancestor_inode[cp_ancestor_count] = above.inode;
+                                        cp_ancestor_major[cp_ancestor_count] = above.device_major;
+                                        cp_ancestor_minor[cp_ancestor_count] = above.device_minor;
+                                        cp_ancestor_count++;
+                                }
+                        }
                 whole = file_copy_one(cp_tree_serial.source, name, (string_address)from,
                                       cp_tree_serial.destination, name, (string_address)to,
                                       cp_tree_depth > level ? cp_tree_depth - level : 1,
                                       false, false, false, null, -1, FILE_COPY_FRESH);
+                cp_ancestor_count = kept;
+        }
 
         memory_give(from);
         memory_give(to);
@@ -35480,28 +35644,6 @@ static bool cp_update_kept(file_facts address_to facts, file_facts address_to th
 }
 
 /*
-        The directories a copy is inside, by identity. A link followed back to
-        one of them would be copied inside itself without end; GNU's
-        is_ancestor names the link and goes on with its neighbours.
-*/
-#define CP_ANCESTORS_MAX 4096
-static p64 cp_ancestor_inode[CP_ANCESTORS_MAX];
-static p32 cp_ancestor_major[CP_ANCESTORS_MAX];
-static p32 cp_ancestor_minor[CP_ANCESTORS_MAX];
-static positive cp_ancestor_count;
-
-static bool cp_ancestor_holds(file_facts address_to facts)
-{
-        for (positive at = 0; at < cp_ancestor_count; at++)
-                if (cp_ancestor_inode[at] == facts->inode &&
-                    cp_ancestor_major[at] == facts->device_major &&
-                    cp_ancestor_minor[at] == facts->device_minor)
-                        return true;
-
-        return false;
-}
-
-/*
         A process told how much address space it may have -- ulimit -v -- is
         told so to be bounded in memory (the upstream link-heap test measures
         cp -al under a limit four megabytes past the bare minimum), and the
@@ -35739,20 +35881,8 @@ static bool file_copy_one(bipolar source_directory, string_address source,
 
         if (!moving && named && kind == MODE_DIRECTORY)
         {
-                p8 from[FILE_PATH_MAX];
-                p8 to[FILE_PATH_MAX];
-
-                // Both sides followed all the way: a destination spelled
-                // through a link into the source is still inside it.
-                if (file_resolve(source_shown, from, true) &&
-                    file_resolve_as(destination_shown, to, true,
-                                    FILE_RESOLVE_FINAL_MISSING) &&
-                    realpath_under(from, to))
-                {
-                        return string_report(log_error, false, "cp: cannot copy a directory, %w, into itself, %w\n",
-                                      writer_shell_quoted_name, source_shown,
-                                      writer_shell_quoted_name, destination_shown);
-                }
+                cp_top_source = source_shown;
+                cp_top_destination = destination_shown;
         }
 
         /* Under a backup GNU looks at a destination without following it,
@@ -35822,6 +35952,20 @@ static bool file_copy_one(bipolar source_directory, string_address source,
            failure still writes the arrow. -n skip above does not. A
            directory is announced only when it is made, not when it is
            there to copy into. */
+        //      A name GNU unlinks before it opens it -- --remove-destination,
+        //      one with other names when links are kept, a link or a node
+        //      made where a file is -- is announced as rm -v would, ahead of
+        //      the arrow.
+        if (!moving && cp_loud && !fresh && kind != MODE_DIRECTORY && !file_backup_kind &&
+            destination_entry_exists &&
+            (destination_entry.mode & MODE_FORMAT) != MODE_DIRECTORY &&
+            (cp_replace ||
+             (!cp_attributes_only &&
+              ((cp_keep_links && destination_entry.hard_links > 1) ||
+               (cp_dereference == 0 && kind != MODE_FILE)))))
+                string_format(log, "removed %w\n", writer_shell_quoted_name,
+                              destination_shown);
+
         if (!moving && cp_loud && kind != MODE_DIRECTORY)
                 file_backup_told(source_shown, destination_shown,
                                  (string_address) "'",
@@ -35869,6 +36013,9 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                       (destination_entry.mode & MODE_FORMAT) !=
                           MODE_DIRECTORY)))
                 {
+                        if (!moving && cp_loud && destination_entry_exists)
+                                string_format(log, "removed %w\n",
+                                              writer_shell_quoted_name, destination_shown);
                         bipolar linked = file_linked_replace(
                             earlier, destination_directory, destination);
                         if (linked >= 0)
@@ -36112,11 +36259,17 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                    exclusively and without following a link, and it starts
                    without the group and other bits an owner or a mode
                    still to be given would open early. */
+                //      With links preserved (-a, -d, --preserve=links) a
+                //      destination with other names is not written through,
+                //      which would change those too: it is replaced, as GNU
+                //      unlinks it before it opens it.
+                bool shared = !moving && cp_keep_links && destination_exists &&
+                              there.hard_links > 1;
                 bool streamed = !moving && !fresh && kind != MODE_FILE &&
                                 !destination_exists && !cp_replace &&
                                 !destination_is_link;
                 bool staged = !fresh && !streamed &&
-                              (moving || cp_replace || destination_is_link ||
+                              (moving || cp_replace || shared || destination_is_link ||
                                !destination_exists);
                 positive omitted = file_keeps & FILE_KEEP_OWNER ? 0077
                                    : file_keeps & FILE_KEEP_MODE ? 0022
@@ -36234,6 +36387,11 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                 return string_report(log_error, false, "cp: %w is nested too deep\n",
                               writer_shell_quoted_name, source_shown);
         }
+        if (!moving && !named && cp_created_holds(address_of facts))
+                return string_report(log_error, false,
+                                     "cp: cannot copy a directory, %w, into itself, %w\n",
+                                     writer_shell_quoted_name, cp_top_source,
+                                     writer_shell_quoted_name, cp_top_destination);
         if (!moving && cp_ancestor_holds(address_of facts))
                 return string_report(log_error, false,
                                      "cp: cannot copy cyclic symbolic link %w\n",
@@ -36250,7 +36408,15 @@ static bool file_copy_one(bipolar source_directory, string_address source,
             : file_open_same(
                   source_directory, source, address_of facts,
                   FILE_READ | O_DIRECTORY | (follow ? 0 : O_NOFOLLOW));
-        if (source_handle < 0)
+        //      A directory cp may not read is made all the same, empty and
+        //      with the mode it had, as GNU makes it before it asks to list
+        //      it: the copy of everything else goes on and the exit says one
+        //      thing could not be done.
+        bool unreadable = false;
+
+        if (source_handle == -ERROR_ACCESS && !moving)
+                unreadable = true;
+        else if (source_handle < 0)
         {
                 string_format(log_error, "%s: cannot read directory %w: %s\n", program,
                               writer_shell_quoted_name, source_shown,
@@ -36299,6 +36465,20 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                 string_format(log, "created directory %w\n",
                               writer_shell_quoted_name, destination_shown);
 
+        if (!moving && !destination_exists && !cp_created_valid)
+        {
+                file_facts made_facts;
+
+                if (file_look_code(destination_handle, (string_address)"", AT_EMPTY_PATH,
+                                   address_of made_facts) >= 0)
+                {
+                        cp_created_valid = true;
+                        cp_created_inode = made_facts.inode;
+                        cp_created_major = made_facts.device_major;
+                        cp_created_minor = made_facts.device_minor;
+                }
+        }
+
         bool linked_root = named && file_linked_root < 0;
         if (linked_root)
         {
@@ -36329,7 +36509,7 @@ static bool file_copy_one(bipolar source_directory, string_address source,
 
         /*      A directory cp made in its own stage is filled in batches; the
                 ones below it, and every other kind of copy, name by name. */
-        if ((staged || in_place) && !moving && !cp_symbolic && !cp_attributes_only &&
+        if (!unreadable && (staged || in_place) && !moving && !cp_symbolic && !cp_attributes_only &&
             !file_debug && cp_reflink_policy != 'A' && !cp_memory_bounded())
         {
                 complete = cp_tree_parallel(walk.handle, source_shown,
@@ -36348,10 +36528,18 @@ static bool file_copy_one(bipolar source_directory, string_address source,
         struct linux_dirent64 address_to address_to listed = null;
         positive listed_count = 0;
         positive listed_at = 0;
-        if (moving)
+        //      A copy that goes name by name takes them in inode order too,
+        //      as GNU's savedir gives them to copy_dir, so what it says of
+        //      them comes in that order and not the file system's.
+        bool serial_walk = !((staged || in_place) && !moving && !cp_hard && !cp_symbolic &&
+                             !cp_attributes_only && !file_debug && cp_reflink_policy != 'A' &&
+                             !cp_memory_bounded());
+
+        if ((moving || serial_walk) && !unreadable)
                 listed = file_listing_by_inode(address_of walk,
                                                address_of listed_count);
-        while (!((staged || in_place) && !moving && !cp_hard && !cp_symbolic && !cp_attributes_only &&
+        while (!unreadable &&
+               !((staged || in_place) && !moving && !cp_hard && !cp_symbolic && !cp_attributes_only &&
                  !file_debug && cp_reflink_policy != 'A' && !cp_memory_bounded()) &&
                (child = listed ? (listed_at < listed_count ? listed[listed_at++] : null)
                                : file_walk_next(address_of walk)))
@@ -36430,6 +36618,13 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                 file_linked_root = -1;
                 file_linked_root_shown = null;
         }
+        if (unreadable)
+        {
+                string_format(log_error, "%s: cannot access '%w': %s\n", program,
+                              writer_terminal_quoted_name, source_shown,
+                              file_reason(-ERROR_ACCESS));
+                complete = false;
+        }
         if (walk.error < 0)
         {
                 string_format(log_error, "%s: cannot read directory %w: %s\n", program,
@@ -36437,7 +36632,7 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                 mv_across_said |= moving;
                 complete = false;
         }
-        if ((moving || cp_preserve) &&
+        if (!unreadable && (moving || cp_preserve) &&
             file_xattrs_copy(walk.handle, destination_handle, program,
                              destination_shown) < 0)
                 complete = false;
@@ -36629,6 +36824,7 @@ static bool cp_slash_allowed(string_address source, string_address given,
 // pair it hands over is a named one at full depth.
 static fn cp_pair(string_address source, string_address destination)
 {
+        cp_created_valid = false;
         static p8 source_leaf[FILE_PATH_MAX];
         static p8 destination_leaf[FILE_PATH_MAX];
         static p8 stripped[FILE_PATH_MAX];
@@ -36667,7 +36863,7 @@ static fn cp_pair(string_address source, string_address destination)
         if (source_directory < 0 || destination_directory < 0)
         {
                 if (source_directory < 0)
-                        string_format(log_error, "cp: cannot access %w: %s\n",
+                        string_format(log_error, "cp: cannot stat %w: %s\n",
                                       writer_shell_quoted_name, source,
                                       file_reason(source_directory));
                 else
@@ -36863,7 +37059,11 @@ static fn cp_pair(string_address source, string_address destination)
         bipolar source_pinned = file_open_same(
             source_directory, source_leaf, address_of source_facts,
             source_flags);
-        if (source_pinned < 0)
+        //      A directory that will not open is still made, empty, with the
+        //      mode it had: file_copy_one opens it again and says so.
+        bool blind = kind == MODE_DIRECTORY && source_pinned == -ERROR_ACCESS;
+
+        if (source_pinned < 0 && !blind)
         {
                 //      A file that is there but will not open is GNU's open
                 //      of the source, after the arrow -v writes for it.
@@ -37046,7 +37246,8 @@ static fn cp_pair(string_address source, string_address destination)
         if (!file_copy_one(source_directory, source_leaf, source,
                            destination_directory, destination_leaf,
                            destination, FILE_MAX_DEPTH, true, false, false,
-                           address_of source_facts, source_pinned,
+                           blind ? null : address_of source_facts,
+                           blind ? -1 : source_pinned,
                            destination_slashed ? FILE_COPY_SLASHED : 0))
                 cp_status = 1;
         file_made_now(destination_directory, destination_leaf);
@@ -37119,8 +37320,11 @@ static bool file_backup_seen(string_address program, p8 letter,
                 file_backup_control_named = null;
                 return true;
         }
+        //      GNU stores the word and reads it after every other option
+        //      and check has had its say (xget_version), so a bad word is
+        //      refused where file_backup_taken reads it and not before.
         file_backup_control_named = value;
-        return file_backup_control(program, (string_address) "backup type", value);
+        return true;
 }
 
 static bool file_update_seen(string_address program, p8 letter,
@@ -37375,16 +37579,35 @@ static b32 file_cp()
         taking.first = 0;
         count = file_operand_count;
 
-        if (!file_backup_taken(address_of taking, (string_address) "cp"))
-                return 1;
-
         if (cp_selected.collision == 'n')
                 cp_update_policy = 'n';
+
+        //      A copy is one kind of link or the other, never both.
+        if ((taking.flags & FILE_FLAG('l')) && (taking.flags & FILE_FLAG('s')))
+        {
+                log_error("cp: cannot make both hard and symbolic links\n", 0);
+                return string_report(log_error, 1, "Try 'cp --help' for more information.\n");
+        }
 
         if ((taking.flags & (FILE_FLAG('b') | FILE_FLAG('B') | FILE_FLAG('S'))) &&
             (cp_update_policy == 'n' || cp_update_policy == 'F'))
                 return string_report(log_error, 1,
                                      "cp: --backup is mutually exclusive with -n or --update=none-fail\n");
+
+        {
+                p8 sparse = cp_sparse_policy;
+                p8 reflink = cp_reflink_policy;
+
+                if (reflink == 'A' && sparse != 'a')
+                {
+                        log_error("cp: --reflink can be used only with --sparse=auto\n", 0);
+                        return string_report(log_error, 1,
+                                             "Try 'cp --help' for more information.\n");
+                }
+        }
+
+        if (!file_backup_taken(address_of taking, (string_address) "cp"))
+                return 1;
 
         //      This image has no SELinux. -Z and a bare --context are
         //      no-ops there, and a named context is warned about and
@@ -37399,25 +37622,6 @@ static b32 file_cp()
                 return string_report(log_error, 1,
                                      "cp: cannot preserve security context without an "
                           "SELinux-enabled kernel\n");
-        }
-
-        //      A copy is one kind of link or the other, never both.
-        if ((taking.flags & FILE_FLAG('l')) && (taking.flags & FILE_FLAG('s')))
-        {
-                log_error("cp: cannot make both hard and symbolic links\n", 0);
-                return string_report(log_error, 1, "Try 'cp --help' for more information.\n");
-        }
-
-        {
-                p8 sparse = cp_sparse_policy;
-                p8 reflink = cp_reflink_policy;
-
-                if (reflink == 'A' && sparse != 'a')
-                {
-                        log_error("cp: --reflink can be used only with --sparse=auto\n", 0);
-                        return string_report(log_error, 1,
-                                             "Try 'cp --help' for more information.\n");
-                }
         }
 
         cp_attributes_only = (taking.flags & FILE_FLAG('A')) != 0;
@@ -37457,14 +37661,6 @@ static b32 file_cp()
         string_address into = file_option_value(address_of taking, 't');
 
         file_join_source_path = (flags & FILE_FLAG('e')) != 0;
-        if (file_join_source_path &&
-            ((flags & FILE_FLAG('T')) != 0 ||
-             (!into && count - first == 2 &&
-              !file_is_directory_through(file_operand_at(count - 1)))))
-        {
-                log_error("cp: with --parents, the destination must be a directory\n", 0);
-                return string_report(log_error, 1, "Try 'cp --help' for more information.\n");
-        }
 
         if (!file_source_destination((string_address) "cp", first, count, into,
                                      (flags & FILE_FLAG('T')) != 0, cp_pair))
@@ -38556,8 +38752,53 @@ static p8 mv_collision_option;
 
 
 
+// mv reads its backup word where GNU's xget_version does, after the operand
+// checks and just before the first name is moved, so a bad word is refused
+// after the usage errors that come before it and never after a move.
+static file_taking address_to mv_backup_taking;
+static p8 mv_backup_state;
+// The two names of a plain mv of one thing to one name. GNU renames them
+// before it weighs any option against another, without replacing what is
+// there, so a move that was going to be refused for its options is made all
+// the same when the name is free: the same is done here, at the refusal.
+static string_address mv_plain_source;
+static string_address mv_plain_destination;
+
+static fn mv_refused_after_rename(void)
+{
+        if (mv_plain_source && mv_plain_destination)
+                (void)system_rename_at(AT_FDCWD, mv_plain_source, AT_FDCWD, mv_plain_destination,
+                                       SYSTEM_PATH_RENAME_NOREPLACE);
+}
+
 static fn mv_one(string_address source, string_address destination)
 {
+        if (!mv_backup_state)
+        {
+                positive asked = mv_backup_taking->flags;
+
+                mv_backup_state = 1;
+                if ((asked & (FILE_FLAG('b') | FILE_FLAG('B') | FILE_FLAG('S'))) &&
+                    ((asked & FILE_FLAG('X')) || mv_update_policy == 'n' ||
+                     mv_update_policy == 'F'))
+                {
+                        mv_refused_after_rename();
+                        log_error("mv: cannot combine --backup with --exchange, -n, or --update=none-fail\n", 0);
+                        log_error("Try 'mv --help' for more information.\n", 0);
+                        mv_backup_state = 2;
+                }
+                else if (!file_backup_taken(mv_backup_taking, (string_address) "mv"))
+                {
+                        mv_refused_after_rename();
+                        mv_backup_state = 2;
+                }
+        }
+        if (mv_backup_state == 2)
+        {
+                mv_status = 1;
+                return;
+        }
+
         static p8 source_leaf[FILE_PATH_MAX];
         static p8 destination_leaf[FILE_PATH_MAX];
         static p8 stripped[FILE_PATH_MAX];
@@ -38597,10 +38838,16 @@ static fn mv_one(string_address source, string_address destination)
             destination, destination_leaf);
         if (source_directory < 0 || destination_directory < 0)
         {
-                string_format(log_error, "mv: cannot move %w to %w: %s\n",
-                              writer_shell_quoted_name, source, writer_shell_quoted_name,
-                              destination,
-                              file_reason(source_directory < 0 ? source_directory : destination_directory));
+                //      A source that cannot be reached is the stat that failed;
+                //      only a destination that cannot be is a move that failed.
+                if (source_directory < 0)
+                        string_format(log_error, "mv: cannot stat %w: %s\n",
+                                      writer_shell_quoted_name, source,
+                                      file_reason(source_directory));
+                else
+                        string_format(log_error, "mv: cannot move %w to %w: %s\n",
+                                      writer_shell_quoted_name, source, writer_shell_quoted_name,
+                                      destination, file_reason(destination_directory));
                 mv_status = 1;
                 goto finished;
         }
@@ -39083,17 +39330,18 @@ static b32 file_mv()
         taking.first = 0;
         count = file_operand_count;
 
-        if (!file_backup_taken(address_of taking, (string_address) "mv"))
-                return 1;
+        mv_backup_taking = address_of taking;
+        mv_backup_state = 0;
+        mv_plain_source = mv_plain_destination = null;
+        if (count - taking.first == 2 && !file_option_value(address_of taking, 't') &&
+            !(taking.flags & (FILE_FLAG('X') | FILE_FLAG('T'))))
+        {
+                mv_plain_source = file_operand_at(taking.first);
+                mv_plain_destination = file_operand_at(taking.first + 1);
+        }
 
         if (mv_collision_option == 'n')
                 mv_update_policy = 'n';
-
-        if ((taking.flags & (FILE_FLAG('b') | FILE_FLAG('B') | FILE_FLAG('S'))) &&
-            ((taking.flags & FILE_FLAG('X')) || mv_update_policy == 'n' ||
-             mv_update_policy == 'F'))
-                return string_report(log_error, 1,
-                                     "mv: cannot combine --backup with --exchange, -n, or --update=none-fail\n");
 
         // A tree mv copies across devices is made under the same mask cp
         // reads, so a directory it makes can always be written into.
