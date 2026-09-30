@@ -7184,17 +7184,8 @@ static bool factor_big_prime(const factor_big address_to number)
         }
 
         //      Minus one is the modulus less R.
-        {
-                p64 borrow = 0;
-
-                for (positive at = 0; at < ring.width; at++)
-                {
-                        p64 before = number->limb[at];
-
-                        minus_one[at] = before - ring.one[at] - borrow;
-                        borrow = (before < ring.one[at]) | ((before - ring.one[at]) < borrow);
-                }
-        }
+        memory_copy(minus_one, number->limb, ring.width * sizeof(p64));
+        limbs_subtract(minus_one, ring.width, ring.one, ring.width);
 
         for (positive which = 0; which < sizeof(bases); which++)
         {
