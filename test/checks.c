@@ -9100,8 +9100,8 @@ static fn error_test_transcript(void)
 /*
         The hash block cores as the textbooks write them, with none of the
         assembly's tricks: no renamed registers, no carried terms, no schedule
-        ring, no extension instructions. CHECK_verify checks the cores against
-        these and BENCH_hardware_floor times the cores against them, so the C
+        ring, no extension instructions. CHECK_checksum_crc checks the cores
+        against these and BENCH_hardware_floor times the cores against them, so the C
         floor a hash is beaten by is the C floor it was proved against.
 */
 static p32 hash_reference_rol(p32 x, positive s)
@@ -32368,7 +32368,7 @@ b32 main(void)
         CHECK_declare, and CHECK_declare_reference builds
         that same file against the host's real headers and glibc. The pair is
         what makes the lane mean anything: a case file that compiles here and
-        not there would mean src/standard/declare.c had declared something in
+        not there would mean the prototypes in src/lib.c had declared something in
         a way no real header would recognise, and a case file that passes
         here and fails there is a genuine disagreement about behaviour rather
         than about what to test.
@@ -32432,7 +32432,7 @@ b32 main(void)
         is put through the library those names are specified by, on the
         machine the tests run on, and so that the case file has to compile
         against real headers -- which is the actual assertion about
-        src/standard/declare.c. A prototype there that disagreed with
+        the prototypes in src/lib.c. A prototype there that disagreed with
         <string.h> by a const or by a size_t would make this file fail to
         compile, and no amount of agreement at run time would make up for it.
 
@@ -37439,8 +37439,8 @@ b32 main(void)
 
         _GNU_SOURCE is deliberately absent. glibc chooses between the POSIX
         strerror_r, which returns int, and the GNU one, which returns char *,
-        on that macro, and the POSIX one is the contract src/standard/error.c
-        implements.
+        on that macro, and the POSIX one is the contract the error section of
+        src/lib.util.c implements.
 */
 
 #define _POSIX_C_SOURCE 200809L
@@ -37619,7 +37619,7 @@ b32 main(void)
         distribution ships. It exists so that every expectation in
         CHECK_strings is checked against the implementation those
         routines are specified by, on the machine the tests run on -- an
-        expectation that only src/standard/text.c satisfies is an expectation
+        expectation that only this library's string routines satisfy is an expectation
         that agrees with a bug.
 
         Build it beside the freestanding one and compare the verdicts:
@@ -40951,7 +40951,7 @@ int main(int words, char **word)
             2147483648 is that number here and -2147483648 in glibc, which
             holds it in an int. %G and %g both follow it over.
           - %Y, %C and %G are unpadded, which is what glibc 2.44 does and is
-            not what musl does; see the note in src/standard/clock.c.
+            not what musl does; see the note in the clock section of src/lib.util.c.
           - localtime follows POSIX TZ, then /root/timezone, then the footer
             of /etc/localtime, then UTC. glibc reads the whole of that file,
             history included, and so disagrees about dates before the zone's
@@ -47644,9 +47644,9 @@ b32 main(void)
 /*
         <signal.h>, and the half of setjmp that was missing, on three machines.
 
-        src/standard/signal.c is included directly when the umbrella has not
-        already pulled it in, so this test builds and runs before the merge
-        that adds that line to src/lib.util.c and stays correct after
+        The signal section of src/lib.util.c was included directly when the
+        umbrella had not already pulled it in, so this test builds and runs
+        before the merge that adds that line to src/lib.util.c and stays correct after
         it: the file guards itself, and the guard is what this asks about.
 
         Every case is in the table CHECK_signal shares with
@@ -47836,7 +47836,7 @@ b32 main(void)
 
                 Everywhere else a standard spelling is a symbol with no
                 prototype -- nm shows memcpy, and &memcpy does not compile.
-                src/standard/signal.c declares its sixteen and lets the .set
+                The signal section declares its sixteen and lets the .set
                 supply the bodies, so the lines below are ordinary C calling
                 sigemptyset and sigprocmask by those names.
 
@@ -47893,7 +47893,7 @@ b32 main(void)
         distribution ships. It exists so that every expectation in
         CHECK_signal is checked against the implementation those
         routines are specified by, on the machine the tests run on -- an
-        expectation that only src/standard/signal.c satisfies is an
+        expectation that only this library's signal section satisfies is an
         expectation that agrees with a bug.
 
         Build it beside the freestanding one and compare the verdicts:
@@ -47980,7 +47980,7 @@ int main(void)
                 glibc's sigfillset leaves thirty two and thirty three out.
                 They are SIGCANCEL and SIGSETXID, NPTL's own, and a program
                 that blocked them would break the runtime under it.
-                src/standard/signal.c has no threads to protect and fills all
+                The signal section has no threads to protect and fills all
                 sixty four.
         */
         {
@@ -48008,10 +48008,10 @@ int main(void)
                 failure: arm64 defines SA_RESTORER and would honour one, but
                 glibc does not supply one there and lets the kernel point x30
                 at the vDSO trampoline instead -- which is the same choice
-                src/standard/signal.c makes. riscv64 has no such field at all.
+                the signal section makes. riscv64 has no such field at all.
 
                 So glibc answers 0x14000000 on x86_64 and 0x10000000 on the
-                other two. src/standard/signal.c clears the bit on all three,
+                other two. The signal section clears the bit on all three,
                 so that what a caller reads back is what a caller asked for
                 and is the same number on every machine.
         */
@@ -83463,7 +83463,7 @@ b32 main(void)
 #ifdef BENCH_cksum_crc
 /*
         cksum's CRC over its own read blocks, tier for tier: the C that
-        src/sh/cksum.c carried until hash_crc32_msb -- slice tables built at
+        src/sh/checksum.c carried until hash_crc32_msb -- slice tables built at
         run time, four table streams joined by GF(2) shifts, SSE and
         AVX-512 folds 64 bytes a turn -- copied here unchanged under a
         former_ prefix, against the assembly with its feature bytes written
