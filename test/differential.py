@@ -10261,7 +10261,6 @@ def files_hostname_set(farm):
     import random
     import shutil
     import socket
-    import struct
     import tempfile
     candidate = Path(farm) / "hostname"
     unshare = shutil.which("unshare")
@@ -43908,6 +43907,7 @@ def harness_wget_mutation(argv):
     import socket
     import tempfile
     import threading
+    import time
     parser = argparse.ArgumentParser(prog="differential.py --harness wget_mutation")
     parser.add_argument("--cc", default=os.environ.get("CC", "gcc"))
     parser.add_argument("--shell", help="a built shell to use instead of building one")
@@ -43997,7 +43997,8 @@ def harness_wget_mutation(argv):
             "http://127.0.0.1:%d/x" % port]
         try:
             code = subprocess.run(command, capture_output=True, timeout=8,
-                                  cwd=str(farm), env={"PATH": "/usr/bin:/bin"}).returncode
+                                  cwd=str(farm), env={"PATH": "/usr/bin:/bin"},
+                                  preexec_fn=_limits).returncode
         except subprocess.TimeoutExpired:
             code = "timeout"
         finished.set()
@@ -44005,11 +44006,32 @@ def harness_wget_mutation(argv):
         listener.close()
         return code
 
-    def procedure(farm, chunks, reset=False):
-        """One real wget transaction under an exact server write schedule."""
+    reference = {}
+
+    def outstanding(peer):
+        """Bytes this side has sent that the peer's kernel has not yet acked."""
+        import array
+        import fcntl
+        import termios
+        left = array.array("i", [0])
+        fcntl.ioctl(peer.fileno(), termios.TIOCOUTQ, left, True)
+        return left[0]
+
+    def procedure(farm, chunks, reset=False, tool="ours"):
+        """One transaction under an exact server write schedule, to the
+        built shell's wget (tool "ours"), to GNU wget ("wget") or to curl:
+        (exit status, standard output), or None when it ran out of time.
+
+        Each write goes out as its own segment: Nagle is off and the next
+        write waits until the kernel has this one acked and then a moment for
+        the client to read it. Without that, a loopback peer coalesces a
+        byte-at-a-time schedule into two reads (measured: 219 one-byte
+        writes arrived as 2 reads). The kernel still decides what a read
+        returns, so this is a schedule of writes, not a promise about reads."""
         listener = socket.socket()
         listener.bind(("127.0.0.1", 0))
         listener.listen(1)
+        listener.settimeout(6)
         port = listener.getsockname()[1]
 
         def serve():
@@ -44017,19 +44039,28 @@ def harness_wget_mutation(argv):
             try:
                 peer, _ = listener.accept()
                 peer.settimeout(2)
+                peer.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 request = b""
                 while b"\r\n\r\n" not in request and len(request) < 8192:
                     got = peer.recv(8192 - len(request))
                     if not got:
                         return
                     request += got
+                gap = 0.0003 if len(chunks) > 8 else 0.002
                 for chunk in chunks:
                     peer.sendall(chunk)
+                    while outstanding(peer):
+                        time.sleep(0.00002)
+                    time.sleep(gap)
                 if reset:
                     peer.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
                                     struct.pack("ii", 1, 0))
                 else:
                     peer.shutdown(socket.SHUT_WR)
+                    try:
+                        peer.recv(1)
+                    except OSError:
+                        pass
             except OSError:
                 pass
             finally:
@@ -44039,15 +44070,22 @@ def harness_wget_mutation(argv):
 
         server = threading.Thread(target=serve, daemon=True)
         server.start()
+        url = "http://127.0.0.1:%d/procedure" % port
+        command = {
+            "ours": [str(farm / "wget"), "-q", "-O", "-", url],
+            "wget": [reference["wget"], "-q", "-O", "-", "-t", "1", "-T", "5",
+                     "--no-config", url] if "wget" in reference else None,
+            "curl": [reference["curl"], "-s", "--http1.1", "--max-time", "6",
+                     url] if "curl" in reference else None,
+        }[tool]
         try:
             ran = subprocess.run(
-                [str(farm / "wget"), "-q", "-O", "-",
-                 "http://127.0.0.1:%d/procedure" % port],
-                capture_output=True, timeout=8, cwd=str(farm),
-                env={"PATH": "/usr/bin:/bin"})
+                command, capture_output=True, timeout=8, cwd=str(farm),
+                env={"PATH": "/usr/bin:/bin", "HOME": str(farm)},
+                preexec_fn=_limits)
         except subprocess.TimeoutExpired:
             ran = None
-        server.join(timeout=3)
+        server.join(timeout=8)
         return None if ran is None else (ran.returncode, ran.stdout)
 
     checks = Checks()
@@ -44063,6 +44101,23 @@ def harness_wget_mutation(argv):
         for tool in ("wget", "fetch"):
             (work / tool).symlink_to(shell)
 
+        #       The oracles: GNU wget and curl, when the machine has them
+        #       (the version is printed, so a run says which it read). A
+        #       stand-in under the same name is not one: only a program that
+        #       says what it is counts.
+        for name, needle in (("wget", "GNU Wget"), ("curl", "curl ")):
+            found = shutil.which(name)
+            if not found:
+                continue
+            said = subprocess.run([found, "--version"], capture_output=True,
+                                  text=True, timeout=10, preexec_fn=_limits)
+            if said.stdout.startswith(needle):
+                reference[name] = found
+                print("wget mutation: oracle %s" % said.stdout.splitlines()[0])
+        for name in ("wget", "curl"):
+            if name not in reference:
+                print("wget mutation: %s oracle NOT RUN -- no GNU wget/curl here" % name)
+
         payload = b"procedural body"
         length = (b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n"
                   b"Connection: close\r\n\r\n" % len(payload)) + payload
@@ -44071,8 +44126,11 @@ def harness_wget_mutation(argv):
                    b"0\r\nWitness: yes\r\n\r\n")
         close_body = (b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n" +
                       payload)
-        informational = (b"HTTP/1.1 103 Early Hints\r\nLink: </style.css>\r\n\r\n" * 32 +
-                         length)
+        hint = b"HTTP/1.1 103 Early Hints\r\nLink: </style.css>\r\n\r\n"
+        informational = hint * 32 + length
+        empty = (0, b"")
+        # (name, writes, RST after them, what the built shell's wget must
+        # answer -- None when only "a failure" is asked)
         procedures = [
             ("a length response delivered one byte at a time",
              [length[at:at + 1] for at in range(len(length))], False, (0, payload)),
@@ -44092,32 +44150,85 @@ def harness_wget_mutation(argv):
             ("an informational-response storm completes within the transaction bound",
              [informational[at:at + 1] for at in range(len(informational))],
              False, (0, payload)),
-            ("204 with Content-Length is accepted as wget accepts it",
-             [b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"], False, (0, b"")),
-            ("204 with Transfer-Encoding is accepted as wget accepts it",
+            #   204 and 205 as wget and curl take them: the default accepts a
+            #   204 whatever its head declares (the body is never read, and
+            #   the connection closes after the one response) and reads a
+            #   205's declared content like any other body.
+            ("204 with Content-Length 0",
+             [b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"], False, empty),
+            ("204 with Content-Length and a body",
+             [b"HTTP/1.1 204 No Content\r\nContent-Length: 5\r\n\r\nhello"], False,
+             empty),
+            ("204 with Transfer-Encoding",
              [b"HTTP/1.1 204 No Content\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n"],
-             False, (0, b"")),
-            ("205 with a zero Content-Length is accepted",
-             [b"HTTP/1.1 205 Reset Content\r\nContent-Length: 0\r\n\r\n"],
-             False, (0, b"")),
-            ("205 with a nonzero Content-Length is read as wget reads it",
-             [b"HTTP/1.1 205 Reset Content\r\nContent-Length: 5\r\n\r\nhello"],
-             False, (0, b"hello")),
-            ("205 with a zero chunk is accepted",
+             False, empty),
+            ("204 chunked with trailers",
+             [b"HTTP/1.1 204 No Content\r\nTransfer-Encoding: chunked\r\n\r\n"
+              b"0\r\nX-T: y\r\n\r\n"], False, empty),
+            ("204 followed by a second response in the same write",
+             [b"HTTP/1.1 204 No Content\r\n\r\nHTTP/1.1 200 OK\r\n"
+              b"Content-Length: 3\r\n\r\nabc"], False, empty),
+            ("204 followed by a second response one byte at a time",
+             [(b"HTTP/1.1 204 No Content\r\n\r\nHTTP/1.1 200 OK\r\n"
+               b"Content-Length: 3\r\n\r\nabc")[at:at + 1] for at in range(70)],
+             False, empty),
+            ("a 1xx storm before a 204",
+             [hint * 40 + b"HTTP/1.1 204 No Content\r\n\r\n"], False, empty),
+            ("a 1xx storm before a 204 with Content-Length 0, byte by byte",
+             [(hint * 12 + b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")[at:at + 1]
+              for at in range(len(hint) * 12 + 47)], False, empty),
+            ("a 1xx storm before a 205",
+             [hint * 40 + b"HTTP/1.1 205 Reset Content\r\nContent-Length: 0\r\n\r\n"],
+             False, empty),
+            ("205 with a zero Content-Length",
+             [b"HTTP/1.1 205 Reset Content\r\nContent-Length: 0\r\n\r\n"], False, empty),
+            ("205 with a nonzero Content-Length",
+             [b"HTTP/1.1 205 Reset Content\r\nContent-Length: 5\r\n\r\nhello"], False,
+             (0, b"hello")),
+            ("205 with a zero chunk",
              [b"HTTP/1.1 205 Reset Content\r\nTransfer-Encoding: chunked\r\n\r\n"
-              b"0\r\nWitness: yes\r\n\r\n"], False, (0, b"")),
-            ("205 with a nonzero chunk is read as wget reads it",
+              b"0\r\nWitness: yes\r\n\r\n"], False, empty),
+            ("205 with a nonzero chunk",
              [b"HTTP/1.1 205 Reset Content\r\nTransfer-Encoding: chunked\r\n\r\n"
               b"1\r\nx\r\n0\r\n\r\n"], False, (0, b"x")),
-            ("close-delimited 205 with no content is accepted",
-             [b"HTTP/1.1 205 Reset Content\r\nConnection: close\r\n\r\n"],
-             False, (0, b"")),
-            ("close-delimited 205 content is read as wget reads it",
-             [b"HTTP/1.1 205 Reset Content\r\nConnection: close\r\n\r\nx"],
-             False, (0, b"x")),
+            ("close-delimited 205 with no content",
+             [b"HTTP/1.1 205 Reset Content\r\nConnection: close\r\n\r\n"], False, empty),
+            ("close-delimited 205 with content",
+             [b"HTTP/1.1 205 Reset Content\r\nConnection: close\r\n\r\nx"], False,
+             (0, b"x")),
+            ("HTTP/1.0 205 ended by FIN",
+             [b"HTTP/1.0 205 Reset Content\r\n\r\n"], False, empty),
+            ("HTTP/1.0 205 with content ended by FIN",
+             [b"HTTP/1.0 205 Reset Content\r\n\r\nx"], False, (0, b"x")),
+            ("RST right after a complete 200",
+             [length], True, (0, payload)),
+            ("RST right after a complete 204",
+             [b"HTTP/1.1 204 No Content\r\n\r\n"], True, empty),
             ("304 metadata may carry the selected representation's length",
              [b"HTTP/1.1 304 Not Modified\r\nContent-Length: 99\r\n\r\n"],
              False, (8, b"")),
+            ("304 with a body it does not read",
+             [b"HTTP/1.1 304 Not Modified\r\nContent-Length: 5\r\n\r\nhello"],
+             False, (8, b"")),
+            #   Head shapes end to end (framing's matrix asks the same of the
+            #   parser alone): a request-smuggling shape is refused by
+            #   wget/curl or by this client, never read two ways.
+            ("a duplicated equal Content-Length", [length.replace(
+                b"Content-Length: 15\r\n", b"Content-Length: 15\r\nContent-Length: 15\r\n")],
+             False, None),
+            ("conflicting Content-Length values", [length.replace(
+                b"Content-Length: 15\r\n", b"Content-Length: 15\r\nContent-Length: 3\r\n")],
+             False, None),
+            ("an obs-fold continuation line in the head", [length.replace(
+                b"Connection: close\r\n", b"X-Fold: a\r\n b\r\nConnection: close\r\n")],
+             False, None),
+            ("a control byte in the reason phrase",
+             [length.replace(b"200 OK", b"200 O\x01K")], False, None),
+            ("a bare CR in the reason phrase",
+             [length.replace(b"200 OK", b"200 O\rK")], False, None),
+            ("a bare LF ends the status line, a second Content-Length follows",
+             [length.replace(b"200 OK\r\n", b"200 OK\nContent-Length: 999\n")], False,
+             None),
         ]
         # Two writes on either side of every grammar boundary keep coverage
         # even when a future server helper stops doing the bytewise schedules.
@@ -44135,11 +44246,67 @@ def harness_wget_mutation(argv):
                    length.find(b"\r\n\r\n") + 4, len(length) - 1):
             procedures.append(("FIN cuts a response at byte %d" % at,
                                [length[:at]], False, None))
+
+        #       Where the built shell's wget refuses what GNU wget accepts.
+        #       These refusals predate the harness and stay listed, not
+        #       settled: wget and curl both accept an identical duplicate
+        #       Content-Length and a control byte in the reason phrase, so
+        #       whether the default should is the user's decision. Anything
+        #       else must answer as GNU wget does, and never accept what curl
+        #       refuses.
+        #       A FIN inside the status line or a header is not a response:
+        #       GNU wget 1.25.0 exits 0 with nothing written for some of
+        #       those cut points, which lets whoever can cut a connection turn
+        #       a download into an empty success. This client fails them all.
+        STRICTER_THAN_WGET = {
+            "conflicting Content-Length values":
+                "duplicate framing fields are refused before a length is chosen",
+            "a duplicated equal Content-Length":
+                "duplicate framing fields are refused before a length is chosen",
+            "an obs-fold continuation line in the head":
+                "obsolete line folding is refused so a proxy cannot split views",
+            "a control byte in the reason phrase":
+                "a control byte in the status line would reach logs and terminals",
+            "a bare CR in the reason phrase":
+                "a bare CR mid-status-line is not a field separator",
+            "a bare LF ends the status line, a second Content-Length follows":
+                "a header line with no colon is not a field",
+        }
+
+        def worked(answer):
+            return answer is not None and answer[0] == 0
+
+        def verdict(answer):
+            """What two programs must agree on: whether it worked and what
+            it printed. Exit numbers are each program's own."""
+            return (worked(answer), answer[1] if worked(answer) else b"") \
+                if answer is not None else None
+
+        started = time.monotonic()
         for name, chunks, reset, expected in procedures:
             answer = procedure(work, chunks, reset)
             checks(answer == expected if expected is not None
                    else answer is not None and answer[0] != 0,
                    "%s: got %r" % (name, answer))
+            if "wget" in reference:
+                wanted = procedure(work, chunks, reset, "wget")
+                if name in STRICTER_THAN_WGET or name.startswith("FIN cuts"):
+                    checks(answer is not None and wanted is not None and
+                           (verdict(answer) == verdict(wanted) or
+                            not worked(answer)),
+                           "%s: only stricter than GNU wget is allowed: ours %r, wget %r" % (
+                               name, answer, wanted))
+                else:
+                    checks(answer is not None and verdict(answer) == verdict(wanted),
+                           "%s: ours %r, GNU wget %r" % (name, answer, wanted))
+            if "curl" in reference:
+                seen = procedure(work, chunks, reset, "curl")
+                checks(not worked(answer) or
+                       (worked(seen) and seen[1] == answer[1]),
+                       "%s: ours accepts what curl does not read the same: ours %r, curl %r" % (
+                           name, answer, seen))
+        print("wget mutation: %d procedures in %.1f s" % (
+            len(procedures), time.monotonic() - started))
         exits = collections.Counter()
         deaths = []
         for number in range(args.runs):
