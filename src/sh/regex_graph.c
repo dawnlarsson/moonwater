@@ -77,6 +77,11 @@ typedef struct
 {
         p8 first_skip[256], last_bytes[256], literal[RX_LITERAL_MAX];
         positive literal_length, fixed_length, fixed_work;
+        // regex_test's ledger of this program: what its questions cost the
+        // graph, and which compile this is.
+        positive asks, work, bytes;
+        p32 serial;
+        p8 verdict;
         positive2 literal_anchors, fixed_anchors;
         p8 fixed_literal[RX_NODE_MAX];
 } rx_hints;
@@ -1272,6 +1277,8 @@ static bool rx_fixed(const rx_node *nodes, p16 first, rx_hints *hints, positive 
         return true;
 }
 
+static p32 rx_compiles;
+
 // Why the last compile refused its pattern, when it did.
 static p8 regex_failure;
 
@@ -1295,6 +1302,7 @@ static bool rx_compile(rx_pool *pool, regex_program *out, string_address pattern
         memory_fill(hints, 0, __builtin_offsetof(rx_hints, fixed_literal));
         c.program = (regex_program){.nodes = pool->nodes, .sets = (const p8 (*)[256])pool->sets,
                                 .hints = hints, .policy = policy, .flags = icase ? RX_IGNORE_CASE : 0};
+        hints->serial = ++rx_compiles;
         regex_warning_count = 0;
         rx_fragment root = rx_alternation(address_of c);
         c.program.first = root.first;
@@ -1346,6 +1354,53 @@ static bool rx_compile(rx_pool *pool, regex_program *out, string_address pattern
         *out = c.program;
         pool->used = c.cursor;
         return true;
+}
+
+/*
+        rx_compile for a caller that compiles above a mark and rewinds to it
+        after every use -- [[ =~ ]] in a loop is the same pattern each time --
+        and so builds the same program over again (5.8 thousand instructions
+        a run). What it built is still standing above the mark until the next
+        compile of any kind, and a compile that has not happened since is a
+        pool nobody has written to: the same pattern under the same terms
+        gets the same program back without a byte of the pool touched.
+*/
+static struct
+{
+        p8 key[256];
+        positive length;
+        p8 extended, icase, escapes, policy, valid;
+        p32 compiles;
+        rx_pool *pool;
+        regex_program program;
+} rx_again;
+
+static __attribute__((unused)) bool rx_compile_again(rx_pool *pool, regex_program *out, string_address pattern,
+                             bool extended, bool icase, bool escapes, p8 policy)
+{
+        positive length = string_length(pattern);
+        if (rx_again.valid && rx_again.compiles == rx_compiles && rx_again.pool == pool &&
+            rx_again.length == length && rx_again.extended == extended &&
+            rx_again.icase == icase && rx_again.escapes == escapes &&
+            rx_again.policy == policy && !memory_compare(rx_again.key, pattern, length))
+        {
+                *out = rx_again.program;
+                regex_failure = 0;
+                return true;
+        }
+        bool made = rx_compile(pool, out, pattern, extended, icase, escapes, policy);
+        rx_again.valid = made && length < sizeof(rx_again.key);
+        if (rx_again.valid)
+        {
+                memory_copy_apart(rx_again.key, pattern, length);
+                rx_again.length = length;
+                rx_again.extended = extended, rx_again.icase = icase;
+                rx_again.escapes = escapes, rx_again.policy = policy;
+                rx_again.compiles = rx_compiles;
+                rx_again.pool = pool;
+                rx_again.program = *out;
+        }
+        return made;
 }
 
 /* Iterative graph execution. Continuations stay immutable while a choice can
@@ -2627,6 +2682,70 @@ static fn regex_keep(regex_program *into)
 {
         *into = regex_current;
         regex_retained = regex_pool.used;
+}
+
+/*
+        Whether a program matches anywhere in text[0, length), for a caller
+        that asks the same program of many subjects and holds text[length] as
+        a NUL. The graph answers, and is watched: a program whose questions
+        cost it more than the machine's reading of every byte would (an awk
+        /re/ over a log was 1.7 s in the graph and 0.25 s in the machine) is
+        given the machine, and one the required-string prefilter answers for
+        nothing stays with the graph. The one machine belongs to one program
+        at a time and is handed over a few times at most. A subject holding
+        a NUL, a program with line anchors and a machine that would not fit
+        are the graph's.
+*/
+enum { RX_ASK_WATCH, RX_ASK_MACHINE, RX_ASK_GRAPH };
+#define RX_ASKS_FIRST 64
+#define RX_ASKS_LAST 1024
+#define RX_MACHINE_HANDOVERS 8
+
+static const rx_hints *regex_machine_owner;
+static p32 regex_machine_serial;
+static positive regex_machine_handovers;
+
+static bool regex_find(p8 mode, string_address text, positive length, positive from);
+
+static bool regex_test(const regex_program *program, string_address text, positive length)
+{
+        rx_hints *hints = (rx_hints *)program->hints;
+        if (hints->verdict == RX_ASK_MACHINE &&
+            (regex_machine_owner != hints || regex_machine_serial != hints->serial))
+        {
+                if (regex_machine_handovers == RX_MACHINE_HANDOVERS ||
+                    !rx_dfa_compile(&regex_dfa, program, REGEX_BOUNDARY_NONE, '\0'))
+                        hints->verdict = RX_ASK_GRAPH;
+                else
+                {
+                        regex_machine_handovers++;
+                        rx_dfa_attach(&regex_dfa_cache, &regex_dfa);
+                        regex_machine_owner = hints;
+                        regex_machine_serial = hints->serial;
+                }
+        }
+        if (hints->verdict == RX_ASK_MACHINE && !regex_dfa_cache.failed &&
+            !memory_first_of(text, 0, length))
+        {
+                string_address hit = rx_dfa_scan(&regex_dfa_cache, text, text + length + 1);
+                if (hit || !regex_dfa_cache.failed)
+                        return hit != null;
+        }
+        regex_current = *program;
+        bool answer = regex_find(REGEX_FIRST, text, length, 0);
+        if (hints->verdict == RX_ASK_WATCH)
+        {
+                hints->asks++;
+                hints->work += regex_match.work_used;
+                hints->bytes += length;
+                if (hints->asks == RX_ASKS_FIRST || hints->asks == RX_ASKS_LAST)
+                        hints->verdict = hints->work * 2 > hints->bytes &&
+                                         !(program->policy & REGEX_LINE_ANCHORS)
+                                             ? RX_ASK_MACHINE
+                                         : hints->asks == RX_ASKS_LAST ? RX_ASK_GRAPH
+                                                                       : RX_ASK_WATCH;
+        }
+        return answer;
 }
 
 static bool regex_find(p8 mode, string_address text, positive length, positive from)

@@ -5080,8 +5080,7 @@ static regex_program address_to awk_program_of(awk_node address_to node)
 
 static bool awk_matches(awk_node address_to pattern, awk_text address_to subject)
 {
-        regex_current = *awk_program_of(pattern);
-        return regex_find(REGEX_FIRST, subject->text, subject->length, 0);
+        return regex_test(awk_program_of(pattern), subject->text, subject->length);
 }
 
 static fn awk_call(awk_node address_to node, awk_value address_to out);
