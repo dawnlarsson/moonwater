@@ -26185,6 +26185,12 @@ static bool grep_binary_holes(const grep_binary address_to binary,
 */
 enum
 {
+        // Spans shorter than this are walked by one lane.
+        GREP_LANES_MIN = 16384,
+        // A hunt's strings landing closer than this many bytes on average,
+        // after this many of them, are not filtering.
+        GREP_HUNT_DENSE = 16,
+        GREP_HUNT_SPACING = 256,
         GREP_GRAPH_YIELD = 64,
         GREP_GRAPH_YIELD_BYTE = 1,
         GREP_MACHINE_PROBE = 64
@@ -26239,6 +26245,8 @@ typedef struct
         // later line asks the machine first.
         bool machine_first;
         p8 machine_lines;
+        // A hunt found records too close together to be worth hunting.
+        bool dense;
         bool done;
         // A line selected to be printed and kept from the output.
         bool unprintable;
@@ -26364,7 +26372,7 @@ static bool grep_line_matches(const grep_plan address_to plan,
         state->match->work_yield =
             yielding ? GREP_GRAPH_YIELD + length * GREP_GRAPH_YIELD_BYTE : 0;
 
-        state->match->literal_known = plan->literal != null;
+        state->match->literal_known = plan->literal != null && !state->dense;
 
         p8 result = rx_find(state->match, plan->program, REGEX_FIRST, false,
                             line, length, 0);
@@ -26746,6 +26754,117 @@ static fn grep_record_stream(const grep_plan address_to plan,
                 grep_line_selected(plan, state, null, 0);
 }
 
+/*
+        The machine over the rest of a span, from the first record of `at`:
+        it stops at a record that matches, and the records it passed are the
+        ones -v selects. Where it will not fit, what is left goes a line at a
+        time as before. Returns where the span has been dealt with to.
+*/
+static string_address grep_span_machine(const grep_plan address_to plan,
+                                        grep_state address_to state,
+                                        string_address at, string_address past)
+{
+        bool dense = false;
+
+        while (plan->dfa && !plan->dfa->failed && at < past && !state->done)
+        {
+                /*
+                        Four stretches of the span at once when it is long
+                        enough to cut. A count is the whole span's; a print
+                        takes the records of a block in order, and a block
+                        with more of them than a table holds is the serial
+                        walk's, and so is every block after it.
+                */
+                if (past - at >= GREP_LANES_MIN && !dense &&
+                    plan->mode != GREP_SPAN_FIRST)
+                {
+                        rx_dfa_hits hits;
+                        string_address block;
+                        bool counted = plan->mode == GREP_SPAN_COUNT &&
+                                       plan->limit == TEXT_UNSET;
+                        positive got = rx_dfa_lanes(plan->dfa, at, past,
+                                                    counted ? null : &hits, &block);
+
+                        if (got == positive_max)
+                        {
+                                if (plan->dfa->failed)
+                                        break;
+
+                                dense = true;
+                                continue;
+                        }
+
+                        if (counted)
+                        {
+                                state->matches += plan->invert
+                                    ? memory_count(at, (positive)(past - at), text_delimiter) - got
+                                    : got;
+                                at = past;
+                                break;
+                        }
+
+                        string_address cursor = at;
+
+                        for (positive k = 0; k < 4; k++)
+                                for (positive j = 0; j < hits.count[k] && !state->done; j++)
+                                {
+                                        string_address stop = at + hits.at[k][j];
+                                        string_address before = (string_address)memory_last_of(
+                                            cursor, text_delimiter, (positive)(stop - cursor));
+                                        string_address line = before ? before + 1 : cursor;
+
+                                        if (plan->invert)
+                                                grep_lines_selected(plan, state, cursor,
+                                                                    (positive)(line - cursor));
+                                        else
+                                                grep_line_selected(plan, state, line,
+                                                                   (positive)(stop - line));
+
+                                        cursor = stop + 1;
+                                }
+
+                        if (plan->invert)
+                                grep_lines_selected(plan, state, cursor,
+                                                    (positive)(block - cursor));
+
+                        at = block;
+                        continue;
+                }
+
+                string_address hit = rx_dfa_scan(plan->dfa, at, past);
+
+                if (!hit && plan->dfa->failed)
+                        break;
+
+                string_address line = past;
+
+                if (hit)
+                {
+                        string_address before = (string_address)memory_last_of(
+                            at, text_delimiter, (positive)(hit - at));
+
+                        line = before ? before + 1 : at;
+                }
+
+                if (plan->invert)
+                        grep_lines_selected(plan, state, at, (positive)(line - at));
+
+                if (!hit)
+                {
+                        at = past;
+                        break;
+                }
+
+                if (!plan->invert && !state->done)
+                        grep_line_selected(plan, state, line, (positive)(hit - line));
+
+                at = hit + 1;
+        }
+
+
+        return at;
+}
+
 static fn grep_span(const grep_plan address_to plan, grep_state address_to state,
                     string_address span, positive size)
 {
@@ -26789,49 +26908,40 @@ static fn grep_span(const grep_plan address_to plan, grep_state address_to state
         }
 
         /*
-                With no string to hunt, the machine reads the span itself and
-                stops only at a record that matches; the records it passed are
-                the ones -v selects. If it will not fit, the rest of the span
-                goes a line at a time as before.
+                With no string to hunt, or a hunt that has found a record in
+                every few, the machine reads the span itself.
         */
-        while (!literal && !plan->set && plan->dfa && !plan->dfa->failed &&
-               at < past && !state->done)
-        {
-                string_address hit = rx_dfa_scan(plan->dfa, at, past);
+        bool hunting = (literal || plan->set) && !state->dense;
+        positive candidates = 0;
 
-                if (!hit && plan->dfa->failed)
-                        break;
-
-                string_address line = past;
-
-                if (hit)
-                {
-                        string_address before = (string_address)memory_last_of(
-                            at, text_delimiter, (positive)(hit - at));
-
-                        line = before ? before + 1 : at;
-                }
-
-                if (plan->invert)
-                        grep_lines_selected(plan, state, at, (positive)(line - at));
-
-                if (!hit)
-                {
-                        at = past;
-                        break;
-                }
-
-                if (!plan->invert && !state->done)
-                        grep_line_selected(plan, state, line, (positive)(hit - line));
-
-                at = hit + 1;
-        }
+        if (!hunting)
+                at = grep_span_machine(plan, state, at, past);
 
         while (at < past && !state->done)
         {
                 string_address line = at;
 
-                if (literal || plan->set)
+                /*
+                        A string that lands in a record every few hundred
+                        bytes leaves the graph or the machine a record at a
+                        time, each with its own start-up, where the machine
+                        over the span reads every byte once and four at a
+                        time. A hunt that is not the whole answer, is finding
+                        that many, and has found the graph dear on this file
+                        (machine_first) gives the rest of it to the machine.
+                */
+                if (hunting && ++candidates > GREP_HUNT_DENSE && state->machine_first &&
+                    !plan->literal_proves && !plan->set_proves && plan->dfa &&
+                    !plan->dfa->failed &&
+                    (positive)(at - span) < candidates * GREP_HUNT_SPACING)
+                {
+                        state->dense = true;
+                        hunting = false;
+                        at = grep_span_machine(plan, state, at, past);
+                        continue;
+                }
+
+                if (hunting)
                 {
                         string_address found = literal
                             ? text_literal_find(at, (positive)(past - at), 0,

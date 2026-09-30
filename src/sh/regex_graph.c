@@ -1856,7 +1856,7 @@ static p8 rx_find(rx_match *match, const regex_program *program, p8 mode, bool c
 
 enum { RX_NFA_SET = 1, RX_NFA_SPLIT, RX_NFA_BEGIN, RX_NFA_END, RX_NFA_EDGE, RX_NFA_MATCH };
 enum { RX_DFA_UNKNOWN = -1, RX_DFA_HIT = -2, RX_DFA_DEAD = -3,
-       RX_DFA_END_HIT = -4, RX_DFA_END_MISS = -5, RX_DFA_FULL = -6 };
+       RX_DFA_END_HIT = -4, RX_DFA_FULL = -6 };
 enum { RX_DFA_PREVIOUS_NAME = 1, RX_DFA_BEGINNING = 2 };
 enum { RX_DFA_RESTART_ALWAYS, RX_DFA_RESTART_AFTER_OTHER, RX_DFA_RESTART_NEVER };
 
@@ -2232,8 +2232,10 @@ static b32 rx_dfa_step(rx_dfa_cache *cache, b32 row, p8 class)
         b32 next;
         if (class == dfa->delimiter_class)
         {
+                // A record that ends unmatched begins the next: the cell is the
+                // start's own row, and the walk never stops for one.
                 next = rx_dfa_close(cache, state, before, false, true, &consuming)
-                           ? RX_DFA_END_HIT : RX_DFA_END_MISS;
+                           ? RX_DFA_END_HIT : cache->start * (b32)dfa->class_count;
                 cache->trans[cell] = next;
                 return next;
         }
@@ -2321,12 +2323,6 @@ static string_address rx_dfa_scan(rx_dfa_cache *cache, string_address at,
                 }
                 if (next == RX_DFA_END_HIT)
                         return at;
-                if (next == RX_DFA_END_MISS)
-                {
-                        at++;
-                        row = start;
-                        continue;
-                }
                 string_address stop = (string_address)memory_first_of(
                     at, dfa->delimiter, (positive)(past - at));
                 if (!stop)
@@ -2336,6 +2332,230 @@ static string_address rx_dfa_scan(rx_dfa_cache *cache, string_address at,
                 at = stop + 1;
                 row = start;
         }
+}
+
+/*
+        The same walk over four stretches of records at once. One byte of the
+        walk waits for the load that named its row, so a walk alone is
+        latency and not work (six and a half cycles a byte); four walks that
+        share nothing keep four loads in flight and cost about a quarter each.
+
+        The span is cut into four at record ends, each stretch walked from
+        its first byte with its own row, and the walks are stepped together
+        for as long as all four have bytes and none needs deciding. What
+        needs deciding is what the serial walk decides -- a cell not yet
+        made, a record that matched, a record the machine has finished with
+        -- and a stretch that has to is dealt with alone before the four go
+        on. A cell that made a reset empties every row, so every stretch
+        begins again at its own record's first byte. The stretches are in
+        order, so what they find is in order too.
+
+        Counting takes any length. With `out` the delimiters of the records
+        that matched are kept, per stretch, and the span is cut short to
+        RX_DFA_LANE_BLOCK bytes a stretch, `*block` telling where. Positive
+        maximum is the answer when the machine gave up (cache->failed) or a
+        stretch matched more records than a table holds; the serial walk
+        starts again where the caller was.
+*/
+#define RX_DFA_LANES 4
+#define RX_DFA_LANE_BLOCK 16384
+#define RX_DFA_LANE_HITS 512
+
+typedef struct
+{
+        positive count[RX_DFA_LANES];
+        // Offsets from the start of the block.
+        p32 at[RX_DFA_LANES][RX_DFA_LANE_HITS];
+} rx_dfa_hits;
+
+typedef struct
+{
+        string_address at, past, begin;
+        b32 row;
+} rx_lane;
+
+enum { RX_LANE_GO, RX_LANE_RESET, RX_LANE_GAVE_UP };
+
+/* What the serial walk does with a cell that is not a row, for the stretch
+   whose next byte is at lane->at. A record that matched is `*hit`. */
+static int rx_lane_event(rx_dfa_cache *cache, rx_lane *lane, b32 next,
+                         string_address *hit)
+{
+        const rx_dfa *dfa = cache->dfa;
+        b32 start = cache->start * (b32)dfa->class_count;
+        *hit = null;
+        if (next == RX_DFA_UNKNOWN)
+        {
+                positive resets = cache->resets;
+                next = rx_dfa_step(cache, lane->row, dfa->classes[*lane->at]);
+                if (next == RX_DFA_FULL)
+                        return RX_LANE_GAVE_UP;
+                if (cache->resets != resets)
+                        return RX_LANE_RESET;
+                if (next >= 0)
+                {
+                        lane->row = next;
+                        lane->at++;
+                        return RX_LANE_GO;
+                }
+                start = cache->start * (b32)dfa->class_count;
+        }
+        if (next == RX_DFA_END_HIT)
+        {
+                *hit = lane->at++;
+                lane->row = start;
+                return RX_LANE_GO;
+        }
+        string_address stop = (string_address)memory_first_of(
+            lane->at, dfa->delimiter, (positive)(lane->past - lane->at));
+        if (next == RX_DFA_HIT)
+                *hit = stop ? stop : lane->past - 1;
+        lane->at = stop ? stop + 1 : lane->past;
+        lane->row = start;
+        return RX_LANE_GO;
+}
+
+static positive rx_dfa_lanes(rx_dfa_cache *cache, string_address at,
+                             string_address past, rx_dfa_hits *out,
+                             string_address *block)
+{
+        const rx_dfa *dfa = cache->dfa;
+        const p8 *classes = dfa->classes;
+        const b32 *trans = cache->trans;
+        const string_address base = at;
+        rx_lane lane[RX_DFA_LANES];
+        positive total = 0;
+        if (out)
+        {
+                memory_fill(out->count, 0, sizeof(out->count));
+                if ((positive)(past - at) > RX_DFA_LANES * RX_DFA_LANE_BLOCK)
+                {
+                        string_address from = at + RX_DFA_LANES * RX_DFA_LANE_BLOCK - 1;
+                        string_address stop = (string_address)memory_first_of(
+                            from, dfa->delimiter, (positive)(past - from));
+                        past = stop ? stop + 1 : past;
+                }
+        }
+        *block = past;
+        b32 start = cache->start * (b32)dfa->class_count;
+        string_address cut = at;
+        for (positive k = 0; k < RX_DFA_LANES; k++)
+        {
+                string_address next = past;
+                if (k < RX_DFA_LANES - 1)
+                {
+                        string_address target = at + (positive)(past - at) / RX_DFA_LANES * (k + 1);
+                        if (target < cut)
+                                target = cut;
+                        string_address stop = (string_address)memory_first_of(
+                            target, dfa->delimiter, (positive)(past - target));
+                        next = stop ? stop + 1 : past;
+                }
+                lane[k] = (rx_lane){.at = cut, .past = next, .begin = cut, .row = start};
+                cut = next;
+        }
+        for (;;)
+        {
+                positive m = positive_max, live = 0;
+                for (positive k = 0; k < RX_DFA_LANES; k++)
+                {
+                        positive left = (positive)(lane[k].past - lane[k].at);
+                        m = left < m ? left : m;
+                        live += left != 0;
+                }
+                if (!live)
+                        break;
+                // The lane that walks alone while another has run out, or the
+                // four while every one has bytes.
+                positive one = 0, mask = (1u << RX_DFA_LANES) - 1;
+                b32 n[RX_DFA_LANES] = {0};
+                if (m)
+                {
+                        string_address a0 = lane[0].at, a1 = lane[1].at, a2 = lane[2].at,
+                                       a3 = lane[3].at;
+                        b32 r0 = lane[0].row, r1 = lane[1].row, r2 = lane[2].row,
+                            r3 = lane[3].row;
+                        b32 n0 = 0, n1 = 0, n2 = 0, n3 = 0;
+                        bool stopped = false;
+                        while (m--)
+                        {
+                                n0 = trans[r0 + classes[*a0]];
+                                n1 = trans[r1 + classes[*a1]];
+                                n2 = trans[r2 + classes[*a2]];
+                                n3 = trans[r3 + classes[*a3]];
+                                if ((n0 | n1 | n2 | n3) < 0)
+                                {
+                                        stopped = true;
+                                        break;
+                                }
+                                a0++, a1++, a2++, a3++;
+                                r0 = n0, r1 = n1, r2 = n2, r3 = n3;
+                        }
+                        lane[0].at = a0, lane[1].at = a1, lane[2].at = a2, lane[3].at = a3;
+                        lane[0].row = r0, lane[1].row = r1, lane[2].row = r2, lane[3].row = r3;
+                        if (!stopped)
+                                continue;
+                        n[0] = n0, n[1] = n1, n[2] = n2, n[3] = n3;
+                }
+                else
+                {
+                        while (lane[one].at == lane[one].past)
+                                one++;
+                        rx_lane *l = lane + one;
+                        b32 next = 0;
+                        while (l->at < l->past && (next = trans[l->row + classes[*l->at]]) >= 0)
+                        {
+                                l->row = next;
+                                l->at++;
+                        }
+                        if (l->at == l->past)
+                                continue;
+                        n[one] = next;
+                        mask = 1u << one;
+                }
+                bool reset = false;
+                for (positive k = 0; k < RX_DFA_LANES && !reset; k++)
+                {
+                        rx_lane *l = lane + k;
+                        string_address hit;
+                        if (!(mask >> k & 1))
+                                continue;
+                        if (n[k] >= 0)
+                        {
+                                l->row = n[k];
+                                l->at++;
+                                continue;
+                        }
+                        int event = rx_lane_event(cache, l, n[k], &hit);
+                        if (event == RX_LANE_GAVE_UP)
+                                return positive_max;
+                        reset = event == RX_LANE_RESET;
+                        if (!hit)
+                                continue;
+                        total++;
+                        if (out)
+                        {
+                                if (out->count[k] == RX_DFA_LANE_HITS)
+                                        return positive_max;
+                                out->at[k][out->count[k]++] = (p32)(hit - base);
+                        }
+                }
+                if (reset)
+                {
+                        start = cache->start * (b32)dfa->class_count;
+                        for (positive k = 0; k < RX_DFA_LANES; k++)
+                        {
+                                rx_lane *l = lane + k;
+                                if (l->at == l->past)
+                                        continue;
+                                string_address before = (string_address)memory_last_of(
+                                    l->begin, dfa->delimiter, (positive)(l->at - l->begin));
+                                l->at = before ? before + 1 : l->begin;
+                                l->row = start;
+                        }
+                }
+        }
+        return total;
 }
 
 #define REGEX_SCRATCH_MAX 20000
