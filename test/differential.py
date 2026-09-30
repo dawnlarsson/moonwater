@@ -38983,6 +38983,8 @@ typedef uint64_t p64;
 typedef unsigned long positive;
 typedef long bipolar;
 typedef int b32;
+#define DHCP_CLIENT_PORT 68
+#define DHCP_SERVER_PORT 67
 #define COLD
 #define CONST
 #define fn void
@@ -39237,6 +39239,95 @@ int main(int argc, char **argv) {
                         agreed++;
         }
         fprintf(stdout, "  overloaded %lu, joined pieces %lu\n", overloaded, joined);
+        /* The frame a packet socket hands over (dhcp_unframe): a well formed
+           IPv4/UDP datagram from port 67 to port 68 round the reply, with
+           its real checksums, then one thing wrong with it at a time. Each
+           goes to the parser in a heap block exactly its length, and the
+           verdict is the one written beside the fault. */
+        unsigned long frames = 0, frames_agreed = 0, frames_bad = 0;
+        for (long n = 0; n < count / 4; n++) {
+                static const char *names[] = {"whole", "version", "short header", "cut", "more fragments",
+                        "fragment offset", "protocol", "header checksum", "source port", "destination port",
+                        "udp length", "udp checksum", "no udp checksum", "link padding", "long header"};
+                int fault = (int)draw(15);
+                p32 header = 20 + 4 * (fault == 14 ? draw(11) : !draw(6) ? draw(11) : 0);
+                p32 payload = draw(700);
+                p32 total = header + 8 + payload;
+                p32 room = total + (fault == 13 ? draw(30) + 1 : 0);
+                p8 *frame = calloc(room, 1);
+                for (p32 i = header + 8; i < total; i++) frame[i] = (p8)draw(256);
+                frame[0] = 0x40 | (header / 4);
+                frame[2] = total >> 8; frame[3] = total;
+                frame[8] = 64; frame[9] = 17;
+                put32(frame + 12, draw(0)); put32(frame + 16, draw(2) ? 0xffffffffu : draw(0));
+                frame[header] = 0; frame[header + 1] = 67; frame[header + 2] = 0; frame[header + 3] = 68;
+                frame[header + 4] = (total - header) >> 8; frame[header + 5] = total - header;
+                for (p32 i = 20; i < header; i++) frame[i] = (p8)draw(256);
+                bool valid = true, trusted = false;
+                if (!draw(3)) frame[6] = 0x40;  /* don't fragment */
+                switch (fault) {
+                case 1: frame[0] = (frame[0] & 15) | (draw(2) ? 0x60 : 0x50); valid = false; break;
+                case 2: frame[0] = 0x40 | draw(5); valid = false; break;
+                case 3: room = draw(total); valid = false; break;
+                case 4: frame[6] |= 0x20; valid = false; break;
+                case 5: frame[7] = 1 + draw(255); valid = false; break;
+                case 6: frame[9] = draw(2) ? 6 : 1; valid = false; break;
+                case 8: frame[header + 1] = 68; valid = false; break;
+                case 9: frame[header + 3] = 67; valid = false; break;
+                case 10: frame[header + 5] += 1 + draw(8); valid = false; break;
+                }
+                /* The header's checksum over the header as it stands. */
+                {
+                        unsigned sum = 0;
+                        frame[10] = frame[11] = 0;
+                        for (p32 i = 0; i + 1 < header; i += 2) sum += frame[i] << 8 | frame[i + 1];
+                        while (sum >> 16) sum = (sum & 0xffff) + (sum >> 16);
+                        frame[10] = (p8)(~sum >> 8); frame[11] = (p8)~sum;
+                        if (fault == 2 || fault == 1) { frame[10] = frame[11] = 0; }
+                        if (fault == 7) { frame[10] ^= 1 << draw(8); valid = false; }
+                }
+                if (fault != 2 && fault != 1 && fault != 3 && fault != 7) {
+                        unsigned sum = 0;
+                        p32 udp = total - header;
+                        frame[header + 6] = frame[header + 7] = 0;
+                        for (int i = 0; i < 8; i += 2) sum += frame[12 + i] << 8 | frame[13 + i];
+                        sum += 17 + udp;
+                        for (p32 i = 0; i + 1 < udp; i += 2) sum += frame[header + i] << 8 | frame[header + i + 1];
+                        if (udp & 1) sum += frame[header + udp - 1] << 8;
+                        while (sum >> 16) sum = (sum & 0xffff) + (sum >> 16);
+                        sum = ~sum & 0xffff;
+                        if (!sum) sum = 0xffff;
+                        frame[header + 6] = sum >> 8; frame[header + 7] = sum;
+                        if (fault == 11) {
+                                if (payload) { frame[header + 8 + draw(payload)] ^= 1 << draw(8); valid = false; }
+                        }
+                        if (fault == 12) { frame[header + 6] = frame[header + 7] = 0; }
+                        if (fault == 11 && draw(3) == 0) trusted = true, valid = true;
+                }
+                if (fault == 3 && room < total) valid = false;
+                p8 *exact = malloc(room ? room : 1);
+                memcpy(exact, frame, room);
+                p32 source = 0, destination = 0;
+                p16 port = 0;
+                positive offset = 0, length = 0;
+                bipolar verdict = dhcp_unframe(exact, room, trusted, &source, &destination, &port, &offset, &length);
+                bool ok = (verdict == 0) == valid;
+                if (ok && valid)
+                        ok = port == 67 && offset == header + 8 && length == payload &&
+                             source == ((p32)frame[12] << 24 | (p32)frame[13] << 16 | (p32)frame[14] << 8 | frame[15]) &&
+                             destination == ((p32)frame[16] << 24 | (p32)frame[17] << 16 | (p32)frame[18] << 8 | frame[19]) &&
+                             !memcmp(exact + offset, frame + offset, length);
+                free(exact);
+                free(frame);
+                frames++;
+                if (ok) frames_agreed++;
+                else if (frames_bad++ < 5)
+                        printf("  FAIL frame %ld (%s): verdict %ld, wanted %d\n", n, names[fault], verdict, valid);
+        }
+        fprintf(stdout, "  frames %lu agreed %lu\n", frames, frames_agreed);
+        whole += frames;
+        agreed += frames_agreed;
+        wrong += frames_bad;
         printf("%ld %lu %lu %lu %lu\n", count, parsed, whole, agreed, wrong);
         return wrong != 0;
 }

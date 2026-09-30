@@ -52011,6 +52011,361 @@ done:
                 socket_close((b32)receiver);
 }
 
+/*
+        The acquisition behind reverse-path filtering, on a real wire.
+
+        A DHCP server is another host, and its OFFER arrives from an address
+        this machine has no route to: rp_filter 1 (strict) and 2 (loose)
+        discard it before a UDP socket could see it, so a client that reads
+        UDP never takes a lease on a host that has turned either on. Here a
+        child enters its own user and network namespaces, one end of a veth
+        pair stays with it and the other goes to a server process in a second
+        network namespace (so that there is no route to the server's address,
+        as between two machines), and dhcp_ask is run with rp_filter 0, 1 and
+        2 on the client's interface: each must take the server's lease. Needs
+        user namespaces; NOT RUN under emulation and where they are refused.
+        The exit status of the child is 0x80 when it could not be set up,
+        otherwise one bit per mode that took the lease and the bit 8 when the
+        setup worked.
+*/
+static positive net_test_attribute(p8 address_to to, positive at, p16 type,
+                                   const void address_to data, positive size)
+{
+        positive length = 4 + size;
+
+        memory_fill(to + at, 0, (length + 3) & ~(positive)3);
+        to[at] = (p8)length;
+        to[at + 1] = (p8)(length >> 8);
+        to[at + 2] = (p8)type;
+        to[at + 3] = (p8)(type >> 8);
+        memory_copy(to + at + 4, data, size);
+        return at + ((length + 3) & ~(positive)3);
+}
+
+static bipolar net_test_write(string_address path, string_address text)
+{
+        bipolar handle = system_open_at(AT_FDCWD, path, 1 | O_CLOEXEC);
+        bipolar wrote;
+
+        if (handle < 0)
+                return handle;
+        wrote = system_write_all((positive)handle, (p8 address_to)text,
+                                 string_length(text));
+        system_close((positive)handle);
+        return wrote == (bipolar)string_length(text) ? 0 : -1;
+}
+
+//      "0 <id> 1\n", the id map of one user.
+static fn net_test_map(p8 address_to to, positive id)
+{
+        p8 digits[24];
+        positive count = 0;
+        positive at = 0;
+
+        do
+                digits[count++] = (p8)('0' + id % 10);
+        while (id /= 10);
+        to[at++] = '0';
+        to[at++] = ' ';
+        while (count)
+                to[at++] = digits[--count];
+        to[at++] = ' ';
+        to[at++] = '1';
+        to[at++] = '\n';
+        to[at] = 0;
+}
+
+static bipolar net_test_index(string_address name)
+{
+        struct
+        {
+                p8 name[16];
+                b32 index;
+                p8 rest[20];
+        } request = {{0}, 0, {0}};
+        bipolar handle = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+        bipolar status;
+
+        if (handle < 0)
+                return handle;
+        memory_copy(request.name, name, string_length(name));
+        status = system_call_3(syscall(ioctl), (positive)handle, 0x8933,
+                               (positive)address_of request);
+        socket_close((b32)handle);
+        return status < 0 ? status : (bipolar)request.index;
+}
+
+//      The server: every DISCOVER is offered, every REQUEST acknowledged,
+//      10.77.0.50 for 3600 s, answered by broadcast.
+static fn net_test_dhcp_server(string_address device, p32 own)
+{
+        bipolar handle = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+        b32 one = 1;
+        socket_address_internet bound = {.family = AF_INET,
+                                         .port = network_order_16(67)};
+        socket_address_internet wide = {
+            .family = AF_INET, .port = network_order_16(68),
+            .host = network_order_32(0xffffffffu)};
+        p8 packet[1024];
+
+        if (handle < 0 ||
+            socket_option_set((b32)handle, SOL_SOCKET, SO_BROADCAST,
+                              address_of one, sizeof one) < 0 ||
+            socket_option_set((b32)handle, SOL_SOCKET, SO_REUSEADDR,
+                              address_of one, sizeof one) < 0 ||
+            socket_option_set((b32)handle, SOL_SOCKET, SO_BINDTODEVICE,
+                              (address_any)device,
+                              string_length(device) + 1) < 0 ||
+            socket_bind((b32)handle, address_of bound, sizeof bound) < 0)
+                system_call_1(syscall(exit_group), 1);
+        for (;;)
+        {
+                bipolar got = socket_receive((b32)handle, packet, sizeof packet,
+                                             0, null, null);
+                p8 reply[300];
+                positive at = 0;
+                p8 kind = 0;
+                static const p8 tail[] = {1, 4, 255, 255, 255, 0, 3, 4, 10, 77,
+                                          0, 1, 51, 4, 0, 0, 14, 16, 255};
+
+                if (got < 241 || packet[0] != 1)
+                        continue;
+                for (positive i = 240; i + 2 < (positive)got && packet[i] != 255;
+                     i += 2 + packet[i + 1])
+                        if (packet[i] == 53)
+                                kind = packet[i + 2];
+                if (kind != 1 && kind != 3)
+                        continue;
+                memory_fill(reply, 0, sizeof reply);
+                reply[0] = 2;
+                reply[1] = 1;
+                reply[2] = 6;
+                memory_copy(reply + 4, packet + 4, 4);
+                memory_copy(reply + 10, packet + 10, 2);
+                network_store_32(reply + 16, 0x0a4d0032);
+                memory_copy(reply + 28, packet + 28, 16);
+                network_store_32(reply + 236, 0x63825363);
+                at = 240;
+                reply[at++] = 53;
+                reply[at++] = 1;
+                reply[at++] = kind == 1 ? 2 : 5;
+                reply[at++] = 54;
+                reply[at++] = 4;
+                network_store_32(reply + at, own);
+                at += 4;
+                memory_copy(reply + at, tail, sizeof tail);
+                at += sizeof tail;
+                socket_send((b32)handle, reply, 300, 0, address_of wide,
+                            sizeof wide);
+        }
+}
+
+static bipolar net_test_veth(b32 handle, string_address near, string_address far,
+                             p32 pid)
+{
+        netlink_buffer request = {0};
+        netlink_link address_to body;
+        p32 sequence = netlink_sequence_take();
+        p8 peer[96];
+        p8 data[128];
+        p8 info[192];
+        positive used = sizeof(netlink_link);
+        positive at;
+
+        memory_fill(peer, 0, sizeof peer);
+        used = net_test_attribute(peer, used, IFLA_IFNAME, far,
+                                  string_length(far) + 1);
+        used = net_test_attribute(peer, used, 19 /* IFLA_NET_NS_PID */, &pid, 4);
+        at = net_test_attribute(data, 0, 1 /* VETH_INFO_PEER */, peer, used);
+        used = net_test_attribute(info, 0, IFLA_INFO_KIND, "veth", 5);
+        used = net_test_attribute(info, used, 2 /* IFLA_INFO_DATA */, data, at);
+        if (!netlink_begin(address_of request, RTM_NEWLINK,
+                           NLM_REQUEST | NLM_ACK | NLM_CREATE | NLM_EXCLUSIVE,
+                           sequence, sizeof(netlink_link)))
+                return -1;
+        body = (netlink_link address_to)netlink_body(address_of request);
+        body->family = AF_UNSPEC;
+        netlink_attribute_add(address_of request, IFLA_IFNAME, (address_any)near,
+                              string_length(near) + 1);
+        netlink_attribute_add(address_of request, IFLA_LINKINFO, info, used);
+        return netlink_transact(handle, address_of request, sequence, null,
+                                null);
+}
+
+static fn net_test_sleep(positive milliseconds)
+{
+        timespec span = {(b64)(milliseconds / 1000),
+                         (b64)(milliseconds % 1000 * 1000000)};
+
+        system_call_2(syscall(nanosleep), (positive)address_of span, 0);
+}
+
+//      The child of dhcp_behind_rp_filter: the status is the exit code.
+static fn net_test_dhcp_namespaces(positive uid, positive gid)
+{
+        static const string_address modes[3] = {"0\n", "1\n", "2\n"};
+        b32 ends[2];
+        bipolar server;
+        bipolar handle;
+        positive result = 0;
+        p8 line[32];
+        bipolar near;
+
+        if (system_call_1(syscall(unshare), 0x10000000 | 0x40000000) < 0)
+                system_call_1(syscall(exit_group), 0x80);
+        if (net_test_write((string_address)"/proc/self/setgroups",
+                           (string_address)"deny\n") < 0)
+                system_call_1(syscall(exit_group), 0x80);
+        net_test_map(line, gid);
+        if (net_test_write((string_address)"/proc/self/gid_map", (string_address)line) < 0)
+                system_call_1(syscall(exit_group), 0x80);
+        net_test_map(line, uid);
+        if (net_test_write((string_address)"/proc/self/uid_map", (string_address)line) < 0)
+                system_call_1(syscall(exit_group), 0x80);
+
+        //      The server's own network namespace, made by the server.
+        if (system_call_2(syscall(pipe2), (positive)ends, O_CLOEXEC) < 0)
+                system_call_1(syscall(exit_group), 0x80);
+        server = system_fork();
+        if (server != 0)
+                system_close((positive)ends[1]);
+        if (server == 0)
+        {
+                b32 nl;
+                bipolar far;
+                p8 ready = 1;
+
+                if (system_call_1(syscall(unshare), 0x40000000) < 0)
+                {
+                        log_direct(str("net: test server cannot unshare\n"));
+                        system_call_1(syscall(exit_group), 1);
+                }
+                system_call_3(syscall(write), (positive)ends[1],
+                              (positive)address_of ready, 1);
+                for (positive tries = 0; tries < 200; tries++)
+                {
+                        far = net_test_index((string_address)"dhcps0");
+                        if (far > 0)
+                                break;
+                        net_test_sleep(10);
+                }
+                nl = (b32)netlink_open_groups(0);
+                if (far <= 0)
+                        log_direct(str("net: test server never saw dhcps0\n"));
+                else if ((bipolar)nl < 0)
+                        log_direct(str("net: test server has no netlink\n"));
+                else if (netlink_link_up(nl, (p32)far) < 0)
+                        log_direct(str("net: test server cannot raise dhcps0\n"));
+                else if (netlink_address_add(nl, (p32)far, 0x0a4d0001, 24) < 0)
+                        log_direct(str("net: test server cannot address dhcps0\n"));
+                else
+                        net_test_dhcp_server((string_address)"dhcps0", 0x0a4d0001);
+                system_call_1(syscall(exit_group), 2);
+        }
+        {
+                p8 ready = 0;
+
+                system_read_retry((positive)ends[0], address_of ready, 1);
+                if (!ready)
+                        system_call_1(syscall(exit_group), 0x80);
+        }
+        handle = netlink_open_groups(0);
+        if (handle < 0 ||
+            net_test_veth((b32)handle, (string_address)"dhcpc0",
+                          (string_address)"dhcps0", (p32)server) < 0)
+        {
+                log_direct(str("net: test veth pair refused\n"));
+                system_call_1(syscall(exit_group), 0x80);
+        }
+        near = net_test_index((string_address)"dhcpc0");
+        if (near <= 0 || netlink_link_up((b32)handle, (p32)near) < 0)
+        {
+                log_direct(str("net: test client has no dhcpc0\n"));
+                system_call_1(syscall(exit_group), 0x80);
+        }
+        net_test_sleep(300);
+        for (positive mode = 0; mode < 3; mode++)
+        {
+                b32 status = 0;
+                bipolar exchange;
+
+                if (net_test_write((string_address)"/proc/sys/net/ipv4/conf/all/rp_filter",
+                                   modes[mode]) < 0 ||
+                    net_test_write((string_address)"/proc/sys/net/ipv4/conf/dhcpc0/rp_filter",
+                                   modes[mode]) < 0)
+                        system_call_1(syscall(exit_group), 0x80);
+                exchange = system_fork();
+                if (exchange == 0)
+                {
+                        p8 hardware[6] = {2, 0, 0, 0, 0, 7};
+                        dhcp_lease lease = {0};
+
+                        system_call_1(syscall(exit_group),
+                                      dhcp_ask((string_address)"dhcpc0", hardware,
+                                               address_of lease) == DHCP_OK &&
+                                              lease.address == 0x0a4d0032 &&
+                                              lease.server == 0x0a4d0001
+                                          ? 0 : 1);
+                }
+                //      Nobody answering is a ninety-second schedule: give it
+                //      ten seconds.
+                for (positive waited = 0;; waited += 50)
+                {
+                        if (system_call_4(syscall(wait4), (positive)exchange,
+                                          (positive)address_of status, 1 /* WNOHANG */,
+                                          0) == exchange)
+                                break;
+                        if (waited >= 10000)
+                        {
+                                system_call_2(syscall(kill), (positive)exchange,
+                                              SIGKILL);
+                                system_call_4(syscall(wait4), (positive)exchange,
+                                              (positive)address_of status, 0, 0);
+                                status = 1;
+                                break;
+                        }
+                        net_test_sleep(50);
+                }
+                if (!status)
+                        result |= 1u << mode;
+        }
+        system_call_2(syscall(kill), (positive)server, SIGKILL);
+        system_call_1(syscall(exit_group), 8 | result);
+}
+
+static fn dhcp_behind_rp_filter(void)
+{
+        b32 status = 0;
+        bipolar child;
+
+        if (net_as_emulated())
+        {
+                log_direct(str("net: DHCP acquisition behind rp_filter NOT RUN -- under emulation\n"));
+                return;
+        }
+        child = system_fork();
+        if (child == 0)
+                net_test_dhcp_namespaces(
+                    (positive)system_call(syscall(getuid)),
+                    (positive)system_call(syscall(getgid)));
+        if (child < 0 ||
+            system_call_4(syscall(wait4), (positive)child,
+                          (positive)address_of status, 0, 0) < 0)
+        {
+                log_direct(str("net: DHCP acquisition behind rp_filter NOT RUN -- no fork\n"));
+                return;
+        }
+        if (status >> 8 == 0x80)
+        {
+                log_direct(str("net: DHCP acquisition behind rp_filter NOT RUN -- user or network namespaces unavailable\n"));
+                return;
+        }
+        check("the veth fixture for the acquisition came up", (status >> 8) & 8);
+        check("a DHCP lease is taken with rp_filter 0", (status >> 8) & 1);
+        check("a DHCP lease is taken with rp_filter 1 (strict)", (status >> 8) & 2);
+        check("a DHCP lease is taken with rp_filter 2 (loose)", (status >> 8) & 4);
+}
+
 static fn error_frames(void)
 {
         b32 pair[2];
@@ -65119,6 +65474,7 @@ b32 main(void)
         leasing_datagrams();
         dhcp_transaction_randomness();
         userspace_route_source_in_namespace();
+        dhcp_behind_rp_filter();
 
         return test_report(null);
 }
