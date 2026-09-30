@@ -9051,9 +9051,25 @@ static positive check_render_reuse()
                                 edit_prompt_length = lengths[n];
                                 edit_columns = widths[w];
                                 for (positive at = 0; at < lengths[n]; at++)
+                                        edit_prompt_text[at] = (p8)(seed + at * 17);
+                                //      What the terminal is sent: a control,
+                                //      a DEL, a C1 byte standing alone and a
+                                //      C1 control spelled in UTF-8 are one
+                                //      question mark each; nothing else moves.
+                                for (positive at = 0; at < lengths[n]; at++)
                                 {
-                                        p8 byte = (p8)(seed + at * 17);
-                                        edit_prompt_text[at] = byte;
+                                        p8 byte = edit_prompt_text[at];
+                                        if (byte < 0x20 || byte == 0x7f ||
+                                            (byte >= 0x80 && byte < 0xa0 &&
+                                             (!at || edit_prompt_text[at - 1] < 0x80)))
+                                                byte = '?';
+                                        else if (byte == 0xc2 && at + 1 < lengths[n] &&
+                                                 edit_prompt_text[at + 1] >= 0x80 &&
+                                                 edit_prompt_text[at + 1] < 0xa0)
+                                        {
+                                                byte = '?';
+                                                at++;
+                                        }
                                         expected[used++] = byte;
                                         if (byte < 128 || byte >= 192) cells++;
                                 }
@@ -10116,6 +10132,20 @@ b32 main()
                         edit_resize(columns, rows);
                         i++;
                 }
+                else if (string_compare(verb, (string_address) "path") == 0)
+                {
+                        static p8 named[256];
+                        positive at = 0;
+                        positive built = 0;
+                        bipolar c;
+
+                        while ((c = next_byte(argument, &at)) >= 0 &&
+                               built + 1 < sizeof(named))
+                                named[built++] = (p8)c;
+                        named[built] = end;
+                        edit_path = named;
+                        i++;
+                }
                 else if (string_compare(verb, (string_address) "keys") == 0)
                 {
                         feed_keys(argument);
@@ -10400,6 +10430,28 @@ same 'joins forward'   'abcd'           40 6 text 'ab\ncd' keys '<end><del>' buf
 group word
 same 'ctrl backspace'  'one '           40 6 keys 'one two<c-bs>' buffer
 same 'stops at the space' 'one two '    40 6 keys 'one two three<c-bs>' buffer
+
+#
+#       The file is input to the program and not to the terminal: what it
+#       holds that a terminal would act on is drawn as a question mark (a C1
+#       control in UTF-8 not at all), and the file is saved as it was.
+#
+section hostile
+
+group escapes
+same 'an escape is not sent'    '[1 a?[2Jb]'   40 6 text 'a\e[2Jb' keys '<right>' row 0
+same 'the screen was not cleared' '[1 a?[2Jb]|[ untitled  Ln 1, Col 2                  ]' 40 2 text 'a\e[2Jb' keys '<right>' row 0 row 1
+same 'a title is not set'       '[1 ?]0;x?]'   40 6 text '\e]0;x\x07' keys '<right>' row 0
+same 'a bell is not rung'       '[1 a?b]'      40 6 text 'a\x07b' keys '<right>' row 0
+same 'a delete is not sent'     '[1 a?b]'      40 6 text 'a\x7fb' keys '<right>' row 0
+same 'a lone C1 byte is not sent' '[1 a<fffd>b]' 40 6 text 'a\x9bb' keys '<right>' row 0
+same 'a C1 in UTF-8 is not drawn' '[1 ab]'     40 6 text 'a\xc2\x9bb' keys '<right>' row 0
+same 'the file is kept as it was' "$(printf 'a\033[2Jb')" 40 6 text 'a\e[2Jb' keys '<right>' buffer
+same 'the caret counts the mark' '0,4'         40 6 text 'a\e[2Jb' keys '<right><right>' cursor
+
+group name
+same 'a name with an escape'    '[ a?[2Jb +  Ln 1, Col 1                  ]' 40 6 path 'a\e[2Jb' keys 'x<bs>' row 5
+same 'a name with a C1 in UTF-8' '[ a?b +  Ln 1, Col 1                     ]' 40 6 path 'a\xc2\x9bb' keys 'x<bs>' row 5
 
 #
 #       Selection.

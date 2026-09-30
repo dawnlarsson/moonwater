@@ -1323,6 +1323,19 @@ static COLD ARM64_ERRATUM_ALIGN bool edit_step_move(bool backward)
         outside ASCII is several bytes and one column. Every routine below that
         has "column" in its name means the screen; everything else means bytes.
 */
+/*
+        What is sent to the terminal for a character of the file. The file is
+        the program's input and not the terminal's: an escape, a C0 control, a
+        DEL, or a byte that is not UTF-8 (a lone 0x9b is a CSI to some
+        terminals) is drawn as a question mark, which is one cell, and a C1
+        control spelled in UTF-8 is not drawn at all, having no cell. What the
+        file holds is not changed, and is saved as it was.
+*/
+static CONST bool edit_byte_unsafe(p8 byte)
+{
+        return byte < 0x20 || byte == 0x7f || byte >= 0x80;
+}
+
 static CONST bool edit_is_continuation(p8 character)
 {
         return (character & 0xc0) == 0x80;
@@ -1346,6 +1359,11 @@ static PURE positive edit_cells_at(positive line, positive column)
         positive next = edit_step_forward(line, column);
         memory_utf8_state state = {0, 0, 0};
         b32 result = 0;
+
+        //      A byte that is a control to the terminal, or is not UTF-8, is
+        //      drawn as one question mark (edit_row_put_character).
+        if (next - column == 1 && edit_byte_unsafe(text->text[column]))
+                return 1;
 
         for (positive at = column; at < next && !result; at++)
                 result = memory_utf8_feed(address_of state, text->text[at]);
@@ -1592,6 +1610,17 @@ static fn edit_row_put(address_any text, positive length)
         byte_store_append_exact(address_of edit_row_output, text, length);
 }
 
+static fn edit_row_put_character(string_address text, positive length)
+{
+        if (length == 1 && edit_byte_unsafe((p8)text[0]))
+                edit_row_put((string_address)"?", 1);
+        else if (length == 2 && (p8)text[0] == 0xc2 && (p8)text[1] >= 0x80 &&
+                 (p8)text[1] < 0xa0)
+                return;
+        else
+                edit_row_put(text, length);
+}
+
 #define edit_row_put_literal(literal) \
         edit_row_put((string_address)(literal), sizeof(literal) - 1)
 
@@ -1717,12 +1746,13 @@ static fn edit_row_build(positive screen_row)
                         if (!cells)
                         {
                                 if (drawn && display > edit_left)
-                                        edit_row_put(edit_lines[line].text + at,
-                                                     next - at);
+                                        edit_row_put_character(edit_lines[line].text + at,
+                                                               next - at);
                         }
                         else if (display >= edit_left && drawn + cells <= width)
                         {
-                                edit_row_put(edit_lines[line].text + at, next - at);
+                                edit_row_put_character(edit_lines[line].text + at,
+                                                       next - at);
                                 drawn += cells;
                         }
                         else
@@ -1750,8 +1780,8 @@ static fn edit_row_build(positive screen_row)
                                 edit_row_put((string_address)" ", 1);
                         else
                         {
-                                edit_row_put(edit_lines[line].text + at,
-                                             edit_step_forward(line, at) - at);
+                                edit_row_put_character(edit_lines[line].text + at,
+                                                       edit_step_forward(line, at) - at);
                         }
 
                         drawn++;
@@ -1784,12 +1814,29 @@ static positive edit_status_cells;
 static fn edit_status_put(address_any data, positive length)
 {
         p8 address_to text = data;
-        if (!byte_store_append_exact(address_of edit_status_output, text, length))
-                return;
 
+        //      The name of the file and what a command says of it are the
+        //      file's and the user's bytes: controls are questions marks here
+        //      as they are in the rows, a C1 control in UTF-8 one of them.
         for (positive at = 0; at < length; at++)
-                if (!edit_is_continuation((p8)text[at]))
+        {
+                p8 byte = text[at];
+
+                if (byte < 0x20 || byte == 0x7f ||
+                    (byte >= 0x80 && byte < 0xa0 && (!at || text[at - 1] < 0x80)))
+                        byte = '?';
+                else if (byte == 0xc2 && at + 1 < length &&
+                         text[at + 1] >= 0x80 && text[at + 1] < 0xa0)
+                {
+                        byte = '?';
+                        at++;
+                }
+
+                if (!byte_store_append_exact(address_of edit_status_output, &byte, 1))
+                        return;
+                if (!edit_is_continuation(byte))
                         edit_status_cells++;
+        }
 }
 
 static fn edit_status_put_text(string_address text)
