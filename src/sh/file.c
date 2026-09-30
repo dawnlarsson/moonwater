@@ -4983,29 +4983,12 @@ static bool file_tree_put(parallel_output address_to output,
 }
 
 /*
-        A tool that changes something about a name, and under -R about
-        everything beneath it. chmod, chown and chgrp are this one walk with a
-        different visit at the leaf, so the visit is what comes in and the
-        walk is written once.
-
-        is_directory here asks about the link itself, so a link to a directory
-        is changed and not walked into; the depth is what a directory that
-        links into itself runs out of before the stack does.
+        chmod and chown visit a name the same way whether or not -R is given:
+        the name, how it is shown, and what the walk already looked at.
 */
 typedef fn(address_to file_visit)(bipolar directory, string_address name,
                                   string_address shown,
                                   file_facts address_to known);
-
-/*
-        Whether a directory is visited before or after what is under it.
-
-        chmod walks a tree from the top: a directory is changed and then read,
-        because the mode it is given is what says whether it can be read at
-        all. chown and chgrp walk it from the bottom, which is what the
-        reference's own -v listing shows, and this is where the two differ.
-*/
-static bool file_change_after_contents;
-static bool file_change_prune;
 
 /* True while a visit is a name the walk reached, not one the user typed. A
    symlink the user names is theirs to mean; one found under a -R walk is not,
@@ -5019,130 +5002,9 @@ static bool file_change_descended;
    look and a change, so the visit changes it through the name with
    AT_SYMLINK_NOFOLLOW, one call, where anywhere else it pins the object with
    an open and a second look first -- which is what made chmod -R three looks
-   an entry against the reference's one. The walk decides it from the
-   directory it opened, after a visit before the contents has given that
-   directory its new mode. */
+   an entry against the reference's one. */
 static bool file_change_trusted;
 static p32 file_change_user;
-
-static fn file_change_walk_as(bipolar directory, string_address name,
-                              string_address shown, positive depth,
-                              string_address program, b32 address_to status,
-                              file_visit visit, bool report_walk_errors,
-                              p8 type, bool trusted_parent)
-{
-        file_facts facts;
-
-        //      A kind the listing gave that is not a directory is not looked
-        //      at here: the visit looks for itself, and a name that changed
-        //      kind since is what that look sees. What the walk did look at
-        //      is handed over, so no name is looked at twice.
-        bool looked = (type == 0 || type == DT_DIR) &&
-                      file_look(directory, name, AT_SYMLINK_NOFOLLOW,
-                                address_of facts);
-        bool here = looked && (facts.mode & MODE_FORMAT) == MODE_DIRECTORY;
-
-        if (depth == FILE_MAX_DEPTH)
-                file_change_user = (p32)system_call(syscall(geteuid));
-
-        //      A name reached below the top of the walk is a descendant, and
-        //      the depth is what says so: the roots enter at FILE_MAX_DEPTH.
-        file_change_descended = depth != FILE_MAX_DEPTH;
-        file_change_trusted = trusted_parent;
-
-        if (!here || !file_change_after_contents)
-                visit(directory, name, shown, looked ? address_of facts : null);
-
-        //      A visit may ask for the directory it was shown not to be entered.
-        if (file_change_prune)
-        {
-                file_change_prune = false;
-                return;
-        }
-
-        if (!here)
-                return;
-
-        if (depth == 0)
-        {
-                string_format(log_error, "%s: %w is nested too deep\n", program,
-                              writer_shell_quoted_name, shown);
-                address_to status = 1;
-                return;
-        }
-
-        file_walk walk;
-        file_facts opened;
-
-        walk.handle = file_open_same_facts(
-            directory, name, address_of facts,
-            FILE_READ | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW, address_of opened);
-        walk.error = walk.handle < 0 ? walk.handle : 0;
-        walk.have = 0;
-        walk.at = 0;
-
-        if (walk.handle < 0)
-        {
-                if (report_walk_errors)
-                {
-                        string_format(log_error, "%s: cannot open directory %w: %s\n", program,
-                                      writer_shell_quoted_name, shown, file_reason(walk.error));
-                        address_to status = 1;
-                }
-
-                if (file_change_after_contents)
-                {
-                        file_change_trusted = trusted_parent;
-                        visit(directory, name, shown, address_of facts);
-                }
-
-                return;
-        }
-
-        bool trusted = (opened.owner == file_change_user || opened.owner == 0) &&
-                       !(opened.mode & 0022);
-
-        struct linux_dirent64 address_to entry;
-
-        while ((entry = file_walk_next(address_of walk)))
-        {
-                if (file_is_dot(entry->d_name))
-                        continue;
-
-                p8 below[FILE_PATH_MAX];
-
-                if (!file_path_join(below, shown, entry->d_name))
-                {
-                        string_format(log_error, "%s: cannot access '%w/%w': %s\n", program,
-                                      writer_terminal_quoted_name, shown,
-                                      writer_terminal_quoted_name, entry->d_name,
-                                      file_reason(-ERROR_NAME_TOO_LONG));
-                        address_to status = 1;
-                        continue;
-                }
-
-                file_change_walk_as(walk.handle, entry->d_name, below,
-                                    depth - 1, program, status, visit,
-                                    report_walk_errors, entry->d_type,
-                                    trusted);
-        }
-
-        if (report_walk_errors && walk.error < 0)
-        {
-                string_format(log_error, "%s: cannot read directory %w: %s\n", program,
-                              writer_shell_quoted_name, shown, file_reason(walk.error));
-                address_to status = 1;
-        }
-
-        file_walk_close(address_of walk);
-
-        if (file_change_after_contents)
-        {
-                file_change_descended = depth != FILE_MAX_DEPTH;
-                file_change_trusted = trusted_parent;
-                visit(directory, name, shown, address_of facts);
-        }
-}
 
 /*
         The node a -R walk on the pool keeps for one directory: what the
@@ -5201,10 +5063,6 @@ typedef struct file_change_tree_node
 FILE_TREE_NODE_NEW(file_change_tree_node_new, file_change_tree_node,
                    node->length = length;
                    node->name_at = length - name_length;)
-
-//      A walk of the tool's own for everything under an operand of -R, when
-//      it has one; the serial walk below otherwise.
-static fn(address_to file_change_tree)(string_address path);
 
 /*
         The root failsafe chmod, chown and chgrp offer, which is rm's with
@@ -5302,7 +5160,8 @@ static string_address file_operand_at(positive index)
 
 static fn file_change_paths(positive first, positive count, bool recursive,
                             string_address program, b32 address_to status,
-                            file_visit visit)
+                            file_visit visit,
+                            fn(address_to tree)(string_address path))
 {
         //      first and count index the operands the option scan
         //      collected, in getopt's order: options anywhere on the line,
@@ -5314,12 +5173,8 @@ static fn file_change_paths(positive first, positive count, bool recursive,
                 if (recursive && file_change_root_refused(path, program, status))
                         continue;
 
-                if (recursive && file_change_tree)
-                        file_change_tree(path);
-                else if (recursive)
-                        file_change_walk_as(AT_FDCWD, path, path, FILE_MAX_DEPTH,
-                                            program, status, visit, false, 0,
-                                            false);
+                if (recursive)
+                        tree(path);
                 else
                 {
                         file_change_descended = false;
@@ -21423,12 +21278,10 @@ static b32 file_chmod()
 
         chmod_umask = file_umask();
 
-        file_change_tree = chmod_tree;
         file_change_preserve_root = chmod_selected.root == 'p';
         file_change_paths(first, count, (taking.flags & FILE_FLAG('R')) != 0,
                           (string_address) "chmod", address_of chmod_status,
-                          chmod_one);
-        file_change_tree = null;
+                          chmod_one, chmod_tree);
 
         return chmod_status;
 }
@@ -22313,13 +22166,10 @@ static bool chown_spec_read(string_address who, bipolar address_to user,
 
 static fn chown_paths(positive first, positive count)
 {
-        file_change_after_contents = true;
-        file_change_tree = chown_tree;
         file_change_preserve_root = chown_selected.root == 'p';
         file_change_paths(first, count, (chown_flags & FILE_FLAG('R')) != 0,
-                          chown_program, address_of chown_status, chown_one);
-        file_change_tree = null;
-        file_change_after_contents = false;
+                          chown_program, address_of chown_status, chown_one,
+                          chown_tree);
 }
 
 static b32 file_chown_common(string_address program, bool groups_only)
@@ -29361,7 +29211,6 @@ static b32 file_truncate()
         temporary name that is renamed over them. A link that moves counts
         against its inode, and the space is saved when the last one has.
 
-        The walk is file_change_walk_as, shared with chmod/chown/chgrp.
         Content is compared as it always was here: a hash of each side read
         once, and memory_compare as the final proof, so a collision never
         replaces data. Replacement is linkat plus renameat2(RENAME_EXCHANGE):
@@ -29437,6 +29286,8 @@ static positive hardlink_root_length;
 static positive hardlink_root_major;
 static positive hardlink_root_minor;
 static b32 hardlink_status;
+//      Set by a visit that asks for the directory it was shown not to be entered.
+static bool hardlink_prune;
 static positive hardlink_temp_number;
 static positive hardlink_process;
 static positive address_to hardlink_seen;
@@ -29569,14 +29420,14 @@ static fn hardlink_visit(bipolar directory, string_address name,
                         string_format(log_error, "hardlink: cannot read %w: %s\n",
                                       writer_terminal_name, shown,
                                       file_reason(-ERROR_ACCESS));
-                        file_change_prune = true;
+                        hardlink_prune = true;
                         return;
                 }
                 if (hardlink_within_mount &&
                     (facts.device_major != hardlink_root_major ||
                      facts.device_minor != hardlink_root_minor))
                 {
-                        file_change_prune = true;
+                        hardlink_prune = true;
                         return;
                 }
                 if (hardlink_subtree_count &&
@@ -29584,7 +29435,7 @@ static fn hardlink_visit(bipolar directory, string_address name,
                 {
                         HARDLINK_SAY(2, "Skipped (excluded subtree) %w\n",
                                      writer_terminal_name, shown);
-                        file_change_prune = true;
+                        hardlink_prune = true;
                 }
                 return;
         }
@@ -29682,6 +29533,82 @@ static fn hardlink_visit(bipolar directory, string_address name,
         file->dir_size = (b64)file->base_at - (b64)hardlink_root_length;
         hardlink_path_used += length + 1;
         hardlink_seen[slot] = hardlink_file_count;
+}
+
+static fn hardlink_walk(bipolar directory, string_address name,
+                        string_address shown, positive depth, p8 type)
+{
+        file_facts facts;
+
+        //      A kind the listing gave that is not a directory is not looked
+        //      at here: the visit looks for itself, and a name that changed
+        //      kind since is what that look sees. What the walk did look at
+        //      is handed over, so no name is looked at twice. is_directory
+        //      asks about the link itself, so a link to a directory is not
+        //      walked into; the depth is what a directory that links into
+        //      itself runs out of before the stack does.
+        bool looked = (type == 0 || type == DT_DIR) &&
+                      file_look(directory, name, AT_SYMLINK_NOFOLLOW,
+                                address_of facts);
+        bool here = looked && (facts.mode & MODE_FORMAT) == MODE_DIRECTORY;
+
+        hardlink_visit(directory, name, shown, looked ? address_of facts : null);
+
+        //      A visit may ask for the directory it was shown not to be entered.
+        if (hardlink_prune)
+        {
+                hardlink_prune = false;
+                return;
+        }
+
+        if (!here)
+                return;
+
+        if (depth == 0)
+        {
+                string_format(log_error, "hardlink: %w is nested too deep\n",
+                              writer_shell_quoted_name, shown);
+                hardlink_status = 1;
+                return;
+        }
+
+        file_walk walk;
+        file_facts opened;
+
+        walk.handle = file_open_same_facts(
+            directory, name, address_of facts,
+            FILE_READ | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW, address_of opened);
+        walk.error = walk.handle < 0 ? walk.handle : 0;
+        walk.have = 0;
+        walk.at = 0;
+
+        if (walk.handle < 0)
+                return;
+
+        struct linux_dirent64 address_to entry;
+
+        while ((entry = file_walk_next(address_of walk)))
+        {
+                if (file_is_dot(entry->d_name))
+                        continue;
+
+                p8 below[FILE_PATH_MAX];
+
+                if (!file_path_join(below, shown, entry->d_name))
+                {
+                        string_format(log_error, "hardlink: cannot access '%w/%w': %s\n",
+                                      writer_terminal_quoted_name, shown,
+                                      writer_terminal_quoted_name, entry->d_name,
+                                      file_reason(-ERROR_NAME_TOO_LONG));
+                        hardlink_status = 1;
+                        continue;
+                }
+
+                hardlink_walk(walk.handle, entry->d_name, below, depth - 1,
+                              entry->d_type);
+        }
+
+        file_walk_close(address_of walk);
 }
 
 static string_address hardlink_base(hardlink_file address_to file)
@@ -30726,9 +30653,8 @@ static b32 file_hardlink()
                 hardlink_root_minor = root.device_minor;
                 if (hardlink_prioritize)
                         hardlink_tree++;
-                file_change_walk_as(AT_FDCWD, (string_address)real, (string_address)real, FILE_MAX_DEPTH,
-                                    (string_address)"hardlink", address_of hardlink_status,
-                                    hardlink_visit, false, 0, false);
+                hardlink_walk(AT_FDCWD, (string_address)real, (string_address)real,
+                              FILE_MAX_DEPTH, 0);
         }
 
         if (hardlink_file_count)
