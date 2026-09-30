@@ -1997,12 +1997,12 @@ static bool tar_xattr_wanted(string_address name)
         positive at;
 
         for (at = 0; at < tar_xattr_exclude_count; at++)
-                if (file_fnmatch(tar_xattr_exclude[at], name))
+                if (shell_match(tar_xattr_exclude[at], name))
                         return false;
         if (!tar_xattr_include_count)
                 return true;
         for (at = 0; at < tar_xattr_include_count; at++)
-                if (file_fnmatch(tar_xattr_include[at], name))
+                if (shell_match(tar_xattr_include[at], name))
                         return true;
         return false;
 }
@@ -3695,7 +3695,7 @@ static bool tar_excluded(string_address name)
                         memory_copy(part, name + start, stop - start);
                         part[stop - start] = end;
                         for (positive at = 0; at < tar_exclude_count; at++)
-                                if (file_fnmatch(tar_exclude[at], (string_address)part))
+                                if (shell_match(tar_exclude[at], (string_address)part))
                                         return true;
                 }
                 if (tar_exclude_anchored)
@@ -5307,7 +5307,7 @@ static positive tar_x_used;
 static bool tar_x_wanted(string_address key)
 {
         for (positive at = 0; at < tar_pax_deleted_count; at++)
-                if (file_fnmatch(tar_pax_deleted[at], key))
+                if (shell_match(tar_pax_deleted[at], key))
                         return false;
         return true;
 }

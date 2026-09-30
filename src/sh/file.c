@@ -8919,69 +8919,9 @@ static bool ls_tabsize_said;
 static positive ls_width_option;
 static positive ls_tabsize_option;
 
+// The shell's own matcher, which -name and -path and grep's globs all go
+// through. Declared here rather than defined because expand.c is read last.
 bool shell_match(string_address pattern, string_address text);
-
-/*
-        fnmatch as coreutils, findutils and util-linux have it from glibc:
-        a set that opens with ^ is the complement, as one that opens with !
-        is. The shell's matcher reads the caret that way only in bash mode,
-        so find -name '[^a]*', ls -I and du --exclude took [^a] for the set
-        of a caret and an a -- and find -delete removed the names it should
-        have kept. The pattern is respelled with ! for the call, on the
-        caller's stack: the mode is the shell's and shared by every thread of
-        a parallel walk, so it is never touched. Only a set that closes is
-        respelled, by the rule the matcher closes sets with; [^x with no ]
-        is a literal caret either way.
-*/
-static bool file_fnmatch(string_address pattern, string_address text)
-{
-        if (!string_first_of(pattern, '^'))
-                return shell_match(pattern, text);
-
-        p8 small[FILE_PATH_MAX];
-        positive length = string_length(pattern);
-
-        if (length >= sizeof(small))
-                return shell_match(pattern, text);
-
-        memory_copy(small, pattern, length + 1);
-
-        for (positive at = 0; at < length; at++)
-        {
-                if (small[at] == '\\' && small[at + 1])
-                {
-                        at++;
-                        continue;
-                }
-                if (small[at] != '[')
-                        continue;
-
-                positive step = at + 1;
-                bool inverted = small[step] == '!' || small[step] == '^';
-
-                step += inverted;
-                if (small[step] == ']')
-                        step++;
-                while (small[step] && small[step] != ']')
-                {
-                        string_address past = byte_class_end(small + step, null);
-
-                        if (past)
-                                step = (positive)(past - small);
-                        else if (small[step] == '\\' && small[step + 1])
-                                step += 2;
-                        else
-                                step++;
-                }
-                if (!small[step])
-                        continue;
-                if (small[at + 1] == '^')
-                        small[at + 1] = '!';
-                at = step;
-        }
-
-        return shell_match(small, text);
-}
 
 // A minor trouble answers 1 unless a serious one has already made it 2,
 // as GNU's set_exit_status never lowers the status.
@@ -10279,7 +10219,7 @@ static bool ls_term_colors()
 
                         memory_copy_apart(pattern, line + 5, length);
                         pattern[length] = end;
-                        if (file_fnmatch(pattern, term))
+                        if (shell_match(pattern, term))
                                 return true;
                 }
                 line = string_get(stop) ? stop + 1 : stop;
@@ -11580,7 +11520,7 @@ static bool ls_pattern_matches(string_address pattern, string_address name)
         if (string_is(name, '.') && !string_is(pattern, '.') &&
             !(string_is(pattern, '\\') && pattern[1] == '.'))
                 return false;
-        return file_fnmatch(pattern, name);
+        return shell_match(pattern, name);
 }
 
 static bool ls_pattern_hidden(string_address name)
@@ -15747,10 +15687,6 @@ static bool find_regex_holds(find_node address_to node, string_address text)
         return regex_find(REGEX_EXACT_LONGEST, text, length, 0);
 }
 
-// The shell's own matcher, which -name and -path and grep's globs all go
-// through. Declared here rather than defined because expand.c is read last.
-bool shell_match(string_address pattern, string_address text);
-
 /*
         The operators recurse and the tests do not, so they are two functions.
 
@@ -15806,12 +15742,12 @@ static __attribute__((noinline)) bool find_true_test(find_node address_to node)
         case 'n':
                 if (node->comparison)
                         return find_pattern_holds(node, find_name, false);
-                return file_fnmatch(node->text, find_name);
+                return shell_match(node->text, find_name);
 
         case 'p':
                 if (node->comparison)
                         return find_pattern_holds(node, find_path, false);
-                return file_fnmatch(node->text, find_path);
+                return shell_match(node->text, find_path);
 
         case 'N':
         case 'P':
@@ -15822,7 +15758,7 @@ static __attribute__((noinline)) bool find_true_test(find_node address_to node)
                                                   true);
 
                 find_lowered(node->kind == 'N' ? find_name : find_path, name);
-                return file_fnmatch(node->text, name);
+                return shell_match(node->text, name);
 
         case 'L':
         case 'I':
@@ -15841,7 +15777,7 @@ static __attribute__((noinline)) bool find_true_test(find_node address_to node)
                 if (node->kind == 'I')
                         memory_to_lower_ascii(name, (positive)length);
 
-                return file_fnmatch(node->text, name);
+                return shell_match(node->text, name);
         }
 
         case 't':
@@ -16429,17 +16365,17 @@ static __attribute__((noinline)) bool find_tree_test(
         case 'n':
                 if (node->comparison)
                         return find_pattern_holds(node, name, false);
-                return file_fnmatch(node->text, name);
+                return shell_match(node->text, name);
         case 'p':
                 if (node->comparison)
                         return find_pattern_holds(node, path, false);
-                return file_fnmatch(node->text, path);
+                return shell_match(node->text, path);
         case 'N':
         case 'P':
                 if (node->comparison)
                         return find_pattern_holds(node, node->kind == 'N' ? name : path, true);
                 find_lowered(node->kind == 'N' ? name : path, lowered);
-                return file_fnmatch(node->text, lowered);
+                return shell_match(node->text, lowered);
         case 't':
                 return find_type_holds(node->number, mode);
         case 'd':
@@ -18205,7 +18141,7 @@ static bool du_excluded(string_address path)
         path_tail_copy(name, FILE_PATH_MAX, path);
 
         for (positive i = 0; i < du_exclude_have; i++)
-                if (file_fnmatch(du_excludes[i], path) || file_fnmatch(du_excludes[i], name))
+                if (shell_match(du_excludes[i], path) || shell_match(du_excludes[i], name))
                         return true;
 
         return false;
@@ -23790,7 +23726,7 @@ static bool whereis_name_matches(positive kind, string_address query,
                                  string_address candidate, bool glob)
 {
         if (glob)
-                return file_fnmatch(query, candidate);
+                return shell_match(query, candidate);
         if (kind == WHEREIS_BINARY)
                 return string_equals(query, candidate);
         return whereis_suffix_match(kind, query, candidate);
@@ -33326,7 +33262,7 @@ static bool dircolors_parse(string_address input, positive length, string_addres
                                 return string_report(log_error, false, "dircolors: memory exhausted\n");
                         memory_copy_apart(pattern, input + value, size);
                         pattern[size] = end;
-                        state = file_fnmatch(pattern, term_gate ? term : colorterm) ? DC_SURE : DC_NO;
+                        state = shell_match(pattern, term_gate ? term : colorterm) ? DC_SURE : DC_NO;
                         if (pattern != small)
                                 memory_give(pattern);
                         continue;
