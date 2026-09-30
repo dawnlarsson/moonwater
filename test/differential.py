@@ -39531,6 +39531,285 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     return tls_fuzz_run("dhcp", "dhcp", source, 1500)
 
 
+def harness_term_fuzz(argv):
+    """Coverage-guided libFuzzer over the terminal emulator, src/canvas/term.c.
+
+    What a program writes to a terminal is hostile input: the escape parser,
+    the CSI and OSC state machine, UTF-8, wide cells, the scroll region, the
+    alternate screen, insert and delete, REP, the resize and the keys and
+    pointer it answers. The unit is the terminal fixture of lane_term (the
+    same includes and the same window page) built hosted with ASan/UBSan: the
+    first eight bytes of an input are the grid (1 to 300 columns, which
+    crosses the 256-cell stride, and 1 to 60 rows), how the stream is cut into
+    writes (1 to 64 bytes, so every sequence is split at every point) and a
+    tape of what happens between writes (a resize, a key, a modified key,
+    focus, a pointer report, line editing on or off, Enter); the rest is the
+    stream. After every write the cursor must be on the grid and no row may be
+    longer than a line is. The emulator is lib.util.c's own libc, so every
+    symbol but the entry point is made local before the link, and the
+    sanitizer runs over the emulator's own arrays.
+
+    Not covered: KERNEL_MODE (the printk path, where a record begins by
+    resetting the parser) is the same file but is not built hosted; MSan.
+
+        python3 test/differential.py --harness term_fuzz
+    """
+    del argv
+    clang = shutil.which("clang")
+    objcopy = shutil.which("objcopy")
+    if not clang or not objcopy:
+        print("term fuzz: NOT RUN -- no clang or objcopy")
+        return 2
+    sanitize, environment, san_label = tls_fuzz_sanitize_config(clang)
+    if sanitize is None:
+        print("term fuzz: NOT RUN -- %s" % san_label)
+        return 2
+    source = r"""
+#include "src/lib.util.c"
+#include "src/moonwater/spark.c"
+#include "src/canvas/window.c"
+#include "src/canvas/term.c"
+#include "src/sh/pty.c"
+#define BOWL_DEFAULT_PATH "/fixture/bin"
+#include "src/canvas/terminfo.c"
+static fn host_terminal_opening() {}
+static bipolar shell_exec_file(string_address path, string_address address_to arguments,
+                               positive count, string_address address_to environment)
+{ (void)path; (void)arguments; (void)count; (void)environment; return -1; }
+static fn kill_name(positive number, p8 address_to into) { positive_into_string(into, number); }
+static fn bowl_session_prepare(string_address home, string_address runtime)
+{ (void)home; (void)runtime; }
+static string_address address_to bowl_environment(string_address address_to inherited)
+{ return inherited; }
+#include "src/canvas/screen.c"
+#define TERMINAL_FIXTURE_OUTPUT 16384
+#define TERMINAL_FIXTURE_BELL
+#define SHARED_terminal_fixture
+#include "test/checks.c"
+#undef SHARED_terminal_fixture
+
+int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size)
+{
+        if (size < 8)
+                return 0;
+        unsigned int columns = 1 + (data[0] | (data[1] & 1) << 8) % 300;
+        unsigned int rows = 1 + data[2] % 60;
+        unsigned long chunk = 1 + data[3] % 64;
+        const unsigned char *tape = data + 4;
+        unsigned long at = 8, step = 0;
+
+        terminal_fixture_start(columns, rows);
+        while (at < size) {
+                unsigned long n = size - at < chunk ? size - at : chunk;
+
+                term_bytes(data + at, n);
+                at += n;
+                unsigned int op = tape[step & 3] >> (2 * ((step >> 2) & 3));
+                step++;
+                switch (op & 7) {
+                case 1: {
+                        window->columns = 1 + (tape[0] ^ (unsigned)at * 7) % 120;
+                        window->rows = 1 + (tape[1] ^ (unsigned)at * 13) % 40;
+                        regrid(-1);
+                        break; }
+                case 2: term_key_modified('a' + (op >> 3) % 26, 0, (op >> 3) & 7); break;
+                case 3: term_key_modified(0, 100 + (op >> 3) % 20, (op >> 3) & 7); break;
+                case 4: term_focus((op >> 3) & 1); break;
+                case 5: term_pointer((op >> 3) % 100, (op >> 4) % 50, (op >> 5) & 3, (op >> 2) & 7); break;
+                case 6: term_line_editing((op >> 3) & 1); break;
+                case 7: term_key('\r', 0); break;
+                }
+                if (row >= ROWS || column > COLUMNS)
+                        __builtin_trap();
+                for (unsigned int r = 0; r < ROWS; r++)
+                        if (*row_length(r) > GRID_STRIDE)
+                                __builtin_trap();
+        }
+        return 0;
+}
+b32 moonwater_program_main(void) { return 0; }
+"""
+    seeds = {
+        "sgr": b"\x50\x00\x18\x20\0\0\0\0\x1b[1;31;48;5;200mhi\x1b[0m\x1b[38;2;1;2;3mx\n",
+        "cursor": b"\x50\x00\x18\x05\0\0\0\0\x1b[2J\x1b[10;20Hab\x1b[5A\x1b[3B\x1b[4C\x1b[2D\x1b[s\x1b[u",
+        "region": b"\x50\x00\x18\x07\0\0\0\0\x1b[5;10r\x1b[10;1H\n\n\n\x1bM\x1bM\x1b[2L\x1b[3M\x1b[r",
+        "alt": b"\x50\x00\x18\x09\0\0\0\0\x1b[?1049h\x1b[?25l\x1b[H\x1b[2Jfull\x1b[?1049l\x1b[?1000h\x1b[?1006h",
+        "osc": b"\x50\x00\x18\x03\0\0\0\0\x1b]0;title\x07\x1b]8;;http://x\x1b\\\x1b]4;1;rgb:ff/00/00\x07\x1b]104\x07",
+        "utf8": b"\x50\x00\x18\x0b\0\0\0\0\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e\xf0\x9f\x98\x80e\xcc\x81\xc3(",
+        "edit": b"\x50\x00\x18\x0d\0\0\0\0abcdef\x1b[3D\x1b[2@XY\x1b[2P\x1b[K\x1b[1K\x1b[2X\x1b[3b\tx\x1b[I\x1b[Z",
+        "tiny": b"\x01\x00\x00\x02\x01\x01\x01\x01wide\xe6\x97\xa5\x1b[2J\x1b[10;10Hx\n\n\n",
+        "wide": b"\x2c\x01\x3b\x10\x05\x04\x03\x02" + b"A" * 300 + b"\xe6\x97\xa5" * 40 + b"\x1b[300C\x1b[1;300Hz",
+        "resize": b"\x50\x00\x18\x20\x01\x01\x01\x01" + b"line\n" * 40 + b"\x1b[?1049hq\x1b[?1049l",
+    }
+    return fuzz_lib_run("term", "term-fuzz", source, seeds, 4096)
+
+
+def fuzz_lib_run(label, tally, source, seeds, max_len, lib=True):
+    """Build a hosted unit that includes lib.util.c as a libFuzzer target.
+
+    lib.util.c carries its own libc (memcpy, malloc, exit, main), which would
+    replace the sanitizer runtime's, so the unit is compiled with main
+    renamed and every symbol but LLVMFuzzerTestOneInput made local before
+    the link: the sanitizers then run over the code's own arrays and the
+    runtime keeps the real libc. Returns 2 (NOT RUN) without clang, objcopy
+    or libFuzzer, 1 on a sanitizer report or a trap."""
+    clang = shutil.which("clang")
+    objcopy = shutil.which("objcopy")
+    if not clang or not objcopy:
+        print("%s fuzz: NOT RUN -- no clang or objcopy" % label)
+        return 2
+    sanitize, environment, san_label = tls_fuzz_sanitize_config(clang)
+    if sanitize is None:
+        print("%s fuzz: NOT RUN -- %s" % (label, san_label))
+        return 2
+    runs, seconds, timeout = tls_fuzz_budget()
+    with tempfile.TemporaryDirectory(prefix=tally + "-") as temporary:
+        work = Path(temporary)
+        unit = work / (tally + ".c")
+        unit.write_text(source)
+        flags = [clang, "-O1", "-g", "-std=gnu11", "-w", "-fno-omit-frame-pointer",
+                 "-fno-sanitize-recover=all", "-I", str(HARNESS_ROOT)]
+        if lib:
+            flags.append("-Dmain=fuzz_unused_main")
+        built = subprocess.run(flags + [sanitize.replace("fuzzer,", "fuzzer-no-link,"),
+                                        "-c", str(unit), "-o", str(work / "a.o")],
+                               capture_output=True, text=True, cwd=HARNESS_ROOT)
+        if built.returncode:
+            print("  FAIL " + label + " fuzz lift does not build:\n" + built.stderr[-2000:])
+            write_tally(tally, 0, 1)
+            return 1
+        local = subprocess.run([objcopy] + (["--keep-global-symbol=LLVMFuzzerTestOneInput"] if lib else [])
+                               + [str(work / "a.o"), str(work / "b.o")],
+                               capture_output=True, text=True)
+        linked = subprocess.run([clang, sanitize, str(work / "b.o"), "-o", str(work / tally)],
+                                capture_output=True, text=True)
+        if local.returncode or linked.returncode:
+            print("  FAIL " + label + " fuzz does not link:\n" + (local.stderr + linked.stderr)[-2000:])
+            write_tally(tally, 0, 1)
+            return 1
+        corpus = work / "corpus"
+        corpus.mkdir()
+        for name, data in seeds.items():
+            (corpus / name).write_bytes(data)
+        ran = subprocess.run(
+            [str(work / tally), str(corpus), "-seed=1", "-runs=%d" % runs,
+             "-max_total_time=%d" % seconds, "-max_len=%d" % max_len,
+             "-artifact_prefix=" + str(work) + "/", "-print_final_stats=0"],
+            capture_output=True, text=True, env=environment, timeout=timeout)
+        ok = ran.returncode == 0 and "ERROR" not in ran.stderr and \
+            "Sanitizer" not in ran.stderr and "runtime error" not in ran.stderr
+        if not ok:
+            print("  FAIL " + label + " libFuzzer:\n" + (ran.stderr or ran.stdout)[-3000:])
+            write_tally(tally, 0, 1)
+            return 1
+        print("  " + label + " fuzz: %d seeds, %s (-runs=%d -max_total_time=%d) clean"
+              % (len(seeds), san_label, runs, seconds))
+        write_tally(tally, 1, 1)
+    return 0
+
+
+def harness_bowl_json_fuzz(argv):
+    """Coverage-guided libFuzzer over bowl's JSON reader (the OCI layout).
+
+    bowl_json_whole, _member, _next, _text, _says and _count read Fedora's
+    index.json and manifest. With every bootstrap download pinned by digest
+    that input is the release's own bytes, so this is defence in depth, not
+    a reachable hole; it is here because a reader that walks attacker-shaped
+    bytes at 32 levels of nesting should be shown to stay inside them. Each
+    input is copied into a block exactly its length (ASan sees one byte
+    over) and walked every way the layout reader walks it: whole, every
+    member name the reader asks for, each array to its end with the cursor,
+    the text and number readers at every element. A document the reader calls
+    whole must be one JSON parses (the reverse is not asked: the reader
+    refuses non-ASCII and deep nesting on purpose).
+
+        python3 test/differential.py --harness bowl_json_fuzz
+    """
+    del argv
+    bowl = (HARNESS_ROOT / "src/bowl.c").read_text()
+    lift = bowl[bowl.index("#define BOWL_JSON_DEPTH 32"):
+                bowl.index("/* ---- An OCI image layout, unpacked into a root. ---- */")]
+    source = r"""
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <stdbool.h>
+typedef uint8_t p8;
+typedef uint64_t p64;
+typedef unsigned long positive;
+typedef int b32;
+typedef const char *string_address;
+#define address_to *
+#define address_of &
+#define end 0
+#define null 0
+#define array_count(a) (sizeof(a) / sizeof((a)[0]))
+#define string_length strlen
+#define memory_compare memcmp
+#define string_equals(a, b) (!strcmp((const char *)(a), (const char *)(b)))
+#define string_first_of(set, c) (strchr((set), (c)))
+static bool byte_is_hexadecimal(int c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); }
+static positive string_digits_hexadecimal_escape_max(string_address at, positive most, positive *taken)
+{
+        positive value = 0, n = 0;
+        for (; n < most && byte_is_hexadecimal(at[n]); n++)
+                value = value * 16 + (positive)(at[n] <= '9' ? at[n] - '0' : (at[n] | 32) - 'a' + 10);
+        *taken = n;
+        return value;
+}
+""" + lift + r"""
+int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size)
+{
+        char *copy = (char *)malloc(size ? size : 1);
+        string_address stop;
+        static const char *names[] = {"schemaVersion", "mediaType", "manifests",
+                                      "digest", "size", "layers", "config",
+                                      "annotations", "platform", "os", "architecture", "a", ""};
+
+        memcpy(copy, data, size);
+        stop = copy + size;
+        bool whole = bowl_json_whole(copy, stop);
+        for (unsigned int n = 0; n < sizeof(names) / sizeof(names[0]); n++) {
+                string_address value = bowl_json_member(copy, stop, names[n]);
+                p8 text[64];
+                p64 count;
+
+                if (!value)
+                        continue;
+                if (value < copy || value > stop)
+                        __builtin_trap();
+                bowl_json_text(value, stop, text, sizeof(text));
+                bowl_json_count(value, stop, &count);
+                bowl_json_says(copy, stop, names[n], "sha256");
+                string_address cursor = value;
+                for (unsigned int guard = 0; guard < 4096; guard++) {
+                        string_address element = bowl_json_next(&cursor, stop);
+
+                        if (!element)
+                                break;
+                        if (element < copy || element > stop)
+                                __builtin_trap();
+                        bowl_json_member(element, stop, "digest");
+                        bowl_json_text(element, stop, text, sizeof(text));
+                }
+        }
+        if (whole && !size)
+                __builtin_trap();
+        free(copy);
+        return 0;
+}
+"""
+    seeds = {
+        "index": b'{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:f1e66cdd6eff2c9ccad192f8865af9be6d69b46b3f13329d2975a2d61a1296c5","size":572,"annotations":{"org.opencontainers.image.ref.name":"fedora:44"}}]}',
+        "manifest": b'{"config":{"mediaType":"x","digest":"sha256:00","size":1},"layers":[{"digest":"sha256:ab","size":12345},{"digest":"sha256:cd","size":6}]}',
+        "escapes": b'{"a":"\\u0041\\\\\\/\\"","b":[1,[2,{"c":[]}],{}],"d":{"e":{"f":{}}}}',
+        "deep": b"[" * 40 + b"]" * 40,
+        "bad": b'{"a":"\\u00zz","digest":"\x01","size":99999999999999999999999}',
+    }
+    return fuzz_lib_run("bowl json", "bowl-json-fuzz", source, seeds, 8192, lib=False)
+
+
 def harness_terminfo_install(argv):
     """The terminfo blob is written into a directory, never through a name.
 
@@ -52917,6 +53196,21 @@ def harness_security_hygiene(argv):
     checks(not twice, "differential.py: registered twice: " + ", ".join(twice))
     for name in security:
         checks("--harness " + name in run, "test/run: no lane asks for --harness " + name)
+    #   The terminal emulator's and bowl's JSON reader's coverage-guided targets,
+    #   and the supply chain of CI itself: an action is a commit, and a tool
+    #   downloaded there is checked against a digest before it runs.
+    for name in ("term_fuzz", "bowl_json_fuzz"):
+        checks(name in HARNESS_CHECKS, "differential.py: %s is not registered" % name)
+        checks("--harness " + name in run, "test/run: no lane asks for --harness " + name)
+        checks(name + ": skipped (soft)" in run, "test/run: no soft skip for " + name)
+    workflow = (HARNESS_ROOT / ".github/workflows/ci.yml").read_text()
+    for used in re.findall(r"^\s*-?\s*uses:\s*(\S+)", workflow, re.M):
+        checks(re.search(r"@[0-9a-f]{40}$", used) is not None,
+               "ci.yml: %s is a moving tag, not a commit" % used)
+    checks(not re.search(r"curl[^\n]*\|\s*(tar|sh|bash|sudo)", workflow),
+           "ci.yml: a download is piped into a command with no digest check")
+    checks("sha256sum -c" in workflow and "SHELLCHECK_SHA256" in workflow,
+           "ci.yml: the shellcheck download is not checked against a digest")
     for name in ("tls_der_fuzz", "tls_hs_fuzz", "pathname_race", "dhcp_fuzz",
                  "sntp_fuzz", "dns_fuzz", "netlink_fuzz", "http_fuzz", "wifi_eapol_fuzz",
                  "wifi_scan_fuzz"):
@@ -61920,6 +62214,8 @@ HARNESS_CHECKS = {
     "terminfo_install": harness_terminfo_install,
     "dhcp_packets": harness_dhcp_packets,
     "dhcp_fuzz": harness_dhcp_fuzz,
+    "term_fuzz": harness_term_fuzz,
+    "bowl_json_fuzz": harness_bowl_json_fuzz,
     "term_streams": harness_term_streams,
     "console_queue": harness_console_queue,
     "sort_spill_names": harness_sort_spill_names,

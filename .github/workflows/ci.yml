@@ -22,13 +22,14 @@ on:
 
 env:
   SHELLCHECK_VERSION: "0.10.0"
+  SHELLCHECK_SHA256: "6c881ab0698e4e6ea235245f22832860544f17ba386442fe7e9d629f8cbedf87"
 
 jobs:
   scripts:
     name: Scripts (syntax, shellcheck, dash)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install dash
         run: sudo apt-get update && sudo apt-get install -y dash
@@ -37,9 +38,14 @@ jobs:
       # compatibility checks fire, so an unpinned one makes CI disagree with
       # whatever a contributor has installed locally.
       - name: Install shellcheck ${{ env.SHELLCHECK_VERSION }}
+        # The tarball is checked against the digest recorded here before it
+        # is unpacked; moving SHELLCHECK_VERSION means recording the new
+        # tarball's SHA-256 beside it.
         run: |
-          curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz" \
-            | tar -xJ --strip-components=1 -C /usr/local/bin "shellcheck-v${SHELLCHECK_VERSION}/shellcheck"
+          curl -fsSL -o shellcheck.tar.xz "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          echo "${SHELLCHECK_SHA256}  shellcheck.tar.xz" | sha256sum -c -
+          tar -xJ --strip-components=1 -C /usr/local/bin "shellcheck-v${SHELLCHECK_VERSION}/shellcheck" < shellcheck.tar.xz
+          rm -f shellcheck.tar.xz
           shellcheck --version
 
       - name: Parse POSIX scripts with dash
@@ -72,7 +78,7 @@ jobs:
     name: Every test (sh test/run)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # dash is what the shell suite compares against, qemu and the two cross
       # compilers are what runs the assembly in library.c on the machines this
@@ -97,7 +103,7 @@ jobs:
     name: Security lanes (net, machine, tls_chains)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # Cross compilers + qemu-user let freestanding net/machine exercise
       # x86_64, arm64, and riscv64. A missing arch is NOT RUN (lane exit 2 →
@@ -145,7 +151,7 @@ jobs:
     name: The library, the probes and the shell under clang
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install dash
         run: sudo apt-get update && sudo apt-get install -y dash clang
