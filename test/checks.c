@@ -44,6 +44,27 @@
         against something test/run does not link.
 */
 
+/*
+        The one macro every section may use, so it stands ahead of the chain:
+        BENCH_ALTERNATE times two runs in the order a trial asks for. An even
+        trial takes first then second, an odd one second then first, so
+        neither side always inherits the warm cache or the far end of a
+        drifting clock.
+*/
+#define BENCH_ALTERNATE(trial, first, first_run, second, second_run)          \
+        do {                                                                  \
+                if ((trial) & 1)                                              \
+                {                                                             \
+                        (second) = (second_run);                              \
+                        (first) = (first_run);                                \
+                }                                                             \
+                else                                                          \
+                {                                                             \
+                        (first) = (first_run);                                \
+                        (second) = (second_run);                              \
+                }                                                             \
+        } while (0)
+
 #if defined(SHARED_sizes)
 /* Literal arguments exercise compiler-owned specializations. The scan checks
    keep their twenty-size function bands to bound compiler resource use. */
@@ -5947,18 +5968,8 @@ static fn bench_report(string_address name, bench_work work, positive tries,
         once here.
 */
 #define BENCH_BOTH_ORDERS(trial, assembly, former, ...)                       \
-        do {                                                                  \
-                if ((trial) & 1)                                              \
-                {                                                             \
-                        (assembly) = run(true, __VA_ARGS__);                  \
-                        (former) = run(false, __VA_ARGS__);                   \
-                }                                                             \
-                else                                                          \
-                {                                                             \
-                        (former) = run(false, __VA_ARGS__);                   \
-                        (assembly) = run(true, __VA_ARGS__);                  \
-                }                                                             \
-        } while (0)
+        BENCH_ALTERNATE(trial, former, run(false, __VA_ARGS__), assembly,     \
+                        run(true, __VA_ARGS__))
 
 static fn order(positive address_to values, positive count)
 {
@@ -90188,16 +90199,10 @@ static fn row(string_address name, positive size, positive ratio)
                 {                                                             \
                         p64 floor_time;                                        \
                         p64 candidate_time;                                    \
-                        if (trial & 1)                                         \
-                        {                                                     \
-                                candidate_time = TIMED_ONCE(rounds, candidate_body); \
-                                floor_time = TIMED_ONCE(rounds, floor_body);   \
-                        }                                                     \
-                        else                                                  \
-                        {                                                     \
-                                floor_time = TIMED_ONCE(rounds, floor_body);   \
-                                candidate_time = TIMED_ONCE(rounds, candidate_body); \
-                        }                                                     \
+                        BENCH_ALTERNATE(trial, floor_time,                    \
+                                        TIMED_ONCE(rounds, floor_body),       \
+                                        candidate_time,                       \
+                                        TIMED_ONCE(rounds, candidate_body));  \
                         ratios[trial] = (positive)(candidate_time * 10000 /   \
                                                    (floor_time ? floor_time : 1)); \
                 }                                                             \
@@ -90817,16 +90822,8 @@ b32 main(void)
                 for (positive trial = 0; trial < TRIES; trial++)
                 {
                         p64 former, assembly;
-                        if (trial & 1)
-                        {
-                                assembly = run(true, size, rounds);
-                                former = run(false, size, rounds);
-                        }
-                        else
-                        {
-                                former = run(false, size, rounds);
-                                assembly = run(true, size, rounds);
-                        }
+                        BENCH_BOTH_ORDERS(trial, assembly, former,
+                                          size, rounds);
                         ratios[trial] = (positive)(assembly * 10000 / (former ? former : 1));
                 }
                 order(ratios, TRIES);
@@ -90977,16 +90974,8 @@ b32 main(void)
                                 for (positive trial = 0; trial < TRIES; trial++)
                                 {
                                         p64 former, assembly;
-                                        if (trial & 1)
-                                        {
-                                                assembly = run(true, size, rounds, json);
-                                                former = run(false, size, rounds, json);
-                                        }
-                                        else
-                                        {
-                                                former = run(false, size, rounds, json);
-                                                assembly = run(true, size, rounds, json);
-                                        }
+                                        BENCH_BOTH_ORDERS(trial, assembly, former,
+                                                          size, rounds, json);
                                         ratios[trial] = assembly * 10000 / (former ? former : 1);
                                 }
                                 order(ratios, TRIES);
@@ -91111,16 +91100,8 @@ b32 main(void)
                         for (positive trial = 0; trial < TRIES; trial++)
                         {
                                 p64 before, after;
-                                if (trial & 1)
-                                {
-                                        after = run(true, size, rounds);
-                                        before = run(false, size, rounds);
-                                }
-                                else
-                                {
-                                        before = run(false, size, rounds);
-                                        after = run(true, size, rounds);
-                                }
+                                BENCH_BOTH_ORDERS(trial, after, before,
+                                                  size, rounds);
                                 ratios[trial] = after * 10000 / (before ? before : 1);
                         }
                         order(ratios, TRIES);
@@ -91438,16 +91419,8 @@ static fn row(string_address name, positive width, p8 prefix)
                 p64 got_former;
                 p64 got_assembly;
 
-                if (t & 1)
-                {
-                        got_assembly = assembly_once(width, prefix);
-                        got_former = former_once(width, prefix);
-                }
-                else
-                {
-                        got_former = former_once(width, prefix);
-                        got_assembly = assembly_once(width, prefix);
-                }
+                BENCH_ALTERNATE(t, got_former, former_once(width, prefix),
+                                got_assembly, assembly_once(width, prefix));
 
                 if (got_former < former)
                         former = got_former;
@@ -91716,16 +91689,8 @@ static fn fixed_row(string_address name, fixed_parser scalar,
                 p64 scalar_ticks;
                 p64 assembly_ticks;
 
-                if (trial & 1)
-                {
-                        assembly_ticks = run_fixed(assembly);
-                        scalar_ticks = run_fixed(scalar);
-                }
-                else
-                {
-                        scalar_ticks = run_fixed(scalar);
-                        assembly_ticks = run_fixed(assembly);
-                }
+                BENCH_ALTERNATE(trial, scalar_ticks, run_fixed(scalar),
+                                assembly_ticks, run_fixed(assembly));
 
                 scalar_samples[trial] = scalar_ticks;
                 assembly_samples[trial] = assembly_ticks;
@@ -91753,16 +91718,9 @@ static fn base_row(string_address name, base_parser scalar, positive base,
                 p64 scalar_ticks;
                 p64 assembly_ticks;
 
-                if (trial & 1)
-                {
-                        assembly_ticks = run_base(string_digits_base_max, base);
-                        scalar_ticks = run_base(scalar, base);
-                }
-                else
-                {
-                        scalar_ticks = run_base(scalar, base);
-                        assembly_ticks = run_base(string_digits_base_max, base);
-                }
+                BENCH_ALTERNATE(trial,
+                                scalar_ticks, run_base(scalar, base),
+                                assembly_ticks, run_base(string_digits_base_max, base));
 
                 scalar_samples[trial] = scalar_ticks;
                 assembly_samples[trial] = assembly_ticks;
@@ -91961,16 +91919,8 @@ static fn row(string_address name, positive width)
                 p64 got_former;
                 p64 got_assembly;
 
-                if (t & 1)
-                {
-                        got_assembly = assembly_once(width);
-                        got_former = former_once(width);
-                }
-                else
-                {
-                        got_former = former_once(width);
-                        got_assembly = assembly_once(width);
-                }
+                BENCH_ALTERNATE(t, got_former, former_once(width),
+                                got_assembly, assembly_once(width));
 
                 if (got_former < former)
                         former = got_former;
@@ -92182,20 +92132,13 @@ static fn row(string_address name, positive shape, bool writer_form)
                 p64 got_former;
                 p64 got_assembly;
 
-                if (t & 1)
-                {
-                        got_assembly = writer_form ? writer_once(shape, true)
-                                                   : buffer_once(shape, true);
-                        got_former = writer_form ? writer_once(shape, false)
-                                                 : buffer_once(shape, false);
-                }
-                else
-                {
-                        got_former = writer_form ? writer_once(shape, false)
-                                                 : buffer_once(shape, false);
-                        got_assembly = writer_form ? writer_once(shape, true)
-                                                   : buffer_once(shape, true);
-                }
+                BENCH_ALTERNATE(t,
+                                got_former, writer_form
+                                                ? writer_once(shape, false)
+                                                : buffer_once(shape, false),
+                                got_assembly, writer_form
+                                                  ? writer_once(shape, true)
+                                                  : buffer_once(shape, true));
 
                 if (got_former < former)
                         former = got_former;
@@ -92384,16 +92327,8 @@ static fn row(string_address name, bool binary, positive shape)
         for (positive t = 0; t < TRIES; t++)
         {
                 p64 got_former, got_assembly;
-                if (t & 1)
-                {
-                        got_assembly = run_once(true, binary, shape);
-                        got_former = run_once(false, binary, shape);
-                }
-                else
-                {
-                        got_former = run_once(false, binary, shape);
-                        got_assembly = run_once(true, binary, shape);
-                }
+                BENCH_ALTERNATE(t, got_former, run_once(false, binary, shape),
+                                got_assembly, run_once(true, binary, shape));
 
                 if (got_former < former)
                         former = got_former;
@@ -92581,16 +92516,8 @@ static fn string_row(positive length)
                 p64 former;
                 p64 assembly;
 
-                if (trial & 1)
-                {
-                        assembly = run_string(true, rounds);
-                        former = run_string(false, rounds);
-                }
-                else
-                {
-                        former = run_string(false, rounds);
-                        assembly = run_string(true, rounds);
-                }
+                BENCH_ALTERNATE(trial, former, run_string(false, rounds),
+                                assembly, run_string(true, rounds));
 
                 ratios[trial] = (positive)(assembly * 10000 /
                                             (former ? former : 1));
@@ -93832,28 +93759,12 @@ static fn row(positive count, positive offset)
         {
                 p64 ours, floor;
 
-                if (trial & 1)
-                {
-                        floor = run(1, count, rounds, offset);
-                        ours = run(0, count, rounds, offset);
-                }
-                else
-                {
-                        ours = run(0, count, rounds, offset);
-                        floor = run(1, count, rounds, offset);
-                }
+                BENCH_ALTERNATE(trial, ours, run(0, count, rounds, offset),
+                                floor, run(1, count, rounds, offset));
 
                 scalar[trial] = (positive)(ours * 10000 / max(floor, 1ull));
-                if (trial & 1)
-                {
-                        floor = run(2, count, rounds, offset);
-                        ours = run(0, count, rounds, offset);
-                }
-                else
-                {
-                        ours = run(0, count, rounds, offset);
-                        floor = run(2, count, rounds, offset);
-                }
+                BENCH_ALTERNATE(trial, ours, run(0, count, rounds, offset),
+                                floor, run(2, count, rounds, offset));
                 bulk[trial] = (positive)(ours * 10000 / max(floor, 1ull));
         }
 
@@ -94003,29 +93914,13 @@ static fn row(positive count, positive offset)
         {
                 p64 ours, floor;
 
-                if (trial & 1)
-                {
-                        floor = run(1, count, rounds, offset);
-                        ours = run(0, count, rounds, offset);
-                }
-                else
-                {
-                        ours = run(0, count, rounds, offset);
-                        floor = run(1, count, rounds, offset);
-                }
+                BENCH_ALTERNATE(trial, ours, run(0, count, rounds, offset),
+                                floor, run(1, count, rounds, offset));
 
                 scalar[trial] = (positive)(ours * 10000 / max(floor, 1ull));
 
-                if (trial & 1)
-                {
-                        floor = run(2, count, rounds, offset);
-                        ours = run(0, count, rounds, offset);
-                }
-                else
-                {
-                        ours = run(0, count, rounds, offset);
-                        floor = run(2, count, rounds, offset);
-                }
+                BENCH_ALTERNATE(trial, ours, run(0, count, rounds, offset),
+                                floor, run(2, count, rounds, offset));
 
                 bulk[trial] = (positive)(ours * 10000 / max(floor, 1ull));
         }
@@ -94221,16 +94116,9 @@ static fn path_row(string_address label, positive operation,
                 p64 one;
                 p64 two;
 
-                if (t & 1)
-                {
-                        two = path_run(true, operation, directory, name, path, rounds);
-                        one = path_run(false, operation, directory, name, path, rounds);
-                }
-                else
-                {
-                        one = path_run(false, operation, directory, name, path, rounds);
-                        two = path_run(true, operation, directory, name, path, rounds);
-                }
+                BENCH_ALTERNATE(t,
+                                one, path_run(false, operation, directory, name, path, rounds),
+                                two, path_run(true, operation, directory, name, path, rounds));
 
                 if (one < former)
                         former = one;
@@ -94415,16 +94303,8 @@ static fn primitive_row(positive size)
         {
                 p64 one, two;
 
-                if (trial & 1)
-                {
-                        two = primitive_run(true, size, rounds);
-                        one = primitive_run(false, size, rounds);
-                }
-                else
-                {
-                        one = primitive_run(false, size, rounds);
-                        two = primitive_run(true, size, rounds);
-                }
+                BENCH_ALTERNATE(trial, one, primitive_run(false, size, rounds),
+                                two, primitive_run(true, size, rounds));
 
                 if (one < former) former = one;
                 if (two < assembly) assembly = two;
@@ -94448,16 +94328,8 @@ static fn rev_row(positive size)
         {
                 p64 one, two;
 
-                if (trial & 1)
-                {
-                        two = rev_run(true, size, rounds);
-                        one = rev_run(false, size, rounds);
-                }
-                else
-                {
-                        one = rev_run(false, size, rounds);
-                        two = rev_run(true, size, rounds);
-                }
+                BENCH_ALTERNATE(trial, one, rev_run(false, size, rounds),
+                                two, rev_run(true, size, rounds));
 
                 if (one < former) former = one;
                 if (two < folded) folded = two;
@@ -94611,24 +94483,13 @@ static fn row(string_address name, bool string_form, positive shape,
                 p64 one;
                 p64 two;
 
-                if (trial & 1)
-                {
-                        two = string_form
-                                  ? string_once(true, shape, width, left, rounds)
-                                  : raw_once(true, shape, width, left, rounds);
-                        one = string_form
-                                  ? string_once(false, shape, width, left, rounds)
-                                  : raw_once(false, shape, width, left, rounds);
-                }
-                else
-                {
-                        one = string_form
-                                  ? string_once(false, shape, width, left, rounds)
-                                  : raw_once(false, shape, width, left, rounds);
-                        two = string_form
-                                  ? string_once(true, shape, width, left, rounds)
-                                  : raw_once(true, shape, width, left, rounds);
-                }
+                BENCH_ALTERNATE(trial,
+                                one, string_form
+                                         ? string_once(false, shape, width, left, rounds)
+                                         : raw_once(false, shape, width, left, rounds),
+                                two, string_form
+                                         ? string_once(true, shape, width, left, rounds)
+                                         : raw_once(true, shape, width, left, rounds));
 
                 if (one < former)
                         former = one;
@@ -94928,28 +94789,15 @@ static fn row(string_address name, positive length, bool hold_equal,
                 p64 former;
                 p64 assembly;
 
-                if (t & 1)
-                {
-                        assembly = byte ? byte_once(true)
-                                        : (flush ? flush_once(true)
-                                                 : put_once(length, hold_equal, true,
-                                                            rounds, pending));
-                        former = byte ? byte_once(false)
-                                      : (flush ? flush_once(false)
-                                               : put_once(length, hold_equal, false,
-                                                          rounds, pending));
-                }
-                else
-                {
-                        former = byte ? byte_once(false)
-                                      : (flush ? flush_once(false)
-                                               : put_once(length, hold_equal, false,
-                                                          rounds, pending));
-                        assembly = byte ? byte_once(true)
-                                        : (flush ? flush_once(true)
-                                                 : put_once(length, hold_equal, true,
-                                                            rounds, pending));
-                }
+                BENCH_ALTERNATE(t,
+                                former, byte ? byte_once(false)
+                                             : (flush ? flush_once(false)
+                                                      : put_once(length, hold_equal, false,
+                                                                 rounds, pending)),
+                                assembly, byte ? byte_once(true)
+                                               : (flush ? flush_once(true)
+                                                        : put_once(length, hold_equal, true,
+                                                                   rounds, pending)));
 
                 ratios[t] = (positive)(assembly * 10000 / (former ? former : 1));
         }
@@ -94972,16 +94820,8 @@ static fn log_row(string_address name, positive length)
                 p64 former;
                 p64 assembly;
 
-                if (t & 1)
-                {
-                        assembly = log_once(length, true);
-                        former = log_once(length, false);
-                }
-                else
-                {
-                        former = log_once(length, false);
-                        assembly = log_once(length, true);
-                }
+                BENCH_ALTERNATE(t, former, log_once(length, false),
+                                assembly, log_once(length, true));
 
                 ratios[t] = (positive)(assembly * 10000 / (former ? former : 1));
         }
@@ -95396,16 +95236,7 @@ static fn row(string_address name, p64 (*run)(bool))
                 p64 former;
                 p64 folded;
 
-                if (trial & 1)
-                {
-                        folded = run(true);
-                        former = run(false);
-                }
-                else
-                {
-                        former = run(false);
-                        folded = run(true);
-                }
+                BENCH_ALTERNATE(trial, former, run(false), folded, run(true));
 
                 ratios[trial] = (positive)(folded * 10000 /
                                             (former ? former : 1));
@@ -97048,16 +96879,8 @@ static void row(string_address name, positive length, positive columns, bool wra
                 p64 former;
                 p64 shared;
 
-                if (trial & 1)
-                {
-                        shared = run(true, length, columns, wrap, rounds);
-                        former = run(false, length, columns, wrap, rounds);
-                }
-                else
-                {
-                        former = run(false, length, columns, wrap, rounds);
-                        shared = run(true, length, columns, wrap, rounds);
-                }
+                BENCH_BOTH_ORDERS(trial, shared, former,
+                                  length, columns, wrap, rounds);
 
                 ratios[trial] = (positive)(shared * 10000 / (former ? former : 1));
         }
@@ -97611,16 +97434,8 @@ static fn row(string_address name, positive length, string_address wanted,
                 p64 former;
                 p64 assembly;
 
-                if (trial & 1)
-                {
-                        assembly = run(true, length, size, rounds);
-                        former = run(false, length, size, rounds);
-                }
-                else
-                {
-                        former = run(false, length, size, rounds);
-                        assembly = run(true, length, size, rounds);
-                }
+                BENCH_BOTH_ORDERS(trial, assembly, former,
+                                  length, size, rounds);
 
                 ratios[trial] = (positive)(assembly * 10000 /
                                              (former ? former : 1));
@@ -97779,16 +97594,8 @@ static fn row(string_address name, string_address wanted, bool icase,
                 p64 current;
                 p64 prepared_time;
 
-                if (trial & 1)
-                {
-                        prepared_time = run(true, ROOM, address_of search, rounds);
-                        current = run(false, ROOM, address_of search, rounds);
-                }
-                else
-                {
-                        current = run(false, ROOM, address_of search, rounds);
-                        prepared_time = run(true, ROOM, address_of search, rounds);
-                }
+                BENCH_BOTH_ORDERS(trial, prepared_time, current,
+                                  ROOM, address_of search, rounds);
 
                 ratios[trial] = (positive)(prepared_time * 10000 /
                                             (current ? current : 1));
@@ -98016,16 +97823,7 @@ static fn gap(void)
                 p64 floor_time;
                 p64 fused_time;
 
-                if (trial & 1)
-                {
-                        fused_time = run(3);
-                        floor_time = run(0);
-                }
-                else
-                {
-                        floor_time = run(0);
-                        fused_time = run(3);
-                }
+                BENCH_ALTERNATE(trial, floor_time, run(0), fused_time, run(3));
 
                 ratios[trial] = (positive)(fused_time * 10000 /
                                             (floor_time ? floor_time : 1));
