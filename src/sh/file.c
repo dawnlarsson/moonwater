@@ -49792,15 +49792,27 @@ static bool date_batch(string_address path, string_address format, b64 now,
         static byte_store lines;
         bool ok = true;
         bool ended = false;
-        positive held = 0;
+        positive begin = 0; // where the first line not yet answered starts
+        positive held = 0;  // where what has been read ends
 
         lines.used = 0;
-        while (!ended || held)
+        while (!ended || held > begin)
         {
-                p8 address_to stop = held ? memory_first_of(lines.bytes, '\n', held) : null;
+                p8 address_to stop = held > begin
+                                         ? memory_first_of(lines.bytes + begin, '\n', held - begin)
+                                         : null;
 
                 if (!stop && !ended)
                 {
+                        // What is left of a line goes to the front only when
+                        // more is to be read, so a line costs its own length
+                        // and not everything read behind it.
+                        if (begin)
+                        {
+                                memory_copy(lines.bytes, lines.bytes + begin, held - begin);
+                                held -= begin;
+                                begin = 0;
+                        }
                         if (stdbuf_prompt())
                                 log_flush();
                         if (!byte_store_reserve(address_of lines, held + 4096, 4096))
@@ -49825,7 +49837,7 @@ static bool date_batch(string_address path, string_address format, b64 now,
                         continue;
                 }
 
-                positive length = stop ? (positive)(stop - lines.bytes) : held;
+                positive length = stop ? (positive)(stop - (lines.bytes + begin)) : held - begin;
                 b64 when;
                 positive ns = 0;
 
@@ -49834,28 +49846,26 @@ static bool date_batch(string_address path, string_address format, b64 now,
                         ok = false;
                         break;
                 }
-                p8 saved = lines.bytes[length];
+                p8 address_to line = lines.bytes + begin;
+                p8 saved = line[length];
 
-                lines.bytes[length] = end;
-                if (!pd_parse(lines.bytes, now, now_ns, pd_debug, address_of when,
+                line[length] = end;
+                if (!pd_parse(line, now, now_ns, pd_debug, address_of when,
                               address_of ns))
                 {
                         string_format(log_error, "date: invalid date '%w'\n",
-                                      writer_terminal_quoted_name, lines.bytes);
+                                      writer_terminal_quoted_name, line);
                         ok = false;
                 }
                 else if (!date_emit(format, when, ns))
                         ok = false;
-                lines.bytes[length] = saved;
+                line[length] = saved;
 
                 // A refused write ends the run there, as GNU's does.
                 if (log_failed())
                         break;
 
-                positive used = stop ? length + 1 : length;
-
-                memory_copy(lines.bytes, lines.bytes + used, held - used);
-                held -= used;
+                begin += stop ? length + 1 : length;
         }
 
         if (close_handle)
