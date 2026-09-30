@@ -748,6 +748,31 @@ static rx_fragment rx_atom(rx_compiler *c)
 
                                 return whole;
                         }
+
+                        /*
+                                A bracket with one member is that byte, and
+                                the hints, the fixed string and the machine's
+                                classes see a byte where they would see a
+                                set: [z]{3} is zzz. The set is given back.
+                        */
+                        if (!c->broken && byte == c->cursor.sets - 1)
+                        {
+                                positive members = 0, only = 0;
+
+                                for (positive i = 0; i < 256 && members < 2; i++)
+                                        if (c->pool->sets[byte][i])
+                                        {
+                                                members++;
+                                                only = i;
+                                        }
+
+                                if (members == 1 && only < 0x80)
+                                {
+                                        kind = RX_BYTE;
+                                        byte = (p8)only;
+                                        c->cursor.sets--;
+                                }
+                        }
                 }
                 else if (byte == '^' && (c->extended || !at ||
                          (at >= 2 && c->pattern[at - 2] == '\\' &&
@@ -1166,7 +1191,7 @@ static b32 rx_edges(const regex_program *program, p16 first, p16 last, p8 *table
 
 /* A literal sequence outside alternation, or inside a mandatory child, is a
    safe block prefilter. Captures delimit runs; counted nodes are never copied. */
-static fn rx_required(const rx_node *nodes, p16 first, rx_hints *hints)
+static fn rx_required(const rx_node *nodes, p16 first, p8 *literal, positive *literal_length)
 {
         for (p16 at = first; at;)
         {
@@ -1182,19 +1207,19 @@ static fn rx_required(const rx_node *nodes, p16 first, rx_hints *hints)
                 {
                         if (length > RX_LITERAL_MAX)
                                 length = RX_LITERAL_MAX;
-                        if (length > hints->literal_length)
+                        if (length > *literal_length)
                         {
-                                hints->literal_length = length;
+                                *literal_length = length;
                                 for (positive i = 0; i < length; i++)
                                 {
-                                        hints->literal[i] = nodes[from].argument;
+                                        literal[i] = nodes[from].argument;
                                         from = nodes[from].next;
                                 }
                         }
                         continue;
                 }
                 if (node->kind == RX_CAPTURE || (node->kind == RX_COUNT && node->minimum > 0))
-                        rx_required(nodes, node->left, hints);
+                        rx_required(nodes, node->left, literal, literal_length);
                 at = node->next;
         }
 }
@@ -1306,7 +1331,7 @@ static bool rx_compile(rx_pool *pool, regex_program *out, string_address pattern
         }
         if (root.first && pool->nodes[root.first].kind == RX_BEGIN)
                 c.program.flags |= RX_ANCHORED;
-        rx_required(pool->nodes, root.first, hints);
+        rx_required(pool->nodes, root.first, hints->literal, address_of hints->literal_length);
         positive fixed_work = 0;
         if (!literal && rx_fixed(pool->nodes, root.first, hints, &fixed_work) &&
             hints->fixed_length)
@@ -1354,6 +1379,8 @@ typedef struct {
         string_address bytes;
         positive length, slots[20], best_slots[20];
         positive best_stop, best_limit, work_used, work_limit;
+        // The caller has just found the required string in the subject.
+        bool literal_known;
         /*
                 A second, lower ceiling that only the walk below honours,
                 set by a caller holding a machine that reads every byte
@@ -1727,6 +1754,19 @@ static p8 rx_find(rx_match *match, const regex_program *program, p8 mode, bool c
                 match->slots[1] = match->slots[0] + size;
                 return RX_MATCH;
         }
+        /*
+                The one prefilter every caller shares: a string the program
+                cannot match without, looked for once in the whole subject
+                before any start is tried. grep, sed, awk, expr, csplit and
+                [[ =~ ]] all come through here, so a record without it is a
+                search and nothing more, whichever of them asks.
+        */
+        if (hints->literal_length && !match->literal_known &&
+            !text_literal_find(bytes, length, start, (string_address)hints->literal,
+                               hints->literal_length,
+                               (program->flags & RX_IGNORE_CASE) != 0,
+                               hints->literal_anchors))
+                return RX_NO_MATCH;
         for (positive at = start; at <= length; at++)
         {
                 if (program->boundary == REGEX_BOUNDARY_WORD && at && mode != REGEX_EXACT_LONGEST)

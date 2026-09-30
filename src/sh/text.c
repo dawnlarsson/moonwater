@@ -25897,9 +25897,15 @@ typedef struct
 
 static grep_set grep_literals;
 
-// False when some branch is not bytes alone, or the set would not fit.
+/*
+        False when some branch is not bytes alone, or the set would not fit.
+        With `exact` false the set is only where a match must be: each branch
+        gives the longest string it cannot match without, a branch that gives
+        none or a single byte gives the set up, and the machine or the graph
+        asks about the lines the strings land in.
+*/
 static bool grep_set_gather(const regex_program address_to program, p16 node,
-                            bool icase)
+                            bool icase, bool exact)
 {
         const rx_node address_to nodes = program->nodes;
         grep_set address_to set = address_of grep_literals;
@@ -25909,21 +25915,36 @@ static bool grep_set_gather(const regex_program address_to program, p16 node,
                 return false;
 
         if (nodes[node].kind == RX_ALT && !nodes[node].next)
-                return grep_set_gather(program, nodes[node].left, icase) &&
-                       grep_set_gather(program, nodes[node].right, icase);
+                return grep_set_gather(program, nodes[node].left, icase, exact) &&
+                       grep_set_gather(program, nodes[node].right, icase, exact);
 
         // Nothing reads what a group captured when there are no references.
         if (nodes[node].kind == RX_CAPTURE && !nodes[node].next)
-                return grep_set_gather(program, nodes[node].left, icase);
+                return grep_set_gather(program, nodes[node].left, icase, exact);
 
         positive start = set->used;
 
-        for (p16 at = node; at; at = nodes[at].next)
+        if (exact)
+                for (p16 at = node; at; at = nodes[at].next)
+                {
+                        if (nodes[at].kind != RX_BYTE || set->used == GREP_SET_BYTES)
+                                return false;
+
+                        set->bytes[set->used++] = nodes[at].argument;
+                }
+        else
         {
-                if (nodes[at].kind != RX_BYTE || set->used == GREP_SET_BYTES)
+                positive size = 0;
+
+                if (set->used + RX_LITERAL_MAX > GREP_SET_BYTES)
                         return false;
 
-                set->bytes[set->used++] = nodes[at].argument;
+                rx_required(nodes, node, set->bytes + start, address_of size);
+
+                if (size < 2)
+                        return false;
+
+                set->used += size;
         }
 
         if (set->count == GREP_SET_MAX)
@@ -26176,6 +26197,8 @@ typedef struct
         const rx_hints address_to literal;
         // The strings that are the whole program, or null.
         const grep_set address_to set;
+        // The set is the whole program, and not only where a match must be.
+        bool set_proves;
         // The deterministic machine, when a record needs the whole question
         // asked and the question has no backreference in it; null otherwise.
         rx_dfa_cache address_to dfa;
@@ -26276,7 +26299,7 @@ static bool grep_line_matches(const grep_plan address_to plan,
                                             plan->literal->literal_anchors);
 
         // The same for a set: the machine would try each branch in turn.
-        if (plan->set && (plan->whole || length < TEXT_LINE_MAX))
+        if (plan->set_proves && (plan->whole || length < TEXT_LINE_MAX))
         {
                 const grep_set address_to set = plan->set;
 
@@ -26341,10 +26364,13 @@ static bool grep_line_matches(const grep_plan address_to plan,
         state->match->work_yield =
             yielding ? GREP_GRAPH_YIELD + length * GREP_GRAPH_YIELD_BYTE : 0;
 
+        state->match->literal_known = plan->literal != null;
+
         p8 result = rx_find(state->match, plan->program, REGEX_FIRST, false,
                             line, length, 0);
 
         state->match->work_yield = 0;
+        state->match->literal_known = false;
 
         // The graph answered a probe for less than a quarter of what the
         // machine would have read: it is cheap here again.
@@ -27025,7 +27051,7 @@ typedef struct
         file_facts output_facts;
         bool never, icase, invert, counting, listing, listing_without, quiet,
              quietly, whole_line, whole_word, only, null_data, literal_proves,
-             literal_set, machine, grouped, discarded, refuse_output;
+             literal_set, literal_hunt, machine, grouped, discarded, refuse_output;
         // Every file of a walk is handed back to the line loop, unread.
         bool serial;
         bool found_any, shown_any;
@@ -27048,7 +27074,8 @@ static grep_plan grep_plan_of(const grep_run address_to run,
         return (grep_plan){
             .program = address_of regex_current,
             .literal = run->literal->literal_length ? run->literal : null,
-            .set = run->literal_set ? address_of grep_literals : null,
+            .set = run->literal_set || run->literal_hunt ? address_of grep_literals : null,
+            .set_proves = run->literal_set,
             .dfa = dfa,
             .limit = limit,
             .mode = first_mode      ? GREP_SPAN_FIRST
@@ -27447,7 +27474,7 @@ static bool grep_one(grep_run address_to run, string_address name)
                         }
                         else if (plan.mode != GREP_SPAN_PRINT &&
                                  grep_binary_files != GREP_BINARY_WITHOUT &&
-                                 (plan.literal_proves || plan.set) &&
+                                 (plan.literal_proves || plan.set_proves) &&
                                  plan.boundary == REGEX_BOUNDARY_NONE)
                         {
                                 grep_record_stream(address_of plan,
@@ -29424,8 +29451,19 @@ static b32 text_grep()
                            (regex_current.flags & RX_BRANCHING) &&
                            !(regex_current.flags & RX_HAS_BACKREF) &&
                            grep_set_gather(address_of regex_current,
-                                           regex_current.first, icase) &&
+                                           regex_current.first, icase, true) &&
                            grep_literals.count > 1;
+
+        // No string is the whole program, but every match holds one of a few.
+        grep_literals.count = literal_set ? grep_literals.count : 0;
+        grep_literals.used = literal_set ? grep_literals.used : 0;
+
+        bool literal_hunt = !never && !literal_proves && !literal_set &&
+                            !literal->literal_length &&
+                            (regex_current.flags & RX_BRANCHING) &&
+                            grep_set_gather(address_of regex_current,
+                                            regex_current.first, icase, false) &&
+                            grep_literals.count > 1;
 
         if (before && !grep_hold_make(before))
                 return text_done(2);
@@ -29619,6 +29657,7 @@ static b32 text_grep()
             .null_data = null_data,
             .literal_proves = literal_proves,
             .literal_set = literal_set,
+            .literal_hunt = literal_hunt,
             .machine = machine,
             .grouped = grouped,
             .discarded = discarded,
