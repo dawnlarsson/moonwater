@@ -70868,6 +70868,50 @@ static fn authorization_files(void)
                 check("sec: and made private it is read", groups.count == 1);
                 (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
         }
+
+        /*      A record from before 2026-09-30 has a SHA-256 of the secret in
+                its check field. Reading the file takes it out of the file,
+                not only out of memory: a listener never writes the file, so
+                it stayed on the disk until somebody joined or left. */
+        {
+                struct link_group_record group;
+                struct link_group_record stored;
+                link_groups groups;
+                bipolar handle;
+                bipolar read = -1;
+
+                memory_zero(address_of group, sizeof group);
+                string_copy(group.namespace, "office");
+                memory_fill(group.key, 0x5a, sizeof group.key);
+                memory_fill(group.check, 0xa5, sizeof group.check);
+                group.may = 6;
+                (void)wls_write(LINK_GROUPS_PATH, address_of group,
+                                sizeof group, 0600);
+                link_groups_load(address_of groups);
+                memory_fill(address_of stored, 0xee, sizeof stored);
+                handle = system_open_at(AT_FDCWD, LINK_GROUPS_PATH, FILE_READ);
+                if (handle >= 0)
+                {
+                        read = system_read_retry((positive)handle,
+                                                 address_of stored,
+                                                 sizeof stored);
+                        system_close((positive)handle);
+                }
+                check("sec: reading a group file with an old check reads the group",
+                      groups.count == 1 && groups.record[0].may == 6 &&
+                          string_equals(groups.record[0].namespace, "office"));
+                check("sec: and takes the old check out of the file as well, "
+                      "the rest of the record as it was",
+                      read == (bipolar)sizeof stored &&
+                          memory_span_byte(stored.check, 0,
+                                           sizeof stored.check) ==
+                              sizeof stored.check &&
+                          !memory_compare(stored.key, group.key,
+                                          sizeof group.key) &&
+                          stored.may == 6 &&
+                          string_equals(stored.namespace, "office"));
+                (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
+        }
 }
 
 /*
