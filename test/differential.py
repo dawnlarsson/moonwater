@@ -56750,6 +56750,23 @@ say(open(top + "/b/root/target", "rb").read() == b"untouched",
 status, out, err = on("a", moon + " link pull b /root/nothing-here /root/nothing", timeout=30)
 say(status == 1 and b"No such file" in err and not os.path.exists(top + "/a/root/nothing"),
     "pulling what is not there fails, says why, and leaves nothing here")
+# The name a pull is kept under here sits in a buffer of 1025 bytes, and its
+# staging name beside it in one a little longer: a local name longer than the
+# first is refused, and not copied past the end of it.
+with open(top + "/b/root/tiny", "wb") as f:
+    f.write(b"tiny")
+deep = "/root" + "".join("/" + "d" * 200 for _ in range(5))
+os.makedirs(top + "/a" + deep, exist_ok=True)
+for length in (1024, 1025, 1028):
+    name = deep + "/" + "n" * (length - len(deep) - 1)
+    status, out, err = on("a", moon + " link pull b /root/tiny " + name, timeout=60)
+    made = os.path.exists(top + "/a" + name)
+    if length <= 1024:
+        say(status == 0 and made and open(top + "/a" + name, "rb").read() == b"tiny",
+            "a pull to a local name of %d bytes works" % length)
+    else:
+        say(status == 1 and b"too long a name" in err and not made,
+            "a pull to a local name of %d bytes is refused, not copied past its buffer" % length)
 status, out, err = on("a", "timeout 5 " + moon + " link log b", timeout=30)
 say(out.startswith(b"[") or b"read kernel buffer failed" in err,
     "log follows the kernel log, or dmesg says it cannot be read")
