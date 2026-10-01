@@ -30,7 +30,7 @@ not kept in the tree (seed files are banned by `security_hygiene`).
 | HTTP/URL | sink-side request validation, framing conflicts, 204/205/304 as wget and curl take them with the RFC 9110 framing at the tight tier, split-point and chunk/trailer checks, `http.client` and curl framing oracles, HTTPS downgrade harness, GNU wget and curl as live oracles for byte-at-a-time, split, FIN/RST and 1xx-storm delivery (`wget_mutation`), hostile servers and redirect shapes against the built wget (`wget_hostile`), a redirect from public to non-public address space refused at the tight tier | the tight tier is not fuzzed (`http_fuzz` models the default); TLS and redirect legs of hostile scheduling |
 | DHCPv4 | peer/xid/MAC binding, option framing/overload, state cross-product, entropy faults, leases a server has no business handing out refused, the watcher's exchange cut once by link news rather than by every carrier flap; the `netem` lane (clean, tripled, forged, late, dropped and NAKed answers, plain and under loss, duplication and reordering); `dhcp_fuzz` (coverage-guided option stream) | DHCP over a raw packet socket and address-conflict probing are separate changes |
 | SNTP | nonce and peer binding, ancillary timestamp parsing, arithmetic and selection checks, each sample with its own wait, era-boundary integration (`sntp_era`: 2036, 2038, 2104), the `netem` lane | plain SNTP is unauthenticated; authenticated time is a separate change |
-| Wi-Fi | RSN and EAPOL-Key handling, replay counters, scan-result parsing (`wifi_scan_fuzz`, `wifi_eapol_fuzz`), an access point's name read from its first name element only, a join that prefers the access points that offer what the saved network asks for, EAPOL frames accepted only from the access point | management-frame protection and WPA3 are separate changes |
+| Wi-Fi | RSN and EAPOL-Key handling, replay counters, scan-result parsing (`wifi_scan_fuzz`, `wifi_eapol_fuzz`), an access point's name read from its first name element only, a join that prefers the access points that offer what the saved network asks for, EAPOL frames accepted only from the access point; management frame protection (802.11w: a spoofed deauthentication or disassociation is ignored by a protected station) and WPA3-Personal (SAE over group 19, hunt and hash-to-element) against wpa_supplicant's and hostapd 2.11's access points on `mac80211_hwsim` radios, the standard's values from a reference written in Python | password identifiers, groups other than 19, SAE-PK, AKM 24 and 25; real radios and firmware (hwsim has none) |
 | Waterlink and saved state | Noise handshake, cookie, replay window, grants; the saved wifi and bluetooth lists written beside themselves and renamed; no hash of the group secret in `/root/link.groups` | handshake flood under netem; MSan on waterlink |
 
 The unauthenticated-protocol limits in `SECURITY.md` remain fundamental: an
@@ -136,13 +136,14 @@ not part of this one; they are listed with the gap they would close.
 | Waterlink | `/root/link.groups` held a fast salted SHA-256 of the secret, a guessing oracle for anyone who could read it | `link` lane |
 | SNTP | five samples shared one ten-second deadline, so one lost datagram in four ended a query | the `netem` lane's SNTP scenes |
 | Supply chain | bowl's Arch, RISC-V Arch and Debian bootstraps rested on TLS and a mirror alone | pinned digests, a pinned signing key for Arch Linux ARM, `bowl` lane |
+| Wi-Fi | a deauthentication or disassociation frame from anyone in radio range ended the association: the join carried no protection (no MFPC or MFPR, no group management cipher, no IGTK) | the `pmf` family of the `wifi` lane on `mac80211_hwsim` radios (a third radio made a monitor sends the spoofed frames in the access point's name); `/root/wifi.pmf` remembers that a network offered protection, and a twin of that name without it is never joined |
+| Wi-Fi | WPA3-only networks were saved and never tried, and a network offering WPA2 and WPA3 together was joined as WPA2 | the `sae` family of the `wifi` lane against wpa_supplicant's access point (WPA3 alone, and WPA2 and WPA3 with a different key so only WPA3 can have joined) and hostapd 2.11 with `sae_pwe` 0, 1 and 2; every SAE step against a Python reference in `waterlink_service` |
 
 ### Open, in separate branches
 
 | Gap | Branch |
 | --- | --- |
 | Authenticated time (NTS), a floor for the clock, wget's status 5 for an unverifiable certificate | `feature/clock-floor`, `feature/nts` |
-| 802.11w management-frame protection, WPA3-SAE | `feature/wpa3-pmf-sae` |
 | DNS over TLS | `feature/dns-over-tls` |
 | DHCP over a raw packet socket (so `rp_filter` can be on), ARP address-conflict probing, the exchange not cut between REQUEST and ACK | `feature/dhcp-packet-socket-acd` |
 | The default accepts what wget and curl accept in a header block, URL spelling and redirect statuses | `feature/wget-curl-parity` |
@@ -150,6 +151,17 @@ not part of this one; they are listed with the gap they would close.
 
 ### Open, with no change planned here
 
+- WPA3 is built for SAE over group 19 with PMF required. Not built: password
+  identifiers, other groups (and the rejected-groups element), SAE-PK, the
+  extended-key suites (AKM 24 and 25). hwsim has no firmware, no 6 GHz
+  regulatory limits and no real rekeys forty minutes in beyond the `rekey`
+  family; the PSK and SAE offload paths of a driver that implements them
+  are not exercised (the offload path is kept for PSK and never used for
+  SAE).
+- EAPOL before the keys is unauthenticated by design: an attacker who spoofs
+  both the transmitter and the source address of a frame inside the
+  handshake's window can still replace a pending ANonce. From the first key
+  the kernel drops unprotected EAPOL.
 - Plain SNTP is accepted into any moment the build and clock window allow;
   only authenticated time narrows that.
 - The DHCP client reads its OFFER from a UDP socket, so `rp_filter` 1 or 2
@@ -175,6 +187,9 @@ not part of this one; they are listed with the gap they would close.
 | D03 | DNSSEC is out of scope | The resolver is a stub that trusts the network's DNS |
 | D04 | Defaults hold what GNU wget 1.25.0 and curl 8.22.0 do for 204 and 205; the RFC 9110 framing is the tight tier's | Real servers send a 204 with `Content-Length: 0`, and the client closes the connection after the one response, so an unread declared body can never be taken for the next response |
 | D05 | "Guest is root, not a wall": root is not hardened against itself | Documented policy in `SECURITY.md` |
+| WIFI-D1 | TKIP and WPA1 stay refused, and a mixed WPA and WPA2 network whose group cipher is TKIP is refused the same way | TKIP is broken; the refusal says why and what to change (set the access point to WPA2 with AES) in `wifi add`, bare `wifi` and `status` |
+| WIFI-D2 | The default keeps joining a secured network that has never offered management frame protection; `MOONWATER_STRICT` refuses it. Once an access point of a name has offered protection, no access point of that name that does not is joined | Protection is optional in WPA2 and many networks never offer it, so refusing them is the strict tier's policy; the memory of an offer closes the downgrade where a network has shown it can do better |
+| WIFI-D3 | Protection is asked of the kernel as required whenever the access point offers it | The kernel refuses `NL80211_MFP_OPTIONAL` on a driver with no connect of its own ("Operation not supported"), found by the first version of the test |
 
 SYN flood recipe (by hand): in a network namespace with two taps, a guest on
 one (a scripted DHCP server serves it, and an HTTP server serves a small static

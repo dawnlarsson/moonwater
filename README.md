@@ -94,8 +94,9 @@ wired to the hardware and cannot be bound.
 **Wifi.** Bare `moonwater wifi` lists networks strongest first (`*` joined,
 `+` saved). When wifi cannot work it says why in one line -- no hardware, no
 driver, missing firmware, rfkill, switched off, or why the last join failed.
-Open and WPA2 (including WPA2/WPA3 mixed) networks can be joined; WPA3-only,
-802.1X and WEP networks are saved but not tried. A password on the command line
+Open, WPA2 and WPA3 networks can be joined, with protected management frames
+whenever the access point offers them (WPA3 needs them); TKIP and WPA1, 802.1X
+and WEP networks are saved but not tried, and the refusal says what to change. A password on the command line
 shows in `ps`, so leave it off or pipe it with `-`. The image carries the
 firmware its wifi and bluetooth drivers load, fetched from linux-firmware at a
 pinned commit and checked against pinned SHA-256s; no blob is in this
