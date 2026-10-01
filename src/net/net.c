@@ -1864,14 +1864,15 @@ static COLD bipolar dns_server_at(string_address path, positive wanted)
 #define DNS_EDNS_LENGTH 11
 
 //      The name's letters in random case. False when randomness is refused,
-//      and then the name is left as written.
+//      and then the name is left as written. The bits are one request for
+//      all 32 bytes, nonblocking as the transaction id's is (a pool that is
+//      not ready refuses rather than gives a guessable case), not four.
 static COLD bool dns_mix_case(p8 address_to name, positive length)
 {
         p8 bits[32];
 
-        for (positive at = 0; at < sizeof bits; at += 8)
-                if (!network_transaction_secure(bits + at, 8))
-                        return false;
+        if (system_random_fill(bits, sizeof bits, 1))
+                return false;
         for (positive at = 0; at < length; at++)
         {
                 p8 letter = name[at] | 0x20;
@@ -2072,10 +2073,14 @@ static COLD bipolar dns_query_once(p32 server, p16 port, string_address name,
 
         failure = dns_reply_result(reply, (positive)got, id, request,
                                    question_length, found);
-        if (failure == DNS_REFUSED && edns &&
-            ((network_load_16(reply + 2) & DNS_CODE_MASK) == 1 ||
-             (network_load_16(reply + 2) & DNS_CODE_MASK) == 4))
-                return DNS_FORMAT_ERROR;
+        if (failure == DNS_REFUSED && edns)
+        {
+                //      FORMERR or NOTIMP to the option: ask again without it.
+                p16 code = network_load_16(reply + 2) & DNS_CODE_MASK;
+
+                if (code == 1 || code == 4)
+                        return DNS_FORMAT_ERROR;
+        }
         if (failure == DNS_TRY_TCP)
                 return dns_retry_tcp(address_of where, request,
                                      request_length, id,
