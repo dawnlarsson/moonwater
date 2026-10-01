@@ -17,9 +17,8 @@ fault sweeps, `http.client`, curl and GNU wget as oracles for HTTP framing and
 delivery, and a `netem` lane that runs the DHCP and SNTP clients against an
 adversarial server in namespaces. It is **not yet release-grade evidence for
 memory safety or parser completeness** because those lanes are not mandatory
-(the CI `security` job is parked, `workflow_dispatch` only), the HTTP fuzz
-target models the default tier only, and a corpus beyond the generated seeds is
-not kept in the tree (seed files are banned by `security_hygiene`).
+(the CI `security` job is parked, `workflow_dispatch` only), and a corpus
+beyond the generated seeds is not kept in the tree (seed files are banned by `security_hygiene`).
 
 | Area | Evidence present | Important remaining gap |
 | --- | --- | --- |
@@ -27,7 +26,7 @@ not kept in the tree (seed files are banned by `security_hygiene`).
 | DNS | exact question/ID binding, compression loops, full RR framing, UDP truncation to TCP; the source port drawn per query, 0x20 case mixing and EDNS0 with a fallback for each; the network's own resolver asked first and its first answer final; `dns_fuzz` | independent packet oracle; DNSSEC is out of scope (D03) |
 | TLS records/handshake | record and handshake fragmentation, transcript/Finished, AEAD limits, state ordering, `tls_hs_fuzz` libFuzzer target over the record layer and handshake state machine | a corpus beyond the generated seeds |
 | X.509 | strict DER and generated-chain policy matrix against OpenSSL and, as a second independent path validator, Go's `crypto/x509` (`tls_chains`); `tls_der_fuzz` / `tls_verify_fuzz` libFuzzer targets; DNS-name and IP matching against OpenSSL's own check (`tls_hostnames`); validity times against RFC 5280 (`tls_dates`); Wycheproof's vectors under the production crypto (`crypto_vectors --wycheproof`); Mozilla's server-auth `distrust-after` dates per anchor | name constraints in more shapes than the matrix has |
-| HTTP/URL | sink-side request validation, framing conflicts, 204/205/304 as wget and curl take them with the RFC 9110 framing at the tight tier, split-point and chunk/trailer checks, `http.client` and curl framing oracles, HTTPS downgrade harness, GNU wget and curl as live oracles for byte-at-a-time, split, FIN/RST and 1xx-storm delivery (`wget_mutation`), hostile servers and redirect shapes against the built wget (`wget_hostile`), a redirect from public to non-public address space refused at the tight tier | the tight tier is not fuzzed (`http_fuzz` models the default); TLS and redirect legs of hostile scheduling |
+| HTTP/URL | sink-side request validation, framing conflicts, 204/205/304 as wget and curl take them with the RFC 9110 framing at the tight tier, split-point and chunk/trailer checks, `http.client` and curl framing oracles, HTTPS downgrade harness, GNU wget and curl as live oracles for byte-at-a-time, split, FIN/RST and 1xx-storm delivery (`wget_mutation`), hostile servers and redirect shapes against the built wget (`wget_hostile`), a redirect from public to non-public address space refused at the tight tier, URL splitting and Location resolution against `urllib` (`http_urls`); the default takes what GNU wget and curl both take in a response head and the tight tier refuses it (a generated-heads model holds both tiers, `http_fuzz_tight` fuzzes the tight one) | slow-stream scheduling across TLS and redirects; a truncated head stays a failure in both tiers on purpose |
 | DHCPv4 | peer/xid/MAC binding, option framing/overload, state cross-product, entropy faults, leases a server has no business handing out refused, the watcher's exchange cut once by link news rather than by every carrier flap; the `netem` lane (clean, tripled, forged, late, dropped and NAKed answers, plain and under loss, duplication and reordering); `dhcp_fuzz` (coverage-guided option stream) | DHCP over a raw packet socket and address-conflict probing are separate changes |
 | SNTP | nonce and peer binding, ancillary timestamp parsing, arithmetic and selection checks, each sample with its own wait, era-boundary integration (`sntp_era`: 2036, 2038, 2104), the `netem` lane | plain SNTP is unauthenticated; authenticated time is a separate change |
 | Wi-Fi | RSN and EAPOL-Key handling, replay counters, scan-result parsing (`wifi_scan_fuzz`, `wifi_eapol_fuzz`), an access point's name read from its first name element only, a join that prefers the access points that offer what the saved network asks for, EAPOL frames accepted only from the access point | management-frame protection and WPA3 are separate changes |
@@ -66,10 +65,10 @@ does not convert those protocols into authenticated ones.
 ### P0 — evidence needed before a high-assurance claim
 
 1. Persistent fuzzing: done for TLS (DER, certificate lists, handshake and
-   record layer), DNS names and RRs, HTTP response framing and chunks (the
-   default tier), DHCP option streams, SNTP replies, netlink, Wi-Fi, crypto and
-   waterlink, seeded from generators and run under ASan+UBSan. Open: the HTTP
-   target at the tight tier, and a corpus beyond the generated seeds.
+   record layer), DNS names and RRs, HTTP response framing and chunks (both
+   tiers: `http_fuzz`, `http_fuzz_tight`), DHCP option streams, SNTP replies,
+   netlink, Wi-Fi, crypto and waterlink, seeded from generators and run under
+   ASan+UBSan. Open: a corpus beyond the generated seeds.
 2. Make x86-64 ASan+UBSan and native namespace/netem runs required CI jobs.
    `MOONWATER_FUZZ_REPORT=… sh test/run fuzz` already records compiler and sanitizer
    versions, seed counts, budgets and exits; it has to run on every release,
@@ -137,6 +136,18 @@ not part of this one; they are listed with the gap they would close.
 | SNTP | five samples shared one ten-second deadline, so one lost datagram in four ended a query | the `netem` lane's SNTP scenes |
 | Supply chain | bowl's Arch, RISC-V Arch and Debian bootstraps rested on TLS and a mirror alone | pinned digests, a pinned signing key for Arch Linux ARM, `bowl` lane |
 
+### Behaviour changes toward GNU wget and curl
+
+None of these closes a security gap; each makes the default do what the references do, and where it had been stricter the refusal moved to the tight tier (`MOONWATER_STRICT` 2) or is kept as named in the matrix.
+
+| Area | Change | Evidence |
+| --- | --- | --- |
+| HTTP | an identical duplicate `Content-Length`, a list of one number (`3, 3`), an obsolete folded line after an ordinary field and a control byte in the reason phrase are taken by the default and refused at the tight tier; a pair that disagrees, an empty list element, a NUL or bare CR in the status line and a fold after a framing field stay refused in both | `http_response_framing` (MUST_ACCEPT rows with TIGHT_REFUSES), its generated heads held to a model at each tier, `wget_mutation` rows required to equal GNU wget and curl, `http_fuzz_tight` |
+| URL | the legacy IPv4 spellings 127.1, 0x7f.1, 0177.0.0.1 and 2130706433 are connected to, and the address policy judges what they name (a redirect or an AIA URL to one is still refused as loopback); a space, a backslash and non-ASCII bytes in a URL or a Location are percent-encoded after the authority, which is left alone | `wget_hostile`; `http_urls` (inet_aton's grammar against glibc's through Python over 3,000 random strings; the encoder against a regular-expression oracle with exactly enough room and one byte less) |
+| wget | a redirect with no Location or an empty one is answered as the server's status (exit 8), and a Location too long to follow is named as it was | `wget_hostile` |
+| DHCP | a `/32` lease from a router outside its prefix installs its default route on-link, where it had been rolled back and asked for again for ever | `net_router_onlink` and a kernel `RTNH_F_ONLINK` route on a loopback in `CHECK_net`; the guest half by hand |
+| Watcher | its log lines were dropped by the kernel's `/dev/kmsg` rate limit (ten lines in five seconds for each open file, without an error); it writes `on` to `kernel.printk_devkmsg` | the wifi lane's `watch` family (an image is needed) |
+
 ### Open, in separate branches
 
 | Gap | Branch |
@@ -145,7 +156,6 @@ not part of this one; they are listed with the gap they would close.
 | 802.11w management-frame protection, WPA3-SAE | `feature/wpa3-pmf-sae` |
 | DNS over TLS | `feature/dns-over-tls` |
 | DHCP over a raw packet socket (so `rp_filter` can be on), ARP address-conflict probing, the exchange not cut between REQUEST and ACK | `feature/dhcp-packet-socket-acd` |
-| The default accepts what wget and curl accept in a header block, URL spelling and redirect statuses | `feature/wget-curl-parity` |
 | `edit` sends file bytes to the terminal raw; a secret on a command line is kept by the shell history; boot takes the first install that looks like this build; `fs.protected_*`, `kptr_restrict`, `dmesg_restrict`, `io_uring_disabled` defaults | `hardening/outside-network` |
 
 ### Open, with no change planned here
@@ -175,6 +185,8 @@ not part of this one; they are listed with the gap they would close.
 | D03 | DNSSEC is out of scope | The resolver is a stub that trusts the network's DNS |
 | D04 | Defaults hold what GNU wget 1.25.0 and curl 8.22.0 do for 204 and 205; the RFC 9110 framing is the tight tier's | Real servers send a 204 with `Content-Length: 0`, and the client closes the connection after the one response, so an unread declared body can never be taken for the next response |
 | D05 | "Guest is root, not a wall": root is not hardened against itself | Documented policy in `SECURITY.md` |
+| PAR-D1 | The default takes what GNU wget 1.25.0 and curl 8.22.0 both take in a response head; the tight tier keeps every refusal | The rule is default 1:1 with the references. The reason phrase is never read, printed or stored (only the code is), which is why accepting its bytes is safe; what only one of them takes, or what they read differently (a disagreeing pair, a fold after a framing field), stays refused in both tiers |
+| PAR-D2 | The saved file name of a percent-encoded URL is the escaped name, not the decoded one | Decoding would need `%2f`, `%00` and `%1b` re-escaped; GNU wget decodes, and this stays as it was on purpose |
 
 SYN flood recipe (by hand): in a network namespace with two taps, a guest on
 one (a scripted DHCP server serves it, and an HTTP server serves a small static
