@@ -12459,15 +12459,16 @@ export SPARK_OWNER=parent
 /shell -c 'printf "owner-%s\n" "$SPARK_OWNER"'
 ls /monitor.sh | rev
 #
-#       The kernel network settings the default tier asks of the network
-#       watcher when it starts, before the first lease: no redirects, no
+#       The kernel settings the default tier asks of the network watcher when
+#       it starts, before the first lease: the network ones (no redirects, no
 #       router advertisements or SLAAC on the interface that was already
-#       there (IPv6 has no copy from `default`), TIME-WAIT assassination
-#       refused, SYN cookies. The watcher starts a moment after init, so the
-#       last is waited for.
+#       there, TIME-WAIT assassination refused, SYN cookies) and the shared
+#       filesystem and kernel-pointer ones (protected symlinks and regular
+#       files, kptr_restrict and io_uring_disabled 1). The watcher starts a
+#       moment after init, so the last network one is waited for.
 #
 for i in $(seq 1 60); do [ "$(cat /proc/sys/net/ipv4/tcp_syncookies)" = 1 ] && break; sleep 0.2; done
-printf 'nk-%s-%s-%s-%s-%s\n' "$(cat /proc/sys/net/ipv4/conf/default/accept_redirects)" "$(cat /proc/sys/net/ipv6/conf/eth0/accept_ra)" "$(cat /proc/sys/net/ipv6/conf/default/autoconf)" "$(cat /proc/sys/net/ipv4/tcp_rfc1337)" "$(cat /proc/sys/net/ipv4/tcp_syncookies)" | rev
+printf 'nk-%s-%s-%s-%s-%s-%s-%s-%s-%s\n' "$(cat /proc/sys/net/ipv4/conf/default/accept_redirects)" "$(cat /proc/sys/net/ipv6/conf/eth0/accept_ra)" "$(cat /proc/sys/net/ipv6/conf/default/autoconf)" "$(cat /proc/sys/net/ipv4/tcp_rfc1337)" "$(cat /proc/sys/net/ipv4/tcp_syncookies)" "$(cat /proc/sys/fs/protected_symlinks)" "$(cat /proc/sys/fs/protected_regular)" "$(cat /proc/sys/kernel/kptr_restrict)" "$(cat /proc/sys/kernel/io_uring_disabled)" | rev
 #
 #       The address space of a program the Spark loader started is randomized,
 #       as an ELF's is: the loader never set PF_RANDOMIZE, which begin_new_exec
@@ -12822,7 +12823,7 @@ says transcript 'setting a zone does not move the clock' '0warp'
 says transcript 'and the clock reads the zone it was set to' '0010+'
 says transcript 'and the zone reached the kernel and this system' '1applied'
 says transcript 'as a TZif that bowl programs read' '2fiZTtzif'
-says transcript 'the watcher set the default kernel network settings' '1-1-0-0-0-kn'
+says transcript 'the watcher set the default kernel network and file settings' '1-1-1-1-1-1-0-0-0-kn'
 says transcript 'floodlight device'   'fl-device-thgildoolf #'
 says transcript 'floodlight refuses nothing' 'fl-denials-0'
 says transcript 'floodlight has awk'  'fl-awk-1'

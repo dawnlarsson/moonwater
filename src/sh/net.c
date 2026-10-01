@@ -2176,7 +2176,21 @@ static COLD bipolar net_watch_events(b32 events, netlink_buffer address_to messa
         written.
 
         The reference tier (STRICT_REFERENCE) keeps the kernel's own values,
-        the rest write the table below. rp_filter is left alone on purpose: the
+        the rest write the table below. Default is what Debian and Arch ship
+        or a host that forwards nothing needs: the four fs.protected_*
+        switches, kptr_restrict 1 (pointers hidden from processes without
+        CAP_SYSLOG; root's perf and kallsyms work), dmesg_restrict 1 and
+        io_uring_disabled 1 (io_uring_setup refused to processes without
+        CAP_SYS_ADMIN; nothing in the image uses it and root, bowls included,
+        is not affected). sec_hardened (STRICT_TIGHT) goes further:
+        protected_fifos and protected_regular 2, kptr_restrict 2 and
+        io_uring_disabled 2. unprivileged_bpf_disabled has no knob here, the
+        image is built without bpf(2) (classic socket filters, which the DHCP
+        client uses, are unaffected), and unprivileged user namespaces stay as
+        the kernel has them: root is unaffected, no tool here needs them, and a
+        kiosk tier that wants them off sets user.max_user_namespaces itself.
+
+        rp_filter is left alone on purpose: the
         DHCP client is a UDP socket, its OFFER comes from an address with no
         route yet, and with rp_filter 1 or 2 the OFFER is dropped and no lease
         is ever taken (measured: OFFERs sent, no REQUEST, in a KVM guest booted
@@ -2282,6 +2296,23 @@ static COLD fn net_kernel_defaults(void)
                                   "0\n", true);
         net_sysctl("/proc/sys/net/ipv4/tcp_rfc1337", "1\n");
         net_sysctl("/proc/sys/net/ipv4/tcp_syncookies", "1\n");
+        //      Not the network's, the same moment's: the shared filesystem
+        //      and kernel-pointer settings a machine that was never told
+        //      anything else runs on the kernel's own.
+        net_sysctl("/proc/sys/fs/protected_symlinks", "1\n");
+        net_sysctl("/proc/sys/fs/protected_hardlinks", "1\n");
+#if MOONWATER_STRICT >= STRICT_TIGHT
+        net_sysctl("/proc/sys/fs/protected_fifos", "2\n");
+        net_sysctl("/proc/sys/fs/protected_regular", "2\n");
+        net_sysctl("/proc/sys/kernel/kptr_restrict", "2\n");
+        net_sysctl("/proc/sys/kernel/io_uring_disabled", "2\n");
+#else
+        net_sysctl("/proc/sys/fs/protected_fifos", "1\n");
+        net_sysctl("/proc/sys/fs/protected_regular", "1\n");
+        net_sysctl("/proc/sys/kernel/kptr_restrict", "1\n");
+        net_sysctl("/proc/sys/kernel/io_uring_disabled", "1\n");
+#endif
+        net_sysctl("/proc/sys/kernel/dmesg_restrict", "1\n");
 }
 #endif
 
