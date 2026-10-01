@@ -178,31 +178,69 @@ outside its prefix was rolled back for ever (the route is now marked on-link);
 `sec_hardened` now refuses ICMP redirects, source routes, TIME-WAIT
 assassination and io_uring at watcher start.
 
-Open, ranked:
+Open, ranked (items 2, 3, 5, 6 and 7 of this list are closed by the closenet
+pass below, item 1 by the closewifi pass; 4 belongs to the closeclock stream):
 
 1. ~~No 802.11w.~~ Closed in the closewifi pass below (66b4e01b): management frame
    protection is negotiated and tested against spoofed deauthentication on
    simulated radios with a real access point.
-2. The DHCP client is a UDP socket, so `rp_filter` 1 or 2 drops the OFFER
-   (route to the server does not exist yet) and no lease is ever taken:
-   measured, OFFERs sent and no REQUEST. `rp_filter` therefore stays 0 in
-   every tier; an `AF_PACKET` receive path would lift that.
-3. No ARP probe or gratuitous ARP for a leased address (`arp_notify` is 0,
-   `arp_announce` 0, `arp_ignore` 0, `arp_filter` 0): an address in use
-   elsewhere is not noticed.
 4. Unauthenticated SNTP is accepted into any moment between 2026-09-01 and
    2036-01-01 while the clock is unset, and within 24 hours of it afterwards;
    an on-path attacker at boot chooses the date the certificate checks run
    under. Authenticated time (NTS) is not implemented.
-5. Name resolution asks 1.1.1.1 first, in the clear, before the network's own
-   resolver; a source port and a 16-bit id are the only protection (the kernel's
-   port range 32768-60999, no 0x20 encoding).
-6. The general image enables IPv6 with SLAAC and router advertisements
-   accepted (`accept_ra` 1, EUI-64 addresses, `accept_redirects` 1) although
-   none of the tools here speak it; `modern` turns IPv6 off.
-7. Outside the network zone, seen while measuring: `fs.protected_*` 0,
-   `kernel.kptr_restrict` 0, `kernel.dmesg_restrict` 0, unprivileged user
-   namespaces and io_uring on in the default tier.
+
+## Closure pass: DHCP, ARP, DNS, IPv6 and kernel defaults (closenet, 2026-10-01)
+
+Each row was found open in the netlow pass above or in the PR 16 body; each
+landed as its own commit with a test that failed before it. Measured in KVM
+guests of the built image (two e1000 on taps in a network namespace, a scripted
+DHCP/DNS server, QMP `set_link`, lease time from the serial console) unless
+said otherwise.
+
+| Item | What changed | Commit | Evidence | Kept / decided |
+| --- | --- | --- | --- | --- |
+| Lease sanity | `dhcp_lease_usable` refuses an address, router or server identifier in 0/8, 127/8 or 224/3, a router equal to the address, a mask whose prefix reaches 0/8, 127/8 or 224/3, and on a subnet wider than /31 the subnet's first and last addresses; the `/32` lease with an off-link router stays | d54bd70b | a 14 x 13 x 10 grid (1,820 leases) against the written rule in `CHECK_net` | default tier: no real server hands these out |
+| DHCP over `rp_filter` | acquisition reads OFFER/ACK/NAK from an `AF_PACKET` `SOCK_DGRAM` socket (classic BPF prefilter attached and locked before the bind, `PACKET_AUXDATA`, full parse in `dhcp_unframe`); the send path and renewals stay UDP | d9bcf0f2 | `CHECK_net` runs the exchange across a veth pair into a second network namespace with `rp_filter` 0, 1 and 2 (red on 1 and 2 before); `dhcp_packets` 50,000 IP/UDP frames with one fault each under ASan/UBSan and three planted mutants; KVM lease 4.12-4.15 s against 4.11-4.17 s (four boots each), and a reply unicast to the offered address is now taken (4.18 s); the `netem` lane's rp_filter 1 and 2 rows (the client as built, in a user namespace, with and without netem loss) are 184 of 184 here and fail on the parent's shell ("nobody offered a lease" after 74.9 s) | `rp_filter` is 2 by default and 1 in `sec_hardened` |
+| Kernel defaults | `net_kernel_defaults` at watcher start, before any link is up: IPv4 redirects, secure redirects, source routes, send redirects 0; `rp_filter` 2; IPv6 `accept_ra`, `autoconf`, `accept_redirects` 0 on all, default and every interface present; `tcp_rfc1337`, `tcp_syncookies` 1; `fs.protected_*` 1; `kptr_restrict` 1; `dmesg_restrict` 1; `io_uring_disabled` 1; `sec_hardened` adds `rp_filter` 1, `protected_fifos` and `protected_regular` 2, `kptr_restrict` 2, `io_uring_disabled` 2; `sec_reference` keeps the kernel's own | e12605d7 | a boot-lane row reads eight of them from the booted guest (150 of 152 on the parent's image, 151 of 152 on this one; the other miss is `scenario-miss radio 11 status`, in both); read back in default and hardened guests | see decisions D12-D13 |
+| Address conflict | three ARP probes before a leased address is used (`dhcp_probe`, RFC 5227), `DHCPDECLINE` and a ten-second hold-off on a conflict, two announcements after the lease is applied; `arp_ignore` 1, `arp_announce` 2, `arp_filter` 1, `arp_notify` 1 | fe98aa94 | the namespace fixture (confined as the watcher's child is) offers an address its own kernel answers ARP for: declined, then the next free one leased; KVM lease 4.38-4.45 s against 4.16-4.18 s; a server claiming the address saw the probe and the DECLINE and leased the next at 14.5 s | default probe window is about 0.2 s, `sec_hardened` keeps RFC 5227's seconds (lease at 9.3-10.2 s); D14 |
+| Exchange cut between REQUEST and ACK | the child reports its REQUEST and its probe down the answer pipe; news after that waits up to 2 s (8 s probing in `sec_hardened`) for the answer; an unacknowledged REQUEST is released (`DHCPRELEASE`) by the child and, when the wait is cut, by the watcher | 1322bdcb | namespace fixture: interim record on the pipe, RELEASE counted by the server; KVM with an ACK 1 s late and a carrier toggle at 4.7 s: lease 5.36 s from the first transaction (6.47 s and a second DISCOVER before); an ACK 3 s late: RELEASE at +2 s; hardened probe window with a toggle at 6.0 s: one DISCOVER, no release | f6556826's interruptibility is unchanged for a cut before the REQUEST |
+| DNS hygiene | source port drawn from the CSPRNG over 1024-65535 and bound explicitly; 0x20 case mixing with a retry in typed case for a server that folds it; EDNS0 advertising 1232 bytes with a retry without it on FORMERR/NOTIMP | 9b8d47c3 | 96 queries against a reporting server (mixed case, EDNS0, 94 or more distinct ports, 20 or more below 32768); a folding server and a FORMERR server still answered; a KVM guest's queries showed `MixeD.CaSe.EXAMplE.Com`, EDNS0 and ports 61911, 31443, 25781 | a forged reply that differs from the question only in case can make one query ask again without mixing; it still needs the id and the port |
+| Resolver order | DHCP nameserver first, 1.1.1.1 behind it; the first server that gives an answer about the name, NXDOMAIN included, is believed (glibc/musl rule) | 812e37bf | a namespace check with two real servers on 127.0.0.2/3: NXDOMAIN from the first ends the lookup, SERVFAIL goes on | a captive portal that answers every name still answers every name |
+| DNS over TLS | `moonwater dns plain|tls|tls-only`; 1.1.1.1, 1.0.0.1, 9.9.9.9 and 149.112.112.112 on 853 with the https certificate checks and the resolver's own address against an iPAddress name; `tls` falls back to UDP, `tls-only` asks nothing else | 054f1f9b | `dns_tls` harness: a shell trusting a generated root, a server on 1.1.1.1 in a namespace answering 192.0.2.53 over TLS and 192.0.2.17 over UDP: ten cases (plain, tls, tls with a leaf for another address, expired, nothing on 853, tls-only with each, a resolver outside the four, a garbage setting), 6 of 10 before; live against Cloudflare and Quad9 from the box | off by default, D13 |
+| SYN cookies under a flood | measured, not changed | (this commit) | a spoofed-source SYN flood, 20,000 packets a second for 14 s (280,000 SYNs) at a listener in the guest (accept loop, backlog 128): with `tcp_syncookies` 1 the kernel logged "Sending cookies" and 48 of 48 connections from a host it had not met were answered; with 0, 0 of 6 (each timed out after 2 s) and `ListenDrops` read 278,551 | a peer the kernel has already seen succeed gets through with cookies off too (the last quarter of the SYN backlog is kept for destinations it has proven), so the test host must be one that has not; see the recipe below |
+
+Lanes run on the final tree of this pass, each against the parent's where one
+could differ: `net` 514,569 of 514,569 (x86_64, arm64, riscv64 under qemu-user,
+tight tier, with the namespace checks named NOT RUN on the emulated two),
+`netem` 184 of 184 at `rp_filter` 0, 1 and 2 (the parent's shell fails the
+`rp_filter` 1 and 2 rows), `machine`, `cli` (5,974), `waterlink` and `link`
+7,276 of 7,276, `bowl` 4,071 of 4,071, `kit` 39 of 41 (the same two as the
+parent: firmware line pins and the performance map), `storage_io` with the same
+three symlink-staging rows as the parent. On images: `boot` 151 of 152 (the
+parent's image 150 of 152, the new row, and `scenario-miss radio 11 status` in
+both), `canvas` 71 of 71, `install` 116 of 117 (the parent's image gives the
+same), `wifi` 8 of 9 on an `hwsim` image of each tree (the same miss, `watch
+never took an access point`). The `wifi` and `boot` lanes feed a console that
+loses what it is sent while the machine is busy: with other jobs running, one
+`wifi` run gave 3 of 9 and another 2 of 9 on this tree, 8 of 9 alone.
+
+SYN flood recipe (by hand): in a network namespace with two taps, a guest on
+one (the scripted server of the lease tests serves DHCP, and an HTTP server
+serves a 850 KB static listener that accepts and closes), `wget` the listener
+into the guest, start it, then `flood.py 10.9.0.50 9000 14 20000` (a raw
+IP_HDRINCL sender with random source addresses and ports) while a second
+address of the namespace connects every quarter second and counts. Toggle
+`/proc/sys/net/ipv4/tcp_syncookies` in the guest between runs.
+
+Sysctl values of the built images (read in guests): default `all`/`default`
+`rp_filter` 2, `accept_redirects` 0, IPv6 `accept_ra` 0 on eth0, `protected_*`
+1, `kptr_restrict` 1, `io_uring_disabled` 1, ARP 1/2/1/1; `sec_hardened`
+`rp_filter` 1, `protected_fifos` and `protected_regular` 2, `kptr_restrict` 2,
+`io_uring_disabled` 2, `accept_source_route` 0. `rp_filter` 1 was leased on
+one link (the lease exchange and the route it installs); strict filtering on a
+host with two leased links and asymmetric routing is not measured and will
+drop what arrives on the interface the route back does not use, which is what
+it is for.
 
 ## Supply chain, secrets and the terminal (closesupply pass, 2026-09-30)
 
@@ -383,13 +421,13 @@ downloads, boot disk, argv secrets, terminal fuzz; closeledger = the rest.
 | L03 | netlow #4; PR 12 deferral | No NTS (authenticated time) | in progress (closeclock) |
 | L04 | TLS trust policy; nettls | Mozilla `distrust-after` and per-anchor constraints not enforced (`anchors.inc` is SPKI-only; Izenpe.com carries 2026-04-15 upstream) | in progress (closeclock) |
 | L05 | matrix SNTP row | Era-boundary SNTP integration tests (2036 NTP era rollover, 2038) | closed (f33257c3): `--harness sntp_era`, 108 checks: the 2036 wrap, 2038 and 2104 at the shipped window and at the window moved to the end of era 1 |
-| L06 | netlow #2 | DHCP client is a UDP socket: `rp_filter` 1 or 2 drops the OFFER, so `rp_filter` stays 0 in every tier | in progress (closenet) |
-| L07 | netlow #3 | No ARP probe or gratuitous ARP for a leased address (`arp_notify`/`arp_announce`/`arp_ignore`/`arp_filter` 0) | in progress (closenet) |
-| L08 | netlow #5 | DNS asks 1.1.1.1 first, in the clear, 16-bit id and kernel source port only, no 0x20 | in progress (closenet) |
-| L09 | netlow #6 | General image: IPv6 with SLAAC, RA and redirects accepted though no tool speaks it | in progress (closenet) |
-| L10 | netlow #7 | `fs.protected_*`, `kptr_restrict`, `dmesg_restrict`, unprivileged user namespaces and io_uring on in the default tier | in progress (closenet) |
-| L11 | a40bfc9d note | DHCP yiaddr/router sanity (127/8, 224/4, router equal to the address) not refused; rogue-server-only | in progress (closenet) |
-| L12 | d1bcc3eb note | SYN cookies enabled and read back but not measured under a flood | open (closenet) |
+| L06 | netlow #2 | DHCP client is a UDP socket: `rp_filter` 1 or 2 drops the OFFER, so `rp_filter` stays 0 in every tier | closed (d9bcf0f2; `rp_filter` 2 by default from e12605d7, 1 in `sec_hardened`) |
+| L07 | netlow #3 | No ARP probe or gratuitous ARP for a leased address (`arp_notify`/`arp_announce`/`arp_ignore`/`arp_filter` 0) | closed (fe98aa94; hold-off and release 1322bdcb) |
+| L08 | netlow #5 | DNS asks 1.1.1.1 first, in the clear, 16-bit id and kernel source port only, no 0x20 | closed (9b8d47c3, 812e37bf, 054f1f9b) |
+| L09 | netlow #6 | General image: IPv6 with SLAAC, RA and redirects accepted though no tool speaks it | closed (e12605d7) |
+| L10 | netlow #7 | `fs.protected_*`, `kptr_restrict`, `dmesg_restrict`, unprivileged user namespaces and io_uring on in the default tier | closed (e12605d7; user namespaces left as the kernel has them, D12) |
+| L11 | a40bfc9d note | DHCP yiaddr/router sanity (127/8, 224/4, router equal to the address) not refused; rogue-server-only | closed (d54bd70b) |
+| L12 | d1bcc3eb note | SYN cookies enabled and read back but not measured under a flood | closed (measured in KVM under a 20,000 pps spoofed flood, this pass) |
 | L13 | netlow #1; nettls | No 802.11w/PMF: `wifi_rsn_ie` has no MFPC bit, no IGTK; a spoofed deauthentication frame ends the association | closed (66b4e01b): MFPC/MFPR, USE_MFP required whenever offered, PSK-SHA256, IGTK, `/root/wifi.pmf` (no downgrade), STRICT requires it; `pmf` family against spoofed deauthentication and disassociation |
 | L14 | README; netlink2 | No SAE: WPA3-only networks cannot be joined | closed (c5f9b131, 61cf5e76): SAE group 19 by the hunt and by hash-to-element through authenticate/associate; hostapd 2.11 and wpa_supplicant interop; not built: password identifiers, other groups, SAE-PK, AKM 24/25 |
 | L15 | netlink2 | TKIP group cipher unsupported (by design) | closed (66b4e01b): still refused, in words that say why and what to set (decision D10) |
@@ -418,8 +456,9 @@ downloads, boot disk, argv secrets, terminal fuzz; closeledger = the rest.
 | L38 | P1 #3 | ARM64 and RISC-V network lanes are not required anywhere; sanitizer-capable builds there are not run | in progress (closeledger): the CI job requires the net-x86_64, net-arm64 and net-riscv64 tallies, and `sh test/run net` runs all three under qemu-user; sanitizer builds exist on x86_64 only |
 | L39 | P2 #3, #4 | Static-analysis reports with suppressions reviewed; an independent review after the P0 lanes are reproducible | open (closeledger; user decision for the review) |
 | L40 | kit lane | `sh test/run kit` is 39 of 41 on this branch and on main (firmware line pins, performance map BENCH sections); not a network defect, carried for honesty | open (main's, not this branch's) |
-| L41 | found by the `netem` lane | The DHCP client waits for the ACK of its REQUEST only a quarter second (and an OFFER 250 ms for the first twelve attempts): against a server that answers 1.5 s late under 25% loss the lease took 28 s and 16 DISCOVERs (availability on a high-latency link, not an attack) | open (closenet) |
+| L41 | found by the `netem` lane | The DHCP client waits for the ACK of its REQUEST only a quarter second (and an OFFER 250 ms for the first twelve attempts): against a server that answers 1.5 s late under 25% loss the lease took 28 s and 16 DISCOVERs (availability on a high-latency link, not an attack) | closed (not reproduced: the `netem` rows give 3.0 s on the parent and 3.1-3.4 s here for a server 1.5 s away, with and without loss, because the attempts' waits lengthen after twelve and 1322bdcb bounds the ACK wait to two seconds; `net netem` now asserts under 15 s) |
 | L42 | found by the `netem` lane | SNTP shares one ten second deadline across its five samples: a datagram lost first spends all of it and the rest are sent with no time to wait, so one lost packet in four ends a query with no answer (pinned as the KNOWN OPEN `sntp drop2` row; availability, not an attack) | open (closeclock) |
+| L43 | netlow | A DHCP exchange cut between REQUEST and ACK leaves the server holding the address | closed (1322bdcb) |
 
 ### Decisions (closed by decision, reasons recorded; the user can override)
 
@@ -437,3 +476,7 @@ downloads, boot disk, argv secrets, terminal fuzz; closeledger = the rest.
 | D10 | TKIP and WPA1 networks stay refused | TKIP is broken; the refusal now names what to change at the access point (WPA2 with AES). The user can override |
 | D10 | The default still takes, without asking, the first same-build install on an internal bus when none is the disk the session started from | Reaching it means opening the case and adding a disk, which already gives write access to the unencrypted disk and the machine; asking about every internal disk would put a question on every boot from a live stick. `MOONWATER_STRICT` tight asks, and the user can make that the default |
 | D11 | A response cut inside its status line or a header stays a failure in both tiers | Measured against GNU wget 1.25.0 and curl 8.22.0 from a raw-socket server: cut at byte 8, wget exits 4 and curl 52; at 15, wget exits 0 with nothing written and curl 52; at 24 (inside a header), both exit 0 with nothing written; right after the last header line, wget exits 4 and curl 18. The two references disagree with each other, so no tier is 1:1 with both, and accepting a cut as success turns a download an attacker (or a dropped connection) truncated into an empty success that a script testing the exit status cannot tell from a real empty file. The user can override by changing `STRICTER_THAN_WGET`'s `FIN cuts` rows in `wget_mutation` and the no-reply status |
+| D12 | Unprivileged user namespaces are left as the kernel has them | Root is unaffected, no tool here creates one, and `user.max_user_namespaces` 0 would also take them from the test harnesses that run on the same kernel; a kiosk tier that wants them off sets it itself. `unprivileged_bpf_disabled` has no knob: the image is built without `bpf(2)` (classic socket filters, which the DHCP packet socket uses, are separate) |
+| D13 | DNS over TLS is off by default; `tls` (with UDP fallback) and `tls-only` are opt-in | A captive portal answers or drops port 853 and a first lease comes with the clock unset, where a certificate that has not begun is refused: both are an ordinary first minute. `tls` survives them at up to two seconds a lookup, which a default should not cost; `tls-only` cannot have its clock set by names it cannot resolve, so the time servers' names (and hostid, logger's server, waterlink's peers) are always asked in plain. Only wget and host follow the setting. The user can change the default |
+| D14 | The default conflict probe listens for about 0.2 s, not RFC 5227's 4-7 s | Four to seven seconds would more than double the time to a lease; a kernel answers ARP in a millisecond or two on a wired LAN. A host that answers slower (a radio in power save) can be missed; `sec_hardened` keeps RFC 5227's numbers. The user can change the default |
+| D15 | `rp_filter` is 2 (loose) by default and 1 in `sec_hardened` | 2 is what Debian ships and is lease-safe; 1 drops asymmetric traffic by design and was measured on one leased link only |

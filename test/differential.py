@@ -55862,6 +55862,13 @@ try:
         log = open(top + "/dhcp.log").read() if os.path.exists(top + "/dhcp.log") else ""
         say(" type 1 " in log and " type 3 " in log, "%s: the server saw a DISCOVER and a REQUEST" % label)
         say(took < 120, "%s: the lease came within two minutes (%.1f s)" % (label, took))
+        if mode == "late":
+            #   A server a second and a half away answers both the DISCOVER
+            #   and the REQUEST that late, and the first twelve attempts
+            #   listen a quarter second each (netem ledger L41 measured 28 s
+            #   once; 3.0 to 3.4 s here, the lease coming when the attempts'
+            #   waits lengthen and the ACK is listened for two seconds).
+            say(took < 15, "%s: a server 1.5 s away is waited for (%.1f s)" % (label, took))
     else:
         run("ip", "addr", "add", "10.88.0.1/24", "dev", "eth0")
         open("/root/ntp.server", "w").write("10.88.0.2\n")
@@ -55990,6 +55997,8 @@ def harness_net_netem(argv):
             for line in text.splitlines():
                 if line.startswith("ok ") or line.startswith("FAIL "):
                     asked += 1
+                    if os.environ.get("NET_NETEM_SHOW"):
+                        print("  " + line)
                     checks(line.startswith("ok "), line.split(" ", 1)[1])
             checks(asked >= 2, "%s %s %s: the scene asked its questions (%d)%s" % (
                 kind, mode, netem, asked, "" if asked >= 2 else ": " + text[-400:]))
