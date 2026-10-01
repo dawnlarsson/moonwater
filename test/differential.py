@@ -39941,7 +39941,10 @@ def harness_dhcp_fuzz(argv):
     seconds), dhcp_prefix_of (the mask's population count, 24 for none),
     dhcp_lease_acknowledge over a held lease (still usable), and the watcher's
     clock arithmetic at a fuzzed start and now (a wake within the lease, a
-    request never past its boundary, a retry never past expiry). Seeds from
+    request never past its boundary, a retry never past expiry). A parsed
+    lease is judged usable or not by dhcp_lease_usable and by the rule of
+    what a server may hand out written the other way round (the prefix as a
+    range of addresses against 0/8, 127/8 and 224/3). Seeds from
     dhcp_fuzz_seeds; ASan/UBSan, or MSan with MOONWATER_MSAN=1; NOT RUN (2)
     without clang/libFuzzer.
 
@@ -40027,6 +40030,38 @@ static int reference_read(const p8 *packet, long size, p32 lease[8], p8 *kind)
         return 1;
 }
 
+/* What a server may hand out, written the other way round from net.c: the
+   address, the server and the router are unicast hosts (first octet 1 to 223,
+   not 127; a router is not the address); the prefix, as the range of
+   addresses it covers, reaches none of 0/8, 127/8 and 224/3; and on a subnet
+   wider than a /31 the address is neither its first nor its last. */
+static int reference_unicast(p32 address)
+{
+        unsigned first = address >> 24;
+        return first >= 1 && first <= 223 && first != 127;
+}
+
+static int reference_usable(const dhcp_lease *lease)
+{
+        p32 mask = lease->mask ? lease->mask : 0xffffff00u;
+        p32 low = lease->address & mask;
+        p32 high = low | ~mask;
+
+        if (!lease->address || !lease->server || !lease->seconds)
+                return 0;
+        if (!reference_unicast(lease->address) || !reference_unicast(lease->server))
+                return 0;
+        if (lease->router && (!reference_unicast(lease->router) ||
+                              lease->router == lease->address))
+                return 0;
+        if (low <= 0x00ffffffu || (low <= 0x7fffffffu && high >= 0x7f000000u) ||
+            high >= 0xe0000000u)
+                return 0;
+        if (__builtin_popcount(mask) <= 30 && (lease->address == low || lease->address == high))
+                return 0;
+        return 1;
+}
+
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
         if (size < 9)
@@ -40060,6 +40095,8 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         }
         FUZZ_REQUIRE(kind == want_kind && !memcmp(&lease, want, sizeof want),
                      "dhcp_read and the reference read different values");
+        FUZZ_REQUIRE(dhcp_lease_usable(&lease) == reference_usable(&lease),
+                     "dhcp_lease_usable and the written rule disagree on a parsed lease");
 
         dhcp_lease timed = lease;
         bool ordered = dhcp_lease_timers(&timed);
@@ -50111,6 +50148,12 @@ static positive fuzz_next[6];
 static positive fuzz_tcp_taken;
 static positive fuzz_clock;
 static p8 fuzz_faults;
+/* The last datagram or stream write of twelve bytes or more that went out,
+   and how many stream sockets the run opened: what a driver needs to ask
+   whether an answer was taken for the question that was sent. */
+static p8 fuzz_sent[600];
+static positive fuzz_sent_length;
+static positive fuzz_stream_sockets;
 static const p8 *fuzz_file;
 static positive fuzz_file_length;
 enum { FAULT_SOCKET = 2, FAULT_CONNECTING = 4, FAULT_SO_ERROR = 8,
@@ -50133,6 +50176,7 @@ static fuzz_frame *fuzz_frame_next(b32 handle)
 static const p8 *fuzz_frames_load(const p8 *at, positive left)
 {
         fuzz_frame_count = fuzz_tcp_taken = fuzz_clock = 0;
+        fuzz_sent_length = fuzz_stream_sockets = 0;
         memset(fuzz_next, 0, sizeof fuzz_next);
         while (left >= 3 && fuzz_frame_count < FUZZ_FRAMES)
         {
@@ -50181,6 +50225,7 @@ static bipolar socket_new(b32 family, b32 kind, b32 protocol)
         (void)protocol;
         if (fuzz_faults & FAULT_SOCKET)
                 return -24;
+        fuzz_stream_sockets += (kind & 15) == SOCK_STREAM;
         return family == AF_NETLINK ? FUZZ_NETLINK
                : (kind & 15) == SOCK_STREAM ? FUZZ_TCP : FUZZ_UDP;
 }
@@ -50233,6 +50278,11 @@ static bipolar socket_send(b32 handle, address_any data, positive size,
         {
                 fuzz_faults &= (p8)~FAULT_SEND_INTERRUPT;
                 return -4;
+        }
+        if (!(fuzz_faults & FAULT_SEND) && size >= 12 && size <= sizeof fuzz_sent)
+        {
+                memcpy(fuzz_sent, data, size);
+                fuzz_sent_length = size;
         }
         return (fuzz_faults & FAULT_SEND) ? -28 : (bipolar)size;
 }
@@ -50306,13 +50356,28 @@ def dns_fuzz_seed_record(owner, kind, data, cls=1):
     return owner + struct.pack(">HHIH", kind, cls, 300, len(data)) + data
 
 
+def dns_fuzz_seed_mixed(name):
+    """The question as the resolver sends it under the shim's randomness, which
+    fills every byte with 0xa5: dns_mix_case flips the case of the letter at
+    each wire offset whose bit (offset mod 8) of 0xa5 is set, 0, 2, 5 and 7."""
+    wire = bytearray(dns_fuzz_seed_name(name))
+    for at, byte in enumerate(wire):
+        if (0xa5 >> (at % 8)) & 1 and 0x61 <= (byte | 0x20) <= 0x7a:
+            wire[at] = byte ^ 0x20
+    return bytes(wire)
+
+
 def dns_fuzz_seed_reply(name, answers=(), authority=(), additional=(),
-                        flags=0x8180, ident=0xa5a5, tail=b""):
+                        flags=0x8180, ident=0xa5a5, tail=b"", mixed=False):
     """A reply to the fuzz resolver's question: id 0xa5a5 (the shim's
-    randomness), the asked name spelled at offset 12 for c00c to name."""
+    randomness), the asked name spelled at offset 12 for c00c to name, in the
+    case the resolver sent it (mixed) or as typed. The first attempt of a
+    query sends it mixed and wants it back so; a server that folds the case
+    is asked again as typed."""
     return (struct.pack(">HHHHHH", ident, flags, 1, len(answers),
                         len(authority), len(additional)) +
-            dns_fuzz_seed_name(name) + b"\0\1\0\1" +
+            (dns_fuzz_seed_mixed(name) if mixed else dns_fuzz_seed_name(name)) +
+            b"\0\1\0\1" +
             b"".join(answers) + b"".join(authority) + b"".join(additional) +
             tail)
 
@@ -50365,7 +50430,40 @@ def dns_fuzz_seeds():
     conf = (b"# written by hand\nsearch example.com\noptions ndots:2 timeout:1\n"
             b"nameserver\t10.0.0.1 # first\r\nnameserver ::1\n"
             b"nameserver 192.0.2.53\nnameserver 10.0.0.300\nnameserver")
+    #   The resolver asks in mixed case with the EDNS0 option, and asks again
+    #   as typed after a server that folded the case, and again without the
+    #   option after one that did not understand it: the replies that walk
+    #   each of those, in the order the attempts take them.
+    mixed = lambda *records, **named: dns_fuzz_seed_reply(
+        "example.com", list(records), mixed=True, **named)
+    plain_mixed = mixed(a(at12, [192, 0, 2, 1]))
+    truncated_mixed = mixed(flags=0x8380)
+    framed_mixed = struct.pack(">H", len(plain_mixed)) + plain_mixed
+    chain_mixed = dns_fuzz_seed_reply("www.example.com", [
+        cname(at12, dns_fuzz_seed_name("edge.example.net")),
+        a(dns_fuzz_seed_name("EDGE.example.NET"), [198, 51, 100, 7])], mixed=True)
     return {
+        "a_mixed.bin": seed("example.com", udp(plain_mixed)),
+        "cname_chain_mixed.bin": seed("www.example.com", udp(chain_mixed)),
+        "nxdomain_mixed.bin": seed("example.com", udp(mixed(authority=[soa], flags=0x8183))),
+        "case_folded_then_plain.bin": seed("example.com", udp(plain), udp(plain)),
+        "case_folded_then_junk.bin": seed("example.com", udp(plain),
+                                          udp(dns_fuzz_seed_reply("other.com"))),
+        "edns_formerr_then_plain.bin": seed(
+            "example.com", udp(mixed(flags=0x8181)), udp(plain_mixed)),
+        "edns_notimp_then_plain.bin": seed(
+            "example.com", udp(mixed(flags=0x8184)), udp(plain_mixed)),
+        "folded_formerr_then_plain.bin": seed(
+            "example.com", udp(plain), udp(dns_fuzz_seed_reply("example.com", flags=0x8181)),
+            udp(plain)),
+        "formerr_twice.bin": seed(
+            "example.com", udp(mixed(flags=0x8181)), udp(mixed(flags=0x8181))),
+        "tc_mixed_then_tcp.bin": seed("example.com", udp(truncated_mixed), tcp(framed_mixed)),
+        "tc_mixed_then_tcp_split.bin": seed(
+            "example.com", udp(truncated_mixed),
+            tcp(framed_mixed[:1]), tcp(framed_mixed[1:9]), tcp(framed_mixed[9:]), mode=4),
+        "tc_mixed_then_tcp_lowercase.bin": seed(
+            "example.com", udp(truncated_mixed), tcp(framed)),
         "a_plain.bin": seed("example.com", udp(plain)),
         "junk_then_answer.bin": seed(
             "example.com",
@@ -50462,6 +50560,38 @@ static void fuzz_own_question(fuzz_frame *frame)
         free(copy);
 }
 
+/* The invariant the resolver exists for: an address is believed only from a
+   datagram that carries the id of the query that was sent and its question
+   byte for byte, in the case it was written in (the mixed case of a query's
+   first attempt, as typed on the retry that follows a server that folded it).
+   Held to the bytes the fake socket saw go out and the frame it served last,
+   for an answer that came by UDP. */
+static void fuzz_check_taken(bipolar status)
+{
+        const fuzz_frame *served;
+        bipolar name_end;
+        positive question;
+
+        if (status != DNS_OK || fuzz_stream_sockets ||
+            fuzz_sent_length < DNS_HEADER + 5 || !fuzz_next[FUZZ_UDP])
+                return;
+        served = &fuzz_frames[fuzz_next[FUZZ_UDP] - 1];
+        name_end = dns_skip_name(fuzz_sent, fuzz_sent_length, DNS_HEADER);
+        if (name_end < 0)
+        {
+                fprintf(stderr, "the resolver sent a name it cannot read\n");
+                abort();
+        }
+        question = (positive)name_end + 4 - DNS_HEADER;
+        if (served->length < DNS_HEADER + question ||
+            network_load_16(served->bytes) != network_load_16(fuzz_sent) ||
+            memcmp(served->bytes + DNS_HEADER, fuzz_sent + DNS_HEADER, question))
+        {
+                fprintf(stderr, "an answer was taken whose id or question is not the one asked\n");
+                abort();
+        }
+}
+
 static bipolar fuzz_resolve(const char *name, const p8 *frames, positive left,
                             p8 faults, p32 *found)
 {
@@ -50475,6 +50605,7 @@ static bipolar fuzz_resolve(const char *name, const p8 *frames, positive left,
                      : dns_resolve_at(0x7f000001, DNS_PORT, (string_address)name,
                                       found, 3);
         fuzz_faults = 0;
+        fuzz_check_taken(status);
         return status;
 }
 
