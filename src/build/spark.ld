@@ -521,6 +521,10 @@ SECTIONS
                 *(.rodata .rodata.*)
                 /* riscv64 puts read only globals of a few bytes here. */
                 *(.srodata .srodata.*)
+                /* Tables of pointers that are const and so never written: with the
+                   rodata, where a read of one is a fault on a page that is
+                   mapped already or a clean one, not a page of .data. */
+                *(.data.rel.ro .data.rel.ro.*)
 
                 *(.text.unlikely .text.unlikely.*)
                 /* The routines written in assembly that every command runs,
@@ -574,6 +578,10 @@ SECTIONS
                    were placed wherever the linker felt like, which on riscv64
                    is outside every region the loader maps. */
                 *(.sdata .sdata.*)
+                /* Whole pages in the file, so that the kernel has no tail of
+                   the last one to zero before the bss starts: that zeroing
+                   copies a page of the file at every exec. */
+                . = ALIGN(4096);
         }
 
         /* RISC-V _start establishes gp as required by its psABI.  Ordinary
@@ -596,7 +604,8 @@ SECTIONS
                   .bss.log_writer_buffer_length .bss.log_writer_failed
                   .bss.writer_stderr_failed .bss.working_directory
                   .bss.program_vdso_clock .bss.program_entry_identity .bss.program_words
-                  .bss.cpu_has_* .bss.cpu_hash_probed)
+                  .bss.cpu_has_* .bss.cpu_hash_probed
+                  .bss.program_words_count .bss.log_writer_buffer)
                 *(.bss .bss.*)
                 *(.sbss .sbss.*)
                 *(COMMON)

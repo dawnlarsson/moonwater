@@ -37217,10 +37217,15 @@ static void system_close(bipolar handle) { (void)handle; }
 /* The identity files are already there, so session prep asks once and stops;
    what it writes when they are not is the bowl lane's to check. */
 #define array_count(list) (sizeof(list) / sizeof((list)[0]))
+/*  The identity files are there; every directory is not, so that session prep
+    takes the walk that makes it, which is what this window counts. */
 static bipolar system_access_at(bipolar dir, string_address path, positive mode) {
-    (void)dir; (void)path; (void)mode;
-    return 0;
+    (void)dir; (void)mode;
+    return !strncmp(path, "/etc/", 5) ? 0 : -2;
 }
+static bipolar system_stat_at_stub(void) { return -2; }
+#define system_stat_at(dir, path, flags, mask, into) system_stat_at_stub()
+#define AT_SYMLINK_NOFOLLOW 0x100
 static bipolar system_random_fill(void *into, positive length, positive flags) {
     (void)into; (void)length; (void)flags;
     return 0;

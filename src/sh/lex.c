@@ -189,7 +189,7 @@ KEEP __attribute__((externally_visible)) b8 lex_ordinary[STRING_SET_BYTES];
 KEEP __attribute__((externally_visible)) b8 lex_operator[STRING_SET_BYTES];
 // What decides nothing inside a double quote: wider than lex_ordinary,
 // because a blank means nothing in there.
-static b8 lex_in_double[STRING_SET_BYTES];
+static b8 lex_in_double[STRING_SET_BYTES] HOT_STATE;
 /*
         Bytes that cannot open a line continuation. parse_feed used to walk
         every line twice -- lex_unfinished, then lex_line -- and the second
@@ -198,7 +198,7 @@ static b8 lex_in_double[STRING_SET_BYTES];
         process substitution or an a=( list might still be open; this set lets one
         string_span prove the common line has none of those.
 */
-static b8 lex_closed[STRING_SET_BYTES];
+static b8 lex_closed[STRING_SET_BYTES] HOT_STATE;
 static b32 lex_ready HOT_STATE;
 
 /* expand.c is included later in this translation unit.  Its substitution

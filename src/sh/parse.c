@@ -193,7 +193,7 @@ static parse_redirect address_to parse_redirects;
 #define CASE_TEST_ON 2
 
 static b32 parse_node_used;
-static b32 parse_node_top;
+static b32 parse_node_top HOT_STATE;
 static b32 parse_word_used;
 static b32 parse_word_top;
 static b32 parse_redirect_used;
@@ -336,7 +336,7 @@ static positive parse_pending_line;
 static string_address parse_want[PARSE_WANT_ROOM];
 static string_address parse_want_opener[PARSE_WANT_ROOM];
 static positive parse_want_line[PARSE_WANT_ROOM];
-static positive parse_want_used;
+static positive parse_want_used HOT_STATE;
 
 //      A closer waited for, with the command waiting and its line, which
 //      is what bash names when the input ends before it is closed.

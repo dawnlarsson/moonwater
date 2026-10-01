@@ -186,7 +186,7 @@ fn shell_catch(b32 number)
 
 // Whether anybody is watching. A script and a terminal want different
 // things of a shell that has just been told to do something impossible.
-b32 shell_is_interactive;
+b32 shell_is_interactive HOT_STATE;
 
 /* One implementation, two conflicting shell policies. The standalone entry
    selects Bash policy only when invoked as bash; sh/dash and embedded callers
@@ -1873,7 +1873,7 @@ HOT bool shell_builtin(string_address arguments, positive2 named)
 {
         static shell_command address_to remembered HOT_STATE;
         static positive remembered_length HOT_STATE;
-        static positive remembered_hash;
+        static positive remembered_hash HOT_STATE;
         static positive remembered_generation HOT_STATE;
         shell_command address_to command = null;
 

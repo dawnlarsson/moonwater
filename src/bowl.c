@@ -1192,9 +1192,11 @@ static b32 bowl_env_named(string_address entry, string_address name)
 #define BOWL_ENV_ROOM 512
 #define BOWL_ENV_DEFAULTS 10
 
-static p8 bowl_runtime_path[sizeof(BOWL_RUNTIME_DIR) + 20];
+static p8 bowl_runtime_path[sizeof(BOWL_RUNTIME_DIR) + 20]
+    __attribute__((section(".bss.hot")));
 static p8 bowl_runtime_assignment[sizeof("XDG_RUNTIME_DIR=") +
-                                 sizeof(bowl_runtime_path)];
+                                 sizeof(bowl_runtime_path)]
+    __attribute__((section(".bss.hot")));
 static p8 bowl_user_assignment[sizeof("USER=") + 20];
 static p8 bowl_logname_assignment[sizeof("LOGNAME=") + 20];
 
@@ -1495,19 +1497,57 @@ static fn bowl_session_prepare_at(string_address home, string_address runtime,
                 : MOONWATER_STRICT >= STRICT_TIGHT ? BOWL_MAKE_NONE
                                                    : BOWL_MAKE_LEAF;
 
-        bowl_mkdir_parents_made(runtime, make, address_of made);
-        if (made && !bowl_runtime_shared(runtime))
-                bowl_chmod_directory(runtime, 0700);
-        bowl_mkdir("/tmp");
-        bowl_chmod_directory("/tmp", 01777);
+        /*  A shell start on a machine that is already set up asks one
+            question of each of these and does nothing else: the answer to
+            "is it there" is a faccessat, where the walk that would make it
+            costs an open and a close of every component. A directory that
+            is there is not this session's to make or change (see made), so
+            the walk's only work in that case is the open that finds it
+            there, and a symlink in the way is a refusal there and "there"
+            here, which come to the same nothing. Anything that is not there
+            takes the walk, which is the only one that creates. /tmp is the
+            one that is changed when it is there: its mode is put back to
+            1777 at every start, and one statx says it already is, so the
+            open, the fchmod and the close are for a /tmp that is not. */
+        if (system_access_at(AT_FDCWD, runtime, 0) < 0)
+        {
+                bowl_mkdir_parents_made(runtime, make, address_of made);
+                if (made && !bowl_runtime_shared(runtime))
+                        bowl_chmod_directory(runtime, 0700);
+        }
+        {
+                p8 held[256];
+                bool sticky = false;
+
+                if (system_stat_at(AT_FDCWD, "/tmp", AT_SYMLINK_NOFOLLOW,
+                                   0x7ff, held) >= 0)
+                {
+                        unsigned mode = (unsigned)(held[28] | held[29] << 8);
+
+                        sticky = (mode & 0170000) == 0040000 &&
+                                 (mode & 07777) == 01777;
+                }
+                if (!sticky)
+                {
+                        bowl_mkdir("/tmp");
+                        bowl_chmod_directory("/tmp", 01777);
+                }
+        }
         /* Where Xwayland, and every X client of any bowl, puts its socket:
            kwin_wayland_wrapper stops at "/tmp/.X11-unix does not exist". */
-        bowl_mkdir_parents_made("/tmp/.X11-unix", BOWL_MAKE_LEAF, address_of sockets);
-        if (sockets)
-                bowl_chmod_directory("/tmp/.X11-unix", 01777);
-        bowl_mkdir("/dev/shm");
-        bowl_mkdir("/run/lock");
-        bowl_mkdir("/var");
+        if (system_access_at(AT_FDCWD, "/tmp/.X11-unix", 0) < 0)
+        {
+                bowl_mkdir_parents_made("/tmp/.X11-unix", BOWL_MAKE_LEAF,
+                                        address_of sockets);
+                if (sockets)
+                        bowl_chmod_directory("/tmp/.X11-unix", 01777);
+        }
+        if (system_access_at(AT_FDCWD, "/dev/shm", 0) < 0)
+                bowl_mkdir("/dev/shm");
+        if (system_access_at(AT_FDCWD, "/run/lock", 0) < 0)
+                bowl_mkdir("/run/lock");
+        if (system_access_at(AT_FDCWD, "/var", 0) < 0)
+                bowl_mkdir("/var");
         bowl_dev_link("/run", "/var/run");
         bowl_dev_link("/run/lock", "/var/lock");
         bowl_session_identity();

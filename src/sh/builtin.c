@@ -452,7 +452,7 @@ static fn exec_input_finish();
 static fn exec_wait_background(bipolar child);
 /* The name this shell was started under, less any directory and a login
    dash, which a prompt's \s says. */
-string_address shell_invocation_name;
+string_address shell_invocation_name HOT_STATE;
 /* Whether FUNCNEST was ever given a value: a function call asks for it
    only then, rather than looking the name up on every call. */
 bool shell_funcnest_seen;
@@ -1285,7 +1285,7 @@ KEEP __attribute__((externally_visible)) struct
 // Fast negative answer for the overwhelmingly common shell with no readonly
 // declarations. The names themselves remain in the indexed variable table;
 // this is only a count, not a second registry.
-static positive readonly_count;
+static positive readonly_count HOT_STATE;
 static bool shell_bashpid_cleared HOT_STATE;
 
 /*
@@ -1311,7 +1311,7 @@ typedef struct
 KEEP __attribute__((externally_visible)) name_index_slot address_to env_index;
 static positive env_index_room;
 KEEP __attribute__((externally_visible)) positive env_index_slots;
-static positive env_index_tombstones;
+static positive env_index_tombstones HOT_STATE;
 
 static inline INLINE fn env_index_touch()
 {
@@ -5634,8 +5634,8 @@ static inline bool shell_inventory_sorted(
    name. An empty-environment shell can therefore publish the getcwd result as
    `PWD=value` without a second buffer or allocation. On the first cd or PWD
    assignment the ordinary borrowed-record COW path takes ownership. */
-static p8 shell_directory_assignment[SHELL_DIRECTORY_MAX + 4];
-p8 address_to shell_directory = shell_directory_assignment + 4;
+static p8 shell_directory_assignment[SHELL_DIRECTORY_MAX + 4] HOT_STATE;
+p8 address_to shell_directory HOT_DATA = shell_directory_assignment + 4;
 static p8 shell_directory_was[SHELL_DIRECTORY_MAX];
 static PURE bool shell_physical_on();
 

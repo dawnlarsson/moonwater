@@ -102,8 +102,8 @@ static bool cat_output_known;
 #define TEXT_STDIO_UNSIZED 8192
 
 static bipolar text_out_error HOT_STATE;
-static positive text_out_offered;
-static positive text_out_error_offered;
+static positive text_out_offered HOT_STATE;
+static positive text_out_error_offered HOT_STATE;
 static positive text_out_error_handle;
 static positive text_out_error_buffer;
 // The buffer glibc would give standard output, sized at the first write --
@@ -1315,8 +1315,8 @@ static bool text_word(p8 character)
         everything below starts at one and text_argument_count is what stops
         the walk.
 */
-static b32 text_argument_count;
-static positive text_files_count;
+static b32 text_argument_count HOT_STATE;
+static positive text_files_count HOT_STATE;
 static bool text_files_failed HOT_STATE;
 // --files0-from replaces the operand list with names cut from a file.
 static string_address address_to text_file_list;

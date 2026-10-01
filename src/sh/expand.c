@@ -358,10 +358,10 @@ static p8 address_to expand_mark;
 static positive expand_mark_room;
 static positive expand_length HOT_STATE;
 static bool expand_overflow HOT_STATE;
-static bool expand_quoted_seen;
+static bool expand_quoted_seen HOT_STATE;
 // How many of the bytes in the buffer are empty marks and not bytes of the
 // word, so that "the word expanded to nothing" can still be asked.
-static positive expand_empty_count;
+static positive expand_empty_count HOT_STATE;
 static bool expand_failed HOT_STATE;
 // A here-document expanded in this process (dash) turns ${x?} into the
 // command's status rather than ending the script, so ${x:=} can still stick.
@@ -1821,7 +1821,7 @@ string_address shell_script_name HOT_DATA = (string_address) "sh";
 // Entry-only flags seed the options `set` can subsequently change. A no-arg
 // shell reads standard input and begins with s; a script file resets it and
 // -c has its own entry marker.
-string_address shell_option_flags = (string_address) "s";
+string_address shell_option_flags HOT_DATA = (string_address) "s";
 
 static p8 address_to shell_parameter_bytes;
 static positive shell_parameter_bytes_room;
