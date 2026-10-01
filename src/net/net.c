@@ -2942,8 +2942,7 @@ static p64 crypto_fe_subtract_raw(p64 address_to d,
         return (p64)borrow;
 }
 
-static inline INLINE PURE p64 crypto_fe_zero_bit(const p64 address_to a,
-                                                 positive n)
+static inline p64 crypto_fe_zero_bit(const p64 address_to a, positive n)
 {
         //      Four limbs (P-256) and six (P-384) are straight lines; the
         //      scalar recoding's five and seven take the loop. Which one is
