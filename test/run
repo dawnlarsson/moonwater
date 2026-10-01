@@ -3900,6 +3900,7 @@ lane_net()
         python3 test/differential.py --harness tls_dates || net_outcome=1
         python3 test/differential.py --harness public_suffixes || net_outcome=1
         python3 test/differential.py --harness anchors || net_outcome=1
+        python3 test/differential.py --harness g_tables || net_outcome=1
         need_shell || return 1
         python3 test/differential.py --harness tls_peer --shell "$shell_binary"
         case $? in

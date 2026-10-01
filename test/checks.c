@@ -61829,6 +61829,354 @@ static positive montgomery_check_wrong(void)
         return wrong;
 }
 
+/* The binary inverse for public values against the Fermat exponentiation it
+   stands beside, under both group orders and both fields: the ends of the
+   range, and values from a generator that is not the library's. */
+static fn crypto_floor_inverse(void)
+{
+        const crypto_field address_to fields[4] = {
+            address_of crypto_p256_order, address_of crypto_p384_order,
+            address_of crypto_p256_field, address_of crypto_p384_field};
+        positive wrong = 0;
+        positive tried = 0;
+        p64 seed = 0x9e3779b97f4a7c15ull;
+
+        for (positive k = 0; k < 4; k++)
+        {
+                const crypto_field address_to f = fields[k];
+                positive n = f->n;
+                p64 a[CRYPTO_FE_MAX];
+                p64 fast[CRYPTO_FE_MAX];
+                p64 slow[CRYPTO_FE_MAX];
+                p64 mont[CRYPTO_FE_MAX];
+
+                for (positive turn = 0; turn < 300; turn++)
+                {
+                        memory_fill(a, 0, sizeof a);
+                        if (turn < 3)
+                                a[0] = turn;
+                        else if (turn == 3)
+                        {
+                                p64 plain_one[CRYPTO_FE_MAX];
+
+                                memory_fill(plain_one, 0, sizeof plain_one);
+                                plain_one[0] = 1;
+                                crypto_fe_subtract_raw(a, f->m, plain_one, n);
+                        }
+                        else
+                        {
+                                for (positive i = 0; i < n; i++)
+                                {
+                                        seed ^= seed << 13;
+                                        seed ^= seed >> 7;
+                                        seed ^= seed << 17;
+                                        a[i] = seed >> (turn % 5 ? 0 : 20 * (i & 1));
+                                }
+                                while (crypto_fe_cmp(a, f->m, n) >= 0)
+                                        crypto_fe_subtract_raw(a, a, f->m, n);
+                        }
+                        crypto_fe_mul(mont, a, f->square, f);
+                        crypto_fe_inv(slow, mont, f);
+                        crypto_fe_inv_public(fast, a, f);
+                        tried++;
+                        wrong += memory_compare(fast, slow, n * 8) != 0;
+                }
+        }
+        check("crypto_fe_inv_public gives the Fermat inverse, in Montgomery "
+              "form, for 1200 values under both orders and both fields "
+              "(0 gives 0)",
+              tried == 1200 && wrong == 0);
+}
+
+/* The affine table of the generator's odd multiples against the library's
+   own point arithmetic, and ECDSA's double-scalar sum by the table (mixed
+   additions, width 7 for u1) against the general path (a copy of the field
+   at another address takes it): random scalars and the cases a mixed
+   addition tells apart, equal points, opposite points, infinity and
+   scalars of every bit pattern the recoding turns. */
+static fn crypto_floor_g_table(void)
+{
+        const crypto_field address_to fields[2] = {
+            address_of crypto_p256_field, address_of crypto_p384_field};
+        const p8 address_to gxs[2] = {crypto_p256_gx_be, crypto_p384_gx_be};
+        const p8 address_to gys[2] = {crypto_p256_gy_be, crypto_p384_gy_be};
+        positive entries_wrong = 0;
+        positive sums_wrong = 0;
+        positive sums = 0;
+        p64 seed = 0x2545f4914f6cdd1dull;
+
+        for (positive k = 0; k < 2; k++)
+        {
+                const crypto_field address_to f = fields[k];
+                crypto_field plain_field = *f;
+                const p64 address_to table = crypto_g_table(f);
+                positive n = f->n;
+                p64 gx[CRYPTO_FE_MAX], gy[CRYPTO_FE_MAX];
+                crypto_point g, general, point, twice;
+                p64 x[CRYPTO_FE_MAX], y[CRYPTO_FE_MAX];
+
+                crypto_fe_load_be(gx, gxs[k], n);
+                crypto_fe_load_be(gy, gys[k], n);
+                crypto_point_set_xy(address_of g, gx, gy, f);
+                point = g;
+                crypto_point_double(address_of twice, address_of g);
+                for (positive j = 0; j < 32; j++)
+                {
+                        crypto_point walked = point;
+
+                        crypto_point_affine(address_of walked);
+                        crypto_fe_mul(x, table + j * 2 * n, crypto_unit, f);
+                        crypto_fe_mul(y, table + j * 2 * n + n, crypto_unit, f);
+                        entries_wrong += memory_compare(x, walked.x, n * 8) != 0;
+                        entries_wrong += memory_compare(y, walked.y, n * 8) != 0;
+                        crypto_point_add(address_of point, address_of point,
+                                         address_of twice);
+                }
+
+                crypto_point_set_xy(address_of general, gx, gy, address_of plain_field);
+                for (positive turn = 0; turn < 40; turn++)
+                {
+                        p64 u1[CRYPTO_FE_MAX], u2[CRYPTO_FE_MAX];
+                        crypto_point q, fast, slow;
+                        p64 qk[CRYPTO_FE_MAX];
+
+                        memory_fill(u1, 0, sizeof u1);
+                        memory_fill(u2, 0, sizeof u2);
+                        memory_fill(qk, 0, sizeof qk);
+                        for (positive i = 0; i < n; i++)
+                        {
+                                seed ^= seed << 13;
+                                seed ^= seed >> 7;
+                                seed ^= seed << 17;
+                                u1[i] = turn % 7 == 3 ? ~(p64)0 : seed;
+                                u2[i] = turn % 5 == 2 ? ~(p64)0 : seed >> 3;
+                                qk[i] = seed >> 9;
+                        }
+                        u1[n - 1] >>= 2;
+                        u2[n - 1] >>= 2;
+                        qk[n - 1] >>= 2;
+                        if (turn == 0)
+                                memory_fill(u1, 0, sizeof u1);
+                        if (turn == 1)
+                                memory_fill(u2, 0, sizeof u2);
+                        if (turn == 2)
+                        {
+                                memory_fill(u1, 0, sizeof u1);
+                                u1[0] = 1;
+                        }
+                        /* Q = G (so u1 G + u2 G, equal points) for a few
+                           turns, Q = -G with u1 = u2, and Q = qk G. */
+                        if (turn >= 4 && turn < 8)
+                                q = g;
+                        else
+                        {
+                                crypto_point_double_scalar(address_of q, address_of g,
+                                                           qk, address_of g, qk);
+                                if (crypto_fe_is_zero(q.z, n))
+                                        q = g;
+                        }
+                        if (turn == 6)
+                        {
+                                p64 zero[CRYPTO_FE_MAX];
+
+                                memory_fill(zero, 0, sizeof zero);
+                                crypto_fe_sub(q.y, zero, q.y, f);
+                                memory_copy(u2, u1, n * 8);
+                        }
+                        crypto_point_double_scalar(address_of fast, address_of g,
+                                                   u1, address_of q, u2);
+                        crypto_point_double_scalar(address_of slow, address_of general,
+                                                   u1, address_of q, u2);
+                        sums++;
+                        if (crypto_fe_is_zero(fast.z, n) || crypto_fe_is_zero(slow.z, n))
+                                sums_wrong += crypto_fe_is_zero(fast.z, n) !=
+                                              crypto_fe_is_zero(slow.z, n);
+                        else
+                        {
+                                crypto_point_affine(address_of fast);
+                                crypto_point_affine(address_of slow);
+                                sums_wrong += memory_compare(fast.x, slow.x, n * 8) != 0;
+                                sums_wrong += memory_compare(fast.y, slow.y, n * 8) != 0;
+                        }
+                }
+        }
+        check("the generator's affine table holds (2j + 1) G for j below 32 "
+              "on P-256 and P-384, as the library's own point addition makes them",
+              entries_wrong == 0);
+        check("u1 G + u2 Q by the table and mixed additions equals the general "
+              "path for 80 scalar pairs (zero, one, all ones, Q = G)",
+              sums == 80 && sums_wrong == 0);
+}
+
+/* crypto_wnaf by what its digits are for: the sum of d_i 2^i is the scalar,
+   each nonzero digit is odd, within the width's range and followed by width
+   - 1 zeros, and there are no more digits than bits plus one; at widths 5
+   and 7, six and four limbs, for the ends of the range, powers of two,
+   runs of ones and a seeded spread. */
+static fn crypto_floor_wnaf(void)
+{
+        positive wrong = 0;
+        positive tried = 0;
+        p64 seed = 0x9e3779b97f4a7c15ull;
+
+        for (positive width = 5; width <= 7; width += 2)
+                for (positive limbs = 4; limbs <= 6; limbs += 2)
+                        for (positive turn = 0; turn < 300; turn++)
+                        {
+                                p64 k[CRYPTO_FE_MAX];
+                                p64 acc[CRYPTO_FE_MAX + 1];
+                                b8 digits[CRYPTO_FE_MAX * 64 + 1];
+                                positive count;
+                                positive last = 0;
+                                bool seen = false;
+                                bool bad = false;
+
+                                memory_fill(k, 0, sizeof k);
+                                for (positive i = 0; i < limbs; i++)
+                                {
+                                        seed ^= seed << 13;
+                                        seed ^= seed >> 7;
+                                        seed ^= seed << 17;
+                                        k[i] = turn % 4 == 1   ? ~(p64)0
+                                               : turn % 4 == 2 ? (seed & (seed >> 7) & (seed >> 19))
+                                                               : seed;
+                                }
+                                if (turn == 0)
+                                        memory_fill(k, 0, sizeof k);
+                                if (turn == 3)
+                                {
+                                        memory_fill(k, 0, sizeof k);
+                                        k[(turn + width) % limbs] = (p64)1 << ((turn * 7) % 64);
+                                }
+                                count = crypto_wnaf(digits, k, limbs, width);
+                                if (count > limbs * 64 + 1)
+                                        bad = true;
+                                memory_fill(acc, 0, sizeof acc);
+                                for (positive i = count; i-- && !bad;)
+                                {
+                                        p64 carry = 0;
+
+                                        for (positive j = 0; j <= limbs; j++)
+                                        {
+                                                p64 next = acc[j] >> 63;
+
+                                                acc[j] = (acc[j] << 1) | carry;
+                                                carry = next;
+                                        }
+                                        if (digits[i] > 0)
+                                        {
+                                                p64 add = (p64)digits[i];
+
+                                                for (positive j = 0; add && j <= limbs; j++)
+                                                {
+                                                        acc[j] += add;
+                                                        add = acc[j] < add;
+                                                }
+                                        }
+                                        else if (digits[i] < 0)
+                                        {
+                                                p64 sub = (p64)(-(bipolar)digits[i]);
+
+                                                for (positive j = 0; sub && j <= limbs; j++)
+                                                {
+                                                        p64 before = acc[j];
+
+                                                        acc[j] -= sub;
+                                                        sub = before < sub;
+                                                }
+                                        }
+                                }
+                                for (positive i = 0; i < count; i++)
+                                {
+                                        bipolar d = digits[i];
+                                        bipolar magnitude = d < 0 ? -d : d;
+
+                                        if (d)
+                                        {
+                                                bad |= !(magnitude & 1);
+                                                bad |= magnitude >= (bipolar)1 << (width - 1);
+                                                bad |= seen && i - last < width;
+                                                last = i;
+                                                seen = true;
+                                        }
+                                }
+                                bad |= memory_compare(acc, k, limbs * 8) != 0 || acc[limbs] != 0;
+                                if (count && !digits[count - 1])
+                                        bad = true;
+                                wrong += bad;
+                                tried++;
+                        }
+        check("crypto_wnaf's digits sum to the scalar, are odd, within range, "
+              "spaced by the width and no longer than the scalar, at widths 5 "
+              "and 7 for 1,200 scalars",
+              tried == 1200 && wrong == 0);
+}
+
+/* The NIST field bodies in lib.c (p256_ and p384_ multiply and square, each
+   body there is on this machine) against the generic Montgomery routine, for
+   operands below the prime: seeded random ones, the ends of the range (0, 1,
+   p - 1, p - 2) and all-ones limbs. A body that is wrong for one carry
+   pattern in a hundred fails a handshake and not a vector file, so the
+   count is large. */
+static fn crypto_floor_field_bodies(void)
+{
+        const crypto_field address_to fields[2] = {
+            address_of crypto_p256_field, address_of crypto_p384_field};
+        positive wrong = 0;
+        positive tried = 0;
+        p64 seed = 0x2545f4914f6cdd1dull;
+
+        for (positive k = 0; k < 2; k++)
+        {
+                const crypto_field address_to f = fields[k];
+                positive n = f->n;
+
+                for (positive turn = 0; turn < 60000; turn++)
+                {
+                        p64 a[CRYPTO_FE_MAX], b[CRYPTO_FE_MAX];
+                        p64 got[CRYPTO_FE_MAX], want[CRYPTO_FE_MAX];
+
+                        for (positive i = 0; i < n; i++)
+                        {
+                                seed ^= seed << 13;
+                                seed ^= seed >> 7;
+                                seed ^= seed << 17;
+                                a[i] = turn % 5 == 0 ? ~(p64)0 : seed;
+                                seed ^= seed << 13;
+                                seed ^= seed >> 7;
+                                seed ^= seed << 17;
+                                b[i] = turn % 7 == 0 ? 0 : seed;
+                        }
+                        if (turn == 0)
+                                memory_fill(a, 0, sizeof a);
+                        if (turn == 1)
+                        {
+                                memory_fill(a, 0, sizeof a);
+                                a[0] = 1;
+                        }
+                        if (turn == 2)
+                                memory_copy(a, f->m, n * 8), a[0] -= 1;
+                        if (turn == 3)
+                                memory_copy(b, f->m, n * 8), b[0] -= 2;
+                        while (crypto_fe_cmp(a, f->m, n) >= 0)
+                                crypto_fe_subtract_raw(a, a, f->m, n);
+                        while (crypto_fe_cmp(b, f->m, n) >= 0)
+                                crypto_fe_subtract_raw(b, b, f->m, n);
+
+                        crypto_fe_mul(got, a, b, f);
+                        montgomery_multiply(want, a, b, f->m, f->inverse, n);
+                        wrong += memory_compare(got, want, n * 8) != 0;
+                        crypto_fe_sqr(got, a, f);
+                        montgomery_multiply(want, a, a, f->m, f->inverse, n);
+                        wrong += memory_compare(got, want, n * 8) != 0;
+                        tried += 2;
+                }
+        }
+        check("the P-256 and P-384 field multiply and square equal the generic "
+              "Montgomery routine for 240,000 operand pairs below the prime",
+              tried == 240000 && wrong == 0);
+}
+
 static fn crypto_floor_montgomery(void)
 {
         const crypto_field address_to orders[2] = {
@@ -65573,6 +65921,10 @@ b32 main(void)
         crypto_floor_ghash();
         crypto_floor_field();
         crypto_floor_montgomery();
+        crypto_floor_inverse();
+        crypto_floor_field_bodies();
+        crypto_floor_wnaf();
+        crypto_floor_g_table();
         crypto_floor_x25519();
         crypto_floor_aes();
         crypto_rsa_served_sizes();
