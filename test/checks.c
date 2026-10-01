@@ -53233,6 +53233,8 @@ static fn dns_policy_server(bipolar datagram, positive mode, b32 report,
                 network_store_16(reply + 6, 0);
                 network_store_16(reply + 8, 0);
                 network_store_16(reply + 10, 0);
+                if (mode == 5 && (note[0] & 2))
+                        continue; // an EDNS-blackholed path; plain DNS answers
                 if (mode == 2 && (note[0] & 2))
                         network_store_16(reply + 2, DNS_FLAG_RESPONSE | 1);
                 else if (mode == 3 || mode == 4)
@@ -53256,6 +53258,18 @@ static fn dns_policy_server(bipolar datagram, positive mode, b32 report,
                         for (positive i = DNS_HEADER; i < at; i++)
                                 if (reply[i] >= 'A' && reply[i] <= 'Z')
                                         reply[i] |= 0x20;
+                if (mode == 6 || mode == 7)
+                {
+                        p16 honest = network_load_16(reply);
+                        positive junk = mode == 6 ? DNS_DISCARD_MAX
+                                                  : DNS_DISCARD_MAX + 1;
+
+                        network_store_16(reply, (p16)(honest ^ 0xffff));
+                        for (positive i = 0; i < junk; i++)
+                                socket_send((b32)datagram, reply, length, 0,
+                                            address_of client, client_size);
+                        network_store_16(reply, honest);
+                }
                 socket_send((b32)datagram, reply, length, 0, address_of client,
                             client_size);
         }
@@ -53466,6 +53480,23 @@ static fn resolving_policy(void)
                   found == 0xc0000207);
         check("the first query had the option and the second not",
               (notes[0] & 2) && !(notes[3] & 2));
+
+        memory_fill(notes, 0, sizeof notes);
+        check("a path that silently drops EDNS0 is retried without it",
+              dns_policy_case(5, 1, 2, (string_address)"dropped.example.com",
+                              notes, address_of found) == DNS_OK &&
+                  found == 0xc0000207);
+        check("the silent query had EDNS0 and the answerable retry did not",
+              (notes[0] & 2) && !(notes[3] & 2));
+
+        check("DNS discards its exact wrong-identity packet budget and then "
+              "takes the valid neighbor",
+              dns_policy_case(6, 1, 1, (string_address)"budget.example.com",
+                              notes, address_of found) == DNS_OK &&
+                  found == 0xc0000207);
+        check("one wrong-identity packet over the DNS work budget fails closed",
+              dns_policy_case(7, 1, 1, (string_address)"over.example.com",
+                              notes, address_of found) == DNS_NO_REPLY);
 }
 
 /*
@@ -65112,7 +65143,10 @@ static fn leasing(void)
                                             (routers[r] >> 24 &&
                                              routers[r] >> 24 != 127 &&
                                              routers[r] < 0xe0000000 &&
-                                             routers[r] != addresses[a]);
+                                             routers[r] != addresses[a] &&
+                                             (network_mask == 0xffffffffu ||
+                                              (routers[r] & network_mask) ==
+                                                  network));
                                         //      The prefix may not reach 0/8,
                                         //      127/8 or 224/3.
                                         bool covers =
@@ -65132,7 +65166,7 @@ static fn leasing(void)
                                         if (dhcp_lease_usable(address_of one) != want)
                                                 wrong++;
                                 }
-                check("a DHCP lease names a unicast address, a sane router and a prefix clear of 0/8, 127/8 and 224/3",
+                check("a DHCP lease names a unicast address, an on-link router and a prefix clear of 0/8, 127/8 and 224/3",
                       rows == array_count(addresses) * array_count(masks) * array_count(routers) &&
                           !wrong);
         }
@@ -65353,6 +65387,40 @@ static fn leasing_datagrams(void)
               dhcp_receive(receiver, received, sizeof received, 123, hardware,
                            &lease, &kind, address_of sender_at, false, null,
                            address_of deadline));
+
+        network_store_32(packet + 4, 124);
+        for (positive at = 0; at < DHCP_DISCARD_MAX; at++)
+                check("DHCP exact-budget wrong transaction queues",
+                      socket_send((b32)sender, packet, 300, 0,
+                                  address_of receiver_at,
+                                  sizeof receiver_at) == 300);
+        network_store_32(packet + 4, 123);
+        check("DHCP valid neighbor after the exact budget queues",
+              socket_send((b32)sender, packet, 300, 0, address_of receiver_at,
+                          sizeof receiver_at) == 300);
+        check("DHCP exact discard budget starts",
+              network_deadline_begin(address_of deadline, 1, 0));
+        check("DHCP discards exactly its wrong-transaction work budget",
+              dhcp_receive(receiver, received, sizeof received, 123, hardware,
+                           &lease, &kind, address_of sender_at, false, null,
+                           address_of deadline));
+
+        network_store_32(packet + 4, 124);
+        for (positive at = 0; at <= DHCP_DISCARD_MAX; at++)
+                check("DHCP over-budget wrong transaction queues",
+                      socket_send((b32)sender, packet, 300, 0,
+                                  address_of receiver_at,
+                                  sizeof receiver_at) == 300);
+        network_store_32(packet + 4, 123);
+        check("DHCP valid neighbor behind the over-budget flood queues",
+              socket_send((b32)sender, packet, 300, 0, address_of receiver_at,
+                          sizeof receiver_at) == 300);
+        check("DHCP over discard budget starts",
+              network_deadline_begin(address_of deadline, 1, 0));
+        check("DHCP fails closed one wrong transaction over its work budget",
+              !dhcp_receive(receiver, received, sizeof received, 123, hardware,
+                            &lease, &kind, address_of sender_at, false, null,
+                            address_of deadline));
         socket_close((b32)receiver);
         socket_close((b32)sender);
         socket_close((b32)other);
@@ -69939,17 +70007,31 @@ static fn handshake(void)
 
         static p8 unproven[WATERLINK_DATAGRAM];
 
+        {
+                struct waterlink_bucket bucket = {0};
+                struct waterlink_bucket before;
+
+                check("an admission bucket starts with one bounded burst",
+                      waterlink_bucket_take(address_of bucket, 5, 5, 100));
+                before = bucket;
+                check("sec: an admission clock moving backward fails closed",
+                      !waterlink_bucket_take(address_of bucket, 5, 5, 99) &&
+                              !memory_compare(address_of bucket,
+                                              address_of before, sizeof bucket));
+                bucket.tokens = 0;
+                check("sec: an enormous forward jump refills without arithmetic wrap",
+                      waterlink_bucket_take(address_of bucket, 5, 5, ~0ull) &&
+                              bucket.tokens == 4 && bucket.at == ~0ull);
+        }
+
         memory_zero(address_of admission, sizeof admission);
-        for (positive at = 0; at < 50; at++)
+        for (positive at = 0; at < 6; at++)
                 admitted += waterlink_admit(address_of admission, unproven,
                                             source, 7, 1000000 + at * 1000) == 1;
-        check("a flood from one source is held to its burst",
-              admitted == WATERLINK_ADMIT_BURST);
-        check("and it earns an initiation back in a fifth of a second",
-              waterlink_admit(address_of admission, unproven, source, 7,
-                              1000000 + 250000) == 1);
+        check("sec: an unproven source cannot spend the per-source bucket",
+              admitted == 6 && !admission.source[0].at);
         source[15] = 3;
-        check("while another source is not held by it",
+        check("and another source remains admitted below global load",
               waterlink_admit(address_of admission, unproven, source, 7,
                               1000000 + 50000) == 1);
 
@@ -71125,6 +71207,25 @@ static fn responder(bipolar listener, p16 port)
               wls_heard(listener, answer) == WATERLINK_DATAGRAM &&
                       wls_sessions_used() == 1);
 
+        /* `leave --forget` removes the authorization record while a listener
+           and its sessions may still be live.  The peer's next authenticated
+           rekey must revoke the old keys, not merely refuse to replace them. */
+        (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
+        wls_initiation(datagram, 12, 1001, 0x01020305);
+        link_server_initiation(datagram, WATERLINK_DATAGRAM, wls_loopback, port,
+                               3000000);
+        check("sec: forgetting makes every traffic-key epoch unaddressable "
+              "before queued carry datagrams are dispatched",
+              link_self.session[0].finished && !link_self.session[0].now.live &&
+                      !link_self.session[0].next.live &&
+                      !link_self.session[0].before.live);
+        link_self.server = true;
+        (void)link_sessions_turn(3000001);
+        link_self.server = false;
+        check("sec: a forgotten peer's authenticated rekey closes its live "
+              "session and is not answered",
+              wls_sessions_used() == 0 && wls_heard(listener, answer) <= 0);
+
         for (positive at = 0; at < LINK_SESSIONS; at++)
                 if (link_self.session[at].used)
                         link_session_close(link_self.session + at);
@@ -72210,7 +72311,8 @@ static fn greetings(bipolar listener, p16 port)
         check("sec: with no entropy a member is still kept, but not greeted "
               "back, and not marked as greeted",
               wls_peers_count() == 1 && wls_heard(listener, back) <= 0 &&
-                      !link_greeted_lately(wls_loopback, port, 1700001));
+                      !link_greeted_lately(wls_office.mark, wls_loopback, port,
+                                           1700001));
         (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
 }
 
@@ -72235,6 +72337,27 @@ static fn mdns_amplification(void)
         positive length;
 
         wls_group();
+        {
+                struct waterlink_group_keys second;
+                p8 derived[32];
+                positive before = entropy_draws;
+
+                waterlink_group_derive("second", (p8 address_to)"sesame", 6,
+                                       1000, derived);
+                waterlink_group_keys_from(address_of second, derived, "second");
+                link_nearby.groups.count = 2;
+                link_nearby.keys[1] = second;
+                link_pair_begin(0, wls_loopback, 9, 1000000);
+                link_pair_begin(1, wls_loopback, 9, 1000001);
+                check("sec: one place is greeted immediately for each group, "
+                      "not throttled as if groups shared an identity",
+                      entropy_draws - before == 2 &&
+                          link_greeted_lately(wls_office.mark, wls_loopback, 9,
+                                               1000002) &&
+                          link_greeted_lately(second.mark, wls_loopback, 9,
+                                               1000002));
+                wls_group();
+        }
         (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
         for (positive at = 0; at < array_count(socket); at++)
         {
@@ -72247,7 +72370,7 @@ static fn mdns_amplification(void)
                                                  host, port[at], 0, 4500, 0,
                                                  null, 0);
                 link_nearby_heard(packet, length, wls_loopback,
-                                  WATERLINK_MDNS_PORT, 2000000 + at);
+                                  WATERLINK_MDNS_PORT, 0, 2000000 + at);
         }
         for (positive at = 0; at < array_count(socket); at++)
         {
@@ -72276,7 +72399,7 @@ static fn mdns_amplification(void)
                 length = waterlink_mdns_announce(packet, sizeof packet, instance,
                                                  host, 0, 0, 4500, 0, null, 0);
                 link_nearby_heard(packet, length, place, WATERLINK_MDNS_PORT,
-                                  5000000 + at);
+                                  0, 5000000 + at);
         }
         check("sec: announcements naming a place that refuses a greeting "
               "spend the same budget",
@@ -72297,17 +72420,29 @@ static fn mdns_amplification(void)
                 return;
         }
         link_address_v4(loopback4, HOST_LOOPBACK);
+        link_nearby.interfaces = 2;
+        link_nearby.interface_address[0] = 0x0a000001;
+        link_nearby.interface_address[1] = HOST_LOOPBACK;
         length = waterlink_mdns_query(packet, sizeof packet);
         for (positive at = 0; at < 8; at++)
                 link_nearby_heard(packet, length, loopback4,
-                                  network_order_16(where.port), 3000000 + at);
+                                  network_order_16(where.port), HOST_LOOPBACK,
+                                  3000000 + at);
         link_nearby_heard(packet, length, loopback4, network_order_16(where.port),
-                          3000000 + LINK_ANSWER_AGAIN);
-        while (wls_heard(asker, back) > 0)
+                          HOST_LOOPBACK, 3000000 + LINK_ANSWER_AGAIN);
+        bool right_address = true;
+        bipolar heard;
+        while ((heard = wls_heard(asker, back)) > 0)
+        {
                 answers++;
+                right_address &= heard >= 4 &&
+                                 network_load_32(back + heard - 4) == HOST_LOOPBACK;
+        }
         check("sec: a one-shot question is answered unicast, a few times a "
               "second at most",
               answers == 2);
+        check("sec: a one-shot mDNS answer names the address that received "
+              "the question, not the first interface", right_address);
         system_close(asker);
         socket_close((b32)link_nearby.socket);
         link_nearby.socket = -1;

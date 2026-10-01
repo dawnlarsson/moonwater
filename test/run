@@ -2395,7 +2395,14 @@ target_tools()
         #       A target whose tools are not here did not run, and says so.
         for tool in $target_compiler $target_runner; do
                 command -v "$tool" > /dev/null 2>&1 ||
-                        { note "$target: NOT RUN -- no $tool"; return 2; }
+                        {
+                                if [ "${MOONWATER_REQUIRE_ARCHES:-0}" = 1 ]; then
+                                        note "$target: REQUIRED BUT MISSING -- no $tool"
+                                        return 1
+                                fi
+                                note "$target: NOT RUN -- no $tool"
+                                return 2
+                        }
         done
 }
 
@@ -3847,6 +3854,9 @@ net_tight_one()
 
 lane_net()
 {
+        python3 test/differential.py --harness net_clock_fault || return 1
+        python3 test/differential.py --harness net_math_proof || return 1
+        python3 test/differential.py --harness net_dependency_closure || return 1
         python3 test/differential.py --harness security_hygiene || return 1
         freestanding_checks_lane net net
         net_outcome=$?

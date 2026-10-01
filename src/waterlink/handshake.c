@@ -509,12 +509,12 @@ bool waterlink_stamp_newer(p8 address_to stamp, p8 address_to last)
 }
 
 /*
-        Initiations per source address: a bucket of WATERLINK_ADMIT_BURST
-        that refills at WATERLINK_ADMIT_RATE a second, in a table of fixed
-        size where a new address takes the stalest entry. A second bucket
-        caps the whole table: source addresses are unauthenticated here, so
-        without it a sender could rotate spoofed addresses through the table
-        and keep the curve busy without limit. A third counts every
+        Initiations from a cookie-proven source address: a bucket of
+        WATERLINK_ADMIT_BURST that refills at WATERLINK_ADMIT_RATE a second,
+        in a table of fixed size where a new address takes the stalest entry.
+        An unproven address must never spend this bucket: spoofing a paired
+        peer's address would otherwise starve that peer below the load
+        threshold. A second bucket caps the whole table. A third counts every
         initiation that passed mac1, and when it runs dry the listener is
         under load: an initiation then needs a good mac2 to reach the other
         two at all, so made-up addresses spend neither the table nor the
@@ -558,7 +558,20 @@ static bool waterlink_bucket_take(struct waterlink_bucket address_to bucket,
         }
         else
         {
-                p64 earned = (now - bucket->at) * rate / 1000000;
+                p64 elapsed;
+                p64 full_after;
+                p64 earned;
+
+                /* link_now is monotonic, but suspend/virtualization faults and
+                   a hostile test clock must fail closed rather than turn an
+                   unsigned subtraction into a full refill. */
+                if (now < bucket->at)
+                        return false;
+                elapsed = now - bucket->at;
+                full_after = ((p64)burst * 1000000 + rate - 1) / rate;
+                earned = elapsed >= full_after
+                                 ? burst
+                                 : elapsed * rate / 1000000;
 
                 if (earned)
                 {
@@ -662,6 +675,7 @@ bipolar waterlink_admit(struct waterlink_admission address_to table,
 {
         positive at = 0;
         positive stalest = 0;
+        bool source_proven = false;
 
         if (!waterlink_bucket_take(address_of table->arrivals,
                                    WATERLINK_ADMIT_LOADED,
@@ -683,9 +697,10 @@ bipolar waterlink_admit(struct waterlink_admission address_to table,
                         table->cookies++;
                         return -1;
                 }
+                source_proven = true;
         }
 
-        for (; at < WATERLINK_ADMIT_SOURCES; at++)
+        for (; source_proven && at < WATERLINK_ADMIT_SOURCES; at++)
         {
                 if (table->source[at].at &&
                     !memory_compare(table->address[at], address, 16))
@@ -693,15 +708,16 @@ bipolar waterlink_admit(struct waterlink_admission address_to table,
                 if (table->source[at].at < table->source[stalest].at)
                         stalest = at;
         }
-        if (at == WATERLINK_ADMIT_SOURCES)
+        if (source_proven && at == WATERLINK_ADMIT_SOURCES)
         {
                 at = stalest;
                 memory_copy(table->address[at], address, 16);
                 table->source[at].at = 0;
         }
 
-        if (!waterlink_bucket_take(table->source + at, WATERLINK_ADMIT_BURST,
-                                   WATERLINK_ADMIT_RATE, now) ||
+        if ((source_proven &&
+             !waterlink_bucket_take(table->source + at, WATERLINK_ADMIT_BURST,
+                                    WATERLINK_ADMIT_RATE, now)) ||
             !waterlink_bucket_take(address_of table->all,
                                    WATERLINK_ADMIT_GLOBAL_BURST,
                                    WATERLINK_ADMIT_GLOBAL_RATE, now))

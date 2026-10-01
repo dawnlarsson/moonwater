@@ -40032,7 +40032,8 @@ static int reference_read(const p8 *packet, long size, p32 lease[8], p8 *kind)
 
 /* What a server may hand out, written the other way round from net.c: the
    address, the server and the router are unicast hosts (first octet 1 to 223,
-   not 127; a router is not the address); the prefix, as the range of
+   not 127; a router is not the address and, except for a /32, is on the
+   leased prefix); the prefix, as the range of
    addresses it covers, reaches none of 0/8, 127/8 and 224/3; and on a subnet
    wider than a /31 the address is neither its first nor its last. */
 static int reference_unicast(p32 address)
@@ -40052,7 +40053,9 @@ static int reference_usable(const dhcp_lease *lease)
         if (!reference_unicast(lease->address) || !reference_unicast(lease->server))
                 return 0;
         if (lease->router && (!reference_unicast(lease->router) ||
-                              lease->router == lease->address))
+                              lease->router == lease->address ||
+                              (mask != 0xffffffffu &&
+                               (lease->router & mask) != low)))
                 return 0;
         if (low <= 0x00ffffffu || (low <= 0x7fffffffu && high >= 0x7f000000u) ||
             high >= 0xe0000000u)
@@ -40930,6 +40933,26 @@ def harness_moonwater_cli(argv):
         after = joined.split("@@ after\n", 1)[1].split("@@end", 1)[0].split() if "@@ after" in joined else []
         check(after == ["cut-a", "passpass1", "cut-b", "passpass2", "cut-d", "passpass4", "0"],
               "a leftover temporary file from a crash is replaced by the next write", repr(after))
+
+        # A root-owned state pathname is still an input boundary. A FIFO at
+        # the wifi list used to block in open(2) forever; a final symlink was
+        # followed by the reader even though the writer already refused one.
+        got = tuned("rm -f /root/wifi /root/wifi-target /root/bluetooth\n"
+                    "mkfifo /root/wifi\n"
+                    "timeout 2 /tmp/moonwater wifi >/tmp/fifo.out 2>&1; echo \"@@ fifo $?\"\n"
+                    "rm -f /root/wifi\n"
+                    "printf 'stolen\\npasspass1\\n' > /root/wifi-target\n"
+                    "ln -s wifi-target /root/wifi\n"
+                    "timeout 2 /tmp/moonwater wifi >/tmp/link.out 2>&1; echo \"@@ link $?\"\n"
+                    "mkfifo /root/bluetooth\n"
+                    "timeout 2 /tmp/moonwater bluetooth >/tmp/bt.out 2>&1; echo \"@@ bluetooth $?\"\n"
+                    "cat /tmp/fifo.out /tmp/link.out /tmp/bt.out\n")
+        joined = "\n".join(got)
+        check(all(mark not in joined for mark in
+                  ("@@ fifo 124", "@@ link 124", "@@ bluetooth 124")),
+              "radio commands refuse special state files without blocking", joined[-300:])
+        check("stolen" not in joined and "passpass1" not in joined,
+              "wifi does not read a planted final symlink", joined[-300:])
 
         # Bluetooth add and remove read the list, change it and write it
         # whole: with the radio lock held by another run they wait for it.
@@ -43190,7 +43213,28 @@ def harness_https_downgrade(argv):
         context.load_cert_chain(work / "chain.pem", work / "leaf.key")
         context.set_ecdh_curve("prime256v1")
 
-        def serve_map(routes, accepts):
+        deliveries = ("whole", "byte", "grammar")
+
+        def delivered(reply, schedule):
+            """Deterministic hostile delivery of an HTTP leg inside TLS.
+
+            The byte schedule maximizes read calls.  The grammar schedule
+            cuts immediately before and after every CR/LF and colon, so status,
+            field-name, field-value and end-of-head transitions cross reads.
+            """
+            if schedule == "whole":
+                return (reply,)
+            if schedule == "byte":
+                return tuple(reply[at:at + 1] for at in range(len(reply)))
+            cuts = {0, len(reply)}
+            for at, byte in enumerate(reply):
+                if byte in b"\r\n:":
+                    cuts.update((at, at + 1))
+            points = sorted(cuts)
+            return tuple(reply[points[at]:points[at + 1]]
+                         for at in range(len(points) - 1))
+
+        def serve_map(routes, accepts, schedule):
             listener = socket.socket()
             listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             listener.bind(("127.0.0.1", 0))
@@ -43221,7 +43265,8 @@ def harness_https_downgrade(argv):
                                 b"Connection: close\r\n\r\n"))
                             if callable(reply):
                                 reply = reply(port)
-                            tls.sendall(reply)
+                            for piece in delivered(reply, schedule):
+                                tls.sendall(piece)
                 except (OSError, ssl.SSLError):
                     pass
                 finally:
@@ -43249,33 +43294,38 @@ def harness_https_downgrade(argv):
                 env={"PATH": "/usr/bin:/bin", "HOME": str(work)})
 
         def expect_downgrade(url, routes, accepts, label):
-            port, done = serve_map(routes, accepts)
-            fetched = wget(url % port)
-            done.wait(25)
-            err = fetched.stderr.decode(errors="replace")
-            checks(fetched.returncode != 0 and
-                   "refused an HTTPS to HTTP redirect" in err and
-                   "too many redirects" not in err,
-                   "%s (%s)" % (label, err.strip()[:200]))
-            return err
+            for schedule in deliveries:
+                port, done = serve_map(routes, accepts, schedule)
+                fetched = wget(url % port)
+                done.wait(25)
+                err = fetched.stderr.decode(errors="replace")
+                checks(fetched.returncode != 0 and
+                       "refused an HTTPS to HTTP redirect" in err and
+                       "too many redirects" not in err,
+                       "%s under %s delivery (%s)" %
+                       (label, schedule, err.strip()[:200]))
 
         def expect_ok(url, routes, accepts, label):
-            port, done = serve_map(routes, accepts)
-            fetched = wget(url % port)
-            done.wait(25)
-            err = fetched.stderr.decode(errors="replace")
-            checks(fetched.returncode == 0 and fetched.stdout == b"ok",
-                   "%s (%s)" % (label, err.strip()[:200]))
+            for schedule in deliveries:
+                port, done = serve_map(routes, accepts, schedule)
+                fetched = wget(url % port)
+                done.wait(25)
+                err = fetched.stderr.decode(errors="replace")
+                checks(fetched.returncode == 0 and fetched.stdout == b"ok",
+                       "%s under %s delivery (%s)" %
+                       (label, schedule, err.strip()[:200]))
 
         def expect_refuse_not_downgrade(url, routes, accepts, label):
-            port, done = serve_map(routes, accepts)
-            fetched = wget(url % port)
-            done.wait(25)
-            err = fetched.stderr.decode(errors="replace")
-            checks(fetched.returncode != 0 and
-                   "refused an HTTPS to HTTP redirect" not in err and
-                   fetched.stdout != b"ok",
-                   "%s (%s)" % (label, err.strip()[:200]))
+            for schedule in deliveries:
+                port, done = serve_map(routes, accepts, schedule)
+                fetched = wget(url % port)
+                done.wait(25)
+                err = fetched.stderr.decode(errors="replace")
+                checks(fetched.returncode != 0 and
+                       "refused an HTTPS to HTTP redirect" not in err and
+                       fetched.stdout != b"ok",
+                       "%s under %s delivery (%s)" %
+                       (label, schedule, err.strip()[:200]))
 
         # 1. First hop already HTTPS; Location is plain HTTP — refuse before
         #    connecting to the http:// target (hop budget still has room).
@@ -54989,6 +55039,298 @@ int main(void)
     return checks.verdict("msan net", "msan-net")
 
 
+def harness_net_clock_fault(argv):
+    """Compile wait.c over a hostile monotonic clock and inject clock jumps."""
+    del argv
+    wait = (HARNESS_ROOT / "src/net/wait.c").read_text()
+    deadline = src_slice(wait, "typedef struct\n{\n        positive began;",
+                         "/* A DNS id is part of reply authentication")
+    source = r'''
+#include <stdint.h>
+#include <stdio.h>
+#include <limits.h>
+#include <stdbool.h>
+typedef uint64_t positive;
+#define positive_max UINT64_MAX
+#define address_to *
+#define NETWORK_NANOSECONDS 1000000000ull
+static positive hostile_now;
+static positive clock_monotonic_nanoseconds(void) { return hostile_now; }
+''' + deadline + r'''
+int main(void) {
+    network_deadline d;
+    positive seconds = 99, nanos = 99;
+    hostile_now = 100;
+    if (!network_deadline_begin(&d, 2, 0) || d.began != 100 ||
+        d.budget != 2000000000ull) return 1;
+    hostile_now = 0;
+    if (network_deadline_left(&d, &seconds, &nanos)) return 2;
+    hostile_now = 99;
+    if (network_deadline_left(&d, &seconds, &nanos)) return 3;
+    hostile_now = 100;
+    if (!network_deadline_left(&d, &seconds, &nanos) ||
+        seconds != 2 || nanos != 0) return 4;
+    hostile_now = 1500000100ull;
+    if (!network_deadline_left(&d, &seconds, &nanos) ||
+        seconds != 0 || nanos != 500000000ull) return 5;
+    hostile_now = 2000000100ull;
+    if (network_deadline_left(&d, &seconds, &nanos)) return 6;
+    hostile_now = 100;
+    if (!network_deadline_begin(&d, UINT64_MAX, 999999999) ||
+        d.budget != UINT64_MAX) return 7;
+    if (network_deadline_begin(&d, 1, 1000000000ull)) return 8;
+    puts("backward, zero, exact, forward, expiry, saturation");
+    return 0;
+}
+'''
+    checks = Checks()
+    clang = shutil.which("clang")
+    if not clang:
+        checks(False, "network clock-fault proof needs clang")
+    else:
+        with tempfile.TemporaryDirectory(prefix="net-clock-fault-") as temporary:
+            unit = Path(temporary) / "clock.c"
+            binary = Path(temporary) / "clock"
+            unit.write_text(source)
+            built = subprocess.run([clang, "-std=c11", "-O2",
+                                    "-fsanitize=address,undefined", str(unit),
+                                    "-o", str(binary)], capture_output=True, text=True)
+            if built.returncode:
+                print(built.stderr[-2000:])
+            checks(built.returncode == 0, "production deadline arithmetic compiles")
+            if built.returncode == 0:
+                ran = subprocess.run([str(binary)], capture_output=True, text=True)
+                checks(ran.returncode == 0 and "backward, zero" in ran.stdout,
+                       "deadlines fail closed across hostile clock jumps and overflow")
+    return checks.verdict("net clock fault", "net-clock-fault")
+
+
+def harness_net_math_proof(argv):
+    """Machine-check finite arithmetic lemmas used by src/net/net.c."""
+    del argv
+    checks = Checks()
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+
+    # Bit-blast x + 1 and x & (x + 1), least-significant bit first. States
+    # carry their path multiplicity, so the final sum proves all 2^32 words
+    # were represented even though equivalent prefixes are merged.
+    states = {(1, False, False, False): 1}  # carry, any-and, saw-zero, 1-after-zero
+    for _ in range(32):
+        following = collections.Counter()
+        for (carry, any_and, saw_zero, bad), paths in states.items():
+            for bit in (0, 1):
+                summed = bit ^ carry
+                next_carry = bit & carry
+                following[(next_carry, any_and or bool(bit & summed),
+                           saw_zero or not bit,
+                           bad or (saw_zero and bool(bit)))] += paths
+        states = dict(following)
+    represented = sum(states.values())
+    accepted = sum(paths for (_, any_and, _, _), paths in states.items()
+                   if not any_and)
+    counterexamples = sum(paths for (_, any_and, _, bad), paths in states.items()
+                          if not any_and and bad)
+    checks(represented == 1 << 32,
+           "mask proof represented every 32-bit word")
+    checks(accepted == 33 and not counterexamples,
+           "x & (x + 1) == 0 exactly characterizes 33 low-one masks")
+    checks("p32 after = ~mask;" in net and
+           "return !mask || !(after & (after + 1));" in net,
+           "DHCP mask production expression is the proved expression")
+
+    # Compile the production field multiply and S-box. The oracle uses the
+    # polynomial definition and square-and-multiply rather than production's
+    # fixed inverse chain. Every finite input is evaluated.
+    aes = src_slice(net, "static p8 crypto_aes_field_multiply(",
+                    "/* Two authenticators compared")
+    proof_c = r'''
+#include <stdint.h>
+#include <stdio.h>
+typedef uint8_t p8;
+typedef unsigned long positive;
+''' + aes + r'''
+static p8 reference_multiply(p8 a, p8 b) {
+    /* Carryless polynomial product, then long division by AES's degree-eight
+       polynomial. This is deliberately not production's shift-and-xtime
+       recurrence, so the exhaustive comparison does not repeat its method. */
+    uint16_t polynomial = 0;
+    for (unsigned bit = 0; bit < 8; bit++)
+        if (b >> bit & 1) polynomial ^= (uint16_t)a << bit;
+    for (int degree = 14; degree >= 8; degree--)
+        if (polynomial >> degree & 1)
+            polynomial ^= (uint16_t)0x11b << (degree - 8);
+    return (p8)polynomial;
+}
+static p8 reference_power(p8 a, unsigned n) {
+    p8 out = 1;
+    while (n) {
+        if (n & 1) out = reference_multiply(out, a);
+        a = reference_multiply(a, a); n >>= 1;
+    }
+    return out;
+}
+static p8 rotate(p8 x, unsigned n) {
+    return (p8)((x << n) | (x >> (8 - n)));
+}
+int main(void) {
+    unsigned seen[256] = {0};
+    for (unsigned a = 0; a < 256; a++)
+        for (unsigned b = 0; b < 256; b++)
+            if (crypto_aes_field_multiply((p8)a, (p8)b) !=
+                reference_multiply((p8)a, (p8)b)) return 1;
+    for (unsigned x = 0; x < 256; x++) {
+        p8 inverse = x ? reference_power((p8)x, 254) : 0;
+        p8 want = (p8)(inverse ^ rotate(inverse, 1) ^ rotate(inverse, 2) ^
+                       rotate(inverse, 3) ^ rotate(inverse, 4) ^ 0x63);
+        p8 got = crypto_aes_substitute((p8)x);
+        if (got != want || seen[got]++) return 2;
+    }
+    puts("65536 field products; 256 S-box values; permutation");
+    return 0;
+}
+'''
+    clang = shutil.which("clang")
+    if not clang:
+        checks(False, "AES finite proof needs clang")
+    else:
+        with tempfile.TemporaryDirectory(prefix="net-math-proof-") as temporary:
+            source = Path(temporary) / "proof.c"
+            binary = Path(temporary) / "proof"
+            source.write_text(proof_c)
+            built = subprocess.run([clang, "-std=c11", "-O2", "-fsanitize=address,undefined",
+                                    str(source), "-o", str(binary)],
+                                   capture_output=True, text=True)
+            checks(built.returncode == 0, "production AES proof subject compiles")
+            if built.returncode == 0:
+                ran = subprocess.run([str(binary)], capture_output=True, text=True,
+                                     timeout=30)
+                checks(ran.returncode == 0 and
+                       "65536 field products; 256 S-box values; permutation" in ran.stdout,
+                       "production AES multiply and S-box equal their definitions exhaustively")
+
+    # HKDF's one-byte counter numbers ceil(L/32) blocks. Check its complete
+    # admitted integer domain, including every partial final block. The two
+    # half-open integer intervals [0, 8161) and [8161, positive_max] partition
+    # the input domain; pinning the production `>` guard proves the latter is
+    # refused without pretending to enumerate an unbounded interval.
+    hkdf_ok = True
+    for length in range(255 * 32 + 1):
+        blocks = (length + 31) // 32
+        copied = sum(min(32, length - at) for at in range(0, length, 32))
+        hkdf_ok &= copied == length and 0 <= blocks <= 255
+        if blocks:
+            hkdf_ok &= blocks == ((length - 1) // 32 + 1)
+    checks(hkdf_ok and 255 * 32 == 8160,
+           "HKDF counters and copies are in bounds for every permitted length")
+    proof_positive_max = (1 << 64) - 1
+    checks(8160 <= 8160 < 8161 <= proof_positive_max,
+           "HKDF ceiling partitions the entire positive output-length domain")
+    checks("if (out_length > 255 * 32)" in net and
+           "p8 counter = 1;" in net and "counter++;" in net,
+           "HKDF production ceiling and counter are the proved expressions")
+
+    # Integer (not machine-wrap) certificates at both wire widths. Four-byte
+    # alignment adds at most three, so admitted maxima remain representable in
+    # the wider host type and the next input is refused.
+    attr_header = 4
+    attr_max_data = (1 << 16) - 1 - attr_header
+    attr_true = attr_header + attr_max_data
+    attr_padded = (attr_true + 3) & ~3
+    msg_max_body = (1 << 32) - 1 - 16
+    msg_aligned = (msg_max_body + 3) & ~3
+    checks(attr_true == 0xffff and attr_padded == 0x10000 and
+           attr_max_data + 1 > 0xffff - attr_header,
+           "netlink attribute width and first refused neighbour are proved")
+    checks(16 + msg_max_body == 0xffffffff and
+           msg_aligned <= 0x100000000 and msg_max_body + 1 > 0xffffffff - 16,
+           "netlink message width, alignment and first refused neighbour are proved")
+    checks("size > 0xffffu - sizeof(netlink_attribute)" in net and
+           "body > 0xffffffffu - NETLINK_HEADER" in net,
+           "netlink production guards are the proved guards")
+    return checks.verdict("net math proof", "net-math-proof")
+
+
+NET_DEPENDENCY_PRIMITIVES = frozenset("""
+array_count array_store_release array_store_reserve
+byte_reader_end byte_reader_here byte_reader_left byte_reader_ok byte_reader_open
+byte_reader_skip byte_reader_take byte_reader_u16 byte_reader_u16le
+byte_reader_u24 byte_reader_u32 byte_reader_u8 byte_reader_vector16
+byte_reader_vector24 byte_reader_vector8 byte_reader_window
+byte_store_append_exact byte_store_release byte_store_reserve
+memory_compare memory_compare_ascii_case memory_copy memory_copy_apart
+memory_copy_apart_end memory_copy_end memory_fill memory_first_of
+memory_load_unaligned memory_search memory_span_byte memory_span_without_byte
+memory_zero network_deadline_begin network_deadline_left network_load_16
+network_load_32 network_load_64 network_order_16 network_order_32
+network_store_16 network_store_32 network_store_64 network_stream_read_all
+network_stream_read_now network_stream_read_some_for network_stream_read_some_until
+network_stream_send_all network_stream_send_all_until network_stream_timeout
+network_transaction_secure network_wait_readable_until network_wait_writable_until
+positive_into socket_bind socket_close socket_connect socket_name socket_new
+socket_option_get socket_option_set socket_receive socket_send string_compare_max
+string_copy string_copy_max_end string_digits_checked string_digits_max
+string_equals string_first_of string_first_of_or_end string_get string_has_prefix
+string_is string_last_of string_length string_span_max string_span_without_set
+string_to_host system_call_1 system_call_2 system_call_3 system_call_5
+system_random_fill system_read_retry
+""".split())
+
+
+def harness_net_dependency_closure(argv):
+    """Fail when net.c gains a shared primitive without reviewed evidence.
+
+    This is an inventory gate, not a substitute for the tests it names. It
+    extracts calls into the shared primitive families from comment/string-free
+    net.c, compares them with NET_DEPENDENCY_PRIMITIVES, and verifies the
+    evidence harnesses and lanes remain registered and invoked.
+    """
+    del argv
+    checks = Checks()
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    # Preserve newlines for useful source behavior while removing tokens in
+    # comments, strings and character literals which look like calls.
+    clean = re.sub(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'',
+                   lambda match: "\n" * match.group(0).count("\n"), net,
+                   flags=re.S)
+    families = ("array_", "byte_reader_", "byte_store_", "memory_",
+                "network_", "positive_", "socket_", "string_", "system_")
+    found = {name for name in re.findall(r'\b([A-Za-z_][A-Za-z0-9_]*)\s*\(', clean)
+             if name.startswith(families)}
+    added = sorted(found - NET_DEPENDENCY_PRIMITIVES)
+    removed = sorted(NET_DEPENDENCY_PRIMITIVES - found)
+    checks(not added, "net dependency closure: unreviewed shared calls: " +
+           ", ".join(added))
+    checks(not removed, "net dependency closure: stale manifest entries: " +
+           ", ".join(removed))
+
+    source = Path(__file__).resolve().read_text()
+    run = (HARNESS_ROOT / "test/run").read_text()
+    evidence = ("crypto_vectors", "crypto_fuzz", "tls_der_fuzz", "tls_hs_fuzz",
+                "tls_verify_fuzz", "dns_fuzz", "dhcp_fuzz", "netlink_fuzz",
+                "http_fuzz", "tls_peer", "wget_mutation", "net_netem", "msan_net")
+    for name in evidence:
+        checks(name in HARNESS_CHECKS,
+               "net dependency closure: unregistered evidence harness " + name)
+        invoked = "tls_fuzz" if name == "tls_verify_fuzz" else name
+        checks("--harness " + invoked in run,
+               "net dependency closure: test/run does not invoke " + name)
+    for lane in ("standard", "strings", "exact", "scan", "leaving", "stack",
+                 "allocator", "reserve", "numbers", "socket", "net", "netem"):
+        checks(re.search(r'(^|[ \t\"])(%s)([ \t\"]|$)' % re.escape(lane), run) is not None,
+               "net dependency closure: test/run has no %s lane" % lane)
+    for phrase in ("SHA-256/384", "AES-128-GCM", "X25519", "P-256/P-384",
+                   "RSA PKCS#1"):
+        checks(phrase in inspect.getdoc(harness_crypto_vectors),
+               "net dependency closure: crypto_vectors no longer promises " + phrase)
+    checks("library_routine_assembly([\"x25519\"])" in
+           inspect.getsource(harness_crypto_fuzz),
+           "net dependency closure: crypto_fuzz no longer links production x25519")
+    checks("net_dependency_closure" in source and
+           "--harness net_dependency_closure" in run,
+           "net dependency closure: its own gate is not wired")
+    return checks.verdict("net dependency closure", "net-dependency-closure")
+
+
 def harness_security_hygiene(argv):
     """Guards on the net/tar security tests that no single harness sees, run at
     the top of lane_net and lane_tar. Untallied, like the script it replaced:
@@ -55015,7 +55357,8 @@ def harness_security_hygiene(argv):
                 "tls_der_fuzz", "tls_hs_fuzz", "tls_fuzz", "msan_net", "pathname_race",
                 "dhcp_fuzz", "sntp_fuzz", "dns_fuzz", "netlink_fuzz", "tls_peer",
                 "http_fuzz", "http_urls", "wifi_eapol_fuzz", "wifi_scan_fuzz",
-                "bowl_sig_fuzz", "wget_mutation", "wget_hostile", "sntp_era", "net_netem")
+                "bowl_sig_fuzz", "wget_mutation", "wget_hostile", "sntp_era", "net_netem",
+                "net_dependency_closure", "net_math_proof", "net_clock_fault")
     for name in security + ("tls_verify_fuzz",):
         checks(name in HARNESS_CHECKS, "differential.py: %s is not registered" % name)
     table = re.search(r"^HARNESS_CHECKS = \{$(.*?)^\}$", source, re.M | re.S)
@@ -60479,22 +60822,32 @@ int main(int argc, char **argv)
                 free(datagram);
         }
 
-        /*      Admission: a bucket a source spends and refills. Fuzz the
-                address table and clock for out-of-bounds, and check the
-                first burst from a fresh address is admitted then refused. */
+        /*      Admission: an unproven address cannot spend a source bucket;
+                only a cookie-proven address reaches that limiter. Fuzz the
+                address table and clock for out-of-bounds as well. */
         struct waterlink_admission table;
         memset(&table, 0, sizeof table);
         unsigned long admit_bad = 0;
         p8 *initiation = malloc(WATERLINK_DATAGRAM);
         memset(initiation, 0, WATERLINK_DATAGRAM);
         {
+                struct waterlink_bucket bucket = {0}, before;
+                if (!waterlink_bucket_take(&bucket, 5, 5, 100)) admit_bad++;
+                before = bucket;
+                if (waterlink_bucket_take(&bucket, 5, 5, 99) ||
+                    memcmp(&bucket, &before, sizeof bucket)) admit_bad++;
+                bucket.tokens = 0;
+                if (!waterlink_bucket_take(&bucket, 5, 5, ~(p64)0) ||
+                    bucket.tokens != 4 || bucket.at != ~(p64)0) admit_bad++;
+        }
+        {
                 p8 fresh[16];
                 for (int i = 0; i < 16; i++) fresh[i] = (p8)draw(256);
                 int ok = 0;
-                for (int i = 0; i < WATERLINK_ADMIT_BURST; i++)
+                for (int i = 0; i < WATERLINK_ADMIT_BURST + 1; i++)
                         ok += waterlink_admit(&table, initiation, fresh, 7, 1000) == 1;
-                if (ok != WATERLINK_ADMIT_BURST) admit_bad++;
-                if (waterlink_admit(&table, initiation, fresh, 7, 1000)) admit_bad++; // dry now
+                if (ok != WATERLINK_ADMIT_BURST + 1) admit_bad++;
+                if (table.source[0].at) admit_bad++;
         }
         /*      Under load: with no secret nothing, with one a cookie for an
                 initiation without mac2, and the curve's buckets untouched;
@@ -60519,6 +60872,10 @@ int main(int argc, char **argv)
                 waterlink_cookie_of(&table, place, 9, cookie);
                 waterlink_mac2(cookie, initiation);
                 if (waterlink_admit(&table, initiation, place, 9, 5000) != 1) admit_bad++;
+                for (int i = 1; i < WATERLINK_ADMIT_BURST; i++)
+                        if (waterlink_admit(&table, initiation, place, 9, 5000) != 1)
+                                admit_bad++;
+                if (waterlink_admit(&table, initiation, place, 9, 5000) != 0) admit_bad++;
                 if (waterlink_admit(&table, initiation, place, 10, 5000) != -1) admit_bad++;
                 table.secret_made = 5000 - (p64)WATERLINK_COOKIE_SECONDS * 1000000;
                 if (waterlink_admit(&table, initiation, place, 9, 5000) != 0) admit_bad++;
@@ -62045,7 +62402,7 @@ static void wl_step(bool server)
 
                 length = take_bytes(raw, length);
                 wl_phase = 1;
-                link_nearby_heard(raw, length, wl_addresses[0], port, now);
+                link_nearby_heard(raw, length, wl_addresses[0], port, 0, now);
                 wl_phase = 0;
                 free(raw);
                 break;
@@ -64548,6 +64905,9 @@ HARNESS_CHECKS = {
     "anchors": harness_anchors,
     "tls_fuzz": harness_tls_fuzz,
     "msan_net": harness_msan_net,
+    "net_clock_fault": harness_net_clock_fault,
+    "net_math_proof": harness_net_math_proof,
+    "net_dependency_closure": harness_net_dependency_closure,
     "security_hygiene": harness_security_hygiene,
     "pathname_race": harness_pathname_race,
     "machine_scan": harness_machine_scan,

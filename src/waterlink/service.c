@@ -2085,6 +2085,33 @@ static fn link_stamp_keep(p8 address_to key, p8 address_to stamp)
         link_self.stamps_dirty = true;
 }
 
+/*
+        An authenticated initiation proves possession of peer even when its
+        authorization record has just been removed.  Do not merely refuse
+        that rekey and leave the old traffic keys usable: close every live
+        conversation for the identity before another queued datagram can use
+        them.  Unknown identities still cost only the fixed session-table
+        walk and close nothing.
+*/
+static fn link_sessions_forget_peer(p8 address_to peer)
+{
+        for (positive at = 0; at < LINK_SESSIONS; at++)
+                if (link_self.session[at].used &&
+                    crypto_same(link_self.session[at].peer, peer, 32))
+                {
+                        struct link_session address_to s =
+                                link_self.session + at;
+
+                        /* Make queued carry datagrams unaddressable now;
+                           link_sessions_turn performs the descriptor/process
+                           teardown at the next turn. */
+                        crypto_forget(address_of s->now, sizeof(s->now));
+                        crypto_forget(address_of s->next, sizeof(s->next));
+                        crypto_forget(address_of s->before, sizeof(s->before));
+                        s->finished = true;
+                }
+}
+
 static fn link_server_initiation(p8 address_to datagram, positive length,
                                  p8 address_to address, p16 port, p64 now)
 {
@@ -2153,10 +2180,15 @@ static fn link_server_initiation(p8 address_to datagram, positive length,
         peer = link_peer_keyed(address_of peers, who);
         memory_copy(address_of conversation, hello + WATERLINK_STAMP_BYTES, 8);
         memory_copy(address_of theirs, hello + WATERLINK_STAMP_BYTES + 8, 4);
+        if (!peer)
+        {
+                link_sessions_forget_peer(who);
+                goto forget;
+        }
         /* Zero is not a session index: link_index_new deliberately never
            issues it, and no carried reply can find it. Refuse it before it
            can reserve a session or consume the peer's replay stamp. */
-        if (!peer || !link_stamp_new(who, hello) || !theirs)
+        if (!link_stamp_new(who, hello) || !theirs)
                 goto forget;
 
         for (positive at = 0; at < LINK_SESSIONS; at++)

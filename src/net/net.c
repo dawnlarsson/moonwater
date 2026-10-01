@@ -58,6 +58,7 @@
 #define NETLINK_HEADER 16
 #define NETLINK_DATAGRAM_MAX (16u * 1024u * 1024u)
 #define NETLINK_TRANSACTION_SECONDS 10
+#define NETLINK_DISCARD_MAX 64
 
 #define NLM_REQUEST 0x0001
 #define NLM_ACK 0x0004
@@ -548,6 +549,7 @@ static bipolar netlink_walk(b32 handle, netlink_buffer address_to request,
         network_deadline deadline;
         bool enough = false;
         bool interrupted = false;
+        positive discarded = 0;
         bipolar sent;
         positive at;
 
@@ -565,6 +567,7 @@ static bipolar netlink_walk(b32 handle, netlink_buffer address_to request,
         for (;;)
         {
                 p32 local_port = 0;
+                bool matched = false;
                 bipolar got = network_wait_readable_until(
                     handle, address_of deadline);
 
@@ -604,6 +607,7 @@ static bipolar netlink_walk(b32 handle, netlink_buffer address_to request,
                                 at += netlink_align(header->length);
                                 continue;
                         }
+                        matched = true;
 
                         interrupted |= (header->flags &
                                         NLM_DUMP_INTERRUPTED) != 0;
@@ -625,6 +629,8 @@ static bipolar netlink_walk(b32 handle, netlink_buffer address_to request,
 
                         at += netlink_align(header->length);
                 }
+                if (!matched && discarded++ == NETLINK_DISCARD_MAX)
+                        return -1;
         }
 }
 
@@ -1293,6 +1299,7 @@ static COLD bipolar netlink_leases_on(b32 handle,
 //      encoder needs more jumps than a name has labels.
 #define DNS_NAME_MAX 255
 #define DNS_POINTER_HOPS 127
+#define DNS_DISCARD_MAX 64
 //      Everything the caller may want to tell apart.
 #define DNS_OK 0
 #define DNS_NO_SERVER (-1)
@@ -1311,6 +1318,7 @@ static COLD bipolar netlink_leases_on(b32 handle,
 //      answered the EDNS0 option with FORMERR or NOTIMP.
 #define DNS_CASE_FOLDED (-9)
 #define DNS_FORMAT_ERROR (-10)
+#define DNS_EDNS_SILENT (-11)
 
 /*
         The name, as labels.
@@ -1862,6 +1870,7 @@ static COLD bipolar dns_server_at(string_address path, positive wanted)
 */
 #define DNS_EDNS_SIZE 1232
 #define DNS_EDNS_LENGTH 11
+#define DNS_EDNS_PROBE_SECONDS 1
 
 //      The name's letters in random case. False when randomness is refused,
 //      and then the name is left as written. The bits are one request for
@@ -1943,6 +1952,7 @@ static COLD bipolar dns_query_once(p32 server, p16 port, string_address name,
         bipolar failure = DNS_NO_REPLY;
         positive question_length;
         positive request_length;
+        positive discarded = 0;
         positive left[2];
         network_deadline deadline = *budget;
 
@@ -2034,7 +2044,11 @@ static COLD bipolar dns_query_once(p32 server, p16 port, string_address name,
                 got = network_wait_readable_until(handle, address_of deadline);
 
                 if (got <= 0)
+                {
+                        if (!got && edns)
+                                failure = DNS_EDNS_SILENT;
                         goto failed;
+                }
 
                 got = socket_receive((b32)handle, reply, sizeof reply,
                                      MSG_TRUNC, 0, 0);
@@ -2061,6 +2075,14 @@ static COLD bipolar dns_query_once(p32 server, p16 port, string_address name,
                                          question_length))
                         {
                                 failure = DNS_CASE_FOLDED;
+                                goto failed;
+                        }
+                        if (discarded++ == DNS_DISCARD_MAX)
+                        {
+                                /* A peer able to keep this socket readable
+                                   must not buy unbounded parse/syscall work
+                                   inside one monotonic deadline. */
+                                failure = DNS_NO_REPLY;
                                 goto failed;
                         }
                         continue;
@@ -2095,7 +2117,9 @@ failed:
 
 /* The query, with its two fallbacks: once without the case mixing when the
    server folded the question, once without EDNS0 when the server did not
-   understand the option. Both share the one budget. */
+   understand the option or silently dropped it. Both share the one budget.
+   EDNS gets only the first second of that absolute budget: otherwise silence
+   spends the entire deadline and a nominal fallback can never be sent. */
 static COLD bipolar dns_resolve_at(p32 server, p16 port, string_address name,
                                    p32 address_to found, positive seconds)
 {
@@ -2111,16 +2135,26 @@ static COLD bipolar dns_resolve_at(p32 server, p16 port, string_address name,
 
         for (positive attempt = 0; attempt < 3; attempt++)
         {
+                network_deadline probe = budget;
+
+                if (edns && probe.budget >
+                                DNS_EDNS_PROBE_SECONDS * NETWORK_NANOSECONDS)
+                        probe.budget = DNS_EDNS_PROBE_SECONDS *
+                                       NETWORK_NANOSECONDS;
                 status = dns_query_once(server, port, name, found, mixed, edns,
-                                        address_of budget);
+                                        edns ? address_of probe
+                                             : address_of budget);
                 if (status == DNS_CASE_FOLDED && mixed)
                         mixed = false;
                 else if (status == DNS_FORMAT_ERROR && edns)
                         edns = false;
+                else if (status == DNS_EDNS_SILENT && edns)
+                        edns = false;
                 else
                         break;
         }
-        return status == DNS_CASE_FOLDED ? DNS_NO_REPLY
+        return status == DNS_CASE_FOLDED || status == DNS_EDNS_SILENT
+                   ? DNS_NO_REPLY
                : status == DNS_FORMAT_ERROR ? DNS_REFUSED : status;
 }
 
@@ -10317,6 +10351,7 @@ static bipolar http_fetch_to(string_address start, bipolar dest, bool check_cert
 
 #define DHCP_CLIENT_PORT 68
 #define DHCP_SERVER_PORT 67
+#define DHCP_DISCARD_MAX 64
 
 #define DHCP_HEAD 236
 #define DHCP_COOKIE 0x63825363
@@ -10709,7 +10744,9 @@ static COLD fn dhcp_lease_merge(dhcp_lease address_to lease,
    machine's own loopback and every multicast group onto the wire. On a subnet
    wider than a /31 the first and last addresses name the subnet and are not
    hosts. A /32 lease and its off-link router stay legal (the clouds hand
-   them out): only the router's own class is judged. Every server that speaks
+   them out); every wider prefix requires its router on that link, since the
+   kernel cannot reach an off-link next hop without a route through that same
+   next hop. Every server that speaks
    to this machine can send any of these; none of them is a network. */
 static CONST COLD bool dhcp_address_unicast(p32 address)
 {
@@ -10733,12 +10770,17 @@ static CONST COLD bool dhcp_prefix_clear(p32 address, p32 mask)
 
 static COLD bool dhcp_lease_usable(const dhcp_lease address_to lease)
 {
+        p32 mask = lease->mask ? lease->mask : 0xffffff00u;
+
         return lease->address && lease->server && lease->seconds &&
                dhcp_mask_valid(lease->mask) &&
                dhcp_address_unicast(lease->address) &&
                dhcp_address_unicast(lease->server) &&
                (!lease->router || (dhcp_address_unicast(lease->router) &&
-                                   lease->router != lease->address)) &&
+                                   lease->router != lease->address &&
+                                   (mask == 0xffffffffu ||
+                                    (lease->router & mask) ==
+                                        (lease->address & mask)))) &&
                dhcp_prefix_clear(lease->address, lease->mask);
 }
 
@@ -10927,6 +10969,7 @@ static COLD bool dhcp_receive(bipolar handle, p8 address_to packet, positive roo
                          const network_deadline address_to deadline)
 {
         bipolar got;
+        positive discarded = 0;
 
         for (;;)
         {
@@ -10947,7 +10990,7 @@ static COLD bool dhcp_receive(bipolar handle, p8 address_to packet, positive roo
                 if (got < 0)
                         return false;
                 if (!got)
-                        continue;
+                        goto discard;
 
                 if ((positive)got <= room &&
                     dhcp_peer_matches(address_of peer, peer_size,
@@ -10959,6 +11002,9 @@ static COLD bool dhcp_receive(bipolar handle, p8 address_to packet, positive roo
                                 *accepted_peer = peer;
                         return true;
                 }
+        discard:
+                if (discarded++ == DHCP_DISCARD_MAX)
+                        return false;
         }
 }
 
@@ -10975,6 +11021,7 @@ static COLD bipolar dhcp_complete(bipolar handle, p8 address_to packet,
 {
         dhcp_lease answer;
         p8 kind = 0;
+        positive discarded = 0;
 
         while (dhcp_receive(handle, packet, room, transaction, hardware,
                             address_of answer, address_of kind, peer,
@@ -10984,6 +11031,8 @@ static COLD bipolar dhcp_complete(bipolar handle, p8 address_to packet,
                     (kind == DHCP_NAK ||
                      dhcp_lease_acknowledge(lease, address_of answer)))
                         return kind == DHCP_ACK ? DHCP_OK : DHCP_REFUSED;
+                else if (discarded++ == DHCP_DISCARD_MAX)
+                        break;
 
         return DHCP_NO_OFFER;
 }
@@ -11053,6 +11102,7 @@ static bipolar dhcp_ask(string_address device, p8 address_to hardware,
         {
                 p8 kind = 0;
                 network_deadline deadline;
+                positive discarded = 0;
 
                 /*
                         A quarter second apart while it matters.
@@ -11098,7 +11148,11 @@ static bipolar dhcp_ask(string_address device, p8 address_to hardware,
                                     address_of deadline))
                 {
                         if (kind != DHCP_OFFER || !dhcp_lease_usable(lease))
+                        {
+                                if (discarded++ == DHCP_DISCARD_MAX)
+                                        break;
                                 continue;
+                        }
 
                         //      Take the offer, naming the server so that any
                         //      other server that offered knows it lost.
