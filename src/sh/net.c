@@ -2223,6 +2223,8 @@ static COLD fn net_sysctl_path(p8 address_to to, positive size,
 
 //      leaf, written in `all`, `default` and every interface the directory
 //      lists, or only the first two for the IPv4 switches the kernel copies.
+//      The listing is read to its end, however many interfaces there are:
+//      one read of a small buffer left the later ones on the kernel's value.
 static COLD fn net_sysctl_family(string_address directory, string_address leaf,
                                  string_address value, bool each)
 {
@@ -2237,32 +2239,30 @@ static COLD fn net_sysctl_family(string_address directory, string_address leaf,
         if (each)
         {
                 p8 names[1024];
-                bipolar handle;
-                bipolar got;
+                struct linux_dirent64 address_to entry;
+                positive have = 0;
                 positive at = 0;
+                bipolar error = 0;
+                bipolar handle = system_open_at(AT_FDCWD, directory,
+                                                O_DIRECTORY | O_CLOEXEC);
 
-                handle = system_open_at(AT_FDCWD, directory,
-                                        O_DIRECTORY | O_CLOEXEC);
                 if (handle < 0)
                         return;
-                got = system_read_directory(handle, names, sizeof names);
-                system_close((positive)handle);
-                while (got > 0 && at + 19 < (positive)got)
+                while ((entry = file_directory_next(handle, names, sizeof names,
+                                                    address_of have,
+                                                    address_of at,
+                                                    address_of error)))
                 {
-                        p16 length = *(p16 address_to)(names + at + 16);
-                        string_address name = (string_address)(names + at + 19);
+                        string_address name = (string_address)entry->d_name;
 
-                        if (length < 20 || at + length > (positive)got)
-                                break;
-                        if (name[0] != '.' && !string_equals(name, "all") &&
-                            !string_equals(name, "default"))
-                        {
-                                net_sysctl_path(path, sizeof path, directory,
-                                                name, leaf);
-                                net_sysctl((string_address)path, value);
-                        }
-                        at += length;
+                        if (name[0] == '.' || string_equals(name, "all") ||
+                            string_equals(name, "default"))
+                                continue;
+                        net_sysctl_path(path, sizeof path, directory, name,
+                                        leaf);
+                        net_sysctl((string_address)path, value);
                 }
+                system_close((positive)handle);
         }
 }
 

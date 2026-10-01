@@ -38217,6 +38217,244 @@ int main(void) {
     return 1 if failures else 0
 
 
+def harness_net_sysctl(argv):
+    """The kernel's network defaults reach every interface, however many there are.
+
+    net_kernel_defaults writes a value into one sysctl leaf for `all`,
+    `default` and, for IPv6 (which has no copy from `default` to the links
+    already there), for each directory net/ipv6/conf lists. That walk read
+    the listing once into a 1,024-byte buffer, which holds about thirty
+    names: a machine with more links (VLANs, bridge ports, the host end of a
+    container's veth) left the later ones on the kernel's own value, router
+    advertisements and SLAAC on, which is what the default exists to refuse.
+
+    net_sysctl, net_sysctl_path and net_sysctl_family are cut out of
+    src/sh/net.c with file_directory_next from src/sh/file.c, and run over a
+    scratch tree of seventy interface directories beside all and default,
+    each holding the leaf as the kernel's files do. Every leaf has to say
+    what was asked; a name that starts with a dot and a name too long for
+    the path buffer are left alone; the form for the IPv4 switches (`all` and
+    `default` only) leaves the interfaces alone. The parent's walk, one
+    read, is run the same way and has to miss some of them.
+
+        python3 test/differential.py --harness net_sysctl
+    """
+    del argv
+    import subprocess
+    import tempfile
+    if sys.platform != "linux":
+        print("net sysctl: NOT RUN -- the fixture reads directories with Linux's getdents64")
+        return 0
+    net = (HARNESS_ROOT / "src/sh/net.c").read_text()
+    files = (HARNESS_ROOT / "src/sh/file.c").read_text()
+    try:
+        walk = src_slice(net, "static COLD fn net_sysctl(string_address path, string_address value)",
+                         "static COLD fn net_kernel_defaults(void)", "net sysctl")
+        listing = src_slice(files, "static inline struct linux_dirent64 address_to file_directory_next(",
+                            "struct linux_dirent64 address_to file_walk_next(", "net sysctl")
+        head = walk[:walk.index("static COLD fn net_sysctl_family(")]
+    except ValueError as error:
+        print("  FAIL net sysctl lift: " + str(error))
+        write_tally("net-sysctl", 0, 1)
+        return 1
+    parent = r"""
+static COLD fn net_sysctl_family(string_address directory, string_address leaf,
+                                 string_address value, bool each)
+{
+        p8 path[128];
+        static const string_address wide[] = {"all", "default", null};
+
+        for (positive at = 0; wide[at]; at++)
+        {
+                net_sysctl_path(path, sizeof path, directory, wide[at], leaf);
+                net_sysctl((string_address)path, value);
+        }
+        if (each)
+        {
+                p8 names[1024];
+                bipolar handle;
+                bipolar got;
+                positive at = 0;
+
+                handle = system_open_at(AT_FDCWD, directory,
+                                        O_DIRECTORY | O_CLOEXEC);
+                if (handle < 0)
+                        return;
+                got = system_read_directory(handle, names, sizeof names);
+                system_close((positive)handle);
+                while (got > 0 && at + 19 < (positive)got)
+                {
+                        p16 length = *(p16 address_to)(names + at + 16);
+                        string_address name = (string_address)(names + at + 19);
+
+                        if (length < 20 || at + length > (positive)got)
+                                break;
+                        if (name[0] != '.' && !string_equals(name, "all") &&
+                            !string_equals(name, "default"))
+                        {
+                                net_sysctl_path(path, sizeof path, directory,
+                                                name, leaf);
+                                net_sysctl((string_address)path, value);
+                        }
+                        at += length;
+                }
+        }
+}
+"""
+    shim = r"""
+#define _GNU_SOURCE
+#include <errno.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/syscall.h>
+#include <sys/types.h>
+""" + HOSTED_FILE_HEAD + r"""
+typedef uint16_t p16;
+typedef uint64_t p64;
+#define COLD
+#define address_of &
+#define null NULL
+#define string_length(s) ((positive)strlen(s))
+#define string_equals(a, b) (strcmp((a), (b)) == 0)
+#define memory_copy memcpy
+struct linux_dirent64
+{
+        p64 d_ino;
+        p64 d_off;
+        p16 d_reclen;
+        p8 d_type;
+        p8 d_name[];
+};
+static bipolar system_open_at(bipolar d, string_address p, positive f) {
+        long r = openat((int)d, p, (int)f);
+        return r < 0 ? -errno : r;
+}
+static positive system_write_all(positive h, const void *data, positive n) {
+        ssize_t w = write((int)h, data, n);
+        return w < 0 ? 0 : (positive)w;
+}
+static fn system_close(positive h) { close((int)h); }
+static bipolar system_read_directory(bipolar h, void *block, positive capacity) {
+        long r = syscall(SYS_getdents64, (int)h, block, capacity);
+        return r < 0 ? -errno : r;
+}
+"""
+    driver = r"""
+#define INTERFACES 70
+static int failures, checks;
+static void check(int good, const char *what) {
+        checks++;
+        if (good) return;
+        failures++;
+        printf("  FAIL %s\n", what);
+}
+static void leaf(const char *directory, const char *name) {
+        char path[512];
+        int handle;
+        snprintf(path, sizeof path, "%s/%s", directory, name);
+        mkdir(path, 0755);
+        snprintf(path, sizeof path, "%s/%s/accept_ra", directory, name);
+        handle = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (handle < 0 || write(handle, "1\n", 2) != 2) exit(3);
+        close(handle);
+}
+static int says(const char *directory, const char *name, const char *want) {
+        char path[512], seen[8] = {0};
+        int handle;
+        ssize_t got;
+        snprintf(path, sizeof path, "%s/%s/accept_ra", directory, name);
+        handle = open(path, O_RDONLY);
+        if (handle < 0) return 0;
+        got = read(handle, seen, sizeof seen - 1);
+        close(handle);
+        return got == 2 && !strcmp(seen, want);
+}
+int main(void) {
+        for (int each = 0; each < 2; each++) {
+                char directory[16], name[256], what[160];
+                char longest[201];
+                int missed = 0, touched = 0;
+                snprintf(directory, sizeof directory, "conf%d", each);
+                mkdir(directory, 0755);
+                leaf(directory, "all");
+                leaf(directory, "default");
+                leaf(directory, "lo");
+                for (int at = 0; at < INTERFACES; at++) {
+                        snprintf(name, sizeof name, "veth%d", at);
+                        leaf(directory, name);
+                }
+                leaf(directory, ".hidden");
+                memset(longest, 'v', 200);
+                longest[200] = 0;
+                leaf(directory, longest);
+                net_sysctl_family(directory, "accept_ra", "0\n", each);
+                check(says(directory, "all", "0\n") && says(directory, "default", "0\n"),
+                      each ? "all and default are written" : "the IPv4 form writes all and default");
+                for (int at = 0; at < INTERFACES; at++) {
+                        snprintf(name, sizeof name, "veth%d", at);
+                        if (each) missed += !says(directory, name, "0\n");
+                        else touched += says(directory, name, "0\n");
+                }
+                missed += each && !says(directory, "lo", "0\n");
+                touched += !each && says(directory, "lo", "0\n");
+                if (each) {
+                        snprintf(what, sizeof what, "every interface's leaf is written (missed %d of %d)",
+                                 missed, INTERFACES + 1);
+                        check(!missed, what);
+                } else {
+                        check(!touched, "the IPv4 form leaves the interfaces alone");
+                }
+                check(says(directory, ".hidden", "1\n"), "a name that starts with a dot is left alone");
+                check(says(directory, longest, "1\n"), "a name too long for the path is refused, not cut");
+        }
+        printf("%d %d\n", checks - failures, checks);
+        return failures != 0;
+}
+"""
+
+    def run(body):
+        with tempfile.TemporaryDirectory(prefix="net-sysctl-") as temporary:
+            top = Path(temporary).resolve()
+            (top / "fixture.c").write_text(shim + listing + body + driver)
+            built = subprocess.run(["cc", "-w", "-o", str(top / "fixture"), str(top / "fixture.c")],
+                                   capture_output=True, text=True)
+            if built.returncode:
+                return None, built.stderr[-2000:]
+            ran = subprocess.run([str(top / "fixture")], cwd=top, capture_output=True, text=True,
+                                 timeout=30)
+            return ran.returncode, ran.stdout
+
+    failures = []
+    now, said = run(walk)
+    if now is None:
+        print("  FAIL the walk did not build:\n" + said)
+        write_tally("net-sysctl", 0, 1)
+        return 1
+    then, before = run(head + parent)
+    if then is None:
+        print("  FAIL the parent's walk did not build:\n" + before)
+        write_tally("net-sysctl", 0, 1)
+        return 1
+    for line in said.splitlines():
+        if line.startswith("  FAIL"):
+            failures.append(line.strip()[5:])
+    if now not in (0, 1) or not said.strip():
+        failures.append("the fixture did not run to its end (exit %s)" % now)
+    lost = [line.strip()[5:] for line in before.splitlines() if line.startswith("  FAIL")]
+    parent_lost = len(lost)
+    if parent_lost < 1:
+        failures.append("the parent's walk lost nothing: the fixture no longer reaches the "
+                        "thirty names one read holds\n%s" % before)
+    for failure in failures:
+        print("  FAIL " + failure)
+    print("net sysctl: %s, parent lost %d%s"
+          % (said.strip().splitlines()[-1] if said.strip() else "?", parent_lost,
+             " (" + "; ".join(lost) + ")" if lost else ""))
+    write_tally("net-sysctl", 1 if not failures else 0, 1)
+    return 1 if failures else 0
+
+
 def harness_console_queue(argv):
     """The kernel console's ring of printk records, flooded and wrapped.
 
@@ -63125,6 +63363,7 @@ HARNESS_CHECKS = {
     "mount_names": harness_mount_names,
     "pane_restride": harness_pane_restride,
     "host_writes": harness_host_writes,
+    "net_sysctl": harness_net_sysctl,
     "moonwater_cli": harness_moonwater_cli,
     "machine_reap": harness_machine_reap,
     "tls_chains": harness_tls_chains,
