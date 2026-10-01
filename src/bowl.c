@@ -172,6 +172,44 @@ static bipolar bowl_open_directory(string_address path, p8 create,
         if (!path || !string_get(path))
                 return -22;
 
+        /*  A path that is there is one system call, not three for every
+            component: the kernel refuses a symlink at any step itself
+            (RESOLVE_NO_SYMLINKS is the walk's O_NOFOLLOW on each, and no
+            magic link either), and what it hands back is the same
+            descriptor the walk ends on. A path that is not there, one the
+            kernel refuses, and one with a .. or a name too long to be one
+            go the long way, which makes what it makes and says what it
+            said: it is the only one of the two that does either. */
+        {
+                bool plain = true;
+                positive run = 0;
+                bool dots = true;
+
+                for (string_address walk = path;; walk++)
+                {
+                        if (!string_get(walk) || string_is(walk, '/'))
+                        {
+                                if (run >= 255 || (run == 2 && dots))
+                                        plain = false;
+                                run = 0;
+                                dots = true;
+                                if (!string_get(walk))
+                                        break;
+                                continue;
+                        }
+                        dots = dots && string_is(walk, '.');
+                        run++;
+                }
+                if (plain)
+                {
+                        held = system_open_resolved(AT_FDCWD, path, flags,
+                                                    SYSTEM_RESOLVE_NO_SYMLINKS |
+                                                        SYSTEM_RESOLVE_NO_MAGICLINKS);
+                        if (held >= 0)
+                                return held;
+                }
+        }
+
         held = system_open_at(AT_FDCWD,
                               path[0] == '/' ? (string_address)"/"
                                              : (string_address)".",

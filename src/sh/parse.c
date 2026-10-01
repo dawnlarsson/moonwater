@@ -3717,6 +3717,15 @@ static bool parse_arenas()
                                (positive)-1, 0);
         if (mapped < 0 && mapped > -4096)
                 return false;
+        /* Ordinary pages, as lib.util.c asks for the bss and for what it
+           says: a command touches the first page or two of each of these
+           arrays, and a kernel that has transparent huge pages at "always"
+           answers every one of those first touches with two megabytes of
+           zeroed memory. Five arrays are five of them: `echo hi` spent 60 of
+           its 150 microseconds on it, and the one call (a model of the same
+           five touches in a plain C program: 120 microseconds with the
+           default, 54 with this) is below what a syscall measures. */
+        system_call_3(syscall(madvise), (positive)mapped, total, 15);
         for (positive i = 0; i < array_count(sizes); i++)
         {
                 *places[i] = (address_any)mapped;

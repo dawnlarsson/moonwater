@@ -1106,7 +1106,7 @@ enum {
         SYSTEM_RESOLVE_BENEATH = 0x08, SYSTEM_RESOLVE_IN_ROOT = 0x10,
 };
 
-static COLD bipolar system_open_resolved(bipolar directory, string_address path,
+static bipolar system_open_resolved(bipolar directory, string_address path,
                                          positive flags, positive resolve)
 {
         struct
