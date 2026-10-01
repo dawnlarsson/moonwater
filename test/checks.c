@@ -66226,6 +66226,53 @@ static bool crypto_vector_run(p8 address_to kind, positive kind_length,
                                 return false;
                 return true;
         }
+        if (KIND("siv"))
+        {
+                static crypto_siv_key key;
+                const p8 address_to parts[4];
+                positive lengths[4];
+                positive count = 0;
+                positive at = 0;
+
+                if (CL(0) != 32 || CL(4) != 16 || CL(2) != CL(3))
+                        return false;
+                while (at < CL(1))
+                {
+                        positive size;
+
+                        if (count == 4 || CL(1) - at < 2)
+                                return false;
+                        size = (positive)CV(1)[at] << 8 | CV(1)[at + 1];
+                        at += 2;
+                        if (size > CL(1) - at)
+                                return false;
+                        parts[count] = CV(1) + at;
+                        lengths[count++] = size;
+                        at += size;
+                }
+                crypto_siv_prepare(address_of key, CV(0));
+                if (expect)
+                {
+                        p8 tag[16];
+
+                        memory_copy(work, CV(2), CL(2));
+                        crypto_siv_seal(address_of key, parts, lengths, count,
+                                        work, CL(2), tag);
+                        if (!crypto_vector_is(work, 3) ||
+                            memory_compare(tag, CV(4), 16) != 0)
+                                return false;
+                }
+                memory_copy(work, CV(3), CL(3));
+                if (crypto_siv_open(address_of key, parts, lengths, count,
+                                    work, CL(3), CV(4)) != expect)
+                        return false;
+                if (expect)
+                        return crypto_vector_is(work, 2);
+                for (positive i = 0; i < CL(3); i++)
+                        if (work[i])
+                                return false;
+                return true;
+        }
         if (KIND("x25519"))
         {
                 bool valid;
