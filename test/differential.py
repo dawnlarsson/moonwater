@@ -51501,6 +51501,8 @@ def crypto_vectors_lines(seed):
 CRYPTO_X25519_COUNTED = (
     r'"cmpb \$0, cpu_hash_probed\(%rip\)\\n jne \.Lp384_multiply_probed\\n call cpu_hash_detect\\n"',
     r'"cmpb \$0, cpu_has_mulx\(%rip\)\\n jne \.Lp384_multiply_mulx\\n"',
+    r'"cmpb \$0, cpu_hash_probed\(%rip\)\\n jne \.Lp384_square_probed\\n call cpu_hash_detect\\n"',
+    r'"cmpb \$0, cpu_has_mulx\(%rip\)\\n jne \.Lp384_square_mulx\\n"',
     r'"decq 520\(%rsp\)\\n\s+jns \.Lx25519_x64_" s "_step\\n"',
     r'"dec %ebp\\n\s+jnz \.Lx25519_x64_" s "_squares_" id "\\n"',
     r'"cmpb \$0, cpu_hash_probed\(%rip\)\\n\s+jne \.Lx25519_x64_probed\\n"',
