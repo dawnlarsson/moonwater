@@ -52939,11 +52939,20 @@ static fn dns_tcp_test_server(bipolar datagram, bipolar listening,
                                      address_of fixture_deadline))
                 system_call_1(syscall(exit_group), 1);
 
+        //      The question, without the EDNS0 option a query now carries.
+        {
+                positive at = DNS_HEADER;
+
+                while (at < request_length && request[at])
+                        at += 1 + request[at];
+                request_length = at + 1 + 4;
+        }
         memory_copy(reply, request, request_length);
         network_store_16(reply + 2,
                          (network_load_16(request + 2) |
                           DNS_FLAG_RESPONSE) & ~DNS_FLAG_TRUNCATED);
         network_store_16(reply + 6, 1);
+        network_store_16(reply + 10, 0);
         positive length = request_length;
         reply[length++] = 0xc0;
         reply[length++] = DNS_HEADER;
@@ -53082,6 +53091,377 @@ static fn resolving_truncated(void)
               dns_tcp_loopback_case(DNS_TCP_DEADLINE, null,
                                      address_of elapsed) == DNS_NO_REPLY &&
                   elapsed < NETWORK_NANOSECONDS + NETWORK_NANOSECONDS / 2);
+}
+
+static bipolar net_test_write(string_address path, string_address text)
+{
+        bipolar handle = system_open_at(AT_FDCWD, path, 1 | O_CLOEXEC);
+        bipolar wrote;
+
+        if (handle < 0)
+                return handle;
+        wrote = system_write_all((positive)handle, (p8 address_to)text,
+                                 string_length(text));
+        system_close((positive)handle);
+        return wrote == (bipolar)string_length(text) ? 0 : -1;
+}
+
+//      A file made with `text` in it.
+static bipolar net_test_create(string_address path, string_address text)
+{
+        bipolar handle = system_call_4(syscall(openat), (positive)AT_FDCWD,
+                                       (positive)path,
+                                       1 | 0100 | 01000 | O_CLOEXEC, 0600);
+        bipolar wrote;
+
+        if (handle < 0)
+                return handle;
+        wrote = system_write_all((positive)handle, (p8 address_to)text,
+                                 string_length(text));
+        system_close((positive)handle);
+        return wrote == (bipolar)string_length(text) ? 0 : -1;
+}
+
+//      "0 <id> 1\n", the id map of one user.
+static fn net_test_map(p8 address_to to, positive id)
+{
+        p8 digits[24];
+        positive count = 0;
+        positive at = 0;
+
+        do
+                digits[count++] = (p8)('0' + id % 10);
+        while (id /= 10);
+        to[at++] = '0';
+        to[at++] = ' ';
+        while (count)
+                to[at++] = digits[--count];
+        to[at++] = ' ';
+        to[at++] = '1';
+        to[at++] = '\n';
+        to[at] = 0;
+}
+
+static bipolar net_test_index(string_address name)
+{
+        struct
+        {
+                p8 name[16];
+                b32 index;
+                p8 rest[20];
+        } request = {{0}, 0, {0}};
+        bipolar handle = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+        bipolar status;
+
+        if (handle < 0)
+                return handle;
+        memory_copy(request.name, name, string_length(name));
+        status = system_call_3(syscall(ioctl), (positive)handle, 0x8933,
+                               (positive)address_of request);
+        socket_close((b32)handle);
+        return status < 0 ? status : (bipolar)request.index;
+}
+
+//      The caller's own user and network namespaces, with root mapped to the
+//      caller: what a test needs to bind port 53 or make a veth pair.
+static bool net_test_enter_namespaces(positive uid, positive gid)
+{
+        p8 line[32];
+
+        if (system_call_1(syscall(unshare), 0x10000000 | 0x40000000) < 0 ||
+            net_test_write((string_address)"/proc/self/setgroups",
+                           (string_address)"deny\n") < 0)
+                return false;
+        net_test_map(line, gid);
+        if (net_test_write((string_address)"/proc/self/gid_map",
+                           (string_address)line) < 0)
+                return false;
+        net_test_map(line, uid);
+        return net_test_write((string_address)"/proc/self/uid_map",
+                              (string_address)line) >= 0;
+}
+
+
+/*
+        The resolver's own hardening, against a server that reports what it
+        saw: the source port of every query, whether the question came in
+        mixed case, whether it carried the EDNS0 option; and that misbehaves
+        as asked: folds the question's case in its reply (mode 1), or answers
+        an EDNS0 query with FORMERR (mode 2).
+*/
+static fn dns_policy_server(bipolar datagram, positive mode, b32 report,
+                            positive count)
+{
+        for (positive served = 0; served < count; served++)
+        {
+                p8 request[DNS_MAX_MESSAGE];
+                p8 reply[DNS_MAX_MESSAGE];
+                socket_address_internet client;
+                p32 client_size = sizeof client;
+                network_deadline fixture_deadline;
+                bipolar got;
+                positive at = DNS_HEADER;
+                positive length;
+                p8 note[3] = {0, 0, 0};
+
+                if (!network_deadline_begin(address_of fixture_deadline, 5, 0) ||
+                    network_wait_readable_until(datagram,
+                                                address_of fixture_deadline) <= 0)
+                        system_call_1(syscall(exit_group), 1);
+                got = socket_receive((b32)datagram, request, sizeof request, 0,
+                                     address_of client, address_of client_size);
+                if (got < DNS_HEADER + 5)
+                        system_call_1(syscall(exit_group), 1);
+                while (at < (positive)got && request[at])
+                {
+                        for (positive i = 1; i <= request[at]; i++)
+                                if (request[at + i] >= 'A' && request[at + i] <= 'Z')
+                                        note[0] |= 1;
+                        at += 1 + request[at];
+                }
+                length = at + 1 + 4;
+                if (network_load_16(request + 10))
+                        note[0] |= 2;
+                note[1] = (p8)(network_order_16(client.port) >> 8);
+                note[2] = (p8)network_order_16(client.port);
+                system_call_3(syscall(write), (positive)report,
+                              (positive)address_of note, 3);
+
+                memory_copy(reply, request, length);
+                network_store_16(reply + 2, DNS_FLAG_RESPONSE | DNS_FLAG_RECURSE);
+                network_store_16(reply + 4, 1);
+                network_store_16(reply + 6, 0);
+                network_store_16(reply + 8, 0);
+                network_store_16(reply + 10, 0);
+                if (mode == 2 && (note[0] & 2))
+                        network_store_16(reply + 2, DNS_FLAG_RESPONSE | 1);
+                else if (mode == 3 || mode == 4)
+                        //      No such name (3), or the server failed (4).
+                        network_store_16(reply + 2,
+                                         DNS_FLAG_RESPONSE | DNS_FLAG_RECURSE |
+                                             (mode == 3 ? 3 : 2));
+                else
+                {
+                        network_store_16(reply + 6, 1);
+                        reply[length++] = 0xc0;
+                        reply[length++] = DNS_HEADER;
+                        network_store_16(reply + length, DNS_TYPE_A);
+                        network_store_16(reply + length + 2, DNS_CLASS_IN);
+                        network_store_32(reply + length + 4, 0);
+                        network_store_16(reply + length + 8, 4);
+                        network_store_32(reply + length + 10, 0xc0000207);
+                        length += 14;
+                }
+                if (mode == 1)
+                        for (positive i = DNS_HEADER; i < at; i++)
+                                if (reply[i] >= 'A' && reply[i] <= 'Z')
+                                        reply[i] |= 0x20;
+                socket_send((b32)datagram, reply, length, 0, address_of client,
+                            client_size);
+        }
+        system_call_1(syscall(exit_group), 0);
+}
+
+//      Asks `count` times what one server in `mode` answers; the notes it
+//      took, three bytes a query, come back in `notes`. The last query's
+//      status is the result.
+static bipolar dns_policy_case(positive mode, positive queries,
+                               positive served, string_address name,
+                               p8 address_to notes, p32 address_to found)
+{
+        socket_address_internet where = {
+            .family = AF_INET, .host = network_order_32(HOST_LOOPBACK)};
+        p32 size = sizeof where;
+        bipolar datagram = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+        b32 pipes[2];
+        bipolar child;
+        bipolar status = DNS_NO_SERVER;
+        positive raw = 0;
+
+        if (datagram < 0 ||
+            system_call_2(syscall(pipe2), (positive)pipes, O_CLOEXEC) < 0 ||
+            socket_bind((b32)datagram, address_of where, sizeof where) < 0 ||
+            socket_name((b32)datagram, address_of where, address_of size) < 0 ||
+            !where.port)
+                return DNS_NO_SERVER;
+        child = system_call_2(syscall(clone), SIGCHLD, 0);
+        if (child < 0)
+                return DNS_NO_SERVER;
+        if (!child)
+                dns_policy_server(datagram, mode, pipes[1], served);
+        socket_close((b32)datagram);
+        system_close((positive)pipes[1]);
+        for (positive query = 0; query < queries; query++)
+                status = dns_resolve_at(HOST_LOOPBACK,
+                                        network_order_16(where.port), name,
+                                        found, 2);
+        if (system_wait4_retry((b32)child, address_of raw, 0, null) != child ||
+            wait_status_code(raw) != 0)
+                status = DNS_NO_SERVER;
+        system_read_retry((positive)pipes[0], notes, 3 * served);
+        system_close((positive)pipes[0]);
+        return status;
+}
+
+/*
+        Which resolvers a lookup asks, in a namespace of its own where port 53
+        is bindable: the first listed answers "no such name" (or fails), the
+        second would answer with an address. "No such name" is the network's
+        answer and is final; a failure goes on to the second.
+*/
+static fn net_test_dns_walk(positive uid, positive gid)
+{
+        static const string_address path = "/tmp/closenet-dns-walk.conf";
+        static const string_address conf =
+            "nameserver 127.0.0.2\nnameserver 127.0.0.3\n";
+        positive result = 0;
+        bipolar lo;
+        b32 nl;
+
+        if (!net_test_enter_namespaces(uid, gid))
+                system_call_1(syscall(exit_group), 0x7f);
+        lo = net_test_index((string_address)"lo");
+        nl = (b32)netlink_open_groups(0);
+        if (lo <= 0 || (bipolar)nl < 0 || netlink_link_up(nl, (p32)lo) < 0 ||
+            net_test_create(path, conf) < 0)
+                system_call_1(syscall(exit_group), 0x7f);
+        for (positive which = 0; which < 2; which++)
+        {
+                static const positive first_mode[2] = {3, 4};
+                bipolar servers[2];
+                b32 notes[2][2];
+                bipolar children[2];
+                p32 found = 0;
+                bipolar status;
+                p8 heard[3];
+                bool second_asked;
+
+                for (positive at = 0; at < 2; at++)
+                {
+                        socket_address_internet bound = {
+                            .family = AF_INET, .port = network_order_16(53),
+                            .host = network_order_32(0x7f000002 + at)};
+
+                        servers[at] = socket_new(AF_INET,
+                                                 SOCK_DGRAM | SOCK_CLOEXEC, 0);
+                        if (servers[at] < 0 ||
+                            socket_bind((b32)servers[at], address_of bound,
+                                        sizeof bound) < 0 ||
+                            system_call_2(syscall(pipe2), (positive)notes[at],
+                                          O_CLOEXEC | 04000) < 0)
+                                system_call_1(syscall(exit_group), 0x7f);
+                        children[at] = system_fork();
+                        if (!children[at])
+                                dns_policy_server(servers[at],
+                                                  at ? 0 : first_mode[which],
+                                                  notes[at][1], 1);
+                        socket_close((b32)servers[at]);
+                }
+                status = dns_resolve_any(path, (string_address)"walk.example.com",
+                                         address_of found, 2);
+                second_asked = system_call_3(syscall(read),
+                                             (positive)notes[1][0],
+                                             (positive)address_of heard,
+                                             3) == 3;
+                for (positive at = 0; at < 2; at++)
+                {
+                        system_call_2(syscall(kill), (positive)children[at],
+                                      SIGKILL);
+                        system_call_4(syscall(wait4), (positive)children[at],
+                                      0, 0, 0);
+                        system_close((positive)notes[at][0]);
+                        system_close((positive)notes[at][1]);
+                }
+                if (which == 0 && status == DNS_NO_SUCH_NAME && !second_asked)
+                        result |= 1;
+                if (which == 1 && status == DNS_OK && found == 0xc0000207 &&
+                    second_asked)
+                        result |= 2;
+        }
+        system_remove_at(AT_FDCWD, path, 0);
+        system_call_1(syscall(exit_group), 0x80 | result);
+}
+
+static fn resolving_walk(void)
+{
+        b32 status = 0;
+        bipolar child;
+
+        if (net_as_emulated())
+        {
+                log_direct(str("net: DNS resolver walk NOT RUN -- under emulation\n"));
+                return;
+        }
+        child = system_fork();
+        if (child == 0)
+                net_test_dns_walk((positive)system_call(syscall(getuid)),
+                                  (positive)system_call(syscall(getgid)));
+        if (child < 0 ||
+            system_call_4(syscall(wait4), (positive)child,
+                          (positive)address_of status, 0, 0) < 0 ||
+            status >> 8 == 0x7f)
+        {
+                log_direct(str("net: DNS resolver walk NOT RUN -- user or network namespaces unavailable\n"));
+                return;
+        }
+        check("a resolver that says no such name ends the lookup, the second is not asked",
+              (status >> 8) & 1);
+        check("a resolver that fails sends the lookup on to the second",
+              (status >> 8) & 2);
+}
+
+static fn resolving_policy(void)
+{
+        static p8 notes[3 * 128];
+        p32 found = 0;
+        positive mixed = 0;
+        positive edns = 0;
+        positive below = 0;
+        positive distinct = 0;
+        positive answered = 0;
+
+        memory_fill(notes, 0, sizeof notes);
+        check("a query against a plain server is answered",
+              dns_policy_case(0, 96, 96, (string_address)"policy.example.com",
+                              notes, address_of found) == DNS_OK &&
+                  found == 0xc0000207);
+        for (positive query = 0; query < 96; query++)
+        {
+                p16 port = (p16)(notes[3 * query + 1] << 8 | notes[3 * query + 2]);
+
+                answered++;
+                mixed += notes[3 * query] & 1;
+                edns += (notes[3 * query] >> 1) & 1;
+                below += port < 32768;
+                for (positive other = 0; other < query; other++)
+                        if ((p16)(notes[3 * other + 1] << 8 | notes[3 * other + 2]) == port)
+                                goto repeated;
+                distinct++;
+        repeated:;
+        }
+        check("every question is sent in mixed case (draft-vixie-dnsext-dns0x20)",
+              answered == 96 && mixed == 96);
+        check("every query advertises EDNS0", edns == 96);
+        check("every query has a source port of its own (96 queries, at most 2 repeats)",
+              distinct >= 94);
+        check("source ports come from the whole unprivileged range, not the kernel's 32768 to 60999",
+              below >= 20);
+
+        memory_fill(notes, 0, sizeof notes);
+        check("a server that folds the question to lower case is still answered",
+              dns_policy_case(1, 1, 2, (string_address)"folded.example.com",
+                              notes, address_of found) == DNS_OK &&
+                  found == 0xc0000207);
+        check("the first query was mixed case and the second as typed",
+              (notes[0] & 1) && !(notes[3] & 1));
+
+        memory_fill(notes, 0, sizeof notes);
+        check("a server that answers EDNS0 with FORMERR is asked again without it",
+              dns_policy_case(2, 1, 2, (string_address)"formerr.example.com",
+                              notes, address_of found) == DNS_OK &&
+                  found == 0xc0000207);
+        check("the first query had the option and the second not",
+              (notes[0] & 2) && !(notes[3] & 2));
 }
 
 /*
@@ -53765,6 +54145,31 @@ static fn fetching(void)
                           sizeof(wire) - 1, (p8 address_to)(body),           \
                           sizeof(body) - 1))
 
+                framing_harness("204-clean", true, FRAME,
+                                "HTTP/1.1 204 No Content\r\n\r\n", "");
+                /* The default accepts these as wget and curl do; the tight tier
+                   refuses them. */
+                framing_harness("204-with-content-length",
+                                MOONWATER_STRICT < STRICT_TIGHT, FRAME,
+                                "HTTP/1.1 204 No Content\r\n"
+                                "Content-Length: 0\r\n\r\n", "");
+                framing_harness("204-with-transfer-encoding",
+                                MOONWATER_STRICT < STRICT_TIGHT, FRAME,
+                                "HTTP/1.1 204 No Content\r\n"
+                                "Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+                                "");
+                framing_harness("205-with-zero-content-length", true, FRAME,
+                                "HTTP/1.1 205 Reset Content\r\n"
+                                "Content-Length: 0\r\n\r\n", "");
+#if MOONWATER_STRICT < STRICT_TIGHT
+                framing_harness("205-with-content-length", true, FRAME,
+                                "HTTP/1.1 205 Reset Content\r\n"
+                                "Content-Length: 5\r\n\r\nhello", "hello");
+#else
+                framing_harness("205-with-content-length", false, FRAME,
+                                "HTTP/1.1 205 Reset Content\r\n"
+                                "Content-Length: 5\r\n\r\nhello", "");
+#endif
                 framing_harness("te-cl-conflict", false, FRAME,
                                 "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"
                                 "Content-Length: 5\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
@@ -61927,16 +62332,16 @@ static fn crypto_rsa_served_sizes(void)
                   child.sig_length == 512);
         check("ISRG Root X1's 4096-bit PKCS#1 signature over Root YR verifies",
               child.sig_length == 512 &&
-                  tls_anchor_verifies(address_of child));
+                  tls_anchor_verifies(address_of child, 20260101000000ull));
         if (child.sig_length == 512)
         {
                 child.sig[child.sig_length - 1] ^= 1;
                 check("the 4096-bit verify refuses one flipped signature bit",
-                      !tls_anchor_verifies(address_of child));
+                      !tls_anchor_verifies(address_of child, 20260101000000ull));
                 child.sig[child.sig_length - 1] ^= 1;
                 child.tbs[child.tbs_length - 1] ^= 1;
                 check("the 4096-bit verify refuses one flipped TBS bit",
-                      !tls_anchor_verifies(address_of child));
+                      !tls_anchor_verifies(address_of child, 20260101000000ull));
                 child.tbs[child.tbs_length - 1] ^= 1;
         }
 
@@ -62578,28 +62983,28 @@ static fn tls_trust_anchor_chains(void)
                 return;
 
         check("kernel.org's Atlas intermediate finds GlobalSign Root CA - R3 by Name",
-              tls_anchor_verifies(address_of atlas_cert));
+              tls_anchor_verifies(address_of atlas_cert, 20260101000000ull));
         check("a served GTS Root R1 cross-certificate carries an anchor key",
-              tls_spki_is_anchor(address_of gts_cert) &&
-                  !tls_spki_is_anchor(address_of wr2_cert));
+              tls_spki_is_anchor(address_of gts_cert, 20260101000000ull) &&
+                  !tls_spki_is_anchor(address_of wr2_cert, 20260101000000ull));
         check("WR2 chains to the served GTS Root R1",
               tls_certificate_names_chain(address_of wr2_cert,
                                           address_of gts_cert) &&
                   tls_verify_one(address_of wr2_cert, address_of gts_cert));
         check("Sectigo OV R36 verifies under Root R46 with sha384WithRSAEncryption",
-              tls_anchor_verifies(address_of r36_cert));
+              tls_anchor_verifies(address_of r36_cert, 20260101000000ull));
         r36_cert.sig[r36_cert.sig_length - 1] ^= 1;
         check("the SHA-384 PKCS#1 verify refuses one flipped signature bit",
-              !tls_anchor_verifies(address_of r36_cert));
+              !tls_anchor_verifies(address_of r36_cert, 20260101000000ull));
         r36_cert.sig[r36_cert.sig_length - 1] ^= 1;
         check("Certum Trusted Root CA verifies under Certum Trusted Network CA with sha512WithRSAEncryption",
-              tls_anchor_verifies(address_of certum_cert));
+              tls_anchor_verifies(address_of certum_cert, 20260101000000ull));
         certum_cert.sig[certum_cert.sig_length - 1] ^= 1;
         check("the SHA-512 PKCS#1 verify refuses one flipped signature bit",
-              !tls_anchor_verifies(address_of certum_cert));
+              !tls_anchor_verifies(address_of certum_cert, 20260101000000ull));
         atlas_cert.issuer[atlas_cert.issuer_length - 1] ^= 1;
         check("an issuer Name no anchor carries fails closed",
-              !tls_anchor_verifies(address_of atlas_cert));
+              !tls_anchor_verifies(address_of atlas_cert, 20260101000000ull));
         atlas_cert.issuer[atlas_cert.issuer_length - 1] ^= 1;
 
         for (positive i = 0; i < array_count(tls_anchors); i++)
@@ -62607,7 +63012,7 @@ static fn tls_trust_anchor_chains(void)
                 tls_cert root;
 
                 if (!tls_anchor_key(tls_anchors + i, address_of root) ||
-                    !tls_spki_is_anchor(address_of root) ||
+                    !tls_spki_is_anchor(address_of root, 0) ||
                     (root.curve == 3 &&
                      (root.modulus_length < 256 ||
                       !(root.modulus[root.modulus_length - 1] & 1) ||
@@ -62616,6 +63021,29 @@ static fn tls_trust_anchor_chains(void)
         }
         check("every anchor decodes to its length and finds itself by key",
               bad_anchors == 0 && array_count(tls_anchors) == 120);
+
+        /* Mozilla's distrust-after: a root that has a date anchors a leaf
+           issued up to it, to the second, and none after. */
+        {
+                positive dated = 0;
+                positive wrong = 0;
+
+                for (positive i = 0; i < array_count(tls_anchors); i++)
+                {
+                        tls_cert root;
+                        p64 date = tls_anchors[i].distrust;
+
+                        if (!date || !tls_anchor_key(tls_anchors + i, address_of root))
+                                continue;
+                        dated++;
+                        wrong += !tls_spki_is_anchor(address_of root, date) ||
+                                 !tls_spki_is_anchor(address_of root, date - 1) ||
+                                 tls_spki_is_anchor(address_of root, date + 1) ||
+                                 tls_spki_is_anchor(address_of root, date + 10000000000ull);
+                }
+                check("a root with a distrust-after date anchors leaves up to it and none after",
+                      dated >= 1 && !wrong);
+        }
 }
 
 /*
@@ -63404,6 +63832,14 @@ static fn fetching_for_real(void)
                                          "Content-Length: 9\r\n"
                                          "\r\n"
                                          "forbidden";
+                p8 answer_reset_length[] = "HTTP/1.1 205 Reset Content\r\n"
+                                           "Content-Length: 5\r\n"
+                                           "\r\n"
+                                           "reset";
+                p8 answer_reset_chunked[] = "HTTP/1.1 205 Reset Content\r\n"
+                                            "Transfer-Encoding: chunked\r\n"
+                                            "\r\n"
+                                            "1\r\nx\r\n0\r\n\r\n";
                 p8 answer_not_modified[] = "HTTP/1.1 304 Not Modified\r\n"
                                            "Content-Length: 9\r\n"
                                            "\r\n"
@@ -63441,6 +63877,8 @@ static fn fetching_for_real(void)
                     (string_address)answer_interim,
                     (string_address)answer_no_content,
                     (string_address)answer_no_content,
+                    (string_address)answer_reset_length,
+                    (string_address)answer_reset_chunked,
                     (string_address)answer_not_modified,
                     (string_address)answer_use_proxy,
                     (string_address)answer_unused,
@@ -63462,6 +63900,8 @@ static fn fetching_for_real(void)
                     sizeof(answer_interim) - 1,
                     sizeof(answer_no_content) - 1,
                     sizeof(answer_no_content) - 1,
+                    sizeof(answer_reset_length) - 1,
+                    sizeof(answer_reset_chunked) - 1,
                     sizeof(answer_not_modified) - 1,
                     sizeof(answer_use_proxy) - 1,
                     sizeof(answer_unused) - 1,
@@ -63624,15 +64064,62 @@ static fn fetching_for_real(void)
                           body.bytes &&
                           !memory_compare(body.bytes, "final", 5));
 
+                /* A 204 that declares a body: the default does what wget and
+                   curl do (succeeds, the body ignored, nothing published);
+                   the tight tier refuses the declaration. */
+#if MOONWATER_STRICT >= STRICT_TIGHT
+                /* A refused fetch leaves the caller's store as it was, so
+                   start each of these from an empty one. */
+                http_forget(address_of body);
+#endif
                 status = http_get(url, address_of body, address_of code);
+#if MOONWATER_STRICT < STRICT_TIGHT
                 check("a 204 response publishes an empty buffered body",
                       status == HTTP_OK && code == 204 && !body.used);
+#else
+                check("a 204 that declares a body is refused by the tight tier",
+                      status == HTTP_MALFORMED && !body.used);
+#endif
 
                 {
                         status = http_fetch_to(url, -1, false,
                                                address_of code, null);
+#if MOONWATER_STRICT < STRICT_TIGHT
                         check("a streaming 204 succeeds without writing its forbidden body",
                               status == HTTP_OK && code == 204);
+#else
+                        check("a streaming 204 that declares a body is refused by the tight tier",
+                              status == HTTP_MALFORMED);
+#endif
+                        /* 205: the default reads its content as a 200's, as
+                           wget and curl print it; the tight tier consumes the
+                           framing and refuses any content. */
+#if MOONWATER_STRICT >= STRICT_TIGHT
+                        http_forget(address_of body);
+#endif
+                        status = http_get(url, address_of body, address_of code);
+#if MOONWATER_STRICT < STRICT_TIGHT
+                        check("a 205 with content-length publishes its body by default",
+                              status == HTTP_OK && code == 205 && body.used == 5 &&
+                                  !memory_compare(body.bytes, "reset", 5));
+#else
+                        check("a 205 with non-zero content-length is refused by the tight tier",
+                              status == HTTP_MALFORMED && !body.used);
+#endif
+#if MOONWATER_STRICT >= STRICT_TIGHT
+                        http_forget(address_of body);
+#endif
+                        status = http_get(url, address_of body, address_of code);
+#if MOONWATER_STRICT < STRICT_TIGHT
+                        check("a 205 with a chunked body publishes it by default",
+                              status == HTTP_OK && code == 205 && body.used == 1 &&
+                                  !memory_compare(body.bytes, "x", 1));
+#else
+                        check("a 205 with chunked content is refused by the tight tier",
+                              status != HTTP_OK && !body.used);
+#endif
+                        /* A failed fetch leaves the caller's store as it was. */
+                        http_forget(address_of body);
                         status = http_fetch_to(url, -1, false,
                                                address_of code, null);
                         check("a terminal 304 is not redirected or accepted as a download",
@@ -64581,6 +65068,71 @@ static fn leasing(void)
                       !dhcp_lease_usable(address_of usable));
         }
         {
+                //      What a lease may name: an address and a router from
+                //      the unicast space, in a prefix that does not cover the
+                //      machine's own loopback or the multicast and reserved
+                //      ranges. The address is usable exactly when the
+                //      reference rule below says so.
+                static const p32 addresses[] = {
+                    0x0a00020f, 0x0a000000, 0x0a0002ff, 0x00000005, 0x7f000005,
+                    0x7fffffff, 0xe0000001, 0xefffffff, 0xf0000001,
+                    0xffffffff, 0xc0a80105, 0xa9fe0105, 0x64400001, 0x0a000001};
+                static const p32 masks[] = {
+                    0, 0xffffff00, 0xffffffff, 0xfffffffe, 0xff000000,
+                    0xffff0000, 0x80000000, 0xe0000000, 0xf0000000,
+                    0xfe000000, 0xffffffc0, 0xc0000000, 0x00000000};
+                static const p32 routers[] = {
+                    0, 0x0a000001, 0x0a00020f, 0x7f000001, 0xe0000002,
+                    0xf0000001, 0xffffffff, 0x00000001, 0x0a09004d, 0xc0a80101};
+                positive wrong = 0;
+                positive rows = 0;
+
+                for (positive a = 0; a < array_count(addresses); a++)
+                        for (positive m = 0; m < array_count(masks); m++)
+                                for (positive r = 0; r < array_count(routers); r++)
+                                {
+                                        dhcp_lease one = {
+                                            .address = addresses[a],
+                                            .mask = masks[m],
+                                            .router = routers[r],
+                                            .server = 0x0a000202,
+                                            .seconds = 3600};
+                                        p32 network_mask = masks[m] ? masks[m]
+                                                                    : 0xffffff00;
+                                        p32 network = addresses[a] & network_mask;
+                                        bool unicast = addresses[a] >> 24 &&
+                                                       addresses[a] >> 24 != 127 &&
+                                                       addresses[a] < 0xe0000000;
+                                        bool router_ok =
+                                            !routers[r] ||
+                                            (routers[r] >> 24 &&
+                                             routers[r] >> 24 != 127 &&
+                                             routers[r] < 0xe0000000 &&
+                                             routers[r] != addresses[a]);
+                                        //      The prefix may not reach 0/8,
+                                        //      127/8 or 224/3.
+                                        bool covers =
+                                            !((network ^ 0x00000000) & network_mask & 0xff000000) ||
+                                            !((network ^ 0x7f000000) & network_mask & 0xff000000) ||
+                                            !((network ^ 0xe0000000) & network_mask & 0xe0000000);
+                                        //      A subnet's own first and last
+                                        //      address name the subnet, unless
+                                        //      it is a /31 or a /32.
+                                        bool named = network_mask < 0xfffffffe &&
+                                                     (addresses[a] == network ||
+                                                      addresses[a] == (network | ~network_mask));
+                                        bool want = unicast && router_ok &&
+                                                    !covers && !named;
+
+                                        rows++;
+                                        if (dhcp_lease_usable(address_of one) != want)
+                                                wrong++;
+                                }
+                check("a DHCP lease names a unicast address, a sane router and a prefix clear of 0/8, 127/8 and 224/3",
+                      rows == array_count(addresses) * array_count(masks) * array_count(routers) &&
+                          !wrong);
+        }
+        {
                 dhcp_lease timed = {.seconds = 3600};
 
                 check("omitted DHCP timers use RFC defaults",
@@ -64904,6 +65456,8 @@ b32 main(void)
         resolving();
         resolving_edges();
         resolving_truncated();
+        resolving_policy();
+        resolving_walk();
         resolving_servers();
         fetching();
         streaming_chunk_boundaries();
@@ -65202,6 +65756,23 @@ static bool crypto_vector_run(p8 address_to kind, positive kind_length,
                                       : crypto_ecdsa_p384(CV(0), CL(0), CV(1),
                                                           CL(1), CV(2), CL(2),
                                                           CV(3), CV(4)));
+        }
+        if (KIND("ecdsader256") || KIND("ecdsader384"))
+        {
+                //      A CertificateVerify's ECDSA as the handshake takes it:
+                //      the DER signature parsed, the digest the scheme's own.
+                static tls_conn tls;
+                positive size = KIND("ecdsader256") ? 32 : 48;
+
+                if (CL(2) != size || CL(3) != size)
+                        return false;
+                memory_fill(address_of tls, 0, sizeof tls);
+                tls.leaf_curve = size == 32 ? 1 : 2;
+                memory_copy(tls.leaf_qx + 48 - size, CV(2), size);
+                memory_copy(tls.leaf_qy + 48 - size, CV(3), size);
+                return expect == tls_signature_valid(address_of tls,
+                                                     size == 32 ? 0x0403 : 0x0503,
+                                                     CV(0), CL(0), CV(1), CL(1));
         }
         if (KIND("pkcs256") || KIND("pkcs384"))
         {
@@ -71761,6 +72332,32 @@ static fn labels(void)
 }
 
 //      WPA's pre-shared key, made through the shared PBKDF2 (IEEE 802.11i).
+/* The access point's frames are the ones answered: a frame on the EAPOL
+   socket from any other address is dropped. */
+static fn wifi_source_checks(void)
+{
+        wifi_link link;
+        socket_address_packet from;
+
+        memory_fill(address_of link, 0, sizeof(link));
+        memory_fill(address_of from, 0, sizeof(from));
+        memory_copy(link.bssid, "\x02\x00\x00\x00\x01\x00", 6);
+        from.family = AF_PACKET;
+        from.halen = 6;
+        memory_copy(from.addr, "\x02\x00\x00\x00\x01\x00", 6);
+        check("an EAPOL frame from the access point's address is taken",
+              wifi_eapol_from(address_of link, address_of from, sizeof(from)));
+        from.addr[5] = 1;
+        check("one from another address is not", !wifi_eapol_from(address_of link, address_of from, sizeof(from)));
+        from.addr[5] = 0;
+        from.halen = 4;
+        check("one whose hardware address is not six bytes is not",
+              !wifi_eapol_from(address_of link, address_of from, sizeof(from)));
+        from.halen = 6;
+        check("the kernel's 18 bytes of it are enough", wifi_eapol_from(address_of link, address_of from, 18));
+        check("one the kernel gave no address for is not", !wifi_eapol_from(address_of link, address_of from, 4));
+}
+
 static fn wpa_key(void)
 {
         p8 pmk[32];
@@ -72229,6 +72826,7 @@ b32 main(void)
         mdns_hop_limit();
         labels();
         wpa_key();
+        wifi_source_checks();
         key_text();
         places();
         ipv4_only();
@@ -72913,6 +73511,8 @@ static fn distros(void)
                 bool store_own = false;
                 bool foreign = false;
 
+                //      A release pinned by commit or by date names its build by
+                //      the digest, which Debian's URL has no arch in to show.
                 for (string_address address_to name = own; *name; name++)
                 {
                         url_own |= string_find(row->url, *name) != null;
@@ -72922,7 +73522,7 @@ static fn distros(void)
                         foreign |= string_find(row->url, *name) != null ||
                                    string_find(row->store, *name) != null;
                 check("Every setup downloads this machine's own build",
-                      url_own && store_own && !foreign);
+                      (url_own || row->sha256) && store_own && !foreign);
         }
 
         const struct bowl_distro address_to alpine = bowl_find_distro("alpine");
@@ -73388,6 +73988,201 @@ static fn isolated_root_children(void)
               code == 0);
 }
 
+/*
+        The downloads a setup takes, against a mirror that lies. The bytes a
+        download leaves are checked here as bowl_setup_download checks them
+        (the digest or the key a row pins), on files: right bytes, one byte
+        wrong, one byte short, one byte long, another release's bytes, and
+        for a signature an older signed archive (the replay a floor refuses),
+        another key's signature, a bit flipped in the signature, a packet cut
+        short, junk after it and a critical subpacket this does not know. The
+        signatures are gpg's own, made with a throwaway 2048-bit key; every
+        pinned row is checked for having a digest or a key, and the Arch Linux
+        ARM key for being the key its fingerprint names.
+*/
+static bool put_file(string_address path, const p8 address_to bytes,
+                     positive length)
+{
+        bipolar handle = system_open_at_mode(
+            AT_FDCWD, path, O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC, 0600);
+        bool done = handle >= 0 &&
+                    system_write_all((positive)handle, bytes, length) == length;
+
+        if (handle >= 0)
+                system_close(handle);
+        return done;
+}
+
+static fn downloads(void)
+{
+        static const p8 archive[] = "moonwater bowl test archive\n";
+        static const struct bowl_key signer = {
+            "5F40E0EDD18BC9772C6354D481303DFF244CBCB8", 1785542400, 65537,
+            "f1e4a224eedcd103607b82d65374a0d08d22a8d70f84379d16f8f047e4bc0873"
+            "576ff2e3ded41edfaeb9f3552b9abc5b7a4f2f38f15a9b7b850620884eaa2c71"
+            "5724d899f7a232bac78ce30302202af58e69a41a1b3507de4c27d91c21a0797d"
+            "e0368e3c5f867d61ef4a6026461df7e215d82e123e8e87c34c5d5c9389034a4d"
+            "5ecc61ccc209e9462fc7104d5ad2a55229d0e6ccdedd7ac7d4decf99743544dc"
+            "e71e545a7085b6be0944af85a90b7a662321024f2fb3da60f702b1cf5770986d"
+            "e8e6f00ba0d01c24ab774e76bddb0f185eb7053a56e1d79d9e993b4a6a38b230"
+            "b50053004d433625bdfb7332463f81e8af60edbad759167439fd94379692ad4f",
+            0};
+        static const struct bowl_key other = {
+            "F3FACE255553013000D17F663396A190CC8CC5BB", 1785542400, 65537,
+            "b18cae83b331b6f3a64a7173d37a9ea50fb182a14a369fb20b097b7d0517fae7"
+            "e69118340d3155163d1e70139b933da728b9649b0019a2b8ae2b685113f54adc"
+            "4f962d2c91189b3501dd7649ff88318975b7a426ceb0694c2475bf86821fb4fa"
+            "4ed9bd02de402f0a6657d6a762ac668b663d4c2537db6940f9436e6bb56c9376"
+            "e37a57d3f6346994e98dd1673901f0631619b33c1c22aac3b3312c8982d188e2"
+            "6f7ed846bdccc8cece966eff85f845aad626c46e9bb6d2fe1d096f7a75c02320"
+            "99ba9260b1ff615bad3da031d0ac1d430a80b47ddcfdab20a243547d4fa5e1c1"
+            "233abe192523ef9c21df8d686578eef4358e207f89d61fd164009f1e64536187",
+            0};
+        static const p8 sig_sha512[] = {0x89, 0x01, 0x4f, 0x04, 0x00, 0x01, 0x0a, 0x00, 0x39, 0x16, 0x21, 0x04, 0x5f, 0x40, 0xe0, 0xed, 0xd1, 0x8b, 0xc9, 0x77, 0x2c, 0x63, 0x54, 0xd4, 0x81, 0x30, 0x3d, 0xff, 0x24, 0x4c, 0xbc, 0xb8, 0x05, 0x02, 0x6a, 0x96, 0xbe, 0x40, 0x1b, 0x14, 0x80, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x0e, 0x6d, 0x61, 0x6e, 0x75, 0x32, 0x2c, 0x32, 0x2e, 0x35, 0x2b, 0x31, 0x2e, 0x31, 0x32, 0x2c, 0x30, 0x2c, 0x33, 0x00, 0x0a, 0x09, 0x10, 0x81, 0x30, 0x3d, 0xff, 0x24, 0x4c, 0xbc, 0xb8, 0xf2, 0x74, 0x08, 0x00, 0xa9, 0xdc, 0x2b, 0xc6, 0xf4, 0xa5, 0xdd, 0xc4, 0x4a, 0x94, 0x56, 0xda, 0xc3, 0x38, 0x46, 0x9f, 0x66, 0xa3, 0x95, 0xad, 0x41, 0x8d, 0x5a, 0xa3, 0x6b, 0xec, 0x7a, 0x9d, 0x9c, 0x65, 0xbd, 0xb1, 0xbc, 0xef, 0x58, 0xa0, 0x52, 0x99, 0xfc, 0xa8, 0x8c, 0xd8, 0x9b, 0x92, 0xc7, 0xf2, 0x71, 0xd9, 0xcd, 0x82, 0xcb, 0x92, 0x6b, 0x1a, 0x3e, 0x60, 0xd7, 0xa7, 0x12, 0xdd, 0x99, 0x57, 0xd4, 0x2b, 0xa6, 0xad, 0xea, 0x35, 0x08, 0xd8, 0x44, 0xbb, 0xde, 0xc1, 0xa8, 0x9a, 0xd2, 0x61, 0xfd, 0xd5, 0x48, 0x9f, 0xbb, 0x5c, 0x16, 0x03, 0x0a, 0x94, 0x16, 0x4a, 0xc4, 0x3d, 0x86, 0x8f, 0xf5, 0x0a, 0x13, 0xef, 0x43, 0xd6, 0xbb, 0xa7, 0xc9, 0x56, 0xdf, 0x21, 0xe0, 0xec, 0xa1, 0xf6, 0x15, 0xd5, 0x90, 0x32, 0xc6, 0xac, 0x55, 0x1e, 0x3a, 0x45, 0x00, 0x3b, 0x11, 0xa5, 0x3f, 0x3d, 0x61, 0xf0, 0xb2, 0x5c, 0x3a, 0x88, 0x6f, 0xd3, 0x2d, 0xcb, 0x8f, 0xd8, 0x70, 0x78, 0x53, 0x6e, 0x9c, 0xa7, 0x23, 0xf5, 0x35, 0x61, 0xb6, 0x57, 0xbd, 0x92, 0x8f, 0xee, 0xa8, 0x74, 0xfb, 0xb2, 0x42, 0x52, 0x66, 0x9f, 0x18, 0x2d, 0xc6, 0xa5, 0x50, 0x26, 0x60, 0xb8, 0x03, 0xbd, 0xde, 0x0f, 0x4f, 0x4a, 0xc2, 0x74, 0xe1, 0xc4, 0x19, 0xa5, 0x38, 0x28, 0xb9, 0x31, 0x34, 0x3f, 0x9d, 0xef, 0x72, 0x54, 0x34, 0x0e, 0x3e, 0xb4, 0xae, 0x06, 0x79, 0x8b, 0xe5, 0xb7, 0xb9, 0x5e, 0x57, 0x7f, 0xea, 0x62, 0x8f, 0x45, 0x1e, 0x80, 0x9d, 0x9f, 0x5e, 0x2a, 0xd0, 0x88, 0x67, 0x06, 0x73, 0xa4, 0x99, 0xa3, 0xf3, 0xe7, 0x6d, 0x2a, 0xf4, 0xa6, 0x1e, 0x8f, 0x84, 0x63, 0xc1, 0x13, 0x02, 0xf6, 0xa2, 0xf8, 0x2b, 0x51, 0x01, 0x44, 0xb4, 0x11, 0x47, 0xc6, 0xd1, 0x06, 0x7f, 0x2a, 0xed, 0x3f, 0x39, 0x82};
+        static const p8 sig_sha256[] = {0x89, 0x01, 0x4f, 0x04, 0x00, 0x01, 0x08, 0x00, 0x39, 0x16, 0x21, 0x04, 0x5f, 0x40, 0xe0, 0xed, 0xd1, 0x8b, 0xc9, 0x77, 0x2c, 0x63, 0x54, 0xd4, 0x81, 0x30, 0x3d, 0xff, 0x24, 0x4c, 0xbc, 0xb8, 0x05, 0x02, 0x6a, 0x96, 0xbe, 0x40, 0x1b, 0x14, 0x80, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x0e, 0x6d, 0x61, 0x6e, 0x75, 0x32, 0x2c, 0x32, 0x2e, 0x35, 0x2b, 0x31, 0x2e, 0x31, 0x32, 0x2c, 0x30, 0x2c, 0x33, 0x00, 0x0a, 0x09, 0x10, 0x81, 0x30, 0x3d, 0xff, 0x24, 0x4c, 0xbc, 0xb8, 0xf9, 0xd8, 0x07, 0xfd, 0x12, 0x9c, 0x15, 0x9c, 0xde, 0xba, 0x04, 0x64, 0x8f, 0x58, 0xcc, 0x10, 0x86, 0x2c, 0x3e, 0xe9, 0x5b, 0x94, 0xde, 0x5a, 0x8e, 0x99, 0x2d, 0x5c, 0xc1, 0x79, 0xbc, 0x3e, 0xab, 0xe2, 0xcd, 0x8c, 0x79, 0x4d, 0xb2, 0xbc, 0x50, 0xb1, 0x61, 0x7f, 0x14, 0x42, 0x01, 0x7b, 0x1a, 0x63, 0xbd, 0x61, 0x83, 0x46, 0xf1, 0xeb, 0x16, 0xbc, 0x3b, 0x90, 0x65, 0x78, 0xe2, 0xb5, 0x0c, 0xf4, 0x1b, 0x65, 0x47, 0x12, 0x51, 0xb1, 0x04, 0x69, 0x35, 0xb8, 0x0d, 0xbf, 0x19, 0x4f, 0xc0, 0xfb, 0x17, 0xb1, 0x28, 0xaa, 0x54, 0x7d, 0x7b, 0xc9, 0x76, 0x21, 0xd5, 0xd7, 0xe3, 0x14, 0xc5, 0x20, 0xfc, 0xb6, 0x26, 0x93, 0xe9, 0x9c, 0x37, 0x2e, 0xb8, 0x8a, 0xa6, 0x05, 0x5a, 0xf5, 0x96, 0x31, 0xfa, 0x6f, 0x4f, 0xf4, 0x5e, 0xcc, 0x28, 0xbd, 0x4e, 0xa6, 0x91, 0x0c, 0x1b, 0x8c, 0x84, 0x7e, 0x62, 0x0b, 0x31, 0xe9, 0xce, 0xbe, 0x68, 0x47, 0xcd, 0x33, 0x02, 0x13, 0xe4, 0x02, 0x7e, 0x75, 0x7f, 0x57, 0x0d, 0x75, 0x18, 0x82, 0x80, 0xb2, 0xdb, 0x1a, 0x87, 0xda, 0x8d, 0x35, 0xf4, 0x6b, 0x3d, 0xb1, 0xbc, 0xae, 0x07, 0x6b, 0xaa, 0xd8, 0x55, 0xfe, 0xb6, 0xf3, 0x9b, 0xdf, 0x93, 0x33, 0xef, 0x61, 0x46, 0x44, 0xfa, 0x0e, 0xc8, 0x3a, 0xd8, 0x27, 0xd5, 0x47, 0xe7, 0x6d, 0xda, 0x27, 0x57, 0x55, 0x74, 0x78, 0x8a, 0xde, 0x94, 0xdf, 0xdc, 0xb2, 0x10, 0x28, 0xb6, 0x6d, 0x6d, 0x7e, 0xc9, 0xbf, 0xa3, 0x1e, 0x65, 0x4f, 0x58, 0x8e, 0x9c, 0xb0, 0xb8, 0x0a, 0x18, 0x9c, 0x48, 0x89, 0x5f, 0x31, 0x7a, 0x0e, 0x88, 0x53, 0xce, 0x5c, 0x39, 0x83, 0xbe, 0x77, 0xa2, 0xcb, 0xdc, 0xf2, 0x5a, 0x99, 0x05, 0x86, 0x0e, 0x32, 0xe3, 0x93, 0x2f, 0x7d, 0x6d, 0x0c, 0x91, 0x83, 0x61, 0x9f, 0x87, 0x24};
+        const positive size = sizeof(archive) - 1;
+        p8 copy[sizeof(sig_sha512) + 1];
+        p8 hex[BOWL_DIGEST_HEX + 1];
+        p8 wrong[sizeof(archive)];
+        bipolar handle;
+        struct bowl_key floor_ok;
+        struct bowl_key floor_late;
+        string_address file = BOWL_ROOT_DIRECTORY "/download";
+        string_address sign = BOWL_ROOT_DIRECTORY "/download.sig";
+
+        system_make_directory_at(AT_FDCWD, BOWL_ROOT_DIRECTORY, 0755);
+
+        // A digest pin: the right bytes and nothing else.
+        put_file(file, archive, size);
+        handle = system_open_at(AT_FDCWD, file, FILE_READ | O_CLOEXEC);
+        bowl_sha256_of(handle, hex, null);
+        system_close(handle);
+        check("A pinned digest takes the bytes it names",
+              bowl_archive_digest_ok(file, (string_address)hex));
+        check("A row that pins no digest takes nothing",
+              !bowl_archive_digest_ok(file, null));
+        put_file(file, archive, size - 1);
+        check("A download one byte short of its digest is refused",
+              !bowl_archive_digest_ok(file, (string_address)hex));
+        put_file(file, archive, 0);
+        check("An empty download is refused",
+              !bowl_archive_digest_ok(file, (string_address)hex));
+        memory_copy(wrong, archive, size);
+        wrong[size] = 'x';
+        put_file(file, wrong, size + 1);
+        check("A download one byte long is refused",
+              !bowl_archive_digest_ok(file, (string_address)hex));
+        memory_copy(wrong, archive, size);
+        wrong[3] ^= 1;
+        put_file(file, wrong, size);
+        check("A download with one bit changed is refused",
+              !bowl_archive_digest_ok(file, (string_address)hex));
+        put_file(file, archive, size);
+        check("A digest in capitals is not the pinned one",
+              !bowl_archive_digest_ok(file,
+                                      "895661BDF6C64E91B7725874165FD05DD30C438D3FFEC661671AB5CFB261CA58"));
+        check("A download that is not there is refused",
+              !bowl_archive_digest_ok(BOWL_ROOT_DIRECTORY "/absent", (string_address)hex));
+
+        // A signature pin.
+        put_file(file, archive, size);
+        floor_ok = signer;
+        floor_ok.since = 1788264000;
+        floor_late = signer;
+        floor_late.since = 1788264001;
+        for (positive which = 0; which < 2; which++)
+        {
+                const p8 address_to sig = which ? sig_sha256 : sig_sha512;
+                positive length = which ? sizeof(sig_sha256) : sizeof(sig_sha512);
+
+                put_file(sign, sig, length);
+                check("A signature by the pinned key over the archive is taken",
+                      bowl_signature_ok(file, sign, address_of signer));
+                check("A signature made on the floor's second is taken",
+                      bowl_signature_ok(file, sign, address_of floor_ok));
+                check("An older signed archive is a replay and is refused",
+                      !bowl_signature_ok(file, sign, address_of floor_late));
+                check("A signature by another key is refused",
+                      !bowl_signature_ok(file, sign, address_of other));
+
+                put_file(file, archive, size - 1);
+                check("A signed archive one byte short is refused",
+                      !bowl_signature_ok(file, sign, address_of signer));
+                put_file(file, wrong, size);
+                check("A signed archive with a bit changed is refused",
+                      !bowl_signature_ok(file, sign, address_of signer));
+                put_file(file, archive, size);
+
+                {
+                        //      Every byte is covered but the unhashed area,
+                        //      which bowl_signature_read does not read.
+                        positive hashed = 3 + 6 + ((positive)sig[7] << 8) + sig[8];
+                        positive unhashed = ((positive)sig[hashed] << 8) + sig[hashed + 1];
+                        bool refused = true;
+                        bool cut_refused = true;
+
+                        for (positive at = 0; at < length; at++)
+                        {
+                                bool free_byte = at >= hashed + 2 &&
+                                                 at < hashed + 2 + unhashed;
+
+                                memory_copy(copy, sig, length);
+                                copy[at] ^= 1 << (at & 7);
+                                put_file(sign, copy, length);
+                                refused &= bowl_signature_ok(file, sign,
+                                                             address_of signer) == free_byte;
+                        }
+                        check("A signature with any one bit changed is refused, "
+                              "unless it is in the unhashed area", refused);
+                        for (positive cut = 0; cut < length; cut += 7)
+                        {
+                                put_file(sign, sig, cut);
+                                cut_refused &= !bowl_signature_ok(file, sign,
+                                                                  address_of signer);
+                        }
+                        check("A signature cut short is refused", cut_refused);
+                }
+                memory_copy(copy, sig, length);
+                copy[length] = 0;
+                put_file(sign, copy, length + 1);
+                check("A byte after the signature packet is refused",
+                      !bowl_signature_ok(file, sign, address_of signer));
+        }
+        check("A signature that is not there is refused",
+              !bowl_signature_ok(file, BOWL_ROOT_DIRECTORY "/absent", address_of signer));
+
+        // The pinned key is the key its fingerprint names.
+        {
+                p8 made[41];
+
+                check("The Arch Linux ARM key's numbers make its fingerprint",
+                      bowl_key_fingerprint(address_of bowl_alarm_key, made) &&
+                          string_equals((string_address)made,
+                                        bowl_alarm_key.fingerprint));
+                check("The test key's numbers make its fingerprint",
+                      bowl_key_fingerprint(address_of signer, made) &&
+                          string_equals((string_address)made, signer.fingerprint));
+        }
+
+        // Every row names how it is checked, and only one way.
+        for (positive at = 0; at < array_count(bowl_distros); at++)
+        {
+                const struct bowl_distro address_to row = bowl_distros + at;
+                p8 made[41];
+
+                check("Every setup download is pinned by a digest or by a key, not neither",
+                      row->sha256 || row->key);
+                check("A row pins a digest or a key, not both", !(row->sha256 && row->key));
+                check("A key a row names makes its own fingerprint",
+                      !row->key ||
+                          (bowl_key_fingerprint(row->key, made) &&
+                           string_equals((string_address)made, row->key->fingerprint)));
+        }
+
+        system_remove_at(AT_FDCWD, file, 0);
+        system_remove_at(AT_FDCWD, sign, 0);
+}
+
 b32 main(void)
 {
         names();
@@ -73399,6 +74194,7 @@ b32 main(void)
         archive_policy();
         landing();
         distros();
+        downloads();
         json();
         oci();
         nix();
@@ -79031,6 +79827,14 @@ static fn storage_test_link_state(void)
                   held.lost);
         check("new interface can retry after configuration failure",
               net_link_news(13, 0, address_of held));
+        /* A flapping second link must not cut every exchange as it starts:
+           after a cut the news waits out the hold-off, then cuts again. */
+        check("link news may cut an exchange nothing has cut", net_news_may_cut(100));
+        net_news_holdoff_until = 104;
+        check("link news is held off for the seconds after a cut",
+              !net_news_may_cut(100) && !net_news_may_cut(103));
+        check("and cuts again when the hold-off ends", net_news_may_cut(104));
+        net_news_holdoff_until = 0;
 
         dhcp_lease same = held.lease;
         dhcp_lease changed = held.lease;
@@ -80176,11 +80980,33 @@ static fn storage_test_net_files(void)
                         address_of resolver_facts) &&
                   (resolver_facts.mode & 0777) == 0600);
         static p8 wanted[] =
-            "nameserver 1.1.1.1\nnameserver 10.0.0.1\n";
+            "nameserver 10.0.0.1\nnameserver 1.1.1.1\n";
         got = storage_test_file_read(target, bytes, sizeof bytes);
-        check("resolver writes are complete and ordered",
+        check("resolver writes are complete and ordered (the network's resolver first)",
               got == sizeof(wanted) - 1 &&
                   !memory_compare(bytes, wanted, sizeof(wanted) - 1));
+        {
+                static p8 alone[] = "nameserver 1.1.1.1\n";
+
+                check("a network with no resolver of its own gets the public one alone",
+                      net_write_resolv_to(target, 0) == 0 &&
+                          storage_test_file_read(target, bytes, sizeof bytes) ==
+                              sizeof(alone) - 1 &&
+                          !memory_compare(bytes, alone, sizeof(alone) - 1));
+                check("and one that names the public resolver itself is not asked twice",
+                      net_write_resolv_to(target, DNS_FALLBACK) == 0 &&
+                          storage_test_file_read(target, bytes, sizeof bytes) ==
+                              sizeof(alone) - 1 &&
+                          !memory_compare(bytes, alone, sizeof(alone) - 1));
+                check("only an answer about the name ends the walk over resolvers",
+                      dns_answer_is_final(DNS_OK) &&
+                          dns_answer_is_final(DNS_NO_SUCH_NAME) &&
+                          dns_answer_is_final(DNS_NO_ADDRESS) &&
+                          !dns_answer_is_final(DNS_NO_REPLY) &&
+                          !dns_answer_is_final(DNS_REFUSED) &&
+                          !dns_answer_is_final(DNS_MALFORMED) &&
+                          !dns_answer_is_final(DNS_NO_SERVER));
+        }
 
         p8 unsafe[] = {'h', 'o', 's', 't', 27, 0};
         storage_test_output_used = 0;

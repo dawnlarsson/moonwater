@@ -17,9 +17,9 @@
         found the same way, by its greeting from the new place.
 
         A group is a line in /root/link.groups -- the namespace, the key
-        derived from it and the secret (never the secret itself), a hash of
-        the secret so a machine script that joins at every boot does not pay
-        the derivation every boot, and the grants members get here. Written
+        derived from it and the secret (never the secret itself, and no hash
+        of it either: a fast hash beside the slow key let anyone holding the
+        file guess at full speed) and the grants members get here. Written
         by `moonwater link join`, read by the listener whenever it changes.
 
         Discovery is IPv4 only for now, 224.0.0.251 on every interface that
@@ -55,7 +55,7 @@
 struct link_group_record {
         char namespace[WATERLINK_NAMESPACE_MAX];
         p8 key[32];   // PBKDF2 of namespace and secret
-        p8 check[32]; // SHA-256 of the secret, salted: skips a repeat derivation
+        p8 check[32]; // unused; older files held a SHA-256 of the secret here
         p32 may;
         p32 flags;
         p8 reserved[24];
@@ -85,6 +85,10 @@ fn link_groups_load(link_groups address_to groups)
         for (positive at = 0; at < groups->count; at++)
         {
                 groups->record[at].namespace[WATERLINK_NAMESPACE_MAX - 1] = 0;
+                //      Files written before 2026-09-30 hold a SHA-256 of the
+                //      secret here, a guessing oracle at full speed. Nothing
+                //      reads it, and the next write of the file drops it.
+                memory_zero(groups->record[at].check, sizeof groups->record[at].check);
                 if (!link_name_good(groups->record[at].namespace))
                 {
                         groups->record[at] = groups->record[--groups->count];
@@ -99,21 +103,6 @@ static bipolar link_groups_save(link_groups address_to groups)
                                  groups->record,
                                  groups->count * sizeof(struct link_group_record),
                                  true);
-}
-
-fn link_group_check(string_address namespace, p8 address_to secret,
-                    positive length, p8 address_to check)
-{
-        crypto_sha256 hash;
-
-        crypto_sha256_open(address_of hash);
-        crypto_sha256_write(address_of hash, (p8 address_to) "waterlink check ",
-                            16);
-        crypto_sha256_write(address_of hash, (p8 address_to)namespace,
-                            string_length(namespace));
-        crypto_sha256_write(address_of hash, (p8 address_to) " ", 1);
-        crypto_sha256_write(address_of hash, secret, length);
-        crypto_sha256_close(address_of hash, check);
 }
 
 /*

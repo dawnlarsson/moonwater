@@ -2764,8 +2764,10 @@ static bool bowl_sha256_of(bipolar handle, p8 address_to hex, p64 address_to siz
         return true;
 }
 
-/* Whether a download is the one the table pins; a row that pins none -- a
-   distribution whose URL follows its latest release -- takes any. */
+/* Whether a download is the one the table pins. A row that pins no digest
+   is not one this takes: a release that is unpinned is refused, never
+   waved through (Arch's, Debian's and Arch Linux RISC-V's rows were once
+   taken on the mirror's word alone). */
 static bool bowl_archive_digest_ok(string_address path, string_address want)
 {
         p8 hex[BOWL_DIGEST_HEX + 1];
@@ -2773,7 +2775,7 @@ static bool bowl_archive_digest_ok(string_address path, string_address want)
         bool same;
 
         if (!want)
-                return true;
+                return false;
 
         handle = system_open_at(AT_FDCWD, path,
                                 FILE_READ | O_NOFOLLOW | O_CLOEXEC);
@@ -2784,6 +2786,389 @@ static bool bowl_archive_digest_ok(string_address path, string_address want)
         system_close(handle);
         return same;
 }
+
+/* ---- Signed downloads: an OpenPGP detached signature against a pinned key. ---- */
+
+/*
+        Arch Linux ARM publishes one root tarball, always the latest, with no
+        dated copy to pin a digest to, and signs it with its build system's
+        RSA key. The key is pinned here as its modulus and exponent and as
+        the fingerprint those make (checked again on every use, so a table
+        that drifts from its fingerprint verifies nothing); the signature is
+        fetched from the mirror beside the archive and proves nothing the
+        key did not sign. since is the floor on the signature's creation
+        time: an older archive, validly signed, is a replay and is refused,
+        and the floor is what a newer release raises.
+
+        Read as RFC 4880 section 5.2 has it, version 4 only: a binary
+        document signature (0x00), RSA (1), SHA-256 or SHA-512, the creation
+        time and the issuer fingerprint in the hashed area (the unhashed area
+        is an attacker's and is not read), an unknown critical subpacket a
+        refusal, one packet and nothing after it. The key is asked to make
+        exactly the PKCS#1 v1.5 block the net code's RSA checks.
+*/
+struct bowl_key
+{
+        string_address fingerprint; // 40 upper-case hex digits, the v4 one
+        p32 created;                // the key packet's creation time
+        p32 exponent;
+        string_address modulus;     // big endian, lower-case hex
+        p32 since;                  // no signature made before this
+};
+
+static bool crypto_rsa_pkcs1(p8 address_to n_bytes, positive n_length,
+                             p64 exponent, p8 address_to sig,
+                             positive sig_length,
+                             const p8 address_to digestinfo,
+                             positive digestinfo_length, p8 address_to hash,
+                             positive hash_length);
+
+#define BOWL_KEY_BYTES 512
+#define BOWL_SIGNATURE_BYTES 2048
+
+static positive bowl_key_modulus(const struct bowl_key address_to key,
+                                 p8 address_to into)
+{
+        positive length = string_length(key->modulus);
+        positive at;
+
+        if (length > BOWL_KEY_BYTES * 2 || (length & 1))
+                return 0;
+
+        for (at = 0; at < length; at++)
+        {
+                p8 c = (p8)key->modulus[at];
+                p8 v = c >= 'a' ? (p8)(c - 'a' + 10) : (p8)(c - '0');
+
+                if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+                        return 0;
+                if (at & 1)
+                        into[at / 2] |= v;
+                else
+                        into[at / 2] = (p8)(v << 4);
+        }
+        return length / 2;
+}
+
+// The bits in a byte, counted from its highest set one.
+static positive bowl_key_width(p8 byte)
+{
+        positive width = 0;
+
+        for (; byte; byte >>= 1)
+                width++;
+        return width;
+}
+
+static positive bowl_key_mpi(p8 address_to into, const p8 address_to bytes,
+                             positive length)
+{
+        positive bits;
+
+        while (length && !*bytes)
+        {
+                bytes++;
+                length--;
+        }
+        bits = length ? length * 8 - 8 + bowl_key_width(bytes[0]) : 0;
+        into[0] = (p8)(bits >> 8);
+        into[1] = (p8)bits;
+        memory_copy(into + 2, bytes, length);
+        return 2 + length;
+}
+
+/* The v4 fingerprint the key's numbers make, as upper-case hex. */
+static bool bowl_key_fingerprint(const struct bowl_key address_to key,
+                                 p8 address_to hex)
+{
+        p8 modulus[BOWL_KEY_BYTES];
+        p8 exponent[4] = {(p8)(key->exponent >> 24), (p8)(key->exponent >> 16),
+                          (p8)(key->exponent >> 8), (p8)key->exponent};
+        p8 packet[3 + 6 + 2 + BOWL_KEY_BYTES + 2 + 4];
+        p8 sum[20];
+        positive modulus_length = bowl_key_modulus(key, modulus);
+        positive at = 3;
+        digest_state digest;
+
+        if (!modulus_length)
+                return false;
+
+        packet[at++] = 4;
+        packet[at++] = (p8)(key->created >> 24);
+        packet[at++] = (p8)(key->created >> 16);
+        packet[at++] = (p8)(key->created >> 8);
+        packet[at++] = (p8)key->created;
+        packet[at++] = 1;
+        at += bowl_key_mpi(packet + at, modulus, modulus_length);
+        at += bowl_key_mpi(packet + at, exponent, 4);
+        packet[0] = 0x99;
+        packet[1] = (p8)((at - 3) >> 8);
+        packet[2] = (p8)(at - 3);
+
+        digest_open(address_of digest, DIGEST_SHA1, 20);
+        digest_write(address_of digest, packet, at);
+        digest_close(address_of digest, sum);
+        memory_into_hex(hex, sum, sizeof(sum));
+        for (at = 0; at < 40; at++)
+                if (hex[at] >= 'a')
+                        hex[at] = (p8)(hex[at] - 32);
+        hex[40] = end;
+        return true;
+}
+
+/* The signature packet's fields, or false for anything this does not read. */
+struct bowl_signature
+{
+        positive hash;           // 8 or 10: the OpenPGP hash algorithm
+        p32 created;
+        const p8 address_to hashed;     // the hashed subpackets' bytes
+        positive hashed_length;
+        p8 left[2];
+        const p8 address_to mpi;        // the signature integer, no header
+        positive mpi_length;
+};
+
+static bool bowl_signature_read(const p8 address_to bytes, positive length,
+                                const struct bowl_key address_to key,
+                                struct bowl_signature address_to into)
+{
+        positive at = 0;
+        positive body;
+        positive end_of_hashed;
+        positive unhashed;
+        positive bits;
+        bool created = false;
+        bool issuer = false;
+
+        if (length < 2 || !(bytes[0] & 0x80))
+                return false;
+
+        // Old or new packet header; tag 2 is a signature.
+        if (bytes[0] & 0x40)
+        {
+                if ((bytes[0] & 0x3f) != 2)
+                        return false;
+                if (bytes[1] < 192)
+                {
+                        body = bytes[1];
+                        at = 2;
+                }
+                else if (bytes[1] < 224 && length > 2)
+                {
+                        body = (positive)((bytes[1] - 192) << 8) + bytes[2] + 192;
+                        at = 3;
+                }
+                else
+                        return false;
+        }
+        else
+        {
+                if (((bytes[0] >> 2) & 15) != 2)
+                        return false;
+                if ((bytes[0] & 3) == 0)
+                {
+                        body = bytes[1];
+                        at = 2;
+                }
+                else if ((bytes[0] & 3) == 1 && length > 2)
+                {
+                        body = (positive)(bytes[1] << 8) | bytes[2];
+                        at = 3;
+                }
+                else
+                        return false;
+        }
+        if (at + body != length || body < 12)
+                return false;
+
+        bytes += at;
+        length = body;
+        if (bytes[0] != 4 || bytes[1] != 0 || bytes[2] != 1 ||
+            (bytes[3] != 8 && bytes[3] != 10))
+                return false;
+        into->hash = bytes[3];
+        into->hashed_length = (positive)(bytes[4] << 8) | bytes[5];
+        if (6 + into->hashed_length + 2 > length)
+                return false;
+        into->hashed = bytes + 6;
+        end_of_hashed = 6 + into->hashed_length;
+
+        for (at = 0; at < into->hashed_length;)
+        {
+                positive size = into->hashed[at];
+                positive kind;
+
+                if (size < 192)
+                        at += 1;
+                else if (size < 255 && at + 1 < into->hashed_length)
+                {
+                        size = (positive)((size - 192) << 8) +
+                               into->hashed[at + 1] + 192;
+                        at += 2;
+                }
+                else
+                        return false;
+                if (!size || at + size > into->hashed_length)
+                        return false;
+                kind = into->hashed[at];
+                if (kind == 2 && size == 5 && !created)
+                {
+                        into->created = ((p32)into->hashed[at + 1] << 24) |
+                                        ((p32)into->hashed[at + 2] << 16) |
+                                        ((p32)into->hashed[at + 3] << 8) |
+                                        into->hashed[at + 4];
+                        created = true;
+                }
+                else if (kind == 33 && size == 22 && !issuer &&
+                         into->hashed[at + 1] == 4)
+                {
+                        p8 hex[41];
+
+                        memory_into_hex(hex, into->hashed + at + 2, 20);
+                        hex[40] = end;
+                        for (positive digit = 0; digit < 40; digit++)
+                                if (hex[digit] >= 'a')
+                                        hex[digit] = (p8)(hex[digit] - 32);
+                        issuer = string_equals((string_address)hex,
+                                               key->fingerprint);
+                }
+                else if (kind == 2 || kind == 33)
+                        return false;
+                else if (kind & 0x80)
+                        return false;
+                at += size;
+        }
+        if (!created || !issuer)
+                return false;
+
+        unhashed = (positive)(bytes[end_of_hashed] << 8) | bytes[end_of_hashed + 1];
+        at = end_of_hashed + 2 + unhashed;
+        if (at + 2 + 2 > length)
+                return false;
+        into->left[0] = bytes[at];
+        into->left[1] = bytes[at + 1];
+        bits = (positive)(bytes[at + 2] << 8) | bytes[at + 3];
+        at += 4;
+        into->mpi_length = (bits + 7) / 8;
+        into->mpi = bytes + at;
+        // The count is the integer's own width, so one integer has one spelling.
+        return bits && at + into->mpi_length == length && bytes[at] &&
+               bits == into->mpi_length * 8 - 8 + bowl_key_width(bytes[at]);
+}
+
+/* Whether the signature file is a good signature by key over the archive,
+   made no earlier than key->since. */
+static bool bowl_signature_ok(string_address archive, string_address signature,
+                              const struct bowl_key address_to key)
+{
+        static const p8 info_256[] = {0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60,
+                                      0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
+                                      0x01, 0x05, 0x00, 0x04, 0x20};
+        static const p8 info_512[] = {0x30, 0x51, 0x30, 0x0d, 0x06, 0x09, 0x60,
+                                      0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
+                                      0x03, 0x05, 0x00, 0x04, 0x40};
+        static p8 chunk[65536];
+        p8 modulus[BOWL_KEY_BYTES];
+        p8 sig[BOWL_SIGNATURE_BYTES];
+        p8 padded[BOWL_KEY_BYTES];
+        p8 hex[41];
+        p8 sum[64];
+        p8 trailer[6];
+        struct bowl_signature found;
+        digest_state digest;
+        positive modulus_length;
+        positive sig_length = 0;
+        positive sum_length;
+        bipolar handle;
+        bipolar got;
+
+        if (!bowl_key_fingerprint(key, hex) ||
+            !string_equals((string_address)hex, key->fingerprint))
+                return false;
+        modulus_length = bowl_key_modulus(key, modulus);
+
+        handle = system_open_at(AT_FDCWD, signature,
+                                FILE_READ | O_NOFOLLOW | O_CLOEXEC);
+        if (handle < 0)
+                return false;
+        while ((got = system_read_once(handle, sig + sig_length,
+                                       sizeof(sig) - sig_length)) > 0)
+                sig_length += (positive)got;
+        system_close(handle);
+        if (got < 0 || sig_length == sizeof(sig) ||
+            !bowl_signature_read(sig, sig_length, key, address_of found) ||
+            found.created < key->since || found.mpi_length > modulus_length)
+                return false;
+
+        handle = system_open_at(AT_FDCWD, archive,
+                                FILE_READ | O_NOFOLLOW | O_CLOEXEC);
+        if (handle < 0)
+                return false;
+        sum_length = found.hash == 10 ? 64 : 32;
+        digest_open(address_of digest, found.hash == 10 ? DIGEST_SHA512 : DIGEST_SHA256,
+                    sum_length);
+        while ((got = system_read_once(handle, chunk, sizeof(chunk))) > 0)
+                digest_write(address_of digest, chunk, (positive)got);
+        system_close(handle);
+        if (got < 0)
+                return false;
+        {
+                p8 head[6] = {4, 0, 1, (p8)found.hash,
+                              (p8)(found.hashed_length >> 8),
+                              (p8)found.hashed_length};
+                positive total = 6 + found.hashed_length;
+
+                digest_write(address_of digest, head, 6);
+                digest_write(address_of digest, found.hashed, found.hashed_length);
+                trailer[0] = 4;
+                trailer[1] = 0xff;
+                trailer[2] = (p8)(total >> 24);
+                trailer[3] = (p8)(total >> 16);
+                trailer[4] = (p8)(total >> 8);
+                trailer[5] = (p8)total;
+                digest_write(address_of digest, trailer, 6);
+        }
+        digest_close(address_of digest, sum);
+        if (sum[0] != found.left[0] || sum[1] != found.left[1])
+                return false;
+
+        memory_fill(padded, 0, sizeof(padded));
+        memory_copy(padded + modulus_length - found.mpi_length, found.mpi,
+                    found.mpi_length);
+        return crypto_rsa_pkcs1(modulus, modulus_length, key->exponent, padded,
+                                modulus_length,
+                                found.hash == 10 ? info_512 : info_256,
+                                found.hash == 10 ? sizeof(info_512)
+                                                 : sizeof(info_256),
+                                sum, sum_length);
+}
+
+/* Arch Linux ARM Build System <builder@archlinuxarm.org>, which signs every
+   root tarball the mirrors carry. Taken from keyserver.ubuntu.com and from
+   the archlinuxarm-keyring package's own archlinuxarm.gpg (GitHub, sha256
+   6ce771e8...2332f) on 2026-09-30, where both gave this fingerprint. Its
+   v4 fingerprint is what bowl_key_fingerprint makes of the numbers below.
+   since is 2026-08-05, the signature on the build setup last measured;
+   raise it with each release that is measured. */
+static const struct bowl_key bowl_alarm_key = {
+        "68B3537F39A313B3E574D06777193F152BDBE6A6", 1390085363, 65537,
+        "cd0765c2849429950c1b01c97cc2486c3d93a8cc68715183be055105e6f2a3c5"
+        "c373791e7b7238f5bde4b0e1a32612fd373240478bd2b2ca4db02949051ee4f1"
+        "e030396719d3b7ed927047b31057261282ec45889d790df9b5859a163a636432"
+        "db4786e9d04ba60a2f33bf1c10857975cb899166d0425fccf8a2d7605e4f1d05"
+        "448926c1e026c991a1bccdac10c612be799cd6d3f3c07155c1b7f627446ff54e"
+        "3aa4b6e2ba20349be4414751c26bbc0466d2588fc868b07459cddc30431809fe"
+        "538c4c12f47b12bd43a675613a45689ba67690a7dfc20b63c78cfd509d76f2dd"
+        "bd6d0389cd9b72243fc1eac29788ad22f785748628c9f7afc0ff4a297591f535"
+        "5399e5974ca4d6116801f54ae00584bdc5c7ab2dc1c0361ad62ca28aa1b198d4"
+        "7288aebc11995cdb4b868c6fc6b0d271fbfb40a964ce5bcb0926ba7e6064ffd3"
+        "bb87da244f8af8d601eb608a1eb19666db92c90a9b885023eb28cd614e6d0ccf"
+        "7bd47594d2df9dc197c71396924bc695b7595576273d229fe9d17e1fe9592e34"
+        "af851ce74e5cfe8ccfcebbff5b9b37f492f26de9f388e1a47c65eb1e5c425fc6"
+        "903405d6f16ab8cf52b3e3f5754bbbbe5b1573337912045b7ccb77d3a21c09f1"
+        "7cb966fd60f0734cd88c923253457f295858c7b2aa98d943e73a60e20221fa7e"
+        "773a94993ec2c25b1c1aff9cbcc3c1cb384a59441fcdea8726cc84928aa59497",
+        1785933702};
 
 /* ---- Just enough JSON for an OCI layout. ---- */
 
@@ -3870,14 +4255,35 @@ static b32 bowl_land(string_address archive, string_address root,
         tree beside the primary architectures. Nix publishes all three from
         the one release.
 
-        A download that names one release is pinned to its SHA-256, taken
-        from that release's own word for it: Alpine's .sha256 beside each
-        tarball, Fedora's CHECKSUM file, which Fedora signs (the riscv64
-        image's .sha256), and the hash lines of the installer at
-        releases.nixos.org/nix/nix-2.35.2/install. Arch's, Arch Linux ARM's,
-        Arch Linux RISC-V's and Debian's name only the latest build, have no
-        hash to pin and are held to the floor and a known archive instead. A
-        newer release is a new set of lines here.
+        Every download is checked against something this file carries, and
+        a row that carries nothing is refused. Five kinds of row, each named
+        by where its bytes come from:
+          Alpine, Fedora, Nix: the SHA-256 of one release, from that
+          release's own word for it (Alpine's .sha256 beside each tarball,
+          Fedora's CHECKSUM file, which Fedora signs, and the riscv64 image's
+          .sha256, the hash lines of the installer at
+          releases.nixos.org/nix/nix-2.35.2/install).
+          Arch, x86_64: archive.archlinux.org/iso/2026.09.01, a dated copy
+          that never changes, SHA-256 from its sha256sums.txt and checked
+          against Pierre Schmitz's signature (3E80CA1A...9A5C, Ed25519) with
+          gpg on 2026-09-30.
+          Arch Linux RISC-V: its dated archriscv-2026-08-27, SHA-256 taken
+          from the download (the mirror publishes none).
+          Debian: the file at one commit of docker-debian-artifacts, which
+          is a content address (the branch the old URL followed moves daily),
+          with the SHA-256 of what that commit holds.
+          Arch Linux ARM: only ever a latest, with no dated copy to name, so
+          a signature: its build system's RSA key, pinned as numbers and as a
+          fingerprint, with a floor on the signature's date (bowl_alarm_key).
+        To move to a newer release, change its lines and nothing else: take
+        the new URL (a newer date for Arch x86_64 and RISC-V, the new commit
+        from `git ls-remote` on the dist-ARCH branch for Debian, a newer
+        release for the others), download it with the wget this builds,
+        record its SHA-256 and its size (BOWL_*_BYTES, the first figure), and
+        check the unpacked tree against the second; for Arch Linux ARM raise
+        bowl_alarm_key's since to the new signature's creation time. A
+        commit GitHub has stopped serving, or a dated copy a mirror has
+        dropped, is a refused download and a reason to move.
 
         The sizes are what each download and its unpacked tree took on a
         4 KiB-page tmpfs, with nothing added, so a setup that fits is never
@@ -3893,7 +4299,10 @@ static b32 bowl_land(string_address archive, string_address root,
 #if X64
 #define BOWL_ARCH_LABEL "Arch"
 #define BOWL_ARCH_URL \
-        "https://geo.mirror.pkgbuild.com/iso/latest/archlinux-bootstrap-x86_64.tar.zst"
+        "https://archive.archlinux.org/iso/2026.09.01/archlinux-bootstrap-2026.09.01-x86_64.tar.zst"
+#define BOWL_ARCH_SHA256 \
+        "895661bdf6c64e91b7725874165fd05dd30c438d3ffec661671ab5cfb261ca58"
+#define BOWL_ARCH_KEY null
 #define BOWL_ARCH_STORE "archlinux-bootstrap-x86_64.tar.zst"
 #define BOWL_ARCH_BYTES 126491574, 607944704
 #define BOWL_ALPINE_URL \
@@ -3903,9 +4312,11 @@ static b32 bowl_land(string_address archive, string_address root,
 #define BOWL_ALPINE_STORE "alpine-minirootfs-x86_64.tar.gz"
 #define BOWL_ALPINE_BYTES 3698422, 8675328
 #define BOWL_DEBIAN_URL \
-        "https://github.com/debuerreotype/docker-debian-artifacts/raw/dist-amd64/stable/oci/blobs/rootfs.tar.gz"
+        "https://github.com/debuerreotype/docker-debian-artifacts/raw/8f962b15d7884a90e17876a9303cbac909d119aa/stable/oci/blobs/rootfs.tar.gz"
+#define BOWL_DEBIAN_SHA256 \
+        "5b2f4c89fd582d08d15b8ee070cd70b636281bd0f1948889bd090fdfd6887e52"
 #define BOWL_DEBIAN_STORE "debian-rootfs-amd64.tar.gz"
-#define BOWL_DEBIAN_BYTES 49337828, 130928640
+#define BOWL_DEBIAN_BYTES 49379699, 130928640
 #define BOWL_FEDORA_URL \
         "https://dl.fedoraproject.org/pub/fedora/linux/releases/44/Container/x86_64/images/Fedora-Container-Base-Generic-44-1.7.x86_64.oci.tar.xz"
 #define BOWL_FEDORA_SHA256 \
@@ -3922,6 +4333,8 @@ static b32 bowl_land(string_address archive, string_address root,
 #define BOWL_ARCH_LABEL "Arch Linux ARM"
 #define BOWL_ARCH_URL \
         "https://fl.us.mirror.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz"
+#define BOWL_ARCH_SHA256 null
+#define BOWL_ARCH_KEY address_of bowl_alarm_key
 #define BOWL_ARCH_STORE "archlinuxarm-aarch64.tar.gz"
 #define BOWL_ARCH_BYTES 829367415, 2193645568
 #define BOWL_ALPINE_URL \
@@ -3931,7 +4344,9 @@ static b32 bowl_land(string_address archive, string_address root,
 #define BOWL_ALPINE_STORE "alpine-minirootfs-aarch64.tar.gz"
 #define BOWL_ALPINE_BYTES 4023732, 8912896
 #define BOWL_DEBIAN_URL \
-        "https://github.com/debuerreotype/docker-debian-artifacts/raw/dist-arm64v8/stable/oci/blobs/rootfs.tar.gz"
+        "https://github.com/debuerreotype/docker-debian-artifacts/raw/ca011a8b1c3b259e4cbbf83bf6841f1fd5f497c1/stable/oci/blobs/rootfs.tar.gz"
+#define BOWL_DEBIAN_SHA256 \
+        "6b7b02a048d52062eea469add2cba2aff1c9de92848af7dd77d44d20e3072846"
 #define BOWL_DEBIAN_STORE "debian-rootfs-arm64.tar.gz"
 #define BOWL_DEBIAN_BYTES 49748834, 153010176
 #define BOWL_FEDORA_URL \
@@ -3949,7 +4364,10 @@ static b32 bowl_land(string_address archive, string_address root,
 #elif RISCV64
 #define BOWL_ARCH_LABEL "Arch Linux RISC-V"
 #define BOWL_ARCH_URL \
-        "https://archriscv.felixc.at/images/archriscv-latest.tar.zst"
+        "https://archriscv.felixc.at/images/archriscv-2026-08-27.tar.zst"
+#define BOWL_ARCH_SHA256 \
+        "a2045c8b62232db2f60d8e4db610dbb5d9e12856dab0ba08634ad3d7cb7ad498"
+#define BOWL_ARCH_KEY null
 #define BOWL_ARCH_STORE "archriscv-riscv64.tar.zst"
 #define BOWL_ARCH_BYTES 171783137, 745746432
 #define BOWL_ALPINE_URL \
@@ -3959,7 +4377,9 @@ static b32 bowl_land(string_address archive, string_address root,
 #define BOWL_ALPINE_STORE "alpine-minirootfs-riscv64.tar.gz"
 #define BOWL_ALPINE_BYTES 3442892, 7393280
 #define BOWL_DEBIAN_URL \
-        "https://github.com/debuerreotype/docker-debian-artifacts/raw/dist-riscv64/stable/oci/blobs/rootfs.tar.gz"
+        "https://github.com/debuerreotype/docker-debian-artifacts/raw/53b98b5d28214ce21bc9801fd9c94101867d4517/stable/oci/blobs/rootfs.tar.gz"
+#define BOWL_DEBIAN_SHA256 \
+        "b940b8c443bae67bb23b7a64f960907cf55246e9cef2e9298d447a14b5afc091"
 #define BOWL_DEBIAN_STORE "debian-rootfs-riscv64.tar.gz"
 #define BOWL_DEBIAN_BYTES 47866994, 116793344
 #define BOWL_FEDORA_URL \
@@ -4003,6 +4423,9 @@ struct bowl_distro
         string_address sha256;
         // How a download that is not a root tarball is unpacked, or null.
         b32(address_to unpack)(string_address archive, string_address root);
+        // The key that signs a download no digest can name, or null. Every
+        // row has a digest or a key; a row with neither is refused.
+        const struct bowl_key address_to key;
 };
 
 static string_address bowl_sudo_places[] = {
@@ -4042,32 +4465,60 @@ static b32 bowl_setup_run(string_address path, string_address address_to argv,
         return bowl_wait_applet(child, what);
 }
 
-static b32 bowl_setup_download(string_address dest, string_address url,
-                               p64 floor, string_address sha256)
+/* Whether an archive is what a row pins: its digest, or a signature from its
+   key that is no older than the key's floor. A row that has neither is
+   refused, and so is an archive whose signature file is missing. */
+static bool bowl_archive_trusted(const struct bowl_distro address_to distro,
+                                 string_address archive, string_address signature)
+{
+        if (distro->sha256)
+                return bowl_archive_digest_ok(archive, distro->sha256);
+        return distro->key && bowl_signature_ok(archive, signature, distro->key);
+}
+
+static b32 bowl_setup_fetch(string_address self, string_address into,
+                            string_address url)
+{
+        string_address argv[6];
+
+        system_remove_at(AT_FDCWD, into, 0);
+
+        argv[0] = "wget";
+        argv[1] = "-q";
+        argv[2] = "-O";
+        argv[3] = into;
+        argv[4] = url;
+        argv[5] = null;
+
+        return bowl_setup_run(self, argv, "download failed\n");
+}
+
+static b32 bowl_setup_download(const struct bowl_distro address_to distro)
 {
         p8 self[BOWL_PATH_LIMIT];
         p8 part[BOWL_PATH_LIMIT];
-        string_address argv[6];
+        p8 sign[BOWL_PATH_LIMIT];
+        p8 sign_part[BOWL_PATH_LIMIT];
+        p8 sign_url[BOWL_PATH_LIMIT];
+        string_address dest = distro->store;
 
-        string_format(log, bowl_label "downloading %s\n", url);
+        string_format(log, bowl_label "downloading %s\n", distro->url);
         log_flush();
 
-        if (!bowl_root_path(part, sizeof(part), dest, ".part"))
+        if (!distro->sha256 && !distro->key)
+                return bowl_refuse("this download names no digest and no key "
+                                   "to check it against\n");
+
+        if (!bowl_root_path(part, sizeof(part), dest, ".part") ||
+            !bowl_root_path(sign, sizeof(sign), dest, ".sig") ||
+            !bowl_root_path(sign_part, sizeof(sign_part), dest, ".sig.part") ||
+            !bowl_root_path(sign_url, sizeof(sign_url), distro->url, ".sig"))
                 return bowl_refuse("bowl path is too long\n");
 
         if (bowl_setup_self(self, sizeof(self)))
                 return 1;
 
-        system_remove_at(AT_FDCWD, part, 0);
-
-        argv[0] = "wget";
-        argv[1] = "-q";
-        argv[2] = "-O";
-        argv[3] = part;
-        argv[4] = url;
-        argv[5] = null;
-
-        if (bowl_setup_run(self, argv, "download failed\n"))
+        if (bowl_setup_fetch(self, part, distro->url))
         {
                 // Asked while the part that filled it is still there.
                 bowl_room_say_low(BOWL_ROOT_DIRECTORY);
@@ -4075,23 +4526,40 @@ static b32 bowl_setup_download(string_address dest, string_address url,
                 return 1;
         }
 
-        if (!bowl_archive_usable(part, floor))
+        if (distro->key && !distro->sha256 &&
+            bowl_setup_fetch(self, sign_part, sign_url))
         {
                 system_remove_at(AT_FDCWD, part, 0);
+                system_remove_at(AT_FDCWD, sign_part, 0);
+                return 1;
+        }
+
+        if (!bowl_archive_usable(part, distro->floor))
+        {
+                system_remove_at(AT_FDCWD, part, 0);
+                system_remove_at(AT_FDCWD, sign_part, 0);
                 return bowl_refuse("download was not a bootstrap archive\n");
         }
 
-        if (!bowl_archive_digest_ok(part, sha256))
+        if (!bowl_archive_trusted(distro, part, sign_part))
         {
                 system_remove_at(AT_FDCWD, part, 0);
-                return bowl_refuse("download is not the release setup pins: "
-                                   "its SHA-256 differs\n");
+                system_remove_at(AT_FDCWD, sign_part, 0);
+                return bowl_refuse(distro->sha256
+                                       ? "download is not the release setup pins: "
+                                         "its SHA-256 differs\n"
+                                       : "download is not signed by the key setup "
+                                         "pins, or by it before the floor\n");
         }
 
         system_remove_at(AT_FDCWD, dest, 0);
-        if (system_rename_at(AT_FDCWD, part, AT_FDCWD, dest, 0) < 0)
+        system_remove_at(AT_FDCWD, sign, 0);
+        if (system_rename_at(AT_FDCWD, part, AT_FDCWD, dest, 0) < 0 ||
+            (!distro->sha256 &&
+             system_rename_at(AT_FDCWD, sign_part, AT_FDCWD, sign, 0) < 0))
         {
                 system_remove_at(AT_FDCWD, part, 0);
+                system_remove_at(AT_FDCWD, sign_part, 0);
                 return bowl_refuse("could not keep the bootstrap archive\n");
         }
 
@@ -4357,7 +4825,7 @@ static const struct bowl_distro bowl_distros[] = {
     {"arch", BOWL_ARCH_LABEL, BOWL_ROOT_PREFIX "arch",
      BOWL_ROOT_PREFIX BOWL_ARCH_STORE, BOWL_ARCH_URL,
      "/usr/bin/pacman", "pacman -Syu", (p64)32 * 1024 * 1024,
-     BOWL_ARCH_BYTES, BOWL_PRIME_ARCH, bowl_arch_expose, null, null},
+     BOWL_ARCH_BYTES, BOWL_PRIME_ARCH, bowl_arch_expose, BOWL_ARCH_SHA256, null, BOWL_ARCH_KEY},
     {"alpine", "Alpine", BOWL_ROOT_PREFIX "alpine",
      BOWL_ROOT_PREFIX BOWL_ALPINE_STORE, BOWL_ALPINE_URL, "/sbin/apk",
      "apk update", (p64)1024 * 1024, BOWL_ALPINE_BYTES, BOWL_PRIME_NONE,
@@ -4365,7 +4833,7 @@ static const struct bowl_distro bowl_distros[] = {
     {"debian", "Debian", BOWL_ROOT_PREFIX "debian",
      BOWL_ROOT_PREFIX BOWL_DEBIAN_STORE, BOWL_DEBIAN_URL, "/usr/bin/apt-get",
      "apt-get update", (p64)8 * 1024 * 1024, BOWL_DEBIAN_BYTES,
-     BOWL_PRIME_NONE, bowl_debian_expose, null, null},
+     BOWL_PRIME_NONE, bowl_debian_expose, BOWL_DEBIAN_SHA256, null},
     {"fedora", "Fedora", BOWL_ROOT_PREFIX "fedora",
      BOWL_ROOT_PREFIX BOWL_FEDORA_STORE, BOWL_FEDORA_URL,
      "/usr/bin/dnf", "dnf makecache", (p64)32 * 1024 * 1024,
@@ -4417,6 +4885,15 @@ static b32 bowl_room_short(const struct bowl_distro address_to distro, p64 need)
         return 1;
 }
 
+static fn bowl_store_forget(const struct bowl_distro address_to distro)
+{
+        p8 sign[BOWL_PATH_LIMIT];
+
+        system_remove_at(AT_FDCWD, distro->store, 0);
+        if (bowl_root_path(sign, sizeof(sign), distro->store, ".sig"))
+                system_remove_at(AT_FDCWD, sign, 0);
+}
+
 static b32 bowl_setup_distro(const struct bowl_distro address_to distro)
 {
         b32 failed = 0;
@@ -4428,8 +4905,11 @@ static b32 bowl_setup_distro(const struct bowl_distro address_to distro)
 
         if (!bowl_has(distro->root, distro->marker))
         {
-                bool kept = bowl_archive_usable(distro->store, distro->floor) &&
-                            bowl_archive_digest_ok(distro->store, distro->sha256);
+                p8 sign[BOWL_PATH_LIMIT];
+                bool kept = bowl_root_path(sign, sizeof(sign), distro->store,
+                                           ".sig") &&
+                            bowl_archive_usable(distro->store, distro->floor) &&
+                            bowl_archive_trusted(distro, distro->store, sign);
 
                 if (bowl_room_short(distro, distro->tree_bytes +
                                                 (kept ? 0 : distro->archive_bytes)))
@@ -4437,16 +4917,15 @@ static b32 bowl_setup_distro(const struct bowl_distro address_to distro)
 
                 if (!kept)
                 {
-                        system_remove_at(AT_FDCWD, distro->store, 0);
-                        failed = bowl_setup_download(distro->store, distro->url,
-                                                     distro->floor, distro->sha256);
+                        bowl_store_forget(distro);
+                        failed = bowl_setup_download(distro);
                         if (failed)
                                 return failed;
 
                         // The download is in place now and its tree is not.
                         if (bowl_room_short(distro, distro->tree_bytes))
                         {
-                                system_remove_at(AT_FDCWD, distro->store, 0);
+                                bowl_store_forget(distro);
                                 return 1;
                         }
                 }
@@ -4459,11 +4938,11 @@ static b32 bowl_setup_distro(const struct bowl_distro address_to distro)
                 if (failed)
                 {
                         if (!bowl_has(distro->root, distro->marker))
-                                system_remove_at(AT_FDCWD, distro->store, 0);
+                                bowl_store_forget(distro);
                         return failed;
                 }
 
-                system_remove_at(AT_FDCWD, distro->store, 0);
+                bowl_store_forget(distro);
 
                 /*
                         A keyring that arrives in the tarball was made where

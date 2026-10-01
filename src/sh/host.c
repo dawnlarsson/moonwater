@@ -284,17 +284,68 @@ static bipolar host_open_state(bipolar directory, string_address path,
 static bipolar host_write_file(string_address path, p8 address_to bytes,
                                positive length, positive mode, bool sync)
 {
-        bipolar handle = host_open_state(AT_FDCWD, path, mode);
+        p8 next[HOST_PATH_ROOM];
+        bipolar handle;
         bipolar failed;
 
+        if (!sync)
+        {
+                handle = host_open_state(AT_FDCWD, path, mode);
+                if (handle < 0)
+                        return handle;
+                failed = storage_format_write(handle, bytes, length, 0);
+                system_close(handle);
+                return failed;
+        }
+
+        /*      A file that has to survive is written beside itself, synced,
+                and renamed over the old one, and the directory is synced
+                after: the old bytes are opened for writing never, so a crash
+                or a signal part way (the saved wifi list, passwords and all,
+                was truncated first and written second) leaves the list as it
+                was or as it is to be, and nothing half of each. A leftover
+                from a crash is removed and the name made again exclusively,
+                which also never follows a planted link; the rename replaces
+                a link at the final name instead of writing through it. */
+        if (string_length(path) + 5 >= sizeof(next))
+                return -36;
+        string_copy_bounded(next, path, sizeof(next));
+        string_append_bounded(next, ".new", sizeof(next));
+        system_remove_at(AT_FDCWD, next, 0);
+        handle = system_open_output_at(AT_FDCWD, next, false, mode);
         if (handle < 0)
                 return handle;
-
-        failed = storage_format_write(handle, bytes, length, 0);
-        if (!failed && sync)
+        failed = system_call_2(syscall(fchmod), (positive)handle, mode);
+        if (!failed)
+                failed = storage_format_write(handle, bytes, length, 0);
+        if (!failed)
                 failed = system_call_1(syscall(fsync), (positive)handle);
         system_close(handle);
-        return failed;
+        if (!failed)
+                failed = system_rename_at(AT_FDCWD, next, AT_FDCWD, path, 0);
+        if (failed)
+        {
+                system_remove_at(AT_FDCWD, next, 0);
+                return failed;
+        }
+
+        {
+                positive cut = string_length(path);
+                bipolar parent;
+
+                while (cut > 1 && path[cut - 1] != '/')
+                        cut--;
+                string_copy_bounded(next, path, sizeof(next));
+                next[cut > 1 ? cut - 1 : cut] = end;
+                parent = system_open_at(AT_FDCWD, next,
+                                        FILE_READ | O_DIRECTORY | O_CLOEXEC);
+                if (parent >= 0)
+                {
+                        system_call_1(syscall(fsync), (positive)parent);
+                        system_close(parent);
+                }
+        }
+        return 0;
 }
 
 static bipolar host_write_text(string_address path, string_address text)
@@ -4922,13 +4973,36 @@ static COLD bipolar wifi_wait(wifi_link address_to link,
         }
 }
 
+/* Whether a frame on the EAPOL socket came from the access point the link
+   is with: its hardware address is the access point's and no other's.
+   Anything else is another station's frame the access point relayed, or a
+   forgery, and is not the access point talking (wpa_supplicant drops it
+   too): before this, a message 1 from any source address was answered, and
+   its ANonce replaced the pending key a real message 3 is checked under. */
+static COLD bool wifi_eapol_from(wifi_link address_to link, socket_address_packet address_to from,
+                                 p32 size)
+{
+        //      The kernel gives back the address only as far as the hardware
+        //      address goes, which is 18 bytes of the 20 here.
+        return size >= (p32)((p8 address_to)from->addr - (p8 address_to)from) + 6 &&
+               from->halen == 6 && !memory_compare(from->addr, link->bssid, 6);
+}
+
 /* One frame off the EAPOL socket, through the state machine. */
 static COLD bipolar wifi_eapol_take(wifi_link address_to link)
 {
         p8 frame[512];
-        bipolar got = socket_receive(link->eapol, frame, sizeof(frame), MSG_DONTWAIT, null,
-                                     null);
-        bipolar step = got > 0 ? wifi_eapol_step(link, frame, (positive)got) : 0;
+        socket_address_packet from;
+        p32 size = sizeof(from);
+        bipolar got;
+        bipolar step;
+
+        memory_fill(address_of from, 0, sizeof(from));
+        got = socket_receive(link->eapol, frame, sizeof(frame), MSG_DONTWAIT, address_of from,
+                             address_of size);
+        step = got > 0 && wifi_eapol_from(link, address_of from, size)
+                   ? wifi_eapol_step(link, frame, (positive)got)
+                   : 0;
 
         crypto_forget(frame, sizeof(frame));
         return step;
@@ -5368,7 +5442,7 @@ static COLD bool nl80211_associated(void)
 }
 
 static COLD bipolar radio_bss_choose(nl80211 address_to session, p32 index,
-                                     p8 address_to ssid, positive ssid_length,
+                                     p8 address_to ssid, positive ssid_length, bool secured,
                                      p8 address_to bssid, p32 address_to frequency);
 
 static COLD bool wifi_mac_set(p8 address_to mac)
@@ -5421,7 +5495,7 @@ static COLD bipolar nl80211_join(p8 address_to ssid, positive ssid_length, p8 ad
                 wifi_link_mac((string_address)iface.name, link->sta);
 
         picked = radio_bss_choose(address_of link->session, iface.index, ssid, ssid_length,
-                                  chosen, address_of frequency);
+                                  pmk != null, chosen, address_of frequency);
         if (!picked)
         {
                 wifi_link_close(link);
@@ -6357,7 +6431,7 @@ static bool radio_bss_read(netlink_header address_to header, radio_heard address
         p8 address_to elements;
         p8 address_to value;
         byte_reader ies;
-        bool rsn = false, wpa = false;
+        bool rsn = false, wpa = false, named = false;
         p16 capability = 0;
 
         if (header->length < NETLINK_HEADER + GENL_HEADER ||
@@ -6413,10 +6487,18 @@ static bool radio_bss_read(netlink_header address_to header, radio_heard address
 
                 if (!byte_reader_ok(&ies))
                         break;
-                if (id == 0 && span <= RADIO_SSID_MOST && !one->ssid_length)
+                //      The first name element is the access point's name, the one
+                //      the kernel joins by: a later one is a beacon built to be
+                //      read differently, and an empty or over-long first leaves
+                //      it nameless.
+                if (id == 0 && !named)
                 {
-                        memory_copy(one->ssid, byte_reader_here(&data), span);
-                        one->ssid_length = (p8)span;
+                        named = true;
+                        if (span <= RADIO_SSID_MOST)
+                        {
+                                memory_copy(one->ssid, byte_reader_here(&data), span);
+                                one->ssid_length = (p8)span;
+                        }
                 }
                 else if (id == 48 && !rsn)
                 {
@@ -6811,6 +6893,8 @@ typedef struct
         radio_heard best;
         bool found;
         bool avoided;
+        bool secured;
+        bool fits;
 } radio_pick;
 
 /* The strongest the kernel still lists by the name, one given up on only
@@ -6820,6 +6904,7 @@ static bool radio_pick_seen(netlink_header address_to header, address_any contex
         radio_pick address_to pick = (radio_pick address_to)context;
         radio_heard one;
         bool avoided = false;
+        bool fits;
 
         if (!radio_bss_read(header, address_of one) || one.seen > RADIO_AIR_STALE_MS ||
             !wifi_mac_set(one.bssid) || one.ssid_length != pick->ssid_length ||
@@ -6827,12 +6912,22 @@ static bool radio_pick_seen(netlink_header address_to header, address_any contex
                 return true;
         for (positive at = 0; at < pick->avoid_count; at++)
                 avoided |= !memory_compare(pick->avoid[at].bssid, one.bssid, 6);
-        if (pick->found && (avoided > pick->avoided ||
-                            (avoided == pick->avoided && one.mbm <= pick->best.mbm)))
+        //      What the saved network asks of an access point: WPA2 for one
+        //      with a password, nothing for one without. A twin by the same
+        //      name that offers anything else, and beacons louder than the
+        //      real one, is the last resort and not the first: the kernel
+        //      will not join it, and asking cost a join its whole timeout.
+        fits = pick->secured ? one.security == RADIO_WPA2 || one.security == RADIO_WPA23
+                             : one.security == RADIO_OPEN;
+        if (pick->found && (fits < pick->fits ||
+                            (fits == pick->fits &&
+                             (avoided > pick->avoided ||
+                              (avoided == pick->avoided && one.mbm <= pick->best.mbm)))))
                 return true;
         pick->best = one;
         pick->found = true;
         pick->avoided = avoided;
+        pick->fits = fits;
         return true;
 }
 
@@ -6848,16 +6943,17 @@ static bool radio_pick_seen(netlink_header address_to header, address_any contex
         name, -1 when no scan could be had: the join then goes by name.
 */
 static COLD bipolar radio_bss_choose(nl80211 address_to session, p32 index,
-                                     p8 address_to ssid, positive ssid_length,
+                                     p8 address_to ssid, positive ssid_length, bool secured,
                                      p8 address_to bssid, p32 address_to frequency)
 {
         radio_avoid avoid[RADIO_AVOID_MOST];
-        radio_pick pick = {.ssid = ssid, .ssid_length = ssid_length, .avoid = avoid};
+        radio_pick pick = {
+            .ssid = ssid, .ssid_length = ssid_length, .avoid = avoid, .secured = secured};
         bipolar heard = 1;
 
         pick.avoid_count = radio_avoid_load(avoid);
         radio_air_dump(session, index, radio_pick_seen, address_of pick);
-        if (!pick.found || pick.avoided)
+        if (!pick.found || pick.avoided || !pick.fits)
         {
                 heard = radio_air_scan(session, index, ssid, ssid_length, true) ? 1 : -1;
                 pick.found = false;
@@ -7705,8 +7801,8 @@ static b32 radio_bluetooth_power(bool on, bool say)
 static b32 radio_bluetooth_add(string_address identity)
 {
         p8 text[4096];
-        bipolar got = file_slurp_once_at(AT_FDCWD, NET_BLUETOOTH_LIST, text,
-                                         sizeof(text));
+        bipolar got;
+        bipolar lock;
         p8 line[320];
         positive used;
 
@@ -7716,6 +7812,13 @@ static b32 radio_bluetooth_add(string_address identity)
         if (!radio_text_plain(identity, string_length(identity)))
                 return host_refuse("that bluetooth name cannot be stored%s\n", "");
 
+        /*      The list is read, changed and written back whole, so two
+                runs at once lost one of the names: under the lock the wifi
+                verbs take, the second reads what the first wrote. */
+        lock = radio_lock(true);
+        if (lock < 0)
+                return host_fail("bluetooth", lock);
+        got = file_slurp_once_at(AT_FDCWD, NET_BLUETOOTH_LIST, text, sizeof(text));
         if (got < 0)
         {
                 text[0] = end;
@@ -7728,14 +7831,21 @@ static b32 radio_bluetooth_add(string_address identity)
                 string_append_bounded(line, "\n", sizeof(line));
                 used = (positive)got;
                 if (used + string_length(line) >= sizeof(text))
+                {
+                        radio_unlock(lock);
                         return host_refuse("too many saved bluetooth devices%s\n",
                                            "");
+                }
                 memory_copy(text + used, line, string_length(line));
                 used += string_length(line);
                 if (host_write_file(NET_BLUETOOTH_LIST, text, used, 0644,
                                     true) < 0)
+                {
+                        radio_unlock(lock);
                         return host_fail("bluetooth", -1);
+                }
         }
+        radio_unlock(lock);
 
         radio_bluetooth_power(true, false);
         host_say(log, host_label "bluetooth remembered %s\n", identity);
@@ -7747,7 +7857,8 @@ static b32 radio_bluetooth_remove(string_address identity)
 {
         p8 text[4096];
         p8 kept[4096];
-        bipolar got = file_slurp_once_at(AT_FDCWD, NET_BLUETOOTH_LIST, text, sizeof(text));
+        bipolar got;
+        bipolar lock;
         positive at = 0;
         positive used = 0;
         bool found = false;
@@ -7755,8 +7866,15 @@ static b32 radio_bluetooth_remove(string_address identity)
 
         if (!want_length || want_length > 128)
                 return host_refuse("that bluetooth name is empty or too long%s\n", "");
+        lock = radio_lock(true);
+        if (lock < 0)
+                return host_fail("bluetooth", lock);
+        got = file_slurp_once_at(AT_FDCWD, NET_BLUETOOTH_LIST, text, sizeof(text));
         if (got <= 0 || !radio_line_has(text, (positive)got, identity))
+        {
+                radio_unlock(lock);
                 return host_refuse("no remembered bluetooth device is called %s\n", identity);
+        }
 
         while (at < (positive)got)
         {
@@ -7778,7 +7896,11 @@ static b32 radio_bluetooth_remove(string_address identity)
         }
 
         if (!found || host_write_file(NET_BLUETOOTH_LIST, kept, used, 0644, true) < 0)
+        {
+                radio_unlock(lock);
                 return host_fail("bluetooth", -1);
+        }
+        radio_unlock(lock);
         host_say(log, host_label "bluetooth forgot %s\n", identity);
         return 0;
 }
@@ -10286,11 +10408,6 @@ static COLD bipolar sntp_query_at(p32 server, bool filter, bool tight,
         if (!sntp_math_ok())
                 return SNTP_MALFORMED;
 
-        if (!network_deadline_begin(address_of deadline,
-                                    SNTP_SECONDS * (filter ? SNTP_SAMPLES : 1),
-                                    0))
-                return SNTP_NO_REPLY;
-
         handle = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
         if (handle < 0)
                 return SNTP_NO_SERVER;
@@ -10308,6 +10425,14 @@ static COLD bipolar sntp_query_at(p32 server, bool filter, bool tight,
         memory_zero(row, sizeof(row));
         for (at = 0; at < want; at++)
         {
+                //      Each sample has its own wait. They used to share one
+                //      of SNTP_SECONDS times the count, so a datagram lost
+                //      first spent all of it and the samples after it were
+                //      sent with no time to be answered in: one lost packet
+                //      in four ended a query with no answer.
+                if (!network_deadline_begin(address_of deadline, SNTP_SECONDS,
+                                            0))
+                        break;
                 failed = sntp_exchange((b32)handle, address_of deadline, tight,
                                        address_of sequence, row + at);
                 if (failed == SNTP_BAD_SERVER || failed == SNTP_RATE_LIMITED)

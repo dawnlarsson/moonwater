@@ -579,10 +579,9 @@ static p32 link_grants_of(string_address address_to words, positive count,
 
         With a secret, this machine is in the group from now on and across
         boots, install and wipe; the secret itself is never kept, only what
-        PBKDF2 makes of it and a salted hash that lets a machine script
-        joining every boot skip the derivation when nothing changed. Without
-        one, the group already joined is joined again, or a new group gets a
-        secret of 160 random bits, printed once for the other machines.
+        PBKDF2 makes of it. Without one, the group already joined is joined
+        again, or a new group gets a secret of 160 random bits, printed once
+        for the other machines.
         Members get the grants named here, and the verbs when none are. The
         link is switched on.
 */
@@ -663,21 +662,18 @@ static b32 link_join(string_address address_to words, positive count)
 
         if (secret)
         {
-                p8 check[32];
-
-                link_group_check(namespace, (p8 address_to)secret,
-                                 string_length(secret), check);
-                //      The slow part, once: a script that joins at every boot
-                //      with the same secret does not pay it again.
-                if (!crypto_same(check, record->check, 32))
-                {
-                        waterlink_group_derive(namespace, (p8 address_to)secret,
-                                               string_length(secret),
-                                               WATERLINK_GROUP_ROUNDS,
-                                               record->key);
-                        memory_copy(record->check, check, 32);
-                }
-                crypto_forget(check, sizeof check);
+                //      The slow part, every time. A salted hash of the secret
+                //      used to sit beside the key so that a script joining at
+                //      every boot could skip it, and that hash was a guessing
+                //      oracle at SHA-256 speed for anyone who could read the
+                //      file, which holds the slow key to check a guess
+                //      against only if the guess is made slowly. A script
+                //      that joins at every boot says `link join NAMESPACE`
+                //      and keeps the group it has.
+                waterlink_group_derive(namespace, (p8 address_to)secret,
+                                       string_length(secret),
+                                       WATERLINK_GROUP_ROUNDS, record->key);
+                memory_zero(record->check, sizeof record->check);
         }
         if (granted)
                 record->may = may;
