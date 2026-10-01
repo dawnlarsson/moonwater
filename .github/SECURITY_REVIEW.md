@@ -136,6 +136,11 @@ not part of this one; they are listed with the gap they would close.
 | Waterlink | `/root/link.groups` held a fast salted SHA-256 of the secret, a guessing oracle for anyone who could read it | `link` lane |
 | SNTP | five samples shared one ten-second deadline, so one lost datagram in four ended a query | the `netem` lane's SNTP scenes |
 | Supply chain | bowl's Arch, RISC-V Arch and Debian bootstraps rested on TLS and a mirror alone | pinned digests, a pinned signing key for Arch Linux ARM, `bowl` lane |
+| Terminal | `edit` wrote a file's bytes and name to the terminal raw: an escape cleared the screen, a title was set, a bell rang | the `hostile` section of the edit lane (15 rows) |
+| Secrets | a wifi password or a group secret given on the command line stayed in `ps` and in the shell's history | `history_secret_line` never keeps a line that carries one (`CHECK_bowl`); `wifi add SSID -` and `link join NAME -` read standard input (`moonwater_cli`); `MOONWATER_STRICT` tight refuses the argv forms |
+| Boot | boot ran `/root/main.moonwater.sh` as root from the first attached disk that looked like an install of the same build, and every copy of a public release says that build | `host_census_pick` takes this session's own disk first, then one on a bus nothing is plugged into, and asks about any other (`boot_links` and `boot_choice` in `CHECK_bowl`, the install lane); the tight tier takes only the first kind |
+| Kernel | `fs.protected_*`, `kptr_restrict`, `dmesg_restrict` and `io_uring_disabled` ran at the kernel's own values | the boot lane reads nine settings from the booted guest; the tight tier's stricter values |
+| Fuzzing | the terminal emulator and bowl's JSON reader had no coverage-guided target | `term_fuzz` and `bowl_json_fuzz` |
 
 ### Open, in separate branches
 
@@ -146,7 +151,6 @@ not part of this one; they are listed with the gap they would close.
 | DNS over TLS | `feature/dns-over-tls` |
 | DHCP over a raw packet socket (so `rp_filter` can be on), ARP address-conflict probing, the exchange not cut between REQUEST and ACK | `feature/dhcp-packet-socket-acd` |
 | The default accepts what wget and curl accept in a header block, URL spelling and redirect statuses | `feature/wget-curl-parity` |
-| `edit` sends file bytes to the terminal raw; a secret on a command line is kept by the shell history; boot takes the first install that looks like this build; `fs.protected_*`, `kptr_restrict`, `dmesg_restrict`, `io_uring_disabled` defaults | `hardening/outside-network` |
 
 ### Open, with no change planned here
 
@@ -175,6 +179,9 @@ not part of this one; they are listed with the gap they would close.
 | D03 | DNSSEC is out of scope | The resolver is a stub that trusts the network's DNS |
 | D04 | Defaults hold what GNU wget 1.25.0 and curl 8.22.0 do for 204 and 205; the RFC 9110 framing is the tight tier's | Real servers send a 204 with `Content-Length: 0`, and the client closes the connection after the one response, so an unread declared body can never be taken for the next response |
 | D05 | "Guest is root, not a wall": root is not hardened against itself | Documented policy in `SECURITY.md` |
+| OUT-D1 | The default still takes, without asking, the first same-build install on an internal bus when none is the disk the session started from | Reaching it means opening the case and adding a disk, which already gives write access to the unencrypted disk and the machine; asking about every internal disk would put a question on every boot from a live stick. `MOONWATER_STRICT` tight asks. The default can be changed |
+| OUT-D2 | The data partition is mounted without `nodev` and `nosuid` | It holds the user's `/root`, `/home` and the bowls; a bowl's `sudo` and `su` need setuid, and a device node on it can only have been made by root. Whose disk boot takes without asking is the control (OUT-D1) |
+| OUT-D3 | Unprivileged user namespaces are left as the kernel has them | Root is unaffected, no tool here creates one, and `user.max_user_namespaces` 0 would also take them from the test harnesses that run on the same kernel; a kiosk tier that wants them off sets it itself. `unprivileged_bpf_disabled` has no knob: the image is built without `bpf(2)` (the classic socket filters the DHCP client uses are separate) |
 
 SYN flood recipe (by hand): in a network namespace with two taps, a guest on
 one (a scripted DHCP server serves it, and an HTTP server serves a small static
