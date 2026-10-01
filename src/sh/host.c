@@ -7286,6 +7286,10 @@ static bipolar radio_password_read(p8 address_to into, positive room,
         }
         into[used] = end;
         crypto_forget(quiet, sizeof(quiet));
+        //      A password given up on (Control-C or Control-D after some of
+        //      it was typed) leaves nothing of it in the caller's bytes.
+        if (result < 0)
+                crypto_forget(into, room);
         return result < 0 ? result : (bipolar)used;
 }
 
@@ -8206,7 +8210,10 @@ static b32 host_radio(string_address address_to arguments, positive count)
                         {
                                 if (radio_password_read(pass, sizeof(pass), arguments[3],
                                                         count == 4) < 0)
+                                {
+                                        crypto_forget(pass, sizeof(pass));
                                         return host_refuse("nothing saved%s\n", "");
+                                }
                         }
                         else
                         {
