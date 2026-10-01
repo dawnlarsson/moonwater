@@ -2419,7 +2419,10 @@ static COLD b32 net_watch(void)
                         if (!ready)
                         {
                                 if (wake < 0)
+                                {
                                         wake = net_wake_listen();
+                                        net_wake_watch = wake;
+                                }
 
                                 if (!held.index || !held.lease.seconds)
                                 {
