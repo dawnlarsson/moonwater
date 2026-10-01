@@ -72825,6 +72825,27 @@ static fn indexes_and_commands(void)
                                              FILE_READ) < 0);
                 entropy_down = false;
         }
+
+        /*      The name a member keeps is kept whole in a file: every byte of
+                the buffer is the name's or zero, never what the stack held. */
+        {
+                static link_peers peers;
+                p8 name[WATERLINK_NAME_MAX];
+                p8 offered[WATERLINK_NAME_MAX];
+                p8 key[32];
+
+                memory_zero(address_of peers, sizeof peers);
+                memory_zero(offered, sizeof offered);
+                memory_copy(offered, "box", 4);
+                memory_fill(key, 0x33, sizeof key);
+                memory_fill(name, 0xa5, sizeof name);
+                link_name_for(address_of peers, offered, key, name);
+                check("a member's name is the name and zeros, nothing of the "
+                      "stack after its end",
+                      string_equals((string_address)name, "box") &&
+                          memory_span_byte(name + 4, 0, sizeof name - 4) ==
+                              sizeof name - 4);
+        }
 }
 
 b32 main(void)

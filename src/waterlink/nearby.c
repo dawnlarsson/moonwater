@@ -200,6 +200,9 @@ static fn link_name_for(link_peers address_to peers, p8 address_to offered,
         p8 base[WATERLINK_NAME_MAX];
         positive length;
 
+        //      Every byte of the name is written, the tail after its end
+        //      too: the caller keeps the whole buffer in a file.
+        memory_zero(name, WATERLINK_NAME_MAX);
         offered[WATERLINK_NAME_MAX - 1] = 0;
         memory_zero(base, sizeof base);
         length = string_length((string_address)offered);
