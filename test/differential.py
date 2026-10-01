@@ -45542,6 +45542,7 @@ def harness_wget_hostile(argv):
         (farm / "wget").symlink_to(args.netns)
         rows = [
             ("public to loopback", "8.8.8.8", b"http://127.0.0.1:PORT/z", False),
+            ("public to a legacy spelling of loopback", "8.8.8.8", b"http://2130706433:PORT/z", False),
             ("public to public", "8.8.8.8", b"http://8.8.4.4:PORT/z", True),
             ("loopback to loopback", "127.0.0.1", b"http://127.0.0.1:PORT/z", True),
             ("loopback to public", "127.0.0.1", b"http://8.8.8.8:PORT/z", True),
@@ -45643,7 +45644,7 @@ def harness_wget_hostile(argv):
                         checks(False, line)
                 passed = [int(line.split()[1]) for line in inside.stdout.splitlines()
                           if line.startswith("PASS")]
-                checks(inside.returncode == 0 and passed == [4],
+                checks(inside.returncode == 0 and passed == [5],
                        "address policy, %s shell: exit %d, %s" % (
                            level, inside.returncode, inside.stderr[-300:] or inside.stdout[-300:]))
     return checks.verdict("wget hostile", "wget-hostile")
