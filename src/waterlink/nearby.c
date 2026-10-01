@@ -717,14 +717,16 @@ static fn link_nearby_heard(p8 address_to packet, positive length,
 static p32 link_nearby_local(p8 address_to control, positive length,
                              positive room)
 {
-        for (positive at = 0; at + 16 <= length && at + 16 <= room;)
+        if (length > room)
+                length = room;
+        for (positive at = 0; at + 16 <= length;)
         {
                 p64 size;
                 b32 has[2];
 
                 memory_copy(address_of size, control + at, 8);
                 memory_copy(has, control + at + 8, 8);
-                if (size < 16 || size > room - at)
+                if (size < 16 || size > length - at)
                         break;
                 if (!has[0] && has[1] == 8 && size >= 28) // IPPROTO_IP, IP_PKTINFO
                         return network_load_32(control + at + 20);

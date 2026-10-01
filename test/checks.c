@@ -72690,6 +72690,25 @@ static fn mdns_amplification(void)
 
         wls_group();
         {
+                /* IP_PKTINFO's control message: the length the kernel filled
+                   bounds the read, not the room the buffer has. */
+                p8 control[64];
+                p64 size = 28;
+                b32 level_and_type[2] = {0, 8};
+
+                memory_fill(control, 0, sizeof control);
+                memory_copy(control, address_of size, 8);
+                memory_copy(control + 8, level_and_type, 8);
+                network_store_32(control + 20, 0x7f000001);
+                check("sec: a whole IP_PKTINFO message gives the address the "
+                      "kernel says received the packet",
+                      link_nearby_local(control, 28, sizeof control) ==
+                          0x7f000001);
+                check("sec: a message the filled length cuts short is not "
+                      "read, though the buffer has room for it",
+                      link_nearby_local(control, 24, sizeof control) == 0);
+        }
+        {
                 struct waterlink_group_keys second;
                 p8 derived[32];
                 positive before = entropy_draws;
