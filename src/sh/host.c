@@ -9407,6 +9407,9 @@ typedef struct
         bipolar delay_ns;
         bipolar distance_ns;
         bool ok;
+        //      The server's address, so that one server answering under three
+        //      names is counted once.
+        p32 address;
 } sntp_sample;
 
 static inline INLINE CONST bool sntp_wall_ok(bipolar ns)
@@ -9614,6 +9617,10 @@ static PURE COLD bipolar sntp_choose(sntp_sample address_to row, positive count)
                 for (positive other = 0; other < count; other++)
                 {
                         if (other == at || !row[other].ok)
+                                continue;
+                        //      The same server again is no second opinion,
+                        //      whatever name it was reached under.
+                        if (row[other].address == row[at].address)
                                 continue;
                         others++;
                         if (row[at].offset_ns - row[at].distance_ns <=
@@ -10339,6 +10346,13 @@ static COLD bool sntp_math_ok(void)
                     {0, 0, 10000000, true},
                 };
 
+                for (positive server = 0; server < SNTP_SERVERS; server++)
+                {
+                        three[server].address = (p32)(server + 1);
+                        apart[server].address = (p32)(server + 1);
+                }
+                far[0].address = 1;
+                far[1].address = 2;
                 if (sntp_choose(three, 3) != 1 || sntp_choose(three + 1, 2) != 1 ||
                     sntp_choose(three + 2, 1) != 0 || sntp_choose(apart, 3) != 2)
                         return false;
@@ -10349,6 +10363,24 @@ static COLD bool sntp_math_ok(void)
                         return false;
                 far[1].offset_ns = far[0].offset_ns + 1000000;
                 if (sntp_choose(far, 2) != 0)
+                        return false;
+                /* one server under three names is one answer: three that agree
+                   from one address are not a majority, a second server that
+                   agrees with them is, and a step within 2 s needs no word */
+                sntp_sample same[3] = {
+                    {(bipolar)7200 * 1000000000, 0, 500000, true, 9},
+                    {(bipolar)7200 * 1000000000, 0, 600000, true, 9},
+                    {(bipolar)7200 * 1000000000, 0, 700000, true, 9},
+                };
+
+                if (sntp_choose(same, 3) != -1)
+                        return false;
+                same[2].address = 10;
+                if (sntp_choose(same, 3) != 0)
+                        return false;
+                same[0].offset_ns = same[1].offset_ns = same[2].offset_ns = 1000000;
+                same[2].address = 9;
+                if (sntp_choose(same, 3) != 0)
                         return false;
         }
 
@@ -10488,6 +10520,7 @@ static COLD bipolar sntp_query_at(p32 server, bool filter, bool tight,
         if (best < 0)
                 return failed < 0 ? failed : SNTP_NO_REPLY;
         address_to answer = row[best];
+        answer->address = server;
         return SNTP_OK;
 }
 
@@ -12082,7 +12115,20 @@ static bipolar locale_ntp_apply(void)
                 failed = locale_ntp_ask((string_address)locale_ntp_fallback[at],
                                         filter, tight, heard + heard_count);
                 if (failed >= 0)
-                        heard_from[heard_count++] = (b32)at;
+                {
+                        bool again = false;
+
+                        //      Another name for a server already heard from
+                        //      is that server saying it again: the network's
+                        //      resolver can name every one of these the same
+                        //      host. It is not counted, and the next name is
+                        //      asked.
+                        for (positive earlier = 0; earlier < heard_count; earlier++)
+                                again |= heard[earlier].address ==
+                                         heard[heard_count].address;
+                        if (!again)
+                                heard_from[heard_count++] = (b32)at;
+                }
                 else if (failed == SNTP_RATE_LIMITED)
                         rated = true;
                 //      A far step is not taken on one server's word.
@@ -12094,7 +12140,13 @@ static bipolar locale_ntp_apply(void)
         if (heard_count)
         {
                 bipolar chosen = sntp_choose(heard, heard_count);
+                bipolar now = sntp_now_ns();
 
+                //      A clock nobody has set takes the one server there is:
+                //      it has no time of its own to be moved from, and the
+                //      window bounds what it can be told.
+                if (chosen < 0 && heard_count == 1 && now >= 0 && !sntp_wall_ok(now))
+                        chosen = 0;
                 if (chosen < 0)
                         return SNTP_UNCONFIRMED;
                 return locale_ntp_take(

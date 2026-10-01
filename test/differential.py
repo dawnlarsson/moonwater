@@ -49665,7 +49665,10 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                 memset(heard + heard_count, 0, sizeof heard[0]);
                 if (sntp_reply_sample(reply, request, t1, t4, flags & 2,
                                       heard + heard_count) == SNTP_OK)
+                {
+                        heard[heard_count].address = (p32)(heard_count + 1);
                         heard_count++;
+                }
         }
         (void)sntp_pick(heard, heard_count);
         if (heard_count && sntp_choose(heard, heard_count) >= 0)
