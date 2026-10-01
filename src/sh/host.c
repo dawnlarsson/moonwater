@@ -10672,6 +10672,12 @@ static b32 host_tune(string_address address_to arguments, positive count)
 #define SNTP_RATE_LIMITED (-5)
 #define SNTP_UNCONFIRMED (-6)
 #define SNTP_BELOW_FLOOR (-7)
+#define SNTP_NTS_NAK (-8)
+#define SNTP_CONTRADICTS (-9)
+//      How far an answer is believed, for sntp_sample_sane: a clock that is
+//      not synchronised may be stepped a day, one that is two seconds, and an
+//      authenticated answer as far as the window goes (the floor to 2036).
+#define SNTP_TRUST_NTS 2
 #define SNTP_KISS_RATE 0x52415445u /* "RATE" */
 #define SNTP_KISS_DENY 0x44454e59u /* "DENY" */
 #define SNTP_KISS_RSTR 0x52535452u /* "RSTR" */
@@ -10845,7 +10851,7 @@ static inline INLINE fn sntp_offset_delay(bipolar t1, bipolar t2, bipolar t3,
 
 static CONST COLD bool sntp_sample_sane(bipolar t1, bipolar t2, bipolar t3,
                                    bipolar t4, bipolar offset_ns,
-                                   bipolar delay_ns, bool tight)
+                                   bipolar delay_ns, positive tight)
 {
         if (t1 < 0 || t4 < t1 || t3 < t2)
                 return false;
@@ -10853,6 +10859,8 @@ static CONST COLD bool sntp_sample_sane(bipolar t1, bipolar t2, bipolar t3,
                 return false;
         if (delay_ns < 0 || delay_ns > SNTP_DELAY_MOST_NS)
                 return false;
+        if (tight == SNTP_TRUST_NTS)
+                return true;
         if (tight)
                 return sntp_within(offset_ns, SNTP_OFFSET_SYNCED_NS);
         return !sntp_wall_ok(t1) || sntp_within(offset_ns, SNTP_OFFSET_MOST_NS);
@@ -11190,7 +11198,7 @@ static COLD bipolar sntp_reply_ok(p8 address_to reply, p8 address_to request)
 */
 static COLD bipolar sntp_reply_sample(p8 address_to reply,
                                       p8 address_to request, bipolar t1,
-                                      bipolar t4, bool tight,
+                                      bipolar t4, positive tight,
                                       sntp_sample address_to into)
 {
         bipolar verdict = sntp_reply_ok(reply, request);
@@ -11422,6 +11430,31 @@ static COLD bool sntp_math_ok(void)
                              SNTP_TEST_NOW + 50000000, offset, delay, false))
                 return false;
 
+        /* An authenticated answer is believed wherever the window puts it: a
+           month out and two years out, from a clock that is synchronised or
+           not, where the same offset from the pool is refused. */
+        if (!sntp_sample_sane(SNTP_TEST_NOW, SNTP_TEST_NOW + 30 * 86400 * (bipolar)SNTP_NANOSECONDS,
+                              SNTP_TEST_NOW + 30 * 86400 * (bipolar)SNTP_NANOSECONDS,
+                              SNTP_TEST_NOW + 10000000, 30 * 86400 * (bipolar)SNTP_NANOSECONDS,
+                              10000000, SNTP_TRUST_NTS) ||
+            !sntp_sample_sane(SNTP_TEST_NOW, SNTP_TEST_NOW + 700 * 86400 * (bipolar)SNTP_NANOSECONDS,
+                              SNTP_TEST_NOW + 700 * 86400 * (bipolar)SNTP_NANOSECONDS,
+                              SNTP_TEST_NOW + 10000000, 700 * 86400 * (bipolar)SNTP_NANOSECONDS,
+                              10000000, SNTP_TRUST_NTS) ||
+            sntp_sample_sane(SNTP_TEST_NOW, SNTP_TEST_NOW + 30 * 86400 * (bipolar)SNTP_NANOSECONDS,
+                             SNTP_TEST_NOW + 30 * 86400 * (bipolar)SNTP_NANOSECONDS,
+                             SNTP_TEST_NOW + 10000000, 30 * 86400 * (bipolar)SNTP_NANOSECONDS,
+                             10000000, true) ||
+            sntp_sample_sane(SNTP_TEST_NOW, SNTP_TEST_NOW + 30 * 86400 * (bipolar)SNTP_NANOSECONDS,
+                             SNTP_TEST_NOW + 30 * 86400 * (bipolar)SNTP_NANOSECONDS,
+                             SNTP_TEST_NOW + 10000000, 30 * 86400 * (bipolar)SNTP_NANOSECONDS,
+                             10000000, false) ||
+            /* but not one that is out of the window, or whose order is wrong */
+            sntp_sample_sane(SNTP_TEST_NOW, SNTP_WALL_MOST_NS + 1, SNTP_WALL_MOST_NS + 1,
+                             SNTP_TEST_NOW + 10000000, 1, 10000000, SNTP_TRUST_NTS) ||
+            sntp_sample_sane(SNTP_TEST_NOW, SNTP_TEST_NOW + 5, SNTP_TEST_NOW + 4,
+                             SNTP_TEST_NOW + 10000000, 0, 10000000, SNTP_TRUST_NTS))
+                return false;
         if (!sntp_short_ok(0) || !sntp_short_ok(SNTP_SHORT_SECOND) ||
             sntp_short_ok(SNTP_SHORT_SECOND + 1) ||
             sntp_short_ok(0x80000000u))
@@ -11665,10 +11698,12 @@ static COLD bool sntp_math_ok(void)
 static HOT bipolar sntp_exchange(b32 handle,
                                  network_deadline address_to deadline,
                                  bool tight, p32 address_to sequence,
+                                 nts_exchange address_to nts,
                                  sntp_sample address_to into)
 {
-        p8 request[SNTP_PACKET];
-        p8 reply[SNTP_PACKET];
+        p8 request[NTS_PACKET_ROOM];
+        p8 reply[NTS_PACKET_ROOM];
+        positive request_length = SNTP_PACKET;
         p64 sent[2];
         p64 got[2];
         p64 spare[2];
@@ -11680,15 +11715,25 @@ static HOT bipolar sntp_exchange(b32 handle,
         bool stamped;
 
         into->ok = false;
-        memory_fill(request, 0, sizeof(request));
+        memory_fill(request, 0, SNTP_PACKET);
         request[0] = SNTP_LI_VN_MODE;
 
+        //      The packet is whole, extension fields and their tag
+        //      included, before the clock is read for t1: the crypto is
+        //      not in the offset (and t1 and t4 are the kernel's stamps
+        //      regardless).
+        if_rare (!sntp_put_stamp(request + 40))
+                return SNTP_NO_REPLY;
+        if (nts)
+        {
+                request_length = nts_request(nts, request, sizeof(request));
+                if_rare (!request_length)
+                        return SNTP_NO_REPLY;
+        }
         if_rare (system_call_2(syscall(clock_gettime), CLOCK_REALTIME,
                                (positive)sent) < 0)
                 return SNTP_NO_REPLY;
-        if_rare (!sntp_put_stamp(request + 40))
-                return SNTP_NO_REPLY;
-        if_rare (socket_send(handle, request, SNTP_PACKET, 0, 0, 0) < 0)
+        if_rare (socket_send(handle, request, request_length, 0, 0, 0) < 0)
                 return SNTP_NO_REPLY;
         mine = address_to sequence;
         address_to sequence = mine + 1;
@@ -11728,21 +11773,33 @@ static HOT bipolar sntp_exchange(b32 handle,
                 }
                 if_rare (received < SNTP_PACKET)
                         continue;
+                if (nts)
+                {
+                        bipolar nts_verdict = nts_reply(nts, reply,
+                                                        (positive)received);
+
+                        if (nts_verdict == NTS_REPLY_NAK)
+                                return SNTP_NTS_NAK;
+                        if (nts_verdict != NTS_REPLY_OK)
+                                continue;
+                }
                 verdict = sntp_reply_sample(reply, request, t1,
                                             sntp_timespec_ns(got[0], got[1]),
-                                            tight, into);
+                                            nts ? SNTP_TRUST_NTS : tight,
+                                            into);
                 if_rare (verdict == SNTP_NO_REPLY)
                         continue;
                 return verdict;
         }
 }
 
-static COLD bipolar sntp_query_at(p32 server, bool filter, bool tight,
+static COLD bipolar sntp_query_at(p32 server, p16 port, bool filter,
+                                  bool tight, nts_exchange address_to nts,
                                   sntp_sample address_to answer)
 {
         socket_address_internet where = {
             .family = AF_INET,
-            .port = network_order_16(SNTP_PORT),
+            .port = network_order_16(port),
             .host = network_order_32(server),
         };
         network_deadline deadline;
@@ -11785,8 +11842,9 @@ static COLD bipolar sntp_query_at(p32 server, bool filter, bool tight,
                                             0))
                         break;
                 failed = sntp_exchange((b32)handle, address_of deadline, tight,
-                                       address_of sequence, row + at);
-                if (failed == SNTP_BAD_SERVER || failed == SNTP_RATE_LIMITED)
+                                       address_of sequence, nts, row + at);
+                if (failed == SNTP_BAD_SERVER || failed == SNTP_RATE_LIMITED ||
+                    failed == SNTP_NTS_NAK)
                         break;
         }
         socket_close((b32)handle);
@@ -11798,8 +11856,10 @@ static COLD bipolar sntp_query_at(p32 server, bool filter, bool tight,
         return SNTP_OK;
 }
 
-static COLD bipolar sntp_query(string_address name, bool filter, bool tight,
-                               sntp_sample address_to answer)
+static COLD bipolar sntp_query_named(string_address name, p16 port,
+                                     bool filter, bool tight,
+                                     nts_exchange address_to nts,
+                                     sntp_sample address_to answer)
 {
         bipolar numeric;
         p32 host = 0;
@@ -11809,13 +11869,20 @@ static COLD bipolar sntp_query(string_address name, bool filter, bool tight,
                 return SNTP_NO_SERVER;
         numeric = string_to_host(name);
         if (numeric >= 0)
-                return sntp_query_at((p32)numeric, filter, tight, answer);
+                return sntp_query_at((p32)numeric, port, filter, tight, nts,
+                                     answer);
 
         found = dns_resolve_any((string_address) "/etc/resolv.conf", name,
                                 address_of host, SNTP_SECONDS);
         if (found != DNS_OK)
                 return SNTP_NO_SERVER;
-        return sntp_query_at(host, filter, tight, answer);
+        return sntp_query_at(host, port, filter, tight, nts, answer);
+}
+
+static COLD bipolar sntp_query(string_address name, bool filter, bool tight,
+                               sntp_sample address_to answer)
+{
+        return sntp_query_named(name, SNTP_PORT, filter, tight, null, answer);
 }
 
 #endif
@@ -11827,6 +11894,12 @@ static COLD bipolar sntp_query(string_address name, bool filter, bool tight,
 #define LOCALE_NTP_PATH "/root/ntp"
 #define LOCALE_NTP_SERVER_PATH "/root/ntp.server"
 #define LOCALE_NTP_SAMPLING_PATH "/root/ntp.sampling"
+#define LOCALE_NTS_PATH "/root/ntp.nts"
+#define LOCALE_NTS_SERVERS_PATH "/root/ntp.nts.servers"
+#define LOCALE_NTS_STATE_PATH HOST_STATE "/nts"
+#define LOCALE_NTS_FAILED_PATH HOST_STATE "/nts.failed"
+#define LOCALE_NTP_LAST_PATH HOST_STATE "/ntp.last"
+#define LOCALE_NTP_LAST_ROOM 96
 #define LOCALE_KEYBOARD_PATH "/root/keyboard"
 #define LOCALE_NTP_DEFAULT_SERVER "pool.ntp.org"
 #define LOCALE_NTP_RETRY_LEAST 1
@@ -11967,6 +12040,13 @@ static bipolar locale_ntp_apply(void);
 //      person who asked by hand. The scheduled queries run in a child and
 //      nobody reads these there.
 static bipolar locale_ntp_moved_ns;
+//      Asked for by a person, so no back-off applies.
+static bool locale_ntp_manual;
+//      Why the last NTS server could not be asked, for the person who asked,
+//      and whether any got as far as a name that resolved (a network that is
+//      not up yet is not a network that blocks NTS).
+static p8 locale_nts_why[112];
+static bool locale_nts_reached;
 static p8 locale_ntp_answered[80];
 
 static fn locale_word(string_address path, p8 address_to into, positive room)
@@ -12921,6 +13001,7 @@ static b32 locale_time_sync(void)
 
         locale_ntp_moved_ns = 0;
         locale_ntp_answered[0] = end;
+        locale_ntp_manual = true;
         failed = locale_ntp_apply();
         if (failed == SNTP_BELOW_FLOOR)
                 string_format(log, host_label "time: the answer was earlier "
@@ -12929,6 +13010,12 @@ static b32 locale_time_sync(void)
                                    "sure), so the clock was left alone; "
                                    "remove /root/clock.good if that is "
                                    "wrong\n");
+        else if (failed == SNTP_CONTRADICTS)
+                string_format(log, host_label "time: %s answered, but it is "
+                                   "further from the time NTS gave this "
+                                   "boot than the clock can have drifted, "
+                                   "so the clock was left alone\n",
+                              locale_ntp_answered);
         else if (failed < 0 && locale_ntp_answered[0])
                 string_format(log, host_label "time: %s answered, but the "
                                    "clock could not be set: %s\n",
@@ -12938,10 +13025,14 @@ static b32 locale_time_sync(void)
                                    "with a step past 2 s, so the clock was "
                                    "left alone\n");
         else if (failed < 0)
+        {
                 string_format(log, host_label "time: no server answered%s\n",
                               failed == SNTP_RATE_LIMITED
                                   ? " -- asked too often, try in a minute"
                                   : "");
+                if (locale_nts_why[0])
+                        string_format(log, "  NTS: %s\n", locale_nts_why);
+        }
         else
         {
                 bipolar moved = locale_ntp_moved_ns;
@@ -13052,6 +13143,24 @@ static fn locale_clock_mark_synced(positive error_us)
         step too. After that, only 128 ms is worth a step.
 */
 static bool locale_ntp_first;
+
+//      Whether a plain answer puts the clock further from the time NTS gave
+//      (known seconds, given elapsed boot seconds ago) than a crystal can
+//      have drifted since: 1000 ppm, which no real one reaches, and five
+//      seconds for the whole-second stamps it was kept in.
+static CONST bool locale_plain_apart(bipolar now, bipolar offset_ns, p64 known,
+                                     p64 elapsed)
+{
+        bipolar apart;
+
+        if (!known || now < 0)
+                return false;
+        apart = now + offset_ns - (bipolar)known * (bipolar)SNTP_NANOSECONDS;
+        if (apart < 0)
+                apart = -apart;
+        return apart > ((bipolar)5 + (bipolar)(elapsed / 1000)) *
+                           (bipolar)SNTP_NANOSECONDS;
+}
 
 static bool locale_ntp_wants_step(bipolar offset_ns)
 {
@@ -13253,6 +13362,24 @@ static COLD bool locale_discipline_ok(void)
                 return false;
         /* a 10 ms distance is 10 ms, rounded up a microsecond; a negative
            or absurd one still gives a bound the kernel accepts */
+        {
+                bipolar noon = (bipolar)SNTP_TEST_NOW;
+                p64 known = (p64)(SNTP_TEST_NOW / (bipolar)SNTP_NANOSECONDS);
+
+                /* Five seconds and a thousandth of the time since: an hour
+                   of uptime allows 8.6 s, a minute 5.06 s. Nothing known
+                   allows everything. */
+                if (locale_plain_apart(noon, 0, known, 0) ||
+                    locale_plain_apart(noon, 4900000000, known, 0) ||
+                    !locale_plain_apart(noon, 5100000000, known, 0) ||
+                    !locale_plain_apart(noon, -5100000000, known, 0) ||
+                    locale_plain_apart(noon, 8000000000, known, 3600) ||
+                    !locale_plain_apart(noon, 9000000000, known, 3600) ||
+                    !locale_plain_apart(noon, 3600000000000, known, 60) ||
+                    locale_plain_apart(noon, 3600000000000, 0, 0) ||
+                    locale_plain_apart(-1, 1, known, 0))
+                        return false;
+        }
         return locale_ntp_error_us((bipolar)10 * 1000000) == 10001 &&
                locale_ntp_error_us(0) == 1 && locale_ntp_error_us(-5) == 1 &&
                locale_ntp_error_us((bipolar)60 * 1000000000) ==
@@ -13381,8 +13508,9 @@ static bool locale_clock_number(string_address text, positive address_to at,
         return true;
 }
 
-//      What the authenticated answer puts the time at now, or 0.
-static p64 locale_clock_authenticated_now(void)
+//      What the authenticated answer puts the time at now, or 0; with
+//      elapsed, the boot seconds since it was given.
+static p64 locale_clock_authenticated_now(p64 address_to elapsed)
 {
         p8 text[48];
         positive at = 0;
@@ -13396,7 +13524,27 @@ static p64 locale_clock_authenticated_now(void)
             !locale_clock_number((string_address)text, address_of at, address_of booted) ||
             text[at] || booted > now_boot)
                 return 0;
+        if (elapsed)
+                address_to elapsed = now_boot - booted;
         return wall + (now_boot - booted);
+}
+
+static fn locale_clock_authenticated(void)
+{
+        p8 text[48];
+        time_t stamp = time(null);
+        positive length;
+
+        if (stamp < 0)
+                return;
+        length = positive_into(text, (positive)stamp);
+        text[length++] = ' ';
+        length += positive_into(text + length,
+                                (positive)(system_clock_ns(HOST_CLOCK_BOOTTIME) /
+                                           1000000000ull));
+        text[length++] = '\n';
+        (void)host_write_file(LOCALE_CLOCK_AUTH_PATH, text, length, 0644,
+                              false);
 }
 
 //      The floor this boot started with, which /run/moonwater/clock.base
@@ -13428,7 +13576,7 @@ static fn locale_clock_base_keep(void)
 static bool locale_clock_persist(bool sync)
 {
         p64 floor = clock_trust_floor();
-        p64 value = locale_clock_authenticated_now();
+        p64 value = locale_clock_authenticated_now(null);
         p8 text[24];
         positive length;
 
@@ -13472,6 +13620,22 @@ static fn host_clock_stop(void)
         (void)locale_clock_persist(true);
 }
 
+/*
+        An unauthenticated answer does not get to undo an authenticated one.
+        When NTS has set the clock this boot, what it said is known to within
+        the drift of the crystal since (1000 ppm is a bound no real one
+        reaches, plus five seconds), and a plain answer that puts the clock
+        further from that is refused: it is a forgery, or a pool server that
+        is wrong, and either way the authenticated time is the better one.
+*/
+static bool locale_plain_contradicts(bipolar offset_ns)
+{
+        p64 elapsed = 0;
+        p64 known = locale_clock_authenticated_now(address_of elapsed);
+
+        return locale_plain_apart(sntp_now_ns(), offset_ns, known, elapsed);
+}
+
 static bipolar locale_ntp_ask(string_address server, bool filter, bool tight,
                               sntp_sample address_to answer)
 {
@@ -13482,12 +13646,39 @@ static bipolar locale_ntp_ask(string_address server, bool filter, bool tight,
 }
 
 static bipolar locale_ntp_take(string_address server,
-                               const sntp_sample address_to answer)
+                               const sntp_sample address_to answer,
+                               bool authenticated)
 {
+        bipolar applied;
+        p8 last[LOCALE_NTP_LAST_ROOM];
+        positive length;
+
         locale_ntp_moved_ns = answer->offset_ns;
         string_copy_bounded(locale_ntp_answered, server,
                             sizeof(locale_ntp_answered));
-        return locale_ntp_apply_offset(answer->offset_ns, answer->distance_ns);
+        if (authenticated)
+                string_append_bounded(locale_ntp_answered, " (NTS)",
+                                      sizeof(locale_ntp_answered));
+        else if (locale_plain_contradicts(answer->offset_ns))
+                return SNTP_CONTRADICTS;
+        applied = locale_ntp_apply_offset(answer->offset_ns,
+                                          answer->distance_ns);
+        if (applied < 0)
+                return applied;
+        //      What set the clock, for the status page, and what it now
+        //      knows for sure.
+        string_copy_bounded(last, authenticated ? "nts " : "plain ",
+                            sizeof(last));
+        string_append_bounded(last, server, sizeof(last));
+        length = string_length(last);
+        last[length++] = '\n';
+        (void)host_write_file(LOCALE_NTP_LAST_PATH, last, length, 0644, false);
+        if (authenticated)
+        {
+                locale_clock_authenticated();
+                (void)locale_clock_persist(false);
+        }
+        return applied;
 }
 
 /*
@@ -13507,7 +13698,7 @@ static bipolar locale_ntp_take(string_address server,
         two seconds, when a second is asked for, since sntp_choose believes
         no such step on one word.
 */
-static bipolar locale_ntp_apply(void)
+static bipolar locale_ntp_plain(void)
 {
         p8 server[80];
         bipolar failed = SNTP_NO_SERVER;
@@ -13526,7 +13717,7 @@ static bipolar locale_ntp_apply(void)
                 failed = locale_ntp_ask((string_address)server, filter, tight,
                                         heard);
                 if (failed >= 0)
-                        return locale_ntp_take((string_address)server, heard);
+                        return locale_ntp_take((string_address)server, heard, false);
                 rated = failed == SNTP_RATE_LIMITED;
         }
 
@@ -13558,9 +13749,443 @@ static bipolar locale_ntp_apply(void)
                         return SNTP_UNCONFIRMED;
                 return locale_ntp_take(
                     (string_address)locale_ntp_fallback[heard_from[chosen]],
-                    heard + chosen);
+                    heard + chosen, false);
         }
         return rated ? SNTP_RATE_LIMITED : failed;
+}
+
+/*
+        Network Time Security, as the machine uses it.
+
+        NTS is preferred: a machine asks for time from the key-establishment
+        servers it knows (the defaults below, or the lines of
+        /root/ntp.nts.servers, each a name or name:port) before it asks the
+        pool, and an answer that authenticated is what sets an unset clock.
+        The pool is the fallback, and only when no NTS server could be
+        reached; its answers are marked plain (moonwater ntp says which set
+        the clock last), are never written to the floor as known, and move an
+        unset clock no earlier than the floor. A network that blocks TCP
+        4460 costs one try of a few seconds, and then the pool is used
+        without trying NTS again for two minutes (by hand, always).
+
+        The keys and cookies live in /run/moonwater/nts (0600, in place,
+        read back with every field checked: a torn or planted file is no
+        state and the next query establishes afresh), since the scheduled
+        query runs in a child of the machine process that is gone when it
+        answers.
+*/
+#define LOCALE_NTS_MAGIC 0x3153544eu /* "NTS1" */
+#define LOCALE_NTS_BACKOFF_NS ((p64)120 * 1000000000ull)
+#define LOCALE_NTS_SERVERS_MOST 4
+
+static const char locale_nts_default[][24] = {
+        "time.cloudflare.com",
+        "nts.netnod.se",
+        "ptbtime1.ptb.de",
+};
+
+static bool locale_ntp_authenticated;
+
+//      /root/ntp.nts is on (the default), off, or only: NTS and nothing the
+//      path could have forged, so a network that blocks it leaves the clock
+//      alone instead of asking the pool.
+static bool locale_nts_only(void)
+{
+        p8 word[16];
+
+        locale_word(LOCALE_NTS_PATH, word, sizeof(word));
+        return string_equals(word, "only");
+}
+
+static bool locale_nts_wanted(void)
+{
+        return locale_switch_on(LOCALE_NTS_PATH) || locale_nts_only();
+}
+
+//      "name" or "name:port", as the key-establishment server it names.
+static bool locale_nts_entry(string_address entry, p8 address_to host,
+                             p16 address_to port)
+{
+        positive length = string_length(entry);
+        positive colon = length;
+        positive number = 0;
+
+        for (positive at = 0; at < length; at++)
+                if (entry[at] == ':')
+                        colon = at;
+        if (colon < length)
+        {
+                if (colon + 1 == length || length - colon > 6)
+                        return false;
+                for (positive at = colon + 1; at < length; at++)
+                {
+                        if (entry[at] < '0' || entry[at] > '9')
+                                return false;
+                        number = number * 10 + (positive)(entry[at] - '0');
+                }
+                if (!number || number > 65535)
+                        return false;
+        }
+        if (!nts_name_ok((const p8 address_to)entry, colon))
+                return false;
+        memory_copy(host, entry, colon);
+        host[colon] = end;
+        address_to port = colon < length ? (p16)number : NTS_KE_PORT;
+        return true;
+}
+
+//      The settings' servers, else the defaults: each line that is a valid
+//      entry, to LOCALE_NTS_SERVERS_MOST. Returns the count.
+static positive locale_nts_servers(p8 address_to into, positive stride)
+{
+        p8 text[4 * 80];
+        positive count = 0;
+        positive at = 0;
+
+        if (host_read_text(LOCALE_NTS_SERVERS_PATH, text, sizeof(text)) > 0)
+        {
+                positive length = string_length(text);
+
+                while (at < length && count < LOCALE_NTS_SERVERS_MOST)
+                {
+                        p8 line[80];
+                        p8 host[NTS_SERVER_MAX];
+                        p16 port;
+                        positive size = 0;
+
+                        while (at < length && text[at] != '\n' &&
+                               size + 1 < sizeof(line))
+                                line[size++] = text[at++];
+                        while (at < length && text[at] != '\n')
+                                at++;
+                        at++;
+                        while (size && (line[size - 1] == '\r' ||
+                                        line[size - 1] == ' '))
+                                size--;
+                        line[size] = end;
+                        if (locale_nts_entry((string_address)line, host, address_of port) &&
+                            size < stride)
+                                string_copy_bounded(into + count++ * stride,
+                                                    (string_address)line, stride);
+                }
+                if (count)
+                        return count;
+        }
+        for (count = 0; count < array_count(locale_nts_default); count++)
+                string_copy_bounded(into + count * stride,
+                                    (string_address)locale_nts_default[count],
+                                    stride);
+        return count;
+}
+
+static bool locale_nts_state_ok(const nts_state address_to state)
+{
+        if (state->count > NTS_COOKIES || !state->origin_port || !state->port ||
+            !nts_name_ok(state->origin, string_length((string_address)state->origin)) ||
+            (state->server[0] &&
+             !nts_name_ok(state->server, string_length((string_address)state->server))))
+                return false;
+        for (positive at = 0; at < state->count; at++)
+                if (!state->length[at] || state->length[at] > NTS_COOKIE_MAX)
+                        return false;
+        return true;
+}
+
+static bool locale_nts_load(nts_state address_to state)
+{
+        p8 bytes[4 + sizeof(nts_state) + 1];
+        bipolar got = file_read_once_at(AT_FDCWD,
+                                        (string_address)LOCALE_NTS_STATE_PATH,
+                                        bytes, sizeof(bytes));
+        bool good = got == (bipolar)(4 + sizeof(nts_state)) &&
+                    network_load_32(bytes) == LOCALE_NTS_MAGIC;
+
+        if (good)
+        {
+                memory_copy(state, bytes + 4, sizeof(nts_state));
+                //      Fields that are read as text end where they should.
+                state->origin[NTS_SERVER_MAX - 1] = end;
+                state->server[NTS_SERVER_MAX - 1] = end;
+                good = locale_nts_state_ok(state);
+        }
+        crypto_forget(bytes, sizeof(bytes));
+        if (!good)
+                memory_fill(state, 0, sizeof(*state));
+        return good;
+}
+
+static fn locale_nts_save(const nts_state address_to state)
+{
+        p8 bytes[4 + sizeof(nts_state)];
+
+        network_store_32(bytes, LOCALE_NTS_MAGIC);
+        memory_copy(bytes + 4, state, sizeof(nts_state));
+        (void)host_write_file(LOCALE_NTS_STATE_PATH, bytes, sizeof(bytes), 0600,
+                              false);
+        crypto_forget(bytes, sizeof(bytes));
+}
+
+//      A negotiated time server that is not the key-establishment server's
+//      own name has to be a public address, unless the key-establishment
+//      server is not one: a name in an authenticated reply is still a name
+//      someone chose, and this is the same test a redirect gets.
+static bool locale_nts_server_ok(string_address host, string_address server)
+{
+        p32 ip;
+
+        if (!server[0] || string_equals(server, host))
+                return true;
+        ip = http_lookup(server);
+        return ip && (http_address_public(ip) ||
+                      !http_address_public(http_lookup(host)));
+}
+
+//      One key-establishment server asked for the time: the exchange with
+//      its cookies, or the key establishment first when there is no state
+//      or none left, and once more if the server says the cookie is no
+//      good. The answer is authenticated or there is none.
+static COLD bipolar locale_nts_ask(string_address entry, bool filter,
+                                   bool tight, sntp_sample address_to answer)
+{
+        static nts_state state;
+        nts_exchange exchange;
+        p8 host[NTS_SERVER_MAX];
+        p16 port;
+        bool have;
+        bipolar status = SNTP_NO_SERVER;
+
+        if (!locale_nts_entry(entry, host, address_of port))
+                return SNTP_NO_SERVER;
+        have = locale_nts_load(&state) &&
+               string_equals((string_address)state.origin, (string_address)host) &&
+               state.origin_port == port && state.count;
+        for (positive attempt = 0; attempt < 2; attempt++)
+        {
+                string_address server;
+
+                if (!have)
+                {
+                        //      Until an authenticated answer has been taken this
+                        //      boot, the certificate is judged as of the floor.
+                        bipolar why = nts_ke(
+                            (string_address)host, port,
+                            !locale_clock_authenticated_now(null), &state);
+
+                        if (why)
+                        {
+                                locale_nts_reached |= why != HTTP_NO_HOST;
+                                string_copy_bounded((string_address)locale_nts_why,
+                                                    (string_address)host,
+                                                    sizeof(locale_nts_why));
+                                string_append_bounded((string_address)locale_nts_why, ": ",
+                                                      sizeof(locale_nts_why));
+                                string_append_bounded(
+                                    (string_address)locale_nts_why,
+                                    why == HTTP_CLOCK
+                                        ? (string_address) "the clock is unset"
+                                        : locale_auto_reason(why),
+                                    sizeof(locale_nts_why));
+                                return SNTP_NO_SERVER;
+                        }
+                        string_copy_bounded((string_address)state.origin,
+                                            (string_address)host,
+                                            sizeof(state.origin));
+                        state.origin_port = port;
+                        if (!locale_nts_state_ok(&state))
+                                return SNTP_NO_SERVER;
+                        locale_nts_save(&state);
+                }
+                server = state.server[0] ? (string_address)state.server
+                                         : (string_address)host;
+                if (!locale_nts_server_ok((string_address)host, server))
+                        return SNTP_NO_SERVER;
+                locale_nts_reached = true;
+                nts_exchange_open(&exchange, &state);
+                status = sntp_query_named(server, state.port, filter, tight,
+                                          &exchange, answer);
+                nts_exchange_close(&exchange);
+                locale_nts_save(&state);
+                if (status != SNTP_NTS_NAK)
+                        break;
+                have = false;
+        }
+        crypto_forget(&state, sizeof(state));
+        return status;
+}
+
+//      NTS servers have been tried and failed within the last two minutes.
+static bool locale_nts_backed_off(void)
+{
+        p8 text[24];
+        positive at = 0;
+        p64 then;
+
+        locale_word(LOCALE_NTS_FAILED_PATH, text, sizeof(text));
+        return !locale_ntp_manual &&
+               locale_clock_number((string_address)text, address_of at, address_of then) &&
+               system_clock_ns(HOST_CLOCK_BOOTTIME) <
+                   then * 1000000000ull + LOCALE_NTS_BACKOFF_NS;
+}
+
+static fn locale_nts_failed(void)
+{
+        p8 text[24];
+        positive length = positive_into(
+            text, (positive)(system_clock_ns(HOST_CLOCK_BOOTTIME) / 1000000000ull));
+
+        text[length++] = '\n';
+        (void)host_write_file(LOCALE_NTS_FAILED_PATH, text, length, 0644, false);
+}
+
+//      The scheduled and the manual query: NTS servers in order, then the
+//      pool. Returns what the step that set the clock (or refused to) said.
+static bipolar locale_ntp_apply(void)
+{
+        p8 manual[80];
+        p8 servers[LOCALE_NTS_SERVERS_MOST * 80];
+        bool filter = locale_ntp_sampling_wanted();
+        bool tight = locale_clock_synced();
+        bipolar failed = SNTP_NO_SERVER;
+        bool rated = false;
+
+        locale_ntp_authenticated = false;
+        locale_nts_why[0] = end;
+        locale_nts_reached = false;
+        locale_word(LOCALE_NTP_SERVER_PATH, manual, sizeof(manual));
+        if (!manual[0] && locale_nts_wanted() && !locale_nts_backed_off())
+        {
+                positive count = locale_nts_servers(servers, 80);
+                sntp_sample row[SNTP_SERVERS];
+                positive from[SNTP_SERVERS];
+                positive heard = 0;
+                bipolar now = sntp_now_ns();
+                //      An unset clock has nothing to contradict, so the first
+                //      authenticated answer sets it; so does the only server
+                //      there is.
+                bool alone = count == 1 || now < 0 ||
+                             now < (bipolar)clock_trust_floor() *
+                                       (bipolar)SNTP_NANOSECONDS;
+
+                for (positive at = 0; at < count && heard < SNTP_SERVERS; at++)
+                {
+                        failed = locale_nts_ask((string_address)servers + at * 80,
+                                                filter, tight, row + heard);
+                        if (failed < 0)
+                        {
+                                rated |= failed == SNTP_RATE_LIMITED;
+                                continue;
+                        }
+                        from[heard++] = at;
+                        //      A step past two seconds on a clock that is set is
+                        //      taken on two servers' words, authenticated or not:
+                        //      one wrong or compromised server cannot do it.
+                        if (alone ||
+                            (heard == 1 && sntp_within(row[0].offset_ns,
+                                                       SNTP_OFFSET_SYNCED_NS)) ||
+                            (heard > 1 && sntp_choose(row, heard) >= 0))
+                                break;
+                }
+                if (heard)
+                {
+                        bipolar chosen = alone ? 0 : sntp_choose(row, heard);
+
+                        if (chosen < 0)
+                                return SNTP_UNCONFIRMED;
+                        locale_ntp_authenticated = true;
+                        return locale_ntp_take(
+                            (string_address)servers + from[chosen] * 80,
+                            row + chosen, true);
+                }
+                if (locale_nts_reached)
+                        locale_nts_failed();
+                if (locale_nts_only())
+                        return failed < 0 && rated ? SNTP_RATE_LIMITED : failed;
+        }
+        failed = locale_ntp_plain();
+        return failed < 0 && rated && failed == SNTP_NO_SERVER
+                   ? SNTP_RATE_LIMITED : failed;
+}
+
+//      moonwater ntp nts: whether it is asked for first, who is asked, and
+//      what set the clock last (nts: authenticated; plain: the pool, which
+//      anyone on the path could have forged).
+static fn locale_nts_status(void)
+{
+        p8 servers[LOCALE_NTS_SERVERS_MOST * 80];
+        p8 last[LOCALE_NTP_LAST_ROOM];
+        positive count = locale_nts_servers(servers, 80);
+
+        host_say(log, host_label "ntp nts %s, servers",
+                 locale_nts_only() ? "only" : locale_nts_wanted() ? "on" : "off");
+        for (positive at = 0; at < count; at++)
+                host_say(log, " %s", (string_address)servers + at * 80);
+        locale_word(LOCALE_NTP_LAST_PATH, last, sizeof(last));
+        host_say(log, "; the clock was last set by %s\n",
+                 last[0] ? (string_address)last
+                         : (string_address) "nothing this boot");
+}
+
+//      moonwater ntp nts [on|off|only|servers [default|HOST[:PORT] ...]]
+static b32 locale_nts_command(string_address address_to arguments, positive count)
+{
+        string_address word = count > 3 ? arguments[3] : null;
+
+        if (count == 3)
+        {
+                locale_nts_status();
+                return 0;
+        }
+        if (string_equals(word, "servers"))
+        {
+                p8 text[LOCALE_NTS_SERVERS_MOST * 80];
+                positive length = 0;
+
+                if (count == 4)
+                {
+                        locale_nts_status();
+                        return 0;
+                }
+                if (count - 4 > LOCALE_NTS_SERVERS_MOST)
+                        return host_usage();
+                host_need_root("moonwater");
+                if (count == 5 && string_equals(arguments[4], "default"))
+                {
+                        (void)system_remove_at(AT_FDCWD, LOCALE_NTS_SERVERS_PATH, 0);
+                        locale_nts_status();
+                        return 0;
+                }
+                for (positive at = 4; at < count; at++)
+                {
+                        p8 host[NTS_SERVER_MAX];
+                        p16 port;
+                        positive size = string_length(arguments[at]);
+
+                        if (!locale_nts_entry(arguments[at], host, address_of port) ||
+                            length + size + 1 > sizeof(text))
+                        {
+                                host_say(log_error, host_label "ntp nts: %s is not a server name "
+                                                    "(a name or name:port)\n", arguments[at]);
+                                return 1;
+                        }
+                        memory_copy(text + length, arguments[at], size);
+                        length += size;
+                        text[length++] = '\n';
+                }
+                if (host_write_file(LOCALE_NTS_SERVERS_PATH, text, length, 0644, true) < 0)
+                        return host_fail("ntp nts", -1);
+                locale_nts_status();
+                return 0;
+        }
+        if (count != 4 || (!string_equals(word, "on") && !string_equals(word, "off") &&
+                           !string_equals(word, "only")))
+                return host_usage();
+        host_need_root("moonwater");
+        if (radio_write_word(LOCALE_NTS_PATH, word) < 0)
+                return host_fail("ntp nts", -1);
+        if (string_equals(word, "on"))
+                locale_ntp_next = 0;
+        locale_nts_status();
+        return 0;
 }
 
 static b32 locale_ntp_status(void)
@@ -13577,6 +14202,7 @@ static b32 locale_ntp_status(void)
                  wanted ? "on" : "off", server,
                  locale_ntp_sampling_wanted() ? "on" : "off",
                  synced ? "synchronised" : "waiting");
+        locale_nts_status();
         return 0;
 }
 
@@ -13885,6 +14511,8 @@ static b32 host_locale(string_address address_to arguments, positive count)
         {
                 if (count == 2)
                         return locale_ntp_status();
+                if (string_equals(word, "nts"))
+                        return locale_nts_command(arguments, count);
                 if (string_equals(word, "sampling"))
                 {
                         if (count == 3)
@@ -13941,6 +14569,9 @@ static string_address host_wipe_keep[] = {
     "ntp",
     "ntp.server",
     "ntp.sampling",
+    "ntp.nts",
+    "ntp.nts.servers",
+    "clock.good",
     "keyboard",
     "dns",
     "link",
@@ -14320,6 +14951,7 @@ static fn host_usage_write(writer out)
                  "                              " TERM_DIM "request per network joined" TERM_RESET "\n"
                  HOST_ROW("ntp [on|off]", "                ", "set the clock from the network [on]")
                  HOST_ROW("ntp sampling [on|off]", "       ", "keep the lowest-delay sample of five [on]")
+                 HOST_ROW("ntp nts [on|off|only|servers ..]", " ", "NTS servers first, which authenticate [on]")
                  HOST_ROW("link [on|off|help]", "         ", "shell and run on paired machines, by key")
                  HOST_ROW("keyboard [LAYOUT|list]", "      ", "Canvas keys: us uk de se no dk fi fr es it")
                  HOST_ROW("dns [plain|tls|tls-only]", "    ", "wget and host over TLS to 1.1.1.1 and 9.9.9.9 [plain]")
