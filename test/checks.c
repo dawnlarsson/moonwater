@@ -61798,6 +61798,65 @@ static positive montgomery_check_wrong(void)
         return wrong;
 }
 
+/* The binary inverse for public values against the Fermat exponentiation it
+   stands beside, under both group orders and both fields: the ends of the
+   range, and values from a generator that is not the library's. */
+static fn crypto_floor_inverse(void)
+{
+        const crypto_field address_to fields[4] = {
+            address_of crypto_p256_order, address_of crypto_p384_order,
+            address_of crypto_p256_field, address_of crypto_p384_field};
+        positive wrong = 0;
+        positive tried = 0;
+        p64 seed = 0x9e3779b97f4a7c15ull;
+
+        for (positive k = 0; k < 4; k++)
+        {
+                const crypto_field address_to f = fields[k];
+                positive n = f->n;
+                p64 a[CRYPTO_FE_MAX];
+                p64 fast[CRYPTO_FE_MAX];
+                p64 slow[CRYPTO_FE_MAX];
+                p64 mont[CRYPTO_FE_MAX];
+
+                for (positive turn = 0; turn < 300; turn++)
+                {
+                        memory_fill(a, 0, sizeof a);
+                        if (turn < 3)
+                                a[0] = turn;
+                        else if (turn == 3)
+                        {
+                                p64 plain_one[CRYPTO_FE_MAX];
+
+                                memory_fill(plain_one, 0, sizeof plain_one);
+                                plain_one[0] = 1;
+                                crypto_fe_subtract_raw(a, f->m, plain_one, n);
+                        }
+                        else
+                        {
+                                for (positive i = 0; i < n; i++)
+                                {
+                                        seed ^= seed << 13;
+                                        seed ^= seed >> 7;
+                                        seed ^= seed << 17;
+                                        a[i] = seed >> (turn % 5 ? 0 : 20 * (i & 1));
+                                }
+                                while (crypto_fe_cmp(a, f->m, n) >= 0)
+                                        crypto_fe_subtract_raw(a, a, f->m, n);
+                        }
+                        crypto_fe_mul(mont, a, f->square, f);
+                        crypto_fe_inv(slow, mont, f);
+                        crypto_fe_inv_public(fast, a, f);
+                        tried++;
+                        wrong += memory_compare(fast, slow, n * 8) != 0;
+                }
+        }
+        check("crypto_fe_inv_public gives the Fermat inverse, in Montgomery "
+              "form, for 1200 values under both orders and both fields "
+              "(0 gives 0)",
+              tried == 1200 && wrong == 0);
+}
+
 static fn crypto_floor_montgomery(void)
 {
         const crypto_field address_to orders[2] = {
@@ -65505,6 +65564,7 @@ b32 main(void)
         crypto_floor_ghash();
         crypto_floor_field();
         crypto_floor_montgomery();
+        crypto_floor_inverse();
         crypto_floor_x25519();
         crypto_floor_aes();
         crypto_rsa_served_sizes();

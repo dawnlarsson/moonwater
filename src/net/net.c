@@ -3086,6 +3086,105 @@ static fn crypto_fe_inv(p64 address_to d, const p64 address_to a,
         crypto_forget(result, sizeof result);
 }
 
+/* The word-array steps of crypto_fe_inv_public. */
+static bool crypto_limbs_is_one(const p64 address_to x, positive n)
+{
+        p64 rest = 0;
+
+        for (positive i = 1; i < n; i++)
+                rest |= x[i];
+        return x[0] == 1 && !rest;
+}
+
+/* x >> 1 with top entering the top bit. */
+static fn crypto_limbs_halve(p64 address_to x, positive n, p64 top)
+{
+        for (positive i = 0; i < n; i++)
+                x[i] = (x[i] >> 1) | (i + 1 < n ? x[i + 1] << 63 : top << 63);
+}
+
+/* x / 2 mod m for x below the odd m: m is added first when x is odd. */
+static fn crypto_limbs_halve_mod(p64 address_to x, const p64 address_to m,
+                                 positive n)
+{
+        crypto_wide carry = 0;
+
+        if (x[0] & 1)
+                for (positive i = 0; i < n; i++)
+                {
+                        carry += (crypto_wide)x[i] + m[i];
+                        x[i] = (p64)carry;
+                        carry >>= 64;
+                }
+        crypto_limbs_halve(x, n, (p64)carry);
+}
+
+/* x - y mod m for both below m. */
+static fn crypto_limbs_sub_mod(p64 address_to x, const p64 address_to y,
+                               const p64 address_to m, positive n)
+{
+        if (crypto_fe_subtract_raw(x, x, y, n))
+        {
+                crypto_wide carry = 0;
+
+                for (positive i = 0; i < n; i++)
+                {
+                        carry += (crypto_wide)x[i] + m[i];
+                        x[i] = (p64)carry;
+                        carry >>= 64;
+                }
+        }
+}
+
+/* d = 1/a in Montgomery form for a plain a from 1 to m - 1, by the binary
+   extended Euclid: shifts, subtractions and a halving mod m on four to six
+   words, a few thousand word operations where the exponentiation above is
+   about five hundred multiplies through the generic Montgomery routine.
+   It branches on a, so only a public value may come here (a signature's s);
+   a = 0 gives 0. */
+static fn crypto_fe_inv_public(p64 address_to d, const p64 address_to a,
+                               const crypto_field address_to f)
+{
+        p64 u[CRYPTO_FE_MAX], v[CRYPTO_FE_MAX];
+        p64 x1[CRYPTO_FE_MAX], x2[CRYPTO_FE_MAX];
+        positive n = f->n;
+
+        if (crypto_fe_is_zero(a, n))
+        {
+                memory_fill(d, 0, n * 8);
+                return;
+        }
+        memory_copy(u, a, n * 8);
+        memory_copy(v, f->m, n * 8);
+        memory_fill(x1, 0, sizeof x1);
+        memory_fill(x2, 0, sizeof x2);
+        x1[0] = 1;
+        while (!crypto_limbs_is_one(u, n) && !crypto_limbs_is_one(v, n))
+        {
+                while (!(u[0] & 1))
+                {
+                        crypto_limbs_halve(u, n, 0);
+                        crypto_limbs_halve_mod(x1, f->m, n);
+                }
+                while (!(v[0] & 1))
+                {
+                        crypto_limbs_halve(v, n, 0);
+                        crypto_limbs_halve_mod(x2, f->m, n);
+                }
+                if (crypto_fe_cmp(u, v, n) >= 0)
+                {
+                        crypto_fe_subtract_raw(u, u, v, n);
+                        crypto_limbs_sub_mod(x1, x2, f->m, n);
+                }
+                else
+                {
+                        crypto_fe_subtract_raw(v, v, u, n);
+                        crypto_limbs_sub_mod(x2, x1, f->m, n);
+                }
+        }
+        crypto_fe_mul(d, crypto_limbs_is_one(u, n) ? x1 : x2, f->square, f);
+}
+
 /* Jacobian points: (X, Y, Z) is the affine (X/Z^2, Y/Z^3), coordinates in
    the field's Montgomery form, and Z = 0 is infinity.  crypto_point_affine
    is the exit: it leaves x and y as plain integers with z = 1, for output
@@ -3599,6 +3698,38 @@ static bool crypto_point_is_on_curve(const p8 address_to x_bytes,
         return crypto_fe_cmp(left, right, limbs) == 0;
 }
 
+/* Whether the affine x of a point, taken mod n, is r (below n), without the
+   inversion that the affine form costs: a field exponentiation, a tenth of
+   a verify.  x = X/Z^2 is r when X = r Z^2, and is r + n when that is below
+   p and X = (r + n) Z^2: x is below p, so no other x reduces to r.  Both
+   sides are in Montgomery form, which r is brought to by the field's R^2. */
+static bool crypto_point_x_is(const crypto_point address_to point,
+                              const p64 address_to r, const p64 address_to n)
+{
+        const crypto_field address_to f = point->field;
+        positive limbs = f->n;
+        p64 z2[CRYPTO_FE_MAX], candidate[CRYPTO_FE_MAX], scaled[CRYPTO_FE_MAX];
+        crypto_wide carry = 0;
+
+        crypto_fe_sqr(z2, point->z, f);
+        crypto_fe_mul(candidate, r, f->square, f);
+        crypto_fe_mul(scaled, candidate, z2, f);
+        if (crypto_fe_cmp(scaled, point->x, limbs) == 0)
+                return true;
+
+        for (positive i = 0; i < limbs; i++)
+        {
+                carry += (crypto_wide)r[i] + n[i];
+                candidate[i] = (p64)carry;
+                carry >>= 64;
+        }
+        if (carry || crypto_fe_cmp(candidate, f->m, limbs) >= 0)
+                return false;
+        crypto_fe_mul(candidate, candidate, f->square, f);
+        crypto_fe_mul(scaled, candidate, z2, f);
+        return crypto_fe_cmp(scaled, point->x, limbs) == 0;
+}
+
 /* Everything here is public: the key, the signature and the digest.  The
    scalar multiplies may therefore branch on their bits. */
 static bool crypto_ecdsa_verify(p8 address_to hash, positive hash_length,
@@ -3634,8 +3765,7 @@ static bool crypto_ecdsa_verify(p8 address_to hash, positive hash_length,
 
         /* w = 1/s in Montgomery form, so multiplying a plain e or r by it
            reduces straight to the plain e/s and r/s. */
-        crypto_fe_mul(w, s, order->square, order);
-        crypto_fe_inv(w, w, order);
+        crypto_fe_inv_public(w, s, order);
         crypto_fe_mul(u1, e, w, order);
         crypto_fe_mul(u2, r, w, order);
 
@@ -3650,11 +3780,8 @@ static bool crypto_ecdsa_verify(p8 address_to hash, positive hash_length,
                                    address_of q, u2);
         if (crypto_fe_is_zero(rpoint.z, limbs))
                 return false;
-        crypto_point_affine(address_of rpoint);
-        while (crypto_fe_cmp(rpoint.x, order->m, limbs) >= 0)
-                crypto_fe_subtract_raw(rpoint.x, rpoint.x, order->m, limbs);
 
-        return crypto_fe_cmp(rpoint.x, r, limbs) == 0;
+        return crypto_point_x_is(address_of rpoint, r, order->m);
 }
 
 static bool crypto_ecdsa_p256(p8 address_to hash, positive hash_length,
