@@ -28,7 +28,7 @@ not kept in the tree (seed files are banned by `security_hygiene`).
 | TLS records/handshake | record and handshake fragmentation, transcript/Finished, AEAD limits, state ordering, `tls_hs_fuzz` libFuzzer target over the record layer and handshake state machine | a corpus beyond the generated seeds |
 | X.509 | strict DER and generated-chain policy matrix against OpenSSL and, as a second independent path validator, Go's `crypto/x509` (`tls_chains`); `tls_der_fuzz` / `tls_verify_fuzz` libFuzzer targets; DNS-name and IP matching against OpenSSL's own check (`tls_hostnames`); validity times against RFC 5280 (`tls_dates`); Wycheproof's vectors under the production crypto (`crypto_vectors --wycheproof`); Mozilla's server-auth `distrust-after` dates per anchor | name constraints in more shapes than the matrix has |
 | HTTP/URL | sink-side request validation, framing conflicts, 204/205/304 as wget and curl take them with the RFC 9110 framing at the tight tier, split-point and chunk/trailer checks, `http.client` and curl framing oracles, HTTPS downgrade harness, GNU wget and curl as live oracles for byte-at-a-time, split, FIN/RST and 1xx-storm delivery (`wget_mutation`), hostile servers and redirect shapes against the built wget (`wget_hostile`), a redirect from public to non-public address space refused at the tight tier | the tight tier is not fuzzed (`http_fuzz` models the default); TLS and redirect legs of hostile scheduling |
-| DHCPv4 | peer/xid/MAC binding, option framing/overload, state cross-product, entropy faults, leases a server has no business handing out refused, the watcher's exchange cut once by link news rather than by every carrier flap; the `netem` lane (clean, tripled, forged, late, dropped and NAKed answers, plain and under loss, duplication and reordering); `dhcp_fuzz` (coverage-guided option stream) | DHCP over a raw packet socket and address-conflict probing are separate changes |
+| DHCPv4 | peer/xid/MAC binding, option framing/overload, state cross-product, entropy faults, leases a server has no business handing out refused, the watcher's exchange cut once by link news rather than by every carrier flap; the `netem` lane (clean, tripled, forged, late, dropped and NAKed answers, plain and under loss, duplication and reordering); `dhcp_fuzz` (coverage-guided option stream); the OFFER, ACK and NAK read from a packet socket so the kernel's source-address check can be on (the exchange across a veth pair into a second namespace at `rp_filter` 0, 1 and 2, `dhcp_packets` frame grammar under ASan/UBSan); an address-conflict probe before a lease is used (RFC 5227); the exchange not cut between its REQUEST and the ACK | the default probe window is about 0.2 s, so a host that answers ARP slower (a radio in power save) can be missed (DHCP-D2) |
 | SNTP | nonce and peer binding, ancillary timestamp parsing, arithmetic and selection checks, each sample with its own wait, era-boundary integration (`sntp_era`: 2036, 2038, 2104), the `netem` lane | plain SNTP is unauthenticated; authenticated time is a separate change |
 | Wi-Fi | RSN and EAPOL-Key handling, replay counters, scan-result parsing (`wifi_scan_fuzz`, `wifi_eapol_fuzz`), an access point's name read from its first name element only, a join that prefers the access points that offer what the saved network asks for, EAPOL frames accepted only from the access point | management-frame protection and WPA3 are separate changes |
 | Waterlink and saved state | Noise handshake, cookie, replay window, grants; the saved wifi and bluetooth lists written beside themselves and renamed; no hash of the group secret in `/root/link.groups` | handshake flood under netem; MSan on waterlink |
@@ -136,6 +136,9 @@ not part of this one; they are listed with the gap they would close.
 | Waterlink | `/root/link.groups` held a fast salted SHA-256 of the secret, a guessing oracle for anyone who could read it | `link` lane |
 | SNTP | five samples shared one ten-second deadline, so one lost datagram in four ended a query | the `netem` lane's SNTP scenes |
 | Supply chain | bowl's Arch, RISC-V Arch and Debian bootstraps rested on TLS and a mirror alone | pinned digests, a pinned signing key for Arch Linux ARM, `bowl` lane |
+| DHCP | the client read its OFFER from a UDP socket, which the kernel never delivers to when `rp_filter` is 1 or 2 and the server has no route back: no lease, so the image could not turn the source-address check on | `CHECK_net` runs the exchange across a veth pair into a second network namespace at `rp_filter` 0, 1 and 2; the `netem` lane's `rp_filter` rows; `dhcp_packets` frame grammar with planted mutants |
+| DHCP and ARP | a leased address was used without asking whether another host held it | `dhcp_probe` (three ARP probes, a DECLINE and a ten-second hold-off on a conflict, announcements after the address is applied) in the `CHECK_net` namespace fixture, which offers an address its own kernel answers ARP for |
+| DHCP | an exchange cut by link news after its REQUEST was sent left the server's lease unacknowledged and started over | the namespace fixture's interim record on the answer pipe and the RELEASE the server counts |
 
 ### Open, in separate branches
 
@@ -144,7 +147,6 @@ not part of this one; they are listed with the gap they would close.
 | Authenticated time (NTS), a floor for the clock, wget's status 5 for an unverifiable certificate | `feature/clock-floor`, `feature/nts` |
 | 802.11w management-frame protection, WPA3-SAE | `feature/wpa3-pmf-sae` |
 | DNS over TLS | `feature/dns-over-tls` |
-| DHCP over a raw packet socket (so `rp_filter` can be on), ARP address-conflict probing, the exchange not cut between REQUEST and ACK | `feature/dhcp-packet-socket-acd` |
 | The default accepts what wget and curl accept in a header block, URL spelling and redirect statuses | `feature/wget-curl-parity` |
 | `edit` sends file bytes to the terminal raw; a secret on a command line is kept by the shell history; boot takes the first install that looks like this build; `fs.protected_*`, `kptr_restrict`, `dmesg_restrict`, `io_uring_disabled` defaults | `hardening/outside-network` |
 
@@ -152,8 +154,6 @@ not part of this one; they are listed with the gap they would close.
 
 - Plain SNTP is accepted into any moment the build and clock window allow;
   only authenticated time narrows that.
-- The DHCP client reads its OFFER from a UDP socket, so `rp_filter` 1 or 2
-  drops it; the image keeps `rp_filter` at the kernel's value.
 - A body dripped one byte per 29 seconds runs forever (each read has its own 30
   second timeout, as GNU wget's and curl's without `--max-time`), and the
   endless-body disk fill has no Content-Length pre-check (GNU has none).
@@ -175,6 +175,8 @@ not part of this one; they are listed with the gap they would close.
 | D03 | DNSSEC is out of scope | The resolver is a stub that trusts the network's DNS |
 | D04 | Defaults hold what GNU wget 1.25.0 and curl 8.22.0 do for 204 and 205; the RFC 9110 framing is the tight tier's | Real servers send a 204 with `Content-Length: 0`, and the client closes the connection after the one response, so an unread declared body can never be taken for the next response |
 | D05 | "Guest is root, not a wall": root is not hardened against itself | Documented policy in `SECURITY.md` |
+| DHCP-D1 | `rp_filter` is 2 (loose) by default and 1 in `sec_hardened`; `arp_ignore` 1, `arp_announce` 2, `arp_filter` 1 and `arp_notify` 1 | 2 is what Debian ships and is lease-safe now that the OFFER is read from a packet socket; 1 drops asymmetric traffic by design and was measured on one leased link only |
+| DHCP-D2 | The default conflict probe listens for about 0.2 s, not RFC 5227's 4 to 7 s | Four to seven seconds would more than double the time to a lease; a kernel answers ARP in a millisecond or two on a wired LAN. A host that answers slower can be missed; `sec_hardened` keeps RFC 5227's numbers. The default can be changed |
 
 SYN flood recipe (by hand): in a network namespace with two taps, a guest on
 one (a scripted DHCP server serves it, and an HTTP server serves a small static
