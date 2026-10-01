@@ -53439,8 +53439,12 @@ static fn resolving_policy(void)
                 distinct++;
         repeated:;
         }
+        //      A name of sixteen letters comes out all lower case one time in
+        //      65,536, which over ninety-six questions is once in about seven
+        //      hundred runs of this row: one such question is not a resolver
+        //      that stopped mixing, two are one in a million.
         check("every question is sent in mixed case (draft-vixie-dnsext-dns0x20)",
-              answered == 96 && mixed == 96);
+              answered == 96 && mixed >= 95);
         check("every query advertises EDNS0", edns == 96);
         check("every query has a source port of its own (96 queries, at most 2 repeats)",
               distinct >= 94);
