@@ -4776,6 +4776,19 @@ typedef struct
            clock (which side of them the clock is on), that reason. */
         bool untrusted;
         p8 fault;
+        /* Network Time Security's key establishment (RFC 8915 4) uses TLS for
+           two things besides a connection: an application protocol to offer
+           in the ClientHello and to see named back, which is also how this
+           client knows it must not settle for TLS 1.2 (no exporter there,
+           and RFC 8915 requires 1.3), and a key derived from the finished
+           handshake under a label (RFC 8446 7.5). clock_bootstrap says the
+           connection is the one that will say what time it is, so the clock
+           cannot yet be asked: see tls_verify_chain. */
+        const p8 address_to alpn;
+        positive alpn_length;
+        bool clock_bootstrap;
+        bool keep_exporter;
+        p8 exporter[32];
         /* TLS 1.2 (RFC 5246, 5288, 7627): the suite, the server's random,
            the master secret -- the premaster until the client's flight --
            and the client's key exchange point, made when the server's
@@ -7060,14 +7073,12 @@ static COLD p64 clock_trust_floor(void)
         return value;
 }
 
-static COLD bool tls_date_now(p64 address_to value)
+static COLD bool tls_date_of(time_t stamp, p64 address_to value)
 {
-        time_t stamp = time(null);
         tm calendar;
         p64 answer;
 
-        if (stamp < 0 || (p64)stamp < clock_trust_floor() ||
-            !gmtime_r(address_of stamp, address_of calendar))
+        if (stamp < 0 || !gmtime_r(address_of stamp, address_of calendar))
                 return false;
         answer = (p64)(calendar.tm_year + 1900);
         answer = answer * 100 + (p64)(calendar.tm_mon + 1);
@@ -7077,6 +7088,21 @@ static COLD bool tls_date_now(p64 address_to value)
         answer = answer * 100 + (p64)calendar.tm_sec;
         address_to value = answer;
         return true;
+}
+
+static COLD bool tls_date_now(p64 address_to value)
+{
+        time_t stamp = time(null);
+
+        return stamp >= 0 && (p64)stamp >= clock_trust_floor() &&
+               tls_date_of(stamp, value);
+}
+
+/* The date the floor is, for a connection that has to go ahead on a clock
+   that is below it (tls->clock_bootstrap). */
+static COLD bool tls_date_floor(p64 address_to value)
+{
+        return tls_date_of((time_t)clock_trust_floor(), value);
 }
 
 static COLD bool tls_cert_current(tls_cert address_to cert, p64 now)
@@ -7255,6 +7281,8 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
         positive depth = 0;
         p64 now = 0;
         bool asked = false;
+        bool unset = false;
+        p64 leaf_from;
 
         if (!tls_certificate_body_open(body, body_length, address_of list))
                 return false;
@@ -7282,6 +7310,7 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
         if (!count || byte_reader_left(&list))
                 return false;
 
+        leaf_from = certs[0].not_before;
         tls_keep_leaf(tls, certs);
 
         if (tls->check_cert && !certs[0].san_match)
@@ -7292,7 +7321,29 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
         if (!tls->check_cert)
                 return true;
 
-        if (!tls_date_now(address_of now))
+        if (tls->clock_bootstrap)
+        {
+                /* The connection that will say what time it is cannot be
+                   judged by the time it has not yet said, whether the clock
+                   is unset or only wrong (an RTC two years out reads every
+                   certificate expired). It is judged as of the floor: the
+                   certificate has to be unexpired on the day this system
+                   was built or last sure (an old, stolen one is not), and
+                   notBefore is not asked, since a short-lived certificate
+                   was issued after that day and the clock cannot say when
+                   it is now. chrony's nocerttimecheck does the same, with
+                   no floor at all. The caller asks for this only until an
+                   authenticated answer has been taken this boot. */
+                if (!tls_date_floor(address_of now))
+                {
+                        tls->fault = TLS_FAULT_CLOCK;
+                        return false;
+                }
+                unset = true;
+                for (positive at = 0; at < count; at++)
+                        certs[at].not_before = 0;
+        }
+        else if (!tls_date_now(address_of now))
         {
                 tls->fault = TLS_FAULT_CLOCK;
                 return false;
@@ -7302,7 +7353,7 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
         else if (certs[0].not_after < now)
                 tls->fault = TLS_FAULT_LATE;
         if (!tls_leaf_authorized(certs, now) ||
-            tls_spki_is_anchor(certs, certs[0].not_before))
+            tls_spki_is_anchor(certs, leaf_from))
                 return false;
         for (;;)
         {
@@ -7314,7 +7365,7 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
                             tls_certificate_names_chain(certs + child,
                                                         certs + next) &&
                             ((anchor = tls_spki_is_anchor(certs + next,
-                                                          certs[0].not_before)) ||
+                                                          leaf_from)) ||
                              tls_issuer_authorized(certs + next, depth, now)) &&
                             tls_verify_one(certs + child, certs + next) &&
                             tls_path_permitted(certs, path, depth + 1,
@@ -7324,8 +7375,7 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
                 {
                         positive length;
 
-                        if (tls_anchor_verifies(certs + child,
-                                                certs[0].not_before))
+                        if (tls_anchor_verifies(certs + child, leaf_from))
                                 return true;
                         if (asked || !certs[child].ca_issuers)
                                 return false;
@@ -7336,6 +7386,8 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
                         if (!length || tls_parse_cert(fetched, length,
                                                       certs + count, null))
                                 return false;
+                        if (unset)
+                                certs[count].not_before = 0;
                         count++;
                         continue;
                 }
@@ -7446,6 +7498,10 @@ static COLD bipolar tls_client_hello(tls_conn address_to tls, p8 address_to out,
             0, 0x2b, 0, 5, 4, 0x03, 0x04, 0x03, 0x03,
             0, 0x0d, 0, 12, 0, 10, 0x04, 0x03, 0x05, 0x03, 0x08, 0x04,
             0x04, 0x01, 0x05, 0x01};
+        /* The same, with TLS 1.3 alone on offer, for a connection that may
+           not be TLS 1.2 (tls->alpn). supported_versions is the first nine
+           bytes of tail. */
+        static const p8 only_thirteen[] = {0, 0x2b, 0, 3, 2, 0x03, 0x04};
         p8 share[10 + 97];
         positive share_length;
         positive host_length = string_length(tls->host);
@@ -7519,10 +7575,31 @@ static COLD bipolar tls_client_hello(tls_conn address_to tls, p8 address_to out,
                         goto done;
         }
 
+        if (tls->alpn_length)
+        {
+                positive n = 3 + tls->alpn_length;
+                p8 head[] = {0, 0x10, (p8)((n + 0) >> 8), (p8)n,
+                             (p8)((n - 2) >> 8), (p8)(n - 2),
+                             (p8)tls->alpn_length};
+
+                if (tls->alpn_length > 32 ||
+                    !tls_hello_append(out, room, address_of at, head,
+                                      sizeof head) ||
+                    !tls_hello_append(out, room, address_of at, tls->alpn,
+                                      tls->alpn_length))
+                        goto done;
+        }
+
         if (!tls_hello_append(out, room, address_of at, groups, sizeof groups) ||
             !tls_hello_append(out, room, address_of at, share,
                               10 + share_length) ||
-            !tls_hello_append(out, room, address_of at, tail, sizeof tail))
+            (tls->alpn_length
+                 ? !tls_hello_append(out, room, address_of at, only_thirteen,
+                                     sizeof only_thirteen) ||
+                       !tls_hello_append(out, room, address_of at, tail + 9,
+                                         sizeof tail - 9)
+                 : !tls_hello_append(out, room, address_of at, tail,
+                                     sizeof tail)))
                 goto done;
 
         {
@@ -7797,6 +7874,9 @@ static COLD fn tls_derive_app_keys(tls_conn address_to tls)
                           tls->c_ap_traffic);
         tls_derive_secret(master, "s ap traffic", address_of tls->transcript,
                           tls->s_ap_traffic);
+        if (tls->keep_exporter)
+                tls_derive_secret(master, "exp master",
+                                  address_of tls->transcript, tls->exporter);
 
         crypto_forget(derived, sizeof derived);
         crypto_forget(master, sizeof master);
@@ -8097,6 +8177,38 @@ static COLD bool tls_encrypted_extensions_valid(p8 address_to body,
         return true;
 }
 
+/* What EncryptedExtensions says about the application protocol (RFC 7301
+   3.1): when one was offered, exactly that one, named once. */
+static COLD bool tls_alpn_named(tls_conn address_to tls, p8 address_to body,
+                                positive length)
+{
+        byte_reader reader = byte_reader_open(body, length);
+        byte_reader list = byte_reader_vector16(&reader);
+
+        while (byte_reader_left(&list))
+        {
+                p16 kind = byte_reader_u16(&list);
+                byte_reader value = byte_reader_vector16(&list);
+
+                if (!byte_reader_ok(&list))
+                        return false;
+                if (kind == 0x0010)
+                {
+                        byte_reader names = byte_reader_vector16(&value);
+                        byte_reader name = byte_reader_vector8(&names);
+
+                        return byte_reader_ok(&value) &&
+                               !byte_reader_left(&value) &&
+                               byte_reader_ok(&names) &&
+                               !byte_reader_left(&names) &&
+                               byte_reader_left(&name) == tls->alpn_length &&
+                               !memory_compare(byte_reader_here(&name),
+                                               tls->alpn, tls->alpn_length);
+                }
+        }
+        return false;
+}
+
 static COLD bool tls_new_session_ticket_valid(p8 address_to body,
                                          positive length)
 {
@@ -8325,7 +8437,10 @@ static COLD bipolar tls_flight_message(tls_conn address_to tls,
 
         if (msg[0] == TLS_HS_ENCRYPTED_EXTS)
                 valid = tls_encrypted_extensions_valid(
-                    body, body_length, (positive)1 << 0x000a | tls->named);
+                    body, body_length,
+                    (positive)1 << 0x000a | tls->named |
+                        (tls->alpn_length ? (positive)1 << 0x0010 : 0)) &&
+                        (!tls->alpn_length || tls_alpn_named(tls, body, body_length));
         else if (msg[0] == TLS_HS_CERT_REQUEST)
                 //      TLS 1.3's has an empty context, then extensions.
                 valid = tls->cert_requested =
@@ -8533,6 +8648,7 @@ static COLD bipolar tls_handshake(
         /* TLS 1.2 is never the answer to a retry. In TLS 1.3 the keys
            change after ServerHello, so nothing may share its records. */
         if (hello_kind || (retried && tls->tls12) ||
+            (tls->tls12 && tls->alpn_length) ||
             (!tls->tls12 && used != length))
                 goto done;
         tls_transcript_add(tls, hs, length);
@@ -8576,8 +8692,14 @@ done:
         return status;
 }
 
-static COLD bipolar tls_connect(tls_conn address_to tls, bipolar handle,
-                           string_address host, bool check_cert)
+/* A connection, and for Network Time Security's key establishment an
+   application protocol named in the hello and back (TLS 1.3 only), the
+   exporter secret kept, and the certificate judged as of the floor when the
+   clock is unset. */
+static COLD bipolar tls_connect_with(tls_conn address_to tls, bipolar handle,
+                                     string_address host, bool check_cert,
+                                     const p8 address_to alpn,
+                                     positive alpn_length, bool bootstrap)
 {
         bipolar status;
         network_deadline deadline;
@@ -8586,6 +8708,10 @@ static COLD bipolar tls_connect(tls_conn address_to tls, bipolar handle,
         tls->handle = handle;
         tls->host = host;
         tls->check_cert = check_cert;
+        tls->alpn = alpn;
+        tls->alpn_length = alpn_length;
+        tls->keep_exporter = alpn_length != 0;
+        tls->clock_bootstrap = bootstrap;
         status = network_deadline_begin(address_of deadline,
                                         TLS_HANDSHAKE_SECONDS, 0)
                      ? tls_handshake(tls, address_of deadline) : TLS_FAIL;
@@ -8600,6 +8726,33 @@ static COLD bipolar tls_connect(tls_conn address_to tls, bipolar handle,
                 tls_forget(tls);
         }
         return status;
+}
+
+static COLD bipolar tls_connect(tls_conn address_to tls, bipolar handle,
+                           string_address host, bool check_cert)
+{
+        return tls_connect_with(tls, handle, host, check_cert, null, 0, false);
+}
+
+/* RFC 8446 7.5: TLS-Exporter(label, context, length) from the exporter
+   master secret kept at the handshake's end. The caller's length is at most
+   32, one HKDF block. */
+static COLD bool tls_export(tls_conn address_to tls, string_address label,
+                            const p8 address_to context,
+                            positive context_length, p8 address_to out,
+                            positive length)
+{
+        p8 derived[32];
+        p8 hash[32];
+
+        if (!tls->keep_exporter || !tls->application || tls->tls12 ||
+            length > 32)
+                return false;
+        crypto_sha256_of((p8 address_to)context, context_length, hash);
+        tls_expand_label(tls->exporter, label, tls_empty_sha256, 32, derived, 32);
+        tls_expand_label(derived, "exporter", hash, 32, out, length);
+        crypto_forget(derived, sizeof derived);
+        return true;
 }
 
 static bipolar tls_write(tls_conn address_to tls, p8 address_to data,
@@ -10346,6 +10499,481 @@ static COLD positive tls_aia_fetch(const p8 address_to url, positive length,
                 return 0;
         memory_copy(into, into + header, used - header);
         return used - header;
+}
+
+/*
+        Network Time Security, key establishment: RFC 8915 4.
+
+        The NTS-KE connection is TLS 1.3 to the server's port (4460), the
+        ALPN protocol "ntske/1", one request of three records (NTPv4 is the
+        protocol asked for, AEAD_AES_SIV_CMAC_256 the algorithm) and one
+        reply: the two it chose, cookies to spend one at a time, and
+        optionally another server and port for the time itself. The keys
+        are not in the reply. Both ends derive them from the finished
+        handshake with the TLS exporter (RFC 8446 7.5) under the label
+        "EXPORTER-network-time-security", context the protocol number, the
+        algorithm number and one byte for the direction.
+
+        nts_ke_reply is the reply's parser alone, fed bytes from anywhere
+        (nts_ke_fuzz): critical records it does not know fail, an error or
+        a warning record fails, a number is taken only as the one it asked
+        for, a name only as a host name, a port not at zero, and nothing
+        follows the end record. A cookie too long for this client's room is
+        passed over, since a server can issue any length; with none that
+        fit, the exchange fails.
+*/
+#define NTS_KE_PORT 4460
+#define NTS_COOKIES 8
+#define NTS_COOKIE_MAX 256
+#define NTS_SERVER_MAX 64
+#define NTS_AEAD_SIV_CMAC_256 15
+#define NTS_NTP_PORT 123
+#define NTS_KE_ROOM 4096
+#define NTS_KE_SECONDS 6
+
+typedef struct
+{
+        p8 c2s[32];
+        p8 s2c[32];
+        /* The key-establishment server this came from, and the time server
+           (and port) the exchange named, empty and 123 when it named none. */
+        p8 origin[NTS_SERVER_MAX];
+        p16 origin_port;
+        p8 server[NTS_SERVER_MAX];
+        p16 port;
+        positive count;
+        p16 length[NTS_COOKIES];
+        p8 cookie[NTS_COOKIES][NTS_COOKIE_MAX];
+} nts_state;
+
+/* A host name, or a dotted address: letters, digits, dots and hyphens, not
+   starting or ending with a dot or a hyphen, no empty label. */
+static COLD bool nts_name_ok(const p8 address_to name, positive length)
+{
+        if (!length || length >= NTS_SERVER_MAX || name[0] == '.' ||
+            name[0] == '-' || name[length - 1] == '.' ||
+            name[length - 1] == '-')
+                return false;
+        for (positive at = 0; at < length; at++)
+                if (!((name[at] >= 'a' && name[at] <= 'z') ||
+                      (name[at] >= 'A' && name[at] <= 'Z') ||
+                      (name[at] >= '0' && name[at] <= '9') ||
+                      name[at] == '-' || (name[at] == '.' && name[at + 1] != '.')))
+                        return false;
+        return true;
+}
+
+//      Whether the reply so far holds its end record, in whole records.
+static COLD bool nts_ke_complete(const p8 address_to data, positive length)
+{
+        byte_reader reader = byte_reader_open((p8 address_to)data, length);
+
+        while (byte_reader_left(&reader) >= 4)
+        {
+                p16 type = byte_reader_u16(&reader);
+
+                (void)byte_reader_vector16(&reader);
+                if (!byte_reader_ok(&reader))
+                        return false;
+                if ((type & 0x7fff) == 0)
+                        return true;
+        }
+        return false;
+}
+
+#define NTS_KE_OK 0
+#define NTS_KE_MALFORMED (-1)
+#define NTS_KE_ERROR (-2)
+
+static COLD bipolar nts_ke_reply(const p8 address_to data, positive length,
+                                 nts_state address_to state)
+{
+        byte_reader reader = byte_reader_open((p8 address_to)data, length);
+        bool protocol = false;
+        bool algorithm = false;
+        bool named = false;
+        bool ported = false;
+        bool done = false;
+
+        state->count = 0;
+        state->server[0] = end;
+        state->port = NTS_NTP_PORT;
+        while (!done && byte_reader_left(&reader))
+        {
+                p16 type = byte_reader_u16(&reader);
+                byte_reader body = byte_reader_vector16(&reader);
+                positive size = byte_reader_left(&body);
+                bool critical = (type & 0x8000) != 0;
+
+                if (!byte_reader_ok(&reader))
+                        return NTS_KE_MALFORMED;
+                switch (type & 0x7fff)
+                {
+                case 0:
+                        if (size || !critical)
+                                return NTS_KE_MALFORMED;
+                        done = true;
+                        break;
+                case 1:
+                        if (protocol || size != 2 || byte_reader_u16(&body))
+                                return NTS_KE_MALFORMED;
+                        protocol = true;
+                        break;
+                case 2:
+                        return NTS_KE_ERROR;
+                case 3:
+                        return NTS_KE_ERROR;
+                case 4:
+                        if (algorithm || size != 2 ||
+                            byte_reader_u16(&body) != NTS_AEAD_SIV_CMAC_256)
+                                return NTS_KE_MALFORMED;
+                        algorithm = true;
+                        break;
+                case 5:
+                        if (size && size <= NTS_COOKIE_MAX &&
+                            state->count < NTS_COOKIES)
+                        {
+                                memory_copy(state->cookie[state->count],
+                                            byte_reader_here(&body), size);
+                                state->length[state->count++] = (p16)size;
+                        }
+                        break;
+                case 6:
+                        if (named || !nts_name_ok(byte_reader_here(&body), size))
+                                return NTS_KE_MALFORMED;
+                        memory_copy(state->server, byte_reader_here(&body),
+                                    size);
+                        state->server[size] = end;
+                        named = true;
+                        break;
+                case 7:
+                        if (ported || size != 2)
+                                return NTS_KE_MALFORMED;
+                        state->port = byte_reader_u16(&body);
+                        if (!state->port)
+                                return NTS_KE_MALFORMED;
+                        ported = true;
+                        break;
+                default:
+                        if (critical)
+                                return NTS_KE_MALFORMED;
+                }
+        }
+        return done && !byte_reader_left(&reader) && protocol && algorithm &&
+                       state->count
+                   ? NTS_KE_OK : NTS_KE_MALFORMED;
+}
+
+/*
+        NTS in the packet, RFC 8915 5: extension fields after the 48 bytes.
+
+        A request carries a unique identifier (32 random bytes the reply
+        must echo), one cookie (spent: it is taken out of the state as the
+        packet is built, and the reply brings a fresh one), and the
+        authenticator: a nonce and the AEAD tag over everything before it,
+        under the client-to-server key. A reply is believed only when it
+        echoes the identifier and its authenticator, the last field,
+        opens under the server-to-client key over the packet before it; the
+        cookies it carries inside are then kept. A reply that fails either
+        is noise, not an answer: the exchange goes on waiting for the real
+        one, so a forger who has seen the identifier in the clear spends
+        nothing but its own packet. The one thing an unauthenticated reply
+        may do is say the cookie is no good (a kiss code NTSN with the
+        identifier), which sends the caller back to key establishment once.
+
+        The plaintext is empty in a request, so the ciphertext is the
+        16-byte tag alone. Nonces are 16 random bytes, never reused under
+        a key because they are drawn, and the origin timestamp stays the
+        random authenticator it always was.
+*/
+#define NTS_HEADER 48
+#define NTS_PACKET_ROOM 1280
+#define NTS_EF_UID 0x0104
+#define NTS_EF_COOKIE 0x0204
+#define NTS_EF_PLACEHOLDER 0x0304
+#define NTS_EF_AUTH 0x0404
+#define NTS_UID_BYTES 32
+#define NTS_NONCE_BYTES 16
+#define NTS_TAG_BYTES 16
+#define NTS_REPLY_OK 0
+#define NTS_REPLY_IGNORE (-1)
+#define NTS_REPLY_NAK (-2)
+#define NTS_KISS_NTSN 0x4e54534eu /* "NTSN" */
+
+typedef struct
+{
+        crypto_siv_key c2s;
+        crypto_siv_key s2c;
+        p8 uid[NTS_UID_BYTES];
+        nts_state address_to state;
+} nts_exchange;
+
+//      The keys of a state, ready for an exchange.
+static COLD fn nts_exchange_open(nts_exchange address_to exchange,
+                                 nts_state address_to state)
+{
+        exchange->state = state;
+        crypto_siv_prepare(address_of exchange->c2s, state->c2s);
+        crypto_siv_prepare(address_of exchange->s2c, state->s2c);
+}
+
+static COLD fn nts_exchange_close(nts_exchange address_to exchange)
+{
+        crypto_forget(exchange, sizeof(*exchange));
+}
+
+//      The fields after the header already in packet, or 0 when there is
+//      no cookie left or no room. The cookie is spent, and a placeholder of
+//      its size is sent for each the state is short of eight after it (RFC
+//      8915 5.5: the server returns one new cookie for each cookie or
+//      placeholder), so that a reply that never comes costs a cookie only
+//      until the next one that does.
+static COLD positive nts_request(nts_exchange address_to exchange,
+                                 p8 address_to packet, positive room)
+{
+        nts_state address_to state = exchange->state;
+        const p8 address_to parts[2];
+        positive lengths[2];
+        p8 nonce[NTS_NONCE_BYTES];
+        positive at = NTS_HEADER;
+        positive length;
+        positive padded;
+        positive auth;
+        positive more;
+
+        if (!state->count)
+                return 0;
+        length = state->length[state->count - 1];
+        padded = (length + 3) & ~(positive)3;
+        if (room < at + 4 + NTS_UID_BYTES + 4 + padded + 4 + 4 +
+                       NTS_NONCE_BYTES + NTS_TAG_BYTES ||
+            system_random_fill(exchange->uid, NTS_UID_BYTES, 0) ||
+            system_random_fill(nonce, NTS_NONCE_BYTES, 0))
+                return 0;
+        network_store_16(packet + at, NTS_EF_UID);
+        network_store_16(packet + at + 2, 4 + NTS_UID_BYTES);
+        memory_copy(packet + at + 4, exchange->uid, NTS_UID_BYTES);
+        at += 4 + NTS_UID_BYTES;
+        network_store_16(packet + at, NTS_EF_COOKIE);
+        network_store_16(packet + at + 2, (p16)(4 + padded));
+        memory_copy(packet + at + 4, state->cookie[state->count - 1], length);
+        memory_fill(packet + at + 4 + length, 0, padded - length);
+        at += 4 + padded;
+        crypto_forget(state->cookie[--state->count], NTS_COOKIE_MAX);
+        state->length[state->count] = 0;
+
+        //      One of the eight is the cookie just sent; the rest, while the
+        //      packet has room for them and the authenticator after.
+        for (more = NTS_COOKIES - state->count - 1; more; more--)
+        {
+                if (room < at + 4 + padded + 4 + 4 + NTS_NONCE_BYTES +
+                               NTS_TAG_BYTES)
+                        break;
+                network_store_16(packet + at, NTS_EF_PLACEHOLDER);
+                network_store_16(packet + at + 2, (p16)(4 + padded));
+                memory_fill(packet + at + 4, 0, padded);
+                at += 4 + padded;
+        }
+
+        auth = at;
+        network_store_16(packet + at, NTS_EF_AUTH);
+        network_store_16(packet + at + 2,
+                         4 + 4 + NTS_NONCE_BYTES + NTS_TAG_BYTES);
+        network_store_16(packet + at + 4, NTS_NONCE_BYTES);
+        network_store_16(packet + at + 6, NTS_TAG_BYTES);
+        memory_copy(packet + at + 8, nonce, NTS_NONCE_BYTES);
+        parts[0] = packet;
+        lengths[0] = auth;
+        parts[1] = nonce;
+        lengths[1] = NTS_NONCE_BYTES;
+        crypto_siv_seal(address_of exchange->c2s, parts, lengths, 2,
+                        packet + at + 8 + NTS_NONCE_BYTES, 0,
+                        packet + at + 8 + NTS_NONCE_BYTES);
+        return auth + 4 + 4 + NTS_NONCE_BYTES + NTS_TAG_BYTES;
+}
+
+//      The cookies in a reply's decrypted fields, added to the state.
+static COLD fn nts_cookies_take(nts_state address_to state,
+                                const p8 address_to plain, positive length)
+{
+        byte_reader reader = byte_reader_open((p8 address_to)plain, length);
+
+        while (byte_reader_left(&reader) >= 4)
+        {
+                p16 type = byte_reader_u16(&reader);
+                positive size = byte_reader_u16(&reader);
+
+                if (size < 4 || size % 4 || size - 4 > byte_reader_left(&reader))
+                        return;
+                size -= 4;
+                if (type == NTS_EF_COOKIE && size && size <= NTS_COOKIE_MAX &&
+                    state->count < NTS_COOKIES)
+                {
+                        memory_copy(state->cookie[state->count],
+                                    byte_reader_here(&reader), size);
+                        state->length[state->count++] = (p16)size;
+                }
+                (void)byte_reader_skip(&reader, size);
+        }
+}
+
+static COLD bipolar nts_reply(nts_exchange address_to exchange,
+                              const p8 address_to reply, positive length)
+{
+        byte_reader reader;
+        const p8 address_to parts[2];
+        positive lengths[2];
+        p8 plain[NTS_PACKET_ROOM];
+        positive auth = 0;
+        positive auth_length = 0;
+        bool echoed = false;
+
+        if (length < NTS_HEADER)
+                return NTS_REPLY_IGNORE;
+        reader = byte_reader_open((p8 address_to)reply + NTS_HEADER,
+                                  length - NTS_HEADER);
+        while (byte_reader_left(&reader))
+        {
+                positive at = (positive)(byte_reader_here(&reader) - reply);
+                p16 type = byte_reader_u16(&reader);
+                positive size = byte_reader_u16(&reader);
+
+                if (!byte_reader_ok(&reader) || size < 16 || size % 4 ||
+                    size - 4 > byte_reader_left(&reader))
+                        return NTS_REPLY_IGNORE;
+                if (type == NTS_EF_UID)
+                {
+                        if (echoed || size != 4 + NTS_UID_BYTES ||
+                            memory_compare(byte_reader_here(&reader),
+                                           exchange->uid, NTS_UID_BYTES))
+                                return NTS_REPLY_IGNORE;
+                        echoed = true;
+                }
+                else if (type == NTS_EF_AUTH)
+                {
+                        if (auth || size - 4 != byte_reader_left(&reader))
+                                return NTS_REPLY_IGNORE;
+                        auth = at;
+                        auth_length = size;
+                }
+                (void)byte_reader_skip(&reader, size - 4);
+        }
+        if (!echoed)
+                return NTS_REPLY_IGNORE;
+        if (!auth)
+                return reply[1] == 0 &&
+                               network_load_32((p8 address_to)reply + 12) == NTS_KISS_NTSN
+                           ? NTS_REPLY_NAK : NTS_REPLY_IGNORE;
+        {
+                byte_reader body = byte_reader_open(
+                    (p8 address_to)reply + auth + 4, auth_length - 4);
+                positive nonce_length = byte_reader_u16(&body);
+                positive cipher_length = byte_reader_u16(&body);
+                positive nonce_padded = (nonce_length + 3) & ~(positive)3;
+                positive cipher_padded = (cipher_length + 3) & ~(positive)3;
+                const p8 address_to nonce;
+                const p8 address_to cipher;
+
+                if (!byte_reader_ok(&body) || cipher_length < NTS_TAG_BYTES ||
+                    cipher_length > sizeof(plain) + NTS_TAG_BYTES ||
+                    nonce_padded + cipher_padded > byte_reader_left(&body))
+                        return NTS_REPLY_IGNORE;
+                nonce = byte_reader_here(&body);
+                cipher = nonce + nonce_padded;
+                memory_copy(plain, cipher + NTS_TAG_BYTES,
+                            cipher_length - NTS_TAG_BYTES);
+                parts[0] = reply;
+                lengths[0] = auth;
+                parts[1] = nonce;
+                lengths[1] = nonce_length;
+                if (!crypto_siv_open(address_of exchange->s2c, parts, lengths,
+                                     2, plain, cipher_length - NTS_TAG_BYTES,
+                                     cipher))
+                        return NTS_REPLY_IGNORE;
+                nts_cookies_take(exchange->state, plain,
+                                 cipher_length - NTS_TAG_BYTES);
+                crypto_forget(plain, sizeof plain);
+        }
+        return NTS_REPLY_OK;
+}
+
+/* The keys a finished handshake yields: RFC 8915 4.2. */
+static COLD bool nts_ke_keys(tls_conn address_to tls, nts_state address_to state)
+{
+        p8 context[5] = {0, 0, 0, NTS_AEAD_SIV_CMAC_256, 0};
+
+        if (!tls_export(tls, "EXPORTER-network-time-security", context, 5,
+                        state->c2s, 32))
+                return false;
+        context[4] = 1;
+        return tls_export(tls, "EXPORTER-network-time-security", context, 5,
+                          state->s2c, 32);
+}
+
+/* One key establishment with host on port: the state it leaves, or the
+   reason it did not (an HTTP_ status: no name, no route, the certificate
+   refused, or the exchange malformed). bootstrap says the certificate may
+   be judged as of the clock's floor, because this is the exchange that will
+   set the clock. */
+static COLD bipolar nts_ke(string_address host, p16 port, bool bootstrap,
+                           nts_state address_to state)
+{
+        static const p8 request[] = {0x80, 0x01, 0, 2, 0, 0, 0, 4, 0, 2, 0,
+                                     NTS_AEAD_SIV_CMAC_256, 0x80, 0, 0, 0};
+        http_link link;
+        network_deadline deadline;
+        p8 reply[NTS_KE_ROOM];
+        positive used = 0;
+        bipolar status;
+        p32 ip = http_lookup(host);
+
+        memory_fill(state, 0, sizeof(*state));
+        if (!ip)
+                return HTTP_NO_HOST;
+        memory_fill(address_of link, 0, __builtin_offsetof(http_link, session));
+        link.handle = http_stream_open(ip, port, NTS_KE_SECONDS);
+        if (link.handle < 0)
+                return link.handle;
+        status = tls_connect_with(address_of link.session, link.handle, host,
+                                  true, (const p8 address_to) "ntske/1", 7,
+                                  bootstrap);
+        if (status)
+        {
+                http_link_close(address_of link);
+                return status == TLS_UNTRUSTED ? HTTP_UNTRUSTED
+                       : status == TLS_EXPIRED ? HTTP_EXPIRED
+                       : status == TLS_NOT_YET ? HTTP_NOT_YET
+                       : status == TLS_MISMATCH ? HTTP_MISMATCH
+                       : status == TLS_CLOCK ? HTTP_CLOCK : HTTP_TLS;
+        }
+        link.tls = true;
+        status = http_link_write(address_of link, (p8 address_to)request,
+                                 sizeof request);
+        if (!status &&
+            !network_deadline_begin(address_of deadline, NTS_KE_SECONDS, 0))
+                status = HTTP_NO_REPLY;
+        while (!status && !nts_ke_complete(reply, used))
+        {
+                positive got = 0;
+
+                if (used == sizeof reply ||
+                    http_link_read_until(address_of link, reply + used,
+                                         sizeof reply - used, address_of got,
+                                         address_of deadline) ||
+                    !got)
+                        status = HTTP_NO_REPLY;
+                else
+                        used += got;
+        }
+        if (!status &&
+            (nts_ke_reply(reply, used, state) != NTS_KE_OK ||
+             !nts_ke_keys(address_of link.session, state)))
+                status = HTTP_MALFORMED;
+        http_link_close(address_of link);
+        crypto_forget(reply, sizeof reply);
+        if (status)
+                memory_fill(state, 0, sizeof(*state));
+        return status;
 }
 
 static fn http_url_leaf(string_address path, p8 address_to into, positive room)
