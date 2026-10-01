@@ -34,6 +34,7 @@ the random tier happened upon is run every time after.
 import argparse
 import ast
 import base64
+import bisect
 import collections
 import dataclasses
 import hashlib
@@ -64913,6 +64914,103 @@ def g_table_text(source):
     return "\n".join(out)
 
 
+HOT_ORDER_COMMANDS = [
+    ":", "echo hi", "echo hi | cat > /dev/null", "ls /tmp > /dev/null",
+    "x=$(echo a); echo $x > /dev/null", "for i in 1 2 3; do echo $i; done > /dev/null",
+    "cat /etc/hostname > /dev/null", "wget -q -O /dev/null http://127.0.0.1:1/ 2> /dev/null",
+    "[ -f /etc/hostname ] && echo yes > /dev/null", "grep -c a /etc/hostname > /dev/null",
+    "sed s/a/b/ /etc/hostname > /dev/null", "sort /etc/hostname > /dev/null",
+    "cp /etc/hostname /tmp/hot-order.$$; rm /tmp/hot-order.$$", "date > /dev/null",
+    "find /tmp -maxdepth 1 > /dev/null", "awk '{print}' /etc/hostname > /dev/null",
+    "printf '%s\\n' a > /dev/null", "test -n a", "wc -l /etc/hostname > /dev/null",
+    "mkdir -p /tmp/hot-order; rmdir /tmp/hot-order", "head -1 /etc/hostname > /dev/null",
+    "tr a b < /etc/hostname > /dev/null", "if true; then echo a; fi > /dev/null",
+    "case a in a) echo b;; esac > /dev/null", "f() { echo $1; }; f x > /dev/null",
+    "export A=1; env > /dev/null",
+]
+
+
+def harness_hot_order(argv):
+    """Write the order of the hot functions in src/build/spark.ld.
+
+        python3 test/differential.py --harness hot_order SHELL MAP [--write]
+
+    SHELL is a shell built for x86_64 with symbols and -ffunction-sections,
+    MAP its link map (-Wl,-Map=MAP). Every command of HOT_ORDER_COMMANDS is
+    run under qemu-user with its translation blocks logged (exact, where
+    perf's instruction sampling is throttled), each block address is named by
+    nm, and the functions come out ordered by how many of the commands
+    executed them, each as its own input section from the map. A text fault
+    maps sixteen pages of the file and the exit unmaps them: about a
+    microsecond a 64 KB window, measured, and a start went from seventeen
+    windows to eleven with this list in front. Assembly routines are left to
+    their own list in the script (riscv64's jal reaches a megabyte).
+    Without --write the block is printed."""
+    args = [a for a in argv if not a.startswith("--")]
+    if len(args) != 2:
+        print("hot_order: SHELL MAP [--write]", file=sys.stderr)
+        return 2
+    shell, mapfile = args
+    symbols = []
+    for line in subprocess.run(["nm", "-n", "-S", shell], text=True,
+                               stdout=subprocess.PIPE).stdout.splitlines():
+        part = line.split()
+        if len(part) == 4 and part[2] in "tTwW":
+            symbols.append((int(part[0], 16), int(part[1], 16), part[3]))
+    symbols.sort()
+    starts = [entry[0] for entry in symbols]
+    sections = set(re.findall(r"^ (\.text[^\s]*)", Path(mapfile).read_text(errors="replace"),
+                              re.M))
+    asm = set()
+    for source in (HARNESS_ROOT / "src").rglob("*"):
+        if source.suffix in (".c", ".inc"):
+            asm.update(re.findall(r"ASM_(?:LOCAL_)?FUNC\((\w+)\)", source.read_text(errors="replace")))
+    count = {}
+    with tempfile.TemporaryDirectory(prefix="moonwater-hot-order-") as temporary:
+        log = Path(temporary) / "blocks"
+        for command in HOT_ORDER_COMMANDS:
+            log.unlink(missing_ok=True)
+            subprocess.run(["qemu-x86_64", "-cpu", "max", "-d", "exec,nochain", "-D", str(log),
+                            shell, "-c", command], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=120)
+            seen = set()
+            for address in set(re.findall(r"\[[0-9a-f]+/([0-9a-f]+)/", log.read_text(errors="replace"))):
+                at = int(address, 16)
+                found = bisect.bisect_right(starts, at) - 1
+                if found >= 0 and at < symbols[found][0] + max(symbols[found][1], 1):
+                    seen.add(symbols[found][2])
+            for name in seen:
+                count[name] = count.get(name, 0) + 1
+
+    def section_for(name):
+        base = name[:-5] if name.endswith(".cold") else name
+        for candidate in ([".text.unlikely." + base] if name.endswith(".cold") else
+                          [".text.hot." + base, ".text." + base, ".text.startup." + base,
+                           ".text.unlikely." + base]):
+            if candidate in sections:
+                return candidate
+        return None
+
+    ordered = []
+    for name, ran in sorted(count.items(), key=lambda item: (-item[1], item[0])):
+        if re.sub(r"(\.(part|constprop|isra|cold)(\.[0-9]+)*)+$", "", name) in asm or name in asm:
+            continue
+        found = section_for(name)
+        if found and found not in ordered:
+            ordered.append(found)
+    block = "".join("                *(%s)\n" % found for found in ordered)
+    if "--write" not in argv:
+        print(block, end="")
+        return 0
+    path = HARNESS_ROOT / "src/build/spark.ld"
+    text = path.read_text()
+    begin = text.index("/* hot_order begin */\n") + len("/* hot_order begin */\n")
+    end = text.index("                /* hot_order end */")
+    path.write_text(text[:begin] + block + text[end:])
+    print("hot order: %d functions of %d executed, written" % (len(ordered), len(count)))
+    return 0
+
+
 def harness_g_tables(argv):
     """Check (or with --write, write) the table of the generator's odd
     multiples in src/net/net.c against what Python's own arithmetic gives.
@@ -64943,6 +65041,7 @@ def harness_g_tables(argv):
 
 HARNESS_CHECKS = {
     "g_tables": harness_g_tables,
+    "hot_order": harness_hot_order,
     "https_bench": harness_https_bench,
     "compression": harness_compression,
     "engines": harness_engines_main,

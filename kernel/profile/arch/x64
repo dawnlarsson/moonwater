@@ -71,6 +71,7 @@
 #       is a different case: it is compiled with -mno-sse, so v2 there means
 #       integer instructions only and there is no vector code to trip over.
 #> program_flags -march=x86-64 -mno-avx -mno-bmi -mno-bmi2 -falign-functions=1
+#> program_flags -ffunction-sections
 
 
 CONFIG_64BIT=y

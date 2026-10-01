@@ -15,6 +15,7 @@
 #       ARMv8.0 floor every arm64 core runs.
 #
 #> program_flags -mno-outline-atomics
+#> program_flags -ffunction-sections
 
 #
 #       The generic arm64 machine: a device tree or ACPI from firmware, a
