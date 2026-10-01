@@ -61977,6 +61977,110 @@ static fn crypto_floor_g_table(void)
               sums == 80 && sums_wrong == 0);
 }
 
+/* crypto_wnaf by what its digits are for: the sum of d_i 2^i is the scalar,
+   each nonzero digit is odd, within the width's range and followed by width
+   - 1 zeros, and there are no more digits than bits plus one; at widths 5
+   and 7, six and four limbs, for the ends of the range, powers of two,
+   runs of ones and a seeded spread. */
+static fn crypto_floor_wnaf(void)
+{
+        positive wrong = 0;
+        positive tried = 0;
+        p64 seed = 0x9e3779b97f4a7c15ull;
+
+        for (positive width = 5; width <= 7; width += 2)
+                for (positive limbs = 4; limbs <= 6; limbs += 2)
+                        for (positive turn = 0; turn < 300; turn++)
+                        {
+                                p64 k[CRYPTO_FE_MAX];
+                                p64 acc[CRYPTO_FE_MAX + 1];
+                                b8 digits[CRYPTO_FE_MAX * 64 + 1];
+                                positive count;
+                                positive last = 0;
+                                bool seen = false;
+                                bool bad = false;
+
+                                memory_fill(k, 0, sizeof k);
+                                for (positive i = 0; i < limbs; i++)
+                                {
+                                        seed ^= seed << 13;
+                                        seed ^= seed >> 7;
+                                        seed ^= seed << 17;
+                                        k[i] = turn % 4 == 1   ? ~(p64)0
+                                               : turn % 4 == 2 ? (seed & (seed >> 7) & (seed >> 19))
+                                                               : seed;
+                                }
+                                if (turn == 0)
+                                        memory_fill(k, 0, sizeof k);
+                                if (turn == 3)
+                                {
+                                        memory_fill(k, 0, sizeof k);
+                                        k[(turn + width) % limbs] = (p64)1 << ((turn * 7) % 64);
+                                }
+                                count = crypto_wnaf(digits, k, limbs, width);
+                                if (count > limbs * 64 + 1)
+                                        bad = true;
+                                memory_fill(acc, 0, sizeof acc);
+                                for (positive i = count; i-- && !bad;)
+                                {
+                                        p64 carry = 0;
+
+                                        for (positive j = 0; j <= limbs; j++)
+                                        {
+                                                p64 next = acc[j] >> 63;
+
+                                                acc[j] = (acc[j] << 1) | carry;
+                                                carry = next;
+                                        }
+                                        if (digits[i] > 0)
+                                        {
+                                                p64 add = (p64)digits[i];
+
+                                                for (positive j = 0; add && j <= limbs; j++)
+                                                {
+                                                        acc[j] += add;
+                                                        add = acc[j] < add;
+                                                }
+                                        }
+                                        else if (digits[i] < 0)
+                                        {
+                                                p64 sub = (p64)(-(bipolar)digits[i]);
+
+                                                for (positive j = 0; sub && j <= limbs; j++)
+                                                {
+                                                        p64 before = acc[j];
+
+                                                        acc[j] -= sub;
+                                                        sub = before < sub;
+                                                }
+                                        }
+                                }
+                                for (positive i = 0; i < count; i++)
+                                {
+                                        bipolar d = digits[i];
+                                        bipolar magnitude = d < 0 ? -d : d;
+
+                                        if (d)
+                                        {
+                                                bad |= !(magnitude & 1);
+                                                bad |= magnitude >= (bipolar)1 << (width - 1);
+                                                bad |= seen && i - last < width;
+                                                last = i;
+                                                seen = true;
+                                        }
+                                }
+                                bad |= memory_compare(acc, k, limbs * 8) != 0 || acc[limbs] != 0;
+                                if (count && !digits[count - 1])
+                                        bad = true;
+                                wrong += bad;
+                                tried++;
+                        }
+        check("crypto_wnaf's digits sum to the scalar, are odd, within range, "
+              "spaced by the width and no longer than the scalar, at widths 5 "
+              "and 7 for 1,200 scalars",
+              tried == 1200 && wrong == 0);
+}
+
 static fn crypto_floor_montgomery(void)
 {
         const crypto_field address_to orders[2] = {
@@ -65685,6 +65789,7 @@ b32 main(void)
         crypto_floor_field();
         crypto_floor_montgomery();
         crypto_floor_inverse();
+        crypto_floor_wnaf();
         crypto_floor_g_table();
         crypto_floor_x25519();
         crypto_floor_aes();

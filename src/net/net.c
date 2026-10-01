@@ -3500,6 +3500,21 @@ static fn crypto_point_scalar_private(
         crypto_forget(address_of digit, sizeof digit);
 }
 
+/* How many low bits of a nonzero x are zero, by halving the range: a public
+   value, and no count-trailing-zeros that every architecture has. */
+static positive crypto_trailing_zeros(p64 x)
+{
+        positive zeros = 0;
+
+        for (positive step = 32; step; step >>= 1)
+                if (!(x & (((p64)1 << step) - 1)))
+                {
+                        zeros += step;
+                        x >>= step;
+                }
+        return zeros;
+}
+
 /* Width-w non-adjacent form of a public scalar below 2^(64 limbs): each
    digit is zero or odd in [-(2^(w-1) - 1), 2^(w-1) - 1], a nonzero digit is
    followed by at least w - 1 zeros, and the digits weighted by 2^i sum to k.
@@ -3511,14 +3526,39 @@ static positive crypto_wnaf(b8 address_to digits, const p64 address_to k,
         const p64 half = whole >> 1;
         p64 v[CRYPTO_FE_MAX + 1];
         positive count = 0;
+        positive words = limbs + 1;
 
         memory_copy(v, k, limbs * 8);
         v[limbs] = 0;
-        while (!crypto_fe_is_zero(v, limbs + 1))
+        for (;;)
         {
-                b8 digit = 0;
+                b8 digit;
+                positive zeros;
 
-                if (v[0] & 1)
+                /* The zeros between digits go in one shift, and the scalar
+                   is looked at for the end only when its low word is. */
+                if (!v[0])
+                {
+                        if (crypto_fe_is_zero(v, words))
+                                break;
+                        for (positive i = 0; i < limbs; i++)
+                                v[i] = v[i + 1];
+                        v[limbs] = 0;
+                        memory_fill(digits + count, 0, 64);
+                        count += 64;
+                        continue;
+                }
+                zeros = crypto_trailing_zeros(v[0]);
+                if (zeros)
+                {
+                        for (positive i = 0; i + 1 < words; i++)
+                                v[i] = (v[i] >> zeros) | (v[i + 1] << (64 - zeros));
+                        v[words - 1] >>= zeros;
+                        memory_fill(digits + count, 0, zeros);
+                        count += zeros;
+                }
+
+                /* v is odd. */
                 {
                         p64 low = v[0] & (whole - 1);
 
