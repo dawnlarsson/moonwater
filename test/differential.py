@@ -51496,8 +51496,11 @@ def crypto_vectors_lines(seed):
 #       The only conditional branches the x25519 bodies may hold, each on
 #       the line that decides it: a count loaded as a constant and stepped
 #       down -- the ladder's bit index, a run of squares, the frame wipe --
-#       or, on x86_64, the feature bytes. Nothing the scalar or u reaches.
+#       or, on x86_64, the feature bytes (and p384_multiply's two, which pick
+#       its mulx body the same way). Nothing the scalar or u reaches.
 CRYPTO_X25519_COUNTED = (
+    r'"cmpb \$0, cpu_hash_probed\(%rip\)\\n jne \.Lp384_multiply_probed\\n call cpu_hash_detect\\n"',
+    r'"cmpb \$0, cpu_has_mulx\(%rip\)\\n jne \.Lp384_multiply_mulx\\n"',
     r'"decq 520\(%rsp\)\\n\s+jns \.Lx25519_x64_" s "_step\\n"',
     r'"dec %ebp\\n\s+jnz \.Lx25519_x64_" s "_squares_" id "\\n"',
     r'"cmpb \$0, cpu_hash_probed\(%rip\)\\n\s+jne \.Lx25519_x64_probed\\n"',

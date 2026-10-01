@@ -4247,6 +4247,27 @@ __asm__(
     "mov %rcx, %rbp\n add %rdx, %rbp\n sbb %rdx, %rdx\n neg %rdx\n"             \
     "sub %rcx, " w0 "\n sbb %rax, " w1 "\n sbb %rbp, " w2 "\n sbb %rdx, " w3 "\n sbb $0, " w4 "\n sbb $0, " w5 "\n sbb $0, " w6 "\n sbb $0, " w7 "\n"
 
+/* The same row by mulx: b_i in rdx, the six products on two carry chains (adcx
+   takes the low halves into w0..w5, adox the high halves into w1..w6), and
+   the carry each chain leaves added into w6 and w7, with rbp zero. A mulq
+   row waits for each product's carry before the next limb; here only the
+   chains wait. The reduction after it is the mulq row's own text. */
+#define FIELD_X64_P384_ROW_MULX(off, w0, w1, w2, w3, w4, w5, w6, w7)                     \
+    "xor %ebp, %ebp\n mov %rbp, " w7 "\n"                                      \
+    "mov " off "(%rbx), %rdx\n"                                                \
+    "mulx (%rsi), %rax, %rcx\n adcx %rax, " w0 "\n adox %rcx, " w1 "\n"        \
+    "mulx 8(%rsi), %rax, %rcx\n adcx %rax, " w1 "\n adox %rcx, " w2 "\n"       \
+    "mulx 16(%rsi), %rax, %rcx\n adcx %rax, " w2 "\n adox %rcx, " w3 "\n"      \
+    "mulx 24(%rsi), %rax, %rcx\n adcx %rax, " w3 "\n adox %rcx, " w4 "\n"      \
+    "mulx 32(%rsi), %rax, %rcx\n adcx %rax, " w4 "\n adox %rcx, " w5 "\n"      \
+    "mulx 40(%rsi), %rax, %rcx\n adcx %rax, " w5 "\n adox %rcx, " w6 "\n"      \
+    "adcx %rbp, " w6 "\n adox %rbp, " w7 "\n adcx %rbp, " w7 "\n"             \
+    "mov " w0 ", %rcx\n shl $32, %rcx\n add " w0 ", %rcx\n"                    \
+    "mov %rcx, %rax\n shl $32, %rax\n mov %rcx, %rdx\n shr $32, %rdx\n"         \
+    "add %rax, " w0 "\n adc %rdx, " w1 "\n adc $0, " w2 "\n adc $0, " w3 "\n adc $0, " w4 "\n adc $0, " w5 "\n adc %rcx, " w6 "\n adc $0, " w7 "\n" \
+    "mov %rcx, %rbp\n add %rdx, %rbp\n sbb %rdx, %rdx\n neg %rdx\n"             \
+    "sub %rcx, " w0 "\n sbb %rax, " w1 "\n sbb %rbp, " w2 "\n sbb %rdx, " w3 "\n sbb $0, " w4 "\n sbb $0, " w5 "\n sbb $0, " w6 "\n sbb $0, " w7 "\n"
+
 /* Separate REDC step on a six-limb window with the new top limb in tp:
    (W + q p) / 2^64 < 2^384 always fits, so no carry leaves the window. */
 #define FIELD_X64_P384_REDUCE(w0, w1, w2, w3, w4, w5, tp)                                \
@@ -11786,7 +11807,15 @@ __asm__(
        (OpenSSL 5.2), p384_multiply 18.9 (C 47.7; OpenSSL's generic
        bn_mul_mont 32.6), p384_square 13.7, add and subtract 1.0 to 1.7 (C
        5.2 to 8.1). A MULX/ADX body would buy a tenth on p256_multiply
-       alone, so there is none. */
+       alone, so there is none there. p384_multiply has one: its six rows
+       were each waiting on the carry of the product before (a mulq, an add
+       and an adc a limb), and with BMI2 and ADX (cpu_has_mulx, asked once a
+       call as the hashes ask it) the row is six mulx on two carry chains
+       and the reduction after it is the same text. A tiny verified https
+       fetch, which is nearly all P-384 on a chain of two P-384
+       intermediates, went from 3.54 to 3.35 million user cycles on the
+       9950X (13.55 to 12.58 million instructions). p384_square stays
+       mulq: squaring through the mulx multiply was 2% worse. */
 
     ASM_FUNC(p256_multiply)
     "push %rbx\n push %rbp\n push %r12\n push %r13\n push %r14\n push %r15\n"
@@ -11897,6 +11926,11 @@ __asm__(
     ASM_END(p384_square)
 
     ASM_FUNC(p384_multiply)
+#ifndef KERNEL_MODE
+    "cmpb $0, cpu_hash_probed(%rip)\n jne .Lp384_multiply_probed\n call cpu_hash_detect\n"
+    ".Lp384_multiply_probed:\n"
+    "cmpb $0, cpu_has_mulx(%rip)\n jne .Lp384_multiply_mulx\n"
+#endif
     "push %rbx\n push %rbp\n push %r12\n push %r13\n push %r14\n push %r15\n push %rdi\n"
     "mov %rdx, %rbx\n"
     "xor %r8d, %r8d\n xor %r9d, %r9d\n xor %r10d, %r10d\n xor %r11d, %r11d\n"
@@ -11916,6 +11950,27 @@ __asm__(
     "mov %r14, (%rdi)\n mov %r15, 8(%rdi)\n mov %r8, 16(%rdi)\n mov %r9, 24(%rdi)\n mov %r10, 32(%rdi)\n mov %r11, 40(%rdi)\n"
     "pop %r15\n pop %r14\n pop %r13\n pop %r12\n pop %rbp\n pop %rbx\n"
     ASM_RET
+#ifndef KERNEL_MODE
+    ".Lp384_multiply_mulx:\n"
+    "push %rbx\n push %rbp\n push %r12\n push %r13\n push %r14\n push %r15\n push %rdi\n"
+    "mov %rdx, %rbx\n"
+    "xor %r8d, %r8d\n xor %r9d, %r9d\n xor %r10d, %r10d\n xor %r11d, %r11d\n"
+    "xor %r12d, %r12d\n xor %r13d, %r13d\n xor %r14d, %r14d\n xor %r15d, %r15d\n"
+    FIELD_X64_P384_ROW_MULX("0", "%r8", "%r9", "%r10", "%r11", "%r12", "%r13", "%r14", "%r15")
+    FIELD_X64_P384_ROW_MULX("8", "%r9", "%r10", "%r11", "%r12", "%r13", "%r14", "%r15", "%r8")
+    FIELD_X64_P384_ROW_MULX("16", "%r10", "%r11", "%r12", "%r13", "%r14", "%r15", "%r8", "%r9")
+    FIELD_X64_P384_ROW_MULX("24", "%r11", "%r12", "%r13", "%r14", "%r15", "%r8", "%r9", "%r10")
+    FIELD_X64_P384_ROW_MULX("32", "%r12", "%r13", "%r14", "%r15", "%r8", "%r9", "%r10", "%r11")
+    FIELD_X64_P384_ROW_MULX("40", "%r13", "%r14", "%r15", "%r8", "%r9", "%r10", "%r11", "%r12")
+    "mov %r14, %rax\n mov %r15, %rdx\n mov %r8, %rcx\n mov %r9, %rbp\n mov %r10, %rsi\n mov %r11, %rbx\n"
+    "mov $0xffffffff, %edi\n sub %rdi, %rax\n not %rdi\n sbb %rdi, %rdx\n"
+    "sbb $-2, %rcx\n sbb $-1, %rbp\n sbb $-1, %rsi\n sbb $-1, %rbx\n sbb $0, %r12\n"
+    "cmovnc %rax, %r14\n cmovnc %rdx, %r15\n cmovnc %rcx, %r8\n cmovnc %rbp, %r9\n cmovnc %rsi, %r10\n cmovnc %rbx, %r11\n"
+    "pop %rdi\n"
+    "mov %r14, (%rdi)\n mov %r15, 8(%rdi)\n mov %r8, 16(%rdi)\n mov %r9, 24(%rdi)\n mov %r10, 32(%rdi)\n mov %r11, 40(%rdi)\n"
+    "pop %r15\n pop %r14\n pop %r13\n pop %r12\n pop %rbp\n pop %rbx\n"
+    ASM_RET
+#endif
     ASM_END(p384_multiply)
 
     ASM_FUNC(p384_add)

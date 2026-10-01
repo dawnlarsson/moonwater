@@ -2908,13 +2908,24 @@ static p64 crypto_fe_subtract_raw(p64 address_to d,
         return (p64)borrow;
 }
 
-static p64 crypto_fe_zero_bit(const p64 address_to a, positive n)
+static inline INLINE PURE p64 crypto_fe_zero_bit(const p64 address_to a,
+                                                 positive n)
 {
-        p64 combined = 0;
+        //      Four limbs (P-256) and six (P-384) are straight lines; the
+        //      scalar recoding's five and seven take the loop. Which one is
+        //      the curve's, so nothing here depends on a value.
+        p64 combined;
 
-        for (positive i = 0; i < n; i++)
-                combined |= a[i];
-
+        if (n == 4)
+                combined = a[0] | a[1] | a[2] | a[3];
+        else if (n == 6)
+                combined = a[0] | a[1] | a[2] | a[3] | a[4] | a[5];
+        else
+        {
+                combined = 0;
+                for (positive i = 0; i < n; i++)
+                        combined |= a[i];
+        }
         return ((combined | (0 - combined)) >> 63) ^ 1;
 }
 
@@ -3450,23 +3461,24 @@ static fn crypto_point_odd_multiples(crypto_point address_to table,
 }
 
 static fn crypto_point_add_digit(crypto_point address_to r,
-                                 const crypto_point address_to table, b8 digit)
+                                 crypto_point address_to table, b8 digit)
 {
-        crypto_point entry;
-        crypto_point sum;
-
+        //      r is both the accumulator and the sum: crypto_point_add reads
+        //      both points whole before it writes one. A positive digit adds
+        //      its table entry where it stands; only a negative one needs a
+        //      copy, to negate its y.
         if (digit > 0)
-                entry = table[digit >> 1];
-        else
         {
-                p64 zero[CRYPTO_FE_MAX];
-
-                memory_fill(zero, 0, sizeof zero);
-                entry = table[(-digit) >> 1];
-                crypto_fe_sub(entry.y, zero, entry.y, entry.field);
+                crypto_point_add(r, r, table + (digit >> 1));
+                return;
         }
-        crypto_point_add(address_of sum, r, address_of entry);
-        *r = sum;
+
+        crypto_point entry = table[(-digit) >> 1];
+        p64 zero[CRYPTO_FE_MAX];
+
+        memory_fill(zero, 0, sizeof zero);
+        crypto_fe_sub(entry.y, zero, entry.y, entry.field);
+        crypto_point_add(r, r, address_of entry);
 }
 
 /* u1 G + u2 Q for public scalars and points (below 2^(64 limbs)), in one
@@ -3484,7 +3496,6 @@ static fn crypto_point_double_scalar(crypto_point address_to r,
         b8 d2[CRYPTO_FE_MAX * 64 + 1];
         crypto_point tg[8];
         crypto_point tq[8];
-        crypto_point doubled;
         positive n1 = crypto_wnaf(d1, u1, g->n);
         positive n2 = crypto_wnaf(d2, u2, g->n);
         positive at = n1 > n2 ? n1 : n2;
@@ -3497,8 +3508,7 @@ static fn crypto_point_double_scalar(crypto_point address_to r,
         while (at)
         {
                 at--;
-                crypto_point_double(address_of doubled, r);
-                *r = doubled;
+                crypto_point_double(r, r);
                 if (at < n1 && d1[at])
                         crypto_point_add_digit(r, tg, d1[at]);
                 if (at < n2 && d2[at])
