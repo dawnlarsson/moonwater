@@ -6,6 +6,22 @@ malformed packet. A pass counts as new evidence only when it closes a named
 threat family, demonstrates that the test fails without the fix, or removes a
 gap below.
 
+The next adversarial campaign is scoped in
+[`NETWORK_ATTACK_PLAN.md`](NETWORK_ATTACK_PLAN.md). It concentrates on protocol
+composition, hostile scheduling, lifecycle confusion and asymmetric resource
+cost rather than adding another isolated malformed-packet case.
+
+The shared primitives under `net.c`, including `lib.c`'s production crypto,
+are inventoried with their evidence in
+[`NETWORK_DEPENDENCY_CLOSURE.md`](NETWORK_DEPENDENCY_CLOSURE.md). Its automated
+gate fails when `net.c` begins calling a new primitive without a reviewed test
+assignment; skipped lanes still prevent a release claim of a closed loop.
+
+Finite arithmetic claims that can be proved rather than sampled are recorded
+in [`NETWORK_PROOFS.md`](NETWORK_PROOFS.md) and checked by `net_math_proof` at
+the start of the net lane. The proof boundary is intentionally narrower than a
+claim that the entire protocol stack is formally verified.
+
 ## Current assessment
 
 The stack has strong hand-written boundary checks and unusually broad
@@ -88,16 +104,25 @@ does not convert those protocols into authenticated ones.
 ### P1 — resource and state-machine assurance
 
 1. Byte, item and recursion ceilings are recorded and hit-tested
-   (`SECURITY_TEST_MATRIX.md`); add an explicit CPU-work budget per parser or
-   transaction loop.
+   (`SECURITY_TEST_MATRIX.md`). DNS, DHCP, SNTP and netlink now also cap
+   hostile or unrelated datagrams per receive phase. HTTP and TLS parser work
+   is charged to their byte, header, handshake and record ceilings; continue
+   auditing any newly introduced transaction loop before it enters the
+   dependency manifest.
 2. Allocation, `mmap`, descriptor, short-I/O, `EINTR` and deadline faults are
-   injected for HTTP, TLS, DNS, DHCP and netlink; add clock-jump faults and
-   extend the rest to SNTP.
-3. Make ARM64 and RISC-V network lanes required, including sanitizer-capable
-   hosted builds where available. “Not run” is not evidence.
-4. Deterministic hostile scheduling: done for HTTP responses by
-   `wget_mutation` (one-byte delivery, every grammar boundary, early FIN/RST,
-   a 1xx storm); open for TLS and for the redirect legs.
+   injected for HTTP, TLS, DNS, DHCP and netlink. The shared absolute-deadline
+   arithmetic now runs over zero, backward and forward clock jumps; extend the
+   remaining allocation and I/O faults to SNTP itself.
+3. The release command now makes ARM64 and RISC-V network lanes required and
+   enables freestanding UBSan traps (`MOONWATER_REQUIRE_ARCHES=1 MW_UBSAN=1 sh
+   test/run net`); hosted ASan/UBSan and MSan remain required companion reports.
+   Ordinary developer lanes may still soft-skip. “Not run” is not release
+   evidence.
+4. Deterministic hostile scheduling: HTTP responses use `wget_mutation`
+   (one-byte delivery, every grammar boundary, early FIN/RST, a 1xx storm),
+   TLS handshake/record reads use the seeded `tls_hs_fuzz` chunk scheduler,
+   and every live HTTPS redirect leg is repeated whole, byte-at-a-time and at
+   HTTP grammar boundaries by `https_downgrade`.
 
 ### P2 — independent and operational assurance
 
@@ -184,26 +209,36 @@ not part of this one; they are listed with the gap they would close.
   of the Wi-Fi code, the watcher, SNTP, waterlink and the network client; no
   memory-corruption bug a network attacker can reach was found) left these as
   they are, each low and each found by reading:
-  - The DNS client falls back from EDNS0 on FORMERR and NOTIMP, not on a
-    timeout, as the resolvers that followed the 2019 flag day do: a network
-    that silently drops queries carrying an OPT record resolves nothing.
-  - Waterlink's admission limiter is keyed on the source address before the
-    address is proved, so a spoofed address of a paired peer at about six
-    datagrams a second starves that peer's handshakes (the sender needs the
-    listener's public key), and a holder of an IPv6 /64 can drain the global
-    bucket. WireGuard's answer, a per-source limit behind a cookie, is the fix.
+  - The DNS EDNS0 black-hole is closed here: the EDNS attempt owns only the
+    first second of the resolver's absolute budget, and silence is retried
+    once without the option. FORMERR and NOTIMP retain the same fallback.
+  - Waterlink's per-source admission limiter is now behind cookie proof. An
+    unproven address can spend only the global/load buckets, so spoofing a
+    paired peer below the load threshold cannot drain that peer's private
+    burst; once load triggers cookies, only a mac2 bound to the source address
+    and port reaches the per-source limiter. IPv6 rotation is held by the
+    global/load buckets rather than creating fresh private bursts. Its refill
+    arithmetic also refuses backward clock readings and saturates large
+    forward jumps without overflowing the elapsed-time product.
   - A forged clock step, on a clock before the SNTP window, cannot be undone by
     honest answers; authenticated time is the fix (a separate pull request).
-  - Waterlink's `leave --forget` does not end a live session at its next
-    rekey; a group after the first is greeted back no sooner than ten seconds
-    after the first group's greeting; the one-shot unicast reply of the
-    mDNS reader carries the first interface's address.
+  - Waterlink's `leave --forget` now ends a forgotten peer's live sessions as
+    soon as that peer proves its identity in its next rekey: all three traffic
+    key epochs are scrubbed before another queued carry can be accepted, and
+    the next service turn tears down descriptors and children. The cross-group greeting delay is closed here: the recent-greeting
+    key includes the group's stable cryptographic mark, while the ring remains
+    the global amplification budget. The one-shot mDNS reply's former use of
+    the first enumerated interface is closed here: `IP_PKTINFO` binds its A
+    record to the local address that received the question.
   - The radio lock is held across a whole join, so `bluetooth add` and
-    `remove` wait on a long one; a FIFO planted at `/root/wifi` blocks the
-    readers of the list (root's write is needed); 64 or more beacon names hide
-    real networks from the list.
-  - An off-link router in a lease is accepted and then refused by the kernel,
-    so the lease is rolled back and asked for again every four to ten seconds.
+    `remove` wait on a long one; 64 or more beacon names hide real networks
+    from the list. The FIFO planted at `/root/wifi` is closed here: saved wifi
+    and bluetooth state is opened nonblocking and accepted only as a regular
+    file, without following a final symlink.
+  - An off-link router in a lease is refused before the lease is installed,
+    except with a /32 address where an off-link next hop is an intentional
+    point-to-point/cloud configuration. This closes the former four-to-ten
+    second acquire/rollback loop.
 - The CI `security` job is parked by design and this change does not touch it.
 
 ### Decisions

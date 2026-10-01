@@ -250,6 +250,38 @@ static bipolar host_read_text(string_address path, p8 address_to into,
         return got;
 }
 
+/* Persistent state is a regular file owned by this program. Opening it
+   nonblocking first means a FIFO planted at a state name cannot stop a root
+   command before it has a chance to reject the object; O_NOFOLLOW gives a
+   planted final symlink the same refusal as the writers. */
+static bipolar host_read_state(string_address path, p8 address_to into,
+                               positive capacity)
+{
+        struct stat facts;
+        bipolar handle;
+        bipolar got;
+
+        if (!capacity)
+                return -1;
+        handle = system_open_at(AT_FDCWD, path,
+                                FILE_READ | O_NONBLOCK | O_NOFOLLOW |
+                                    O_CLOEXEC);
+        if (handle < 0)
+                return handle;
+        if (system_file_status(handle, address_of facts) < 0 ||
+            !S_ISREG(facts.st_mode))
+        {
+                system_close(handle);
+                into[0] = end;
+                return -22;
+        }
+        got = system_read_retry((positive)handle, into, capacity - 1);
+        system_close(handle);
+        if (got >= 0)
+                into[got] = end;
+        return got;
+}
+
 /*
         A state file this writes as root, under /run/moonwater or /root, is
         opened where it is and never through a link: a name planted there
@@ -5728,8 +5760,7 @@ static bool radio_line_has(p8 address_to text, positive got, string_address want
 static positive radio_wifi_load(radio_network address_to into, positive room)
 {
         p8 text[8192];
-        bipolar got = file_slurp_once_at(AT_FDCWD, NET_WIFI_LIST, text,
-                                         sizeof(text));
+        bipolar got = host_read_state(NET_WIFI_LIST, text, sizeof(text));
         positive count = 0;
         positive at = 0;
         bool want_ssid = true;
@@ -7866,7 +7897,7 @@ static b32 radio_bluetooth_add(string_address identity)
         lock = radio_lock(true);
         if (lock < 0)
                 return host_fail("bluetooth", lock);
-        got = file_slurp_once_at(AT_FDCWD, NET_BLUETOOTH_LIST, text, sizeof(text));
+        got = host_read_state(NET_BLUETOOTH_LIST, text, sizeof(text));
         if (got < 0)
         {
                 text[0] = end;
@@ -7917,7 +7948,7 @@ static b32 radio_bluetooth_remove(string_address identity)
         lock = radio_lock(true);
         if (lock < 0)
                 return host_fail("bluetooth", lock);
-        got = file_slurp_once_at(AT_FDCWD, NET_BLUETOOTH_LIST, text, sizeof(text));
+        got = host_read_state(NET_BLUETOOTH_LIST, text, sizeof(text));
         if (got <= 0 || !radio_line_has(text, (positive)got, identity))
         {
                 radio_unlock(lock);
@@ -7956,8 +7987,7 @@ static b32 radio_bluetooth_remove(string_address identity)
 static b32 radio_bluetooth_status(void)
 {
         p8 text[4096];
-        bipolar got = file_slurp_once_at(AT_FDCWD, NET_BLUETOOTH_LIST, text,
-                                         sizeof(text));
+        bipolar got = host_read_state(NET_BLUETOOTH_LIST, text, sizeof(text));
         bool off = radio_word_is(NET_BLUETOOTH_POWER, "off");
         positive at = 0;
 
@@ -9362,6 +9392,7 @@ static b32 host_tune(string_address address_to arguments, positive count)
 #define SNTP_SECONDS 2
 #define SNTP_SAMPLES 5
 #define SNTP_SERVERS 3
+#define SNTP_DISCARD_MAX 64
 #define SNTP_UNIX 2208988800u
 #define SNTP_LI_VN_MODE 0x23
 #define SNTP_NANOSECONDS 1000000000ull
@@ -10409,6 +10440,7 @@ static HOT bipolar sntp_exchange(b32 handle,
         bipolar wait;
         bipolar received;
         bipolar verdict;
+        positive discarded = 0;
         bool stamped;
 
         into->ok = false;
@@ -10456,15 +10488,25 @@ static HOT bipolar sntp_exchange(b32 handle,
                                 the deadline ran out.
                         */
                         (void)sntp_transmit_stamp(handle, mine, spare);
+                        if (discarded++ == SNTP_DISCARD_MAX)
+                                return SNTP_NO_REPLY;
                         continue;
                 }
                 if_rare (received < SNTP_PACKET)
+                {
+                        if (discarded++ == SNTP_DISCARD_MAX)
+                                return SNTP_NO_REPLY;
                         continue;
+                }
                 verdict = sntp_reply_sample(reply, request, t1,
                                             sntp_timespec_ns(got[0], got[1]),
                                             tight, into);
                 if_rare (verdict == SNTP_NO_REPLY)
+                {
+                        if (discarded++ == SNTP_DISCARD_MAX)
+                                return SNTP_NO_REPLY;
                         continue;
+                }
                 return verdict;
         }
 }

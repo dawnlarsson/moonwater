@@ -233,6 +233,7 @@ static fn link_name_for(link_peers address_to peers, p8 address_to offered,
 struct link_greeted {
         p8 address[16];
         p16 port;
+        p32 group;
         p64 at;
 };
 
@@ -437,6 +438,8 @@ static fn link_nearby_open(void)
                                 address_of ttl, sizeof ttl);
         (void)socket_option_set((b32)link_nearby.socket, 0, 12, // RECVTTL
                                 address_of one, sizeof one);
+        (void)socket_option_set((b32)link_nearby.socket, 0, 8, // IP_PKTINFO
+                                address_of one, sizeof one);
 
         if (socket_bind((b32)link_nearby.socket, address_of self,
                         sizeof self) < 0)
@@ -535,13 +538,15 @@ static fn link_nearby_stop(void)
 }
 
 // The same place is greeted once in a while, not at every announcement.
-static bool link_greeted_lately(p8 address_to address, p16 port, p64 now)
+static bool link_greeted_lately(p32 group, p8 address_to address, p16 port,
+                                p64 now)
 {
         for (positive at = 0; at < LINK_GREETED; at++)
         {
                 struct link_greeted address_to greeted = link_nearby.greeted + at;
 
                 if (greeted->at && now - greeted->at < LINK_GREET_AGAIN &&
+                    greeted->group == group &&
                     greeted->port == port &&
                     !memory_compare(greeted->address, address, 16))
                         return true;
@@ -564,7 +569,7 @@ static fn link_pair_begin(positive group, p8 address_to address, p16 port,
         p8 ephemeral[32];
         p64 wall = system_clock_ns(0);
 
-        if (link_greeted_lately(address, port, now) ||
+        if (link_greeted_lately(keys->mark, address, port, now) ||
             system_random_fill(ephemeral, 32, 0) < 0)
                 return;
         waterlink_stamp(hello, wall / 1000000000ull,
@@ -586,6 +591,7 @@ static fn link_pair_begin(positive group, p8 address_to address, p16 port,
                         (link_nearby.greeted_next + 1) % LINK_GREETED;
                 memory_copy(next->address, address, 16);
                 next->port = port;
+                next->group = keys->mark;
                 next->at = now ? now : 1;
         }
         crypto_forget(ephemeral, sizeof ephemeral);
@@ -612,7 +618,8 @@ static bool link_pair_greeted(positive group, p8 address_to key,
         each group, unless a member of that group is already known there.
 */
 static fn link_nearby_heard(p8 address_to packet, positive length,
-                            p8 address_to address, p16 source_port, p64 now)
+                            p8 address_to address, p16 source_port,
+                            p32 local_address, p64 now)
 {
         struct waterlink_found found;
         link_peers peers;
@@ -634,9 +641,11 @@ static fn link_nearby_heard(p8 address_to packet, positive length,
                         positive reply_length = waterlink_mdns_announce(
                                 reply, sizeof reply, link_nearby.instance,
                                 link_nearby.host, link_port(),
-                                link_nearby.interfaces
-                                        ? link_nearby.interface_address[0]
-                                        : 0,
+                                local_address
+                                    ? local_address
+                                    : (link_nearby.interfaces
+                                           ? link_nearby.interface_address[0]
+                                           : 0),
                                 10, found.id, found.question,
                                 found.question_length);
                         socket_address_internet to = {
@@ -700,6 +709,30 @@ static fn link_nearby_heard(p8 address_to packet, positive length,
                                                 now);
                 }
         }
+}
+
+/* The local IPv4 address the kernel says received this packet. IP_PKTINFO's
+   data is ifindex, spec_dst and the header's destination, each four bytes;
+   spec_dst is the local address selected for the incoming packet. */
+static p32 link_nearby_local(p8 address_to control, positive length,
+                             positive room)
+{
+        if (length > room)
+                length = room;
+        for (positive at = 0; at + 16 <= length;)
+        {
+                p64 size;
+                b32 has[2];
+
+                memory_copy(address_of size, control + at, 8);
+                memory_copy(has, control + at + 8, 8);
+                if (size < 16 || size > length - at)
+                        break;
+                if (!has[0] && has[1] == 8 && size >= 28) // IPPROTO_IP, IP_PKTINFO
+                        return network_load_32(control + at + 20);
+                at += (size + 7) & ~7ull;
+        }
+        return 0;
 }
 
 /*
@@ -802,7 +835,10 @@ static fn link_nearby_receive(p64 now)
 
                 link_address_v4(address, network_order_32(from.host));
                 link_nearby_heard(packet, (positive)got, address,
-                                  network_order_16(from.port), now);
+                                  network_order_16(from.port),
+                                  link_nearby_local((p8 address_to)control,
+                                                    message.control_length,
+                                                    sizeof control), now);
         }
 }
 
