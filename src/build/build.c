@@ -166,7 +166,7 @@ static build_setting build_settings[BUILD_SETTING_ROOM] = {
         /*      Booting the built image, and where the module's own build
                 products land beside its source. */
         {"emulator", "qemu-system-x86_64"},
-        {"emulator_flags", "-m 2G -smp 2 -cpu Nehalem"},
+        {"emulator_flags", "-m 4G -smp 2 -cpu Nehalem"},
         {"emulator_devices",
          "-vga none -device virtio-gpu-pci -device qemu-xhci"
          " -device usb-tablet -device usb-kbd"
@@ -178,7 +178,7 @@ static build_setting build_settings[BUILD_SETTING_ROOM] = {
                 display to turn off, a PL011 on arm64, and a GICv3 there so
                 hvf and kvm can accelerate the interrupt controller. */
         {"emulator_arm64", "qemu-system-aarch64"},
-        {"emulator_flags_arm64", "-machine virt,gic-version=3 -cpu max,pauth-impdef=on -m 2G -smp 2"},
+        {"emulator_flags_arm64", "-machine virt,gic-version=3 -cpu max,pauth-impdef=on -m 4G -smp 2"},
         {"emulator_devices_arm64",
          "-device virtio-gpu-pci -device qemu-xhci"
          " -device usb-tablet -device usb-kbd"
@@ -186,7 +186,7 @@ static build_setting build_settings[BUILD_SETTING_ROOM] = {
          " -device virtio-rng-pci -no-reboot"},
         {"kernel_cmdline_arm64", "console=ttyAMA0 drm_client_lib.active="},
         {"emulator_riscv64", "qemu-system-riscv64"},
-        {"emulator_flags_riscv64", "-machine virt -cpu rv64 -m 2G -smp 2"},
+        {"emulator_flags_riscv64", "-machine virt -cpu rv64 -m 4G -smp 2"},
         {"emulator_devices_riscv64",
          "-device virtio-gpu-pci -device qemu-xhci"
          " -device usb-tablet -device usb-kbd"
@@ -6131,7 +6131,35 @@ static string_address build_boot_setting(string_address name,
         return value ? value : build_setting_get(name);
 }
 
-static b32 build_boot(string_address image, bool console, string_address arch)
+/*
+        Gigabytes of guest memory, as "8" or "8G": the -m value, or null when
+        it is not a whole number from 1 to 4096. A -m after the emulator flags
+        wins over the one in them, so a setting that names its own memory is
+        overridden by --ram and by nothing else.
+*/
+static string_address build_ram(string_address text)
+{
+        static p8 value[8];
+        positive digits = 0;
+        positive gigs = 0;
+
+        while (text[digits] >= '0' && text[digits] <= '9' && digits < 5)
+                gigs = gigs * 10 + (positive)(text[digits++] - '0');
+
+        if (text[digits] == 'G' || text[digits] == 'g')
+                digits++;
+
+        if (!gigs || gigs > 4096 || text[digits] || text[0] == '0')
+                return null;
+
+        digits = positive_into(value, gigs);
+        value[digits] = 'G';
+        value[digits + 1] = end;
+        return (string_address)value;
+}
+
+static b32 build_boot(string_address image, bool console, string_address arch,
+                      string_address ram)
 {
         string_address emulator = build_boot_setting("emulator", arch);
         bool native = word_is(build_arch_here(), arch);
@@ -6157,6 +6185,11 @@ static b32 build_boot(string_address image, bool console, string_address arch)
         count = build_add_split((string_address address_to)words, count,
                                 BUILD_ARGUMENT_ROOM,
                                 build_boot_setting("emulator_flags", arch));
+        if (ram)
+        {
+                words[count++] = "-m";
+                words[count++] = ram;
+        }
         words[count++] = "-kernel";
         words[count++] = image;
         count = build_add_split((string_address address_to)words, count,
@@ -6492,6 +6525,7 @@ b32 main()
                 string_address arch_asked = null;
                 string_address profile_arch = null;
                 string_address target = null;
+                string_address ram = null;
 
                 build_is_safe();
 
@@ -6510,6 +6544,19 @@ b32 main()
                         }
                         else if (word_is(word, "--shell"))
                                 console = true;
+                        else if (word_is(word, "--ram") ||
+                                 string_has_prefix(word, "--ram="))
+                        {
+                                string_address given =
+                                    word[5] ? word + 6
+                                            : (at + 1 < count ? arguments[++at]
+                                                              : (string_address)"");
+
+                                ram = build_ram(given);
+                                if (!ram)
+                                        return build_die(
+                                                "--ram wants whole gigabytes of memory, 1 to 4096");
+                        }
                         else if (word_is(word, "--usb"))
                                 usb = true;
                         else if (word_is(word, "--host"))
@@ -6641,6 +6688,6 @@ b32 main()
                 if (usb)
                         return build_usb(image);
 
-                return build_boot(image, console, target ? target : (string_address)"x64");
+                return build_boot(image, console, target ? target : (string_address)"x64", ram);
         }
 }
