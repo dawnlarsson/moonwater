@@ -1171,11 +1171,20 @@ static COLD bool net_lease_expired_at(const net_holding address_to held,
                now - held->taken >= held->lease.seconds;
 }
 
+/* A server picks T1 and T2 for the lease it hands out, and a T1 of a second on
+   a lease of an hour makes a client fork, ask, rewrite resolv.conf and log every
+   second for as long as the server says so. The renewal is not scheduled sooner
+   than ten seconds after the lease was taken, or than half the lease where that
+   is shorter (a lease of three seconds is renewed at one, as it says): the lease
+   is taken as it was given and the interval is the client's own. */
+#define NET_RENEW_FLOOR_SECONDS 10
+
 static COLD positive net_lease_due_in(const net_holding address_to held,
                                  positive now)
 {
         positive gone;
         positive retry;
+        positive floor;
 
         if (!held || !held->index || !held->lease.seconds)
                 return 0;
@@ -1186,6 +1195,9 @@ static COLD positive net_lease_due_in(const net_holding address_to held,
 
         gone = now - held->taken;
         retry = held->retry ? held->retry : held->lease.renewal;
+        floor = min(held->lease.seconds / 2, (positive)NET_RENEW_FLOOR_SECONDS);
+        if (retry && retry < floor)
+                retry = floor;
         if (!retry || retry > held->lease.seconds)
                 retry = held->lease.seconds;
         return gone >= retry ? 1 : retry - gone;

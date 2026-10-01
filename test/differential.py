@@ -40138,6 +40138,15 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         FUZZ_REQUIRE(due >= 1 && due <= timed.seconds, "a wake outside the lease");
         FUZZ_REQUIRE(expired || (now >= start && now - start < timed.seconds),
                      "a lease kept past its lifetime");
+        /* A renewal is not due sooner than its floor after the lease was
+           taken, whatever T1 the server named: ten seconds, or half the
+           lease where that is shorter. */
+        if (start && timed.seconds >= 3 && !net_lease_expired_at(&holding, start))
+        {
+                positive floor = timed.seconds / 2 < 10 ? timed.seconds / 2 : 10;
+                FUZZ_REQUIRE(net_lease_due_in(&holding, start) >= floor,
+                             "a renewal due sooner than its floor");
+        }
         bool rebinding = net_lease_rebinding_at(&holding, now);
         positive attempt = net_lease_attempt_time(&holding, now, rebinding);
         FUZZ_REQUIRE(attempt <= 4 && (!attempt ||
