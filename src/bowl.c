@@ -2737,30 +2737,46 @@ static bool bowl_hex_digest(string_address text, positive length)
                string_span_max(text, length, bowl_set_lower_hex) == length;
 }
 
+/* Everything a descriptor reads, written into a digest that is already open
+   (the signed archive adds its trailer after it), with how many bytes that
+   was when asked. False when a read failed, an interrupted one retried. One
+   buffer for both callers. */
+static bool bowl_digest_stream(bipolar handle, digest_state address_to digest,
+                               p64 address_to size)
+{
+        static p8 chunk[65536];
+        bipolar got;
+        p64 total = 0;
+
+        while ((got = system_read_retry((positive)handle, chunk,
+                                        sizeof(chunk))) > 0)
+        {
+                digest_write(digest, chunk, (positive)got);
+                total += (p64)got;
+        }
+        if (got < 0)
+                return false;
+        if (size)
+                address_to size = total;
+        return true;
+}
+
 /* The SHA-256 of what a descriptor reads, as lower-case hex, with how many
    bytes that was. */
 static bool bowl_sha256_of(bipolar handle, p8 address_to hex, p64 address_to size)
 {
-        static p8 chunk[65536];
         digest_state digest;
         p8 sum[32];
-        bipolar got;
-        p64 total = 0;
+        bool whole;
 
         digest_open(address_of digest, DIGEST_SHA256, 32);
-        while ((got = system_read_once(handle, chunk, sizeof(chunk))) > 0)
-        {
-                digest_write(address_of digest, chunk, (positive)got);
-                total += (p64)got;
-        }
+        whole = bowl_digest_stream(handle, address_of digest, size);
         digest_close(address_of digest, sum);
-        if (got < 0)
+        if (!whole)
                 return false;
 
         memory_into_hex(hex, sum, sizeof(sum));
         hex[BOWL_DIGEST_HEX] = end;
-        if (size)
-                address_to size = total;
         return true;
 }
 
@@ -2829,50 +2845,44 @@ static bool crypto_rsa_pkcs1(p8 address_to n_bytes, positive n_length,
 static positive bowl_key_modulus(const struct bowl_key address_to key,
                                  p8 address_to into)
 {
+        static p8 digits[256];
         positive length = string_length(key->modulus);
-        positive at;
 
         if (length > BOWL_KEY_BYTES * 2 || (length & 1))
                 return 0;
 
-        for (at = 0; at < length; at++)
+        //      Lower case only, as the table holds it: anything else is the
+        //      sentinel, and the decoder stops before the pair it is in.
+        if (!digits[0])
         {
-                p8 c = (p8)key->modulus[at];
-                p8 v = c >= 'a' ? (p8)(c - 'a' + 10) : (p8)(c - '0');
-
-                if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
-                        return 0;
-                if (at & 1)
-                        into[at / 2] |= v;
-                else
-                        into[at / 2] = (p8)(v << 4);
+                memory_fill(digits, 255, sizeof(digits));
+                for (positive at = 0; at < 10; at++)
+                        digits['0' + at] = (p8)at;
+                for (positive at = 0; at < 6; at++)
+                        digits['a' + at] = (p8)(10 + at);
         }
-        return length / 2;
+        return memory_decode_power2(into, (address_any)key->modulus, length / 2,
+                                    digits, 4) == length / 2
+                   ? length / 2
+                   : 0;
 }
 
 // The bits in a byte, counted from its highest set one.
 static positive bowl_key_width(p8 byte)
 {
-        positive width = 0;
-
-        for (; byte; byte >>= 1)
-                width++;
-        return width;
+        return byte ? top_bit_known(byte) + 1 : 0;
 }
 
 static positive bowl_key_mpi(p8 address_to into, const p8 address_to bytes,
                              positive length)
 {
+        positive zeros = memory_span_byte((address_any)bytes, 0, length);
         positive bits;
 
-        while (length && !*bytes)
-        {
-                bytes++;
-                length--;
-        }
+        bytes += zeros;
+        length -= zeros;
         bits = length ? length * 8 - 8 + bowl_key_width(bytes[0]) : 0;
-        into[0] = (p8)(bits >> 8);
-        into[1] = (p8)bits;
+        network_store_16(into, (p16)bits);
         memory_copy(into + 2, bytes, length);
         return 2 + length;
 }
@@ -2882,8 +2892,7 @@ static bool bowl_key_fingerprint(const struct bowl_key address_to key,
                                  p8 address_to hex)
 {
         p8 modulus[BOWL_KEY_BYTES];
-        p8 exponent[4] = {(p8)(key->exponent >> 24), (p8)(key->exponent >> 16),
-                          (p8)(key->exponent >> 8), (p8)key->exponent};
+        p8 exponent[4];
         p8 packet[3 + 6 + 2 + BOWL_KEY_BYTES + 2 + 4];
         p8 sum[20];
         positive modulus_length = bowl_key_modulus(key, modulus);
@@ -2893,25 +2902,20 @@ static bool bowl_key_fingerprint(const struct bowl_key address_to key,
         if (!modulus_length)
                 return false;
 
+        network_store_32(exponent, key->exponent);
         packet[at++] = 4;
-        packet[at++] = (p8)(key->created >> 24);
-        packet[at++] = (p8)(key->created >> 16);
-        packet[at++] = (p8)(key->created >> 8);
-        packet[at++] = (p8)key->created;
+        network_store_32(packet + at, key->created);
+        at += 4;
         packet[at++] = 1;
         at += bowl_key_mpi(packet + at, modulus, modulus_length);
         at += bowl_key_mpi(packet + at, exponent, 4);
         packet[0] = 0x99;
-        packet[1] = (p8)((at - 3) >> 8);
-        packet[2] = (p8)(at - 3);
+        network_store_16(packet + 1, (p16)(at - 3));
 
         digest_open(address_of digest, DIGEST_SHA1, 20);
         digest_write(address_of digest, packet, at);
         digest_close(address_of digest, sum);
-        memory_into_hex(hex, sum, sizeof(sum));
-        for (at = 0; at < 40; at++)
-                if (hex[at] >= 'a')
-                        hex[at] = (p8)(hex[at] - 32);
+        memory_into_hex_case(hex, sum, sizeof(sum), 1);
         hex[40] = end;
         return true;
 }
@@ -2932,103 +2936,95 @@ static bool bowl_signature_read(const p8 address_to bytes, positive length,
                                 const struct bowl_key address_to key,
                                 struct bowl_signature address_to into)
 {
-        positive at = 0;
-        positive body;
-        positive end_of_hashed;
+        byte_reader packet = byte_reader_open(bytes, length);
+        p8 tag = byte_reader_u8(&packet);
+        positive size;
+        byte_reader body;
+        byte_reader hashed;
         positive unhashed;
         positive bits;
         bool created = false;
+        bool listed = false;
         bool issuer = false;
 
-        if (length < 2 || !(bytes[0] & 0x80))
+        if (!(tag & 0x80))
                 return false;
 
         // Old or new packet header; tag 2 is a signature.
-        if (bytes[0] & 0x40)
+        if (tag & 0x40)
         {
-                if ((bytes[0] & 0x3f) != 2)
+                p8 first;
+
+                if ((tag & 0x3f) != 2)
                         return false;
-                if (bytes[1] < 192)
-                {
-                        body = bytes[1];
-                        at = 2;
-                }
-                else if (bytes[1] < 224 && length > 2)
-                {
-                        body = (positive)((bytes[1] - 192) << 8) + bytes[2] + 192;
-                        at = 3;
-                }
+                first = byte_reader_u8(&packet);
+                if (first < 192)
+                        size = first;
+                else if (first < 224)
+                        size = (positive)((first - 192) << 8) +
+                               byte_reader_u8(&packet) + 192;
                 else
                         return false;
         }
         else
         {
-                if (((bytes[0] >> 2) & 15) != 2)
+                if (((tag >> 2) & 15) != 2)
                         return false;
-                if ((bytes[0] & 3) == 0)
-                {
-                        body = bytes[1];
-                        at = 2;
-                }
-                else if ((bytes[0] & 3) == 1 && length > 2)
-                {
-                        body = (positive)(bytes[1] << 8) | bytes[2];
-                        at = 3;
-                }
+                if ((tag & 3) == 0)
+                        size = byte_reader_u8(&packet);
+                else if ((tag & 3) == 1)
+                        size = byte_reader_u16(&packet);
                 else
                         return false;
         }
-        if (at + body != length || body < 12)
+
+        // One packet and nothing after it.
+        body = byte_reader_window(&packet, size);
+        if (!byte_reader_end(&packet) || size < 12)
                 return false;
 
-        bytes += at;
-        length = body;
-        if (bytes[0] != 4 || bytes[1] != 0 || bytes[2] != 1 ||
-            (bytes[3] != 8 && bytes[3] != 10))
+        if (byte_reader_u8(&body) != 4 || byte_reader_u8(&body) != 0 ||
+            byte_reader_u8(&body) != 1)
                 return false;
-        into->hash = bytes[3];
-        into->hashed_length = (positive)(bytes[4] << 8) | bytes[5];
-        if (6 + into->hashed_length + 2 > length)
+        into->hash = byte_reader_u8(&body);
+        if (into->hash != 8 && into->hash != 10)
                 return false;
-        into->hashed = bytes + 6;
-        end_of_hashed = 6 + into->hashed_length;
+        into->hashed_length = byte_reader_u16(&body);
+        hashed = byte_reader_window(&body, into->hashed_length);
+        if (!byte_reader_ok(&body))
+                return false;
+        into->hashed = byte_reader_here(&hashed);
 
-        for (at = 0; at < into->hashed_length;)
+        while (byte_reader_left(&hashed))
         {
-                positive size = into->hashed[at];
-                positive kind;
+                positive span = byte_reader_u8(&hashed);
+                byte_reader field;
+                const p8 address_to print;
+                p8 kind;
 
-                if (size < 192)
-                        at += 1;
-                else if (size < 255 && at + 1 < into->hashed_length)
-                {
-                        size = (positive)((size - 192) << 8) +
-                               into->hashed[at + 1] + 192;
-                        at += 2;
-                }
-                else
+                if (span == 255)
                         return false;
-                if (!size || at + size > into->hashed_length)
+                if (span >= 192)
+                        span = (positive)((span - 192) << 8) +
+                               byte_reader_u8(&hashed) + 192;
+                field = byte_reader_window(&hashed, span);
+                if (!span || !byte_reader_ok(&hashed))
                         return false;
-                kind = into->hashed[at];
-                if (kind == 2 && size == 5 && !created)
+                kind = byte_reader_u8(&field);
+                if (kind == 2 && span == 5 && !created)
                 {
-                        into->created = ((p32)into->hashed[at + 1] << 24) |
-                                        ((p32)into->hashed[at + 2] << 16) |
-                                        ((p32)into->hashed[at + 3] << 8) |
-                                        into->hashed[at + 4];
+                        into->created = byte_reader_u32(&field);
                         created = true;
                 }
-                else if (kind == 33 && size == 22 && !issuer &&
-                         into->hashed[at + 1] == 4)
+                else if (kind == 33 && span == 22 && !listed &&
+                         byte_reader_u8(&field) == 4 &&
+                         (print = byte_reader_take(&field, 20)))
                 {
                         p8 hex[41];
 
-                        memory_into_hex(hex, into->hashed + at + 2, 20);
+                        memory_into_hex_case(hex, (address_any)print, 20, 1);
                         hex[40] = end;
-                        for (positive digit = 0; digit < 40; digit++)
-                                if (hex[digit] >= 'a')
-                                        hex[digit] = (p8)(hex[digit] - 32);
+                        listed = true;
                         issuer = string_equals((string_address)hex,
                                                key->fingerprint);
                 }
@@ -3036,24 +3032,21 @@ static bool bowl_signature_read(const p8 address_to bytes, positive length,
                         return false;
                 else if (kind & 0x80)
                         return false;
-                at += size;
         }
-        if (!created || !issuer)
+        if (!byte_reader_ok(&hashed) || !created || !issuer)
                 return false;
 
-        unhashed = (positive)(bytes[end_of_hashed] << 8) | bytes[end_of_hashed + 1];
-        at = end_of_hashed + 2 + unhashed;
-        if (at + 2 + 2 > length)
-                return false;
-        into->left[0] = bytes[at];
-        into->left[1] = bytes[at + 1];
-        bits = (positive)(bytes[at + 2] << 8) | bytes[at + 3];
-        at += 4;
+        // The unhashed area is an attacker's and is not read.
+        unhashed = byte_reader_u16(&body);
+        (void)byte_reader_skip(&body, unhashed);
+        into->left[0] = byte_reader_u8(&body);
+        into->left[1] = byte_reader_u8(&body);
+        bits = byte_reader_u16(&body);
         into->mpi_length = (bits + 7) / 8;
-        into->mpi = bytes + at;
+        into->mpi = byte_reader_take(&body, into->mpi_length);
         // The count is the integer's own width, so one integer has one spelling.
-        return bits && at + into->mpi_length == length && bytes[at] &&
-               bits == into->mpi_length * 8 - 8 + bowl_key_width(bytes[at]);
+        return byte_reader_end(&body) && bits && into->mpi[0] &&
+               bits == into->mpi_length * 8 - 8 + bowl_key_width(into->mpi[0]);
 }
 
 /* Whether the signature file is a good signature by key over the archive,
@@ -3067,7 +3060,6 @@ static bool bowl_signature_ok(string_address archive, string_address signature,
         static const p8 info_512[] = {0x30, 0x51, 0x30, 0x0d, 0x06, 0x09, 0x60,
                                       0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
                                       0x03, 0x05, 0x00, 0x04, 0x40};
-        static p8 chunk[65536];
         p8 modulus[BOWL_KEY_BYTES];
         p8 sig[BOWL_SIGNATURE_BYTES];
         p8 padded[BOWL_KEY_BYTES];
@@ -3081,6 +3073,7 @@ static bool bowl_signature_ok(string_address archive, string_address signature,
         positive sum_length;
         bipolar handle;
         bipolar got;
+        bool whole;
 
         if (!bowl_key_fingerprint(key, hex) ||
             !string_equals((string_address)hex, key->fingerprint))
@@ -3091,8 +3084,8 @@ static bool bowl_signature_ok(string_address archive, string_address signature,
                                 FILE_READ | O_NOFOLLOW | O_CLOEXEC);
         if (handle < 0)
                 return false;
-        while ((got = system_read_once(handle, sig + sig_length,
-                                       sizeof(sig) - sig_length)) > 0)
+        while ((got = system_read_retry((positive)handle, sig + sig_length,
+                                        sizeof(sig) - sig_length)) > 0)
                 sig_length += (positive)got;
         system_close(handle);
         if (got < 0 || sig_length == sizeof(sig) ||
@@ -3107,25 +3100,19 @@ static bool bowl_signature_ok(string_address archive, string_address signature,
         sum_length = found.hash == 10 ? 64 : 32;
         digest_open(address_of digest, found.hash == 10 ? DIGEST_SHA512 : DIGEST_SHA256,
                     sum_length);
-        while ((got = system_read_once(handle, chunk, sizeof(chunk))) > 0)
-                digest_write(address_of digest, chunk, (positive)got);
+        whole = bowl_digest_stream(handle, address_of digest, null);
         system_close(handle);
-        if (got < 0)
+        if (!whole)
                 return false;
         {
-                p8 head[6] = {4, 0, 1, (p8)found.hash,
-                              (p8)(found.hashed_length >> 8),
-                              (p8)found.hashed_length};
-                positive total = 6 + found.hashed_length;
+                p8 head[6] = {4, 0, 1, (p8)found.hash};
 
+                network_store_16(head + 4, (p16)found.hashed_length);
                 digest_write(address_of digest, head, 6);
                 digest_write(address_of digest, found.hashed, found.hashed_length);
                 trailer[0] = 4;
                 trailer[1] = 0xff;
-                trailer[2] = (p8)(total >> 24);
-                trailer[3] = (p8)(total >> 16);
-                trailer[4] = (p8)(total >> 8);
-                trailer[5] = (p8)total;
+                network_store_32(trailer + 2, (p32)(6 + found.hashed_length));
                 digest_write(address_of digest, trailer, 6);
         }
         digest_close(address_of digest, sum);
