@@ -16,7 +16,9 @@ The testable model distinguishes four attackers:
 3. **On-path or same-link network:** can observe, inject, replay, delay,
    reorder, truncate, and suppress traffic. TLS is expected to authenticate
    HTTPS. Plain DNS, DHCPv4, and SNTP do not authenticate an on-path peer;
-   endpoint and nonce checks protect only against off-path forgery.
+   endpoint and nonce checks protect only against off-path forgery. DNS over
+   TLS (`moonwater dns tls|tls-only`, off by default) authenticates the four
+   public resolvers it knows.
 4. **Hostile service:** owns the connected endpoint and can stream arbitrary
    bytes and timing forever. Bounds and absolute deadlines must contain it.
 

@@ -24,7 +24,7 @@ not kept in the tree (seed files are banned by `security_hygiene`).
 | Area | Evidence present | Important remaining gap |
 | --- | --- | --- |
 | Netlink | sender PID, sequence, length/alignment, multipart and truncation checks; `netlink_fuzz` | persistent fuzzing of nested attributes beyond the bounded target |
-| DNS | exact question/ID binding, compression loops, full RR framing, UDP truncation to TCP; the source port drawn per query, 0x20 case mixing and EDNS0 with a fallback for each; the network's own resolver asked first and its first answer final; `dns_fuzz` | independent packet oracle; DNSSEC is out of scope (D03) |
+| DNS | exact question/ID binding, compression loops, full RR framing, UDP truncation to TCP; the source port drawn per query, 0x20 case mixing and EDNS0 with a fallback for each; the network's own resolver asked first and its first answer final; DNS over TLS to the four public resolvers that offer it, as a setting (`dns_tls`); `dns_fuzz` | independent packet oracle; DNSSEC is out of scope (D03); the default stays plain DNS (DOT-D1) |
 | TLS records/handshake | record and handshake fragmentation, transcript/Finished, AEAD limits, state ordering, `tls_hs_fuzz` libFuzzer target over the record layer and handshake state machine | a corpus beyond the generated seeds |
 | X.509 | strict DER and generated-chain policy matrix against OpenSSL and, as a second independent path validator, Go's `crypto/x509` (`tls_chains`); `tls_der_fuzz` / `tls_verify_fuzz` libFuzzer targets; DNS-name and IP matching against OpenSSL's own check (`tls_hostnames`); validity times against RFC 5280 (`tls_dates`); Wycheproof's vectors under the production crypto (`crypto_vectors --wycheproof`); Mozilla's server-auth `distrust-after` dates per anchor | name constraints in more shapes than the matrix has |
 | HTTP/URL | sink-side request validation, framing conflicts, 204/205/304 as wget and curl take them with the RFC 9110 framing at the tight tier, split-point and chunk/trailer checks, `http.client` and curl framing oracles, HTTPS downgrade harness, GNU wget and curl as live oracles for byte-at-a-time, split, FIN/RST and 1xx-storm delivery (`wget_mutation`), hostile servers and redirect shapes against the built wget (`wget_hostile`), a redirect from public to non-public address space refused at the tight tier | the tight tier is not fuzzed (`http_fuzz` models the default); TLS and redirect legs of hostile scheduling |
@@ -136,6 +136,7 @@ not part of this one; they are listed with the gap they would close.
 | Waterlink | `/root/link.groups` held a fast salted SHA-256 of the secret, a guessing oracle for anyone who could read it | `link` lane |
 | SNTP | five samples shared one ten-second deadline, so one lost datagram in four ended a query | the `netem` lane's SNTP scenes |
 | Supply chain | bowl's Arch, RISC-V Arch and Debian bootstraps rested on TLS and a mirror alone | pinned digests, a pinned signing key for Arch Linux ARM, `bowl` lane |
+| DNS | no way to ask a resolver over an authenticated channel: every name wget and host looked up crossed the network in the clear | `moonwater dns plain|tls|tls-only` (off by default; 1.1.1.1, 1.0.0.1, 9.9.9.9 and 149.112.112.112 on 853, the https certificate checks and the resolver's own address against an iPAddress name), the `dns_tls` harness (ten cases of setting and leaf against a server on 1.1.1.1 in a namespace) |
 
 ### Open, in separate branches
 
@@ -143,13 +144,18 @@ not part of this one; they are listed with the gap they would close.
 | --- | --- |
 | Authenticated time (NTS), a floor for the clock, wget's status 5 for an unverifiable certificate | `feature/clock-floor`, `feature/nts` |
 | 802.11w management-frame protection, WPA3-SAE | `feature/wpa3-pmf-sae` |
-| DNS over TLS | `feature/dns-over-tls` |
 | DHCP over a raw packet socket (so `rp_filter` can be on), ARP address-conflict probing, the exchange not cut between REQUEST and ACK | `feature/dhcp-packet-socket-acd` |
 | The default accepts what wget and curl accept in a header block, URL spelling and redirect statuses | `feature/wget-curl-parity` |
 | `edit` sends file bytes to the terminal raw; a secret on a command line is kept by the shell history; boot takes the first install that looks like this build; `fs.protected_*`, `kptr_restrict`, `dmesg_restrict`, `io_uring_disabled` defaults | `hardening/outside-network` |
 
 ### Open, with no change planned here
 
+- DNS over TLS is a setting and off by default, so with it off an on-path peer
+  can still forge DNS answers; with `tls` a resolver that cannot be reached
+  over TLS is asked over UDP, as before. Only wget and `host` follow the
+  setting: the time servers' names, hostid, logger's server and waterlink's
+  peers are always asked in plain, because a clock cannot be set by names
+  that need it.
 - Plain SNTP is accepted into any moment the build and clock window allow;
   only authenticated time narrows that.
 - The DHCP client reads its OFFER from a UDP socket, so `rp_filter` 1 or 2
@@ -175,6 +181,7 @@ not part of this one; they are listed with the gap they would close.
 | D03 | DNSSEC is out of scope | The resolver is a stub that trusts the network's DNS |
 | D04 | Defaults hold what GNU wget 1.25.0 and curl 8.22.0 do for 204 and 205; the RFC 9110 framing is the tight tier's | Real servers send a 204 with `Content-Length: 0`, and the client closes the connection after the one response, so an unread declared body can never be taken for the next response |
 | D05 | "Guest is root, not a wall": root is not hardened against itself | Documented policy in `SECURITY.md` |
+| DOT-D1 | DNS over TLS is off by default; `tls` (with UDP fallback) and `tls-only` are opt-in | A captive portal answers or drops port 853 and a first lease comes with the clock unset, where a certificate that has not begun is refused: both are an ordinary first minute. `tls` survives them at up to two seconds a lookup, which a default should not cost; `tls-only` cannot have its clock set by names it cannot resolve. The default can be changed |
 
 SYN flood recipe (by hand): in a network namespace with two taps, a guest on
 one (a scripted DHCP server serves it, and an HTTP server serves a small static
