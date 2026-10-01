@@ -64479,7 +64479,93 @@ def harness_kernel_ports(argv):
     return checks.verdict("kernel ports: checks passed", "kernel-ports")
 
 
+# ----------------------------------------------------------------------------
+#       The generator's odd multiples, affine, for ECDSA verify.
+# ----------------------------------------------------------------------------
+
+G_TABLE_BEGIN = "/* g_tables begin (python3 test/differential.py --harness g_tables --write) */"
+G_TABLE_END = "/* g_tables end */"
+
+
+def g_table_text(source):
+    """The C text between the markers: (2j + 1) G for j below 32 on P-256 and
+    P-384, x and y in Montgomery form (times 2^256 or 2^384 mod p), as limbs,
+    least significant first. The generator's coordinates are read from the
+    same net.c, so the table cannot name another point than the code does."""
+    def bytes_of(name):
+        found = re.search(r"static const p8 %s\[\d+\] = \{([^}]*)\};" % name, source, re.S)
+        return int("".join(re.findall(r"0x([0-9a-fA-F]{2})", found.group(1))), 16)
+
+    curves = (("p256", 256, 4, (1 << 256) - (1 << 224) + (1 << 192) + (1 << 96) - 1),
+              ("p384", 384, 6, (1 << 384) - (1 << 128) - (1 << 96) + (1 << 32) - 1))
+    out = [G_TABLE_BEGIN,
+           "/* (2j + 1) G for j below 32, affine, x then y in Montgomery form, as",
+           "   limbs, least significant first: ECDSA verify adds them to its",
+           "   accumulator by the mixed formulas with the width-7 digits of u1. */"]
+    for name, bits, limbs, p in curves:
+        gx, gy = bytes_of("crypto_%s_gx_be" % name), bytes_of("crypto_%s_gy_be" % name)
+
+        def add(a, b):
+            if a is None:
+                return b
+            if b is None:
+                return a
+            if a[0] == b[0]:
+                if (a[1] + b[1]) % p == 0:
+                    return None
+                slope = (3 * a[0] * a[0] - 3) * pow(2 * a[1], -1, p) % p
+            else:
+                slope = (b[1] - a[1]) * pow(b[0] - a[0], -1, p) % p
+            x = (slope * slope - a[0] - b[0]) % p
+            return (x, (slope * (a[0] - x) - a[1]) % p)
+
+        g = (gx, gy)
+        twice = add(g, g)
+        point = g
+        out.append("static const p64 crypto_%s_g_table[32][%d] = {" % (name, 2 * limbs))
+        for _ in range(32):
+            words = []
+            for coordinate in point:
+                montgomery = coordinate * (1 << bits) % p
+                words += ["0x%016xull" % ((montgomery >> (64 * i)) & ((1 << 64) - 1)) for i in range(limbs)]
+            out.append("    {" + ", ".join(words[:limbs]) + ",")
+            out.append("     " + ", ".join(words[limbs:]) + "},")
+            point = add(point, twice)
+        out.append("};")
+    out.append(G_TABLE_END)
+    return "\n".join(out)
+
+
+def harness_g_tables(argv):
+    """Check (or with --write, write) the table of the generator's odd
+    multiples in src/net/net.c against what Python's own arithmetic gives.
+    The C side compares every entry with the library's own point code
+    (CHECK_net), so the two computations are independent."""
+    path = HARNESS_ROOT / "src/net/net.c"
+    source = path.read_text()
+    begin = source.find(G_TABLE_BEGIN)
+    end = source.find(G_TABLE_END)
+    if begin < 0 or end < 0:
+        if "--write" not in argv:
+            print("g tables: no table in net.c", file=sys.stderr)
+            return 1
+        print("g tables: put the two marker lines where the table goes first", file=sys.stderr)
+        return 1
+    current = source[begin:end + len(G_TABLE_END)]
+    wanted = g_table_text(source)
+    if "--write" in argv:
+        if current != wanted:
+            path.write_text(source[:begin] + wanted + source[end + len(G_TABLE_END):])
+        print("g tables: written")
+        return 0
+    ok = current == wanted
+    print("g tables %d/1" % (1 if ok else 0))
+    write_tally("g-tables", 1 if ok else 0, 1)
+    return 0 if ok else 1
+
+
 HARNESS_CHECKS = {
+    "g_tables": harness_g_tables,
     "https_bench": harness_https_bench,
     "compression": harness_compression,
     "engines": harness_engines_main,

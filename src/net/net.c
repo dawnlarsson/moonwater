@@ -3500,13 +3500,15 @@ static fn crypto_point_scalar_private(
         crypto_forget(address_of digit, sizeof digit);
 }
 
-/* Width-5 non-adjacent form of a public scalar below 2^(64 limbs): each
-   digit is zero or odd in [-15, 15], a nonzero digit is followed by at least
-   four zeros, and the digits weighted by 2^i sum to k.  Returns how many
-   digits were written, at most 64 limbs + 1. */
+/* Width-w non-adjacent form of a public scalar below 2^(64 limbs): each
+   digit is zero or odd in [-(2^(w-1) - 1), 2^(w-1) - 1], a nonzero digit is
+   followed by at least w - 1 zeros, and the digits weighted by 2^i sum to k.
+   Returns how many digits were written, at most 64 limbs + 1. */
 static positive crypto_wnaf(b8 address_to digits, const p64 address_to k,
-                            positive limbs)
+                            positive limbs, positive width)
 {
+        const p64 whole = (p64)1 << width;
+        const p64 half = whole >> 1;
         p64 v[CRYPTO_FE_MAX + 1];
         positive count = 0;
 
@@ -3518,13 +3520,13 @@ static positive crypto_wnaf(b8 address_to digits, const p64 address_to k,
 
                 if (v[0] & 1)
                 {
-                        p64 low = v[0] & 31;
+                        p64 low = v[0] & (whole - 1);
 
-                        if (low > 15)
+                        if (low >= half)
                         {
-                                p64 carry = 32 - low;
+                                p64 carry = whole - low;
 
-                                digit = (b8)((bipolar)low - 32);
+                                digit = (b8)((bipolar)low - (bipolar)whole);
                                 for (positive i = 0; carry && i <= limbs; i++)
                                 {
                                         v[i] += carry;
@@ -3580,11 +3582,231 @@ static fn crypto_point_add_digit(crypto_point address_to r,
         crypto_point_add(r, r, address_of entry);
 }
 
+/* g_tables begin (python3 test/differential.py --harness g_tables --write) */
+/* (2j + 1) G for j below 32, affine, x then y in Montgomery form, as
+   limbs, least significant first: ECDSA verify adds them to its
+   accumulator by the mixed formulas with the width-7 digits of u1. */
+static const p64 crypto_p256_g_table[32][8] = {
+    {0x79e730d418a9143cull, 0x75ba95fc5fedb601ull, 0x79fb732b77622510ull, 0x18905f76a53755c6ull,
+     0xddf25357ce95560aull, 0x8b4ab8e4ba19e45cull, 0xd2e88688dd21f325ull, 0x8571ff1825885d85ull},
+    {0xffac3f904eebc127ull, 0xb027f84a087d81fbull, 0x66ad77dd87cbbc98ull, 0x26936a3fb6ff747eull,
+     0xb04c5c1fc983a7ebull, 0x583e47ad0861fe1aull, 0x788208311a2ee98eull, 0xd5f06a29e587cc07ull},
+    {0xbe1b8aaec45c61f5ull, 0x90ec649a94b9537dull, 0x941cb5aad076c20cull, 0xc9079605890523c8ull,
+     0xeb309b4ae7ba4f10ull, 0x73c568efe5eb882bull, 0x3540a9877e7a1f68ull, 0x73a076bb2dd1e916ull},
+    {0x0746354ea0173b4full, 0x2bd20213d23c00f7ull, 0xf43eaab50c23bb08ull, 0x13ba5119c3123e03ull,
+     0x2847d0303f5b9d4dull, 0x6742f2f25da67bddull, 0xef933bdc77c94195ull, 0xeaedd9156e240867ull},
+    {0x75c96e8f264e20e8ull, 0xabe6bfed59a7a841ull, 0x2cc09c0444c8eb00ull, 0xe05b3080f0c4e16bull,
+     0x1eb7777aa45f3314ull, 0x56af7bedce5d45e3ull, 0x2b6e019a88b12f1aull, 0x086659cdfd835f9bull},
+    {0xea7d260a6245e404ull, 0x9de407956e7fdfe0ull, 0x1ff3a4158dac1ab5ull, 0x3e7090f1649c9073ull,
+     0x1a7685612b944e88ull, 0x250f939ee57f61c8ull, 0x0c0daa891ead643dull, 0x68930023e125b88eull},
+    {0xccc425634b2ed709ull, 0x0e356769856fd30dull, 0xbcbcd43f559e9811ull, 0x738477ac5395b759ull,
+     0x35752b90c00ee17full, 0x68748390742ed2e3ull, 0x7cd06422bd1f5bc1ull, 0xfbc08769c9e7b797ull},
+    {0x72bcd8b7bc60055bull, 0x03cc23ee56e27e4bull, 0xee337424e4819370ull, 0xe2aa0e430ad3da09ull,
+     0x40b8524f6383c45dull, 0xd766355442a41b25ull, 0x64efa6de778a4797ull, 0x2042170a7079adf4ull},
+    {0x97091dcbd53c5c9dull, 0xf17624b6ac0a177bull, 0xb0f139752cfe2dffull, 0xc1a35c0a6c7a574eull,
+     0x227d314693e79987ull, 0x0575bf30e89cb80eull, 0x2f4e247f0d1883bbull, 0xebd512263274c3d0ull},
+    {0xfea912baa5659ae8ull, 0x68363aba25e1a16eull, 0xb8842277752c41acull, 0xfe545c282897c3fcull,
+     0x2d36e9e7dc4c696bull, 0x5806244afba977c5ull, 0x85665e9be39508c1ull, 0xf720ee256d12597bull},
+    {0x562e4cecc135b208ull, 0x74e1b2654783f47dull, 0x6d2a506c5a3f3b30ull, 0xecead9f4c16762fcull,
+     0xf29dd4b2e286e5b9ull, 0x1b0fadc083bb3c61ull, 0x7a75023e7fac29a4ull, 0xc086d5f1c9477fa3ull},
+    {0xf4f876532de45068ull, 0x37c7a7e89e2e1f6eull, 0xd0825fa2a3584069ull, 0xaf2cea7c1727bf42ull,
+     0x0360a4fb9e4785a9ull, 0xe5fda49c27299f4aull, 0x48068e1371ac2f71ull, 0x83d0687b9077666full},
+    {0xa4a319acd837879full, 0x6fc1b49eed6b67b0ull, 0xe395993332f1f3afull, 0x966742eb65432a2eull,
+     0x4b8dc9feb4966228ull, 0x96cc631243f43950ull, 0x12068859c9b731eeull, 0x7b948dc356f79968ull},
+    {0x042c2af497e2feb4ull, 0xd36a42d7aebf7313ull, 0x49d2c9eb084ffdd7ull, 0x9f8aa54b2ef7c76aull,
+     0x9200b7ba09895e70ull, 0x3bd0c66fddb7fb58ull, 0x2d97d10878eb4cbbull, 0x2d431068d84bde31ull},
+    {0x5e5db46acb66e132ull, 0xf1be963a0d925880ull, 0x944a70270317b9e2ull, 0xe266f95948603d48ull,
+     0x98db66735c208899ull, 0x90472447a2fb18a3ull, 0x8a966939777c619full, 0x3798142a2a3be21bull},
+    {0xe2f73c696755ff89ull, 0xdd3cf7e7473017e6ull, 0x8ef5689d3cf7600dull, 0x948dc4f8b1fc87b4ull,
+     0xd9e9fe814ea53299ull, 0x2d921ca298eb6028ull, 0xfaecedfd0c9803fcull, 0xf38ae8914d7b4745ull},
+    {0x871514560f664534ull, 0x85ceae7c4b68f103ull, 0xac09c4ae65578ab9ull, 0x33ec6868f044b10cull,
+     0x6ac4832b3a8ec1f1ull, 0x5509d1285847d5efull, 0xf909604f763f1574ull, 0xb16c4303c32f63c4ull},
+    {0xfd16847fdec67ef5ull, 0x742ee464233e76b7ull, 0x0b8e4134efc2b4c8ull, 0xca640b8642a3e521ull,
+     0x653a01908ceb6aa9ull, 0x313c300c547852d5ull, 0x24e4ab126b237af7ull, 0x2ba901628bb47af8ull},
+    {0x00467bc58cce08b5ull, 0xb636458c7f178d55ull, 0xc5748baea677d806ull, 0x2763a387dfa394ebull,
+     0xa12b448a7d3cebb6ull, 0xe7adda3e6f20d850ull, 0xf63ebce51558462cull, 0x58b36143620088a8ull},
+    {0xa9d89488a059c142ull, 0x6f5ae714ff0b9346ull, 0x068f237d16fb3664ull, 0x5853e4c4363186acull,
+     0xe2d87d2363c52f98ull, 0x2ec4a76681828876ull, 0x47b864fae14e7b1cull, 0x0c0bc0e569192408ull},
+    {0x624d60492ed22e91ull, 0x6fdfe0b56f072822ull, 0xeeca111539ce2271ull, 0x98100a4fdb01614full,
+     0xb6b0daa2a35c628full, 0xb6f94d2ec87e9a47ull, 0xc67732591d57d9ceull, 0xf70bfeec03884a7bull},
+    {0x4ff23ffd248a7d06ull, 0x80c5bfb4878873faull, 0xb7d9ad9005745981ull, 0x179c85db3db01994ull,
+     0xba41b06261a6966cull, 0x4d82d052eadce5a8ull, 0x9e91cd3ba5e6a318ull, 0x47795f4f95b2dda0ull},
+    {0x1ee426ccd5cd79bfull, 0x0032940b946c6e18ull, 0x1b1e8ae057477f58ull, 0xe94f7d346d823278ull,
+     0xc747cb96782ba21aull, 0xc5254469f72b33a5ull, 0x772ef6dec7f80c81ull, 0xd73acbfe2cd9e6b5ull},
+    {0x283c7513caa76097ull, 0x0a624fa936c83906ull, 0x6b20afec715af2c7ull, 0x4b969974eba78bfdull,
+     0x220755ccd921d60eull, 0x9b944e107baeca13ull, 0x04819d515ded93d4ull, 0x9bbff86e6dddfd27ull},
+    {0x21950b421ff6acd3ull, 0xffe7048453dc6909ull, 0xff4cd0b228766127ull, 0xabdbe6084fb7db2bull,
+     0x837c92285e1109e8ull, 0x26147d27f4645b5aull, 0x4d78f592f7818ed8ull, 0xd394077ef247fa36ull},
+    {0x508cec1c3b3f64c9ull, 0xe20bc0ba1e5edf3full, 0xda1deb852f4318d4ull, 0xd20ebe0d5c3fa443ull,
+     0x370b4ea773241ea3ull, 0x61f1511c5e1a5f65ull, 0x99a5e23d82681c62ull, 0xd731e383a2f54c2dull},
+    {0x97359638546c4d8dull, 0x5f9c3fc492f24679ull, 0x912e8beda8c8acd9ull, 0xec3a318d306634b0ull,
+     0x80167f41c31cb264ull, 0x3db82f6f522113f2ull, 0xb155bcd2dcafe197ull, 0xfba1da5943465283ull},
+    {0x258bbbf9e7305683ull, 0x31eea5bf07ef5be6ull, 0x0deb0e4a46c814c1ull, 0x5cee8449a7b730ddull,
+     0xeab495c5a0182bdeull, 0xee759f879e27a6b4ull, 0xc2cf6a6880e518caull, 0x25e8013ff14cf3f4ull},
+    {0x3ec832e77acaca28ull, 0x1bfeea57c7385b29ull, 0x068212e3fd1eaf38ull, 0xc13298306acf8cccull,
+     0xb909f2db2aac9e59ull, 0x5748060db661782aull, 0xc5ab2632c79b7a01ull, 0xda44c6c600017626ull},
+    {0x69d44ed65c46aa8eull, 0x2100d5d3a8d063d1ull, 0xcb9727eaa2d17c36ull, 0x4c2bab1b8add53b7ull,
+     0xa084e90c15426704ull, 0x778afcd3a837ebeaull, 0x6651f7017ce477f8ull, 0xa062499846fb7a8bull},
+    {0x3667eb1a7f4c04ccull, 0x59556621a9404f84ull, 0x71cdf6537eceb50aull, 0x994a44a69b8335faull,
+     0xd7faf819dbeb9b69ull, 0x473c5680eed4350dull, 0xb6658466da44bba2ull, 0x0d1bc780872bdbf3ull},
+    {0xb8d3d9319ff91fe5ull, 0x039c4800f0518eedull, 0x95c376329182cb26ull, 0x0763a43482fc568dull,
+     0x707c04d5383e76baull, 0xac98b930824e8197ull, 0x92bf7c8f91230de0ull, 0x90876a0140959b70ull},
+};
+static const p64 crypto_p384_g_table[32][12] = {
+    {0x3dd0756649c0b528ull, 0x20e378e2a0d6ce38ull, 0x879c3afc541b4d6eull, 0x6454868459a30effull, 0x812ff723614ede2bull, 0x4d3aadc2299e1513ull,
+     0x23043dad4b03a4feull, 0xa1bfa8bf7bb4a9acull, 0x8bade7562e83b050ull, 0xc6c3521968f4ffd9ull, 0xdd8002263969a840ull, 0x2b78abc25a15c5e9ull},
+    {0x05e4dbe6c1dc4073ull, 0xc54ea9fff04f779cull, 0x6b2034e9a170ccf0ull, 0x3a48d732d51c6c3eull, 0xe36f7e2d263aa470ull, 0xd283fe68e7c1c3acull,
+     0x7e284821c04ee157ull, 0x92d789a77ae0e36dull, 0x132663c04ef67446ull, 0x68012d5ad2e1d0b4ull, 0xf6db68b15102b339ull, 0x465465fc983292afull},
+    {0xbb595eba68f1f0dfull, 0xc185c0cbcc873466ull, 0x7f1eb1b5293c703bull, 0x60db2cf5aacc05e6ull, 0xc676b987e2e8e4c6ull, 0xe1bb26b11d178ffbull,
+     0x2b694ba07073fa21ull, 0x22c16e2e72f34566ull, 0x80b61b3101c35b99ull, 0x4b237faf982c0411ull, 0xe6c5944024de236dull, 0x4db1c9d6e209e4a3ull},
+    {0xdf13b9d17d69222bull, 0x4ce6415f874774b1ull, 0x731edcf8211faa95ull, 0x5f4215d1659753edull, 0xf893db589db2df55ull, 0x932c9f811c89025bull,
+     0x0996b2207706a61eull, 0x135349d5a8641c79ull, 0x65aad76f50130844ull, 0x0ff37c0401fff780ull, 0xf57f238e693b0706ull, 0xd90a16b6af6c9b3eull},
+    {0x2f5d200e2353b92full, 0xe35d87293fd7e4f9ull, 0x26094833a96d745dull, 0xdc351dc13cbfff3full, 0x26d464c6dad54d6aull, 0x5cab1d1d53636c6aull,
+     0xf2813072b18ec0b0ull, 0x3777e270d742aa2full, 0x27f061c7033ca7c2ull, 0xa6ecaccc68ead0d8ull, 0x7d9429f4ee69a754ull, 0xe770633431e8f5c6ull},
+    {0xc7708b19b68b8c7dull, 0x4532077c44377abaull, 0x0dcc67706cdad64full, 0x01b8bf56147b6602ull, 0xf8d89885f0561d79ull, 0x9c19e9fc7ba9c437ull,
+     0x764eb146bdc4ba25ull, 0x604fe46bac144b83ull, 0x3ce813298a77e780ull, 0x2e070f36fe9e682eull, 0x41821d0c3a53287aull, 0x9aa62f9f3533f918ull},
+    {0x9b7aeb7e75ccbdfbull, 0xb25e28c5f6749a95ull, 0x8a7a8e4633b7d4aeull, 0xdb5203a8d9c1bd56ull, 0xd2657265ed22df97ull, 0xb51c56e18cf23c94ull,
+     0xf4d394596c3d812dull, 0xd8e88f1a87cae0c2ull, 0x789a2a48cf4d0fe3ull, 0xb7feac2dfec38d60ull, 0x81fdbd1c3b490ec3ull, 0x4617adb7cc6979e1ull},
+    {0x446ad8884709f4a9ull, 0x2b7210e2ec3dabd8ull, 0x83ccf19550e07b34ull, 0x59500917789b3075ull, 0x0fc01fd4eb085993ull, 0xfb62d26f4903026bull,
+     0x2309cc9d6fe989bbull, 0x61609cbd144bd586ull, 0x4b23d3a0de06610cull, 0xdddc2866d898f470ull, 0x8733fc41400c5797ull, 0x5a68c6fed0bc2716ull},
+    {0x8903e1304b4a3cd0ull, 0x3ea4ea4c8ff1f43eull, 0xe6fc3f2af655a10dull, 0x7be3737d524ffefcull, 0x9f6928555330455eull, 0x524f166ee475ce70ull,
+     0x3fcc69cd6c12f055ull, 0x4e23b6ffd5b9c0daull, 0x49ce6993336bf183ull, 0xf87d6d854a54504aull, 0x25eb5df1b3c2677aull, 0xac37986f55b164c9ull},
+    {0x82a2ed4abaa84c08ull, 0x22c4cc5f41a8c912ull, 0xca109c3b154aad5eull, 0x23891298fc38538eull, 0xb3b6639c539802aeull, 0xfa0f1f450390d706ull,
+     0x46b78e5db0dc21d0ull, 0xa8c72d3cc3da2eacull, 0x9170b3786ff2f643ull, 0x3f5a799bb67f30c3ull, 0x15d1dc778264b672ull, 0xa1d47b23e9577764ull},
+    {0x08265e510422ce2full, 0x88e0d496dd2f9e21ull, 0x30128aa06177f75dull, 0x2e59ab62bd9ebe69ull, 0x1b1a0f6c5df0e537ull, 0xab16c626dac012b5ull,
+     0x8014214b008c5de7ull, 0xaa740a9e38f17beaull, 0x262ebb498a149098ull, 0xb454111e8527cd59ull, 0x266ad15aacea5817ull, 0x21824f411353ccbaull},
+    {0xd1b4e74d12e3683bull, 0x990ed20b569b8ef6ull, 0xb9d3dd25429c0a18ull, 0x1c75b8ab2a351783ull, 0x61e4ca2b905432f0ull, 0x80826a69eea8f224ull,
+     0x7fc33a6bec52abadull, 0x0bcca3f0a65e4813ull, 0x7ad8a132a527cebeull, 0xf0138950eaf22c7eull, 0x282d2437566718c1ull, 0x9dfccb0de2212559ull},
+    {0x1e93722758ce3b83ull, 0xbb280dfa3cb3fb36ull, 0x57d0f3d2e2be174aull, 0x9bd51b99208abe1eull, 0x3809ab50de248024ull, 0xc29c6e2ca5bb7331ull,
+     0x9944fd2e61124f05ull, 0x83ccbc4e9009e391ull, 0x01628f059424a3ccull, 0xd6a2f51dea8e4344ull, 0xda3e1a3d4cebc96eull, 0x1fe6fb42e97809dcull},
+    {0xa04482d2467d66e4ull, 0xcf1912934d78291dull, 0x8e0d4168482396f9ull, 0x7228e2d5d18f14d0ull, 0x2f7e8d509c6a58feull, 0xe8ca780e373e5aecull,
+     0x42aad1d61b68e9f8ull, 0x58a6d7f569e2f8f4ull, 0xd779adfe31da1beaull, 0x7d26540638c85a85ull, 0x67e67195d44d3cdfull, 0x17820a0bc5134ed7ull},
+    {0x019d6ac5d3021470ull, 0x25846b66780443d6ull, 0xce3c15ed55c97647ull, 0x3dc22d490e3feb0full, 0x2065b7cba7df26e4ull, 0xc8b00ae8187cea1full,
+     0x1a5284a0865dded3ull, 0x293c164920c83de2ull, 0xab178d26cce851b3ull, 0x8e6db10b404505fbull, 0xf6f57e7190c82033ull, 0x1d2a1c015977f16cull},
+    {0xa39c89317c8906a4ull, 0xb6e7ecdd9e821ee6ull, 0x2ecf8340f0df4fe6ull, 0xd42f7dc953c14965ull, 0x1afb51a3e3ba8285ull, 0x6c07c4040a3305d1ull,
+     0xdab83288127fc1daull, 0xbc0a699b374c4b08ull, 0x402a9bab42eb20ddull, 0xd7dd464f045a7a1cull, 0x5b3d0d6d36beecc4ull, 0x475a3e756398a19dull},
+    {0x61333a382fb3ba63ull, 0xdf330d9d5b943c86ull, 0xbbc7c7ee955ef3afull, 0xda631fc160f09efbull, 0x68af622641d5c400ull, 0xcc9e97a46c833e9dull,
+     0x7fd73e8e3a625e76ull, 0x13bf6124c209e55eull, 0x08467cea48b90b91ull, 0x8a416eb9bb6f0abaull, 0x6fcc93a1b8c31072ull, 0xa7fd2b619057dad7ull},
+    {0x58a5b5433720ec9bull, 0xbb3800d52d7c2fb4ull, 0x4a508620dde6bd0aull, 0x65f16273a02583fdull, 0x832bd8e34fc78523ull, 0xd6149f75e9417bc6ull,
+     0xfeb026e93deeb52aull, 0x0ce18088a55e0956ull, 0x50018998988092a2ull, 0x22f19fab28f35eeeull, 0xac8a877f52ccd35cull, 0xb13a8ad830e23f26ull},
+    {0x0202d57de44f61a3ull, 0x4027704bb5630ef2ull, 0xa129e2dff5b54a5dull, 0xacb60a7597482b86ull, 0x9261ede87ef27114ull, 0x1eba28f3defc58b5ull,
+     0x6c91c0c98be5589eull, 0x2f1643d514594beeull, 0x2ea912435d2ca034ull, 0xb50649a894047d1full, 0x284fcbb5638ca337ull, 0xfa0e07b7fe85bf85ull},
+    {0x7d894f80506e0e42ull, 0xd984244a8e3d2c46ull, 0x6d7edf642b7f006full, 0x36a1cd6dde9b6230ull, 0xc9985040b76c0665ull, 0x587df4d6b89b1fc2ull,
+     0x4c0638476a71ae7aull, 0x7b2b0ab3e8294747ull, 0x345c553ab53153b8ull, 0xb646e453436d9fe2ull, 0x1a95355f1cd60340ull, 0x2d7bc128074968fbull},
+    {0xad148e87bca6d14cull, 0x41dfd24d456a201eull, 0x73a82933a80d68f3ull, 0x89746c8d852ca035ull, 0xe3bc778895fd71aeull, 0x8764cd2cda92245dull,
+     0xa2fe2c4782eb23e2ull, 0x5ac762e00f3c9d6eull, 0x57860ce121646f31ull, 0xbdc9d6c34f9f589aull, 0x679952c7d193272eull, 0x82ea702eeb18f1c5ull},
+    {0x37fa935500846d44ull, 0x09112fc50578bc8cull, 0xdad9f5b239c4943dull, 0x7314f5f0416dbd86ull, 0x5cf095a901fefb56ull, 0x35178bad22dab393ull,
+     0xcf79fc1b36baf1a7ull, 0x1b7ee42d749e5498ull, 0xbce78aa9ede314bbull, 0xaaf8e0f6bd0628dfull, 0xa974b09415cbf948ull, 0x8f3f1f63c9632b78ull},
+    {0xd4c411564fddda5bull, 0xd4af65c673ad9112ull, 0xffe8e0bb39eb8f59ull, 0xb0040c0e8d6fcf13ull, 0x99e1c0c61f2bb599ull, 0x9c94c858b2ac3405ull,
+     0x8f8878d76eeed85dull, 0x62b2f54351fcca3full, 0xeb3b44a9e5b56918ull, 0x16f96676b7234e93ull, 0x17477722bd2af19eull, 0x42eb2979db83a485ull},
+    {0x6f888f7df0c668caull, 0x65c788785f0dc66cull, 0xbfb185125f5b07a0ull, 0x780abff7d878acd0ull, 0x504f21b1570cf950ull, 0xea5b37c5da233371ull,
+     0x487ae8bd22437ed1ull, 0x9c701758249cf9b7ull, 0xf86562a898fb34ffull, 0xdfeea1a265e0fc91ull, 0xeef006912e20fc23ull, 0xac9dfec7dfa72a8bull},
+    {0xfa5c3aef697136c6ull, 0x8ea5af63a5ea6fb8ull, 0xa669156542e365a4ull, 0x47c56c115b6e3386ull, 0x1197832bcea03f56ull, 0x0b470bb250e4ea9eull,
+     0x3113c74313b25712ull, 0x8d6c174ed2497d48ull, 0xfc4486ee49c9ebe8ull, 0x2487edd57f82bdd3ull, 0x771e64415b57be2full, 0x2d1cc518e28b2bdbull},
+    {0x2c4ccac72070ac8dull, 0x1947c0caec4a22b8ull, 0xa5e0fb598c5a78d9ull, 0x464ae8d241a84de7ull, 0x3dba16e9daaabc27ull, 0x16634a504f35cb3cull,
+     0xadc18bf9b16ec84full, 0x324d067e7359dd35ull, 0xdaeac0c3570543f0ull, 0x0b2240003c887d36ull, 0xc69489e2373f1a0dull, 0x518b047dcbaa0d97ull},
+    {0x3b1bddc6fbde49efull, 0xdaed7c268a0915ccull, 0x0b0110610f0422a2ull, 0xcf485c74a7c54b16ull, 0x642ec4e615c3aae2ull, 0xa8ba8f10e0f383eaull,
+     0x2a2054b495618501ull, 0xebec6442089efa8bull, 0x5786a19a4e2fa83eull, 0xd2c71ad139069963ull, 0xadc93d9a481765e2ull, 0xedf2e3eb7ecc9485ull},
+    {0xbcab5f60069f3367ull, 0xfd6622bc1718ec3cull, 0xa4fb7867e3a142d6ull, 0x6078d8bf085faeb3ull, 0xfa5cbfda60f4554full, 0xb3fcd5d1690cd408ull,
+     0x4ebdee7d281f7884ull, 0x82af23aa180a63a7ull, 0x8de3107c3d079f61ull, 0x17c6b5cbbe2334f8ull, 0x6a91e73997d0fa06ull, 0x7460257314ceeed4ull},
+    {0xb14ba61cf97f865cull, 0x73bae4c1694b8b0dull, 0xa14967dfac4bbf62ull, 0x1e9dd1509bf446e0ull, 0xc052f3eb1c99ceefull, 0x814d7fa07a78c189ull,
+     0xa101a483ab74b05dull, 0x7788c258a1737b65ull, 0x0d60bab7e809a13cull, 0x8f427bc473c81d5bull, 0xd2e130552952c1fcull, 0x0a823b9a4b26df63ull},
+    {0xaf467ce227bf64c9ull, 0xdfca6897f929974cull, 0x64473b595c322738ull, 0x96a917cf1ed0e315ull, 0x3703435b0de64db9ull, 0x9ba039679267b646ull,
+     0xdf0c2aae3a522fbeull, 0x41bdb741b335eff0ull, 0xaccf2edd7b059703ull, 0x6fb34b3028463cceull, 0x96d9ba0bd9e3ca19ull, 0xff336f12504655c1ull},
+    {0x48da1fd3fc60a6e0ull, 0x54fb5a34222241e8ull, 0x6035e34f772ae080ull, 0x5ff77ff2332982d0ull, 0x2366467300fe51fdull, 0xc93ea049ef6ba006ull,
+     0x6640f1177d381266ull, 0x394d32cd6ae9f4acull, 0xe6a7885370d303ebull, 0x0dda19ffe5275767ull, 0xb0a6c77201466d23ull, 0xc4cc11451fc69829ull},
+    {0xc5c0e6d7aaed89c0ull, 0x6ce8ead6149a1896ull, 0x7a50f7458c949f8full, 0xcd7e35f76e2b71aaull, 0xf6159e519a049f7aull, 0x1c9bf0b0f1e52d1eull,
+     0x3bb6c1f518202c80ull, 0x8d3a5f621ecd7b1aull, 0x3bb034e888d17f19ull, 0xdc89bd4997d4048dull, 0xf5af7b8e3735df22ull, 0x52bb3712a0a689e8ull},
+};
+/* g_tables end */
+
+/* The affine table of a curve's generator, by its field: 32 entries of x and
+   y, or none. */
+static const p64 address_to crypto_g_table(const crypto_field address_to f)
+{
+        if (f == address_of crypto_p256_field)
+                return address_of crypto_p256_g_table[0][0];
+        if (f == address_of crypto_p384_field)
+                return address_of crypto_p384_g_table[0][0];
+        return 0;
+}
+
+/* r = p + (qx, qy) for an affine point, or its negation: the general sum
+   with Z2 = 1, which leaves out the square of z2, the products with it and
+   with z2 cubed (eight multiplies and three squares where the general
+   addition is eleven and five).  Public points only: infinity and the
+   equal and opposite cases branch. */
+static fn crypto_point_add_affine(crypto_point address_to r,
+                                  crypto_point address_to p,
+                                  const p64 address_to qx,
+                                  const p64 address_to qy, bool negate)
+{
+        const crypto_field address_to f = p->field;
+        crypto_jacobian_work w;
+        p64 y2[CRYPTO_FE_MAX];
+        positive n = f->n;
+
+        if (negate)
+        {
+                p64 zero[CRYPTO_FE_MAX];
+
+                memory_fill(zero, 0, sizeof zero);
+                crypto_fe_sub(y2, zero, qy, f);
+        }
+        else
+                memory_copy(y2, qy, n * 8);
+
+        if (crypto_fe_is_zero(p->z, n))
+        {
+                memory_copy(r->x, qx, n * 8);
+                memory_copy(r->y, y2, n * 8);
+                memory_copy(r->z, f->one, n * 8);
+                r->n = n;
+                r->field = f;
+                return;
+        }
+
+        crypto_fe_sqr(w.z1z1, p->z, f);
+        crypto_fe_mul(w.u2, qx, w.z1z1, f);
+        crypto_fe_mul(w.tmp, p->z, w.z1z1, f);
+        crypto_fe_mul(w.s2, y2, w.tmp, f);
+        crypto_fe_sub(w.h, w.u2, p->x, f);
+        crypto_fe_sub(w.rr, w.s2, p->y, f);
+        if (crypto_fe_is_zero(w.h, n))
+        {
+                if (crypto_fe_is_zero(w.rr, n))
+                        crypto_point_double(r, p);
+                else
+                        crypto_point_zero(r, f);
+                return;
+        }
+        crypto_fe_sqr(w.hh, w.h, f);
+        crypto_fe_mul(w.hhh, w.h, w.hh, f);
+        crypto_fe_mul(w.v, p->x, w.hh, f);
+
+        crypto_fe_sqr(w.tmp, w.rr, f);
+        crypto_fe_sub(w.tmp, w.tmp, w.hhh, f);
+        crypto_fe_add(w.tmp2, w.v, w.v, f);
+        crypto_fe_sub(w.out.x, w.tmp, w.tmp2, f);
+
+        crypto_fe_sub(w.tmp, w.v, w.out.x, f);
+        crypto_fe_mul(w.tmp2, w.rr, w.tmp, f);
+        crypto_fe_mul(w.tmp, p->y, w.hhh, f);
+        crypto_fe_sub(w.out.y, w.tmp2, w.tmp, f);
+
+        crypto_fe_mul(w.out.z, p->z, w.h, f);
+        w.out.n = n;
+        w.out.field = f;
+        *r = w.out;
+}
+
 /* u1 G + u2 Q for public scalars and points (below 2^(64 limbs)), in one
-   chain of doublings: each scalar's width-5 digits add a precomputed odd
-   multiple of its own point or its negation.  About bits doublings and
-   bits/3 additions against bits doublings and bits additions for two
-   separate binary multiplies.  Everything may branch; nothing is secret. */
+   chain of doublings: each scalar's digits add a precomputed odd multiple of
+   its own point or its negation.  Q's are width 5 and built here (eight
+   odd multiples); G's are width 7 and read from the affine table above, so
+   no multiples are built for it and its additions are the cheaper mixed
+   ones.  Another curve's generator takes the general path: Q's treatment,
+   width 5 and a built table.  Everything may branch; nothing is secret. */
 static fn crypto_point_double_scalar(crypto_point address_to r,
                                      crypto_point address_to g,
                                      const p64 address_to u1,
@@ -3595,12 +3817,14 @@ static fn crypto_point_double_scalar(crypto_point address_to r,
         b8 d2[CRYPTO_FE_MAX * 64 + 1];
         crypto_point tg[8];
         crypto_point tq[8];
-        positive n1 = crypto_wnaf(d1, u1, g->n);
-        positive n2 = crypto_wnaf(d2, u2, g->n);
+        const p64 address_to table = crypto_g_table(g->field);
+        positive limbs = g->n;
+        positive n1 = crypto_wnaf(d1, u1, limbs, table ? 7 : 5);
+        positive n2 = crypto_wnaf(d2, u2, limbs, 5);
         positive at = n1 > n2 ? n1 : n2;
 
         crypto_point_zero(r, g->field);
-        if (n1)
+        if (n1 && !table)
                 crypto_point_odd_multiples(tg, g);
         if (n2)
                 crypto_point_odd_multiples(tq, q);
@@ -3609,7 +3833,18 @@ static fn crypto_point_double_scalar(crypto_point address_to r,
                 at--;
                 crypto_point_double(r, r);
                 if (at < n1 && d1[at])
-                        crypto_point_add_digit(r, tg, d1[at]);
+                {
+                        b8 digit = d1[at];
+                        bool negative = digit < 0;
+                        positive entry = (positive)(negative ? -digit : digit) >> 1;
+
+                        if (table)
+                                crypto_point_add_affine(
+                                    r, r, table + entry * 2 * limbs,
+                                    table + entry * 2 * limbs + limbs, negative);
+                        else
+                                crypto_point_add_digit(r, tg, digit);
+                }
                 if (at < n2 && d2[at])
                         crypto_point_add_digit(r, tq, d2[at]);
         }

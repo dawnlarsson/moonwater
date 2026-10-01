@@ -61857,6 +61857,126 @@ static fn crypto_floor_inverse(void)
               tried == 1200 && wrong == 0);
 }
 
+/* The affine table of the generator's odd multiples against the library's
+   own point arithmetic, and ECDSA's double-scalar sum by the table (mixed
+   additions, width 7 for u1) against the general path (a copy of the field
+   at another address takes it): random scalars and the cases a mixed
+   addition tells apart, equal points, opposite points, infinity and
+   scalars of every bit pattern the recoding turns. */
+static fn crypto_floor_g_table(void)
+{
+        const crypto_field address_to fields[2] = {
+            address_of crypto_p256_field, address_of crypto_p384_field};
+        const p8 address_to gxs[2] = {crypto_p256_gx_be, crypto_p384_gx_be};
+        const p8 address_to gys[2] = {crypto_p256_gy_be, crypto_p384_gy_be};
+        positive entries_wrong = 0;
+        positive sums_wrong = 0;
+        positive sums = 0;
+        p64 seed = 0x2545f4914f6cdd1dull;
+
+        for (positive k = 0; k < 2; k++)
+        {
+                const crypto_field address_to f = fields[k];
+                crypto_field plain_field = *f;
+                const p64 address_to table = crypto_g_table(f);
+                positive n = f->n;
+                p64 gx[CRYPTO_FE_MAX], gy[CRYPTO_FE_MAX];
+                crypto_point g, general, point, twice;
+                p64 x[CRYPTO_FE_MAX], y[CRYPTO_FE_MAX];
+
+                crypto_fe_load_be(gx, gxs[k], n);
+                crypto_fe_load_be(gy, gys[k], n);
+                crypto_point_set_xy(address_of g, gx, gy, f);
+                point = g;
+                crypto_point_double(address_of twice, address_of g);
+                for (positive j = 0; j < 32; j++)
+                {
+                        crypto_point walked = point;
+
+                        crypto_point_affine(address_of walked);
+                        crypto_fe_mul(x, table + j * 2 * n, crypto_unit, f);
+                        crypto_fe_mul(y, table + j * 2 * n + n, crypto_unit, f);
+                        entries_wrong += memory_compare(x, walked.x, n * 8) != 0;
+                        entries_wrong += memory_compare(y, walked.y, n * 8) != 0;
+                        crypto_point_add(address_of point, address_of point,
+                                         address_of twice);
+                }
+
+                crypto_point_set_xy(address_of general, gx, gy, address_of plain_field);
+                for (positive turn = 0; turn < 40; turn++)
+                {
+                        p64 u1[CRYPTO_FE_MAX], u2[CRYPTO_FE_MAX];
+                        crypto_point q, fast, slow;
+                        p64 qk[CRYPTO_FE_MAX];
+
+                        memory_fill(u1, 0, sizeof u1);
+                        memory_fill(u2, 0, sizeof u2);
+                        memory_fill(qk, 0, sizeof qk);
+                        for (positive i = 0; i < n; i++)
+                        {
+                                seed ^= seed << 13;
+                                seed ^= seed >> 7;
+                                seed ^= seed << 17;
+                                u1[i] = turn % 7 == 3 ? ~(p64)0 : seed;
+                                u2[i] = turn % 5 == 2 ? ~(p64)0 : seed >> 3;
+                                qk[i] = seed >> 9;
+                        }
+                        u1[n - 1] >>= 2;
+                        u2[n - 1] >>= 2;
+                        qk[n - 1] >>= 2;
+                        if (turn == 0)
+                                memory_fill(u1, 0, sizeof u1);
+                        if (turn == 1)
+                                memory_fill(u2, 0, sizeof u2);
+                        if (turn == 2)
+                        {
+                                memory_fill(u1, 0, sizeof u1);
+                                u1[0] = 1;
+                        }
+                        /* Q = G (so u1 G + u2 G, equal points) for a few
+                           turns, Q = -G with u1 = u2, and Q = qk G. */
+                        if (turn >= 4 && turn < 8)
+                                q = g;
+                        else
+                        {
+                                crypto_point_double_scalar(address_of q, address_of g,
+                                                           qk, address_of g, qk);
+                                if (crypto_fe_is_zero(q.z, n))
+                                        q = g;
+                        }
+                        if (turn == 6)
+                        {
+                                p64 zero[CRYPTO_FE_MAX];
+
+                                memory_fill(zero, 0, sizeof zero);
+                                crypto_fe_sub(q.y, zero, q.y, f);
+                                memory_copy(u2, u1, n * 8);
+                        }
+                        crypto_point_double_scalar(address_of fast, address_of g,
+                                                   u1, address_of q, u2);
+                        crypto_point_double_scalar(address_of slow, address_of general,
+                                                   u1, address_of q, u2);
+                        sums++;
+                        if (crypto_fe_is_zero(fast.z, n) || crypto_fe_is_zero(slow.z, n))
+                                sums_wrong += crypto_fe_is_zero(fast.z, n) !=
+                                              crypto_fe_is_zero(slow.z, n);
+                        else
+                        {
+                                crypto_point_affine(address_of fast);
+                                crypto_point_affine(address_of slow);
+                                sums_wrong += memory_compare(fast.x, slow.x, n * 8) != 0;
+                                sums_wrong += memory_compare(fast.y, slow.y, n * 8) != 0;
+                        }
+                }
+        }
+        check("the generator's affine table holds (2j + 1) G for j below 32 "
+              "on P-256 and P-384, as the library's own point addition makes them",
+              entries_wrong == 0);
+        check("u1 G + u2 Q by the table and mixed additions equals the general "
+              "path for 80 scalar pairs (zero, one, all ones, Q = G)",
+              sums == 80 && sums_wrong == 0);
+}
+
 static fn crypto_floor_montgomery(void)
 {
         const crypto_field address_to orders[2] = {
@@ -65565,6 +65685,7 @@ b32 main(void)
         crypto_floor_field();
         crypto_floor_montgomery();
         crypto_floor_inverse();
+        crypto_floor_g_table();
         crypto_floor_x25519();
         crypto_floor_aes();
         crypto_rsa_served_sizes();
