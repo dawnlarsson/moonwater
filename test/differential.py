@@ -50818,6 +50818,63 @@ def crypto_vectors_lines(seed):
     sealed = AESGCM(key).encrypt(iv, b"", aad)
     emit("gcm", 1, key, iv, aad, b"", b"", sealed)
 
+    # ---- AES-SIV-CMAC-256 (RFC 5297; NTS's AEAD_AES_SIV_CMAC_256) -------
+    #   Fields: the 32-byte key, the strings before the plaintext (each a
+    #   two-byte length and its bytes), the plaintext, the ciphertext and the
+    #   16-byte tag that leads OpenSSL's output. RFC 5297's two examples
+    #   first, held to OpenSSL's answer too; then every length either side of
+    #   the padding and block edges under zero to three strings (NTS seals
+    #   with two: the packet so far, then the nonce); then the tag's every
+    #   byte flipped, the text and each string tampered, a string moved.
+    from cryptography.hazmat.primitives.ciphers.aead import AESSIV
+
+    def siv_emit(expect, key, strings, plain, cipher, tag):
+        packed = b"".join(len(part).to_bytes(2, "big") + part for part in strings)
+        emit("siv", expect, key, packed, plain, cipher, tag)
+
+    def siv_seal(key, strings, plain):
+        sealed = AESSIV(key).encrypt(plain, list(strings))
+        return sealed[16:], sealed[:16]
+
+    rfc = (
+        ("A.1", bytes.fromhex("fffefdfcfbfaf9f8f7f6f5f4f3f2f1f0f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff"),
+         [bytes.fromhex("101112131415161718191a1b1c1d1e1f2021222324252627")],
+         bytes.fromhex("112233445566778899aabbccddee"),
+         "85632d07c6e8f37f950acd320a2ecc9340c02b9690c4dc04daef7f6afe5c"),
+        ("A.2", bytes.fromhex("7f7e7d7c7b7a79787776757473727170404142434445464748494a4b4c4d4e4f"),
+         [bytes.fromhex("00112233445566778899aabbccddeeffdeaddadadeaddadaffeeddccbbaa99887766554433221100"),
+          bytes.fromhex("102030405060708090a0"), bytes.fromhex("09f911029d74e35bd84156c5635688c0")],
+         bytes.fromhex("7468697320697320736f6d6520706c61696e7465787420746f20656e6372797074207573696e67205349562d414553"),
+         "7bdb6e3b432667eb06f4d14bff2fbd0fcb900f2fddbe404326601965c889bf17dba77ceb094fa663b7a3f748ba8af829ea64ad544a272e9c485b62a3fd5c0d"),
+    )
+    for name, key, strings, plain, expected in rfc:
+        cipher, tag = siv_seal(key, strings, plain)
+        assert (tag + cipher).hex() == expected, "RFC 5297 %s: OpenSSL disagrees with the RFC" % name
+        siv_emit(1, key, strings, plain, cipher, tag)
+    for length in sorted({0, 1, 15, 16, 17, 31, 32, 33, 47, 48, 49, 100, 255, 256, 1000, 4096}):
+        key = draw(32)
+        strings = [draw(rng.choice((0, 1, 15, 16, 17, 40, 100))) for _ in range(rng.choice((0, 1, 2, 3)))]
+        plain = draw(length)
+        cipher, tag = siv_seal(key, strings, plain)
+        siv_emit(1, key, strings, plain, cipher, tag)
+    key, strings, plain = draw(32), [draw(70), draw(16)], draw(40)
+    cipher, tag = siv_seal(key, strings, plain)
+    for at in range(16):
+        flipped = bytearray(tag)
+        flipped[at] ^= 1 << rng.randrange(8)
+        siv_emit(0, key, strings, plain, cipher, bytes(flipped))
+    for at in (0, 39):
+        text = bytearray(cipher)
+        text[at] ^= 0x80
+        siv_emit(0, key, strings, plain, bytes(text), tag)
+    for index in (0, 1):
+        changed = list(strings)
+        changed[index] = bytes([changed[index][0] ^ 1]) + changed[index][1:]
+        siv_emit(0, key, changed, plain, cipher, tag)
+    siv_emit(0, key, strings[:1], plain, cipher, tag)
+    siv_emit(0, key, strings[::-1], plain, cipher, tag)
+    siv_emit(0, key, strings + [b""], plain, cipher, tag)
+
     # ---- X25519 -------------------------------------------------------
     p25519 = 2 ** 255 - 19
     #   RFC 7748 and Wycheproof's low-order and edge u: each of them makes
@@ -51341,6 +51398,9 @@ b32 main(void)
         p8 secret[96], out[160], peer[97], peer_scalar[48], message[64], tag[16];
         p8 iv[12] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
         crypto_aesgcm_key key;
+        crypto_siv_key siv;
+        const p8 *siv_parts[2] = {message, message + 16};
+        positive siv_lengths[2] = {16, 8};
         p64 seed = 0x9e3779b97f4a7c15ull * (p64)(p8)which[0];
 
         for (positive i = 0; i < 96; i++)
@@ -51385,6 +51445,18 @@ b32 main(void)
                 tag[(p8)which[0] % 16] ^= 1;
                 out[0] = crypto_aesgcm_open(&key, iv, message, 16, message + 16, 32, tag);
                 break;
+        case 'j':
+                //      The NTS AEAD under a secret key: both AES schedules,
+                //      CMAC and the counter stream.
+                crypto_siv_prepare(&siv, secret);
+                crypto_siv_seal(&siv, siv_parts, siv_lengths, 2, message + 24, 32, tag);
+                break;
+        case 'k':
+                crypto_siv_prepare(&siv, secret);
+                crypto_siv_seal(&siv, siv_parts, siv_lengths, 2, message + 24, 32, tag);
+                tag[(p8)which[0] % 16] ^= 1;
+                out[0] = crypto_siv_open(&siv, siv_parts, siv_lengths, 2, message + 24, 32, tag);
+                break;
         default: crypto_hkdf_extract(message, 32, secret, 32, out);
         }
         //      What was computed is read, or the compiler drops a compare
@@ -51400,6 +51472,7 @@ CRYPTO_SECRET_PRIMITIVES = (
     ("c", "ECDH P-384 public"), ("d", "ECDH P-384 shared"),
     ("e", "AES-128-GCM key and seal"), ("f", "HMAC-SHA256 key"),
     ("g", "crypto_same"), ("i", "AES-128-GCM refusing a forged tag"),
+    ("j", "AES-SIV-CMAC-256 key and seal"), ("k", "AES-SIV-CMAC-256 refusing a forged tag"),
     ("h", "HKDF-Extract"))
 
 

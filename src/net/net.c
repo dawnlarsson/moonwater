@@ -2723,6 +2723,209 @@ static bool crypto_aesgcm_open(crypto_aesgcm_key address_to key,
 }
 
 /*
+        AES-SIV-CMAC-256, RFC 5297: the AEAD RFC 8915 makes mandatory for
+        NTS (AEAD_AES_SIV_CMAC_256, number 15). The 256-bit key is two
+        AES-128 keys, the left for S2V, which turns the associated data and
+        the plaintext into a synthetic IV with CMAC (RFC 4493), the right
+        for counter mode under that IV. The IV is the tag and leads the
+        ciphertext. Nothing is built that the AES-128 schedule and
+        lib.c's counter body did not already give: one block is the counter
+        body over a zero block, and the two bits RFC 5297 clears in the
+        counter are what make the body's 32-bit wrapping increment exact.
+        Strings are taken as parts (the associated data, then the nonce
+        RFC 5116 asks to be the last of them), and the plaintext is the
+        final string S2V takes.
+*/
+typedef struct
+{
+        p8 round[176];
+        p8 first[16];
+        p8 second[16];
+} crypto_cmac_key;
+
+typedef struct
+{
+        crypto_cmac_key mac;
+        p8 round[176];
+} crypto_siv_key;
+
+static fn crypto_aes128_block(const p8 address_to round, const p8 address_to in,
+                              p8 address_to out)
+{
+        p8 counter[16];
+
+        memory_copy(counter, in, 16);
+        memory_fill(out, 0, 16);
+        aes128_ctr_blocks(round, counter, out, out, 1);
+        crypto_forget(counter, sizeof counter);
+}
+
+//      Multiplication by x in GF(2^128) (RFC 5297 2.3, RFC 4493 2.3).
+static fn crypto_siv_double(p8 address_to block)
+{
+        p8 carry = (p8)(block[0] >> 7);
+
+        for (positive at = 0; at < 15; at++)
+                block[at] = (p8)((block[at] << 1) | (block[at + 1] >> 7));
+        block[15] = (p8)((block[15] << 1) ^ (0x87 & (p8)(0 - carry)));
+}
+
+static fn crypto_cmac_prepare(crypto_cmac_key address_to key,
+                              const p8 address_to raw)
+{
+        p8 zero[16];
+
+        memory_fill(zero, 0, 16);
+        crypto_aes128_expand((p8 address_to)raw, key->round);
+        crypto_aes128_block(key->round, zero, key->first);
+        crypto_siv_double(key->first);
+        memory_copy(key->second, key->first, 16);
+        crypto_siv_double(key->second);
+}
+
+//      CMAC of a span. With xorend, the span's last 16 bytes are taken
+//      with that block xored in, which is S2V's "xorend" without a copy.
+static fn crypto_cmac(const crypto_cmac_key address_to key,
+                      const p8 address_to data, positive length,
+                      const p8 address_to xorend, p8 address_to out)
+{
+        positive blocks = length ? (length + 15) / 16 : 1;
+        p8 state[16];
+        p8 block[16];
+
+        memory_fill(state, 0, 16);
+        for (positive at = 0; at < blocks; at++)
+        {
+                bool last = at + 1 == blocks;
+
+                for (positive in = 0; in < 16; in++)
+                {
+                        positive index = at * 16 + in;
+                        p8 byte = 0;
+
+                        if (index < length)
+                        {
+                                byte = data[index];
+                                if (xorend && length >= 16 && index + 16 >= length)
+                                        byte ^= xorend[index + 16 - length];
+                        }
+                        else if (index == length)
+                                byte = 0x80;
+                        block[in] = byte ^ state[in];
+                }
+                if (last)
+                {
+                        const p8 address_to subkey =
+                            length && length % 16 == 0 ? key->first
+                                                        : key->second;
+
+                        for (positive in = 0; in < 16; in++)
+                                block[in] ^= subkey[in];
+                }
+                crypto_aes128_block(key->round, block, state);
+        }
+        memory_copy(out, state, 16);
+        crypto_forget(state, sizeof state);
+        crypto_forget(block, sizeof block);
+}
+
+static fn crypto_siv_prepare(crypto_siv_key address_to key,
+                             const p8 address_to raw)
+{
+        crypto_cmac_prepare(address_of key->mac, raw);
+        crypto_aes128_expand((p8 address_to)raw + 16, key->round);
+}
+
+//      S2V(K1, part 1 .. part count, text), RFC 5297 2.4.
+static fn crypto_siv_s2v(const crypto_siv_key address_to key,
+                         const p8 address_to address_to parts,
+                         const positive address_to lengths, positive count,
+                         const p8 address_to text, positive text_length,
+                         p8 address_to v)
+{
+        p8 zero[16];
+        p8 d[16];
+        p8 t[16];
+
+        memory_fill(zero, 0, 16);
+        crypto_cmac(address_of key->mac, zero, 16, null, d);
+        for (positive at = 0; at < count; at++)
+        {
+                crypto_siv_double(d);
+                crypto_cmac(address_of key->mac, parts[at], lengths[at], null, t);
+                for (positive in = 0; in < 16; in++)
+                        d[in] ^= t[in];
+        }
+        if (text_length >= 16)
+                crypto_cmac(address_of key->mac, text, text_length, d, v);
+        else
+        {
+                crypto_siv_double(d);
+                memory_fill(t, 0, 16);
+                memory_copy(t, text, text_length);
+                t[text_length] = 0x80;
+                for (positive in = 0; in < 16; in++)
+                        t[in] ^= d[in];
+                crypto_cmac(address_of key->mac, t, 16, null, v);
+        }
+        crypto_forget(d, sizeof d);
+        crypto_forget(t, sizeof t);
+}
+
+//      Counter mode under the IV with its two bits cleared.
+static fn crypto_siv_ctr(const crypto_siv_key address_to key,
+                         const p8 address_to v, p8 address_to text,
+                         positive length)
+{
+        p8 counter[16];
+        p8 padded[16];
+        positive whole = length / 16;
+        positive rest = length % 16;
+
+        memory_copy(counter, v, 16);
+        counter[8] &= 0x7f;
+        counter[12] &= 0x7f;
+        aes128_ctr_blocks(key->round, counter, text, text, whole);
+        if (rest)
+        {
+                memory_fill(padded, 0, 16);
+                memory_copy(padded, text + whole * 16, rest);
+                aes128_ctr_blocks(key->round, counter, padded, padded, 1);
+                memory_copy(text + whole * 16, padded, rest);
+        }
+        crypto_forget(counter, sizeof counter);
+        crypto_forget(padded, sizeof padded);
+}
+
+static fn crypto_siv_seal(const crypto_siv_key address_to key,
+                          const p8 address_to address_to parts,
+                          const positive address_to lengths, positive count,
+                          p8 address_to text, positive length,
+                          p8 address_to tag)
+{
+        crypto_siv_s2v(key, parts, lengths, count, text, length, tag);
+        crypto_siv_ctr(key, tag, text, length);
+}
+
+static bool crypto_siv_open(const crypto_siv_key address_to key,
+                            const p8 address_to address_to parts,
+                            const positive address_to lengths, positive count,
+                            p8 address_to text, positive length,
+                            const p8 address_to tag)
+{
+        p8 v[16];
+        bool valid;
+
+        crypto_siv_ctr(key, tag, text, length);
+        crypto_siv_s2v(key, parts, lengths, count, text, length, v);
+        valid = crypto_same(v, tag, 16);
+        if (!valid)
+                crypto_forget(text, length);
+        crypto_forget(v, sizeof v);
+        return valid;
+}
+
+/*
         RFC 7748 X25519. lib.c's x25519 is the whole of the arithmetic --
         clamp, ladder, inversion, canonical encoding, its own scratch wiped
         -- on four 64-bit limbs on x86_64 and arm64 and five 51-bit ones on
