@@ -58344,7 +58344,8 @@ def harness_wifi_eapol_fuzz(argv):
 def wifi_scan_fuzz_seeds():
     """What a scan dump's access point can carry, in the driver's modes: 0 the
     BSS nest's own bytes, 1 fixed BSS fields and then information elements
-    (the second byte picks INFORMATION_ELEMENTS or BEACON_IES), 2 a bare
+    (the second byte picks INFORMATION_ELEMENTS or BEACON_IES, and its
+    bit 2 puts a bare probe response first and these elements as the beacon's), 2 a bare
     generic netlink body, 3 an RSN element on its own. Elements are the
     ones a beacon holds: an SSID, an RSN element for each key management
     a network asks for, the WPA vendor element, and those cut short, doubled,
@@ -58371,6 +58372,11 @@ def wifi_scan_fuzz_seeds():
     seeds["ies_wpa.bin"] = b"\x01\x00\x10\x00" + ssid + wpa
     seeds["ies_wep.bin"] = b"\x01\x00\x10\x00" + ssid
     seeds["ies_beacon.bin"] = b"\x01\x01\x00\x00" + ssid + element(48, rsn(2))
+    # A probe response with no RSN element as the latest frame, the real
+    # beacon's elements beside it.
+    seeds["ies_forged_response.bin"] = b"\x01\x04\x00\x00" + ssid + element(48, rsn(2))
+    seeds["ies_forged_response_both.bin"] = b"\x01\x04\x00\x00" + ssid + element(48, rsn(2, 8))
+    seeds["ies_forged_response_wpa.bin"] = b"\x01\x04\x10\x00" + ssid + wpa
     seeds["ies_two_ssids.bin"] = b"\x01\x00\x00\x00" + element(0, b"") + ssid + element(0, b"other")
     seeds["ies_long_ssid.bin"] = b"\x01\x00\x00\x00" + element(0, b"x" * 33) + element(0, b"y" * 32)
     seeds["ies_cut.bin"] = b"\x01\x00\x00\x00" + ssid + b"\x30\x40" + rsn(2)[:9]
@@ -58503,7 +58509,8 @@ static void check_one(netlink_header *header)
         radio_air air;
 
         if (radio_bss_read(header, &one) &&
-            (one.ssid_length > RADIO_SSID_MOST || one.security > RADIO_EAP))
+            (one.ssid_length > RADIO_SSID_MOST || one.security > RADIO_EAP ||
+             one.beacon_security > RADIO_EAP))
         {
                 fprintf(stderr, "a scan row out of range\n");
                 abort();
@@ -58559,6 +58566,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                 positive ies_size = size;
                 p16 capability = 0;
                 p8 key = 0, sstr[RADIO_SSID_MOST + 1], sl = 0, sec = 0;
+                static const p8 forged[] = {0, 1, 'x'};
 
                 if (mode == 0)
                 {
@@ -58581,9 +58589,20 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                         at = put_attribute(at, NL80211_BSS_SIGNAL_MBM, (p8 *)&signal, 4);
                         at = put_attribute(at, NL80211_BSS_STATUS, (p8 *)&status, 4);
                         at = put_attribute(at, NL80211_BSS_SEEN_MS_AGO, (p8 *)&seen, 4);
-                        at = put_attribute(at, key & 1 ? NL80211_BSS_BEACON_IES
-                                                       : NL80211_BSS_INFORMATION_ELEMENTS,
-                                           ies, ies_size);
+                        if (key & 4)
+                        {
+                                /* A probe response in the real access point's
+                                   name with no RSN element, as the latest
+                                   frame, and the real beacon's elements
+                                   beside it. */
+                                at = put_attribute(at, NL80211_BSS_INFORMATION_ELEMENTS,
+                                                   forged, sizeof forged);
+                                at = put_attribute(at, NL80211_BSS_BEACON_IES, ies, ies_size);
+                        }
+                        else
+                                at = put_attribute(at, key & 1 ? NL80211_BSS_BEACON_IES
+                                                               : NL80211_BSS_INFORMATION_ELEMENTS,
+                                                   ies, ies_size);
                 }
                 {
                         positive nest_size = (positive)(at - nest);
@@ -58598,8 +58617,26 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                         if (mode == 1 && radio_bss_read(header, &one))
                         {
                                 elements_model(ies, ies_size, capability, sstr, &sl, &sec);
-                                if (one.ssid_length != sl || memcmp(one.ssid, sstr, sl) ||
-                                    one.security != sec || one.frequency != 2412 || one.seen != 9)
+                                if (key & 4)
+                                {
+                                        /* The latest frame says what it says, and
+                                           the beacon's own elements are kept
+                                           apart: what the real access point
+                                           asks of a station is still there. */
+                                        p8 bare_ssid[RADIO_SSID_MOST + 1], bare_length = 0, bare = 0;
+
+                                        elements_model(forged, sizeof forged, capability,
+                                                       bare_ssid, &bare_length, &bare);
+                                        if (one.ssid_length != bare_length || one.security != bare ||
+                                            one.beacon_security != sec)
+                                        {
+                                                fprintf(stderr, "a beacon's elements were not kept apart\n");
+                                                abort();
+                                        }
+                                }
+                                else if (one.ssid_length != sl || memcmp(one.ssid, sstr, sl) ||
+                                         one.security != sec || one.beacon_security != sec ||
+                                         one.frequency != 2412 || one.seen != 9)
                                 {
                                         fprintf(stderr, "a scan row is not what its elements say\n");
                                         abort();

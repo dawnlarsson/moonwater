@@ -6362,6 +6362,9 @@ typedef struct
         p8 ssid[RADIO_SSID_MOST + 1];
         p8 ssid_length;
         p8 security;
+        //      What the access point's last beacon asked, where the kernel
+        //      keeps one apart from the frame its other elements came from.
+        p8 beacon_security;
         bool joined;
         b32 mbm;
         p32 frequency;
@@ -6417,6 +6420,30 @@ static p8 radio_rsn_security(p8 address_to element, positive length)
                           : RADIO_WPA2;
 }
 
+/* What the elements of one frame ask of a station: the first RSN element's
+   key management, else a WPA vendor element, else what the capability's
+   privacy bit says. */
+static p8 radio_ies_security(p8 address_to elements, positive size, p16 capability)
+{
+        byte_reader ies = byte_reader_open(elements, elements ? size : 0);
+        bool wpa = false;
+
+        while (byte_reader_left(&ies))
+        {
+                p8 id = byte_reader_u8(&ies);
+                byte_reader data = byte_reader_vector8(&ies);
+                positive span = byte_reader_left(&data);
+
+                if (!byte_reader_ok(&ies))
+                        break;
+                if (id == 48)
+                        return radio_rsn_security((p8 address_to)byte_reader_here(&data), span);
+                if (id == 221 && span >= 4 && byte_reader_u32(&data) == 0x0050f201)
+                        wpa = true;
+        }
+        return wpa ? RADIO_WPA : (capability & 0x10) ? RADIO_WEP : RADIO_OPEN;
+}
+
 /* One access point of a scan dump: false for a message that is not one. */
 static bool radio_bss_read(netlink_header address_to header, radio_heard address_to one)
 {
@@ -6427,6 +6454,8 @@ static bool radio_bss_read(netlink_header address_to header, radio_heard address
         p8 address_to elements;
         p8 address_to value;
         byte_reader ies;
+        p8 address_to beacon;
+        positive beacon_size = 0;
         bool rsn = false, wpa = false, named = false;
         p16 capability = 0;
 
@@ -6470,10 +6499,13 @@ static bool radio_bss_read(netlink_header address_to header, radio_heard address
         elements = (p8 address_to)netlink_find_span(bss, length,
                                                     NL80211_BSS_INFORMATION_ELEMENTS,
                                                     address_of size);
+        beacon = (p8 address_to)netlink_find_span(bss, length, NL80211_BSS_BEACON_IES,
+                                                  address_of beacon_size);
         if (!elements)
-                elements = (p8 address_to)netlink_find_span(bss, length,
-                                                            NL80211_BSS_BEACON_IES,
-                                                            address_of size);
+        {
+                elements = beacon;
+                size = beacon_size;
+        }
         ies = byte_reader_open(elements, elements ? size : 0);
         while (byte_reader_left(&ies))
         {
@@ -6508,6 +6540,9 @@ static bool radio_bss_read(netlink_header address_to header, radio_heard address
         }
         if (!rsn)
                 one->security = wpa ? RADIO_WPA : (capability & 0x10) ? RADIO_WEP : RADIO_OPEN;
+        one->beacon_security = beacon && beacon != elements
+                                   ? radio_ies_security(beacon, beacon_size, capability)
+                                   : one->security;
         return true;
 }
 
@@ -6893,6 +6928,14 @@ typedef struct
         bool fits;
 } radio_pick;
 
+/* Whether what an access point's frame asks of a station is what a saved
+   network wants: WPA2 for one with a password, nothing for one without. */
+static bool radio_security_fits(bool secured, p8 security)
+{
+        return secured ? security == RADIO_WPA2 || security == RADIO_WPA23
+                       : security == RADIO_OPEN;
+}
+
 /* The strongest the kernel still lists by the name, one given up on only
    if no other is. */
 static bool radio_pick_seen(netlink_header address_to header, address_any context)
@@ -6913,8 +6956,13 @@ static bool radio_pick_seen(netlink_header address_to header, address_any contex
         //      name that offers anything else, and beacons louder than the
         //      real one, is the last resort and not the first: the kernel
         //      will not join it, and asking cost a join its whole timeout.
-        fits = pick->secured ? one.security == RADIO_WPA2 || one.security == RADIO_WPA23
-                             : one.security == RADIO_OPEN;
+        //      The frame the kernel keeps the elements of is the latest, a
+        //      probe response as well as a beacon, and any station can send
+        //      one in the real access point's name without an RSN element:
+        //      what its last beacon asked counts as well, so one forged
+        //      response does not push the real one out behind a twin.
+        fits = radio_security_fits(pick->secured, one.security) ||
+               radio_security_fits(pick->secured, one.beacon_security);
         if (pick->found && (fits < pick->fits ||
                             (fits == pick->fits &&
                              (avoided > pick->avoided ||

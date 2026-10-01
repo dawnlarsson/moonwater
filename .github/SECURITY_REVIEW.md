@@ -165,6 +165,21 @@ not part of this one; they are listed with the gap they would close.
   success would be an empty success.
 - `tls_parse_cert` and its raw index reads are guarded by hand, fuzzed and
   judged sound, but are not on `byte_reader`.
+- The elements a scan reads are unauthenticated. The join prefers an access
+  point that offers what the saved network asks for (WPA2 for one with a
+  password, nothing for one without) over a louder one that does not, and
+  counts what the real access point's last beacon asked as well as the latest
+  frame's, because any station can send a probe response in its name with no
+  RSN element in it. That closes the single forged response; an attacker who
+  keeps forging the beacons out-races the real ones and can still push the
+  real access point behind a twin. The cost is bounded: the order only says
+  which access point is tried first, a failed join puts the twin on the avoid
+  list, and the handshake is what authenticates. What a twin that is tried
+  can take is its first message 2, which any WPA2 station gives to whoever
+  sent it a message 1 (an offline guess at the passphrase), as before.
+  Held by the `wifi_scan_fuzz` driver (the beacon's elements are kept apart
+  from the latest frame's); not held by a join in the `wifi` lane, which has
+  no forged-response row.
 - The CI `security` job is parked by design and this change does not touch it.
 
 ### Decisions
