@@ -11,7 +11,8 @@ gap below.
 The stack has strong hand-written boundary checks and unusually broad
 deterministic regression coverage. Local lanes exist for coverage-guided
 fuzzing under ASan/UBSan (`sh test/run fuzz`: TLS, DER, DHCP, SNTP, DNS,
-netlink, Wi-Fi, crypto, waterlink and the HTTP response section), MSan over
+netlink, Wi-Fi, crypto, waterlink, bowl's OpenPGP signature reader and the HTTP
+response section), MSan over
 hosted parser lifts (`sh test/run msan`), resource-exhaustion and mid-path
 fault sweeps, `http.client`, curl and GNU wget as oracles for HTTP framing and
 delivery, and a `netem` lane that runs the DHCP and SNTP clients against an
@@ -67,8 +68,8 @@ does not convert those protocols into authenticated ones.
 
 1. Persistent fuzzing: done for TLS (DER, certificate lists, handshake and
    record layer), DNS names and RRs, HTTP response framing and chunks (the
-   default tier), DHCP option streams, SNTP replies, netlink, Wi-Fi, crypto and
-   waterlink, seeded from generators and run under ASan+UBSan. Open: the HTTP
+   default tier), DHCP option streams, SNTP replies, netlink, Wi-Fi, crypto,
+   waterlink and bowl's OpenPGP signature reader, seeded from generators and run under ASan+UBSan. Open: the HTTP
    target at the tight tier, and a corpus beyond the generated seeds.
 2. Make x86-64 ASan+UBSan and native namespace/netem runs required CI jobs.
    `MOONWATER_FUZZ_REPORT=… sh test/run fuzz` already records compiler and sanitizer
@@ -135,7 +136,7 @@ not part of this one; they are listed with the gap they would close.
 | Saved state | `/root/wifi` and `/root/bluetooth` rewritten in place; bluetooth add and remove without the radio lock | `moonwater_cli`: a write cut short leaves the saved list as it was |
 | Waterlink | `/root/link.groups` held a fast salted SHA-256 of the secret, a guessing oracle for anyone who could read it | `link` lane |
 | SNTP | five samples shared one ten-second deadline, so one lost datagram in four ended a query | the `netem` lane's SNTP scenes |
-| Supply chain | bowl's Arch, RISC-V Arch and Debian bootstraps rested on TLS and a mirror alone | pinned digests, a pinned signing key for Arch Linux ARM, `bowl` lane |
+| Supply chain | bowl's Arch, RISC-V Arch and Debian bootstraps rested on TLS and a mirror alone | pinned digests, a pinned signing key for Arch Linux ARM, `bowl` lane, the signature reader under `bowl_sig_fuzz` |
 
 ### Open, in separate branches
 

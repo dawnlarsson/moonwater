@@ -3947,6 +3947,12 @@ lane_net()
         2) note "wifi_scan_fuzz: skipped (soft) -- does not downgrade net" ;;
         *) net_outcome=1 ;;
         esac
+        python3 test/differential.py --harness bowl_sig_fuzz
+        case $? in
+        0) ;;
+        2) note "bowl_sig_fuzz: skipped (soft) -- does not downgrade net" ;;
+        *) net_outcome=1 ;;
+        esac
         python3 test/differential.py --harness dns_fuzz
         case $? in
         0) ;;

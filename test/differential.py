@@ -44894,6 +44894,30 @@ def http_fuzz_seeds():
                     b"\r\nContent-Length: 0\r\n\r\n")
         for lane in (0, 1):
             seeds["hop%d_%s.bin" % (lane, name)] = bytes([lane, 7]) + redirect + hop + ok
+    for name, chain in (
+            ("public_then_inside", (b"public.example/p", b"127.0.0.1/q")),
+            ("public_then_private", (b"public.example/p", b"inside.example/q")),
+            ("inside_then_public", (b"inside.example/p", b"public.example/q")),
+            ("public_twice", (b"public.example/p", b"public.example/q")),
+            ("public_inside_public", (b"public.example/p", b"inside.example/q",
+                                      b"public.example/r"))):
+        for lane in (0, 1):
+            scheme = b"https://" if lane else b"http://"
+            wire = hop.join(b"HTTP/1.1 302 Found\r\nLocation: " + scheme + where +
+                            b"\r\nContent-Length: 0\r\n\r\n" for where in chain)
+            seeds["policy%d_%s.bin" % (lane, name)] = bytes([lane, 7]) + wire + hop + ok
+    for name, chain in (
+            ("public_then_inside", (b"public.example/p", b"127.0.0.1/q")),
+            ("public_then_private", (b"public.example/p", b"inside.example/q")),
+            ("inside_then_public", (b"inside.example/p", b"public.example/q")),
+            ("public_twice", (b"public.example/p", b"public.example/q")),
+            ("public_inside_public", (b"public.example/p", b"inside.example/q",
+                                      b"public.example/r"))):
+        for lane in (0, 1):
+            scheme = b"https://" if lane else b"http://"
+            wire = hop.join(b"HTTP/1.1 302 Found\r\nLocation: " + scheme + where +
+                            b"\r\nContent-Length: 0\r\n\r\n" for where in chain)
+            seeds["policy%d_%s.bin" % (lane, name)] = bytes([lane, 7]) + wire + hop + ok
     seeds["hop0_eleven.bin"] = b"\x00\x05" + hop.join(
         [b"HTTP/1.1 301 Moved\r\nLocation: /again\r\n\r\n"] * 11)
     seeds["run1_chunked_split_records.bin"] = b"\x01\x11" + (
@@ -51866,6 +51890,7 @@ static void fuzz_sha1_final(fuzz_sha1 *h, p8 *out)
 #define DIGEST_SHA1 1
 #define DIGEST_SHA256 3
 #define DIGEST_SHA384 4
+#define DIGEST_SHA512 5
 typedef struct
 {
         positive algorithm;
@@ -51883,6 +51908,8 @@ static void digest_open(digest_state *d, positive algorithm, positive size)
                 fuzz_sha1_init(&d->one);
         else if (algorithm == DIGEST_SHA256)
                 fuzz_sha256_init(&d->two);
+        else if (algorithm == DIGEST_SHA512)
+                fuzz_sha512_init(&d->five);
         else
                 fuzz_sha384_init(&d->five);
 }
@@ -52786,10 +52813,890 @@ def harness_crypto_fuzz(argv):
         return tls_fuzz_run("crypto", "crypto", source, 2048, extra + [str(assembly)])
 
 
+#       bowl_sig_fuzz: what a mirror's .sig file can do to bowl.c's OpenPGP
+#       reader. The two keys are throwaway RSA keys made for this harness
+#       (2048 bits, and 4096 as the pinned key's size), given by their primes; they sign only
+#       BOWL_SIG_ARCHIVE and nothing trusts them. Every signature the
+#       driver starts from is made here in pure Python (EMSA-PKCS1-v1_5 and
+#       a modular power), so none of them is gpg's and each is built to be
+#       taken or refused for a reason this file names.
+BOWL_SIG_ARCHIVE = b"moonwater bowl test archive\n"
+BOWL_SIG_KEY_CREATED = 1785542400
+BOWL_SIG_TIME = 1790000000
+BOWL_SIG_PRIMES = (
+    (2048,
+     "cdf9b7262b839bd730a5582771b5e5350fd42434382863b8f3570db1ea7f9503"
+     "d89e026a4ce6f5cc81c01b618bc016e6ce59df610d7d3e1aa6e9557ae3d65560"
+     "d3238ca0b27ec6d8629086fd4837fbf880c725c1b4f2d9b20a9a1b38a5d9316f"
+     "3bb2155bac34b24dfa05b3da29d2ba1b117a5231fc92433a2e44358c862564bd",
+     "c5c7d257130fbc1d668d08c9f2f89c327d10f48c8408b49b03484ea814052ebd"
+     "e09928702d9b6999f9547d74e068dc6158d64a919bb50a871067aa3514292ced"
+     "9215e44d21a64f5f1cfc19f2a1d72d24fd7bc68cd2e4151c15c6e25ebbf069a9"
+     "4d6c972b5f80f3e03f01600d818a76607fa37af18fbf8d12e0a525011df1d9cb"),
+    (4096,
+     "ea0f2b231f81b7896ebdcdca8f048da5e49cdd361b09ed5625af2b282bf31810"
+     "a9cf8732c088472552f6c1d294dc47823b0d9e1338c12aaca620d8fe5fb3c0a9"
+     "e1cc05a1647ab8fe748a3192a42337eee14620ffd3a83a379099265c953eb364"
+     "5dd1a2714a19509fd2a57f9ade99f66f53a1412e0f70db9237d58b86191d7336"
+     "4fb869429f776bc12a170392665a2c3fab24a0baa8280f7a222dad69975e45f4"
+     "4db21ca42cc3ed6dd6da0d477ed55d985f8f3e9315b326e8e8e2bd5280e11da2"
+     "47267d947079d932e97ce40afde309d00e2a34eda1f6517108f5782697df45a2"
+     "45cc787732b8964ece7f929d54007e9f1920640eb7eb79e2536a95779ffdfcbd",
+     "d64be5a9886dab840271ae0b92e258e14449d1481617c8332f5dc50d44a0e613"
+     "afe59a59a09578c457d6f7d79407feb09ffb46c9b6d89fcd1317616684c40178"
+     "0fe7c513c2ba70db83096f9bee6fa7999cd3012ee7502fe5cbedb02251c94867"
+     "7ae2eacaf97f6cc3d32fd9b2bb2bf8b7e21bf59830188e1738c602082be1774f"
+     "d1197979d5befec116745527a71259204472770420deab7e6f3689df3f4376c6"
+     "44d9f2eab602fd185513f7aa4fc687c7699ec453043d501dd3c3bffc6b76052b"
+     "f9605bb0736033548fe30c96d972f32a3aedaafbbec2b823ade04abd9666ea2b"
+     "d6afa713e0af4f18681aa80add3fe5085a6ba47afc2c4176721a319d4c15f637"),
+)
+
+#       The DigestInfo each hash algorithm of the reader (8 and 10) is held to.
+BOWL_SIG_INFO = {
+    8: ("sha256", bytes.fromhex("3031300d060960864801650304020105000420")),
+    10: ("sha512", bytes.fromhex("3051300d060960864801650304020305000440")),
+}
+
+
+def bowl_sig_u16(value):
+    return bytes((value >> 8 & 255, value & 255))
+
+
+def bowl_sig_u32(value):
+    return int(value).to_bytes(4, "big")
+
+
+def bowl_sig_numbers(index, cache={}):
+    """(bits, modulus, p, q, the private exponent mod p-1, mod q-1) of key
+    index; the exponent is 65537."""
+    if index not in cache:
+        bits, p_hex, q_hex = BOWL_SIG_PRIMES[index]
+        p, q = int(p_hex, 16), int(q_hex, 16)
+        d = pow(65537, -1, (p - 1) * (q - 1))
+        cache[index] = (bits, p * q, p, q, d % (p - 1), d % (q - 1))
+    return cache[index]
+
+
+def bowl_sig_modulus(index):
+    """Key index's modulus as the pinned table writes it: lower-case hex."""
+    return "%x" % bowl_sig_numbers(index)[1]
+
+
+def bowl_sig_fingerprint(index):
+    """The v4 fingerprint of key index (RFC 4880 12.2: SHA-1 over 0x99, the
+    two length octets and the key packet), upper-case hex. The driver checks
+    that bowl_key_fingerprint makes the same."""
+    n = bowl_sig_numbers(index)[1]
+
+    def mpi(value):
+        return bowl_sig_u16(value.bit_length()) + value.to_bytes(
+            (value.bit_length() + 7) // 8, "big")
+
+    body = b"\x04" + bowl_sig_u32(BOWL_SIG_KEY_CREATED) + b"\x01" + mpi(n) + mpi(65537)
+    return hashlib.sha1(b"\x99" + bowl_sig_u16(len(body)) + body).hexdigest().upper()
+
+
+def bowl_sig_subpacket(kind, body, critical=False):
+    """One signature subpacket (RFC 4880 5.2.3.1): a one-octet length below
+    192, two octets to 8383, the type octet counted in it."""
+    data = bytes((kind | (0x80 if critical else 0),)) + body
+    size = len(data)
+    if size < 192:
+        return bytes((size,)) + data
+    size -= 192
+    return bytes((192 + (size >> 8), size & 255)) + data
+
+
+def bowl_sig_header(form, size):
+    """The packet header of a signature (tag 2) in each of the spellings
+    RFC 4880 4.2 has: old format with one, two and four length octets, new
+    format with one and two and with five."""
+    if form == "old1":
+        return bytes((0x88, size & 255))
+    if form == "old2":
+        return bytes((0x89,)) + bowl_sig_u16(size)
+    if form == "old4":
+        return bytes((0x8a,)) + size.to_bytes(4, "big")
+    if form == "new":
+        if size < 192:
+            return bytes((0xc2, size))
+        size -= 192
+        return bytes((0xc2, 192 + (size >> 8), size & 255))
+    if form == "new5":
+        return bytes((0xc2, 255)) + size.to_bytes(4, "big")
+    raise ValueError(form)
+
+
+def bowl_sig_make(index, algorithm, hashed, unhashed=b"", form="old2"):
+    """A version 4 binary-document signature by key index over
+    BOWL_SIG_ARCHIVE with the given hashed and unhashed subpacket bytes:
+    (packet bytes, where the pieces are)."""
+    bits, n, p, q, dp, dq = bowl_sig_numbers(index)
+    name, info = BOWL_SIG_INFO[algorithm]
+    head = bytes((4, 0, 1, algorithm)) + bowl_sig_u16(len(hashed))
+    trailer = bytes((4, 0xff)) + bowl_sig_u32(len(head) + len(hashed))
+    digest = hashlib.new(name, BOWL_SIG_ARCHIVE + head + hashed + trailer).digest()
+    em = int.from_bytes(b"\x00\x01" + b"\xff" * (bits // 8 - 3 - len(info) - len(digest)) +
+                        b"\x00" + info + digest, "big")
+    # The signature, by the Chinese remainder theorem.
+    s_p, s_q = pow(em % p, dp, p), pow(em % q, dq, q)
+    s = s_q + q * (((s_p - s_q) * pow(q, -1, p)) % p)
+    body = (head + hashed + bowl_sig_u16(len(unhashed)) + unhashed + digest[:2] +
+            bowl_sig_u16(s.bit_length()) + s.to_bytes((s.bit_length() + 7) // 8, "big"))
+    header = bowl_sig_header(form, len(body))
+    where = {"header": len(header), "hashed_end": len(header) + len(head) + len(hashed)}
+    where["tail"] = where["hashed_end"] + 2 + len(unhashed)
+    return header + body, where
+
+
+def bowl_sig_bases():
+    """The signatures the driver starts from, in the order its table has
+    them: dicts with name, key, bytes, the offsets bowl_sig_make gives, the
+    creation time and accept, whether bowl_signature_ok has to take it with
+    the key's floor at zero. Everything not accepted is refused for the one
+    reason its name gives (a critical subpacket this does not know, a
+    creation time twice, another key's fingerprint, a hash that is neither
+    SHA-256 nor SHA-512, a packet that is not a version 4 RSA binary
+    signature, a length spelling the reader does not take)."""
+    bases = []
+
+    def issuer(index, fingerprint=None):
+        return bowl_sig_subpacket(
+            33, b"\x04" + bytes.fromhex(fingerprint or bowl_sig_fingerprint(index)))
+
+    def when(created):
+        return bowl_sig_subpacket(2, bowl_sig_u32(created))
+
+    def add(name, index, algorithm, hashed, unhashed=b"", form="old2", accept=True,
+            created=BOWL_SIG_TIME, patch=()):
+        packet, where = bowl_sig_make(index, algorithm, hashed, unhashed, form)
+        packet = bytearray(packet)
+        for at, value in patch:
+            packet[where["header"] + at] = value
+        bases.append(dict(name="%s_%d" % (name, BOWL_SIG_PRIMES[index][0]), key=index,
+                          bytes=bytes(packet), accept=accept, created=created, **where))
+
+    manu = bowl_sig_subpacket(20, b"\x80\x00\x00\x00\x00\x04\x00\x0emanu2,2.5+1.12,0,3")
+    for index in (0, 1):
+        fp = bytes.fromhex(bowl_sig_fingerprint(index))
+        keyid = bowl_sig_subpacket(16, fp[12:])
+        both = issuer(index) + when(BOWL_SIG_TIME)
+        add("gpg_sha512", index, 10, both + manu, keyid)
+        add("gpg_sha256", index, 8, both + manu, keyid)
+        add("empty_unhashed", index, 10, both)
+        # Integers whose first bytes are zero or small, found by trying
+        # creation times: a short integer in a full size key, one of 2040
+        # bits and one of 2043 (the same at 4096).
+        for label, delta in (("mpi_high", (1, 0)), ("mpi_mid", (0, 2)),
+                             ("mpi_small", (10, 14)), ("mpi_zero", (113, 389))):
+            created = BOWL_SIG_TIME + delta[index]
+            add(label, index, 10, issuer(index) + when(created), created=created)
+        add("wrong_issuer", index, 10, issuer(index, bowl_sig_fingerprint(1 - index)) +
+            when(BOWL_SIG_TIME), accept=False)
+        add("critical_unknown", index, 10, both + bowl_sig_subpacket(100, b"x", True),
+            accept=False)
+        if index:
+            continue
+        add("time_first", index, 10, when(BOWL_SIG_TIME) + issuer(index))
+        add("new_header", index, 10, both + manu, keyid, form="new")
+        add("flags", index, 10, both + bowl_sig_subpacket(27, b"\x03") +
+            bowl_sig_subpacket(21, b"\x0a\x08") + bowl_sig_subpacket(30, b"\x01") +
+            bowl_sig_subpacket(4, b"\x01"), keyid)
+        add("long_notation", index, 10, both + bowl_sig_subpacket(
+            20, bytes(4) + bowl_sig_u16(4) + bowl_sig_u16(300) + b"name" + b"v" * 300))
+        add("private_use", index, 8, both + bowl_sig_subpacket(100, b"x") +
+            bowl_sig_subpacket(110, bytes(40)))
+        add("junk_unhashed", index, 10, both, b"\xff\xff\xff\x00\x01")
+        add("big_unhashed", index, 8, both, bytes(range(256)) * 4)
+        add("before_floor", index, 10, issuer(index) + when(BOWL_SIG_TIME - 1),
+            created=BOWL_SIG_TIME - 1)
+        add("critical_known", index, 10, both + bowl_sig_subpacket(4, b"\x01", True),
+            accept=False)
+        add("critical_created", index, 10, issuer(index) + bowl_sig_subpacket(
+            2, bowl_sig_u32(BOWL_SIG_TIME), True), accept=False)
+        add("dup_created", index, 10, both + when(BOWL_SIG_TIME), accept=False)
+        add("dup_issuer", index, 10, issuer(index) + both, accept=False)
+        add("no_created", index, 10, issuer(index), accept=False)
+        add("no_issuer", index, 10, when(BOWL_SIG_TIME), accept=False)
+        add("issuer_v3", index, 10, bowl_sig_subpacket(33, b"\x03" + fp) +
+            when(BOWL_SIG_TIME), accept=False)
+        add("issuer_short", index, 10, bowl_sig_subpacket(33, b"\x04" + fp[:19]) +
+            when(BOWL_SIG_TIME), accept=False)
+        add("created_short", index, 10, issuer(index) + bowl_sig_subpacket(2, bytes(3)),
+            accept=False)
+        add("zero_length", index, 10, b"\x00" + both, accept=False)
+        add("five_octet", index, 10, both + b"\xff" + bowl_sig_u32(5) + bytes((100, 1, 2, 3, 4)),
+            accept=False)
+        add("overrun", index, 10, both + b"\x40" + bytes(10), accept=False)
+        add("old4", index, 10, both, form="old4", accept=False)
+        add("new5", index, 10, both, form="new5", accept=False)
+        for label, at, value in (("version3", 0, 3), ("text_type", 1, 1), ("dsa", 2, 17),
+                                 ("sha1", 3, 2), ("sha224", 3, 11), ("sha384", 3, 9)):
+            add(label, index, 10, both, accept=False, patch=((at, value),))
+    return bases
+
+
+#       The hosted stand-ins bowl.c's signature section stands on, in one
+#       place: the library calls it makes (and the ones its spellings have
+#       made), each as the contract lib.c states for it, and the descriptor
+#       calls over two in-memory files, the .sig and the archive. A change
+#       to what the section calls is a line here.
+BOWL_SIG_FUZZ_SHIM = r"""
+#include <fcntl.h>
+#ifndef AT_FDCWD
+#define AT_FDCWD (-100)
+#endif
+#define FILE_READ O_RDONLY
+
+/* Lower or upper case hex of size bytes, no terminator; its length. */
+static positive memory_into_hex_case(void *into, const void *from, positive size,
+                                     positive upper)
+{
+        const char *digits = upper ? "0123456789ABCDEF" : "0123456789abcdef";
+        const p8 *in = from;
+        p8 *out = into;
+
+        for (positive at = 0; at < size; at++)
+        {
+                out[2 * at] = (p8)digits[in[at] >> 4];
+                out[2 * at + 1] = (p8)digits[in[at] & 15];
+        }
+        return 2 * size;
+}
+static positive memory_into_hex(void *into, const void *from, positive size)
+{
+        return memory_into_hex_case(into, from, size, 0);
+}
+static bool string_equals(const char *one, const char *two)
+{
+        return strcmp(one, two) == 0;
+}
+/* The index of the highest set bit; never asked about zero. */
+static p32 top_bit_known(positive value)
+{
+        return 63 - (p32)__builtin_clzll(value);
+}
+/* lib.c's memory_decode_power2 for the one alphabet bowl.c asks it about,
+   four bits a symbol: groups quanta of two symbols to a byte through a
+   256 byte table of indices below 16 and the sentinel 255, stopping before
+   the first quantum with a symbol the table does not know; the quanta
+   completed. */
+static positive memory_decode_power2(void *into, const void *from, positive groups,
+                                     const void *values, positive bits)
+{
+        const p8 *in = from, *table = values;
+        p8 *out = into;
+        positive done;
+
+        if (bits != 4)
+                abort();
+        for (done = 0; done < groups; done++)
+        {
+                p8 high = table[in[2 * done]], low = table[in[2 * done + 1]];
+
+                if (high == 255 || low == 255)
+                        break;
+                out[done] = (p8)(high << 4 | low);
+        }
+        return done;
+}
+
+/* Two files: the signature a mirror served and the archive it signs. */
+static const p8 *fz_data[2];
+static positive fz_size[2], fz_pos[2];
+static positive fz_chunk;       /* at most this many bytes a read; 0 for all */
+static long fz_fail_at[2];      /* each file's reads fail from this offset; -1 never */
+static bipolar system_open_at(int directory, const char *path, int flags)
+{
+        (void)directory;
+        /* The flags production passes: no link followed, close on exec. */
+        if (!(flags & O_NOFOLLOW) || !(flags & O_CLOEXEC) || (flags & O_ACCMODE))
+                abort();
+        if (!strcmp(path, "sig"))
+        {
+                fz_pos[0] = 0;
+                return 3;
+        }
+        if (!strcmp(path, "archive"))
+        {
+                fz_pos[1] = 0;
+                return 4;
+        }
+        return -2;
+}
+static bipolar system_read_once(bipolar handle, void *into, positive size)
+{
+        int which = handle == 3 ? 0 : 1;
+        positive take = fz_size[which] - fz_pos[which];
+
+        if (handle != 3 && handle != 4)
+                abort();
+        if (fz_fail_at[which] >= 0 && fz_pos[which] >= (positive)fz_fail_at[which])
+                return -5;
+        if (take > size)
+                take = size;
+        if (fz_chunk && take > fz_chunk)
+                take = fz_chunk;
+        if (take)
+                memcpy(into, fz_data[which] + fz_pos[which], take);
+        fz_pos[which] += take;
+        return (bipolar)take;
+}
+static bipolar system_read_retry(positive handle, void *into, positive size)
+{
+        return system_read_once((bipolar)handle, into, size);
+}
+static bipolar system_close(bipolar handle)
+{
+        return handle == 3 || handle == 4 ? 0 : -9;
+}
+"""
+
+#       What the driver does with its input. The first four bytes pick the
+#       lane: byte 0 the mode (bits 0-2), the key (bit 3) and the floor
+#       (bits 4-5), byte 1 how many bytes a read returns (0 all), byte 2 the
+#       offset (in eights) from which the signature's reads fail or, with
+#       its top bit, (in fours) the archive's, byte 3 a base. Mode 0 is a signature file of any bytes. 1 is a base with its
+#       unhashed area replaced by the input and the packet's length put
+#       right, which has to be taken; 2 is a base with a few bytes changed,
+#       which has to be refused when a signed byte is among them; 3 is a base
+#       cut short or followed by junk, which has to be refused; 4 is a key
+#       made of the input's bytes, checked only for what it does to the
+#       reader; 5 is a base with another integer, of any length up to 600
+#       bytes and spelled as the reader wants it, behind the base's check
+#       bytes, which has to be refused; 6 is the input as the body of a
+#       packet, framed with a header that says its length (old or new
+#       format by the base byte's low bit).
+BOWL_SIG_FUZZ_DRIVER = r"""
+#include <stdint.h>
+
+#define FZ_CAP 2700
+#define FZ_TIME 1790000000u
+
+typedef struct
+{
+        const p8 *bytes;
+        positive length;
+        positive header;        /* octets of packet header */
+        positive hashed_end;    /* where the unhashed area's length is */
+        positive tail;          /* where the check bytes are, after the unhashed area */
+        int new_format;
+        int key;
+        int accept;
+        p32 created;
+} fz_base;
+
+static const p8 fz_archive[] = "moonwater bowl test archive\n";
+@@BASES@@
+@@KEYS@@
+
+static void fz_fail(const char *what, const char *name)
+{
+        fprintf(stderr, "bowl_sig_fuzz: %s%s%s\n", what, name ? ": " : "", name ? name : "");
+        abort();
+}
+
+static bool fz_ok(const p8 *sig, positive n, const struct bowl_key *key,
+                  positive chunk, long fail_sig, long fail_archive)
+{
+        bool ok;
+
+        fz_data[0] = sig;
+        fz_size[0] = n;
+        fz_chunk = chunk;
+        fz_fail_at[0] = fail_sig;
+        fz_fail_at[1] = fail_archive;
+        ok = bowl_signature_ok("archive", "sig", key);
+        fz_chunk = 0;
+        fz_fail_at[0] = fz_fail_at[1] = -1;
+        return ok;
+}
+
+/* bowl_signature_read over a copy of exactly n bytes, so a read past the
+   packet is an out-of-bounds read to the sanitizer, and what it answers
+   held to what it promises. */
+static bool fz_parse(const p8 *sig, positive n, const struct bowl_key *key,
+                     p32 *created)
+{
+        p8 *copy = malloc(n ? n : 1);
+        struct bowl_signature found;
+        bool parsed;
+
+        memcpy(copy, sig, n);
+        parsed = bowl_signature_read(copy, n, key, &found);
+        if (parsed)
+        {
+                if (found.hash != 8 && found.hash != 10)
+                        fz_fail("a hash that is neither SHA-256 nor SHA-512", 0);
+                if (found.hashed < copy || found.hashed_length > n ||
+                    found.hashed + found.hashed_length > copy + n)
+                        fz_fail("a hashed area outside the packet", 0);
+                if (!found.mpi_length || found.mpi < copy ||
+                    found.mpi + found.mpi_length != copy + n || !found.mpi[0])
+                        fz_fail("an integer that is not the packet's tail", 0);
+                *created = found.created;
+        }
+        free(copy);
+        return parsed;
+}
+
+static p32 fz_floor(unsigned selector)
+{
+        return selector == 0 ? 0 : selector == 1 ? FZ_TIME : selector == 2 ? FZ_TIME + 1
+                                                                          : 0xffffffffu;
+}
+
+/* The packet of base with its unhashed area replaced and what follows it
+   (the check bytes and the integer) given. */
+static positive fz_splice(p8 *out, const fz_base *base, const p8 *unhashed, positive m,
+                          const p8 *rest, positive rest_length)
+{
+        p8 body[FZ_CAP + 16];
+        positive at = base->hashed_end - base->header;
+        positive size;
+
+        if (base->header != 3)
+                abort();
+        memcpy(body, base->bytes + base->header, at);
+        body[at++] = (p8)(m >> 8);
+        body[at++] = (p8)m;
+        if (m)
+                memcpy(body + at, unhashed, m);
+        at += m;
+        memcpy(body + at, rest, rest_length);
+        size = at + rest_length;
+        if (base->new_format)
+        {
+                out[0] = 0xc2;
+                out[1] = (p8)(192 + ((size - 192) >> 8));
+                out[2] = (p8)(size - 192);
+        }
+        else
+        {
+                out[0] = 0x89;
+                out[1] = (p8)(size >> 8);
+                out[2] = (p8)size;
+        }
+        memcpy(out + 3, body, size);
+        return 3 + size;
+}
+
+static void fz_start(void)
+{
+        p8 hex[41];
+
+        fz_data[1] = fz_archive;
+        fz_size[1] = sizeof fz_archive - 1;
+        fz_fail_at[0] = fz_fail_at[1] = -1;
+        for (int k = 0; k < 2; k++)
+                if (!bowl_key_fingerprint(&fz_keys[k], hex) ||
+                    strcmp((char *)hex, fz_keys[k].fingerprint))
+                        fz_fail("a test key's numbers do not make its fingerprint", 0);
+        for (positive i = 0; i < FZ_BASES; i++)
+        {
+                const fz_base *base = &fz_bases[i];
+                struct bowl_key key = fz_keys[base->key];
+                p32 created = 0;
+                bool parsed = fz_parse(base->bytes, base->length, &key, &created);
+
+                key.since = 0;
+                if (fz_ok(base->bytes, base->length, &key, 0, -1, -1) != (bool)base->accept)
+                        fz_fail(base->accept ? "a good signature is refused"
+                                             : "a signature that is bad is taken",
+                                fz_base_names[i]);
+                if (!base->accept)
+                        continue;
+                if (!parsed || created != base->created)
+                        fz_fail("a good signature is not read as made", fz_base_names[i]);
+                key.since = base->created;
+                if (!fz_ok(base->bytes, base->length, &key, 0, -1, -1))
+                        fz_fail("a signature made on the floor's second is refused",
+                                fz_base_names[i]);
+                key.since = base->created + 1;
+                if (fz_ok(base->bytes, base->length, &key, 0, -1, -1))
+                        fz_fail("a signature made before the floor is taken",
+                                fz_base_names[i]);
+        }
+}
+
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+{
+        static bool started;
+        static p8 sig[FZ_CAP + 16];
+        const uint8_t *input;
+        const fz_base *base;
+        struct bowl_key key;
+        unsigned mode;
+        positive chunk, n = 0, have;
+        long fail_sig, fail_archive;
+        bool expect_accept = false, expect_refuse = false, ok, parsed;
+        p32 created = 0;
+
+        if (!started)
+        {
+                started = true;
+                fz_start();
+        }
+        if (size < 4)
+                return 0;
+        mode = data[0] & 7;
+        chunk = data[1];
+        fail_sig = data[2] && !(data[2] & 0x80) ? (long)(data[2] - 1) * 8 : -1;
+        fail_archive = data[2] & 0x80 ? (long)(data[2] & 0x7f) * 4 : -1;
+        base = &fz_bases[data[3] % FZ_BASES];
+        key = fz_keys[(data[0] >> 3) & 1];
+        key.since = fz_floor((data[0] >> 4) & 3);
+        input = data + 4;
+        have = size - 4;
+        if (have > FZ_CAP)
+                have = FZ_CAP;
+
+        if (mode == 0)
+        {
+                memcpy(sig, input, have);
+                n = have;
+        }
+        else if (mode == 6)
+        {
+                /* The input is the body of a signature packet, framed in a
+                   header that says exactly its length, so what the packet
+                   header holds never stands between the fuzzer and the
+                   fields behind it. */
+                if (data[3] & 1)
+                {
+                        if (have < 256)
+                        {
+                                sig[0] = 0x88;
+                                sig[1] = (p8)have;
+                                n = 2;
+                        }
+                        else
+                        {
+                                sig[0] = 0x89;
+                                sig[1] = (p8)(have >> 8);
+                                sig[2] = (p8)have;
+                                n = 3;
+                        }
+                }
+                else
+                {
+                        sig[0] = 0xc2;
+                        if (have < 192)
+                        {
+                                sig[1] = (p8)have;
+                                n = 2;
+                        }
+                        else
+                        {
+                                sig[1] = (p8)(192 + ((have - 192) >> 8));
+                                sig[2] = (p8)(have - 192);
+                                n = 3;
+                        }
+                }
+                memcpy(sig + n, input, have);
+                n += have;
+        }
+        else if (mode >= 1 && mode <= 3 || mode == 5)
+        {
+                key = fz_keys[base->key];
+                key.since = fz_floor((data[0] >> 4) & 3);
+                if (mode == 1)
+                {
+                        positive m = have > 1500 ? 1500 : have;
+
+                        if (base->header != 3)
+                                return 0;
+                        n = fz_splice(sig, base, input, m, base->bytes + base->tail,
+                                      base->length - base->tail);
+                        expect_accept = base->accept && n < 2048;
+                        expect_refuse = !base->accept;
+                }
+                else if (mode == 2)
+                {
+                        positive at = have >= 2 ? ((positive)input[0] << 8 | input[1]) % base->length : 0;
+                        positive count = have >= 3 ? 1 + input[2] % 16 : 1;
+                        bool signed_change = false;
+
+                        memcpy(sig, base->bytes, base->length);
+                        n = base->length;
+                        for (positive i = 0; i < count && at + i < n; i++)
+                        {
+                                p8 value = 3 + i < have ? input[3 + i] : 0;
+                                positive where = at + i;
+
+                                signed_change |= value != sig[where] &&
+                                                 ((where >= base->header && where < base->hashed_end) ||
+                                                  where >= base->tail);
+                                sig[where] = value;
+                        }
+                        expect_refuse = signed_change && base->accept;
+                }
+                else if (mode == 5)
+                {
+                        /* The integer replaced by one of the input's choosing,
+                           from one byte to more than a key has, spelled as
+                           the reader wants it and behind the base's own
+                           check bytes, so it is the integer that decides. */
+                        p8 rest[2 + 2 + 700];
+                        positive length = have >= 2 ? 1 + ((positive)input[0] << 8 | input[1]) % 600 : 1;
+                        positive bits;
+                        p8 first;
+
+                        if (base->header != 3)
+                                return 0;
+                        for (positive i = 0; i < length; i++)
+                                rest[4 + i] = 2 + i < have ? input[2 + i] : (p8)(0x55 + i);
+                        if (!rest[4])
+                                rest[4] = 1;
+                        first = rest[4];
+                        bits = length * 8 - 8;
+                        while (first)
+                        {
+                                bits++;
+                                first >>= 1;
+                        }
+                        rest[0] = base->bytes[base->tail];
+                        rest[1] = base->bytes[base->tail + 1];
+                        rest[2] = (p8)(bits >> 8);
+                        rest[3] = (p8)bits;
+                        n = fz_splice(sig, base, base->bytes + base->hashed_end + 2,
+                                      base->tail - base->hashed_end - 2, rest, 4 + length);
+                        expect_refuse = length != base->length - base->tail - 4 ||
+                                        memcmp(rest + 4, base->bytes + base->tail + 4, length);
+                }
+                else
+                {
+                        positive cut = have >= 2 ? ((positive)input[0] << 8 | input[1]) % (base->length + 1) : 0;
+                        positive junk = have > 2 ? have - 2 : 0;
+
+                        if (junk > 64)
+                                junk = 64;
+                        memcpy(sig, base->bytes, cut);
+                        if (junk)
+                                memcpy(sig + cut, input + 2, junk);
+                        n = cut + junk;
+                        expect_refuse = n != base->length;
+                        expect_accept = n == base->length && !memcmp(sig, base->bytes, n) &&
+                                        base->accept;
+                }
+        }
+        else
+        {
+                /* A key made of the input: a fingerprint that is the one
+                   its numbers make (so the check passes and the rest runs),
+                   a modulus of whatever characters, an exponent. */
+                static char modulus[1200];
+                p8 hex[41];
+                positive length = have > 8 ? have - 8 : 0;
+
+                if (length > sizeof modulus - 1)
+                        length = sizeof modulus - 1;
+                static const char table[] = "0123456789abcdef0123456789abcdefABCDEFg -";
+
+                for (positive i = 0; i < length; i++)
+                        modulus[i] = table[input[8 + i] % (sizeof table - 1)];
+                modulus[length] = 0;
+                key.modulus = modulus;
+                key.fingerprint = "";
+                key.exponent = have >= 4 ? network_load_32(input) : 65537;
+                key.created = have >= 8 ? network_load_32(input + 4) : 0;
+                if (bowl_key_fingerprint(&key, hex) && !(data[3] & 1))
+                {
+                        static char text[41];
+
+                        memcpy(text, hex, 41);
+                        key.fingerprint = text;
+                }
+                memcpy(sig, fz_bases[0].bytes, fz_bases[0].length);
+                n = fz_bases[0].length;
+        }
+
+        parsed = fz_parse(sig, n, &key, &created);
+        ok = fz_ok(sig, n, &key, chunk, fail_sig, fail_archive);
+        if (ok && !parsed)
+                fz_fail("taken what the reader refuses", 0);
+        if (ok && (created < key.since || n >= 2048))
+                fz_fail("taken against the floor or past the room", 0);
+        if (ok && expect_refuse)
+                fz_fail("a changed signature is taken", mode == 1 ? "unhashed area" : mode == 2 ? "edit" : "cut");
+        if (!ok && expect_accept && fail_sig < 0 && fail_archive < 0 && key.since <= base->created)
+                fz_fail("a good signature with its unhashed area replaced is refused", fz_base_names[data[3] % FZ_BASES]);
+        return 0;
+}
+"""
+
+
+def bowl_sig_fuzz_tables():
+    """The driver's tables as C: each base's bytes and where the pieces are,
+    the names the driver reports them by, and the two keys as bowl.c writes
+    a pinned one (fingerprint, creation time, exponent, modulus, floor)."""
+    bases = bowl_sig_bases()
+    lines = []
+    for at, base in enumerate(bases):
+        lines.append("static const p8 fz_base_%d[] = {%s};" % (
+            at, ", ".join("0x%02x" % byte for byte in base["bytes"])))
+    lines.append("#define FZ_BASES %d" % len(bases))
+    lines.append("static const fz_base fz_bases[FZ_BASES] = {")
+    for at, base in enumerate(bases):
+        lines.append("        {fz_base_%d, %d, %d, %d, %d, %d, %d, %d, %du}," % (
+            at, len(base["bytes"]), base["header"], base["hashed_end"], base["tail"],
+            base["bytes"][0] == 0xc2, base["key"], base["accept"], base["created"]))
+    lines.append("};")
+    lines.append("static const char *const fz_base_names[FZ_BASES] = {%s};" % ", ".join(
+        '"%s"' % base["name"] for base in bases))
+    keys = ["static struct bowl_key fz_keys[2] = {"]
+    for index in (0, 1):
+        keys.append('        {"%s", %d, 65537, "%s", 0},' % (
+            bowl_sig_fingerprint(index), BOWL_SIG_KEY_CREATED, bowl_sig_modulus(index)))
+    keys.append("};")
+    return "\n".join(lines), "\n".join(keys)
+
+
+def bowl_sig_fuzz_source(net, bowl, checks):
+    """The lift: net.c's hosted crypto (crypto_fuzz's, without its oracle and
+    driver, so crypto_rsa_pkcs1 is the production one), then bowl.c's
+    signed-download section from its banner to the pinned key by those two
+    anchors over BOWL_SIG_FUZZ_SHIM, then the driver. ValueError when an
+    anchor moved. What the section calls is stood in for in the shim, each
+    call by itself, and the digest stream it reads the archive through comes
+    from above the banner when bowl.c has one."""
+    crypto = crypto_fuzz_source(net, checks, False)
+    if CRYPTO_FUZZ_DRIVER_C not in crypto:
+        raise ValueError("crypto_fuzz_source no longer ends in its driver")
+    crypto = crypto.replace(CRYPTO_FUZZ_DRIVER_C, "")
+    signed = src_slice(
+        bowl,
+        "/* ---- Signed downloads: an OpenPGP detached signature against a pinned key. ---- */",
+        "/* Arch Linux ARM Build System <builder@archlinuxarm.org>",
+        "bowl_sig_fuzz")
+    #   The archive is read into the digest by bowl_digest_stream, which sits
+    #   above the banner where bowl.c has it; a bowl.c that reads it in the
+    #   section itself has no such helper to bring.
+    stream = "/* Everything a descriptor reads, written into a digest that is already open"
+    digest = src_slice(bowl, stream,
+                       "/* The SHA-256 of what a descriptor reads, as lower-case hex",
+                       "bowl_sig_fuzz") if stream in bowl else ""
+    bases, keys = bowl_sig_fuzz_tables()
+    driver = BOWL_SIG_FUZZ_DRIVER.replace("@@BASES@@", bases).replace("@@KEYS@@", keys)
+    return "\n".join((crypto, BOWL_SIG_FUZZ_SHIM, digest, signed, driver))
+
+
+def bowl_sig_fuzz_seeds():
+    """The driver's seeds from the bases: each as a raw file, each taken
+    base with its unhashed area replaced, a few with one byte changed at
+    every field they have, a few cut and extended, and keys written the way
+    the pinned one is and then bent."""
+    bases = bowl_sig_bases()
+    seeds = {"empty.bin": b""}
+
+    def lane(mode, base=0, key=0, floor=0, chunk=0, fail=0):
+        return bytes((mode | key << 3 | floor << 4, chunk, fail, base))
+
+    for at, base in enumerate(bases):
+        seeds["raw_%s.bin" % base["name"]] = lane(0, at, base["key"]) + base["bytes"]
+        if base["header"] == 3:
+            seeds["splice_%s.bin" % base["name"]] = lane(1, at) + base["bytes"][
+                base["hashed_end"] + 2:base["tail"]]
+    first = bases[0]
+    for label, unhashed in (("empty", b""), ("pattern", bytes(range(256)) * 2),
+                            ("long", b"\xff" * 1500), ("one", b"\x01")):
+        seeds["splice_gpg_%s.bin" % label] = lane(1, 0) + unhashed
+    seeds["splice_floor.bin"] = lane(1, 0, floor=1) + b"\x01\x02"
+    for at, base in enumerate(bases):
+        if base["name"] not in ("gpg_sha512_2048", "gpg_sha256_2048", "mpi_zero_2048",
+                                "mpi_small_2048", "mpi_mid_2048", "new_header_2048",
+                                "gpg_sha512_4096"):
+            continue
+        body = base["header"]
+        places = (0, body, body + 1, body + 2, body + 3, body + 4, body + 5, body + 6,
+                  body + 7, base["hashed_end"] - 1, base["hashed_end"] + 1,
+                  base["tail"], base["tail"] + 2, base["tail"] + 3, base["tail"] + 4,
+                  len(base["bytes"]) - 1)
+        for place in places:
+            seeds["edit_%s_%d.bin" % (base["name"], place)] = lane(2, at) + bytes((
+                place >> 8, place & 255, 0, base["bytes"][place] ^ 1))
+        seeds["edit_%s_run.bin" % base["name"]] = lane(2, at) + bytes((
+            (body + 6) >> 8, (body + 6) & 255, 15)) + bytes(range(16))
+        for cut in (0, 1, 2, 3, 9, base["hashed_end"], base["tail"],
+                    len(base["bytes"]) - 1):
+            seeds["cut_%s_%d.bin" % (base["name"], cut)] = lane(3, at) + bytes((
+                cut >> 8, cut & 255))
+        seeds["junk_%s.bin" % base["name"]] = lane(3, at) + bytes((
+            len(base["bytes"]) >> 8, len(base["bytes"]) & 255, 0))
+    for at, base in enumerate(bases):
+        body = base["bytes"][base["header"]:]
+        seeds["body_%s.bin" % base["name"]] = lane(6, at & 1) + body
+        if base["name"] in ("gpg_sha512_2048", "gpg_sha512_4096"):
+            # the body cut at every field boundary after its first twelve bytes
+            hashed_at = base["hashed_end"] - base["header"]
+            after = base["tail"] - base["header"]
+            for cut in sorted({6, 11, 12, 13, hashed_at - 1, hashed_at, hashed_at + 1, hashed_at + 2,
+                               after - 1, after, after + 1, after + 2, after + 3,
+                               after + 4, after + 5, len(body) - 1}):
+                seeds["body_%s_cut%d.bin" % (base["name"], cut)] = lane(6, 1) + body[:cut]
+    for at, base in enumerate(bases):
+        if base["name"] in ("gpg_sha512_2048", "mpi_zero_2048", "gpg_sha512_4096"):
+            size = len(base["bytes"]) - base["tail"] - 4
+            integer = base["bytes"][base["tail"] + 4:]
+            for label, length in (("same", size), ("one", 1), ("short", size - 1),
+                                  ("long", size + 1), ("longer", 600), ("two", 2)):
+                seeds["integer_%s_%s.bin" % (base["name"], label)] = lane(5, at) + bytes((
+                    (length - 1) >> 8, (length - 1) & 255)) + (
+                        integer if label == "same" else bytes(range(1, 255)) * 3)
+    modulus = bowl_sig_modulus(0).encode()
+    seeds["key_real.bin"] = lane(4) + bytes.fromhex("00010001") + bytes(4) + modulus
+    seeds["key_odd.bin"] = lane(4) + bytes.fromhex("00010001") + bytes(4) + modulus + b"0"
+    seeds["key_upper.bin"] = lane(4) + bytes.fromhex("00010001") + bytes(4) + modulus.upper()
+    seeds["key_full.bin"] = lane(4) + bytes.fromhex("00010001") + bytes(4) + b"f" * 1024
+    seeds["key_over.bin"] = lane(4) + bytes.fromhex("00010001") + bytes(4) + b"f" * 1026
+    seeds["key_bad_digit.bin"] = lane(4) + bytes.fromhex("00010001") + bytes(4) + modulus[:-2] + b"g1"
+    seeds["key_zero.bin"] = lane(4) + bytes(8) + b"00" * 200
+    seeds["key_small.bin"] = lane(4) + bytes.fromhex("00000003") + bytes(4) + b"0b"
+    # the same signature read in pieces, and with a read that fails part way
+    seeds["pieces_gpg.bin"] = lane(0, 0, 0, 0, 1) + first["bytes"]
+    seeds["pieces_seven.bin"] = lane(0, 0, 0, 0, 7) + first["bytes"]
+    seeds["fails_gpg.bin"] = lane(0, 0, 0, 0, 0, 20) + first["bytes"]
+    seeds["floor_taken.bin"] = lane(0, 0, 0, 1) + first["bytes"]
+    seeds["floor_late.bin"] = lane(0, 0, 0, 2) + first["bytes"]
+    return seeds
+
+
+def harness_bowl_sig_fuzz(argv):
+    """libFuzzer over bowl.c's OpenPGP signature reader: bowl_signature_ok
+    and bowl_signature_read as a mirror's .sig file reaches them, and the
+    key routines under them (bowl_key_modulus, bowl_key_mpi,
+    bowl_key_fingerprint), lifted by their anchors over net.c's hosted
+    crypto, so the RSA check is the production one. The driver's keys are
+    throwaway 2048 and 4096 bit keys and its signatures are made here, in
+    Python: it starts by holding each of 46 of them to be taken or refused
+    for the reason it was built for, the pinned key's fingerprint to what its
+    numbers make, and then fuzzes the file (any bytes, a good packet with its
+    unhashed area replaced, with bytes changed, cut or followed by junk; a
+    key of any text), served in pieces and with reads that fail. Every
+    answer is held to what it promises: a signature taken is one the reader
+    reads and the floor allows, a signed byte changed is refused, the
+    unhashed area decides nothing. Bounded fixed-seed; 2 when
+    clang/libFuzzer is absent; MOONWATER_MSAN=1 runs it under MemorySanitizer.
+
+        python3 test/differential.py --harness bowl_sig_fuzz
+    """
+    del argv
+    try:
+        source = bowl_sig_fuzz_source((HARNESS_ROOT / "src/net/net.c").read_text(),
+                                      (HARNESS_ROOT / "src/bowl.c").read_text(),
+                                      (HARNESS_ROOT / "test/checks.c").read_text())
+    except (ValueError, RuntimeError) as exc:
+        print("  FAIL bowl sig fuzz: " + str(exc))
+        write_tally("bowl-sig-fuzz", 0, 1)
+        return 1
+    return tls_fuzz_run("bowl sig", bowl_sig_fuzz_seeds(), source, 2700)
+
+
 def harness_tls_fuzz(argv):
     """tls_der_fuzz, tls_hs_fuzz, tls_verify_fuzz, waterlink_pre_fuzz,
     waterlink_fuzz, dhcp_fuzz, sntp_fuzz, dns_fuzz, netlink_fuzz,
-    crypto_fuzz and http_fuzz in turn: `sh test/run fuzz`.
+    crypto_fuzz, bowl_sig_fuzz and http_fuzz in turn: `sh test/run fuzz`.
 
     Continuous by default, an hour a target with no run cap, unless
     MOONWATER_FUZZ_SECONDS / MOONWATER_FUZZ_RUNS say otherwise. With
@@ -52807,13 +53714,14 @@ def harness_tls_fuzz(argv):
     os.environ.setdefault("MOONWATER_FUZZ_RUNS", "20000" if report else "-1")
     os.environ.setdefault("MOONWATER_FUZZ_SECONDS", "5" if report else "3600")
     runs, seconds, _ = tls_fuzz_budget()
-    print("tls fuzz: der then hs then verify then waterlink pre then waterlink then dhcp then sntp then dns then netlink then crypto then http "
+    print("tls fuzz: der then hs then verify then waterlink pre then waterlink then dhcp then sntp then dns then netlink then crypto then bowl sig then http "
           "(runs=%d seconds=%d)" % (runs, seconds))
     seeds = {corpus: len(tls_fuzz_seeds(corpus))
              for corpus in ("tls_der", "tls_hs", "waterlink", "dhcp", "sntp", "dns", "netlink", "crypto", "http")}
     seeds["waterlink_pre"] = len(waterlink_pre_seeds())
     seeds["wifi_eapol"] = len(wifi_eapol_fuzz_seeds())
     seeds["wifi_scan"] = len(wifi_scan_fuzz_seeds())
+    seeds["bowl_sig"] = len(bowl_sig_fuzz_seeds())
     targets = []
     for name, corpus, harness in (
             ("tls_der_fuzz", "tls_der", harness_tls_der_fuzz),
@@ -52828,6 +53736,7 @@ def harness_tls_fuzz(argv):
             ("dns_fuzz", "dns", harness_dns_fuzz),
             ("netlink_fuzz", "netlink", harness_netlink_fuzz),
             ("crypto_fuzz", "crypto", harness_crypto_fuzz),
+            ("bowl_sig_fuzz", "bowl_sig", harness_bowl_sig_fuzz),
             ("http_fuzz", "http", harness_http_fuzz)):
         began = time.time()
         try:
@@ -53878,6 +54787,7 @@ int main(void)
         dns = harness_dns_fuzz([])
         netlink = harness_netlink_fuzz([])
         crypto = harness_crypto_fuzz([])
+        bowl = harness_bowl_sig_fuzz([])
         http = harness_http_fuzz([])
     finally:
         if prior is None:
@@ -53899,6 +54809,7 @@ int main(void)
     checks(dns == 0, "dns_fuzz clean under MSan")
     checks(netlink == 0, "netlink_fuzz clean under MSan")
     checks(crypto in (0, 2), "crypto_fuzz clean under MSan")
+    checks(bowl == 0, "bowl_sig_fuzz clean under MSan")
     checks(http == 0, "http_fuzz clean under MSan")
     return checks.verdict("msan net", "msan-net")
 
@@ -53929,7 +54840,7 @@ def harness_security_hygiene(argv):
                 "tls_der_fuzz", "tls_hs_fuzz", "tls_fuzz", "msan_net", "pathname_race",
                 "dhcp_fuzz", "sntp_fuzz", "dns_fuzz", "netlink_fuzz", "tls_peer",
                 "http_fuzz", "http_urls", "wifi_eapol_fuzz", "wifi_scan_fuzz",
-                "wget_mutation", "wget_hostile", "sntp_era", "net_netem")
+                "bowl_sig_fuzz", "wget_mutation", "wget_hostile", "sntp_era", "net_netem")
     for name in security + ("tls_verify_fuzz",):
         checks(name in HARNESS_CHECKS, "differential.py: %s is not registered" % name)
     table = re.search(r"^HARNESS_CHECKS = \{$(.*?)^\}$", source, re.M | re.S)
@@ -53941,7 +54852,7 @@ def harness_security_hygiene(argv):
         checks("--harness " + name in run, "test/run: no lane asks for --harness " + name)
     for name in ("tls_der_fuzz", "tls_hs_fuzz", "pathname_race", "dhcp_fuzz",
                  "sntp_fuzz", "dns_fuzz", "netlink_fuzz", "http_fuzz", "wifi_eapol_fuzz",
-                 "wifi_scan_fuzz"):
+                 "wifi_scan_fuzz", "bowl_sig_fuzz"):
         checks(name + ": skipped (soft)" in run, "test/run: no soft skip for " + name)
 
     names = set()
@@ -63394,6 +64305,7 @@ HARNESS_CHECKS = {
     "sntp_fuzz": harness_sntp_fuzz,
     "wifi_eapol_fuzz": harness_wifi_eapol_fuzz,
     "wifi_scan_fuzz": harness_wifi_scan_fuzz,
+    "bowl_sig_fuzz": harness_bowl_sig_fuzz,
     "wget_mutation": harness_wget_mutation,
     "wget_hostile": harness_wget_hostile,
     "dns_fuzz": harness_dns_fuzz,
