@@ -31663,6 +31663,81 @@ static fn shell_asm_names(p8 address_to pages)
 }
 
 /*
+        shell_key_next from src/sh/builtin.c against the loop it replaces,
+        over tables of every count to 300 (and every count that is a whole
+        number of vectors, of words and one short of them), from every place
+        in the table, with keys drawn from a few values so that matches repeat,
+        values one apart and differing in one bit so the borrow of the word
+        test has something to be wrong about, the high bit of a halfword and
+        all ones, a key with garbage above its sixteen bits, and the table
+        ending on the last byte before a page nobody may read.
+*/
+positive shell_key_next(const void address_to keys, positive count, positive from, positive key);
+
+static fn shell_asm_keys(p8 address_to pages)
+{
+        static p16 own[320] __attribute__((aligned(8)));
+        static p16 pool[48];
+
+        for (positive round = 0; round < 6000; round++)
+        {
+                positive count = shell_asm_next() % 301;
+                positive alphabet = 1 + shell_asm_next() % 40;
+                p16 address_to keys = own;
+
+                if (round % 4 == 0)
+                        count &= ~(positive)15;
+                else if (round % 4 == 1)
+                        count = (count & ~(positive)3) + 3;
+                if (count > 300)
+                        count = 300;
+                if (pages && round % 2)
+                        keys = (p16 address_to)(((positive)(pages + 8192 - count * 2)) & ~(positive)7);
+                for (positive j = 0; j < alphabet; j++)
+                {
+                        p64 roll = shell_asm_next();
+
+                        pool[j] = j % 4 == 0 ? (p16)roll
+                                : j % 4 == 1 ? (p16)(pool[j - 1] + 1)
+                                : j % 4 == 2 ? (p16)(pool[j - 2] ^ 0x8000)
+                                             : (p16)(pool[j - 3] - 1);
+                        if (roll >> 60 == 0)
+                                pool[j] = 0xffff;
+                        else if (roll >> 60 == 1)
+                                pool[j] = 0;
+                }
+                for (positive i = 0; i < count; i++)
+                        keys[i] = pool[shell_asm_next() % alphabet];
+
+                positive key = pool[shell_asm_next() % alphabet];
+                positive step = count < 40 ? 1 : 1 + shell_asm_next() % 13;
+
+                for (positive from = 0; from <= count; from += step)
+                {
+                        positive want = count;
+                        positive ask = shell_asm_next() % 3 ? key : (key | shell_asm_next() << 16);
+
+                        for (positive i = from; i < count; i++)
+                                if (keys[i] == key)
+                                {
+                                        want = i;
+                                        break;
+                                }
+                        positive got = shell_key_next(keys, count, from, ask);
+
+                        checks++;
+                        if (got != want)
+                        {
+                                failures++;
+                                if (failures < 10)
+                                        string_format(log, "FAIL shell_key_next count %p from %p key %p: %p want %p\n",
+                                                      count, from, key, got, want);
+                        }
+                }
+        }
+}
+
+/*
         arith_plain_natural from src/sh/expand.c against the C it replaced,
         which asked at every digit whether the next would overflow: every
         byte after 7, 0 and 123, every pair and triple of bytes a literal,
@@ -32031,6 +32106,7 @@ b32 main(void)
         shell_asm_binaries((bipolar)(positive)pages > 0 ? pages : null);
         shell_asm_writes((bipolar)(positive)pages > 0 ? pages : null);
         shell_asm_names((bipolar)(positive)pages > 0 ? pages : null);
+        shell_asm_keys((bipolar)(positive)pages > 0 ? pages : null);
         shell_asm_naturals((bipolar)(positive)pages > 0 ? pages : null);
         shell_asm_scalars((bipolar)(positive)pages > 0 ? pages : null);
 

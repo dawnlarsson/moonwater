@@ -16999,6 +16999,87 @@ __asm__(
 #endif
 
 /*
+        The next key in a table of two byte keys that is a given one, from a
+        given place on, or the count when there is none.
+
+        A key is a halfword, the first byte of a name and its length, the
+        pair shell_tool_key holds for every tool: keys[i][0] | keys[i][1] << 8
+        on the little endian machines this runs on. The table is the one the
+        compiler wrote, aligned to eight bytes, and nothing is read beyond its
+        count: whole vectors only while a whole vector is left, the halfwords
+        after that one at a time. Sixteen keys a turn on x86_64 (SSE2, which
+        the architecture has) and on arm64 (NEON), four a word on riscv64,
+        where the exact lowest match of the word-at-a-time zero test is the
+        one asked for.
+
+        The index of a tool is a 260 name table filled once a process and a
+        process that runs one command asks it two or three times; this is the
+        ask without the fill, a hundred and ninety instructions a ask where
+        the C loop was eleven hundred.
+*/
+positive shell_key_next(const void address_to keys, positive count,
+                        positive from, positive key);
+
+#if X64
+__asm__(
+    ASM_FUNC(shell_key_next)
+    "movd %ecx, %xmm0\n   pshuflw $0, %xmm0, %xmm0\n   pshufd $0, %xmm0, %xmm0\n"
+    "mov %rdx, %rax\n"
+    "1: lea 16(%rax), %r8\n   cmp %rsi, %r8\n   ja 3f\n"
+    "movdqu (%rdi,%rax,2), %xmm1\n   movdqu 16(%rdi,%rax,2), %xmm2\n"
+    "pcmpeqw %xmm0, %xmm1\n   pcmpeqw %xmm0, %xmm2\n   packsswb %xmm2, %xmm1\n"
+    "pmovmskb %xmm1, %r9d\n   test %r9d, %r9d\n   jnz 2f\n"
+    "mov %r8, %rax\n   jmp 1b\n"
+    "2: bsf %r9d, %r9d\n   add %r9, %rax\n"
+    ASM_RET
+    "3: cmp %rsi, %rax\n   jae 4f\n   cmpw %cx, (%rdi,%rax,2)\n   je 4f\n"
+    "inc %rax\n   jmp 3b\n"
+    "4:\n"
+    ASM_RET
+    ASM_END(shell_key_next)
+);
+#elif ARM64
+__asm__(
+    ASM_FUNC(shell_key_next)
+    "dup v0.8h, w3\n   mov x4, x2\n"
+    "1: add x5, x4, #16\n   cmp x5, x1\n   b.hi 3f\n"
+    "add x6, x0, x4, lsl #1\n   ld1 {v1.8h, v2.8h}, [x6]\n"
+    "cmeq v1.8h, v1.8h, v0.8h\n   cmeq v2.8h, v2.8h, v0.8h\n"
+    "uzp1 v1.16b, v1.16b, v2.16b\n   shrn v1.8b, v1.8h, #4\n   fmov x7, d1\n"
+    "cbnz x7, 2f\n   mov x4, x5\n   b 1b\n"
+    "2: rbit x7, x7\n   clz x7, x7\n   add x0, x4, x7, lsr #2\n"
+    ASM_RET
+    "3: cmp x4, x1\n   b.hs 4f\n   ldrh w5, [x0, x4, lsl #1]\n   cmp w5, w3, uxth\n   b.eq 4f\n"
+    "add x4, x4, #1\n   b 3b\n"
+    "4: mov x0, x4\n"
+    ASM_RET
+    ASM_END(shell_key_next)
+);
+#elif RISCV64
+__asm__(
+    ASM_FUNC(shell_key_next)
+    // The key in all four halfwords of a word, the ones and the highs of the zero test.
+    "slli a3, a3, 48\n   srli a3, a3, 48\n   slli a4, a3, 16\n   or a4, a4, a3\n   slli a5, a4, 32\n   or a4, a4, a5\n"
+    "li a5, 0x0001000100010001\n   li a6, 0x8000800080008000\n"
+    "mv t0, a2\n"
+    // Halfwords until the index is a multiple of four, so the words are aligned.
+    "1: bgeu t0, a1, 9f\n   andi t1, t0, 3\n   beqz t1, 2f\n"
+    "slli t2, t0, 1\n   add t2, t2, a0\n   lhu t3, 0(t2)\n   beq t3, a3, 9f\n   addi t0, t0, 1\n   j 1b\n"
+    "2: addi t1, t0, 4\n   bltu a1, t1, 5f\n"
+    "slli t2, t0, 1\n   add t2, t2, a0\n   ld t3, 0(t2)\n   xor t3, t3, a4\n"
+    "sub t4, t3, a5\n   not t3, t3\n   and t4, t4, t3\n   and t4, t4, a6\n   bnez t4, 6f\n"
+    "mv t0, t1\n   j 2b\n"
+    "6: slli t1, t4, 48\n   bnez t1, 9f\n   addi t0, t0, 1\n   slli t1, t4, 32\n   bnez t1, 9f\n"
+    "addi t0, t0, 1\n   slli t1, t4, 16\n   bnez t1, 9f\n   addi t0, t0, 1\n   j 9f\n"
+    "5: bgeu t0, a1, 9f\n   slli t2, t0, 1\n   add t2, t2, a0\n   lhu t3, 0(t2)\n   beq t3, a3, 9f\n"
+    "addi t0, t0, 1\n   j 5b\n"
+    "9: mv a0, t0\n"
+    ASM_RET
+    ASM_END(shell_key_next)
+);
+#endif
+
+/*
         Which single tools this build keeps.
 
         The configuration header defines MOONWATER_TOOL_OFF_<name> as 1 for
@@ -17089,7 +17170,7 @@ static shell_tool shell_tools[] = {
         which the largest is six, so what survives the filter is a handful of
         candidates rather than a shorter list of the same kind.
 */
-static const p8 shell_tool_key[][2] = {
+static const p8 shell_tool_key[][2] __attribute__((aligned(8))) = {
 #define SHELL_TOOL_KEEP(name, function) \
         {(p8)(#name)[0], (p8)(sizeof(#name) - 1)},
 #include "tools.inc"
@@ -17154,10 +17235,56 @@ _Static_assert(SHELL_TOOLS < SHELL_TOOL_INDEX_ROOM,
                "the tool index needs a free slot for every tool");
 static bool shell_tool_index_ready;
 
+/*
+        How many names a process asks before it fills an index.
+
+        The fill is a few thousand instructions and a table's worth of
+        memory written, and a lookup that does not use an index is a scan of
+        keys at a hundred and ninety, or of a handful of names, so the index
+        is for a process that asks hundreds of times -- a script -- and not
+        for the one command that asks two or three times and is gone.
+*/
+#define SHELL_NAME_SCAN_ASKS 24
+
+static p8 shell_tool_asks HOT_STATE;
+
+/*
+        A name in a table of sixteen byte rows (the name first), by the keys
+        of the names: every row whose key agrees is compared, in table order,
+        which is the first the index would have found.
+*/
+static positive shell_name_scan(string_address name, positive length,
+                                const p8 (address_to keys)[2], positive count,
+                                address_any table)
+{
+        positive key;
+
+        if (length > 255)
+                return count;
+
+        key = (p8)name[0] | length << 8;
+
+        for (positive at = shell_key_next(keys, count, 0, key); at < count;
+             at = shell_key_next(keys, count, at + 1, key))
+                if (!memory_compare(name,
+                                    *(string_address address_to)((p8 address_to)table + at * 16),
+                                    length))
+                        return at;
+
+        return count;
+}
+
 static positive shell_tool_find_hashed(string_address name, positive2 named)
 {
         if (!shell_tool_index_ready)
         {
+                if_common (shell_tool_asks < SHELL_NAME_SCAN_ASKS)
+                {
+                        shell_tool_asks++;
+                        return shell_name_scan(name, named.y, shell_tool_key,
+                                               SHELL_TOOLS, shell_tools);
+                }
+
                 shell_name_index_build(shell_tools, sizeof(shell_tools[0]),
                                        SHELL_TOOLS, shell_tool_index,
                                        SHELL_TOOL_INDEX_ROOM, shell_tool_hash,
@@ -19611,34 +19738,14 @@ static b32 shell_tool_call(positive which)
         asks the two byte key first and only follows the pointer when the key
         matches, which for a name that is not a tool's -- the ordinary case,
         since a shell is what this binary usually is -- means the table is
-        walked without leaving this array at all.
-
-        The length is taken once. A name longer than a byte can hold is not
-        any tool's, and stopping on it here keeps the comparison below from
-        having to describe what it would mean.
+        walked without leaving this array at all, sixteen keys a step
+        (shell_key_next). A name longer than a byte can hold is not any
+        tool's and is answered before the walk.
 */
 static positive shell_tool_key_find(string_address name)
 {
-        positive length = string_length(name);
-        p8 first = (p8)name[0];
-
-        if (length > 255)
-                return SHELL_TOOLS;
-
-        for (positive at = 0; at < SHELL_TOOLS; at++)
-        {
-                if (shell_tool_key[at][0] != first ||
-                    shell_tool_key[at][1] != (p8)length)
-                        continue;
-
-                /* The key already agreed about the first byte and the
-                   length, so the terminator is what the length says it is
-                   and comparing it again would prove nothing. */
-                if (!memory_compare(name, shell_tools[at].name, length))
-                        return at;
-        }
-
-        return SHELL_TOOLS;
+        return shell_name_scan(name, string_length(name), shell_tool_key,
+                               SHELL_TOOLS, shell_tools);
 }
 
 /*
@@ -22820,11 +22927,43 @@ static bool shell_command_index_ready;
 static bool shell_disabled[SHELL_COMMAND_COUNT];
 static positive shell_disabled_count;
 
+static p8 shell_command_asks HOT_STATE;
+
+/*
+        A builtin by its first byte and then its whole name, in table order,
+        for a process that has asked too few times to be worth an index (see
+        SHELL_NAME_SCAN_ASKS). The names are one run of string literals, so
+        the walk is a few cache lines.
+*/
+static positive shell_command_scan(string_address name, positive length)
+{
+        p8 first = (p8)name[0];
+
+        if (length > 255)
+                return SHELL_COMMAND_COUNT;
+
+        for (positive at = 0; at < SHELL_COMMAND_COUNT; at++)
+        {
+                string_address row = shell_commands[at].name;
+
+                if ((p8)row[0] == first && !string_compare(row, name))
+                        return at;
+        }
+
+        return SHELL_COMMAND_COUNT;
+}
+
 static positive shell_command_index_hashed(string_address name,
                                             positive2 named)
 {
         if (!shell_command_index_ready)
         {
+                if_common (shell_command_asks < SHELL_NAME_SCAN_ASKS)
+                {
+                        shell_command_asks++;
+                        return shell_command_scan(name, named.y);
+                }
+
                 shell_name_index_build(shell_commands, sizeof(shell_commands[0]),
                                        SHELL_COMMAND_COUNT, shell_command_index,
                                        SHELL_COMMAND_INDEX_ROOM, null, null);
