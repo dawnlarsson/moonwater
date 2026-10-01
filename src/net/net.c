@@ -1306,6 +1306,11 @@ static COLD bipolar netlink_leases_on(b32 handle,
 /* Internal result: a validated UDP response asks for the same transaction to
    continue over TCP.  It is never returned to a caller. */
 #define DNS_TRY_TCP (-8)
+//      Inside one query, not answers: the server sent the question back in
+//      lower case (it does not keep the case the query was written in), or
+//      answered the EDNS0 option with FORMERR or NOTIMP.
+#define DNS_CASE_FOLDED (-9)
+#define DNS_FORMAT_ERROR (-10)
 
 /*
         The name, as labels.
@@ -1829,6 +1834,93 @@ static COLD bipolar dns_server_at(string_address path, positive wanted)
 }
 
 /*
+        Hardening a stub resolver can do on its own.
+
+        A reply is believed when its transaction id and its echoed question
+        match, and an attacker who cannot see the query has sixteen bits of id
+        and the source port to guess. Three things add to that without any
+        server's help, each with the fallback a server that cannot do it needs:
+
+        The source port is drawn from the CSPRNG over 1024 to 65535 and bound
+        explicitly (a few tries if taken, then the kernel's own pick), not
+        left to the kernel's 32768 to 60999. Every query is its own socket,
+        so every query has its own port.
+
+        The question is sent in mixed case (draft-vixie-dnsext-dns0x20): each
+        letter of the name takes a random case, every server that keeps the
+        question as it was sent echoes it so, and a forged reply has to
+        guess that too, a bit a letter. A server that answers in lower case
+        (some forwarders do) is noticed when its reply matches in every
+        respect but case, and the query is asked again once in the case it
+        was typed.
+
+        EDNS0 (RFC 6891) advertises 1232 bytes, the size the 2020 DNS flag day
+        settled on because it survives an IPv6 minimum MTU without
+        fragmentation, so an answer of 513 to 1232 bytes arrives by UDP and
+        not by the TCP retry that 512 forces. A server that answers the option
+        with FORMERR or NOTIMP is asked again without it (RFC 6891 7).
+*/
+#define DNS_EDNS_SIZE 1232
+#define DNS_EDNS_LENGTH 11
+
+//      The name's letters in random case. False when randomness is refused,
+//      and then the name is left as written. The bits are one request for
+//      all 32 bytes, nonblocking as the transaction id's is (a pool that is
+//      not ready refuses rather than gives a guessable case), not four.
+static COLD bool dns_mix_case(p8 address_to name, positive length)
+{
+        p8 bits[32];
+
+        if (system_random_fill(bits, sizeof bits, 1))
+                return false;
+        for (positive at = 0; at < length; at++)
+        {
+                p8 letter = name[at] | 0x20;
+
+                if (letter >= 'a' && letter <= 'z' && (bits[at / 8 % 32] >> (at % 8) & 1))
+                        name[at] ^= 0x20;
+        }
+        return true;
+}
+
+//      An unconnected socket bound to a random port (1024..65535), or the
+//      caller's own if none can be had.
+static COLD fn dns_bind_random_port(b32 handle)
+{
+        for (positive tries = 0; tries < 8; tries++)
+        {
+                p16 draw;
+                socket_address_internet here = {.family = AF_INET};
+
+                if (!network_transaction_secure(address_of draw, sizeof draw))
+                        return;
+                here.port = network_order_16((p16)(1024 + draw % 64512));
+                if (socket_bind(handle, address_of here, sizeof here) >= 0)
+                        return;
+        }
+}
+
+//      The reply matches what was sent except in case: the same id, one
+//      question, the same bytes under ASCII case folding.
+static COLD bool dns_reply_identity_folded(
+    p8 address_to reply, positive size, p16 id,
+    p8 address_to request, positive question_length)
+{
+        byte_reader reader = byte_reader_open(reply, size);
+        p16 asked = byte_reader_u16(&reader);
+        p16 questions;
+        const p8 address_to question;
+
+        (void)byte_reader_skip(&reader, 2);
+        questions = byte_reader_u16(&reader);
+        (void)byte_reader_skip(&reader, 6);
+        question = byte_reader_take(&reader, question_length);
+        return byte_reader_ok(&reader) && asked == id && questions == 1 &&
+               !memory_compare_ascii_case(question, request + DNS_HEADER,
+                                          question_length);
+}
+
+/*
         One question asked, and the first address in the answer.
 
         The reply is read with a deadline rather than blocked on forever: a
@@ -1837,8 +1929,10 @@ static COLD bipolar dns_server_at(string_address path, positive wanted)
         gives up and says so. The wait is a poll on the socket rather than a
         receive timeout, which keeps a timeval out of the assembly graph.
 */
-static COLD bipolar dns_resolve_at(p32 server, p16 port, string_address name,
-                              p32 address_to found, positive seconds)
+static COLD bipolar dns_query_once(p32 server, p16 port, string_address name,
+                                   p32 address_to found, bool mixed,
+                                   bool edns,
+                                   const network_deadline address_to budget)
 {
         p8 request[DNS_MAX_MESSAGE];
         p8 reply[DNS_MAX_MESSAGE];
@@ -1848,8 +1942,9 @@ static COLD bipolar dns_resolve_at(p32 server, p16 port, string_address name,
         bipolar got;
         bipolar failure = DNS_NO_REPLY;
         positive question_length;
+        positive request_length;
         positive left[2];
-        network_deadline deadline;
+        network_deadline deadline = *budget;
 
         /*
                 A machine with no RDRAND and no virtio-rng seeds the kernel's
@@ -1866,10 +1961,15 @@ static COLD bipolar dns_resolve_at(p32 server, p16 port, string_address name,
                 return DNS_NO_RANDOM;
 
         written = dns_write_name(request + DNS_HEADER,
-                                 sizeof(request) - DNS_HEADER - 4, name);
+                                 sizeof(request) - DNS_HEADER - 4 -
+                                     DNS_EDNS_LENGTH,
+                                 name);
 
         if (written < 0)
                 return DNS_MALFORMED;
+
+        if (mixed)
+                mixed = dns_mix_case(request + DNS_HEADER, (positive)written);
 
         memory_fill(request, 0, DNS_HEADER);
         network_store_16(request, id);
@@ -1880,16 +1980,27 @@ static COLD bipolar dns_resolve_at(p32 server, p16 port, string_address name,
         network_store_16(request + DNS_HEADER + written + 2, DNS_CLASS_IN);
 
         question_length = (positive)written + 4;
+        request_length = DNS_HEADER + question_length;
 
-        /* TCP fallback spends only what the original UDP transaction leaves.
-           Start the one monotonic budget before any socket operation. */
-        if (!network_deadline_begin(address_of deadline, seconds, 0))
-                return DNS_NO_REPLY;
+        if (edns)
+        {
+                p8 address_to option = request + request_length;
+
+                network_store_16(request + 10, 1);
+                option[0] = 0;                        // the root as owner
+                network_store_16(option + 1, 41);     // OPT
+                network_store_16(option + 3, DNS_EDNS_SIZE);
+                network_store_32(option + 5, 0);      // version 0, no flags
+                network_store_16(option + 9, 0);
+                request_length += DNS_EDNS_LENGTH;
+        }
 
         handle = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
 
         if (handle < 0)
                 return DNS_NO_SERVER;
+
+        dns_bind_random_port((b32)handle);
 
         socket_address_internet where = {
             .family = AF_INET, .port = network_order_16(port),
@@ -1904,8 +2015,8 @@ static COLD bipolar dns_resolve_at(p32 server, p16 port, string_address name,
         /* A signal before the datagram left is not the server's silence:
            send it again, within the same budget. */
         do
-                written = socket_send((b32)handle, request,
-                                      DNS_HEADER + question_length, 0, 0, 0);
+                written = socket_send((b32)handle, request, request_length, 0,
+                                      0, 0);
         while (written == NETWORK_INTERRUPTED &&
                network_deadline_left(address_of deadline, left, left + 1));
         if (written < 0)
@@ -1941,7 +2052,19 @@ static COLD bipolar dns_resolve_at(p32 server, p16 port, string_address name,
                     ? sizeof reply : (positive)got;
                 if (!dns_reply_identity(reply, available, id, request,
                                         question_length))
+                {
+                        //      Right id, the question in another case: a
+                        //      server that does not keep the case it is
+                        //      sent. Say so; the caller asks once more.
+                        if (mixed && dns_reply_identity_folded(
+                                         reply, available, id, request,
+                                         question_length))
+                        {
+                                failure = DNS_CASE_FOLDED;
+                                goto failed;
+                        }
                         continue;
+                }
 
                 break;
         }
@@ -1950,9 +2073,17 @@ static COLD bipolar dns_resolve_at(p32 server, p16 port, string_address name,
 
         failure = dns_reply_result(reply, (positive)got, id, request,
                                    question_length, found);
+        if (failure == DNS_REFUSED && edns)
+        {
+                //      FORMERR or NOTIMP to the option: ask again without it.
+                p16 code = network_load_16(reply + 2) & DNS_CODE_MASK;
+
+                if (code == 1 || code == 4)
+                        return DNS_FORMAT_ERROR;
+        }
         if (failure == DNS_TRY_TCP)
                 return dns_retry_tcp(address_of where, request,
-                                     DNS_HEADER + question_length, id,
+                                     request_length, id,
                                      question_length, found,
                                      address_of deadline);
         return failure;
@@ -1962,26 +2093,55 @@ failed:
         return failure;
 }
 
+/* The query, with its two fallbacks: once without the case mixing when the
+   server folded the question, once without EDNS0 when the server did not
+   understand the option. Both share the one budget. */
+static COLD bipolar dns_resolve_at(p32 server, p16 port, string_address name,
+                                   p32 address_to found, positive seconds)
+{
+        network_deadline budget;
+        bool mixed = true;
+        bool edns = true;
+        bipolar status = DNS_NO_REPLY;
+
+        /* TCP fallback spends only what the original UDP transaction leaves.
+           Start the one monotonic budget before any socket operation. */
+        if (!network_deadline_begin(address_of budget, seconds, 0))
+                return DNS_NO_REPLY;
+
+        for (positive attempt = 0; attempt < 3; attempt++)
+        {
+                status = dns_query_once(server, port, name, found, mixed, edns,
+                                        address_of budget);
+                if (status == DNS_CASE_FOLDED && mixed)
+                        mixed = false;
+                else if (status == DNS_FORMAT_ERROR && edns)
+                        edns = false;
+                else
+                        break;
+        }
+        return status == DNS_CASE_FOLDED ? DNS_NO_REPLY
+               : status == DNS_FORMAT_ERROR ? DNS_REFUSED : status;
+}
+
 /*
-        The servers resolv.conf names, in the order it names them.
+        The servers resolv.conf names, in the order it names them, asked the
+        way glibc and musl ask them.
 
-        Which servers those are is not decided here -- that is what writes the
-        file, and this only reads it. What is decided here is what happens
-        when one of them does not answer, and the answer is: ask the next.
+        The first server that gives an answer about the name is believed: an
+        address, "no such name" or "no address for it". Only a server that
+        gives none (no reply, refused, a malformed or failed answer, no
+        socket) sends the walk on to the next. The walk stops after three
+        servers, which is all glibc and musl read (MAXNS): a file listing more
+        would otherwise hold a lookup for its timeout once per line.
 
-        "No such name" does not end the walk either, and that is deliberate
-        rather than thorough. The file is written with a public resolver
-        first, and a public resolver has never heard of anything inside the
-        network it is outside of, so a name that exists only on the local
-        network comes back from it as NXDOMAIN. Treating that as final would
-        make a machine unable to reach anything on its own network. So it is
-        remembered as the answer to fall back on, the rest of the list is
-        asked anyway, and only an actual address stops the walk.
-
-        The cost is one extra query for a name that genuinely exists nowhere.
-        The walk stops after three servers, which is all glibc and musl read
-        (MAXNS): a file listing more would otherwise hold a lookup for its
-        timeout once per line.
+        That is a change of rule with the order the file is written in (see
+        net_write_resolv_to: the network's own resolver first, a public one
+        behind it). While a public resolver was written first, its "no such
+        name" for an inside-the-network name could not be final, so the walk
+        went on past it and every name that existed nowhere was also asked in
+        the clear of the next server. With the network's resolver first and
+        believed, a name the network does not know is not sent anywhere else.
 
         With no resolv.conf at all there is still somewhere to ask. A machine
         that has not been configured yet should be able to resolve a name, if
@@ -1990,10 +2150,15 @@ failed:
 #define DNS_FALLBACK 0x01010101u
 #define DNS_SERVERS_MAX 3
 
+static CONST COLD bool dns_answer_is_final(bipolar status)
+{
+        return status == DNS_OK || status == DNS_NO_SUCH_NAME ||
+               status == DNS_NO_ADDRESS;
+}
+
 static COLD bipolar dns_resolve_any(string_address path, string_address name,
                                p32 address_to found, positive seconds)
 {
-        bipolar definite = DNS_NO_SERVER;
         bipolar status = DNS_NO_SERVER;
         bipolar server;
         positive index = 0;
@@ -2006,19 +2171,15 @@ static COLD bipolar dns_resolve_any(string_address path, string_address name,
                 status = dns_resolve_at((p32)server, DNS_PORT, name, found,
                                         seconds);
 
-                if (status == DNS_OK)
-                        return DNS_OK;
-
-                if (definite == DNS_NO_SERVER &&
-                    (status == DNS_NO_SUCH_NAME || status == DNS_NO_ADDRESS))
-                        definite = status;
+                if (dns_answer_is_final(status))
+                        return status;
         }
 
         if (!asked)
                 return dns_resolve_at(DNS_FALLBACK, DNS_PORT, name, found,
                                       seconds);
 
-        return definite != DNS_NO_SERVER ? definite : status;
+        return status;
 }
 
 #endif // STANDARD_MODERN_C_NET_DNS
@@ -4341,7 +4502,11 @@ static bool crypto_rsa_pss_sha256(p8 address_to n_bytes, positive n_length,
 
 /* One trust anchor from anchors.inc: hashes that find candidates, then the
    key itself (curve 1 P-256, 2 P-384, 3 RSA), key_length raw bytes at key_at
-   in tls_anchor_keys. */
+   in tls_anchor_keys. distrust is Mozilla's server-auth distrust-after date
+   as YYYYMMDDHHMMSS, the form a certificate's dates are kept in, or 0 for
+   none: a chain that ends at this anchor is refused when its leaf's
+   notBefore is later than that (NSS applies the same comparison, and Chrome
+   and Firefox refuse the same chains). */
 typedef struct
 {
         p8 name[8];
@@ -4350,6 +4515,7 @@ typedef struct
         p32 exponent;
         p16 key_length;
         p32 key_at;
+        p64 distrust;
 } tls_anchor;
 
 #include "anchors.inc"
@@ -6430,11 +6596,30 @@ static COLD bool tls_anchor_key(const tls_anchor address_to anchor,
    anchors.inc. */
 #ifdef TLS_BENCH_ANCHOR
 #include TLS_BENCH_ANCHOR
+/* The bench root carries a distrust-after date only when the file says so,
+   so a test can put a chain on either side of one. */
+static COLD bool tls_bench_distrusts(p64 leaf_from)
+{
+#ifdef TLS_BENCH_DISTRUST
+        return leaf_from > TLS_BENCH_DISTRUST;
+#else
+        (void)leaf_from;
+        return false;
 #endif
+}
+#endif
+
+/* Whether this anchor's distrust-after date is earlier than the leaf's
+   notBefore. */
+static COLD bool tls_anchor_distrusts(const tls_anchor address_to anchor,
+                                      p64 leaf_from)
+{
+        return anchor->distrust && leaf_from > anchor->distrust;
+}
 
 /* A served certificate carrying an anchor's key ends the chain, whoever
    signed it: the key hash finds candidates and the whole key decides. */
-static COLD bool tls_spki_is_anchor(tls_cert address_to cert)
+static COLD bool tls_spki_is_anchor(tls_cert address_to cert, p64 leaf_from)
 {
         p8 key[96];
         p8 digest[32];
@@ -6455,7 +6640,7 @@ static COLD bool tls_spki_is_anchor(tls_cert address_to cert)
         if (cert->curve == 2 &&
             !memory_compare(cert->qx, tls_bench_anchor_x, 48) &&
             !memory_compare(cert->qy, tls_bench_anchor_y, 48))
-                return true;
+                return !tls_bench_distrusts(leaf_from);
 #endif
 
         for (positive i = 0; i < array_count(tls_anchors); i++)
@@ -6464,6 +6649,7 @@ static COLD bool tls_spki_is_anchor(tls_cert address_to cert)
 
                 if (tls_anchors[i].curve != cert->curve ||
                     memory_compare(tls_anchors[i].key_hash, digest, 8) ||
+                    tls_anchor_distrusts(tls_anchors + i, leaf_from) ||
                     !tls_anchor_key(tls_anchors + i, address_of root))
                         continue;
                 if (cert->curve == 3
@@ -6543,7 +6729,7 @@ static COLD bool tls_verify_one(tls_cert address_to child, tls_cert address_to i
 /* The last certificate served names its issuer.  Each anchor with that
    subject Name is tried, and one signature that verifies ends the chain; a
    Name no anchor carries fails without any signature check. */
-static COLD bool tls_anchor_verifies(tls_cert address_to child)
+static COLD bool tls_anchor_verifies(tls_cert address_to child, p64 leaf_from)
 {
         p8 digest[32];
 
@@ -6557,7 +6743,8 @@ static COLD bool tls_anchor_verifies(tls_cert address_to child)
                 root.curve = 2;
                 memory_copy(root.qx, tls_bench_anchor_x, 48);
                 memory_copy(root.qy, tls_bench_anchor_y, 48);
-                if (tls_verify_one(child, address_of root))
+                if (!tls_bench_distrusts(leaf_from) &&
+                    tls_verify_one(child, address_of root))
                         return true;
         }
 #endif
@@ -6567,6 +6754,7 @@ static COLD bool tls_anchor_verifies(tls_cert address_to child)
                 tls_cert root;
 
                 if (memory_compare(tls_anchors[i].name, digest, 8) ||
+                    tls_anchor_distrusts(tls_anchors + i, leaf_from) ||
                     !tls_anchor_key(tls_anchors + i, address_of root))
                         continue;
                 if (tls_verify_one(child, address_of root))
@@ -6826,7 +7014,7 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
                 return true;
 
         if (!tls_date_now(address_of now) || !tls_leaf_authorized(certs, now) ||
-            tls_spki_is_anchor(certs))
+            tls_spki_is_anchor(certs, certs[0].not_before))
                 return false;
         for (;;)
         {
@@ -6837,7 +7025,8 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
                         if (!(unusable >> next & 1) &&
                             tls_certificate_names_chain(certs + child,
                                                         certs + next) &&
-                            ((anchor = tls_spki_is_anchor(certs + next)) ||
+                            ((anchor = tls_spki_is_anchor(certs + next,
+                                                          certs[0].not_before)) ||
                              tls_issuer_authorized(certs + next, depth, now)) &&
                             tls_verify_one(certs + child, certs + next) &&
                             tls_path_permitted(certs, path, depth + 1,
@@ -6847,7 +7036,8 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
                 {
                         positive length;
 
-                        if (tls_anchor_verifies(certs + child))
+                        if (tls_anchor_verifies(certs + child,
+                                                certs[0].not_before))
                                 return true;
                         if (asked || !certs[child].ca_issuers)
                                 return false;
@@ -8302,6 +8492,9 @@ static bipolar tls_read_until(
 #define HTTP_STATUS (-10)
 #define HTTP_WRITE (-11)
 #define HTTP_SCHEME (-12)
+//      STRICT_TIGHT only: a redirect that leaves public address space for
+//      an address that is not public.
+#define HTTP_PRIVATE (-17)
 
 typedef byte_store http_buffer;
 #define http_forget(buffer) byte_store_release(buffer)
@@ -8823,6 +9016,28 @@ static bipolar http_response_framing_from(p8 address_to bytes, positive size,
                         response->body_kind = HTTP_BODY_LENGTH;
                 }
 
+                /* RFC 9110 15.3.5: a 204 response ends at the blank line;
+                   Content-Length is forbidden, and RFC 9112 6.1 likewise
+                   forbids Transfer-Encoding.  Section 15.3.6 permits a 205
+                   Content-Length only when it is zero.  The default does
+                   what wget and curl do -- both accept every one of these,
+                   ignore a 204's declared body and print a 205's -- because
+                   real servers send 204 with Content-Length: 0 and this
+                   client closes the connection after one response, so bytes
+                   left unread after the head can never be taken for the next
+                   response.  A build that wants the RFC's framing exactly
+                   refuses a declaration that cannot describe the no-content
+                   response.  (Plain C, not #if: a hosted lift of this section that
+                   forgets to define the tier fails to build instead of
+                   silently running as the tight one.) */
+                if (MOONWATER_STRICT >= STRICT_TIGHT &&
+                    ((response->code == 204 &&
+                      response->body_kind != HTTP_BODY_CLOSE) ||
+                     (response->code == 205 &&
+                      response->body_kind == HTTP_BODY_LENGTH &&
+                      response->body_length)))
+                        return HTTP_MALFORMED;
+
                 /* Informational responses precede, rather than replace, the
                    final response.  They cannot carry message framing, and a
                    protocol switch is outside this connection-close client. */
@@ -9026,7 +9241,7 @@ static bipolar http_response_head(
 
 static bool http_response_has_no_body(b32 code)
 {
-        return code == 204 || code == 205 || code == 304;
+        return code == 204 || code == 304;
 }
 
 typedef struct
@@ -9610,7 +9825,8 @@ static bipolar http_absolutize(bool tls, string_address host, p16 port,
 }
 
 /* 1 for a "." segment, 2 for "..", either spelled with %2e as well, as
-   GNU wget and a browser read them; 0 for any other. */
+   curl and a browser read them (GNU wget 1.25 sends a %2e spelling on
+   as written, but resolves the plain dots); 0 for any other. */
 static positive http_dot_segment(string_address segment, positive length)
 {
         positive dots = 0;
@@ -9630,7 +9846,7 @@ static positive http_dot_segment(string_address segment, positive length)
 
 /* RFC 3986 5.2.4's remove_dot_segments over the path in front of a query,
    in place, where the path starts with '/': GNU wget and curl resolve the
-   dot segments of every URL and Location rather than asking the server to,
+   plain dot segments of every URL and Location rather than asking the server to,
    and a path climbing above the root stays at it. Output never outruns
    input, so each segment moves down over what was dropped. */
 static fn http_path_simplify(p8 address_to path)
@@ -9839,8 +10055,9 @@ static fn http_url_leaf(string_address path, p8 address_to into, positive room)
                 query[0] = end;
 
         /* No last segment, ".", or "..", %2e spellings too: each names a
-           directory, which a file cannot replace, and GNU wget saves all
-           three as index.html. */
+           directory, which a file cannot replace, and GNU wget saves the
+           plain three as index.html (a %2e spelling it saves as %2E, a
+           name this client does not want for a path it would resolve). */
         slash = string_last_of(target, '/');
         path = slash ? slash + 1 : target;
         if (!string_get(path) || http_dot_segment(path, string_length(path)))
@@ -9888,6 +10105,9 @@ static bipolar http_run(string_address start, const http_manners address_to how,
         http_buffer whole = {0};
         positive hop;
         bool secure = false;
+#if MOONWATER_STRICT >= STRICT_TIGHT
+        bool reached_public = false;
+#endif
         bipolar status;
 
         if (string_length(start) >= sizeof url)
@@ -9926,6 +10146,23 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                             how->version_minor, how->agent, address_of used);
                 if (!status && !(ip = http_lookup(host)))
                         status = HTTP_NO_HOST;
+#if MOONWATER_STRICT >= STRICT_TIGHT
+                /* Once a chain has reached public space no later hop may
+                   go back inside: a name that resolves, or a Location that
+                   spells, an address on this host or its network is how a
+                   server it was pointed at reaches what it was never given.
+                   GNU wget and curl follow such a redirect, so it is the
+                   tight tier's; a chain that starts inside may go anywhere,
+                   and the address checked is the one connected to. */
+                if (!status)
+                {
+                        bool outside = http_address_public(ip);
+
+                        if (reached_public && !outside)
+                                status = HTTP_PRIVATE;
+                        reached_public |= outside;
+                }
+#endif
                 if (status)
                         goto done;
 
@@ -9975,20 +10212,28 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                         status = HTTP_STATUS;
                 else if (!status && !http_response_has_no_body(response.code))
                 {
+                        /* The default reads a 205's content as any other
+                           response's, as wget and curl do.  The tight tier
+                           holds it to the RFC: the framing is consumed and a
+                           zero-capacity store refuses any content before it
+                           reaches the caller's output. */
+                        bool reset = MOONWATER_STRICT >= STRICT_TIGHT &&
+                                     response.code == 205;
                         http_body body = {
                             .link = address_of link,
                             .stash = head + header,
                             .stash_used = used - header,
                             .scratch = head,
-                            .store = into ? address_of whole : null,
-                            .store_limit = HTTP_FETCH_MAX,
+                            .store = reset || into ? address_of whole : null,
+                            .store_limit = reset ? 0 : HTTP_FETCH_MAX,
                         };
 
                         status = into &&
                                          response.body_kind == HTTP_BODY_LENGTH &&
                                          response.body_length > HTTP_FETCH_MAX
                                      ? HTTP_MALFORMED
-                                     : http_copy_body(address_of body, dest,
+                                     : http_copy_body(address_of body,
+                                                      reset ? -1 : dest,
                                                       address_of response);
                 }
 
@@ -10455,10 +10700,46 @@ static COLD fn dhcp_lease_merge(dhcp_lease address_to lease,
         }
 }
 
+/* What a server may hand out. The address and the router come from the unicast
+   space: not 0/8 (this network), 127/8 (the machine itself), nor 224/3
+   (multicast, the reserved block and the limited broadcast). A router is the
+   address of another host, so it is not the leased address itself. The prefix
+   the mask implies (an omitted mask is the /24 policy above) must not reach
+   0/8, 127/8 or 224/3 either: a /1 mask on a 10/8 address would route the
+   machine's own loopback and every multicast group onto the wire. On a subnet
+   wider than a /31 the first and last addresses name the subnet and are not
+   hosts. A /32 lease and its off-link router stay legal (the clouds hand
+   them out): only the router's own class is judged. Every server that speaks
+   to this machine can send any of these; none of them is a network. */
+static CONST COLD bool dhcp_address_unicast(p32 address)
+{
+        return (address >> 24) && (address >> 24) != 127 && address < 0xe0000000u;
+}
+
+static CONST COLD bool dhcp_prefix_clear(p32 address, p32 mask)
+{
+        p32 network;
+
+        if (!mask)
+                mask = 0xffffff00u;
+        network = address & mask;
+        if (!((network ^ 0x00000000u) & mask & 0xff000000u) ||
+            !((network ^ 0x7f000000u) & mask & 0xff000000u) ||
+            !((network ^ 0xe0000000u) & mask & 0xe0000000u))
+                return false;
+        return mask >= 0xfffffffeu ||
+               (address != network && address != (network | ~mask));
+}
+
 static COLD bool dhcp_lease_usable(const dhcp_lease address_to lease)
 {
         return lease->address && lease->server && lease->seconds &&
-               dhcp_mask_valid(lease->mask);
+               dhcp_mask_valid(lease->mask) &&
+               dhcp_address_unicast(lease->address) &&
+               dhcp_address_unicast(lease->server) &&
+               (!lease->router || (dhcp_address_unicast(lease->router) &&
+                                   lease->router != lease->address)) &&
+               dhcp_prefix_clear(lease->address, lease->mask);
 }
 
 /* Every ACK starts a new lease interval.  Timer values from the OFFER or the

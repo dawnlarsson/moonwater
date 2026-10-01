@@ -91,7 +91,7 @@ export TEST_TALLY
 #       kernel/profile/sec_sanitize.
 asked_lanes="wifi fuzz msan ring0"
 
-lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex slurp wait writer native probe stack checksum storage_io storage_format machine sensors cli differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep"
+lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex slurp wait writer native probe stack checksum storage_io storage_format machine sensors cli differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep"
 
 describe()
 {
@@ -107,6 +107,7 @@ describe()
         allocator) echo "malloc, free, calloc and realloc against glibc's" ;;
         reserve) echo "movable mappings, growth failures, relocation and sparse-page residency" ;;
         link) echo "moonwater link end to end between two network namespaces: run, shell over a pty, netem loss, refusals, rekeys, on and off" ;;
+        netem) echo "the DHCP and SNTP clients against a hostile server over a veth pair with netem loss, duplication, reordering and delay (NOT RUN without unprivileged namespaces, veth and netem)" ;;
         waterlink) echo "the waterlink core as a pure transform: supersession, reliable per-key delivery and congestion over a generated lossy network, the seal, the Noise IK handshake against a reference, and the replay window" ;;
         utf8) echo "bounded UTF-8 character traversal, malformed bytes and guard pages on three machines" ;;
         hex) echo "bounded hexadecimal encoding, alignment and guard pages on three machines" ;;
@@ -2736,6 +2737,18 @@ lane_link()
         need_shell || return 1
         python3 test/differential.py --harness waterlink_link --shell "$shell_binary"
 }
+#
+#       The network clients under adversarial scheduling: DHCP and SNTP as
+#       built, in namespaces joined by a veth pair with netem on both ends and
+#       a server that answers late, twice, forged or not at all.
+#       differential.py --harness net_netem says what it asks; exit 2 (NOT
+#       RUN) where the box has no unprivileged namespaces, veth or netem.
+#
+lane_netem()
+{
+        need_shell || return 1
+        python3 test/differential.py --harness net_netem --shell "$shell_binary"
+}
 #       qemu's default riscv64 cpu is its richest one, with V at a vector
 #       length of 128 bits, so the lane above runs the vector bodies at that
 #       length only. It asks again with the cpu that has no V, which is the
@@ -3790,7 +3803,9 @@ lane_socket() { freestanding_checks_lane socket socket; }
 #
 #       tls_chains puts wget's certificate verdicts against openssl verify's
 #       over a grammar of generated chains, served from loopback.
-#       public_suffixes holds the wildcard check's lookup to suffixes.inc and
+#       tls_hostnames puts the certificate name check against OpenSSL's over a
+#       grammar of subjectAltNames and hosts. public_suffixes holds the
+#       wildcard check's lookup to suffixes.inc and
 #       anchors holds anchors.inc to the sizes and hashes net.c relies on. tls_peer
 #       serves a grammar of TLS 1.3 flights and record streams from a
 #       scripted server to wget and to OpenSSL's client, with real crypto.
@@ -3808,11 +3823,39 @@ lane_socket() { freestanding_checks_lane socket socket; }
 #       still propagate exit 2 into net_outcome when the lane was otherwise 0.
 #       security_hygiene holds the guards no one harness sees: registration
 #       and soft-skip wiring, the seed tables, the verify lift's proves.
+#       CHECK_net again with the tight tier (MOONWATER_STRICT 2, what
+#       kernel/profile/sec_hardened builds), on the host architecture only: the RFC 9110 204/205
+#       framing refusals live there, and no other build of the checks says
+#       whether the tier still refuses what the default accepts.
+net_tight_one()
+{
+        #       Native only: the check runs the host's own build, no runner.
+        [ "$target" = "$host_arch" ] && [ -z "$target_runner" ] || return 0
+        target_build freestanding_check net "$work/net.tight" "$target" \
+                -DMOONWATER_STRICT=2 || return 1
+        "$work/net.tight" > "$work/net.tight.out" 2>&1
+        net_tight_status=$?
+        sed -n '/FAIL/p;/NOT RUN/p' "$work/net.tight.out"
+        net_tight_line=$(sed -n \
+                's/^\([0-9]*\) checks, \([0-9]*\) failures$/\1 \2/p' \
+                "$work/net.tight.out")
+        [ -n "$net_tight_line" ] || { note "net tight printed no verdict"; return 1; }
+        tally "net-tight-$target" "$(( ${net_tight_line% *} - ${net_tight_line#* } ))" \
+                "${net_tight_line% *}"
+        [ "$net_tight_status" = 0 ] && [ "${net_tight_line#* }" = 0 ]
+}
+
 lane_net()
 {
         python3 test/differential.py --harness security_hygiene || return 1
         freestanding_checks_lane net net
         net_outcome=$?
+        target_lane net_tight_one
+        case $? in
+        0) ;;
+        2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
+        *) net_outcome=1 ;;
+        esac
         #       The crypto against OpenSSL on all three machines: the vectors
         #       come from Python's cryptography, the answers from
         #       CHECK_crypto_vectors reading them on its standard input.
@@ -3838,6 +3881,13 @@ lane_net()
         2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
         *) net_outcome=1 ;;
         esac
+        python3 test/differential.py --harness tls_hostnames
+        case $? in
+        0) ;;
+        2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
+        *) net_outcome=1 ;;
+        esac
+        python3 test/differential.py --harness tls_dates || net_outcome=1
         python3 test/differential.py --harness public_suffixes || net_outcome=1
         python3 test/differential.py --harness anchors || net_outcome=1
         need_shell || return 1
@@ -3897,6 +3947,12 @@ lane_net()
         2) note "wifi_scan_fuzz: skipped (soft) -- does not downgrade net" ;;
         *) net_outcome=1 ;;
         esac
+        python3 test/differential.py --harness bowl_sig_fuzz
+        case $? in
+        0) ;;
+        2) note "bowl_sig_fuzz: skipped (soft) -- does not downgrade net" ;;
+        *) net_outcome=1 ;;
+        esac
         python3 test/differential.py --harness dns_fuzz
         case $? in
         0) ;;
@@ -3927,10 +3983,22 @@ lane_net()
         2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
         *) net_outcome=1 ;;
         esac
+        python3 test/differential.py --harness wget_hostile --shell "$shell_binary"
+        case $? in
+        0) ;;
+        2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
+        *) net_outcome=1 ;;
+        esac
         python3 test/differential.py --harness http_fuzz
         case $? in
         0) ;;
         2) note "http_fuzz: skipped (soft) -- does not downgrade net" ;;
+        *) net_outcome=1 ;;
+        esac
+        python3 test/differential.py --harness sntp_era
+        case $? in
+        0) ;;
+        2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
         *) net_outcome=1 ;;
         esac
         return "$net_outcome"
@@ -10998,6 +11066,7 @@ python3 test/differential.py --harness spark_entry || kit_failed=1
 python3 test/differential.py --harness objtool_shape || kit_failed=1
 python3 test/differential.py --harness terminfo_install || kit_failed=1
 python3 test/differential.py --harness host_writes || kit_failed=1
+python3 test/differential.py --harness net_sysctl || kit_failed=1
 python3 test/differential.py --harness console_queue || kit_failed=1
 python3 test/differential.py --harness pane_restride || kit_failed=1
 python3 test/differential.py --harness pane_pages || kit_failed=1
@@ -12317,6 +12386,16 @@ export SPARK_OWNER=parent
 /shell -c 'printf "owner-%s\n" "$SPARK_OWNER"'
 ls /monitor.sh | rev
 #
+#       The kernel network settings the default tier asks of the network
+#       watcher when it starts, before the first lease: no redirects, no
+#       router advertisements or SLAAC on the interface that was already
+#       there (IPv6 has no copy from `default`), TIME-WAIT assassination
+#       refused, SYN cookies. The watcher starts a moment after init, so the
+#       last is waited for.
+#
+for i in $(seq 1 60); do [ "$(cat /proc/sys/net/ipv4/tcp_syncookies)" = 1 ] && break; sleep 0.2; done
+printf 'nk-%s-%s-%s-%s-%s\n' "$(cat /proc/sys/net/ipv4/conf/default/accept_redirects)" "$(cat /proc/sys/net/ipv6/conf/eth0/accept_ra)" "$(cat /proc/sys/net/ipv6/conf/default/autoconf)" "$(cat /proc/sys/net/ipv4/tcp_rfc1337)" "$(cat /proc/sys/net/ipv4/tcp_syncookies)" | rev
+#
 #       The address space of a program the Spark loader started is randomized,
 #       as an ELF's is: the loader never set PF_RANDOMIZE, which begin_new_exec
 #       clears, so every program's stack sat at the top of the address space
@@ -12670,6 +12749,7 @@ says transcript 'setting a zone does not move the clock' '0warp'
 says transcript 'and the clock reads the zone it was set to' '0010+'
 says transcript 'and the zone reached the kernel and this system' '1applied'
 says transcript 'as a TZif that bowl programs read' '2fiZTtzif'
+says transcript 'the watcher set the default kernel network settings' '1-1-0-0-0-kn'
 says transcript 'floodlight device'   'fl-device-thgildoolf #'
 says transcript 'floodlight refuses nothing' 'fl-denials-0'
 says transcript 'floodlight has awk'  'fl-awk-1'

@@ -3020,7 +3020,8 @@ static b32 link_client_run(string_address name, p8 kind,
                         memory_copy(request + request_length, address_of mode, 4);
                         request_length += 4;
                 }
-                else if (string_length(words[1]) + 28 > sizeof s->part)
+                else if (string_length(words[1]) >= sizeof s->whole ||
+                         string_length(words[1]) + 28 > sizeof s->part)
                         return host_refuse("%s is too long a name\n", words[1]);
                 memory_copy(request + request_length, far, length);
                 request_length += length;

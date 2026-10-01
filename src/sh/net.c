@@ -809,6 +809,11 @@ static COLD b32 net_wget_failed(bipolar status, b32 code, p8 address_to where,
                 return string_report(log_error, WGET_NETWORK,
                                      "wget: TLS handshake with %w failed\n",
                                      writer_terminal_quoted_name, host);
+        case HTTP_PRIVATE:
+                return string_report(log_error, WGET_GENERIC,
+                                     "wget: refused a redirect to %w, an address "
+                                     "that is not public\n",
+                                     writer_terminal_quoted_name, where);
         case HTTP_DOWNGRADE:
                 return string_report(log_error, WGET_GENERIC,
                                      "wget: refused an HTTPS to HTTP redirect "
@@ -994,19 +999,26 @@ static b32 net_wget(void)
 
 
 /*
-        /etc/resolv.conf, written with a resolver that is known to work.
+        /etc/resolv.conf: the network's resolver first, a public one behind it.
 
-        Cloudflare goes first, and the one the network handed out goes under
-        it. A DHCP nameserver is usually the router in the corner, which is
-        also the thing most likely to answer slowly, cache a stale record, or
-        have been handed a captive portal's idea of the truth. Naming a public
-        resolver first is what lets a machine work on a network whose own
-        resolver does not.
+        The resolver the DHCP server handed out goes first, as dhclient and
+        every other client write it, and Cloudflare's goes second, to be
+        asked only when the first gives no answer at all (a router whose
+        resolver is down, slow or refusing): the resolver believes the first
+        server that answers, "no such name" included (dns_resolve_any). A
+        network with no resolver of its own, or one that names Cloudflare
+        itself, has Cloudflare alone.
 
-        The network's own is still written, and is still asked, because it is
-        the only one that knows the names inside the network. The resolver
-        walks this list in order and does not stop at a public resolver saying
-        it has never heard of something local.
+        This replaces an order written in the other direction, public resolver
+        first. Its reason was a network whose own resolver was slow or
+        answered with a captive portal's idea of the truth; it cost every
+        machine on every network one name in the clear per lookup, to a
+        third party, before the network's own resolver (which knows the names
+        inside the network and is the only one that should be told them) was
+        asked at all. The two failures it guarded against are the ones the
+        fallback still covers, the first directly (no answer goes on), the
+        second only as far as a portal that lies about a name is one that
+        also lied before.
 
         Order is the whole of the policy. Putting it here rather than in the
         resolver means changing which server is preferred is one line in a
@@ -1015,7 +1027,8 @@ static b32 net_wget(void)
 static COLD bipolar net_write_resolv_to(string_address path, p32 nameserver)
 {
         const p32 servers[2] = {
-            DNS_FALLBACK, nameserver == DNS_FALLBACK ? 0 : nameserver};
+            nameserver ? nameserver : DNS_FALLBACK,
+            nameserver && nameserver != DNS_FALLBACK ? DNS_FALLBACK : 0};
         p8 line[64];
         positive used = 0;
         file_staged_name staged;
@@ -1158,11 +1171,20 @@ static COLD bool net_lease_expired_at(const net_holding address_to held,
                now - held->taken >= held->lease.seconds;
 }
 
+/* A server picks T1 and T2 for the lease it hands out, and a T1 of a second on
+   a lease of an hour makes a client fork, ask, rewrite resolv.conf and log every
+   second for as long as the server says so. The renewal is not scheduled sooner
+   than ten seconds after the lease was taken, or than half the lease where that
+   is shorter (a lease of three seconds is renewed at one, as it says): the lease
+   is taken as it was given and the interval is the client's own. */
+#define NET_RENEW_FLOOR_SECONDS 10
+
 static COLD positive net_lease_due_in(const net_holding address_to held,
                                  positive now)
 {
         positive gone;
         positive retry;
+        positive floor;
 
         if (!held || !held->index || !held->lease.seconds)
                 return 0;
@@ -1173,6 +1195,9 @@ static COLD positive net_lease_due_in(const net_holding address_to held,
 
         gone = now - held->taken;
         retry = held->retry ? held->retry : held->lease.renewal;
+        floor = min(held->lease.seconds / 2, (positive)NET_RENEW_FLOOR_SECONDS);
+        if (retry && retry < floor)
+                retry = floor;
         if (!retry || retry > held->lease.seconds)
                 retry = held->lease.seconds;
         return gone >= retry ? 1 : retry - gone;
@@ -1465,12 +1490,13 @@ static COLD b32 net_apply_lease(b32 handle, p32 index, string_address name,
                                       net_host_text(written, lease->router));
 
                 string_format(net_out, "ip: nameserver %s",
-                              net_host_text(written, DNS_FALLBACK));
+                              net_host_text(written, lease->nameserver
+                                                         ? lease->nameserver
+                                                         : DNS_FALLBACK));
 
                 if (lease->nameserver && lease->nameserver != DNS_FALLBACK)
                         string_format(net_out, ", then %s",
-                                      net_host_text(written,
-                                                    lease->nameserver));
+                                      net_host_text(written, DNS_FALLBACK));
 
                 string_format(net_out, "\n");
         }
@@ -1589,6 +1615,27 @@ static bool net_exchange_cut;
 #define NET_DHCP_TIMED_OUT (-10)
 #define NET_DHCP_INTERRUPTED (-11)
 
+/*
+        Link news may cut an exchange, but not again at once.
+
+        Every carrier change on any link is news while no lease is held, so
+        a second port whose cable flaps (or a radio whose association an
+        attacker keeps dropping) cut each exchange as it started, and a
+        server whose round trip was longer than the flap's period never got
+        to finish one: the good link's lease waited for the flapping to
+        stop. After a cut the link news is left unread for
+        NET_NEWS_HOLDOFF_SECONDS, which is longer than any round trip worth
+        waiting for, and read when it ends. The wake pipe is the operator's
+        and always cuts.
+*/
+#define NET_NEWS_HOLDOFF_SECONDS 4
+static positive net_news_holdoff_until;
+
+static bool net_news_may_cut(positive now)
+{
+        return now >= net_news_holdoff_until;
+}
+
 /* 1 when the exchange spoke, 0 when the budget ran out, -2 when the wake
    pipe or the link news did, negative for a broken descriptor. */
 static COLD bipolar net_exchange_wait(bipolar answer,
@@ -1601,11 +1648,20 @@ static COLD bipolar net_exchange_wait(bipolar answer,
                 timespec limit;
                 system_poll_descriptor waited[3];
                 positive count = 1;
+                positive now = net_seconds();
+                bool news = net_events_watch >= 0 && net_news_may_cut(now);
                 bipolar ready;
 
                 if (!network_deadline_left(deadline, address_of seconds,
                                            address_of nanoseconds))
                         return 0;
+                //      While the news is held off, wake up when it ends.
+                if (net_events_watch >= 0 && !news &&
+                    seconds >= net_news_holdoff_until - now)
+                {
+                        seconds = net_news_holdoff_until - now;
+                        nanoseconds = 0;
+                }
                 limit.tv_sec = (b64)seconds;
                 limit.tv_nsec = (b64)nanoseconds;
                 waited[0].descriptor = (b32)answer;
@@ -1617,7 +1673,7 @@ static COLD bipolar net_exchange_wait(bipolar answer,
                         waited[count].events = SYSTEM_POLL_READ;
                         waited[count++].returned = 0;
                 }
-                if (net_events_watch >= 0)
+                if (news)
                 {
                         waited[count].descriptor = (b32)net_events_watch;
                         waited[count].events = SYSTEM_POLL_READ;
@@ -1625,6 +1681,8 @@ static COLD bipolar net_exchange_wait(bipolar answer,
                 }
                 ready = system_poll_wait(waited, count, address_of limit, null);
                 if (ready == NETWORK_INTERRUPTED)
+                        continue;
+                if (ready == 0 && !news)
                         continue;
                 if (ready <= 0)
                         return ready;
@@ -1692,6 +1750,8 @@ static COLD bipolar net_dhcp_apart(string_address device, p8 address_to hardware
                 if (watching && waited == -2)
                 {
                         net_exchange_cut = true;
+                        net_news_holdoff_until = net_seconds() +
+                                                 NET_NEWS_HOLDOFF_SECONDS;
                         return NET_DHCP_INTERRUPTED;
                 }
                 return watching && waited == 0 ? NET_DHCP_TIMED_OUT
@@ -2109,6 +2169,134 @@ static COLD bipolar net_watch_events(b32 events, netlink_buffer address_to messa
         return acted;
 }
 
+/*
+        What the image asks of the kernel's network stack, once, when the
+        watcher starts (before any link is brought up, so before the first
+        frame of a lease).
+
+        Nothing else in the image writes /proc/sys, so a machine ran on
+        Linux's own defaults: ICMP redirects accepted from whoever sits on the
+        link (a host that does not forward takes one when EITHER the interface
+        or `all` allows it, so both are written, and `default` reaches every
+        interface not set by hand, wlan0 as it appears included), the
+        per-interface source-route switch on for new interfaces, TIME-WAIT
+        assassination by a forged RST allowed, and IPv6 router advertisements
+        and SLAAC on although nothing here speaks IPv6 (waterlink's dual-stack
+        sockets and link-local addresses stay: only what a neighbour can push
+        at the machine is refused). IPv6 has no copy from `default` to the
+        interfaces already there, so each directory under net/ipv6/conf is
+        written.
+
+        The reference tier (STRICT_REFERENCE) keeps the kernel's own values,
+        the rest write the table below. rp_filter is left alone on purpose: the
+        DHCP client is a UDP socket, its OFFER comes from an address with no
+        route yet, and with rp_filter 1 or 2 the OFFER is dropped and no lease
+        is ever taken (measured: OFFERs sent, no REQUEST, in a KVM guest booted
+        with either).
+*/
+#if MOONWATER_STRICT >= STRICT_SAFE
+static COLD fn net_sysctl(string_address path, string_address value)
+{
+        bipolar handle = system_open_at(AT_FDCWD, path, 1 | O_CLOEXEC);
+
+        if (handle < 0)
+                return;
+        system_write_all((positive)handle, (p8 address_to)value,
+                         string_length(value));
+        system_close((positive)handle);
+}
+
+//      "directory/name/leaf" into `to`, cut short when it would not fit.
+static COLD fn net_sysctl_path(p8 address_to to, positive size,
+                               string_address directory, string_address name,
+                               string_address leaf)
+{
+        string_address parts[3] = {directory, name, leaf};
+        positive at = 0;
+
+        for (positive part = 0; part < 3; part++)
+        {
+                positive length = string_length(parts[part]);
+
+                if (!parts[part][0])
+                        continue;
+                if (at + length + 2 > size)
+                {
+                        to[0] = 0;
+                        return;
+                }
+                if (at)
+                        to[at++] = '/';
+                memory_copy(to + at, parts[part], length);
+                at += length;
+        }
+        to[at] = 0;
+}
+
+//      leaf, written in `all`, `default` and every interface the directory
+//      lists, or only the first two for the IPv4 switches the kernel copies.
+//      The listing is read to its end, however many interfaces there are:
+//      one read of a small buffer left the later ones on the kernel's value.
+static COLD fn net_sysctl_family(string_address directory, string_address leaf,
+                                 string_address value, bool each)
+{
+        p8 path[128];
+        static const string_address wide[] = {"all", "default", null};
+
+        for (positive at = 0; wide[at]; at++)
+        {
+                net_sysctl_path(path, sizeof path, directory, wide[at], leaf);
+                net_sysctl((string_address)path, value);
+        }
+        if (each)
+        {
+                p8 names[1024];
+                struct linux_dirent64 address_to entry;
+                positive have = 0;
+                positive at = 0;
+                bipolar error = 0;
+                bipolar handle = system_open_at(AT_FDCWD, directory,
+                                                O_DIRECTORY | O_CLOEXEC);
+
+                if (handle < 0)
+                        return;
+                while ((entry = file_directory_next(handle, names, sizeof names,
+                                                    address_of have,
+                                                    address_of at,
+                                                    address_of error)))
+                {
+                        string_address name = (string_address)entry->d_name;
+
+                        if (name[0] == '.' || string_equals(name, "all") ||
+                            string_equals(name, "default"))
+                                continue;
+                        net_sysctl_path(path, sizeof path, directory, name,
+                                        leaf);
+                        net_sysctl((string_address)path, value);
+                }
+                system_close((positive)handle);
+        }
+}
+
+static COLD fn net_kernel_defaults(void)
+{
+        static const string_address quiet[] = {
+            "accept_redirects", "secure_redirects", "accept_source_route",
+            "send_redirects", null};
+        static const string_address quiet_v6[] = {
+            "accept_ra", "autoconf", "accept_redirects", null};
+
+        for (positive at = 0; quiet[at]; at++)
+                net_sysctl_family("/proc/sys/net/ipv4/conf", quiet[at], "0\n",
+                                  false);
+        for (positive at = 0; quiet_v6[at]; at++)
+                net_sysctl_family("/proc/sys/net/ipv6/conf", quiet_v6[at],
+                                  "0\n", true);
+        net_sysctl("/proc/sys/net/ipv4/tcp_rfc1337", "1\n");
+        net_sysctl("/proc/sys/net/ipv4/tcp_syncookies", "1\n");
+}
+#endif
+
 static COLD b32 net_watch(void)
 {
         netlink_buffer message = {0};
@@ -2145,10 +2333,14 @@ static COLD b32 net_watch(void)
                 return 1;
         }
 
+#if MOONWATER_STRICT >= STRICT_SAFE
+        net_kernel_defaults();
+#endif
         wake = net_wake_listen();
         net_wake_watch = wake;
         net_events_watch = events;
         net_exchange_cut = false;
+        net_news_holdoff_until = 0;
 
         //      Configure whatever is already plugged in before waiting for
         //      anything to change, or a machine that boots with its cable in
@@ -2227,7 +2419,10 @@ static COLD b32 net_watch(void)
                         if (!ready)
                         {
                                 if (wake < 0)
+                                {
                                         wake = net_wake_listen();
+                                        net_wake_watch = wake;
+                                }
 
                                 if (!held.index || !held.lease.seconds)
                                 {

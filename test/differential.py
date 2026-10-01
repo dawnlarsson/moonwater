@@ -38081,6 +38081,39 @@ static bipolar storage_format_write(bipolar h, const void *b, positive n, positi
         return write((int)h, b, n) == (ssize_t)n ? 0 : -EIO;
 }
 static fn system_close(bipolar h) { close((int)h); }
+#define HOST_PATH_ROOM 256
+#define end '\0'
+static positive string_length(string_address s) { return (positive)strlen(s); }
+static positive string_copy_bounded(string_address d, string_address s, positive n) {
+        char *to = (char *)d;
+        positive at = 0;
+        if (!n) return 0;
+        while (at + 1 < n && s[at]) { to[at] = s[at]; at++; }
+        to[at] = 0;
+        return at;
+}
+static positive string_append_bounded(string_address d, string_address s, positive n) {
+        positive at = strlen(d);
+        return at + string_copy_bounded(d + at, s, n > at ? n - at : 0);
+}
+static bipolar system_rename_at(bipolar od, string_address o, bipolar nd, string_address n, positive f) {
+        (void)f;
+        return answer(renameat((int)od, o, (int)nd, n));
+}
+/* dirname: the head of a path, "." when it has no directory, "/" for the root's. */
+static positive path_head_copy(p8 *to, positive capacity, string_address path) {
+        positive length = strlen(path), cut, at = 0;
+        const char *head;
+        if (!capacity) return 0;
+        while (length > 1 && path[length - 1] == '/') length--;
+        for (cut = length; cut && path[cut - 1] != '/'; cut--) ;
+        while (cut > 1 && path[cut - 1] == '/') cut--;
+        head = cut ? path : ".";
+        if (!cut) cut = 1;
+        for (; at < cut && at + 1 < capacity; at++) to[at] = (p8)head[at];
+        to[at] = 0;
+        return at;
+}
 '''
     driver = r'''
 static int failures, checks;
@@ -38195,6 +38228,244 @@ int main(void) {
     print("host writes: %d write opens, %s scenes, parent lost %d"
           % (sites, said.strip().splitlines()[-1] if said.strip() else "?", parent_lost))
     write_tally("host-writes", 1 if not failures else 0, 1)
+    return 1 if failures else 0
+
+
+def harness_net_sysctl(argv):
+    """The kernel's network defaults reach every interface, however many there are.
+
+    net_kernel_defaults writes a value into one sysctl leaf for `all`,
+    `default` and, for IPv6 (which has no copy from `default` to the links
+    already there), for each directory net/ipv6/conf lists. That walk read
+    the listing once into a 1,024-byte buffer, which holds about thirty
+    names: a machine with more links (VLANs, bridge ports, the host end of a
+    container's veth) left the later ones on the kernel's own value, router
+    advertisements and SLAAC on, which is what the default exists to refuse.
+
+    net_sysctl, net_sysctl_path and net_sysctl_family are cut out of
+    src/sh/net.c with file_directory_next from src/sh/file.c, and run over a
+    scratch tree of seventy interface directories beside all and default,
+    each holding the leaf as the kernel's files do. Every leaf has to say
+    what was asked; a name that starts with a dot and a name too long for
+    the path buffer are left alone; the form for the IPv4 switches (`all` and
+    `default` only) leaves the interfaces alone. The parent's walk, one
+    read, is run the same way and has to miss some of them.
+
+        python3 test/differential.py --harness net_sysctl
+    """
+    del argv
+    import subprocess
+    import tempfile
+    if sys.platform != "linux":
+        print("net sysctl: NOT RUN -- the fixture reads directories with Linux's getdents64")
+        return 0
+    net = (HARNESS_ROOT / "src/sh/net.c").read_text()
+    files = (HARNESS_ROOT / "src/sh/file.c").read_text()
+    try:
+        walk = src_slice(net, "static COLD fn net_sysctl(string_address path, string_address value)",
+                         "static COLD fn net_kernel_defaults(void)", "net sysctl")
+        listing = src_slice(files, "static inline struct linux_dirent64 address_to file_directory_next(",
+                            "struct linux_dirent64 address_to file_walk_next(", "net sysctl")
+        head = walk[:walk.index("static COLD fn net_sysctl_family(")]
+    except ValueError as error:
+        print("  FAIL net sysctl lift: " + str(error))
+        write_tally("net-sysctl", 0, 1)
+        return 1
+    parent = r"""
+static COLD fn net_sysctl_family(string_address directory, string_address leaf,
+                                 string_address value, bool each)
+{
+        p8 path[128];
+        static const string_address wide[] = {"all", "default", null};
+
+        for (positive at = 0; wide[at]; at++)
+        {
+                net_sysctl_path(path, sizeof path, directory, wide[at], leaf);
+                net_sysctl((string_address)path, value);
+        }
+        if (each)
+        {
+                p8 names[1024];
+                bipolar handle;
+                bipolar got;
+                positive at = 0;
+
+                handle = system_open_at(AT_FDCWD, directory,
+                                        O_DIRECTORY | O_CLOEXEC);
+                if (handle < 0)
+                        return;
+                got = system_read_directory(handle, names, sizeof names);
+                system_close((positive)handle);
+                while (got > 0 && at + 19 < (positive)got)
+                {
+                        p16 length = *(p16 address_to)(names + at + 16);
+                        string_address name = (string_address)(names + at + 19);
+
+                        if (length < 20 || at + length > (positive)got)
+                                break;
+                        if (name[0] != '.' && !string_equals(name, "all") &&
+                            !string_equals(name, "default"))
+                        {
+                                net_sysctl_path(path, sizeof path, directory,
+                                                name, leaf);
+                                net_sysctl((string_address)path, value);
+                        }
+                        at += length;
+                }
+        }
+}
+"""
+    shim = r"""
+#define _GNU_SOURCE
+#include <errno.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/syscall.h>
+#include <sys/types.h>
+""" + HOSTED_FILE_HEAD + r"""
+typedef uint16_t p16;
+typedef uint64_t p64;
+#define COLD
+#define address_of &
+#define null NULL
+#define string_length(s) ((positive)strlen(s))
+#define string_equals(a, b) (strcmp((a), (b)) == 0)
+#define memory_copy memcpy
+struct linux_dirent64
+{
+        p64 d_ino;
+        p64 d_off;
+        p16 d_reclen;
+        p8 d_type;
+        p8 d_name[];
+};
+static bipolar system_open_at(bipolar d, string_address p, positive f) {
+        long r = openat((int)d, p, (int)f);
+        return r < 0 ? -errno : r;
+}
+static positive system_write_all(positive h, const void *data, positive n) {
+        ssize_t w = write((int)h, data, n);
+        return w < 0 ? 0 : (positive)w;
+}
+static fn system_close(positive h) { close((int)h); }
+static bipolar system_read_directory(bipolar h, void *block, positive capacity) {
+        long r = syscall(SYS_getdents64, (int)h, block, capacity);
+        return r < 0 ? -errno : r;
+}
+"""
+    driver = r"""
+#define INTERFACES 70
+static int failures, checks;
+static void check(int good, const char *what) {
+        checks++;
+        if (good) return;
+        failures++;
+        printf("  FAIL %s\n", what);
+}
+static void leaf(const char *directory, const char *name) {
+        char path[512];
+        int handle;
+        snprintf(path, sizeof path, "%s/%s", directory, name);
+        mkdir(path, 0755);
+        snprintf(path, sizeof path, "%s/%s/accept_ra", directory, name);
+        handle = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (handle < 0 || write(handle, "1\n", 2) != 2) exit(3);
+        close(handle);
+}
+static int says(const char *directory, const char *name, const char *want) {
+        char path[512], seen[8] = {0};
+        int handle;
+        ssize_t got;
+        snprintf(path, sizeof path, "%s/%s/accept_ra", directory, name);
+        handle = open(path, O_RDONLY);
+        if (handle < 0) return 0;
+        got = read(handle, seen, sizeof seen - 1);
+        close(handle);
+        return got == 2 && !strcmp(seen, want);
+}
+int main(void) {
+        for (int each = 0; each < 2; each++) {
+                char directory[16], name[256], what[160];
+                char longest[201];
+                int missed = 0, touched = 0;
+                snprintf(directory, sizeof directory, "conf%d", each);
+                mkdir(directory, 0755);
+                leaf(directory, "all");
+                leaf(directory, "default");
+                leaf(directory, "lo");
+                for (int at = 0; at < INTERFACES; at++) {
+                        snprintf(name, sizeof name, "veth%d", at);
+                        leaf(directory, name);
+                }
+                leaf(directory, ".hidden");
+                memset(longest, 'v', 200);
+                longest[200] = 0;
+                leaf(directory, longest);
+                net_sysctl_family(directory, "accept_ra", "0\n", each);
+                check(says(directory, "all", "0\n") && says(directory, "default", "0\n"),
+                      each ? "all and default are written" : "the IPv4 form writes all and default");
+                for (int at = 0; at < INTERFACES; at++) {
+                        snprintf(name, sizeof name, "veth%d", at);
+                        if (each) missed += !says(directory, name, "0\n");
+                        else touched += says(directory, name, "0\n");
+                }
+                missed += each && !says(directory, "lo", "0\n");
+                touched += !each && says(directory, "lo", "0\n");
+                if (each) {
+                        snprintf(what, sizeof what, "every interface's leaf is written (missed %d of %d)",
+                                 missed, INTERFACES + 1);
+                        check(!missed, what);
+                } else {
+                        check(!touched, "the IPv4 form leaves the interfaces alone");
+                }
+                check(says(directory, ".hidden", "1\n"), "a name that starts with a dot is left alone");
+                check(says(directory, longest, "1\n"), "a name too long for the path is refused, not cut");
+        }
+        printf("%d %d\n", checks - failures, checks);
+        return failures != 0;
+}
+"""
+
+    def run(body):
+        with tempfile.TemporaryDirectory(prefix="net-sysctl-") as temporary:
+            top = Path(temporary).resolve()
+            (top / "fixture.c").write_text(shim + listing + body + driver)
+            built = subprocess.run(["cc", "-w", "-o", str(top / "fixture"), str(top / "fixture.c")],
+                                   capture_output=True, text=True)
+            if built.returncode:
+                return None, built.stderr[-2000:]
+            ran = subprocess.run([str(top / "fixture")], cwd=top, capture_output=True, text=True,
+                                 timeout=30)
+            return ran.returncode, ran.stdout
+
+    failures = []
+    now, said = run(walk)
+    if now is None:
+        print("  FAIL the walk did not build:\n" + said)
+        write_tally("net-sysctl", 0, 1)
+        return 1
+    then, before = run(head + parent)
+    if then is None:
+        print("  FAIL the parent's walk did not build:\n" + before)
+        write_tally("net-sysctl", 0, 1)
+        return 1
+    for line in said.splitlines():
+        if line.startswith("  FAIL"):
+            failures.append(line.strip()[5:])
+    if now not in (0, 1) or not said.strip():
+        failures.append("the fixture did not run to its end (exit %s)" % now)
+    lost = [line.strip()[5:] for line in before.splitlines() if line.startswith("  FAIL")]
+    parent_lost = len(lost)
+    if parent_lost < 1:
+        failures.append("the parent's walk lost nothing: the fixture no longer reaches the "
+                        "thirty names one read holds\n%s" % before)
+    for failure in failures:
+        print("  FAIL " + failure)
+    print("net sysctl: %s, parent lost %d%s"
+          % (said.strip().splitlines()[-1] if said.strip() else "?", parent_lost,
+             " (" + "; ".join(lost) + ")" if lost else ""))
+    write_tally("net-sysctl", 1 if not failures else 0, 1)
     return 1 if failures else 0
 
 
@@ -39670,7 +39941,10 @@ def harness_dhcp_fuzz(argv):
     seconds), dhcp_prefix_of (the mask's population count, 24 for none),
     dhcp_lease_acknowledge over a held lease (still usable), and the watcher's
     clock arithmetic at a fuzzed start and now (a wake within the lease, a
-    request never past its boundary, a retry never past expiry). Seeds from
+    request never past its boundary, a retry never past expiry). A parsed
+    lease is judged usable or not by dhcp_lease_usable and by the rule of
+    what a server may hand out written the other way round (the prefix as a
+    range of addresses against 0/8, 127/8 and 224/3). Seeds from
     dhcp_fuzz_seeds; ASan/UBSan, or MSan with MOONWATER_MSAN=1; NOT RUN (2)
     without clang/libFuzzer.
 
@@ -39756,6 +40030,38 @@ static int reference_read(const p8 *packet, long size, p32 lease[8], p8 *kind)
         return 1;
 }
 
+/* What a server may hand out, written the other way round from net.c: the
+   address, the server and the router are unicast hosts (first octet 1 to 223,
+   not 127; a router is not the address); the prefix, as the range of
+   addresses it covers, reaches none of 0/8, 127/8 and 224/3; and on a subnet
+   wider than a /31 the address is neither its first nor its last. */
+static int reference_unicast(p32 address)
+{
+        unsigned first = address >> 24;
+        return first >= 1 && first <= 223 && first != 127;
+}
+
+static int reference_usable(const dhcp_lease *lease)
+{
+        p32 mask = lease->mask ? lease->mask : 0xffffff00u;
+        p32 low = lease->address & mask;
+        p32 high = low | ~mask;
+
+        if (!lease->address || !lease->server || !lease->seconds)
+                return 0;
+        if (!reference_unicast(lease->address) || !reference_unicast(lease->server))
+                return 0;
+        if (lease->router && (!reference_unicast(lease->router) ||
+                              lease->router == lease->address))
+                return 0;
+        if (low <= 0x00ffffffu || (low <= 0x7fffffffu && high >= 0x7f000000u) ||
+            high >= 0xe0000000u)
+                return 0;
+        if (__builtin_popcount(mask) <= 30 && (lease->address == low || lease->address == high))
+                return 0;
+        return 1;
+}
+
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
         if (size < 9)
@@ -39789,6 +40095,8 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         }
         FUZZ_REQUIRE(kind == want_kind && !memcmp(&lease, want, sizeof want),
                      "dhcp_read and the reference read different values");
+        FUZZ_REQUIRE(dhcp_lease_usable(&lease) == reference_usable(&lease),
+                     "dhcp_lease_usable and the written rule disagree on a parsed lease");
 
         dhcp_lease timed = lease;
         bool ordered = dhcp_lease_timers(&timed);
@@ -39805,8 +40113,14 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 
         dhcp_lease held = {0x0a00020f, 0xffffff00, 0x0a000202, 0x0a000203,
                            0x0a000202, 3600, 1800, 3150};
-        FUZZ_REQUIRE(dhcp_lease_acknowledge(&held, &lease) && dhcp_lease_usable(&held),
-                     "an acknowledgement made a held lease unusable");
+        bool acknowledged = dhcp_lease_acknowledge(&held, &lease);
+        /* A merged lease is judged like any other (a mask, router, server or
+           address a server names that the unicast rules refuse makes it
+           unusable, and the exchange then refuses the ACK); one that names
+           none of the four cannot take a usable lease from it. */
+        if (!lease.address && !lease.mask && !lease.router && !lease.server)
+                FUZZ_REQUIRE(acknowledged && dhcp_lease_usable(&held),
+                             "an acknowledgement made a held lease unusable");
 
         if (!ordered)
                 return 0;
@@ -39824,6 +40138,15 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         FUZZ_REQUIRE(due >= 1 && due <= timed.seconds, "a wake outside the lease");
         FUZZ_REQUIRE(expired || (now >= start && now - start < timed.seconds),
                      "a lease kept past its lifetime");
+        /* A renewal is not due sooner than its floor after the lease was
+           taken, whatever T1 the server named: ten seconds, or half the
+           lease where that is shorter. */
+        if (start && timed.seconds >= 3 && !net_lease_expired_at(&holding, start))
+        {
+                positive floor = timed.seconds / 2 < 10 ? timed.seconds / 2 : 10;
+                FUZZ_REQUIRE(net_lease_due_in(&holding, start) >= floor,
+                             "a renewal due sooner than its floor");
+        }
         bool rebinding = net_lease_rebinding_at(&holding, now);
         positive attempt = net_lease_attempt_time(&holding, now, rebinding);
         FUZZ_REQUIRE(attempt <= 4 && (!attempt ||
@@ -40584,6 +40907,52 @@ def harness_moonwater_cli(argv):
         check(left == ["mouse2"], "bluetooth remove takes one device out and leaves the other", repr(left))
         check(answers(got)["bluetooth remove kbd1"]["status"] == 1, "a forgotten device is refused a second time")
 
+        # The saved lists survive a write cut short. RLIMIT_FSIZE 0 makes
+        # every write fail and kills the writer with SIGXFSZ, the way a
+        # crash part way through would: a list written in place was truncated
+        # first, so the saved networks (with their passwords) were gone; one
+        # written beside itself and renamed is what it was. A leftover from a
+        # crash (the killed writer leaves its temporary file) is not in the way of the next write.
+        got = tuned("rm -f /root/wifi /root/wifi.new /root/bluetooth /root/bluetooth.new\n" +
+                    say("wifi add cut-a passpass1") + say("wifi add cut-b passpass2") +
+                    say("bluetooth add cut-k") +
+                    "cp /root/wifi /tmp/wifi.before; cp /root/bluetooth /tmp/bluetooth.before\n"
+                    "( ulimit -f 0; /tmp/moonwater wifi add cut-c passpass3 >/dev/null 2>&1 )\n"
+                    "( ulimit -f 0; /tmp/moonwater wifi remove cut-a >/dev/null 2>&1 )\n"
+                    "( ulimit -f 0; /tmp/moonwater bluetooth add cut-m >/dev/null 2>&1 )\n"
+                    "cmp /root/wifi /tmp/wifi.before && echo '@@ wifi intact'\n"
+                    "cmp /root/bluetooth /tmp/bluetooth.before && echo '@@ bluetooth intact'\n"
+                    "echo partial > /root/wifi.new\n" + say("wifi add cut-d passpass4") +
+                    "echo '@@ after'; cat /root/wifi; ls /root | grep -c '^wifi[.]new$'; echo '@@end'\n")
+        joined = "\n".join(got)
+        check("@@ wifi intact" in joined, "a wifi list write cut short leaves the saved list as it was", joined[-300:])
+        check("@@ bluetooth intact" in joined, "a bluetooth list write cut short leaves the list as it was", joined[-300:])
+        after = joined.split("@@ after\n", 1)[1].split("@@end", 1)[0].split() if "@@ after" in joined else []
+        check(after == ["cut-a", "passpass1", "cut-b", "passpass2", "cut-d", "passpass4", "0"],
+              "a leftover temporary file from a crash is replaced by the next write", repr(after))
+
+        # Bluetooth add and remove read the list, change it and write it
+        # whole: with the radio lock held by another run they wait for it.
+        got = tuned("rm -f /root/bluetooth\n"
+                    "mkdir -p /run/moonwater\n"
+                    "flock -x /run/moonwater/radio.lock sleep 3 &\n"
+                    "sleep 1\n"
+                    "s=$(date +%s); /tmp/moonwater bluetooth add held-one >/dev/null 2>&1; e=$(date +%s)\n"
+                    "echo \"@@ waited $((e - s))\"\n"
+                    "flock -x /run/moonwater/radio.lock sleep 3 &\n"
+                    "sleep 1\n"
+                    "s=$(date +%s); /tmp/moonwater bluetooth remove held-one >/dev/null 2>&1; e=$(date +%s)\n"
+                    "echo \"@@ waited $((e - s))\"\n"
+                    "for i in 1 2 3 4 5 6 7 8 9 10 11 12; do /tmp/moonwater bluetooth add race$i >/dev/null 2>&1 & done; wait\n"
+                    "echo '@@ race'; sort /root/bluetooth | tr '\\n' ' '; echo; echo '@@end'\n")
+        joined = "\n".join(got)
+        waits = re.findall(r"@@ waited (\d+)", joined)
+        check(len(waits) == 2 and all(int(w) >= 1 for w in waits),
+              "bluetooth add and remove wait for the radio lock the wifi verbs take", repr(waits) + joined[-200:])
+        race = joined.split("@@ race\n", 1)[1].split("@@end", 1)[0].split() if "@@ race" in joined else []
+        check(sorted(race) == sorted(f"race{i}" for i in range(1, 13)),
+              "twelve bluetooth adds at once keep all twelve names", repr(race))
+
         # Every zone, code and offset: set it, then read what it wrote with
         # the host's glibc and hold it to the host's tzdata.
         wanted = [z for z in zones if z != "UTC"] + codes + ["+1", "-5", "+5:30", "-3:30",
@@ -41002,6 +41371,8 @@ def openssl_workbench(work):
         "policy=names\nunique_subject=no\n[names]\ncommonName=supplied\n")
 
     def when(days):
+        if isinstance(days, str):
+            return days
         moment = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=days)
         return moment.strftime("%Y%m%d%H%M%SZ")
 
@@ -41027,7 +41398,7 @@ def openssl_workbench(work):
     return openssl, issue
 
 
-def spark_shell_command(cc, output, anchor=None):
+def spark_shell_command(cc, output, anchor=None, defines=()):
     """The cc line that builds programs/shell.c as a spark image does, run from HARNESS_ROOT.
 
     Match freestanding spark builds: pin baseline x86-64 (no BMI2), keep
@@ -41044,6 +41415,7 @@ def spark_shell_command(cc, output, anchor=None):
             "-T", "src/build/spark.ld", "-Wl,-e,_start", "-Wl,--build-id=none",
             "-Wl,--no-warn-rwx-segments",
             *(['-DTLS_BENCH_ANCHOR="%s"' % anchor] if anchor else []),
+            *("-D" + define for define in defines),
             "-o", str(output), "programs/shell.c"]
 
 
@@ -41057,6 +41429,65 @@ def bench_anchor(work):
             axis, ", ".join("0x%02x" % b for b in coordinate))
         for axis, coordinate in (("x", point[1:49]), ("y", point[49:97]))))
     return work / "anchor.inc"
+
+
+GO_CHAIN_VERIFIER = r"""
+package main
+
+import (
+	"crypto/x509"
+	"encoding/pem"
+	"fmt"
+	"os"
+)
+
+func load(path string) []*x509.Certificate {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var out []*x509.Certificate
+	for {
+		var block *pem.Block
+		block, data = pem.Decode(data)
+		if block == nil {
+			return out
+		}
+		if block.Type != "CERTIFICATE" {
+			continue
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "parse:", err)
+			os.Exit(3)
+		}
+		out = append(out, cert)
+	}
+}
+
+func main() {
+	roots := x509.NewCertPool()
+	for _, c := range load(os.Args[1]) {
+		roots.AddCert(c)
+	}
+	inter := x509.NewCertPool()
+	for _, c := range load(os.Args[2]) {
+		inter.AddCert(c)
+	}
+	leaf := load(os.Args[3])
+	if len(leaf) != 1 {
+		os.Exit(3)
+	}
+	_, err := leaf[0].Verify(x509.VerifyOptions{
+		Roots: roots, Intermediates: inter, DNSName: os.Args[4],
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+"""
 
 
 def harness_tls_chains(argv):
@@ -41081,6 +41512,7 @@ def harness_tls_chains(argv):
     import threading
     parser = argparse.ArgumentParser(prog="differential.py --harness tls_chains")
     parser.add_argument("--cc", default=os.environ.get("CC", "gcc"))
+    parser.add_argument("--only", help="run only the rows whose name contains this text")
     args = parser.parse_args(argv)
     if platform.system() != "Linux" or not shutil.which("openssl"):
         print("tls chains: NOT RUN -- needs Linux and openssl")
@@ -41228,6 +41660,52 @@ def harness_tls_chains(argv):
         ("first intermediate excludes the second's subject", 2, good_leaf,
          {"first_extra": "nameConstraints=critical,excluded;dirName:subtree\n"
                          "[subtree]\nCN=tls chains second\n", "keys": ("P-256",)}),
+        #   Name constraints, breadth: range shapes, an excluded subtree
+        #   winning over a permitted one, case, label boundaries, the same
+        #   name checked against two CAs' constraints, and a leaf with one
+        #   name inside and one outside.
+        ("a one-address range permits the leaf", 2, good_leaf,
+         {"second_extra": "nameConstraints=critical,permitted;IP:127.0.0.1/255.255.255.255\n",
+          "keys": ("P-256",)}),
+        ("a range of everything permits the leaf", 2, good_leaf,
+         {"second_extra": "nameConstraints=critical,permitted;IP:0.0.0.0/0.0.0.0\n",
+          "keys": ("P-256",)}),
+        ("a range of everything excluded refuses the leaf", 2, good_leaf,
+         {"second_extra": "nameConstraints=critical,excluded;IP:0.0.0.0/0.0.0.0\n",
+          "keys": ("P-256",)}),
+        ("an excluded address wins over a permitted range", 2, good_leaf,
+         {"second_extra": "nameConstraints=critical,permitted;IP:127.0.0.0/255.0.0.0,"
+                          "excluded;IP:127.0.0.1/255.255.255.255\n",
+          "keys": ("P-256",)}),
+        ("DNS constraints leave an IP name alone", 2, good_leaf,
+         {"second_extra": "nameConstraints=critical,permitted;DNS:example.com\n",
+          "keys": ("P-256",)}),
+        ("a DNS constraint is compared without case", 2,
+         good_leaf.replace("IP:127.0.0.1", "IP:127.0.0.1,DNS:www.example.com"),
+         {"second_extra": "nameConstraints=critical,permitted;DNS:EXAMPLE.com\n",
+          "keys": ("P-256",)}),
+        ("a DNS constraint ends at a label boundary", 2,
+         good_leaf.replace("IP:127.0.0.1", "IP:127.0.0.1,DNS:www.notexample.com"),
+         {"second_extra": "nameConstraints=critical,permitted;DNS:example.com\n",
+          "keys": ("P-256",)}),
+        ("a leaf with one name inside and one outside", 2,
+         good_leaf.replace("IP:127.0.0.1", "IP:127.0.0.1,DNS:www.example.com,DNS:www.evil.test"),
+         {"second_extra": "nameConstraints=critical,permitted;DNS:example.com\n",
+          "keys": ("P-256",)}),
+        ("two CAs' DNS constraints, the leaf inside both", 2,
+         good_leaf.replace("IP:127.0.0.1", "IP:127.0.0.1,DNS:www.example.com"),
+         {"first_extra": "nameConstraints=critical,permitted;DNS:example.com\n",
+          "second_extra": "nameConstraints=critical,permitted;DNS:www.example.com\n",
+          "keys": ("P-256",)}),
+        ("two CAs' DNS constraints, the leaf outside the second", 2,
+         good_leaf.replace("IP:127.0.0.1", "IP:127.0.0.1,DNS:www.example.com"),
+         {"first_extra": "nameConstraints=critical,permitted;DNS:example.com\n",
+          "second_extra": "nameConstraints=critical,permitted;DNS:evil.test\n",
+          "keys": ("P-256",)}),
+        ("the first CA excludes a name the leaf carries", 2,
+         good_leaf.replace("IP:127.0.0.1", "IP:127.0.0.1,DNS:a.evil.test"),
+         {"first_extra": "nameConstraints=critical,excluded;DNS:evil.test\n",
+          "keys": ("P-256",)}),
         # rsa8192.badssl.com's shape, the largest key browsers take: the
         # leaf and the intermediate that signs it both RSA-8192.
         ("RSA-8192 leaf under an RSA-8192 intermediate", 2, good_leaf,
@@ -41307,6 +41785,24 @@ def harness_tls_chains(argv):
         ("an unrelated root served too", 2, good_leaf, {"extra": "stranger"}),
         ("a SHA-1 legacy root served too", 2, good_leaf, {"extra": "legacy"}),
         ("an impostor intermediate served first", 2, good_leaf, {"impostor": True}),
+        # Mozilla's server-auth distrust-after (anchors.inc's last field): the
+        # bench root carries the date 2024-06-15 23:59:59 in a second build of
+        # the shell, and a leaf whose notBefore is later than that is refused
+        # however the chain ends at the root.
+        ("distrust-after: leaf issued before the date", 2, good_leaf,
+         {"distrust": True, "leaf_dates": ("20240101000000Z", 90)}),
+        ("distrust-after: leaf issued on the date", 2, good_leaf,
+         {"distrust": True, "leaf_dates": ("20240615235959Z", 90)}),
+        ("distrust-after: leaf issued a second after", 2, good_leaf,
+         {"distrust": True, "leaf_dates": ("20240616000000Z", 90)}),
+        ("distrust-after: leaf issued long after", 2, good_leaf,
+         {"distrust": True}),
+        ("distrust-after: leaf under the root, issued after", 0, good_leaf,
+         {"distrust": True}),
+        ("distrust-after: root served too, leaf issued after", 2, good_leaf,
+         {"distrust": True, "serve_root": True}),
+        ("distrust-after: root served first, leaf issued after", 2, good_leaf,
+         {"distrust": True, "root_first": True}),
     )
     keys = (("P-256", ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1"]),
             ("P-384", ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:secp384r1"]),
@@ -41317,6 +41813,11 @@ def harness_tls_chains(argv):
     every_key = ("P-256", "P-384", "RSA-2048")
     #       This tree's policy where it is stricter than openssl, on purpose.
     DELIBERATE = {
+        "distrust-after: leaf issued a second after": "Mozilla's distrust-after date; openssl has none",
+        "distrust-after: leaf issued long after": "Mozilla's distrust-after date; openssl has none",
+        "distrust-after: leaf under the root, issued after": "Mozilla's distrust-after date; openssl has none",
+        "distrust-after: root served too, leaf issued after": "Mozilla's distrust-after date; openssl has none",
+        "distrust-after: root served first, leaf issued after": "Mozilla's distrust-after date; openssl has none",
         "no subject alternative name": "a name is taken from subjectAltName only, never the CN",
         "leaf is a CA": "a certificate that says CA:TRUE is not an end entity (tls_leaf_authorized)",
         "leaf wildcard whose star can be an excluded label":
@@ -41352,6 +41853,18 @@ def harness_tls_chains(argv):
         "a permitted subject compared case-folded", "leaf mailbox on a permitted host",
         "RSA-8192 leaf under an RSA-8192 intermediate",
         "a left-out intermediate fetched from the leaf's caIssuers",
+        "distrust-after: leaf issued before the date", "distrust-after: leaf issued on the date",
+        "a one-address range permits the leaf", "a range of everything permits the leaf",
+        "DNS constraints leave an IP name alone",
+        "a DNS constraint is compared without case",
+        "two CAs' DNS constraints, the leaf inside both",
+    }
+    #       Where wget accepts what OpenSSL refuses, each with its reason and
+    #       with Go's crypto/x509 on wget's side of it.
+    LOOSER_THAN_OPENSSL = {
+        "DNS constraints leave an IP name alone":
+            "OpenSSL also holds the subject's CN to a DNS constraint; RFC 5280 "
+            "and Go do not, and this client never reads a CN for a name",
     }
 
     checks = Checks()
@@ -41452,6 +41965,16 @@ def harness_tls_chains(argv):
             print(built.stderr[-3000:])
             return 1
         (work / "wget").symlink_to(work / "shell")
+        #   The same shell with a distrust-after date on the bench root.
+        built = subprocess.run(spark_shell_command(
+            args.cc, work / "shell_distrust", bench_anchor(work),
+            ("TLS_BENCH_DISTRUST=20240615235959",)), cwd=HARNESS_ROOT,
+            capture_output=True, text=True)
+        if built.returncode:
+            print(built.stderr[-3000:])
+            return 1
+        (work / "distrust").mkdir()
+        (work / "distrust" / "wget").symlink_to(work / "shell_distrust")
 
         #   caIssuers locations are served from the work directory.
         import functools
@@ -41461,12 +41984,30 @@ def harness_tls_chains(argv):
             def log_message(self, *arguments):
                 pass
 
+        go_rows = []
+        go_verifier = None
+        if shutil.which("go"):
+            (work / "gochain.go").write_text(GO_CHAIN_VERIFIER)
+            built = subprocess.run(["go", "build", "-o", str(work / "gochain"),
+                                    str(work / "gochain.go")], cwd=work,
+                                   capture_output=True, text=True,
+                                   env=dict(os.environ, GO111MODULE="off",
+                                            GOFLAGS="", GOCACHE=str(work / ".gocache")))
+            if built.returncode == 0:
+                go_verifier = work / "gochain"
+            else:
+                print("tls chains: Go oracle NOT RUN -- " + built.stderr[-200:])
+        else:
+            print("tls chains: Go oracle NOT RUN -- no go toolchain")
+
         files = http.server.ThreadingHTTPServer(
             ("127.0.0.1", 0), functools.partial(Quiet, directory=str(work)))
         threading.Thread(target=files.serve_forever, daemon=True).start()
         files_port = files.server_address[1]
 
         for mutation, depth, leaf_ext, change in mutations:
+            if args.only and args.only not in mutation:
+                continue
             for key_name, key in keys:
                 if key_name not in change.get("keys", every_key):
                     continue
@@ -41545,6 +42086,17 @@ def harness_tls_chains(argv):
                     verify += ["-untrusted", "untrusted.pem"]
                 openssl_ok = subprocess.run(verify + ["leaf.pem"], cwd=work,
                                             capture_output=True).returncode == 0
+                if go_verifier:
+                    #   The second path validator: Go's crypto/x509, given
+                    #   the same root, the same untrusted pool and the same
+                    #   name and purpose. Its verdict is recorded against
+                    #   the row; GO_DIFFERS pins where it parts from OpenSSL.
+                    went = subprocess.run(
+                        [str(go_verifier), "root.pem", "untrusted.pem", "leaf.pem",
+                         "127.0.0.1"], cwd=work, capture_output=True)
+                    go_rows.append(("%s with a %s leaf" % (mutation, key_name),
+                                    openssl_ok, went.returncode == 0,
+                                    went.stderr.decode(errors="replace").strip()[:120], None))
 
                 context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
                 context.minimum_version = ssl.TLSVersion.TLSv1_3
@@ -41555,6 +42107,8 @@ def harness_tls_chains(argv):
                     # leaves we still want to verify as refused by wget.
                     ours_ok = False
                     name = "%s with a %s leaf" % (mutation, key_name)
+                    if go_verifier:
+                        go_rows[-1] = go_rows[-1][:4] + (ours_ok,)
                     expected = mutation in MUST_ACCEPT
                     checks(openssl_ok == expected or mutation in DELIBERATE,
                            "%s: the OpenSSL oracle %s a chain the standards matrix says to %s" % (
@@ -41599,7 +42153,8 @@ def harness_tls_chains(argv):
                     server = threading.Thread(target=serve, daemon=True)
                     server.start()
                     fetched = subprocess.run(
-                        [str(work / "wget"), "-q", "-O", "-", "https://127.0.0.1:%d/" %
+                        [str(work / ("distrust/wget" if change.get("distrust") else "wget")),
+                         "-q", "-O", "-", "https://127.0.0.1:%d/" %
                          listener.getsockname()[1]], capture_output=True, timeout=30,
                         env={"PATH": "/usr/bin:/bin", "HOME": str(work)})
                     server.join(25)
@@ -41618,11 +42173,14 @@ def harness_tls_chains(argv):
                 fetched12 = fetch(context12)
                 ours_ok = fetched.returncode == 0 and fetched.stdout.startswith(b"truste")
                 name = "%s with a %s leaf" % (mutation, key_name)
+                if go_verifier:
+                    go_rows[-1] = go_rows[-1][:4] + (ours_ok,)
                 checks(ours_ok == (fetched12.returncode == 0 and
                                    fetched12.stdout.startswith(b"truste")),
                        "%s: wget's TLS 1.2 verdict differs from its TLS 1.3 one" % name)
                 expected = mutation in MUST_ACCEPT
-                checks(openssl_ok == expected or mutation in DELIBERATE,
+                checks(openssl_ok == expected or mutation in DELIBERATE or
+                       mutation in LOOSER_THAN_OPENSSL,
                        "%s: the OpenSSL oracle %s a chain the standards matrix says to %s" % (
                            name, "accepts" if openssl_ok else "refuses",
                            "accept" if expected else "refuse"))
@@ -41634,12 +42192,41 @@ def harness_tls_chains(argv):
                 if mutation in DELIBERATE and openssl_ok and not ours_ok:
                     checks(True, name)
                     continue
+                if mutation in LOOSER_THAN_OPENSSL and ours_ok and not openssl_ok:
+                    checks(not go_verifier or go_rows[-1][2],
+                           "%s: listed as looser than OpenSSL but Go refuses it too" % name)
+                    continue
                 checks(ours_ok == openssl_ok,
                        "%s: openssl %s it and wget %s it (%s)" % (
                            name, "accepts" if openssl_ok else "refuses",
                            "accepts" if ours_ok else "refuses",
                            fetched.stderr.decode(errors="replace").strip()[:200]))
         files.shutdown()
+    if go_rows:
+        differ = [row for row in go_rows if row[1] != row[2]]
+        print("tls chains: Go crypto/x509 second oracle: %d rows, %d differ from OpenSSL" % (
+            len(go_rows), len(differ)))
+        for name, openssl_said, go_said, why, ours_said in differ:
+            print("    go %s, openssl %s, wget %s: %s  [%s]" % (
+                "accepts" if go_said else "refuses",
+                "accepts" if openssl_said else "refuses",
+                "accepts" if ours_said else "refuses", name, why))
+        #   Where wget is looser than Go it has to be a limit of Go's, named
+        #   here with its reason; anything else is a new disagreement between
+        #   two independent validators and fails the row.
+        go_limits = {
+            "intermediate permits the leaf's subject":
+                "Go does not evaluate directoryName constraints: unhandled critical extension",
+            "a permitted subject compared case-folded":
+                "Go does not evaluate directoryName constraints: unhandled critical extension",
+        }
+        for name, openssl_said, go_said, why, ours_said in go_rows:
+            mutation = name.rsplit(" with a ", 1)[0]
+            if ours_said and not go_said:
+                checks(mutation in go_limits,
+                       "%s: wget accepts what Go's crypto/x509 refuses (%s)" % (name, why))
+            else:
+                checks(True, "%s: no chain Go refuses that wget accepts" % name)
     return checks.verdict("tls chains", "tls-chains")
 
 
@@ -42909,6 +43496,12 @@ static positive string_digits_max(string_address source, positive bound,
                 *used = n;
         return got;
 }
+#define STRICT_REFERENCE 0
+#define STRICT_SAFE 1
+#define STRICT_TIGHT 2
+#ifndef MOONWATER_STRICT
+#define MOONWATER_STRICT STRICT_SAFE
+#endif
 typedef struct { int handle; bool tls; } tls_conn;
 typedef struct { bipolar handle; bool tls; tls_conn session; } http_link;
 typedef struct { p8 *bytes; positive used; positive room; } http_buffer;
@@ -43062,6 +43655,56 @@ int main(void)
          b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello", b"hello"),
         ("empty-length", "frame",
          b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n", b""),
+        ("204-clean", "frame",
+         b"HTTP/1.1 204 No Content\r\n\r\n", None),
+        ("204-with-content-length", "frame",
+         b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n", None),
+        ("204-with-content-length-and-body", "frame",
+         b"HTTP/1.1 204 No Content\r\nContent-Length: 5\r\n\r\nhello", None),
+        ("204-chunked-trailers", "frame",
+         b"HTTP/1.1 204 No Content\r\nTransfer-Encoding: chunked\r\n\r\n"
+         b"0\r\nX-Trailer: y\r\n\r\n", None),
+        ("204-then-pipelined-response", "frame",
+         b"HTTP/1.1 204 No Content\r\n\r\n"
+         b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabc", None),
+        ("1xx-storm-then-204", "frame",
+         b"HTTP/1.1 103 Early Hints\r\nLink: </a>\r\n\r\n" * 40 +
+         b"HTTP/1.1 204 No Content\r\n\r\n", None),
+        ("1xx-storm-then-204-with-content-length", "frame",
+         b"HTTP/1.1 103 Early Hints\r\nLink: </a>\r\n\r\n" * 40 +
+         b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n", None),
+        ("1xx-storm-then-205-with-content-length", "frame",
+         b"HTTP/1.1 102 Processing\r\n\r\n" * 40 +
+         b"HTTP/1.1 205 Reset Content\r\nContent-Length: 4\r\n\r\nabcd", None),
+        ("205-chunked-content", "full",
+         b"HTTP/1.1 205 Reset Content\r\nTransfer-Encoding: chunked\r\n\r\n"
+         b"1\r\nx\r\n0\r\n\r\n", b"x"),
+        ("205-close-delimited", "frame",
+         b"HTTP/1.1 205 Reset Content\r\nConnection: close\r\n\r\nx", None),
+        ("http10-205-close", "frame",
+         b"HTTP/1.0 205 Reset Content\r\n\r\n", None),
+        ("304-with-content-length", "frame",
+         b"HTTP/1.1 304 Not Modified\r\nContent-Length: 99\r\n\r\n", None),
+        ("304-with-body", "frame",
+         b"HTTP/1.1 304 Not Modified\r\nContent-Length: 5\r\n\r\nhello", None),
+        ("reason-phrase-control", "frame",
+         b"HTTP/1.1 200 O\x01K\r\nContent-Length: 0\r\n\r\n", None),
+        ("reason-phrase-bare-lf-injection", "frame",
+         b"HTTP/1.1 200 OK\nContent-Length: 999\nX: y\r\nContent-Length: 0\r\n\r\n",
+         None),
+        ("content-length-equal-twice", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nContent-Length: 3\r\n\r\nabc",
+         None),
+        ("content-length-conflict-twice", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nContent-Length: 4\r\n\r\nabcd",
+         None),
+        ("204-with-transfer-encoding", "frame",
+         b"HTTP/1.1 204 No Content\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+         None),
+        ("205-with-zero-content-length", "frame",
+         b"HTTP/1.1 205 Reset Content\r\nContent-Length: 0\r\n\r\n", None),
+        ("205-with-content-length", "frame",
+         b"HTTP/1.1 205 Reset Content\r\nContent-Length: 5\r\n\r\nhello", None),
         ("bare-lf-headers", "frame",
          b"HTTP/1.1 200 OK\nContent-Length: 0\n\n", None),
         ("chunked-full", "full",
@@ -43230,7 +43873,16 @@ int main(void)
          b"\r\n5\r\nhello\r\n0\r\n\r\n", None),
     ]
     MUST_ACCEPT = {
-        "simple-length", "empty-length", "bare-lf-headers", "chunked-full",
+        "simple-length", "empty-length", "204-clean",
+        "204-with-content-length", "204-with-transfer-encoding",
+        "204-with-content-length-and-body", "204-chunked-trailers",
+        "204-then-pipelined-response", "1xx-storm-then-204",
+        "1xx-storm-then-204-with-content-length",
+        "1xx-storm-then-205-with-content-length", "205-chunked-content",
+        "205-close-delimited", "http10-205-close",
+        "205-with-content-length", "304-with-content-length",
+        "304-with-body",
+        "205-with-zero-content-length", "bare-lf-headers", "chunked-full",
         "chunked-extension", "redirect-location",
         "1xx-then-200", "http10-length", "dup-date-ok", "dup-host-ok",
         "close-delimited", "te-chunked-case", "te-chunked-trail-ws",
@@ -43244,6 +43896,12 @@ int main(void)
         "te-cl-conflict":
             "RFC 9112 forbids TE with Content-Length; Moonwater refuses both",
         "duplicate-content-length":
+            "duplicate framing fields are refused before a length is chosen",
+        "reason-phrase-control":
+            "a control byte in the status line is refused: it would reach logs and terminals",
+        "content-length-equal-twice":
+            "duplicate framing fields are refused before a length is chosen",
+        "content-length-conflict-twice":
             "duplicate framing fields are refused before a length is chosen",
         "bare-cr-in-location":
             "response field values reject embedded controls (NUL/CR/LF)",
@@ -43331,6 +43989,29 @@ int main(void)
             "chunk data is followed by its own line ending, or the frame is cut",
     }
 
+    #       What only the tight tier (MOONWATER_STRICT 2, kernel/profile/
+    #       sec_hardened) refuses. wget and curl, and so the default, accept
+    #       all of them: a real server sends 204 with Content-Length: 0, both
+    #       tools ignore a 204's declared body and print a 205's, and this
+    #       client closes the connection after one response, so a declared
+    #       body left unread can never be taken for the next response.
+    TIGHT_REFUSES = {
+        "204-with-content-length":
+            "RFC 9110 15.3.5 forbids Content-Length on 204",
+        "204-with-transfer-encoding":
+            "RFC 9112 6.1 forbids Transfer-Encoding on 204",
+        "204-with-content-length-and-body":
+            "RFC 9110 15.3.5 forbids Content-Length on 204",
+        "204-chunked-trailers":
+            "RFC 9112 6.1 forbids Transfer-Encoding on 204",
+        "1xx-storm-then-204-with-content-length":
+            "RFC 9110 15.3.5 forbids Content-Length on 204",
+        "205-with-content-length":
+            "RFC 9110 15.3.6 permits Content-Length on 205 only when it is zero",
+        "1xx-storm-then-205-with-content-length":
+            "RFC 9110 15.3.6 permits Content-Length on 205 only when it is zero",
+    }
+
     def python_oracle(mode, wire):
         if mode == "unchunk":
             wire = (b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
@@ -43404,34 +44085,57 @@ int main(void)
         source = shim + defines + headers + body + status + driver
         (work / "http_response_framing.c").write_text(source)
         compiler = "clang" if shutil.which("clang") else os.environ.get("CC", "cc")
-        built = subprocess.run(
-            [compiler, "-O1", "-g", "-std=gnu11", "-Wno-unused-function",
-             str(work / "http_response_framing.c"),
-             "-o", str(work / "http_response_framing")],
-            capture_output=True, text=True)
-        if built.returncode:
-            print("  FAIL the response framing probe did not build:\n" +
-                  built.stderr[-3000:])
-            write_tally("http-response-framing", 0, 1)
-            return 1
-
         stdin = "".join(
             "%s %s %s\n" % (name, mode, wire.hex() or "00")
             for name, mode, wire, _ in CASES)
-        ran = subprocess.run([str(work / "http_response_framing")],
-                             input=stdin, capture_output=True, text=True,
-                             timeout=60)
-        if ran.returncode or ran.stderr.strip():
-            print("  FAIL the probe aborted:\n" + (ran.stderr or ran.stdout)[-3000:])
+
+        def probe(strict):
+            """The matrix through the lifted framing at a MOONWATER_STRICT
+            tier: (verdict lines, None), or (None, why it failed)."""
+            binary = work / ("http_response_framing_%d" % strict)
+            built = subprocess.run(
+                [compiler, "-O1", "-g", "-std=gnu11", "-Wno-unused-function",
+                 "-DMOONWATER_STRICT=%d" % strict,
+                 str(work / "http_response_framing.c"), "-o", str(binary)],
+                capture_output=True, text=True)
+            if built.returncode:
+                return None, ("the response framing probe did not build:\n" +
+                              built.stderr[-3000:])
+            ran = subprocess.run([str(binary)], input=stdin,
+                                 capture_output=True, text=True, timeout=60)
+            if ran.returncode or ran.stderr.strip():
+                return None, ("the probe aborted:\n" +
+                              (ran.stderr or ran.stdout)[-3000:])
+            return ran.stdout, None
+
+        stdout, failure = probe(1)
+        if failure:
+            print("  FAIL " + failure)
             write_tally("http-response-framing", 0, 1)
             return 1
+        tight_stdout, failure = probe(2)
+        if failure:
+            print("  FAIL tight tier: " + failure)
+            write_tally("http-response-framing", 0, 1)
+            return 1
+        tight = {line.split("\t")[0]: line.split("\t")[1] == "ACCEPT"
+                 for line in tight_stdout.splitlines()}
 
         answers = {}
-        for line in ran.stdout.splitlines():
+        for line in stdout.splitlines():
             name, verdict, body_hex = line.split("\t")
             body = (binascii.unhexlify(body_hex) if body_hex != "-" else None)
             answers[name] = (verdict == "ACCEPT", body)
 
+        for name, mode, wire, want_body in CASES:
+            want_tight = (answers[name][0] and name not in TIGHT_REFUSES)
+            checks(tight[name] == want_tight,
+                   "%s: the tight tier %s a frame the matrix says to %s" % (
+                       name, "accepts" if tight[name] else "refuses",
+                       "accept" if want_tight else "refuse"))
+        for name in sorted(TIGHT_REFUSES):
+            checks(name in answers and answers[name][0],
+                   "%s: TIGHT_REFUSES names a row the default refuses" % name)
         for name, mode, wire, want_body in CASES:
             ours_ok, ours_body = answers[name]
             expected = name in MUST_ACCEPT
@@ -43479,7 +44183,7 @@ int main(void)
     return checks.verdict("http response framing", "http-response-framing")
 
 
-def http_fuzz_source(net, util, driver):
+def http_fuzz_source(net, util, driver, tight=False):
     """The whole HTTP section of net.c from "#define HTTP_PORT 80" to the
     section's #endif, less http_lookup, over a hosted shim whose transport is
     a script: each connection serves the next segment of the input, cut into
@@ -43488,12 +44192,17 @@ def http_fuzz_source(net, util, driver):
     lifetime is a heap-use-after-free under ASan. memory_copy is memmove and
     memory_copy_apart is memcpy, the contracts lib.c keeps, so ASan also
     holds every copy to the overlap it declares. The byte predicates, the
-    checked digit scanner and the byte_store appends are lib.util.c's own."""
+    checked digit scanner and the byte_store appends are lib.util.c's own.
+    tight builds it at MOONWATER_STRICT 2, where http_run also holds a redirect
+    chain that has reached public space to public space (http_address_public,
+    which sits between http_lookup and the part kept, is brought back for it)."""
     begin = net.index("#define HTTP_PORT 80")
     lookup = net.index("static p32 http_lookup(string_address host)")
     leaf = net.index("static fn http_url_leaf(")
     finish = net.index("#endif // STANDARD_MODERN_C_NET_HTTP")
-    http = net[begin:lookup] + net[leaf:finish]
+    public = src_slice(net, "/* Whether a fetch whose destination the peer chose may go to ip",
+                       "#define TLS_AIA_SECONDS", "http_fuzz_source")
+    http = net[begin:lookup] + public + net[leaf:finish]
     known = util[util.index("static inline INLINE b32 known_is_digit(b32 value)"):
                  util.index("static inline INLINE b32 known_is_ascii(b32 value)")]
     digits = util[util.index("static inline INLINE positive digit_known(p8 character, "
@@ -43520,10 +44229,19 @@ typedef long bipolar;
 typedef void *address_any;
 typedef p8 *string_address;
 typedef const p8 *const_string;
+#define STRICT_REFERENCE 0
+#define STRICT_SAFE 1
+#define STRICT_TIGHT 2
+#ifndef MOONWATER_STRICT
+#define MOONWATER_STRICT STRICT_SAFE
+#endif
 #define INLINE
 #define COLD
 #define CONST
 #define PURE
+#define STRICT_SAFE 1
+#define STRICT_TIGHT 2
+#define MOONWATER_STRICT STRICT_SAFE
 #define fn void
 #define address_to *
 #define address_of &
@@ -43663,6 +44381,8 @@ static const p8 *fuzz_segment;
 static positive fuzz_segment_size;
 static positive fuzz_segment_at;
 static positive fuzz_opened;
+static p32 fuzz_connected[32];
+static positive fuzz_connected_count;
 static positive fuzz_requests;
 static p64 fuzz_random;
 static positive fuzz_largest;
@@ -43732,7 +44452,10 @@ static bool network_stream_timeout(bipolar h, positive s, positive n)
 }
 static int socket_connect(b32 h, const void *where, positive size)
 {
-        (void)h; (void)where; (void)size;
+        (void)h; (void)size;
+        if (fuzz_connected_count < 32)
+                fuzz_connected[fuzz_connected_count++] =
+                    ((const socket_address_internet *)where)->host;
         return 0;
 }
 static int socket_close(b32 h) { (void)h; return 0; }
@@ -43937,11 +44660,22 @@ static bipolar system_call_3(positive number, positive fd, positive spans,
         return (bipolar)wrote;
 }
 
+/* A name that does not resolve, one in public space (8.8.8.8), one inside
+   (10.0.0.1), and every other name and literal on this machine. */
 static p32 http_lookup(string_address host)
 {
-        return strcmp(host, "unknown.invalid") ? 0x7f000001 : 0;
+        if (!strcmp(host, "unknown.invalid"))
+                return 0;
+        if (!strcmp(host, "public.example"))
+                return 0x08080808;
+        if (!strcmp(host, "inside.example"))
+                return 0x0a000001;
+        return 0x7f000001;
 }
 """
+    if tight:
+        shim = shim.replace("#define MOONWATER_STRICT STRICT_SAFE",
+                            "#define MOONWATER_STRICT STRICT_TIGHT")
     return shim + http + driver
 
 
@@ -43965,6 +44699,13 @@ def harness_http_fuzz(argv):
     held to one request line, four fields and CRLF only. Seeds are the
     http_response_framing CASES plus URL and redirect shapes, written per
     run. Bounded run in lane_net; `sh test/run fuzz` runs it longer.
+
+    It runs twice, built at the default tier and at MOONWATER_STRICT 2 (the
+    tight tier: a 204 that declares a body and a 205 with content refused,
+    and a redirect chain that has reached public space held there). The
+    shim's names resolve to 8.8.8.8 (public.example), 10.0.0.1
+    (inside.example) or loopback, every connection is recorded, and at the
+    tight tier none that follows one to public space may be inside.
 
         python3 test/differential.py --harness http_fuzz
     """
@@ -44003,25 +44744,28 @@ static int fuzz_whole(const p8 *segment, positive size, bool tls, bool follow,
                 return 0;
         if (http_response_has_no_body(response.code))
                 return 1;
+        /* The tight tier reads a 205 as the RFC does: its framing is taken
+           and any content is a refusal. */
+        bool reset = MOONWATER_STRICT >= STRICT_TIGHT && response.code == 205;
         switch (response.body_kind) {
         case HTTP_BODY_LENGTH:
                 if (size - header < response.body_length)
                         return 0;
                 memmove(copy, copy + header, response.body_length);
                 *body_size = response.body_length;
-                return 1;
+                return reset && *body_size ? 0 : 1;
         case HTTP_BODY_CHUNKED:
                 memmove(copy, copy + header, size - header);
                 verdict = (int)http_unchunk(copy, size - header);
                 if (verdict < 0)
                         return -1;
                 *body_size = (positive)verdict;
-                return 1;
+                return reset && *body_size ? 0 : 1;
         default:
                 /* Close-delimited: plaintext EOF, or close_notify. */
                 memmove(copy, copy + header, size - header);
                 *body_size = size - header;
-                return 1;
+                return reset && *body_size ? 0 : 1;
         }
 }
 
@@ -44038,12 +44782,22 @@ static void fuzz_run(const p8 *data, positive size, int lane)
         fuzz_input = data;
         fuzz_input_size = size;
         fuzz_opened = 0;
+        fuzz_connected_count = 0;
         fuzz_requests = 0;
         fuzz_sink_used = 0;
         status = fetch ? http_get((string_address)start, &store, &code)
                        : http_fetch_to((string_address)start, 7, true, &code, null);
         if (fuzz_requests != fuzz_opened)
                 fuzz_die("a connection was opened with no request written on it");
+        /* At the tight tier a chain that has reached public space never
+           connects inside again. */
+        if (MOONWATER_STRICT >= STRICT_TIGHT)
+                for (positive i = 0; i < fuzz_connected_count; i++)
+                        for (positive j = i + 1; j < fuzz_connected_count; j++)
+                                if (http_address_public(fuzz_connected[i]) &&
+                                    !http_address_public(fuzz_connected[j]))
+                                        fuzz_die("a connection went inside after one to "
+                                                 "public space");
 
         if (fuzz_opened && !fuzz_write_faults && fuzz_segment_open(fuzz_opened - 1)) {
                 p8 *want = NULL;
@@ -44196,7 +44950,10 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
         return 0;
 }
 """
-    return tls_fuzz_run("http", "http", http_fuzz_source(net, util, driver), 65536)
+    default = tls_fuzz_run("http", "http", http_fuzz_source(net, util, driver), 65536)
+    tight = tls_fuzz_run("http tight", "http", http_fuzz_source(net, util, driver, True),
+                         65536)
+    return 1 if 1 in (default, tight) else 2 if 2 in (default, tight) else 0
 
 
 def http_fuzz_seeds():
@@ -44227,6 +44984,18 @@ def http_fuzz_seeds():
                     b"\r\nContent-Length: 0\r\n\r\n")
         for lane in (0, 1):
             seeds["hop%d_%s.bin" % (lane, name)] = bytes([lane, 7]) + redirect + hop + ok
+    for name, chain in (
+            ("public_then_inside", (b"public.example/p", b"127.0.0.1/q")),
+            ("public_then_private", (b"public.example/p", b"inside.example/q")),
+            ("inside_then_public", (b"inside.example/p", b"public.example/q")),
+            ("public_twice", (b"public.example/p", b"public.example/q")),
+            ("public_inside_public", (b"public.example/p", b"inside.example/q",
+                                      b"public.example/r"))):
+        for lane in (0, 1):
+            scheme = b"https://" if lane else b"http://"
+            wire = hop.join(b"HTTP/1.1 302 Found\r\nLocation: " + scheme + where +
+                            b"\r\nContent-Length: 0\r\n\r\n" for where in chain)
+            seeds["policy%d_%s.bin" % (lane, name)] = bytes([lane, 7]) + wire + hop + ok
     seeds["hop0_eleven.bin"] = b"\x00\x05" + hop.join(
         [b"HTTP/1.1 301 Moved\r\nLocation: /again\r\n\r\n"] * 11)
     seeds["run1_chunked_split_records.bin"] = b"\x01\x11" + (
@@ -44261,9 +45030,14 @@ def harness_wget_mutation(argv):
     http_fuzz runs the HTTP section over a hosted lift; this runs the whole
     program a person types, file staging and exit paths included, over real
     loopback sockets. The bases are http_fuzz's own exchanges -- every
-    http_response_framing row, redirect chains across hops, chunked bodies --
-    and each run mutates one or more of a chain's responses (a flipped bit, a
-    control byte, an inserted or deleted or doubled run, a cut, a header
+    http_response_framing row, redirect chains across hops and chunked bodies.
+    Before those mutations, deterministic procedures drive valid length and
+    chunked responses one byte at a time and across grammar boundaries, put
+    FIN and RST at incomplete states, run an informational-response storm,
+    and prove that forbidden 204/205 framing is rejected by the real wget
+    path.  Each random run then mutates one or more of a
+    chain's responses (a flipped bit, a control byte, an inserted or deleted
+    or doubled run, a cut, a header
     dropped in, a huge length) and serves it, in pieces, to wget or to fetch.
     A run that ends by a signal, or is still going after eight seconds, fails;
     any exit status the program chooses for itself is an answer. Seeded, so a
@@ -44278,6 +45052,7 @@ def harness_wget_mutation(argv):
     import socket
     import tempfile
     import threading
+    import time
     parser = argparse.ArgumentParser(prog="differential.py --harness wget_mutation")
     parser.add_argument("--cc", default=os.environ.get("CC", "gcc"))
     parser.add_argument("--shell", help="a built shell to use instead of building one")
@@ -44367,13 +45142,96 @@ def harness_wget_mutation(argv):
             "http://127.0.0.1:%d/x" % port]
         try:
             code = subprocess.run(command, capture_output=True, timeout=8,
-                                  cwd=str(farm), env={"PATH": "/usr/bin:/bin"}).returncode
+                                  cwd=str(farm), env={"PATH": "/usr/bin:/bin"},
+                                  preexec_fn=_limits).returncode
         except subprocess.TimeoutExpired:
             code = "timeout"
         finished.set()
         server.join(timeout=3)
         listener.close()
         return code
+
+    reference = {}
+
+    def outstanding(peer):
+        """Bytes this side has sent that the peer's kernel has not yet acked."""
+        import array
+        import fcntl
+        import termios
+        left = array.array("i", [0])
+        fcntl.ioctl(peer.fileno(), termios.TIOCOUTQ, left, True)
+        return left[0]
+
+    def procedure(farm, chunks, reset=False, tool="ours"):
+        """One transaction under an exact server write schedule, to the
+        built shell's wget (tool "ours"), to GNU wget ("wget") or to curl:
+        (exit status, standard output), or None when it ran out of time.
+
+        Each write goes out as its own segment: Nagle is off and the next
+        write waits until the kernel has this one acked and then a moment for
+        the client to read it. Without that, a loopback peer coalesces a
+        byte-at-a-time schedule into two reads (measured: 219 one-byte
+        writes arrived as 2 reads). The kernel still decides what a read
+        returns, so this is a schedule of writes, not a promise about reads."""
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        listener.settimeout(6)
+        port = listener.getsockname()[1]
+
+        def serve():
+            peer = None
+            try:
+                peer, _ = listener.accept()
+                peer.settimeout(2)
+                peer.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                request = b""
+                while b"\r\n\r\n" not in request and len(request) < 8192:
+                    got = peer.recv(8192 - len(request))
+                    if not got:
+                        return
+                    request += got
+                gap = 0.0003 if len(chunks) > 8 else 0.002
+                for chunk in chunks:
+                    peer.sendall(chunk)
+                    while outstanding(peer):
+                        time.sleep(0.00002)
+                    time.sleep(gap)
+                if reset:
+                    peer.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                                    struct.pack("ii", 1, 0))
+                else:
+                    peer.shutdown(socket.SHUT_WR)
+                    try:
+                        peer.recv(1)
+                    except OSError:
+                        pass
+            except OSError:
+                pass
+            finally:
+                if peer is not None:
+                    peer.close()
+                listener.close()
+
+        server = threading.Thread(target=serve, daemon=True)
+        server.start()
+        url = "http://127.0.0.1:%d/procedure" % port
+        command = {
+            "ours": [str(farm / "wget"), "-q", "-O", "-", url],
+            "wget": [reference["wget"], "-q", "-O", "-", "-t", "1", "-T", "5",
+                     "--no-config", url] if "wget" in reference else None,
+            "curl": [reference["curl"], "-s", "--http1.1", "--max-time", "6",
+                     url] if "curl" in reference else None,
+        }[tool]
+        try:
+            ran = subprocess.run(
+                command, capture_output=True, timeout=8, cwd=str(farm),
+                env={"PATH": "/usr/bin:/bin", "HOME": str(farm)},
+                preexec_fn=_limits)
+        except subprocess.TimeoutExpired:
+            ran = None
+        server.join(timeout=8)
+        return None if ran is None else (ran.returncode, ran.stdout)
 
     checks = Checks()
     with tempfile.TemporaryDirectory(prefix="wget-mutation-") as temporary:
@@ -44387,6 +45245,213 @@ def harness_wget_mutation(argv):
                 return 1
         for tool in ("wget", "fetch"):
             (work / tool).symlink_to(shell)
+
+        #       The oracles: GNU wget and curl, when the machine has them
+        #       (the version is printed, so a run says which it read). A
+        #       stand-in under the same name is not one: only a program that
+        #       says what it is counts.
+        for name, needle in (("wget", "GNU Wget"), ("curl", "curl ")):
+            found = shutil.which(name)
+            if not found:
+                continue
+            said = subprocess.run([found, "--version"], capture_output=True,
+                                  text=True, timeout=10, preexec_fn=_limits)
+            if said.stdout.startswith(needle):
+                reference[name] = found
+                print("wget mutation: oracle %s" % said.stdout.splitlines()[0])
+        for name in ("wget", "curl"):
+            if name not in reference:
+                print("wget mutation: %s oracle NOT RUN -- no GNU wget/curl here" % name)
+
+        payload = b"procedural body"
+        length = (b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n"
+                  b"Connection: close\r\n\r\n" % len(payload)) + payload
+        chunked = (b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"
+                   b"Connection: close\r\n\r\n4\r\nproc\r\nB\r\nedural body\r\n"
+                   b"0\r\nWitness: yes\r\n\r\n")
+        close_body = (b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n" +
+                      payload)
+        hint = b"HTTP/1.1 103 Early Hints\r\nLink: </style.css>\r\n\r\n"
+        informational = hint * 32 + length
+        empty = (0, b"")
+        # (name, writes, RST after them, what the built shell's wget must
+        # answer -- None when only "a failure" is asked)
+        procedures = [
+            ("a length response delivered one byte at a time",
+             [length[at:at + 1] for at in range(len(length))], False, (0, payload)),
+            ("a chunked response delivered one byte at a time",
+             [chunked[at:at + 1] for at in range(len(chunked))], False, (0, payload)),
+            ("the final body byte arriving beside FIN",
+             [length[:-1], length[-1:]], False, (0, payload)),
+            ("RST in an exact-length body is not success",
+             [length[:-1]], True, None),
+            ("close-delimited content ends at FIN",
+             [close_body[:17], close_body[17:-1], close_body[-1:]], False,
+             (0, payload)),
+            ("RST does not terminate close-delimited content cleanly",
+             [close_body], True, None),
+            ("a chunked body without its zero chunk is not success",
+             [chunked[:chunked.rfind(b"0\r\n")]], False, None),
+            ("an informational-response storm completes within the transaction bound",
+             [informational[at:at + 1] for at in range(len(informational))],
+             False, (0, payload)),
+            #   204 and 205 as wget and curl take them: the default accepts a
+            #   204 whatever its head declares (the body is never read, and
+            #   the connection closes after the one response) and reads a
+            #   205's declared content like any other body.
+            ("204 with Content-Length 0",
+             [b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"], False, empty),
+            ("204 with Content-Length and a body",
+             [b"HTTP/1.1 204 No Content\r\nContent-Length: 5\r\n\r\nhello"], False,
+             empty),
+            ("204 with Transfer-Encoding",
+             [b"HTTP/1.1 204 No Content\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n"],
+             False, empty),
+            ("204 chunked with trailers",
+             [b"HTTP/1.1 204 No Content\r\nTransfer-Encoding: chunked\r\n\r\n"
+              b"0\r\nX-T: y\r\n\r\n"], False, empty),
+            ("204 followed by a second response in the same write",
+             [b"HTTP/1.1 204 No Content\r\n\r\nHTTP/1.1 200 OK\r\n"
+              b"Content-Length: 3\r\n\r\nabc"], False, empty),
+            ("204 followed by a second response one byte at a time",
+             [(b"HTTP/1.1 204 No Content\r\n\r\nHTTP/1.1 200 OK\r\n"
+               b"Content-Length: 3\r\n\r\nabc")[at:at + 1] for at in range(70)],
+             False, empty),
+            ("a 1xx storm before a 204",
+             [hint * 40 + b"HTTP/1.1 204 No Content\r\n\r\n"], False, empty),
+            ("a 1xx storm before a 204 with Content-Length 0, byte by byte",
+             [(hint * 12 + b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")[at:at + 1]
+              for at in range(len(hint) * 12 + 47)], False, empty),
+            ("a 1xx storm before a 205",
+             [hint * 40 + b"HTTP/1.1 205 Reset Content\r\nContent-Length: 0\r\n\r\n"],
+             False, empty),
+            ("205 with a zero Content-Length",
+             [b"HTTP/1.1 205 Reset Content\r\nContent-Length: 0\r\n\r\n"], False, empty),
+            ("205 with a nonzero Content-Length",
+             [b"HTTP/1.1 205 Reset Content\r\nContent-Length: 5\r\n\r\nhello"], False,
+             (0, b"hello")),
+            ("205 with a zero chunk",
+             [b"HTTP/1.1 205 Reset Content\r\nTransfer-Encoding: chunked\r\n\r\n"
+              b"0\r\nWitness: yes\r\n\r\n"], False, empty),
+            ("205 with a nonzero chunk",
+             [b"HTTP/1.1 205 Reset Content\r\nTransfer-Encoding: chunked\r\n\r\n"
+              b"1\r\nx\r\n0\r\n\r\n"], False, (0, b"x")),
+            ("close-delimited 205 with no content",
+             [b"HTTP/1.1 205 Reset Content\r\nConnection: close\r\n\r\n"], False, empty),
+            ("close-delimited 205 with content",
+             [b"HTTP/1.1 205 Reset Content\r\nConnection: close\r\n\r\nx"], False,
+             (0, b"x")),
+            ("HTTP/1.0 205 ended by FIN",
+             [b"HTTP/1.0 205 Reset Content\r\n\r\n"], False, empty),
+            ("HTTP/1.0 205 with content ended by FIN",
+             [b"HTTP/1.0 205 Reset Content\r\n\r\nx"], False, (0, b"x")),
+            ("RST right after a complete 200",
+             [length], True, (0, payload)),
+            ("RST right after a complete 204",
+             [b"HTTP/1.1 204 No Content\r\n\r\n"], True, empty),
+            ("304 metadata may carry the selected representation's length",
+             [b"HTTP/1.1 304 Not Modified\r\nContent-Length: 99\r\n\r\n"],
+             False, (8, b"")),
+            ("304 with a body it does not read",
+             [b"HTTP/1.1 304 Not Modified\r\nContent-Length: 5\r\n\r\nhello"],
+             False, (8, b"")),
+            #   Head shapes end to end (framing's matrix asks the same of the
+            #   parser alone): a request-smuggling shape is refused by
+            #   wget/curl or by this client, never read two ways.
+            ("a duplicated equal Content-Length", [length.replace(
+                b"Content-Length: 15\r\n", b"Content-Length: 15\r\nContent-Length: 15\r\n")],
+             False, None),
+            ("conflicting Content-Length values", [length.replace(
+                b"Content-Length: 15\r\n", b"Content-Length: 15\r\nContent-Length: 3\r\n")],
+             False, None),
+            ("an obs-fold continuation line in the head", [length.replace(
+                b"Connection: close\r\n", b"X-Fold: a\r\n b\r\nConnection: close\r\n")],
+             False, None),
+            ("a control byte in the reason phrase",
+             [length.replace(b"200 OK", b"200 O\x01K")], False, None),
+            ("a bare CR in the reason phrase",
+             [length.replace(b"200 OK", b"200 O\rK")], False, None),
+            ("a bare LF ends the status line, a second Content-Length follows",
+             [length.replace(b"200 OK\r\n", b"200 OK\nContent-Length: 999\n")], False,
+             None),
+        ]
+        # Two writes on either side of every grammar boundary keep coverage
+        # even when a future server helper stops doing the bytewise schedules.
+        # The cut cases put FIN at incomplete status, header, delimiter and
+        # body states; every one has to be a bounded failure.
+        split_points = {1, len(length) - 1}
+        for mark in (b" ", b"\r", b"\n", b":"):
+            split_points.update(at for at, byte in enumerate(length, 1)
+                                if byte == mark[0])
+        for at in sorted(split_points):
+            procedures.append(("a length response split at byte %d" % at,
+                               [length[:at], length[at:]], False, (0, payload)))
+        for at in (1, 8, 15, length.find(b"Content-Length") + 7,
+                   length.find(b"\r\n\r\n") + 2,
+                   length.find(b"\r\n\r\n") + 4, len(length) - 1):
+            procedures.append(("FIN cuts a response at byte %d" % at,
+                               [length[:at]], False, None))
+
+        #       Where the built shell's wget refuses what GNU wget accepts.
+        #       These refusals predate the harness and stay listed, not
+        #       settled: wget and curl both accept an identical duplicate
+        #       Content-Length and a control byte in the reason phrase, so
+        #       whether the default should is the user's decision. Anything
+        #       else must answer as GNU wget does, and never accept what curl
+        #       refuses.
+        #       A FIN inside the status line or a header is not a response:
+        #       GNU wget 1.25.0 exits 0 with nothing written for some of
+        #       those cut points, which lets whoever can cut a connection turn
+        #       a download into an empty success. This client fails them all.
+        STRICTER_THAN_WGET = {
+            "conflicting Content-Length values":
+                "duplicate framing fields are refused before a length is chosen",
+            "a duplicated equal Content-Length":
+                "duplicate framing fields are refused before a length is chosen",
+            "an obs-fold continuation line in the head":
+                "obsolete line folding is refused so a proxy cannot split views",
+            "a control byte in the reason phrase":
+                "a control byte in the status line would reach logs and terminals",
+            "a bare CR in the reason phrase":
+                "a bare CR mid-status-line is not a field separator",
+            "a bare LF ends the status line, a second Content-Length follows":
+                "a header line with no colon is not a field",
+        }
+
+        def worked(answer):
+            return answer is not None and answer[0] == 0
+
+        def verdict(answer):
+            """What two programs must agree on: whether it worked and what
+            it printed. Exit numbers are each program's own."""
+            return (worked(answer), answer[1] if worked(answer) else b"") \
+                if answer is not None else None
+
+        started = time.monotonic()
+        for name, chunks, reset, expected in procedures:
+            answer = procedure(work, chunks, reset)
+            checks(answer == expected if expected is not None
+                   else answer is not None and answer[0] != 0,
+                   "%s: got %r" % (name, answer))
+            if "wget" in reference:
+                wanted = procedure(work, chunks, reset, "wget")
+                if name in STRICTER_THAN_WGET or name.startswith("FIN cuts"):
+                    checks(answer is not None and wanted is not None and
+                           (verdict(answer) == verdict(wanted) or
+                            not worked(answer)),
+                           "%s: only stricter than GNU wget is allowed: ours %r, wget %r" % (
+                               name, answer, wanted))
+                else:
+                    checks(answer is not None and verdict(answer) == verdict(wanted),
+                           "%s: ours %r, GNU wget %r" % (name, answer, wanted))
+            if "curl" in reference:
+                seen = procedure(work, chunks, reset, "curl")
+                checks(not worked(answer) or
+                       (worked(seen) and seen[1] == answer[1]),
+                       "%s: ours accepts what curl does not read the same: ours %r, curl %r" % (
+                           name, answer, seen))
+        print("wget mutation: %d procedures in %.1f s" % (
+            len(procedures), time.monotonic() - started))
         exits = collections.Counter()
         deaths = []
         for number in range(args.runs):
@@ -44405,6 +45470,247 @@ def harness_wget_mutation(argv):
             exits.items(), key=str))))
     return checks.verdict("wget mutation", "wget-mutation")
 
+
+
+def harness_wget_hostile(argv):
+    """The built shell's wget against scripted servers, request line by request
+    line, with the real GNU wget and curl beside it wherever the claim is
+    "as they do".
+
+    wget_mutation asks whether hostile bytes can kill the program; this asks
+    whether the program does the right thing with them.  Each case is a server
+    script (what it answers to each request it gets), a URL the way a person
+    types it, and what must be true: the exit status, the request lines the
+    server saw, the file saved, a word in the message.  A case marked "with"
+    also runs GNU wget and/or curl (when installed) and holds them to the same
+    request lines, so a claim that a reference does something is checked and
+    not remembered: it once was wrong for %2e dot segments, which wget sends
+    on as written and curl resolves.  DELIBERATE names the cases where this
+    client refuses what both fetch, and the reason.
+
+        python3 test/differential.py --harness wget_hostile [--shell PATH]
+    """
+    import shutil
+    import socket
+    import tempfile
+    import threading
+    parser = argparse.ArgumentParser(prog="differential.py --harness wget_hostile")
+    parser.add_argument("--cc", default=os.environ.get("CC", "gcc"))
+    parser.add_argument("--shell", help="a built shell to use instead of building one")
+    parser.add_argument("--tight-shell", help="a shell built with MOONWATER_STRICT=2")
+    parser.add_argument("--netns", help=argparse.SUPPRESS)
+    parser.add_argument("--tight", action="store_true", help=argparse.SUPPRESS)
+    args = parser.parse_args(argv)
+    if platform.system() != "Linux":
+        print("wget hostile: NOT RUN -- needs Linux")
+        return 2
+
+    def ok(body=b"hi"):
+        return b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n" % len(body) + body
+
+    def redirect(location, code=302):
+        return b"HTTP/1.1 %d Found\r\nLocation: " % code + location + \
+            b"\r\nContent-Length: 0\r\n\r\n"
+
+    def hop(location):
+        """/x redirects to location; anything else is the answer."""
+        return lambda line, port: (redirect(location.replace(b"PORT", b"%d" % port))
+                                   if line.startswith(b"GET /x ") else ok())
+
+    def answer(response):
+        return lambda line, port: response.replace(b"PORT", b"%d" % port)
+
+    class Server:
+        def __init__(self, script, address="127.0.0.1"):
+            self.script = script
+            self.lines = []
+            self.hosts = []
+            self.listener = socket.socket()
+            self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.listener.bind((address, 0))
+            self.listener.listen(8)
+            self.port = self.listener.getsockname()[1]
+            threading.Thread(target=self.loop, daemon=True).start()
+
+        def loop(self):
+            while True:
+                try:
+                    peer, _ = self.listener.accept()
+                except OSError:
+                    return
+                threading.Thread(target=self.serve, args=(peer,), daemon=True).start()
+
+        def serve(self, peer):
+            try:
+                peer.settimeout(5)
+                head = b""
+                while b"\r\n\r\n" not in head:
+                    more = peer.recv(4096)
+                    if not more:
+                        return
+                    head += more
+                line = head.split(b"\r\n")[0]
+                self.lines.append(line.rsplit(b" ", 1)[0])
+                for field in head.split(b"\r\n")[1:]:
+                    if field.lower().startswith(b"host:"):
+                        self.hosts.append(field[5:].strip())
+                reply = self.script(line, self.port)
+                for at in range(0, len(reply), 4096):
+                    peer.sendall(reply[at:at + 4096])
+            except OSError:
+                pass
+            finally:
+                peer.close()
+
+        def close(self):
+            self.listener.close()
+
+    def clients(farm):
+        found = {"mw": [str(farm / "wget"), "-O", "saved"]}
+        if shutil.which("wget"):
+            found["wget"] = [shutil.which("wget"), "-q", "--tries=1", "-O", "saved"]
+        if shutil.which("curl"):
+            found["curl"] = [shutil.which("curl"), "-s", "-L", "--max-redirs", "20",
+                             "-o", "saved"]
+        return found
+
+    #   name, script, url (PORT and HOST filled in), expected request lines,
+    #   expected exit for mw, references that must show the same lines, note
+    def case(name, script, url, lines, code=0, refs=("wget", "curl"), host=None,
+             saved=b"hi", message=None):
+        return dict(name=name, script=script, url=url, lines=lines, code=code,
+                    refs=refs, host=host, saved=saved, message=message)
+
+    GET = lambda target: b"GET " + target
+    CASES = [
+        case("a redirect loop stops", answer(redirect(b"/x")),
+             "http://127.0.0.1:PORT/x", [GET(b"/x")] * 21, code=8, refs=(), saved=None,
+             message=b"redirections exceeded"),
+        #   The stricter side: what this client refuses that both fetch.
+        case("DELIBERATE: userinfo in a Location is refused", hop(b"http://u:p@127.0.0.1:PORT/z"),
+             "http://127.0.0.1:PORT/x", [GET(b"/x")], code=1, refs=(), saved=None),
+        case("DELIBERATE: a backslash in the authority is refused",
+             hop(b"http://127.0.0.1:PORT\\@evil.example/z"),
+             "http://127.0.0.1:PORT/x", [GET(b"/x")], code=1, refs=(), saved=None),
+        case("DELIBERATE: a %00 in a Location is refused", hop(b"/a%00b"),
+             "http://127.0.0.1:PORT/x", [GET(b"/x")], code=1, refs=(), saved=None),
+    ]
+
+    #   The address policy of the tight tier, in a network namespace of its
+    #   own where 8.8.8.8 and 8.8.4.4 are loopback addresses: a chain that has
+    #   reached public space may not be sent back inside, and a chain that
+    #   never left the inside may go anywhere.  The default follows all of it,
+    #   as GNU wget and curl do.
+    if args.netns:
+        farm = Path(tempfile.mkdtemp(prefix="wget-netns-"))
+        (farm / "wget").symlink_to(args.netns)
+        rows = [
+            ("public to loopback", "8.8.8.8", b"http://127.0.0.1:PORT/z", False),
+            ("public to public", "8.8.8.8", b"http://8.8.4.4:PORT/z", True),
+            ("loopback to loopback", "127.0.0.1", b"http://127.0.0.1:PORT/z", True),
+            ("loopback to public", "127.0.0.1", b"http://8.8.8.8:PORT/z", True),
+        ]
+        failures = 0
+        for name, first, location, follows in rows:
+            server = Server(hop(location), "0.0.0.0")
+            done = subprocess.run([str(farm / "wget"), "-O", "saved",
+                                   "http://%s:%d/x" % (first, server.port)],
+                                  capture_output=True, timeout=60, cwd=str(farm))
+            server.close()
+            want = [GET(b"/x"), GET(b"/z")] if follows or not args.tight else [GET(b"/x")]
+            code = 0 if follows or not args.tight else 1
+            good = server.lines == want and done.returncode == code and (
+                follows or not args.tight or b"not public" in done.stderr)
+            if not good:
+                failures += 1
+                print("FAIL %s %s: lines %r exit %d (%s)" % (
+                    "tight" if args.tight else "default", name, server.lines,
+                    done.returncode, done.stderr[-120:]))
+        print("PASS %d" % (len(rows) - failures))
+        return 1 if failures else 0
+
+    checks = Checks()
+    with tempfile.TemporaryDirectory(prefix="wget-hostile-") as temporary:
+        work = Path(temporary)
+        shell = Path(args.shell) if args.shell else work / "shell"
+        if not args.shell:
+            built = subprocess.run(spark_shell_command(args.cc, shell), cwd=HARNESS_ROOT,
+                                   capture_output=True, text=True)
+            if built.returncode:
+                print(built.stderr[-3000:])
+                return 1
+        (work / "wget").symlink_to(shell)
+        found = clients(work)
+        for one in CASES:
+            for who, command in found.items():
+                if who != "mw" and who not in one["refs"]:
+                    continue
+                server = Server(one["script"])
+                folder = Path(tempfile.mkdtemp(dir=work))
+                url = one["url"].replace("PORT", str(server.port))
+                try:
+                    done = subprocess.run(command + [url], capture_output=True,
+                                          timeout=60, cwd=str(folder),
+                                          env={"PATH": "/usr/bin:/bin"})
+                except subprocess.TimeoutExpired:
+                    done = None
+                server.close()
+                label = "%s: %s" % (who, one["name"])
+                if done is None:
+                    checks(False, label + ": did not finish")
+                    continue
+                wire = [line for line in server.lines]
+                checks(wire == one["lines"], "%s: request lines %r, wanted %r" % (
+                    label, wire, one["lines"]))
+                if who == "mw":
+                    checks(done.returncode == one["code"], "%s: exit %d, wanted %d (%s)" % (
+                        label, done.returncode, one["code"], done.stderr[-160:]))
+                    if one["host"]:
+                        want = one["host"] + b":%d" % server.port
+                        checks(server.hosts == [want] * len(server.hosts) and server.hosts,
+                               "%s: Host %r, wanted %r" % (label, server.hosts[:2], want))
+                    if one["message"]:
+                        checks(one["message"] in done.stderr, "%s: message %r lacks %r" % (
+                            label, done.stderr[-200:], one["message"]))
+                    saved = folder / "saved"
+                    have = saved.read_bytes() if saved.exists() else None
+                    checks(have == one["saved"], "%s: saved %r, wanted %r" % (
+                        label, have, one["saved"]))
+        #   The address policy, by the default shell and by a tight-tier build.
+        probe = subprocess.run(["unshare", "-Urn", "sh", "-c",
+                                "ip link set lo up && ip addr add 8.8.8.8/32 dev lo"],
+                               capture_output=True) if shutil.which("unshare") and shutil.which("ip") \
+            else None
+        if probe is None or probe.returncode:
+            print("wget hostile: address policy rows skipped (no unshare -Urn with ip)")
+        else:
+            tight = Path(args.tight_shell) if args.tight_shell else work / "tight"
+            if not args.tight_shell:
+                built = subprocess.run(spark_shell_command(
+                    args.cc, tight, defines=("MOONWATER_STRICT=2",)), cwd=HARNESS_ROOT,
+                    capture_output=True, text=True)
+                checks(built.returncode == 0, "the tight-tier shell did not build: "
+                       + built.stderr[-300:])
+            for level, path in (("default", shell), ("tight", tight)):
+                if not path.exists():
+                    continue
+                inside = subprocess.run(
+                    ["unshare", "-Urn", "sh", "-c",
+                     'ip link set lo up && ip addr add 8.8.8.8/32 dev lo && '
+                     'ip addr add 8.8.4.4/32 dev lo && exec "$0" "$@"',
+                     sys.executable, str(Path(__file__).resolve()), "--harness",
+                     "wget_hostile", "--netns", str(path)] + (
+                         ["--tight"] if level == "tight" else []),
+                    capture_output=True, text=True, timeout=300)
+                for line in inside.stdout.splitlines():
+                    if line.startswith("FAIL"):
+                        checks(False, line)
+                passed = [int(line.split()[1]) for line in inside.stdout.splitlines()
+                          if line.startswith("PASS")]
+                checks(inside.returncode == 0 and passed == [4],
+                       "address policy, %s shell: exit %d, %s" % (
+                           level, inside.returncode, inside.stderr[-300:] or inside.stdout[-300:]))
+    return checks.verdict("wget hostile", "wget-hostile")
 
 
 def harness_http_urls(argv):
@@ -44672,6 +45978,7 @@ int main(void)
                        % (base, reference, got, joined))
         for key, why in DELIBERATE.items():
             checks(seen[key] > 0, "DELIBERATE %s never generated (%s)" % (key, why))
+
     return checks.verdict("http urls", "http-urls")
 
 
@@ -47102,6 +48409,307 @@ def public_suffix_probes(tables):
     return sorted(n for n in names if n.count(".") >= 1)
 
 
+def harness_tls_hostnames(argv):
+    """The certificate name check against OpenSSL's, over a grammar of
+    subjectAltNames and hosts, with no network and no sockets.
+
+    Each dNSName or iPAddress pattern (wildcards whole, partial and doubled,
+    other case, trailing dots, empty labels, public-suffix stars, punycode,
+    an embedded NUL, an address spelled as a DNS name) becomes a leaf under
+    one CA, built from raw DER so any bytes reach the SAN, and each host
+    (case, trailing dot, deeper and shallower names, dotted and colon
+    addresses) is handshaken against it by Python's ssl over two MemoryBIOs,
+    which is OpenSSL's chain and name check. The lifted tls_parse_san, which
+    holds the production name rules and the value's framing, is asked the
+    same pairs. It may be stricter than OpenSSL and never looser, except for
+    the two differences named in the code (a trailing dot, an underscore
+    under a wildcard); the counts of what both accept and of what only
+    OpenSSL accepts are printed.
+
+        python3 test/differential.py --harness tls_hostnames
+    """
+    import datetime
+    import ipaddress
+    import platform
+    import ssl
+    import tempfile
+    try:
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+    except ImportError:
+        print("tls hostnames: NOT RUN -- python3 cryptography is missing", file=sys.stderr)
+        return 2
+    if platform.system() != "Linux":
+        print("tls hostnames: NOT RUN -- needs Linux")
+        return 2
+    checks = Checks()
+
+    def der(tag, body):
+        n = len(body)
+        head = bytes([n]) if n < 128 else (b"\x81" + bytes([n]) if n < 256 else b"\x82" + n.to_bytes(2, "big"))
+        return bytes([tag]) + head + body
+
+    def san_value(entries):
+        return der(0x30, b"".join(der(tag, body) for tag, body in entries))
+
+    dns = lambda text: (0x82, text if isinstance(text, bytes) else text.encode())
+    ip = lambda text: (0x87, ipaddress.ip_address(text).packed)
+    patterns = [
+        [dns(n)] for n in (
+            "example.com", "EXAMPLE.COM", "*.example.com", "*.EXAMPLE.com", "example.com.",
+            "*.example.com.", "w*.example.com", "*w.example.com", "*.*.example.com", "*",
+            "*.", "*.com", "*.co.uk", "*.appspot.com", "*.b.example.com", "a.b.example.com",
+            "xn--bcher-kva.example", "*.xn--bcher-kva.example", ".example.com", "example..com",
+            "*..example.com", "ex ample.com", "-a.example.com", "a_b.example.com",
+            "*.a_b.example.com", "127.0.0.1", "::1", "example", "com", "co.uk",
+            "*.example", "b.example.com", "www.example.com", "*.www.example.com",
+            b"example.com\x00.evil.example", b"example.com\x00", b"\x00example.com", "")]
+    patterns += [[ip("127.0.0.1")], [ip("::1")], [ip("2001:db8::1")],
+                 [(0x87, b"\x7f\x00\x00")], [(0x87, bytes(15))], [(0x87, bytes(17))],
+                 [dns("other.test"), dns("example.com")], [dns("other.test"), dns("*.example.com")],
+                 [dns("other.test"), ip("127.0.0.1")], [ip("10.0.0.1"), dns("www.example.com")],
+                 [(0x81, b"example.com")], [(0x86, b"https://example.com/")],
+                 [(0xa4, der(0x30, b""))]]
+    hosts = ["example.com", "EXAMPLE.com", "www.example.com", "a.b.example.com", "b.example.com",
+             "example.com.", "www.example.com.", "example", "com", "co.uk", "a.co.uk",
+             "www.appspot.com", "appspot.com", "xn--bcher-kva.example", "www.xn--bcher-kva.example",
+             "127.0.0.1", "::1", "2001:db8::1", "10.0.0.1", "a_b.example.com", "x.a_b.example.com",
+             "-a.example.com", "other.test", "www.other.test", "a.example", "example.example",
+             "ww.example.com", "wwww.example.com", ".example.com", "1.2.3.4"]
+    # Two named differences, where this client is looser on purpose: an absolute
+    # name's trailing dot is dropped as Chrome drops it, and a wildcard's star
+    # stands for a label with an underscore (DNS carries them, http_host_byte
+    # lets wget and curl reach them, and GnuTLS's own match takes them).
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    ca_key = ec.generate_private_key(ec.SECP256R1())
+    ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "names test root")])
+    ca = (x509.CertificateBuilder().subject_name(ca_name).issuer_name(ca_name)
+          .public_key(ca_key.public_key()).serial_number(1)
+          .not_valid_before(now - datetime.timedelta(days=1))
+          .not_valid_after(now + datetime.timedelta(days=30))
+          .add_extension(x509.BasicConstraints(ca=True, path_length=None), True)
+          .add_extension(x509.KeyUsage(False, False, False, False, False, True, True, False, False), True)
+          .add_extension(x509.SubjectKeyIdentifier.from_public_key(ca_key.public_key()), False)
+          .sign(ca_key, hashes.SHA256()))
+    leaf_key = ec.generate_private_key(ec.SECP256R1())
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    oids, parsers, policy, framing, shim = tls_der_fuzz_lift_parts(net)
+    driver = r"""
+static int unhex(int c) { return c <= '9' ? c - '0' : (c | 32) - 'a' + 10; }
+int main(void)
+{
+        static char line[70000];
+
+        while (fgets(line, sizeof line, stdin))
+        {
+                static p8 value[35000];
+                char *tab = strchr(line, '\t');
+                char *host = tab + 1;
+                bool matched = false;
+                bool ok;
+                size_t length = 0;
+
+                host[strcspn(host, "\n")] = 0;
+                for (char *at = line; at < tab; at += 2)
+                        value[length++] = (p8)(unhex(at[0]) << 4 | unhex(at[1]));
+                ok = tls_parse_san(value, length, (string_address)host, &matched);
+                printf("%d %d\n", ok, ok && matched);
+        }
+        return 0;
+}
+"""
+    with tempfile.TemporaryDirectory(prefix="tls-hostnames-") as temporary:
+        work = Path(temporary)
+        (work / "names.c").write_text(shim + oids + "\n" + parsers + driver)
+        built = subprocess.run([os.environ.get("CC", "cc"), "-O1", "-w", "-fsanitize=address,undefined",
+                                "-o", str(work / "names"), str(work / "names.c")],
+                               capture_output=True, text=True)
+        if built.returncode:
+            print("tls hostnames: FAIL -- the lift does not build:\n" + built.stderr[-2000:])
+            return 1
+        (work / "ca.pem").write_bytes(ca.public_bytes(serialization.Encoding.PEM))
+        (work / "leaf.key").write_bytes(leaf_key.private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption()))
+        client = ssl.create_default_context(cafile=str(work / "ca.pem"))
+        client.verify_flags &= ~ssl.VERIFY_X509_STRICT
+
+        def handshake(server, host):
+            bios = [ssl.MemoryBIO() for _ in range(4)]
+            c = client.wrap_bio(bios[0], bios[1], server_hostname=host)
+            s = server.wrap_bio(bios[2], bios[3], server_side=True)
+            done = [False, False]
+            for _ in range(40):
+                for who, peer, index in ((c, 0, 0), (s, 2, 1)):
+                    if done[index]:
+                        continue
+                    try:
+                        who.do_handshake()
+                        done[index] = True
+                    except ssl.SSLWantReadError:
+                        pass
+                    except ssl.SSLError:
+                        return False
+                    (bios[2] if index == 0 else bios[0]).write(
+                        (bios[1] if index == 0 else bios[3]).read())
+                if all(done):
+                    return True
+            return False
+
+        both = only_openssl = 0
+        for number, entries in enumerate(patterns):
+            value = san_value(entries)
+            leaf = (x509.CertificateBuilder()
+                    .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "leaf")]))
+                    .issuer_name(ca_name).public_key(leaf_key.public_key())
+                    .serial_number(1000 + number)
+                    .not_valid_before(now - datetime.timedelta(days=1))
+                    .not_valid_after(now + datetime.timedelta(days=30))
+                    .add_extension(x509.BasicConstraints(ca=False, path_length=None), True)
+                    .add_extension(x509.KeyUsage(True, False, False, False, False, False, False, False, False), True)
+                    .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), False)
+                    .add_extension(x509.SubjectKeyIdentifier.from_public_key(leaf_key.public_key()), False)
+                    .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()), False)
+                    .add_extension(x509.UnrecognizedExtension(
+                        x509.ObjectIdentifier("2.5.29.17"), value), False)
+                    .sign(ca_key, hashes.SHA256()))
+            (work / "leaf.pem").write_bytes(leaf.public_bytes(serialization.Encoding.PEM))
+            server = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            server.load_cert_chain(str(work / "leaf.pem"), str(work / "leaf.key"))
+            lines = "".join("%s\t%s\n" % (value.hex(), host) for host in hosts)
+            ran = subprocess.run([str(work / "names")], input=lines, capture_output=True,
+                                 text=True, env={"ASAN_OPTIONS": "detect_leaks=0"})
+            answers = ran.stdout.split("\n")
+            checks(ran.returncode == 0 and len(answers) == len(hosts) + 1,
+                   "the lifted tls_parse_san died on pattern %d: %s" % (number, ran.stderr[-300:]))
+            for host, answer in zip(hosts, answers):
+                try:
+                    theirs = handshake(server, host)
+                except (ValueError, UnicodeError):
+                    continue
+                ours = answer.split() == ["1", "1"]
+                what = "%r for %s" % (entries, host)
+                trailing = host.endswith(".") or any(
+                    tag == 0x82 and body.endswith(b".") for tag, body in entries)
+                if ours and not theirs:
+                    underscore = "_" in host and any(
+                        tag == 0x82 and body.startswith(b"*.") for tag, body in entries)
+                    checks(trailing or underscore,
+                           "this client accepts %s and OpenSSL refuses" % what)
+                elif ours:
+                    both += 1
+                    checks(True, what)
+                elif theirs:
+                    only_openssl += 1
+                    print("tls hostnames: only OpenSSL accepts %s" % what)
+                    checks(True, what)
+                else:
+                    checks(True, what)
+    checks(both >= 20, "only %d pairs accepted by both: the grammar reaches nothing" % both)
+    print("tls hostnames: %d patterns, %d hosts, %d pairs both accept, %d only OpenSSL accepts" % (
+        len(patterns), len(hosts), both, only_openssl))
+    return checks.verdict("tls hostnames", "tls-hostnames")
+
+
+def harness_tls_dates(argv):
+    """tls_date_value, the reader of a certificate's validity times, against
+    RFC 5280 4.1.2.5 written out in Python: UTCTime is YYMMDDHHMMSSZ with the
+    years 50-99 as 19xx and 00-49 as 20xx, GeneralizedTime is YYYYMMDDHHMMSSZ
+    and (this client's rule, since 1950-2049 has one canonical spelling) only
+    from 2050, no fraction, no offset, no missing seconds, second 60 refused,
+    the calendar exact (leap years by the Gregorian rule, 1900, 2100 and 2400
+    included), year 0 refused. Every month's day edges, every hour, minute and
+    second edge, both tags and their wrong-length, wrong-letter and wrong-tag
+    neighbours, at the century and epoch edges.
+
+        python3 test/differential.py --harness tls_dates
+    """
+    import calendar
+    checks = Checks()
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    oids, parsers, policy, framing, shim = tls_der_fuzz_lift_parts(net)
+    driver = r"""
+int main(void)
+{
+        char line[128];
+
+        while (fgets(line, sizeof line, stdin))
+        {
+                p64 value = 0;
+                int tag = (unsigned char)line[0];
+                size_t length = strcspn(line + 1, "\n");
+                bool ok = tls_date_value((p8)tag, (p8 *)line + 1, length, &value);
+
+                printf("%d %llu\n", ok, (unsigned long long)(ok ? value : 0));
+        }
+        return 0;
+}
+"""
+
+    def reference(tag, text):
+        digits = 2 if tag == 0x17 else 4 if tag == 0x18 else None
+        if digits is None or len(text) != digits + 11 or not text.endswith("Z") \
+                or not text[:-1].isascii() or not text[:-1].isdigit():
+            return None
+        year = int(text[:digits])
+        if digits == 2:
+            year += 1900 if year >= 50 else 2000
+        elif year < 2050:
+            return None
+        month, day, hour, minute, second = (int(text[digits + at:digits + at + 2])
+                                            for at in range(0, 10, 2))
+        if not year or not 1 <= month <= 12 or hour > 23 or minute > 59 or second > 59:
+            return None
+        if not 1 <= day <= calendar.monthrange(year, month)[1]:
+            return None
+        return int("%04d%02d%02d%02d%02d%02d" % (year, month, day, hour, minute, second))
+
+    samples = []
+    years2 = ["00", "01", "24", "48", "49", "50", "51", "99"]
+    years4 = ["0000", "0001", "1949", "1950", "1999", "2000", "2049", "2050", "2051",
+              "2099", "2100", "2400", "9999"]
+    for tag, years in ((0x17, years2), (0x18, years4)):
+        for year in years:
+            for month in (0, 1, 2, 4, 12, 13):
+                for day in (0, 1, 28, 29, 30, 31, 32):
+                    samples.append((tag, "%s%02d%02d000000Z" % (year, month, day)))
+            for hour, minute, second in ((23, 59, 59), (24, 0, 0), (0, 60, 0), (0, 0, 60), (0, 0, 0)):
+                samples.append((tag, "%s0101%02d%02d%02dZ" % (year, hour, minute, second)))
+            base = "%s0615123456Z" % year
+            samples += [(tag, base[:-1]), (tag, base + "Z"), (tag, base[:-1] + "z"),
+                        (tag, base[:-1] + "+"), (tag, base[:-1] + "0"),
+                        (tag, base.replace("3", "x", 1)), (tag, base[:4] + " " + base[5:]),
+                        (tag, base[:-3] + "Z"), (tag, base[:-1] + ".0Z"),
+                        (tag, base[:-1] + "+0000"), (tag, ""), (0x16, base), (0x18 if tag == 0x17 else 0x17, base)]
+    samples = [(tag, text) for tag, text in samples if "\n" not in text]
+    with tempfile.TemporaryDirectory(prefix="tls-dates-") as temporary:
+        work = Path(temporary)
+        (work / "dates.c").write_text(shim + oids + "\n" + parsers + driver)
+        built = subprocess.run([os.environ.get("CC", "cc"), "-O1", "-w", "-fsanitize=address,undefined",
+                                "-o", str(work / "dates"), str(work / "dates.c")],
+                               capture_output=True, text=True)
+        if built.returncode:
+            print("tls dates: FAIL -- the lift does not build:\n" + built.stderr[-2000:])
+            return 1
+        ran = subprocess.run([str(work / "dates")], capture_output=True, text=True,
+                             input="".join(chr(tag) + text + "\n" for tag, text in samples))
+    answers = ran.stdout.split("\n")
+    checks(ran.returncode == 0 and len(answers) == len(samples) + 1,
+           "the lift died: %s" % ran.stderr[-300:])
+    accepted = 0
+    for (tag, text), answer in zip(samples, answers):
+        want = reference(tag, text)
+        accepted += want is not None
+        checks(answer == ("0 0" if want is None else "1 %d" % want),
+               "tag %#x %r: this client says %r, RFC 5280 says %s" % (tag, text, answer, want))
+    checks(accepted > 200, "only %d of %d samples are valid: the grammar reaches little" % (
+        accepted, len(samples)))
+    return checks.verdict("tls dates", "tls-dates")
+
+
 def harness_public_suffixes(argv):
     """The wildcard public-suffix tables in src/net/suffixes.inc and the C
     lookup that reads them.
@@ -47248,9 +48856,10 @@ def anchor_escape(data):
 
 def anchors_render(head, anchors):
     """anchors.inc from its header comment and (name, cert sha256 prefix, subject hash, key hash,
-    curve, exponent, key) rows: the keys as one string literal, then a row per root."""
+    curve, exponent, key, distrust) rows: the keys as one string literal, then a row per root.
+    distrust is Mozilla's server-auth distrust-after date as YYYYMMDDHHMMSS, or 0."""
     keys = []
-    for name, fingerprint, _, _, _, _, key in anchors:
+    for name, fingerprint, _, _, _, _, key, _ in anchors:
         keys.append("    /* %s, sha256 %s */" % (name, fingerprint))
         line = '    "'
         for token in anchor_escape(key):
@@ -47261,11 +48870,11 @@ def anchors_render(head, anchors):
         keys.append(line + '"')
     rows = []
     at = 0
-    for name, fingerprint, subject, digest, curve, exponent, key in anchors:
+    for name, fingerprint, subject, digest, curve, exponent, key, distrust in anchors:
         rows.append("    /* %s, sha256 %s */" % (name, fingerprint))
-        rows.append("    {{%s}, {%s}, %d, %d, %d, %d}," % (
+        rows.append("    {{%s}, {%s}, %d, %d, %d, %d, %d}," % (
             ", ".join("0x%02x" % b for b in subject), ", ".join("0x%02x" % b for b in digest),
-            curve, exponent, len(key), at))
+            curve, exponent, len(key), at, distrust))
         at += len(key)
     return "%s\n\nstatic const p8 tls_anchor_keys[%d] __attribute__((nonstring)) =\n%s;\n\nstatic const tls_anchor tls_anchors[] = {\n%s\n};\n" % (
         head, at, "\n".join(keys), "\n".join(rows))
@@ -47283,19 +48892,39 @@ def anchors_parse(text):
                         and len(match.group(1)) == 3 else ord(match.group(1) or match.group(2)))
     assert len(keys) == int(declared.group(1))
     anchors = []
-    for name, fingerprint, subject, digest, curve, exponent, length, at in re.findall(
-            r"/\* (.*?), sha256 ([0-9a-f]{16}) \*/\n    \{\{([^}]*)\}, \{([^}]*)\}, (\d), (\d+), (\d+), (\d+)\},",
+    for name, fingerprint, subject, digest, curve, exponent, length, at, distrust in re.findall(
+            r"/\* (.*?), sha256 ([0-9a-f]{16}) \*/\n    \{\{([^}]*)\}, \{([^}]*)\}, (\d), (\d+), (\d+), (\d+), (\d+)\},",
             text[declared.end():]):
         anchors.append((name, fingerprint, bytes(int(b, 16) for b in subject.split(",")),
                         bytes(int(b, 16) for b in digest.split(",")), int(curve), int(exponent),
-                        bytes(keys[int(at):int(at) + int(length)])))
+                        bytes(keys[int(at):int(at) + int(length)]), int(distrust)))
     return head, anchors
 
 
-def anchors_from_bundle(pem):
+def anchors_distrust_dates(source):
+    """Mozilla's server-auth distrust-after dates from a p11-kit trust source (Arch's
+    /usr/share/ca-certificates/trust-source/mozilla.trust.p11-kit): {certificate sha256 hex:
+    YYYYMMDDHHMMSS} for each root that has one. The value is a UTCTime, "%00" when there is
+    none; a year under 50 is 20YY, as RFC 5280 reads one."""
+    import base64
+    dates = {}
+    for block in source.split("[p11-kit-object-v1]")[1:]:
+        date = re.search(r'^nss-server-distrust-after: "([^"]*)"', block, re.M)
+        pem = re.search(r"-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----", block, re.S)
+        if not date or not pem or date.group(1) == "%00":
+            continue
+        match = re.fullmatch(r"(\d\d)(\d{10})Z", date.group(1))
+        assert match, "a distrust-after date that is not a UTCTime: %r" % date.group(1)
+        year = int(match.group(1))
+        digest = hashlib.sha256(base64.b64decode("".join(pem.group(1).split()))).hexdigest()
+        dates[digest] = ((2000 if year < 50 else 1900) + year) * 10**10 + int(match.group(2))
+    return dates
+
+
+def anchors_from_bundle(pem, distrust=None):
     """The roots this client verifies, from a PEM bundle whose certificates each follow a
     '# label' line: RSA of 2048 to 4096 bits with an odd exponent, and P-256 and P-384,
-    sorted by label."""
+    sorted by label. distrust is anchors_distrust_dates' answer, for the last field."""
     from cryptography import x509
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.asymmetric import ec, rsa
@@ -47317,7 +48946,8 @@ def anchors_from_bundle(pem):
             continue
         anchors.append((label.decode(), certificate.fingerprint(hashes.SHA256()).hex()[:16],
                         hashlib.sha256(certificate.subject.public_bytes()).digest()[:8],
-                        hashlib.sha256(key).digest()[:8], curve, exponent, key))
+                        hashlib.sha256(key).digest()[:8], curve, exponent, key,
+                        (distrust or {}).get(certificate.fingerprint(hashes.SHA256()).hex(), 0)))
     return sorted(anchors, key=lambda row: row[0].casefold())
 
 
@@ -47326,18 +48956,24 @@ def harness_anchors(argv):
 
     Without --bundle, parses anchors.inc and holds it to what net.c relies on: the declared
     size is the keys' length, each row's offset is the running sum of the lengths before it,
-    its key is the size its curve (or an RSA modulus of 2048 to 4096 bits) has, and its key
-    hash is the SHA-256 of that key; and that anchors_render writes the file back byte for
-    byte. With --bundle FILE (a PEM bundle, each certificate after a '# label' line; the
-    pinned one is Arch ca-certificates-mozilla 3.127, and a later one changes labels and
-    roots) it lists what the bundle changes against the file, and with --write regenerates
-    the file from it, keeping the header comment.
+    its key is the size its curve (or an RSA modulus of 2048 to 4096 bits) has, its key
+    hash is the SHA-256 of that key, and its distrust-after date is 0 or a real
+    YYYYMMDDHHMMSS; and that anchors_render writes the file back byte for byte. With
+    --bundle FILE (a PEM bundle, each certificate after a '# label' line; Arch's
+    ca-certificates-mozilla) and --trust-source FILE (its mozilla.trust.p11-kit, where
+    Mozilla's server-auth distrust-after dates are; /usr/share/ca-certificates/trust-source/
+    mozilla.trust.p11-kit by default) it lists what they change against the file, and with
+    --write regenerates the file from them, keeping the header comment and rewriting the
+    two input digests in it. When the two inputs are the very ones the header names, the
+    file must be exactly what they regenerate to: that is the reproducibility check.
 
         python3 test/differential.py --harness anchors
         python3 test/differential.py --harness anchors --bundle /etc/ssl/certs/ca-certificates.crt [--write]
     """
     parser = argparse.ArgumentParser(prog="differential.py --harness anchors")
     parser.add_argument("--bundle")
+    parser.add_argument("--trust-source",
+                        default="/usr/share/ca-certificates/trust-source/mozilla.trust.p11-kit")
     parser.add_argument("--write", action="store_true")
     args = parser.parse_args(argv)
     path = HARNESS_ROOT / "src/net/anchors.inc"
@@ -47345,18 +48981,30 @@ def harness_anchors(argv):
     head, anchors = anchors_parse(text)
     checks = Checks()
     at = 0
-    for name, _, _, digest, curve, exponent, key in anchors:
+    for name, _, _, digest, curve, exponent, key, distrust in anchors:
         checks(len(key) == {1: 64, 2: 96}.get(curve, len(key)) and (curve != 3 or 256 <= len(key) <= 512),
                "%s: a key of %d bytes for curve %d" % (name, len(key), curve))
         checks(hashlib.sha256(key).digest()[:8] == digest, "%s: the key hash is not the key's" % name)
         checks(curve == 3 or exponent == 0, "%s: an exponent on a curve" % name)
+        checks(distrust == 0 or (2000 <= distrust // 10**10 <= 2100 and 1 <= distrust // 10**8 % 100 <= 12 and
+                                 1 <= distrust // 10**6 % 100 <= 31 and distrust // 10**4 % 100 < 24 and
+                                 distrust // 100 % 100 < 60 and distrust % 100 < 60),
+               "%s: a distrust-after of %d is not a date" % (name, distrust))
         at += len(key)
     checks(len(anchors) == 120 and at == 39328, "%d anchors, %d key bytes" % (len(anchors), at))
     checks([row[0].casefold() for row in anchors] == sorted(row[0].casefold() for row in anchors),
            "the rows are not sorted by name")
     checks(anchors_render(head, anchors) == text, "anchors.inc is not what anchors_render writes for it")
     if args.bundle:
-        fresh = anchors_from_bundle(Path(args.bundle).read_bytes())
+        bundle = Path(args.bundle).read_bytes()
+        source = Path(args.trust_source).read_bytes()
+        digests = "bundle sha256 %s\n            trust-source sha256 %s" % (
+            hashlib.sha256(bundle).hexdigest(), hashlib.sha256(source).hexdigest())
+        fresh = anchors_from_bundle(bundle, anchors_distrust_dates(source.decode()))
+        rendered = anchors_render(re.sub(r"bundle sha256 [0-9a-f]+\n            trust-source sha256 [0-9a-f]+",
+                                         digests, head), fresh)
+        if digests in head:
+            checks(rendered == text, "the inputs the header names do not regenerate anchors.inc byte for byte")
         now = {row[1]: row for row in anchors}
         new = {row[1]: row for row in fresh}
         for fingerprint in sorted(now.keys() | new.keys()):
@@ -47368,7 +49016,7 @@ def harness_anchors(argv):
             elif now[fingerprint][0] != row[0] or now[fingerprint][2:] != row[2:]:
                 print("  changed: %s %s (%s)" % (now[fingerprint][0], fingerprint, row[0]))
         if args.write:
-            path.write_text(anchors_render(head, fresh))
+            path.write_text(rendered)
             print("anchors: wrote %s (%d roots, %d key bytes)" % (path, len(fresh), sum(len(r[6]) for r in fresh)))
     print("anchors: %d roots, %d key bytes" % (len(anchors), at))
     return checks.verdict("anchors", "anchors")
@@ -48026,7 +49674,10 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                 memset(heard + heard_count, 0, sizeof heard[0]);
                 if (sntp_reply_sample(reply, request, t1, t4, flags & 2,
                                       heard + heard_count) == SNTP_OK)
+                {
+                        heard[heard_count].address = (p32)(heard_count + 1);
                         heard_count++;
+                }
         }
         (void)sntp_pick(heard, heard_count);
         if (heard_count && sntp_choose(heard, heard_count) >= 0)
@@ -48154,6 +49805,151 @@ def sntp_fuzz_source(host):
     return SNTP_FUZZ_SHIM + "\n".join(parts) + SNTP_FUZZ_DRIVER
 
 
+SNTP_ERA_DRIVER = r"""
+static void era_put(p8 *at, long long unix_seconds, unsigned long long nanoseconds)
+{
+        network_store_32(at, (p32)((unix_seconds + 2208988800ll) & 0xffffffffll));
+        network_store_32(at + 4, (p32)((nanoseconds << 32) / 1000000000ull));
+}
+
+/* stdin: client-seconds server-seconds tight; one answer a line: the
+   verdict of sntp_reply_sample and what it measured. The client sends at
+   its second, hears 2 ms later; the server stamps one ms in, so the true
+   offset is exactly server minus client and the delay is 2 ms. */
+int main(void)
+{
+        long long client;
+        long long server;
+        int tight;
+
+        if (!sntp_math_ok())
+        {
+                fprintf(stderr, "sntp_era: the lifted self-test fails\n");
+                return 1;
+        }
+        while (scanf("%lld %lld %d", &client, &server, &tight) == 3)
+        {
+                p8 request[SNTP_PACKET] = {0};
+                p8 reply[SNTP_PACKET] = {0};
+                sntp_sample sample = {0};
+                bipolar verdict;
+
+                request[0] = SNTP_LI_VN_MODE;
+                memcpy(request + 40, "eraNONCE", 8);
+                reply[0] = 0x24;
+                reply[1] = 2;
+                reply[2] = 6;
+                reply[3] = 0xec;
+                network_store_32(reply + 4, 0x100);
+                network_store_32(reply + 8, 0x100);
+                era_put(reply + 16, server - 10, 0);
+                memcpy(reply + 24, request + 40, 8);
+                era_put(reply + 32, server, 1000000);
+                era_put(reply + 40, server, 1000000);
+                verdict = sntp_reply_sample(
+                    reply, request, sntp_timespec_ns((p64)client, 0),
+                    sntp_timespec_ns((p64)client, 2000000), tight, &sample);
+                printf("%lld %lld %ld %ld %ld\n", client, server, (long)verdict,
+                       verdict == SNTP_OK ? (long)sample.offset_ns : 0,
+                       verdict == SNTP_OK ? (long)sample.delay_ns : 0);
+        }
+        return 0;
+}
+"""
+
+
+def harness_sntp_era(argv):
+    """host.c's SNTP sample arithmetic across the NTP era boundary, 2036
+    and 2038 and 2104.
+
+    sntp_reply_sample, lifted with the fuzz target's anchors, is asked about
+    exchanges whose true offset is known to the nanosecond: the client's
+    clock and the server's at an instant around 2036-02-07 06:28:16 UTC
+    (where the 32-bit NTP seconds wrap), 2038-01-19 03:14:08 (where a signed
+    32-bit time_t does), 2100 and the end of era 1, each with the server
+    equal, an hour ahead and an hour behind. Run twice. At the window the
+    source ships (SNTP_WALL_LEAST..SNTP_WALL_MOST, read from host.c) a
+    sample is taken exactly inside it, and with the answer right. Then again
+    with the window's far edge moved to the end of era 1, the edit the
+    source comment says is the only one the date needs: every instant the
+    wrap could break must give the true offset, so nothing about the era
+    depends on the window staying where it is.
+
+        python3 test/differential.py --harness sntp_era
+    """
+    del argv
+    import datetime
+    import shutil
+    import subprocess
+    import tempfile
+    compiler = shutil.which("clang") or shutil.which("gcc") or shutil.which("cc")
+    if not compiler:
+        print("sntp era: NOT RUN -- no C compiler")
+        return 2
+    host = (HARNESS_ROOT / "src/sh/host.c").read_text()
+    try:
+        source = sntp_fuzz_source(host).replace(SNTP_FUZZ_DRIVER, SNTP_ERA_DRIVER)
+    except ValueError as exc:
+        print("  FAIL sntp era: an anchor moved: " + str(exc))
+        return 1
+    if SNTP_ERA_DRIVER not in source:
+        print("  FAIL sntp era: the fuzz driver's text moved")
+        return 1
+    least = int(re.search(r"#define SNTP_WALL_LEAST (\d+)ll", host).group(1))
+    most = int(re.search(r"#define SNTP_WALL_MOST (\d+)ll", host).group(1))
+    era_end = (1 << 33) - 2208988800
+    moved = "#define SNTP_WALL_MOST %dll" % (era_end - 86400)
+    instants = []
+    for text in ("2026-09-30 12:00:00", "2035-12-31 23:59:59", "2036-01-01 00:00:00",
+                 "2036-02-07 06:28:14", "2036-02-07 06:28:15", "2036-02-07 06:28:16",
+                 "2036-02-07 06:28:17", "2037-06-01 00:00:00", "2038-01-19 03:14:07",
+                 "2038-01-19 03:14:08", "2040-01-01 00:00:00", "2100-01-01 00:00:00",
+                 "2104-02-25 00:00:00"):
+        instants.append(int(datetime.datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+                            .replace(tzinfo=datetime.timezone.utc).timestamp()))
+    checks = Checks()
+    with tempfile.TemporaryDirectory(prefix="sntp-era-") as temporary:
+        work = Path(temporary)
+        for label, window, edit in (("the shipped window", (least, most), None),
+                                    ("the window moved to the end of era 1",
+                                     (least, era_end - 86400), moved)):
+            text = source if edit is None else re.sub(
+                r"#define SNTP_WALL_MOST \d+ll", edit, source)
+            (work / "era.c").write_text(text)
+            built = subprocess.run([compiler, "-O1", "-g", "-std=gnu11", "-Wno-unused-function",
+                                    "-fsanitize=address,undefined", "-fno-sanitize-recover=all",
+                                    str(work / "era.c"), "-o", str(work / "era")],
+                                   capture_output=True, text=True)
+            if built.returncode:
+                print("  FAIL sntp era: the lift does not build:\n" + built.stderr[-2000:])
+                write_tally("sntp-era", 0, 1)
+                return 1
+            #   A synchronised clock (tight) takes only a small offset.
+            rows = [(at, at + shift, tight) for at in instants
+                    for shift in (0, 3600, -3600) for tight in (0, 1)
+                    if not (tight and shift)]
+            ran = subprocess.run([str(work / "era")], capture_output=True, text=True,
+                                 input="".join("%d %d %d\n" % row for row in rows), timeout=120)
+            checks(ran.returncode == 0 and not ran.stderr.strip(),
+                   "%s: the probe ran (%s)" % (label, ran.stderr[-300:]))
+            answers = [line.split() for line in ran.stdout.splitlines()]
+            checks(len(answers) == len(rows), "%s: one answer a row" % label)
+            for (client, server, tight), answer in zip(rows, answers):
+                verdict, offset, delay = int(answer[2]), int(answer[3]), int(answer[4])
+                when = datetime.datetime.fromtimestamp(client, datetime.timezone.utc)
+                name = "%s: client %s, server %+d s, tight %d" % (
+                    label, when.strftime("%Y-%m-%d %H:%M:%S"), server - client, tight)
+                inside = window[0] <= client < window[1] and window[0] <= server < window[1]
+                if inside:
+                    checks(verdict == 0 and abs(offset - (server - client) * 10**9) <= 2 and
+                           abs(delay - 2000000) <= 2,
+                           "%s: taken with the true offset (verdict %d, offset %d ns, delay %d ns)" % (
+                               name, verdict, offset, delay))
+                else:
+                    checks(verdict != 0, "%s: outside the window and refused" % name)
+    return checks.verdict("sntp era", "sntp-era")
+
+
 def harness_sntp_fuzz(argv):
     """libFuzzer over host.c's SNTP reply path: sntp_reply_sample (header,
     kiss codes, the four stamps and their window), sntp_choose over three
@@ -48262,6 +50058,13 @@ static void network_store_16(p8 *at, p16 value)
         at[0] = (p8)(value >> 8);
         at[1] = (p8)value;
 }
+static void network_store_32(p8 *at, p32 value)
+{
+        at[0] = (p8)(value >> 24);
+        at[1] = (p8)(value >> 16);
+        at[2] = (p8)(value >> 8);
+        at[3] = (p8)value;
+}
 static b32 memory_compare_ascii_case(const void *one, const void *two,
                                      positive size)
 {
@@ -48357,6 +50160,12 @@ static positive fuzz_next[6];
 static positive fuzz_tcp_taken;
 static positive fuzz_clock;
 static p8 fuzz_faults;
+/* The last datagram or stream write of twelve bytes or more that went out,
+   and how many stream sockets the run opened: what a driver needs to ask
+   whether an answer was taken for the question that was sent. */
+static p8 fuzz_sent[600];
+static positive fuzz_sent_length;
+static positive fuzz_stream_sockets;
 static const p8 *fuzz_file;
 static positive fuzz_file_length;
 enum { FAULT_SOCKET = 2, FAULT_CONNECTING = 4, FAULT_SO_ERROR = 8,
@@ -48379,6 +50188,7 @@ static fuzz_frame *fuzz_frame_next(b32 handle)
 static const p8 *fuzz_frames_load(const p8 *at, positive left)
 {
         fuzz_frame_count = fuzz_tcp_taken = fuzz_clock = 0;
+        fuzz_sent_length = fuzz_stream_sockets = 0;
         memset(fuzz_next, 0, sizeof fuzz_next);
         while (left >= 3 && fuzz_frame_count < FUZZ_FRAMES)
         {
@@ -48427,6 +50237,7 @@ static bipolar socket_new(b32 family, b32 kind, b32 protocol)
         (void)protocol;
         if (fuzz_faults & FAULT_SOCKET)
                 return -24;
+        fuzz_stream_sockets += (kind & 15) == SOCK_STREAM;
         return family == AF_NETLINK ? FUZZ_NETLINK
                : (kind & 15) == SOCK_STREAM ? FUZZ_TCP : FUZZ_UDP;
 }
@@ -48479,6 +50290,11 @@ static bipolar socket_send(b32 handle, address_any data, positive size,
         {
                 fuzz_faults &= (p8)~FAULT_SEND_INTERRUPT;
                 return -4;
+        }
+        if (!(fuzz_faults & FAULT_SEND) && size >= 12 && size <= sizeof fuzz_sent)
+        {
+                memcpy(fuzz_sent, data, size);
+                fuzz_sent_length = size;
         }
         return (fuzz_faults & FAULT_SEND) ? -28 : (bipolar)size;
 }
@@ -48552,13 +50368,28 @@ def dns_fuzz_seed_record(owner, kind, data, cls=1):
     return owner + struct.pack(">HHIH", kind, cls, 300, len(data)) + data
 
 
+def dns_fuzz_seed_mixed(name):
+    """The question as the resolver sends it under the shim's randomness, which
+    fills every byte with 0xa5: dns_mix_case flips the case of the letter at
+    each wire offset whose bit (offset mod 8) of 0xa5 is set, 0, 2, 5 and 7."""
+    wire = bytearray(dns_fuzz_seed_name(name))
+    for at, byte in enumerate(wire):
+        if (0xa5 >> (at % 8)) & 1 and 0x61 <= (byte | 0x20) <= 0x7a:
+            wire[at] = byte ^ 0x20
+    return bytes(wire)
+
+
 def dns_fuzz_seed_reply(name, answers=(), authority=(), additional=(),
-                        flags=0x8180, ident=0xa5a5, tail=b""):
+                        flags=0x8180, ident=0xa5a5, tail=b"", mixed=False):
     """A reply to the fuzz resolver's question: id 0xa5a5 (the shim's
-    randomness), the asked name spelled at offset 12 for c00c to name."""
+    randomness), the asked name spelled at offset 12 for c00c to name, in the
+    case the resolver sent it (mixed) or as typed. The first attempt of a
+    query sends it mixed and wants it back so; a server that folds the case
+    is asked again as typed."""
     return (struct.pack(">HHHHHH", ident, flags, 1, len(answers),
                         len(authority), len(additional)) +
-            dns_fuzz_seed_name(name) + b"\0\1\0\1" +
+            (dns_fuzz_seed_mixed(name) if mixed else dns_fuzz_seed_name(name)) +
+            b"\0\1\0\1" +
             b"".join(answers) + b"".join(authority) + b"".join(additional) +
             tail)
 
@@ -48611,7 +50442,40 @@ def dns_fuzz_seeds():
     conf = (b"# written by hand\nsearch example.com\noptions ndots:2 timeout:1\n"
             b"nameserver\t10.0.0.1 # first\r\nnameserver ::1\n"
             b"nameserver 192.0.2.53\nnameserver 10.0.0.300\nnameserver")
+    #   The resolver asks in mixed case with the EDNS0 option, and asks again
+    #   as typed after a server that folded the case, and again without the
+    #   option after one that did not understand it: the replies that walk
+    #   each of those, in the order the attempts take them.
+    mixed = lambda *records, **named: dns_fuzz_seed_reply(
+        "example.com", list(records), mixed=True, **named)
+    plain_mixed = mixed(a(at12, [192, 0, 2, 1]))
+    truncated_mixed = mixed(flags=0x8380)
+    framed_mixed = struct.pack(">H", len(plain_mixed)) + plain_mixed
+    chain_mixed = dns_fuzz_seed_reply("www.example.com", [
+        cname(at12, dns_fuzz_seed_name("edge.example.net")),
+        a(dns_fuzz_seed_name("EDGE.example.NET"), [198, 51, 100, 7])], mixed=True)
     return {
+        "a_mixed.bin": seed("example.com", udp(plain_mixed)),
+        "cname_chain_mixed.bin": seed("www.example.com", udp(chain_mixed)),
+        "nxdomain_mixed.bin": seed("example.com", udp(mixed(authority=[soa], flags=0x8183))),
+        "case_folded_then_plain.bin": seed("example.com", udp(plain), udp(plain)),
+        "case_folded_then_junk.bin": seed("example.com", udp(plain),
+                                          udp(dns_fuzz_seed_reply("other.com"))),
+        "edns_formerr_then_plain.bin": seed(
+            "example.com", udp(mixed(flags=0x8181)), udp(plain_mixed)),
+        "edns_notimp_then_plain.bin": seed(
+            "example.com", udp(mixed(flags=0x8184)), udp(plain_mixed)),
+        "folded_formerr_then_plain.bin": seed(
+            "example.com", udp(plain), udp(dns_fuzz_seed_reply("example.com", flags=0x8181)),
+            udp(plain)),
+        "formerr_twice.bin": seed(
+            "example.com", udp(mixed(flags=0x8181)), udp(mixed(flags=0x8181))),
+        "tc_mixed_then_tcp.bin": seed("example.com", udp(truncated_mixed), tcp(framed_mixed)),
+        "tc_mixed_then_tcp_split.bin": seed(
+            "example.com", udp(truncated_mixed),
+            tcp(framed_mixed[:1]), tcp(framed_mixed[1:9]), tcp(framed_mixed[9:]), mode=4),
+        "tc_mixed_then_tcp_lowercase.bin": seed(
+            "example.com", udp(truncated_mixed), tcp(framed)),
         "a_plain.bin": seed("example.com", udp(plain)),
         "junk_then_answer.bin": seed(
             "example.com",
@@ -48708,6 +50572,38 @@ static void fuzz_own_question(fuzz_frame *frame)
         free(copy);
 }
 
+/* The invariant the resolver exists for: an address is believed only from a
+   datagram that carries the id of the query that was sent and its question
+   byte for byte, in the case it was written in (the mixed case of a query's
+   first attempt, as typed on the retry that follows a server that folded it).
+   Held to the bytes the fake socket saw go out and the frame it served last,
+   for an answer that came by UDP. */
+static void fuzz_check_taken(bipolar status)
+{
+        const fuzz_frame *served;
+        bipolar name_end;
+        positive question;
+
+        if (status != DNS_OK || fuzz_stream_sockets ||
+            fuzz_sent_length < DNS_HEADER + 5 || !fuzz_next[FUZZ_UDP])
+                return;
+        served = &fuzz_frames[fuzz_next[FUZZ_UDP] - 1];
+        name_end = dns_skip_name(fuzz_sent, fuzz_sent_length, DNS_HEADER);
+        if (name_end < 0)
+        {
+                fprintf(stderr, "the resolver sent a name it cannot read\n");
+                abort();
+        }
+        question = (positive)name_end + 4 - DNS_HEADER;
+        if (served->length < DNS_HEADER + question ||
+            network_load_16(served->bytes) != network_load_16(fuzz_sent) ||
+            memcmp(served->bytes + DNS_HEADER, fuzz_sent + DNS_HEADER, question))
+        {
+                fprintf(stderr, "an answer was taken whose id or question is not the one asked\n");
+                abort();
+        }
+}
+
 static bipolar fuzz_resolve(const char *name, const p8 *frames, positive left,
                             p8 faults, p32 *found)
 {
@@ -48721,6 +50617,7 @@ static bipolar fuzz_resolve(const char *name, const p8 *frames, positive left,
                      : dns_resolve_at(0x7f000001, DNS_PORT, (string_address)name,
                                       found, 3);
         fuzz_faults = 0;
+        fuzz_check_taken(status);
         return status;
 }
 
@@ -49872,6 +51769,127 @@ def crypto_x25519_instruction_counts():
     return lines, failed
 
 
+def wycheproof_lines(directory):
+    """C2SP/wycheproof's testvectors_v1 files found in directory, as the
+    (kind, expect, fields) crypto_vectors_lines makes. Only what this client
+    means to accept is asked: 128-bit AES-GCM with a 96-bit nonce and a full
+    tag, ECDSA over the curve's own digest (checked through
+    tls_signature_valid, so the DER parse is in it), P-256/P-384 ECDH over
+    raw points, X25519, RSA PKCS#1 v1.5 and PSS with SHA-256 and a 32-byte
+    salt. A vector Wycheproof calls acceptable is left out and counted. The
+    files are fetched by hand (needs the network), so this is no lane."""
+    import json
+    import pathlib
+    root = pathlib.Path(directory)
+    out = []
+    skipped = collections.Counter()
+
+    def be(value, size):
+        return value.to_bytes(size, "big")
+
+    def load(name):
+        path = root / (name + ".json")
+        if not path.exists():
+            skipped["missing " + name] += 1
+            return []
+        return json.loads(path.read_text())["testGroups"]
+
+    def rsa_numbers(group):
+        from cryptography.hazmat.primitives.serialization import load_der_public_key
+        numbers = load_der_public_key(bytes.fromhex(group["publicKeyDer"])).public_numbers()
+        return numbers.n, numbers.e
+
+    def verdict(test, name):
+        if test["result"] == "acceptable":
+            skipped["acceptable " + name] += 1
+            return None
+        return int(test["result"] == "valid")
+
+    for group in load("aes_gcm_test"):
+        if (group["keySize"], group["ivSize"], group["tagSize"]) != (128, 96, 128):
+            skipped["gcm shape"] += len(group["tests"])
+            continue
+        for test in group["tests"]:
+            want = verdict(test, "gcm")
+            if want is None:
+                continue
+            key, iv, aad, msg, ct, tag = (bytes.fromhex(test[k]) for k in
+                                          ("key", "iv", "aad", "msg", "ct", "tag"))
+            if len(tag) != 16:
+                skipped["gcm tag"] += 1
+                continue
+            out.append(("gcm", want, (key, iv, aad, msg if want else bytes(len(ct)), ct, tag)))
+    for name, size, scheme in (("ecdsa_secp256r1_sha256_test", 32, 0x0403),
+                               ("ecdsa_secp384r1_sha384_test", 48, 0x0503)):
+        for group in load(name):
+            key = bytes.fromhex(group["publicKey"]["uncompressed"])
+            if len(key) != 2 * size + 1:
+                continue
+            for test in group["tests"]:
+                want = verdict(test, name)
+                if want is not None:
+                    out.append(("ecdsader%d" % (size * 8), want,
+                                (bytes.fromhex(test["msg"]), bytes.fromhex(test["sig"]),
+                                 key[1:1 + size], key[1 + size:])))
+    for name, size in (("ecdh_secp256r1_ecpoint_test", 32), ("ecdh_secp384r1_ecpoint_test", 48)):
+        for group in load(name):
+            for test in group["tests"]:
+                want = verdict(test, name)
+                if want is None:
+                    continue
+                private = int(test["private"], 16)
+                if private.bit_length() > size * 8 or len(test["public"]) != 2 * (2 * size + 1):
+                    #   The share's length is the caller's frame check
+                    #   (tls_share_use), not the shared-secret routine's.
+                    skipped["ecdh private or point length"] += 1
+                    continue
+                out.append(("ecdh%d" % (size * 8), want,
+                            (be(private, size), bytes.fromhex(test["public"]),
+                             bytes.fromhex(test["shared"]) if want else bytes(size))))
+    for group in load("x25519_test"):
+        for test in group["tests"]:
+            private, public, shared = (bytes.fromhex(test[k]) for k in
+                                       ("private", "public", "shared"))
+            if len(private) != 32 or len(public) != 32:
+                skipped["x25519 size"] += 1
+                continue
+            out.append(("x25519", int(any(shared)), (private, public, shared)))
+    for name, digest, size in (("rsa_signature_2048_sha256_test", hashlib.sha256, 32),
+                               ("rsa_signature_3072_sha256_test", hashlib.sha256, 32),
+                               ("rsa_signature_4096_sha256_test", hashlib.sha256, 32),
+                               ("rsa_signature_2048_sha384_test", hashlib.sha384, 48),
+                               ("rsa_signature_3072_sha384_test", hashlib.sha384, 48),
+                               ("rsa_signature_4096_sha384_test", hashlib.sha384, 48)):
+        for group in load(name):
+            n, e = rsa_numbers(group)
+            if e.bit_length() > 64:
+                skipped["rsa exponent"] += len(group["tests"])
+                continue
+            for test in group["tests"]:
+                want = verdict(test, name)
+                if want is not None:
+                    out.append(("pkcs%d" % (size * 8), want,
+                                (be(n, (n.bit_length() + 7) // 8), be(e, 8),
+                                 bytes.fromhex(test["sig"]),
+                                 digest(bytes.fromhex(test["msg"])).digest())))
+    for name in ("rsa_pss_2048_sha256_mgf1_32_test", "rsa_pss_3072_sha256_mgf1_32_test",
+                 "rsa_pss_4096_sha256_mgf1_32_test", "rsa_pss_2048_sha256_mgf1_0_test"):
+        for group in load(name):
+            n, e = rsa_numbers(group)
+            if (group["sha"], group["mgfSha"], group["sLen"]) != ("SHA-256", "SHA-256", 32):
+                skipped["pss salt %s" % group["sLen"]] += len(group["tests"])
+                continue
+            for test in group["tests"]:
+                want = verdict(test, name)
+                if want is not None:
+                    out.append(("pss", want, (be(n, (n.bit_length() + 7) // 8), be(e, 8),
+                                              bytes.fromhex(test["sig"]),
+                                              bytes.fromhex(test["msg"]))))
+    for what, count in sorted(skipped.items()):
+        print("wycheproof: left out %d (%s)" % (count, what), file=sys.stderr)
+    return out
+
+
 def harness_crypto_vectors(argv):
     """Wycheproof-style vectors for the crypto in src/net/net.c, answered by
     Python's cryptography (OpenSSL) and printed for CHECK_crypto_vectors.
@@ -49920,10 +51938,22 @@ def harness_crypto_vectors(argv):
     to have. Returns 2 when cryptography is missing.
 
         python3 test/differential.py --harness crypto_vectors [--seed N]
+                                     [--wycheproof DIR]
+
+    --wycheproof DIR adds C2SP/wycheproof's own vectors (testvectors_v1 files
+    fetched into DIR by hand; see wycheproof_lines) to the printed set.
     """
     seed = 20260928
-    if argv[:1] == ["--seed"] and len(argv) > 1:
-        seed = int(argv[1])
+    wycheproof = None
+    while argv:
+        if argv[0] == "--seed" and len(argv) > 1:
+            seed = int(argv[1])
+        elif argv[0] == "--wycheproof" and len(argv) > 1:
+            wycheproof = argv[1]
+        else:
+            print("crypto vectors: unknown argument %s" % argv[0], file=sys.stderr)
+            return 1
+        argv = argv[2:]
     try:
         import cryptography  # noqa: F401
     except ImportError:
@@ -49941,6 +51971,8 @@ def harness_crypto_vectors(argv):
     if uneven:
         return 1
     lines = crypto_vectors_lines(seed)
+    if wycheproof:
+        lines += wycheproof_lines(wycheproof)
     kinds = collections.Counter(kind for kind, _, _ in lines)
     accepts = collections.Counter(kind for kind, expect, _ in lines if expect)
     for kind in kinds:
@@ -50033,6 +52065,7 @@ static void fuzz_sha1_final(fuzz_sha1 *h, p8 *out)
 #define DIGEST_SHA1 1
 #define DIGEST_SHA256 3
 #define DIGEST_SHA384 4
+#define DIGEST_SHA512 5
 typedef struct
 {
         positive algorithm;
@@ -50050,6 +52083,8 @@ static void digest_open(digest_state *d, positive algorithm, positive size)
                 fuzz_sha1_init(&d->one);
         else if (algorithm == DIGEST_SHA256)
                 fuzz_sha256_init(&d->two);
+        else if (algorithm == DIGEST_SHA512)
+                fuzz_sha512_init(&d->five);
         else
                 fuzz_sha384_init(&d->five);
 }
@@ -50953,10 +52988,890 @@ def harness_crypto_fuzz(argv):
         return tls_fuzz_run("crypto", "crypto", source, 2048, extra + [str(assembly)])
 
 
+#       bowl_sig_fuzz: what a mirror's .sig file can do to bowl.c's OpenPGP
+#       reader. The two keys are throwaway RSA keys made for this harness
+#       (2048 bits, and 4096 as the pinned key's size), given by their primes; they sign only
+#       BOWL_SIG_ARCHIVE and nothing trusts them. Every signature the
+#       driver starts from is made here in pure Python (EMSA-PKCS1-v1_5 and
+#       a modular power), so none of them is gpg's and each is built to be
+#       taken or refused for a reason this file names.
+BOWL_SIG_ARCHIVE = b"moonwater bowl test archive\n"
+BOWL_SIG_KEY_CREATED = 1785542400
+BOWL_SIG_TIME = 1790000000
+BOWL_SIG_PRIMES = (
+    (2048,
+     "cdf9b7262b839bd730a5582771b5e5350fd42434382863b8f3570db1ea7f9503"
+     "d89e026a4ce6f5cc81c01b618bc016e6ce59df610d7d3e1aa6e9557ae3d65560"
+     "d3238ca0b27ec6d8629086fd4837fbf880c725c1b4f2d9b20a9a1b38a5d9316f"
+     "3bb2155bac34b24dfa05b3da29d2ba1b117a5231fc92433a2e44358c862564bd",
+     "c5c7d257130fbc1d668d08c9f2f89c327d10f48c8408b49b03484ea814052ebd"
+     "e09928702d9b6999f9547d74e068dc6158d64a919bb50a871067aa3514292ced"
+     "9215e44d21a64f5f1cfc19f2a1d72d24fd7bc68cd2e4151c15c6e25ebbf069a9"
+     "4d6c972b5f80f3e03f01600d818a76607fa37af18fbf8d12e0a525011df1d9cb"),
+    (4096,
+     "ea0f2b231f81b7896ebdcdca8f048da5e49cdd361b09ed5625af2b282bf31810"
+     "a9cf8732c088472552f6c1d294dc47823b0d9e1338c12aaca620d8fe5fb3c0a9"
+     "e1cc05a1647ab8fe748a3192a42337eee14620ffd3a83a379099265c953eb364"
+     "5dd1a2714a19509fd2a57f9ade99f66f53a1412e0f70db9237d58b86191d7336"
+     "4fb869429f776bc12a170392665a2c3fab24a0baa8280f7a222dad69975e45f4"
+     "4db21ca42cc3ed6dd6da0d477ed55d985f8f3e9315b326e8e8e2bd5280e11da2"
+     "47267d947079d932e97ce40afde309d00e2a34eda1f6517108f5782697df45a2"
+     "45cc787732b8964ece7f929d54007e9f1920640eb7eb79e2536a95779ffdfcbd",
+     "d64be5a9886dab840271ae0b92e258e14449d1481617c8332f5dc50d44a0e613"
+     "afe59a59a09578c457d6f7d79407feb09ffb46c9b6d89fcd1317616684c40178"
+     "0fe7c513c2ba70db83096f9bee6fa7999cd3012ee7502fe5cbedb02251c94867"
+     "7ae2eacaf97f6cc3d32fd9b2bb2bf8b7e21bf59830188e1738c602082be1774f"
+     "d1197979d5befec116745527a71259204472770420deab7e6f3689df3f4376c6"
+     "44d9f2eab602fd185513f7aa4fc687c7699ec453043d501dd3c3bffc6b76052b"
+     "f9605bb0736033548fe30c96d972f32a3aedaafbbec2b823ade04abd9666ea2b"
+     "d6afa713e0af4f18681aa80add3fe5085a6ba47afc2c4176721a319d4c15f637"),
+)
+
+#       The DigestInfo each hash algorithm of the reader (8 and 10) is held to.
+BOWL_SIG_INFO = {
+    8: ("sha256", bytes.fromhex("3031300d060960864801650304020105000420")),
+    10: ("sha512", bytes.fromhex("3051300d060960864801650304020305000440")),
+}
+
+
+def bowl_sig_u16(value):
+    return bytes((value >> 8 & 255, value & 255))
+
+
+def bowl_sig_u32(value):
+    return int(value).to_bytes(4, "big")
+
+
+def bowl_sig_numbers(index, cache={}):
+    """(bits, modulus, p, q, the private exponent mod p-1, mod q-1) of key
+    index; the exponent is 65537."""
+    if index not in cache:
+        bits, p_hex, q_hex = BOWL_SIG_PRIMES[index]
+        p, q = int(p_hex, 16), int(q_hex, 16)
+        d = pow(65537, -1, (p - 1) * (q - 1))
+        cache[index] = (bits, p * q, p, q, d % (p - 1), d % (q - 1))
+    return cache[index]
+
+
+def bowl_sig_modulus(index):
+    """Key index's modulus as the pinned table writes it: lower-case hex."""
+    return "%x" % bowl_sig_numbers(index)[1]
+
+
+def bowl_sig_fingerprint(index):
+    """The v4 fingerprint of key index (RFC 4880 12.2: SHA-1 over 0x99, the
+    two length octets and the key packet), upper-case hex. The driver checks
+    that bowl_key_fingerprint makes the same."""
+    n = bowl_sig_numbers(index)[1]
+
+    def mpi(value):
+        return bowl_sig_u16(value.bit_length()) + value.to_bytes(
+            (value.bit_length() + 7) // 8, "big")
+
+    body = b"\x04" + bowl_sig_u32(BOWL_SIG_KEY_CREATED) + b"\x01" + mpi(n) + mpi(65537)
+    return hashlib.sha1(b"\x99" + bowl_sig_u16(len(body)) + body).hexdigest().upper()
+
+
+def bowl_sig_subpacket(kind, body, critical=False):
+    """One signature subpacket (RFC 4880 5.2.3.1): a one-octet length below
+    192, two octets to 8383, the type octet counted in it."""
+    data = bytes((kind | (0x80 if critical else 0),)) + body
+    size = len(data)
+    if size < 192:
+        return bytes((size,)) + data
+    size -= 192
+    return bytes((192 + (size >> 8), size & 255)) + data
+
+
+def bowl_sig_header(form, size):
+    """The packet header of a signature (tag 2) in each of the spellings
+    RFC 4880 4.2 has: old format with one, two and four length octets, new
+    format with one and two and with five."""
+    if form == "old1":
+        return bytes((0x88, size & 255))
+    if form == "old2":
+        return bytes((0x89,)) + bowl_sig_u16(size)
+    if form == "old4":
+        return bytes((0x8a,)) + size.to_bytes(4, "big")
+    if form == "new":
+        if size < 192:
+            return bytes((0xc2, size))
+        size -= 192
+        return bytes((0xc2, 192 + (size >> 8), size & 255))
+    if form == "new5":
+        return bytes((0xc2, 255)) + size.to_bytes(4, "big")
+    raise ValueError(form)
+
+
+def bowl_sig_make(index, algorithm, hashed, unhashed=b"", form="old2"):
+    """A version 4 binary-document signature by key index over
+    BOWL_SIG_ARCHIVE with the given hashed and unhashed subpacket bytes:
+    (packet bytes, where the pieces are)."""
+    bits, n, p, q, dp, dq = bowl_sig_numbers(index)
+    name, info = BOWL_SIG_INFO[algorithm]
+    head = bytes((4, 0, 1, algorithm)) + bowl_sig_u16(len(hashed))
+    trailer = bytes((4, 0xff)) + bowl_sig_u32(len(head) + len(hashed))
+    digest = hashlib.new(name, BOWL_SIG_ARCHIVE + head + hashed + trailer).digest()
+    em = int.from_bytes(b"\x00\x01" + b"\xff" * (bits // 8 - 3 - len(info) - len(digest)) +
+                        b"\x00" + info + digest, "big")
+    # The signature, by the Chinese remainder theorem.
+    s_p, s_q = pow(em % p, dp, p), pow(em % q, dq, q)
+    s = s_q + q * (((s_p - s_q) * pow(q, -1, p)) % p)
+    body = (head + hashed + bowl_sig_u16(len(unhashed)) + unhashed + digest[:2] +
+            bowl_sig_u16(s.bit_length()) + s.to_bytes((s.bit_length() + 7) // 8, "big"))
+    header = bowl_sig_header(form, len(body))
+    where = {"header": len(header), "hashed_end": len(header) + len(head) + len(hashed)}
+    where["tail"] = where["hashed_end"] + 2 + len(unhashed)
+    return header + body, where
+
+
+def bowl_sig_bases():
+    """The signatures the driver starts from, in the order its table has
+    them: dicts with name, key, bytes, the offsets bowl_sig_make gives, the
+    creation time and accept, whether bowl_signature_ok has to take it with
+    the key's floor at zero. Everything not accepted is refused for the one
+    reason its name gives (a critical subpacket this does not know, a
+    creation time twice, another key's fingerprint, a hash that is neither
+    SHA-256 nor SHA-512, a packet that is not a version 4 RSA binary
+    signature, a length spelling the reader does not take)."""
+    bases = []
+
+    def issuer(index, fingerprint=None):
+        return bowl_sig_subpacket(
+            33, b"\x04" + bytes.fromhex(fingerprint or bowl_sig_fingerprint(index)))
+
+    def when(created):
+        return bowl_sig_subpacket(2, bowl_sig_u32(created))
+
+    def add(name, index, algorithm, hashed, unhashed=b"", form="old2", accept=True,
+            created=BOWL_SIG_TIME, patch=()):
+        packet, where = bowl_sig_make(index, algorithm, hashed, unhashed, form)
+        packet = bytearray(packet)
+        for at, value in patch:
+            packet[where["header"] + at] = value
+        bases.append(dict(name="%s_%d" % (name, BOWL_SIG_PRIMES[index][0]), key=index,
+                          bytes=bytes(packet), accept=accept, created=created, **where))
+
+    manu = bowl_sig_subpacket(20, b"\x80\x00\x00\x00\x00\x04\x00\x0emanu2,2.5+1.12,0,3")
+    for index in (0, 1):
+        fp = bytes.fromhex(bowl_sig_fingerprint(index))
+        keyid = bowl_sig_subpacket(16, fp[12:])
+        both = issuer(index) + when(BOWL_SIG_TIME)
+        add("gpg_sha512", index, 10, both + manu, keyid)
+        add("gpg_sha256", index, 8, both + manu, keyid)
+        add("empty_unhashed", index, 10, both)
+        # Integers whose first bytes are zero or small, found by trying
+        # creation times: a short integer in a full size key, one of 2040
+        # bits and one of 2043 (the same at 4096).
+        for label, delta in (("mpi_high", (1, 0)), ("mpi_mid", (0, 2)),
+                             ("mpi_small", (10, 14)), ("mpi_zero", (113, 389))):
+            created = BOWL_SIG_TIME + delta[index]
+            add(label, index, 10, issuer(index) + when(created), created=created)
+        add("wrong_issuer", index, 10, issuer(index, bowl_sig_fingerprint(1 - index)) +
+            when(BOWL_SIG_TIME), accept=False)
+        add("critical_unknown", index, 10, both + bowl_sig_subpacket(100, b"x", True),
+            accept=False)
+        if index:
+            continue
+        add("time_first", index, 10, when(BOWL_SIG_TIME) + issuer(index))
+        add("new_header", index, 10, both + manu, keyid, form="new")
+        add("flags", index, 10, both + bowl_sig_subpacket(27, b"\x03") +
+            bowl_sig_subpacket(21, b"\x0a\x08") + bowl_sig_subpacket(30, b"\x01") +
+            bowl_sig_subpacket(4, b"\x01"), keyid)
+        add("long_notation", index, 10, both + bowl_sig_subpacket(
+            20, bytes(4) + bowl_sig_u16(4) + bowl_sig_u16(300) + b"name" + b"v" * 300))
+        add("private_use", index, 8, both + bowl_sig_subpacket(100, b"x") +
+            bowl_sig_subpacket(110, bytes(40)))
+        add("junk_unhashed", index, 10, both, b"\xff\xff\xff\x00\x01")
+        add("big_unhashed", index, 8, both, bytes(range(256)) * 4)
+        add("before_floor", index, 10, issuer(index) + when(BOWL_SIG_TIME - 1),
+            created=BOWL_SIG_TIME - 1)
+        add("critical_known", index, 10, both + bowl_sig_subpacket(4, b"\x01", True),
+            accept=False)
+        add("critical_created", index, 10, issuer(index) + bowl_sig_subpacket(
+            2, bowl_sig_u32(BOWL_SIG_TIME), True), accept=False)
+        add("dup_created", index, 10, both + when(BOWL_SIG_TIME), accept=False)
+        add("dup_issuer", index, 10, issuer(index) + both, accept=False)
+        add("no_created", index, 10, issuer(index), accept=False)
+        add("no_issuer", index, 10, when(BOWL_SIG_TIME), accept=False)
+        add("issuer_v3", index, 10, bowl_sig_subpacket(33, b"\x03" + fp) +
+            when(BOWL_SIG_TIME), accept=False)
+        add("issuer_short", index, 10, bowl_sig_subpacket(33, b"\x04" + fp[:19]) +
+            when(BOWL_SIG_TIME), accept=False)
+        add("created_short", index, 10, issuer(index) + bowl_sig_subpacket(2, bytes(3)),
+            accept=False)
+        add("zero_length", index, 10, b"\x00" + both, accept=False)
+        add("five_octet", index, 10, both + b"\xff" + bowl_sig_u32(5) + bytes((100, 1, 2, 3, 4)),
+            accept=False)
+        add("overrun", index, 10, both + b"\x40" + bytes(10), accept=False)
+        add("old4", index, 10, both, form="old4", accept=False)
+        add("new5", index, 10, both, form="new5", accept=False)
+        for label, at, value in (("version3", 0, 3), ("text_type", 1, 1), ("dsa", 2, 17),
+                                 ("sha1", 3, 2), ("sha224", 3, 11), ("sha384", 3, 9)):
+            add(label, index, 10, both, accept=False, patch=((at, value),))
+    return bases
+
+
+#       The hosted stand-ins bowl.c's signature section stands on, in one
+#       place: the library calls it makes (and the ones its spellings have
+#       made), each as the contract lib.c states for it, and the descriptor
+#       calls over two in-memory files, the .sig and the archive. A change
+#       to what the section calls is a line here.
+BOWL_SIG_FUZZ_SHIM = r"""
+#include <fcntl.h>
+#ifndef AT_FDCWD
+#define AT_FDCWD (-100)
+#endif
+#define FILE_READ O_RDONLY
+
+/* Lower or upper case hex of size bytes, no terminator; its length. */
+static positive memory_into_hex_case(void *into, const void *from, positive size,
+                                     positive upper)
+{
+        const char *digits = upper ? "0123456789ABCDEF" : "0123456789abcdef";
+        const p8 *in = from;
+        p8 *out = into;
+
+        for (positive at = 0; at < size; at++)
+        {
+                out[2 * at] = (p8)digits[in[at] >> 4];
+                out[2 * at + 1] = (p8)digits[in[at] & 15];
+        }
+        return 2 * size;
+}
+static positive memory_into_hex(void *into, const void *from, positive size)
+{
+        return memory_into_hex_case(into, from, size, 0);
+}
+static bool string_equals(const char *one, const char *two)
+{
+        return strcmp(one, two) == 0;
+}
+/* The index of the highest set bit; never asked about zero. */
+static p32 top_bit_known(positive value)
+{
+        return 63 - (p32)__builtin_clzll(value);
+}
+/* lib.c's memory_decode_power2 for the one alphabet bowl.c asks it about,
+   four bits a symbol: groups quanta of two symbols to a byte through a
+   256 byte table of indices below 16 and the sentinel 255, stopping before
+   the first quantum with a symbol the table does not know; the quanta
+   completed. */
+static positive memory_decode_power2(void *into, const void *from, positive groups,
+                                     const void *values, positive bits)
+{
+        const p8 *in = from, *table = values;
+        p8 *out = into;
+        positive done;
+
+        if (bits != 4)
+                abort();
+        for (done = 0; done < groups; done++)
+        {
+                p8 high = table[in[2 * done]], low = table[in[2 * done + 1]];
+
+                if (high == 255 || low == 255)
+                        break;
+                out[done] = (p8)(high << 4 | low);
+        }
+        return done;
+}
+
+/* Two files: the signature a mirror served and the archive it signs. */
+static const p8 *fz_data[2];
+static positive fz_size[2], fz_pos[2];
+static positive fz_chunk;       /* at most this many bytes a read; 0 for all */
+static long fz_fail_at[2];      /* each file's reads fail from this offset; -1 never */
+static bipolar system_open_at(int directory, const char *path, int flags)
+{
+        (void)directory;
+        /* The flags production passes: no link followed, close on exec. */
+        if (!(flags & O_NOFOLLOW) || !(flags & O_CLOEXEC) || (flags & O_ACCMODE))
+                abort();
+        if (!strcmp(path, "sig"))
+        {
+                fz_pos[0] = 0;
+                return 3;
+        }
+        if (!strcmp(path, "archive"))
+        {
+                fz_pos[1] = 0;
+                return 4;
+        }
+        return -2;
+}
+static bipolar system_read_once(bipolar handle, void *into, positive size)
+{
+        int which = handle == 3 ? 0 : 1;
+        positive take = fz_size[which] - fz_pos[which];
+
+        if (handle != 3 && handle != 4)
+                abort();
+        if (fz_fail_at[which] >= 0 && fz_pos[which] >= (positive)fz_fail_at[which])
+                return -5;
+        if (take > size)
+                take = size;
+        if (fz_chunk && take > fz_chunk)
+                take = fz_chunk;
+        if (take)
+                memcpy(into, fz_data[which] + fz_pos[which], take);
+        fz_pos[which] += take;
+        return (bipolar)take;
+}
+static bipolar system_read_retry(positive handle, void *into, positive size)
+{
+        return system_read_once((bipolar)handle, into, size);
+}
+static bipolar system_close(bipolar handle)
+{
+        return handle == 3 || handle == 4 ? 0 : -9;
+}
+"""
+
+#       What the driver does with its input. The first four bytes pick the
+#       lane: byte 0 the mode (bits 0-2), the key (bit 3) and the floor
+#       (bits 4-5), byte 1 how many bytes a read returns (0 all), byte 2 the
+#       offset (in eights) from which the signature's reads fail or, with
+#       its top bit, (in fours) the archive's, byte 3 a base. Mode 0 is a signature file of any bytes. 1 is a base with its
+#       unhashed area replaced by the input and the packet's length put
+#       right, which has to be taken; 2 is a base with a few bytes changed,
+#       which has to be refused when a signed byte is among them; 3 is a base
+#       cut short or followed by junk, which has to be refused; 4 is a key
+#       made of the input's bytes, checked only for what it does to the
+#       reader; 5 is a base with another integer, of any length up to 600
+#       bytes and spelled as the reader wants it, behind the base's check
+#       bytes, which has to be refused; 6 is the input as the body of a
+#       packet, framed with a header that says its length (old or new
+#       format by the base byte's low bit).
+BOWL_SIG_FUZZ_DRIVER = r"""
+#include <stdint.h>
+
+#define FZ_CAP 2700
+#define FZ_TIME 1790000000u
+
+typedef struct
+{
+        const p8 *bytes;
+        positive length;
+        positive header;        /* octets of packet header */
+        positive hashed_end;    /* where the unhashed area's length is */
+        positive tail;          /* where the check bytes are, after the unhashed area */
+        int new_format;
+        int key;
+        int accept;
+        p32 created;
+} fz_base;
+
+static const p8 fz_archive[] = "moonwater bowl test archive\n";
+@@BASES@@
+@@KEYS@@
+
+static void fz_fail(const char *what, const char *name)
+{
+        fprintf(stderr, "bowl_sig_fuzz: %s%s%s\n", what, name ? ": " : "", name ? name : "");
+        abort();
+}
+
+static bool fz_ok(const p8 *sig, positive n, const struct bowl_key *key,
+                  positive chunk, long fail_sig, long fail_archive)
+{
+        bool ok;
+
+        fz_data[0] = sig;
+        fz_size[0] = n;
+        fz_chunk = chunk;
+        fz_fail_at[0] = fail_sig;
+        fz_fail_at[1] = fail_archive;
+        ok = bowl_signature_ok("archive", "sig", key);
+        fz_chunk = 0;
+        fz_fail_at[0] = fz_fail_at[1] = -1;
+        return ok;
+}
+
+/* bowl_signature_read over a copy of exactly n bytes, so a read past the
+   packet is an out-of-bounds read to the sanitizer, and what it answers
+   held to what it promises. */
+static bool fz_parse(const p8 *sig, positive n, const struct bowl_key *key,
+                     p32 *created)
+{
+        p8 *copy = malloc(n ? n : 1);
+        struct bowl_signature found;
+        bool parsed;
+
+        memcpy(copy, sig, n);
+        parsed = bowl_signature_read(copy, n, key, &found);
+        if (parsed)
+        {
+                if (found.hash != 8 && found.hash != 10)
+                        fz_fail("a hash that is neither SHA-256 nor SHA-512", 0);
+                if (found.hashed < copy || found.hashed_length > n ||
+                    found.hashed + found.hashed_length > copy + n)
+                        fz_fail("a hashed area outside the packet", 0);
+                if (!found.mpi_length || found.mpi < copy ||
+                    found.mpi + found.mpi_length != copy + n || !found.mpi[0])
+                        fz_fail("an integer that is not the packet's tail", 0);
+                *created = found.created;
+        }
+        free(copy);
+        return parsed;
+}
+
+static p32 fz_floor(unsigned selector)
+{
+        return selector == 0 ? 0 : selector == 1 ? FZ_TIME : selector == 2 ? FZ_TIME + 1
+                                                                          : 0xffffffffu;
+}
+
+/* The packet of base with its unhashed area replaced and what follows it
+   (the check bytes and the integer) given. */
+static positive fz_splice(p8 *out, const fz_base *base, const p8 *unhashed, positive m,
+                          const p8 *rest, positive rest_length)
+{
+        p8 body[FZ_CAP + 16];
+        positive at = base->hashed_end - base->header;
+        positive size;
+
+        if (base->header != 3)
+                abort();
+        memcpy(body, base->bytes + base->header, at);
+        body[at++] = (p8)(m >> 8);
+        body[at++] = (p8)m;
+        if (m)
+                memcpy(body + at, unhashed, m);
+        at += m;
+        memcpy(body + at, rest, rest_length);
+        size = at + rest_length;
+        if (base->new_format)
+        {
+                out[0] = 0xc2;
+                out[1] = (p8)(192 + ((size - 192) >> 8));
+                out[2] = (p8)(size - 192);
+        }
+        else
+        {
+                out[0] = 0x89;
+                out[1] = (p8)(size >> 8);
+                out[2] = (p8)size;
+        }
+        memcpy(out + 3, body, size);
+        return 3 + size;
+}
+
+static void fz_start(void)
+{
+        p8 hex[41];
+
+        fz_data[1] = fz_archive;
+        fz_size[1] = sizeof fz_archive - 1;
+        fz_fail_at[0] = fz_fail_at[1] = -1;
+        for (int k = 0; k < 2; k++)
+                if (!bowl_key_fingerprint(&fz_keys[k], hex) ||
+                    strcmp((char *)hex, fz_keys[k].fingerprint))
+                        fz_fail("a test key's numbers do not make its fingerprint", 0);
+        for (positive i = 0; i < FZ_BASES; i++)
+        {
+                const fz_base *base = &fz_bases[i];
+                struct bowl_key key = fz_keys[base->key];
+                p32 created = 0;
+                bool parsed = fz_parse(base->bytes, base->length, &key, &created);
+
+                key.since = 0;
+                if (fz_ok(base->bytes, base->length, &key, 0, -1, -1) != (bool)base->accept)
+                        fz_fail(base->accept ? "a good signature is refused"
+                                             : "a signature that is bad is taken",
+                                fz_base_names[i]);
+                if (!base->accept)
+                        continue;
+                if (!parsed || created != base->created)
+                        fz_fail("a good signature is not read as made", fz_base_names[i]);
+                key.since = base->created;
+                if (!fz_ok(base->bytes, base->length, &key, 0, -1, -1))
+                        fz_fail("a signature made on the floor's second is refused",
+                                fz_base_names[i]);
+                key.since = base->created + 1;
+                if (fz_ok(base->bytes, base->length, &key, 0, -1, -1))
+                        fz_fail("a signature made before the floor is taken",
+                                fz_base_names[i]);
+        }
+}
+
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+{
+        static bool started;
+        static p8 sig[FZ_CAP + 16];
+        const uint8_t *input;
+        const fz_base *base;
+        struct bowl_key key;
+        unsigned mode;
+        positive chunk, n = 0, have;
+        long fail_sig, fail_archive;
+        bool expect_accept = false, expect_refuse = false, ok, parsed;
+        p32 created = 0;
+
+        if (!started)
+        {
+                started = true;
+                fz_start();
+        }
+        if (size < 4)
+                return 0;
+        mode = data[0] & 7;
+        chunk = data[1];
+        fail_sig = data[2] && !(data[2] & 0x80) ? (long)(data[2] - 1) * 8 : -1;
+        fail_archive = data[2] & 0x80 ? (long)(data[2] & 0x7f) * 4 : -1;
+        base = &fz_bases[data[3] % FZ_BASES];
+        key = fz_keys[(data[0] >> 3) & 1];
+        key.since = fz_floor((data[0] >> 4) & 3);
+        input = data + 4;
+        have = size - 4;
+        if (have > FZ_CAP)
+                have = FZ_CAP;
+
+        if (mode == 0)
+        {
+                memcpy(sig, input, have);
+                n = have;
+        }
+        else if (mode == 6)
+        {
+                /* The input is the body of a signature packet, framed in a
+                   header that says exactly its length, so what the packet
+                   header holds never stands between the fuzzer and the
+                   fields behind it. */
+                if (data[3] & 1)
+                {
+                        if (have < 256)
+                        {
+                                sig[0] = 0x88;
+                                sig[1] = (p8)have;
+                                n = 2;
+                        }
+                        else
+                        {
+                                sig[0] = 0x89;
+                                sig[1] = (p8)(have >> 8);
+                                sig[2] = (p8)have;
+                                n = 3;
+                        }
+                }
+                else
+                {
+                        sig[0] = 0xc2;
+                        if (have < 192)
+                        {
+                                sig[1] = (p8)have;
+                                n = 2;
+                        }
+                        else
+                        {
+                                sig[1] = (p8)(192 + ((have - 192) >> 8));
+                                sig[2] = (p8)(have - 192);
+                                n = 3;
+                        }
+                }
+                memcpy(sig + n, input, have);
+                n += have;
+        }
+        else if (mode >= 1 && mode <= 3 || mode == 5)
+        {
+                key = fz_keys[base->key];
+                key.since = fz_floor((data[0] >> 4) & 3);
+                if (mode == 1)
+                {
+                        positive m = have > 1500 ? 1500 : have;
+
+                        if (base->header != 3)
+                                return 0;
+                        n = fz_splice(sig, base, input, m, base->bytes + base->tail,
+                                      base->length - base->tail);
+                        expect_accept = base->accept && n < 2048;
+                        expect_refuse = !base->accept;
+                }
+                else if (mode == 2)
+                {
+                        positive at = have >= 2 ? ((positive)input[0] << 8 | input[1]) % base->length : 0;
+                        positive count = have >= 3 ? 1 + input[2] % 16 : 1;
+                        bool signed_change = false;
+
+                        memcpy(sig, base->bytes, base->length);
+                        n = base->length;
+                        for (positive i = 0; i < count && at + i < n; i++)
+                        {
+                                p8 value = 3 + i < have ? input[3 + i] : 0;
+                                positive where = at + i;
+
+                                signed_change |= value != sig[where] &&
+                                                 ((where >= base->header && where < base->hashed_end) ||
+                                                  where >= base->tail);
+                                sig[where] = value;
+                        }
+                        expect_refuse = signed_change && base->accept;
+                }
+                else if (mode == 5)
+                {
+                        /* The integer replaced by one of the input's choosing,
+                           from one byte to more than a key has, spelled as
+                           the reader wants it and behind the base's own
+                           check bytes, so it is the integer that decides. */
+                        p8 rest[2 + 2 + 700];
+                        positive length = have >= 2 ? 1 + ((positive)input[0] << 8 | input[1]) % 600 : 1;
+                        positive bits;
+                        p8 first;
+
+                        if (base->header != 3)
+                                return 0;
+                        for (positive i = 0; i < length; i++)
+                                rest[4 + i] = 2 + i < have ? input[2 + i] : (p8)(0x55 + i);
+                        if (!rest[4])
+                                rest[4] = 1;
+                        first = rest[4];
+                        bits = length * 8 - 8;
+                        while (first)
+                        {
+                                bits++;
+                                first >>= 1;
+                        }
+                        rest[0] = base->bytes[base->tail];
+                        rest[1] = base->bytes[base->tail + 1];
+                        rest[2] = (p8)(bits >> 8);
+                        rest[3] = (p8)bits;
+                        n = fz_splice(sig, base, base->bytes + base->hashed_end + 2,
+                                      base->tail - base->hashed_end - 2, rest, 4 + length);
+                        expect_refuse = length != base->length - base->tail - 4 ||
+                                        memcmp(rest + 4, base->bytes + base->tail + 4, length);
+                }
+                else
+                {
+                        positive cut = have >= 2 ? ((positive)input[0] << 8 | input[1]) % (base->length + 1) : 0;
+                        positive junk = have > 2 ? have - 2 : 0;
+
+                        if (junk > 64)
+                                junk = 64;
+                        memcpy(sig, base->bytes, cut);
+                        if (junk)
+                                memcpy(sig + cut, input + 2, junk);
+                        n = cut + junk;
+                        expect_refuse = n != base->length;
+                        expect_accept = n == base->length && !memcmp(sig, base->bytes, n) &&
+                                        base->accept;
+                }
+        }
+        else
+        {
+                /* A key made of the input: a fingerprint that is the one
+                   its numbers make (so the check passes and the rest runs),
+                   a modulus of whatever characters, an exponent. */
+                static char modulus[1200];
+                p8 hex[41];
+                positive length = have > 8 ? have - 8 : 0;
+
+                if (length > sizeof modulus - 1)
+                        length = sizeof modulus - 1;
+                static const char table[] = "0123456789abcdef0123456789abcdefABCDEFg -";
+
+                for (positive i = 0; i < length; i++)
+                        modulus[i] = table[input[8 + i] % (sizeof table - 1)];
+                modulus[length] = 0;
+                key.modulus = modulus;
+                key.fingerprint = "";
+                key.exponent = have >= 4 ? network_load_32(input) : 65537;
+                key.created = have >= 8 ? network_load_32(input + 4) : 0;
+                if (bowl_key_fingerprint(&key, hex) && !(data[3] & 1))
+                {
+                        static char text[41];
+
+                        memcpy(text, hex, 41);
+                        key.fingerprint = text;
+                }
+                memcpy(sig, fz_bases[0].bytes, fz_bases[0].length);
+                n = fz_bases[0].length;
+        }
+
+        parsed = fz_parse(sig, n, &key, &created);
+        ok = fz_ok(sig, n, &key, chunk, fail_sig, fail_archive);
+        if (ok && !parsed)
+                fz_fail("taken what the reader refuses", 0);
+        if (ok && (created < key.since || n >= 2048))
+                fz_fail("taken against the floor or past the room", 0);
+        if (ok && expect_refuse)
+                fz_fail("a changed signature is taken", mode == 1 ? "unhashed area" : mode == 2 ? "edit" : "cut");
+        if (!ok && expect_accept && fail_sig < 0 && fail_archive < 0 && key.since <= base->created)
+                fz_fail("a good signature with its unhashed area replaced is refused", fz_base_names[data[3] % FZ_BASES]);
+        return 0;
+}
+"""
+
+
+def bowl_sig_fuzz_tables():
+    """The driver's tables as C: each base's bytes and where the pieces are,
+    the names the driver reports them by, and the two keys as bowl.c writes
+    a pinned one (fingerprint, creation time, exponent, modulus, floor)."""
+    bases = bowl_sig_bases()
+    lines = []
+    for at, base in enumerate(bases):
+        lines.append("static const p8 fz_base_%d[] = {%s};" % (
+            at, ", ".join("0x%02x" % byte for byte in base["bytes"])))
+    lines.append("#define FZ_BASES %d" % len(bases))
+    lines.append("static const fz_base fz_bases[FZ_BASES] = {")
+    for at, base in enumerate(bases):
+        lines.append("        {fz_base_%d, %d, %d, %d, %d, %d, %d, %d, %du}," % (
+            at, len(base["bytes"]), base["header"], base["hashed_end"], base["tail"],
+            base["bytes"][0] == 0xc2, base["key"], base["accept"], base["created"]))
+    lines.append("};")
+    lines.append("static const char *const fz_base_names[FZ_BASES] = {%s};" % ", ".join(
+        '"%s"' % base["name"] for base in bases))
+    keys = ["static struct bowl_key fz_keys[2] = {"]
+    for index in (0, 1):
+        keys.append('        {"%s", %d, 65537, "%s", 0},' % (
+            bowl_sig_fingerprint(index), BOWL_SIG_KEY_CREATED, bowl_sig_modulus(index)))
+    keys.append("};")
+    return "\n".join(lines), "\n".join(keys)
+
+
+def bowl_sig_fuzz_source(net, bowl, checks):
+    """The lift: net.c's hosted crypto (crypto_fuzz's, without its oracle and
+    driver, so crypto_rsa_pkcs1 is the production one), then bowl.c's
+    signed-download section from its banner to the pinned key by those two
+    anchors over BOWL_SIG_FUZZ_SHIM, then the driver. ValueError when an
+    anchor moved. What the section calls is stood in for in the shim, each
+    call by itself, and the digest stream it reads the archive through comes
+    from above the banner when bowl.c has one."""
+    crypto = crypto_fuzz_source(net, checks, False)
+    if CRYPTO_FUZZ_DRIVER_C not in crypto:
+        raise ValueError("crypto_fuzz_source no longer ends in its driver")
+    crypto = crypto.replace(CRYPTO_FUZZ_DRIVER_C, "")
+    signed = src_slice(
+        bowl,
+        "/* ---- Signed downloads: an OpenPGP detached signature against a pinned key. ---- */",
+        "/* Arch Linux ARM Build System <builder@archlinuxarm.org>",
+        "bowl_sig_fuzz")
+    #   The archive is read into the digest by bowl_digest_stream, which sits
+    #   above the banner where bowl.c has it; a bowl.c that reads it in the
+    #   section itself has no such helper to bring.
+    stream = "/* Everything a descriptor reads, written into a digest that is already open"
+    digest = src_slice(bowl, stream,
+                       "/* The SHA-256 of what a descriptor reads, as lower-case hex",
+                       "bowl_sig_fuzz") if stream in bowl else ""
+    bases, keys = bowl_sig_fuzz_tables()
+    driver = BOWL_SIG_FUZZ_DRIVER.replace("@@BASES@@", bases).replace("@@KEYS@@", keys)
+    return "\n".join((crypto, BOWL_SIG_FUZZ_SHIM, digest, signed, driver))
+
+
+def bowl_sig_fuzz_seeds():
+    """The driver's seeds from the bases: each as a raw file, each taken
+    base with its unhashed area replaced, a few with one byte changed at
+    every field they have, a few cut and extended, and keys written the way
+    the pinned one is and then bent."""
+    bases = bowl_sig_bases()
+    seeds = {"empty.bin": b""}
+
+    def lane(mode, base=0, key=0, floor=0, chunk=0, fail=0):
+        return bytes((mode | key << 3 | floor << 4, chunk, fail, base))
+
+    for at, base in enumerate(bases):
+        seeds["raw_%s.bin" % base["name"]] = lane(0, at, base["key"]) + base["bytes"]
+        if base["header"] == 3:
+            seeds["splice_%s.bin" % base["name"]] = lane(1, at) + base["bytes"][
+                base["hashed_end"] + 2:base["tail"]]
+    first = bases[0]
+    for label, unhashed in (("empty", b""), ("pattern", bytes(range(256)) * 2),
+                            ("long", b"\xff" * 1500), ("one", b"\x01")):
+        seeds["splice_gpg_%s.bin" % label] = lane(1, 0) + unhashed
+    seeds["splice_floor.bin"] = lane(1, 0, floor=1) + b"\x01\x02"
+    for at, base in enumerate(bases):
+        if base["name"] not in ("gpg_sha512_2048", "gpg_sha256_2048", "mpi_zero_2048",
+                                "mpi_small_2048", "mpi_mid_2048", "new_header_2048",
+                                "gpg_sha512_4096"):
+            continue
+        body = base["header"]
+        places = (0, body, body + 1, body + 2, body + 3, body + 4, body + 5, body + 6,
+                  body + 7, base["hashed_end"] - 1, base["hashed_end"] + 1,
+                  base["tail"], base["tail"] + 2, base["tail"] + 3, base["tail"] + 4,
+                  len(base["bytes"]) - 1)
+        for place in places:
+            seeds["edit_%s_%d.bin" % (base["name"], place)] = lane(2, at) + bytes((
+                place >> 8, place & 255, 0, base["bytes"][place] ^ 1))
+        seeds["edit_%s_run.bin" % base["name"]] = lane(2, at) + bytes((
+            (body + 6) >> 8, (body + 6) & 255, 15)) + bytes(range(16))
+        for cut in (0, 1, 2, 3, 9, base["hashed_end"], base["tail"],
+                    len(base["bytes"]) - 1):
+            seeds["cut_%s_%d.bin" % (base["name"], cut)] = lane(3, at) + bytes((
+                cut >> 8, cut & 255))
+        seeds["junk_%s.bin" % base["name"]] = lane(3, at) + bytes((
+            len(base["bytes"]) >> 8, len(base["bytes"]) & 255, 0))
+    for at, base in enumerate(bases):
+        body = base["bytes"][base["header"]:]
+        seeds["body_%s.bin" % base["name"]] = lane(6, at & 1) + body
+        if base["name"] in ("gpg_sha512_2048", "gpg_sha512_4096"):
+            # the body cut at every field boundary after its first twelve bytes
+            hashed_at = base["hashed_end"] - base["header"]
+            after = base["tail"] - base["header"]
+            for cut in sorted({6, 11, 12, 13, hashed_at - 1, hashed_at, hashed_at + 1, hashed_at + 2,
+                               after - 1, after, after + 1, after + 2, after + 3,
+                               after + 4, after + 5, len(body) - 1}):
+                seeds["body_%s_cut%d.bin" % (base["name"], cut)] = lane(6, 1) + body[:cut]
+    for at, base in enumerate(bases):
+        if base["name"] in ("gpg_sha512_2048", "mpi_zero_2048", "gpg_sha512_4096"):
+            size = len(base["bytes"]) - base["tail"] - 4
+            integer = base["bytes"][base["tail"] + 4:]
+            for label, length in (("same", size), ("one", 1), ("short", size - 1),
+                                  ("long", size + 1), ("longer", 600), ("two", 2)):
+                seeds["integer_%s_%s.bin" % (base["name"], label)] = lane(5, at) + bytes((
+                    (length - 1) >> 8, (length - 1) & 255)) + (
+                        integer if label == "same" else bytes(range(1, 255)) * 3)
+    modulus = bowl_sig_modulus(0).encode()
+    seeds["key_real.bin"] = lane(4) + bytes.fromhex("00010001") + bytes(4) + modulus
+    seeds["key_odd.bin"] = lane(4) + bytes.fromhex("00010001") + bytes(4) + modulus + b"0"
+    seeds["key_upper.bin"] = lane(4) + bytes.fromhex("00010001") + bytes(4) + modulus.upper()
+    seeds["key_full.bin"] = lane(4) + bytes.fromhex("00010001") + bytes(4) + b"f" * 1024
+    seeds["key_over.bin"] = lane(4) + bytes.fromhex("00010001") + bytes(4) + b"f" * 1026
+    seeds["key_bad_digit.bin"] = lane(4) + bytes.fromhex("00010001") + bytes(4) + modulus[:-2] + b"g1"
+    seeds["key_zero.bin"] = lane(4) + bytes(8) + b"00" * 200
+    seeds["key_small.bin"] = lane(4) + bytes.fromhex("00000003") + bytes(4) + b"0b"
+    # the same signature read in pieces, and with a read that fails part way
+    seeds["pieces_gpg.bin"] = lane(0, 0, 0, 0, 1) + first["bytes"]
+    seeds["pieces_seven.bin"] = lane(0, 0, 0, 0, 7) + first["bytes"]
+    seeds["fails_gpg.bin"] = lane(0, 0, 0, 0, 0, 20) + first["bytes"]
+    seeds["floor_taken.bin"] = lane(0, 0, 0, 1) + first["bytes"]
+    seeds["floor_late.bin"] = lane(0, 0, 0, 2) + first["bytes"]
+    return seeds
+
+
+def harness_bowl_sig_fuzz(argv):
+    """libFuzzer over bowl.c's OpenPGP signature reader: bowl_signature_ok
+    and bowl_signature_read as a mirror's .sig file reaches them, and the
+    key routines under them (bowl_key_modulus, bowl_key_mpi,
+    bowl_key_fingerprint), lifted by their anchors over net.c's hosted
+    crypto, so the RSA check is the production one. The driver's keys are
+    throwaway 2048 and 4096 bit keys and its signatures are made here, in
+    Python: it starts by holding each of 46 of them to be taken or refused
+    for the reason it was built for, the pinned key's fingerprint to what its
+    numbers make, and then fuzzes the file (any bytes, a good packet with its
+    unhashed area replaced, with bytes changed, cut or followed by junk; a
+    key of any text), served in pieces and with reads that fail. Every
+    answer is held to what it promises: a signature taken is one the reader
+    reads and the floor allows, a signed byte changed is refused, the
+    unhashed area decides nothing. Bounded fixed-seed; 2 when
+    clang/libFuzzer is absent; MOONWATER_MSAN=1 runs it under MemorySanitizer.
+
+        python3 test/differential.py --harness bowl_sig_fuzz
+    """
+    del argv
+    try:
+        source = bowl_sig_fuzz_source((HARNESS_ROOT / "src/net/net.c").read_text(),
+                                      (HARNESS_ROOT / "src/bowl.c").read_text(),
+                                      (HARNESS_ROOT / "test/checks.c").read_text())
+    except (ValueError, RuntimeError) as exc:
+        print("  FAIL bowl sig fuzz: " + str(exc))
+        write_tally("bowl-sig-fuzz", 0, 1)
+        return 1
+    return tls_fuzz_run("bowl sig", bowl_sig_fuzz_seeds(), source, 2700)
+
+
 def harness_tls_fuzz(argv):
     """tls_der_fuzz, tls_hs_fuzz, tls_verify_fuzz, waterlink_pre_fuzz,
     waterlink_fuzz, dhcp_fuzz, sntp_fuzz, dns_fuzz, netlink_fuzz,
-    crypto_fuzz and http_fuzz in turn: `sh test/run fuzz`.
+    crypto_fuzz, bowl_sig_fuzz and http_fuzz in turn: `sh test/run fuzz`.
 
     Continuous by default, an hour a target with no run cap, unless
     MOONWATER_FUZZ_SECONDS / MOONWATER_FUZZ_RUNS say otherwise. With
@@ -50974,13 +53889,14 @@ def harness_tls_fuzz(argv):
     os.environ.setdefault("MOONWATER_FUZZ_RUNS", "20000" if report else "-1")
     os.environ.setdefault("MOONWATER_FUZZ_SECONDS", "5" if report else "3600")
     runs, seconds, _ = tls_fuzz_budget()
-    print("tls fuzz: der then hs then verify then waterlink pre then waterlink then dhcp then sntp then dns then netlink then crypto then http "
+    print("tls fuzz: der then hs then verify then waterlink pre then waterlink then dhcp then sntp then dns then netlink then crypto then bowl sig then http "
           "(runs=%d seconds=%d)" % (runs, seconds))
     seeds = {corpus: len(tls_fuzz_seeds(corpus))
              for corpus in ("tls_der", "tls_hs", "waterlink", "dhcp", "sntp", "dns", "netlink", "crypto", "http")}
     seeds["waterlink_pre"] = len(waterlink_pre_seeds())
     seeds["wifi_eapol"] = len(wifi_eapol_fuzz_seeds())
     seeds["wifi_scan"] = len(wifi_scan_fuzz_seeds())
+    seeds["bowl_sig"] = len(bowl_sig_fuzz_seeds())
     targets = []
     for name, corpus, harness in (
             ("tls_der_fuzz", "tls_der", harness_tls_der_fuzz),
@@ -50995,6 +53911,7 @@ def harness_tls_fuzz(argv):
             ("dns_fuzz", "dns", harness_dns_fuzz),
             ("netlink_fuzz", "netlink", harness_netlink_fuzz),
             ("crypto_fuzz", "crypto", harness_crypto_fuzz),
+            ("bowl_sig_fuzz", "bowl_sig", harness_bowl_sig_fuzz),
             ("http_fuzz", "http", harness_http_fuzz)):
         began = time.time()
         try:
@@ -52045,6 +54962,7 @@ int main(void)
         dns = harness_dns_fuzz([])
         netlink = harness_netlink_fuzz([])
         crypto = harness_crypto_fuzz([])
+        bowl = harness_bowl_sig_fuzz([])
         http = harness_http_fuzz([])
     finally:
         if prior is None:
@@ -52066,6 +54984,7 @@ int main(void)
     checks(dns == 0, "dns_fuzz clean under MSan")
     checks(netlink == 0, "netlink_fuzz clean under MSan")
     checks(crypto in (0, 2), "crypto_fuzz clean under MSan")
+    checks(bowl == 0, "bowl_sig_fuzz clean under MSan")
     checks(http == 0, "http_fuzz clean under MSan")
     return checks.verdict("msan net", "msan-net")
 
@@ -52096,7 +55015,7 @@ def harness_security_hygiene(argv):
                 "tls_der_fuzz", "tls_hs_fuzz", "tls_fuzz", "msan_net", "pathname_race",
                 "dhcp_fuzz", "sntp_fuzz", "dns_fuzz", "netlink_fuzz", "tls_peer",
                 "http_fuzz", "http_urls", "wifi_eapol_fuzz", "wifi_scan_fuzz",
-                "wget_mutation")
+                "bowl_sig_fuzz", "wget_mutation", "wget_hostile", "sntp_era", "net_netem")
     for name in security + ("tls_verify_fuzz",):
         checks(name in HARNESS_CHECKS, "differential.py: %s is not registered" % name)
     table = re.search(r"^HARNESS_CHECKS = \{$(.*?)^\}$", source, re.M | re.S)
@@ -52108,7 +55027,7 @@ def harness_security_hygiene(argv):
         checks("--harness " + name in run, "test/run: no lane asks for --harness " + name)
     for name in ("tls_der_fuzz", "tls_hs_fuzz", "pathname_race", "dhcp_fuzz",
                  "sntp_fuzz", "dns_fuzz", "netlink_fuzz", "http_fuzz", "wifi_eapol_fuzz",
-                 "wifi_scan_fuzz"):
+                 "wifi_scan_fuzz", "bowl_sig_fuzz"):
         checks(name + ": skipped (soft)" in run, "test/run: no soft skip for " + name)
 
     names = set()
@@ -52212,9 +55131,11 @@ def harness_security_hygiene(argv):
         ("wifi_gtk_take", ("plain",)),
         ("radio_rsn_security", ("element",)),
         ("radio_bss_read", ("elements",)),
+        ("bowl_signature_read", ("bytes",)),
     )
     wire_source = (net + (HARNESS_ROOT / "src/sh/host.c").read_text() +
-                   (HARNESS_ROOT / "src/waterlink/discover.c").read_text())
+                   (HARNESS_ROOT / "src/waterlink/discover.c").read_text() +
+                   (HARNESS_ROOT / "src/bowl.c").read_text())
     try:
         byte_reader_source()
     except ValueError as error:
@@ -52222,7 +55143,8 @@ def harness_security_hygiene(argv):
     for name, wire in reader_only:
         found = re.search(r"^[a-z][^\n(;]*\b%s\([^;{]*?\)\s*\n\{.*?^\}$" % name,
                           wire_source, re.M | re.S)
-        checks(found is not None, "reader-only: cannot find %s in net.c, host.c or discover.c" % name)
+        checks(found is not None,
+               "reader-only: cannot find %s in net.c, host.c, discover.c or bowl.c" % name)
         if not found:
             continue
         body = re.sub(r"//[^\n]*", "", re.sub(r"/\*.*?\*/", "", found.group(0), flags=re.S))
@@ -53357,6 +56279,305 @@ def harness_waterlink_noise(argv):
     return checks.verdict("waterlink noise:", "waterlink-noise")
 
 
+NET_NETEM_DHCP_SERVER = r"""import socket, struct, sys, time, threading
+mode = sys.argv[1]
+OFFER_IP = "10.88.0.50"; BAD_IP = "10.88.0.66"; SERVER = "10.88.0.2"
+def parse(data):
+    xid = data[4:8]; chaddr = data[28:34]
+    opts = {}
+    i = 240
+    while i < len(data) and data[i] != 255:
+        if data[i] == 0: i += 1; continue
+        opts[data[i]] = data[i+2:i+2+data[i+1]]; i += 2 + data[i+1]
+    return xid, chaddr, opts
+def reply(xid, chaddr, mtype, ip):
+    p = struct.pack("!BBBB4sHH4s4s4s4s16s64s128s", 2, 1, 6, 0, xid, 0, 0x8000,
+                    b"\0"*4, socket.inet_aton(ip), b"\0"*4, b"\0"*4, chaddr + b"\0"*10, b"", b"")
+    p += b"\x63\x82\x53\x63"
+    p += bytes([53,1,mtype]) + bytes([54,4]) + socket.inet_aton(SERVER)
+    if mtype != 6:
+        p += bytes([51,4]) + struct.pack("!I", 3600) + bytes([1,4]) + socket.inet_aton("255.255.255.0")
+        p += bytes([3,4]) + socket.inet_aton(SERVER) + bytes([6,4]) + socket.inet_aton(SERVER)
+    return p + b"\xff"
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, b"cb")
+s.bind(("0.0.0.0", 67))
+log = open(sys.argv[2], "a", buffering=1)
+seen_discover = 0; naked = False
+def send(pkt, delay=0.0):
+    def go():
+        time.sleep(delay); s.sendto(pkt, ("255.255.255.255", 68))
+    threading.Thread(target=go, daemon=True).start()
+while True:
+    data, _ = s.recvfrom(2048)
+    if len(data) < 241 or data[0] != 1: continue
+    xid, chaddr, opts = parse(data)
+    t = opts.get(53, b"\0")[0]
+    log.write("%.3f rx type %d xid %s\n" % (time.time(), t, xid.hex()))
+    if t == 1:
+        seen_discover += 1
+        if mode == "drop3" and seen_discover <= 3: continue
+        msgs = []
+        if mode == "stale":  msgs.append(reply(bytes(a ^ 0xff for a in xid), chaddr, 2, BAD_IP))
+        msgs.append(reply(xid, chaddr, 2, OFFER_IP))
+        d = 1.5 if mode == "late" else 0.0
+        for m in msgs:
+            for _ in range(3 if mode == "dup" else 1): send(m, d)
+    elif t == 3:
+        if mode == "nak" and not naked:
+            naked = True; send(reply(xid, chaddr, 6, "0.0.0.0")); continue
+        msgs = []
+        if mode == "stale": msgs.append(reply(bytes(a ^ 0xff for a in xid), chaddr, 5, BAD_IP))
+        msgs.append(reply(xid, chaddr, 5, OFFER_IP))
+        for m in msgs:
+            for _ in range(3 if mode == "dup" else 1): send(m, 1.5 if mode == "late" else 0)
+        if mode == "dup":
+            send(reply(xid, chaddr, 2, BAD_IP), 0.3)   # an OFFER after the ACK
+"""
+
+NET_NETEM_NTP_SERVER = r"""import socket, struct, sys, time, threading
+mode = sys.argv[1]; log = open(sys.argv[2], "a", buffering=1)
+skew = float(sys.argv[3]) if len(sys.argv) > 3 else 0.0
+def ntp(t):  # unix float -> 8 bytes
+    s = int(t) + 2208988800
+    return struct.pack(">II", s & 0xffffffff, int((t - int(t)) * 2**32) & 0xffffffff)
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, b"cb")
+s.bind(("0.0.0.0", 123))
+n = 0
+def send(pkt, addr, d=0.0):
+    def go(): time.sleep(d); s.sendto(pkt, addr)
+    threading.Thread(target=go, daemon=True).start()
+def reply(req, stratum=2, refid=b"\x7f\x00\x00\x01", origin=None, t=None):
+    now = (t if t is not None else time.time()) + skew
+    origin = origin if origin is not None else req[40:48]
+    return (bytes([0x24, stratum, 6, 0xec]) + struct.pack(">II", 0x100, 0x100) + refid +
+            ntp(now - 1) + origin + ntp(now) + ntp(now))
+while True:
+    req, addr = s.recvfrom(512)
+    if len(req) < 48: continue
+    n += 1
+    log.write("%.3f rx %d\n" % (time.time(), n))
+    if mode == "drop2" and n <= 2: continue
+    if mode == "spoof":   send(reply(req, origin=bytes(8), t=time.time() + 10800), addr)   # wrong nonce, wrong hour, first
+    if mode == "kod":     send(reply(req, stratum=0, refid=b"RATE"), addr); continue
+    if mode == "late":    send(reply(req), addr, 1.0); continue
+    if mode == "era":     send(reply(req, t=time.time()), addr); continue
+    for _ in range(3 if mode == "dup" else 1): send(reply(req), addr)
+"""
+
+NET_NETEM_INNER = r"""
+import fcntl, os, socket, struct, subprocess, sys, time
+
+top, kind, mode, netem_on = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4] == "netem"
+env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": "/root", "LC_ALL": "C"}
+procs = []
+
+def say(ok, what):
+    print(("ok " if ok else "FAIL ") + what, flush=True)
+
+def run(*argv, **kw):
+    return subprocess.run(list(argv), capture_output=True, text=True, timeout=kw.pop("timeout", 30), **kw)
+
+try:
+    for directory in ("/etc", "/root", "/run"):
+        run("mount", "-t", "tmpfs", "none", directory)
+    peer = subprocess.Popen(["unshare", "-n", "sleep", "900"], stdin=subprocess.DEVNULL)
+    procs.append(peer)
+    time.sleep(0.3)
+    pid = str(peer.pid)
+
+    def there(*argv):
+        return run("nsenter", "-t", pid, "-n", *argv)
+
+    run("ip", "link", "add", "eth0", "type", "veth", "peer", "name", "cb")
+    run("ip", "link", "set", "cb", "netns", pid)
+    there("ip", "link", "set", "lo", "up")
+    there("ip", "addr", "add", "10.88.0.2/24", "dev", "cb")
+    there("ip", "link", "set", "cb", "up")
+    if netem_on:
+        #   DHCP retransmits, so it gets loss too; SNTP's netem has none, since
+        #   its samples would only be fewer (the drop2 row drops requests
+        #   itself, and each sample has its own wait).
+        profile = ["delay", "20ms", "10ms"] + (["loss", "25%"] if kind == "dhcp" else []) + [
+                   "duplicate", "10%", "reorder", "25%", "50%", "seed", "7"]
+        for one in (run("tc", "qdisc", "add", "dev", "eth0", "root", "netem", *profile),
+                    there("tc", "qdisc", "add", "dev", "cb", "root", "netem", *profile)):
+            if one.returncode:
+                say(False, "netem profile refused: " + one.stderr.strip())
+    run("ip", "link", "set", "eth0", "up")
+    for scope in ("all", "default", "eth0"):
+        try:
+            open("/proc/sys/net/ipv4/conf/%s/rp_filter" % scope, "w").write(os.environ.get("NETEM_RP_FILTER", "0"))
+        except OSError:
+            pass
+    for name in ("ip", "moonwater"):
+        if not os.path.exists(top + "/" + name):
+            os.symlink("shell", top + "/" + name)
+
+    def server(script, *argv):
+        procs.append(subprocess.Popen(["nsenter", "-t", pid, "-n", sys.executable, top + "/" + script, *argv],
+                                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                      stderr=subprocess.DEVNULL))
+        time.sleep(0.5)
+
+    def address():
+        s = socket.socket()
+        try:
+            return socket.inet_ntoa(fcntl.ioctl(s, 0x8915, struct.pack("256s", b"eth0"))[20:24])
+        except OSError:
+            return None
+
+    label = "%s %s%s%s" % (kind, mode, " under netem" if netem_on else "",
+                           " rp_filter " + os.environ["NETEM_RP_FILTER"]
+                           if os.environ.get("NETEM_RP_FILTER", "0") != "0" else "")
+    if kind == "dhcp":
+        server("dhcpsrv.py", mode, top + "/dhcp.log")
+        began = time.time()
+        client = run(top + "/ip", "auto", env=env, timeout=150)
+        if mode == "nak":
+            #   The one-shot ip auto reports a refused REQUEST and leaves
+            #   nothing configured; the watcher asks again, which is a second
+            #   run here, and the server answers that one.
+            say(client.returncode != 0 and address() is None,
+                "%s: a NAK leaves no address and a failed status (%d, %s)" % (
+                    label, client.returncode, address()))
+            client = run(top + "/ip", "auto", env=env, timeout=150)
+        took = time.time() - began
+        route = open("/proc/net/route").read().splitlines()[1:]
+        default = [line.split() for line in route if line.split()[1] == "00000000"]
+        say(client.returncode == 0, "%s: ip auto took a lease (status %d, %.1f s: %s)" % (
+            label, client.returncode, took, (client.stdout + client.stderr).strip().replace("\n", " | ")[-160:]))
+        say(address() == "10.88.0.50", "%s: the address is the real server's, not a forged one (%s)" % (label, address()))
+        say(bool(default) and default[0][2] == "0200580A", "%s: the default route is via the server" % label)
+        say("nameserver 10.88.0.2" in open("/etc/resolv.conf").read() if os.path.exists("/etc/resolv.conf") else False,
+            "%s: the resolver is the server's" % label)
+        log = open(top + "/dhcp.log").read() if os.path.exists(top + "/dhcp.log") else ""
+        say(" type 1 " in log and " type 3 " in log, "%s: the server saw a DISCOVER and a REQUEST" % label)
+        say(took < 120, "%s: the lease came within two minutes (%.1f s)" % (label, took))
+    else:
+        run("ip", "addr", "add", "10.88.0.1/24", "dev", "eth0")
+        open("/root/ntp.server", "w").write("10.88.0.2\n")
+        skew = "10800" if mode == "skewed" else "0"
+        server("ntpsrv.py", mode, top + "/ntp.log", skew)
+        said = run(top + "/moonwater", "time", "sync", env=env, timeout=90)
+        text = said.stdout + said.stderr
+        log = open(top + "/ntp.log").read() if os.path.exists(top + "/ntp.log") else ""
+        asked = len(log.splitlines())
+        #   answered = the sample passed every check and reached the clock,
+        #   which an unprivileged namespace then refuses to set.
+        answered = "answered, but the clock could not be set" in text or "synchronised" in text
+        if mode in ("skewed", "kod"):
+            say(not answered, "%s: a lone far-off or rate-limit answer is not believed (%s)" % (
+                label, text.strip().replace("\n", " | ")[:120]))
+        else:
+            say(answered, "%s: an answer was taken (%s)" % (label, text.strip().replace("\n", " | ")[:140]))
+        say(asked >= 1, "%s: the server was asked (%d requests)" % (label, asked))
+except Exception as failure:
+    say(False, "scene %s %s crashed: %r" % (kind, mode, failure))
+finally:
+    for one in procs:
+        try:
+            one.kill()
+        except OSError:
+            pass
+"""
+
+
+def harness_net_netem(argv):
+    """The DHCP client and the SNTP client, as built, against a server that
+    schedules its answers adversarially, over a veth pair in namespaces with
+    netem on both ends.
+
+    A user namespace (mapped with --map-auto so that the DHCP child can drop
+    to nobody) owns two network namespaces joined by a veth pair; the far one
+    runs a Python server that is deliberately hostile, and both ends carry
+    netem delay, jitter, 25% loss, duplication and reordering (fixed seed).
+    `ip auto` is the DHCP client: against a server that answers clean, three
+    times over, with a forged reply (wrong transaction id, another address)
+    before each real one, 1.5 s late, not at all for the first three
+    DISCOVERs, or with a NAK for the first REQUEST, it has to end with the
+    real server's address, route and resolver and never a forged one.
+    `moonwater time sync` is the SNTP client, with `/root/ntp.server` naming
+    the far end: it has to take a clean, tripled, late or once-dropped answer,
+    take the right one of a forged reply (wrong origin, three hours off) and
+    a true one, and not believe a lone server that is three hours off or
+    that says RATE. NOT RUN (exit 2) where unprivileged user namespaces,
+    --map-auto, veth, netem, ip, tc or nsenter are not there.
+
+        python3 test/differential.py --harness net_netem [--shell PATH]
+    """
+    import shutil
+    import subprocess
+    import tempfile
+    parser = argparse.ArgumentParser(prog="differential.py --harness net_netem")
+    parser.add_argument("--shell")
+    parser.add_argument("--cc", default=os.environ.get("CC", "gcc"))
+    args = parser.parse_args(argv)
+    if platform.system() != "Linux":
+        print("net netem: NOT RUN -- Linux namespaces")
+        return 2
+    for tool in ("unshare", "ip", "tc", "nsenter"):
+        if not shutil.which(tool):
+            print("net netem: NOT RUN -- no %s" % tool)
+            return 2
+    unshare = ["unshare", "--map-root-user", "--map-auto", "-m", "-n", "--fork"]
+    probe = subprocess.run(unshare + ["sh", "-c",
+                                      "ip link add na type veth peer name nb && "
+                                      "tc qdisc add dev na root netem delay 1ms seed 7"],
+                           capture_output=True, stdin=subprocess.DEVNULL)
+    if probe.returncode:
+        print("net netem: NOT RUN -- no user namespaces with --map-auto, veth or netem here: " +
+              probe.stderr.decode(errors="replace")[:200])
+        return 2
+
+    with tempfile.TemporaryDirectory(prefix="net-netem-") as temporary:
+        top = Path(temporary)
+        if args.shell:
+            shutil.copy(args.shell, top / "shell")
+        else:
+            built = subprocess.run(spark_shell_command(args.cc, top / "shell"),
+                                   cwd=HARNESS_ROOT, capture_output=True, text=True)
+            if built.returncode:
+                print(built.stderr[-3000:])
+                return 1
+        (top / "dhcpsrv.py").write_text(NET_NETEM_DHCP_SERVER)
+        (top / "ntpsrv.py").write_text(NET_NETEM_NTP_SERVER)
+        (top / "inner.py").write_text(NET_NETEM_INNER)
+        scenes = [("dhcp", mode, netem, "0") for netem in ("", "netem")
+                  for mode in ("clean", "dup", "stale", "late", "drop3", "nak")]
+        scenes += [("sntp", mode, netem, "0") for netem in ("", "netem")
+                   for mode in ("clean", "dup", "spoof", "late", "drop2", "skewed", "kod")]
+        checks = Checks()
+        for kind, mode, netem, rp in scenes:
+            for leftover in ("dhcp.log", "ntp.log"):
+                (top / leftover).unlink(missing_ok=True)
+            said = top / "said"
+            with open(said, "wb") as sink:
+                scene = subprocess.Popen(unshare + [sys.executable, str(top / "inner.py"),
+                                                    str(top), kind, mode, netem or "plain"],
+                                         stdin=subprocess.DEVNULL, stdout=sink, stderr=sink,
+                                         env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                                              "LC_ALL": "C", "NETEM_RP_FILTER": rp})
+                try:
+                    scene.wait(timeout=300)
+                except subprocess.TimeoutExpired:
+                    scene.kill()
+                    scene.wait()
+                    checks(False, "%s %s %s rp_filter %s: the scene hung" % (kind, mode, netem, rp))
+            text = said.read_bytes().decode(errors="replace")
+            asked = 0
+            for line in text.splitlines():
+                if line.startswith("ok ") or line.startswith("FAIL "):
+                    asked += 1
+                    checks(line.startswith("ok "), line.split(" ", 1)[1])
+            checks(asked >= 2, "%s %s %s: the scene asked its questions (%d)%s" % (
+                kind, mode, netem, asked, "" if asked >= 2 else ": " + text[-400:]))
+        return checks.verdict("net netem", "net-netem")
+
+
 def harness_waterlink_link(argv):
     """moonwater link between two network namespaces, as two machines.
 
@@ -53672,6 +56893,23 @@ say(open(top + "/b/root/target", "rb").read() == b"untouched",
 status, out, err = on("a", moon + " link pull b /root/nothing-here /root/nothing", timeout=30)
 say(status == 1 and b"No such file" in err and not os.path.exists(top + "/a/root/nothing"),
     "pulling what is not there fails, says why, and leaves nothing here")
+# The name a pull is kept under here sits in a buffer of 1025 bytes, and its
+# staging name beside it in one a little longer: a local name longer than the
+# first is refused, and not copied past the end of it.
+with open(top + "/b/root/tiny", "wb") as f:
+    f.write(b"tiny")
+deep = "/root" + "".join("/" + "d" * 200 for _ in range(5))
+os.makedirs(top + "/a" + deep, exist_ok=True)
+for length in (1024, 1025, 1028):
+    name = deep + "/" + "n" * (length - len(deep) - 1)
+    status, out, err = on("a", moon + " link pull b /root/tiny " + name, timeout=60)
+    made = os.path.exists(top + "/a" + name)
+    if length <= 1024:
+        say(status == 0 and made and open(top + "/a" + name, "rb").read() == b"tiny",
+            "a pull to a local name of %d bytes works" % length)
+    else:
+        say(status == 1 and b"too long a name" in err and not made,
+            "a pull to a local name of %d bytes is refused, not copied past its buffer" % length)
 status, out, err = on("a", "timeout 5 " + moon + " link log b", timeout=30)
 say(out.startswith(b"[") or b"read kernel buffer failed" in err,
     "log follows the kernel log, or dmesg says it cannot be read")
@@ -53759,6 +56997,25 @@ say(os.stat(top + "/a/root/link.groups").st_mode & 0o777 == 0o600,
     "the group file is root's alone")
 say(secret.encode() not in open(top + "/a/root/link.groups", "rb").read(),
     "and does not hold the secret")
+groups_file = open(top + "/a/root/link.groups", "rb").read()
+say(len(groups_file) % 128 == 0 and groups_file != b"" and
+    all(not any(groups_file[at + 64:at + 96]) for at in range(0, len(groups_file), 128)),
+    "no hash of the secret sits beside the key, where it would let a guess skip the slow derivation")
+#       A record from before: a SHA-256 of the secret in the check field. It is
+#       read as nothing and the next write of the file drops it.
+import hashlib
+old_record = bytearray(groups_file[:128])
+old_record[64:96] = hashlib.sha256(b"waterlink check lab " + secret.encode()).digest()
+open(top + "/a/root/link.groups", "wb").write(bytes(old_record))
+os.chmod(top + "/a/root/link.groups", 0o600)
+status, out, err = on("a", moon + " link join lab")
+say(status == 0, "a group file with the old check still joins (%r)" % (err[-200:],))
+say(not any(open(top + "/a/root/link.groups", "rb").read()[64:96]),
+    "and the file written after it has no check")
+status, out, err = on("a", moon + " link join fresh-lab allow run")
+say(status == 0 and b"link join fresh-lab " in out,
+    "a made secret is told with the join command that takes it (%r)" % (out[-200:],))
+on("a", moon + " link leave fresh-lab")
 
 names = {}
 began = time.time()
@@ -53798,6 +57055,107 @@ while time.time() < end:
 say(b"_waterlink" in heard, "the network carries waterlink announcements")
 say(all(word not in heard for word in (b"lab", b"box-a", b"box-b", b"box-c", secret.encode())),
     "and not the group, the machine names or the secret")
+
+#       A handshake flood. Anyone who knows the listener's public key can make
+#       an initiation that passes mac1, and a listener that did the curve for
+#       each would be kept busy by a sender with a few thousand source ports.
+#       Four seconds of them, about 3,000 a second from 900 ports, over a
+#       link with delay, jitter and loss: the listener has to go to asking for
+#       mac2 (cookie replies reach the flooder), stay within a fraction of
+#       one core and a few megabytes, and still answer a paired peer, during
+#       the flood and after it.
+import re, socket, threading, hmac as hmac_module
+status, out, err = on("b", moon + " link on")
+match = re.search(rb"udp (\d+)", out)
+status, key_b, err = on("b", moon + " link key")
+listener = None
+candidates = []
+for entry in os.listdir("/proc"):
+    try:
+        if entry.isdigit() and os.readlink("/proc/%s/ns/net" % entry) == os.readlink(netns):
+            words = open("/proc/%s/cmdline" % entry, "rb").read().split(b"\0")
+            candidates.append((int(entry), [w.decode(errors="replace") for w in words[:5]]))
+            if b"link" in words and (b"serve" in words or b"on" in words):
+                listener = int(entry)
+    except OSError:
+        continue
+say(match is not None and listener is not None and len(key_b.strip()) == 44,
+    "flood: the listener's port, pid and key are found (%r %r %r)" % (match and match.group(1), listener, candidates[:8]))
+if match is not None and listener is not None and len(names) == 2:
+    port_b = int(match.group(1))
+    far_name = names["a"]
+    public_b = base64.b64decode(key_b.strip())
+    gate = hashlib.sha256(b"mac1----" + public_b).digest()
+
+    def cpu_seconds(pid):
+        fields = open("/proc/%d/stat" % pid).read().rsplit(")", 1)[1].split()
+        return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
+
+    def rss_kb(pid):
+        for line in open("/proc/%d/status" % pid):
+            if line.startswith("VmRSS:"):
+                return int(line.split()[1])
+        return 0
+
+    outcome = {"sent": 0, "cookies": 0}
+
+    def flood(seconds, ports=900, per_second=3000):
+        sockets = []
+        for _ in range(ports):
+            one = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            one.bind(("10.77.0.1", 0))
+            one.setblocking(False)
+            sockets.append(one)
+        head = struct.pack("<IIQ", 1, 0, 0)
+        began = time.time()
+        turn = 0
+        while time.time() - began < seconds:
+            due = int((time.time() - began) * per_second) - outcome["sent"]
+            for _ in range(min(max(due, 0), 200)):
+                body = head + os.urandom(140)
+                datagram = body + hmac_module.new(gate, body, hashlib.sha256).digest()[:16] + bytes(16)
+                datagram += bytes(1200 - len(datagram))
+                sockets[turn % ports].sendto(datagram, ("10.77.0.2", port_b))
+                turn += 1
+                outcome["sent"] += 1
+            ready, _, _ = select.select(sockets, [], [], 0.002)
+            for one in ready:
+                try:
+                    reply = one.recv(2048)
+                except BlockingIOError:
+                    continue
+                if len(reply) == 72 and struct.unpack("<I", reply[:4])[0] == 5:
+                    outcome["cookies"] += 1
+        for one in sockets:
+            one.close()
+
+    subprocess.run(["tc", "qdisc", "add", "dev", "wb0", "root", "netem", "delay", "4ms", "2ms", "loss", "3%"], check=True)
+    subprocess.run(["nsenter", "--net=" + netns, "tc", "qdisc", "add", "dev", "wb", "root", "netem", "delay", "4ms", "2ms", "loss", "3%"], check=True)
+    on("a", moon + " link run %s true" % far_name, timeout=60)
+    cpu0, rss0, began = cpu_seconds(listener), rss_kb(listener), time.time()
+    flooder = threading.Thread(target=flood, args=(4.0,))
+    flooder.start()
+    time.sleep(1.0)
+    began_run = time.time()
+    status, out, err = on("a", moon + " link run %s 'echo through-the-flood'" % far_name, timeout=60)
+    during = time.time() - began_run
+    flooder.join()
+    cpu1, rss1 = cpu_seconds(listener), rss_kb(listener)
+    for dev, where in (("wb0", None), ("wb", netns)):
+        subprocess.run((["nsenter", "--net=" + where] if where else []) +
+                       ["tc", "qdisc", "del", "dev", dev, "root"], check=True)
+    print("  flood: %d initiations sent, %d cookie replies, listener CPU %.2f s, resident +%d kB, "
+          "a paired run took %.1f s during it" % (outcome["sent"], outcome["cookies"], cpu1 - cpu0,
+                                                   rss1 - rss0, during), flush=True)
+    say(outcome["sent"] > 8000, "flood: %d initiations with a good mac1 were sent" % outcome["sent"])
+    say(outcome["cookies"] >= 100, "flood: the listener asked for mac2 (%d cookie replies reached the flooder)" % outcome["cookies"])
+    say(cpu1 - cpu0 < 2.0, "flood: the listener spent %.2f s of CPU on %d initiations in 4 s" % (cpu1 - cpu0, outcome["sent"]))
+    say(rss1 - rss0 < 4096, "flood: and its resident memory grew by %d kB" % (rss1 - rss0))
+    say(status == 0 and out == b"through-the-flood\n", "flood: a paired peer still ran a command during it (%.1f s, %r)" % (during, err[-80:]))
+    began_run = time.time()
+    status, out, err = on("a", moon + " link run %s 'echo after-the-flood'" % far_name, timeout=60)
+    say(status == 0 and out == b"after-the-flood\n" and time.time() - began_run < 5,
+        "flood: and the first after it took %.1f s" % (time.time() - began_run))
 
 status, out, err = on("a", moon + " link leave lab forget")
 say(status == 0 and b"forgot the 1 machines" in out, "leave with forget drops what the group paired")
@@ -54998,7 +58356,8 @@ def harness_wifi_eapol_fuzz(argv):
 def wifi_scan_fuzz_seeds():
     """What a scan dump's access point can carry, in the driver's modes: 0 the
     BSS nest's own bytes, 1 fixed BSS fields and then information elements
-    (the second byte picks INFORMATION_ELEMENTS or BEACON_IES), 2 a bare
+    (the second byte picks INFORMATION_ELEMENTS or BEACON_IES, and its
+    bit 2 puts a bare probe response first and these elements as the beacon's), 2 a bare
     generic netlink body, 3 an RSN element on its own. Elements are the
     ones a beacon holds: an SSID, an RSN element for each key management
     a network asks for, the WPA vendor element, and those cut short, doubled,
@@ -55025,6 +58384,11 @@ def wifi_scan_fuzz_seeds():
     seeds["ies_wpa.bin"] = b"\x01\x00\x10\x00" + ssid + wpa
     seeds["ies_wep.bin"] = b"\x01\x00\x10\x00" + ssid
     seeds["ies_beacon.bin"] = b"\x01\x01\x00\x00" + ssid + element(48, rsn(2))
+    # A probe response with no RSN element as the latest frame, the real
+    # beacon's elements beside it.
+    seeds["ies_forged_response.bin"] = b"\x01\x04\x00\x00" + ssid + element(48, rsn(2))
+    seeds["ies_forged_response_both.bin"] = b"\x01\x04\x00\x00" + ssid + element(48, rsn(2, 8))
+    seeds["ies_forged_response_wpa.bin"] = b"\x01\x04\x10\x00" + ssid + wpa
     seeds["ies_two_ssids.bin"] = b"\x01\x00\x00\x00" + element(0, b"") + ssid + element(0, b"other")
     seeds["ies_long_ssid.bin"] = b"\x01\x00\x00\x00" + element(0, b"x" * 33) + element(0, b"y" * 32)
     seeds["ies_cut.bin"] = b"\x01\x00\x00\x00" + ssid + b"\x30\x40" + rsn(2)[:9]
@@ -55085,13 +58449,14 @@ static p8 rsn_model(const p8 *element, positive length)
                : owe ? RADIO_OWE : eap ? RADIO_EAP : RADIO_WPA2;
 }
 
-/* What a beacon's elements say, counted the long way: the first name of at
-   most 32 bytes while there is none, the first RSN element, a WPA vendor
+/* What a beacon's elements say, counted the long way: the first name element
+   (the one the kernel joins by: a later one is not this access point's name,
+   and one over 32 bytes or empty leaves it with none), the first RSN element, a WPA vendor
    element, and what the capability bit says when there is neither. */
 static void elements_model(const p8 *ies, positive size, p16 capability,
                            p8 *ssid, p8 *ssid_length, p8 *security)
 {
-        bool rsn = false, wpa = false;
+        bool rsn = false, wpa = false, named = false;
         *ssid_length = 0;
         *security = RADIO_OPEN;
         for (positive at = 0; at + 2 <= size;)
@@ -55101,10 +58466,14 @@ static void elements_model(const p8 *ies, positive size, p16 capability,
                 const p8 *data = ies + at + 2;
                 if (at + 2 + span > size)
                         break;
-                if (id == 0 && span <= RADIO_SSID_MOST && !*ssid_length)
+                if (id == 0 && !named)
                 {
-                        memcpy(ssid, data, span);
-                        *ssid_length = span;
+                        named = true;
+                        if (span <= RADIO_SSID_MOST)
+                        {
+                                memcpy(ssid, data, span);
+                                *ssid_length = span;
+                        }
                 }
                 else if (id == 48 && !rsn)
                 {
@@ -55152,7 +58521,8 @@ static void check_one(netlink_header *header)
         radio_air air;
 
         if (radio_bss_read(header, &one) &&
-            (one.ssid_length > RADIO_SSID_MOST || one.security > RADIO_EAP))
+            (one.ssid_length > RADIO_SSID_MOST || one.security > RADIO_EAP ||
+             one.beacon_security > RADIO_EAP))
         {
                 fprintf(stderr, "a scan row out of range\n");
                 abort();
@@ -55208,6 +58578,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                 positive ies_size = size;
                 p16 capability = 0;
                 p8 key = 0, sstr[RADIO_SSID_MOST + 1], sl = 0, sec = 0;
+                static const p8 forged[] = {0, 1, 'x'};
 
                 if (mode == 0)
                 {
@@ -55230,9 +58601,20 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                         at = put_attribute(at, NL80211_BSS_SIGNAL_MBM, (p8 *)&signal, 4);
                         at = put_attribute(at, NL80211_BSS_STATUS, (p8 *)&status, 4);
                         at = put_attribute(at, NL80211_BSS_SEEN_MS_AGO, (p8 *)&seen, 4);
-                        at = put_attribute(at, key & 1 ? NL80211_BSS_BEACON_IES
-                                                       : NL80211_BSS_INFORMATION_ELEMENTS,
-                                           ies, ies_size);
+                        if (key & 4)
+                        {
+                                /* A probe response in the real access point's
+                                   name with no RSN element, as the latest
+                                   frame, and the real beacon's elements
+                                   beside it. */
+                                at = put_attribute(at, NL80211_BSS_INFORMATION_ELEMENTS,
+                                                   forged, sizeof forged);
+                                at = put_attribute(at, NL80211_BSS_BEACON_IES, ies, ies_size);
+                        }
+                        else
+                                at = put_attribute(at, key & 1 ? NL80211_BSS_BEACON_IES
+                                                               : NL80211_BSS_INFORMATION_ELEMENTS,
+                                                   ies, ies_size);
                 }
                 {
                         positive nest_size = (positive)(at - nest);
@@ -55247,8 +58629,26 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                         if (mode == 1 && radio_bss_read(header, &one))
                         {
                                 elements_model(ies, ies_size, capability, sstr, &sl, &sec);
-                                if (one.ssid_length != sl || memcmp(one.ssid, sstr, sl) ||
-                                    one.security != sec || one.frequency != 2412 || one.seen != 9)
+                                if (key & 4)
+                                {
+                                        /* The latest frame says what it says, and
+                                           the beacon's own elements are kept
+                                           apart: what the real access point
+                                           asks of a station is still there. */
+                                        p8 bare_ssid[RADIO_SSID_MOST + 1], bare_length = 0, bare = 0;
+
+                                        elements_model(forged, sizeof forged, capability,
+                                                       bare_ssid, &bare_length, &bare);
+                                        if (one.ssid_length != bare_length || one.security != bare ||
+                                            one.beacon_security != sec)
+                                        {
+                                                fprintf(stderr, "a beacon's elements were not kept apart\n");
+                                                abort();
+                                        }
+                                }
+                                else if (one.ssid_length != sl || memcmp(one.ssid, sstr, sl) ||
+                                         one.security != sec || one.beacon_security != sec ||
+                                         one.frequency != 2412 || one.seen != 9)
                                 {
                                         fprintf(stderr, "a scan row is not what its elements say\n");
                                         abort();
@@ -55332,6 +58732,9 @@ def harness_wifi_air(argv):
              is not joined, there and in moonwater status
       watch  ip watch leases the station and never the radio's monitor
              (hwsim0) or an access point in the machine's own namespace
+      twin   a stronger twin of a saved WPA2 network, open or WPA3 alone: the
+             machine stays off it with the real one gone and joins the real
+             one, never the twin, when it is back
       reassoc the link held while idle; the access point gone and back,
              joined again; a twin by the same name taking over when the
              first goes, and the first again after it
@@ -55473,6 +58876,12 @@ def harness_wifi_air(argv):
             prep.append("$A $W -B -i $i%d -c /tmp/ap%d.conf -D nl80211 -f /tmp/ap%d.log -P /tmp/ap%d.pid"
                         % (at, at, at, at))
     prep.append("for i in $(seq 40); do n=$(cat /tmp/ap*.log 2>/dev/null | grep -c AP-ENABLED); [ \"$n\" = %d ] && break; sleep 0.25; done" % len(aps))
+    #       The access point K was a station for the moments between its radio's
+    #       making and wpa_supplicant's switching it to AP mode, and the watcher
+    #       may take it then, as it takes any new station (and after a cut it
+    #       leaves the news that it changed unread for a few seconds); what it
+    #       must never do is take it as an access point, counted from here.
+    prep.append("k0=$(dmesg | grep -c \"ip: using $K\\$\")")
     for at, ap in enumerate(aps):
         prep.append("%s/mnt/stick/hwsim_radio power $i%d %d" % ("" if at == 3 else "$A ", at, ap["power"]))
     prep.append("$A /mnt/stick/hwsim_radio dhcp $i0 40 > /tmp/dhcp0.log 2>&1 &")
@@ -55505,7 +58914,7 @@ def harness_wifi_air(argv):
     lines.append("for i in $(seq 120); do dmesg | grep -q \"ip: 192.168.77.100/24 on $S\" && break; sleep 0.5; done")
     lines.append("scen_count 'watch leased the station' 1 \"$(dmesg | grep -c \"ip: 192.168.77.100/24 on $S\")\"")
     lines.append("scen_count 'watch never took the radio monitor' 0 \"$(dmesg | grep -c 'ip: using hwsim0')\"")
-    lines.append("scen_count 'watch never took an access point' 0 \"$(dmesg | grep -c \"ip: using $K\\$\")\"")
+    lines.append("scen_count 'watch never took an access point, once it was one' 0 \"$(( $(dmesg | grep -c \"ip: using $K\\$\") - k0 ))\"")
     family("watch", lines)
 
     # ---- reassoc: joined, the machine keeps the association while idle;
@@ -55605,6 +59014,51 @@ def harness_wifi_air(argv):
     lines.append("scen_count 'air none in range' 1 \"$(moonwater wifi 2>&1 | scen_strip | grep -c -x 'not joined: no saved network is in range')\"")
     lines.append("rm -f /root/wifi /run/moonwater/wifi.last")
     family("air", lines)
+
+    # ---- twin: an evil twin of a saved WPA2 network. Its name is the real
+    # one's, it beacons far stronger, and it offers what the saved network
+    # does not: nothing at all (open), or WPA3 alone. With the real access
+    # point gone the machine must stay off both; with it back the machine
+    # must join it and never the twin, with no more than a handshake's
+    # wait for the trouble the twin is.
+    lines = []
+    lines.append("rm -f /root/wifi /run/moonwater/wifi.avoid /run/moonwater/wifi.last")
+    lines.append("printf '%%s\\n' %s | moonwater wifi add \"$ap0\" - > /tmp/sc.got 2>&1; scen_status 'twin saved network joined' 0 $?" % q(good["password"]))
+    lines.append("$A /mnt/stick/hwsim_radio power $i0 5")
+    lines.append("rm0=$(dmesg | grep -a \"$S: authenticate with\" | tail -1 | sed 's/.*authenticate with \\([0-9a-f:]*\\).*/\\1/'); h0=$(dmesg | grep -c 4WAY_HANDSHAKE_TIMEOUT)")
+    channel = 6 if good["channel"] != 6 else 11
+    for at, (kind, power) in enumerate((("open", 20), ("wpa3", 19))):
+        body = ["network={", "ssid=%s" % good["ssid"].hex(), "mode=2",
+                "frequency=%d" % (2407 + 5 * channel)]
+        if kind == "open":
+            body.append("key_mgmt=NONE")
+        else:
+            body += ["proto=RSN", "pairwise=CCMP", "group=CCMP", "key_mgmt=SAE", "ieee80211w=2",
+                     "sae_password=\"%s\"" % good["password"]]
+        body.append("}")
+        lines.append("/mnt/stick/hwsim_radio new > /dev/null; tn=$(station $S); tm%d=$(cat /sys/class/net/$tn/address); "
+                     "it%d=$(/mnt/stick/hwsim_radio move $NS $tn)" % (at, at))
+        lines.append("printf '%%s\\n' %s > /tmp/twin%d.conf" % (" ".join(q(line) for line in body), at))
+        lines.append("$A $W -B -i $it%d -c /tmp/twin%d.conf -D nl80211 -f /tmp/twin%d.log -P /tmp/twin%d.pid" % (at, at, at, at))
+        lines.append("for i in $(seq 40); do grep -q AP-ENABLED /tmp/twin%d.log 2>/dev/null && break; sleep 0.25; done" % at)
+        lines.append("$A /mnt/stick/hwsim_radio power $it%d %d" % (at, power))
+    lines.append("kill $(cat /tmp/ap0.pid)")
+    lines.append("for i in $(seq 60); do [ \"$(joined \"$ap0\")\" = 0 ] && break; sleep 0.5; done")
+    lines.append("scen_count 'twin real access point gone' 0 \"$(joined \"$ap0\")\"")
+    lines.append("n0=$(dmesg | grep -c \"$S: associated\"); sleep 30")
+    lines.append("scen_count 'twin with only the twins in range, not joined' 0 \"$(joined \"$ap0\")\"")
+    lines.append("scen_count 'twin no association with either twin' 0 \"$(( $(dmesg | grep -c \"$S: associated\") - n0 ))\"")
+    lines.append("$A $W -B -i $i0 -c /tmp/ap0.conf -D nl80211 -f /tmp/ap0.log -P /tmp/ap0.pid; t0=$(uptime_now)")
+    lines.append("for i in $(seq 240); do [ \"$(joined \"$ap0\")\" = 1 ] && break; sleep 0.25; done; echo \"wifi-time twin-back $(took $t0)\"")
+    lines.append("scen_count 'twin real access point back, joined' 1 \"$(joined \"$ap0\")\"")
+    lines.append("scen_count 'twin joined through the real one' 1 \"$([ \"$(dmesg | grep -a \"$S: authenticate with\" | tail -1 | sed 's/.*authenticate with \\([0-9a-f:]*\\).*/\\1/')\" = \"$rm0\" ] && echo 1 || echo 0)\"")
+    lines.append("scen_count 'twin no four-way timeout' \"$h0\" \"$(dmesg | grep -c 4WAY_HANDSHAKE_TIMEOUT)\"")
+    # The twins are louder and are the ones the kernel will not join: the
+    # real one is picked ahead of them, not after a join has waited them out.
+    lines.append("scen_count 'twin real one joined within 20 s of its return' 1 \"$(awk -v t=\"$(took $t0)\" 'BEGIN { print (t < 20) }')\"")
+    lines.append("dmesg | grep -a -e \"$S:\" | tail -40 | sed 's/^/twin-log /'")
+    lines.append("kill $(cat /tmp/twin0.pid) $(cat /tmp/twin1.pid); rm -f /root/wifi")
+    family("twin", lines)
 
     # ---- rekey: hostapd, whose control socket starts rekeys on demand.
     # Two access points by one name, the first much the stronger, each
@@ -61063,6 +64517,7 @@ HARNESS_CHECKS = {
     "mount_names": harness_mount_names,
     "pane_restride": harness_pane_restride,
     "host_writes": harness_host_writes,
+    "net_sysctl": harness_net_sysctl,
     "moonwater_cli": harness_moonwater_cli,
     "machine_reap": harness_machine_reap,
     "tls_chains": harness_tls_chains,
@@ -61070,6 +64525,8 @@ HARNESS_CHECKS = {
     "https_downgrade": harness_https_downgrade,
     "http_response_framing": harness_http_response_framing,
     "http_fuzz": harness_http_fuzz,
+    "net_netem": harness_net_netem,
+    "sntp_era": harness_sntp_era,
     "http_urls": harness_http_urls,
     "tls_der_fuzz": harness_tls_der_fuzz,
     "tls_hs_fuzz": harness_tls_hs_fuzz,
@@ -61077,13 +64534,17 @@ HARNESS_CHECKS = {
     "sntp_fuzz": harness_sntp_fuzz,
     "wifi_eapol_fuzz": harness_wifi_eapol_fuzz,
     "wifi_scan_fuzz": harness_wifi_scan_fuzz,
+    "bowl_sig_fuzz": harness_bowl_sig_fuzz,
     "wget_mutation": harness_wget_mutation,
+    "wget_hostile": harness_wget_hostile,
     "dns_fuzz": harness_dns_fuzz,
     "netlink_fuzz": harness_netlink_fuzz,
     "crypto_vectors": harness_crypto_vectors,
     "crypto_fuzz": harness_crypto_fuzz,
     "x509_corpus": harness_x509_corpus,
     "public_suffixes": harness_public_suffixes,
+    "tls_hostnames": harness_tls_hostnames,
+    "tls_dates": harness_tls_dates,
     "anchors": harness_anchors,
     "tls_fuzz": harness_tls_fuzz,
     "msan_net": harness_msan_net,

@@ -17,9 +17,9 @@
         found the same way, by its greeting from the new place.
 
         A group is a line in /root/link.groups -- the namespace, the key
-        derived from it and the secret (never the secret itself), a hash of
-        the secret so a machine script that joins at every boot does not pay
-        the derivation every boot, and the grants members get here. Written
+        derived from it and the secret (never the secret itself, and no hash
+        of it either: a fast hash beside the slow key let anyone holding the
+        file guess at full speed) and the grants members get here. Written
         by `moonwater link join`, read by the listener whenever it changes.
 
         Discovery is IPv4 only for now, 224.0.0.251 on every interface that
@@ -55,7 +55,7 @@
 struct link_group_record {
         char namespace[WATERLINK_NAMESPACE_MAX];
         p8 key[32];   // PBKDF2 of namespace and secret
-        p8 check[32]; // SHA-256 of the secret, salted: skips a repeat derivation
+        p8 check[32]; // unused; older files held a SHA-256 of the secret here
         p32 may;
         p32 flags;
         p8 reserved[24];
@@ -70,9 +70,12 @@ typedef struct
         positive count;
 } link_groups;
 
+static fn link_groups_scrub(positive records);
+
 fn link_groups_load(link_groups address_to groups)
 {
         positive got = 0;
+        bool old = false;
 
         memory_zero(groups, sizeof(address_to groups));
         if (link_read_private_records(LINK_GROUPS_PATH,
@@ -85,12 +88,59 @@ fn link_groups_load(link_groups address_to groups)
         for (positive at = 0; at < groups->count; at++)
         {
                 groups->record[at].namespace[WATERLINK_NAMESPACE_MAX - 1] = 0;
+                old |= memory_span_byte(groups->record[at].check, 0,
+                                        sizeof groups->record[at].check) !=
+                       sizeof groups->record[at].check;
+                memory_zero(groups->record[at].check, sizeof groups->record[at].check);
                 if (!link_name_good(groups->record[at].namespace))
                 {
                         groups->record[at] = groups->record[--groups->count];
                         at--;
                 }
         }
+        if (old)
+                link_groups_scrub(got / sizeof(struct link_group_record));
+}
+
+/*
+        Files written before 2026-09-30 hold a SHA-256 of the secret in the
+        check field of each record, a guessing oracle at full speed for
+        anyone who can read the file or a copy of the disk, and it stayed
+        there until a join or a leave next wrote the file whole -- which a
+        machine that only listens never does. So whoever reads a file with
+        one in it zeroes the field in the file as well, in place. Nothing
+        reads the field and a file written now has nothing in it, so a record
+        that was replaced since it was read loses nothing but old bytes.
+*/
+static fn link_groups_scrub(positive records)
+{
+        static const p8 zeros[32];
+        file_facts facts;
+        bipolar handle = system_open_at(AT_FDCWD, LINK_GROUPS_PATH,
+                                        FILE_READ_WRITE | O_NOFOLLOW |
+                                                O_CLOEXEC);
+
+        if (handle < 0)
+                return;
+        if (file_look(handle, (string_address) "", AT_EMPTY_PATH,
+                      address_of facts) &&
+            (facts.mode & MODE_FORMAT) == MODE_FILE && facts.owner == 0 &&
+            !(facts.mode & 077) &&
+            !(facts.size % sizeof(struct link_group_record)))
+        {
+                for (positive at = 0;
+                     at < records &&
+                     (at + 1) * sizeof(struct link_group_record) <= facts.size;
+                     at++)
+                        (void)system_call_4(
+                            syscall(pwrite64), (positive)handle,
+                            (positive)zeros, sizeof zeros,
+                            at * sizeof(struct link_group_record) +
+                                __builtin_offsetof(struct link_group_record,
+                                                   check));
+                (void)system_call_1(syscall(fsync), (positive)handle);
+        }
+        system_close(handle);
 }
 
 static bipolar link_groups_save(link_groups address_to groups)
@@ -99,21 +149,6 @@ static bipolar link_groups_save(link_groups address_to groups)
                                  groups->record,
                                  groups->count * sizeof(struct link_group_record),
                                  true);
-}
-
-fn link_group_check(string_address namespace, p8 address_to secret,
-                    positive length, p8 address_to check)
-{
-        crypto_sha256 hash;
-
-        crypto_sha256_open(address_of hash);
-        crypto_sha256_write(address_of hash, (p8 address_to) "waterlink check ",
-                            16);
-        crypto_sha256_write(address_of hash, (p8 address_to)namespace,
-                            string_length(namespace));
-        crypto_sha256_write(address_of hash, (p8 address_to) " ", 1);
-        crypto_sha256_write(address_of hash, secret, length);
-        crypto_sha256_close(address_of hash, check);
 }
 
 /*
@@ -165,6 +200,9 @@ static fn link_name_for(link_peers address_to peers, p8 address_to offered,
         p8 base[WATERLINK_NAME_MAX];
         positive length;
 
+        //      Every byte of the name is written, the tail after its end
+        //      too: the caller keeps the whole buffer in a file.
+        memory_zero(name, WATERLINK_NAME_MAX);
         offered[WATERLINK_NAME_MAX - 1] = 0;
         memory_zero(base, sizeof base);
         length = string_length((string_address)offered);
