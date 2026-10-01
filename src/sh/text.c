@@ -28,7 +28,7 @@ enum
 // lexical comparison of sort, join and comm is the locale's strcoll, decided
 // once before any thread starts; the C locale never sets it and keeps the
 // radix over bytes, and every other text tool clears it in text_begin.
-static bool sort_collating;
+static bool sort_collating HOT_STATE;
 
 static PURE bipolar sort_compare_bytes(p8 address_to one,
                                        positive one_length,
@@ -66,11 +66,11 @@ static PURE bipolar sort_compare_bytes(p8 address_to one,
 #define TEXT_UNSET ((positive)-1)
 
 static p8 text_out_buffer[TEXT_OUT_MAX];
-static positive text_out_used;
-static positive text_out_handle = 1;
-static string_address text_name = "text";
+static positive text_out_used HOT_STATE;
+static positive text_out_handle HOT_DATA = 1;
+static string_address text_name HOT_DATA = "text";
 static b32 text_status;
-static bool text_out_failed;
+static bool text_out_failed HOT_STATE;
 // Whether cat could look at its output at all: text_done words a failure
 // there the way GNU's look at standard output does.
 static bool cat_output_known;
@@ -101,7 +101,7 @@ static bool cat_output_known;
 #define TEXT_STDIO_PAGE 4096
 #define TEXT_STDIO_UNSIZED 8192
 
-static bipolar text_out_error;
+static bipolar text_out_error HOT_STATE;
 static positive text_out_offered;
 static positive text_out_error_offered;
 static positive text_out_error_handle;
@@ -121,7 +121,7 @@ static positive text_stdio_buffer(positive handle)
                                                           : TEXT_STDIO_UNSIZED;
 }
 
-static bool text_write_out(address_any data, positive length)
+static HOT bool text_write_out(address_any data, positive length)
 {
         system_write_result wrote =
             system_write_all_checked(text_out_handle, data, length);
@@ -370,7 +370,7 @@ static bool text_write_error_worded()
         return false;
 }
 
-static b32 text_done(b32 code)
+static HOT b32 text_done(b32 code)
 {
         text_flush();
 
@@ -551,11 +551,11 @@ static text_reader text_input;
 static bool text_quiet_open;
 /* sed reads a script file, and R a line at a time, without a word about a
    file that will not open or read -- as GNU passes over both. */
-static bool text_quiet_read;
+static bool text_quiet_read HOT_STATE;
 /* tail -f opens its files without blocking when it has more than one or a
    --pid to watch, and GNU takes a read that would block as the end of what
    there is for now rather than as a failure. */
-static bool text_again_ends;
+static bool text_again_ends HOT_STATE;
 /* One sentinel slot is used while a sed script file is turned into text.
    The array is mapped on first touch (UTILITY_HELD); a record longer than
    TEXT_LINE_MAX moves text_line to a heap store of its own (see
@@ -745,7 +745,7 @@ static bool text_reader_open_at(text_reader address_to reader,
             shown);
 }
 
-static bool text_reader_open(text_reader address_to reader, string_address path)
+static HOT bool text_reader_open(text_reader address_to reader, string_address path)
 {
         bool opened = true;
 
@@ -778,7 +778,7 @@ static inline INLINE fn text_close_handle(bool address_to opened,
         the answer, because a tool that is only moving bytes does not need to
         know which of them happened.
 */
-static bool text_reader_fill_amount(text_reader address_to reader,
+static HOT bool text_reader_fill_amount(text_reader address_to reader,
                                     positive amount)
 {
         if (reader->position < reader->filled)
@@ -851,7 +851,7 @@ static fn text_close()
         text_close_handle(address_of text_input.opened, text_input.handle);
 }
 
-static bool text_fill_amount(positive amount)
+static HOT bool text_fill_amount(positive amount)
 {
         if (text_reader_fill_amount(address_of text_input, amount))
                 return true;
@@ -1317,7 +1317,7 @@ static bool text_word(p8 character)
 */
 static b32 text_argument_count;
 static positive text_files_count;
-static bool text_files_failed;
+static bool text_files_failed HOT_STATE;
 // --files0-from replaces the operand list with names cut from a file.
 static string_address address_to text_file_list;
 static positive text_files_from_bad;
@@ -1330,13 +1330,13 @@ static bool text_files_from_ahead;
 static bool text_files_from(string_address path);
 // wc's list of names, when it is read as it goes (see text_files_from).
 static text_reader text_files_reader;
-static bool text_files_lazy;
+static bool text_files_lazy HOT_STATE;
 static bool text_files_lazy_stdin;
 static byte_store text_files_name;
 static string_address text_files_lazy_path;
 static bool text_files_next(string_address address_to name);
 
-static fn text_begin(string_address name)
+static HOT fn text_begin(string_address name)
 {
         /* A shell may run several built-in tools in one process. */
         sort_collating = false;
@@ -1440,7 +1440,7 @@ static bool text_directory(positive handle)
                (facts.mode & MODE_FORMAT) == MODE_DIRECTORY;
 }
 
-static bool text_regular_size(positive handle, positive address_to size)
+static HOT bool text_regular_size(positive handle, positive address_to size)
 {
         file_facts facts;
         p8 edge;
@@ -1484,7 +1484,7 @@ static bool text_regular_size(positive handle, positive address_to size)
         takes the pieces it can and leaves the rest to its serial loop calls
         text_lines_done, which puts the descriptor where the pieces stopped.
 */
-static bool text_lines_open(parallel_lines address_to run, p8 delimiter)
+static HOT bool text_lines_open(parallel_lines address_to run, p8 delimiter)
 {
         positive size = 0;
         bipolar at;
@@ -1505,10 +1505,10 @@ static fn text_lines_done(parallel_lines address_to run)
         parallel_lines_close(run);
 }
 
-static b32 address_to text_files;
-static positive text_files_room;
+static b32 address_to text_files HOT_STATE;
+static positive text_files_room HOT_STATE;
 
-static fn text_file_add(b32 which)
+static HOT fn text_file_add(b32 which)
 {
         if (text_files_failed)
                 return;
@@ -6091,7 +6091,7 @@ static b32 text_join()
 #define CAT_SHOW 16      // -v
 #define CAT_SQUEEZE 32   // -s
 
-static positive cat_flags;
+static positive cat_flags HOT_STATE;
 static positive cat_line_number;
 static bool cat_blank_before;
 static bool cat_at_line_start;
@@ -6193,7 +6193,7 @@ static const b8 cat_ends_set[2][256] = {
     {['\t'] = 1, ['\n'] = 1, ['\r'] = 1},
 };
 
-static bool cat_pending_cr;
+static bool cat_pending_cr HOT_STATE;
 
 static fn cat_release_cr()
 {
@@ -6771,7 +6771,7 @@ static fn wc_row(positive lines, positive words, positive chars, positive bytes,
         name are a byte a character. GNU also falls back to bytes for a UTF-8
         name the system has no locale for, which a name alone cannot see.
 */
-static bool text_locale_utf8()
+static HOT bool text_locale_utf8()
 {
         string_address locale = locale_environment((string_address) "LC_CTYPE");
 

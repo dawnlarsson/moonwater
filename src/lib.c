@@ -627,6 +627,13 @@
 #else
 #define HOT_STATE __attribute__((section(".bss.hot")))
 #endif
+//      The same for what is written at start but is not zero: .data.hot
+//      is the first of .data, so a fork copies the one page of it.
+#if defined(KERNEL_MODE) || defined(__APPLE__)
+#define HOT_DATA
+#else
+#define HOT_DATA __attribute__((section(".data.hot")))
+#endif
 #define INLINE __attribute__((always_inline))
 #define NO_FRAME __attribute__((noframe))
 #define KEEP __attribute__((used))

@@ -23,7 +23,7 @@
 #define EXEC_SIGNAL_INPUT_ERROR 6
 #define EXEC_ASSIGNMENT_LINE_ABORT 256
 
-static b32 exec_signal;
+static b32 exec_signal HOT_STATE;
 static b32 exec_signal_level;
 static b32 exec_loop_depth HOT_STATE;
 /* In dash a function counts LINENO from its own first line; 0 elsewhere. */
@@ -623,7 +623,7 @@ static COLD fn exec_source_return_trap()
                 exec_trap_condition(TRAP_RETURN);
 }
 
-static fn exec_errexit(b32 status)
+static HOT fn exec_errexit(b32 status)
 {
         if (exec_line_aborted() || !status || exec_tested)
                 return;
@@ -5337,7 +5337,7 @@ fn history_file_size_changed()
         }
 }
 
-fn history_leaving()
+HOT fn history_leaving()
 {
         string_address path;
 
@@ -6253,7 +6253,7 @@ typedef struct
 } exec_saved_fd;
 
 static exec_saved_fd exec_saves[REDIRECT_SAVE_MAX];
-static b32 exec_save_count;
+static b32 exec_save_count HOT_STATE;
 
 /*
         A child never puts back what its parent put aside: it leaves before
@@ -6339,7 +6339,7 @@ static PURE bool exec_saved_fd_is(b32 fd)
         return false;
 }
 
-static bipolar exec_save_duplicate(b32 fd, parse_node address_to node, b32 floor)
+static HOT bipolar exec_save_duplicate(b32 fd, parse_node address_to node, b32 floor)
 {
         for (;;)
         {
@@ -6462,7 +6462,7 @@ static COLD bool exec_internal_source_release(
                                                          3, source));
 }
 
-static bool exec_save_fd(b32 fd, parse_node address_to node)
+static HOT bool exec_save_fd(b32 fd, parse_node address_to node)
 {
         bipolar saved;
         bool closed = false;
@@ -6543,7 +6543,7 @@ static bool exec_save_fd(b32 fd, parse_node address_to node)
         return true;
 }
 
-static fn exec_redirect_restore(b32 mark)
+static HOT fn exec_redirect_restore(b32 mark)
 {
         log_flush();
 
@@ -6986,7 +6986,7 @@ static bool exec_redirect_var_store(string_address name, positive length,
                                       env_name_hash(name, length), digits);
 }
 
-static bool exec_redirect_apply(b32 index)
+static HOT bool exec_redirect_apply(b32 index)
 {
         parse_node address_to node = parse_nodes + index;
         b32 at;
@@ -8313,7 +8313,7 @@ positive exec_function_environment_count()
         return count;
 }
 
-bool exec_function_environment_fill(string_address address_to environment,
+HOT bool exec_function_environment_fill(string_address address_to environment,
                                     positive count)
 {
         positive used = 0;
@@ -8624,7 +8624,7 @@ leave:
         return answer;
 }
 
-fn exec_function_import_environment(string_address address_to environment)
+HOT fn exec_function_import_environment(string_address address_to environment)
 {
         b32 status = shell_status;
 
@@ -11202,7 +11202,7 @@ static COLD fn exec_return_bash()
 /* break, continue and return are executor operations, not ordinary C
    builtins: their result has to unwind the surrounding parse tree. Query mode
    exposes that same namespace to command/type without copying the name list. */
-bool exec_control_builtin(string_address name, bool run)
+HOT bool exec_control_builtin(string_address name, bool run)
 {
         p8 initial = string_get(name);
 
@@ -11346,7 +11346,7 @@ bool exec_control_builtin(string_address name, bool run)
         return true;
 }
 
-static b32 exec_dispatch(b32 command_word)
+static HOT b32 exec_dispatch(b32 command_word)
 {
         /* PATH answers are transient only until exec/spawn has copied argv.
            Keep one movable room across commands instead of mapping and
@@ -11518,7 +11518,7 @@ static b32 exec_dispatch(b32 command_word)
         status the interrupted command answered with, and a return or a break
         inside one belongs to the action and not to the loop it landed in.
 */
-fn exec_traps()
+HOT fn exec_traps()
 {
         b32 kept_status = shell_status;
         b32 kept_signal = exec_signal;
@@ -11772,7 +11772,7 @@ static PURE b32 exec_assignment_error_status(bool assignments_only,
         return EXEC_ASSIGNMENT_LINE_ABORT;
 }
 
-static b32 exec_simple(b32 index)
+static HOT b32 exec_simple(b32 index)
 {
         parse_node address_to node = parse_nodes + index;
         exec_kept_value address_to kept = null;
@@ -16786,7 +16786,7 @@ static inline INLINE fn exec_expansion_done(shell_mark expanded,
         subshell or a loop is one too, and checking only the simple ones left
         a trap waiting behind a "( ... )" until whatever came after it.
 */
-static b32 exec_node(b32 index)
+static HOT b32 exec_node(b32 index)
 {
         /* -n still parses the entire physical program before it gets here.
            Once a command in that program enables it, later sibling nodes are
@@ -17047,7 +17047,7 @@ static b32 exec_node_kind(b32 index)
         return status;
 }
 
-static b32 exec_depth;
+static b32 exec_depth HOT_STATE;
 
 /*
         A tree, walked.
@@ -17060,7 +17060,7 @@ static b32 exec_depth;
         value the loop was standing on and a redirection around it was never
         put back.
 */
-fn exec_program(b32 root)
+HOT fn exec_program(b32 root)
 {
         shell_mark kept_arena = shell_store_mark(address_of exec_store);
         b32 kept_saves = exec_save_count;

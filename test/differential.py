@@ -31437,9 +31437,9 @@ def harness_floodlight(argv):
                    for i in range(len(tokens) - window))
 
     exec_simple_source = exec_source[
-        exec_source.index('static b32 exec_simple('):
+        exec_source.index('static HOT b32 exec_simple('):
         exec_source.index('\nstatic bool exec_loop_again()',
-                          exec_source.index('static b32 exec_simple('))]
+                          exec_source.index('static HOT b32 exec_simple('))]
     exec_simple_tokens = [token.value for token in lex(exec_simple_source)[0]]
 
     for ok, what in (

@@ -65,10 +65,10 @@ typedef struct
         kilobytes of token text is one long argument, and 512 tokens is a
         generated command list.
 */
-static parse_token address_to parse_tokens;
-static positive parse_token_room;
-static positive parse_token_count;
-static shell_store parse_store;
+static parse_token address_to parse_tokens HOT_STATE;
+static positive parse_token_room HOT_STATE;
+static positive parse_token_count HOT_STATE;
+static shell_store parse_store HOT_STATE;
 static parse_token parse_no_token;
 
 string_address alias_lookup(string_address name);
@@ -262,7 +262,7 @@ typedef struct
 
 static parse_memo address_to parse_memos;
 static positive parse_memo_room;
-static positive parse_memo_epoch = 1;
+static positive parse_memo_epoch HOT_DATA = 1;
 static bool parse_memo_on;
 
 /* Live marks and saved marks intentionally have one shape. One assignment is
@@ -329,7 +329,7 @@ static positive here_names_room;
 */
 static p8 address_to parse_pending;
 static positive parse_pending_room;
-static positive parse_pending_used;
+static positive parse_pending_used HOT_STATE;
 static positive parse_pending_line;
 
 #define PARSE_WANT_ROOM 16
@@ -340,7 +340,7 @@ static positive parse_want_used;
 
 //      A closer waited for, with the command waiting and its line, which
 //      is what bash names when the input ends before it is closed.
-static fn parse_want_push_for(string_address word, b32 index)
+static HOT fn parse_want_push_for(string_address word, b32 index)
 {
         string_address opener = null;
 
@@ -411,14 +411,14 @@ bool parse_eof_can_complete()
 
 //      dash's own reason for a syntax error the grammar cannot name by its
 //      token: a for loop's variable that is no name.
-static string_address parse_syntax_reason;
+static string_address parse_syntax_reason HOT_STATE;
 
 //      How many commands deep the parse is, for parse_command's limit. Every
 //      way out of parse_command passes the one decrement, so nothing needs to
 //      put it back.
 static positive parse_depth;
 
-fn parse_reset()
+HOT fn parse_reset()
 {
         parse_syntax_reason = null;
         parse_pending_used = 0;
@@ -543,7 +543,7 @@ static PURE inline INLINE parse_token address_to parse_look(b32 ahead)
         return parse_tokens + index;
 }
 
-static PURE bool parse_word_is_length(b32 ahead, string_address text,
+static HOT PURE bool parse_word_is_length(b32 ahead, string_address text,
                                       positive length)
 {
         parse_token address_to token = parse_look(ahead);
@@ -1001,7 +1001,7 @@ static bool parse_hold(string_address line, b32 unfinished)
 */
 #define PARSE_STRIP_DEPTH 64
 
-static bool parse_joined_line;
+static bool parse_joined_line HOT_STATE;
 
 static COLD positive parse_strip_continuations(p8 address_to text,
                                                positive length, p8 kind)
@@ -1220,7 +1220,7 @@ static bool parse_copy_lex(parse_token address_to into,
 
 // One token of the line the lexer just cut, and whether it touched the one
 // before it -- which the lexer's positions say and only the parser keeps.
-static bool parse_copy_lexed(parse_token address_to into, b32 index,
+static HOT bool parse_copy_lexed(parse_token address_to into, b32 index,
                              parse_alias_trace address_to trace)
 {
         lex_token address_to source = lex_tokens + index;
@@ -1295,7 +1295,7 @@ static bool parse_here_at(b32 at)
         is kept as a token of its own: it separates commands exactly as a
         semicolon does, and inside a construct it is the only thing that does.
 */
-bool parse_feed(string_address line)
+HOT bool parse_feed(string_address line)
 {
         b32 count;
         positive token_start;
@@ -1577,7 +1577,7 @@ leave:
         return answer;
 }
 
-static b32 parse_node_new(b32 kind)
+static HOT b32 parse_node_new(b32 kind)
 {
         b32 index;
 
@@ -1695,7 +1695,7 @@ __asm__(
 );
 #endif
 
-static b32 parse_word_new(string_address text, positive length)
+static HOT b32 parse_word_new(string_address text, positive length)
 {
         positive name_length = 0;
         p8 assignment;
@@ -1765,7 +1765,7 @@ static fn parse_attach_word(b32 index, string_address text, positive length)
 // The word the reader is standing on, put on a node and stepped past. Every
 // construct that names something -- for's variable, case's subject and each
 // of an item's patterns, a function, a coproc -- takes its word this way.
-static fn parse_take_word(b32 index)
+static HOT fn parse_take_word(b32 index)
 {
         parse_attach_word(index, parse_look(0)->text, parse_look(0)->length);
         parse_position++;
@@ -1842,7 +1842,7 @@ static bool parse_expect_operator(b32 op)
         happens to be spelled "done" is read as an argument, because argument
         position never asks this question.
 */
-static PURE bool parse_at_list_end()
+static HOT PURE bool parse_at_list_end()
 {
         parse_token address_to token = parse_look(0);
         b32 keyword;
@@ -1934,7 +1934,7 @@ static PURE bool parse_redirect_fd_number(string_address text, positive length,
 
 /* Return the number of descriptor tokens before a redirect operator, or -1.
    Alias scans and the grammar must agree on this exact two-token prefix. */
-static PURE b32 parse_redirect_prefix(b32 at)
+static HOT PURE b32 parse_redirect_prefix(b32 at)
 {
         if (at >= (b32)parse_token_count)
                 return -1;
@@ -2266,7 +2266,7 @@ static fn parse_alias_command()
         }
 }
 
-static bool parse_take_redirect(b32 index)
+static HOT bool parse_take_redirect(b32 index)
 {
         string_address delimiter;
         string_address brace_name = null;
@@ -3015,7 +3015,7 @@ static b32 parse_command()
         return index;
 }
 
-static b32 parse_command_body()
+static HOT b32 parse_command_body()
 {
         b32 index;
         b32 compound = true;
@@ -3214,7 +3214,7 @@ static b32 parse_time(bool inverted)
         return parse_state ? 0 : index;
 }
 
-static b32 parse_pipeline(bool inverted)
+static HOT b32 parse_pipeline(bool inverted)
 {
         if (parse_state)
                 return 0;
@@ -3350,7 +3350,7 @@ static b32 parse_and_or()
 /* Whether the list that stopped last stopped because the tokens ran out. */
 static bool parse_list_ran_out;
 
-static b32 parse_list()
+static HOT b32 parse_list()
 {
         b32 index = 0;
         b32 head = 0;
@@ -3478,7 +3478,7 @@ static b32 parse_list()
 // Everything read so far, as one tree. Zero with parse_state set to
 // PARSE_INCOMPLETE means the source stops in the middle of a construct and the
 // caller should ask for another line rather than complain.
-b32 parse_program()
+HOT b32 parse_program()
 {
         b32 root;
 

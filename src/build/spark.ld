@@ -51,12 +51,49 @@ SECTIONS
                 *(.srodata .srodata.*)
 
                 *(.text.unlikely .text.unlikely.*)
+                /* The routines written in assembly that every command runs,
+                   each in a section of its own (ASM_FUNC), first among the
+                   rest: what the library's routines call one another with
+                   on riscv64 is a jal, which reaches a megabyte, so they
+                   stay together instead of going to the front, and a
+                   command touches this part of the image as one run of
+                   pages rather than one a routine. */
+                *(.text.memory_compare .text.memory_compare_ascii_case)
+                *(.text.memory_copy .text.memory_copy_apart .text.memory_copy_apart_end)
+                *(.text.memory_copy_end .text.memory_count .text.memory_first_of)
+                *(.text.memory_growth .text.memory_hash_33 .text.memory_release)
+                *(.text.memory_reserve .text.memory_search .text.memory_search_prepare)
+                *(.text.memory_search_prepared_core .text.memory_span_byte)
+                *(.text.memory_take .text.memory_free .text.memory_give)
+                *(.text.string_compare .text.string_copy .text.string_copy_max_end)
+                *(.text.string_digits .text.string_digits_max .text.string_first_of)
+                *(.text.string_first_of_or_end .text.string_get_environment)
+                *(.text.string_hash_33_length .text.string_last_of .text.string_length)
+                *(.text.string_length_max .text.string_set_add .text.string_span)
+                *(.text.string_span_max .text.string_table_find .text.string_to_host)
+                *(.text.strlen .text.strncmp .text.strnlen .text.strrchr .text.memset)
+                *(.text.memcpy .text.bytes_reverse_16 .text.bytes_reverse_32 .text.log)
+                *(.text.log_failed .text.log_failure_reset .text.log_flush)
+                *(.text.positive_digits_core .text.positive_into)
+                *(.text.positive_into_core .text.positive_into_string)
+                *(.text.bipolar_into_core .text.bipolar_into_string)
+                *(.text.program_argument .text.program_argument_count)
+                *(.text.program_argument_list .text.program_arguments_use)
+                *(.text.program_environment_list .text.program_initial_identity)
+                *(.text.moonwater_cpu_detect .text.shell_key_next .text.lex_line_floor)
+                *(.text.lex_line_store .text.system_call .text.system_call_1)
+                *(.text.system_call_2 .text.system_call_3 .text.system_call_4)
+                *(.text.system_call_5 .text.system_call_6 .text.system_read_retry)
+                *(.text.system_wait4_retry .text.system_write_all_checked)
+                *(.text.wait_status_code .text.wait_status_code_base)
+                *(.text.buffered_flush)
                 *(.text.*)
         }
 
         . = ALIGN(4096);
 
         .data : {
+                *(.data.hot)
                 *(.data .data.*)
                 *(.got .got.plt)
                 /* And small writable ones here, one section each because the
@@ -80,6 +117,13 @@ SECTIONS
                 /* What every command writes, on the first page and no
                    other, so a fork copies the one page (HOT_STATE). */
                 *(.bss.hot)
+                /* Library state every process writes before main, one section
+                   each because it is written in assembly (ASM_BSS_OBJECT_BEGIN). */
+                *(.bss.program_stack_base .bss.thread_main .bss.threads_live
+                  .bss.log_writer_buffer_length .bss.log_writer_failed
+                  .bss.writer_stderr_failed .bss.working_directory
+                  .bss.program_vdso_clock .bss.program_entry_identity .bss.program_words
+                  .bss.cpu_has_* .bss.cpu_hash_probed)
                 *(.bss .bss.*)
                 *(.sbss .sbss.*)
                 *(COMMON)

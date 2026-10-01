@@ -898,7 +898,7 @@ static bool system_state_held;
 static p32 system_state_user;
 static positive system_state_mask;
 
-static p32 system_effective_user(void)
+static HOT p32 system_effective_user(void)
 {
         return system_state_held ? system_state_user
                                  : (p32)system_call(syscall(geteuid));
@@ -8170,7 +8170,7 @@ static positive allocator_fit(positive bytes)
         turn takes at least sixteen bytes and each next shelf is no larger
         than the one before.
 */
-static fn allocator_spend_remainder(void)
+static HOT fn allocator_spend_remainder(void)
 {
         while (allocator_bump_left >= allocator_class_size[0])
         {
@@ -8319,7 +8319,7 @@ allocator_take_shared(b32 class, bool address_to fresh)
         return block;
 }
 
-static address_any allocator_take(positive bytes, bool address_to fresh)
+static HOT address_any allocator_take(positive bytes, bool address_to fresh)
 {
         if (fresh)
                 address_to fresh = 0;
@@ -8397,7 +8397,7 @@ static address_any allocator_take(positive bytes, bool address_to fresh)
 //      allocator_take_slow. pub carries KEEP -- __attribute__((used)) -- and
 //      is what says the reference exists somewhere the compiler is not
 //      looking. The same goes for allocator_give_slow below.
-pub address_any allocator_take_slow(positive bytes)
+HOT pub address_any allocator_take_slow(positive bytes)
 {
         return allocator_take(bytes, null);
 }
@@ -9002,7 +9002,7 @@ static struct
         parallel_run run;
 } parallel_beside_state;
 
-pub positive parallel_width(void)
+HOT pub positive parallel_width(void)
 {
         if (!parallel_pool.width)
         {
@@ -9625,7 +9625,7 @@ typedef struct
         it wants one that is not the usual: a chunk of zero is the usual, and
         only that one has a size below which threads are not worth it.
 */
-pub bool parallel_lines_open(parallel_lines address_to run, positive handle,
+HOT pub bool parallel_lines_open(parallel_lines address_to run, positive handle,
                              positive start, positive size, p8 delimiter,
                              positive chunk)
 {
@@ -15951,7 +15951,7 @@ static positive stdlib_environment_room = 0;
         chance that one caller did the one thing almost nobody does. It is
         written down instead.
 */
-string_address address_to environ = null;
+string_address address_to environ HOT_STATE = null;
 
 //      Take a private copy of the vector, once. False means the arena could
 //      not give us the room, and every caller falls back to read-only
@@ -16469,7 +16469,7 @@ b32 clearenv(void)
 typedef fn(address_to stdlib_exit_handler)(void);
 
 static stdlib_exit_handler stdlib_exit_list[STDLIB_EXIT_HANDLERS];
-static positive stdlib_exit_count = 0;
+static positive stdlib_exit_count HOT_STATE = 0;
 
 static stdlib_exit_handler stdlib_quick_list[STDLIB_EXIT_HANDLERS];
 static positive stdlib_quick_count = 0;
@@ -16560,7 +16560,7 @@ fn(address_to stdlib_exit_flush_hook)(void) = null;
         translation unit that asked for no platform under it -- and then the
         buffers can only be ours, because nothing in such a build forked.
 */
-static positive stdlib_process_at_start = 0;
+static positive stdlib_process_at_start HOT_STATE = 0;
 
 positive stdlib_process_identity(void)
 {
@@ -16680,7 +16680,7 @@ b32 at_quick_exit(stdlib_exit_handler handler)
                                   address_of stdlib_quick_count);
 }
 
-DEAD_END fn stdlib_exit(b32 code)
+HOT DEAD_END fn stdlib_exit(b32 code)
 {
         while (stdlib_exit_count > 0)
         {
@@ -17825,6 +17825,52 @@ static bool clock_break_down(bipolar seconds, tm address_to broken)
 
 typedef b32 (*clock_vdso_entry)(clockid_t which, timespec address_to into);
 
+//      The symbol at an index of the dynamic table, if it is the function
+//      asked for under the version asked for: its address, or zero.
+static COLD positive clock_vdso_symbol(const p8 address_to symbols,
+                                       string_address names,
+                                       const p16 address_to versions,
+                                       const p8 address_to definitions,
+                                       positive i, positive bias)
+{
+        const p8 address_to symbol = symbols + 24 * i;
+        p8 info = symbol[4];
+
+        if ((info & 15) != 2 || ((info >> 4) != 1 && (info >> 4) != 2) ||
+            address_to (const p16 address_to)(symbol + 6) == 0 ||
+            string_compare(names + address_to (const p32 address_to)symbol,
+                           (string_address)CLOCK_VDSO_NAME) != 0)
+                return 0;
+        if (!is_null(versions) && !is_null(definitions))
+        {
+                p16 wanted = versions[i] & 0x7fff;
+                const p8 address_to definition = definitions;
+                bool found = false;
+
+                for (;;)
+                {
+                        //      VER_FLG_BASE names the object, not a version.
+                        if (!(address_to (const p16 address_to)(definition + 2) & 1) &&
+                            (address_to (const p16 address_to)(definition + 4) & 0x7fff) == wanted)
+                        {
+                                const p8 address_to aux =
+                                    definition + address_to (const p32 address_to)(definition + 12);
+
+                                found = string_compare(
+                                            names + address_to (const p32 address_to)aux,
+                                            (string_address)CLOCK_VDSO_VERSION) == 0;
+                                break;
+                        }
+                        if (!address_to (const p32 address_to)(definition + 16))
+                                break;
+                        definition += address_to (const p32 address_to)(definition + 16);
+                }
+                if (!found)
+                        return 0;
+        }
+        return bias + address_to (const p64 address_to)(symbol + 8);
+}
+
 static COLD positive clock_vdso_find(void)
 {
         string_address address_to walk = program_environment_list();
@@ -17892,62 +17938,48 @@ static COLD positive clock_vdso_find(void)
         if (is_null(symbols) || is_null(names))
                 return CLOCK_VDSO_NONE;
 
-        //      DT_HASH says how many symbols there are. DT_GNU_HASH only says
-        //      where each bucket's chain starts, so the count is one past the
-        //      end of the chain the highest bucket starts.
-        if (!is_null(hash))
-                count = hash[1];
-        else if (!is_null(gnu))
+        //      DT_GNU_HASH answers for a name with a bucket and a chain: the
+        //      hash of the name picks the one chain whose entries could be
+        //      it, and each entry that agrees on all but the lowest bit of the
+        //      hash is a symbol worth looking at. It is what the dynamic
+        //      linker does, and a chain is a handful of entries where the walk
+        //      below is every symbol the object has. An object that has only
+        //      DT_HASH is walked whole, as it always was.
+        if (!is_null(gnu) && gnu[0] != 0)
         {
+                p32 wanted = 5381;
                 const p32 address_to buckets = gnu + 4 + 2 * gnu[2];
                 const p32 address_to chains = buckets + gnu[0];
 
-                for (positive i = 0; i < gnu[0]; i++)
-                        count = max(count, (positive)buckets[i]);
-                if (count >= gnu[1])
-                        while (!(chains[count - gnu[1]] & 1))
-                                count++;
-                count += count != 0;
+                for (string_address name = (string_address)CLOCK_VDSO_NAME; *name; name++)
+                        wanted = wanted * 33 + (p8)*name;
+
+                for (positive at = buckets[wanted % gnu[0]], steps = 0;
+                     at >= gnu[1] && steps < 4096; at++, steps++)
+                {
+                        p32 entry = chains[at - gnu[1]];
+                        positive found;
+
+                        if ((entry | 1) == (wanted | 1) &&
+                            (found = clock_vdso_symbol(symbols, names, versions,
+                                                       definitions, at, bias)))
+                                return found;
+                        if (entry & 1)
+                                break;
+                }
+                return CLOCK_VDSO_NONE;
         }
+
+        if (!is_null(hash))
+                count = hash[1];
 
         for (positive i = 0; i < min(count, 4096); i++)
         {
-                const p8 address_to symbol = symbols + 24 * i;
-                p8 info = symbol[4];
+                positive found = clock_vdso_symbol(symbols, names, versions,
+                                                   definitions, i, bias);
 
-                if ((info & 15) != 2 || ((info >> 4) != 1 && (info >> 4) != 2) ||
-                    address_to (const p16 address_to)(symbol + 6) == 0 ||
-                    string_compare(names + address_to (const p32 address_to)symbol,
-                                   (string_address)CLOCK_VDSO_NAME) != 0)
-                        continue;
-                if (!is_null(versions) && !is_null(definitions))
-                {
-                        p16 wanted = versions[i] & 0x7fff;
-                        const p8 address_to definition = definitions;
-                        bool found = false;
-
-                        for (;;)
-                        {
-                                //      VER_FLG_BASE names the object, not a version.
-                                if (!(address_to (const p16 address_to)(definition + 2) & 1) &&
-                                    (address_to (const p16 address_to)(definition + 4) & 0x7fff) == wanted)
-                                {
-                                        const p8 address_to aux =
-                                            definition + address_to (const p32 address_to)(definition + 12);
-
-                                        found = string_compare(
-                                                    names + address_to (const p32 address_to)aux,
-                                                    (string_address)CLOCK_VDSO_VERSION) == 0;
-                                        break;
-                                }
-                                if (!address_to (const p32 address_to)(definition + 16))
-                                        break;
-                                definition += address_to (const p32 address_to)(definition + 16);
-                        }
-                        if (!found)
-                                continue;
-                }
-                return bias + address_to (const p64 address_to)(symbol + 8);
+                if (found)
+                        return found;
         }
         return CLOCK_VDSO_NONE;
 }

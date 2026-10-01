@@ -54,9 +54,9 @@ fn shell_signal(b32 number, positive disposition)
         than about what we just did.
 */
 positive shell_signals_ignored;
-static positive shell_signals_known;
+static positive shell_signals_known HOT_STATE;
 
-static bool shell_signal_was_ignored(b32 number)
+static HOT bool shell_signal_was_ignored(b32 number)
 {
         positive mask;
 
@@ -81,7 +81,7 @@ static bool shell_signal_was_ignored(b32 number)
 
 #define shell_was_ignored(n) shell_signal_was_ignored((b32)(n))
 
-fn shell_signals_start()
+HOT fn shell_signals_start()
 {
         positive ignored[4] = {SIGNAL_IGNORE, 0, 0, 0};
         b32 numbers[2] = {SIGNAL_INTERRUPT, SIGNAL_QUIT};
@@ -119,7 +119,7 @@ fn shell_signals_start()
         kept that deafness too. dash and bash leave a non-interactive shell
         interruptible; what was already ignored when it started stays ignored.
 */
-fn shell_signals_settle(bool interactive)
+HOT fn shell_signals_settle(bool interactive)
 {
         b32 numbers[2] = {SIGNAL_INTERRUPT, SIGNAL_QUIT};
 
@@ -191,8 +191,8 @@ b32 shell_is_interactive;
 /* One implementation, two conflicting shell policies. The standalone entry
    selects Bash policy only when invoked as bash; sh/dash and embedded callers
    retain Moonwater's existing dash-compatible defaults. */
-KEEP __attribute__((externally_visible)) bool shell_bash_compat;
-bool shell_dash_compat;
+KEEP __attribute__((externally_visible)) bool shell_bash_compat HOT_STATE;
+bool shell_dash_compat HOT_STATE;
 // Takes bash's additions out of the language for the names dash and sh.
 fn shell_dash_begin();
 /* Set by the reader when more source remains after this physical line,
@@ -237,7 +237,7 @@ bool shell_restricted_sticky;
         is declared here rather than beside the reader below: the executor is
         included first and reads it.
 */
-static positive shell_run_depth;
+static positive shell_run_depth HOT_STATE;
 
 // Whether output that can carry colour does. An interface that draws its own
 // screen turns it off while it holds the terminal.
@@ -295,7 +295,7 @@ static bool shell_memory_failed;
    doing large work; its final expansion is not its working set. */
 static bool shell_large_request;
 
-static address_any shell_map(positive size)
+static HOT address_any shell_map(positive size)
 {
         //      memory_checked answers null for the kernel's own negative
         //      errno as well, which as an address is the top page of the
@@ -452,7 +452,7 @@ shell_store_take_aligned(shell_store address_to store, positive room)
 }
 
 /* Stable, terminated spans share the arena's allocation and overflow policy. */
-static p8 address_to shell_store_copy(shell_store address_to store,
+static HOT p8 address_to shell_store_copy(shell_store address_to store,
                                       address_any text, positive length)
 {
         if (length == positive_max)
@@ -590,7 +590,7 @@ static fn shell_words_bind(shell_words address_to list,
 static bool shell_tail_command HOT_STATE;
 // The substitution child grants that privilege after parsing proves the line
 // is one simple command; functions decline it later in exec_dispatch.
-static bool shell_tail_line_requested;
+static bool shell_tail_line_requested HOT_STATE;
 fn shell_thread_instance_mode(bool preserve_ignored);
 
 // More than one line of source, run one at a time: what a trap action, eval
@@ -835,7 +835,7 @@ static bool floodlight_parent_supervised;
 #include "system.c"
 #define PROMPT TERM_RESET TERM_BOLD " $ " TERM_RESET
 
-static positive shell_syntax_generation;
+static positive shell_syntax_generation HOT_STATE;
 
 /* Source bytes held in memory have no live producer for a child to influence.
    A streamed descriptor does: classify it once at the authenticated reader
@@ -871,8 +871,8 @@ static positive shell_syntax_generation;
    shared open description also changes where the parent continues. */
 static file_facts shell_parser_isolated_facts;
 static bool shell_parser_isolated_live;
-static bool shell_parser_source_active;
-static bool shell_parser_source_ambiguous;
+static bool shell_parser_source_active HOT_STATE;
+static bool shell_parser_source_ambiguous HOT_STATE;
 static positive shell_parser_source_kind = SHELL_PARSER_SOURCE_MEMORY;
 static bipolar shell_parser_source_handle = -1;
 static bipolar shell_parser_source_process = -1;
@@ -1395,7 +1395,7 @@ string_address shell_arguments()
         too", and giving the default back over either made a subshell or a
         spawned program the one thing in the script control-C could reach.
 */
-static fn shell_child_default(b32 number)
+static HOT fn shell_child_default(b32 number)
 {
         if (!trap_ignored((positive)number) && !shell_was_ignored(number))
                 shell_default(number);
@@ -1671,7 +1671,7 @@ static b32 shell_spawn_keeps()
 /* Submit a launch whose Floodlight decision the caller already made. Keeping
    policy out of this sender lets paths which need the decision for their fork
    fallback make one stable choice before probing or opening /dev/spark. */
-static bipolar shell_spawn_preflighted(b32 flags, string_address path,
+static HOT bipolar shell_spawn_preflighted(b32 flags, string_address path,
                                        string_address address_to arguments,
                                        b32 input, b32 output, b32 error)
 {
@@ -1869,12 +1869,12 @@ fn shell_execute_command()
         log_flush();
 }
 
-bool shell_builtin(string_address arguments, positive2 named)
+HOT bool shell_builtin(string_address arguments, positive2 named)
 {
-        static shell_command address_to remembered;
-        static positive remembered_length;
+        static shell_command address_to remembered HOT_STATE;
+        static positive remembered_length HOT_STATE;
         static positive remembered_hash;
-        static positive remembered_generation;
+        static positive remembered_generation HOT_STATE;
         shell_command address_to command = null;
 
         if (!arguments && shell_command_name_stable &&
@@ -2162,7 +2162,7 @@ static COLD bool shell_substitutions_parse(positive from, positive to)
         return true;
 }
 
-static fn run_line_inner(string_address line)
+static HOT fn run_line_inner(string_address line)
 {
         string_address waiting = parse_here_open();
         positive fed_from;
@@ -2392,7 +2392,7 @@ static fn run_line_inner(string_address line)
         eval or a multi-line dot script stop, while the next line read from the
         terminal gets a clean execution signal and still sees $? == 2.
 */
-fn run_line(string_address line)
+HOT fn run_line(string_address line)
 {
         bool top = !shell_run_depth;
 
