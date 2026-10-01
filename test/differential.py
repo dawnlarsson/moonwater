@@ -55671,9 +55671,18 @@ status, out, err = on("a", moon + " link join lab")
 say(status == 0, "a group file with the old check still joins (%r)" % (err[-200:],))
 say(not any(open(top + "/a/root/link.groups", "rb").read()[64:96]),
     "and the file written after it has no check")
+#       The secret on standard input: never in argv, and the same key as when
+#       it was typed there.
+before_key = open(top + "/a/root/link.groups", "rb").read()[32:64]
+status, out, err = on("a", moon + " link join lab -", stdin=(secret + "\n").encode())
+say(status == 0 and open(top + "/a/root/link.groups", "rb").read()[32:64] == before_key,
+    "a secret on standard input makes the same key as one in argv (%r)" % (err[-200:],))
+status, out, err = on("a", moon + " link join lab -", stdin=b"")
+say(status != 0 and b"nothing saved" in (out + err),
+    "and no line on standard input is refused, not taken for an empty secret")
 status, out, err = on("a", moon + " link join fresh-lab allow run")
-say(status == 0 and b"link join fresh-lab " in out,
-    "a made secret is told with the join command that takes it (%r)" % (out[-200:],))
+say(status == 0 and b"link join fresh-lab -" in out,
+    "a made secret is told with the form that keeps it out of argv (%r)" % (out[-200:],))
 on("a", moon + " link leave fresh-lab")
 
 names = {}

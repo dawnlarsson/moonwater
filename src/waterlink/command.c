@@ -575,13 +575,13 @@ static p32 link_grants_of(string_address address_to words, positive count,
 }
 
 /*
-        join NAMESPACE [SECRET] [allow GRANT...]
+        join NAMESPACE [SECRET|-] [allow GRANT...]
 
         With a secret, this machine is in the group from now on and across
         boots, install and wipe; the secret itself is never kept, only what
-        PBKDF2 makes of it. Without one, the group already joined is joined
-        again, or a new group gets a secret of 160 random bits, printed once
-        for the other machines.
+        PBKDF2 makes of it. "-" reads the secret from standard input, which
+        keeps it out of argv. Without one, the group already joined is joined again, or a new group gets a
+        secret of 160 random bits, printed once for the other machines.
         Members get the grants named here, and the verbs when none are. The
         link is switched on.
 */
@@ -643,9 +643,12 @@ static b32 link_join(string_address address_to words, positive count)
                 may = link_grants_of(words + at + 1, count - at - 1,
                                      address_of good);
                 if (!good)
+                {
+                        crypto_forget(typed, sizeof typed);
                         return host_refuse("a grant is one of run shell files "
                                            "log screen channels verbs%s\n",
                                            "");
+                }
                 granted = true;
         }
 
@@ -677,6 +680,7 @@ static b32 link_join(string_address address_to words, positive count)
                 if (groups.count >= LINK_GROUPS_MAX)
                 {
                         crypto_forget(made, sizeof made);
+                        crypto_forget(typed, sizeof typed);
                         crypto_forget(address_of groups, sizeof groups);
                         return host_refuse("this machine is in %s groups "
                                            "already\n",
@@ -709,6 +713,7 @@ static b32 link_join(string_address address_to words, positive count)
         if (link_groups_save(address_of groups) < 0)
         {
                 crypto_forget(made, sizeof made);
+                crypto_forget(typed, sizeof typed);
                 crypto_forget(address_of groups, sizeof groups);
                 return host_refuse("%s could not be written\n", LINK_GROUPS_PATH);
         }
@@ -719,9 +724,9 @@ static b32 link_join(string_address address_to words, positive count)
         if (generated)
                 string_format(log,
                               host_label "the secret is %s -- on each other "
-                                         "machine: moonwater link join %s %s\n",
-                              (string_address)made, namespace,
-                              (string_address)made);
+                                         "machine, with it on standard input: "
+                                         "moonwater link join %s -\n",
+                              (string_address)made, namespace);
         else if (secret && string_length(secret) < 20)
                 string_format(log, host_label "a secret this short can be "
                                               "guessed offline by anyone on "
