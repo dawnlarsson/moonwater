@@ -37213,6 +37213,22 @@ static bipolar system_open_at(bipolar dir, string_address path, positive flags) 
     return 3;
 }
 static void system_close(bipolar handle) { (void)handle; }
+/* The identity files are already there, so session prep asks once and stops;
+   what it writes when they are not is the bowl lane's to check. */
+#define array_count(list) (sizeof(list) / sizeof((list)[0]))
+static bipolar system_access_at(bipolar dir, string_address path, positive mode) {
+    (void)dir; (void)path; (void)mode;
+    return 0;
+}
+static bipolar system_random_fill(void *into, positive length, positive flags) {
+    (void)into; (void)length; (void)flags;
+    return 0;
+}
+static b32 bowl_write_bytes(string_address path, string_address text, positive length) {
+    (void)path; (void)text; (void)length;
+    return 0;
+}
+static bool bowl_quiet;
 static bipolar bowl_mkdir(string_address path) {
     if (mkdirs < 32) snprintf(made[mkdirs], sizeof(made[0]), "%s", path);
     mkdirs++;
