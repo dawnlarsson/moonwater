@@ -101,17 +101,31 @@ firmware its wifi and bluetooth drivers load, fetched from linux-firmware at a
 pinned commit and checked against pinned SHA-256s; no blob is in this
 repository.
 
-**Time.** NTP runs from boot until turned off, walking several public servers
-until the kernel reports the clock synchronised. NTP sampling takes five
-samples a query and keeps the one with the fastest round trip, RFC 5905's clock
-filter, so a queueing spike never sets the clock; it also asks three servers
-and believes the one with the least root distance among those whose answers
-agree, so one wrong server cannot set it either. A server named in
-`/root/ntp.server` is believed on its own. The clock has a floor: the date of the source this was built from, or the
-latest time the machine knew (`/root/clock.good`, kept forward only), whichever
-is later. A clock below it is unset, not wrong: certificates are not judged
-against it (`wget` says so and names `moonwater time sync`, status 5) and no NTP
-answer earlier than it is taken. The timezone is auto until set
+**Time.** NTP runs from boot until turned off. It asks Network Time Security
+servers first (RFC 8915: `time.cloudflare.com`, `nts.netnod.se`,
+`ptbtime1.ptb.de`, or the lines of `/root/ntp.nts.servers`, set with
+`moonwater ntp nts servers NAME...`; `moonwater ntp nts off` turns it off and
+`only` refuses the pool), whose
+answers are authenticated, and falls back to several public pool servers,
+whose answers are not, when none can be reached; `moonwater ntp` says which set
+the clock last. NTP sampling takes five samples a query and keeps the one with
+the fastest round trip, RFC 5905's clock filter, so a queueing spike never sets
+the clock; the pool walk also asks three servers and believes the one with the
+least root distance among those whose answers agree, so one wrong server cannot
+set it either. A server named in `/root/ntp.server` is believed on its own.
+The clock has a floor: the date of the source this was built from, or the latest
+time the machine knew for certain (`/root/clock.good`, written after every
+authenticated answer and while it runs and when it stops),
+whichever is later. A clock below it is unset, not wrong: certificates are not
+judged against it (`wget` says so and names `moonwater time sync`), no answer
+earlier than it is taken, and the NTS key establishment, until an answer has
+been authenticated this boot, is judged as of the floor (`notBefore` not asked),
+which is how an unset or wrong clock gets set.
+`/root/clock.good` is a lower bound nothing forged can move: an authenticated
+answer's own time, or else the floor the boot began with plus the seconds since.
+An authenticated answer is believed wherever the window puts it, a pool answer only
+within a day (two seconds once the clock is synchronised) and never against the NTS
+time of this boot; `moonwater ntp nts only` refuses the pool altogether. The timezone is auto until set
 by hand: on each new network the machine makes one HTTPS request to Cloudflare
 and takes the zone it reports, at most once every three minutes. There is no
 zoneinfo directory: each of tzdata's 420 zones maps to the POSIX rule in its

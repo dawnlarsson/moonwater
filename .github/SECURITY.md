@@ -15,8 +15,10 @@ The testable model distinguishes four attackers:
    exchange. Transaction entropy and exact reply identity must stop it.
 3. **On-path or same-link network:** can observe, inject, replay, delay,
    reorder, truncate, and suppress traffic. TLS is expected to authenticate
-   HTTPS. Plain DNS, DHCPv4, and SNTP do not authenticate an on-path peer;
-   endpoint and nonce checks protect only against off-path forgery.
+   HTTPS. Plain DNS, DHCPv4, and plain SNTP do not authenticate an on-path peer;
+   endpoint and nonce checks protect only against off-path forgery. Time from
+   an NTS server (RFC 8915) is authenticated, and is what sets an unset clock
+   when one is reachable.
 4. **Hostile service:** owns the connected endpoint and can stream arbitrary
    bytes and timing forever. Bounds and absolute deadlines must contain it.
 
@@ -49,7 +51,9 @@ security.
 
 ## Residual risks
 
-- DHCPv4 and unauthenticated SNTP cannot defeat a same-link or on-path peer.
+- DHCPv4 and plain (non-NTS) SNTP cannot defeat a same-link or on-path peer;
+  plain SNTP is the fallback when no NTS server can be reached, and
+  `moonwater ntp nts only` refuses it.
 - DNS is not DNSSEC-validating; transaction checks do not authenticate data to
   its zone owner.
 - The C implementation cannot obtain compile-time ownership and bounds proofs.

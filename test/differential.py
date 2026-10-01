@@ -40364,6 +40364,11 @@ def harness_moonwater_cli(argv):
                 'timezone ""', "timezone a b", "time", "time sync", "time bogus",
                 "time sync extra", "ntp", "ntp on", "ntp off", "ntp sampling", "ntp sampling on",
                 "ntp sampling off", "ntp sampling maybe", "ntp sampling on extra", "ntp a b",
+                "ntp nts", "ntp nts on", "ntp nts off", "ntp nts only", "ntp nts maybe", "ntp nts on extra",
+                "ntp nts servers", "ntp nts servers default",
+                "ntp nts servers a.example b.example:444", "ntp nts servers bad_name",
+                "ntp nts servers a.example:0", "ntp nts servers a.example:99999",
+                "ntp nts servers a b c d e", 'ntp nts servers ""',
                 "keyboard", "keyboard xx", "keyboard a b", "canvas", "canvas on", "canvas off",
                 "canvas bogus", "bind", "bind init", "bind exit", "bind bogus", "wifi",
                 "wifi off", "wifi on", "wifi add", "wifi remove", "wifi remove nobody",
@@ -40705,7 +40710,7 @@ while True:
     except socket.timeout:
         break
     spec = json.load(open("/tmp/ntp.spec"))
-    now = time.time()
+    now = time.time() + spec.get("skew", 0)
     def stamp(t):
         return struct.pack("!II", (int(t) + 2208988800) & 0xffffffff, int((t % 1) * 2**32))
     head = (spec["li"] << 6) | (spec["vn"] << 3) | spec["mode"]
@@ -40847,9 +40852,26 @@ while True:
         script += say("keyboard xx") + "echo \"@@kept $(cat /root/keyboard)\"\n"
         script += say("ntp off") + "echo \"@@ntp $(cat /root/ntp)\"\n"
         script += say("ntp on") + "echo \"@@ntp $(cat /root/ntp)\"\n"
+        #       NTS: its switch, and the servers it asks, refused when one is no name
+        #       (and then the list is as it was), put back by "default".
+        script += say("ntp nts off") + "echo \"@@nts $(cat /root/ntp.nts)\"\n"
+        script += say("ntp nts only") + "echo \"@@nts $(cat /root/ntp.nts)\"\n"
+        script += say("ntp nts on") + "echo \"@@nts $(cat /root/ntp.nts)\"\n"
+        script += (say("ntp nts servers a.example b.example:444") +
+                   "echo \"@@servers $(tr '\\n' , < /root/ntp.nts.servers)\"\n" +
+                   say("ntp nts servers ok.example bad_name") +
+                   "echo \"@@servers $(tr '\\n' , < /root/ntp.nts.servers)\"\n" +
+                   say("ntp nts servers a.example:0") +
+                   "echo \"@@servers $(tr '\\n' , < /root/ntp.nts.servers)\"\n" +
+                   say("ntp nts servers a b c d e") +
+                   "echo \"@@servers $(tr '\\n' , < /root/ntp.nts.servers)\"\n" +
+                   say("ntp nts servers default") +
+                   "echo \"@@servers $([ -e /root/ntp.nts.servers ] && echo present || echo absent)\"\n" +
+                   say("ntp nts servers time.example") + say("ntp nts off"))
         script += say("link key") + say("link off") + "printf g > /root/link.groups\n"
         script += "echo off > /root/wired.power; printf 'power powersave\\n' > /root/tune\n"
-        script += ("mkdir -p /home/u/deep && echo x > /home/u/deep/f && echo y > /root/junk && "
+        script += ("printf x > /root/clock.good && "
+                   "mkdir -p /home/u/deep && echo x > /home/u/deep/f && echo y > /root/junk && "
                    "mkdir -p /root/dir && echo z > /bowls/one/kept\n" + say("wipe") +
                    "echo \"@@after $(ls -A /home | wc -l) $(ls /root | tr '\\n' ,) "
                    "$(cat /bowls/one/kept)\"\n")
@@ -40867,11 +40889,22 @@ while True:
                 check(line != "@@status 0", "an unknown layout is refused", line)
             elif line.startswith("@@ntp "):
                 check(line.split()[1] == current.split()[1], f"{current} is written", line)
+            elif line.startswith("@@nts "):
+                check(line.split()[1] == current.split()[2], f"{current} is written", line)
+            elif line.startswith("@@servers "):
+                want = {"ntp nts servers a.example b.example:444": "a.example,b.example:444,",
+                        "ntp nts servers ok.example bad_name": "a.example,b.example:444,",
+                        "ntp nts servers a.example:0": "a.example,b.example:444,",
+                        "ntp nts servers a b c d e": "a.example,b.example:444,"}.get(current)
+                if current == "ntp nts servers default":
+                    check(line.endswith(" absent"), "ntp nts servers default removes the list", line)
+                else:
+                    check(line.split(" ", 1)[1:] == [want], f"{current} leaves the list as it should", line)
             elif line.startswith("@@after "):
                 parts = line.split()
                 kept = set(filter(None, parts[2].split(",")))
                 check(parts[1] == "0" and "junk" not in kept and "dir" not in kept and
-                             {"keyboard", "ntp", "timezone", "link", "link.key",
+                             {"keyboard", "ntp", "ntp.nts", "ntp.nts.servers", "clock.good", "timezone", "link", "link.key",
                               "link.groups", "wired.power", "tune"} <= kept and
                              parts[3] == "z",
                              "wipe empties /home and /root and keeps the settings (wired and the "
@@ -42085,6 +42118,470 @@ def harness_tls_chains(argv):
             else:
                 checks(True, "%s: no chain Go refuses that wget accepts" % name)
     return checks.verdict("tls chains", "tls-chains")
+
+
+def harness_nts(argv):
+    """Network Time Security end to end: this client's NTS-KE and NTP against
+    chrony's server, and against servers that are wrong.
+
+    The shell is built trusting a root the harness makes (TLS_BENCH_ANCHOR), and
+    everything runs in a user, mount and network namespace with only loopback,
+    /root and /run their own. chronyd (built with NTS; MOONWATER_CHRONYD or
+    --chronyd names it, and the lane is NOT RUN without one) serves NTS-KE and
+    NTP on loopback, announcing a time server of 127.0.0.3 that a relay in this
+    harness stands at and forwards to chrony, so that every reply can be
+    changed on the way back. `moonwater time sync` is the client. A kernel
+    will not let a namespace set the clock, so an answer that was believed
+    ends "answered, but the clock could not be set" under the name it came
+    from with "(NTS)" after it; an answer that was not ends "no server
+    answered" (the pool, asked after NTS fails, is not reachable here).
+
+    - the exchange works against chrony, sampling on and off; a second and a
+      tenth sync make no second key establishment (cookies are spent and
+      replaced by the replies), and a state file that is torn, planted or a
+      link to another file is no state (the exchange is made again, and the
+      file the link names is left as it was)
+    - a reply with any one of its bytes changed, cut short, replayed after a
+      fresh one, with its authenticator stripped, answered for another
+      identifier, or dropped is no answer; one that says NTSN (the cookie is
+      no good) makes exactly one new key establishment and then works
+    - a key-establishment server that selects no ALPN, speaks TLS 1.2 only,
+      has a certificate for another address, an expired one, never answers,
+      answers with noise, or answers past the room is no server
+    - a server named in the reply that is not a public address is not asked;
+      with `ntp nts off` no key establishment is made at all
+
+        python3 test/differential.py --harness nts [--chronyd PATH]
+    """
+    import socket
+    import ssl
+    import struct
+    import threading
+    parser = argparse.ArgumentParser(prog="differential.py --harness nts")
+    parser.add_argument("--chronyd", default=os.environ.get("MOONWATER_CHRONYD") or shutil.which("chronyd"))
+    parser.add_argument("--cc", default=os.environ.get("CC", "gcc"))
+    parser.add_argument("--inner")
+    args = parser.parse_args(argv)
+    if platform.system() != "Linux" or not shutil.which("openssl") or not shutil.which("ip"):
+        print("nts: NOT RUN -- needs Linux, openssl and ip")
+        return 2
+    if not args.chronyd or not Path(args.chronyd).exists():
+        print("nts: NOT RUN -- needs chronyd built with NTS (MOONWATER_CHRONYD or --chronyd)")
+        return 2
+    if subprocess.run(["unshare", "-Urmn", "--fork", "true"], capture_output=True).returncode:
+        print("nts: NOT RUN -- no unprivileged user namespaces here")
+        return 2
+    if not args.inner:
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix="nts-") as temporary:
+            work = Path(temporary)
+            openssl, issue = openssl_workbench(work)
+            p384 = ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:secp384r1"]
+            p256 = ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1"]
+            openssl("req", "-x509", *p384, "-nodes", "-keyout", "root.key", "-out", "root.pem",
+                    "-days", "30", "-sha384", "-subj", "/CN=nts root",
+                    "-addext", "basicConstraints=critical,CA:TRUE",
+                    "-addext", "keyUsage=critical,keyCertSign,cRLSign")
+            leaf = ("basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\n"
+                    "extendedKeyUsage=serverAuth\nsubjectAltName=IP:%s\n")
+            issue("good", p256, "/CN=nts", "root", leaf % "127.0.0.1")
+            issue("wrongname", p256, "/CN=nts", "root", leaf % "127.0.0.9")
+            issue("expired", p256, "/CN=nts", "root", leaf % "127.0.0.1", (-400, -1))
+            #   Validity as a clock with a floor sees it: issued in two days, expired
+            #   yesterday, expired twenty days ago, expiring in twelve hours.
+            issue("future", p256, "/CN=nts", "root", leaf % "127.0.0.1", (2, 90))
+            issue("yesterday", p256, "/CN=nts", "root", leaf % "127.0.0.1", (-30, -1))
+            issue("old", p256, "/CN=nts", "root", leaf % "127.0.0.1", (-60, -20))
+            issue("expiring", p256, "/CN=nts", "root", leaf % "127.0.0.1", (-1, 0.5))
+            now_s = int(time.time())
+            #   The shell as shipped, and with a floor ten days back (the clock is above
+            #   it) and one a day ahead (the clock is below it).
+            for variant, defines in (("bin", ()), ("above", ("MOONWATER_CLOCK_FLOOR=%dll" % (now_s - 10 * 86400),)),
+                                     ("below", ("MOONWATER_CLOCK_FLOOR=%dll" % (now_s + 86400),))):
+                (work / variant).mkdir()
+                built = subprocess.run(spark_shell_command(args.cc, work / variant / "moonwater",
+                                                           bench_anchor(work), defines),
+                                       cwd=HARNESS_ROOT, capture_output=True, text=True)
+                if built.returncode:
+                    print(built.stderr[-3000:])
+                    return 1
+                os.symlink("moonwater", work / variant / "wget")
+            ran = subprocess.run(["unshare", "-Urmn", "--fork", sys.executable,
+                                  os.path.abspath(__file__), "--harness", "nts", "--inner", str(work),
+                                  "--chronyd", args.chronyd], cwd=HARNESS_ROOT, stdin=subprocess.DEVNULL,
+                                 timeout=1500)
+            return ran.returncode
+
+    work = Path(args.inner)
+    checks = Checks()
+    subprocess.run(["mount", "-t", "tmpfs", "t", "/root"], check=True)
+    subprocess.run(["mount", "-t", "tmpfs", "t", "/run"], check=True)
+    Path("/run/moonwater").mkdir()
+    subprocess.run(["ip", "link", "set", "lo", "up"], check=True)
+    mw = str(work / "bin/moonwater")
+
+    def chrony(tag, extra, ntsport, ntpport):
+        conf = work / ("chrony-%s.conf" % tag)
+        conf.write_text("port %d\nntsport %d\nbindaddress 127.0.0.1\nntsservercert %s\n"
+                        "ntsserverkey %s\nlocal stratum 3\nallow\ndriftfile %s\npidfile %s\ncmdport 0\n%s" %
+                        (ntpport, ntsport, work / "good.pem", work / "good.key",
+                         work / ("drift-" + tag), work / ("pid-" + tag), extra))
+        return subprocess.Popen([args.chronyd, "-x", "-d", "-f", str(conf)],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    # The servers: one announcing 127.0.0.3 (the relay's), one announcing a
+    # private address, one announcing only a port.
+    daemons = [chrony("relay", "ntsntpserver 127.0.0.3\n", 14460, 123),
+               chrony("private", "ntsntpserver 10.1.2.3\n", 14461, 124),
+               chrony("port", "", 14462, 12346)]
+    time.sleep(2.5)
+
+    #   A TCP proxy in front of chrony's key establishment that counts.
+    ke_count = [0]
+    stop = threading.Event()
+
+    def proxy(listen_port, target_port):
+        listener = socket.socket()
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", listen_port))
+        listener.listen(8)
+        listener.settimeout(0.5)
+
+        def pipe(a, b):
+            try:
+                while True:
+                    data = a.recv(4096)
+                    if not data:
+                        break
+                    b.sendall(data)
+            except OSError:
+                pass
+            for end in (a, b):
+                try:
+                    end.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+
+        while not stop.is_set():
+            try:
+                client, _ = listener.accept()
+            except OSError:
+                continue
+            ke_count[0] += 1
+            upstream = socket.create_connection(("127.0.0.1", target_port))
+            threading.Thread(target=pipe, args=(client, upstream), daemon=True).start()
+            threading.Thread(target=pipe, args=(upstream, client), daemon=True).start()
+
+    threading.Thread(target=proxy, args=(14470, 14460), daemon=True).start()
+
+    #   The NTP relay at 127.0.0.3:123: to chrony and back, changing the reply.
+    mode = {"name": "pass", "arg": 0, "last": None, "served": 0}
+
+    def relay():
+        front = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        front.bind(("127.0.0.3", 123))
+        front.settimeout(0.5)
+        back = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        back.settimeout(1.5)
+        while not stop.is_set():
+            try:
+                request, peer = front.recvfrom(2048)
+            except OSError:
+                continue
+            kind = mode["name"]
+            if kind == "drop":
+                continue
+            back.sendto(request, ("127.0.0.1", 123))
+            try:
+                reply = back.recv(2048)
+            except OSError:
+                continue
+            fresh = reply
+            if kind == "flip":
+                reply = bytearray(reply)
+                reply[mode["arg"] % len(reply)] ^= 0x01
+                reply = bytes(reply)
+            elif kind == "cut":
+                reply = reply[:mode["arg"]]
+            elif kind == "replay" and mode["last"]:
+                reply = mode["last"]
+            elif kind == "strip":
+                at = 48
+                while at + 4 <= len(reply) and reply[at:at + 2] != b"\x04\x04":
+                    at += struct.unpack(">H", reply[at + 2:at + 4])[0]
+                reply = reply[:at]
+            elif kind == "nak" or (kind == "nak-once" and mode["served"] == 0):
+                uid = request[48 + 4:48 + 36]
+                reply = (bytes([0x24, 0, 0, 0]) + bytes(8) + b"NTSN" + bytes(8) + request[40:48] +
+                         bytes(16) + b"\x01\x04\x00\x24" + uid)
+            elif kind == "uid":
+                reply = bytearray(reply)
+                reply[48 + 4] ^= 0x80
+                reply = bytes(reply)
+            elif kind == "extra":
+                reply = reply + b"\0\0\0\0"
+            mode["last"] = fresh
+            mode["served"] += 1
+            front.sendto(reply, peer)
+
+    threading.Thread(target=relay, daemon=True).start()
+
+    def sync(entries, sampling=False, timeout=60, shell=None):
+        Path("/root/ntp.nts.servers").write_text("\n".join(entries) + "\n")
+        Path("/root/ntp.sampling").write_text("on\n" if sampling else "off\n")
+        ran = subprocess.run([shell or mw, "time", "sync"], capture_output=True, text=True, timeout=timeout,
+                             env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
+        text = re.sub(r"\x1b\[[0-9;]*m", "", ran.stdout + ran.stderr)
+        return text.splitlines()[0] if text else ""
+
+    def believed(line, name):
+        return ("%s (NTS) answered" % name) in line
+
+    state_path = Path("/run/moonwater/nts")
+    ke = "127.0.0.1:14470"
+
+    # The exchange works, and its state makes the next ones cheap.
+    for sampling in (False, True):
+        state_path.unlink(missing_ok=True)
+        ke_count[0] = 0
+        line = sync([ke], sampling)
+        checks(believed(line, ke), "an NTS exchange with chrony (sampling %s) says what it should: %s"
+               % (sampling, line))
+        checks(state_path.exists() and (state_path.stat().st_mode & 0o777) == 0o600,
+               "the NTS state is a file of mode 0600")
+        for _ in range(9):
+            line = sync([ke], sampling)
+            checks(believed(line, ke), "a later NTS exchange (sampling %s): %s" % (sampling, line))
+        checks(ke_count[0] == 1, "ten syncs with sampling %s made %d key establishments, not one"
+               % (sampling, ke_count[0]))
+
+    # State that is not state.
+    for label, damage in (("torn", lambda p: p.write_bytes(p.read_bytes()[:700])),
+                          ("zeroed", lambda p: p.write_bytes(bytes(len(p.read_bytes())))),
+                          ("a flipped magic", lambda p: p.write_bytes(b"\xff" + p.read_bytes()[1:])),
+                          ("empty", lambda p: p.write_bytes(b""))):
+        sync([ke])
+        damage(state_path)
+        before = ke_count[0]
+        line = sync([ke])
+        checks(believed(line, ke) and ke_count[0] == before + 1,
+               "NTS state %s is established again (%d new key establishments): %s"
+               % (label, ke_count[0] - before, line))
+    state_path.unlink()
+    victim = work / "victim"
+    victim.write_text("untouched\n")
+    state_path.symlink_to(victim)
+    line = sync([ke])
+    checks(believed(line, ke) and victim.read_text() == "untouched\n",
+           "a link planted as the state file is not written through: %s" % line)
+    state_path.unlink()
+
+    # Lost replies cost cookies only until the next one that comes: placeholders
+    # ask for the eight back.
+    def cookies_held():
+        raw = state_path.read_bytes()
+        return int.from_bytes(raw[4 + 200:4 + 208], "little")
+
+    state_path.unlink(missing_ok=True)
+    before = ke_count[0]
+    sync([ke])
+    checks(cookies_held() == 8, "a fresh state holds eight cookies, not %d" % cookies_held())
+    mode.update(name="drop")
+    for _ in range(3):
+        sync([ke])
+    checks(cookies_held() == 5, "three lost replies leave five cookies, not %d" % cookies_held())
+    mode.update(name="pass")
+    line = sync([ke])
+    checks(believed(line, ke) and cookies_held() == 8 and ke_count[0] == before + 1,
+           "one reply that comes brings the eight back with no new key establishment (%d cookies, %d establishments): %s"
+           % (cookies_held(), ke_count[0] - before, line))
+
+    # A reply that is not the server's.
+    sync([ke])
+    cookies_before = state_path.read_bytes()
+    for kind, arg in [("flip", at) for at in (0, 1, 2, 12, 24, 40, 47, 48, 49, 51, 52, 60, 84, 88, 90,
+                                                   120, 160, 170, 180)] + \
+                     [("cut", at) for at in (0, 47, 48, 60, 84, 100, 150, 200)] + \
+                     [("uid", 0), ("strip", 0), ("extra", 0), ("drop", 0), ("replay", 0)]:
+        mode.update(name=kind, arg=arg, last=mode["last"])
+        line = sync([ke])
+        checks("(NTS)" not in line and "no server answered" in line,
+               "a reply under %s %d is no answer: %s" % (kind, arg, line))
+    mode.update(name="pass")
+    line = sync([ke])
+    checks(believed(line, ke), "and the next honest one is an answer: %s" % line)
+
+    # The server says the cookie is no good: one new key establishment.
+    mode.update(name="nak-once", served=0)
+    before = ke_count[0]
+    line = sync([ke])
+    checks(believed(line, ke) and ke_count[0] == before + 1,
+           "NTSN makes one new key establishment, then the exchange works (%d): %s"
+           % (ke_count[0] - before, line))
+    mode.update(name="nak")
+    before = ke_count[0]
+    line = sync([ke])
+    checks("(NTS)" not in line and ke_count[0] == before + 1,
+           "NTSN every time is one more key establishment and no answer (%d): %s"
+           % (ke_count[0] - before, line))
+    mode.update(name="pass")
+
+    # A key-establishment server that is wrong.
+    def bad_server(port, cert, behaviour, wait=None):
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(work / (cert + ".pem"), work / (cert + ".key"))
+        if behaviour == "tls12":
+            context.minimum_version = context.maximum_version = ssl.TLSVersion.TLSv1_2
+        else:
+            context.minimum_version = ssl.TLSVersion.TLSv1_3
+        if behaviour != "noalpn":
+            context.set_alpn_protocols(["ntske/1"])
+        listener = socket.socket()
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", port))
+        listener.listen(2)
+        listener.settimeout(40)
+        accepted = []
+
+        def serve():
+            try:
+                raw, _ = listener.accept()
+                accepted.append(1)
+                raw.settimeout(15)
+                with context.wrap_socket(raw, server_side=True) as tls:
+                    tls.recv(4096)
+                    record = lambda kind, body: struct.pack(">HH", kind, len(body)) + body
+                    good = (record(0x8001, b"\0\0") + record(0x8004, b"\0\x0f") +
+                            record(5, b"A" * 100) + record(0x8000, b""))
+                    if behaviour == "noise":
+                        tls.sendall(bytes(range(256)) * 4)
+                    elif behaviour == "huge":
+                        tls.sendall(record(5, b"B" * 60000))
+                    elif behaviour == "silent":
+                        time.sleep(wait or 9)
+                    elif behaviour in ("noalpn", "ke"):
+                        tls.sendall(good)
+            except (OSError, ssl.SSLError):
+                pass
+            listener.close()
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        return thread, accepted
+
+    for number, (behaviour, cert) in enumerate((("noalpn", "good"), ("tls12", "good"), ("noise", "good"),
+                                                ("huge", "good"), ("good", "wrongname"),
+                                                ("good", "expired"), ("silent", "good"))):
+        port = 14500 + number
+        thread, accepted = bad_server(port, cert, behaviour)
+        Path("/run/moonwater/nts").unlink(missing_ok=True)
+        line = sync(["127.0.0.1:%d" % port])
+        thread.join(2)
+        checks("(NTS)" not in line and "no server answered" in line,
+               "a key-establishment server that is %s%s is no server: %s" %
+               (behaviour, "" if cert == "good" else " with the %s certificate" % cert, line))
+
+    # A server named in the reply that is not a public address is not asked: the
+    # address is on the loopback here and a listener on it says whether it was.
+    subprocess.run(["ip", "addr", "add", "10.1.2.3/32", "dev", "lo"], check=True)
+    private_seen = []
+
+    def private_listener():
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.bind(("10.1.2.3", 124))
+        sock.settimeout(0.5)
+        while not stop.is_set():
+            try:
+                private_seen.append(sock.recvfrom(2048)[0])
+            except OSError:
+                pass
+
+    threading.Thread(target=private_listener, daemon=True).start()
+    time.sleep(0.3)
+    line = sync(["127.0.0.1:14461"])
+    checks("(NTS)" not in line and not private_seen,
+           "a time server that is a private address is not asked (%d packets there): %s"
+           % (len(private_seen), line))
+    line = sync(["127.0.0.1:14462"])
+    checks(believed(line, "127.0.0.1:14462"), "a port named alone is taken: %s" % line)
+
+    # The connection that says what time it is is judged as of the floor: a
+    # certificate that is not yet valid, or expired since the floor and not
+    # before it, passes; one that had expired before the floor does not. wget
+    # from the same shells holds to the clock and to its floor.
+    def https_get(shell, cert, port):
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.minimum_version = ssl.TLSVersion.TLSv1_3
+        context.load_cert_chain(work / (cert + ".pem"), work / (cert + ".key"))
+        listener = socket.socket()
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", port))
+        listener.listen(1)
+        listener.settimeout(15)
+
+        def serve():
+            try:
+                raw, _ = listener.accept()
+                raw.settimeout(10)
+                with context.wrap_socket(raw, server_side=True) as tls:
+                    tls.recv(4096)
+                    tls.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+            except (OSError, ssl.SSLError):
+                pass
+            listener.close()
+
+        threading.Thread(target=serve, daemon=True).start()
+        ran = subprocess.run([str(Path(shell).parent / "wget"), "-q", "-O", "-", "https://127.0.0.1:%d/" % port],
+                             capture_output=True, text=True, timeout=30, env={"PATH": "/usr/bin:/bin"})
+        return ran.returncode, ran.stderr
+
+    port = 14520
+    for label, shell, cert, accepted in (
+            ("a certificate as issued", "bin", "good", True),
+            ("a certificate not yet valid, floor behind the clock", "above", "future", True),
+            ("a certificate expired since the floor", "above", "yesterday", True),
+            ("a certificate expired before the floor", "above", "old", False),
+            ("a certificate not yet valid, floor ahead of the clock", "below", "future", True),
+            ("a certificate that expires before the floor", "below", "expiring", False),
+            ("a certificate as issued, floor ahead of the clock", "below", "good", True)):
+        port += 1
+        thread, taken = bad_server(port, cert, "ke")
+        state_path.unlink(missing_ok=True)
+        sync(["127.0.0.1:%d" % port], shell=str(work / shell / "moonwater"))
+        thread.join(3)
+        checks(state_path.exists() == accepted,
+               "key establishment with %s (floor %s): %s" % (label, shell,
+                                                               "taken" if state_path.exists() else "refused"))
+    state_path.unlink(missing_ok=True)
+    port += 1
+    code, said = https_get(work / "above" / "moonwater", "yesterday", port)
+    checks(code == 5 and "has expired" in said,
+           "wget refuses the certificate that key establishment took (%d): %s" % (code, said.strip()[:120]))
+    port += 1
+    code, said = https_get(work / "below" / "moonwater", "good", port)
+    checks(code == 5 and "has not been set" in said,
+           "wget from a clock below its floor says so (%d): %s" % (code, said.strip()[:120]))
+
+    # NTS only: the same exchange, and nothing else would be asked.
+    Path("/root/ntp.nts").write_text("only\n")
+    line = sync([ke])
+    checks(believed(line, ke), "ntp nts only still takes an NTS answer: %s" % line)
+    line = sync(["127.0.0.1:14501"])
+    checks("(NTS)" not in line and "no server answered" in line,
+           "ntp nts only with no server to ask is no answer: %s" % line)
+
+    # NTS off: no key establishment at all.
+    Path("/root/ntp.nts").write_text("off\n")
+    before = ke_count[0]
+    line = sync([ke])
+    checks(ke_count[0] == before and "(NTS)" not in line,
+           "ntp nts off makes no key establishment: %s" % line)
+    Path("/root/ntp.nts").unlink()
+
+    stop.set()
+    for daemon in daemons:
+        daemon.terminate()
+    return checks.verdict("nts", "nts")
 
 
 def harness_tls_peer(argv):
@@ -48088,11 +48585,13 @@ def tls_verify_chain_lift(net, now=None, aia=None):
                                 "/*\n        Whether the clock can be believed at all")
     if now:
         date = ("static bool tls_date_now(p64 address_to value)\n"
-                "{\n        address_to value = %s;\n        return true;\n}\n" % now)
+                "{\n        address_to value = %s;\n        return true;\n}\n"
+                "static bool tls_date_floor(p64 address_to value)\n"
+                "{\n        address_to value = %s;\n        return true;\n}\n" % (now, now))
     else:
         date = ("#include <time.h>\ntypedef struct tm tm;\n"
                 "static p64 clock_trust_floor(void) { return 0; }\n") + src_slice(
-            net, "static COLD bool tls_date_now(p64 address_to value)",
+            net, "static COLD bool tls_date_of(time_t stamp, p64 address_to value)",
             "static COLD bool tls_cert_current(")
     return (r"""
 #define array_count(a) (sizeof(a) / sizeof((a)[0]))
@@ -48103,6 +48602,7 @@ def tls_verify_chain_lift(net, now=None, aia=None):
 typedef struct
 {
         bool check_cert;
+        bool clock_bootstrap;
         p8 leaf_qx[48];
         p8 leaf_qy[48];
         p8 leaf_n[CRYPTO_RSA_BYTES];
@@ -49503,7 +50003,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                 if (flags & 1)
                         memcpy(reply + 24, request + 40, 8);
                 memset(heard + heard_count, 0, sizeof heard[0]);
-                if (sntp_reply_sample(reply, request, t1, t4, flags & 2,
+                if (sntp_reply_sample(reply, request, t1, t4, !!(flags & 2),
                                       heard + heard_count) == SNTP_OK)
                         heard_count++;
         }
@@ -50818,6 +51318,125 @@ def crypto_vectors_lines(seed):
     sealed = AESGCM(key).encrypt(iv, b"", aad)
     emit("gcm", 1, key, iv, aad, b"", b"", sealed)
 
+    # ---- AES-SIV-CMAC-256 (RFC 5297; NTS's AEAD_AES_SIV_CMAC_256) -------
+    #   Fields: the 32-byte key, the strings before the plaintext (each a
+    #   two-byte length and its bytes), the plaintext, the ciphertext and the
+    #   16-byte tag that leads OpenSSL's output. RFC 5297's two examples
+    #   first, held to OpenSSL's answer too; then every length either side of
+    #   the padding and block edges under zero to three strings (NTS seals
+    #   with two: the packet so far, then the nonce); then the tag's every
+    #   byte flipped, the text and each string tampered, a string moved.
+    from cryptography.hazmat.primitives.ciphers.aead import AESSIV
+
+    def siv_emit(expect, key, strings, plain, cipher, tag):
+        packed = b"".join(len(part).to_bytes(2, "big") + part for part in strings)
+        emit("siv", expect, key, packed, plain, cipher, tag)
+
+    def siv_seal(key, strings, plain):
+        sealed = AESSIV(key).encrypt(plain, list(strings))
+        return sealed[16:], sealed[:16]
+
+    rfc = (
+        ("A.1", bytes.fromhex("fffefdfcfbfaf9f8f7f6f5f4f3f2f1f0f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff"),
+         [bytes.fromhex("101112131415161718191a1b1c1d1e1f2021222324252627")],
+         bytes.fromhex("112233445566778899aabbccddee"),
+         "85632d07c6e8f37f950acd320a2ecc9340c02b9690c4dc04daef7f6afe5c"),
+        ("A.2", bytes.fromhex("7f7e7d7c7b7a79787776757473727170404142434445464748494a4b4c4d4e4f"),
+         [bytes.fromhex("00112233445566778899aabbccddeeffdeaddadadeaddadaffeeddccbbaa99887766554433221100"),
+          bytes.fromhex("102030405060708090a0"), bytes.fromhex("09f911029d74e35bd84156c5635688c0")],
+         bytes.fromhex("7468697320697320736f6d6520706c61696e7465787420746f20656e6372797074207573696e67205349562d414553"),
+         "7bdb6e3b432667eb06f4d14bff2fbd0fcb900f2fddbe404326601965c889bf17dba77ceb094fa663b7a3f748ba8af829ea64ad544a272e9c485b62a3fd5c0d"),
+    )
+    for name, key, strings, plain, expected in rfc:
+        cipher, tag = siv_seal(key, strings, plain)
+        assert (tag + cipher).hex() == expected, "RFC 5297 %s: OpenSSL disagrees with the RFC" % name
+        siv_emit(1, key, strings, plain, cipher, tag)
+    for length in sorted({0, 1, 15, 16, 17, 31, 32, 33, 47, 48, 49, 100, 255, 256, 1000, 4096}):
+        key = draw(32)
+        strings = [draw(rng.choice((0, 1, 15, 16, 17, 40, 100))) for _ in range(rng.choice((0, 1, 2, 3)))]
+        plain = draw(length)
+        cipher, tag = siv_seal(key, strings, plain)
+        siv_emit(1, key, strings, plain, cipher, tag)
+    key, strings, plain = draw(32), [draw(70), draw(16)], draw(40)
+    cipher, tag = siv_seal(key, strings, plain)
+    for at in range(16):
+        flipped = bytearray(tag)
+        flipped[at] ^= 1 << rng.randrange(8)
+        siv_emit(0, key, strings, plain, cipher, bytes(flipped))
+    for at in (0, 39):
+        text = bytearray(cipher)
+        text[at] ^= 0x80
+        siv_emit(0, key, strings, plain, bytes(text), tag)
+    for index in (0, 1):
+        changed = list(strings)
+        changed[index] = bytes([changed[index][0] ^ 1]) + changed[index][1:]
+        siv_emit(0, key, changed, plain, cipher, tag)
+    siv_emit(0, key, strings[:1], plain, cipher, tag)
+    siv_emit(0, key, strings[::-1], plain, cipher, tag)
+    siv_emit(0, key, strings + [b""], plain, cipher, tag)
+
+    # ---- NTS replies (RFC 8915 5.6; nts_reply) ------------------------------
+    #   A server's reply as Python's AESSIV builds it: the header, the unique
+    #   identifier echoed, an unknown field maybe, and the authenticator with
+    #   the new cookies inside. Fields: the server-to-client key, the
+    #   identifier, the whole packet, the cookies the reply brings (each a
+    #   two-byte length and its bytes). Accepted as it stands, and refused for
+    #   every single byte changed, every shorter length, a foreign
+    #   identifier, the authenticator not last, a field of the wrong size, a
+    #   second identifier and a second authenticator.
+    def nts_ef(kind, body):
+        body = body + b"\0" * (-len(body) % 4)
+        return kind.to_bytes(2, "big") + (len(body) + 4).to_bytes(2, "big") + body
+
+    def nts_reply(key, uid, cookies, extras=(), echo=True, plain=None, nonce_length=16,
+                  auth_first=False):
+        head = draw(48)
+        head = bytes([0x24]) + head[1:]
+        body = (nts_ef(0x0104, uid) if echo else b"") + b"".join(extras)
+        inner = b"".join(nts_ef(0x0204, cookie) for cookie in cookies) if plain is None else plain
+        nonce = draw(nonce_length)
+        sealed = AESSIV(key).encrypt(inner, [head + body, nonce])
+        auth = nts_ef(0x0404, len(nonce).to_bytes(2, "big") + len(sealed).to_bytes(2, "big") +
+                      nonce + b"\0" * (-len(nonce) % 4) + sealed + b"\0" * (-len(sealed) % 4))
+        return head + body + auth
+
+    def nts_emit(expect, key, uid, packet, cookies):
+        emit("ntsreply", expect, key, uid, packet,
+             b"".join(len(c).to_bytes(2, "big") + c for c in cookies))
+
+    for count in (0, 1, 3, 8):
+        key, uid = draw(32), draw(32)
+        cookies = [draw(rng.choice((100, 96, 104, 101))) for _ in range(count)]
+        packet = nts_reply(key, uid, cookies)
+        nts_emit(1, key, uid, packet, [c + b"\0" * (-len(c) % 4) for c in cookies])
+        if count == 3:
+            for at in range(len(packet)):
+                flipped = bytearray(packet)
+                flipped[at] ^= 1 << rng.randrange(8)
+                nts_emit(0, key, uid, bytes(flipped), [])
+            for length in range(len(packet)):
+                nts_emit(0, key, uid, packet[:length], [])
+            nts_emit(0, key, draw(32), packet, [])
+            nts_emit(0, draw(32), uid, packet, [])
+            nts_emit(0, key, uid, packet + b"\0" * 4, [])
+            extra = nts_ef(0x0304, b"\0" * 100)
+            nts_emit(1, key, uid, nts_reply(key, uid, cookies, extras=[extra]), [c + b"\0" * (-len(c) % 4) for c in cookies])
+            nts_emit(0, key, uid, nts_reply(key, uid, cookies, extras=[nts_ef(0x0104, uid)]), [])
+            nts_emit(0, key, uid, nts_reply(key, uid, cookies, echo=False), [])
+            #   Authenticated fields that do not parse bring no cookie and no refusal.
+            nts_emit(1, key, uid, nts_reply(key, uid, cookies, plain=b"\0\0\0"), [])
+            nts_emit(1, key, uid, nts_reply(key, uid, cookies, nonce_length=0), [c + b"\0" * (-len(c) % 4) for c in cookies])
+            nts_emit(1, key, uid, nts_reply(key, uid, cookies, nonce_length=32), [c + b"\0" * (-len(c) % 4) for c in cookies])
+            #   A field of 12 bytes is shorter than RFC 7822 allows a field.
+            nts_emit(0, key, uid, nts_reply(key, uid, cookies, extras=[nts_ef(0x0999, b"\0" * 8)]), [])
+    #   More cookies than the state holds are kept up to its room, never past.
+    key, uid = draw(32), draw(32)
+    many = [draw(80) for _ in range(9)]
+    nts_emit(1, key, uid, nts_reply(key, uid, many), many[:8])
+    #   A cookie longer than the room is passed over, the rest kept.
+    long = [draw(300), draw(100)]
+    nts_emit(1, key, uid, nts_reply(key, uid, long), long[1:])
+
     # ---- X25519 -------------------------------------------------------
     p25519 = 2 ** 255 - 19
     #   RFC 7748 and Wycheproof's low-order and edge u: each of them makes
@@ -51341,6 +51960,9 @@ b32 main(void)
         p8 secret[96], out[160], peer[97], peer_scalar[48], message[64], tag[16];
         p8 iv[12] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
         crypto_aesgcm_key key;
+        crypto_siv_key siv;
+        const p8 *siv_parts[2] = {message, message + 16};
+        positive siv_lengths[2] = {16, 8};
         p64 seed = 0x9e3779b97f4a7c15ull * (p64)(p8)which[0];
 
         for (positive i = 0; i < 96; i++)
@@ -51385,6 +52007,18 @@ b32 main(void)
                 tag[(p8)which[0] % 16] ^= 1;
                 out[0] = crypto_aesgcm_open(&key, iv, message, 16, message + 16, 32, tag);
                 break;
+        case 'j':
+                //      The NTS AEAD under a secret key: both AES schedules,
+                //      CMAC and the counter stream.
+                crypto_siv_prepare(&siv, secret);
+                crypto_siv_seal(&siv, siv_parts, siv_lengths, 2, message + 24, 32, tag);
+                break;
+        case 'k':
+                crypto_siv_prepare(&siv, secret);
+                crypto_siv_seal(&siv, siv_parts, siv_lengths, 2, message + 24, 32, tag);
+                tag[(p8)which[0] % 16] ^= 1;
+                out[0] = crypto_siv_open(&siv, siv_parts, siv_lengths, 2, message + 24, 32, tag);
+                break;
         default: crypto_hkdf_extract(message, 32, secret, 32, out);
         }
         //      What was computed is read, or the compiler drops a compare
@@ -51400,6 +52034,7 @@ CRYPTO_SECRET_PRIMITIVES = (
     ("c", "ECDH P-384 public"), ("d", "ECDH P-384 shared"),
     ("e", "AES-128-GCM key and seal"), ("f", "HMAC-SHA256 key"),
     ("g", "crypto_same"), ("i", "AES-128-GCM refusing a forged tag"),
+    ("j", "AES-SIV-CMAC-256 key and seal"), ("k", "AES-SIV-CMAC-256 refusing a forged tag"),
     ("h", "HKDF-Extract"))
 
 
@@ -52754,6 +53389,7 @@ def harness_tls_fuzz(argv):
     seeds["waterlink_pre"] = len(waterlink_pre_seeds())
     seeds["wifi_eapol"] = len(wifi_eapol_fuzz_seeds())
     seeds["wifi_scan"] = len(wifi_scan_fuzz_seeds())
+    seeds["nts"] = len(nts_fuzz_seeds())
     targets = []
     for name, corpus, harness in (
             ("tls_der_fuzz", "tls_der", harness_tls_der_fuzz),
@@ -52765,6 +53401,7 @@ def harness_tls_fuzz(argv):
             ("sntp_fuzz", "sntp", harness_sntp_fuzz),
             ("wifi_eapol_fuzz", "wifi_eapol", harness_wifi_eapol_fuzz),
             ("wifi_scan_fuzz", "wifi_scan", harness_wifi_scan_fuzz),
+            ("nts_fuzz", "nts", harness_nts_fuzz),
             ("dns_fuzz", "dns", harness_dns_fuzz),
             ("netlink_fuzz", "netlink", harness_netlink_fuzz),
             ("crypto_fuzz", "crypto", harness_crypto_fuzz),
@@ -53815,6 +54452,7 @@ int main(void)
         sntp = harness_sntp_fuzz([])
         wifi = harness_wifi_eapol_fuzz([])
         scan = harness_wifi_scan_fuzz([])
+        nts = harness_nts_fuzz([])
         dns = harness_dns_fuzz([])
         netlink = harness_netlink_fuzz([])
         crypto = harness_crypto_fuzz([])
@@ -53836,6 +54474,7 @@ int main(void)
     checks(sntp == 0, "sntp_fuzz clean under MSan")
     checks(wifi == 0, "wifi_eapol_fuzz clean under MSan")
     checks(scan == 0, "wifi_scan_fuzz clean under MSan")
+    checks(nts in (0, 2), "nts_fuzz clean under MSan")
     checks(dns == 0, "dns_fuzz clean under MSan")
     checks(netlink == 0, "netlink_fuzz clean under MSan")
     checks(crypto in (0, 2), "crypto_fuzz clean under MSan")
@@ -53868,7 +54507,7 @@ def harness_security_hygiene(argv):
     security = ("tls_chains", "https_downgrade", "http_response_framing",
                 "tls_der_fuzz", "tls_hs_fuzz", "tls_fuzz", "msan_net", "pathname_race",
                 "dhcp_fuzz", "sntp_fuzz", "dns_fuzz", "netlink_fuzz", "tls_peer",
-                "http_fuzz", "http_urls", "wifi_eapol_fuzz", "wifi_scan_fuzz",
+                "http_fuzz", "http_urls", "wifi_eapol_fuzz", "wifi_scan_fuzz", "nts_fuzz", "nts",
                 "wget_mutation", "wget_hostile", "sntp_era", "net_netem")
     for name in security + ("tls_verify_fuzz",):
         checks(name in HARNESS_CHECKS, "differential.py: %s is not registered" % name)
@@ -53881,7 +54520,7 @@ def harness_security_hygiene(argv):
         checks("--harness " + name in run, "test/run: no lane asks for --harness " + name)
     for name in ("tls_der_fuzz", "tls_hs_fuzz", "pathname_race", "dhcp_fuzz",
                  "sntp_fuzz", "dns_fuzz", "netlink_fuzz", "http_fuzz", "wifi_eapol_fuzz",
-                 "wifi_scan_fuzz"):
+                 "wifi_scan_fuzz", "nts_fuzz", "nts"):
         checks(name + ": skipped (soft)" in run, "test/run: no soft skip for " + name)
 
     names = set()
@@ -57497,6 +58136,200 @@ def harness_wifi_scan_fuzz(argv):
                         NET_ZONE_FUZZ_SHIM + byte_reader_source() + wait + netlink +
                         WIFI_SCAN_FUZZ_PRELUDE + scan + WIFI_SCAN_FUZZ_DRIVER, 4096)
 
+
+
+NTS_FUZZ_PRELUDE = r"""
+#define NTS_FUZZ_SHIM 1
+static fn crypto_forget(address_any at, positive length)
+{
+        memset(at, 0, length);
+        __asm__ __volatile__("" : : "r"(at) : "memory");
+}
+/* The cipher is not what this target is about: a tag opens when its first
+   byte is odd, so that the reply's decrypted fields are reached, and the
+   plaintext is the ciphertext with one byte changed so that the lift cannot
+   pass the input through unread. */
+typedef struct { p8 key[32]; } crypto_siv_key;
+static fn crypto_siv_prepare(crypto_siv_key *key, const p8 *raw)
+{
+        memcpy(key->key, raw, 32);
+}
+static fn crypto_siv_seal(const crypto_siv_key *key, const p8 **parts,
+                          const positive *lengths, positive count, p8 *text,
+                          positive length, p8 *tag)
+{
+        for (positive at = 0; at < count; at++)
+                if (lengths[at] && !parts[at])
+                        abort();
+        (void)key;
+        (void)text;
+        (void)length;
+        memset(tag, 0xa5, 16);
+}
+static bool crypto_siv_open(const crypto_siv_key *key, const p8 **parts,
+                            const positive *lengths, positive count, p8 *text,
+                            positive length, const p8 *tag)
+{
+        (void)key;
+        for (positive at = 0; at < count; at++)
+                if (lengths[at] && !parts[at])
+                        abort();
+        if (!(tag[0] & 1))
+                return false;
+        (void)text[length ? length - 1 : 0];
+        return true;
+}
+"""
+
+NTS_FUZZ_DRIVER = r"""
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+{
+        static nts_state state;
+        static nts_exchange exchange;
+        p8 *bytes;
+        p8 mode = size ? data[0] : 0;
+
+        if (!size)
+                return 0;
+        size--;
+        data++;
+        /* Exactly the input's size, so ASan sees every byte past it. */
+        bytes = malloc(size ? size : 1);
+        memcpy(bytes, data, size);
+        memset(&state, 0, sizeof state);
+        if (mode % 3 == 0)
+        {
+                bipolar verdict = nts_ke_reply(bytes, size, &state);
+
+                (void)nts_ke_complete(bytes, size);
+                if (verdict == NTS_KE_OK)
+                {
+                        if (!state.count || state.count > NTS_COOKIES || !state.port ||
+                            (state.server[0] &&
+                             !nts_name_ok(state.server, strlen((char *)state.server))))
+                                abort();
+                        for (positive at = 0; at < state.count; at++)
+                                if (!state.length[at] || state.length[at] > NTS_COOKIE_MAX)
+                                        abort();
+                        if (!nts_ke_complete(bytes, size))
+                                abort();
+                }
+        }
+        else if (mode % 3 == 1)
+        {
+                static p8 key[32];
+
+                memset(&exchange, 0, sizeof exchange);
+                exchange.state = &state;
+                crypto_siv_prepare(&exchange.s2c, key);
+                if (size >= 48 + 36)
+                        memcpy(exchange.uid, bytes + 48 + 4, 32);
+                if (nts_reply(&exchange, bytes, size) == NTS_REPLY_OK &&
+                    state.count > NTS_COOKIES)
+                        abort();
+                for (positive at = 0; at < state.count; at++)
+                        if (!state.length[at] || state.length[at] > NTS_COOKIE_MAX)
+                                abort();
+        }
+        else
+        {
+                static p8 packet[NTS_PACKET_ROOM];
+                positive room = NTS_HEADER + (size > 600 ? 600 : size);
+                positive length;
+
+                memset(&exchange, 0, sizeof exchange);
+                exchange.state = &state;
+                state.count = 1 + (mode >> 2) % NTS_COOKIES;
+                for (positive at = 0; at < state.count; at++)
+                {
+                        state.length[at] = (p16)(1 + (size + at * 37) % NTS_COOKIE_MAX);
+                        memset(state.cookie[at], 0x11 + (int)at, state.length[at]);
+                }
+                memset(packet, 0, sizeof packet);
+                length = nts_request(&exchange, packet, room);
+                if (length > room || (length && (length - NTS_HEADER) % 4))
+                        abort();
+        }
+        free(bytes);
+        return 0;
+}
+"""
+
+
+def nts_fuzz_seeds():
+    """Name to bytes for the nts corpus: a mode byte (0 the key-establishment
+    reply's parser, 1 an NTP reply's extension fields, 2 a request built over
+    cookies of the input's shape) and the input. Replies are the good one,
+    every record of it cut off and doubled, and NTP replies whose
+    authenticator tag opens (an odd first byte) with cookies, with none, with
+    a field of the wrong size and with bytes after it."""
+    def record(kind, body):
+        return struct.pack(">HH", kind, len(body)) + body
+
+    good = (record(0x8001, b"\0\0") + record(0x8004, b"\0\x0f") + record(0x8006, b"time.example") +
+            record(0x8007, b"\x10\x1b") + record(5, b"A" * 100) * 8 + record(0x8000, b""))
+    seeds = {"ke_good.bin": b"\0" + good, "ke_empty.bin": b"\0",
+             "ke_error.bin": b"\0" + record(0x8002, b"\0\0") + record(0x8000, b""),
+             "ke_warning.bin": b"\0" + record(3, b"\0\1") + record(0x8000, b""),
+             "ke_long_cookie.bin": b"\0" + record(0x8001, b"\0\0") + record(0x8004, b"\0\x0f") +
+                                   record(5, b"B" * 300) + record(0x8000, b""),
+             "ke_trailing.bin": b"\0" + good + b"\0"}
+    for cut in (1, 5, 9, 20, 60):
+        seeds["ke_cut_%d.bin" % cut] = b"\0" + good[:cut]
+
+    def ef(kind, body):
+        body = body + b"\0" * (-len(body) % 4)
+        return struct.pack(">HH", kind, len(body) + 4) + body
+
+    uid = bytes(range(32))
+    header = bytes([0x24, 2]) + bytes(46)
+
+    def reply(inner, tag=b"\xa5" * 16, extras=b""):
+        sealed = tag + inner
+        return (header + ef(0x0104, uid) + extras +
+                ef(0x0404, struct.pack(">HH", 16, len(sealed)) + b"N" * 16 + sealed))
+
+    cookies = b"".join(ef(0x0204, b"C" * 100) for _ in range(3))
+    seeds["reply_cookies.bin"] = b"\1" + reply(cookies)
+    seeds["reply_none.bin"] = b"\1" + reply(b"")
+    seeds["reply_bad_tag.bin"] = b"\1" + reply(cookies, tag=b"\xa4" * 16)
+    seeds["reply_short_inner.bin"] = b"\1" + reply(b"\0\0\0")
+    seeds["reply_extra_field.bin"] = b"\1" + reply(cookies, extras=ef(0x0304, bytes(100)))
+    seeds["reply_trailing.bin"] = b"\1" + reply(cookies) + bytes(4)
+    seeds["reply_plain.bin"] = b"\1" + header
+    seeds["request_a.bin"] = b"\2" + bytes(40)
+    seeds["request_b.bin"] = b"\x1e" + bytes(400)
+    return seeds
+
+
+def harness_nts_fuzz(argv):
+    """Coverage-guided libFuzzer over the NTS wire code in src/net/net.c:
+    nts_ke_reply and nts_ke_complete (the key-establishment reply, bytes from
+    whoever answers on port 4460), nts_reply (an NTP reply's extension
+    fields and the cookies inside its authenticator) and nts_request (the
+    packet built over cookies of any shape). The cipher is a stand-in whose
+    tag opens when its first byte is odd, since the target is the parsing
+    (crypto_vectors holds the cipher to OpenSSL and the replies to an
+    independent builder); what ASan cannot see is asserted: a reply that is
+    taken leaves one to eight cookies of a size the state holds, a name that
+    is a host name and a port that is not zero, and is complete at its end;
+    a request is whole four-byte fields and within its room. Exit 2 (NOT RUN)
+    without clang/libFuzzer.
+
+        python3 test/differential.py --harness nts_fuzz
+    """
+    del argv
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    try:
+        nts = src_slice(net, "#define NTS_KE_PORT 4460",
+                        "/* The keys a finished handshake yields: RFC 8915 4.2. */")
+    except ValueError as error:
+        print("  FAIL nts fuzz lift: " + str(error))
+        write_tally("nts-fuzz", 0, 1)
+        return 1
+    return tls_fuzz_run("nts", nts_fuzz_seeds(),
+                        NET_ZONE_FUZZ_SHIM + byte_reader_source() + NTS_FUZZ_PRELUDE + nts +
+                        NTS_FUZZ_DRIVER, 4096)
 
 
 def harness_wifi_air(argv):
@@ -63317,6 +64150,8 @@ HARNESS_CHECKS = {
     "moonwater_cli": harness_moonwater_cli,
     "machine_reap": harness_machine_reap,
     "tls_chains": harness_tls_chains,
+    "nts": harness_nts,
+    "nts_fuzz": harness_nts_fuzz,
     "tls_peer": harness_tls_peer,
     "https_downgrade": harness_https_downgrade,
     "http_response_framing": harness_http_response_framing,

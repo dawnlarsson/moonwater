@@ -63047,6 +63047,248 @@ static fn tls_trust_anchor_chains(void)
 }
 
 /*
+        Network Time Security's key establishment reply (RFC 8915 4) and the
+        request's packet, without a network. The reply parser is fed every
+        record the standard defines in every way it can be wrong: an error
+        or a warning, a protocol or algorithm other than the one asked for,
+        one named twice, one missing, an unknown critical record (and an
+        unknown one that is not critical, which passes), a server name that
+        is no host name, a port of zero, bytes after the end record, no end
+        record, and the good reply cut at every length. The request is
+        checked for its layout and that it spends the cookie it carries.
+*/
+static positive nts_record(p8 address_to into, positive at, p16 type,
+                           const p8 address_to body, positive length)
+{
+        network_store_16(into + at, type);
+        network_store_16(into + at + 2, (p16)length);
+        memory_copy(into + at + 4, body, length);
+        return at + 4 + length;
+}
+
+static fn nts_ke_pieces(void)
+{
+        static p8 reply[2048];
+        static p8 cookie[300];
+        static nts_state state;
+        static const p8 zero2[2] = {0, 0};
+        static const p8 one2[2] = {0, 1};
+        static const p8 aead[2] = {0, NTS_AEAD_SIV_CMAC_256};
+        static const p8 other_aead[2] = {0, 30};
+        static const p8 two_aead[4] = {0, NTS_AEAD_SIV_CMAC_256, 0, 30};
+        static const p8 port[2] = {0x10, 0x1b};
+        struct
+        {
+                string_address name;
+                p8 parts[8];
+                bool accept;
+        } rows[] = {
+            /* 'n' NPN, 'N' NPN of 1, 'e' NPN empty, 'a' AEAD 15, 'A' AEAD
+               30, 'B' AEAD of two, 'c' a cookie of 100, 'L' of 300, 'k' an
+               unknown critical record, 'u' an unknown quiet one, 'E' an
+               error, 'W' a warning, 's' a server, 'S' a bad server, 'p' a
+               port, 'P' a port of zero, 'z' the end, 'y' an end with a
+               body, 'x' an end that is not critical. */
+            {"the smallest good reply", "nacz", true},
+            {"a server and a port", "nascpcz", true},
+            {"in another order", "canzz", false},
+            {"an error record", "nacEz", false},
+            {"a warning record", "nacWz", false},
+            {"no protocol", "acz", false},
+            {"a protocol other than NTPv4", "NacZ", false},
+            {"an empty protocol list", "eacz", false},
+            {"the protocol twice", "nnacz", false},
+            {"no algorithm", "ncz", false},
+            {"an algorithm other than SIV", "nAcz", false},
+            {"two algorithms", "nBcz", false},
+            {"the algorithm twice", "naacz", false},
+            {"no cookie", "naz", false},
+            {"a cookie too long and none else", "naLz", false},
+            {"a long cookie then a good one", "naLcz", true},
+            {"an unknown critical record", "nackz", false},
+            {"an unknown record that is not critical", "nacuz", true},
+            {"no end", "nac", false},
+            {"an end with a body", "nacy", false},
+            {"an end that is not critical", "nacx", false},
+            {"a server name that is no name", "nacSz", false},
+            {"the server twice", "nassz", false},
+            {"a port of zero", "nacPz", false},
+            {"the port twice", "nacppz", false},
+            {"nothing", "", false},
+        };
+
+        for (positive row = 0; row < array_count(rows); row++)
+        {
+                positive at = 0;
+                bipolar verdict;
+                bool ok;
+
+                memory_fill(cookie, 0x41, sizeof cookie);
+                for (const p8 *part = rows[row].parts; *part; part++)
+                        switch (*part)
+                        {
+                        case 'n': at = nts_record(reply, at, 0x8001, zero2, 2); break;
+                        case 'N': at = nts_record(reply, at, 0x8001, one2, 2); break;
+                        case 'e': at = nts_record(reply, at, 0x8001, zero2, 0); break;
+                        case 'a': at = nts_record(reply, at, 0x8004, aead, 2); break;
+                        case 'A': at = nts_record(reply, at, 0x8004, other_aead, 2); break;
+                        case 'B': at = nts_record(reply, at, 0x8004, two_aead, 4); break;
+                        case 'c': at = nts_record(reply, at, 5, cookie, 100); break;
+                        case 'L': at = nts_record(reply, at, 5, cookie, 300); break;
+                        case 'k': at = nts_record(reply, at, 0x8099, zero2, 2); break;
+                        case 'u': at = nts_record(reply, at, 0x0099, zero2, 2); break;
+                        case 'E': at = nts_record(reply, at, 0x8002, zero2, 2); break;
+                        case 'W': at = nts_record(reply, at, 0x0003, zero2, 2); break;
+                        case 's': at = nts_record(reply, at, 0x8006, (const p8 address_to)"time.example", 12); break;
+                        case 'S': at = nts_record(reply, at, 0x8006, (const p8 address_to)"not a name", 10); break;
+                        case 'p': at = nts_record(reply, at, 0x8007, port, 2); break;
+                        case 'P': at = nts_record(reply, at, 0x8007, zero2, 2); break;
+                        case 'z': at = nts_record(reply, at, 0x8000, zero2, 0); break;
+                        case 'y': at = nts_record(reply, at, 0x8000, zero2, 2); break;
+                        case 'x': at = nts_record(reply, at, 0x0000, zero2, 0); break;
+                        case 'Z': at = nts_record(reply, at, 0x8000, zero2, 0); break;
+                        }
+                verdict = nts_ke_reply(reply, at, &state);
+                ok = (verdict == NTS_KE_OK) == rows[row].accept;
+                checks++;
+                if (!ok)
+                {
+                        failures++;
+                        string_format(log, "  FAIL an NTS-KE reply: %s\n",
+                                      rows[row].name);
+                }
+        }
+
+        /* The parts a good reply leaves: cookies kept, the port, the name. */
+        {
+                positive at = 0;
+                bipolar verdict;
+
+                at = nts_record(reply, at, 0x8001, zero2, 2);
+                at = nts_record(reply, at, 0x8004, aead, 2);
+                at = nts_record(reply, at, 0x8006, (const p8 address_to)"time.example", 12);
+                at = nts_record(reply, at, 0x8007, port, 2);
+                for (positive i = 0; i < 10; i++)
+                {
+                        memory_fill(cookie, (p8)(0x30 + i), 100);
+                        at = nts_record(reply, at, 5, cookie, 100);
+                }
+                at = nts_record(reply, at, 0x8000, zero2, 0);
+                verdict = nts_ke_reply(reply, at, &state);
+                check("a full reply keeps eight cookies, the name and the port",
+                      verdict == NTS_KE_OK && state.count == NTS_COOKIES &&
+                          state.port == 0x101b &&
+                          string_equals((string_address)state.server, "time.example") &&
+                          state.length[7] == 100 && state.cookie[7][0] == 0x37 &&
+                          state.cookie[0][99] == 0x30);
+                check("a complete reply is complete at its end and at no shorter length",
+                      nts_ke_complete(reply, at));
+                for (positive cut = 0; cut < at; cut++)
+                        if (nts_ke_complete(reply, cut) ||
+                            nts_ke_reply(reply, cut, &state) == NTS_KE_OK)
+                        {
+                                check("a reply cut short is not complete and not a reply", false);
+                                break;
+                        }
+                check("a reply with a byte after its end record is refused",
+                      (reply[at] = 0, nts_ke_reply(reply, at + 1, &state) != NTS_KE_OK));
+        }
+
+        check("host names: letters, digits, dots and hyphens, between labels",
+              nts_name_ok((const p8 address_to)"time.example", 12) &&
+                  nts_name_ok((const p8 address_to)"127.0.0.1", 9) &&
+                  nts_name_ok((const p8 address_to)"a-b.c-d", 7) &&
+                  !nts_name_ok((const p8 address_to)"", 0) &&
+                  !nts_name_ok((const p8 address_to)".a", 2) &&
+                  !nts_name_ok((const p8 address_to)"a.", 2) &&
+                  !nts_name_ok((const p8 address_to)"a..b", 4) &&
+                  !nts_name_ok((const p8 address_to)"-a", 2) &&
+                  !nts_name_ok((const p8 address_to)"a b", 3) &&
+                  !nts_name_ok((const p8 address_to)"a/b", 3) &&
+                  !nts_name_ok((const p8 address_to)"a\x1b" "b", 3) &&
+                  !nts_name_ok(cookie, 64));
+
+        /* The request: header, identifier, one cookie (spent), a placeholder
+           of its size for each cookie the state is then short of eight, and
+           the authenticator last. */
+        {
+                static p8 packet[NTS_PACKET_ROOM];
+                static nts_state spent;
+                nts_exchange exchange;
+                positive length;
+                positive used;
+                positive holders;
+
+                memory_fill(&spent, 0, sizeof spent);
+                memory_fill(packet, 0, sizeof packet);
+                for (positive i = 0; i < 32; i++)
+                {
+                        spent.c2s[i] = (p8)i;
+                        spent.s2c[i] = (p8)(i + 32);
+                }
+                spent.count = 2;
+                spent.length[0] = 100;
+                spent.length[1] = 101;
+                memory_fill(spent.cookie[0], 0x11, 100);
+                memory_fill(spent.cookie[1], 0x22, 101);
+                nts_exchange_open(&exchange, &spent);
+                length = nts_request(&exchange, packet, sizeof packet);
+                used = NTS_HEADER;
+                /* Two cookies, one spent: seven to ask for back, six of them
+                   as placeholders beside the cookie sent. */
+                check("a request is the header, an identifier, the cookie padded to four, six placeholders and a 40-byte authenticator",
+                      length == NTS_HEADER + 36 + 108 + 6 * 108 + 40 &&
+                          packet[used] == 0x01 && packet[used + 1] == 0x04 &&
+                          packet[used + 3] == 36 &&
+                          !memory_compare(packet + used + 4, exchange.uid, 32) &&
+                          packet[used + 36] == 0x02 && packet[used + 37] == 0x04 &&
+                          packet[used + 39] == 108 && packet[used + 40] == 0x22 &&
+                          packet[used + 40 + 100] == 0x22 &&
+                          packet[used + 40 + 101] == 0);
+                holders = 0;
+                for (positive at = used + 36 + 108; at + 108 < length; at += 108)
+                {
+                        bool zero = true;
+
+                        for (positive in = 4; in < 108; in++)
+                                zero = zero && !packet[at + in];
+                        if (packet[at] == 0x03 && packet[at + 1] == 0x04 &&
+                            packet[at + 3] == 108 && zero)
+                                holders++;
+                }
+                check("six placeholders of the cookie's size, all zero, then the authenticator",
+                      holders == 6 && packet[length - 40] == 0x04 &&
+                          packet[length - 39] == 0x04 && packet[length - 37] == 40);
+                check("the request spends the cookie it carries and keeps the other",
+                      spent.count == 1 && spent.length[0] == 100 &&
+                          spent.cookie[0][0] == 0x11 && spent.length[1] == 0 &&
+                          spent.cookie[1][0] == 0);
+                check("a request with no cookie left is no request",
+                      nts_request(&exchange, packet, sizeof packet) != 0 &&
+                          nts_request(&exchange, packet, sizeof packet) == 0);
+                /* A full state asks for no placeholder, and a packet with room
+                   for fewer than seven asks for as many as it has room for. */
+                memory_fill(&spent, 0, sizeof spent);
+                spent.count = NTS_COOKIES;
+                for (positive i = 0; i < NTS_COOKIES; i++)
+                {
+                        spent.length[i] = 100;
+                        memory_fill(spent.cookie[i], (p8)i, 100);
+                }
+                nts_exchange_open(&exchange, &spent);
+                length = nts_request(&exchange, packet, sizeof packet);
+                check("a state of eight cookies spends one and sends no placeholder",
+                      length == NTS_HEADER + 36 + 104 + 40 && spent.count == 7);
+                spent.count = 1;
+                nts_exchange_open(&exchange, &spent);
+                length = nts_request(&exchange, packet, NTS_HEADER + 36 + 104 + 2 * 104 + 40 + 7);
+                check("a packet with room for two placeholders carries two, and stays within its room",
+                      length == NTS_HEADER + 36 + 104 + 2 * 104 + 40);
+                nts_exchange_close(&exchange);
+        }
+}
+
+/*
         TLS 1.2, piece by piece. ServerHello rows: a 1.2 answer needs one of
         the two suites, the extended master secret and an empty
         renegotiation_info, may carry point formats holding uncompressed
@@ -65507,6 +65749,7 @@ b32 main(void)
         tls_name_constraint_rules();
         tls_ca_issuers_rules();
         tls_trust_anchor_chains();
+        nts_ke_pieces();
         tls12_pieces();
         redirect_urls();
         fetching_for_real();
@@ -65711,6 +65954,91 @@ static bool crypto_vector_run(p8 address_to kind, positive kind_length,
                         if (work[i])
                                 return false;
                 return true;
+        }
+        if (KIND("siv"))
+        {
+                static crypto_siv_key key;
+                const p8 address_to parts[4];
+                positive lengths[4];
+                positive count = 0;
+                positive at = 0;
+
+                if (CL(0) != 32 || CL(4) != 16 || CL(2) != CL(3))
+                        return false;
+                while (at < CL(1))
+                {
+                        positive size;
+
+                        if (count == 4 || CL(1) - at < 2)
+                                return false;
+                        size = (positive)CV(1)[at] << 8 | CV(1)[at + 1];
+                        at += 2;
+                        if (size > CL(1) - at)
+                                return false;
+                        parts[count] = CV(1) + at;
+                        lengths[count++] = size;
+                        at += size;
+                }
+                crypto_siv_prepare(address_of key, CV(0));
+                if (expect)
+                {
+                        p8 tag[16];
+
+                        memory_copy(work, CV(2), CL(2));
+                        crypto_siv_seal(address_of key, parts, lengths, count,
+                                        work, CL(2), tag);
+                        if (!crypto_vector_is(work, 3) ||
+                            memory_compare(tag, CV(4), 16) != 0)
+                                return false;
+                }
+                memory_copy(work, CV(3), CL(3));
+                if (crypto_siv_open(address_of key, parts, lengths, count,
+                                    work, CL(3), CV(4)) != expect)
+                        return false;
+                if (expect)
+                        return crypto_vector_is(work, 2);
+                for (positive i = 0; i < CL(3); i++)
+                        if (work[i])
+                                return false;
+                return true;
+        }
+        if (KIND("ntsreply"))
+        {
+                static nts_state state;
+                nts_exchange exchange;
+                bipolar verdict;
+                bool good;
+                positive at = 0;
+                positive seen = 0;
+
+                if (CL(0) != 32 || CL(1) != 32 || CL(2) > NTS_PACKET_ROOM)
+                        return false;
+                memory_fill(&state, 0, sizeof state);
+                memory_fill(&exchange, 0, sizeof exchange);
+                nts_exchange_open(&exchange, &state);
+                crypto_siv_prepare(&exchange.s2c, CV(0));
+                memory_copy(exchange.uid, CV(1), 32);
+                memory_copy(work, CV(2), CL(2));
+                verdict = nts_reply(&exchange, work, CL(2));
+                good = (verdict == NTS_REPLY_OK) == expect;
+                if (expect && good)
+                {
+                        while (at < CL(3))
+                        {
+                                positive size = (positive)CV(3)[at] << 8 | CV(3)[at + 1];
+
+                                at += 2;
+                                good = good && seen < state.count &&
+                                       state.length[seen] == size &&
+                                       !memory_compare(state.cookie[seen], CV(3) + at, size);
+                                at += size;
+                                seen++;
+                        }
+                        good = good && seen == state.count;
+                }
+                else if (good)
+                        good = state.count == 0;
+                return good;
         }
         if (KIND("x25519"))
         {
@@ -82350,7 +82678,7 @@ static fn sntp_test_random_child(positive which)
         {
                 ok = !sntp_put_stamp(field) &&
                      sntp_exchange(0, address_of deadline, false,
-                                   address_of sequence,
+                                   address_of sequence, null,
                                    address_of sample) == SNTP_NO_REPLY &&
                      !sample.ok;
                 for (positive at = 0; at < sizeof field; at++)
