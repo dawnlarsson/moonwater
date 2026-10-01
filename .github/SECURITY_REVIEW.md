@@ -129,14 +129,14 @@ not part of this one; they are listed with the gap they would close.
 | DHCP | a carrier flap on any link cut the watcher's exchange each time | `net_news_may_cut`, the four-second hold-off after a cut |
 | DNS | a 16-bit id and a kernel-chosen source port were all that bound a reply; the public resolver was asked before the network's own | `resolving_policy` and the namespace walk check (`net_test_dns_walk`) in `CHECK_net` |
 | TLS | Mozilla `distrust-after` was not enforced | `tls_chains` rows, `--harness anchors` regenerator |
-| Kernel | no SYN-flood defence in the image; ICMP redirects, source routes, IPv6 router advertisements and TIME-WAIT assassination on by default | `CONFIG_SYN_COOKIES`, `net_kernel_defaults`, the boot-lane row, `sec_hardened` |
+| Kernel | no SYN-flood defence in the image; ICMP redirects, source routes, IPv6 router advertisements and TIME-WAIT assassination on by default | `CONFIG_SYN_COOKIES`, `net_kernel_defaults`, the boot-lane row, `net_sysctl` (every interface, however many), `sec_hardened` |
 | Wi-Fi | an access point's name read from the first non-empty name element, not the first (a differential with the kernel) | `wifi_scan_fuzz` seeds, `wifi_air` |
 | Wi-Fi | a join by name sat out its timeout on a louder open or WPA3-only twin of the saved network | the `twin` family of `wifi_air` |
 | Wi-Fi | EAPOL frames from any address were answered | `wifi_source_checks` |
 | Saved state | `/root/wifi` and `/root/bluetooth` rewritten in place; bluetooth add and remove without the radio lock | `moonwater_cli`: a write cut short leaves the saved list as it was |
 | Waterlink | `/root/link.groups` held a fast salted SHA-256 of the secret, a guessing oracle for anyone who could read it | `link` lane |
 | SNTP | five samples shared one ten-second deadline, so one lost datagram in four ended a query | the `netem` lane's SNTP scenes |
-| Supply chain | bowl's Arch, RISC-V Arch and Debian bootstraps rested on TLS and a mirror alone | pinned digests, a pinned signing key for Arch Linux ARM, `bowl` lane, the signature reader under `bowl_sig_fuzz` |
+| Supply chain | bowl's Arch, RISC-V Arch and Debian bootstraps rested on TLS and a mirror alone | pinned digests, a pinned signing key for Arch Linux ARM (its signature read through `byte_reader`), `bowl` lane, the signature reader under `bowl_sig_fuzz` |
 
 ### Open, in separate branches
 
@@ -180,6 +180,30 @@ not part of this one; they are listed with the gap they would close.
   Held by the `wifi_scan_fuzz` driver (the beacon's elements are kept apart
   from the latest frame's); not held by a join in the `wifi` lane, which has
   no forged-response row.
+- The review round before this landed (two readers and four sub-readers, each
+  of the Wi-Fi code, the watcher, SNTP, waterlink and the network client; no
+  memory-corruption bug a network attacker can reach was found) left these as
+  they are, each low and each found by reading:
+  - The DNS client falls back from EDNS0 on FORMERR and NOTIMP, not on a
+    timeout, as the resolvers that followed the 2019 flag day do: a network
+    that silently drops queries carrying an OPT record resolves nothing.
+  - Waterlink's admission limiter is keyed on the source address before the
+    address is proved, so a spoofed address of a paired peer at about six
+    datagrams a second starves that peer's handshakes (the sender needs the
+    listener's public key), and a holder of an IPv6 /64 can drain the global
+    bucket. WireGuard's answer, a per-source limit behind a cookie, is the fix.
+  - A forged clock step, on a clock before the SNTP window, cannot be undone by
+    honest answers; authenticated time is the fix (a separate pull request).
+  - Waterlink's `leave --forget` does not end a live session at its next
+    rekey; a group after the first is greeted back no sooner than ten seconds
+    after the first group's greeting; the one-shot unicast reply of the
+    mDNS reader carries the first interface's address.
+  - The radio lock is held across a whole join, so `bluetooth add` and
+    `remove` wait on a long one; a FIFO planted at `/root/wifi` blocks the
+    readers of the list (root's write is needed); 64 or more beacon names hide
+    real networks from the list.
+  - An off-link router in a lease is accepted and then refused by the kernel,
+    so the lease is rolled back and asked for again every four to ten seconds.
 - The CI `security` job is parked by design and this change does not touch it.
 
 ### Decisions
