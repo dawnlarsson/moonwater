@@ -28,7 +28,7 @@ not kept in the tree (seed files are banned by `security_hygiene`).
 | DNS | exact question/ID binding, compression loops, full RR framing, UDP truncation to TCP; the source port drawn per query, 0x20 case mixing and EDNS0 with a fallback for each; the network's own resolver asked first and its first answer final; `dns_fuzz` | independent packet oracle; DNSSEC is out of scope (D03) |
 | TLS records/handshake | record and handshake fragmentation, transcript/Finished, AEAD limits, state ordering, `tls_hs_fuzz` libFuzzer target over the record layer and handshake state machine | a corpus beyond the generated seeds |
 | X.509 | strict DER and generated-chain policy matrix against OpenSSL and, as a second independent path validator, Go's `crypto/x509` (`tls_chains`); `tls_der_fuzz` / `tls_verify_fuzz` libFuzzer targets; DNS-name and IP matching against OpenSSL's own check (`tls_hostnames`); validity times against RFC 5280 (`tls_dates`); Wycheproof's vectors under the production crypto (`crypto_vectors --wycheproof`); Mozilla's server-auth `distrust-after` dates per anchor | name constraints in more shapes than the matrix has |
-| HTTP/URL | sink-side request validation, framing conflicts, 204/205/304 as wget and curl take them with the RFC 9110 framing at the tight tier, split-point and chunk/trailer checks, `http.client` and curl framing oracles, HTTPS downgrade harness, GNU wget and curl as live oracles for byte-at-a-time, split, FIN/RST and 1xx-storm delivery (`wget_mutation`), hostile servers and redirect shapes against the built wget (`wget_hostile`), a redirect from public to non-public address space refused at the tight tier | the tight tier is not fuzzed (`http_fuzz` models the default); TLS and redirect legs of hostile scheduling |
+| HTTP/URL | sink-side request validation, framing conflicts, 204/205/304 as wget and curl take them with the RFC 9110 framing at the tight tier, split-point and chunk/trailer checks, `http.client` and curl framing oracles, HTTPS downgrade harness, GNU wget and curl as live oracles for byte-at-a-time, split, FIN/RST and 1xx-storm delivery (`wget_mutation`), hostile servers and redirect shapes against the built wget (`wget_hostile`), a redirect from public to non-public address space refused at the tight tier | the tight tier is fuzzed (`http_fuzz` is built at both tiers) but not under hostile scheduling; TLS and redirect legs of hostile scheduling |
 | DHCPv4 | peer/xid/MAC binding, option framing/overload, state cross-product, entropy faults, leases a server has no business handing out refused, the watcher's exchange cut once by link news rather than by every carrier flap; the `netem` lane (clean, tripled, forged, late, dropped and NAKed answers, plain and under loss, duplication and reordering); `dhcp_fuzz` (coverage-guided option stream) | DHCP over a raw packet socket and address-conflict probing are separate changes |
 | SNTP | nonce and peer binding, ancillary timestamp parsing, arithmetic and selection checks, each sample with its own wait, era-boundary integration (`sntp_era`: 2036, 2038, 2104), the `netem` lane | plain SNTP is unauthenticated; authenticated time is a separate change |
 | Wi-Fi | RSN and EAPOL-Key handling, replay counters, scan-result parsing (`wifi_scan_fuzz`, `wifi_eapol_fuzz`), an access point's name read from its first name element only, a join that prefers the access points that offer what the saved network asks for, EAPOL frames accepted only from the access point | management-frame protection and WPA3 are separate changes |
@@ -68,9 +68,9 @@ does not convert those protocols into authenticated ones.
 
 1. Persistent fuzzing: done for TLS (DER, certificate lists, handshake and
    record layer), DNS names and RRs, HTTP response framing and chunks (the
-   default tier), DHCP option streams, SNTP replies, netlink, Wi-Fi, crypto,
-   waterlink and bowl's OpenPGP signature reader, seeded from generators and run under ASan+UBSan. Open: the HTTP
-   target at the tight tier, and a corpus beyond the generated seeds.
+   default and the tight tier), DHCP option streams, SNTP replies, netlink, Wi-Fi, crypto,
+   waterlink and bowl's OpenPGP signature reader, seeded from generators and run under ASan+UBSan. Open: a
+   corpus beyond the generated seeds.
 2. Make x86-64 ASan+UBSan and native namespace/netem runs required CI jobs.
    `MOONWATER_FUZZ_REPORT=… sh test/run fuzz` already records compiler and sanitizer
    versions, seed counts, budgets and exits; it has to run on every release,
@@ -124,7 +124,7 @@ not part of this one; they are listed with the gap they would close.
 | Area | Issue | Evidence |
 | --- | --- | --- |
 | HTTP | 204 and 205 framing: the response boundary a client and an intermediary read must agree | the framing matrix at both tiers (`http_response_framing`, `CHECK_net` at `MOONWATER_STRICT` 2), `wget_mutation` against GNU wget and curl; the default does what wget and curl do, the tight tier holds RFC 9110 |
-| HTTP | a redirect from public address space into this host or its network (the SSRF and DNS-rebinding half) | tight tier refuses it, `wget_hostile` address-policy rows |
+| HTTP | a redirect from public address space into this host or its network (the SSRF and DNS-rebinding half) | tight tier refuses it, `wget_hostile` address-policy rows, `http_fuzz` at the tight tier (no connection inside after one to public space) |
 | DHCP | a lease a server has no business handing out (0/8, 127/8, 224/3, a router equal to the address) | the lease-sanity grid in `CHECK_net` |
 | DHCP | a carrier flap on any link cut the watcher's exchange each time | `net_news_may_cut`, the four-second hold-off after a cut |
 | DNS | a 16-bit id and a kernel-chosen source port were all that bound a reply; the public resolver was asked before the network's own | `resolving_policy` and the namespace walk check (`net_test_dns_walk`) in `CHECK_net` |

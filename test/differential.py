@@ -44137,7 +44137,7 @@ int main(void)
     return checks.verdict("http response framing", "http-response-framing")
 
 
-def http_fuzz_source(net, util, driver):
+def http_fuzz_source(net, util, driver, tight=False):
     """The whole HTTP section of net.c from "#define HTTP_PORT 80" to the
     section's #endif, less http_lookup, over a hosted shim whose transport is
     a script: each connection serves the next segment of the input, cut into
@@ -44146,12 +44146,17 @@ def http_fuzz_source(net, util, driver):
     lifetime is a heap-use-after-free under ASan. memory_copy is memmove and
     memory_copy_apart is memcpy, the contracts lib.c keeps, so ASan also
     holds every copy to the overlap it declares. The byte predicates, the
-    checked digit scanner and the byte_store appends are lib.util.c's own."""
+    checked digit scanner and the byte_store appends are lib.util.c's own.
+    tight builds it at MOONWATER_STRICT 2, where http_run also holds a redirect
+    chain that has reached public space to public space (http_address_public,
+    which sits between http_lookup and the part kept, is brought back for it)."""
     begin = net.index("#define HTTP_PORT 80")
     lookup = net.index("static p32 http_lookup(string_address host)")
     leaf = net.index("static fn http_url_leaf(")
     finish = net.index("#endif // STANDARD_MODERN_C_NET_HTTP")
-    http = net[begin:lookup] + net[leaf:finish]
+    public = src_slice(net, "/* Whether a fetch whose destination the peer chose may go to ip",
+                       "#define TLS_AIA_SECONDS", "http_fuzz_source")
+    http = net[begin:lookup] + public + net[leaf:finish]
     known = util[util.index("static inline INLINE b32 known_is_digit(b32 value)"):
                  util.index("static inline INLINE b32 known_is_ascii(b32 value)")]
     digits = util[util.index("static inline INLINE positive digit_known(p8 character, "
@@ -44330,6 +44335,8 @@ static const p8 *fuzz_segment;
 static positive fuzz_segment_size;
 static positive fuzz_segment_at;
 static positive fuzz_opened;
+static p32 fuzz_connected[32];
+static positive fuzz_connected_count;
 static positive fuzz_requests;
 static p64 fuzz_random;
 static positive fuzz_largest;
@@ -44399,7 +44406,10 @@ static bool network_stream_timeout(bipolar h, positive s, positive n)
 }
 static int socket_connect(b32 h, const void *where, positive size)
 {
-        (void)h; (void)where; (void)size;
+        (void)h; (void)size;
+        if (fuzz_connected_count < 32)
+                fuzz_connected[fuzz_connected_count++] =
+                    ((const socket_address_internet *)where)->host;
         return 0;
 }
 static int socket_close(b32 h) { (void)h; return 0; }
@@ -44604,11 +44614,22 @@ static bipolar system_call_3(positive number, positive fd, positive spans,
         return (bipolar)wrote;
 }
 
+/* A name that does not resolve, one in public space (8.8.8.8), one inside
+   (10.0.0.1), and every other name and literal on this machine. */
 static p32 http_lookup(string_address host)
 {
-        return strcmp(host, "unknown.invalid") ? 0x7f000001 : 0;
+        if (!strcmp(host, "unknown.invalid"))
+                return 0;
+        if (!strcmp(host, "public.example"))
+                return 0x08080808;
+        if (!strcmp(host, "inside.example"))
+                return 0x0a000001;
+        return 0x7f000001;
 }
 """
+    if tight:
+        shim = shim.replace("#define MOONWATER_STRICT STRICT_SAFE",
+                            "#define MOONWATER_STRICT STRICT_TIGHT")
     return shim + http + driver
 
 
@@ -44632,6 +44653,13 @@ def harness_http_fuzz(argv):
     held to one request line, four fields and CRLF only. Seeds are the
     http_response_framing CASES plus URL and redirect shapes, written per
     run. Bounded run in lane_net; `sh test/run fuzz` runs it longer.
+
+    It runs twice, built at the default tier and at MOONWATER_STRICT 2 (the
+    tight tier: a 204 that declares a body and a 205 with content refused,
+    and a redirect chain that has reached public space held there). The
+    shim's names resolve to 8.8.8.8 (public.example), 10.0.0.1
+    (inside.example) or loopback, every connection is recorded, and at the
+    tight tier none that follows one to public space may be inside.
 
         python3 test/differential.py --harness http_fuzz
     """
@@ -44670,25 +44698,28 @@ static int fuzz_whole(const p8 *segment, positive size, bool tls, bool follow,
                 return 0;
         if (http_response_has_no_body(response.code))
                 return 1;
+        /* The tight tier reads a 205 as the RFC does: its framing is taken
+           and any content is a refusal. */
+        bool reset = MOONWATER_STRICT >= STRICT_TIGHT && response.code == 205;
         switch (response.body_kind) {
         case HTTP_BODY_LENGTH:
                 if (size - header < response.body_length)
                         return 0;
                 memmove(copy, copy + header, response.body_length);
                 *body_size = response.body_length;
-                return 1;
+                return reset && *body_size ? 0 : 1;
         case HTTP_BODY_CHUNKED:
                 memmove(copy, copy + header, size - header);
                 verdict = (int)http_unchunk(copy, size - header);
                 if (verdict < 0)
                         return -1;
                 *body_size = (positive)verdict;
-                return 1;
+                return reset && *body_size ? 0 : 1;
         default:
                 /* Close-delimited: plaintext EOF, or close_notify. */
                 memmove(copy, copy + header, size - header);
                 *body_size = size - header;
-                return 1;
+                return reset && *body_size ? 0 : 1;
         }
 }
 
@@ -44705,12 +44736,22 @@ static void fuzz_run(const p8 *data, positive size, int lane)
         fuzz_input = data;
         fuzz_input_size = size;
         fuzz_opened = 0;
+        fuzz_connected_count = 0;
         fuzz_requests = 0;
         fuzz_sink_used = 0;
         status = fetch ? http_get((string_address)start, &store, &code)
                        : http_fetch_to((string_address)start, 7, true, &code, null);
         if (fuzz_requests != fuzz_opened)
                 fuzz_die("a connection was opened with no request written on it");
+        /* At the tight tier a chain that has reached public space never
+           connects inside again. */
+        if (MOONWATER_STRICT >= STRICT_TIGHT)
+                for (positive i = 0; i < fuzz_connected_count; i++)
+                        for (positive j = i + 1; j < fuzz_connected_count; j++)
+                                if (http_address_public(fuzz_connected[i]) &&
+                                    !http_address_public(fuzz_connected[j]))
+                                        fuzz_die("a connection went inside after one to "
+                                                 "public space");
 
         if (fuzz_opened && !fuzz_write_faults && fuzz_segment_open(fuzz_opened - 1)) {
                 p8 *want = NULL;
@@ -44863,7 +44904,10 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
         return 0;
 }
 """
-    return tls_fuzz_run("http", "http", http_fuzz_source(net, util, driver), 65536)
+    default = tls_fuzz_run("http", "http", http_fuzz_source(net, util, driver), 65536)
+    tight = tls_fuzz_run("http tight", "http", http_fuzz_source(net, util, driver, True),
+                         65536)
+    return 1 if 1 in (default, tight) else 2 if 2 in (default, tight) else 0
 
 
 def http_fuzz_seeds():
@@ -44894,18 +44938,6 @@ def http_fuzz_seeds():
                     b"\r\nContent-Length: 0\r\n\r\n")
         for lane in (0, 1):
             seeds["hop%d_%s.bin" % (lane, name)] = bytes([lane, 7]) + redirect + hop + ok
-    for name, chain in (
-            ("public_then_inside", (b"public.example/p", b"127.0.0.1/q")),
-            ("public_then_private", (b"public.example/p", b"inside.example/q")),
-            ("inside_then_public", (b"inside.example/p", b"public.example/q")),
-            ("public_twice", (b"public.example/p", b"public.example/q")),
-            ("public_inside_public", (b"public.example/p", b"inside.example/q",
-                                      b"public.example/r"))):
-        for lane in (0, 1):
-            scheme = b"https://" if lane else b"http://"
-            wire = hop.join(b"HTTP/1.1 302 Found\r\nLocation: " + scheme + where +
-                            b"\r\nContent-Length: 0\r\n\r\n" for where in chain)
-            seeds["policy%d_%s.bin" % (lane, name)] = bytes([lane, 7]) + wire + hop + ok
     for name, chain in (
             ("public_then_inside", (b"public.example/p", b"127.0.0.1/q")),
             ("public_then_private", (b"public.example/p", b"inside.example/q")),
