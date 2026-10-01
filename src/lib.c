@@ -4203,6 +4203,16 @@ __asm__(
     "mov 16(%rsi), %rax\n mul %rcx\n add %rbp, %rax\n adc $0, %rdx\n add %rax, " t2 "\n adc $0, %rdx\n mov %rdx, %rbp\n" \
     "mov 24(%rsi), %rax\n mul %rcx\n add %rbp, %rax\n adc $0, %rdx\n add %rax, " t3 "\n adc $0, %rdx\n mov %rdx, " t4 "\n"
 
+/* The same row by mulx: b_i in rdx, four products on two carry chains into
+   t0..t3 and t4 (zeroed here), with rbp zero for the last carry. */
+#define FIELD_X64_P256_ROW_MULX(off, t0, t1, t2, t3, t4)                                 \
+    "xor %ebp, %ebp\n mov %rbp, " t4 "\n mov " off "(%rbx), %rdx\n"           \
+    "mulx (%rsi), %rax, %rcx\n adcx %rax, " t0 "\n adox %rcx, " t1 "\n"        \
+    "mulx 8(%rsi), %rax, %rcx\n adcx %rax, " t1 "\n adox %rcx, " t2 "\n"       \
+    "mulx 16(%rsi), %rax, %rcx\n adcx %rax, " t2 "\n adox %rcx, " t3 "\n"      \
+    "mulx 24(%rsi), %rax, %rcx\n adcx %rax, " t3 "\n adox %rcx, " t4 "\n"      \
+    "adcx %rbp, " t4 "\n"
+
 /* q = w0; W + q p = q 2^96 + w1 2^64 + w2 2^128 + (w3 + q p3) 2^192 with
    p3 = 2^64 - 2^32 + 1, by shifts: q p3 = (q - q>>32 - borrow, q - q<<32).
    The new top limb lands in w0, so the window becomes (w1, w2, w3, w0). */
@@ -11825,6 +11835,11 @@ __asm__(
        mulq: squaring through the mulx multiply was 2% worse. */
 
     ASM_FUNC(p256_multiply)
+#ifndef KERNEL_MODE
+    "cmpb $0, cpu_hash_probed(%rip)\n jne .Lp256_multiply_probed\n call cpu_hash_detect\n"
+    ".Lp256_multiply_probed:\n"
+    "cmpb $0, cpu_has_mulx(%rip)\n jne .Lp256_multiply_mulx\n"
+#endif
     "push %rbx\n push %rbp\n push %r12\n push %r13\n push %r14\n push %r15\n"
     "mov %rdx, %rbx\n"
     "mov (%rbx), %rcx\n"
@@ -11836,6 +11851,17 @@ __asm__(
     FIELD_X64_P256_ROW("16", "%r10", "%r11", "%r12", "%r13", "%r14")
     FIELD_X64_P256_ROW("24", "%r11", "%r12", "%r13", "%r14", "%r15")
     FIELD_X64_P256_TAIL
+#ifndef KERNEL_MODE
+    ".Lp256_multiply_mulx:\n"
+    "push %rbx\n push %rbp\n push %r12\n push %r13\n push %r14\n push %r15\n"
+    "mov %rdx, %rbx\n"
+    "xor %r8d, %r8d\n xor %r9d, %r9d\n xor %r10d, %r10d\n xor %r11d, %r11d\n"
+    FIELD_X64_P256_ROW_MULX("0", "%r8", "%r9", "%r10", "%r11", "%r12")
+    FIELD_X64_P256_ROW_MULX("8", "%r9", "%r10", "%r11", "%r12", "%r13")
+    FIELD_X64_P256_ROW_MULX("16", "%r10", "%r11", "%r12", "%r13", "%r14")
+    FIELD_X64_P256_ROW_MULX("24", "%r11", "%r12", "%r13", "%r14", "%r15")
+    FIELD_X64_P256_TAIL
+#endif
     ASM_END(p256_multiply)
 
     ASM_FUNC(p256_square)
