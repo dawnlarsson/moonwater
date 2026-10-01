@@ -107,7 +107,11 @@ samples a query and keeps the one with the fastest round trip, RFC 5905's clock
 filter, so a queueing spike never sets the clock; it also asks three servers
 and believes the one with the least root distance among those whose answers
 agree, so one wrong server cannot set it either. A server named in
-`/root/ntp.server` is believed on its own. The timezone is auto until set
+`/root/ntp.server` is believed on its own. The clock has a floor: the date of the source this was built from, or the
+latest time the machine knew (`/root/clock.good`, kept forward only), whichever
+is later. A clock below it is unset, not wrong: certificates are not judged
+against it (`wget` says so and names `moonwater time sync`, status 5) and no NTP
+answer earlier than it is taken. The timezone is auto until set
 by hand: on each new network the machine makes one HTTPS request to Cloudflare
 and takes the zone it reports, at most once every three minutes. There is no
 zoneinfo directory: each of tzdata's 420 zones maps to the POSIX rule in its

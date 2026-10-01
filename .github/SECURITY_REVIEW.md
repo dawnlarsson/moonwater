@@ -29,7 +29,7 @@ not kept in the tree (seed files are banned by `security_hygiene`).
 | X.509 | strict DER and generated-chain policy matrix against OpenSSL and, as a second independent path validator, Go's `crypto/x509` (`tls_chains`); `tls_der_fuzz` / `tls_verify_fuzz` libFuzzer targets; DNS-name and IP matching against OpenSSL's own check (`tls_hostnames`); validity times against RFC 5280 (`tls_dates`); Wycheproof's vectors under the production crypto (`crypto_vectors --wycheproof`); Mozilla's server-auth `distrust-after` dates per anchor | name constraints in more shapes than the matrix has |
 | HTTP/URL | sink-side request validation, framing conflicts, 204/205/304 as wget and curl take them with the RFC 9110 framing at the tight tier, split-point and chunk/trailer checks, `http.client` and curl framing oracles, HTTPS downgrade harness, GNU wget and curl as live oracles for byte-at-a-time, split, FIN/RST and 1xx-storm delivery (`wget_mutation`), hostile servers and redirect shapes against the built wget (`wget_hostile`), a redirect from public to non-public address space refused at the tight tier | the tight tier is not fuzzed (`http_fuzz` models the default); TLS and redirect legs of hostile scheduling |
 | DHCPv4 | peer/xid/MAC binding, option framing/overload, state cross-product, entropy faults, leases a server has no business handing out refused, the watcher's exchange cut once by link news rather than by every carrier flap; the `netem` lane (clean, tripled, forged, late, dropped and NAKed answers, plain and under loss, duplication and reordering); `dhcp_fuzz` (coverage-guided option stream) | DHCP over a raw packet socket and address-conflict probing are separate changes |
-| SNTP | nonce and peer binding, ancillary timestamp parsing, arithmetic and selection checks, each sample with its own wait, era-boundary integration (`sntp_era`: 2036, 2038, 2104), the `netem` lane | plain SNTP is unauthenticated; authenticated time is a separate change |
+| SNTP | nonce and peer binding, ancillary timestamp parsing, arithmetic and selection checks, each sample with its own wait, era-boundary integration (`sntp_era`: 2036, 2038, 2104), the `netem` lane; the clock has a floor (`MOONWATER_CLOCK_FLOOR`, `/root/clock.good`): a clock below it is unset, and no answer earlier than it is taken | plain SNTP is unauthenticated and moves the clock anywhere between the floor and 2036; authenticated time is a separate change |
 | Wi-Fi | RSN and EAPOL-Key handling, replay counters, scan-result parsing (`wifi_scan_fuzz`, `wifi_eapol_fuzz`), an access point's name read from its first name element only, a join that prefers the access points that offer what the saved network asks for, EAPOL frames accepted only from the access point | management-frame protection and WPA3 are separate changes |
 | Waterlink and saved state | Noise handshake, cookie, replay window, grants; the saved wifi and bluetooth lists written beside themselves and renamed; no hash of the group secret in `/root/link.groups` | handshake flood under netem; MSan on waterlink |
 
@@ -58,6 +58,21 @@ does not convert those protocols into authenticated ones.
   which records both input digests in the header and must reproduce the file
   byte for byte. Anchor validity dates are not enforced; none of the 120
   carries NameConstraints or expires within two years.
+- **The clock has a floor.** A clock earlier than `MOONWATER_CLOCK_FLOOR` (the
+  date of the source, moved with releases and held by a `tls_dates` check not
+  ahead of the machine's clock and, in a git checkout, within 120 days behind
+  the newest commit) or than `/root/clock.good` (the latest time the machine
+  knew) is unset, not wrong: certificates are not judged against it, `wget`
+  says so and names `moonwater time sync` (status 5), `moonwater time` prints
+  "clock unset", and no NTP answer earlier than the floor is taken. A file that
+  is not a decimal number of seconds between the build and 2036 is ignored, so
+  a damaged or planted one can only fail to help; deleting it is always safe.
+  It is written every six hours of uptime from the machine loop and when the
+  machine stops, in place and never through a link, and only forward; `wipe`
+  keeps it. With no authenticated time this boot the wall clock, once the
+  kernel calls it synchronised, raises the floor by at most a day over what is
+  kept. What remains: a machine whose clock is above the floor takes plain NTP
+  at its word up to 2036.
 - **Not in ring 0.** No `crypto_`, `tls_` or X.509 code is in the include graph
   of `src/moonwater/core.c`; `net.c` is compiled into userspace programs only.
 
@@ -136,12 +151,14 @@ not part of this one; they are listed with the gap they would close.
 | Waterlink | `/root/link.groups` held a fast salted SHA-256 of the secret, a guessing oracle for anyone who could read it | `link` lane |
 | SNTP | five samples shared one ten-second deadline, so one lost datagram in four ended a query | the `netem` lane's SNTP scenes |
 | Supply chain | bowl's Arch, RISC-V Arch and Debian bootstraps rested on TLS and a mirror alone | pinned digests, a pinned signing key for Arch Linux ARM, `bowl` lane |
+| Time | `tls_date_now` took `time()` as it was, so a clock rolled back or never set made an expired certificate current, or every certificate not yet valid | the clock floor: `tls_chains` (a floor in 2100 refuses with status 5; `clock.good` a day ahead, a day behind, text, past 2036, before the build, trailing text, absent), `moonwater_cli` (`time sync` with ten kinds of `clock.good`; shutdown keeps the file forward only and never writes through a link) |
+| wget | a certificate it cannot verify made wget exit 4 with "TLS handshake failed" whatever the reason; GNU wget exits 5 and says which way the dates fell, whose names do not match, or that the issuer is unknown | every refused chain of `tls_chains` exits 5 with GNU's wording, "has expired" and "is not yet activated" for the dates |
 
 ### Open, in separate branches
 
 | Gap | Branch |
 | --- | --- |
-| Authenticated time (NTS), a floor for the clock, wget's status 5 for an unverifiable certificate | `feature/clock-floor`, `feature/nts` |
+| Authenticated time (NTS) | `feature/nts` (stacked on this branch) |
 | 802.11w management-frame protection, WPA3-SAE | `feature/wpa3-pmf-sae` |
 | DNS over TLS | `feature/dns-over-tls` |
 | DHCP over a raw packet socket (so `rp_filter` can be on), ARP address-conflict probing, the exchange not cut between REQUEST and ACK | `feature/dhcp-packet-socket-acd` |
