@@ -12040,6 +12040,10 @@ done
 
 set --
 [ -f "$work/stick/hostapd" ] && set -- --hostapd
+#       MOONWATER_WIFI_ONLY=late,watch runs those families and no others (late
+#       makes the station every other family needs); the tally then counts
+#       fewer than a whole lane and is for diagnosis.
+[ -n "${MOONWATER_WIFI_ONLY:-}" ] && set -- "$@" --only "$MOONWATER_WIFI_ONLY"
 if ! python3 test/differential.py --harness wifi_air --seed "${MOONWATER_GUEST_SEED:-1}" "$@" \
         > "$work/script" 2> "$work/script.err"; then
         lost 'wifi scenarios' "the generator failed: $(tail -1 "$work/script.err")"

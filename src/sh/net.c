@@ -2331,8 +2331,29 @@ static COLD b32 net_watch(void)
 
         if (net_kmsg_handle >= 0)
         {
+                b32 limit;
+
                 net_kmsg_begin();
                 net_out = net_kmsg;
+                /*      The kernel drops what a program writes to /dev/kmsg past
+                        ten lines in five seconds for each open file, and
+                        drops it without a word: the write says it succeeded.
+                        A watcher that brings a link up, asks, and is cut and
+                        asks again says that many lines in a moment, and the
+                        line that says the machine has an address was the one
+                        lost -- the lease was taken and nothing said so, until a
+                        later acquisition found the window clear (92 s, in the
+                        wifi lane's watch family). Root's own log is not the
+                        flood that limit is for, so it is turned off; a kernel
+                        started with printk.devkmsg given refuses the write and
+                        keeps what it was told. */
+                limit = (b32)system_open_at(AT_FDCWD, "/proc/sys/kernel/printk_devkmsg",
+                                            1 | O_CLOEXEC);
+                if ((bipolar)limit >= 0)
+                {
+                        (void)system_write_all((positive)limit, (p8 address_to) "on\n", 3);
+                        (void)system_close(limit);
+                }
         }
 
         events = netlink_open_groups(RTNLGRP_LINK_MASK);

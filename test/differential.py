@@ -57795,6 +57795,9 @@ def harness_wifi_air(argv):
         seed = int(argv[argv.index("--seed") + 1])
     rng = random.Random(seed)
     hostapd = "--hostapd" in argv
+    #       --only late,watch runs those families (after the setup every one
+    #       needs) and no others, for the ones a run is repeated for.
+    only = set(argv[argv.index("--only") + 1].split(",")) if "--only" in argv else None
     out = []
     expects = []
 
@@ -57805,6 +57808,8 @@ def harness_wifi_air(argv):
         return "".join("\\%03o" % b for b in data)
 
     def family(name, lines):
+        if only is not None and name not in only:
+            return
         asked = sum(line.count(call) for line in lines
                     for call in ("scen_status ", "scen_count ", "scen_same "))
         out.append("# ---- %s" % name)
@@ -57952,8 +57957,17 @@ def harness_wifi_air(argv):
     lines.append("S=$(station); echo \"station $S\"")
     lines.append("for i in $(seq 120); do dmesg | grep -q \"ip: 192.168.77.100/24 on $S\" && break; sleep 0.5; done")
     lines.append("scen_count 'watch leased the station' 1 \"$(dmesg | grep -c \"ip: 192.168.77.100/24 on $S\")\"")
+    #       The kernel drops what a program writes to /dev/kmsg past ten lines in
+    #       five seconds for each open file, silently. The watcher says several
+    #       lines for every attempt, so the line that says it has an address was
+    #       sometimes the one dropped, and the row above timed out on a lease that
+    #       had been taken (its 92 s was when a later acquisition said it again).
+    lines.append("scen_count 'watch turned the kernel log rate limit off' 1 \"$(grep -c '^on' /proc/sys/kernel/printk_devkmsg)\"")
+    lines.append("( i=0; while [ $i -lt 60 ]; do echo \"<6>kmsg-burst-$i\"; i=$((i + 1)); done ) > /dev/kmsg; sleep 1")
+    lines.append("scen_count 'watch every line of a burst through one open file reaches the log' 60 \"$(dmesg | grep -c 'kmsg-burst-')\"")
     lines.append("scen_count 'watch never took the radio monitor' 0 \"$(dmesg | grep -c 'ip: using hwsim0')\"")
     lines.append("scen_count 'watch never took an access point, once it was one' 0 \"$(( $(dmesg | grep -c \"ip: using $K\\$\") - k0 ))\"")
+    lines.append("echo \"wifi-time lease-after-association $(awk -v a=\"$(associated_at)\" -v l=\"$(dmesg | grep \"ip: 192.168.77.100/24 on $S\" | head -1 | sed 's/^\\[ *\\([0-9.]*\\)\\].*/\\1/')\" 'BEGIN { printf \"%.2f\\n\", l - a }')\"")
     family("watch", lines)
 
     # ---- reassoc: joined, the machine keeps the association while idle;
