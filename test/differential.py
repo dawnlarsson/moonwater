@@ -38100,6 +38100,20 @@ static bipolar system_rename_at(bipolar od, string_address o, bipolar nd, string
         (void)f;
         return answer(renameat((int)od, o, (int)nd, n));
 }
+/* dirname: the head of a path, "." when it has no directory, "/" for the root's. */
+static positive path_head_copy(p8 *to, positive capacity, string_address path) {
+        positive length = strlen(path), cut, at = 0;
+        const char *head;
+        if (!capacity) return 0;
+        while (length > 1 && path[length - 1] == '/') length--;
+        for (cut = length; cut && path[cut - 1] != '/'; cut--) ;
+        while (cut > 1 && path[cut - 1] == '/') cut--;
+        head = cut ? path : ".";
+        if (!cut) cut = 1;
+        for (; at < cut && at + 1 < capacity; at++) to[at] = (p8)head[at];
+        to[at] = 0;
+        return at;
+}
 '''
     driver = r'''
 static int failures, checks;

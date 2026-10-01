@@ -330,13 +330,9 @@ static bipolar host_write_file(string_address path, p8 address_to bytes,
         }
 
         {
-                positive cut = string_length(path);
                 bipolar parent;
 
-                while (cut > 1 && path[cut - 1] != '/')
-                        cut--;
-                string_copy_bounded(next, path, sizeof(next));
-                next[cut > 1 ? cut - 1 : cut] = end;
+                path_head_copy(next, sizeof(next), path);
                 parent = system_open_at(AT_FDCWD, next,
                                         FILE_READ | O_DIRECTORY | O_CLOEXEC);
                 if (parent >= 0)
