@@ -62081,6 +62081,71 @@ static fn crypto_floor_wnaf(void)
               tried == 1200 && wrong == 0);
 }
 
+/* The NIST field bodies in lib.c (p256_ and p384_ multiply and square, each
+   body there is on this machine) against the generic Montgomery routine, for
+   operands below the prime: seeded random ones, the ends of the range (0, 1,
+   p - 1, p - 2) and all-ones limbs. A body that is wrong for one carry
+   pattern in a hundred fails a handshake and not a vector file, so the
+   count is large. */
+static fn crypto_floor_field_bodies(void)
+{
+        const crypto_field address_to fields[2] = {
+            address_of crypto_p256_field, address_of crypto_p384_field};
+        positive wrong = 0;
+        positive tried = 0;
+        p64 seed = 0x2545f4914f6cdd1dull;
+
+        for (positive k = 0; k < 2; k++)
+        {
+                const crypto_field address_to f = fields[k];
+                positive n = f->n;
+
+                for (positive turn = 0; turn < 60000; turn++)
+                {
+                        p64 a[CRYPTO_FE_MAX], b[CRYPTO_FE_MAX];
+                        p64 got[CRYPTO_FE_MAX], want[CRYPTO_FE_MAX];
+
+                        for (positive i = 0; i < n; i++)
+                        {
+                                seed ^= seed << 13;
+                                seed ^= seed >> 7;
+                                seed ^= seed << 17;
+                                a[i] = turn % 5 == 0 ? ~(p64)0 : seed;
+                                seed ^= seed << 13;
+                                seed ^= seed >> 7;
+                                seed ^= seed << 17;
+                                b[i] = turn % 7 == 0 ? 0 : seed;
+                        }
+                        if (turn == 0)
+                                memory_fill(a, 0, sizeof a);
+                        if (turn == 1)
+                        {
+                                memory_fill(a, 0, sizeof a);
+                                a[0] = 1;
+                        }
+                        if (turn == 2)
+                                memory_copy(a, f->m, n * 8), a[0] -= 1;
+                        if (turn == 3)
+                                memory_copy(b, f->m, n * 8), b[0] -= 2;
+                        while (crypto_fe_cmp(a, f->m, n) >= 0)
+                                crypto_fe_subtract_raw(a, a, f->m, n);
+                        while (crypto_fe_cmp(b, f->m, n) >= 0)
+                                crypto_fe_subtract_raw(b, b, f->m, n);
+
+                        crypto_fe_mul(got, a, b, f);
+                        montgomery_multiply(want, a, b, f->m, f->inverse, n);
+                        wrong += memory_compare(got, want, n * 8) != 0;
+                        crypto_fe_sqr(got, a, f);
+                        montgomery_multiply(want, a, a, f->m, f->inverse, n);
+                        wrong += memory_compare(got, want, n * 8) != 0;
+                        tried += 2;
+                }
+        }
+        check("the P-256 and P-384 field multiply and square equal the generic "
+              "Montgomery routine for 240,000 operand pairs below the prime",
+              tried == 240000 && wrong == 0);
+}
+
 static fn crypto_floor_montgomery(void)
 {
         const crypto_field address_to orders[2] = {
@@ -65789,6 +65854,7 @@ b32 main(void)
         crypto_floor_field();
         crypto_floor_montgomery();
         crypto_floor_inverse();
+        crypto_floor_field_bodies();
         crypto_floor_wnaf();
         crypto_floor_g_table();
         crypto_floor_x25519();

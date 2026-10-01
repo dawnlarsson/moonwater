@@ -4272,11 +4272,11 @@ __asm__(
     "mulx 32(%rsi), %rax, %rcx\n adcx %rax, " w4 "\n adox %rcx, " w5 "\n"      \
     "mulx 40(%rsi), %rax, %rcx\n adcx %rax, " w5 "\n adox %rcx, " w6 "\n"      \
     "adcx %rbp, " w6 "\n adox %rbp, " w7 "\n adcx %rbp, " w7 "\n"             \
-    "mov " w0 ", %rcx\n shl $32, %rcx\n add " w0 ", %rcx\n"                    \
-    "mov %rcx, %rax\n shl $32, %rax\n mov %rcx, %rdx\n shr $32, %rdx\n"         \
+    "mov " w0 ", %rax\n shl $32, %rax\n lea (%rax," w0 "), %rcx\n"             \
+    "mov %rcx, %rdx\n shr $32, %rdx\n"                                          \
     "add %rax, " w0 "\n adc %rdx, " w1 "\n adc $0, " w2 "\n adc $0, " w3 "\n adc $0, " w4 "\n adc $0, " w5 "\n adc %rcx, " w6 "\n adc $0, " w7 "\n" \
     "mov %rcx, %rbp\n add %rdx, %rbp\n sbb %rdx, %rdx\n neg %rdx\n"             \
-    "sub %rcx, " w0 "\n sbb %rax, " w1 "\n sbb %rbp, " w2 "\n sbb %rdx, " w3 "\n sbb $0, " w4 "\n sbb $0, " w5 "\n sbb $0, " w6 "\n sbb $0, " w7 "\n"
+    "sub %rax, " w1 "\n sbb %rbp, " w2 "\n sbb %rdx, " w3 "\n sbb $0, " w4 "\n sbb $0, " w5 "\n sbb $0, " w6 "\n sbb $0, " w7 "\n"
 
 /* The squares' cross products by mulx: row i takes a_i (in rdx) times the limbs
    above it into the accumulator limbs i + j and i + j + 1 on the two carry
@@ -4284,6 +4284,17 @@ __asm__(
    chains leave. */
 #define FIELD_X64_P384_TRI_PAIR(off, lo, hi)                                             \
     "mulx " off "(%rsi), %rax, %rcx\n adcx %rax, " lo "\n adox %rcx, " hi "\n"
+
+/* The reduction step as the mulx row has it, for the mulx square: q p from w0
+   (q << 32 is w0 << 32, so one shift makes both), and no subtraction on
+   limb 0, which is zero and does not borrow: so w0 is left as q, which
+   nothing reads but the last step's carry (that one is the plain REDUCE). */
+#define FIELD_X64_P384_REDUCE_MULX(w0, w1, w2, w3, w4, w5, tp)                           \
+    "mov " w0 ", %rax\n shl $32, %rax\n lea (%rax," w0 "), %rcx\n"             \
+    "mov %rcx, %rdx\n shr $32, %rdx\n mov %rcx, " tp "\n"                       \
+    "add %rax, " w0 "\n adc %rdx, " w1 "\n adc $0, " w2 "\n adc $0, " w3 "\n adc $0, " w4 "\n adc $0, " w5 "\n adc $0, " tp "\n" \
+    "mov %rcx, %rbp\n add %rdx, %rbp\n sbb %rdx, %rdx\n neg %rdx\n"             \
+    "sub %rax, " w1 "\n sbb %rbp, " w2 "\n sbb %rdx, " w3 "\n sbb $0, " w4 "\n sbb $0, " w5 "\n sbb $0, " tp "\n"
 
 /* Separate REDC step on a six-limb window with the new top limb in tp:
    (W + q p) / 2^64 < 2^384 always fits, so no carry leaves the window. */
@@ -12005,11 +12016,12 @@ __asm__(
     "mov 40(%rsi), %rdx\n mulx %rdx, %rax, %rbp\n adc %rax, %rdi\n adc %rbp, %rcx\n"
     "mov %r13, 8(%rsp)\n mov %r14, 16(%rsp)\n mov %r15, 24(%rsp)\n mov %rbx, 32(%rsp)\n mov %rdi, 40(%rsp)\n mov %rcx, 48(%rsp)\n"
     "mov (%rsp), %rsi\n"
-    FIELD_X64_P384_REDUCE("%rsi", "%r8", "%r9", "%r10", "%r11", "%r12", "%r13")
-    FIELD_X64_P384_REDUCE("%r8", "%r9", "%r10", "%r11", "%r12", "%r13", "%rsi")
-    FIELD_X64_P384_REDUCE("%r9", "%r10", "%r11", "%r12", "%r13", "%rsi", "%r8")
-    FIELD_X64_P384_REDUCE("%r10", "%r11", "%r12", "%r13", "%rsi", "%r8", "%r9")
-    FIELD_X64_P384_REDUCE("%r11", "%r12", "%r13", "%rsi", "%r8", "%r9", "%r10")
+    FIELD_X64_P384_REDUCE_MULX("%rsi", "%r8", "%r9", "%r10", "%r11", "%r12", "%r13")
+    FIELD_X64_P384_REDUCE_MULX("%r8", "%r9", "%r10", "%r11", "%r12", "%r13", "%rsi")
+    FIELD_X64_P384_REDUCE_MULX("%r9", "%r10", "%r11", "%r12", "%r13", "%rsi", "%r8")
+    FIELD_X64_P384_REDUCE_MULX("%r10", "%r11", "%r12", "%r13", "%rsi", "%r8", "%r9")
+    FIELD_X64_P384_REDUCE_MULX("%r11", "%r12", "%r13", "%rsi", "%r8", "%r9", "%r10")
+    /* the last step zeroes its w0, which the carry out below is */
     FIELD_X64_P384_REDUCE("%r12", "%r13", "%rsi", "%r8", "%r9", "%r10", "%r11")
     "add 8(%rsp), %r13\n adc 16(%rsp), %rsi\n adc 24(%rsp), %r8\n adc 32(%rsp), %r9\n adc 40(%rsp), %r10\n adc 48(%rsp), %r11\n adc $0, %r12\n"
     "mov %r13, %rax\n mov %rsi, %rdx\n mov %r8, %rcx\n mov %r9, %rbp\n mov %r10, %rbx\n mov %r11, %r14\n"
