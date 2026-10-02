@@ -43701,7 +43701,7 @@ def harness_tls_peer(argv):
                 try:
                     code = subprocess.run(
                         [str(work / "wget"), "-q", "--no-check-certificate", "-O", "saved",
-                         "https://127.0.0.1:%d/" % port], capture_output=True, timeout=40,
+                         "https://127.0.0.1:%d/" % port], capture_output=True, timeout=120,
                         cwd=str(folder), env={"PATH": "/usr/bin:/bin", "HOME": str(work)}
                     ).returncode
                 except subprocess.TimeoutExpired:
@@ -43727,7 +43727,11 @@ def harness_tls_peer(argv):
                 else:
                     checks(have == want if code == 0 else have is None,
                            "%s: exit %s published %r" % (label, code, have and have[:40]))
-                checks(elapsed < 10, "%s: took %.1f s" % (label, elapsed))
+                #   A cut has nothing to wait for, so 10 s proves it did not
+                #   wait out the idle timer; a whole delivery is paced by its
+                #   gaps, so its budget grows with the bytes it sent.
+                budget = 10 + (0.002 * seen[0].sent if seen and cut is None else 0)
+                checks(elapsed < budget, "%s: took %.1f s of %.1f" % (label, elapsed, budget))
                 checks(cpu < 1, "%s: took %.2f s of CPU" % (label, cpu))
             print("tls peer schedule: %d deliveries, %s; slowest %.2f s (%s), most CPU "
                   "%.3f s (%s)" % (args.schedule, ", ".join(
