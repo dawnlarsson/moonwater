@@ -13556,7 +13556,7 @@ cat > "$work/live.commands" <<'COMMANDS'
 this line is eaten by the console
 printf 'verdict-%s\n' "$(rev < /run/moonwater/verdict)"
 moonwater status > /tmp/status 2>&1
-printf 'status-live-%s\n' $(( $(grep -c 'live: nothing is kept' /tmp/status) * 7 ))
+printf 'status-live-%s\n' $(( $(grep -c 'live session: nothing is kept' /tmp/status) * 7 ))
 printf 'status-none-%s\n' $(( $(grep -c 'not installed on any disk' /tmp/status) * 7 ))
 printf 'status-stick-%s\n' $(( $(grep -c 'this image is on sda1' /tmp/status) * 7 ))
 mkdir -p /bowls/probe
@@ -13577,11 +13577,11 @@ printf 'link-joined-%s\n' $(( $(grep -c 'in group lab; its members may run' /tmp
 printf 'link-key-%s\n' "$(cat /tmp/linkkey)"
 moonwater name > /root/livename
 printf 'name-live-%s\n' $(( $(grep -c -E '^[a-z]+-[a-z]+$' /root/livename) * 7 ))
-printf 'no\n' | moonwater install nvme0n1 > /tmp/refused 2>&1
+printf 'no\n' | moonwater setup install nvme0n1 > /tmp/refused 2>&1
 printf 'unconfirmed-%s\n' $(( $? + 40 ))
-printf 'sda\n' | moonwater install sda > /tmp/removable 2>&1
+printf 'sda\n' | moonwater setup install sda > /tmp/removable 2>&1
 printf 'removable-%s\n' $(( $? + 40 ))
-printf 'nvme0n1\n' | moonwater install nvme0n1 > /tmp/install 2>&1
+printf 'nvme0n1\n' | moonwater setup install nvme0n1 > /tmp/install 2>&1
 printf 'installed-%s\n' $(( $? + 40 ))
 cat /tmp/install
 printf 'verdict-%s\n' "$(rev < /run/moonwater/verdict)"
@@ -13794,7 +13794,7 @@ this line is eaten by the console
 printf 'two-verdict-%s\n' "$(cut -c1-4 /run/moonwater/verdict | rev)"
 moonwater status > /tmp/status 2>&1
 printf 'two-listed-%s\n' $(( $(grep -c -e 'installed on nvme0n1' -e 'installed on nvme1n1' /tmp/status) * 3 ))
-moonwater use nvme9n1 > /tmp/use9 2>&1
+moonwater setup use nvme9n1 > /tmp/use9 2>&1
 printf 'two-refused-%s\n' $(( $? + 40 ))
 printf 'two-said-%s\n' $(( $(grep -c 'nvme9n1 has no Moonwater install' /tmp/use9) * 7 ))
 poweroff
@@ -13929,12 +13929,12 @@ printf '3\n' | moonwater ask > /tmp/ask 2>&1
 printf 'left-%s\n' "$(rev < /run/moonwater/verdict)"
 moonwater ask > /dev/null 2>&1
 printf 'asked-once-%s\n' $(( $? + 60 ))
-moonwater use > /tmp/use 2>&1
+moonwater setup use > /tmp/use 2>&1
 printf 'used-%s\n' $(( $? + 70 ))
 printf 'used-root-%s\n' "$(rev < /root/second)"
 moonwater status > /tmp/status 2>&1
 printf 'status-kept-other-%s\n' $(( $(grep -c 'installed on nvme0n1, another build' /tmp/status) * 3 ))
-moonwater update > /tmp/update 2>&1
+moonwater setup update > /tmp/update 2>&1
 printf 'updated-beneath-%s\n' $(( $? + 80 ))
 moonwater status > /tmp/status 2>&1
 printf 'status-current-%s\n' $(( $(grep -c 'installed on nvme0n1, this build' /tmp/status) * 3 ))

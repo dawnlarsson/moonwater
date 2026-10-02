@@ -29,8 +29,8 @@
         keyboard belongs to the terminal the compositor starts, so the verdict
         is written under /run/moonwater and that terminal asks before its
         shell does: use the disk's data with this build, update the disk to
-        this build first, or leave the disk alone. `moonwater use`, `update`
-        and `live` answer the same question from any shell.
+        this build first, or leave the disk alone. `moonwater setup use`,
+        `update` and `live` answer the same question from any shell.
 
         Dawn Larsson - Apache-2.0 license
         github.com/dawnlarsson/moonwater
@@ -1516,7 +1516,7 @@ static b32 host_boot(void)
         host_verdict_set("ask ", chosen->disk);
         host_say(log, host_label "%s has Moonwater installed from another build.\n"
                       host_label "A terminal will ask what to do with it, or "
-                      "moonwater use, update or live answers from a shell.\n",
+                      "moonwater setup use, update or live answers from a shell.\n",
                  chosen->disk);
         host_booted(known ? address_of settings : null);
         return 0;
@@ -1624,8 +1624,8 @@ fn host_terminal_opening(void)
         {
                 host_say(log, host_label "This is a live session: nothing is kept "
                                          "after power off.\n"
-                              host_label "moonwater install DISK puts Moonwater "
-                                         "on a disk.\n");
+                              host_label "moonwater setup install DISK puts "
+                                         "Moonwater on a disk.\n");
         }
 }
 
@@ -1733,8 +1733,8 @@ static b32 host_install_disk(string_address asked, bool removable)
 
         if (!removable && host_join(path, sizeof(path), sysfs, "/removable") &&
             host_read_text(path, text, sizeof(text)) > 0 && string_equals(text, "1"))
-                return host_refuse("%s is removable media; moonwater install "
-                                   "needs --removable\n", name);
+                return host_refuse("%s is removable media; moonwater setup "
+                                   "install DISK removable takes it\n", name);
 
         if (!host_running_build(running, sizeof(running)))
                 return host_refuse("%s cannot read its own build\n", "moonwater");
@@ -2080,7 +2080,7 @@ static bipolar host_bind_request(unsigned int op, unsigned int event,
 
         What cannot be written -- a read-only stick, an image found on no
         disk, one built without the section -- stays this session's, says
-        why, and still goes along with moonwater install.
+        why, and still goes along with moonwater setup install.
 */
 #define HOST_SETTINGS HOST_STATE "/settings"
 #define HOST_SETTINGS_NEXT HOST_STATE "/settings.next"
@@ -13148,10 +13148,7 @@ static fn host_usage_write(writer out)
 {
         host_say(out,
                  HOST_ROW("status", "                      ", "this picture")
-                 HOST_ROW("install DISK [--removable]", "  ", "put Moonwater on a disk")
-                 HOST_ROW("use [DISK]", "                  ", "keep that disk this session")
-                 HOST_ROW("update [DISK]", "               ", "write this build onto a disk")
-                 HOST_ROW("live", "                        ", "leave the disks alone")
+                 HOST_ROW("setup", "                       ", "live or kept on a disk: install, update, use, live")
                  HOST_ROW("bind", "                        ", "what the machine's events run")
                  HOST_ROW("bind EVENT [COMMAND]", "        ", "one event; empty puts the default back")
                  HOST_ROW("bind init [add|remove ...]", "  ", "what runs at boot")
@@ -13201,6 +13198,30 @@ static b32 host_usage(void)
 }
 
 /*
+        What setup does. A session is live, with nothing kept after power off,
+        or it keeps /bowls, /root and /home on an install's data partition;
+        the verbs move between the two, or write this build onto a disk.
+*/
+static fn host_setup_usage_write(writer out)
+{
+        host_say(out,
+                 HOST_ROW("setup", "                       ", "where this session runs, and the installs found")
+                 HOST_ROW("setup install DISK [removable]", " ", "erase DISK and put Moonwater on it; removable")
+                 "                              " TERM_DIM "takes a disk that says it is removable" TERM_RESET "\n"
+                 HOST_ROW("setup update [DISK]", "         ", "write this build over an install, keeping its data")
+                 HOST_ROW("setup use [DISK]", "            ", "run this build with an install's /bowls /root /home")
+                 HOST_ROW("setup live", "                  ", "leave the disks alone this session")
+                 "\n");
+}
+
+static b32 host_setup_usage(void)
+{
+        host_title(log_error);
+        host_setup_usage_write(log_error);
+        return 2;
+}
+
+/*
         The wifi line of status, from what the kernel already holds: status
         never scans. Joined and where, why wifi cannot be used, or what the
         last join said.
@@ -13238,21 +13259,17 @@ static fn host_status_wifi(void)
 }
 
 /*
-        This session as one page: the build, the disks, Canvas, the bound
-        events, init and exit, then the commands. Nothing is a log line;
-        the words that name each fact stay as they are.
+        Where this session runs and what is on the disks: the build, whether
+        the session is live, kept on a disk or waiting for an answer, every
+        install found and the stick this image is on. Setup and status both
+        open with it.
 */
-static b32 host_status(void)
+static fn host_setup_state(void)
 {
         p8 running[HOST_BUILD_ROOM];
         p8 verdict[HOST_NAME_ROOM + 16];
         host_census census;
         host_medium_search search;
-        host_settings settings;
-        struct canvas_control canvas;
-
-        host_state_ready();
-        host_title(log);
 
         if (host_running_build(running, sizeof(running)))
                 string_format(log, "  this is %s\n", running);
@@ -13265,10 +13282,11 @@ static b32 host_status(void)
                               verdict + 5, BOWL_ROOT_DIRECTORY);
         else if (host_starts(verdict, "ask "))
                 string_format(log, "  waiting: %s has another build; "
-                                   "moonwater use, update or live\n",
+                                   "moonwater setup use, update or live\n",
                               verdict + 4);
         else
-                string_format(log, "  live: nothing is kept after power off\n");
+                string_format(log, "  live session: nothing is kept after power "
+                                   "off; moonwater setup install DISK keeps it\n");
 
         host_census_take(address_of census);
         for (positive at = 0; at < census.count; at++)
@@ -13295,6 +13313,21 @@ static b32 host_status(void)
                 string_format(log, "  this image is on %s\n", search.name);
                 host_unmount(HOST_MEDIUM);
         }
+}
+
+/*
+        This session as one page: the build, the disks, Canvas, the bound
+        events, init and exit, then the commands. Nothing is a log line;
+        the words that name each fact stay as they are.
+*/
+static b32 host_status(void)
+{
+        host_settings settings;
+        struct canvas_control canvas;
+
+        host_state_ready();
+        host_title(log);
+        host_setup_state();
 
         string_format(log, "\n");
 
@@ -13405,6 +13438,57 @@ static b32 host_answer(bool update, string_address disk)
 
 #include "../waterlink/command.c"
 
+/*
+        `moonwater setup`: a live session, or one that keeps its data on a
+        disk, and the ways to change which. Arguments are judged before
+        root is asked for, so a wrong one is a usage page for anyone.
+*/
+static b32 host_setup(string_address address_to arguments, positive count)
+{
+        string_address verb = count > 2 ? arguments[2] : null;
+        bool update = verb && string_equals(verb, "update");
+
+        if (!verb)
+        {
+                host_state_ready();
+                host_title(log);
+                host_setup_state();
+                string_format(log, "\n");
+                host_setup_usage_write(log);
+                return 0;
+        }
+
+        if (string_equals(verb, "install"))
+        {
+                bool removable = count == 5 && string_equals(arguments[4], "removable");
+
+                if (count < 4 || count > 5 || (count == 5 && !removable))
+                        return host_setup_usage();
+                host_need_root("moonwater setup");
+                host_state_ready();
+                return host_install_disk(arguments[3], removable);
+        }
+
+        if (string_equals(verb, "live") && count == 3)
+        {
+                host_need_root("moonwater setup");
+                host_state_ready();
+                system_remove_at(AT_FDCWD, HOST_QUESTION, 0);
+                host_verdict_set("live", "");
+                host_say(log, host_label "the disks are left alone this session\n");
+                return 0;
+        }
+
+        if ((update || string_equals(verb, "use")) && count <= 4)
+        {
+                host_need_root("moonwater setup");
+                host_state_ready();
+                return host_answer(update, count == 4 ? arguments[3] : null);
+        }
+
+        return host_setup_usage();
+}
+
 static b32 host_main()
 {
         string_address address_to arguments = program_argument_list();
@@ -13423,6 +13507,9 @@ static b32 host_main()
 
         if (string_equals(verb, "status") && count <= 2)
                 return host_status();
+
+        if (string_equals(verb, "setup"))
+                return host_setup(arguments, count);
 
         // Before the root check: reading needs nothing, and the kernel
         // decides who may set a bound event. init and exit still need root.
@@ -13461,50 +13548,19 @@ static b32 host_main()
         if (string_equals(verb, "machine") && count == 2)
                 return host_machine_run();
 
-        if (!string_equals(verb, "install") && !string_equals(verb, "use") &&
-            !string_equals(verb, "update") && !string_equals(verb, "live") &&
-            !string_equals(verb, "boot") && !string_equals(verb, "ask"))
+        if (!string_equals(verb, "boot") && !string_equals(verb, "ask"))
                 return host_usage();
 
         host_need_root("moonwater");
 
         host_state_ready();
 
-        if (string_equals(verb, "install"))
-        {
-                string_address disk = null;
-                bool removable = false;
-
-                for (positive at = 2; at < count; at++)
-                {
-                        if (string_equals(arguments[at], "--removable"))
-                                removable = true;
-                        else if (!disk)
-                                disk = arguments[at];
-                        else
-                                return host_usage();
-                }
-
-                return disk ? host_install_disk(disk, removable) : host_usage();
-        }
-
-        if (count > 3 || (count > 2 && (string_equals(verb, "live") ||
-                                        string_equals(verb, "boot") ||
-                                        string_equals(verb, "ask"))))
+        if (count > 2)
                 return host_usage();
 
         if (string_equals(verb, "boot"))
                 return host_boot();
 
-        if (string_equals(verb, "live"))
-        {
-                system_remove_at(AT_FDCWD, HOST_QUESTION, 0);
-                host_verdict_set("live", "");
-                host_say(log, host_label "the disks are left alone this session\n");
-                return 0;
-        }
-
-        if (string_equals(verb, "ask"))
         {
                 p8 verdict[HOST_NAME_ROOM + 16];
 
@@ -13515,11 +13571,8 @@ static b32 host_main()
                         return host_refuse("there is nothing to ask%s\n", "");
 
                 host_question(verdict + 4);
-                return 0;
         }
-
-        return host_answer(string_equals(verb, "update"),
-                           count == 3 ? arguments[2] : null);
+        return 0;
 }
 
 #define MOONWATER_CLI

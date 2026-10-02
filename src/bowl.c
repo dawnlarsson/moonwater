@@ -1797,7 +1797,7 @@ static fn bowl_room_hint(bowl_room address_to room)
 {
         if (room->in_memory)
                 string_format(log, bowl_label "/bowls is kept in memory, as a live "
-                                              "session keeps it; moonwater install "
+                                              "session keeps it; moonwater setup install "
                                               "DISK puts bowls on the disk's data "
                                               "partition\n");
 }

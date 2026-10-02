@@ -41164,7 +41164,11 @@ def harness_moonwater_cli(argv):
                 "bios reboot extra", "bluetooth", "bluetooth off",
                 "bluetooth on", "priority internet", "priority internet wired",
                 "priority internet wifi", "priority internet cable", "wipe extra",
-                "install", "use", "update", "live extra", "boot", "ask", "machine extra",
+                "install", "use", "update", "live", "setup", "setup install", "setup install a b c",
+                "setup install a removable x", "setup install ../x removable", "setup use a b c",
+                "setup update a b c", "setup live extra", "setup bogus", "setup removable",
+                "setup use nobody", "setup update nobody", "boot extra", "ask extra",
+                "machine extra",
                 #       Not "link pair" or "link NAME CODE": those wait five minutes
                 #       for the other machine, and the link harness has them.
                 "link", "link help", "link key", "link bogus", "link pair x y z",

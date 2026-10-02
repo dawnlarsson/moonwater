@@ -14,11 +14,13 @@ the whole system is meant to stay under 15 MB.
 what the machine's events do.
 
 ```sh
-moonwater                              where this session runs: live, from a disk, or waiting for an answer
-moonwater install DISK [--removable]   erase DISK and install Moonwater on it
-moonwater update [DISK]                write this build over an install, keeping its data and settings
-moonwater use [DISK]                   run this build with an install's /bowls, /root and /home
-moonwater live                         leave the disks alone this session
+moonwater                              the commands
+moonwater status                       this session as one page: build, disks, Canvas, binds, settings
+moonwater setup                        live or kept on a disk, and the installs found
+moonwater setup install DISK [removable]  erase DISK and install Moonwater on it
+moonwater setup update [DISK]          write this build over an install, keeping its data and settings
+moonwater setup use [DISK]             run this build with an install's /bowls, /root and /home
+moonwater setup live                   leave the disks alone this session
 moonwater wipe                         forget /home and extra /root; keep the machine
 
 moonwater bind                         the machine's events, and what each runs
@@ -79,12 +81,22 @@ Commands given to `moonwater` run as root through the shell, as if typed.
 `bind init` runs in the background and keeps each command's output in
 `/run/moonwater/init`; `bind exit` allows 10 seconds a command and 30 in all.
 
+**Live and installed.** A machine started from the stick is a live session:
+Moonwater runs from memory and nothing is kept after power off. `moonwater
+setup install DISK` erases DISK and writes this Moonwater on it with a data
+partition for `/bowls`, `/root` and `/home`, and a session started from that
+disk keeps them there; a disk that says it is removable, a USB stick, is
+installed only with the word `removable`. When a stick finds an install of
+another build, `setup use` runs this build on the disk's data, `setup update`
+writes this build onto the disk first, and `setup live` leaves the disk alone.
+`moonwater setup` says which of these a session is.
+
 **Settings.** Binds, init and exit live in the boot image: set them on a live
-stick and `install` carries them to the disk, while `update` keeps the disk's
-own. Wifi, wired, bluetooth, internet preference, power and charge settings,
+stick and `setup install` carries them to the disk, while `setup update` keeps
+the disk's own. Wifi, wired, bluetooth, internet preference, power and charge settings,
 timezone, NTP, keyboard, name and link settings live in `/root` on the data
-partition, so `update` and `wipe` keep them. A machine gets its name the first
-time it boots, from a live stick too, and `install` carries it to the disk.
+partition, so `setup update` and `wipe` keep them. A machine gets its name the first
+time it boots, from a live stick too, and `setup install` carries it to the disk.
 
 **Events.** Besides the power button and Canvas, `bind` covers `reset`, `mute`,
 `micmute`, `volume_up`/`down`, `brightness_up`/`down`, `lid_close`/`open`,
@@ -152,7 +164,7 @@ on the others. Members on the same local network find each other over mDNS
 (`_waterlink._udp`) and link themselves, under the grants their group line
 gave. Machines announce only a port, under random labels; only the secret's
 600,000-round PBKDF2 result is stored. Join on the live stick before
-`install` and the machine is in the group from its first boot.
+`setup install` and the machine is in the group from its first boot.
 
 ## The machine script
 
@@ -217,7 +229,7 @@ gives package managers a complete namespace with the host's `/proc/sys` and
 global path. A bowl is not a security sandbox: its programs run as root.
 
 `bowl setup` checks for room before downloading. On a live stick bowls live in
-memory; `moonwater install` puts them on a data partition.
+memory; `moonwater setup install` puts them on a data partition.
 
 ### Profiles
 
