@@ -7571,6 +7571,35 @@ b32 main()
                         tell("]\n");
                         to_shell_length = 0;
                 }
+                /*
+                        ask N TEXT: TEXT handed over N times, as reads from a
+                        far end that never reads what is sent back; queued
+                        says how many bytes are then waiting, and the last
+                        one of them.
+                */
+                else if (string_compare(verb, (string_address) "ask") == 0 &&
+                         i + 2 < count)
+                {
+                        static p8 feed[4096];
+                        positive n = 0;
+                        positive at = 0;
+                        unsigned int times = number(argument);
+                        bipolar c;
+
+                        while ((c = next_byte(program_argument(i + 2), &at)) >= 0 &&
+                               n < sizeof(feed))
+                                feed[n++] = (p8)c;
+                        while (times--)
+                                term_bytes(feed, n);
+                        i += 2;
+                }
+                else if (string_compare(verb, (string_address) "queued") == 0)
+                {
+                        say_number((unsigned int)to_shell_length);
+                        say_byte(',');
+                        say_number(to_shell_length ? to_shell[to_shell_length - 1] : 0);
+                        say_byte('\n');
+                }
                 else if (string_compare(verb, (string_address) "wrote") == 0)
                 {
                         bipolar wrote;
@@ -8004,6 +8033,25 @@ same 'ink asked with st' '[\e]10;rgb:e5e5/e5e5/e5e5\e\]' 20 5 in '\e]10;?\e\\' s
 same 'ink then paper' '[\e]10;rgb:e5e5/e5e5/e5e5\x07\e]11;rgb:0000/0000/0000\x07]' 20 5 in '\e]10;?;?\x07' sent
 same 'palette asked' '[\e]4;196;rgb:ffff/0000/0000\x07\e]4;244;rgb:8080/8080/8080\x07]' 20 5 in '\e]4;196;?;244;?\x07' sent
 same 'setting a colour' '[]'                     20 5 in '\e]11;#ffffff\x07\e]4;300;?\x07' sent
+#       Every question the emulator answers, asked 200,000 times by a far end
+#       that reads none of the answers (a file of them on the screen while
+#       the program in front reads no input): what waits stays under the
+#       ceiling plus one answer, a key typed then still goes up whole, and a
+#       question asked once the far end has read is answered again.
+for question in '\e[6n' '\e[?6n' '\e[5n' '\e[c' '\e[>c' '\e[=c' '\e[?7$p' \
+                '\e[4$p' '\e[18t' '\e[14t' '\e[16t' '\e[19t' '\e]11;?\x07' \
+                '\e]10;?;?\e\\' '\e]4;1;?;2;?\x07' '\e[6n\e[c\e[18t'; do
+        once=$(term 20 5 in "$question" sent)
+        got=$(term 20 5 ask 200000 "$question" keys x queued wrote 99999999 \
+                   in "$question" sent)
+        held=${got%%,*}
+        rest=${got#*,}
+        if [ "$held" -le 4160 ] && [ "$rest" = "120|alive|$once" ] && [ "$once" != "[]" ]; then
+                won
+        else
+                lost "answers held for $question" "want at most 4160 then 120|alive|$once, got $got"
+        fi
+done
 
 #
 #       Erasing.

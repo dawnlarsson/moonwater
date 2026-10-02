@@ -705,6 +705,26 @@ static fn emit_bytes(address_any data, positive length)
 #endif
 }
 
+/*
+        Whether a question is answered.
+
+        An answer waits in to_shell until the far end reads it, and a far end
+        that does not read -- `cat` of a file holding a million \e[6n, with
+        the program in front reading no input -- left every one waiting: the
+        queue grew by each answer, and screen.c moves what is left of it down
+        after every partial write, so a hundred megabytes of answers were
+        moved four kilobytes at a time. A question is answered while less
+        than this waits, which is more than any program that reads its
+        answers leaves unread; keys are never refused here. The console's
+        queue is smaller and caps keys and answers alike.
+*/
+#define TERM_ANSWERS_HELD 4096
+
+static b32 answering(void)
+{
+        return to_shell_length < TERM_ANSWERS_HELD;
+}
+
 static fn emit(unsigned int byte)
 {
         p8 one = (p8)byte;
@@ -923,7 +943,8 @@ static fn osc_finish(b32 bell)
                                 break;
                 }
 
-                if (i < osc_length && osc_bytes[i] == '?' && index < 256)
+                if (i < osc_length && osc_bytes[i] == '?' && index < 256 &&
+                    answering())
                 {
                         emit_literal("\x1b]");
                         positive_to_string(emit_bytes, command);
@@ -1734,6 +1755,8 @@ static fn csi_final(unsigned int final)
         case 'n':
                 // The cursor is reported one based, which is the same
                 // counting CUP takes it back in.
+                if (!answering())
+                        break;
                 if (terminal_csi.count && terminal_csi.value[0] == 6)
                 {
                         emit_literal("\x1b[");
@@ -1754,6 +1777,8 @@ static fn csi_final(unsigned int final)
                 // answers and what ncurses's u8 reads for. Secondary DA is
                 // the xterm version report, and tertiary DA the unit's number,
                 // which xterm gives as zeros.
+                if (!answering())
+                        break;
                 if (terminal_csi.marker == '>')
                         emit_literal("\x1b[>0;115;0c");
                 else if (terminal_csi.marker == '=')
@@ -1797,7 +1822,7 @@ static fn csi_final(unsigned int final)
                         soft_reset();
                 // DECRQM. neovim and kakoune ask before they lean on
                 // synchronized output or the mouse.
-                else if (csi_intermediate == '$')
+                else if (csi_intermediate == '$' && answering())
                 {
                         unsigned int p = terminal_csi.count ? terminal_csi.value[0] : 0;
 
@@ -1824,7 +1849,8 @@ static fn csi_final(unsigned int final)
                 unsigned int wide = op == 14 ? COLUMNS * WINDOW_CELL_W
                                   : op == 16 ? WINDOW_CELL_W : COLUMNS;
 
-                if (op != 14 && op != 16 && op != 18 && op != 19)
+                if ((op != 14 && op != 16 && op != 18 && op != 19) ||
+                    !answering())
                         break;
 
                 emit_literal("\x1b[");
