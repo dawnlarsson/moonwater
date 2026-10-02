@@ -113,8 +113,9 @@
 #define LINK_SEGMENTS ((65535 - 40 - 8) / WATERLINK_DATAGRAM)
 
 /*      A grant by name, and what a request needs of one: ask is the
-        request byte that needs this grant, 0 for a grant no request asks
-        for yet. */
+        request byte that needs this grant. Only the grants a request asks
+        for have a name here: the verbs, screen and channels bits are in the
+        protocol for what comes later and nobody can be given them yet. */
 typedef struct
 {
         string_address name;
@@ -124,13 +125,10 @@ typedef struct
 } link_grant;
 
 static const link_grant link_grants[] = {
-    {"verbs", WATERLINK_MAY_VERBS, 0, 0},
-    {"run", WATERLINK_MAY_RUN, LINK_ASK_RUN, 0},
     {"shell", WATERLINK_MAY_SHELL, LINK_ASK_SHELL, 0},
-    {"screen", WATERLINK_MAY_SCREEN, 0, 0},
+    {"run", WATERLINK_MAY_RUN, LINK_ASK_RUN, 0},
     {"files", WATERLINK_MAY_FILES, LINK_ASK_PUSH, LINK_ASK_PULL},
     {"log", WATERLINK_MAY_LOG, LINK_ASK_LOG, 0},
-    {"channels", WATERLINK_MAY_CHANNELS, 0, 0},
 };
 
 // The grant a word names, or 0.
@@ -222,12 +220,23 @@ static bool link_key_parse(string_address text, p8 address_to key)
         underscore, starting with a letter or digit: nothing a terminal would
         act on, nothing a shell word would split.
 */
+/*      The words `moonwater link` itself takes in the place of a machine's
+        name, which no machine or group may be called: link NAME is a
+        terminal on the one, and link log is not. */
+static const string_address link_words[] = {
+    "on",    "off",  "key",  "serve", "pair", "add",  "remove", "allow",
+    "deny",  "group", "leave", "push", "pull", "log",  "shell", "run",  "help",
+};
+
 static bool link_name_good(string_address name)
 {
         positive length = string_length(name);
 
         if (!length || length >= WATERLINK_NAME_MAX)
                 return false;
+        for (positive word = 0; word < array_count(link_words); word++)
+                if (string_equals(name, link_words[word]))
+                        return false;
 
         for (positive at = 0; at < length; at++)
         {
@@ -2030,7 +2039,7 @@ static positive link_stamp_at(p8 address_to key)
 }
 
 /* Peer removal must eventually release its replay slot. The listener may
-   outlive `link forget`, so compact stale markers when capacity matters
+   outlive `link remove`, so compact stale markers when capacity matters
    rather than letting forgotten peers permanently deny a new identity. */
 static fn link_stamps_prune(void)
 {
@@ -3011,7 +3020,7 @@ static b32 link_client_run(string_address name, p8 kind,
 
         if (link_identity(address_of link_self.me, false) < 0)
                 return host_refuse("this machine has no link key; "
-                                   "moonwater link key makes one%s\n",
+                                   "moonwater link on makes one%s\n",
                                    "");
 
         link_peers_load(address_of peers);
@@ -3019,8 +3028,8 @@ static b32 link_client_run(string_address name, p8 kind,
         if (!peer)
                 return host_refuse("no peer is called %s\n", name);
         if (!peer->port)
-                return host_refuse("%s has no address; pair it again with "
-                                   "one\n",
+                return host_refuse("%s has no address: moonwater link add "
+                                   "it again with one\n",
                                    name);
 
         //      The request, before anything is sent: a command that cannot be

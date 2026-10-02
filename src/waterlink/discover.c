@@ -23,7 +23,7 @@
         guesses offline without ever sending a thing, at the price of one
         derivation a guess: 56 ms on one core of a 9950X, and a graphics card
         running PBKDF2 does thousands a second, so a word a person chose will
-        fall to anyone who cares to try. A secret `moonwater link join` makes
+        fall to anyone who cares to try. A secret `moonwater link group` makes
         itself has 160 random bits, and no guessing reaches it.
 
         The records are parsed the way the most exposed parser on the machine

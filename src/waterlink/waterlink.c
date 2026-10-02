@@ -272,9 +272,12 @@ struct waterlink_frame {
         frame costs 2516 cycles where a bulk one costs 461. */
 
 /*      What a peer may do, granted one at a time and starting at none. VERBS
-        is the moonwater vocabulary the machine already answers to and is what
-        a freshly paired peer gets: it cannot execute, open a terminal or
-        write a file. Everything past it is a decision somebody made. */
+        is what a freshly linked peer carries: it cannot execute, open a
+        terminal, write a file or follow the log, and no request asks for it,
+        so it is a marker that nothing has been granted rather than a grant.
+        SCREEN and CHANNELS are bits the protocol keeps for what comes later,
+        and nobody can be given them. Everything else is a decision somebody
+        made, by the name `moonwater link allow` takes. */
 #define WATERLINK_MAY_VERBS 0x0001u
 #define WATERLINK_MAY_RUN 0x0002u      // one command, no terminal
 #define WATERLINK_MAY_SHELL 0x0004u    // a terminal

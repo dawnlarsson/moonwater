@@ -20,7 +20,7 @@
         derived from it and the secret (never the secret itself, and no hash
         of it either: a fast hash beside the slow key let anyone holding the
         file guess at full speed) and the grants members get here. Written
-        by `moonwater link join`, read by the listener whenever it changes.
+        by `moonwater link group`, read by the listener whenever it changes.
 
         Discovery is IPv4 only for now, 224.0.0.251 on every interface that
         takes the membership; ff02::fb is not asked or answered. A packet is
@@ -52,13 +52,31 @@
 #define LINK_GREET_AGAIN 10000000ull     // the same place, not sooner
 #define LINK_ANSWER_AGAIN 100000ull      // a one-shot asker's answer, not sooner
 
+/*
+        A pairing code is a group of one: the namespace is the name of the
+        machine that is waiting, the secret is the code, and the group lets
+        in one machine and is gone. ONCE says so; expires is when it goes in
+        seconds since boot (a code outlives neither its five minutes nor the
+        boot), and expect is the crc of the one name that may use it, or zero
+        for any. DONE is a code that has taken its machine and is kept half a
+        minute, closed to everyone else, so a greeting back that was lost can
+        still be answered.
+*/
+#define LINK_GROUP_ONCE 1u
+#define LINK_GROUP_DONE 2u
+#define LINK_CLOCK_BOOT 7
+#define LINK_PAIR_SECONDS 300
+#define LINK_PAIR_GRACE 30
+
 struct link_group_record {
         char namespace[WATERLINK_NAMESPACE_MAX];
         p8 key[32];   // PBKDF2 of namespace and secret
         p8 check[32]; // unused; older files held a SHA-256 of the secret here
         p32 may;
         p32 flags;
-        p8 reserved[24];
+        p64 expires;
+        p32 expect;
+        p8 reserved[12];
 };
 
 _Static_assert(sizeof(struct link_group_record) == 128,
@@ -151,6 +169,29 @@ static bipolar link_groups_save(link_groups address_to groups)
                                  true);
 }
 
+static p64 link_boot_seconds(void)
+{
+        return system_clock_ns(LINK_CLOCK_BOOT) / 1000000000ull;
+}
+
+//      The check a name carries in a code's record: its CRC-32, which says
+//      whether it is the name that was expected and nothing more. A name
+//      from a greeting has no terminator to count on, so its room is its
+//      length at most.
+static p32 link_name_check(string_address name, positive room)
+{
+        return ~hash_crc32(~0u, (p8 address_to)name,
+                           string_length_max(name, room));
+}
+
+//      A one-use group that has run out, or has taken its machine and been
+//      kept its half minute.
+static bool link_group_spent(struct link_group_record address_to record,
+                             p64 now)
+{
+        return (record->flags & LINK_GROUP_ONCE) && record->expires <= now;
+}
+
 /*
         The peers file has two writers now, the command and the listener, so
         every load, change and save of it happens under this record lock.
@@ -167,9 +208,9 @@ static fn link_peers_unlock(bipolar handle)
 }
 
 /*
-        This machine's name as it offers it to a member: the host name, held
-        to what link_name_good takes and short enough to leave room for a
-        suffix. The far side checks it again all the same.
+        This machine's name as it offers it to a member, and as `link pair`
+        prints it: the host name in lowercase, held to what link_name_good
+        takes. The far side checks it again all the same.
 */
 fn link_machine_name(p8 address_to name)
 {
@@ -178,9 +219,11 @@ fn link_machine_name(p8 address_to name)
 
         memory_zero(name, WATERLINK_NAME_MAX);
         if (system_call_1(syscall(uname), (positive)uts) >= 0)
-                for (positive at = 65; at < 130 && uts[at] && used < 20; at++)
+                for (positive at = 65; at < 130 && uts[at] &&
+                                       used < WATERLINK_NAME_MAX - 1;
+                     at++)
                 {
-                        p8 c = uts[at];
+                        p8 c = byte_to_lower(uts[at]);
 
                         if (byte_is_alnum(c) || (used && (c == '-' || c == '_')))
                                 name[used++] = c;
@@ -192,7 +235,8 @@ fn link_machine_name(p8 address_to name)
 /*
         A member keeps a name that reads as the machine it is, and does not
         take one already in the file: a suffix from its key, the same every
-        time it pairs, is added when it would.
+        time it pairs, is added when it would, and then the name is cut to
+        leave room for it.
 */
 static fn link_name_for(link_peers address_to peers, p8 address_to offered,
                         p8 address_to key, p8 address_to name)
@@ -206,21 +250,22 @@ static fn link_name_for(link_peers address_to peers, p8 address_to offered,
         offered[WATERLINK_NAME_MAX - 1] = 0;
         memory_zero(base, sizeof base);
         length = string_length((string_address)offered);
-        if (length > 20)
-                length = 20;
         memory_copy(base, offered, length);
         if (!link_name_good((string_address)base))
                 string_copy((string_address)base, "machine");
 
         string_copy((string_address)name, (string_address)base);
         for (positive width = 3; link_peer_named(peers, (string_address)name) &&
-                                 width <= 8;
+                                 width <= 6;
              width++)
         {
                 positive used = string_length((string_address)base);
                 p8 hex[8];
 
+                if (used > 24)
+                        used = 24;
                 memory_into_hex(hex, key, 4);
+                memory_zero(name, WATERLINK_NAME_MAX);
                 memory_copy(name, base, used);
                 name[used++] = '-';
                 memory_copy(name + used, hex, width);
@@ -260,6 +305,7 @@ typedef struct
         struct link_greeted greeted[LINK_GREETED];
         positive greeted_next;
         p8 name[WATERLINK_NAME_MAX];
+        p64 expiry_look;
 } link_nearby_state;
 
 static link_nearby_state link_nearby;
@@ -272,6 +318,56 @@ static bool link_nearby_labels(void)
                 system_random_fill(link_nearby.instance,
                                    sizeof link_nearby.instance, 0) >= 0;
         return link_nearby.labels_ready;
+}
+
+//      The one-use group that has taken its machine: closed to anyone else
+//      at once, here and in the file, and gone in half a minute.
+static fn link_group_close(positive group)
+{
+        link_groups groups;
+        p64 now = link_boot_seconds();
+        bipolar lock;
+
+        link_nearby.groups.record[group].flags |= LINK_GROUP_DONE;
+        link_nearby.groups.record[group].expires = now + LINK_PAIR_GRACE;
+
+        lock = link_peers_lock();
+        link_groups_load(address_of groups);
+        for (positive at = 0; at < groups.count; at++)
+                if ((groups.record[at].flags & LINK_GROUP_ONCE) &&
+                    crypto_same(groups.record[at].key,
+                                link_nearby.groups.record[group].key, 32))
+                {
+                        groups.record[at].flags |= LINK_GROUP_DONE;
+                        groups.record[at].expires = now + LINK_PAIR_GRACE;
+                }
+        (void)link_groups_save(address_of groups);
+        link_peers_unlock(lock);
+        crypto_forget(address_of groups, sizeof groups);
+}
+
+//      One-use groups that ran out, dropped from the file whether or not
+//      anything else changed it.
+static fn link_groups_expire(void)
+{
+        link_groups groups;
+        p64 now = link_boot_seconds();
+        bool spent = false;
+        bipolar lock;
+
+        for (positive at = 0; at < link_nearby.groups.count; at++)
+                spent |= link_group_spent(link_nearby.groups.record + at, now);
+        if (!spent)
+                return;
+
+        lock = link_peers_lock();
+        link_groups_load(address_of groups);
+        for (positive at = 0; at < groups.count; at++)
+                if (link_group_spent(groups.record + at, now))
+                        groups.record[at--] = groups.record[--groups.count];
+        (void)link_groups_save(address_of groups);
+        link_peers_unlock(lock);
+        crypto_forget(address_of groups, sizeof groups);
 }
 
 /*
@@ -297,6 +393,16 @@ static bool link_pair_keep(positive group, p8 address_to key,
         bool changed = false;
         bool new = false;
 
+        struct link_group_record address_to record =
+                link_nearby.groups.record + group;
+        bool once = (record->flags & LINK_GROUP_ONCE) != 0;
+        bool open = !once ||
+                    (!(record->flags & LINK_GROUP_DONE) &&
+                     !link_group_spent(record, link_boot_seconds()) &&
+                     (!record->expect ||
+                      record->expect == link_name_check((string_address)offered,
+                                                        WATERLINK_NAME_MAX)));
+
         address_to accepted = false;
 
         if (!link_peers_for_change(address_of peers))
@@ -305,7 +411,7 @@ static bool link_pair_keep(positive group, p8 address_to key,
                 return false;
         }
         peer = link_peer_keyed(address_of peers, key);
-        if (!peer && peers.count < LINK_PEERS_MAX &&
+        if (!peer && open && peers.count < LINK_PEERS_MAX &&
             !crypto_same(key, link_self.me.public, 32))
         {
                 p8 name[WATERLINK_NAME_MAX];
@@ -344,6 +450,8 @@ static bool link_pair_keep(positive group, p8 address_to key,
         address_to accepted = peer != null;
         link_peers_unlock(lock);
         link_self.state_dirty = true;
+        if (once && peer && !(record->flags & LINK_GROUP_DONE))
+                link_group_close(group);
         return new;
 }
 
@@ -460,6 +568,12 @@ static fn link_nearby_reload(p64 now)
         file_facts facts;
         p64 changed = 0;
 
+        if (now - link_nearby.expiry_look >= 2000000)
+        {
+                link_nearby.expiry_look = now;
+                link_groups_expire();
+        }
+
         //      Twice a second at most. Every save is a rename, so the inode
         //      says whether the file is the one already read.
         if (link_nearby.looked && now - link_nearby.looked < 500000)
@@ -557,10 +671,14 @@ static bool link_greeted_lately(p32 group, p8 address_to address, p16 port,
 /*
         Greet a machine as a member of a group: the ordinary first message,
         to the group's key and with its pre-shared key, from this machine's
-        own key and with its name.
+        own key and with its name. Greeted lately is not greeted again,
+        except in answer to a greeting that opened: that machine is waiting
+        for it, and the earlier one may have reached it before it had the
+        group (a code made a moment ago), which is all the member that
+        answers was told.
 */
 static fn link_pair_begin(positive group, p8 address_to address, p16 port,
-                          p64 now)
+                          p64 now, bool answer)
 {
         struct waterlink_group_keys address_to keys = link_nearby.keys + group;
         struct waterlink_noise noise;
@@ -569,7 +687,7 @@ static fn link_pair_begin(positive group, p8 address_to address, p16 port,
         p8 ephemeral[32];
         p64 wall = system_clock_ns(0);
 
-        if (link_greeted_lately(keys->mark, address, port, now) ||
+        if ((!answer && link_greeted_lately(keys->mark, address, port, now)) ||
             system_random_fill(ephemeral, 32, 0) < 0)
                 return;
         waterlink_stamp(hello, wall / 1000000000ull,
@@ -608,7 +726,7 @@ static bool link_pair_greeted(positive group, p8 address_to key,
         if (link_pair_keep(group, key, hello + WATERLINK_STAMP_BYTES,
                            network_load_32(hello + 4), address, port,
                            address_of accepted))
-                link_pair_begin(group, address, port, now);
+                link_pair_begin(group, address, port, now, true);
         return accepted;
 }
 
@@ -689,6 +807,17 @@ static fn link_nearby_heard(p8 address_to packet, positive length,
                 {
                         bool known = false;
                         p64 oldest = link_nearby.greeted[link_nearby.greeted_next].at;
+                        p32 once = link_nearby.groups.record[group].flags;
+
+                        //      A code that is used up greets nobody, and one that
+                        //      waits for a named machine only answers: it cannot
+                        //      tell whose announcement this is, and a greeting to
+                        //      the wrong machine would link that machine to this
+                        //      one, which would not link back.
+                        if ((once & LINK_GROUP_ONCE) &&
+                            ((once & LINK_GROUP_DONE) ||
+                             link_nearby.groups.record[group].expect))
+                                continue;
 
                         for (positive p = 0; p < peers.count && !known; p++)
                                 known = peers.peer[p].group ==
@@ -706,7 +835,7 @@ static fn link_nearby_heard(p8 address_to packet, positive length,
                         if (!known && (!oldest || link_age(now, oldest) >=
                                                           LINK_GREET_AGAIN))
                                 link_pair_begin(group, address, instance->port,
-                                                now);
+                                                now, false);
                 }
         }
 }

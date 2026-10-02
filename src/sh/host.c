@@ -10760,9 +10760,11 @@ static bipolar locale_ntp_apply(void);
 static bipolar locale_ntp_moved_ns;
 static p8 locale_ntp_answered[80];
 
+//      A word from /root, read as state is: a FIFO or a link planted at the
+//      name on the data partition is no word, and cannot stop the command.
 static fn locale_word(string_address path, p8 address_to into, positive room)
 {
-        bipolar got = host_read_text(path, into, room);
+        bipolar got = host_read_state(path, into, room);
         positive length;
 
         if (got < 0)
@@ -12504,7 +12506,6 @@ static fn locale_recover(void)
 */
 #define NAME_PATH "/root/name"
 #define NAME_ROOM 80
-#define NAME_LONGEST 63
 #define NAME_WORDS 512
 #define NAME_LETTERS "abcdefghijklmnopqrstuvwxyz0123456789-"
 
@@ -12640,36 +12641,55 @@ static fn name_roll(p8 address_to into, positive room)
         string_append_bounded(into, noun, room);
 }
 
+static bool link_name_good(string_address name);
+
 /* Lowercase letters, digits and hyphens, a letter or digit at each end: one
-   label of a host name, and not the word that rolls a new one. */
+   label of a host name, and not the word that rolls a new one. It is also
+   what `moonwater link` can say, which is the shorter limit (under 32) and
+   leaves out the words that command takes in a name's place, so the name a
+   machine has is always one it can be linked by. */
 static bool name_valid(string_address name)
 {
         positive length = string_length(name);
 
-        return length && length <= NAME_LONGEST &&
-               string_span_of_set(name, NAME_LETTERS) == length &&
+        return length && string_span_of_set(name, NAME_LETTERS) == length &&
                name[0] != '-' && name[length - 1] != '-' &&
-               !string_equals(name, "random");
+               !string_equals(name, "random") && link_name_good(name);
 }
 
-static bool name_apply(string_address name)
+static bipolar name_apply(string_address name)
 {
         return system_call_2(syscall(sethostname), (positive)name,
-                             string_length(name)) >= 0;
+                             string_length(name));
 }
 
+//      A roll that could not be saved, kept so that the next ask in this
+//      process is the same name and not another roll.
+static p8 name_unsaved[NAME_ROOM];
+
 /* The saved name, rolled and saved first when there is none or it does not
-   read. Says whether it had to roll. */
-static fn name_ensure(p8 address_to into, positive room, bool address_to rolled)
+   read. Says whether it had to roll in `rolled`, and whether the name is
+   saved at the end: false when /root would not take it. */
+static bool name_ensure(p8 address_to into, positive room, bool address_to rolled)
 {
         locale_word(NAME_PATH, into, room);
         address_to rolled = !name_valid(into);
 
         if (!address_to rolled)
-                return;
+                return true;
 
-        name_roll(into, room);
-        (void)radio_write_word(NAME_PATH, into);
+        if (name_unsaved[0])
+                string_copy_bounded(into, (string_address)name_unsaved, room);
+        else
+                name_roll(into, room);
+        if (radio_write_word(NAME_PATH, into) >= 0)
+        {
+                name_unsaved[0] = 0;
+                return true;
+        }
+        string_copy_bounded((string_address)name_unsaved, (string_address)into,
+                            sizeof(name_unsaved));
+        return false;
 }
 
 static fn name_restore(void)
@@ -12677,7 +12697,7 @@ static fn name_restore(void)
         p8 name[NAME_ROOM];
         bool rolled;
 
-        name_ensure(name, sizeof(name), address_of rolled);
+        (void)name_ensure(name, sizeof(name), address_of rolled);
         (void)name_apply(name);
 
         if (rolled)
@@ -12698,17 +12718,20 @@ static b32 host_name(string_address address_to arguments, positive count)
                 file_machine machine;
 
                 //      /root is root's. Anyone else is told what the kernel
-                //      calls the machine, which is the name this applies.
-                if (bowl_is_root())
+                //      calls the machine, which is the name this applies; so
+                //      is root when /root will not keep a roll, because a
+                //      name that is not kept is not made up again at every
+                //      question.
+                if (bowl_is_root() &&
+                    name_ensure(name, sizeof(name), address_of rolled))
                 {
-                        name_ensure(name, sizeof(name), address_of rolled);
                         if (rolled)
                                 (void)name_apply(name);
                 }
                 else if (file_machine_read(address_of machine))
                         string_copy_bounded(name, machine.node, sizeof(name));
                 else
-                        return host_fail("name", -1);
+                        return host_fail("name", -EIO);
 
                 host_say(log, "%s\n", name);
                 return 0;
@@ -12726,16 +12749,27 @@ static b32 host_name(string_address address_to arguments, positive count)
 
                 if (!name_valid(name))
                         return host_refuse("%s is not a machine name: lowercase "
-                                           "letters, digits and hyphens, "
-                                           "at most 63, a letter or digit at "
-                                           "each end\n", arguments[2]);
+                                           "letters, digits and hyphens, a "
+                                           "letter or digit at each end, under "
+                                           "32 characters, and not random or "
+                                           "a word moonwater link takes\n",
+                                           arguments[2]);
         }
 
-        if (radio_write_word(NAME_PATH, name) < 0)
-                return host_fail("name", -1);
+        {
+                bipolar done = radio_write_word(NAME_PATH, name);
 
-        if (!name_apply(name))
-                return host_fail("name", -1);
+                if (done < 0)
+                        return host_fail(NAME_PATH, done);
+                done = name_apply(name);
+                if (done < 0)
+                {
+                        host_say(log_error, host_label "%s is saved, but the "
+                                            "kernel did not take it: %s\n",
+                                 name, file_reason(done));
+                        return 1;
+                }
+        }
 
         host_say(log, "%s\n", name);
         return 0;
@@ -13201,7 +13235,7 @@ static fn host_usage_write(writer out)
                  "                              " TERM_DIM "request per network joined" TERM_RESET "\n"
                  HOST_ROW("ntp [on|off]", "                ", "set the clock from the network [on]")
                  HOST_ROW("ntp sampling [on|off]", "       ", "keep the lowest-delay sample of five [on]")
-                 HOST_ROW("link [on|off|help]", "          ", "shell and run on paired machines, by key")
+                 HOST_ROW("link [pair|NAME|help]", "       ", "link machines by a code, then a terminal or a command on any, by name")
                  HOST_ROW("keyboard [LAYOUT|list]", "      ", "Canvas keys: us uk de se no dk fi fr es it")
                  HOST_ROW("name [NEW|random]", "           ", "what this machine is called; rolled at first boot")
                  HOST_ROW("wipe", "                        ", "forget /home and /root, keep the machine")

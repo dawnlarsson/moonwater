@@ -281,6 +281,22 @@ says()
         fi
 }
 
+#       The same, for a line the program wrote and the kernel's own lines
+#       cut in two: the serial console moves a write 64 bytes at a time and
+#       a printk goes out between the pieces (`...installed from another[
+#       0.927214] ip: using eth0` and then ` build.`), at a moment that
+#       depends on how fast the guest boots. The kernel's lines are taken
+#       out first, which is the one thing that makes the program's line one
+#       again.
+says_whole()
+{
+        if perl -0pe 's/\[ *[0-9]+\.[0-9]+\][^\n]*\n//g' "$work/$1" | grep -q -F -- "$3"; then
+                won
+        else
+                lost "$2" "no $3 in $1, whole"
+        fi
+}
+
 never()
 {
         if grep -q -F -- "$3" "$work/$1"; then
@@ -13552,12 +13568,12 @@ moonwater bind init add "echo boot >> /root/boots" > /dev/null 2>&1
 moonwater bind exit add "echo stop >> /root/stops" > /dev/null 2>&1
 printf 'listed-%s\n' $(( $(moonwater bind init | grep -c -e '^1  echo carried' -e '^2  echo boot') * 7 ))
 moonwater link key > /tmp/linkkey 2>&1
-moonwater link pair host LINK_HOST_KEY > /dev/null 2>&1
+moonwater link add host LINK_HOST_KEY > /dev/null 2>&1
 moonwater link allow host run log > /dev/null 2>&1
 moonwater link on > /tmp/linkon 2>&1
 printf 'link-on-%s\n' $(( $(grep -c 'link on,' /tmp/linkon) * 7 ))
-moonwater link join lab LINK_LAN_SECRET allow run > /tmp/linkjoin 2>&1
-printf 'link-joined-%s\n' $(( $(grep -c 'in lab; members may run' /tmp/linkjoin) * 7 ))
+moonwater link group lab LINK_LAN_SECRET allow run > /tmp/linkjoin 2>&1
+printf 'link-joined-%s\n' $(( $(grep -c 'in group lab; its members may run' /tmp/linkjoin) * 7 ))
 printf 'link-key-%s\n' "$(cat /tmp/linkkey)"
 moonwater name > /root/livename
 printf 'name-live-%s\n' $(( $(grep -c -E '^[a-z]+-[a-z]+$' /root/livename) * 7 ))
@@ -13615,7 +13631,7 @@ i=0; until [ -e /root/link-asked ] || [ $i -ge 45 ]; do sleep 1; i=$((i + 1)); d
 printf 'link-asked-%s\n' "$(rev < /root/link-asked)"
 i=0; until [ -e /root/lan-asked ] || [ $i -ge 120 ]; do sleep 1; i=$((i + 1)); done
 printf 'lan-asked-%s\n' "$(rev < /root/lan-asked)"
-printf 'lan-group-%s\n' $(( $(moonwater link | grep -c 'paired in lab') * 7 ))
+printf 'lan-group-%s\n' $(( $(moonwater link | grep -c 'in group lab') * 7 ))
 printf 'kept-%s\n' "$(rev < /bowls/probe/file)"
 printf 'root-%s\n' "$(rev < /root/probe)"
 printf 'name-kept-%s\n' $(( $(test "$(moonwater name)" = "$(cat /root/livename)" && test "$(uname -n)" = "$(cat /root/livename)" && echo 1 || echo 0) * 7 ))
@@ -13651,7 +13667,7 @@ link_asker=""
 if [ -n "$link_host" ]; then
         link_guest_key=$(grep -o 'link-key-[A-Za-z0-9+/]\{43\}=' "$work/live" |
                 head -1 | sed 's/^link-key-//')
-        link_on_host "$link_host/bin/moonwater link pair guest $link_guest_key 127.0.0.1:$link_port" \
+        link_on_host "$link_host/bin/moonwater link add guest $link_guest_key 127.0.0.1:$link_port" \
                 > /dev/null 2>&1
         (
                 tries=0
@@ -13686,9 +13702,9 @@ until [ -e /run/moonwater/verdict ]; do sleep 1; done
 for i in /sys/class/net/*; do [ "\$(cat \$i/address)" = 52:54:00:66:00:02 ] && lan=\${i##*/}; done
 ip link set \$lan up
 ip addr add 10.66.0.2/24 dev \$lan
-moonwater link join lab $link_lan_secret allow run > /tmp/join 2>&1
-i=0; until moonwater link | grep -q 'paired in lab' || [ \$i -ge 90 ]; do sleep 1; i=\$((i + 1)); done
-name=\$(moonwater link | sed -n 's/^  \([^ ]*\) .*paired in lab.*/\1/p' | head -1)
+moonwater link group lab $link_lan_secret allow run > /tmp/join 2>&1
+i=0; until moonwater link | grep -q 'in group lab' || [ \$i -ge 90 ]; do sleep 1; i=\$((i + 1)); done
+name=\$(moonwater link | sed -n 's/^  \([^ ]*\) .*in group lab.*/\1/p' | head -1)
 moonwater link run "\$name" 'echo asked > /root/lan-asked; echo from-the-headless-box' < /dev/null > /tmp/lanrun 2>&1
 printf 'lan-run-%s\\n' "\$(rev < /tmp/lanrun)"
 poweroff
@@ -13741,7 +13757,7 @@ says disk 'the link switch came through the install and the reboot' 'link-kept-7
 says live 'join takes the group and its grant' 'link-joined-7'
 says neighbour 'a machine on the LAN paired with the headless box and ran a command there' 'lan-run-xob-sseldaeh-eht-morf'
 says disk 'the headless box was asked, having been told nothing on site but its address' 'lan-asked-deksa'
-says disk 'and knows its neighbour as paired in lab' 'lan-group-7'
+says disk 'and knows its neighbour as in group lab' 'lan-group-7'
 if [ -n "$link_host" ]; then
         says disk 'a paired machine ran a command there' 'link-asked-deksa'
         if [ "$(cat "$work/link-run" 2> /dev/null)" = from-the-disk ]; then
@@ -13818,7 +13834,7 @@ COMMANDS
 # shellcheck disable=SC2086
 install_boot update $stick
 says update 'another build is asked about' 'verdict-1n0emvn ksa'
-says update 'boot told the console'      'has Moonwater installed from another build'
+says_whole update 'boot told the console' 'has Moonwater installed from another build'
 says update 'nothing mounted before'     'unmounted-evil'
 says update 'the answer was taken'       'answered-50'
 says update 'answering keeps the disk'   'verdict-1n0emvn ksid'

@@ -73392,7 +73392,7 @@ static fn indexes_and_commands(void)
                 link_key_text(zero, text);
                 (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
                 check("sec: a low-order key is not paired",
-                      link_pair_locked("low", (string_address)text, null) != 0 &&
+                      link_add_locked("low", (string_address)text, null) != 0 &&
                               wls_peers_count() == 0);
         }
 
@@ -73402,7 +73402,7 @@ static fn indexes_and_commands(void)
                 (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
                 entropy_down = true;
                 check("sec: with no entropy no group secret is made up",
-                      link_join(words, 1) != 0 &&
+                      link_group_join(words, 1) != 0 &&
                               system_open_at(AT_FDCWD, LINK_GROUPS_PATH,
                                              FILE_READ) < 0);
                 entropy_down = false;

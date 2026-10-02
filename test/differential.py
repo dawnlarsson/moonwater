@@ -41154,12 +41154,17 @@ def harness_moonwater_cli(argv):
                 "bluetooth on", "priority internet", "priority internet wired",
                 "priority internet wifi", "priority internet cable", "wipe extra",
                 "install", "use", "update", "live extra", "boot", "ask", "machine extra",
-                "link", "link help", "link key", "link bogus", "link pair", "link pair x",
-                "link pair x y z w", "link forget nobody", "link allow nobody run",
-                "link deny", "link run", "link run nobody", "link shell", "link shell nobody",
-                "link serve extra", "link join", "link join .bad",
-                "link join ok allow", "link join ok allow nonsense", "link leave nobody",
-                "link leave nobody forget", "link leave a b c", "link off"]
+                #       Not "link pair" or "link NAME CODE": those wait five minutes
+                #       for the other machine, and the link harness has them.
+                "link", "link help", "link key", "link bogus", "link pair x y z",
+                "link add", "link add x", "link add .bad AAAA", "link add x AAAA", "link remove",
+                "link remove nobody", "link allow nobody run", "link deny", "link run",
+                "link run nobody", "link shell", "link shell nobody", "link serve extra",
+                "link group .bad", "link group ok allow", "link group ok allow nonsense",
+                "link group leave", "link group leave nobody", "link group leave nobody forget",
+                "link group leave a b c", "link nobody", "link nobody abc", "link nobody ab-cd",
+                "link nobody not-a-code", "link nobody whoami", "link nobody reboot",
+                "link nobody abcdef", "link log", "link push nobody", "link off"]
         # State the mode rules act on: neither file, then a zone with no mode.
         script = ("rm -f /root/timezone /root/timezone.mode\n" + say("timezone") +
                   "printf 'Europe/London\\n' > /root/timezone\n" + say("timezone") +
@@ -41572,14 +41577,19 @@ while True:
         for roll in range(24):
             script += say("name random") + "echo \"@@saved $(cat /root/name) $(uname -n)\"\n"
         script += (say("name Space-Wizard") + "echo \"@@saved $(cat /root/name) $(uname -n)\"\n")
-        for given in ("a", "x" * 63, "0-9", "a--b"):
+        for given in ("a", "x" * 31, "0-9", "a--b"):
             script += say(f"name {given}") + "echo \"@@saved $(cat /root/name) $(uname -n)\"\n"
         script += "echo space-wizard > /root/name\n"
-        for bad in ("-x", "x-", "a_b", "a.b", "Random", "x" * 64, "../x", "a b", "", "\\xc3\\xa5"):
+        for bad in ("-x", "x-", "a_b", "a.b", "Random", "x" * 32, "../x", "a b", "", "\\xc3\\xa5",
+                    "log", "run", "Shell", "pair"):
             quoted = shlex.quote(bad)
             script += (f"echo '@@ bad {bad}'; timeout 20 /tmp/moonwater name {quoted} 2>&1; "
                        f"echo \"@@status $? $(cat /root/name)\"\n")
         script += "echo 'BAD NAME' > /root/name\n" + say("name") + "echo \"@@saved $(cat /root/name)\"\n"
+        #       A FIFO at the name is no name and cannot hold the command: it is
+        #       rolled over, and the file that replaces it reads.
+        script += ("rm -f /root/name; mkfifo /root/name\n" + say("name") +
+                   "echo \"@@saved $(timeout 5 cat /root/name)\"\n")
         lines, finished = session(script)
         check(finished, "the name walk finished", "")
         shape = re.compile(r"^([a-z]+)-([a-z]+)$")
@@ -41601,7 +41611,7 @@ while True:
                 elif current == "name Space-Wizard":
                     check(parts == ["space-wizard", "space-wizard"],
                           "a name is folded to lowercase, saved and applied", line)
-                elif current and current.startswith("name ") and current.split()[1] in ("a", "x" * 63, "0-9", "a--b"):
+                elif current and current.startswith("name ") and current.split()[1] in ("a", "x" * 31, "0-9", "a--b"):
                     check(parts == [current.split()[1]] * 2, f"{current} is taken as typed", line)
                 else:
                     check(False, f"an unexpected name answer after {current}", line)
@@ -57621,21 +57631,26 @@ say(out.decode().strip() == keys["a"], "a key once made is the one printed after
 mode = os.stat(top + "/a/root/link.key").st_mode & 0o777
 say(mode == 0o600, "the key file is 0600 (%o)" % mode)
 
-on("a", "%s link pair b %s 10.77.0.2" % (moon, keys["b"]))
-on("c", "%s link pair b %s 10.77.0.2" % (moon, keys["b"]))
-on("a", "%s link pair bwrong %s 10.77.0.2" % (moon, keys["c"]))
-on("b", "%s link pair a %s" % (moon, keys["a"]))
+on("a", "%s link add b %s 10.77.0.2" % (moon, keys["b"]))
+on("c", "%s link add b %s 10.77.0.2" % (moon, keys["b"]))
+on("a", "%s link add bwrong %s 10.77.0.2" % (moon, keys["c"]))
+on("b", "%s link add a %s" % (moon, keys["a"]))
 status, out, err = on("b", moon + " link allow a run")
-say(status == 0 and b"a may verbs run" in out, "a grant is given by name")
-status, _, err = on("b", moon + " link pair 'bad name' " + keys["a"])
+say(status == 0 and b"a may run" in out, "a grant is given by name")
+status, _, err = on("b", moon + " link add 'bad name' " + keys["a"])
 say(status != 0, "a name with a space is refused")
-status, _, err = on("b", moon + " link pair x AAAA")
+status, _, err = on("b", moon + " link add x AAAA")
 say(status != 0, "a key that is not one is refused")
-status, _, err = on("b", moon + " link pair low " + "A" * 43 + "=")
+status, _, err = on("b", moon + " link add low " + "A" * 43 + "=")
 say(status != 0 and b"not a usable link key" in err,
     "sec: a low-order public key is refused before it is stored")
-status, _, err = on("b", "%s link pair me %s" % (moon, keys["b"]))
+status, _, err = on("b", "%s link add me %s" % (moon, keys["b"]))
 say(status != 0, "a machine will not pair its own key")
+on("b", "%s link add c %s" % (moon, keys["c"]))
+status, _, err = on("b", "%s link add a %s" % (moon, keys["c"]))
+say(status != 0 and b"already linked as c" in err,
+    "a key linked under one name is not added under another name's record (%r)" % (err[-120:],))
+on("b", moon + " link remove c")
 
 #       Descriptor 7 open in the server stands for anything a hand-started
 #       `link serve` inherited; no remote command may see it.
@@ -57832,7 +57847,7 @@ say(status == 0 and out == b"restored\n",
 
 status, out, err = on("b", moon + " link")
 text = out.decode(errors="replace")
-say("a  " in text and "may verbs run shell" in text and "heard" in text,
+say("a  " in text and "may shell run" in text and "heard" in text,
     "status names the peer, its grants, and where it was heard")
 
 for dev, where in (("wb0", None), ("wb", netns)):
@@ -57884,13 +57899,13 @@ listen.setblocking(False)
 
 for side in "ab":
     for name in ("a", "b", "bwrong"):
-        on(side, moon + " link forget " + name, timeout=30)
+        on(side, moon + " link remove " + name, timeout=30)
 secret = "lab-secret-for-the-lane-1"
-status, out, err = on("a", "%s link join lab %s allow run" % (moon, secret))
-say(status == 0 and b"in lab; members may run" in out and b"link on" in out,
+status, out, err = on("a", "%s link group lab %s allow run" % (moon, secret))
+say(status == 0 and b"in group lab; its members may run" in out and b"link on" in out,
     "join names the grants and switches the link on (%r)" % (err[-200:],))
-status, out, err = on("b", "%s link join lab %s allow run shell" % (moon, secret))
-status, out, err = on("c", "%s link join lab not-the-%s allow run" % (moon, secret))
+status, out, err = on("b", "%s link group lab %s allow run shell" % (moon, secret))
+status, out, err = on("c", "%s link group lab not-the-%s allow run" % (moon, secret))
 say(os.stat(top + "/a/root/link.groups").st_mode & 0o777 == 0o600,
     "the group file is root's alone")
 say(secret.encode() not in open(top + "/a/root/link.groups", "rb").read(),
@@ -57906,14 +57921,14 @@ old_record = bytearray(groups_file[:128])
 old_record[64:96] = hashlib.sha256(b"waterlink check lab " + secret.encode()).digest()
 open(top + "/a/root/link.groups", "wb").write(bytes(old_record))
 os.chmod(top + "/a/root/link.groups", 0o600)
-status, out, err = on("a", moon + " link join lab")
+status, out, err = on("a", moon + " link group lab")
 say(status == 0, "a group file with the old check still joins (%r)" % (err[-200:],))
 say(not any(open(top + "/a/root/link.groups", "rb").read()[64:96]),
     "and the file written after it has no check")
-status, out, err = on("a", moon + " link join fresh-lab allow run")
-say(status == 0 and b"link join fresh-lab " in out,
+status, out, err = on("a", moon + " link group fresh-lab allow run")
+say(status == 0 and b"link group fresh-lab " in out,
     "a made secret is told with the join command that takes it (%r)" % (out[-200:],))
-on("a", moon + " link leave fresh-lab")
+on("a", moon + " link group leave fresh-lab")
 
 names = {}
 began = time.time()
@@ -57922,7 +57937,7 @@ while time.time() - began < 25 and len(names) < 2:
     for side, other in (("a", "b"), ("b", "a")):
         status, out, err = on(side, moon + " link")
         for line in out.decode(errors="replace").splitlines():
-            if line.startswith("  box-" + other) and "paired in lab" in line:
+            if line.startswith("  box-" + other) and "in group lab" in line:
                 names[side] = line.split()[0]
 say(len(names) == 2, "a and b paired with each other by themselves (%r, %.1fs)" %
     (names, time.time() - began))
@@ -57933,15 +57948,165 @@ if len(names) == 2:
     say(status == 255 and b"shell is not granted" in err,
         "b may not open a shell on a, whose join line granted only run")
     status, out, err = on("b", moon + " link")
-    say(b"may run shell, paired in lab" in out,
+    say(b"may shell run, in group lab" in out,
         "b gives a what its own join line granted, and says how it was paired")
 
 status, out, err = on("c", moon + " link")
-say(b"paired in lab" not in out, "the machine with the wrong secret paired with nobody")
+say(b"in group lab" not in out, "the machine with the wrong secret paired with nobody")
 known = open(top + "/a/root/link.peers", "rb").read() + open(top + "/b/root/link.peers", "rb").read()
 status, key_c, err = on("c", moon + " link key")
 import base64
 say(base64.b64decode(key_c.strip()) not in known, "and neither member stored its key")
+
+#       A code. a waits and prints its name and six symbols, and c says them.
+#       The wait is cut to seconds where a test wants the code to run out,
+#       and WATERLINK_PAIR_SECONDS can only shorten it.
+import re
+code_alphabet = rb"[0-9a-hjkmnp-tv-z]"
+
+def waiting(side, args, seconds):
+    return subprocess.Popen(argv_on(side, moon + " link " + args), stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            env=dict(env, WATERLINK_PAIR_SECONDS=str(seconds)))
+
+def code_said(waiter, name):
+    said = b""
+    end = time.time() + 30
+    while time.time() < end:
+        ready, _, _ = select.select([waiter.stdout], [], [], 0.5)
+        if ready:
+            chunk = os.read(waiter.stdout.fileno(), 4096)
+            if not chunk:
+                break
+            said += chunk
+            found = re.search(name.encode() + rb" (" + code_alphabet + rb"{3}-" +
+                              code_alphabet + rb"{3})", said)
+            if found:
+                return found.group(1).decode(), said
+    return None, said
+
+def once_records(side):
+    data = open(top + "/" + side + "/root/link.groups", "rb").read() if os.path.exists(
+        top + "/" + side + "/root/link.groups") else b""
+    return [(data[at:at + 32].split(b"\0")[0], structure.unpack_from("<I", data, at + 100)[0])
+            for at in range(0, len(data) - 127, 128)
+            if structure.unpack_from("<I", data, at + 100)[0] & 1]
+
+for word in ("log", "leave", "pair", "run"):
+    status, _, err = on("c", moon + " link add " + word + " " + keys["a"])
+    say(status != 0 and b"is not a name" in err, "a machine cannot be called " + word)
+for word in ("abcdefg", "u0u0u0", "abc", "", "a-b-c-d-e-f-g", "whoami", "reboot", "abcdef"):
+    status, _, err = on("c", moon + " link box-a " + word, timeout=30)
+    say(status != 0 and b"no machine is called box-a" in err,
+        "link box-a %r is not a code, and a machine nobody linked is not a command" % word)
+status, _, err = on("c", moon + " link nobody-here ls", timeout=30)
+say(status != 0 and b"no machine is called nobody-here" in err,
+    "a command on a machine that is not known says so")
+
+#       A code that waits for one name only lets in that name.
+waiter = waiting("a", "pair box-nobody", 40)
+code, said = code_said(waiter, "box-a")
+say(code is not None, "pair [NAME] prints the machine's name and a code (%r)" % (said[-200:],))
+if code:
+    status, out, err = on("c", moon + " link box-a " + code, timeout=60,
+                          extra={"WATERLINK_PAIR_SECONDS": "6"})
+    say(status != 0 and b"nobody used the code" in err,
+        "c, which is not the name a waits for, is not let in (%r %r)" % (status, err[-120:]))
+    status, out, err = on("a", moon + " link")
+    say(b"box-c" not in out, "and a did not keep it, nor did c's try link c to a")
+    status, out, err = on("c", moon + " link")
+    say(b"box-a" not in out, "and c holds nothing of a either")
+    status, out, err = on("a", moon + " link")
+    say(b"a pairing code for box-a is waiting" in out, "a says a code is waiting")
+waiter.send_signal(signal.SIGINT)
+try:
+    out, err = waiter.communicate(timeout=30)
+except subprocess.TimeoutExpired:
+    waiter.kill()
+    out, err = waiter.communicate()
+say(waiter.returncode != 0 and b"stopped" in err,
+    "Ctrl+C stops the wait and says the code is no good (%r %r)" % (waiter.returncode, err[-120:]))
+say(once_records("a") == [], "and the code is gone from the file")
+
+#       A code nobody uses runs out.
+waiter = waiting("a", "pair", 3)
+out, err = waiter.communicate(timeout=30)
+say(waiter.returncode != 0 and b"nobody used the code" in err and once_records("a") == [],
+    "a code nobody used is refused at the end and taken back (%r)" % (err[-120:],))
+
+#       A code that nobody used does not leave the listener on.
+on("b", moon + " link off")
+waiter = waiting("b", "pair", 3)
+out, err = waiter.communicate(timeout=60)
+status, out, err = on("b", "cat /root/link")
+say(out.strip() == b"off", "a code nobody used leaves the switch as it was (%r)" % (out,))
+status, out, err = on("b", moon + " link")
+say(b"link off" in out, "and the listener stopped again")
+
+#       The code, a wrong code, a wrong name, then the code as someone would
+#       copy it off a screen.
+waiter = waiting("a", "pair", 90)
+code, said = code_said(waiter, "box-a")
+say(code is not None, "a prints a code (%r)" % (said[-200:],))
+if code:
+    wrong = ("1" if code[0] != "1" else "2") + code[1:]
+    short = {"WATERLINK_PAIR_SECONDS": "6"}
+    status, out, err = on("c", moon + " link box-a " + wrong, timeout=60, extra=short)
+    say(status != 0 and b"nobody used the code" in err, "a wrong code links nobody")
+    status, out, err = on("c", moon + " link box-ax " + code, timeout=60, extra=short)
+    say(status != 0 and b"nobody used the code" in err, "a wrong name links nobody")
+    status, out, err = on("a", moon + " link")
+    say(b"box-c" not in out, "and a has not linked c")
+    sloppy = code.upper().replace("0", "O").replace("1", "L")
+    status, out, err = on("c", moon + " link BOX-A " + sloppy, timeout=90)
+    say(status == 0 and b"linked with box-a" in out,
+        "the code is taken in capitals, with a look-alike letters and a name in capitals (%r %r)" %
+        (status, err[-160:]))
+    if status != 0:
+        for side in "ac":
+            _, shown, _ = on(side, moon + " link")
+            print("  debug %s status:\n%s" % (side, shown.decode(errors="replace")[:900]), flush=True)
+            print("  debug %s groups: %r" % (side, [(r[0], r[1]) for r in once_records(side)]), flush=True)
+        print("  debug sloppy=%r code=%r" % (sloppy, code), flush=True)
+    try:
+        out, err = waiter.communicate(timeout=60)
+    except subprocess.TimeoutExpired:
+        waiter.kill()
+        out, err = waiter.communicate()
+    say(waiter.returncode == 0 and b"linked with box-c" in out, "and a is told, with the name c has")
+    records = once_records("a")
+    say(len(records) == 1 and records[0][1] & 2, "the used code is closed in a's file (%r)" % (records,))
+    #       Used once: with both sides forgotten, the same code finds nobody.
+    on("a", moon + " link remove box-c")
+    on("c", moon + " link remove box-a")
+    status, out, err = on("c", moon + " link box-a " + code, timeout=60, extra=short)
+    say(status != 0 and b"nobody used the code" in err, "a code is good for one machine")
+
+#       And once more, to use what a code gives: a terminal and a command
+#       each way, and the grants it carries.
+waiter = waiting("a", "pair", 90)
+code, said = code_said(waiter, "box-a")
+if code:
+    status, out, err = on("c", moon + " link box-a " + code, timeout=90)
+    waiter.communicate(timeout=60)
+    say(status == 0, "a second code links the two again (%r)" % (err[-160:],))
+    status, out, err = on("c", moon + " link box-a echo coded-$((20+22))", timeout=60)
+    say(status == 0 and out == b"coded-42\n", "link NAME COMMAND runs it there (%r %r)" % (out, err[-100:]))
+    status, out, err = on("a", moon + " link box-c echo back-$((20+22))", timeout=60)
+    say(status == 0 and out == b"back-42\n", "and the other way")
+    status, out, err = on("c", moon + " link box-a", stdin=b"echo shell-$((20+22))\nexit\n", timeout=60)
+    say(b"shell-42" in out, "link NAME is a terminal there (%r %r)" % (out[-80:], err[-100:]))
+    status, out, err = on("a", moon + " link")
+    say(any(line.startswith("  box-c ") and "may shell run files log" in line and "in group" not in line
+            for line in out.decode(errors="replace").splitlines()),
+        "a shows what c may do, and that no group did it")
+
+#       A machine in too many groups has no room for a code.
+on("c", "sh -c 'for i in 1 2 3 4 5 6 7; do %s link group g$i secret-number-$i-a-long-one; done'" % moon,
+   timeout=120)
+status, out, err = on("c", moon + " link pair", timeout=30)
+say(status != 0 and b"8 groups already" in err, "no room for a code in a full groups file (%r)" % (err[-120:],))
+on("c", "sh -c 'for i in 1 2 3 4 5 6 7; do %s link group leave g$i; done'" % moon, timeout=60)
 
 heard = b""
 end = time.time() + 3
@@ -58055,10 +58220,10 @@ if match is not None and listener is not None and len(names) == 2:
     say(status == 0 and out == b"after-the-flood\n" and time.time() - began_run < 5,
         "flood: and the first after it took %.1f s" % (time.time() - began_run))
 
-status, out, err = on("a", moon + " link leave lab forget")
-say(status == 0 and b"forgot the 1 machines" in out, "leave with forget drops what the group paired")
+status, out, err = on("a", moon + " link group leave lab forget")
+say(status == 0 and b"removed the 1 machines" in out, "leave with forget drops what the group paired")
 status, out, err = on("a", moon + " link")
-say(b"paired in lab" not in out and b"in lab:" not in out, "and a is in no group")
+say(b"in group lab" not in out and b"group lab:" not in out, "and a is in no group")
 for side in "abc":
     on(side, moon + " link off")
 
@@ -62433,6 +62598,40 @@ static p16 link_port(void) { return LINK_PORT; }
     NEARBY_STUBS = r'''
 static bipolar link_peers_lock(void) { return 5; }
 static fn link_peers_unlock(bipolar handle) { (void)handle; }
+//      A pairing code's record is read, closed and saved in the driver's own
+//      copy of the groups; the file is the driver's, not a path.
+fn link_groups_load(link_groups address_to groups);
+static bipolar link_groups_save(link_groups address_to groups);
+static p32 hash_crc32(p32 crc, const p8 *data, positive length)
+{
+        while (length--)
+        {
+                crc ^= *data++;
+                for (int k = 0; k < 8; k++)
+                        crc = (crc >> 1) ^ (0xedb88320u & (p32)-(int)(crc & 1));
+        }
+        return crc;
+}
+static positive string_length_max(string_address text, positive room)
+{
+        positive length = 0;
+
+        while (length < room && text[length])
+                length++;
+        return length;
+}
+'''
+
+    NEARBY_GROUP_STUBS = r'''
+fn link_groups_load(link_groups address_to groups)
+{
+        memcpy(groups, &link_nearby.groups, sizeof *groups);
+}
+static bipolar link_groups_save(link_groups address_to groups)
+{
+        memcpy(&link_nearby.groups, groups, sizeof *groups);
+        return 0;
+}
 '''
 
     parts = [
@@ -62450,7 +62649,7 @@ static fn link_peers_unlock(bipolar handle) { (void)handle; }
         sec(disc, "#define WATERLINK_MDNS_PORT 5353", "#endif // WATERLINK_DISCOVER_INCLUDED"),
         sec(svc, "#define LINK_PORT 22348", "/*      A grant by name"),
         sec(svc, "static p64 link_now(void)", "// All digits and nothing else"),
-        sec(svc, "static bool link_name_good(", "/* Everything waterlink keeps"),
+        sec(svc, "static const string_address link_words[]", "/* Everything waterlink keeps"),
         sec(svc, "typedef struct\n{\n        struct waterlink_peer peer[LINK_PEERS_MAX];",
             "static bipolar link_peers_read("),
         sec(svc, "static struct waterlink_peer address_to link_peer_named(",
@@ -62466,8 +62665,10 @@ static fn link_peers_unlock(bipolar handle) { (void)handle; }
         SERVICE_STUBS,
         sec(near, "#define LINK_GROUPS_PATH", "fn link_groups_load("),
         NEARBY_STUBS,
+        sec(near, "static p64 link_boot_seconds(void)", "/*\n        The peers file has two writers now"),
         sec(near, "static fn link_name_for(", "// The listener's side of it"),
         sec(near, "// The listener's side of it", "typedef struct\n{\n        p32 multiaddr;"),
+        NEARBY_GROUP_STUBS,
         sec(near, "typedef struct\n{\n        p32 multiaddr;",
             "/*\n        Every interface with an IPv4 address"),
         sec(near, "static fn link_nearby_send(", "// Goodbye, with TTL zero"),
@@ -62640,6 +62841,7 @@ static bipolar wl_system(positive n, positive a, positive b, positive c, positiv
 static int wl_phase; // 0 authenticated work, 1 mDNS heard
 static p64 wl_greeted_at[256];
 static positive wl_greeted_count;
+static positive wl_greeted_back; // first messages sent outside an mDNS packet's handling
 static p64 wl_answered_at[256];
 static positive wl_answered_count;
 static p8 wl_last_respond[WATERLINK_DATAGRAM];
@@ -62670,6 +62872,8 @@ static bipolar socket_send(b32 socket, const void *bytes, positive size, b32 fla
         if (socket == 3 && kind == WATERLINK_KIND_INITIATE && wl_phase == 1 &&
             wl_greeted_count < array_count(wl_greeted_at))
                 wl_greeted_at[wl_greeted_count++] = wl_clock / 1000;
+        if (socket == 3 && kind == WATERLINK_KIND_INITIATE && wl_phase == 0)
+                wl_greeted_back++;
         if (socket == 3 && kind == WATERLINK_KIND_INITIATE && !link_self.server &&
             size == WATERLINK_DATAGRAM)
                 memcpy(wl_client_first, bytes, size);
@@ -62756,7 +62960,7 @@ static void wl_reset(bool server)
         memset(&wl_file, 0, sizeof wl_file);
         wl_file_unreadable = wl_entropy_down = false;
         wl_bad_names = 0;
-        wl_greeted_count = wl_answered_count = 0;
+        wl_greeted_count = wl_answered_count = wl_greeted_back = 0;
         wl_run_count = wl_run_next = wl_mdns_count = wl_mdns_next = 0;
         wl_have_respond = wl_have_cookie = false;
         wl_clock = 1000000000ull;
@@ -62796,6 +63000,8 @@ static void wl_reset(bool server)
 }
 
 //      A first message from one of the three, stamped delta seconds on.
+static p8 wl_offered[WATERLINK_NAME_MAX];
+
 static void wl_initiation(p8 *datagram, int who, bool group, p32 delta,
                           p64 conversation, p32 index, struct waterlink_noise *noise)
 {
@@ -62809,6 +63015,8 @@ static void wl_initiation(p8 *datagram, int who, bool group, p32 delta,
                 positive n = take_bytes(hello + WATERLINK_STAMP_BYTES,
                                         take8() % (WATERLINK_NAME_MAX + 1));
                 (void)n;
+                memcpy(wl_offered, hello + WATERLINK_STAMP_BYTES, WATERLINK_NAME_MAX);
+                wl_offered[WATERLINK_NAME_MAX - 1] = 0;
         }
         else
         {
@@ -62885,13 +63093,56 @@ static void wl_step(bool server)
                 p32 index = take32();
                 p32 delta = take16();
                 bool spoil = take8() & 1;
+                //      The group is a code in some state: a single use code or
+                //      not, taken or not, run out or not, and for one name or
+                //      any, the name right or wrong.
+                p8 mode = group ? take8() : 0;
+                struct link_group_record *record = &link_nearby.groups.record[0];
+                positive peers_before = wl_file.count;
+                positive back_before = wl_greeted_back;
 
                 wl_initiation(datagram, who, group, delta, conversation, index, &noise);
+                if (group)
+                {
+                        p64 seconds = wl_clock / 1000000000ull;
+
+                        record->flags = (mode & 1 ? LINK_GROUP_ONCE : 0) |
+                                        (mode & 2 ? LINK_GROUP_DONE : 0);
+                        record->expires = mode & 4 ? seconds : seconds + 300;
+                        record->expect = !(mode & 8)    ? 0
+                                         : mode & 16 ? link_name_check((string_address)wl_offered,
+                                                                       WATERLINK_NAME_MAX)
+                                                     : 0x1badc0deu;
+                }
+                //      This place was greeted a moment ago, as an announcement of
+                //      it would have had this machine do.
+                if (group && (mode & 32))
+                {
+                        struct link_greeted *was =
+                                link_nearby.greeted + link_nearby.greeted_next;
+
+                        memcpy(was->address, address, 16);
+                        was->port = port;
+                        was->group = link_nearby.keys[0].mark;
+                        was->at = now ? now : 1;
+                        link_nearby.greeted_next = (link_nearby.greeted_next + 1) % LINK_GREETED;
+                }
                 if (spoil)
                         wl_spoil(datagram, group ? &wl_group.identity : &link_self.me, true);
                 wl_have_respond = false;
                 if (server)
                         link_datagram(datagram, WATERLINK_DATAGRAM, address, port, now);
+                if (server && group && (mode & 1) &&
+                    ((mode & 2) || (mode & 4) || ((mode & 8) && !(mode & 16))))
+                        wl_check(wl_file.count <= peers_before,
+                                 "a code that is closed, run out or for another "
+                                 "name let a machine in");
+                //      A member that was let in is greeted back, whether or not
+                //      this place was greeted lately: it is waiting for it.
+                if (server && group && !spoil && !wl_entropy_down &&
+                    wl_file.count > peers_before)
+                        wl_check(wl_greeted_back > back_before,
+                                 "a member that was let in was not greeted back");
                 if (server && !group && !spoil && wl_have_respond && who < 2 &&
                     waterlink_gate_passes(&wl_id[who], wl_last_respond, WATERLINK_DATAGRAM))
                 {
@@ -62956,9 +63207,20 @@ static void wl_step(bool server)
                 p8 *raw = malloc(length ? length : 1);
 
                 length = take_bytes(raw, length);
-                wl_phase = 1;
-                link_nearby_heard(raw, length, wl_addresses[0], port, 0, now);
-                wl_phase = 0;
+                {
+                        struct link_group_record *record = &link_nearby.groups.record[0];
+                        positive greeted = wl_greeted_count;
+
+                        wl_phase = 1;
+                        link_nearby_heard(raw, length, wl_addresses[0], port, 0, now);
+                        wl_phase = 0;
+                        //      A code that is used up, or waits for a named
+                        //      machine, only answers: it greets nobody.
+                        wl_check(!((record->flags & LINK_GROUP_ONCE) &&
+                                   ((record->flags & LINK_GROUP_DONE) || record->expect)) ||
+                                         wl_greeted_count == greeted,
+                                 "a code that only answers sent a greeting");
+                }
                 free(raw);
                 break;
         }
@@ -63785,7 +64047,7 @@ def waterlink_script_scan(shim):
     script and namespace in a block of exactly its length, against a
     regular expression over a grammar of machine-script lines. It once
     compared the namespace's whole length with memory_compare wherever
-    "link join " was found, reading past a script that ended sooner.
+    "link group " was found, reading past a script that ended sooner.
     Returns 1 on a report or a disagreement, 0 otherwise, and 0 without
     a compiler that has ASan."""
     import random
@@ -63837,9 +64099,9 @@ int main(void)
     clang = shutil.which("clang") or shutil.which("cc")
     generator = random.Random(0x5c1e)
     names = ["home", "lab.1", "a", "net_9", "office-2", "x" * 31]
-    pieces = ["link join ", "link join  ", "link join", "allow", "allowed", "run",
-              " ", "  ", "\x01", ";", "#", "secret", "s3cr3t", "blink join ",
-              "moonwater link join "] + names
+    pieces = ["link group ", "link group  ", "link group", "allow", "allowed", "run",
+              " ", "  ", "\x01", ";", "#", "secret", "s3cr3t", "blink group ",
+              "moonwater link group "] + names
 
     def case():
         name = generator.choice(names)
@@ -63847,7 +64109,7 @@ int main(void)
             text = "".join(generator.choice(pieces) for _ in range(generator.randrange(12)))
         else:
             cut = generator.randrange(len(name) + 1)
-            text = generator.choice(["", "x\x01", "#\x01"]) + "link join " + (
+            text = generator.choice(["", "x\x01", "#\x01"]) + "link group " + (
                 name[:cut] if generator.randrange(2) else name +
                 generator.choice(["", " ", "  allow run", " s", " ;", " #", "\x01"]))
         return name, text
@@ -63867,7 +64129,7 @@ int main(void)
                              env=dict(os.environ, ASAN_OPTIONS="detect_leaks=0"))
     wrong = [pair for pair, got in zip(cases, ran.stdout)
              if (got == "1") != bool(re.search(
-                 "link join +" + re.escape(pair[0]) + " +(?! |allow)[^\x01;#]",
+                 "link group +" + re.escape(pair[0]) + " +(?! |allow)[^\x01;#]",
                  pair[1]))]
     if ran.returncode or len(ran.stdout) != len(cases) or wrong:
         report = [line for line in (ran.stderr or "").splitlines()
