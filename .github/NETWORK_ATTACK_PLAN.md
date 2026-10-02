@@ -137,7 +137,14 @@ are absolute enough to fail in CI, with a slower opt-in campaign for profiling.
 - **Discovery deception.** Exercise hidden SSIDs, duplicate SSID elements,
   multi-BSSID/RNR containers, beacon versus probe-response disagreement,
   maximum BSS counts and continuous beacon churn. The existing 64-name capacity
-  finding becomes a measured eviction-policy campaign rather than a single cap.
+  finding now has a first closure: the bounded list keeps the strongest 64
+  names rather than the first 64 in kernel dump order, never evicts the
+  associated row, and has a full-capacity regression. The duplicate-name
+  edge is closed too: association, BSSID, security, channel and signal now
+  come from one BSS, so a louder unassociated twin cannot donate its metadata
+  to the live association. Continuous churn,
+  multi-BSSID/RNR and a forger strong enough to own every retained row remain
+  campaign work.
 - **Real-driver boundary.** Repeat the hwsim claims on at least two physical
   chipsets/firmwares, especially PMF, SAE offload and key installation. Treat
   hwsim-only evidence as protocol evidence, not driver evidence.

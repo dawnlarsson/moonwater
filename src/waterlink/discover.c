@@ -297,6 +297,7 @@ struct waterlink_found_instance {
         p8 label[63];
         positive label_length;
         p16 port;
+        bool advertised;
         bool has_port;
 };
 
@@ -352,8 +353,11 @@ bool waterlink_mdns_read(const p8 address_to packet, positive length,
         found->id = byte_reader_u16(&header);
         flags = byte_reader_u16(&header);
         found->response = (flags & 0x8000) != 0;
-        //      Opcode, and rcode in a response, must be zero.
-        if ((flags & 0x7800) || (found->response && (flags & 0x000f)))
+        /* Opcode and rcode are zero in both mDNS message directions.  RCODE
+           is not spare query space: accepting a query with an error code
+           made malformed packets which compliant responders ignore another
+           way to reach this responder and its amplification budget. */
+        if ((flags & 0x7800) || (flags & 0x000f))
                 return false;
 
         questions = byte_reader_u16(&header);
@@ -373,14 +377,16 @@ bool waterlink_mdns_read(const p8 address_to packet, positive length,
                                                    address_of name_length);
                 byte_reader tail = dns_message_at(packet, length, next);
                 p32 type;
+                p16 class;
 
                 //      The type and the class, after a name that was one.
                 type = byte_reader_u16(&tail);
-                (void)byte_reader_skip(&tail, 2);
+                class = byte_reader_u16(&tail);
                 if (!next || !byte_reader_ok(&tail))
                         return false;
                 if (!found->response && waterlink_is_service(name, name_length) &&
-                    (type == 12 || type == 255))
+                    (type == 12 || type == 255) &&
+                    (class & 0x7fff) == 1)
                 {
                         byte_reader echo = dns_message_at(packet, length, start);
                         const p8 address_to whole;
@@ -407,6 +413,8 @@ bool waterlink_mdns_read(const p8 address_to packet, positive length,
                 byte_reader tail = dns_message_at(packet, length, next);
                 byte_reader data;
                 p32 type;
+                p16 class;
+                p32 ttl;
                 p8 label[63];
                 positive label_length;
                 struct waterlink_found_instance address_to instance;
@@ -414,29 +422,96 @@ bool waterlink_mdns_read(const p8 address_to packet, positive length,
                 //      The type, class and time to live, then the data
                 //      behind its length.
                 type = byte_reader_u16(&tail);
-                (void)byte_reader_skip(&tail, 6);
+                class = byte_reader_u16(&tail);
+                ttl = byte_reader_u32(&tail);
                 data = byte_reader_vector16(&tail);
                 if (!next || !byte_reader_ok(&tail))
                         return false;
                 at = length - byte_reader_left(&tail);
 
-                if (!found->response ||
-                    !waterlink_instance_of(name, name_length, label,
+                if (!found->response)
+                        continue;
+
+                /* DNS-SD discovers an instance through the service's PTR.
+                   An orphan SRV is not an advertisement merely because its
+                   owner has the service suffix. Keep PTR and SRV independent
+                   while walking: records may arrive in either order. */
+                if (type == 12 && ttl && (class & 0x7fff) == 1 &&
+                    waterlink_is_service(name, name_length))
+                {
+                        p8 target[WATERLINK_NAME_BYTES];
+                        positive target_length = 0;
+                        positive target_at =
+                            (positive)(byte_reader_here(&data) - packet);
+                        positive target_end = waterlink_dns_name(
+                            packet, length, target_at, target,
+                            address_of target_length);
+
+                        if (target_end == at &&
+                            waterlink_instance_of(target, target_length, label,
+                                                  address_of label_length))
+                        {
+                                instance = waterlink_found_at(found, label,
+                                                              label_length);
+                                if (instance)
+                                        instance->advertised = true;
+                        }
+                        continue;
+                }
+
+                if (!waterlink_instance_of(name, name_length, label,
                                            address_of label_length))
                         continue;
 
-                if (type == 33 && byte_reader_left(&data) >= 7)
+                /* TTL zero is a goodbye, not a fresh endpoint. Treating it
+                   as discovery made a peer's departure launch a handshake
+                   and let packets caches deliberately discard drive hidden
+                   curve work here. */
+                if (type == 33 && ttl && (class & 0x7fff) == 1 &&
+                    byte_reader_left(&data) >= 7)
                 {
+                        p8 target[WATERLINK_NAME_BYTES];
+                        positive target_length = 0;
+                        positive target_at;
+                        positive target_end;
+                        p16 port;
+
                         //      Priority and weight, then the port.
                         (void)byte_reader_skip(&data, 4);
-                        instance = waterlink_found_at(found, label,
-                                                      label_length);
+                        port = byte_reader_u16(&data);
+                        target_at = (positive)(byte_reader_here(&data) - packet);
+                        target_end = waterlink_dns_name(
+                            packet, length, target_at, target,
+                            address_of target_length);
+
+                        /* An SRV RDATA ends in exactly one target name. Root
+                           means the service is unavailable, and port zero is
+                           not a destination this UDP service can use. The old
+                           parser ignored the target and accepted both shapes,
+                           letting records other DNS-SD peers discard spend a
+                           cryptographic greeting. */
+                        if (!port || target_length <= 1 || target_end != at)
+                                continue;
+                        instance = waterlink_found_at(found, label, label_length);
                         if (instance)
                         {
-                                instance->port = byte_reader_u16(&data);
+                                instance->port = port;
                                 instance->has_port = true;
                         }
                 }
+        }
+
+        /* Do not expose half of DNS-SD's identity relation. An attacker can
+           order the pair either way, so compact only after all records have
+           been seen. */
+        {
+                positive kept = 0;
+
+                for (positive i = 0; i < found->count; i++)
+                        if (found->instance[i].advertised &&
+                            found->instance[i].has_port)
+                                found->instance[kept++] = found->instance[i];
+                found->count = kept;
         }
 
         return at == length;

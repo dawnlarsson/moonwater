@@ -43555,7 +43555,7 @@ static positive string_digits_max(string_address source, positive bound,
 typedef struct { int handle; bool tls; } tls_conn;
 typedef struct { bipolar handle; bool tls; tls_conn session; } http_link;
 typedef struct { p8 *bytes; positive used; positive room; } http_buffer;
-typedef struct { int dummy; } network_deadline;
+typedef struct { positive began; positive budget; } network_deadline;
 #define TLS_AGAIN (-2)
 #define TLS_OK 0
 #define TLS_FAIL (-1)
@@ -43574,6 +43574,13 @@ static bipolar tls_lend(void *a, positive b, p8 **c, positive *d)
         return TLS_AGAIN;
 }
 static bool network_deadline_begin(network_deadline *d, positive s, positive n)
+{
+        (void)d; (void)s; (void)n;
+        abort();
+        return false;
+}
+static bool network_deadline_left(const network_deadline *d, positive *s,
+                                  positive *n)
 {
         (void)d; (void)s; (void)n;
         abort();
@@ -44434,6 +44441,11 @@ static positive fuzz_opened;
 static p32 fuzz_connected[32];
 static positive fuzz_connected_count;
 static positive fuzz_requests;
+static char fuzz_identity_host[256];
+static p32 fuzz_identity_ip;
+static p16 fuzz_identity_port;
+static bool fuzz_identity_tls;
+static bool fuzz_identity_pending;
 static p64 fuzz_random;
 static positive fuzz_largest;
 static bool fuzz_write_faults;
@@ -44478,7 +44490,7 @@ static positive fuzz_take(positive room)
 }
 
 typedef struct { p16 family; p16 port; p32 host; p64 pad; } socket_address_internet;
-typedef struct { int dummy; } network_deadline;
+typedef struct { positive began; positive budget; } network_deadline;
 #define AF_INET 2
 #define SOCK_STREAM 1
 #define SOCK_CLOEXEC 02000000
@@ -44502,17 +44514,32 @@ static bool network_stream_timeout(bipolar h, positive s, positive n)
 }
 static int socket_connect(b32 h, const void *where, positive size)
 {
-        (void)h; (void)size;
+        const socket_address_internet *to = where;
+        (void)h;
+        if (size != sizeof *to || !fuzz_identity_host[0] ||
+            to->host != fuzz_identity_ip)
+                fuzz_die("connect tuple differs from the resolved authority");
+        fuzz_identity_port = to->port;
+        fuzz_identity_tls = false;
+        fuzz_identity_pending = true;
         if (fuzz_connected_count < 32)
                 fuzz_connected[fuzz_connected_count++] =
-                    ((const socket_address_internet *)where)->host;
+                    to->host;
         return 0;
 }
 static int socket_close(b32 h) { (void)h; return 0; }
 static bool network_deadline_begin(network_deadline *d, positive s, positive n)
 {
-        (void)d; (void)s; (void)n;
+        d->began = 1;
+        d->budget = s * 1000000000UL + n;
         return true;
+}
+static bool network_deadline_left(const network_deadline *d, positive *s,
+                                  positive *n)
+{
+        *s = d->budget / 1000000000UL;
+        *n = d->budget % 1000000000UL;
+        return d->began && d->budget;
 }
 
 /* Every request this client writes: one request line and four fields, each
@@ -44541,6 +44568,27 @@ static void fuzz_request(const p8 *data, positive length)
         positive line = (positive)((const p8 *)memchr(data, '\r', length) - data);
         if (line < 14 || memchr(data + 4, ' ', line - 13))
                 fuzz_die("space inside the request target");
+        if (fuzz_identity_pending) {
+                const p8 *field = memmem(data, length, "\r\nHost: ", 8);
+                const p8 *stop;
+                char expected[264];
+                int expected_length;
+
+                if (!field || !(stop = memmem(field + 8,
+                                               length - (positive)(field + 8 - data),
+                                               "\r\n", 2)))
+                        fuzz_die("the connected request has no complete Host field");
+                expected_length = snprintf(
+                    expected, sizeof expected,
+                    fuzz_identity_port == (fuzz_identity_tls ? 443 : 80)
+                        ? "%s" : "%s:%u",
+                    fuzz_identity_host, (unsigned)fuzz_identity_port);
+                if (expected_length < 0 ||
+                    (positive)expected_length != (positive)(stop - field - 8) ||
+                    memcmp(field + 8, expected, (positive)expected_length))
+                        fuzz_die("Host differs from the connected authority");
+                fuzz_identity_pending = false;
+        }
 }
 
 static bool network_stream_send_all(bipolar h, const p8 *data, positive length)
@@ -44590,7 +44638,10 @@ typedef struct
 
 static bipolar tls_connect(tls_conn *tls, bipolar h, string_address host, bool check)
 {
-        (void)h; (void)host; (void)check;
+        (void)h; (void)check;
+        if (!fuzz_identity_pending || strcmp(host, fuzz_identity_host))
+                fuzz_die("TLS SNI/certificate host differs from the resolved authority");
+        fuzz_identity_tls = true;
         memset(tls, 0, sizeof *tls);
         return TLS_OK;
 }
@@ -44714,13 +44765,21 @@ static bipolar system_call_3(positive number, positive fd, positive spans,
    (10.0.0.1), and every other name and literal on this machine. */
 static p32 http_lookup(string_address host)
 {
+        p32 answer;
+
         if (!strcmp(host, "unknown.invalid"))
                 return 0;
         if (!strcmp(host, "public.example"))
-                return 0x08080808;
-        if (!strcmp(host, "inside.example"))
-                return 0x0a000001;
-        return 0x7f000001;
+                answer = 0x08080808;
+        else if (!strcmp(host, "inside.example"))
+                answer = 0x0a000001;
+        else
+                answer = 0x7f000001;
+        if (strlen(host) >= sizeof fuzz_identity_host)
+                fuzz_die("resolved host exceeds the identity transcript");
+        strcpy(fuzz_identity_host, host);
+        fuzz_identity_ip = answer;
+        return answer;
 }
 """
     if tight:
@@ -44834,11 +44893,15 @@ static void fuzz_run(const p8 *data, positive size, int lane)
         fuzz_opened = 0;
         fuzz_connected_count = 0;
         fuzz_requests = 0;
+        fuzz_identity_host[0] = 0;
+        fuzz_identity_pending = false;
         fuzz_sink_used = 0;
         status = fetch ? http_get((string_address)start, &store, &code)
                        : http_fetch_to((string_address)start, 7, true, &code, null);
         if (fuzz_requests != fuzz_opened)
                 fuzz_die("a connection was opened with no request written on it");
+        if (fuzz_identity_pending)
+                fuzz_die("a connected authority was not consumed by one request");
         /* At the tight tier a chain that has reached public space never
            connects inside again. */
         if (MOONWATER_STRICT >= STRICT_TIGHT)
@@ -45069,6 +45132,8 @@ def http_fuzz_seeds():
             ("port_zero", b"http://h:0/", b"/"),
             ("port_big", b"http://h:65536/", b"/"),
             ("scheme_only", b"gopher://h/", b"mailto:x"),
+            ("bare_web_scheme", b"https:443", b"http:80"),
+            ("bare_other_scheme", b"ftp:21", b"smtp:25"),
             ("long", b"http://h/" + b"a" * 2100, b"b" * 2100)):
         seeds["url_%s.bin" % name] = b"\x03\x00" + url + b"\x00" + location
     return seeds
@@ -60480,10 +60545,43 @@ static positive put_instance(p8 *at, const char *label)
 
 struct model_instance { char label[64]; positive label_length; p16 port; };
 
-/*      A well-formed response carrying `k` SRV records for labels drawn from
-        a small pool, so labels repeat (found_at dedups, last port wins) and
-        overflow past WATERLINK_FOUND_MAX. Fills the model with the instances
-        the reader must find, in the order it will find them. */
+static positive put_ptr_record(p8 *packet, positive at, const char *label)
+{
+        positive owner = put_service(packet + at);
+        positive target;
+
+        at += owner;
+        network_store_16(packet + at, 12);
+        network_store_16(packet + at + 2, 0x8001);
+        network_store_32(packet + at + 4, 4500);
+        target = put_instance(packet + at + 10, label);
+        network_store_16(packet + at + 8, (p16)target);
+        return at + 10 + target;
+}
+
+static positive put_srv_record(p8 *packet, positive at, const char *label,
+                               p16 port)
+{
+        static const char *target[] = {"machine", "local"};
+        positive owner = put_instance(packet + at, label);
+        positive target_length;
+
+        at += owner;
+        network_store_16(packet + at, 33);
+        network_store_16(packet + at + 2, 0x8001);
+        network_store_32(packet + at + 4, 120);
+        target_length = put_name(packet + at + 16, target, 2);
+        network_store_16(packet + at + 8, (p16)(6 + target_length));
+        memset(packet + at + 10, 0, 4);
+        network_store_16(packet + at + 14, port);
+        return at + 16 + target_length;
+}
+
+/*      A well-formed response carrying `k` advertised PTR+SRV pairs for
+        labels drawn from a small pool. Their wire order varies, labels repeat
+        (found_at dedups, last SRV port wins), and the set can overflow
+        WATERLINK_FOUND_MAX. Fills the model with the PTR/SRV intersection the
+        production reader must expose. */
 static positive build_response(p8 *packet, struct model_instance *model,
                                positive *model_count)
 {
@@ -60506,28 +60604,22 @@ static positive build_response(p8 *packet, struct model_instance *model,
         {
                 const char *label = pool[draw(sizeof pool / sizeof pool[0])];
                 p16 port = (p16)(1 + draw(65534));
-                p32 type = draw(4) ? 33 : 16; // usually SRV, sometimes TXT
-                positive name_at = at;
-                positive rdlength;
+                bool advertised = draw(4) != 0;
 
-                at += put_instance(packet + at, label);
-                network_store_16(packet + at, (p16)type);
-                network_store_16(packet + at + 2, 0x8001);
-                network_store_32(packet + at + 4, 4500);
-                if (type == 33)
-                        rdlength = 6 + (draw(3) ? 1 + draw(8) : 0);
-                else
-                        rdlength = draw(6);
-                network_store_16(packet + at + 8, (p16)rdlength);
-                at += 10;
-                for (positive b = 0; b < rdlength; b++)
-                        packet[at + b] = (p8)draw(256);
-                if (type == 33 && rdlength >= 7)
+                if (advertised)
                 {
-                        packet[at + 4] = (p8)(port >> 8);
-                        packet[at + 5] = (p8)port;
-                        /*      Model: found_at dedups by label; the last SRV
-                                on a label sets its port. */
+                        if (draw(2))
+                        {
+                                at = put_ptr_record(packet, at, label);
+                                at = put_srv_record(packet, at, label, port);
+                        }
+                        else
+                        {
+                                at = put_srv_record(packet, at, label, port);
+                                at = put_ptr_record(packet, at, label);
+                        }
+                        ancount += 2;
+
                         positive m;
                         for (m = 0; m < found_count; m++)
                                 if (found[m].label_length == strlen(label) &&
@@ -60541,10 +60633,20 @@ static positive build_response(p8 *packet, struct model_instance *model,
                         }
                         if (m < 8)
                                 found[m < found_count ? m : found_count - 1].port = port;
-                        (void)name_at;
                 }
-                at += rdlength;
-                ancount++;
+                else
+                {
+                        positive owner = put_instance(packet + at, label);
+
+                        at += owner;
+                        network_store_16(packet + at, 16);
+                        network_store_16(packet + at + 2, 0x8001);
+                        network_store_32(packet + at + 4, 120);
+                        network_store_16(packet + at + 8, 1);
+                        packet[at + 10] = 0;
+                        at += 11;
+                        ancount++;
+                }
         }
         network_store_16(packet + 6, ancount);
         *model_count = found_count;
@@ -61922,7 +62024,7 @@ static fn link_peers_unlock(bipolar handle) { (void)handle; }
         sec(near, "// The listener's side of it", "typedef struct\n{\n        p32 multiaddr;"),
         sec(near, "typedef struct\n{\n        p32 multiaddr;",
             "/*\n        Every interface with an IPv4 address"),
-        sec(near, "static fn link_nearby_send(", "// Goodbye, with TTL zero"),
+        sec(near, "static bool link_nearby_send(", "// Goodbye, with TTL zero"),
         sec(near, "// The same place is greeted once in a while",
             "/*\n        The listener's turn:"),
         sec(near, "// Read what is waiting on the mDNS socket",

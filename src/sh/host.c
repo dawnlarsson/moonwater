@@ -6577,6 +6577,53 @@ static bool radio_bss_read(netlink_header address_to header, radio_heard address
         return true;
 }
 
+/* Keep one row per name and, when the bounded display is full, the strongest
+   rows rather than whichever names the kernel happened to dump first.  Scan
+   dump order is not signal order: sixty-four weak forged names used to hide a
+   stronger real network merely by arriving before it.  The associated row is
+   never evicted, even when its current signal is the weakest. */
+static fn radio_air_keep(radio_air address_to air,
+                         const radio_heard address_to one)
+{
+        // A hidden network's name is empty or zeros; it has no row.
+        if (memory_span_byte(one->ssid, 0, one->ssid_length) == one->ssid_length)
+                return;
+
+        for (positive at = 0; at < air->count; at++)
+        {
+                radio_heard address_to have = air->heard + at;
+
+                if (have->ssid_length != one->ssid_length ||
+                    memory_compare(have->ssid, one->ssid, one->ssid_length))
+                        continue;
+                /* `joined` belongs to one BSSID, not to the SSID aggregate.
+                   Never combine an associated row's bit with a stronger
+                   twin's security, channel and address: that presents the
+                   twin as the network carrying the live association.  An
+                   associated BSS owns the row; otherwise the strongest BSS
+                   owns the whole row, not three selected fields from it. */
+                if ((one->joined && !have->joined) ||
+                    (one->joined == have->joined && one->mbm > have->mbm))
+                        *have = *one;
+                return;
+        }
+        if (air->count < RADIO_AIR_MOST)
+                air->heard[air->count++] = *one;
+        else
+        {
+                positive weakest = positive_max;
+
+                for (positive at = 0; at < air->count; at++)
+                        if (!air->heard[at].joined &&
+                            (weakest == positive_max ||
+                             air->heard[at].mbm < air->heard[weakest].mbm))
+                                weakest = at;
+                if (weakest != positive_max &&
+                    (one->joined || one->mbm > air->heard[weakest].mbm))
+                        air->heard[weakest] = *one;
+        }
+}
+
 static bool radio_air_seen(netlink_header address_to header, address_any context)
 {
         radio_air address_to air = (radio_air address_to)context;
@@ -6594,28 +6641,7 @@ static bool radio_air_seen(netlink_header address_to header, address_any context
                 air->any = true;
         }
 
-        // A hidden network's name is empty or zeros; it has no row.
-        if (memory_span_byte(one.ssid, 0, one.ssid_length) == one.ssid_length)
-                return true;
-
-        for (positive at = 0; at < air->count; at++)
-        {
-                radio_heard address_to have = air->heard + at;
-
-                if (have->ssid_length != one.ssid_length ||
-                    memory_compare(have->ssid, one.ssid, one.ssid_length))
-                        continue;
-                have->joined |= one.joined;
-                if (one.mbm > have->mbm)
-                {
-                        have->mbm = one.mbm;
-                        have->frequency = one.frequency;
-                        have->security = one.security;
-                }
-                return true;
-        }
-        if (air->count < RADIO_AIR_MOST)
-                air->heard[air->count++] = one;
+        radio_air_keep(air, address_of one);
         return true;
 }
 
@@ -10425,13 +10451,23 @@ static COLD bool sntp_math_ok(void)
         return sntp_pick(row, 5) == 2 && row[2].offset_ns == 2000000;
 }
 
+static CONST bool sntp_reply_length_ok(bipolar received)
+{
+        return received == SNTP_PACKET;
+}
+
 static HOT bipolar sntp_exchange(b32 handle,
                                  network_deadline address_to deadline,
                                  bool tight, p32 address_to sequence,
                                  sntp_sample address_to into)
 {
         p8 request[SNTP_PACKET];
-        p8 reply[SNTP_PACKET];
+        /* One byte beyond the only wire shape this client understands lets
+           recvmsg distinguish an exact 48-byte reply from a longer datagram.
+           Receiving into exactly SNTP_PACKET bytes silently truncates UDP:
+           the return value is then 48 for both shapes, and attacker-chosen
+           trailing data is accepted without ever being parsed. */
+        p8 reply[SNTP_PACKET + 1];
         p64 sent[2];
         p64 got[2];
         p64 spare[2];
@@ -10492,7 +10528,7 @@ static HOT bipolar sntp_exchange(b32 handle,
                                 return SNTP_NO_REPLY;
                         continue;
                 }
-                if_rare (received < SNTP_PACKET)
+                if_rare (!sntp_reply_length_ok(received))
                 {
                         if (discarded++ == SNTP_DISCARD_MAX)
                                 return SNTP_NO_REPLY;
