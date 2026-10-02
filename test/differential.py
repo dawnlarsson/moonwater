@@ -42832,6 +42832,17 @@ def harness_tls_peer(argv):
     (MUST_ACCEPT) and with each other, except where this client refuses by
     design what OpenSSL accepts, which DELIBERATE names with its reason.
 
+    With --schedule N the same accepted scripts are served N times more with
+    the server's bytes delivered by a schedule below the record layer: one
+    byte at a time, cut into pieces a seeded generator picks, held back and
+    coalesced until the server next reads, or ended by FIN or RST after a
+    drawn number of bytes. A whole delivery must be taken exactly as the
+    unscheduled one was; an ended one may fail but must fail without
+    publishing (the -O file is the whole body or is not there), and every run
+    is held to a wall clock and a CPU budget, so a client that spins on
+    single bytes or waits out an idle timer for a peer that already hung up
+    shows. MOONWATER_TLS_SCHEDULES lengthens it.
+
     With --mutate N the verdicts are set aside: N seeded flights are served to
     wget with EncryptedExtensions, Certificate, CertificateRequest,
     CertificateVerify, tickets and KeyUpdate mutated before they are sealed,
@@ -42839,18 +42850,25 @@ def harness_tls_peer(argv):
     ends by a signal or hangs fails. Built with UBSan in trap mode, a shell
     turns undefined behaviour into that signal.
     """
+    import collections
     import datetime
     import hashlib
     import hmac as hmac_module
+    import resource
     import shutil
     import socket
     import ssl
     import subprocess
     import tempfile
     import threading
+    import time
     parser = argparse.ArgumentParser(prog="differential.py --harness tls_peer")
     parser.add_argument("--cc", default=os.environ.get("CC", "gcc"))
     parser.add_argument("--shell", help="a built shell to use instead of building one")
+    parser.add_argument("--schedule", type=int,
+                        default=int(os.environ.get("MOONWATER_TLS_SCHEDULES", "0")),
+                        help="serve the accepted scripts N times under delivery "
+                             "schedules and FIN/RST cuts, with time and CPU budgets")
     parser.add_argument("--mutate", type=int, default=0,
                         help="instead of the verdicts, serve N flights whose "
                              "handshake messages are mutated to wget and demand "
@@ -42964,6 +42982,12 @@ def harness_tls_peer(argv):
     certificate = b"\0" + (len(leaf) + 5).to_bytes(3, "big") + len(leaf).to_bytes(
         3, "big") + leaf + b"\0\0"
 
+    def entry_with(extensions):
+        """The leaf's Certificate with extensions in its one entry."""
+        return (b"\0" + (len(leaf) + 5 + len(extensions)).to_bytes(3, "big") +
+                len(leaf).to_bytes(3, "big") + leaf + len(extensions).to_bytes(2, "big") +
+                extensions)
+
     body = b"hello, record layer"
     length_head = b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n" % len(body)
     close_head = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n"
@@ -43073,6 +43097,19 @@ def harness_tls_peer(argv):
          [app(length_head + body), close]),
         ("EncryptedExtensions answering unasked ALPN", {"ee": b"\0\x10\0\5\0\3\2h2"},
          [app(length_head + body), close]),
+        ("an unknown extension in EncryptedExtensions", {"ee": b"\xfa\xfa\0\0"},
+         [app(length_head + body), close]),
+        #   RFC 8446 4.4.2: a CertificateEntry's extensions answer the
+        #   ClientHello's, which asks for no OCSP status and no SCT.
+        ("an unasked OCSP status in a CertificateEntry",
+         {"certificate": entry_with(b"\0\5\0\5\1\0\0\0\1\0")},
+         [app(length_head + body), close]),
+        ("an unasked SCT list in a CertificateEntry",
+         {"certificate": entry_with(b"\0\x12\0\4\0\2\0\0")},
+         [app(length_head + body), close]),
+        ("an unknown extension in a CertificateEntry",
+         {"certificate": entry_with(b"\xfa\xfa\0\0")},
+         [app(length_head + body), close]),
         ("CertificateRequest in the flight", {"request": True},
          [app(length_head + body), close]),
         ("CertificateRequest with a context", {"request": True,
@@ -43148,6 +43185,13 @@ def harness_tls_peer(argv):
     }
     # Where OpenSSL 3.6's client accepts what the RFC says to refuse.
     OPENSSL_LENIENT = {
+        "an unknown extension in EncryptedExtensions":
+            "4.2 makes every unasked extension response unsupported_extension; "
+            "OpenSSL passes over one it does not know",
+        "an unknown extension in a CertificateEntry":
+            "4.2 makes every unasked extension response unsupported_extension; "
+            "OpenSSL refuses the OCSP status and SCT list it knows and passes "
+            "over one it does not",
         "TLS 1.2 HelloRequest":
             "RFC 5246 7.4.1.1 lets a client ignore a HelloRequest or answer "
             "it; OpenSSL renegotiates",
@@ -43297,7 +43341,69 @@ def harness_tls_peer(argv):
         except OSError:
             pass
 
-    def serve(listener, flight, steps, outcome):
+    class Scheduled:
+        """The server's end of one connection, its bytes delivered by a
+        schedule: "byte" one at a time, "split" in pieces a seeded generator
+        cuts, "coalesce" held until the server next reads or stops, and
+        "fin" or "rst" ending the stream after cut bytes whatever the script
+        meant to say. Each piece goes out alone (TCP_NODELAY) with a short
+        gap, so the client's reads see the pieces rather than their sum."""
+
+        def __init__(self, sock, kind, rng, cut, seen):
+            import struct
+            self.sock, self.kind, self.rng, self.cut = sock, kind, rng, cut
+            seen.append(self)
+            self.sent, self.held, self.ended = 0, b"", False
+            self.linger = struct.pack("ii", 1, 0)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
+        def settimeout(self, value):
+            self.sock.settimeout(value)
+
+        def out(self, data):
+            if self.ended:
+                raise ConnectionError("the schedule ended the stream")
+            ending = self.cut is not None and self.sent + len(data) >= self.cut
+            if ending:
+                data = data[:self.cut - self.sent]
+            at = 0
+            while at < len(data):
+                step = 1 if self.kind == "byte" else (
+                    len(data) if self.kind == "coalesce" else self.rng.randint(1, 700))
+                self.sock.sendall(data[at:at + step])
+                at += step
+                if self.kind != "coalesce":
+                    time.sleep(0.0002)
+            self.sent += len(data)
+            if ending:
+                self.ended = True
+                if self.kind == "rst":
+                    self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, self.linger)
+                    self.sock.close()
+                else:
+                    self.sock.shutdown(socket.SHUT_WR)
+                raise ConnectionError("the schedule ended the stream")
+
+        def sendall(self, data):
+            if self.kind == "coalesce":
+                self.held += data
+            else:
+                self.out(data)
+
+        def flush(self):
+            data, self.held = self.held, b""
+            if data:
+                self.out(data)
+
+        def recv(self, size):
+            self.flush()
+            return self.sock.recv(size)
+
+        def shutdown(self, how):
+            self.flush()
+            self.sock.shutdown(how)
+
+    def serve(listener, flight, steps, outcome, schedule=None):
         try:
             raw, _ = listener.accept()
         except OSError:
@@ -43305,7 +43411,8 @@ def harness_tls_peer(argv):
         raw.settimeout(20)
         try:
             with raw:
-                (run12 if flight.get("tls12") else run)(raw, flight, steps)
+                (run12 if flight.get("tls12") else run)(
+                    Scheduled(raw, *schedule) if schedule else raw, flight, steps)
                 outcome.append("served")
         except Exception as error:  # the client hung up or refused
             outcome.append("server: %r" % error)
@@ -43422,7 +43529,7 @@ def harness_tls_peer(argv):
         request = message(13, flight.get("request_body", b"\0\0\x08\0\x0d\0\4\0\2\4\3"))
         if flight.get("request"):
             messages.append(request)
-        messages.append(message(11, certificate))
+        messages.append(message(11, flight.get("certificate", certificate)))
         if flight.get("request_late"):
             messages.append(request)
         for part in messages:
@@ -43558,6 +43665,79 @@ def harness_tls_peer(argv):
                 print(built.stderr[-3000:])
                 return 1
         (work / "wget").symlink_to(shell)
+
+        if args.schedule:
+            accepted = [one for one in SCRIPTS if one[0] in MUST_ACCEPT and
+                        one[0] not in DELIBERATE and one[0] not in WGET_LENIENT]
+            rng = random.Random(0x5c4e)
+            kinds = ("byte", "split", "coalesce", "fin", "rst")
+            lengths = {}
+            tally = collections.Counter()
+            slowest = (0.0, "")
+            costliest = (0.0, "")
+            for number in range(args.schedule):
+                script, flight, steps = rng.choice(accepted)
+                kind = kinds[number % len(kinds)]
+                if kind in ("fin", "rst") and script not in lengths:
+                    kind = "split"
+                #   A cut falls inside what the whole delivery sent.
+                cut = rng.randrange(1, lengths[script]) if kind in ("fin", "rst") else None
+                seen = []
+                label = "%s under %s%s" % (script, kind, "@%d" % cut if cut else "")
+                listener = socket.socket()
+                listener.bind(("127.0.0.1", 0))
+                listener.listen(1)
+                listener.settimeout(20)
+                port = listener.getsockname()[1]
+                outcome = []
+                server = threading.Thread(
+                    target=serve, args=(listener, dict(flight, answer_deferred=False), steps,
+                                        outcome, (kind, random.Random(number), cut, seen)),
+                    daemon=True)
+                server.start()
+                folder = Path(tempfile.mkdtemp(dir=work))
+                before = resource.getrusage(resource.RUSAGE_CHILDREN)
+                began = time.monotonic()
+                try:
+                    code = subprocess.run(
+                        [str(work / "wget"), "-q", "--no-check-certificate", "-O", "saved",
+                         "https://127.0.0.1:%d/" % port], capture_output=True, timeout=120,
+                        cwd=str(folder), env={"PATH": "/usr/bin:/bin", "HOME": str(work)}
+                    ).returncode
+                except subprocess.TimeoutExpired:
+                    code = "timeout"
+                elapsed = time.monotonic() - began
+                after = resource.getrusage(resource.RUSAGE_CHILDREN)
+                cpu = (after.ru_utime - before.ru_utime) + (after.ru_stime - before.ru_stime)
+                server.join(25)
+                listener.close()
+                saved = folder / "saved"
+                have = saved.read_bytes() if saved.exists() else None
+                want = flight.get("body", body)
+                tally["%s exit %s" % (kind, code)] += 1
+                slowest = max(slowest, (elapsed, label))
+                costliest = max(costliest, (cpu, label))
+                checks(code != "timeout" and code < 128,
+                       "%s: wget ended with %s" % (label, code))
+                if cut is None:
+                    checks(code == 0 and have == want, "%s: exit %s, saved %r, wanted %r" % (
+                        label, code, have and have[:40], want[:40]))
+                    if seen and code == 0:
+                        lengths[script] = seen[0].sent
+                else:
+                    checks(have == want if code == 0 else have is None,
+                           "%s: exit %s published %r" % (label, code, have and have[:40]))
+                #   A cut has nothing to wait for, so 10 s proves it did not
+                #   wait out the idle timer; a whole delivery is paced by its
+                #   gaps, so its budget grows with the bytes it sent.
+                budget = 10 + (0.002 * seen[0].sent if seen and cut is None else 0)
+                checks(elapsed < budget, "%s: took %.1f s of %.1f" % (label, elapsed, budget))
+                checks(cpu < 1, "%s: took %.2f s of CPU" % (label, cpu))
+            print("tls peer schedule: %d deliveries, %s; slowest %.2f s (%s), most CPU "
+                  "%.3f s (%s)" % (args.schedule, ", ".join(
+                      "%s x%d" % kv for kv in sorted(tally.items())), slowest[0], slowest[1],
+                      costliest[0], costliest[1]))
+            return checks.verdict("tls peer schedule", "tls-peer-schedule")
 
         if args.mutate:
             mutation["rng"] = random.Random(0x7157)
@@ -46190,6 +46370,7 @@ def harness_wget_hostile(argv):
             self.script = script
             self.lines = []
             self.hosts = []
+            self.locals = []
             self.listener = socket.socket()
             self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self.listener.bind((address, 0))
@@ -46208,6 +46389,7 @@ def harness_wget_hostile(argv):
         def serve(self, peer):
             try:
                 peer.settimeout(5)
+                self.locals.append(peer.getsockname()[0])
                 head = b""
                 while b"\r\n\r\n" not in head:
                     more = peer.recv(4096)
@@ -46267,13 +46449,47 @@ def harness_wget_hostile(argv):
     #   never left the inside may go anywhere.  The default follows all of it,
     #   as GNU wget and curl do.
     if args.netns:
+        import struct
         farm = Path(tempfile.mkdtemp(prefix="wget-netns-"))
         (farm / "wget").symlink_to(args.netns)
+        #   The network's resolver, played by a stub on this namespace's own
+        #   127.0.0.1:53 (resolv.conf is bound over in a mount namespace of
+        #   its own): every A question is answered 8.8.4.4, a public address
+        #   that is a loopback one here, and every name asked is kept.
+        (farm / "resolv.conf").write_text("nameserver 127.0.0.1\n")
+        subprocess.run(["mount", "--bind", str(farm / "resolv.conf"), "/etc/resolv.conf"],
+                       check=True)
+        asked = []
+        resolver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        resolver.bind(("127.0.0.1", 53))
+
+        def resolve():
+            while True:
+                try:
+                    data, peer = resolver.recvfrom(4096)
+                    at, labels = 12, []
+                    while data[at]:
+                        labels.append(data[at + 1:at + 1 + data[at]])
+                        at += 1 + data[at]
+                    kind = struct.unpack("!H", data[at + 1:at + 3])[0]
+                    asked.append(b".".join(labels).decode("latin1").lower())
+                    answer = (b"\xc0\x0c" + struct.pack("!HHIH", 1, 1, 60, 4) +
+                              bytes([8, 8, 4, 4])) if kind == 1 else b""
+                    resolver.sendto(struct.pack("!HHHHHH", struct.unpack("!H", data[:2])[0],
+                                                0x8180, 1, int(kind == 1), 0, 0) +
+                                    data[12:at + 5] + answer, peer)
+                except (OSError, IndexError, struct.error):
+                    continue
+        threading.Thread(target=resolve, daemon=True).start()
         rows = [
             ("public to loopback", "8.8.8.8", b"http://127.0.0.1:PORT/z", False),
             ("public to public", "8.8.8.8", b"http://8.8.4.4:PORT/z", True),
             ("loopback to loopback", "127.0.0.1", b"http://127.0.0.1:PORT/z", True),
             ("loopback to public", "127.0.0.1", b"http://8.8.8.8:PORT/z", True),
+            #   localhost is this machine whatever the resolver says, so the
+            #   tight tier refuses it after public space as it refuses
+            #   127.0.0.1; a resolver that said 8.8.4.4 once made it public.
+            ("public to localhost", "8.8.8.8", b"http://LocalHost.:PORT/z", False),
         ]
         failures = 0
         for name, first, location, follows in rows:
@@ -46291,7 +46507,129 @@ def harness_wget_hostile(argv):
                 print("FAIL %s %s: lines %r exit %d (%s)" % (
                     "tight" if args.tight else "default", name, server.lines,
                     done.returncode, done.stderr[-120:]))
-        print("PASS %d" % (len(rows) - failures))
+        #   RFC 6761 6.3: localhost and every name under it, in any case and
+        #   with or without the root's dot, reaches 127.0.0.1 and is never
+        #   asked of the resolver; a name that only looks like one is asked
+        #   like any other. The spellings are generated; curl, which answers
+        #   these names itself, is held to the same rows when it is here.
+        spell = random.Random(0x6761)
+
+        def cased(text):
+            return "".join(c.upper() if spell.randrange(2) else c for c in text)
+        loopback = ["localhost", "localhost.", "LOCALHOST"] + [
+            cased(".".join(["".join(spell.choice("ab-_0") for _ in range(spell.randint(1, 4)))
+                            .strip("-") or "a" for _ in range(spell.randint(1, 3))] +
+                           ["localhost"]) + spell.choice(["", "."])) for _ in range(9)]
+        elsewhere = [cased(name) for name in (
+            "localhostx", "xlocalhost", "localhost.example", "localhost-a.example",
+            "a-localhost", "localhos", "localhost.localhost.example", "ocalhost")]
+        curl = shutil.which("curl") if not args.tight else None
+        for host, inside in [(h, True) for h in loopback] + [(h, False) for h in elsewhere]:
+            row_failed = False
+            for who in ("mw", "curl") if curl else ("mw",):
+                del asked[:]
+                server = Server(answer(ok()), "0.0.0.0")
+                url = "http://%s:%d/y" % (host, server.port)
+                command = ([str(farm / "wget"), "-q", "-O", "saved", url] if who == "mw" else
+                           [curl, "-s", "--max-time", "10", "-o", "saved", url])
+                done = subprocess.run(command, capture_output=True, timeout=60, cwd=str(farm))
+                server.close()
+                want_asked = [] if inside else [host.lower().rstrip(".")]
+                want_local = ["127.0.0.1"] if inside else ["8.8.4.4"]
+                good = (done.returncode == 0 and server.locals == want_local and
+                        sorted(set(asked)) == want_asked)
+                if not good:
+                    row_failed = True
+                    print("FAIL %s %s %r: exit %d, reached %r, resolver asked %r" % (
+                        "tight" if args.tight else "default", who, host, done.returncode,
+                        server.locals, asked))
+            failures += row_failed
+        #   Host spellings against the references, at the default tier: how
+        #   each client reads 127.0.0.1 spelled the ways inet_aton reads it
+        #   (fewer parts, hex, octal, one number, the root's dot), and the
+        #   authority forms this client refuses. A row says what this client
+        #   does -- "literal" (127.0.0.1 reached, nobody asked), "name" (the
+        #   resolver asked, 8.8.4.4 reached) or "refused" (nothing asked or
+        #   reached) -- and why, where GNU wget or curl is known to differ.
+        #   This client is held to its column; the references' answers are
+        #   printed, and one that has come to agree is said.
+        spelled = []
+        if not args.tight:
+            quad = [127, 0, 0, 1]
+
+            def octet(value, form):
+                return {"dec": "%d" % value, "zero": "0%d" % value, "hex": "0x%x" % value,
+                        "HEX": "0X%X" % value, "oct": "0%o" % value}[form]
+            numeric = set()
+            while len(numeric) < 10:
+                parts = spell.choice([quad, [127, 0, 1], [127, 1], [0x7f000001]])
+                forms = [spell.choice(["dec", "dec", "zero", "hex", "HEX", "oct"])
+                         for _ in parts]
+                text = ".".join(octet(v, f) for v, f in zip(parts, forms))
+                try:
+                    same = socket.inet_aton(text) == bytes(quad)
+                except OSError:
+                    same = False
+                if text != "127.0.0.1" and same:
+                    numeric.add(text + spell.choice(["", "", "."]))
+            shorthand = ("a host that is not four plain decimal octets is a name to this "
+                         "client, as the resolver is asked; inet_aton, under GNU wget and "
+                         "curl, reads it as 127.0.0.1 (needs a decision: parity would "
+                         "canonicalize it once in http_split_into)")
+            spelled = [("http://127.0.0.1:PORT/", "literal", None)] + [
+                ("http://%s:PORT/" % text, "name", shorthand) for text in sorted(numeric)] + [
+                ("http://u@127.0.0.1:PORT/", "refused",
+                 "userinfo is refused; both send it as Authorization or drop it"),
+                ("http://127.0.0.1:PORT\\@x/", "refused",
+                 "a backslash is refused; both read x as the host"),
+                ("http://ex%61mple.com:PORT/", "refused",
+                 "a percent-encoded host is refused; both decode it"),
+                ("http://b\u00fccher.example:PORT/", "refused",
+                 "a host outside the DNS alphabet is refused; both apply IDNA"),
+                ("http:PORT", "refused",
+                 "http: without // is refused (SECURITY.md); both reach a host named http"),
+                ("http:/127.0.0.1:PORT/", "refused", "curl reads one slash as two"),
+                ("http://127.0.0.1.:PORT/", "name",
+                 "the root's dot makes a name, as GNU wget reads it; curl reads the address"),
+                ("HTTP://127.0.0.1:PORT/", "literal", None),
+                ("http://Example.COM.:PORT/", "name", None),
+            ]
+        references = [(who, path) for who, path in (("wget", shutil.which("wget")),
+                                                    ("curl", shutil.which("curl"))) if path]
+        for url, want, why in spelled:
+            answers = {}
+            for who, path in [("mw", str(farm / "wget"))] + references:
+                del asked[:]
+                server = Server(answer(ok()), "0.0.0.0")
+                text = url.replace("PORT", str(server.port))
+                command = {"mw": [path, "-q", "-O", "saved", text],
+                           "wget": [path, "-q", "--tries=1", "--timeout=5", "-O", "saved", text],
+                           "curl": [path, "-s", "--max-time", "5", "-o", "saved", text]}[who]
+                try:
+                    done = subprocess.run(command, capture_output=True, timeout=30,
+                                          cwd=str(farm)).returncode
+                except subprocess.TimeoutExpired:
+                    done = None
+                server.close()
+                answers[who] = ("literal" if done == 0 and server.locals == ["127.0.0.1"]
+                                and not asked else
+                                "name" if done == 0 and server.locals == ["8.8.4.4"] and asked
+                                else "refused" if not server.locals and not asked else
+                                "other: exit %s reached %r asked %r" % (done, server.locals,
+                                                                         asked))
+            if answers["mw"] != want:
+                failures += 1
+                print("FAIL default spelling %r: this client %s, wanted %s" % (
+                    url, answers["mw"], want))
+            others = {who: seen for who, seen in answers.items() if who != "mw"}
+            if any(seen != want for seen in others.values()):
+                print("NOTE spelling %r: this client %s; %s%s" % (
+                    url, want, ", ".join("%s %s" % kv for kv in sorted(others.items())),
+                    " -- " + why if why else " -- no reason recorded"))
+            elif why:
+                print("NOTE spelling %r: every reference now agrees (%s)" % (url, why))
+        total = len(rows) + len(loopback) + len(elsewhere) + len(spelled)
+        print("PASS %d of %d" % (total - failures, total))
         return 1 if failures else 0
 
     checks = Checks()
@@ -46342,12 +46680,12 @@ def harness_wget_hostile(argv):
                     checks(have == one["saved"], "%s: saved %r, wanted %r" % (
                         label, have, one["saved"]))
         #   The address policy, by the default shell and by a tight-tier build.
-        probe = subprocess.run(["unshare", "-Urn", "sh", "-c",
+        probe = subprocess.run(["unshare", "-Urnm", "sh", "-c",
                                 "ip link set lo up && ip addr add 8.8.8.8/32 dev lo"],
                                capture_output=True) if shutil.which("unshare") and shutil.which("ip") \
             else None
         if probe is None or probe.returncode:
-            print("wget hostile: address policy rows skipped (no unshare -Urn with ip)")
+            print("wget hostile: address policy rows skipped (no unshare -Urnm with ip)")
         else:
             tight = Path(args.tight_shell) if args.tight_shell else work / "tight"
             if not args.tight_shell:
@@ -46360,7 +46698,7 @@ def harness_wget_hostile(argv):
                 if not path.exists():
                     continue
                 inside = subprocess.run(
-                    ["unshare", "-Urn", "sh", "-c",
+                    ["unshare", "-Urnm", "sh", "-c",
                      'ip link set lo up && ip addr add 8.8.8.8/32 dev lo && '
                      'ip addr add 8.8.4.4/32 dev lo && exec "$0" "$@"',
                      sys.executable, str(Path(__file__).resolve()), "--harness",
@@ -46370,9 +46708,13 @@ def harness_wget_hostile(argv):
                 for line in inside.stdout.splitlines():
                     if line.startswith("FAIL"):
                         checks(False, line)
-                passed = [int(line.split()[1]) for line in inside.stdout.splitlines()
+                for line in inside.stdout.splitlines():
+                    if line.startswith("NOTE"):
+                        print("  " + line)
+                passed = [line.split()[1:4:2] for line in inside.stdout.splitlines()
                           if line.startswith("PASS")]
-                checks(inside.returncode == 0 and passed == [4],
+                checks(inside.returncode == 0 and len(passed) == 1 and
+                       passed[0][0] == passed[0][1] and int(passed[0][1]) >= 25,
                        "address policy, %s shell: exit %d, %s" % (
                            level, inside.returncode, inside.stderr[-300:] or inside.stdout[-300:]))
     return checks.verdict("wget hostile", "wget-hostile")
@@ -46394,6 +46736,13 @@ def harness_http_urls(argv):
     takes. Paths and references carry dot segments too: the client resolves
     them before it asks, as GNU wget does (http_path_simplify, %2e spellings
     included), and the oracle by RFC 3986 5.2.4 over urllib's answer.
+
+    The same questions go to the lift built at MOONWATER_STRICT 2 as well,
+    which must answer every one as the default does but a URL that opens
+    with a scheme token not followed by "//" ("ftp:21", "h:81", "a+b:1"):
+    the default reads that as a schemeless host:port, the tight tier
+    refuses it, and both refuse "http:" and "https:" without "//". Both
+    halves have to be seen.
 
         python3 test/differential.py --harness http_urls
     """
@@ -46481,6 +46830,7 @@ int main(void)
 }
 """
     source = http_fuzz_source(net, util, driver)
+    tight_source = http_fuzz_source(net, util, driver, tight=True)
     random_urls = random.Random(20260928)
     schemes = ["http://", "https://", "HTTP://", "hTtPs://", "", "ftp://", "http:",
                "web+x://", "https:/"]
@@ -46504,6 +46854,15 @@ int main(void)
     for _ in range(4000):
         urls.add(pick(schemes) + pick(users) + pick(hosts) + pick(ports) +
                  pick(paths) + pick(queries) + pick(fragments))
+    #       Scheme tokens with no "//": web schemes in any case, others of
+    #       every character RFC 3986 lets a scheme hold, before a port, a
+    #       path, a slash or nothing.
+    for _ in range(600):
+        token = pick(["http", "HTTPS", "hTTp", "ftp", "h", "a+b", "x-y.z", "web+x",
+                      "localhost", "abc1"])
+        urls.add(token + ":" + pick(["21", "81", "65535", "0", "", "/", "/p", "8080/a?b",
+                                     "x", "//"[:random_urls.randrange(2)]]) +
+                 pick(["", "", "/q", "#f"]))
     urls = sorted(urls)
     bases = ["http://example.com/dir/old", "https://example.com:8443/a/b?q=1",
              "http://h:80/", "https://h/x?y#z", "http://127.0.0.1:8080/d/e/f"]
@@ -46585,8 +46944,13 @@ int main(void)
         flags = [compiler, "-O1", "-g", "-std=gnu11", "-w"]
         if platform.system() == "Linux":
             flags.append("-fsanitize=address,undefined")
+        (work / "http_urls_tight.c").write_text(tight_source)
         built = subprocess.run(flags + [str(unit), "-o", str(work / "http_urls")],
                                capture_output=True, text=True)
+        if not built.returncode:
+            built = subprocess.run(flags + [str(work / "http_urls_tight.c"), "-o",
+                                            str(work / "http_urls_tight")],
+                                   capture_output=True, text=True)
         if built.returncode:
             print("  FAIL the URL lift did not build:\n" + built.stderr[-3000:])
             write_tally("http-urls", 0, 1)
@@ -46594,12 +46958,14 @@ int main(void)
         questions = ["S %s" % encode(url) for url in urls]
         pairs = [(base, reference) for base in bases for reference in references]
         questions += ["A %s %s" % (encode(base), encode(reference)) for base, reference in pairs]
-        ran = subprocess.run([str(work / "http_urls")], input="\n".join(questions) + "\n",
-                             capture_output=True, text=True, timeout=120,
-                             env=dict(os.environ, ASAN_OPTIONS="detect_leaks=0"))
-        answers = ran.stdout.splitlines()
-        if ran.returncode or len(answers) != len(questions):
-            print("  FAIL the URL lift stopped:\n" + ran.stderr[-3000:])
+        runs = [subprocess.run([str(work / name)], input="\n".join(questions) + "\n",
+                               capture_output=True, text=True, timeout=120,
+                               env=dict(os.environ, ASAN_OPTIONS="detect_leaks=0"))
+                for name in ("http_urls", "http_urls_tight")]
+        answers, tight_answers = (ran.stdout.splitlines() for ran in runs)
+        if any(ran.returncode for ran in runs) or len(answers) != len(questions) or \
+                len(tight_answers) != len(questions):
+            print("  FAIL the URL lift stopped:\n" + (runs[0].stderr + runs[1].stderr)[-3000:])
             write_tally("http-urls", 0, 1)
             return 1
 
@@ -46643,6 +47009,27 @@ int main(void)
                        % (base, reference, got, joined))
         for key, why in DELIBERATE.items():
             checks(seen[key] > 0, "DELIBERATE %s never generated (%s)" % (key, why))
+        #   The tight tier: the default's answer, but no scheme token
+        #   without "//" in front of the authority.
+        tiers = collections.Counter()
+        for url, default, tight in zip(urls, answers, tight_answers):
+            scheme = scheme_shape.match(url)
+            token = scheme is not None and not url[scheme.end():].startswith("//")
+            if token:
+                web = scheme.group(1).lower() in ("http", "https")
+                checks(tight == "BAD", "%r: the tight tier took a scheme token: %s" % (url, tight))
+                checks(not web or default == "BAD",
+                       "%r: http(s): without // was taken: %s" % (url, default))
+                tiers["default took, tight refused" if default != "BAD" else
+                      "both refused"] += 1
+            else:
+                checks(tight == default, "%r: the tiers differ: default %s, tight %s" % (
+                    url, default, tight))
+        for (base, reference), default, tight in zip(pairs, answers[len(urls):],
+                                                     tight_answers[len(urls):]):
+            checks(tight == default, "%r + %r: the tiers resolve differently" % (base, reference))
+        checks(tiers["default took, tight refused"] > 0 and tiers["both refused"] > 0,
+               "both halves of the scheme-token rule seen: %r" % dict(tiers))
 
     return checks.verdict("http urls", "http-urls")
 
