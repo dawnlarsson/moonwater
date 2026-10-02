@@ -65257,6 +65257,32 @@ static fn leasing(void)
               packet[249] == DHCP_OPTION_SERVER && packet[250] == 4 &&
               network_load_32(packet + 251) == 0x0a000202);
 
+        //      A DECLINE (RFC 2131 table 5) names the address and the server
+        //      the same way, has no ciaddr and asks for no broadcast reply,
+        //      since none comes, and carries no parameter list: END follows
+        //      the server at once and the rest is padding.
+        memory_fill(packet, 0xa5, sizeof packet);
+        length = dhcp_build(packet, sizeof packet, DHCP_DECLINE, 0x01020304,
+                            hardware, 0x0a00020f, 0x0a000202, 0, false);
+        {
+                bool padded = true;
+
+                for (positive at = 256; at < 300; at++)
+                        padded &= packet[at] == 0;
+                check("a decline names the address, the server and nothing else",
+                      length == 300 && packet[0] == 1 &&
+                          network_load_32(packet + 4) == 0x01020304 &&
+                          !network_load_16(packet + 10) &&
+                          !network_load_32(packet + 12) &&
+                          !memory_compare(packet + 28, hardware, 6) &&
+                          packet[242] == DHCP_DECLINE &&
+                          packet[243] == DHCP_OPTION_REQUESTED &&
+                          network_load_32(packet + 245) == 0x0a00020f &&
+                          packet[249] == DHCP_OPTION_SERVER &&
+                          network_load_32(packet + 251) == 0x0a000202 &&
+                          packet[255] == DHCP_OPTION_END && padded);
+        }
+
         /*
                 An offer, in the shape qemu's own server sends one: the
                 address in yiaddr and the mask, router, server and lease in
@@ -81282,7 +81308,7 @@ static fn storage_test_dhcp_apart(void)
         if (before >= 0)
                 system_close(before);
         bipolar status = net_dhcp_apart("moonwater-no-interface", hardware,
-                                        address_of lease, true, false, 1);
+                                        address_of lease, NET_DHCP_RENEW, 1);
         bipolar after = system_open_at(AT_FDCWD, "/", FILE_READ | O_CLOEXEC);
 
         if (after >= 0)
@@ -81291,6 +81317,57 @@ static fn storage_test_dhcp_apart(void)
               status == DHCP_NO_OFFER && before >= 0 && after == before &&
                   system_call_4(syscall(wait4), (positive)-1, 0, 1, 0) ==
                       -ECHILD);
+
+        //      A DECLINE goes through the same child: nothing to send from
+        //      on a link that is not there, and nothing to name without a
+        //      server, and neither leaves a child or a descriptor.
+        lease.address = 0x0a090909;
+        lease.server = 0x0a090901;
+        status = net_dhcp_apart("moonwater-no-interface", hardware,
+                                address_of lease, NET_DHCP_DECLINE, 0);
+        lease.server = 0;
+        bipolar unnamed = net_dhcp_apart("lo", hardware, address_of lease,
+                                         NET_DHCP_DECLINE, 0);
+        after = system_open_at(AT_FDCWD, "/", FILE_READ | O_CLOEXEC);
+        if (after >= 0)
+                system_close(after);
+        check("a DECLINE apart without a link or a server sends nothing and leaves nothing",
+              status == DHCP_NO_SOCKET && unnamed == DHCP_NO_SOCKET &&
+                  after == before &&
+                  system_call_4(syscall(wait4), (positive)-1, 0, 1, 0) ==
+                      -ECHILD);
+}
+
+/* The wait after a DECLINE is the declined link's, at least ten seconds, and
+   the slots it is kept in never lose a link that is still waiting to one
+   that is not. */
+static fn storage_test_decline_hold(void)
+{
+        memory_zero(net_declined, sizeof net_declined);
+        check("no link waits before anything was declined",
+              !net_decline_waiting(3) && !net_decline_left(0));
+        net_decline_hold(3);
+        positive left = net_decline_left(3);
+        check("a declined link waits ten seconds before it asks again",
+              net_decline_waiting(3) && left > 9900 &&
+                  left <= NET_DECLINE_HOLDOFF_SECONDS * 1000 + 1);
+        check("and only that link waits", !net_decline_waiting(4) &&
+                                              !net_decline_waiting(0));
+        net_decline_hold(3);
+        positive held = 0;
+        for (positive at = 0; at < NET_DECLINE_LINKS; at++)
+                held += net_declined[at].index == 3;
+        check("declining the same link again keeps one wait for it", held == 1);
+        for (p32 index = 10; index < 10 + NET_DECLINE_LINKS + 2; index++)
+                net_decline_hold(index);
+        check("more declined links than slots keep the latest ones waiting",
+              net_decline_waiting(10 + NET_DECLINE_LINKS + 1) &&
+                  net_decline_waiting(10 + NET_DECLINE_LINKS));
+        net_declined[0].until.began -= 11 * NETWORK_NANOSECONDS;
+        p32 expired = net_declined[0].index;
+        check("a wait that has run out is over and frees its slot",
+              !net_decline_waiting(expired) && !net_declined[0].index);
+        memory_zero(net_declined, sizeof net_declined);
 }
 
 /* A user, network and mount namespace of the caller's own, which must be
@@ -82395,6 +82472,7 @@ b32 main(void)
         storage_test_link_state();
         storage_test_lease_clock_origin();
         storage_test_dhcp_apart();
+        storage_test_decline_hold();
         storage_test_arp_claims();
         storage_test_lease_over_existing();
         storage_test_lease_inherited();

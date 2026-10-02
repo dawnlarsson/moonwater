@@ -1703,13 +1703,21 @@ static COLD bipolar net_exchange_wait(bipolar answer,
         }
 }
 
+/* What the child is asked to do: discover, renew with the server that gave
+   the lease, rebind with any, or decline the lease it names. */
+#define NET_DHCP_DISCOVER 0
+#define NET_DHCP_RENEW 1
+#define NET_DHCP_REBIND 2
+#define NET_DHCP_DECLINE 3
+
 static COLD bipolar net_dhcp_apart(string_address device, p8 address_to hardware,
-                                   dhcp_lease address_to lease, bool renew,
-                                   bool rebinding, positive wait)
+                                   dhcp_lease address_to lease, p8 exchange,
+                                   positive wait)
 {
         b32 ends[2];
         net_dhcp_answer answer = {DHCP_NO_SOCKET, *lease};
         network_deadline deadline;
+        bool renew = exchange == NET_DHCP_RENEW || exchange == NET_DHCP_REBIND;
         bool heard;
 
         if (system_call_2(syscall(pipe2), (positive)ends, O_CLOEXEC) < 0)
@@ -1720,11 +1728,13 @@ static COLD bipolar net_dhcp_apart(string_address device, p8 address_to hardware
         if (child == 0)
         {
                 dhcp_apart = ends[1];
-                answer.status = renew ? dhcp_reacquire(device, hardware,
-                                                       address_of answer.lease,
-                                                       rebinding, wait)
-                                      : dhcp_ask(device, hardware,
-                                                 address_of answer.lease);
+                answer.status =
+                    renew ? dhcp_reacquire(device, hardware,
+                                           address_of answer.lease,
+                                           exchange == NET_DHCP_REBIND, wait)
+                    : exchange == NET_DHCP_DECLINE
+                        ? dhcp_decline(device, hardware, address_of answer.lease)
+                        : dhcp_ask(device, hardware, address_of answer.lease);
                 system_write_all((positive)dhcp_apart, address_of answer,
                                  sizeof answer);
                 system_call_1(syscall(exit_group), 0);
@@ -1733,15 +1743,17 @@ static COLD bipolar net_dhcp_apart(string_address device, p8 address_to hardware
         system_close(ends[1]);
         //      dhcp_ask's twenty attempts can each wait out a DISCOVER
         //      and a REQUEST, 150 s in all, after a CSPRNG that may take
-        //      a second; a renewal is its own wait.
-        bool watching = !renew && net_wake_watch >= 0;
+        //      a second; a renewal is its own wait, and a DECLINE is one
+        //      send after the same CSPRNG.
+        bool watching = exchange == NET_DHCP_DISCOVER && net_wake_watch >= 0;
         bipolar waited = -1;
 
         heard = child > 0 &&
                 network_deadline_begin(address_of deadline,
                                        renew ? wait + 5
-                                             : watching ? NET_DHCP_WATCH_SECONDS
-                                                        : 180, 0) &&
+                                       : exchange == NET_DHCP_DECLINE ? 5
+                                       : watching ? NET_DHCP_WATCH_SECONDS
+                                                  : 180, 0) &&
                 (watching
                      ? (waited = net_exchange_wait(ends[0], address_of deadline))
                      : network_wait_readable_until(ends[0], address_of deadline)) > 0 &&
@@ -1761,6 +1773,8 @@ static COLD bipolar net_dhcp_apart(string_address device, p8 address_to hardware
                 return watching && waited == 0 ? NET_DHCP_TIMED_OUT
                                                : DHCP_NO_SOCKET;
         }
+        if (exchange == NET_DHCP_DECLINE)
+                return answer.status == DHCP_OK ? DHCP_OK : DHCP_NO_SOCKET;
         if (answer.status != DHCP_OK)
                 return answer.status == DHCP_NO_OFFER ||
                                answer.status == DHCP_REFUSED ||
@@ -1776,6 +1790,88 @@ static COLD bipolar net_dhcp_apart(string_address device, p8 address_to hardware
 }
 
 static COLD fn radio_links_unleased(netlink_search address_to search);
+
+/*
+        A link that declined an address waits before it asks again.
+
+        RFC 2131 4.4.1: after a DHCPDECLINE the client waits at least ten
+        seconds before it starts over, so that a server with nothing else to
+        offer, or a station that answers for every address, does not turn
+        the link into a DISCOVER, REQUEST and probe as fast as the watcher
+        can loop. The wait is the declined link's: the watcher still asks on
+        any other link, and link news and the wake pipe do not end it. A
+        handful of links is kept; one more takes the slot whose wait is
+        nearest its end.
+*/
+#define NET_DECLINE_HOLDOFF_SECONDS 10
+#define NET_DECLINE_LINKS 4
+
+static struct
+{
+        p32 index;
+        network_deadline until;
+} net_declined[NET_DECLINE_LINKS];
+
+/* The milliseconds left of a link's wait (of the wait nearest its end when
+   index is zero), and 0 when there is none. */
+static COLD positive net_decline_left(p32 index)
+{
+        positive least = 0;
+
+        for (positive at = 0; at < NET_DECLINE_LINKS; at++)
+        {
+                positive seconds;
+                positive nanoseconds;
+                positive left;
+
+                if (!net_declined[at].index ||
+                    (index && net_declined[at].index != index))
+                        continue;
+                if (!network_deadline_left(address_of net_declined[at].until,
+                                           address_of seconds,
+                                           address_of nanoseconds))
+                {
+                        net_declined[at].index = 0;
+                        continue;
+                }
+                left = seconds * 1000 + nanoseconds / 1000000 + 1;
+                if (!least || left < least)
+                        least = left;
+        }
+        return least;
+}
+
+static COLD bool net_decline_waiting(p32 index)
+{
+        return index && net_decline_left(index) != 0;
+}
+
+static COLD fn net_decline_hold(p32 index)
+{
+        positive slot = NET_DECLINE_LINKS;
+
+        for (positive at = 0; at < NET_DECLINE_LINKS; at++)
+                if (net_declined[at].index == index)
+                        slot = at;
+        for (positive at = 0; slot == NET_DECLINE_LINKS && at < NET_DECLINE_LINKS;
+             at++)
+                if (!net_declined[at].index)
+                        slot = at;
+        //      Every slot taken: the wait that began first ends first.
+        if (slot == NET_DECLINE_LINKS)
+        {
+                slot = 0;
+                for (positive at = 1; at < NET_DECLINE_LINKS; at++)
+                        if (net_declined[at].until.began <
+                            net_declined[slot].until.began)
+                                slot = at;
+        }
+        net_declined[slot].index =
+            network_deadline_begin(address_of net_declined[slot].until,
+                                   NET_DECLINE_HOLDOFF_SECONDS, 0)
+                ? index
+                : 0;
+}
 
 /* RFC 5227-style probes before installing a newly leased address.  DHCP is
    not proof that the address is unused: a stale lease, a broken server, or a
@@ -1941,6 +2037,14 @@ static COLD b32 net_auto(b32 handle, net_holding address_to held)
                 if (held && held->index == search.index && !held->lost)
                         return 0;
 
+                if (held && net_decline_waiting(search.index))
+                {
+                        if (search.skip_count >= 8)
+                                return 1;
+                        search.skip[search.skip_count++] = search.index;
+                        continue;
+                }
+
                 if (!search.has_hardware)
                 {
                         string_format(net_out, "ip: %w has no hardware address\n",
@@ -1964,7 +2068,7 @@ static COLD b32 net_auto(b32 handle, net_holding address_to held)
                 net_flush();
 
                 status = net_dhcp_apart(search.name, search.hardware,
-                                        address_of lease, false, false, 0);
+                                        address_of lease, NET_DHCP_DISCOVER, 0);
 
                 if (status == NET_DHCP_INTERRUPTED)
                         return 1;
@@ -2004,12 +2108,24 @@ static COLD b32 net_auto(b32 handle, net_holding address_to held)
                 (void)net_exchange_was_cut();
                 return 1;
         }
+        if (status > 0)
+        {
+                bipolar declined = net_dhcp_apart(search.name, search.hardware,
+                                                  address_of lease,
+                                                  NET_DHCP_DECLINE, 0);
+
+                if (held)
+                        net_decline_hold(search.index);
+                string_format(net_out,
+                              declined == DHCP_OK
+                                  ? "ip: the offered address is already in use; declined\n"
+                                  : "ip: the offered address is already in use\n");
+                net_flush();
+                return 1;
+        }
         if (status)
         {
-                string_format(net_out,
-                              status > 0
-                                  ? "ip: the offered address is already in use\n"
-                                  : "ip: could not check the offered address\n");
+                string_format(net_out, "ip: could not check the offered address\n");
                 net_flush();
                 return 1;
         }
@@ -2516,11 +2632,16 @@ static COLD b32 net_watch(void)
                         system_poll_descriptor waited[2];
                         positive count = 1;
 
+                        positive declined = 0;
+
                         if (held.index && held.lease.seconds)
                                 due = net_lease_due_in(address_of held,
                                                        net_seconds());
                         else
+                        {
                                 due = retry_seconds;
+                                declined = net_decline_left(0);
+                        }
 
                         waited[0].descriptor = (b32)events;
                         waited[0].events = SYSTEM_POLL_READ;
@@ -2535,6 +2656,13 @@ static COLD b32 net_watch(void)
 
                         limit.tv_sec = (b64)(due ? due : retry_seconds);
                         limit.tv_nsec = 0;
+                        //      A declined link is asked when its wait ends,
+                        //      not a backoff step later.
+                        if (declined && declined < (positive)limit.tv_sec * 1000)
+                        {
+                                limit.tv_sec = (b64)(declined / 1000);
+                                limit.tv_nsec = (b64)(declined % 1000 * 1000000);
+                        }
                         ready = system_poll_wait(waited, count, address_of limit,
                                                  null);
                         if (ready < 0)
@@ -2573,6 +2701,8 @@ static COLD b32 net_watch(void)
                                 if (!held.index || !held.lease.seconds)
                                 {
                                         net_reconfigure_fresh(address_of held);
+                                        if (declined)
+                                                continue;
                                         if (!held.index || !held.lease.seconds)
                                         {
                                                 retry_seconds *= 2;
@@ -2604,7 +2734,8 @@ static COLD b32 net_watch(void)
                                 dhcp_lease renewed = held.lease;
                                 bipolar renewal = net_dhcp_apart(
                                     held.name, held.hardware,
-                                    address_of renewed, true, rebinding,
+                                    address_of renewed,
+                                    rebinding ? NET_DHCP_REBIND : NET_DHCP_RENEW,
                                     attempt);
 
                                 if (renewal == DHCP_OK)

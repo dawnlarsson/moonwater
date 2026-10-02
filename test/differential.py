@@ -57251,6 +57251,11 @@ def harness_waterlink_noise(argv):
 NET_NETEM_DHCP_SERVER = r"""import socket, struct, sys, time, threading
 mode = sys.argv[1]
 OFFER_IP = "10.88.0.50"; BAD_IP = "10.88.0.66"; SERVER = "10.88.0.2"
+#   The pool: an address a client DECLINEs (RFC 2131 4.4.1) is marked in use
+#   and the next one offered, as a server does.
+POOL = ["10.88.0.50", "10.88.0.51", "10.88.0.52"]; declined = set()
+def current():
+    return next((a for a in POOL if a not in declined), BAD_IP)
 def parse(data):
     xid = data[4:8]; chaddr = data[28:34]
     opts = {}
@@ -57284,13 +57289,22 @@ while True:
     if len(data) < 241 or data[0] != 1: continue
     xid, chaddr, opts = parse(data)
     t = opts.get(53, b"\0")[0]
+    if t == 4:
+        asked = opts.get(50, b""); named = opts.get(54, b"")
+        log.write("%.3f rx type 4 xid %s req %s sid %s ciaddr %s flags %d ask %s\n" % (
+            time.time(), xid.hex(), socket.inet_ntoa(asked) if len(asked) == 4 else "-",
+            socket.inet_ntoa(named) if len(named) == 4 else "-", socket.inet_ntoa(data[12:16]),
+            struct.unpack("!H", data[10:12])[0], "yes" if 55 in opts else "-"))
+        if len(asked) == 4 and named == socket.inet_aton(SERVER):
+            declined.add(socket.inet_ntoa(asked))
+        continue
     log.write("%.3f rx type %d xid %s\n" % (time.time(), t, xid.hex()))
     if t == 1:
         seen_discover += 1
         if mode == "drop3" and seen_discover <= 3: continue
         msgs = []
         if mode == "stale":  msgs.append(reply(bytes(a ^ 0xff for a in xid), chaddr, 2, BAD_IP))
-        msgs.append(reply(xid, chaddr, 2, OFFER_IP))
+        msgs.append(reply(xid, chaddr, 2, current()))
         d = 1.5 if mode == "late" else 0.0
         for m in msgs:
             for _ in range(3 if mode == "dup" else 1): send(m, d)
@@ -57299,7 +57313,7 @@ while True:
             naked = True; send(reply(xid, chaddr, 6, "0.0.0.0")); continue
         msgs = []
         if mode == "stale": msgs.append(reply(bytes(a ^ 0xff for a in xid), chaddr, 5, BAD_IP))
-        msgs.append(reply(xid, chaddr, 5, OFFER_IP))
+        msgs.append(reply(xid, chaddr, 5, current()))
         for m in msgs:
             for _ in range(3 if mode == "dup" else 1): send(m, 1.5 if mode == "late" else 0)
         if mode == "dup":
@@ -57403,9 +57417,62 @@ try:
                            " rp_filter " + os.environ["NETEM_RP_FILTER"]
                            if os.environ.get("NETEM_RP_FILTER", "0") != "0" else "")
     if kind == "dhcp":
+        want = "10.88.0.51" if mode.startswith("conflict") else "10.88.0.50"
+        if mode.startswith("conflict"):
+            #   A station already on the offered address: the far namespace's
+            #   kernel answers the client's ARP probes for it.
+            there("ip", "addr", "add", "10.88.0.50/24", "dev", "cb")
         server("dhcpsrv.py", mode, top + "/dhcp.log")
         began = time.time()
-        client = run(top + "/ip", "auto", env=env, timeout=150)
+
+        def dhcp_log():
+            return open(top + "/dhcp.log").read() if os.path.exists(top + "/dhcp.log") else ""
+
+        def decline_checks():
+            lines = dhcp_log().splitlines()
+            declines = [line for line in lines if " rx type 4 " in line]
+            say(len(declines) == 1, "%s: one DHCPDECLINE reached the server (%d)" % (label, len(declines)))
+            if not declines:
+                return None
+            say(declines[0].split(" xid ")[1].split()[1:] ==
+                ["req", "10.88.0.50", "sid", "10.88.0.2", "ciaddr", "0.0.0.0", "flags", "0", "ask", "-"],
+                "%s: the DECLINE names the address and the server, no ciaddr, no parameter list (%s)" % (
+                    label, declines[0]))
+            requests = [line.split(" xid ")[1].split()[0] for line in lines[:lines.index(declines[0])]
+                        if " rx type 3 " in line]
+            say(requests and declines[0].split(" xid ")[1].split()[0] not in requests,
+                "%s: the DECLINE has a transaction id of its own" % label)
+            return float(declines[0].split()[0])
+
+        if mode == "conflict":
+            first = run(top + "/ip", "auto", env=env, timeout=150)
+            said_first = first.stdout + first.stderr
+            say(first.returncode != 0 and address() is None and "already in use; declined" in said_first,
+                "%s: an address another station answers for is declined, not installed (%d, %s, %s)" % (
+                    label, first.returncode, address(), said_first.strip().replace("\n", " | ")[-160:]))
+            decline_checks()
+            client = run(top + "/ip", "auto", env=env, timeout=150)
+        elif mode == "conflict-watch":
+            sink = open(top + "/watch.out", "w")
+            watcher = subprocess.Popen([top + "/ip", "watch"], env=env, stdin=subprocess.DEVNULL,
+                                       stdout=sink, stderr=sink)
+            procs.append(watcher)
+            while time.time() - began < 60 and address() != want:
+                time.sleep(0.2)
+            declined_at = decline_checks()
+            after = [float(line.split()[0]) for line in dhcp_log().splitlines()
+                     if " rx type 1 " in line and declined_at is not None and
+                     float(line.split()[0]) > declined_at]
+            say(bool(after) and after[0] - declined_at >= 10.0,
+                "%s: the watcher waits ten seconds after a DECLINE before it asks again (%s)" % (
+                    label, "%.2f s" % (after[0] - declined_at) if after else "no DISCOVER after it"))
+            watcher.kill()
+            watcher.wait()
+            sink.close()
+            client = subprocess.CompletedProcess([], 0 if address() == want else 1,
+                                                 open(top + "/watch.out").read(), "")
+        else:
+            client = run(top + "/ip", "auto", env=env, timeout=150)
         if mode == "nak":
             #   The one-shot ip auto reports a refused REQUEST and leaves
             #   nothing configured; the watcher asks again, which is a second
@@ -57419,7 +57486,7 @@ try:
         default = [line.split() for line in route if line.split()[1] == "00000000"]
         say(client.returncode == 0, "%s: ip auto took a lease (status %d, %.1f s: %s)" % (
             label, client.returncode, took, (client.stdout + client.stderr).strip().replace("\n", " | ")[-160:]))
-        say(address() == "10.88.0.50", "%s: the address is the real server's, not a forged one (%s)" % (label, address()))
+        say(address() == want, "%s: the address is the real server's, not a forged one (%s)" % (label, address()))
         say(bool(default) and default[0][2] == "0200580A", "%s: the default route is via the server" % label)
         say("nameserver 10.88.0.2" in open("/etc/resolv.conf").read() if os.path.exists("/etc/resolv.conf") else False,
             "%s: the resolver is the server's" % label)
@@ -57468,7 +57535,13 @@ def harness_net_netem(argv):
     times over, with a forged reply (wrong transaction id, another address)
     before each real one, 1.5 s late, not at all for the first three
     DISCOVERs, or with a NAK for the first REQUEST, it has to end with the
-    real server's address, route and resolver and never a forged one.
+    real server's address, route and resolver and never a forged one. On a
+    clean wire, a station that already answers ARP for the offered address:
+    `ip auto` declines it (one DHCPDECLINE naming the address and the server,
+    no ciaddr, no parameter list, a transaction id of its own) and the next
+    `ip auto` takes the address the server offers instead, and `ip watch`
+    does the same by itself, waiting at least ten seconds before it asks
+    again.
     `moonwater time sync` is the SNTP client, with `/root/ntp.server` naming
     the far end: it has to take a clean, tripled, late or once-dropped answer,
     take the right one of a forged reply (wrong origin, three hours off) and
@@ -57517,6 +57590,10 @@ def harness_net_netem(argv):
         (top / "inner.py").write_text(NET_NETEM_INNER)
         scenes = [("dhcp", mode, netem, "0") for netem in ("", "netem")
                   for mode in ("clean", "dup", "stale", "late", "drop3", "nak")]
+        #   The ARP probe is three frames; netem's 25% loss on each leg would
+        #   miss the defender one run in twelve, so the conflict scenes are
+        #   asked on a clean wire.
+        scenes += [("dhcp", mode, "", "0") for mode in ("conflict", "conflict-watch")]
         scenes += [("sntp", mode, netem, "0") for netem in ("", "netem")
                    for mode in ("clean", "dup", "spoof", "late", "drop2", "skewed", "kod")]
         checks = Checks()

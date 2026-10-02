@@ -10831,6 +10831,7 @@ static bipolar http_fetch_to(string_address start, bipolar dest, bool check_cert
 #define DHCP_DISCOVER 1
 #define DHCP_OFFER 2
 #define DHCP_REQUEST 3
+#define DHCP_DECLINE 4
 #define DHCP_ACK 5
 #define DHCP_NAK 6
 
@@ -11005,12 +11006,16 @@ static COLD positive dhcp_build(p8 address_to into, positive room, p8 kind,
         //      What we would like to be told, which a server may ignore, and
         //      the end. Short packets are dropped by some servers and by some
         //      switches, so the 261 bytes at most written here are padded to
-        //      the length everything accepts.
+        //      the length everything accepts. A DECLINE asks for nothing: RFC
+        //      2131's table 5 says it MUST NOT carry a parameter list.
         static const p8 ask[] = {DHCP_OPTION_ASK, 3, DHCP_OPTION_MASK,
                                  DHCP_OPTION_ROUTER, DHCP_OPTION_DNS,
                                  DHCP_OPTION_END};
 
-        memory_copy(into + at, ask, sizeof ask);
+        if (kind == DHCP_DECLINE)
+                into[at] = DHCP_OPTION_END;
+        else
+                memory_copy(into + at, ask, sizeof ask);
         return 300;
 }
 
@@ -11739,6 +11744,51 @@ static bipolar dhcp_reacquire(string_address device, p8 address_to hardware,
 done:
         socket_close((b32)handle);
         return status;
+}
+
+/*
+        Giving back an address somebody else answers for.
+
+        The watcher ARP-probes an acknowledged address before it installs it,
+        and a station that answers means the server handed out an address in
+        use: a stale lease, a machine configured by hand, or a host that says
+        so to keep this one off the network. RFC 2131 4.4.1 has the client
+        broadcast a DHCPDECLINE naming the address (option 50) and the server
+        that gave it (option 54), under a transaction id of its own, and wait
+        ten seconds before it asks again; the server marks the address in use
+        and offers another. Without it the server offered the same address on
+        every DISCOVER until its lease ran out, and the link had none.
+
+        Nothing answers a DECLINE, so this is one send, from the same confined
+        child as the other exchanges: its filter already allows sendto.
+*/
+static bipolar dhcp_decline(string_address device, p8 address_to hardware,
+                            const dhcp_lease address_to lease)
+{
+        p8 packet[300];
+        p32 transaction;
+        bipolar handle;
+        bipolar sent;
+        positive length;
+
+        if (!lease->address || !lease->server)
+                return DHCP_NO_OFFER;
+        if (!dhcp_transaction_early(address_of transaction))
+                return DHCP_NO_RANDOM;
+        handle = dhcp_open(device, HOST_ANY, true);
+        if (handle < 0)
+                return DHCP_NO_SOCKET;
+
+        socket_address_internet where = {
+            .family = AF_INET, .port = network_order_16(DHCP_SERVER_PORT),
+            .host = network_order_32(HOST_BROADCAST)};
+
+        length = dhcp_build(packet, sizeof packet, DHCP_DECLINE, transaction,
+                            hardware, lease->address, lease->server, 0, false);
+        sent = socket_send((b32)handle, packet, length, 0, address_of where,
+                           sizeof where);
+        socket_close((b32)handle);
+        return sent == (bipolar)length ? DHCP_OK : DHCP_NO_SOCKET;
 }
 
 #endif // STANDARD_MODERN_C_NET_DHCP
