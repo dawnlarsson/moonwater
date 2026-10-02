@@ -13193,6 +13193,75 @@ asked("a command longer than a bound event holds is refused",
 asked("a moonwater_mute function owns mute",
       "printf '%s\\n' 'function moonwater_mute {' '  :' '}' > /root/main.moonwater.sh; chmod 600 /root/main.moonwater.sh; moonwater bind mute | grep -c 'mute: /root/main.moonwater.sh:1' | sed 's/^/nf-/' | rev",
       b"1-fn")
+#       The file the machine script is read from is held to a policy, and a
+#       file that fails it is said to have been refused, by name, wherever the
+#       script's lines are shown: the kernel keeps what it had, and that is
+#       what `moonwater bind` is describing.
+def refused(name, make, marker, want):
+    asked(name,
+          "rm -f /root/main.moonwater.sh; " + make +
+          "; timeout 10 moonwater bind mute 2>&1 | grep -c 'refused' | sed 's/^/" + marker + "-/' | rev",
+          want)
+
+script_text = "printf '%s\\n' 'function moonwater_mute {' '  :' '}' > /root/main.moonwater.sh"
+refused("a script that others may write is refused, and the status says so",
+        script_text + "; chmod 666 /root/main.moonwater.sh", "wo", b"1-ow")
+refused("a script only the group may write is refused too",
+        script_text + "; chmod 664 /root/main.moonwater.sh", "pg", b"1-gp")
+refused("a link in its place is refused",
+        "echo ':' > /tmp/linked; chmod 600 /tmp/linked; ln -s /tmp/linked /root/main.moonwater.sh", "ln", b"1-nl")
+refused("a fifo in its place is refused and does not hang the command",
+        "mkfifo -m 600 /root/main.moonwater.sh", "fi", b"1-if")
+refused("a script over 64 KiB is refused",
+        "head -c 65537 /dev/zero | tr '\\0' '#' > /root/main.moonwater.sh; chmod 600 /root/main.moonwater.sh", "bg", b"1-gb")
+refused("a script of exactly 64 KiB is taken",
+        "head -c 65536 /dev/zero | tr '\\0' '#' > /root/main.moonwater.sh; chmod 600 /root/main.moonwater.sh", "ok", b"0-ko")
+refused("and an empty one",
+        ": > /root/main.moonwater.sh; chmod 600 /root/main.moonwater.sh", "em", b"0-me")
+#       A second machine process is refused, and says why; and nobody but
+#       root is one.
+asked("a second machine process is refused with 2",
+      "timeout 20 moonwater machine >/dev/null 2>&1; printf 'second-%s\\n' $? | rev",
+      b"2-dnoces")
+asked("and so is one that is not root, with 1",
+      "setpriv --reuid=65534 --regid=65534 --clear-groups moonwater machine >/dev/null 2>&1; printf 'plain-%s\\n' $? | rev",
+      b"1-nialp")
+#       Stopping the machine as somebody who may not takes no time at all: the
+#       exit list is root's, and asking a machine process to end is too.
+asked("poweroff by an ordinary user fails at once",
+      "s=$(date +%s%N); setpriv --reuid=65534 --regid=65534 --clear-groups /shell -c poweroff >/dev/null 2>&1; e=$(date +%s%N); "
+      "[ $(( (e - s) / 1000000 )) -lt 1500 ] && echo quick-poweroff | rev",
+      b"fforewop-kciuq")
+#       The machine process killed while a job of its script that is not an
+#       exec -- a subshell loop, which keeps a copy of its descriptor -- is
+#       alive: the next one attaches. A counter file says how many times
+#       moonwater_init ran. The loop has the machine process's command line
+#       too, so the one killed is the one init started: the child of 1.
+asked("a machine process killed with a background job alive is replaced by one that attaches",
+      "mp() { for f in /proc/[0-9]*/cmdline; do case $(tr '\\0' ' ' < $f) in '/shell -c moonwater machine'*) p=${f#/proc/}; p=${p%/cmdline}; set -- $(cat /proc/$p/stat); [ \"$4\" = 1 ] && echo $p;; esac; done; }; "
+      "rm -f /root/inits /root/bgpids; "
+      "printf '%s\\n' 'function moonwater_init {' '  n=$(cat /root/inits 2>/dev/null || echo 0)' '  echo $((n + 1)) > /root/inits' "
+      "'  ( while :; do sleep 1; done ) &' '  echo $! >> /root/bgpids' '}' > /root/main.moonwater.sh; chmod 600 /root/main.moonwater.sh; "
+      "kill -9 $(mp); for i in $(seq 60); do [ \"$(cat /root/inits 2>/dev/null)\" = 1 ] && break; sleep 0.5; done; "
+      "kill -9 $(mp); for i in $(seq 60); do [ \"$(cat /root/inits 2>/dev/null)\" = 2 ] && break; sleep 0.5; done; "
+      "printf 'reattach-%s\\n' \"$(cat /root/inits)\" | rev; kill $(cat /root/bgpids) 2>/dev/null",
+      b"2-hcattaer", 90)
+#       A key held down is a flood of presses of a row with no debounce: each
+#       is queued or folded into the one waiting, and the machine goes on.
+if button:
+    asked("a volume key is bound to a command",
+          "rm -f /root/main.moonwater.sh /root/vol; moonwater bind volume_up 'echo VOL >> /root/vol' > /dev/null; printf 'bound-%s\\n' ok | rev",
+          b"ko-dnuob")
+    if ready:
+        for _ in range(100):
+            qcmd({"execute": "send-key", "arguments": {"keys": [{"type": "qcode", "data": "volumeup"}]}})
+        pump(3)
+    asked("a hundred volume key presses ran the command and left the machine answering",
+          "[ \"$(wc -l < /root/vol)\" -ge 1 ] && echo flood-answers | rev",
+          b"srewsna-doolf")
+    asked("and the key's command is put back",
+          "moonwater bind volume_up '' > /dev/null; printf 'unbound-%s\\n' ok | rev",
+          b"ko-dnuobnu")
 asked("the power button takes a command",
       "printf '%s\\n' 'function moonwater_event {' '  :' '}' > /root/main.moonwater.sh; chmod 600 /root/main.moonwater.sh; moonwater bind mute >/dev/null; moonwater bind poweroff 'echo NOTTUB | rev > /dev/" + tty + "' | grep -c NOTTUB | sed 's/^/tes-/' | rev",
       b"1-set")
