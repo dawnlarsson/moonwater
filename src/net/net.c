@@ -11585,6 +11585,7 @@ static bipolar dhcp_ask(string_address device, p8 address_to hardware,
                         dhcp_lease address_to lease)
 {
         p8 packet[1024];
+        p8 spread[8];
         p32 transaction;
         bipolar handle;
         bipolar status;
@@ -11595,6 +11596,11 @@ static bipolar dhcp_ask(string_address device, p8 address_to hardware,
         memory_fill(lease, 0, sizeof(dhcp_lease));
         if (!dhcp_transaction_early(address_of transaction))
                 return DHCP_NO_RANDOM;
+        //      The backoff's spread, drawn now: the confined child may not
+        //      ask for randomness later. The pool answered for the
+        //      transaction, so it is ready; a refusal leaves no spread.
+        if (system_random_fill(spread, sizeof spread, 1))
+                memory_fill(spread, 128, sizeof spread);
         handle = dhcp_open(device, HOST_ANY, true);
 
         if (handle < 0)
@@ -11634,6 +11640,13 @@ static bipolar dhcp_ask(string_address device, p8 address_to hardware,
                         only the second) and took the lease 250 ms late.
                 */
                 wait = !attempt ? 50 : attempt < 12 ? 250 : (attempt - 11) * 2000;
+                //      The backoff, once a server has had three seconds
+                //      to answer, moves by up to a second either way (RFC
+                //      2131 4.1), so that machines that lost their server
+                //      together -- a power cut, a switch restarting -- do
+                //      not keep asking it in step.
+                if (attempt >= 12)
+                        wait = wait - 1000 + spread[attempt - 12] * 2000 / 255;
                 length = dhcp_build(packet, sizeof packet, DHCP_DISCOVER,
                                     transaction, hardware, 0, 0, 0, true);
 

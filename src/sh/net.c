@@ -2704,6 +2704,24 @@ static COLD b32 net_watch(void)
 
                         limit.tv_sec = (b64)(due ? due : retry_seconds);
                         limit.tv_nsec = 0;
+                        //      With no lease, the next pass moves by up to a
+                        //      second either way, as dhcp_ask's backoff does:
+                        //      machines whose server went away together do
+                        //      not come back to it in step.
+                        if (!held.index || !held.lease.seconds)
+                        {
+                                p16 draw = 0;
+
+                                if (!system_random_fill(address_of draw,
+                                                        sizeof draw, 1))
+                                {
+                                        positive ms = retry_seconds * 1000 -
+                                                      1000 + draw % 2001;
+
+                                        limit.tv_sec = (b64)(ms / 1000);
+                                        limit.tv_nsec = (b64)(ms % 1000 * 1000000);
+                                }
+                        }
                         //      A declined link is asked when its wait ends,
                         //      not a backoff step later.
                         if (declined && declined < (positive)limit.tv_sec * 1000)

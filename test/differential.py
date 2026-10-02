@@ -57314,6 +57314,7 @@ while True:
             declined.add(socket.inet_ntoa(asked))
         continue
     log.write("%.3f rx type %d xid %s\n" % (time.time(), t, xid.hex()))
+    if mode == "mute-watch": continue
     if t == 1:
         seen_discover += 1
         if mode == "drop3" and seen_discover <= 3: continue
@@ -57486,9 +57487,31 @@ try:
             sink.close()
             client = subprocess.CompletedProcess([], 0 if address() == want else 1,
                                                  open(top + "/watch.out").read(), "")
+        elif mode == "mute-watch":
+            #   Nobody answers: the backoff after the first three seconds of
+            #   a pass (2 s, then 4 s) moves by up to a second either way
+            #   (RFC 2131 4.1), where it used to be the same to the
+            #   millisecond on every machine that lost the server together.
+            sink = open(top + "/watch.out", "w")
+            watcher = subprocess.Popen([top + "/ip", "watch"], env=env, stdin=subprocess.DEVNULL,
+                                       stdout=sink, stderr=sink)
+            procs.append(watcher)
+            time.sleep(27)
+            watcher.kill()
+            watcher.wait()
+            sink.close()
+            times = [float(line.split()[0]) for line in dhcp_log().splitlines() if " rx type 1 " in line]
+            gaps = [b - a for a, b in zip(times, times[1:]) if 1.5 < b - a < 5.5]
+            say(len(gaps) >= 3 and any(min(abs(g - 2), abs(g - 4)) > 0.05 for g in gaps),
+                "%s: the DISCOVER backoff is spread, not in step (%s)" % (
+                    label, " ".join("%.3f" % g for g in gaps)))
+            say(len(times) >= 12, "%s: the watcher kept asking a silent link (%d DISCOVERs in 27 s)" % (
+                label, len(times)))
         else:
             client = run(top + "/ip", "auto", env=env, timeout=150)
-        if mode == "nak":
+        if mode == "mute-watch":
+            pass
+        elif mode == "nak":
             #   The one-shot ip auto reports a refused REQUEST and leaves
             #   nothing configured; the watcher asks again, which is a second
             #   run here, and the server answers that one.
@@ -57497,6 +57520,8 @@ try:
                     label, client.returncode, address()))
             client = run(top + "/ip", "auto", env=env, timeout=150)
         took = time.time() - began
+        if mode == "mute-watch":
+            raise SystemExit(0)
         route = open("/proc/net/route").read().splitlines()[1:]
         default = [line.split() for line in route if line.split()[1] == "00000000"]
         say(client.returncode == 0, "%s: ip auto took a lease (status %d, %.1f s: %s)" % (
@@ -57608,7 +57633,7 @@ def harness_net_netem(argv):
         #   The ARP probe is three frames; netem's 25% loss on each leg would
         #   miss the defender one run in twelve, so the conflict scenes are
         #   asked on a clean wire.
-        scenes += [("dhcp", mode, "", "0") for mode in ("conflict", "conflict-watch")]
+        scenes += [("dhcp", mode, "", "0") for mode in ("conflict", "conflict-watch", "mute-watch")]
         scenes += [("sntp", mode, netem, "0") for netem in ("", "netem")
                    for mode in ("clean", "dup", "spoof", "late", "drop2", "skewed", "kod")]
         checks = Checks()
