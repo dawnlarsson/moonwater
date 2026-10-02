@@ -1636,6 +1636,15 @@ static bool net_news_may_cut(positive now)
         return now >= net_news_holdoff_until;
 }
 
+//      An exchange the wake pipe or the link news cut: the loop asks again
+//      at once, and the news is left unread for the hold-off.
+static COLD bipolar net_exchange_was_cut(void)
+{
+        net_exchange_cut = true;
+        net_news_holdoff_until = net_seconds() + NET_NEWS_HOLDOFF_SECONDS;
+        return NET_DHCP_INTERRUPTED;
+}
+
 /* 1 when the exchange spoke, 0 when the budget ran out, -2 when the wake
    pipe or the link news did, negative for a broken descriptor. */
 static COLD bipolar net_exchange_wait(bipolar answer,
@@ -1748,12 +1757,7 @@ static COLD bipolar net_dhcp_apart(string_address device, p8 address_to hardware
         if (!heard)
         {
                 if (watching && waited == -2)
-                {
-                        net_exchange_cut = true;
-                        net_news_holdoff_until = net_seconds() +
-                                                 NET_NEWS_HOLDOFF_SECONDS;
-                        return NET_DHCP_INTERRUPTED;
-                }
+                        return net_exchange_was_cut();
                 return watching && waited == 0 ? NET_DHCP_TIMED_OUT
                                                : DHCP_NO_SOCKET;
         }
@@ -1826,9 +1830,11 @@ static COLD bipolar net_packet_open(p32 index, p16 protocol)
         return handle;
 }
 
-/* 0 means quiet, 1 means another station claims the address, and -1 means
-   the probe could not be performed.  Failure is not permission to configure
-   an address whose ownership was never checked. */
+/* 0 means quiet, 1 means another station claims the address, -1 means the
+   probe could not be performed, and -2 that the wake pipe or the link news
+   cut it, as they cut an exchange (net_exchange_wait): a cable pulled during
+   the probe is not a quiet link.  Failure is not permission to configure an
+   address whose ownership was never checked. */
 static COLD bipolar net_arp_conflict(p32 index, p8 address_to hardware,
                                      p32 address)
 {
@@ -1862,10 +1868,15 @@ static COLD bipolar net_arp_conflict(p32 index, p8 address_to hardware,
                         goto failed;
                 for (;;)
                 {
-                        bipolar ready = network_wait_readable_until(
-                            (b32)handle, address_of deadline);
+                        bipolar ready = net_exchange_wait(
+                            handle, address_of deadline);
                         bipolar got;
 
+                        if (ready == -2)
+                        {
+                                socket_close((b32)handle);
+                                return -2;
+                        }
                         if (ready < 0)
                                 goto failed;
                         if (!ready)
@@ -1988,6 +1999,11 @@ static COLD b32 net_auto(b32 handle, net_holding address_to held)
         }
 
         status = net_arp_conflict(search.index, search.hardware, lease.address);
+        if (status == -2)
+        {
+                (void)net_exchange_was_cut();
+                return 1;
+        }
         if (status)
         {
                 string_format(net_out,

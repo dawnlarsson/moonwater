@@ -81554,6 +81554,69 @@ static fn storage_test_link_news(b32 events, net_holding address_to held,
         netlink_forget(address_of message);
 }
 
+/* The probe before a new lease, on a link nobody answers on: quiet after
+   its three windows; cut at once by a byte on the wake pipe or by link news,
+   as an exchange is (a cable pulled while it listens is not a quiet link);
+   and never performed on a link that is not there. The child says which by
+   bits over 16, so 2 and the threaded runner's 7 stay NOT RUN. */
+static fn storage_test_arp_probe(void)
+{
+        bipolar child = system_fork();
+
+        if (child == 0)
+        {
+                bipolar handle = storage_test_net_namespace();
+                netlink_search link = {.wanted = (string_address) "wd2"};
+                p8 hardware[6] = {2, 0, 0, 0, 0, 1};
+                b32 ends[2];
+                bipolar events;
+                bipolar quiet, woken, news, missing;
+                positive began, quiet_took, woken_took;
+                b32 wrong = 16;
+
+                if (storage_test_dummy((b32)handle, "wd2") < 0 ||
+                    netlink_link_find((b32)handle, address_of link) < 0 ||
+                    netlink_link_up((b32)handle, link.index) < 0 ||
+                    system_call_2(syscall(pipe2), (positive)ends, O_CLOEXEC) < 0 ||
+                    (events = netlink_open_groups(RTNLGRP_LINK_MASK)) < 0)
+                        system_call_1(syscall(exit_group), 2);
+                began = clock_monotonic_nanoseconds();
+                quiet = net_arp_conflict(link.index, hardware, 0x0a090c0c);
+                quiet_took = clock_monotonic_nanoseconds() - began;
+                system_write_all((positive)ends[1], "x", 1);
+                net_wake_watch = ends[0];
+                began = clock_monotonic_nanoseconds();
+                woken = net_arp_conflict(link.index, hardware, 0x0a090c0c);
+                woken_took = clock_monotonic_nanoseconds() - began;
+                net_wake_watch = -1;
+                net_events_watch = events;
+                net_news_holdoff_until = 0;
+                storage_test_link_set((b32)handle, link.index, IFLA_MTU, 1400);
+                news = net_arp_conflict(link.index, hardware, 0x0a090c0c);
+                net_events_watch = -1;
+                missing = net_arp_conflict(link.index + 1000, hardware,
+                                           0x0a090c0c);
+                if (quiet != 0 || quiet_took < 590000000)
+                        wrong |= 1;
+                if (woken != -2 || woken_took > 100000000 || news != -2)
+                        wrong |= 2;
+                if (missing != -1)
+                        wrong |= 4;
+                system_call_1(syscall(exit_group), wrong);
+        }
+        b32 status = storage_test_child_status(child);
+        if (!storage_test_not_run(status, "ARP probe",
+                                  "no namespaces or dummy links"))
+        {
+                check("a probe nobody answers listens its three windows and finds the address free",
+                      status >= 16 && !(status & 1));
+                check("the wake pipe and link news cut a probe at once",
+                      status >= 16 && !(status & 2));
+                check("a probe on a link that is not there is not performed",
+                      status >= 16 && !(status & 4));
+        }
+}
+
 /* A cable pulled and put back while the watcher was busy: both events are
    read after the carrier is back, and only the kernel's count of carrier
    losses says the link went away -- perhaps into another network. Other
@@ -82335,6 +82398,7 @@ b32 main(void)
         storage_test_arp_claims();
         storage_test_lease_over_existing();
         storage_test_lease_inherited();
+        storage_test_arp_probe();
         storage_test_carrier_bounce();
         storage_test_link_news_overrun();
         storage_test_netlink_output();
