@@ -372,8 +372,11 @@ static b32 link_pair_locked(string_address name, string_address text,
                                            text);
         }
 
-        if (link_identity(address_of me, false) >= 0 &&
-            crypto_same(me.public, peer.key, 32))
+        bool own = link_identity(address_of me, false) >= 0 &&
+                   crypto_same(me.public, peer.key, 32);
+
+        crypto_forget(address_of me, sizeof me);
+        if (own)
                 return host_refuse("that is this machine's own key%s\n", "");
 
         if (place && !link_parse_place(place, peer.address, address_of peer.port))
@@ -541,6 +544,8 @@ static b32 link_switch(bool on)
 
         if (link_identity(address_of me, true) < 0)
                 return host_refuse("%s cannot be read or made\n", LINK_KEY_PATH);
+        link_key_text(me.public, key);
+        crypto_forget(address_of me, sizeof me);
 
         if (link_lock_owner() <= 0)
                 link_serve_start(true);
@@ -548,9 +553,6 @@ static b32 link_switch(bool on)
                 return host_refuse("the listener did not start: is udp %s "
                                    "taken?\n",
                                    "22348");
-
-        link_key_text(me.public, key);
-        crypto_forget(address_of me, sizeof me);
         string_format(log, host_label "link on, udp %p; this machine is %s\n",
                       (positive)link_port(), (string_address)key);
         log_flush();
