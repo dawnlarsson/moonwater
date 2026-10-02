@@ -55,6 +55,8 @@ fn shell_signal(b32 number, positive disposition)
 */
 positive shell_signals_ignored;
 static positive shell_signals_known HOT_STATE;
+// Start left to the options: see programs/shell.c.
+bool shell_signals_deferred HOT_STATE;
 
 static HOT bool shell_signal_was_ignored(b32 number)
 {
@@ -122,6 +124,14 @@ HOT fn shell_signals_start()
 HOT fn shell_signals_settle(bool interactive)
 {
         b32 numbers[2] = {SIGNAL_INTERRUPT, SIGNAL_QUIT};
+
+        if (shell_signals_deferred)
+        {
+                shell_signals_deferred = false;
+                if (interactive)
+                        shell_signals_start();
+                return;
+        }
 
         if (interactive)
                 return;

@@ -783,7 +783,16 @@ b32 main()
         /* Signal policy is observable even while an otherwise empty shell is
            alive, so it remains on the semantic floor rather than being
            treated as parser setup. */
-        shell_signals_start();
+        /* A `-c` string is no shell somebody is typing at, so there is
+           nothing for interrupt and quit to be ignored for until the options
+           have been read, and the four calls that ignore them and then put
+           them back are all that is left to leave out: what was inherited is
+           still what is in place, and trap asks for it the first time it
+           needs it. If the options turn out to ask for an interactive shell
+           after all (`sh -ic`, which is not this spelling), it is done then. */
+        shell_signals_deferred = command_option;
+        if (!command_option)
+                shell_signals_start();
 
         {
                 b32 literal_status = 0;
