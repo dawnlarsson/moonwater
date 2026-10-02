@@ -730,6 +730,10 @@ static fn link_nearby_heard(p8 address_to packet, positive length,
                 }
         }
 
+        /* RFC 6762 6: a response from any port but 5353 is not mDNS, and
+           what it announces is not greeted (Avahi drops it the same way). */
+        if (source_port != WATERLINK_MDNS_PORT)
+                found.count = 0;
         if (found.count)
                 link_peers_load(address_of peers);
         for (positive at = 0; at < found.count; at++)

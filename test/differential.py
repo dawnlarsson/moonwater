@@ -55289,7 +55289,7 @@ static void expect_dns(const char *label, const p8 *msg, positive size,
         p8 into[256];
         positive ended = 0;
         bipolar used = dns_copy_name((p8 address_to)msg, size, at, into,
-                                     sizeof into, address_of ended);
+                                     sizeof into, address_of ended, null);
         int ok = used >= 0;
         if (ok != want_ok) {
                 fprintf(stderr, "msan wire lift: FAIL dns %s (used=%ld)\n",
@@ -58410,6 +58410,85 @@ say(b"_waterlink" in heard, "the network carries waterlink announcements")
 say(all(word not in heard for word in (b"lab", b"box-a", b"box-b", b"box-c", secret.encode())),
     "and not the group, the machine names or the secret")
 
+#       What b greets: an announcement made here, of an instance on a port
+#       here, is greeted from b only when it is mDNS -- from port 5353, at IP
+#       TTL 255, with a record TTL that is not a goodbye. Every other corner
+#       of the three is announced too, each on a port of its own, and none
+#       of them may draw b's curve work or a 1,200-byte datagram.
+def announcement(port, ttl):
+    label = b"wl-" + os.urandom(10).hex().encode()
+    service = b"\x0a_waterlink\x04_udp\x05local\x00"
+    data = bytes([len(label)]) + label + b"\xc0\x0c"
+    srv = structure.pack(">HHH", 0, 0, port) + b"\x0fwl-" + os.urandom(6).hex().encode() + b"\x05local\x00"
+    return (structure.pack(">HHHHHH", 0, 0x8400, 0, 2, 0, 0) + service +
+            structure.pack(">HHIH", 12, 1, 4500, len(data)) + data + b"\xc0\x2d" +
+            structure.pack(">HHIH", 33, 0x8001, ttl, len(srv)) + srv)
+corners = {}
+for source_port in (5353, 40353):
+    for hops in (255, 64):
+        for ttl in (120, 0):
+            catch = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            catch.bind(("10.77.0.1", 0))
+            catch.settimeout(0.2)
+            sender = listen if source_port == 5353 else socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            if sender is not listen:
+                sender.bind(("10.77.0.1", source_port))
+            sender.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, hops)
+            sender.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton("10.77.0.1"))
+            sender.sendto(announcement(catch.getsockname()[1], ttl), ("224.0.0.251", 5353))
+            greeted = 0
+            end = time.time() + 1.5
+            while time.time() < end:
+                try:
+                    data, peer = catch.recvfrom(4096)
+                    greeted += peer[0] == "10.77.0.2"
+                except socket.timeout:
+                    pass
+            corners[source_port, hops, ttl] = greeted
+            catch.close()
+            if sender is not listen:
+                sender.close()
+say(corners[5353, 255, 120] > 0 and
+    all(not greeted for corner, greeted in corners.items() if corner != (5353, 255, 120)),
+    "sec: b greets an announcement only from port 5353 at TTL 255 and not a goodbye (%r)" %
+    (sorted(corners.items()),))
+
+#       Two groups on one machine: b joins ops as well, granting it log
+#       alone, and c, whose lab secret was wrong, joins ops with the right one.
+#       What c may do on b is ops's grant and nothing of lab's, a's record
+#       stays lab's, and leaving ops with forget drops c and not a.
+ops_secret = "ops-secret-for-the-lane-2"
+on("b", "%s link join ops %s allow log" % (moon, ops_secret))
+on("c", "%s link join ops %s allow run" % (moon, ops_secret))
+c_on_b = None
+began = time.time()
+while time.time() - began < 25 and not c_on_b:
+    time.sleep(1)
+    status, out, err = on("b", moon + " link")
+    for line in out.decode(errors="replace").splitlines():
+        if line.startswith("  box-c") and "paired in ops" in line:
+            c_on_b = line
+say(c_on_b is not None and "may log," in c_on_b and "run" not in c_on_b and "shell" not in c_on_b,
+    "sec: a member of a second group gets that group's grants alone (%r)" % (c_on_b,))
+status, out, err = on("b", moon + " link")
+a_line = [l for l in out.decode(errors="replace").splitlines() if l.startswith("  " + names.get("b", "?") + " ")]
+say(a_line and "may run shell, paired in lab" in a_line[0],
+    "sec: and the first group's member keeps the first group's (%r)" % (a_line,))
+#       c paired b by hand above, and a record paired by hand is never
+#       taken over by a group: c asks b under that name.
+status, out, err = on("c", "%s link run b 'echo no'" % moon, timeout=30)
+say(status == 255 and b"run is not granted" in err,
+    "sec: the ops member may not run on b, which granted ops only log (%r)" % (err[-80:],))
+status, left, err = on("b", moon + " link leave ops forget")
+time.sleep(1.5)
+status, out, err = on("b", moon + " link")
+say(b"box-c" not in out and b"paired in lab" in out,
+    "sec: leaving ops with forget drops ops's member and keeps lab's (%r %r)" % (left, [l for l in out.splitlines() if b"box-" in l or b"paired" in l]))
+if len(names) == 2:
+    status, out, err = on("a", "%s link run %s 'echo still-lab'" % (moon, names["a"]))
+    say(status == 0 and out == b"still-lab\n", "and lab's member still runs on b")
+on("c", moon + " link leave ops forget")
+
 #       A handshake flood. Anyone who knows the listener's public key can make
 #       an initiation that passes mac1, and a listener that did the curve for
 #       each would be kept busy by a sender with a few thousand source ports.
@@ -58510,6 +58589,54 @@ if match is not None and listener is not None and len(names) == 2:
     status, out, err = on("a", moon + " link run %s 'echo after-the-flood'" % far_name, timeout=60)
     say(status == 0 and out == b"after-the-flood\n" and time.time() - began_run < 5,
         "flood: and the first after it took %.1f s" % (time.time() - began_run))
+
+#       Revocation reaches what is already open: a command a runs on b that
+#       prints a tick every tenth of a second, and on b, a second into it, the
+#       grant it runs under is denied, or a forgotten. The ticks stop within
+#       a second or two and the far command's client ends, where a session
+#       already open went on under the grant it had (or, forgotten, until
+#       its keys aged out three minutes later). Then everything is put back.
+def revoked(revoke, restore, label):
+    if len(names) != 2:
+        return say(False, label + ": a and b are paired")
+    ticking = subprocess.Popen(argv_on("a", "%s link run %s 'i=0; while :; do i=$((i+1)); "
+                                       "echo tick $i; sleep 0.1; done'" % (moon, names["a"])),
+                               stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.DEVNULL, env=env)
+    fcntl.fcntl(ticking.stdout, fcntl.F_SETFL, os.O_NONBLOCK)
+    seen = [b""]
+    def drain(seconds):
+        end = time.time() + seconds
+        while time.time() < end:
+            select.select([ticking.stdout], [], [], 0.05)
+            try:
+                seen[0] += ticking.stdout.read() or b""
+            except (BlockingIOError, TypeError):
+                pass
+    drain(1.5)
+    before = seen[0].count(b"tick")
+    on("b", revoke)
+    drain(2.0)
+    settled = seen[0].count(b"tick")
+    drain(2.0)
+    after = seen[0].count(b"tick")
+    ended = ticking.poll()
+    if ended is None:
+        ticking.kill()
+    ticking.wait()
+    for command in restore:
+        on("b", command)
+    return say(before > 5 and after == settled and ended not in (None, 0),
+               "sec: %s ends the command already running under it (%d ticks before, %d more in "
+               "the 2 s after the first 2, status %r)" % (label, before, after - settled, ended))
+revoked("%s link deny %s run" % (moon, names.get("b", "a")),
+        ["%s link allow %s run" % (moon, names.get("b", "a"))], "denying run")
+revoked("%s link forget %s" % (moon, names.get("b", "a")),
+        ["%s link pair %s %s 10.77.0.1" % (moon, names.get("b", "a"), keys["a"]),
+         "%s link allow %s run shell" % (moon, names.get("b", "a"))], "forgetting the peer")
+if len(names) == 2:
+    status, out, err = on("a", "%s link run %s 'echo restored'" % (moon, names["a"]))
+    say(status == 0 and out == b"restored\n", "and a runs on b again once it is put back (%r)" % (err[-80:],))
 
 status, out, err = on("a", moon + " link leave lab forget")
 say(status == 0 and b"forgot the 1 machines" in out, "leave with forget drops what the group paired")
@@ -60558,25 +60685,377 @@ def harness_inventory_mutations(argv):
     return 0 if passed == len(cases) else 1
 
 
-def harness_waterlink_mdns(argv):
-    """waterlink's mDNS against dnspython, both ways.
+MDNS_SERVICE = (b"_waterlink", b"_udp", b"local")
+MDNS_SERVICE_WIRE = b"\x0a_waterlink\x04_udp\x05local\x00"
 
-    dnspython reads the announcement and the question the check binary
-    builds and must find real DNS-SD in them: the PTR from the service to
-    the instance, SRV on the port with the cache-flush bit, an empty TXT,
-    the host's A record, no cache-flush on the PTR. Then dnspython builds
-    announcements in the same shape -- compressed its way, cases mixed,
-    records reordered, TXT of any content, extra records about other
-    services around them -- and questions of every type, and the binary's
-    reader must find the instances and ports dnspython put there and
-    nothing else. The
-    hostile half is CHECK_waterlink's; this is the interoperating half. Found
-    through WATERLINK_NOISE_PATH, like the Noise reference.
+
+class MdnsWire:
+    """A DNS message written the way a responder writes one: names
+    compressed against every suffix already in the packet (or not at all),
+    records with their fields where a mutation can find them again."""
+
+    def __init__(self, flags, compress=True):
+        import struct
+        self.pack = struct.pack
+        self.out = bytearray(self.pack(">HHHHHH", 0, flags, 0, 0, 0, 0))
+        self.table = {}
+        self.compress = compress
+        self.fields = []          # (type, class, ttl, rdlength) offsets of each record
+        self.questions = self.records = 0
+
+    def name(self, labels):
+        for at in range(len(labels)):
+            suffix = tuple(labels[at:])
+            if self.compress and suffix in self.table:
+                self.out += self.pack(">H", 0xc000 | self.table[suffix])
+                return
+            if len(self.out) < 0x3fff:
+                self.table[suffix] = len(self.out)
+            self.out.append(len(labels[at]))
+            self.out += labels[at]
+        self.out.append(0)
+
+    def question(self, labels, kind, klass):
+        self.name(labels)
+        self.out += self.pack(">HH", kind, klass)
+        self.questions += 1
+
+    def record(self, labels, kind, klass, ttl, data):
+        """data is bytes, or a list of bytes and name tuples written in turn."""
+        self.name(labels)
+        at = len(self.out)
+        self.out += self.pack(">HHIH", kind, klass, ttl, 0)
+        for piece in (data if isinstance(data, list) else [data]):
+            if isinstance(piece, tuple):
+                self.name(piece)
+            else:
+                self.out += piece
+        self.out[at + 8:at + 10] = self.pack(">H", len(self.out) - at - 10)
+        self.fields.append(at)
+        self.records += 1
+
+    def wire(self, sections=None):
+        out = bytearray(self.out)
+        counts = sections or (self.records, 0, 0)
+        out[4:12] = self.pack(">HHHH", self.questions, *counts)
+        return bytes(out)
+
+
+def mdns_model_name(packet, at, steps=None):
+    """net.c's dns_copy_name, step for step, as the reader calls it: the
+    name and the offset just past it, or None. A step is taken for each
+    label and pointer once its first byte is read."""
+    ceiling, position, jumps, ended, out = len(packet), at, 0, None, bytearray()
+    while True:
+        here = position
+        if position >= ceiling:
+            return None
+        length = packet[position]
+        position += 1
+        if steps is not None:
+            if steps[0] == 0:
+                return None
+            steps[0] -= 1
+        if length & 0xc0 == 0xc0:
+            if position >= ceiling:
+                return None
+            target = (length & 0x3f) << 8 | packet[position]
+            position += 1
+            if ended is None:
+                ended = here + 2
+            jumps += 1
+            if target >= here or jumps > 127:
+                return None
+            ceiling, position = here, target
+            continue
+        if length & 0xc0 or position + length > ceiling or len(out) + 1 + length > 255:
+            return None
+        out.append(length)
+        out += packet[position:position + length]
+        position += length
+        if not length:
+            return bytes(out), ended if ended is not None else position
+
+
+def mdns_model_read(packet, budget=True):
+    """waterlink_mdns_read as a model written from its comments and the
+    RFCs it cites: (read, asked, ports of the instances found, steps the
+    names took). The reader in the binary must say the same of every packet.
+    The names of a packet may take one step, a label or a pointer, for each
+    byte of it; without the budget the steps are only counted."""
+    import struct
+    allowed = len(packet) if budget else 1 << 40
+    steps = [allowed]
+    asked, found = False, []
+    took = lambda: allowed - steps[0]
+
+    def refused():
+        return False, False, [], took()
+    if len(packet) < 12 or len(packet) > 1500:
+        return refused()
+    _, flags, questions, a, b, c = struct.unpack(">HHHHHH", packet[:12])
+    records = a + b + c
+    response = bool(flags & 0x8000)
+    if flags & 0x780f or questions * 5 + records * 11 > len(packet) - 12:
+        return refused()
+
+    def service(name):
+        return len(name) == 23 and name.lower() == MDNS_SERVICE_WIRE
+
+    def instance(name):
+        first = name[0]
+        if not first or 1 + first >= len(name) or not service(name[1 + first:]):
+            return None
+        return name[1:1 + first]
+
+    def slot(label):
+        for one in found:
+            if one[0] == label:
+                return one
+        if len(found) == 8:
+            return None
+        found.append([label, False, 0])
+        return found[-1]
+    at = 12
+    for _ in range(questions):
+        got = mdns_model_name(packet, at, steps)
+        if got is None or got[1] + 4 > len(packet):
+            return refused()
+        kind, klass = struct.unpack(">HH", packet[got[1]:got[1] + 4])
+        if not response and service(got[0]) and kind in (12, 255) and klass & 0x7fff == 1:
+            asked = True
+        at = got[1] + 4
+    for _ in range(records):
+        got = mdns_model_name(packet, at, steps)
+        if got is None or got[1] + 10 > len(packet):
+            return refused()
+        kind, klass, ttl, size = struct.unpack(">HHIH", packet[got[1]:got[1] + 10])
+        data = got[1] + 10
+        if data + size > len(packet):
+            return refused()
+        at = data + size
+        if not response:
+            continue
+        name = got[0]
+        if kind == 12 and ttl and klass & 0x7fff == 1 and service(name):
+            target = mdns_model_name(packet, data, steps)
+            if target and target[1] == at and instance(target[0]) is not None:
+                one = slot(instance(target[0]))
+                if one:
+                    one[1] = True
+            continue
+        label = instance(name)
+        if label is None:
+            continue
+        if kind == 33 and ttl and klass & 0x7fff == 1 and size >= 7:
+            port = struct.unpack(">H", packet[data + 4:data + 6])[0]
+            if not port:
+                continue
+            target = mdns_model_name(packet, data + 6, steps)
+            if not target or target[1] != at or len(target[0]) <= 1:
+                continue
+            one = slot(label)
+            if one:
+                one[2] = port
+    if at != len(packet):
+        return refused()
+    return True, asked, [f[2] for f in found if f[1] and f[2]], took()
+
+
+def mdns_generated(rng):
+    """The DNS-SD a link carries, as responders and browsers write it,
+    each with what it says: (kind, packet, ports a reader must find)."""
+    host = (b"wl-%012x" % rng.getrandbits(48), b"local")
+
+    def flip(labels):
+        if rng.random() < 0.3:
+            return tuple(bytes(ch ^ 0x20 if 0x61 <= (ch | 0x20) <= 0x7a and rng.random() < 0.5
+                               else ch for ch in label) for label in labels)
+        return labels
+    #       A response: waterlink instances, other services, hosts, all
+    #       compressed as far as they go (or not at all), any order, any
+    #       section, until the next record would not fit.
+    wire = MdnsWire(0x8400, compress=rng.random() < 0.85)
+    pieces, ports = [], {}
+    for at in range(rng.choice((0, 1, 1, 2, 3, 5, 8))):
+        label = b"wl-%020x" % rng.getrandbits(80)
+        name = (label,) + flip(MDNS_SERVICE)
+        ports[label] = rng.randint(1, 65535)
+        ttl = rng.choice((120, 4500, 1))
+        flush = rng.choice((0x8001, 0x0001))
+        txt = rng.choice((b"\0", b"\x03v=1", b"\x09txtvers=1\x06path=/"))
+        pieces.append([(flip(MDNS_SERVICE), 12, rng.choice((1, 1, 0x8001)), 4500, [name]),
+                       (name, 33, flush, ttl, [struct_pack(">HHH", 0, 0, ports[label]), host]),
+                       (name, 16, flush, ttl, txt)])
+    for at in range(rng.randint(0, 12)):
+        kind = rng.choice((b"_ipp", b"_http", b"_airplay", b"_raop", b"_smb", b"_ssh"))
+        other = (b"Device %d" % rng.randint(0, 999), kind, rng.choice((b"_tcp", b"_udp")), b"local")
+        pieces.append([(other[1:], 12, 1, 4500, [other]),
+                       (other, 33, 0x8001, 120, [struct_pack(">HHH", 0, 0, rng.randint(1, 65535)), host]),
+                       (other, 16, 0x8001, 4500, bytes([5]) + b"rp=ab")])
+    pieces.append([(host, 1, 0x8001, 120, bytes(rng.getrandbits(8) for _ in range(4)))])
+    if rng.random() < 0.5:
+        pieces.append([(host, 28, 0x8001, 120, bytes(16))])
+    rng.shuffle(pieces)
+    records = [record for piece in pieces for record in piece]
+    if rng.random() < 0.3:
+        rng.shuffle(records)
+    written = collections.Counter()
+    for record in records:
+        before = (bytearray(wire.out), dict(wire.table), list(wire.fields), wire.records)
+        wire.record(*record)
+        if len(wire.out) > 1500:
+            wire.out, wire.table, wire.fields, wire.records = before
+            continue
+        label = record[4][0][0] if record[1] == 12 else record[0][0]
+        if label in ports and record[1] in (12, 33):
+            written[label] += 1
+    split = sorted(rng.randint(0, wire.records) for _ in range(2))
+    sections = (split[0], split[1] - split[0], wire.records - split[1])
+    yield "response", wire.wire(sections), wire, sorted(ports[k] for k in ports if written[k] == 2)
+    #       A browser's question, with what it knows already, and others.
+    wire = MdnsWire(0, compress=rng.random() < 0.85)
+    asked = False
+    for at in range(rng.randint(1, 6)):
+        if rng.random() < 0.4:
+            wire.question(flip(MDNS_SERVICE), rng.choice((12, 255, 33, 16)),
+                          rng.choice((1, 0x8001, 3)))
+        else:
+            wire.question((rng.choice((b"_ipp", b"_http", b"_ssh")), b"_tcp", b"local"), 12, 1)
+    for at in range(rng.randint(0, 6)):
+        wire.record(MDNS_SERVICE, 12, 1, 4500, [(b"wl-%020x" % rng.getrandbits(80),) + MDNS_SERVICE])
+    yield "query", wire.wire(), wire, []
+
+
+def struct_pack(form, *values):
+    import struct
+    return struct.pack(form, *values)
+
+
+def struct_unpack(form, data):
+    import struct
+    return struct.unpack(form, data)
+
+
+def mdns_flood(rng, depth, place, kind, labels, records, pad):
+    """What a sender on the link can make a reader's names cost: a long name
+    -- a chain of depth pointers each two bytes before the last, or labels
+    labels of one byte -- held as a TXT record's data with pad bytes after
+    it, then records records of kind whose owner (place 1), data (2) or both
+    (3) name its end, and one record after them that names the service, so a
+    budget that runs out in the last name of the flood still refuses it.
+    Everything else in the packet is well formed."""
+    out = bytearray(struct_pack(">HHHHHH", 0, 0x8400, 0, 0, 0, 0)) + MDNS_SERVICE_WIRE
+    if labels:
+        held = b"".join(b"\x01" + bytes([0x61 + n % 26]) for n in range(labels)) + b"\xc0\x0c"
+        tail = len(out) + 10
+    else:
+        held = struct_pack(">H", 0xc00c) + b"".join(
+            struct_pack(">H", 0xc000 | (len(out) + 10 + 2 * hop)) for hop in range(depth - 1))
+        tail = len(out) + 10 + 2 * (depth - 1)
+    out += struct_pack(">HHIH", 16, 1, 4500, len(held) + pad) + held + bytes(pad)
+    for _ in range(records):
+        out += struct_pack(">H", 0xc000 | (tail if place & 1 else 12))
+        name = struct_pack(">H", 0xc000 | tail) if place & 2 else b"\0"
+        data = {12: name, 33: struct_pack(">HHH", 0, 0, 22348) + name,
+                16: b"\0" + name, 1: bytes(4)}[kind]
+        out += struct_pack(">HHIH", kind, 0x8001, 120, len(data)) + data
+    out += struct_pack(">HHHIH", 0xc00c, 16, 0x8001, 120, 1) + b"\0"
+    out[6:8] = struct_pack(">H", records + 2)
+    return bytes(out)
+
+
+def mdns_floods(rng, count):
+    """Floods of every shape, and for each the packet whose names take
+    exactly as many steps as it has bytes and the one that takes one more,
+    made by the padding alone: (packet, steps its names take)."""
+    for _ in range(count):
+        depth = rng.choice((1, 2, 4, 16, 64, 126, 127, rng.randint(1, 127)))
+        labels = rng.choice((0, 0, 0, rng.randint(1, 120)))
+        place = rng.choice((1, 2, 3))
+        kind = rng.choice((12, 33, 16, 1))
+        records = rng.randint(1, 110)
+        for pad in (0,):
+            packet = mdns_flood(rng, depth, place, kind, labels, records, pad)
+            if len(packet) > 1500:
+                continue
+            took = mdns_model_read(packet, budget=False)[3]
+            yield packet, took
+            pad = took - len(packet)
+            if 0 < pad and took <= 1500:
+                for less in (0, 1):
+                    packet = mdns_flood(rng, depth, place, kind, labels, records, pad - less)
+                    yield packet, took
+
+
+def mdns_mutated(rng, packet, wire):
+    """A packet a parser has to survive: header bits, counts, record fields
+    the reader decides on, pointers, label types, cuts and flips."""
+    out = bytearray(packet)
+    for _ in range(rng.randint(1, 4)):
+        roll = rng.randrange(10)
+        if roll == 0 and len(out) >= 4:
+            out[2 + rng.randrange(2)] ^= 1 << rng.randrange(8)
+        elif roll == 1 and len(out) >= 12:
+            at = 4 + 2 * rng.randrange(4)
+            value = max(0, (out[at] << 8 | out[at + 1]) + rng.choice((-1, 1, 2, 300)))
+            out[at:at + 2] = struct_pack(">H", value & 0xffff)
+        elif roll in (2, 3, 4) and wire.fields:
+            at = rng.choice(wire.fields)
+            if at + 10 > len(out):
+                continue
+            field = rng.choice(("type", "class", "ttl", "length"))
+            if field == "type":
+                out[at:at + 2] = struct_pack(">H", rng.choice((1, 12, 16, 28, 33, 255, 47)))
+            elif field == "class":
+                out[at + 2:at + 4] = struct_pack(">H", rng.choice((1, 0x8001, 3, 0x8003, 255, 0xfe)))
+            elif field == "ttl":
+                out[at + 4:at + 8] = struct_pack(">I", rng.choice((0, 1, 0x80000000, 0xffffffff)))
+            else:
+                size = out[at + 8] << 8 | out[at + 9]
+                out[at + 8:at + 10] = struct_pack(">H", max(0, size + rng.choice((-1, 1, -6, 7))) & 0xffff)
+        elif roll == 5 and len(out) > 13:
+            at = rng.randrange(12, len(out) - 1)
+            out[at:at + 2] = struct_pack(">H", 0xc000 | rng.randrange(min(len(out) + 4, 0x3fff)))
+        elif roll == 6 and len(out) > 12:
+            out[rng.randrange(12, len(out))] = rng.choice((0x40, 0x80, 0x3f, 0, 63, 64))
+        elif roll == 7:
+            del out[rng.randrange(len(out) + 1):]
+        elif roll == 8 and out:
+            out[rng.randrange(len(out))] ^= 1 << rng.randrange(8)
+        elif roll == 9 and wire.fields:
+            at = rng.choice(wire.fields)
+            if at + 16 <= len(out):
+                out[at + 14:at + 16] = b"\0\0"   # an SRV's port, or bytes like it
+    return bytes(out[:1500 + rng.choice((0, 0, 1))])
+
+
+def harness_waterlink_mdns(argv):
+    """waterlink's mDNS against a second reader, both ways.
+
+    The announcement and the question the check binary builds are read by an
+    independent DNS reader written here (and by dnspython where it is
+    importable) and must be real DNS-SD: the PTR from the service to the
+    instance, SRV on the port with the cache-flush bit, an empty TXT, the
+    host's A record, no cache-flush on the PTR. Then a generator writes the
+    DNS-SD a link carries -- responses with waterlink instances among other
+    services and hosts, compressed as far as it goes or not at all, cases
+    mixed, any order and section; browsers' questions with known answers --
+    and an AFL-style grammar mutates them where the reader decides (header
+    bits, opcode, RCODE, counts, every record's type, class, TTL and length,
+    SRV ports, pointers, label types, cuts, flips). For every packet the
+    binary's reader and a model of it written from the RFCs say the same:
+    read or refused, asked or not, which ports. Nothing here needs a package;
+    dnspython, found through WATERLINK_NOISE_PATH like the Noise reference,
+    adds its own reading and its own packets when it is there.
     """
     import random
+    import struct
     import subprocess
     parser = argparse.ArgumentParser(prog="differential.py --harness waterlink_mdns")
     parser.add_argument("--binary", required=True)
+    parser.add_argument("--count", type=int,
+                        default=int(os.environ.get("MOONWATER_MDNS_CASES", "12000")))
     args = parser.parse_args(argv)
     extra = os.environ.get("WATERLINK_NOISE_PATH")
     if extra:
@@ -60588,100 +61067,136 @@ def harness_waterlink_mdns(argv):
         import dns.rdatatype
         import dns.rdataclass
         import dns.flags
+        have_dnspython = True
     except ImportError:
-        print("waterlink mdns: NOT RUN -- dnspython is not importable")
-        return 2
+        have_dnspython = False
     checks = Checks()
 
     built = subprocess.run([args.binary, "mdns-announce"], capture_output=True, timeout=60)
     lines = built.stdout.decode().split()
     checks(built.returncode == 0 and len(lines) == 2, "the binary built an announcement and a question")
     if len(lines) == 2:
-        announcement = dns.message.from_wire(bytes.fromhex(lines[0]))
-        question = dns.message.from_wire(bytes.fromhex(lines[1]))
-        service = dns.name.from_text("_waterlink._udp.local.")
-        ptr = [r for r in announcement.answer if r.rdtype == dns.rdatatype.PTR and r.name == service]
-        srv = [r for r in announcement.answer if r.rdtype == dns.rdatatype.SRV]
-        txt = [r for r in announcement.answer if r.rdtype == dns.rdatatype.TXT]
-        a = [r for r in announcement.answer if r.rdtype == dns.rdatatype.A]
-        checks(announcement.flags & dns.flags.QR and announcement.flags & dns.flags.AA,
-               "dnspython reads an authoritative response")
-        checks(len(ptr) == 1 and len(ptr[0]) == 1 and ptr[0].rdclass == dns.rdataclass.IN,
-               "one PTR from the service to the instance, no cache-flush bit")
-        #       dnspython knows no cache-flush bit, so a record in class
-        #       0x8001 comes back as raw rdata, read here by the RFC's layout.
-        def raw(record):
-            return list(record)[0].to_wire() if not hasattr(list(record)[0], "data") else list(record)[0].data
+        announcement, question = bytes.fromhex(lines[0]), bytes.fromhex(lines[1])
+        #       Read here, record by record, by the model's name reader.
+        rows, at = [], 12
+        _, flags, qd, an, ns, ar = struct.unpack(">HHHHHH", announcement[:12])
+        for _ in range(qd + an + ns + ar):
+            name, at = mdns_model_name(announcement, at)
+            kind, klass, ttl, size = struct.unpack(">HHIH", announcement[at:at + 10])
+            rows.append((name, kind, klass, ttl, announcement[at + 10:at + 10 + size], at + 10))
+            at += 10 + size
+        service = MDNS_SERVICE_WIRE
+        ptr = [r for r in rows if r[1] == 12 and r[0] == service]
+        srv = [r for r in rows if r[1] == 33]
+        txt = [r for r in rows if r[1] == 16]
+        a = [r for r in rows if r[1] == 1]
+        checks(at == len(announcement) and flags == 0x8400 and qd == 0,
+               "an authoritative response, read to its last byte")
+        checks(len(ptr) == 1 and ptr[0][2] == 1 and
+               mdns_model_name(announcement, ptr[0][5])[0][24:] == service and
+               srv and srv[0][0] == mdns_model_name(announcement, ptr[0][5])[0],
+               "one PTR from the service to the instance the SRV is about, no cache-flush bit")
+        checks(len(srv) == 1 and srv[0][4][4:6] == (22348).to_bytes(2, "big") and srv[0][2] == 0x8001,
+               "SRV on the port with cache-flush")
+        checks(len(txt) == 1 and txt[0][4] == b"\0" and txt[0][2] == 0x8001,
+               "an empty TXT, with cache-flush")
+        checks(len(a) == 1 and a[0][4] == bytes([10, 77, 0, 2]), "the host's A record")
+        checks(question[12:] == service + b"\0\x0c\0\x01", "the question is PTR for the service")
+        if have_dnspython:
+            message = dns.message.from_wire(announcement)
+            name = dns.name.from_text("_waterlink._udp.local.")
+            checks(message.flags & dns.flags.QR and message.flags & dns.flags.AA and
+                   len([r for r in message.answer if r.rdtype == dns.rdatatype.PTR and r.name == name]) == 1 and
+                   dns.message.from_wire(question).question[0].name == name,
+                   "dnspython reads the announcement and the question the same way")
 
-        def strings(data):
-            out, at = [], 0
-            while at < len(data):
-                out.append(data[at + 1:at + 1 + data[at]])
-                at += 1 + data[at]
-            return out
-        checks(len(srv) == 1 and all(raw(r)[4:6] == (22348).to_bytes(2, "big") for r in srv) and
-               all(r.rdclass == 0x8001 for r in srv), "SRV on the port with cache-flush")
-        checks(len(txt) == 1 and all(strings(raw(r)) == [b""] for r in txt) and
-               all(r.rdclass == 0x8001 for r in txt), "an empty TXT, with cache-flush")
-        checks(len(a) == 1 and raw(a[0]) == bytes([10, 77, 0, 2]), "the host's A record")
-        checks(len(question.question) == 1 and question.question[0].name == service and
-               question.question[0].rdtype == dns.rdatatype.PTR, "the question is PTR for the service")
-
-    #       dnspython's own announcements, for the binary to read.
+    #       Generated packets, mutated packets, and dnspython's own.
     rng = random.Random(0x5353)
-    packets = []
-    expect = []
-    for round in range(300):
-        message = dns.message.Message()
-        message.flags = dns.flags.QR | dns.flags.AA
-        count = rng.randint(0, 3)
-        want = []
-        records = []
-        for at in range(count):
-            label = "wl-%020x" % rng.getrandbits(80)
-            base = "_waterlink._udp.local."
-            if rng.random() < 0.3:
-                base = "_WaterLink._UDP.Local."
-            instance = dns.name.from_text(label + "." + base)
-            port = rng.randint(1, 65535)
-            fields = rng.choice([[""], ["v=1"], ["txtvers=1", "path=/"]])
-            records.append(dns.rrset.from_text(dns.name.from_text(base), 4500, "IN", "PTR", instance.to_text()))
-            records.append(dns.rrset.from_text(instance, 120, "IN", "SRV", "0 0 %d wl-host.local." % port))
-            records.append(dns.rrset.from_text(instance, 4500, "IN", "TXT", " ".join('"%s"' % f for f in fields)))
-            want.append(port)
-        for at in range(rng.randint(0, 3)):
-            other = dns.name.from_text("printer%d._ipp._tcp.local." % at)
-            records.append(dns.rrset.from_text(other, 120, "IN", "SRV", "0 0 631 printer.local."))
-            records.append(dns.rrset.from_text(other, 120, "IN", "TXT", '"rp=ipp/print"'))
-        rng.shuffle(records)
-        for record in records:
-            message.answer.append(record)
-        packets.append(message.to_wire().hex())
-        expect.append(("response", sorted(want)))
-    for kind in ("PTR", "ANY", "SRV", "A"):
-        query = dns.message.make_query("_waterlink._udp.local.", kind)
-        query.id = 0
-        packets.append(query.to_wire().hex())
-        expect.append(("asked" if kind in ("PTR", "ANY") else "quiet", []))
+    packets, kinds, intents = [], [], []
+    for packet, took in mdns_floods(rng, args.count // 8):
+        packets.append(packet)
+        kinds.append("flood")
+        intents.append(took)
+    while len(packets) < args.count:
+        for kind, packet, wire, ports in mdns_generated(rng):
+            packets.append(packet)
+            kinds.append(kind)
+            intents.append(ports)
+            for _ in range(3):
+                packets.append(mdns_mutated(rng, packet, wire))
+                kinds.append("mutated")
+                intents.append(None)
+    if have_dnspython:
+        for round in range(300):
+            message = dns.message.Message()
+            message.flags = dns.flags.QR | dns.flags.AA
+            records = []
+            for at in range(rng.randint(0, 3)):
+                label = "wl-%020x" % rng.getrandbits(80)
+                base = rng.choice(("_waterlink._udp.local.", "_WaterLink._UDP.Local."))
+                instance = dns.name.from_text(label + "." + base)
+                records.append(dns.rrset.from_text(dns.name.from_text(base), 4500, "IN", "PTR", instance.to_text()))
+                records.append(dns.rrset.from_text(instance, 120, "IN", "SRV",
+                                                   "0 0 %d wl-host.local." % rng.randint(1, 65535)))
+                records.append(dns.rrset.from_text(instance, 4500, "IN", "TXT", '"v=1"'))
+            rng.shuffle(records)
+            for record in records:
+                message.answer.append(record)
+            packets.append(message.to_wire())
+            kinds.append("dnspython")
+            intents.append(None)
 
-    read = subprocess.run([args.binary, "mdns-read"], input=("\n".join(packets) + "\n").encode(),
-                          capture_output=True, timeout=60)
+    read = subprocess.run([args.binary, "mdns-read"],
+                          input=("\n".join(p.hex() for p in packets) + "\n").encode(),
+                          capture_output=True, timeout=600)
     answers = read.stdout.decode().splitlines()
-    agreed = 0
-    for (kind, want), answer in zip(expect, answers):
+    checks(len(answers) == len(packets), "the binary answered every packet (%d of %d)" %
+           (len(answers), len(packets)))
+    tally = collections.Counter()
+    shown = 0
+    for packet, kind, answer in zip(packets, kinds, answers):
+        model = mdns_model_read(packet)
         words = answer.split()
-        if len(words) < 3 or words[0] != "ok":
-            continue
-        found = [int(item) for item in words[3:] if item.isdigit()]
-        if kind == "response" and sorted(found) == want and words[1] == "-":
-            agreed += 1
-        elif kind == "asked" and words[1] == "asked" and not found:
-            agreed += 1
-        elif kind == "quiet" and words[1] == "-" and not found:
-            agreed += 1
-    checks(len(answers) == len(packets) and agreed == len(packets),
-           "the binary reads dnspython's packets as dnspython wrote them (%d of %d)" %
-           (agreed, len(packets)))
+        said = (words[:1] == ["ok"], words[1:2] == ["asked"],
+                [int(w) for w in words[3:]] if words[:1] == ["ok"] else words[2:3])
+        wanted = (model[0], model[1], model[2] if model[0] else ["0"])
+        tally[kind, model[0]] += 1
+        if said != wanted:
+            tally["disagree", kind] += 1
+            if shown < 5:
+                shown += 1
+                print("    %s: binary %r, model %r: %s" % (kind, answer, model[:3], packet.hex()))
+    print("  mdns cases: " + ", ".join("%s %s %d" % (k[0], k[1], n) for k, n in sorted(tally.items(), key=str)))
+    for kind in ("response", "query", "mutated", "flood", "dnspython"):
+        if kind != "dnspython" or have_dnspython:
+            checks(tally["disagree", kind] == 0 and tally[kind, True] > 0,
+                   "the binary and the model read every %s packet alike (%d disagree)" %
+                   (kind, tally["disagree", kind]))
+    checks(tally["mutated", False] > args.count // 8 and tally["mutated", True] > args.count // 8,
+           "the mutations make packets that are read and packets that are refused")
+    #       What each generated response was written to say, whatever
+    #       either reader thinks: every instance whose PTR and SRV fit.
+    meant = sum(answer.startswith("ok") and sorted(int(w) for w in answer.split()[3:]) == ports
+                for kind, answer, ports in zip(kinds, answers, intents) if kind == "response")
+    checks(meant == kinds.count("response"),
+           "every generated response reads, with the instances it was written with (%d of %d)" %
+           (meant, kinds.count("response")))
+    #       What a packet costs: a flood whose names take exactly as many
+    #       steps as it has bytes reads and one step over is refused; and
+    #       what responders and browsers write is well inside it.
+    edge = collections.Counter()
+    for packet, kind, answer, took in zip(packets, kinds, answers, intents):
+        if kind == "flood" and took - len(packet) in (0, 1):
+            edge[took - len(packet), answer.startswith("ok")] += 1
+    dearest = max(mdns_model_read(p)[3] / len(p) for p, k in zip(packets, kinds)
+                  if k in ("response", "query", "dnspython"))
+    print("  mdns floods at exactly their bytes in steps: %d read, %d refused; one step over: "
+          "%d read, %d refused" % (edge[0, True], edge[0, False], edge[1, True], edge[1, False]))
+    checks(edge[0, True] > 10 and edge[1, False] > 10 and not edge[0, False] and not edge[1, True],
+           "a flood whose names take exactly its bytes in steps reads, one step more is refused")
+    checks(dearest < 0.75, "the dearest packet a responder or browser wrote took %.2f steps a byte" %
+           dearest)
+    print("  mdns steps: the dearest generated response or question took %.2f a byte" % dearest)
     return checks.verdict("waterlink mdns:", "waterlink-mdns")
 
 
@@ -62310,6 +62825,8 @@ int main(int argc, char **argv)
             sec(svc, "#define LINK_PORT 22348", "/*      A grant by name"),
             sec(svc, "typedef struct\n{\n        string_address name;",
                 "// The grant a word names, or 0."),
+            sec(svc, "// The grant a request byte needs",
+                "static p64 link_now(void)"),
             sec(svc, "static const p8 link_kind_asks[] = {0, LINK_ASK_SHELL",
                 "typedef struct"),
             sec(svc, "static winsize link_size_unpack(", "// The streams"),
@@ -62942,6 +63459,9 @@ static fn link_peers_unlock(bipolar handle) { (void)handle; }
         sec(hs, "#define WATERLINK_PROTOCOL", "#endif // WATERLINK_HANDSHAKE_INCLUDED"),
         sec(disc, "#define WATERLINK_MDNS_PORT 5353", "#endif // WATERLINK_DISCOVER_INCLUDED"),
         sec(svc, "#define LINK_PORT 22348", "/*      A grant by name"),
+        sec(svc, "typedef struct\n{\n        string_address name;",
+            "// The grant a word names, or 0."),
+        sec(svc, "// The grant a request byte needs", "static p64 link_now(void)"),
         sec(svc, "static p64 link_now(void)", "// All digits and nothing else"),
         sec(svc, "static bool link_name_good(", "/* Everything waterlink keeps"),
         sec(svc, "typedef struct\n{\n        struct waterlink_peer peer[LINK_PEERS_MAX];",
@@ -62972,6 +63492,8 @@ static fn link_peers_unlock(bipolar handle) { (void)handle; }
         "p8 *payload)\n{\n        (void)context; (void)head; (void)payload;\n"
         "        return true;\n}\n",
         sec(svc, "// The handshake, at the machine's end", "// The state file, for"),
+        sec(svc, "/*      Grants as they are now for what is open",
+            "static p64 link_sessions_turn(p64 now)"),
         sec(svc, "static fn link_note_seen(struct link_session address_to s, p64 wall)\n{",
             "//      Never more than once a fifth"),
         sec(svc, "typedef struct\n{\n        struct waterlink_noise noise;",

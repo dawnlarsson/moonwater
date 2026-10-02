@@ -142,6 +142,17 @@ static p32 link_grant_bit(string_address word)
         return at < array_count(link_grants) ? link_grants[at].bit : 0;
 }
 
+// The grant a request byte needs, as an index of link_grants; past it, none.
+static positive link_grant_asked(p8 ask)
+{
+        positive at = 0;
+
+        while (at < array_count(link_grants) &&
+               (!ask || (link_grants[at].ask != ask && link_grants[at].ask_too != ask)))
+                at++;
+        return at;
+}
+
 static p64 link_now(void)
 {
         return system_clock_ns(1) / 1000;
@@ -827,6 +838,7 @@ typedef struct
         p64 now;           // the turn's clock, which a frame posted in it carries
         p64 wall;          // this machine's clock in seconds, read at
         p64 wall_read;     // this turn's clock
+        p64 granted;       // when the sessions were last held to the peers
         bool server;
         bool gso;
         bool v4; // no IPv6 here: the socket is AF_INET
@@ -1595,6 +1607,7 @@ static fn link_request(struct link_session address_to s, p8 address_to payload,
         p8 text[LINK_REQUEST_MAX + 1];
         p32 mode = 0;
         positive skip;
+        positive grant;
         string_address run[] = {"sh", "-c", (string_address)text, null};
         string_address pull[] = {"cat", "--", (string_address)text, null};
         string_address log[] = {"dmesg", "--follow", null};
@@ -1609,22 +1622,18 @@ static fn link_request(struct link_session address_to s, p8 address_to payload,
                 may = peer->may;
         s->may = may;
 
-        for (positive at = 0; at < array_count(link_grants); at++)
-                if (link_grants[at].ask &&
-                    (payload[0] == link_grants[at].ask ||
-                     payload[0] == link_grants[at].ask_too) &&
-                    !(may & link_grants[at].bit))
-                {
-                        string_copy_bounded((string_address)why,
-                                            link_grants[at].name, sizeof why);
-                        string_append_bounded((string_address)why,
-                                              " is not granted to ", sizeof why);
-                        string_append_bounded((string_address)why,
-                                              (string_address)s->name,
-                                              sizeof why);
-                        link_refuse(s, (string_address)why);
-                        return;
-                }
+        grant = link_grant_asked(payload[0]);
+        if (grant < array_count(link_grants) && !(may & link_grants[grant].bit))
+        {
+                string_copy_bounded((string_address)why,
+                                    link_grants[grant].name, sizeof why);
+                string_append_bounded((string_address)why,
+                                      " is not granted to ", sizeof why);
+                string_append_bounded((string_address)why,
+                                      (string_address)s->name, sizeof why);
+                link_refuse(s, (string_address)why);
+                return;
+        }
 
         for (positive kind = 1; kind < array_count(link_kind_asks); kind++)
                 if (link_kind_asks[kind] == payload[0])
@@ -2076,32 +2085,7 @@ static fn link_stamp_keep(p8 address_to key, p8 address_to stamp)
         link_self.stamps_dirty = true;
 }
 
-/*
-        An authenticated initiation proves possession of peer even when its
-        authorization record has just been removed.  Do not merely refuse
-        that rekey and leave the old traffic keys usable: close every live
-        conversation for the identity before another queued datagram can use
-        them.  Unknown identities still cost only the fixed session-table
-        walk and close nothing.
-*/
-static fn link_sessions_forget_peer(p8 address_to peer)
-{
-        for (positive at = 0; at < LINK_SESSIONS; at++)
-                if (link_self.session[at].used &&
-                    crypto_same(link_self.session[at].peer, peer, 32))
-                {
-                        struct link_session address_to s =
-                                link_self.session + at;
-
-                        /* Make queued carry datagrams unaddressable now;
-                           link_sessions_turn performs the descriptor/process
-                           teardown at the next turn. */
-                        crypto_forget(address_of s->now, sizeof(s->now));
-                        crypto_forget(address_of s->next, sizeof(s->next));
-                        crypto_forget(address_of s->before, sizeof(s->before));
-                        s->finished = true;
-                }
-}
+static fn link_sessions_granted(p64 now);
 
 static fn link_server_initiation(p8 address_to datagram, positive length,
                                  p8 address_to address, p16 port, p64 now)
@@ -2171,9 +2155,12 @@ static fn link_server_initiation(p8 address_to datagram, positive length,
         peer = link_peer_keyed(address_of peers, who);
         memory_copy(address_of conversation, hello + WATERLINK_STAMP_BYTES, 8);
         memory_copy(address_of theirs, hello + WATERLINK_STAMP_BYTES + 8, 4);
+        /*      Proof of a key no longer paired: what it has open ends now,
+                before a datagram queued behind this one can use its keys. */
         if (!peer)
         {
-                link_sessions_forget_peer(who);
+                link_self.granted = 0;
+                link_sessions_granted(now);
                 goto forget;
         }
         /* Zero is not a session index: link_index_new deliberately never
@@ -2254,7 +2241,7 @@ static struct link_keys address_to link_keys_for(p32 index,
         {
                 struct link_session address_to s = link_self.session + at;
 
-                if (!s->used)
+                if (!s->used || s->finished)
                         continue;
                 address_to found = s;
                 if (s->now.live && s->now.ours == index)
@@ -2635,9 +2622,37 @@ static fn link_signals_take(bipolar handle, b32 address_to last)
         the ones that are over -- then a wait on everything any of them
         waits on, then every datagram that came.
 */
+/*      Grants as they are now for what is open, too: once a second a session
+        whose peer was forgotten, or whose command's grant was taken back, is
+        ended, where it went on across every rekey. */
+static fn link_sessions_granted(p64 now)
+{
+        link_peers peers;
+
+        if (link_age(now, link_self.granted) < 1000000)
+                return;
+        link_self.granted = now;
+        link_peers_load(address_of peers);
+        for (positive at = 0; at < LINK_SESSIONS; at++)
+        {
+                struct link_session address_to s = link_self.session + at;
+                struct waterlink_peer address_to peer =
+                        link_peer_keyed(address_of peers, s->peer);
+                positive need = link_grant_asked(link_kind_asks[s->kind]);
+
+                if (s->used && !s->finished &&
+                    (!peer || (need < array_count(link_grants) &&
+                               !(peer->may & link_grants[need].bit))))
+                        link_session_end(s, true);
+        }
+}
+
 static p64 link_sessions_turn(p64 now)
 {
         p64 wake = now + 1000000;
+
+        if (link_self.server)
+                link_sessions_granted(now);
 
         for (positive at = 0; at < LINK_SESSIONS; at++)
         {

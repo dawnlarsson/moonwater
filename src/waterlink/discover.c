@@ -252,17 +252,20 @@ positive waterlink_mdns_query(p8 address_to packet, positive room)
         resolver trusts: a pointer only ever goes back past where it stands,
         and nothing after it may read up to it again, so no loop is possible.
         Returns the offset just past the name as it sits in the packet, or 0
-        for anything that is not a name.
+        for anything that is not a name or would take more of the packet's
+        steps than are left.
 */
 #define WATERLINK_NAME_BYTES 256
 
 static positive waterlink_dns_name(const p8 address_to packet, positive length,
                                    positive at, p8 address_to into,
-                                   positive address_to into_length)
+                                   positive address_to into_length,
+                                   positive address_to steps)
 {
         positive ended;
         bipolar used = dns_copy_name((p8 address_to)packet, length, at, into,
-                                     WATERLINK_NAME_BYTES - 1, address_of ended);
+                                     WATERLINK_NAME_BYTES - 1, address_of ended,
+                                     steps);
 
         if (used < 0)
                 return 0;
@@ -276,11 +279,12 @@ static bool waterlink_rdata_name(const p8 address_to packet, positive length,
                                  positive stop,
                                  const byte_reader address_to data,
                                  p8 address_to into,
-                                 positive address_to into_length)
+                                 positive address_to into_length,
+                                 positive address_to steps)
 {
         return waterlink_dns_name(packet, length,
                                   stop - byte_reader_left(data), into,
-                                  into_length) == stop;
+                                  into_length, steps) == stop;
 }
 
 // Internet class; the top bit is QU in a question and cache-flush in a record.
@@ -351,9 +355,14 @@ waterlink_found_at(struct waterlink_found address_to found,
 
 /*
         Read one mDNS message: whether it asks about the service, and every
-        instance of the service it describes with an SRV port. False when it
-        is not a well formed message; a well formed one about other things
-        answers true with nothing found.
+        instance of the service it describes with an SRV port. False, with
+        nothing found, when it is not a well formed message; a well formed
+        one about other things answers true with nothing found.
+
+        Anyone on the link sends these, so the names of a packet may take one
+        step, a label or a pointer, for each byte of it between them: a
+        hundred records naming the end of one long chain cost 45 us without
+        it. DNS-SD as responders write it takes under 0.4 a byte.
 */
 bool waterlink_mdns_read(const p8 address_to packet, positive length,
                          struct waterlink_found address_to found)
@@ -364,6 +373,7 @@ bool waterlink_mdns_read(const p8 address_to packet, positive length,
         byte_reader header = byte_reader_open(packet, length);
         p16 flags;
         p32 questions, records;
+        positive steps = length;
 
         memory_zero(found, sizeof(address_to found));
         if (length < 12 || length > WATERLINK_MDNS_MAX)
@@ -377,7 +387,7 @@ bool waterlink_mdns_read(const p8 address_to packet, positive length,
            made malformed packets which compliant responders ignore another
            way to reach this responder and its amplification budget. */
         if (flags & (DNS_OPCODE_MASK | DNS_CODE_MASK))
-                return false;
+                goto refused;
 
         questions = byte_reader_u16(&header);
         records = byte_reader_u16(&header);
@@ -387,13 +397,14 @@ bool waterlink_mdns_read(const p8 address_to packet, positive length,
         //      Each question is at least five bytes and each record eleven:
         //      a count the packet cannot hold is refused before any is read.
         if (questions * 5 + records * 11 > length - 12)
-                return false;
+                goto refused;
 
         for (p32 q = 0; q < questions; q++)
         {
                 positive start = at;
                 positive next = waterlink_dns_name(packet, length, at, name,
-                                                   address_of name_length);
+                                                   address_of name_length,
+                                                   address_of steps);
                 byte_reader tail = dns_message_at(packet, length, next);
                 p32 type;
                 p16 class;
@@ -402,7 +413,7 @@ bool waterlink_mdns_read(const p8 address_to packet, positive length,
                 type = byte_reader_u16(&tail);
                 class = byte_reader_u16(&tail);
                 if (!next || !byte_reader_ok(&tail))
-                        return false;
+                        goto refused;
                 if (!found->response && waterlink_is_service(name, name_length) &&
                     (type == 12 || type == 255) && waterlink_internet(class))
                 {
@@ -427,7 +438,8 @@ bool waterlink_mdns_read(const p8 address_to packet, positive length,
         for (p32 r = 0; r < records; r++)
         {
                 positive next = waterlink_dns_name(packet, length, at, name,
-                                                   address_of name_length);
+                                                   address_of name_length,
+                                                   address_of steps);
                 byte_reader tail = dns_message_at(packet, length, next);
                 byte_reader data;
                 p32 type;
@@ -446,7 +458,7 @@ bool waterlink_mdns_read(const p8 address_to packet, positive length,
                 ttl = byte_reader_u32(&tail);
                 data = byte_reader_vector16(&tail);
                 if (!next || !byte_reader_ok(&tail))
-                        return false;
+                        goto refused;
                 at = length - byte_reader_left(&tail);
 
                 if (!found->response)
@@ -461,7 +473,8 @@ bool waterlink_mdns_read(const p8 address_to packet, positive length,
                 {
                         if (waterlink_rdata_name(packet, length, at,
                                                  address_of data, target,
-                                                 address_of target_length) &&
+                                                 address_of target_length,
+                                                 address_of steps) &&
                             waterlink_instance_of(target, target_length, label,
                                                   address_of label_length))
                         {
@@ -499,7 +512,8 @@ bool waterlink_mdns_read(const p8 address_to packet, positive length,
                         if (!port ||
                             !waterlink_rdata_name(packet, length, at,
                                                   address_of data, target,
-                                                  address_of target_length) ||
+                                                  address_of target_length,
+                                                  address_of steps) ||
                             target_length <= 1)
                                 continue;
                         instance = waterlink_found_at(found, label, label_length);
@@ -510,6 +524,9 @@ bool waterlink_mdns_read(const p8 address_to packet, positive length,
                         }
                 }
         }
+
+        if (at != length)
+                goto refused;
 
         /* Do not expose half of DNS-SD's identity relation. An attacker can
            order the pair either way, so compact only after all records have
@@ -523,8 +540,13 @@ bool waterlink_mdns_read(const p8 address_to packet, positive length,
                                 found->instance[kept++] = found->instance[i];
                 found->count = kept;
         }
+        return true;
 
-        return at == length;
+        //      A packet refused says nothing: not the question, not the
+        //      instances read before the byte that broke it.
+refused:
+        memory_zero(found, sizeof(address_to found));
+        return false;
 }
 
 #endif // WATERLINK_DISCOVER_INCLUDED

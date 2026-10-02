@@ -2703,10 +2703,10 @@ lane_waterlink()
                 freestanding_checks_one waterlink_service waterlink_service ||
                         waterlink_outcome=1
         fi
-        #       dnspython and noiseprotocol are found through
-        #       WATERLINK_NOISE_PATH where the system has neither; without
-        #       dnspython the interop half says NOT RUN and the lane stands on
-        #       the rest.
+        #       noiseprotocol and dnspython are found through
+        #       WATERLINK_NOISE_PATH where the system has neither; the mDNS
+        #       half needs neither (its second reader is written in the
+        #       harness), and dnspython adds its own reading when it is there.
         #       Each harness named literally: the oracle proves every
         #       registered harness is asked for by finding its word here.
         if [ -x "$work/waterlink.$host_arch" ]; then
