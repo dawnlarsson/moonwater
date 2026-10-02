@@ -56379,6 +56379,34 @@ def harness_hostile_strings(argv):
                 break
             shown("nodename", "moonwater name", ran)
 
+        #   Archives: member, link, owner and attribute names, listed,
+        #   extracted, compared.
+        for number, name in enumerate(hostile_payloads(seed + 2, many, 200, banned=b"\x00")):
+            text = name.decode("utf-8", "surrogateescape")
+            archive = work / ("a%d.tar" % number)
+            stream = io.BytesIO()
+            with tarfile.open(fileobj=stream, mode="w", format=tarfile.PAX_FORMAT,
+                              encoding="utf-8", errors="surrogateescape") as tar:
+                for member_name in (text, text + "/../escape", "plain"):
+                    info = tarfile.TarInfo(member_name)
+                    info.size = 2
+                    info.uname = info.gname = text[:31]
+                    info.pax_headers = {"SCHILY.xattr.user." + name.decode("utf-8", "ignore") +
+                                        "x" * 250: "v"}
+                    tar.addfile(info, io.BytesIO(b"hi"))
+                link = tarfile.TarInfo("link")
+                link.type = tarfile.SYMTYPE
+                link.linkname = text
+                tar.addfile(link)
+            archive.write_bytes(stream.getvalue())
+            for words in (["-tf"], ["-tvf"], ["-xf"], ["-xvf"], ["--xattrs", "-xf"],
+                          ["-df"]):
+                target = work / ("x%d" % number)
+                target.mkdir(exist_ok=True)
+                ran = subprocess.run([str(farm / "tar")] + words + [str(archive)], cwd=target,
+                                     capture_output=True, timeout=20, env=quiet)
+                shown("tar", "tar " + " ".join(words), ran)
+
         #   HTTP: a status line, a Location and headers chosen by the server,
         #   through wget and fetch, followed or refused.
         class Server(threading.Thread):
