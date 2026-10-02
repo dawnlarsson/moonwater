@@ -56101,6 +56101,26 @@ def harness_security_hygiene(argv):
         ("radio_bss_read", ("elements",)),
         ("bowl_signature_read", ("bytes",)),
     )
+    #   The kernel log is anybody's to read on this image (DMESG_RESTRICT is
+    #   off) and the ring-0 terminal draws it, so every part of a host_kmsg
+    #   line that is not a literal is named here: a saved init command went
+    #   there whole, secrets and all, where its settings are root's alone. A
+    #   new part is a review before it is a leak.
+    kmsg_parts = {"id", "ending", "path", "answer->zone", "answer->mode",
+                  "HOST_MACHINE_SCRIPT", "name"}
+    for file in ("src/sh/host.c", "src/moonwater/moonwater.c"):
+        text = (HARNESS_ROOT / file).read_text()
+        lines = re.findall(r"string_address line\[\] = \{(.*?)\};\s*host_kmsg\(line\);",
+                           text, re.S)
+        calls = len(re.findall(r"\bhost_kmsg\(", text)) - len(
+            re.findall(r"^static fn host_kmsg\(", text, re.M))
+        checks(len(lines) == calls,
+               "%s: a host_kmsg call whose parts this cannot read" % file)
+        for parts in lines:
+            names = {part.strip() for part in
+                     re.sub(r'"(?:[^"\\]|\\.)*"', "", parts).split(",")} - {"", "null"}
+            checks(names <= kmsg_parts, "%s: a kernel log line carries %s"
+                   % (file, ", ".join(sorted(names - kmsg_parts))))
     wire_source = (net + (HARNESS_ROOT / "src/sh/host.c").read_text() +
                    (HARNESS_ROOT / "src/waterlink/discover.c").read_text() +
                    (HARNESS_ROOT / "src/bowl.c").read_text())
