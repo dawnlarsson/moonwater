@@ -43097,6 +43097,8 @@ def harness_tls_peer(argv):
          [app(length_head + body), close]),
         ("EncryptedExtensions answering unasked ALPN", {"ee": b"\0\x10\0\5\0\3\2h2"},
          [app(length_head + body), close]),
+        ("an unknown extension in EncryptedExtensions", {"ee": b"\xfa\xfa\0\0"},
+         [app(length_head + body), close]),
         #   RFC 8446 4.4.2: a CertificateEntry's extensions answer the
         #   ClientHello's, which asks for no OCSP status and no SCT.
         ("an unasked OCSP status in a CertificateEntry",
@@ -43183,6 +43185,9 @@ def harness_tls_peer(argv):
     }
     # Where OpenSSL 3.6's client accepts what the RFC says to refuse.
     OPENSSL_LENIENT = {
+        "an unknown extension in EncryptedExtensions":
+            "4.2 makes every unasked extension response unsupported_extension; "
+            "OpenSSL passes over one it does not know",
         "an unknown extension in a CertificateEntry":
             "4.2 makes every unasked extension response unsupported_extension; "
             "OpenSSL refuses the OCSP status and SCT list it knows and passes "
