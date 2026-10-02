@@ -29653,6 +29653,23 @@ typedef struct
 
 _Static_assert(sizeof(ul_rfkill_event) == 8, "rfkill event ABI changed");
 
+/* One event to /dev/rfkill: the device by index (operation 2) or every device
+   of a type (3), blocked or not. 0, or the error the write had. */
+static bipolar ul_rfkill_send(bipolar handle, p32 index, p8 type, p8 operation, bool soft)
+{
+        ul_rfkill_event event = {
+            .index = index,
+            .type = type,
+            .operation = operation,
+            .soft = soft,
+        };
+        system_write_result sent = system_write_all_checked((positive)handle, address_of event,
+                                                            sizeof(event));
+
+        return sent.bytes == sizeof(event) ? 0
+               : sent.error ? sent.error : -ERROR_INPUT_OUTPUT;
+}
+
 typedef struct
 {
         string_address name;
@@ -29950,17 +29967,10 @@ static b32 ul_rfkill_change(ul_rfkill_row address_to rows, positive count,
 
                 if (!toggle)
                 {
-                        ul_rfkill_event event = {
-                            .index = kind == UL_RFKILL_MATCH_ID
-                                         ? (p32)value : 0,
-                            .type = kind == UL_RFKILL_MATCH_TYPE
-                                        ? (p8)value : 0,
-                            .operation = kind == UL_RFKILL_MATCH_ID ? 2 : 3,
-                            .soft = block,
-                        };
-                        if (system_write_all((positive)handle,
-                                             address_of event,
-                                             sizeof(event)) != sizeof(event))
+                        if (ul_rfkill_send(handle,
+                                           kind == UL_RFKILL_MATCH_ID ? (p32)value : 0,
+                                           kind == UL_RFKILL_MATCH_TYPE ? (p8)value : 0,
+                                           kind == UL_RFKILL_MATCH_ID ? 2 : 3, block))
                                 status = 1;
                         continue;
                 }
@@ -29969,20 +29979,10 @@ static b32 ul_rfkill_change(ul_rfkill_row address_to rows, positive count,
                    snapshot makes each matching radio an explicit CHANGE,
                    avoiding CHANGE_ALL's ambiguous result for mixed state. */
                 for (positive i = 0; i < count; i++)
-                        if (ul_rfkill_matches(rows + i, kind, value))
-                        {
-                                ul_rfkill_event event = {
-                                    .index = (p32)rows[i].id,
-                                    .type = rows[i].type_id,
-                                    .operation = 2,
-                                    .soft = !rows[i].soft,
-                                };
-                                if (system_write_all((positive)handle,
-                                                     address_of event,
-                                                     sizeof(event)) !=
-                                    sizeof(event))
-                                        status = 1;
-                        }
+                        if (ul_rfkill_matches(rows + i, kind, value) &&
+                            ul_rfkill_send(handle, (p32)rows[i].id, rows[i].type_id, 2,
+                                           !rows[i].soft))
+                                status = 1;
         }
 
         if (status)

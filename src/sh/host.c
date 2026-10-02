@@ -5663,6 +5663,12 @@ static fn radio_net_wake(void)
         system_close(handle);
 }
 
+/* The words a switch is set by: 1 for on, 0 for off, -1 for anything else. */
+static bipolar host_onoff(string_address word)
+{
+        return string_equals(word, "on") ? 1 : string_equals(word, "off") ? 0 : -1;
+}
+
 /* One word and its newline over a state file. The room is a timezone name's
    room, because the clock's words come through here too. */
 static bipolar radio_write_word(string_address path, string_address word)
@@ -5720,27 +5726,16 @@ static fn radio_unlock(bipolar handle)
 
 static bipolar radio_rfkill(p8 type, bool block)
 {
-        ul_rfkill_event event = {
-            .index = 0,
-            .type = type,
-            .operation = RADIO_RFKILL_CHANGE_ALL,
-            .soft = block,
-        };
         bipolar handle = system_open_at(AT_FDCWD, "/dev/rfkill",
                                         O_WRONLY | O_CLOEXEC | O_NONBLOCK);
+        bipolar sent;
 
         if (handle < 0)
                 return handle;
 
-        if (system_write_all((positive)handle, address_of event,
-                             sizeof(event)) != sizeof(event))
-        {
-                system_close(handle);
-                return -1;
-        }
-
+        sent = ul_rfkill_send(handle, 0, type, RADIO_RFKILL_CHANGE_ALL, block);
         system_close(handle);
-        return 0;
+        return sent;
 }
 
 static bool radio_text_plain(string_address text, positive length)
@@ -5753,24 +5748,17 @@ static bool radio_text_plain(string_address text, positive length)
         return true;
 }
 
-static bool radio_line_has(p8 address_to text, positive got, string_address want)
+/* The next line of text, its start and length (the newline is neither), with
+   the cursor past it; false once there is none. */
+static bool host_line_next(p8 address_to text, positive size, positive address_to at,
+                           positive address_to start, positive address_to length)
 {
-        positive at = 0;
-        positive want_length = string_length(want);
-
-        while (at < got)
-        {
-                positive start = at;
-
-                at += memory_span_without_byte(text + at, '\n', got - at);
-                if (at - start == want_length &&
-                    !memory_compare(text + start, want, want_length))
-                        return true;
-                if (at < got)
-                        at++;
-        }
-
-        return false;
+        if (*at >= size)
+                return false;
+        *start = *at;
+        *length = memory_span_without_byte(text + *at, '\n', size - *at);
+        *at += *length + (*at + *length < size);
+        return true;
 }
 
 static positive radio_wifi_load(radio_network address_to into, positive room)
@@ -5779,6 +5767,8 @@ static positive radio_wifi_load(radio_network address_to into, positive room)
         bipolar got = host_read_state(NET_WIFI_LIST, text, sizeof(text));
         positive count = 0;
         positive at = 0;
+        positive start;
+        positive length;
         bool want_ssid = true;
 
         memory_fill(into, 0, sizeof(radio_network) * room);
@@ -5788,17 +5778,10 @@ static positive radio_wifi_load(radio_network address_to into, positive room)
            radio_network array below does, so it is scrubbed the same way
            before this frame is left to whatever runs in it next. */
 
-        while (at < (positive)got && count < room)
+        while (count < room &&
+               host_line_next(text, (positive)got, address_of at, address_of start,
+                              address_of length))
         {
-                positive start = at;
-                positive length;
-
-                at += memory_span_without_byte(text + at, '\n',
-                                               (positive)got - at);
-                length = at - start;
-                if (at < (positive)got)
-                        at++;
-
                 if (want_ssid)
                 {
                         if (!length)
@@ -7496,14 +7479,117 @@ static b32 radio_wifi_off(bool say)
         return 0;
 }
 
-static b32 radio_wifi_add(string_address ssid, string_address pass)
+/* The network put on the saved list, or put there again with the password it
+   was last given. -E2BIG when the list is full. */
+static bipolar radio_wifi_store(string_address ssid, string_address pass)
 {
         radio_network networks[RADIO_WIFI_MOST];
-        bipolar lock;
-        positive count;
+        positive count = radio_wifi_load(networks, RADIO_WIFI_MOST);
         positive at;
         positive ssid_length = string_length(ssid);
         positive pass_length = pass ? string_length(pass) : 0;
+        bipolar failed = 0;
+
+        for (at = 0; at < count; at++)
+                if (string_equals((string_address)networks[at].ssid, ssid))
+                        break;
+
+        if (at == count && count++ == RADIO_WIFI_MOST)
+                failed = -E2BIG;
+        else
+        {
+                memory_fill(networks[at].ssid, 0, sizeof(networks[at].ssid));
+                memory_copy(networks[at].ssid, ssid, ssid_length);
+                networks[at].ssid[ssid_length] = end;
+                networks[at].ssid_length = (p8)ssid_length;
+                memory_fill(networks[at].pass, 0, sizeof(networks[at].pass));
+                if (pass_length)
+                        memory_copy(networks[at].pass, pass, pass_length);
+                networks[at].pass[pass_length] = end;
+                networks[at].pass_length = (p8)pass_length;
+                failed = radio_wifi_save(networks, count);
+        }
+
+        crypto_forget(networks, sizeof(networks));
+        return failed;
+}
+
+/* Everything of `wifi add` that happens with the radio lock held. */
+static b32 radio_wifi_enter(string_address ssid, string_address pass)
+{
+        radio_air air;
+        radio_heard address_to heard = null;
+        positive pass_length = pass ? string_length(pass) : 0;
+        bipolar stored = radio_wifi_store(ssid, pass);
+        bipolar failed;
+        p8 why[RADIO_WHY_ROOM];
+
+        if (stored == -E2BIG)
+                return host_refuse("too many saved networks%s\n", "");
+        if (stored < 0)
+                return host_fail("wifi", -1);
+
+        radio_write_word(NET_WIFI_POWER, "on");
+        radio_rfkill(RADIO_RFKILL_WLAN, false);
+
+        /*      What the air already says about it, from the last scan and
+                without asking for another: a network that asks for what the
+                join cannot give is saved and not tried, which would only
+                have waited out the association timeout to say less. */
+        if (radio_air_take(address_of air, RADIO_AIR_STALE | RADIO_AIR_JOINABLE) &&
+            ((heard = radio_air_find(address_of air, ssid)) ||
+             (radio_air_take(address_of air, RADIO_AIR_NOW | RADIO_AIR_JOINABLE) &&
+              (heard = radio_air_find(address_of air, ssid)))))
+        {
+                if (!radio_security_joinable(heard->security))
+                        return host_refuse("saved, but it asks for %s, which "
+                                           "moonwater cannot join yet\n",
+                                           radio_security_words[heard->security]);
+                if (heard->security != RADIO_OPEN && !pass_length)
+                        return host_refuse("saved with no password, but it "
+                                           "asks for one%s\n",
+                                           "");
+        }
+
+        /*      No radio at all is not one that is still arriving: the join's
+                eight seconds of asking are for a card whose interface is on
+                its way at boot. */
+        failed = radio_has_interface() ? radio_wifi_join(ssid, pass) : -19;
+        radio_last_set(ssid, failed);
+
+        radio_net_wake();
+        if (failed == -19)
+                return radio_wifi_why(why, sizeof(why))
+                           ? host_refuse("saved; wifi: %s\n", why)
+                           : host_refuse("saved, but there is no "
+                                         "wireless interface%s\n",
+                                         "");
+        if (failed == -113)
+                return host_refuse("saved, but it is not in range%s\n", "");
+        if (radio_join_said(failed))
+        {
+                if (failed == -110 &&
+                    radio_air_take(address_of air, RADIO_AIR_CACHED) &&
+                    air.count && !radio_air_find(address_of air, ssid))
+                        return host_refuse("saved, but it is not in range%s\n", "");
+                return host_refuse("saved, but the network %s\n",
+                                   radio_join_words(failed));
+        }
+        if (failed < 0)
+                return host_fail("wifi", failed);
+        if (pass && pass[0])
+                crypto_forget((address_any)pass, string_length(pass));
+
+        host_say(log, host_label "wifi joined %s\n", ssid);
+        return 0;
+}
+
+static b32 radio_wifi_add(string_address ssid, string_address pass)
+{
+        positive ssid_length = string_length(ssid);
+        positive pass_length = pass ? string_length(pass) : 0;
+        bipolar lock;
+        b32 result;
 
         if (!ssid_length || ssid_length > RADIO_SSID_MOST)
                 return host_refuse("that network name is empty or too long%s\n",
@@ -7526,135 +7612,19 @@ static b32 radio_wifi_add(string_address ssid, string_address pass)
         lock = radio_lock(true);
         if (lock < 0)
                 return host_fail("wifi", lock);
-        count = radio_wifi_load(networks, RADIO_WIFI_MOST);
-
-        for (at = 0; at < count; at++)
-                if (string_equals((string_address)networks[at].ssid, ssid))
-                        break;
-
-        if (at == count)
-        {
-                if (count == RADIO_WIFI_MOST)
-                {
-                        crypto_forget(networks, sizeof(networks));
-                        radio_unlock(lock);
-                        return host_refuse("too many saved networks%s\n", "");
-                }
-                count++;
-        }
-
-        memory_fill(networks[at].ssid, 0, sizeof(networks[at].ssid));
-        memory_copy(networks[at].ssid, ssid, ssid_length);
-        networks[at].ssid[ssid_length] = end;
-        networks[at].ssid_length = (p8)ssid_length;
-        memory_fill(networks[at].pass, 0, sizeof(networks[at].pass));
-        if (pass_length)
-                memory_copy(networks[at].pass, pass, pass_length);
-        networks[at].pass[pass_length] = end;
-        networks[at].pass_length = (p8)pass_length;
-
-        if (radio_wifi_save(networks, count) < 0)
-        {
-                crypto_forget(networks, sizeof(networks));
-                radio_unlock(lock);
-                return host_fail("wifi", -1);
-        }
-
-        radio_write_word(NET_WIFI_POWER, "on");
-        radio_rfkill(RADIO_RFKILL_WLAN, false);
-        crypto_forget(networks, sizeof(networks));
-
-        /*      What the air already says about it, from the last scan and
-                without asking for another: a network that asks for what the
-                join cannot give is saved and not tried, which would only
-                have waited out the association timeout to say less. */
-        {
-                radio_air air;
-                radio_heard address_to heard;
-
-                if (radio_air_take(address_of air, RADIO_AIR_STALE | RADIO_AIR_JOINABLE) &&
-                    ((heard = radio_air_find(address_of air, ssid)) ||
-                     (radio_air_take(address_of air, RADIO_AIR_NOW | RADIO_AIR_JOINABLE) &&
-                      (heard = radio_air_find(address_of air, ssid)))))
-                {
-                        if (!radio_security_joinable(heard->security) ||
-                            (heard->security != RADIO_OPEN && !pass_length))
-                                radio_unlock(lock);
-                        if (!radio_security_joinable(heard->security))
-                                return host_refuse("saved, but it asks for %s, which "
-                                                   "moonwater cannot join yet\n",
-                                                   radio_security_words[heard->security]);
-                        if (heard->security != RADIO_OPEN && !pass_length)
-                                return host_refuse("saved with no password, but it "
-                                                   "asks for one%s\n",
-                                                   "");
-                }
-        }
-
-        {
-                bipolar failed;
-                p8 why[RADIO_WHY_ROOM];
-
-                /*      No radio at all is not one that is still arriving:
-                        the join's eight seconds of asking are for a card
-                        whose interface is on its way at boot. */
-                failed = radio_has_interface() ? radio_wifi_join(ssid, pass) : -19;
-                radio_unlock(lock);
-                radio_last_set(ssid, failed);
-
-                radio_net_wake();
-                if (failed == -19)
-                        return radio_wifi_why(why, sizeof(why))
-                                   ? host_refuse("saved; wifi: %s\n", why)
-                                   : host_refuse("saved, but there is no "
-                                                 "wireless interface%s\n",
-                                                 "");
-                if (failed == -113)
-                        return host_refuse("saved, but it is not in range%s\n", "");
-                if (radio_join_said(failed))
-                {
-                        radio_air air;
-
-                        if (failed == -110 &&
-                            radio_air_take(address_of air, RADIO_AIR_CACHED) &&
-                            air.count && !radio_air_find(address_of air, ssid))
-                                return host_refuse("saved, but it is not in range%s\n", "");
-                        return host_refuse("saved, but the network %s\n",
-                                           radio_join_words(failed));
-                }
-                if (failed < 0)
-                        return host_fail("wifi", failed);
-                if (pass && pass[0])
-                        crypto_forget((address_any)pass, string_length(pass));
-        }
-
-        host_say(log, host_label "wifi joined %s\n", ssid);
-        return 0;
+        result = radio_wifi_enter(ssid, pass);
+        radio_unlock(lock);
+        return result;
 }
 
-/*
-        Forget a saved network. The list is rewritten without it, and the
-        password with it. A network the machine is joined to when this runs
-        is left too: it was saved so the machine would rejoin it, and once it
-        is not saved nothing else would ever ask for the connection to end.
-*/
-static b32 radio_wifi_remove(string_address ssid)
+/* Everything of `wifi remove` that happens with the radio lock held. */
+static b32 radio_wifi_forget(string_address ssid)
 {
         radio_network networks[RADIO_WIFI_MOST];
-        bipolar lock;
-        positive count;
+        positive count = radio_wifi_load(networks, RADIO_WIFI_MOST);
         positive at;
         bool was_joined = false;
-        positive ssid_length = string_length(ssid);
-
-        if (!ssid_length || ssid_length > RADIO_SSID_MOST)
-                return host_refuse("that network name is empty or too long%s\n",
-                                   "");
-
-        lock = radio_lock(true);
-        if (lock < 0)
-                return host_fail("wifi", lock);
-        count = radio_wifi_load(networks, RADIO_WIFI_MOST);
+        bipolar failed;
 
         for (at = 0; at < count; at++)
                 if (string_equals((string_address)networks[at].ssid, ssid))
@@ -7663,7 +7633,6 @@ static b32 radio_wifi_remove(string_address ssid)
         if (at == count)
         {
                 crypto_forget(networks, sizeof(networks));
-                radio_unlock(lock);
                 return host_refuse("no saved network is called %s\n", ssid);
         }
 
@@ -7684,13 +7653,10 @@ static b32 radio_wifi_remove(string_address ssid)
         count--;
         crypto_forget(address_of networks[count], sizeof(networks[count]));
 
-        if (radio_wifi_save(networks, count) < 0)
-        {
-                crypto_forget(networks, sizeof(networks));
-                radio_unlock(lock);
-                return host_fail("wifi", -1);
-        }
+        failed = radio_wifi_save(networks, count);
         crypto_forget(networks, sizeof(networks));
+        if (failed < 0)
+                return host_fail("wifi", -1);
 
         {
                 p8 last[RADIO_SSID_MOST + 1];
@@ -7703,12 +7669,35 @@ static b32 radio_wifi_remove(string_address ssid)
 
         if (was_joined)
                 (void)radio_wifi_leave();
-        radio_unlock(lock);
         radio_net_wake();
 
         host_say(log, host_label "wifi forgot %s%s\n", ssid,
                  was_joined ? " and left it" : "");
         return 0;
+}
+
+/*
+        Forget a saved network. The list is rewritten without it, and the
+        password with it. A network the machine is joined to when this runs
+        is left too: it was saved so the machine would rejoin it, and once it
+        is not saved nothing else would ever ask for the connection to end.
+*/
+static b32 radio_wifi_remove(string_address ssid)
+{
+        positive ssid_length = string_length(ssid);
+        bipolar lock;
+        b32 result;
+
+        if (!ssid_length || ssid_length > RADIO_SSID_MOST)
+                return host_refuse("that network name is empty or too long%s\n",
+                                   "");
+
+        lock = radio_lock(true);
+        if (lock < 0)
+                return host_fail("wifi", lock);
+        result = radio_wifi_forget(ssid);
+        radio_unlock(lock);
+        return result;
 }
 
 /*
@@ -7898,110 +7887,77 @@ static b32 radio_bluetooth_power(bool on, bool say)
         return 0;
 }
 
-static b32 radio_bluetooth_add(string_address identity)
+/* Remember a device's name or forget it: the list is read, changed and
+   written back whole under the lock the wifi verbs take, so two runs at once
+   cannot lose each other's names. */
+static b32 radio_bluetooth_edit(string_address identity, bool add)
 {
         p8 text[4096];
+        p8 kept[sizeof(text) + 1];
+        positive length = string_length(identity);
+        positive used = 0;
+        positive at = 0;
+        positive start;
+        positive size;
         bipolar got;
         bipolar lock;
-        p8 line[320];
-        positive used;
+        bipolar failed = 0;
+        bool found = false;
 
-        if (!identity[0] || string_length(identity) > 128)
+        if (!length || length > 128)
                 return host_refuse("that bluetooth name is empty or too long%s\n",
                                    "");
-        if (!radio_text_plain(identity, string_length(identity)))
+        if (add && !radio_text_plain(identity, length))
                 return host_refuse("that bluetooth name cannot be stored%s\n", "");
 
-        /*      The list is read, changed and written back whole, so two
-                runs at once lost one of the names: under the lock the wifi
-                verbs take, the second reads what the first wrote. */
         lock = radio_lock(true);
         if (lock < 0)
                 return host_fail("bluetooth", lock);
         got = host_read_state(NET_BLUETOOTH_LIST, text, sizeof(text));
         if (got < 0)
-        {
-                text[0] = end;
                 got = 0;
-        }
 
-        if (!(got > 0 && radio_line_has(text, (positive)got, identity)))
+        while (host_line_next(text, (positive)got, address_of at, address_of start,
+                              address_of size))
         {
-                string_copy_bounded(line, identity, sizeof(line));
-                string_append_bounded(line, "\n", sizeof(line));
-                used = (positive)got;
-                if (used + string_length(line) >= sizeof(text))
-                {
-                        radio_unlock(lock);
-                        return host_refuse("too many saved bluetooth devices%s\n",
-                                           "");
-                }
-                memory_copy(text + used, line, string_length(line));
-                used += string_length(line);
-                if (host_write_file(NET_BLUETOOTH_LIST, text, used, 0644,
-                                    true) < 0)
-                {
-                        radio_unlock(lock);
-                        return host_fail("bluetooth", -1);
-                }
-        }
-        radio_unlock(lock);
-
-        radio_bluetooth_power(true, false);
-        host_say(log, host_label "bluetooth remembered %s\n", identity);
-        return 0;
-}
-
-/* Forget a remembered device: its line goes and the others stay as they were. */
-static b32 radio_bluetooth_remove(string_address identity)
-{
-        p8 text[4096];
-        p8 kept[4096];
-        bipolar got;
-        bipolar lock;
-        positive at = 0;
-        positive used = 0;
-        bool found = false;
-        positive want_length = string_length(identity);
-
-        if (!want_length || want_length > 128)
-                return host_refuse("that bluetooth name is empty or too long%s\n", "");
-        lock = radio_lock(true);
-        if (lock < 0)
-                return host_fail("bluetooth", lock);
-        got = host_read_state(NET_BLUETOOTH_LIST, text, sizeof(text));
-        if (got <= 0 || !radio_line_has(text, (positive)got, identity))
-        {
-                radio_unlock(lock);
-                return host_refuse("no remembered bluetooth device is called %s\n", identity);
-        }
-
-        while (at < (positive)got)
-        {
-                positive start = at;
-                positive end_of_line;
-
-                at += memory_span_without_byte(text + at, '\n', (positive)got - at);
-                end_of_line = at;
-                if (at < (positive)got)
-                        at++;
-                if (end_of_line - start == want_length &&
-                    !memory_compare(text + start, identity, want_length))
+                if (size == length && !memory_compare(text + start, identity, length))
                 {
                         found = true;
-                        continue;
+                        if (!add)
+                                continue;
                 }
-                memory_copy(kept + used, text + start, at - start);
-                used += at - start;
+                memory_copy(kept + used, text + start, size);
+                kept[used += size] = '\n';
+                used++;
         }
 
-        if (!found || host_write_file(NET_BLUETOOTH_LIST, kept, used, 0644, true) < 0)
+        //      1: nothing by that name to forget, 2: no room for another,
+        //      3: the list would not be written.
+        if (!add && !found)
+                failed = 1;
+        else if (add && !found && used + length + 1 >= sizeof(kept))
+                failed = 2;
+        else if (add != found)
         {
-                radio_unlock(lock);
-                return host_fail("bluetooth", -1);
+                if (add)
+                {
+                        memory_copy(kept + used, identity, length);
+                        kept[used += length] = '\n';
+                        used++;
+                }
+                failed = host_write_file(NET_BLUETOOTH_LIST, kept, used, 0644, true) < 0 ? 3 : 0;
         }
         radio_unlock(lock);
-        host_say(log, host_label "bluetooth forgot %s\n", identity);
+
+        if (failed == 1)
+                return host_refuse("no remembered bluetooth device is called %s\n", identity);
+        if (failed == 2)
+                return host_refuse("too many saved bluetooth devices%s\n", "");
+        if (failed)
+                return host_fail("bluetooth", -1);
+        if (add)
+                radio_bluetooth_power(true, false);
+        host_say(log, host_label "bluetooth %s %s\n", add ? "remembered" : "forgot", identity);
         return 0;
 }
 
@@ -8011,30 +7967,22 @@ static b32 radio_bluetooth_status(void)
         bipolar got = host_read_state(NET_BLUETOOTH_LIST, text, sizeof(text));
         bool off = radio_word_is(NET_BLUETOOTH_POWER, "off");
         positive at = 0;
+        positive start;
+        positive length;
 
         string_format(log, host_label "bluetooth %s\n",
                       off ? (string_address) "off" : (string_address) "on");
-        if (got > 0)
-                while (at < (positive)got)
+        while (got > 0 && host_line_next(text, (positive)got, address_of at,
+                                         address_of start, address_of length))
+                if (length)
                 {
-                        positive start = at;
+                        p8 name[129];
 
-                        at += memory_span_without_byte(text + at, '\n',
-                                                       (positive)got - at);
-                        if (at > start)
-                        {
-                                p8 name[129];
-                                positive length = at - start;
-
-                                if (length > 128)
-                                        length = 128;
-                                memory_copy(name, text + start, length);
-                                name[length] = end;
-                                string_format(log, host_label "  %s\n",
-                                              (string_address)name);
-                        }
-                        if (at < (positive)got)
-                                at++;
+                        if (length > 128)
+                                length = 128;
+                        memory_copy(name, text + start, length);
+                        name[length] = end;
+                        string_format(log, host_label "  %s\n", (string_address)name);
                 }
         log_flush();
         return 0;
@@ -8207,6 +8155,7 @@ static b32 host_radio(string_address address_to arguments, positive count)
 {
         string_address verb = arguments[1];
         string_address word = count > 2 ? arguments[2] : null;
+        bipolar power;
         bool mutate;
 
         if (string_equals(verb, "priority"))
@@ -8226,15 +8175,14 @@ static b32 host_radio(string_address address_to arguments, positive count)
         mutate = count > 2;
         if (mutate && !bowl_is_root())
                 return host_refuse("%s needs root\n", "moonwater");
+        power = count == 3 ? host_onoff(word) : -1;
 
         if (string_equals(verb, "wired"))
         {
                 if (count < 3)
                         return radio_wired_status();
-                if (count == 3 && string_equals(word, "on"))
-                        return radio_wired_set(true);
-                if (count == 3 && string_equals(word, "off"))
-                        return radio_wired_set(false);
+                if (power >= 0)
+                        return radio_wired_set(power);
                 return host_usage();
         }
 
@@ -8242,10 +8190,8 @@ static b32 host_radio(string_address address_to arguments, positive count)
         {
                 if (count < 3)
                         return radio_wifi_status();
-                if (string_equals(word, "on") && count == 3)
-                        return radio_wifi_on(true);
-                if (string_equals(word, "off") && count == 3)
-                        return radio_wifi_off(true);
+                if (power >= 0)
+                        return power ? radio_wifi_on(true) : radio_wifi_off(true);
                 if (string_equals(word, "add") && count >= 4 && count <= 5)
                 {
                         p8 pass[256];
@@ -8287,14 +8233,10 @@ static b32 host_radio(string_address address_to arguments, positive count)
 
         if (count < 3)
                 return radio_bluetooth_status();
-        if (string_equals(word, "on") && count == 3)
-                return radio_bluetooth_power(true, true);
-        if (string_equals(word, "off") && count == 3)
-                return radio_bluetooth_power(false, true);
-        if (string_equals(word, "add") && count == 4)
-                return radio_bluetooth_add(arguments[3]);
-        if (string_equals(word, "remove") && count == 4)
-                return radio_bluetooth_remove(arguments[3]);
+        if (power >= 0)
+                return radio_bluetooth_power(power, true);
+        if ((string_equals(word, "add") || string_equals(word, "remove")) && count == 4)
+                return radio_bluetooth_edit(arguments[3], string_equals(word, "add"));
         return host_usage();
 }
 
@@ -8432,32 +8374,35 @@ static bool tune_lists(string_address path, string_address word)
         return false;
 }
 
+/* Whether a line of the kept settings is the one for a key: the key, a blank,
+   then the value. */
+static bool tune_line_is(p8 address_to line, positive length, string_address key)
+{
+        positive size = string_length(key);
+
+        return length > size && !memory_compare(line, key, size) && line[size] == ' ';
+}
+
 /* The kept value for a key, or false. */
 static bool tune_kept(string_address key, p8 address_to into, positive room)
 {
         p8 text[512];
         bipolar got = file_slurp_once_at(AT_FDCWD, TUNE_KEPT, text, sizeof(text) - 1);
         positive at = 0;
-        positive length = string_length(key);
+        positive start;
+        positive length;
 
         if (got <= 0)
                 return false;
-        text[got] = end;
-        while (at < (positive)got)
-        {
-                positive start = at;
-                positive stop = start + memory_span_without_byte(text + start, '\n',
-                                                                 (positive)got - start);
-
-                at = stop < (positive)got ? stop + 1 : stop;
-                if (stop - start > length && !memory_compare(text + start, key, length) &&
-                    text[start + length] == ' ')
+        while (host_line_next(text, (positive)got, address_of at, address_of start,
+                              address_of length))
+                if (tune_line_is(text + start, length, key))
                 {
-                        text[stop] = end;
-                        return string_copy_bounded(into, (string_address)text + start + length + 1,
+                        text[start + length] = end;
+                        return string_copy_bounded(into, (string_address)text + start +
+                                                             string_length(key) + 1,
                                                    room) < room;
                 }
-        }
         return false;
 }
 
@@ -8469,32 +8414,29 @@ static bool tune_keep(string_address key, string_address value)
         bipolar got = file_slurp_once_at(AT_FDCWD, TUNE_KEPT, text, sizeof(text) - 1);
         positive at = 0;
         positive used = 0;
-        positive length = string_length(key);
+        positive start;
+        positive length;
+        positive size = string_length(key);
 
         if (got < 0)
                 got = 0;
-        while (at < (positive)got)
+        while (host_line_next(text, (positive)got, address_of at, address_of start,
+                              address_of length))
         {
-                positive start = at;
-                positive stop = start + memory_span_without_byte(text + start, '\n',
-                                                                 (positive)got - start);
-
-                at = stop < (positive)got ? stop + 1 : stop;
-                if (stop - start > length && !memory_compare(text + start, key, length) &&
-                    text[start + length] == ' ')
+                if (tune_line_is(text + start, length, key))
                         continue;
-                if (used + (at - start) + 1 >= sizeof(out))
+                if (used + length + 1 >= sizeof(out))
                         return false;
-                memory_copy(out + used, text + start, stop - start);
-                used += stop - start;
+                memory_copy(out + used, text + start, length);
+                used += length;
                 out[used++] = '\n';
         }
         if (value[0])
         {
-                if (used + length + string_length(value) + 2 >= sizeof(out))
+                if (used + size + string_length(value) + 2 >= sizeof(out))
                         return false;
-                memory_copy(out + used, key, length);
-                used += length;
+                memory_copy(out + used, key, size);
+                used += size;
                 out[used++] = ' ';
                 memory_copy(out + used, value, string_length(value));
                 used += string_length(value);
@@ -8544,11 +8486,11 @@ static b32 tune_airplane(string_address address_to arguments, positive count)
                          wifi_off && bluetooth_off ? "on" : "off");
                 return 0;
         }
-        if (count != 3 || (!string_equals(arguments[2], "on") && !string_equals(arguments[2], "off")))
+        if (count != 3 || host_onoff(arguments[2]) < 0)
                 return host_usage();
         host_need_root("moonwater airplane");
 
-        if (string_equals(arguments[2], "on"))
+        if (host_onoff(arguments[2]))
         {
                 (void)radio_wifi_off(false);
                 (void)radio_bluetooth_power(false, false);
@@ -8887,9 +8829,9 @@ static b32 tune_cpu(string_address address_to arguments, positive count)
                 return 0;
         }
         if (count == 4 && (string_equals(arguments[2], "boost") || string_equals(arguments[2], "smt")) &&
-            (string_equals(arguments[3], "on") || string_equals(arguments[3], "off")))
+            host_onoff(arguments[3]) >= 0)
         {
-                bool on = string_equals(arguments[3], "on");
+                bool on = host_onoff(arguments[3]);
                 bool boost = string_equals(arguments[2], "boost");
 
                 host_need_root("moonwater cpu");
