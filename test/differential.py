@@ -41086,9 +41086,20 @@ def harness_moonwater_cli(argv):
         (sandbox / "bowls/one/etc/localtime").symlink_to("/usr/share/zoneinfo/UTC")
         shutil.copy(args.shell, sandbox / "tmp/moonwater")
 
+        #       A /dev of its own: the machine's null, zero, full, random, urandom and
+        #       tty, and an rfkill that is a plain file. Binding the whole of /dev
+        #       let airplane, wifi and bluetooth write the real /dev/rfkill, which a
+        #       seated user may; here the last event a verb wrote is a file to read.
+        nodes = [name for name in ("null", "zero", "full", "random", "urandom", "tty")
+                 if Path("/dev", name).exists()]
+        private_dev = (f"mount -t tmpfs -o mode=755 tmpfs {sandbox}/dev && " +
+                       "".join(f": > {sandbox}/dev/{name} && mount --bind /dev/{name} {sandbox}/dev/{name} && "
+                               for name in nodes) +
+                       f": > {sandbox}/dev/rfkill && ln -s /proc/self/fd {sandbox}/dev/fd && ")
+
         def session(script):
             """Run a script in the sandbox; its lines, and whether it finished."""
-            wrapper = (f"mount --rbind /usr {sandbox}/usr && mount --rbind /dev {sandbox}/dev && "
+            wrapper = (f"mount --rbind /usr {sandbox}/usr && {private_dev}"
                        f"mount --rbind /proc {sandbox}/proc && "
                        f"exec chroot {sandbox} /usr/bin/sh -c 'cd / && . /tmp/script'")
             (sandbox / "tmp/script").write_text(script)
@@ -41178,14 +41189,12 @@ def harness_moonwater_cli(argv):
                  "UTC+14", "UTC-14", "<+0530>-5:30", "Europe/", "../../etc/passwd", "x" * 300,
                  "\x1b[31m", "tab\there", "sv", "SE", "\u00e5\u00e4\u00f6", "0", "18446744073709551616",
                  "power", "canvas on", "--", "-h", "status"]
-        #       No "airplane" either: on writes to /dev/rfkill, which the sandbox
-        #       shares with the machine, and would block its radios.
         #       Neither "reboot" nor "bios" carries a reboot into these words: bios
         #       reboot sets a bit in the firmware, and a run as real root would
         #       leave it set on the machine that ran the lane.
         verbs = ["", "status", "timezone", "time", "ntp", "keyboard", "name", "canvas", "bind",
                  "wifi", "wired", "bluetooth", "priority", "brightness", "power", "cpu",
-                 "charge", "-h"]
+                 "charge", "airplane", "-h"]
         fuzzed = []
         for number in range(300):
             argv = [rng.choice(verbs)] + [rng.choice(words) for _ in range(rng.randint(0, 4))]
@@ -41396,6 +41405,23 @@ def harness_moonwater_cli(argv):
         joined = "\n".join(got)
         check("@@ words\noff\noff" in joined, "airplane on turns the wifi and bluetooth words off", joined[-200:])
         check("@@ words2\non\non" in joined, "airplane off turns them back on", joined[-200:])
+
+        # What a verb tells the radios, read from the sandbox's rfkill, which
+        # is a plain file and so holds the last event written to it: eight
+        # bytes, the index, the type (1 wifi, 2 bluetooth, 0 every radio), the
+        # operation (3, every device of the type) and the soft block.
+        events = (("wifi on", "00 00 00 00 01 03 00 00"), ("wifi off", "00 00 00 00 01 03 01 00"),
+                  ("bluetooth on", "00 00 00 00 02 03 00 00"), ("bluetooth off", "00 00 00 00 02 03 01 00"),
+                  ("airplane on", "00 00 00 00 00 03 01 00"))
+        got = tuned("test -f /dev/rfkill && echo '@@ rfkill file'\n" + "".join(
+            f": > /dev/rfkill; timeout 20 /tmp/moonwater {verb} > /dev/null 2>&1; "
+            f"echo \"@@ event {verb}: $(od -An -tx1 /dev/rfkill | tr -s ' ' | sed 's/^ //')\"\n"
+            for verb, _ in events))
+        joined = "\n".join(got)
+        check("@@ rfkill file" in joined, "the sandbox's rfkill is a plain file, not the machine's", joined[:200])
+        for verb, wanted in events:
+            check(f"@@ event {verb}: {wanted}" in joined, f"{verb} writes its rfkill event",
+                  [line for line in got if line.startswith(f"@@ event {verb}")])
 
         got = tuned(say("bluetooth add kbd1") + say("bluetooth add mouse2") + say("bluetooth remove kbd1") +
                     "echo '@@ left'; cat /root/bluetooth; echo '@@end'\n" + say("bluetooth remove kbd1"))
