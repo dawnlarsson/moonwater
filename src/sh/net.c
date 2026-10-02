@@ -1543,36 +1543,28 @@ failed:
         return net_refused(doing, status);
 }
 
+//      host.c's, which is included after this file: a state word is read as a
+//      plain file and never waited for, so a FIFO planted at its name on the
+//      data partition cannot stop the watcher.
+static bipolar host_read_word(string_address path, p8 address_to into, positive room);
+
 /* Whether `moonwater wired off` was said: no wired link is then one a lease
    is asked on, and the walk goes to whatever else has carrier. */
 static COLD bool net_wired_off(void)
 {
         p8 text[8];
-        bipolar got = file_slurp_once_at(AT_FDCWD, NET_WIRED_POWER, text, sizeof(text));
 
-        while (got > 0 && (text[got - 1] == '\n' || text[got - 1] == ' '))
-                got--;
-        if (got < 0)
-                return false;
-        text[got] = end;
-        return string_equals(text, "off");
+        return host_read_word(NET_WIRED_POWER, text, sizeof(text)) >= 0 &&
+               string_equals(text, "off");
 }
 
 static COLD p8 net_internet_prefer(void)
 {
         p8 text[16];
-        bipolar got = file_slurp_once_at(AT_FDCWD, NET_INTERNET_RUN, text,
-                                         sizeof(text));
 
-        if (got < 0)
-                got = file_slurp_once_at(AT_FDCWD, NET_INTERNET_ROOT, text,
-                                         sizeof(text));
-        if (got < 0)
+        if (host_read_word(NET_INTERNET_RUN, text, sizeof(text)) < 0 &&
+            host_read_word(NET_INTERNET_ROOT, text, sizeof(text)) < 0)
                 return NETLINK_PREFER_WIRED;
-
-        while (got > 0 && (text[got - 1] == '\n' || text[got - 1] == ' '))
-                got--;
-        text[got] = end;
         return string_equals(text, "wifi") ? NETLINK_PREFER_WIFI
                                            : NETLINK_PREFER_WIRED;
 }

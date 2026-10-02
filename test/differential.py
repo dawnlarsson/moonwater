@@ -41824,6 +41824,49 @@ def harness_moonwater_cli(argv):
         check("stolen" not in joined and "passpass1" not in joined,
               "wifi does not read a planted final symlink", joined[-300:])
 
+        # The words the switches are kept in, the internet preference and
+        # /root/tune are state files too. A FIFO at any of them held the verb
+        # that reads it (and the machine at boot, which reads them all), and a
+        # link at the name was followed to whatever it named.
+        fifoed = (("wifi.power", "wifi"), ("wifi.power", "wifi off"), ("wired.power", "wired"),
+                  ("wired.power", "wired off"), ("bluetooth.power", "bluetooth"),
+                  ("bluetooth.power", "bluetooth on"), ("internet", "priority internet"),
+                  ("internet", "priority internet wifi"), ("tune", "power"), ("tune", "charge limit 80"),
+                  ("tune", "cpu boost off"))
+        got = tuned("".join(
+            f"rm -f /root/{name}; mkfifo /root/{name}\n"
+            f"timeout 3 /tmp/moonwater {verb} > /dev/null 2>&1; echo \"@@ fifo {name} {verb} $?\"\n"
+            f"rm -f /root/{name}\n" for name, verb in fifoed))
+        joined = "\n".join(got)
+        for name, verb in fifoed:
+            check(f"@@ fifo {name} {verb} 124" not in joined and f"@@ fifo {name} {verb} " in joined,
+                  f"a FIFO at /root/{name} does not hold `{verb}`", joined[-300:])
+        got = tuned("rm -f /run/moonwater/internet /root/wifi.power /root/bluetooth.power /root/internet\n"
+                    "printf 'off\\n' > /root/off-target; printf 'wifi\\n' > /root/wifi-word\n"
+                    "ln -s off-target /root/wifi.power; ln -s off-target /root/bluetooth.power\n"
+                    "ln -s wifi-word /root/internet\n" +
+                    say("wifi") + say("bluetooth") + say("priority internet"))
+        seen = answers(got)
+        check("wifi off" not in " ".join(seen["wifi"]["out"]) and
+              "bluetooth off" not in " ".join(seen["bluetooth"]["out"]) and
+              "prefers wired" in " ".join(seen["priority internet"]["out"]),
+              "a word that is a link is not followed", repr(seen))
+
+        # A word that is already what it is asked to be is not written again:
+        # two syncs, of the file and its directory, at every boot for nothing.
+        # A new file is a new inode, so the same inode is no write.
+        got = tuned("rm -f /root/bluetooth.power /root/wifi.power\n" + say("bluetooth on") + say("wifi on") +
+                    "bi=$(stat -c %i /root/bluetooth.power); wi=$(stat -c %i /root/wifi.power)\n" +
+                    say("bluetooth on") + say("wifi on") +
+                    "echo \"@@ same $([ $bi = $(stat -c %i /root/bluetooth.power) ] && echo b)"
+                    "$([ $wi = $(stat -c %i /root/wifi.power) ] && echo w)\"\n" +
+                    say("bluetooth off") + say("wifi off") +
+                    "echo \"@@ moved $([ $bi != $(stat -c %i /root/bluetooth.power) ] && echo b)"
+                    "$([ $wi != $(stat -c %i /root/wifi.power) ] && echo w) $(cat /root/bluetooth.power /root/wifi.power | tr '\\n' ' ')\"\n")
+        joined = "\n".join(got)
+        check("@@ same bw" in joined, "a word already there is not written again", joined[-300:])
+        check("@@ moved bw off off " in joined, "a word that changes is written", joined[-300:])
+
         # Bluetooth add and remove read the list, change it and write it
         # whole: with the radio lock held by another run they wait for it.
         got = tuned("rm -f /root/bluetooth\n"

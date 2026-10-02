@@ -283,6 +283,22 @@ static bipolar host_read_state(string_address path, p8 address_to into,
         return got;
 }
 
+/* A state word as host_read_state reads it, without its newline or the blanks
+   after it; negative, and empty, when the file is not there or not a plain one. */
+static bipolar host_read_word(string_address path, p8 address_to into, positive room)
+{
+        bipolar got = host_read_state(path, into, room);
+
+        if (got < 0)
+        {
+                into[0] = end;
+                return got;
+        }
+        while (got > 0 && (into[got - 1] == '\n' || into[got - 1] == ' '))
+                into[--got] = end;
+        return got;
+}
+
 /*
         A state file this writes as root, under /run/moonwater or /root, is
         opened where it is and never through a link: a name planted there
@@ -5679,19 +5695,26 @@ static bipolar host_onoff(string_address word)
 static bipolar radio_write_word(string_address path, string_address word)
 {
         p8 line[96];
+        p8 have[96];
 
         string_copy_bounded(line, word, sizeof(line));
         string_append_bounded(line, "\n", sizeof(line));
+        //      A word that is already there is not written again: two syncs,
+        //      of the file and of its directory, at every boot for nothing.
+        if (host_read_state(path, have, sizeof(have)) == (bipolar)string_length(line) &&
+            !string_compare(have, line))
+                return 0;
         return host_write_file(path, line, string_length(line), 0644, true);
 }
 
-static bool radio_word_is(string_address path, string_address word)
+/* What a switch's word says: 1 on, 0 off, -1 when it says neither or is not
+   there, which is the same as on to everything that asks. */
+static bipolar radio_power(string_address path)
 {
         p8 text[16];
 
-        if (host_read_text(path, text, sizeof(text)) < 0)
-                return false;
-        return string_equals(text, word);
+        return host_read_word(path, text, sizeof(text)) < 0 ? -1
+                                                              : host_onoff((string_address)text);
 }
 
 static bipolar radio_lock(bool wait)
@@ -6269,7 +6292,7 @@ static bool radio_wifi_why(p8 address_to why, positive room)
         p8 rfkill = 0;
 
         why[0] = end;
-        if (radio_word_is(NET_WIFI_POWER, "off"))
+        if (radio_power(NET_WIFI_POWER) == 0)
         {
                 radio_line(why, room, (string_address) "switched off (moonwater wifi on)",
                            null, null, null, null);
@@ -7717,11 +7740,6 @@ static b32 radio_wifi_remove(string_address ssid)
         link with Ethernet framing that is neither loopback nor a wireless
         station is wired here.
 */
-static bool radio_wired_is_off(void)
-{
-        return radio_word_is(NET_WIRED_POWER, "off");
-}
-
 static b32 radio_wired_set(bool on)
 {
         netlink_wired wired;
@@ -7759,7 +7777,7 @@ static b32 radio_wired_status(void)
 
         if (handle >= 0)
                 socket_close((b32)handle);
-        string_format(log, host_label "wired %s\n", radio_wired_is_off() ? "off" : "on");
+        string_format(log, host_label "wired %s\n", net_wired_off() ? "off" : "on");
         if (failed >= 0)
                 for (positive at = 0; at < wired.count; at++)
                         string_format(log, host_label "  %s: %s, %s\n", wired.link[at].name,
@@ -7781,7 +7799,7 @@ static b32 radio_wifi_status(void)
         radio_network networks[RADIO_WIFI_MOST];
         positive count = radio_wifi_load(networks, RADIO_WIFI_MOST);
         positive at;
-        bool off = radio_word_is(NET_WIFI_POWER, "off");
+        bool off = radio_power(NET_WIFI_POWER) == 0;
         bool joined = false;
         p8 why[RADIO_WHY_ROOM];
         p8 last[RADIO_SSID_MOST + 1];
@@ -7970,7 +7988,7 @@ static b32 radio_bluetooth_status(void)
 {
         p8 text[4096];
         bipolar got = host_read_state(NET_BLUETOOTH_LIST, text, sizeof(text));
-        bool off = radio_word_is(NET_BLUETOOTH_POWER, "off");
+        bool off = radio_power(NET_BLUETOOTH_POWER) == 0;
         positive at = 0;
         positive start;
         positive length;
@@ -8034,9 +8052,9 @@ static fn radio_internet_copy(void)
         p8 have[16];
         p8 line[8];
 
-        if (host_read_text(NET_INTERNET_ROOT, text, sizeof(text)) < 0)
+        if (host_read_word(NET_INTERNET_ROOT, text, sizeof(text)) < 0)
                 return;
-        if (host_read_text(NET_INTERNET_RUN, have, sizeof(have)) >= 0 &&
+        if (host_read_word(NET_INTERNET_RUN, have, sizeof(have)) >= 0 &&
             string_equals(have, text))
                 return;
 
@@ -8047,15 +8065,13 @@ static fn radio_internet_copy(void)
                 radio_net_wake();
 }
 
-static bool radio_wifi_wanted(void)
+static bool radio_wifi_wanted(bipolar power)
 {
         radio_network networks[1];
         bool wanted;
 
-        if (radio_word_is(NET_WIFI_POWER, "off"))
-                return false;
-        if (radio_word_is(NET_WIFI_POWER, "on"))
-                return true;
+        if (power >= 0)
+                return power;
         wanted = radio_wifi_load(networks, 1) != 0;
         crypto_forget(networks, sizeof(networks));
         return wanted;
@@ -8117,17 +8133,18 @@ static fn radio_wifi_keep(void)
 
 static fn radio_restore(void)
 {
+        bipolar wifi = radio_power(NET_WIFI_POWER);
+        bipolar bluetooth = radio_power(NET_BLUETOOTH_POWER);
+
         radio_internet_copy();
 
-        if (radio_word_is(NET_WIFI_POWER, "off"))
+        if (wifi == 0)
                 radio_wifi_off(false);
-        else if (radio_wifi_wanted())
+        else if (radio_wifi_wanted(wifi))
                 radio_wifi_on(false);
 
-        if (radio_word_is(NET_BLUETOOTH_POWER, "off"))
-                radio_bluetooth_power(false, false);
-        else if (radio_word_is(NET_BLUETOOTH_POWER, "on"))
-                radio_bluetooth_power(true, false);
+        if (bluetooth >= 0)
+                radio_bluetooth_power(bluetooth, false);
 
         /*      The watcher took its first pass before /root was the kept
                 disk, so it knew none of what was set there: a wired-only
@@ -8149,10 +8166,10 @@ static fn radio_recover(void)
 
         radio_internet_copy();
 
-        if (radio_wifi_wanted())
+        if (radio_wifi_wanted(radio_power(NET_WIFI_POWER)))
                 radio_wifi_keep();
 
-        if (radio_word_is(NET_BLUETOOTH_POWER, "on"))
+        if (radio_power(NET_BLUETOOTH_POWER) == 1)
                 radio_rfkill(RADIO_RFKILL_BLUETOOTH, false);
 }
 
@@ -8388,27 +8405,43 @@ static bool tune_line_is(p8 address_to line, positive length, string_address key
         return length > size && !memory_compare(line, key, size) && line[size] == ' ';
 }
 
+/* The kept settings, as far as the room goes: what the bytes are, or negative
+   when none are kept or the file is not a plain one. */
+static bipolar tune_load(p8 address_to text, positive room)
+{
+        return host_read_state(TUNE_KEPT, text, room);
+}
+
+/* The kept value for a key among settings already loaded, or false. */
+static bool tune_find(p8 address_to text, positive size, string_address key,
+                      p8 address_to into, positive room)
+{
+        positive at = 0;
+        positive start;
+        positive length;
+        positive value;
+
+        while (host_line_next(text, size, address_of at, address_of start,
+                              address_of length))
+                if (tune_line_is(text + start, length, key))
+                {
+                        value = length - string_length(key) - 1;
+                        if (value >= room)
+                                return false;
+                        memory_copy(into, text + start + length - value, value);
+                        into[value] = end;
+                        return true;
+                }
+        return false;
+}
+
 /* The kept value for a key, or false. */
 static bool tune_kept(string_address key, p8 address_to into, positive room)
 {
         p8 text[512];
-        bipolar got = file_slurp_once_at(AT_FDCWD, TUNE_KEPT, text, sizeof(text) - 1);
-        positive at = 0;
-        positive start;
-        positive length;
+        bipolar got = tune_load(text, sizeof(text));
 
-        if (got <= 0)
-                return false;
-        while (host_line_next(text, (positive)got, address_of at, address_of start,
-                              address_of length))
-                if (tune_line_is(text + start, length, key))
-                {
-                        text[start + length] = end;
-                        return string_copy_bounded(into, (string_address)text + start +
-                                                             string_length(key) + 1,
-                                                   room) < room;
-                }
-        return false;
+        return got > 0 && tune_find(text, (positive)got, key, into, room);
 }
 
 /* Keep a value for a key: the other lines stay, and an empty value drops the key. */
@@ -8416,7 +8449,7 @@ static bool tune_keep(string_address key, string_address value)
 {
         p8 text[512];
         p8 out[640];
-        bipolar got = file_slurp_once_at(AT_FDCWD, TUNE_KEPT, text, sizeof(text) - 1);
+        bipolar got = tune_load(text, sizeof(text));
         positive at = 0;
         positive used = 0;
         positive start;
@@ -8482,8 +8515,8 @@ static bool tune_percent(string_address text, bool address_to relative, bool add
 /* moonwater airplane [on|off]: every radio, at once. */
 static b32 tune_airplane(string_address address_to arguments, positive count)
 {
-        bool wifi_off = radio_word_is(NET_WIFI_POWER, "off");
-        bool bluetooth_off = radio_word_is(NET_BLUETOOTH_POWER, "off");
+        bool wifi_off = radio_power(NET_WIFI_POWER) == 0;
+        bool bluetooth_off = radio_power(NET_BLUETOOTH_POWER) == 0;
 
         if (count == 2)
         {
@@ -9193,15 +9226,21 @@ static b32 tune_suspend(string_address verb, string_address state)
 /* What was kept, put back at boot. */
 static fn tune_restore(void)
 {
+        p8 text[512];
         p8 value[24];
+        bipolar got = tune_load(text, sizeof(text));
 
-        if (tune_kept("power", value, sizeof(value)))
+        if (got <= 0)
+                return;
+        if (tune_find(text, (positive)got, "power", value, sizeof(value)))
                 (void)tune_power_apply((string_address)value);
-        if (tune_kept("cpu.boost", value, sizeof(value)) && string_equals((string_address)value, "off"))
+        if (tune_find(text, (positive)got, "cpu.boost", value, sizeof(value)) &&
+            string_equals((string_address)value, "off"))
                 (void)tune_cpu_boost(false);
-        if (tune_kept("cpu.smt", value, sizeof(value)) && string_equals((string_address)value, "off"))
+        if (tune_find(text, (positive)got, "cpu.smt", value, sizeof(value)) &&
+            string_equals((string_address)value, "off"))
                 (void)tune_cpu_smt(false);
-        if (tune_kept("charge.limit", value, sizeof(value)))
+        if (tune_find(text, (positive)got, "charge.limit", value, sizeof(value)))
                 (void)tune_charge_apply((string_address)value);
 }
 
