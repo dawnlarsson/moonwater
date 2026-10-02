@@ -41053,7 +41053,7 @@ def harness_moonwater_cli(argv):
     if platform.system() != "Linux":
         print("moonwater cli: NOT RUN -- Linux namespaces")
         return 2
-    probe = subprocess.run(["unshare", "-Urmn", "--fork", "true"], capture_output=True)
+    probe = subprocess.run(["unshare", "-Urmnu", "--fork", "true"], capture_output=True)
     if probe.returncode:
         print("moonwater cli: NOT RUN -- no unprivileged user namespaces here")
         return 2
@@ -41093,7 +41093,7 @@ def harness_moonwater_cli(argv):
                        f"exec chroot {sandbox} /usr/bin/sh -c 'cd / && . /tmp/script'")
             (sandbox / "tmp/script").write_text(script)
             try:
-                ran = subprocess.run(["unshare", "-Urmn", "--fork", "sh", "-c", wrapper],
+                ran = subprocess.run(["unshare", "-Urmnu", "--fork", "sh", "-c", wrapper],
                                      stdin=subprocess.DEVNULL, capture_output=True,
                                      timeout=600, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
             except subprocess.TimeoutExpired:
@@ -41140,7 +41140,9 @@ def harness_moonwater_cli(argv):
                 'timezone ""', "timezone a b", "time", "time sync", "time bogus",
                 "time sync extra", "ntp", "ntp on", "ntp off", "ntp sampling", "ntp sampling on",
                 "ntp sampling off", "ntp sampling maybe", "ntp sampling on extra", "ntp a b",
-                "keyboard", "keyboard xx", "keyboard a b", "canvas", "canvas on", "canvas off",
+                "keyboard", "keyboard xx", "keyboard a b", "name", "name random", "name x",
+                "name a b", "name random x", 'name ""', "name -x", "name x-", "name UPPER",
+                "name " + "x" * 64, "name ../x", "canvas", "canvas on", "canvas off",
                 "canvas bogus", "bind", "bind init", "bind exit", "bind bogus", "wifi",
                 "wifi off", "wifi on", "wifi add", "wifi remove", "wifi remove nobody",
                 "wifi remove a b", 'wifi remove ""', "wired", "wired on", "wired off",
@@ -41176,7 +41178,7 @@ def harness_moonwater_cli(argv):
         #       Neither "reboot" nor "bios" carries a reboot into these words: bios
         #       reboot sets a bit in the firmware, and a run as real root would
         #       leave it set on the machine that ran the lane.
-        verbs = ["", "status", "timezone", "time", "ntp", "keyboard", "canvas", "bind",
+        verbs = ["", "status", "timezone", "time", "ntp", "keyboard", "name", "canvas", "bind",
                  "wifi", "wired", "bluetooth", "priority", "brightness", "power", "cpu",
                  "charge", "-h"]
         fuzzed = []
@@ -41549,10 +41551,81 @@ while True:
             want = "taken" if taken else "rated" if rated else "none"
             check(got == want, f"time sync against {spec} is {want}", got)
 
+        # The machine's name: two lists of words with nothing wrong in them, a
+        # roll the first time it is asked for, one kept until it is changed,
+        # a name taken as the person typed it when it reads as a host name and
+        # refused when it does not, and the kernel told.
+        host_source = (HARNESS_ROOT / "src/sh/host.c").read_text()
+        lists = {}
+        for which in ("adjectives", "nouns"):
+            literal = re.search(r"static const p8 name_%s\[\] =((?:\s*\"[^\"]*\")+);" % which,
+                                host_source)
+            lists[which] = "".join(re.findall(r'"([^"]*)"', literal.group(1))).split() if literal else []
+        every = lists["adjectives"] + lists["nouns"]
+        check(len(lists["adjectives"]) == 512 and len(lists["nouns"]) == 512 and
+              len(set(every)) == 1024 and all(re.fullmatch(r"[a-z]{3,12}", word) for word in every),
+              "the two lists of words are five hundred and twelve each, all different, "
+              "lowercase letters",
+              (len(lists["adjectives"]), len(lists["nouns"]), len(set(every))))
+        script = ("rm -f /root/name\n" + say("name") + "echo \"@@saved $(cat /root/name)\"\n" +
+                  say("name") + "echo \"@@node $(uname -n)\"\n")
+        for roll in range(24):
+            script += say("name random") + "echo \"@@saved $(cat /root/name) $(uname -n)\"\n"
+        script += (say("name Space-Wizard") + "echo \"@@saved $(cat /root/name) $(uname -n)\"\n")
+        for given in ("a", "x" * 63, "0-9", "a--b"):
+            script += say(f"name {given}") + "echo \"@@saved $(cat /root/name) $(uname -n)\"\n"
+        script += "echo space-wizard > /root/name\n"
+        for bad in ("-x", "x-", "a_b", "a.b", "Random", "x" * 64, "../x", "a b", "", "\\xc3\\xa5"):
+            quoted = shlex.quote(bad)
+            script += (f"echo '@@ bad {bad}'; timeout 20 /tmp/moonwater name {quoted} 2>&1; "
+                       f"echo \"@@status $? $(cat /root/name)\"\n")
+        script += "echo 'BAD NAME' > /root/name\n" + say("name") + "echo \"@@saved $(cat /root/name)\"\n"
+        lines, finished = session(script)
+        check(finished, "the name walk finished", "")
+        shape = re.compile(r"^([a-z]+)-([a-z]+)$")
+        rolled = []
+        current = None
+        for line in lines:
+            if line.startswith("@@ "):
+                current = line[3:]
+            elif line.startswith("@@saved "):
+                parts = line.split()[1:]
+                if current in ("name", "name random"):
+                    match = shape.match(parts[0]) if parts else None
+                    check(match and match.group(1) in lists["adjectives"] and
+                          match.group(2) in lists["nouns"] and
+                          (len(parts) < 2 or parts[1] == parts[0]),
+                          f"{current} rolls two listed words, saves them and tells the kernel", line)
+                    if current == "name random":
+                        rolled.append(parts[0])
+                elif current == "name Space-Wizard":
+                    check(parts == ["space-wizard", "space-wizard"],
+                          "a name is folded to lowercase, saved and applied", line)
+                elif current and current.startswith("name ") and current.split()[1] in ("a", "x" * 63, "0-9", "a--b"):
+                    check(parts == [current.split()[1]] * 2, f"{current} is taken as typed", line)
+                else:
+                    check(False, f"an unexpected name answer after {current}", line)
+            elif line.startswith("@@node "):
+                saved = [l for l in lines if l.startswith("@@saved ")][0].split()[1]
+                check(line.split()[1] == saved, "the first roll is the name the kernel is told", line)
+            elif line.startswith("@@status ") and current and current.startswith("bad "):
+                parts = line.split()
+                check(parts[1] != "0" and parts[2:] == ["space-wizard"],
+                      f"{current} is refused and leaves the name as it was", line)
+        stills = [l for l in lines if l.startswith("@@saved ")]
+        check(len(set(rolled)) >= 12, "twenty-four rolls give a dozen different names", sorted(set(rolled)))
+        check(stills and stills[-1].split()[1:] and shape.match(stills[-1].split()[1]),
+              "a name that does not read is rolled again", stills[-1:] )
+        printed = "\n".join(lines)
+        first = printed.split("@@ name", 2)
+        check(len(first) > 2 and shape.match(first[1].split("@@status")[0].strip().splitlines()[0]),
+              "moonwater name says the name and nothing else", first[1][:80] if len(first) > 1 else "")
+
         # What the other settings write, and what wipe keeps.
         script = "".join(say(f"keyboard {layout}") + "echo \"@@kept $(cat /root/keyboard)\"\n"
                          for layout in layouts)
         script += say("keyboard xx") + "echo \"@@kept $(cat /root/keyboard)\"\n"
+        script += say("name keeper") + "echo \"@@ntp $(cat /root/name)\"\n"
         script += say("ntp off") + "echo \"@@ntp $(cat /root/ntp)\"\n"
         script += say("ntp on") + "echo \"@@ntp $(cat /root/ntp)\"\n"
         script += say("link key") + say("link off") + "printf g > /root/link.groups\n"
@@ -41579,7 +41652,7 @@ while True:
                 parts = line.split()
                 kept = set(filter(None, parts[2].split(",")))
                 check(parts[1] == "0" and "junk" not in kept and "dir" not in kept and
-                             {"keyboard", "ntp", "timezone", "link", "link.key",
+                             {"keyboard", "name", "ntp", "timezone", "link", "link.key",
                               "link.groups", "wired.power", "tune"} <= kept and
                              parts[3] == "z",
                              "wipe empties /home and /root and keeps the settings (wired and the "

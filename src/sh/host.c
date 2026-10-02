@@ -178,6 +178,7 @@ static fn radio_restore(void);
 static fn radio_recover(void);
 static b32 host_locale(string_address address_to arguments, positive count);
 static fn locale_restore(void);
+static fn name_restore(void);
 static fn locale_recover(void);
 static unsigned int locale_wake_ms(unsigned int most);
 static b32 host_wipe(void);
@@ -1389,12 +1390,27 @@ static b32 host_take(host_install address_to install, bool update)
         host_say(log, host_label "%s, /root and /home are kept on %s\n",
                  BOWL_ROOT_DIRECTORY, install->disk);
         radio_restore();
+        name_restore();
         locale_restore();
         tune_restore();
         return 0;
 }
 
 // Boot ----------------------------------------------------------
+
+/*
+        The end of boot, whichever way it went.
+
+        The machine's name is settled first, in every branch: a live stick
+        rolls one the first time it boots, an install brings its own with its
+        /root, and either way the prompt of the first shell and everything
+        that asks the kernel what this machine is called has the answer.
+*/
+static fn host_booted(host_settings address_to settings)
+{
+        name_restore();
+        host_events_boot(settings);
+}
 
 static b32 host_boot(void)
 {
@@ -1423,7 +1439,7 @@ static b32 host_boot(void)
                 host_verdict_set("live", "");
                 host_say(log, host_label "init mount is off: nothing on this machine's "
                                          "disks is mounted this session\n");
-                host_events_boot(address_of settings);
+                host_booted(address_of settings);
                 return 0;
         }
 
@@ -1452,7 +1468,7 @@ static b32 host_boot(void)
         {
                 host_write_text(HOST_HINT, "");
                 host_verdict_set("live", "");
-                host_events_boot(known ? address_of settings : null);
+                host_booted(known ? address_of settings : null);
                 return 0;
         }
 
@@ -1480,18 +1496,18 @@ static b32 host_boot(void)
                         host_say(log, host_label "init mount is off: %s is not mounted "
                                                  "this session\n",
                                  chosen->disk);
-                        host_events_boot(address_of settings);
+                        host_booted(address_of settings);
                         return 0;
                 }
 
                 if (!host_take(chosen, false))
                 {
-                        host_events_boot(known ? address_of settings : null);
+                        host_booted(known ? address_of settings : null);
                         return 0;
                 }
 
                 host_verdict_set("live", "");
-                host_events_boot(known ? address_of settings : null);
+                host_booted(known ? address_of settings : null);
                 return 1;
         }
 
@@ -1502,7 +1518,7 @@ static b32 host_boot(void)
                       host_label "A terminal will ask what to do with it, or "
                       "moonwater use, update or live answers from a shell.\n",
                  chosen->disk);
-        host_events_boot(known ? address_of settings : null);
+        host_booted(known ? address_of settings : null);
         return 0;
 }
 
@@ -12469,6 +12485,275 @@ static fn locale_recover(void)
         locale_auto_keep();
 }
 
+/*
+        What this machine is called.
+
+        Two words and a hyphen, rolled the first time a machine boots and kept
+        in /root with the other settings, so a name made on a live stick goes
+        to the disk it installs on, `update` keeps it and `wipe` leaves it.
+        There are five hundred and twelve of each, so a roll is eighteen bits
+        and two machines of one person's are very unlikely to share a name;
+        pairing is what settles one that does. The words are lowercase
+        letters only and the name is a valid host name, which is what the
+        kernel, a prompt and a router will all take.
+
+        The kernel's own default is the same on every machine this image is
+        built for, which is why it is not the name: `hostname NAME` changes
+        what the kernel says for the rest of the session and nothing else,
+        where this is what the machine is.
+*/
+#define NAME_PATH "/root/name"
+#define NAME_ROOM 80
+#define NAME_LONGEST 63
+#define NAME_WORDS 512
+
+static const p8 name_adjectives[] =
+    "ample aqua arctic ashen astral azure balmy bashful bold brave bright brisk "
+    "bronze breezy bubbly burly calm candid careful cheery chilly civil clever "
+    "cloudy coastal cobalt cozy crisp curious dainty dandy dapper daring "
+    "dashing dewy distant dreamy dusky eager earnest early earthy elated "
+    "electric elegant emerald epic even faint fancy fearless fiery fine fleet "
+    "floral fluffy fluent foggy fond frank frosty fuzzy gallant gentle giddy "
+    "gilded glad gleaming glossy glowing golden graceful grand grassy great "
+    "green hardy hasty hazy hearty hidden humble hushed icy idle indigo ivory "
+    "jaunty jolly jovial joyful keen kind lively lofty lucid lucky lunar lush "
+    "magic merry mellow mighty mild minty misty modest mossy mythic natural "
+    "neat nifty nimble noble oaken orbital pastel patient peaceful pearly perky "
+    "plucky plush polar polite precise proud pure quaint quick quiet radiant "
+    "rapid regal rosy royal rustic sable sandy savvy scarlet serene shady sharp "
+    "shiny silent silky silver sleek smart smooth snowy snug solar sonic spry "
+    "stable starry steady stellar still stormy sturdy subtle sunny super swift "
+    "tame teal tender tidal tidy tiny tranquil trusty twilit upbeat urban "
+    "valiant velvet verdant vibrant vivid warm wavy whole wily windy wintry "
+    "wise witty woolly young zany zesty zippy acoustic adept aerial agile airy "
+    "alert alpine amiable amused ancient angular antique apt ardent artful "
+    "atomic avid awake aware balanced beaming benign blazing blithe blooming "
+    "bonny boundless bouncy bountiful bracing brainy brawny brimming broad "
+    "buoyant busy buttery cardinal carefree cascading celestial central certain "
+    "charming cheerful chief chipper choice chosen circular classic clean clear "
+    "cloudless clustered colorful comfy compact composed concise content cool "
+    "copper countless courtly crafty creamy crimson cubic cuddly curly cute "
+    "deft deluxe dense devoted diamond digital diligent divine double downy "
+    "drifting driven dual dynamic eastern ebony ecstatic elastic elfin elite "
+    "endless energetic enigmatic equal erudite ethereal exact exotic expert "
+    "fabled fair faithful famed fanciful fast fertile festive fit flaxen "
+    "fleeting flexible flowing flying formal fortunate fragrant free fresh "
+    "friendly frozen fruitful full funky future galactic gamma genial genuine "
+    "gifted glacial glittering gleeful global gracious gradual grateful "
+    "grounded growing guiding gusty halcyon handy happy harmonic heady heavenly "
+    "helpful heroic honest hopeful humming hybrid ideal immense inner inspired "
+    "intent intrepid inventive iron jazzy jeweled jumbo just kindly knowing "
+    "lacy lasting legendary level liberal light likely limber linen lithe "
+    "little lone long loyal lyrical majestic mature maximal mental metallic "
+    "milky mindful mirrored mobile molten moonlit morning mountain musical "
+    "mystic narrow native nautical nearby neon nested neutral new next "
+    "nocturnal north northern novel oceanic offbeat open optimal orange organic "
+    "original outer oval pacific paper parallel peachy perfect pink placid "
+    "plain playful pleasant plentiful pocket poised polished polka portable "
+    "positive potent practical primal prismatic private prized prompt "
+    "prosperous quantum quilted rare ready real reborn refined regular relaxed "
+    "reliable remote resolute rested rhythmic rich ringing rippling rising "
+    "robust rolling rooted round roving rugged running sacred safe sailing "
+    "savory scenic secret select settled shimmering shining simple sincere "
+    "singing skilled slender slow small smiling snappy social soft solid solo "
+    "soothing sound southern sparkling special speedy spiral splendid spotted "
+    "square standing steel sterling stout strong studious sublime summer sunlit "
+    "supreme sure sweet synthetic";
+
+static const p8 name_nouns[] =
+    "comet nebula quasar pulsar galaxy orbit meteor asteroid planet moon "
+    "eclipse aurora cosmos rocket probe satellite lander rover capsule shuttle "
+    "station beacon horizon zenith equinox solstice wizard sorcerer mage druid "
+    "knight bard dragon griffin phoenix unicorn sprite pixie golem elf dwarf "
+    "oracle sage ranger paladin alchemist wanderer pilgrim voyager explorer "
+    "pioneer captain skipper sailor mariner otter falcon heron lynx fox wolf "
+    "bear owl raven crane ibis panda koala lemur llama alpaca gecko newt toad "
+    "frog turtle dolphin whale seal walrus narwhal orca manta squid octopus "
+    "crab lobster shrimp beetle firefly moth mantis cricket bee ant robin finch "
+    "wren sparrow magpie osprey condor kestrel egret stork puffin penguin "
+    "pelican albatross swan goose duck badger beaver bison camel caribou "
+    "cheetah cougar coyote dingo donkey eagle elk ferret gazelle giraffe goat "
+    "hare hawk hedgehog hippo horse hyena ibex impala jackal jaguar kangaroo "
+    "kiwi leopard lion lizard marmot meerkat mole moose mouse mule ocelot "
+    "opossum oryx parrot pigeon pony porcupine puma quail rabbit raccoon ram "
+    "reindeer rhino salmon seahorse sloth snail sparrowhawk squirrel starling "
+    "tapir tiger tortoise trout toucan turkey vole weasel wombat yak zebra "
+    "maple willow cedar birch aspen oak pine fern moss lotus orchid daisy "
+    "clover thistle ivy bamboo cactus poppy tulip violet lily jasmine lavender "
+    "thyme basil mint rosemary fennel ginger pepper mango lemon peach cherry "
+    "berry honey biscuit pretzel waffle muffin noodle pancake pudding cookie "
+    "cocoa almond walnut pecan hazel acorn olive plum apricot melon papaya "
+    "guava lime citrus canyon glacier meadow lagoon harbor island reef delta "
+    "dune ridge summit valley tundra prairie oasis grove forest river creek "
+    "brook spring cascade geyser volcano plateau mesa cliff cavern grotto fjord "
+    "bay cove shore beach lake pond marsh swamp steppe savanna jungle orchard "
+    "garden lantern compass anchor kettle teapot mirror prism lighthouse bridge "
+    "tower castle window ribbon button lamp clock harp flute drum violin cello "
+    "piano trumpet kite sail mast paddle canoe kayak sled wagon cart wheel gear "
+    "lever pulley hammock tent cabin cottage barn windmill fountain statue arch "
+    "gate path trail road bench swing slide ladder rope knot basket bucket jar "
+    "bottle cup bowl plate spoon fork pan pot kiln forge anvil loom spindle "
+    "needle thimble quilt blanket pillow candle torch ember spark flame cinder "
+    "ash coal pebble marble crystal gem pearl opal ruby topaz jade amber garnet "
+    "quartz agate onyx jasper coral shell atom photon quark proton neutron "
+    "electron vector matrix tensor fractal helix prime lattice cipher token "
+    "signal packet socket kernel module driver router switch relay beam laser "
+    "maser radar sonar echo pulse wave ripple tide current breeze gust gale "
+    "squall storm thunder lightning rainbow cloud mist fog frost snow sleet "
+    "hail dew rain drizzle sunbeam moonbeam stardust starlight twilight sunrise "
+    "sunset daybreak midnight noon dusk dawn hour minute season harvest bloom "
+    "sprout seedling branch petal blossom bud vine root trunk leaf feather "
+    "scale paw whisker tail mane hoof horn tusk antler tuba banjo ukulele "
+    "guitar bagpipe fiddle bell chime gong cymbal tambourine whistle trombone "
+    "oboe clarinet bassoon sitar zither lyre lute dulcimer harmonica accordion "
+    "kazoo marimba xylophone anemone bluebell buttercup chickadee dandelion "
+    "dragonfly hummingbird kingfisher nightingale periwinkle sandpiper "
+    "snowflake tangerine";
+
+/* The word at an index in a list of words one space apart. */
+static fn name_word(const p8 address_to list, positive index, p8 address_to into,
+                    positive room)
+{
+        positive length = 0;
+
+        for (; index; list++)
+                if (address_to list == ' ')
+                        index--;
+
+        while (address_to list && address_to list != ' ' && length + 1 < room)
+                into[length++] = address_to list++;
+
+        into[length] = end;
+}
+
+static fn name_roll(p8 address_to into, positive room)
+{
+        p8 random[4];
+        p8 noun[16];
+        positive bits;
+
+        system_random_fill(random, sizeof(random), 0);
+        bits = random[0] | random[1] << 8 | random[2] << 16 |
+               (positive)random[3] << 24;
+
+        name_word(name_adjectives, bits & (NAME_WORDS - 1), into, room);
+        string_append_bounded(into, "-", room);
+        name_word(name_nouns, (bits >> 9) & (NAME_WORDS - 1), noun, sizeof(noun));
+        string_append_bounded(into, noun, room);
+}
+
+static bool name_edge(p8 byte)
+{
+        return (byte >= 'a' && byte <= 'z') || (byte >= '0' && byte <= '9');
+}
+
+/* Lowercase letters, digits and hyphens, a letter or digit at each end: one
+   label of a host name, and not the word that rolls a new one. */
+static bool name_valid(string_address name)
+{
+        positive length = string_length(name);
+
+        if (!length || length > NAME_LONGEST || !name_edge(name[0]) ||
+            !name_edge(name[length - 1]))
+                return false;
+
+        for (positive at = 1; at + 1 < length; at++)
+                if (!name_edge(name[at]) && name[at] != '-')
+                        return false;
+
+        return !string_equals(name, "random");
+}
+
+static bool name_apply(string_address name)
+{
+        return system_call_2(syscall(sethostname), (positive)name,
+                             string_length(name)) >= 0;
+}
+
+/* The saved name, rolled and saved first when there is none or it does not
+   read. Says whether it had to roll. */
+static fn name_ensure(p8 address_to into, positive room, bool address_to rolled)
+{
+        locale_word(NAME_PATH, into, room);
+        address_to rolled = !name_valid(into);
+
+        if (!address_to rolled)
+                return;
+
+        name_roll(into, room);
+        (void)radio_write_word(NAME_PATH, into);
+}
+
+static fn name_restore(void)
+{
+        p8 name[NAME_ROOM];
+        bool rolled;
+
+        name_ensure(name, sizeof(name), address_of rolled);
+        (void)name_apply(name);
+
+        if (rolled)
+                host_say(log, host_label "this machine is called %s; "
+                                         "moonwater name changes it\n", name);
+}
+
+static b32 host_name(string_address address_to arguments, positive count)
+{
+        p8 name[NAME_ROOM];
+        bool rolled;
+
+        if (count > 3)
+                return host_usage();
+
+        if (count == 2)
+        {
+                file_machine machine;
+
+                //      /root is root's. Anyone else is told what the kernel
+                //      calls the machine, which is the name this applies.
+                if (bowl_is_root())
+                {
+                        name_ensure(name, sizeof(name), address_of rolled);
+                        if (rolled)
+                                (void)name_apply(name);
+                }
+                else if (file_machine_read(address_of machine))
+                        string_copy_bounded(name, machine.node, sizeof(name));
+                else
+                        return host_fail("name", -1);
+
+                host_say(log, "%s\n", name);
+                return 0;
+        }
+
+        host_need_root("moonwater name");
+
+        if (string_equals(arguments[2], "random"))
+                name_roll(name, sizeof(name));
+        else
+        {
+                string_copy_bounded(name, arguments[2], sizeof(name));
+                for (positive at = 0; name[at]; at++)
+                        if (name[at] >= 'A' && name[at] <= 'Z')
+                                name[at] = (p8)(name[at] + ('a' - 'A'));
+
+                if (!name_valid(name))
+                        return host_refuse("%s is not a machine name: lowercase "
+                                           "letters, digits and hyphens, "
+                                           "at most 63, a letter or digit at "
+                                           "each end\n", arguments[2]);
+        }
+
+        if (radio_write_word(NAME_PATH, name) < 0)
+                return host_fail("name", -1);
+
+        if (!name_apply(name))
+                return host_fail("name", -1);
+
+        host_say(log, "%s\n", name);
+        return 0;
+}
+
 static b32 host_locale(string_address address_to arguments, positive count)
 {
         string_address verb = arguments[1];
@@ -12551,6 +12836,7 @@ static string_address host_wipe_keep[] = {
     "ntp.server",
     "ntp.sampling",
     "keyboard",
+    "name",
     "link",
     "link.key",
     "link.peers",
@@ -12930,6 +13216,7 @@ static fn host_usage_write(writer out)
                  HOST_ROW("ntp sampling [on|off]", "       ", "keep the lowest-delay sample of five [on]")
                  HOST_ROW("link [on|off|help]", "          ", "shell and run on paired machines, by key")
                  HOST_ROW("keyboard [LAYOUT|list]", "      ", "Canvas keys: us uk de se no dk fi fr es it")
+                 HOST_ROW("name [NEW|random]", "           ", "what this machine is called; rolled at first boot")
                  HOST_ROW("wipe", "                        ", "forget /home and /root, keep the machine")
                  "\n"
                  TERM_DIM                       "  Settings stay in the image this session started from.\n"
@@ -13069,6 +13356,14 @@ static b32 host_status(void)
                                           : (string_address) "us");
         }
 
+        {
+                p8 name[NAME_ROOM];
+
+                locale_word(NAME_PATH, name, sizeof(name));
+                if (name_valid(name))
+                        string_format(log, "  name %s\n", name);
+        }
+
         host_status_wifi();
 
         (void)host_bind_each("  ", false);
@@ -13185,6 +13480,9 @@ static b32 host_main()
         if (string_equals(verb, "timezone") || string_equals(verb, "ntp") ||
             string_equals(verb, "keyboard") || string_equals(verb, "time"))
                 return host_locale(arguments, count);
+
+        if (string_equals(verb, "name"))
+                return host_name(arguments, count);
 
         if (string_equals(verb, "link"))
                 return link_main(arguments, count);

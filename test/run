@@ -12396,6 +12396,8 @@ export SPARK_OWNER=base
 export SPARK_OWNER=parent
 /shell -c 'printf "owner-%s\n" "$SPARK_OWNER"'
 ls /monitor.sh | rev
+n=$(uname -n); r=$(cat /root/name); case $n in moonwater-box|'') k=default;; *-*) k=rolled;; *) k=odd;; esac; printf 'machine-%s-%s\n' "$k" "$([ "$n" = "$r" ] && echo saved || echo apart)"
+printf 'asked-%s\n' "$([ "$(moonwater name)" = "$(uname -n)" ] && echo same || echo different)"
 #
 #       The kernel network settings the default tier asks of the network
 #       watcher when it starts, before the first lease: no redirects, no
@@ -12798,6 +12800,14 @@ says transcript 'ordinary fifo script' 'ydaer-elbitapmoc-ofif-lf'
 #       and absent when one did not.
 #
 says transcript 'a terminal opened'   'window grid 80x24'
+
+#
+#       The machine has a name from its first boot: two words rolled and
+#       saved in /root, and the kernel told, not the one every image is built
+#       with. moonwater name says the same.
+#
+says transcript 'the first boot rolled and saved a name' 'machine-rolled-saved'
+says transcript 'moonwater name says it'  'asked-same'
 
 #
 #       Nothing the kernel felt the need to warn about.
@@ -13549,6 +13559,8 @@ printf 'link-on-%s\n' $(( $(grep -c 'link on,' /tmp/linkon) * 7 ))
 moonwater link join lab LINK_LAN_SECRET allow run > /tmp/linkjoin 2>&1
 printf 'link-joined-%s\n' $(( $(grep -c 'in lab; members may run' /tmp/linkjoin) * 7 ))
 printf 'link-key-%s\n' "$(cat /tmp/linkkey)"
+moonwater name > /root/livename
+printf 'name-live-%s\n' $(( $(grep -c -E '^[a-z]+-[a-z]+$' /root/livename) * 7 ))
 printf 'no\n' | moonwater install nvme0n1 > /tmp/refused 2>&1
 printf 'unconfirmed-%s\n' $(( $? + 40 ))
 printf 'sda\n' | moonwater install sda > /tmp/removable 2>&1
@@ -13606,6 +13618,7 @@ printf 'lan-asked-%s\n' "$(rev < /root/lan-asked)"
 printf 'lan-group-%s\n' $(( $(moonwater link | grep -c 'paired in lab') * 7 ))
 printf 'kept-%s\n' "$(rev < /bowls/probe/file)"
 printf 'root-%s\n' "$(rev < /root/probe)"
+printf 'name-kept-%s\n' $(( $(test "$(moonwater name)" = "$(cat /root/livename)" && test "$(uname -n)" = "$(cat /root/livename)" && echo 1 || echo 0) * 7 ))
 printf 'second\n' > /root/second
 moonwater status > /tmp/status 2>&1
 printf 'status-same-%s\n' $(( $(grep -c 'installed on nvme0n1, this build' /tmp/status) * 5 ))
@@ -13712,6 +13725,8 @@ wait "$neighbour" 2>/dev/null
 says disk 'the disk alone is found'      'verdict-1n0emvn ksid'
 says disk 'the bowl probe was kept'      'kept-tpek'
 says disk 'root was kept'                'root-emoh'
+says live 'the live stick rolled a name' 'name-live-7'
+says disk 'the install carried the name and the disk boot applied it' 'name-kept-7'
 says disk 'status sees this build'       'status-same-5'
 says disk 'a patched image is another'   'status-other-5'
 says disk 'the install carried init'     'carried-deirrac'
