@@ -57,6 +57,8 @@
 #define LINK_KEY_PATH "/root/link.key"
 #define LINK_PEERS_PATH "/root/link.peers"
 #define LINK_PEERS_NEXT "/root/link.peers.next"
+#define LINK_GROUPS_PATH "/root/link.groups"
+#define LINK_GROUPS_NEXT "/root/link.groups.next"
 #define LINK_PORT_PATH "/root/link.port"
 #define LINK_LOCK_PATH HOST_STATE "/link.lock"
 #define LINK_STATE_PATH HOST_STATE "/link.state"
@@ -930,6 +932,36 @@ static bool link_part_owned(bipolar handle, p8 address_to path)
 }
 
 /*
+        Whether a path is one of the files the link is made of: its key, the
+        machines and groups it knows, the stamps it keeps and the script the
+        machine runs at boot. `files` is every file root has, bar these: the
+        key is this machine to every machine that knows it, and the rest say
+        who else may be anything here, which no peer is to be handed by a
+        grant for files. Looked at by inode, so a link, a second name or a
+        path spelled round one is the same file; a path that is not there is
+        not.
+*/
+static bool link_path_is_own(string_address path)
+{
+        static const string_address own[] = {
+            LINK_KEY_PATH, LINK_PEERS_PATH, LINK_GROUPS_PATH, LINK_STAMPS_PATH,
+            HOST_MACHINE_SCRIPT};
+        file_facts target;
+
+        if (!file_look_at(path, address_of target))
+                return false;
+        for (positive at = 0; at < array_count(own); at++)
+        {
+                file_facts named;
+
+                if (file_look_at(own[at], address_of named) &&
+                    file_same_identity(address_of target, address_of named))
+                        return true;
+        }
+        return false;
+}
+
+/*
         A staging file is removed, or renamed over its name, only while the
         name is still the inode the transfer holds open. A name replaced
         underneath it belongs to somebody else.
@@ -1666,6 +1698,12 @@ static fn link_request(struct link_session address_to s, p8 address_to payload,
         }
         if (s->kind == LINK_KIND_PUSH)
                 memory_copy(address_of mode, payload + 1, 4);
+        if ((s->kind == LINK_KIND_PUSH || s->kind == LINK_KIND_PULL) &&
+            link_path_is_own((string_address)text))
+        {
+                link_refuse(s, "that file is part of the link itself");
+                return;
+        }
 
         //      Pull and log are commands the machine already has, named here
         //      and never parsed by a shell.

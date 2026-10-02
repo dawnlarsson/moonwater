@@ -71672,6 +71672,122 @@ static fn publication(void)
 }
 
 /*
+        A request for a file, as a peer holding `files` and nothing else would
+        send it: the answer is whether the machine took it up.
+*/
+static bool wls_file_asked(struct link_session address_to s, p8 ask,
+                           string_address path)
+{
+        p8 request[LINK_REQUEST_MAX + 8];
+        p8 key[32];
+        positive length = string_length(path);
+        positive at = 1;
+
+        wls_seeded(key, 32, 9);
+        if (!link_session_open(s))
+                return false;
+        memory_copy(s->peer, key, 32);
+        string_copy((string_address)s->name, "client");
+        request[0] = ask;
+        if (ask == LINK_ASK_PUSH)
+        {
+                memory_zero(request + 1, 4);
+                at += 4;
+        }
+        memory_copy(request + at, path, length);
+        link_request(s, request, at + length);
+        return !s->exit_sent && s->kind != LINK_KIND_NONE;
+}
+
+/*
+        The link's own state is not a file a grant for files reaches, however
+        it is named; any other file is.
+*/
+static fn own_files(void)
+{
+        static const string_address own[] = {
+            LINK_KEY_PATH, LINK_PEERS_PATH, LINK_GROUPS_PATH, LINK_STAMPS_PATH,
+            HOST_MACHINE_SCRIPT};
+        struct link_session address_to s = link_self.session;
+        file_facts before[array_count(own)];
+        bool named = true, linked = true, doubled = true, spelled = true;
+        bool kept = true, pushed = false, pulled = false;
+        bool made[array_count(own)];
+        p8 round[64];
+        p8 key[32];
+
+        wls_seeded(key, 32, 9);
+        wls_peers_with(key, WATERLINK_MAY_FILES);
+        for (positive at = 0; at < array_count(own); at++)
+        {
+                made[at] = !file_look_at(own[at], address_of before[at]);
+                if (made[at])
+                        (void)wls_write(own[at], "x", 1, 0600);
+                (void)file_look_at(own[at], address_of before[at]);
+        }
+        for (positive at = 0; at < array_count(own); at++)
+        {
+                file_facts after;
+
+                (void)system_remove_at(AT_FDCWD, "/root/own-link", 0);
+                (void)system_remove_at(AT_FDCWD, "/root/own-hard", 0);
+                (void)system_symbolic_link_at(own[at], AT_FDCWD,
+                                              "/root/own-link");
+                (void)system_call_5(syscall(linkat), (positive)(bipolar)AT_FDCWD,
+                                    (positive)own[at],
+                                    (positive)(bipolar)AT_FDCWD,
+                                    (positive) "/root/own-hard", 0);
+                string_copy((string_address)round, "/root/../root/");
+                string_append_bounded((string_address)round, own[at] + 6,
+                                      sizeof round);
+                named &= link_path_is_own(own[at]);
+                linked &= link_path_is_own("/root/own-link");
+                doubled &= link_path_is_own("/root/own-hard");
+                spelled &= link_path_is_own((string_address)round);
+                //      Neither verb takes it up, and nothing is staged.
+                pushed |= wls_file_asked(s, LINK_ASK_PUSH, own[at]) ||
+                          s->writes[0].fd >= 0;
+                link_session_close(s);
+                pulled |= wls_file_asked(s, LINK_ASK_PULL, own[at]) ||
+                          s->pid > 0;
+                link_session_close(s);
+                pulled |= wls_file_asked(s, LINK_ASK_PULL, "/root/own-link") ||
+                          s->pid > 0;
+                link_session_close(s);
+                kept &= file_look_at(own[at], address_of after) &&
+                        file_same_identity(address_of before[at],
+                                           address_of after) &&
+                        before[at].size == after.size &&
+                        before[at].modified.seconds == after.modified.seconds &&
+                        before[at].modified.nanoseconds ==
+                                after.modified.nanoseconds;
+        }
+        check("sec: the key, the machines, the groups, the stamps and the "
+              "machine script are the link's own files",
+              named);
+        check("sec: and so is a link to one, and a second name for it, and "
+              "a path spelled round it",
+              linked && doubled && spelled);
+        check("sec: a push or a pull of any of them is refused, nothing is "
+              "staged or started, and the file is as it was",
+              !pushed && !pulled && kept);
+        check("a path that is not there, or any other file, is not",
+              !link_path_is_own("/root/no-such-file") &&
+                      wls_write("/root/ordinary", "y", 1, 0600) &&
+                      !link_path_is_own("/root/ordinary"));
+        check("and a push of another file is taken up",
+              wls_file_asked(s, LINK_ASK_PUSH, "/root/ordinary") &&
+                      s->writes[0].fd >= 0);
+        link_session_close(s);
+        (void)system_remove_at(AT_FDCWD, "/root/own-link", 0);
+        (void)system_remove_at(AT_FDCWD, "/root/own-hard", 0);
+        (void)system_remove_at(AT_FDCWD, "/root/ordinary", 0);
+        for (positive at = 0; at < array_count(own); at++)
+                if (made[at])
+                        (void)system_remove_at(AT_FDCWD, own[at], 0);
+}
+
+/*
         The responder: an initiation is answered, and one it cannot answer
         does not hold a session.
 */
@@ -73559,6 +73675,7 @@ b32 main(void)
         authorization_files();
         staging();
         publication();
+        own_files();
         responder(listener, port);
         cookies(listener, port);
         stamps_outlive(listener, port);

@@ -71,7 +71,7 @@ moonwater link pull NAME PATH FILE     a file from NAME
 moonwater link log NAME                follow NAME's kernel log
 moonwater link add NAME KEY [HOST[:PORT]]   link by key, with no code
 moonwater link remove NAME
-moonwater link allow|deny NAME GRANT...  shell run files log
+moonwater link allow|deny NAME GRANT...  shell run log files (any file but the link's own)
 moonwater link group [NAME [SECRET] [allow GRANT...]]   machines on one network that link themselves
 moonwater link group leave NAME [forget]
 moonwater link on|off                  listen on udp 22348, kept across boots [off]
@@ -151,7 +151,10 @@ for the minutes it lives and no longer.
 Without a code, link by key, both ways, as WireGuard does: `link key` prints a
 machine's key and `link add NAME KEY HOST` gives it to the other. A machine
 added so can do nothing until allowed, e.g. `moonwater link allow laptop shell
-run`; `moonwater link` shows each machine's grants.
+run`; `moonwater link` shows each machine's grants. `files` is push and pull of
+any file root has, so it is as good as `run` (a file pushed over a boot script
+is a command), except the link's own key, machines, groups and the machine
+script, which no peer reads or writes.
 
 `link NAME` sends each keystroke in its own datagram at once; with a command it
 passes stdin through and exits with the far command's status (255 if the link

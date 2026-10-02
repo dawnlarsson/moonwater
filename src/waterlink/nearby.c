@@ -40,8 +40,6 @@
 
 #include "discover.c"
 
-#define LINK_GROUPS_PATH "/root/link.groups"
-#define LINK_GROUPS_NEXT "/root/link.groups.next"
 #define LINK_PEERS_LOCK HOST_STATE "/link.peers.lock"
 #define LINK_GROUPS_MAX 8
 #define LINK_INTERFACES 16

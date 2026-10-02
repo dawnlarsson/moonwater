@@ -26,6 +26,12 @@
         a code gives the two that used it a terminal, a command, files and
         the log, in both directions.
 
+        The grants: shell is a terminal, run is one command, log follows the
+        kernel log, and files is push and pull of any file root has, which
+        is as good as run -- a file pushed over a script that runs at boot is
+        a command -- bar the link's own: its key, machines, groups, stamps
+        and the machine script are never read or written through it.
+
         The switch, the key and the machines live in /root, beside the
         wireless networks, so install carries them to the disk and wipe keeps
         them.
@@ -61,7 +67,7 @@ static fn link_usage_write(writer out)
                       TERM_BOLD "  link remove NAME" TERM_RESET
                       "            " TERM_DIM "stop knowing it" TERM_RESET "\n"
                       TERM_BOLD "  link allow|deny NAME GRANT..." TERM_RESET "\n"
-                      "                              " TERM_DIM "shell run files log" TERM_RESET "\n"
+                      "                              " TERM_DIM "shell run log files (any file but the link's own)" TERM_RESET "\n"
                       TERM_BOLD "  link group [NAME [SECRET] [allow GRANT...]]" TERM_RESET "\n"
                       "                              " TERM_DIM "machines on one network that link themselves" TERM_RESET "\n"
                       TERM_BOLD "  link group leave NAME [forget]" TERM_RESET "\n"
@@ -194,7 +200,7 @@ static b32 link_status(void)
         {
                 p8 script[16384];
                 bipolar script_length = file_slurp_once_at(
-                        AT_FDCWD, "/root/main.moonwater.sh", script,
+                        AT_FDCWD, HOST_MACHINE_SCRIPT, script,
                         sizeof script - 1);
 
                 script[script_length > 0 ? script_length : 0] = 0;

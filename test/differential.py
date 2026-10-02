@@ -57878,6 +57878,29 @@ os.symlink(top + "/b/root/target", top + "/b/root/planted")
 status, out, err = on("a", moon + " link push b /root/blob /root/planted", timeout=120)
 say(open(top + "/b/root/target", "rb").read() == b"untouched",
     "a push onto a link replaces the link and never writes through it")
+#       files is every file root has bar the link's own. A peer holding it and
+#       nothing else cannot take the key, which is this machine to everyone,
+#       or write the list of machines, which would make it every grant.
+on("b", moon + " link deny a shell run log")
+peers_kept = open(top + "/b/root/link.peers", "rb").read()
+os.symlink("/root/link.key", top + "/b/root/own-link")
+with open(top + "/a/root/forged", "wb") as f:
+    f.write(bytes(96))
+status, out, err = on("a", moon + " link pull b /root/link.key /root/stolen", timeout=30)
+say(status == 255 and b"part of the link itself" in err and not os.path.exists(top + "/a/root/stolen"),
+    "sec: a peer with files only cannot pull the private key (%r %r)" % (status, err[-80:]))
+status, out, err = on("a", moon + " link pull b /root/own-link /root/stolen", timeout=30)
+say(status == 255 and b"part of the link itself" in err and not os.path.exists(top + "/a/root/stolen"),
+    "sec: nor through a link to it")
+status, out, err = on("a", moon + " link push b /root/forged /root/link.peers", timeout=30)
+say(status == 255 and b"part of the link itself" in err and
+    open(top + "/b/root/link.peers", "rb").read() == peers_kept,
+    "sec: nor write the list of machines (%r %r)" % (status, err[-80:]))
+status, out, err = on("a", moon + " link run b id", timeout=30)
+say(status == 255 and b"run is not granted to a" in err, "sec: and is still not allowed to run anything")
+os.unlink(top + "/b/root/own-link")
+on("b", moon + " link allow a shell run log")
+
 status, out, err = on("a", moon + " link pull b /root/nothing-here /root/nothing", timeout=30)
 say(status == 1 and b"No such file" in err and not os.path.exists(top + "/a/root/nothing"),
     "pulling what is not there fails, says why, and leaves nothing here")
