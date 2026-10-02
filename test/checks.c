@@ -83609,6 +83609,23 @@ static fn machine_hooks(void)
         check("NAME() { is a hook", script.hooks == MOONWATER_HOOK_EVENT);
         check("and the line is the name", script.event_line == 1);
 
+        machine_scan("moonwater_init() ( : )\nmoonwater_end() [[ -n x ]]\n"
+                     "moonwater_event() if :; then\n  case $1 in\n  mute) : ;;\n  esac\nfi\n"
+                     "moonwater_poweroff() { :; }\n",
+                     address_of script);
+        check("a subshell, a test and an if are function bodies too",
+              script.hooks == (MOONWATER_HOOK_INIT | MOONWATER_HOOK_EVENT |
+                               MOONWATER_HOOK_END) &&
+                  script.init_line == 1 && script.end_line == 2 &&
+                  script.event_line == 3);
+        check("a case inside an if body gives its arms, and the end is found",
+              moonwater_bind_line(address_of script, SPARK_BIND_MUTE) == 5 &&
+                  moonwater_bind_line(address_of script, SPARK_BIND_POWEROFF) == 8);
+        machine_scan("moonwater_event() ( echo fi; echo ')' )\nmoonwater_end() { :; }\n",
+                     address_of script);
+        check("a word that closes a compound where one cannot begin closes nothing",
+              script.hooks == (MOONWATER_HOOK_EVENT | MOONWATER_HOOK_END));
+
         machine_scan("function moonwater_init {\n  :\n}\n"
                      "function moonwater_event {\n  :\n}\n"
                      "function moonwater_end {\n  :\n}\n",

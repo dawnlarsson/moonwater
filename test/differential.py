@@ -57535,11 +57535,19 @@ int main(int argc, char **argv)
 
             def define(name, body, spelling):
                 at = sum(line.count("\n") + 1 for line in lines) + 1
-                head = {0: f"{name}() {{", 1: f"function {name} {{", 2: f"function {name}() {{",
-                        3: f"{name} () {{"}[spelling]
+                #   Bash takes any compound command as a function's body: a
+                #   group, a subshell, an if, a [[ ]] test. The last has no
+                #   lines to put a case in, so a body that has one is not
+                #   given it.
+                head, tail = {0: (f"{name}() {{", "}"), 1: (f"function {name} {{", "}"),
+                              2: (f"function {name}() {{", "}"), 3: (f"{name} () {{", "}"),
+                              4: (f"{name}() (", ")"), 5: (f"{name}() if :; then", "fi"),
+                              6: (f"{name}() [[ -n x ]]", None),
+                              7: (f"{name} () while :; do", "done")}[spelling]
                 lines.append(head)
-                lines.extend(body)
-                lines.append("}")
+                if tail is not None:
+                    lines.extend(body)
+                    lines.append(tail)
                 first.setdefault(name, at)
 
             noise = [
@@ -57555,9 +57563,18 @@ int main(int argc, char **argv)
                 lambda: lines.extend(["\tcat <<-END >/dev/null", "\tmoonwater_init() {", "\t}", "\tEND"]),
                 lambda: lines.append("n=$((1<<3)); m=$(( n << 2 ))"),
                 lambda: lines.append("q=a#b; helper2() { :; }"),
+                #   A delimiter longer than the scanner keeps is still the
+                #   delimiter: the body is text and the line that is all of
+                #   it ends it.
+                lambda: lines.extend(["cat <<" + "D" * 70 + " >/dev/null", "moonwater_end() {", "}",
+                                      "D" * 70]),
+                lambda: lines.extend(["cat <<'" + "E" * 64 + "' >/dev/null", "moonwater_init() {", "}",
+                                      "E" * 64]),
             ]
             names = ["moonwater_init", "moonwater_event", "moonwater_end", "helper", "moonwater_poweroff",
-                     "moonwater_volume_up", "moonwater_canvas", "moonwater_lid_close", "moonwater_", "moonwater_nosuch"]
+                     "moonwater_volume_up", "moonwater_canvas", "moonwater_lid_close", "moonwater_", "moonwater_nosuch",
+                     #   Names the scanner's word buffer cannot hold whole.
+                     "moonwater_" + "x" * 70, "moonwater_init" + "y" * 55, "m" * 63, "m" * 64]
             for _ in range(rng.randint(1, 7)):
                 if rng.random() < 0.4:
                     rng.choice(noise)()
@@ -57579,7 +57596,10 @@ int main(int argc, char **argv)
                         if "event" not in first:
                             arms.add(pattern)
                     body.append("        esac")
-                define(name, body, rng.randrange(4))
+                spelling = rng.randrange(8)
+                if spelling == 6 and len(body) > 1:
+                    spelling = rng.randrange(6)
+                define(name, body, spelling)
             text = "\n".join(lines) + "\n"
             return text, first, arms
 
@@ -57593,6 +57613,17 @@ int main(int argc, char **argv)
             path = work / f"r{number}.sh"
             blob = bytes(rng.choice(b"(){};|#\\\"'`\n abcmoonwater_initevent$*?[]-") for _ in range(rng.randint(0, 400)))
             path.write_bytes(blob)
+            cases.append((path, None, None, None))
+        #   And random runs of the words a compound command is made of, which
+        #   no byte soup reaches: bodies that never close, closers with no
+        #   opener, here-documents everywhere, patterns with their ) cut off.
+        pieces = ["if", "fi", "then", "else", "elif", "while", "until", "for", "select", "do", "done",
+                  "case", "in", "esac", ";;", "(", ")", "((", "))", "{", "}", "[[", "]]", "<<EOF", "<<-X",
+                  "<<'q", ";", "|", "&&", "\n", "\n", "moonwater_event()", "moonwater_init", "function",
+                  "mute)", "*)", "x", "$(", "'", '"', "\\\n", "#", "!"]
+        for number in range(300):
+            path = work / f"w{number}.sh"
+            path.write_text(" ".join(rng.choice(pieces) for _ in range(rng.randint(1, 120))))
             cases.append((path, None, None, None))
 
         scanned = subprocess.run([str(work / "scan"), *[str(c[0]) for c in cases]],
@@ -57624,6 +57655,36 @@ int main(int argc, char **argv)
                 checks(bool(fields[5 + index]) == want,
                        f"{path.name}: event {event!r} owned {bool(fields[5 + index])}, "
                        f"bash and the arms say {want}\n{text}")
+
+    #   What a static scan cannot know, said once so a change to it is seen.
+    #   A definition behind an if is armed -- the scanner reads the text, not
+    #   what runs -- and bash defines it only if the branch is taken.
+    with tempfile.TemporaryDirectory(prefix="machine-scan-pin-") as temporary:
+        work = Path(temporary)
+        (work / "scan.c").write_text(source)
+        subprocess.run([cc, "-O1", "-w", "-o", str(work / "scan"), str(work / "scan.c")], check=True)
+        pinned = work / "conditional.sh"
+        pinned.write_text("if false; then\n moonwater_reset() { :; }\nfi\n")
+        said = subprocess.run([str(work / "scan"), str(pinned)], capture_output=True, text=True).stdout.split()
+        defined = subprocess.run([bash, "-c", 'source "$1"; declare -F', "x", str(pinned)],
+                                 capture_output=True, text=True).stdout
+        checks(int(said[5 + events.index("reset")]) == 2 and "moonwater_reset" not in defined,
+               "a function defined behind an if is armed by the scan, and bash does not define it (known)")
+
+        #   Reading a script of nothing but shifts reads it once, not once for
+        #   each: twice the text takes about twice as long, not four times.
+        def timed(count):
+            path = work / f"flood{count}.sh"
+            path.write_text("x<<a\n" * count)
+            best = 1e9
+            for _ in range(3):
+                started = time.perf_counter()
+                subprocess.run([str(work / "scan"), str(path)], capture_output=True, timeout=300)
+                best = min(best, time.perf_counter() - started)
+            return best
+        small, large = timed(6500), timed(26000)
+        checks(large < 6 * max(small, 0.002),
+               f"a script of unclosed here-document starts is read in linear time ({small:.4f}s for 32 KiB, {large:.4f}s for 128 KiB)")
 
     #   The machine process's other side, lifted out of the CLI half and run
     #   against a device that is a few variables: the stop that asks it to
