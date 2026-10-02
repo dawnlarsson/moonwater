@@ -7757,7 +7757,8 @@ static b32 radio_wired_status(void)
         string_format(log, host_label "wired %s\n", radio_wired_is_off() ? "off" : "on");
         if (failed >= 0)
                 for (positive at = 0; at < wired.count; at++)
-                        string_format(log, host_label "  %s: %s, %s\n", wired.link[at].name,
+                        string_format(log, host_label "  %w: %s, %s\n",
+                                      writer_terminal_name, wired.link[at].name,
                                       (wired.link[at].flags & IFF_UP) ? "up" : "down",
                                       (wired.link[at].flags & IFF_RUNNING) ? "carrier"
                                                                            : "no carrier");
@@ -12710,7 +12711,9 @@ static b32 host_name(string_address address_to arguments, positive count)
                 else
                         return host_fail("name", -1);
 
-                host_say(log, "%s\n", name);
+                //      What the kernel says can be whatever the root of a
+                //      UTS namespace set, escape and bell included.
+                host_say(log, "%w\n", writer_terminal_name, name);
                 return 0;
         }
 

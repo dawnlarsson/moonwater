@@ -56005,7 +56005,7 @@ def harness_security_hygiene(argv):
                 "http_fuzz", "http_urls", "wifi_eapol_fuzz", "wifi_scan_fuzz",
                 "bowl_sig_fuzz", "wget_mutation", "wget_hostile", "sntp_era", "net_netem",
                 "net_dependency_closure", "net_math_proof", "net_clock_fault",
-                "protected_links")
+                "protected_links", "hostile_strings")
     for name in security + ("tls_verify_fuzz",):
         checks(name in HARNESS_CHECKS, "differential.py: %s is not registered" % name)
     table = re.search(r"^HARNESS_CHECKS = \{$(.*?)^\}$", source, re.M | re.S)
@@ -56178,6 +56178,291 @@ def harness_security_hygiene(argv):
 
     print("security hygiene %d/%d" % (checks.checks - checks.failures, checks.checks))
     return 1 if checks.failures else 0
+
+
+#       Where bytes somebody else chose enter a program, and every function
+#       that reads them there: each caller is a row hostile_strings drives,
+#       or the reason it needs none. A new caller of a source fails the gate
+#       until it is given one or the other.
+HOSTILE_SOURCES = {
+    "netlink_link_name": {
+        "netlink_link_seen": "row ifname (ip link, ip addr)",
+        "netlink_wired_seen": "row ifname (moonwater wired)",
+        "net_link_line": "row ifname (ip link)",
+        "net_name_seen": "row ifname (ip route)",
+    },
+    "radio_bss_read": {
+        "radio_air_seen": "SSIDs are shown through radio_display only (wifi_scan_fuzz, wifi_air)",
+        "radio_pick_seen": "picks a network; prints nothing",
+    },
+    "dns_copy_name": {
+        "dns_answer_address": "compares names; only addresses are printed",
+        "dns_skip_name": "skips a name",
+        "waterlink_dns_name": "names pass link_name_good before use",
+    },
+    "http_header": {
+        "http_response_framing_from": "row http (Location, reason, headers through wget and fetch)",
+        "locale_auto_from_headers": "words pass locale_auto_word and must name a zone in the table",
+    },
+    "waterlink_mdns_read": {
+        "link_nearby_heard": "names pass link_name_for (link_name_good)",
+    },
+    "file_machine_read": {
+        "build_arch_here": "build tool, the machine field only",
+        "build_local": "build tool, the machine field only",
+        "file_hostname": "hostname prints the node name raw, as GNU's does",
+        "file_ls_as": "ls's own use, the release",
+        "file_uname": "uname prints the fields raw, as GNU's does",
+        "host_name": "row nodename (moonwater name, not root)",
+        "host_running_build": "the release field only",
+        "tools_monitor": "monitor's header; the node name is set by root only",
+        "tools_hostid_value": "hostid hashes it",
+        "tools_hostname": "hostname prints it raw, as GNU's does",
+        "ul_lscpu_take": "lscpu, the machine field only",
+    },
+}
+
+#       What a terminal acts on, found in output: C0 but newline and tab, DEL,
+#       C1 once decoded, bytes that are not UTF-8, and a line a payload
+#       started (FORGED). The program's own bold, dim and reset are not.
+HOSTILE_PIECES = (b"\x1b]0;PWNED\x07", b"\x1b[31;5m", b"\x1bP$qm\x1b\\", b"\x1b_apc\x1b\\",
+                  b"\x1b[6n", b"\x9b6n", b"\xc2\x9b31m", b"\x7f", b"\r", b"\x08", b"\x07",
+                  b"\x0bv", b"\nFORGED: ok", "‮bidi".encode(), b"\xff\xfe", b"\x1bc")
+
+
+def hostile_payloads(seed, count, room, banned=b""):
+    import random
+    generator = random.Random(seed)
+    found = []
+    while len(found) < count:
+        pieces = [generator.choice(HOSTILE_PIECES)
+                  for _ in range(generator.randint(1, 3))]
+        text = b"a" + b"".join(pieces) + b"z"
+        text = bytes(byte for byte in text if byte not in banned)
+        if len(text) <= room and text not in found and len(text) > 2:
+            found.append(text)
+    return found
+
+
+def hostile_scan(data):
+    """What in data a terminal would act on, as a short list of reasons."""
+    own = re.sub(rb"\x1b\[[012]?m", b"", data)
+    found = []
+    for at, byte in enumerate(own):
+        if (byte < 0x20 and byte not in (0x0a, 0x09)) or byte == 0x7f:
+            found.append("byte 0x%02x at %d" % (byte, at))
+            break
+    try:
+        text = own.decode("utf-8")
+        for character in text:
+            if 0x80 <= ord(character) <= 0x9f:
+                found.append("C1 U+%04X" % ord(character))
+                break
+    except UnicodeDecodeError as error:
+        found.append("not UTF-8 at %d" % error.start)
+    if re.search(rb"(^|\n)FORGED", own):
+        found.append("a forged line")
+    return found
+
+
+def harness_hostile_strings(argv):
+    """Bytes somebody else chose, through every source that carries them to a
+    terminal, and nothing a terminal acts on comes out.
+
+    The sources are names: an interface's (IFLA_IFNAME, which the kernel
+    takes with escape and bell in it from anybody with CAP_NET_ADMIN in a
+    namespace), the node name, an archive's member, link, owner and
+    extended attribute names, and an HTTP server's status line, Location
+    and headers. Each gets payloads from a grammar of escape, CSI, OSC, DCS
+    (DECRQSS, which makes a terminal answer), APC, C1 both raw and in UTF-8,
+    DEL, carriage return, backspace, bell, a newline that starts a forged
+    line, a BiDi override and bytes that are not UTF-8, cut to what the
+    source can hold; every command that shows it is run and its standard
+    output and error scanned (hostile_scan). The table HOSTILE_SOURCES names
+    every function that reads such a source and the row that drives it or
+    why none is needed; a new caller fails here first. BiDi controls are
+    counted, not refused: GNU's tools print them in a UTF-8 locale.
+
+        python3 test/differential.py --harness hostile_strings --shell PATH
+    """
+    import io
+    import shutil
+    import socket
+    import tarfile
+    import tempfile
+    import threading
+    parser = argparse.ArgumentParser(prog="differential.py --harness hostile_strings")
+    parser.add_argument("--shell", required=True)
+    parser.add_argument("--inside", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--farm", help=argparse.SUPPRESS)
+    args = parser.parse_args(argv)
+    checks = Checks()
+    seed = int(os.environ.get("MOONWATER_HOSTILE_SEED", "2026"))
+    many = int(os.environ.get("MOONWATER_HOSTILE_COUNT", "6"))
+
+    def shown(row, command, ran):
+        data = ran.stdout + ran.stderr
+        bad = hostile_scan(data)
+        checks(not bad and ran.returncode is not None,
+               "%s: %s shows %s: %r" % (row, command, ", ".join(bad), data[:160]))
+
+    if args.inside:
+        #   In a user and network namespace: interfaces named by the grammar,
+        #   made with the host's iproute2, shown by ours.
+        farm = Path(args.farm)
+        system_ip = shutil.which("ip", path="/usr/sbin:/usr/bin:/sbin:/bin")
+        names = hostile_payloads(seed, many, 15, banned=b"/: \t\n\r\x0b\x0c\x00")
+        made = []
+        for number, name in enumerate(names):
+            if subprocess.run([system_ip, "link", "add", name, "type", "dummy"],
+                              capture_output=True).returncode == 0:
+                subprocess.run([system_ip, "link", "set", name, "up"], capture_output=True)
+                subprocess.run([system_ip, "addr", "add", "10.77.%d.1/24" % number, "dev", name],
+                               capture_output=True)
+                made.append(name)
+        checks(len(made) == len(names), "ifname: the kernel took %d of %d names"
+               % (len(made), len(names)))
+        for words in (["ip", "link"], ["ip", "addr"], ["ip", "route"], ["moonwater", "wired"]):
+            ran = subprocess.run([str(farm / words[0])] + words[1:], capture_output=True,
+                                 timeout=20, env={"PATH": "/usr/bin:/bin"})
+            shown("ifname", " ".join(words), ran)
+            checks(ran.returncode == 0 and b"10.77.0" in ran.stdout if words[1] == "route"
+                   else ran.returncode == 0, "ifname: %s answered (%d)"
+                   % (" ".join(words), ran.returncode))
+        return checks.verdict("hostile strings (namespace)", "hostile-strings-inside")
+
+    #   The gate: every caller of a source has a row or a reason.
+    sources = {}
+    for path in sorted(list((HARNESS_ROOT / "src").rglob("*.c")) +
+                       list((HARNESS_ROOT / "src").rglob("*.inc"))):
+        current = None
+        for line in path.read_text(errors="replace").splitlines():
+            head = re.match(r"^(?:static|fn|b32|bool|bipolar|positive|p\d+|void|int|"
+                            r"string_address)\b[^;=]*?\b(\w+)\(", line)
+            if head:
+                current = head.group(1)
+            for name in HOSTILE_SOURCES:
+                if re.search(r"\b%s\(" % name, line) and current != name:
+                    sources.setdefault(name, set()).add(current)
+    for name, rows in HOSTILE_SOURCES.items():
+        found = sources.get(name, set())
+        checks(found, "gate: %s has no caller any more" % name)
+        for caller in sorted(found - set(rows)):
+            checks(False, "gate: %s reads %s and has no row or reason in HOSTILE_SOURCES"
+                   % (caller, name))
+
+    farm_dir = tempfile.mkdtemp(prefix="hostile-strings.")
+    try:
+        farm = Path(farm_dir)
+        for tool in ("ip", "moonwater", "tar", "wget", "fetch"):
+            (farm / tool).symlink_to(Path(args.shell).resolve())
+        work = farm / "work"
+        work.mkdir()
+        quiet = {"PATH": "/usr/bin:/bin", "LC_ALL": "C.UTF-8", "HOME": str(work)}
+
+        #   The node name, as somebody who is not root asks for it: a user
+        #   namespace of one's own uid and a UTS namespace whose name is set
+        #   before the exec that drops the capability.
+        for name in hostile_payloads(seed + 1, many, 64, banned=b"\x00"):
+            def named(name=name):
+                user, group = os.getuid(), os.getgid()
+                os.unshare(os.CLONE_NEWUSER | os.CLONE_NEWUTS)
+                Path("/proc/self/setgroups").write_text("deny")
+                Path("/proc/self/uid_map").write_text("%d %d 1" % (user, user))
+                Path("/proc/self/gid_map").write_text("%d %d 1" % (group, group))
+                socket.sethostname(name)
+            try:
+                ran = subprocess.run([str(farm / "moonwater"), "name"], capture_output=True,
+                                     timeout=20, env=quiet, preexec_fn=named)
+            except (subprocess.SubprocessError, OSError) as error:
+                print("hostile strings: nodename NOT RUN -- %s" % error)
+                break
+            shown("nodename", "moonwater name", ran)
+
+        #   HTTP: a status line, a Location and headers chosen by the server,
+        #   through wget and fetch, followed or refused.
+        class Server(threading.Thread):
+            def __init__(self, answers):
+                super().__init__(daemon=True)
+                self.answers = answers
+                self.listener = socket.socket()
+                self.listener.bind(("127.0.0.1", 0))
+                self.listener.listen(16)
+                self.port = self.listener.getsockname()[1]
+                self.start()
+
+            def run(self):
+                while True:
+                    try:
+                        peer, _ = self.listener.accept()
+                    except OSError:
+                        return
+                    with peer:
+                        peer.settimeout(5)
+                        head = b""
+                        try:
+                            while b"\r\n\r\n" not in head:
+                                more = peer.recv(4096)
+                                if not more:
+                                    break
+                                head += more
+                            path = head.split(b" ")[1] if head.count(b" ") > 1 else b"/"
+                            peer.sendall(self.answers(path, self.port))
+                        except OSError:
+                            pass
+
+        def http_answers(payload):
+            def answer(path, port):
+                if path.startswith(b"/loop"):
+                    return (b"HTTP/1.1 302 Found\r\nLocation: /loop" + payload +
+                            b"\r\nContent-Length: 0\r\n\r\n")
+                if path.startswith(b"/far"):
+                    return (b"HTTP/1.1 301 " + payload + b"\r\nLocation: http://" + payload +
+                            b".invalid/x\r\nContent-Length: 0\r\n\r\n")
+                if path.startswith(b"/down"):
+                    return (b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:%d/" % port +
+                            payload + b"\r\nContent-Length: 0\r\n\r\n")
+                return (b"HTTP/1.1 404 " + payload + b"\r\nServer: " + payload +
+                        b"\r\nContent-Disposition: attachment; filename=\"" + payload +
+                        b"\"\r\nContent-Length: 2\r\n\r\nno")
+            return answer
+
+        for payload in hostile_payloads(seed + 3, many, 120, banned=b"\x00\r\n"):
+            server = Server(http_answers(payload))
+            for tool, path, words in (("wget", b"/loop", []), ("wget", b"/far", []),
+                                      ("wget", b"/down", ["-O", "out"]),
+                                      ("wget", b"/gone", []), ("fetch", b"/down", []),
+                                      ("fetch", b"/gone", [])):
+                url = "http://127.0.0.1:%d%s" % (server.port, path.decode())
+                ran = subprocess.run([str(farm / tool)] + words + [url], cwd=work,
+                                     capture_output=True, timeout=60, env=quiet)
+                shown("http", "%s %s" % (tool, path.decode()), ran)
+            server.listener.close()
+        made = [entry.name for entry in work.iterdir()]
+        checks(not any(hostile_scan(name.encode("utf-8", "surrogateescape")) for name in made),
+               "http: a saved file's name carries what a terminal acts on: %r" % made[:6])
+
+        #   Interfaces, in a namespace of their own.
+        if shutil.which("unshare") and shutil.which("ip", path="/usr/sbin:/usr/bin:/sbin:/bin"):
+            inner = subprocess.run(
+                ["unshare", "-Urn", sys.executable, str(Path(__file__).resolve()),
+                 "--harness", "hostile_strings", "--inside", "--farm", str(farm),
+                 "--shell", args.shell], capture_output=True, text=True, timeout=300,
+                env=dict(os.environ, MOONWATER_HOSTILE_SEED=str(seed + 4)))
+            tally = re.search(r"^hostile strings \(namespace\) (\d+)/(\d+)$", inner.stdout, re.M)
+            for line in inner.stdout.splitlines():
+                if line.startswith("  FAIL"):
+                    print(line)
+            checks(inner.returncode in (0, 1) and tally,
+                   "ifname: the namespace run did not finish (%s)" % inner.stderr[-200:])
+            if tally:
+                checks.checks += int(tally.group(2))
+                checks.failures += int(tally.group(2)) - int(tally.group(1))
+        else:
+            print("hostile strings: ifname NOT RUN -- no unshare or ip")
+    finally:
+        shutil.rmtree(farm_dir, ignore_errors=True)
+    return checks.verdict("hostile strings", "hostile-strings")
 
 
 def harness_protected_links(argv):
@@ -66018,6 +66303,7 @@ HARNESS_CHECKS = {
     "security_hygiene": harness_security_hygiene,
     "pathname_race": harness_pathname_race,
     "protected_links": harness_protected_links,
+    "hostile_strings": harness_hostile_strings,
     "machine_scan": harness_machine_scan,
     "waterlink_noise": harness_waterlink_noise,
     "waterlink_mdns": harness_waterlink_mdns,
