@@ -73783,6 +73783,303 @@ static fn indexes_and_commands(void)
         }
 }
 
+/*
+        Keys over time, generated: a session rekeyed again and again, its
+        datagrams sealed under the keys it has now, the ones a confirmed
+        rekey replaced, ones waiting to be confirmed, ones a later rekey
+        overwrote before they were used, and ones from before the peer was
+        forgotten; counters fresh, replayed, at both edges of the window,
+        far ahead, at the message limit and one under it; bodies new and
+        ones already delivered under another key; a bit flipped and then
+        the same datagram whole; time moving a little, past the grace an
+        old key has and past the age no key outlives. A model of what
+        link_carried promises says which are taken, and whatever it says,
+        no frame is delivered twice and nothing is taken under a key that
+        is gone.
+*/
+#define EPOCHS_MOST 48
+#define EPOCH_TAKEN 1024
+
+static positive epoch_delivered[32768];
+static p64 epoch_state;
+
+static p64 epoch_next(void)
+{
+        XORSHIFT64(epoch_state);
+        return epoch_state;
+}
+static positive epoch_twice;
+
+static bool epoch_sink(address_any context, struct waterlink_frame address_to head,
+                       p8 address_to payload)
+{
+        p32 id;
+
+        (void)context;
+        if (head->length != 4)
+                return true;
+        memory_copy(address_of id, payload, 4);
+        if (id < 32768 && epoch_delivered[id]++)
+                epoch_twice++;
+        return true;
+}
+
+static fn epochs_generated(void)
+{
+        struct epoch {
+                p8 raw[16];
+                crypto_aesgcm_key key;
+                p32 index;
+                p64 made;
+                p64 sent;
+                p64 top;
+                positive taken;
+                p64 seen[EPOCH_TAKEN];
+        };
+        static struct epoch epoch[EPOCHS_MOST];
+        static p8 body[64][WATERLINK_PAYLOAD];
+        static positive body_used[64];
+        struct link_session address_to s = link_self.session;
+        struct waterlink_link address_to tx;
+        p8 from[16];
+        p8 datagram[WATERLINK_DATAGRAM];
+        positive asked = 0, wrong = 0, taken = 0, after_forget = 0,
+                 dead_taken = 0, edges = 0, limits = 0, graced = 0,
+                 bodies = 0, malformed = 0, promoted = 0, misplaced = 0,
+                 roamed = 0;
+        p8 last[16];
+        p16 last_port = 0;
+        p64 limit = WATERLINK_REKEY_MESSAGES + (1ull << 20);
+        bipolar mapped = system_call_6(syscall(mmap), 0,
+                                       sizeof(struct waterlink_link), 3, 0x22,
+                                       (positive)(bipolar)-1, 0);
+
+        if (mapped < 0 && mapped > -4096)
+                return;
+        tx = (struct waterlink_link address_to)mapped;
+        memory_copy(from, wls_loopback, sizeof from);
+        from[15] = 3;
+        memory_zero(epoch_delivered, sizeof epoch_delivered);
+        epoch_twice = 0;
+
+        for (positive seed = 1; seed <= 24; seed++)
+        {
+                bipolar slot[3] = {-1, -1, -1}; // now, next, before
+                positive epochs = 0;
+                p64 base;
+                p64 at = 0;
+                bool forgotten = false;
+                bool again = false;
+                p64 again_counter = 0;
+                positive again_epoch = 0;
+                positive again_body = 0;
+
+                epoch_state = 0x7a3c9e1bull * seed;
+                if (!link_session_open(s))
+                        return;
+                wls_seeded(s->peer, 32, (p8)seed);
+                last_port = 0;
+                waterlink_link_reset(tx);
+                base = link_now();
+                bodies = 0;
+
+                for (positive op = 0; op < 900; op++)
+                {
+                        p64 roll = epoch_next() % 100;
+
+                        //      A rekey: the first keys are the session's,
+                        //      every later one waits in next.
+                        if (!again && (op == 0 || (roll < 6 && epochs < EPOCHS_MOST && !forgotten)))
+                        {
+                                struct epoch address_to e = epoch + epochs;
+                                struct link_keys address_to keys =
+                                        s->now.live ? address_of s->next : address_of s->now;
+
+                                memory_zero(e, sizeof(address_to e));
+                                wls_seeded(e->raw, 16, (p8)(seed * 64 + epochs));
+                                crypto_aesgcm_prepare(address_of e->key, e->raw);
+                                e->index = (p32)(0x10000 * seed + epochs + 1);
+                                e->made = base + at;
+                                link_keys_install(keys, e->raw, e->raw, e->index, 7);
+                                keys->made = e->made;
+                                slot[keys == address_of s->now ? 0 : 1] = (bipolar)epochs;
+                                epochs++;
+                                continue;
+                        }
+                        if (!again && roll < 14)
+                        {
+                                p64 jump = epoch_next() % 4;
+
+                                at += jump == 0 ? LINK_GRACE + 1000
+                                    : jump == 1 ? (p64)WATERLINK_REJECT_SECONDS * 1000000 / 3
+                                                : 1 + epoch_next() % 2000000;
+                                continue;
+                        }
+                        if (!again && roll < 15 && op > 600 && !forgotten)
+                        {
+                                link_sessions_forget_peer(s->peer);
+                                forgotten = true;
+                                continue;
+                        }
+
+                        //      A datagram.
+                        {
+                                positive which;
+                                positive b;
+                                p64 counter;
+                                bool flip = false;
+                                struct epoch address_to e;
+                                struct waterlink_datagram head = {WATERLINK_KIND_CARRY, 0, 0};
+                                positive length;
+                                bipolar in = -1;
+                                bool want = false;
+                                bool got;
+                                bool duplicate;
+
+                                if (again)
+                                {
+                                        which = again_epoch;
+                                        counter = again_counter;
+                                        b = again_body;
+                                        again = false;
+                                }
+                                else
+                                {
+                                        p64 pick = epoch_next() % 10;
+                                        p64 how = epoch_next() % 12;
+
+                                        which = pick < 5 && slot[0] >= 0 ? (positive)slot[0]
+                                              : pick < 7 && slot[1] >= 0 ? (positive)slot[1]
+                                              : pick < 9 && slot[2] >= 0 ? (positive)slot[2]
+                                                                         : (positive)(epoch_next() % epochs);
+                                        e = epoch + which;
+                                        counter = how < 5 ? e->sent++
+                                                : how == 5 && e->taken ? e->seen[epoch_next() % e->taken]
+                                                : how == 6 && e->top >= WATERLINK_REPLAY_WINDOW
+                                                        ? e->top - WATERLINK_REPLAY_WINDOW
+                                                : how == 7 && e->top + 1 >= WATERLINK_REPLAY_WINDOW
+                                                        ? e->top + 1 - WATERLINK_REPLAY_WINDOW
+                                                : how == 8 ? (e->sent += 1 + epoch_next() % 3000)
+                                                : how == 9 ? limit + 1 - epoch_next() % 3
+                                                : how == 10 ? (e->top + 1 + epoch_next() % 64)
+                                                            : 0;
+                                        edges += how == 6 || how == 7;
+                                        limits += how == 9;
+                                        duplicate = bodies && epoch_next() % 4 == 0;
+                                        if (duplicate)
+                                                b = (positive)(epoch_next() % (bodies < 64 ? bodies : 64));
+                                        else
+                                        {
+                                                p32 id = (p32)(seed * 1000 + bodies);
+                                                bool alone = false;
+
+                                                b = bodies % 64;
+                                                (void)waterlink_post(tx, (p8)(1 + bodies % 8), WATERLINK_FRAME_DURABLE,
+                                                                     address_of id, 4, base + at);
+                                                body_used[b] = waterlink_fill(tx, body[b], base + at,
+                                                                              address_of alone);
+                                                bodies++;
+                                        }
+                                        flip = epoch_next() % 8 == 0;
+                                        if (flip)
+                                        {
+                                                again = true;
+                                                again_epoch = which;
+                                                again_counter = counter;
+                                                again_body = b;
+                                        }
+                                }
+                                e = epoch + which;
+                                head.receiver = e->index;
+                                head.counter = counter;
+                                memory_copy(datagram, address_of head, sizeof head);
+                                memory_copy(datagram + 16, body[b], body_used[b]);
+                                length = waterlink_seal(address_of e->key, datagram, body_used[b]);
+                                if (flip)
+                                {
+                                        datagram[16 + epoch_next() % (length - 16)] ^=
+                                                (p8)(1u << epoch_next() % 8);
+                                        malformed++;
+                                }
+
+                                //      The model.
+                                for (positive k = 0; k < 3; k++)
+                                        if (slot[k] == (bipolar)which)
+                                                in = (bipolar)k;
+                                if (in >= 0 && !forgotten && !flip &&
+                                    base + at - e->made < (p64)WATERLINK_REJECT_SECONDS * 1000000 &&
+                                    counter < limit &&
+                                    !(in == 2 && base + at - epoch[slot[0]].made > LINK_GRACE))
+                                {
+                                        want = true;
+                                        if (counter <= e->top && (e->taken || counter))
+                                        {
+                                                want = e->top - counter < WATERLINK_REPLAY_WINDOW;
+                                                for (positive t = 0; want && t < e->taken; t++)
+                                                        want = e->seen[t] != counter;
+                                        }
+                                        graced += in == 2;
+                                }
+
+                                {
+                                        p8 place = (p8)(epoch_next() % 3);
+                                        p16 port = (p16)(4000 + place);
+
+                                        from[15] = (p8)(3 + place);
+                                        got = link_carried(datagram, length, from, port,
+                                                           base + at, epoch_sink);
+                                        if (got)
+                                        {
+                                                roamed += last_port && last_port != port;
+                                                memory_copy(last, from, 16);
+                                                last_port = port;
+                                        }
+                                        misplaced += last_port &&
+                                                     (memory_compare(s->address, last, 16) ||
+                                                      s->port != last_port);
+                                }
+                                asked++;
+                                wrong += got != want;
+                                taken += got;
+                                after_forget += got && forgotten;
+                                dead_taken += got && in < 0;
+                                if (want && e->taken < EPOCH_TAKEN)
+                                {
+                                        if (counter > e->top || !e->taken)
+                                                e->top = counter > e->top ? counter : e->top;
+                                        e->seen[e->taken++] = counter;
+                                }
+                                if (want && in == 1)
+                                {
+                                        slot[2] = slot[0];
+                                        slot[0] = slot[1];
+                                        slot[1] = -1;
+                                        promoted++;
+                                }
+                        }
+                }
+                link_session_close(s);
+        }
+        system_call_2(syscall(munmap), (positive)tx, sizeof(struct waterlink_link));
+
+        string_format(log, "  epochs: %p datagrams, %p taken, %p promotions, %p under "
+                           "old keys in grace, %p window edges, %p at the limit, %p flipped, "
+                           "%p moves\n",
+                      asked, taken, promoted, graced, edges, limits, malformed, roamed);
+        check("sec: generated rekeys, replays, window edges, limits, flips and "
+              "a forgotten peer: link_carried takes exactly what the model of "
+              "its keys and windows takes", wrong == 0);
+        check("sec: no frame is delivered twice across rekeys and duplicates",
+              epoch_twice == 0);
+        check("sec: nothing is taken under a key that was replaced, overwritten "
+              "or forgotten", after_forget == 0 && dead_taken == 0);
+        check("sec: a session is where its last datagram taken came from, and "
+              "no refused one moves it", misplaced == 0 && roamed > 100);
+        check("and the generator reached every corner it means to",
+              promoted > 24 && graced > 0 && edges > 0 && limits > 0 &&
+                  malformed > 0 && taken > 1000);
+}
+
 b32 main(void)
 {
         bipolar listener;
@@ -73819,6 +74116,7 @@ b32 main(void)
         client_cookie(listener, port);
         initiator_answer();
         carried_is_atomic();
+        epochs_generated();
         seen_once_a_second();
         segment_runs(listener, port);
         in_order_sends(listener, port);
