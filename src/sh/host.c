@@ -178,6 +178,8 @@ static fn radio_restore(void);
 static fn radio_recover(void);
 static b32 host_locale(string_address address_to arguments, positive count);
 static fn locale_restore(void);
+//      Set by the machine process alone, in moonwater.c: only it asks the time.
+static bool host_machine_self;
 static fn name_restore(void);
 static fn locale_recover(void);
 static unsigned int locale_wake_ms(unsigned int most);
@@ -5717,14 +5719,14 @@ static bipolar radio_power(string_address path)
                                                               : host_onoff((string_address)text);
 }
 
-static bipolar radio_lock(bool wait)
+static bipolar host_lock(string_address path, bool wait)
 {
         bipolar handle;
         bipolar locked;
 
         host_state_ready();
         // Not through a link: the lock is made where it is named.
-        handle = system_open_at_mode(AT_FDCWD, RADIO_LOCK_PATH,
+        handle = system_open_at_mode(AT_FDCWD, path,
                                      FILE_READ_WRITE | FILE_CREATE |
                                          O_NOFOLLOW | O_CLOEXEC,
                                      0600);
@@ -5741,6 +5743,11 @@ static bipolar radio_lock(bool wait)
         }
 
         return handle;
+}
+
+static bipolar radio_lock(bool wait)
+{
+        return host_lock(RADIO_LOCK_PATH, wait);
 }
 
 static fn radio_unlock(bipolar handle)
@@ -9468,9 +9475,8 @@ static b32 host_tune(string_address address_to arguments, positive count)
         The forked query is not asked after with kill. A pid that has
         exited but not been waited for is still a pid, so kill(pid, 0)
         answers zero for a zombie exactly as it does for a live child: the
-        poll would see its first query running for ever. Nor is it asked
-        with wait4 alone, since the machine loop reaps every child it has;
-        it says how it went on a pipe (locale_child).
+        poll would see its first query running for ever. It says how it
+        went on a pipe (locale_child), and is waited for once it has.
 
         NOTHING BELOW HAS BEEN SEEN TO SET A CLOCK
 
@@ -10899,15 +10905,17 @@ static COLD bipolar sntp_query(string_address name, bool filter, bipolar most,
 #define LOCALE_KEYBOARD_PATH "/root/keyboard"
 #define LOCALE_NTP_DEFAULT_SERVER "pool.ntp.org"
 #define LOCALE_NTP_RETRY_LEAST 1
-#define LOCALE_NTP_RETRY_MOST 8
+#define LOCALE_NTP_RETRY_MOST 900
 #define LOCALE_NTP_AGAIN 1800
 #define LOCALE_NTP_AGAIN_FIRST 256
 #define LOCALE_NTP_LEARN_LEAST_NS ((bipolar)60 * 1000000000)
 #define LOCALE_NTP_FREQ_MOST ((bipolar)500 << 16)
 #define LOCALE_NTP_NOISE_NS ((bipolar)500000)
-#define LOCALE_WAIT_NOHANG 1
 #define LOCALE_NTP_RATE_AGAIN 300
 #define LOCALE_NTP_EXIT_RATE 2
+#define LOCALE_NTP_EXIT_LONG 3
+#define LOCALE_LOCK_PATH HOST_STATE "/locale.lock"
+#define LOCALE_NTP_LOCK_PATH HOST_STATE "/ntp.lock"
 #define LOCALE_NTP_STEP_NS ((bipolar)128 * 1000000)
 #define LOCALE_NTP_STEP_FIRST_NS ((bipolar)1000000)
 #define LOCALE_NTP_TIMECONST 6
@@ -10944,14 +10952,16 @@ static COLD bipolar sntp_query(string_address name, bool filter, bipolar most,
         answer gets back.
 
         It used to come back as the child's exit status, collected by a
-        wait4 on its pid. But the machine loop runs radio_recover first, and
-        that reaps every child it has with wait4(-1): the status was gone
-        before this side asked, wait4 answered ECHILD, and the status read
-        as zero. So a kiss-o-death never slowed anything down. The answer is
-        now one byte on a pipe, which nothing else in the process reads; the
-        pid is still reaped here when radio_reap has not got there first,
-        and a child that dies without writing reads as end of file, which
-        is a failure like any other.
+        wait4 on its pid, while the machine loop reaped every child it had
+        with wait4(-1): the status was gone before this side asked, and a
+        kiss-o-death never slowed anything down. The answer is one byte on a
+        pipe, which nothing else in the process reads; a child that dies
+        without writing reads as end of file, which is a failure like any
+        other. The byte is the last thing the child does, so it is a zombie
+        a moment later, and it is waited for here, blocking: the wait that
+        did not block found it still running 2,994 times in 3,000 and never
+        came back, so a query that ended left its pid, and its pipe, for
+        the rest of the boot.
 */
 typedef struct
 {
@@ -10978,9 +10988,19 @@ static bipolar locale_child_fork(locale_child address_to child)
         }
         if (!pid)
         {
+                positive keep = (positive)ends[1];
+
                 system_close(ends[0]);
                 child->pid = 0;
                 child->answer = ends[1];
+                //      Nothing of the machine process stays open in it. Its
+                //      descriptor on /dev/spark holds the machine's
+                //      attachment until the last copy closes, and a machine
+                //      restarted during a query found it taken.
+                if (keep > 3)
+                        system_call_3(syscall(close_range), 3, keep - 1, 0);
+                system_call_3(syscall(close_range), keep < 3 ? 3 : keep + 1,
+                              ~(p32)0, 0);
                 return 0;
         }
         system_close(ends[1]);
@@ -10996,6 +11016,20 @@ static DEAD_END fn locale_child_end(locale_child address_to child, p8 code)
         __builtin_unreachable();
 }
 
+//      A query nobody wants any more, ended and waited for.
+static fn locale_child_stop(locale_child address_to child)
+{
+        positive status = 0;
+
+        if (child->pid <= 0)
+                return;
+        system_call_2(syscall(kill), (positive)child->pid, SIGKILL);
+        system_close(child->answer);
+        (void)system_wait4_retry(child->pid, address_of status, 0, null);
+        child->pid = 0;
+        child->answer = -1;
+}
+
 //      LOCALE_CHILD_IDLE with none running, LOCALE_CHILD_RUNNING while it
 //      runs, then the byte it ended with -- once.
 static bipolar locale_child_poll(locale_child address_to child)
@@ -11009,9 +11043,12 @@ static bipolar locale_child_poll(locale_child address_to child)
         got = system_read_once(child->answer, address_of code, 1);
         if (got == -EAGAIN || got == -EINTR)
                 return LOCALE_CHILD_RUNNING;
+        //      The byte or the end of file says it is done; any other
+        //      answer of read says nothing, and is not waited for.
+        if (got < 0)
+                system_call_2(syscall(kill), (positive)child->pid, SIGKILL);
         system_close(child->answer);
-        (void)system_wait4_retry(child->pid, address_of status,
-                                 LOCALE_WAIT_NOHANG, null);
+        (void)system_wait4_retry(child->pid, address_of status, 0, null);
         child->pid = 0;
         child->answer = -1;
         return got == 1 ? code : 1;
@@ -11020,16 +11057,17 @@ static bipolar locale_child_poll(locale_child address_to child)
 static p64 locale_ntp_next;
 static positive locale_ntp_retry = LOCALE_NTP_RETRY_LEAST;
 /*
-        When the query in flight was asked, when the last one that set the
-        clock was, and how long until the next: the forked query reads the
-        last, which the fork hands it, to tell how fast the clock ran.
+        When the last query that set the clock ended, and how long until the
+        next: the forked query reads the first, which the fork hands it, to
+        tell how fast the clock ran. It is the end of the query the machine
+        saw and not the start of the walk, which is up to a minute earlier
+        and would put that into the frequency it learns.
 */
-static p64 locale_ntp_asked;
 static p64 locale_ntp_synced;
 static positive locale_ntp_every = LOCALE_NTP_AGAIN_FIRST;
 static locale_child locale_ntp_child = {0, -1};
 
-static fn locale_ntp_keep(void);
+static fn locale_ntp_keep(bool online);
 static bipolar locale_ntp_apply(bool by_hand);
 
 //      What the last answer moved the clock by, and who gave it, for the
@@ -11410,6 +11448,45 @@ static fn locale_zone_apply(void)
                 string_format(log, "  refused by  %s\n", kept);
 }
 
+/*
+        The zone and how it came to be, as one change. Under a lock, so that
+        the machine's own query -- which looks at the mode and writes the
+        zone it was told, and meant to leave a zone somebody typed alone --
+        cannot do both between a hand's two writes and leave Cloudflare's
+        zone with the word manual beside it; and in the order that leaves
+        the least when it is cut short: a zone somebody chose is marked
+        manual first, so that a crash after that leaves the old zone with
+        the word that keeps it, and one the network chose is written first,
+        so that nobody reads the new word beside the old zone. A write made
+        by the machine says -EBUSY of a zone that has gone manual since it
+        asked.
+*/
+static bipolar locale_zone_write(string_address zone, string_address mode,
+                                 bool by_hand)
+{
+        bipolar lock = host_lock(LOCALE_LOCK_PATH, true);
+        bipolar failed;
+
+        if (lock < 0)
+                return lock;
+        if (!by_hand && locale_zone_manual())
+                failed = -EBUSY;
+        else if (host_starts(mode, "manual"))
+        {
+                failed = radio_write_word(LOCALE_ZONE_MODE_PATH, mode);
+                if (failed >= 0)
+                        failed = radio_write_word(CLOCK_ZONE_PATH, zone);
+        }
+        else
+        {
+                failed = radio_write_word(CLOCK_ZONE_PATH, zone);
+                if (failed >= 0)
+                        failed = radio_write_word(LOCALE_ZONE_MODE_PATH, mode);
+        }
+        radio_unlock(lock);
+        return failed;
+}
+
 //      Setting prints what the clock now reads, so a wrong zone -- an offset
 //      with the sign the other way round, a country in the wrong half of a
 //      continent -- is visible at the moment it is set, not at the next
@@ -11422,14 +11499,15 @@ static b32 locale_zone_store(string_address zone, string_address mode)
         p8 title[128];
         p8 how[48];
         p8 old_shown[80];
+        bipolar failed;
 
         locale_word(CLOCK_ZONE_PATH, was, sizeof(was));
         locale_zone_describe(was, old_shown, sizeof(old_shown));
         locale_zone_moment(before, sizeof(before));
 
-        if (radio_write_word(CLOCK_ZONE_PATH, zone) < 0 ||
-            radio_write_word(LOCALE_ZONE_MODE_PATH, mode) < 0)
-                return host_fail("timezone", -1);
+        failed = locale_zone_write(zone, mode, true);
+        if (failed < 0)
+                return host_fail("timezone", failed);
 
         locale_zone_moment(after, sizeof(after));
         locale_zone_title(zone, title, sizeof(title));
@@ -11507,9 +11585,13 @@ typedef struct
         and the gateway's hardware address when the neighbour table has it.
         Empty with no default route. Two networks that both hand out
         192.168.1.1 differ in the last part, which is why it is there.
+        Whether there is any route at all is the answer: a machine with an
+        address and no gateway is on a network, though nothing that lives
+        past it can be asked.
 */
-static fn locale_network(p8 address_to into, positive room)
+static bool locale_network(p8 address_to into, positive room)
 {
+        bool any = false;
         p8 table[4096];
         p8 gateway[16] = {0};
         p8 device[20] = {0};
@@ -11519,7 +11601,7 @@ static fn locale_network(p8 address_to into, positive room)
         into[0] = end;
         got = host_read_text("/proc/net/route", table, sizeof(table));
         if (got <= 0)
-                return;
+                return false;
         for (line = (string_address)table; line && line[0];)
         {
                 string_address next = string_first_of(line, '\n');
@@ -11541,6 +11623,7 @@ static fn locale_network(p8 address_to into, positive room)
                         if (length)
                                 words++;
                 }
+                any |= words >= 4 && !string_equals(word[0], "Iface");
                 //      Iface Destination Gateway Flags: a default route
                 //      through a gateway.
                 if (words >= 4 && string_equals(word[1], "00000000") &&
@@ -11554,7 +11637,7 @@ static fn locale_network(p8 address_to into, positive room)
                 line = next ? next + 1 : null;
         }
         if (!device[0])
-                return;
+                return any;
 
         string_copy_bounded(into, device, room);
         string_append_bounded(into, " ", room);
@@ -11565,15 +11648,10 @@ static fn locale_network(p8 address_to into, positive room)
         {
                 p32 raw = (p32)string_to_number_unsigned(gateway, null, 16);
                 p8 dotted[20];
-                positive at = 0;
+                positive at = 1;
 
-                dotted[at++] = '\n';
-                for (positive octet = 0; octet < 4; octet++)
-                {
-                        if (octet)
-                                dotted[at++] = '.';
-                        at += positive_into(dotted + at, (raw >> (8 * octet)) & 0xff);
-                }
+                dotted[0] = '\n';
+                at += host_into(dotted + at, bytes_reverse_32(raw));
                 dotted[at++] = ' ';
                 dotted[at] = end;
                 got = host_read_text("/proc/net/arp", table, sizeof(table));
@@ -11607,6 +11685,7 @@ static fn locale_network(p8 address_to into, positive room)
                         }
                 }
         }
+        return true;
 }
 
 /*
@@ -11852,8 +11931,7 @@ static bipolar locale_auto_take(locale_auto_answer address_to answer,
         if (string_equals(was, answer->zone) &&
             string_equals(mode, answer->mode))
                 return 0;
-        if (radio_write_word(CLOCK_ZONE_PATH, answer->zone) < 0 ||
-            radio_write_word(LOCALE_ZONE_MODE_PATH, answer->mode) < 0)
+        if (locale_zone_write(answer->zone, answer->mode, false) < 0)
                 return -1;
         tzset();
         (void)bowl_write_localtime_host();
@@ -11902,11 +11980,10 @@ static p64 locale_auto_next;
 static positive locale_auto_wait = LOCALE_AUTO_LEAST;
 static locale_child locale_auto_child = {0, -1};
 
-static fn locale_auto_keep(void)
+static fn locale_auto_keep(bool ntp_wanted, string_address network)
 {
         p64 now = system_clock_ns(HOST_CLOCK_BOOTTIME);
         bipolar ended = locale_child_poll(address_of locale_auto_child);
-        p8 network[LOCALE_NETWORK_ROOM];
         p8 asked[LOCALE_NETWORK_ROOM];
 
         if (ended == LOCALE_CHILD_RUNNING)
@@ -11927,10 +12004,9 @@ static fn locale_auto_keep(void)
                 return;
         //      A certificate is only as good as the clock that checks it:
         //      while NTP is on and has not set it, wait a minute for it.
-        if (locale_ntp_wanted() && !locale_clock_synced() &&
+        if (ntp_wanted && !locale_clock_synced() &&
             now < (p64)LOCALE_AUTO_CLOCK_WAIT * 1000000000ull)
                 return;
-        locale_network(network, sizeof(network));
         if (!network[0])
                 return;
         locale_word(LOCALE_ZONE_NETWORK_PATH, asked, sizeof(asked));
@@ -11948,7 +12024,6 @@ static fn locale_auto_keep(void)
         {
                 locale_auto_answer answer;
                 bool took = !locale_auto_ask(address_of answer) &&
-                            !locale_zone_manual() &&
                             !locale_auto_take(address_of answer, false);
 
                 if (took)
@@ -12447,7 +12522,7 @@ static bipolar locale_ntp_take(string_address server,
         from, and waiting for the others is a minute on a machine whose
         network is slow to come.
 */
-static bipolar locale_ntp_apply(bool by_hand)
+static bipolar locale_ntp_walk(bool by_hand)
 {
         p8 server[80];
         bipolar failed = SNTP_NO_SERVER;
@@ -12531,6 +12606,32 @@ static bipolar locale_ntp_apply(bool by_hand)
                     heard + chosen);
         }
         return denied ? SNTP_DENIED : rated ? SNTP_RATE_LIMITED : failed;
+}
+
+/*
+        One query at a time, whoever asks. The offset is measured against the
+        clock as it is and applied relative to it, so two that measured
+        before either applied would both move the clock by the same amount:
+        the machine's own query and `moonwater time sync` or `ntp on` typed
+        while it runs. The machine's gives way and is asked again, and a
+        hand waits its turn, and says so, since a walk is up to a minute.
+*/
+static bipolar locale_ntp_apply(bool by_hand)
+{
+        bipolar lock = host_lock(LOCALE_NTP_LOCK_PATH, false);
+        bipolar failed;
+
+        if (lock == -EAGAIN)
+        {
+                if (!by_hand)
+                        return SNTP_NO_REPLY;
+                host_say(log, host_label "time: another query is running; "
+                                         "waiting for it\n");
+                lock = host_lock(LOCALE_NTP_LOCK_PATH, true);
+        }
+        failed = locale_ntp_walk(by_hand);
+        radio_unlock(lock);
+        return failed;
 }
 
 static b32 locale_ntp_status(void)
@@ -12654,34 +12755,6 @@ static b32 locale_keyboard_set(string_address name)
         return 0;
 }
 
-static fn locale_restore(void)
-{
-        p8 zone[80];
-        p8 keyboard[16];
-
-        locale_word(CLOCK_ZONE_PATH, zone, sizeof(zone));
-        if (zone[0])
-        {
-                tzset();
-                (void)locale_zone_kernel();
-                (void)bowl_write_localtime_host();
-                (void)bowl_write_localtime_all(null);
-        }
-
-        locale_word(LOCALE_KEYBOARD_PATH, keyboard, sizeof(keyboard));
-        if (keyboard[0])
-                locale_keyboard_live(keyboard);
-
-        locale_ntp_next = 0;
-        locale_ntp_retry = LOCALE_NTP_RETRY_LEAST;
-        locale_ntp_synced = 0;
-        locale_ntp_every = LOCALE_NTP_AGAIN_FIRST;
-        locale_auto_next = 0;
-        locale_auto_wait = LOCALE_AUTO_LEAST;
-        if (locale_ntp_wanted())
-                locale_ntp_keep();
-}
-
 /*
         What the schedule makes of a query that ended, or of a look between
         queries. A success is only a success if the kernel still says the
@@ -12706,7 +12779,7 @@ static fn locale_ntp_schedule(bipolar ended, bool synced, p64 now)
                 //      fast this clock runs, and half-hourly once it has
                 //      had the time to.
                 locale_ntp_retry = LOCALE_NTP_RETRY_LEAST;
-                locale_ntp_synced = locale_ntp_asked;
+                locale_ntp_synced = now;
                 locale_ntp_next = now + (p64)locale_ntp_every * 1000000000ull;
                 locale_ntp_every = locale_ntp_every * 2 < LOCALE_NTP_AGAIN
                                        ? locale_ntp_every * 2
@@ -12717,11 +12790,17 @@ static fn locale_ntp_schedule(bipolar ended, bool synced, p64 now)
                 locale_ntp_retry = LOCALE_NTP_RETRY_MOST;
                 locale_ntp_next = now + (p64)LOCALE_NTP_RATE_AGAIN * 1000000000ull;
         }
+        else if (ended == LOCALE_NTP_EXIT_LONG)
+                locale_ntp_next = now + (p64)LOCALE_NTP_AGAIN * 1000000000ull;
         else if (ended != LOCALE_CHILD_IDLE)
         {
+                //      Doubling from a second to a quarter of an hour: a
+                //      machine that cannot reach a server does not walk
+                //      seven names every eight seconds for ever.
                 locale_ntp_next = now + (p64)locale_ntp_retry * 1000000000ull;
-                if (locale_ntp_retry < LOCALE_NTP_RETRY_MOST)
-                        locale_ntp_retry *= 2;
+                locale_ntp_retry = locale_ntp_retry * 2 < LOCALE_NTP_RETRY_MOST
+                                       ? locale_ntp_retry * 2
+                                       : LOCALE_NTP_RETRY_MOST;
         }
         else if (locale_ntp_synced && !synced &&
                  locale_ntp_retry == LOCALE_NTP_RETRY_LEAST &&
@@ -12729,18 +12808,37 @@ static fn locale_ntp_schedule(bipolar ended, bool synced, p64 now)
                 locale_ntp_next = now + LOCALE_NTP_RETRY_LEAST * 1000000000ull;
 }
 
-static fn locale_ntp_keep(void)
+/*
+        Whether NTP was wanted at the machine's last turn, which the wake
+        below reads rather than the file again; and which network the turn
+        was on, so that a different one, or the first, is a new chance for
+        the queries that wait out a failure.
+*/
+static bool locale_ntp_on;
+static bool locale_online_held;
+static p8 locale_network_held[LOCALE_NETWORK_ROOM];
+
+static fn locale_ntp_keep(bool online)
 {
         p64 now = system_clock_ns(HOST_CLOCK_BOOTTIME);
-        bipolar ended = locale_child_poll(address_of locale_ntp_child);
+        bipolar ended;
 
+        //      `ntp off` ends a query in flight and waits for it: left to
+        //      run it would set the clock after it was told not to, and
+        //      nothing would reap it or close its pipe.
+        if (!locale_ntp_on)
+        {
+                locale_child_stop(address_of locale_ntp_child);
+                return;
+        }
+        ended = locale_child_poll(address_of locale_ntp_child);
         if (ended == LOCALE_CHILD_RUNNING)
                 return;
         locale_ntp_schedule(ended, locale_clock_synced(), now);
-        if (ended != LOCALE_CHILD_IDLE || (locale_ntp_next && now < locale_ntp_next))
+        if (ended != LOCALE_CHILD_IDLE || (locale_ntp_next && now < locale_ntp_next) ||
+            !online)
                 return;
 
-        locale_ntp_asked = now;
         if (!locale_child_fork(address_of locale_ntp_child))
         {
                 bipolar failed = locale_ntp_apply(false);
@@ -12749,8 +12847,44 @@ static fn locale_ntp_keep(void)
                                  failed >= 0 ? 0
                                  : failed == SNTP_RATE_LIMITED
                                      ? LOCALE_NTP_EXIT_RATE
+                                 : failed == SNTP_DENIED || failed > SNTP_ANSWER
+                                     ? LOCALE_NTP_EXIT_LONG
                                      : 1);
         }
+}
+
+static fn locale_restore(void)
+{
+        p8 zone[80];
+        p8 keyboard[16];
+
+        locale_word(CLOCK_ZONE_PATH, zone, sizeof(zone));
+        if (zone[0])
+        {
+                tzset();
+                (void)locale_zone_kernel();
+                (void)bowl_write_localtime_host();
+                (void)bowl_write_localtime_all(null);
+        }
+
+        locale_word(LOCALE_KEYBOARD_PATH, keyboard, sizeof(keyboard));
+        if (keyboard[0])
+                locale_keyboard_live(keyboard);
+
+        locale_ntp_next = 0;
+        locale_ntp_retry = LOCALE_NTP_RETRY_LEAST;
+        locale_ntp_synced = 0;
+        locale_ntp_every = LOCALE_NTP_AGAIN_FIRST;
+        locale_auto_next = 0;
+        locale_auto_wait = LOCALE_AUTO_LEAST;
+        //      Only the machine process asks the time. `moonwater boot` comes
+        //      through here too when a disk is taken, and the machine
+        //      process, released by the same verdict, asks as well: two
+        //      queries that each measured an offset before either applied it
+        //      stepped the clock twice.
+        locale_ntp_on = locale_ntp_wanted();
+        if (host_machine_self && locale_ntp_on)
+                locale_ntp_keep(true);
 }
 
 /*
@@ -12758,16 +12892,17 @@ static fn locale_ntp_keep(void)
         again, at most the loop's own wake. A query in flight is polled every
         quarter second and a retry is woken for when it falls due: the first
         ask of a boot can run before the lease (its DNS id waits on the same
-        entropy the DHCP transaction id does), and on the radio wake alone
-        that failed ask cost two three-second wakes before the retry went out.
-        Never 0, which the machine wait reads as not waiting at all; a retry
-        already past due (its fork failed) is looked at again in a quarter
-        second rather than in a spin. For ten seconds after a query that set
-        the clock it is a quarter second as well, so that the kernel dropping
-        that synchronisation at the boot's clocksource switch (see
+        entropy the DHCP transaction id does). Never 0, which the machine
+        wait reads as not waiting at all; a retry already past due (its fork
+        failed) is looked at again in a quarter second rather than in a
+        spin. For ten seconds after a query that set the clock it is a
+        quarter second as well, so that the kernel dropping that
+        synchronisation at the boot's clocksource switch (see
         locale_ntp_schedule) is seen at once and not at the next three-second
         wake: three instrumented boots lost it at 1.5 s and asked again only
-        at 5.6 s.
+        at 5.6 s. In the first minute of a boot with no clock set yet it is
+        a second, because the network that comes up then is the one the
+        clock waits for.
 */
 static unsigned int locale_wake_ms(unsigned int most)
 {
@@ -12776,9 +12911,13 @@ static unsigned int locale_wake_ms(unsigned int most)
 
         if (locale_ntp_child.pid > 0)
                 return most < 250 ? most : 250;
-        if (!locale_ntp_next || !locale_ntp_wanted())
+        if (!locale_ntp_on)
                 return most;
         now = system_clock_ns(HOST_CLOCK_BOOTTIME);
+        if (!locale_ntp_synced && now < 60000000000ull && most > 1000)
+                return 1000;
+        if (!locale_ntp_next)
+                return most;
         if (locale_ntp_synced && now - locale_ntp_synced < 10000000000ull)
                 return most < 250 ? most : 250;
         due = locale_ntp_next <= now ? 250
@@ -12791,10 +12930,28 @@ static unsigned int locale_wake_ms(unsigned int most)
 //      their file carries the rule rather than the offset.
 static fn locale_recover(void)
 {
+        p8 network[LOCALE_NETWORK_ROOM];
+        bool online = locale_network(network, sizeof(network));
+
         (void)locale_zone_kernel();
-        if (locale_ntp_wanted())
-                locale_ntp_keep();
-        locale_auto_keep();
+        locale_ntp_on = locale_ntp_wanted();
+        //      A network that is not the one of the last turn, or the first
+        //      after none, is not a reason to go on waiting out a failure
+        //      that was the last one's: both queries are asked at once.
+        if (online && (!locale_online_held ||
+                       (network[0] &&
+                        !locale_network_same(network, locale_network_held))))
+        {
+                locale_ntp_next = 0;
+                locale_ntp_retry = LOCALE_NTP_RETRY_LEAST;
+                locale_auto_next = 0;
+                locale_auto_wait = LOCALE_AUTO_LEAST;
+        }
+        locale_online_held = online;
+        string_copy_bounded(locale_network_held, network,
+                            sizeof(locale_network_held));
+        locale_ntp_keep(online);
+        locale_auto_keep(locale_ntp_on, network);
 }
 
 /*

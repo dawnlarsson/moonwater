@@ -83560,7 +83560,6 @@ static fn machine_ntp_schedule(void)
         p64 second = 1000000000ull;
         p64 now = 1000 * second;
         p64 next = locale_ntp_next;
-        p64 asked = locale_ntp_asked;
         p64 synced = locale_ntp_synced;
         positive retry = locale_ntp_retry;
         positive every = locale_ntp_every;
@@ -83569,15 +83568,13 @@ static fn machine_ntp_schedule(void)
         locale_ntp_synced = 0;
         locale_ntp_retry = LOCALE_NTP_RETRY_LEAST;
         locale_ntp_every = LOCALE_NTP_AGAIN_FIRST;
-        locale_ntp_asked = now - second;
         locale_ntp_schedule(0, false, now);
         check("an answer the kernel has already forgotten is asked again in a second",
               locale_ntp_next == now + second && !locale_ntp_synced);
-        locale_ntp_asked = now + second;
         locale_ntp_schedule(0, true, now + 2 * second);
         check("an answer the kernel keeps waits for the first poll",
               locale_ntp_next == now + 2 * second + LOCALE_NTP_AGAIN_FIRST * second &&
-                  locale_ntp_synced == now + second);
+                  locale_ntp_synced == now + 2 * second);
         locale_ntp_schedule(LOCALE_CHILD_IDLE, true, now + 3 * second);
         check("a clock still synchronised keeps that poll",
               locale_ntp_next == now + 2 * second + LOCALE_NTP_AGAIN_FIRST * second);
@@ -83589,11 +83586,119 @@ static fn machine_ntp_schedule(void)
         check("but never over a RATE answer's wait",
               locale_ntp_next == now + 5 * second + LOCALE_NTP_RATE_AGAIN * second);
 
+        //      What a machine that gets no answer asks for in an hour, in
+        //      its fourth, by what the failure was: unreachable doubles to a
+        //      quarter of an hour, a clock the kernel will not set or a
+        //      server that said DENY is half an hour, RATE is five minutes.
+        //      It was every eight seconds for ever.
+        {
+                static const bipolar ended[3] = {1, LOCALE_NTP_EXIT_LONG,
+                                                 LOCALE_NTP_EXIT_RATE};
+                positive hour[3];
+
+                for (positive at = 0; at < 3; at++)
+                {
+                        p64 when = now;
+
+                        hour[at] = 0;
+                        locale_ntp_next = 0;
+                        locale_ntp_retry = LOCALE_NTP_RETRY_LEAST;
+                        while (when < now + 4 * 3600 * second)
+                        {
+                                locale_ntp_schedule(ended[at], false, when);
+                                when = locale_ntp_next;
+                                hour[at] += when >= now + 3 * 3600 * second &&
+                                            when < now + 4 * 3600 * second;
+                        }
+                }
+                check("a machine with no answer asks at most five times an hour",
+                      hour[0] && hour[0] <= 5);
+                check("one refused or denied asks at most twice an hour",
+                      hour[1] && hour[1] <= 2);
+                check("and one rate limited at most a dozen times",
+                      hour[2] && hour[2] <= 13);
+        }
+
         locale_ntp_next = next;
-        locale_ntp_asked = asked;
         locale_ntp_synced = synced;
         locale_ntp_retry = retry;
         locale_ntp_every = every;
+}
+
+/*
+        The query the machine forks and what becomes of it: every answer
+        byte read once and the child waited for, so that none is left a
+        zombie (the wait did not block, and found the child still running
+        in nearly every case); nothing of the parent open in it, because its
+        descriptor on /dev/spark kept the machine attached; and `ntp off`
+        ending one in flight.
+*/
+static fn machine_ntp_child(void)
+{
+        positive status = 0;
+        positive left = 0;
+        positive wrong = 0;
+        bipolar held = system_open_at(AT_FDCWD, "/dev/null", O_RDONLY);
+        locale_child child = {0, -1};
+
+        for (positive at = 0; at < 300; at++)
+        {
+                bipolar ended;
+
+                if (!locale_child_fork(address_of child))
+                {
+                        //      The third of these ends without its byte.
+                        if (at % 3 == 2)
+                                system_call_1(syscall(exit), 0);
+                        locale_child_end(address_of child, (p8)(at % 3));
+                }
+                while ((ended = locale_child_poll(address_of child)) ==
+                       LOCALE_CHILD_RUNNING)
+                        ;
+                wrong += ended != (at % 3 == 2 ? 1 : (bipolar)(at % 3));
+                left += system_call_4(syscall(wait4), (positive)-1,
+                                      (positive)address_of status, 1, 0) !=
+                        -ECHILD;
+        }
+        check("every query that ended is waited for, so none is left to be a zombie",
+              !left);
+        check("and says what it ended with, or 1 when it died without saying",
+              !wrong);
+
+        if (held >= 0)
+        {
+                bipolar ended;
+
+                if (!locale_child_fork(address_of child))
+                        locale_child_end(address_of child,
+                                         system_call_3(syscall(fcntl),
+                                                       (positive)held, 1, 0) < 0
+                                             ? 0
+                                             : 5);
+                while ((ended = locale_child_poll(address_of child)) ==
+                       LOCALE_CHILD_RUNNING)
+                        ;
+                check("a query is forked with nothing of the machine open in it",
+                      ended == 0);
+                system_close(held);
+        }
+
+        //      A query in flight when NTP is turned off.
+        locale_ntp_on = false;
+        if (!locale_child_fork(address_of locale_ntp_child))
+        {
+                for (;;)
+                        system_call_1(syscall(getppid), 0);
+        }
+        check("`ntp off` with a query in flight ends it and waits for it",
+              locale_ntp_child.pid > 0);
+        locale_ntp_keep(true);
+        check("so no pid is kept, no pipe, and no child is left",
+              locale_ntp_child.pid == 0 && locale_ntp_child.answer < 0 &&
+                  system_call_4(syscall(wait4), (positive)-1,
+                                (positive)address_of status, 1, 0) == -ECHILD);
+        check("and the machine sleeps its whole wake again",
+              locale_wake_ms(3000) == 3000);
 }
 
 static fn machine_sntp(void)
@@ -83603,6 +83708,7 @@ static fn machine_sntp(void)
         check("the clock is stepped when far out and slewed when near",
               locale_discipline_ok());
         machine_ntp_schedule();
+        machine_ntp_child();
 
         /* Case 0 refuses blocking getrandom: the stamp fails untouched and
            the exchange returns before any send. Case 1 refuses only
