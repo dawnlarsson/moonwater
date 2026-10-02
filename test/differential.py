@@ -58066,6 +58066,42 @@ say(corners[5353, 255, 120] > 0 and
     "sec: b greets an announcement only from port 5353 at TTL 255 and not a goodbye (%r)" %
     (sorted(corners.items()),))
 
+#       Two groups on one machine: b joins ops as well, granting it log
+#       alone, and c, whose lab secret was wrong, joins ops with the right one.
+#       What c may do on b is ops's grant and nothing of lab's, a's record
+#       stays lab's, and leaving ops with forget drops c and not a.
+ops_secret = "ops-secret-for-the-lane-2"
+on("b", "%s link join ops %s allow log" % (moon, ops_secret))
+on("c", "%s link join ops %s allow run" % (moon, ops_secret))
+c_on_b = None
+began = time.time()
+while time.time() - began < 25 and not c_on_b:
+    time.sleep(1)
+    status, out, err = on("b", moon + " link")
+    for line in out.decode(errors="replace").splitlines():
+        if line.startswith("  box-c") and "paired in ops" in line:
+            c_on_b = line
+say(c_on_b is not None and "may log," in c_on_b and "run" not in c_on_b and "shell" not in c_on_b,
+    "sec: a member of a second group gets that group's grants alone (%r)" % (c_on_b,))
+status, out, err = on("b", moon + " link")
+a_line = [l for l in out.decode(errors="replace").splitlines() if l.startswith("  " + names.get("b", "?") + " ")]
+say(a_line and "may run shell, paired in lab" in a_line[0],
+    "sec: and the first group's member keeps the first group's (%r)" % (a_line,))
+#       c paired b by hand above, and a record paired by hand is never
+#       taken over by a group: c asks b under that name.
+status, out, err = on("c", "%s link run b 'echo no'" % moon, timeout=30)
+say(status == 255 and b"run is not granted" in err,
+    "sec: the ops member may not run on b, which granted ops only log (%r)" % (err[-80:],))
+status, left, err = on("b", moon + " link leave ops forget")
+time.sleep(1.5)
+status, out, err = on("b", moon + " link")
+say(b"box-c" not in out and b"paired in lab" in out,
+    "sec: leaving ops with forget drops ops's member and keeps lab's (%r %r)" % (left, [l for l in out.splitlines() if b"box-" in l or b"paired" in l]))
+if len(names) == 2:
+    status, out, err = on("a", "%s link run %s 'echo still-lab'" % (moon, names["a"]))
+    say(status == 0 and out == b"still-lab\n", "and lab's member still runs on b")
+on("c", moon + " link leave ops forget")
+
 #       A handshake flood. Anyone who knows the listener's public key can make
 #       an initiation that passes mac1, and a listener that did the curve for
 #       each would be kept busy by a sender with a few thousand source ports.
@@ -58166,6 +58202,54 @@ if match is not None and listener is not None and len(names) == 2:
     status, out, err = on("a", moon + " link run %s 'echo after-the-flood'" % far_name, timeout=60)
     say(status == 0 and out == b"after-the-flood\n" and time.time() - began_run < 5,
         "flood: and the first after it took %.1f s" % (time.time() - began_run))
+
+#       Revocation reaches what is already open: a command a runs on b that
+#       prints a tick every tenth of a second, and on b, a second into it, the
+#       grant it runs under is denied, or a forgotten. The ticks stop within
+#       a second or two and the far command's client ends, where a session
+#       already open went on under the grant it had (or, forgotten, until
+#       its keys aged out three minutes later). Then everything is put back.
+def revoked(revoke, restore, label):
+    if len(names) != 2:
+        return say(False, label + ": a and b are paired")
+    ticking = subprocess.Popen(argv_on("a", "%s link run %s 'i=0; while :; do i=$((i+1)); "
+                                       "echo tick $i; sleep 0.1; done'" % (moon, names["a"])),
+                               stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.DEVNULL, env=env)
+    fcntl.fcntl(ticking.stdout, fcntl.F_SETFL, os.O_NONBLOCK)
+    seen = [b""]
+    def drain(seconds):
+        end = time.time() + seconds
+        while time.time() < end:
+            select.select([ticking.stdout], [], [], 0.05)
+            try:
+                seen[0] += ticking.stdout.read() or b""
+            except (BlockingIOError, TypeError):
+                pass
+    drain(1.5)
+    before = seen[0].count(b"tick")
+    on("b", revoke)
+    drain(2.0)
+    settled = seen[0].count(b"tick")
+    drain(2.0)
+    after = seen[0].count(b"tick")
+    ended = ticking.poll()
+    if ended is None:
+        ticking.kill()
+    ticking.wait()
+    for command in restore:
+        on("b", command)
+    return say(before > 5 and after == settled and ended not in (None, 0),
+               "sec: %s ends the command already running under it (%d ticks before, %d more in "
+               "the 2 s after the first 2, status %r)" % (label, before, after - settled, ended))
+revoked("%s link deny %s run" % (moon, names.get("b", "a")),
+        ["%s link allow %s run" % (moon, names.get("b", "a"))], "denying run")
+revoked("%s link forget %s" % (moon, names.get("b", "a")),
+        ["%s link pair %s %s 10.77.0.1" % (moon, names.get("b", "a"), keys["a"]),
+         "%s link allow %s run shell" % (moon, names.get("b", "a"))], "forgetting the peer")
+if len(names) == 2:
+    status, out, err = on("a", "%s link run %s 'echo restored'" % (moon, names["a"]))
+    say(status == 0 and out == b"restored\n", "and a runs on b again once it is put back (%r)" % (err[-80:],))
 
 status, out, err = on("a", moon + " link leave lab forget")
 say(status == 0 and b"forgot the 1 machines" in out, "leave with forget drops what the group paired")
@@ -62354,6 +62438,8 @@ int main(int argc, char **argv)
             sec(svc, "#define LINK_PORT 22348", "/*      A grant by name"),
             sec(svc, "typedef struct\n{\n        string_address name;",
                 "// The grant a word names, or 0."),
+            sec(svc, "// The grant a request byte needs",
+                "static p64 link_now(void)"),
             sec(svc, "static const p8 link_kind_asks[] = {0, LINK_ASK_SHELL",
                 "typedef struct"),
             sec(svc, "static winsize link_size_unpack(", "// The streams"),
