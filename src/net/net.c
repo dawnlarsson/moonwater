@@ -2405,6 +2405,54 @@ static fn crypto_hmac_sha256(p8 address_to key, positive key_length,
 }
 
 /*
+        A key made ready: the digests of its two pads, so that a message under
+        it costs the blocks it takes and the two that close it, and not the
+        two that open it as well. PBKDF2 runs its rounds on these, and a
+        listener that checks a datagram against a key of its own every time
+        keeps them with the key.
+*/
+typedef struct
+{
+        digest_state inner;
+        digest_state outer;
+} crypto_hmac_key;
+
+static inline INLINE fn crypto_hmac_prepare(positive algorithm, positive size,
+                                            p8 address_to key,
+                                            positive key_length,
+                                            crypto_hmac_key address_to prepared)
+{
+        crypto_mac mac;
+        p8 pad[64];
+
+        crypto_hmac_open(address_of mac, algorithm, size, key, key_length);
+        prepared->inner = mac.hash;
+        for (positive at = 0; at < 64; at++)
+                pad[at] = mac.key_block[at] ^ 0x5c;
+        digest_open(address_of prepared->outer, algorithm, size);
+        digest_write(address_of prepared->outer, pad, 64);
+        crypto_forget(address_of mac, sizeof mac);
+        crypto_forget(pad, sizeof pad);
+}
+
+//      The HMAC of a message under a prepared key.
+static fn crypto_hmac_prepared(const crypto_hmac_key address_to prepared,
+                               p8 address_to data, positive length,
+                               p8 address_to out)
+{
+        digest_state work = prepared->inner;
+        p8 inner[64];
+
+        digest_write(address_of work, data, length);
+        digest_close(address_of work, inner);
+        work = prepared->outer;
+        digest_write(address_of work, inner, work.size);
+        digest_close(address_of work, out);
+        crypto_forget(address_of work, sizeof work);
+        crypto_forget(inner, sizeof inner);
+}
+
+/*
         PBKDF2 over HMAC with SHA-1 or SHA-256 (RFC 8018): WPA's pre-shared
         key and waterlink's group key. Both pads are hashed once and each
         round copies the two prepared states, so a round is two compressions
@@ -2417,22 +2465,14 @@ static fn crypto_pbkdf2(positive algorithm, positive size,
                         positive rounds, p8 address_to out,
                         positive out_length)
 {
-        crypto_mac key;
-        digest_state inner;
-        digest_state outer;
+        crypto_hmac_key key;
         digest_state work;
-        p8 pad[64];
         p8 block[64];
         p8 mix[64];
         p8 number[4];
 
-        crypto_hmac_open(address_of key, algorithm, size, password,
-                         password_length);
-        inner = key.hash;
-        for (positive at = 0; at < 64; at++)
-                pad[at] = key.key_block[at] ^ 0x5c;
-        digest_open(address_of outer, algorithm, size);
-        digest_write(address_of outer, pad, 64);
+        crypto_hmac_prepare(algorithm, size, password, password_length,
+                            address_of key);
 
         for (positive index = 1, done = 0; done < out_length; index++)
         {
@@ -2440,21 +2480,21 @@ static fn crypto_pbkdf2(positive algorithm, positive size,
                                                          : size;
 
                 network_store_32(number, (p32)index);
-                work = inner;
+                work = key.inner;
                 digest_write(address_of work, salt, salt_length);
                 digest_write(address_of work, number, 4);
                 digest_close(address_of work, block);
-                work = outer;
+                work = key.outer;
                 digest_write(address_of work, block, size);
                 digest_close(address_of work, block);
                 memory_copy(mix, block, size);
 
                 for (positive round = 1; round < rounds; round++)
                 {
-                        work = inner;
+                        work = key.inner;
                         digest_write(address_of work, block, size);
                         digest_close(address_of work, block);
-                        work = outer;
+                        work = key.outer;
                         digest_write(address_of work, block, size);
                         digest_close(address_of work, block);
                         for (positive at = 0; at < size; at++)
@@ -2465,10 +2505,7 @@ static fn crypto_pbkdf2(positive algorithm, positive size,
         }
 
         crypto_forget(address_of key, sizeof key);
-        crypto_forget(address_of inner, sizeof inner);
-        crypto_forget(address_of outer, sizeof outer);
         crypto_forget(address_of work, sizeof work);
-        crypto_forget(pad, sizeof pad);
         crypto_forget(block, sizeof block);
         crypto_forget(mix, sizeof mix);
 }

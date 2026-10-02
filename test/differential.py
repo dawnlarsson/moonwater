@@ -62021,6 +62021,21 @@ static void crypto_hmac_sha256(const p8 *key, positive key_size, const void *mes
         crypto_sha256_write(&hash, message, size);
         crypto_sha256_close(&hash, out);
 }
+//      A prepared key, standing in: the key itself, which the stand-in MAC
+//      takes whole, so a message under it is the MAC under the key.
+#define DIGEST_SHA256 3
+typedef struct { p8 key[32]; } crypto_hmac_key;
+static void crypto_hmac_prepare(positive algorithm, positive size, const p8 *key,
+                                positive key_size, crypto_hmac_key *prepared)
+{
+        (void)algorithm; (void)size;
+        memcpy(prepared->key, key, key_size < 32 ? key_size : 32);
+}
+static void crypto_hmac_prepared(const crypto_hmac_key *prepared, const void *message,
+                                 positive size, p8 *out)
+{
+        crypto_hmac_sha256(prepared->key, 32, message, size, out);
+}
 static bool crypto_x25519(p8 *out, const p8 *secret, const p8 *point)
 {
         crypto_sha256 hash;
@@ -63658,6 +63673,19 @@ static void crypto_hmac_sha256(const p8 *key, positive key_size, const void *mes
         crypto_sha256_write(&h, "\x36", 1);
         crypto_sha256_write(&h, message, size);
         crypto_sha256_close(&h, out);
+}
+//      A prepared key, standing in: the key, which the stand-in MAC takes whole.
+typedef struct { p8 key[32]; } crypto_hmac_key;
+static void crypto_hmac_prepare(positive algorithm, positive size, const p8 *key,
+                                positive key_size, crypto_hmac_key *prepared)
+{
+        (void)algorithm; (void)size;
+        memcpy(prepared->key, key, key_size < 32 ? key_size : 32);
+}
+static void crypto_hmac_prepared(const crypto_hmac_key *prepared, const void *message,
+                                 positive size, p8 *out)
+{
+        crypto_hmac_sha256(prepared->key, 32, message, size, out);
 }
 static void crypto_hkdf_extract(const p8 *salt, positive salt_size, const p8 *ikm,
                                 positive size, p8 *prk)

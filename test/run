@@ -16399,7 +16399,7 @@ bench_about()
         unicode-width) bench_section=BENCH_unicode_width
                  bench_line="display widths, variant by variant: term.c's and wc's C against unicode_width" ;;
         link)    bench_section=BENCH_link
-                 bench_line="waterlink's transform a frame at a time: post, fill, seal, open, replay, deliver, acknowledge" ;;
+                 bench_line="waterlink's transform a frame at a time: post, fill, seal, open, replay, deliver, acknowledge, and a stranger's datagram at the gate" ;;
         compression) bench_line="byte-checked gzip/xz/zstd speed and ratio on identical corpora" ;;
         *)       bench_line= ;;
         esac

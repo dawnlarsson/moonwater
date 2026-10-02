@@ -87904,6 +87904,7 @@ b32 main(void)
 #include "../src/net/net.c"
 #include "../src/waterlink/link.c"
 #include "../src/waterlink/seal.c"
+#include "../src/waterlink/handshake.c"
 
 #define STEPS 9
 static struct waterlink_link sender, receiver;
@@ -88025,6 +88026,49 @@ static fn shape(string_address name, positive length, p16 flags)
         string_format(log, "    all  %p\n", (positive)total);
 }
 
+/*
+        The first thing an initiation meets is its gate, asked once for each
+        key the machine holds -- its own, and a group's for each group -- and
+        for a stranger's datagram that none of them accepts it is all the
+        datagram costs: ticks a datagram for the machine's own key and eight
+        groups.
+*/
+static fn gate_shape(void)
+{
+        static struct waterlink_identity keys[9];
+        static p8 gate_datagram[WATERLINK_DATAGRAM];
+        struct waterlink_datagram head = {WATERLINK_KIND_INITIATE, 0, 0};
+        p64 best = ~0ull;
+        positive refused = 0;
+
+        for (positive at = 0; at < 9; at++)
+        {
+                p8 secret[32];
+
+                for (positive byte = 0; byte < 32; byte++)
+                        secret[byte] = (p8)(at * 31 + byte * 7 + 1);
+                waterlink_identity_from(keys + at, secret);
+        }
+        memory_copy(gate_datagram, address_of head, 16);
+        for (positive round = 0; round < 7; round++)
+        {
+                p64 start = get_cpu_time();
+                p64 took;
+
+                for (positive each = 0; each < 20000; each++)
+                        for (positive at = 0; at < 9; at++)
+                                refused += !waterlink_gate_passes(
+                                        keys + at, gate_datagram,
+                                        WATERLINK_DATAGRAM);
+                took = (get_cpu_time() - start) / 20000;
+                if (took < best)
+                        best = took;
+        }
+        string_format(log, "  gate, nine keys and none accepts, ticks a datagram:"
+                           " %p (%p refused)\n",
+                      (positive)best, refused);
+}
+
 b32 main(void)
 {
         string_address address_to words = program_argument_list();
@@ -88048,6 +88092,7 @@ b32 main(void)
                 return 0;
         }
 
+        gate_shape();
         shape("bulk", WATERLINK_FRAME_MAX, WATERLINK_FRAME_DURABLE);
         shape("keystroke", 1, WATERLINK_FRAME_DURABLE | WATERLINK_FRAME_URGENT);
         log_flush();
