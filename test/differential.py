@@ -46514,7 +46514,92 @@ def harness_wget_hostile(argv):
                         "tight" if args.tight else "default", who, host, done.returncode,
                         server.locals, asked))
             failures += row_failed
-        print("PASS %d" % (len(rows) + len(loopback) + len(elsewhere) - failures))
+        #   Host spellings against the references, at the default tier: how
+        #   each client reads 127.0.0.1 spelled the ways inet_aton reads it
+        #   (fewer parts, hex, octal, one number, the root's dot), and the
+        #   authority forms this client refuses. A row says what this client
+        #   does -- "literal" (127.0.0.1 reached, nobody asked), "name" (the
+        #   resolver asked, 8.8.4.4 reached) or "refused" (nothing asked or
+        #   reached) -- and why, where GNU wget or curl is known to differ.
+        #   This client is held to its column; the references' answers are
+        #   printed, and one that has come to agree is said.
+        spelled = []
+        if not args.tight:
+            quad = [127, 0, 0, 1]
+
+            def octet(value, form):
+                return {"dec": "%d" % value, "zero": "0%d" % value, "hex": "0x%x" % value,
+                        "HEX": "0X%X" % value, "oct": "0%o" % value}[form]
+            numeric = set()
+            while len(numeric) < 10:
+                parts = spell.choice([quad, [127, 0, 1], [127, 1], [0x7f000001]])
+                forms = [spell.choice(["dec", "dec", "zero", "hex", "HEX", "oct"])
+                         for _ in parts]
+                text = ".".join(octet(v, f) for v, f in zip(parts, forms))
+                try:
+                    same = socket.inet_aton(text) == bytes(quad)
+                except OSError:
+                    same = False
+                if text != "127.0.0.1" and same:
+                    numeric.add(text + spell.choice(["", "", "."]))
+            shorthand = ("a host that is not four plain decimal octets is a name to this "
+                         "client, as the resolver is asked; inet_aton, under GNU wget and "
+                         "curl, reads it as 127.0.0.1 (needs a decision: parity would "
+                         "canonicalize it once in http_split_into)")
+            spelled = [("http://127.0.0.1:PORT/", "literal", None)] + [
+                ("http://%s:PORT/" % text, "name", shorthand) for text in sorted(numeric)] + [
+                ("http://u@127.0.0.1:PORT/", "refused",
+                 "userinfo is refused; both send it as Authorization or drop it"),
+                ("http://127.0.0.1:PORT\\@x/", "refused",
+                 "a backslash is refused; both read x as the host"),
+                ("http://ex%61mple.com:PORT/", "refused",
+                 "a percent-encoded host is refused; both decode it"),
+                ("http://b\u00fccher.example:PORT/", "refused",
+                 "a host outside the DNS alphabet is refused; both apply IDNA"),
+                ("http:PORT", "refused",
+                 "http: without // is refused (SECURITY.md); both reach a host named http"),
+                ("http:/127.0.0.1:PORT/", "refused", "curl reads one slash as two"),
+                ("http://127.0.0.1.:PORT/", "name",
+                 "the root's dot makes a name, as GNU wget reads it; curl reads the address"),
+                ("HTTP://127.0.0.1:PORT/", "literal", None),
+                ("http://Example.COM.:PORT/", "name", None),
+            ]
+        references = [(who, path) for who, path in (("wget", shutil.which("wget")),
+                                                    ("curl", shutil.which("curl"))) if path]
+        for url, want, why in spelled:
+            answers = {}
+            for who, path in [("mw", str(farm / "wget"))] + references:
+                del asked[:]
+                server = Server(answer(ok()), "0.0.0.0")
+                text = url.replace("PORT", str(server.port))
+                command = {"mw": [path, "-q", "-O", "saved", text],
+                           "wget": [path, "-q", "--tries=1", "--timeout=5", "-O", "saved", text],
+                           "curl": [path, "-s", "--max-time", "5", "-o", "saved", text]}[who]
+                try:
+                    done = subprocess.run(command, capture_output=True, timeout=30,
+                                          cwd=str(farm)).returncode
+                except subprocess.TimeoutExpired:
+                    done = None
+                server.close()
+                answers[who] = ("literal" if done == 0 and server.locals == ["127.0.0.1"]
+                                and not asked else
+                                "name" if done == 0 and server.locals == ["8.8.4.4"] and asked
+                                else "refused" if not server.locals and not asked else
+                                "other: exit %s reached %r asked %r" % (done, server.locals,
+                                                                         asked))
+            if answers["mw"] != want:
+                failures += 1
+                print("FAIL default spelling %r: this client %s, wanted %s" % (
+                    url, answers["mw"], want))
+            others = {who: seen for who, seen in answers.items() if who != "mw"}
+            if any(seen != want for seen in others.values()):
+                print("NOTE spelling %r: this client %s; %s%s" % (
+                    url, want, ", ".join("%s %s" % kv for kv in sorted(others.items())),
+                    " -- " + why if why else " -- no reason recorded"))
+            elif why:
+                print("NOTE spelling %r: every reference now agrees (%s)" % (url, why))
+        total = len(rows) + len(loopback) + len(elsewhere) + len(spelled)
+        print("PASS %d of %d" % (total - failures, total))
         return 1 if failures else 0
 
     checks = Checks()
@@ -46593,9 +46678,13 @@ def harness_wget_hostile(argv):
                 for line in inside.stdout.splitlines():
                     if line.startswith("FAIL"):
                         checks(False, line)
-                passed = [int(line.split()[1]) for line in inside.stdout.splitlines()
+                for line in inside.stdout.splitlines():
+                    if line.startswith("NOTE"):
+                        print("  " + line)
+                passed = [line.split()[1:4:2] for line in inside.stdout.splitlines()
                           if line.startswith("PASS")]
-                checks(inside.returncode == 0 and passed == [25],
+                checks(inside.returncode == 0 and len(passed) == 1 and
+                       passed[0][0] == passed[0][1] and int(passed[0][1]) >= 25,
                        "address policy, %s shell: exit %d, %s" % (
                            level, inside.returncode, inside.stderr[-300:] or inside.stdout[-300:]))
     return checks.verdict("wget hostile", "wget-hostile")
