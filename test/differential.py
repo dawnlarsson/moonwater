@@ -25140,13 +25140,18 @@ static char *strndup_user(const char *from, long limit) {
     if (++allocations == fail_allocation) return (char *)(long)-ENOMEM;
     return strdup(from);
 }
-static int current, spawn_pid = 4242;
+/* The task the kernel calls current: which thread group it is in and whether
+   it is on its way out. Nothing but task_tgid and the flags is read. */
+static struct { int tgid; unsigned flags; } task_current;
+#define current (&task_current)
+#define PF_EXITING 0x4u
+static int spawn_pid = 4242;
 static int spawn_entered;
 /* The work the launch was handed. Interpretation policy is decided in the
    request and only shows up here, on the task that is about to exec. */
 static void *spawn_handed;
-#define task_tgid(t) ((void *)(long)(t))
-#define current_cred() ((const void *)&current)
+#define task_tgid(t) ((void *)(long)(t)->tgid)
+#define current_cred() ((const void *)&task_current)
 #define get_pid(p) (p)
 #define put_pid(p) ((void)(p))
 #define get_cred(c) (c)
@@ -25354,7 +25359,8 @@ static void state_strscpy(char *to, const char *from, unsigned long size) {
     if (size) to[at]=0;
 }
 #define strscpy(to,from,size) state_strscpy((to),(from),(size))
-#define wait_event_interruptible_timeout(wq,cond,to) ((void)(wq),(cond)?1:0)
+static unsigned long wait_timeout;
+#define wait_event_interruptible_timeout(wq,cond,to) ((void)(wq),wait_timeout=(to),(cond)?1:0)
 #define KEY_LEFTCTRL 29
 #define KEY_RIGHTCTRL 97
 #define KEY_LEFTALT 56
@@ -25437,8 +25443,17 @@ static void canvas_thread_wake(void) { wakes++; }
 static void atomic_fetch_add(int value,atomic_t *at) { *at+=value; }
 static void atomic_fetch_sub(int value,atomic_t *at) { *at-=value; }
 #define smp_wmb() ((void)0)
+/* Somebody else's turn at the moment a lock is let go: the hook runs once,
+   with the lock that was, and is how a check puts a second caller between two
+   statements of the first. */
+static void (*unlock_hook)(const void *lock);
 #define spin_lock_irqsave(lock,flags) do { (flags)=0;mutex_lock(lock); } while(0)
-#define spin_unlock_irqrestore(lock,flags) do { (void)(flags);mutex_unlock(lock); } while(0)
+#define spin_unlock_irqrestore(lock,flags) do { \
+        void (*hook_)(const void *)=unlock_hook; \
+        (void)(flags);mutex_unlock(lock); \
+        if (hook_) { unlock_hook=0;hook_(lock); } } while(0)
+#define spin_lock_irq(lock) mutex_lock(lock)
+#define spin_unlock_irq(lock) mutex_unlock(lock)
 struct pointer_handle;
 struct key_link { struct pointer_handle *owner; };
 struct pointer_handle {
@@ -26072,7 +26087,7 @@ static void check_bind(void) {
 
     queued=bind_queued; sleep->last=0; atomic_set(&sleep->bound,1);
     snprintf(sleep->command,sizeof(sleep->command),"true");
-    bind_watch_row(sleep, 1);
+    bind_watch_row(sleep);
     bind_send(EV_KEY,KEY_SLEEP,1);
     check(bind_queued==queued+1,"KEY_SLEEP queues sleep");
     bind_idle(sleep); sleep->last=0; jiffies+=5000;
@@ -26108,7 +26123,7 @@ static void check_bind(void) {
     check(bind_queued==queued,"an unbound volume key does not queue");
     atomic_set(&vol->bound,1);
     snprintf(vol->command,sizeof(vol->command),"true");
-    bind_watch_row(vol, 1);
+    bind_watch_row(vol);
     bind_send(EV_KEY,KEY_VOLUMEUP,1);
     check(bind_queued==queued+1,"a bound volume key queues");
 
@@ -26919,7 +26934,7 @@ static void check_machine_events(void) {
     check(bind_queued==queued+1 && !bind_machine.count,
           "a press after that is not queued for a process that is leaving: the image line runs");
 
-    bind_machine_detach(&machine);
+    bind_machine_detach(&machine,NULL);
     check(!atomic_read(&bind_machine_live) && !bind_machine.owner &&
           !bind_machine.ending,
           "and detaching gives the rows back");
@@ -26935,6 +26950,259 @@ static void check_machine_events(void) {
           machine_script_length==machine_script_builtin &&
           (machine_script_owned & (1u<<(SPARK_BIND_POWEROFF-1))),
           "and the module's own copy of that script owns the same rows");
+}
+
+/*
+        The machine process and the device it holds.
+
+        The attach is an open file, and the file is not the process: a fork
+        that does not exec copies the descriptor into a child, and the file
+        then lives as long as any child does. So who holds the machine is the
+        file and the thread group that attached it, and letting go happens
+        when that thread group is on its way out -- not when the file is
+        released, which a background job in the script can put off for as
+        long as it runs.
+*/
+static struct machine_control machine_answer;
+static long machine_op(struct file *file,unsigned op,unsigned wait) {
+    memset(&machine_answer,0,sizeof machine_answer);
+    machine_answer.op=op; machine_answer.reserved[0]=wait;
+    return report_machine(file,&machine_answer);
+}
+static struct file machine_second;
+/* A second machine process that opens the device at the instant the first
+   one's detach has let go of the queue, and attaches. */
+static void machine_takes_over(const void *lock) {
+    if (lock!=&bind_machine_lock) { unlock_hook=machine_takes_over;return; }
+    task_current.tgid=200;
+    machine_op(&machine_second,MOONWATER_ATTACH,0);
+}
+static void check_machine_owner(void) {
+    struct file first;
+    struct machine_control raw;
+    struct bind_row *volume=bind_row(SPARK_BIND_VOLUME_UP);
+    unsigned queued;
+
+    memset(&first,0,sizeof first); memset(&machine_second,0,sizeof machine_second);
+    power_admin=1; power_capable=1; task_current.tgid=100; task_current.flags=0;
+    check(!bind_machine.owner && !atomic_read(&bind_machine_live),
+          "nobody holds the machine to begin with");
+
+    check(!machine_op(&first,MOONWATER_ATTACH,0) && bind_machine.owner==&first &&
+          bind_machine.process==task_tgid(current) && (machine_answer.flags & MOONWATER_ATTACHED),
+          "a machine process attaches, and the attach is that thread group's");
+    check(machine_op(&machine_second,MOONWATER_ATTACH,0)==-EBUSY && bind_machine.owner==&first,
+          "a second open file is refused while the first holds it");
+    check(machine_op(&machine_second,MOONWATER_WAIT,5)==-EPIPE,
+          "and only the file that holds it reads its queue");
+    check(!machine_op(&machine_second,MOONWATER_STATUS,0) &&
+          (machine_answer.flags & MOONWATER_ATTACHED) && !machine_answer.event,
+          "anybody may ask whether it is held");
+    check(!machine_op(&machine_second,MOONWATER_DETACH,0) && bind_machine.owner==&first &&
+          atomic_read(&bind_machine_live),
+          "and a detach by a file that does not hold it lets go of nothing");
+
+    /*  What the process dying has to do while a child that forked with the
+        descriptor lives on. None of these is the machine process leaving. */
+    task_current.tgid=101; task_current.flags=PF_EXITING;
+    bind_machine_flush(&first);
+    check(bind_machine.owner==&first && atomic_read(&bind_machine_live),
+          "a child that was handed the descriptor and exits does not end the attach");
+    task_current.tgid=100; task_current.flags=0;
+    bind_machine_flush(&first);
+    check(bind_machine.owner==&first && atomic_read(&bind_machine_live),
+          "the machine process closing a copy of the descriptor does not end it either");
+    task_current.flags=PF_EXITING;
+    bind_machine_flush(&machine_second);
+    check(bind_machine.owner==&first,
+          "and the exit of a process that holds some other open file changes nothing");
+
+    snprintf(volume->command,sizeof volume->command,"true");
+    atomic_set(&volume->bound,1);
+    bind_machine.count=0;
+    bind_idle(volume);
+    bind_fire(SPARK_BIND_VOLUME_UP);
+    check(bind_machine.count==1,"a press is queued for the attached process");
+    bind_idle(volume);
+    queued=bind_queued;
+    bind_machine_flush(&first);
+    check(!bind_machine.owner && !bind_machine.process && !bind_machine.ending &&
+          !bind_machine.count && !atomic_read(&bind_machine_live),
+          "the machine process exiting lets go of the machine while a child still holds the file");
+    check(bind_queued==queued+1,
+          "and what it had not read goes to the image line");
+    task_current.tgid=300; task_current.flags=0;
+    check(!machine_op(&machine_second,MOONWATER_ATTACH,0) && bind_machine.owner==&machine_second,
+          "so the next machine process attaches at once and is not told it is busy");
+    check(machine_op(&first,MOONWATER_WAIT,5)==-EPIPE,
+          "and the file that was left holding the old descriptor reads nothing from it");
+    machine_op(&machine_second,MOONWATER_DETACH,0);
+    for (unsigned event=SPARK_BIND_VOLUME_UP;event<=SPARK_BIND_BRIGHTNESS_DOWN;event++) {
+        atomic_set(&bind_row(event)->bound,0); bind_row(event)->command[0]=0;
+    }
+
+    /*  The rows nobody has a line for are heard while a process is attached,
+        because its script may name any of them. A detach that lands after
+        another attach has to read that attach's state, not its own. */
+    task_current.tgid=100;
+    machine_op(&first,MOONWATER_ATTACH,0);
+    check(bind_watched(KEY_VOLUMEUP) && bind_watched(KEY_MUTE) &&
+          bind_watched(KEY_BRIGHTNESSUP),
+          "an attached process hears the keys of rows with no line");
+    unlock_hook=machine_takes_over;
+    machine_op(&first,MOONWATER_DETACH,0);
+    check(bind_machine.owner==&machine_second && atomic_read(&bind_machine_live) &&
+          bind_watched(KEY_VOLUMEUP) && bind_watched(KEY_MUTE) &&
+          bind_watched(KEY_BRIGHTNESSUP) && bind_watched(KEY_BRIGHTNESSDOWN),
+          "a detach that a second attach lands in the middle of leaves the new process its keys");
+    task_current.tgid=200; task_current.flags=PF_EXITING;
+    bind_machine_flush(&machine_second);
+    task_current.tgid=100; task_current.flags=0;
+    check(!bind_machine.owner && !bind_watched(KEY_VOLUMEUP) && !bind_watched(KEY_MUTE),
+          "and with nobody attached the unbound rows are deaf again");
+
+    /*  Who may do what, and what is not a request at all. */
+    power_admin=0;
+    check(machine_op(&first,MOONWATER_ATTACH,0)==-EPERM &&
+          machine_op(&first,MOONWATER_WAIT,5)==-EPERM &&
+          machine_op(&first,MOONWATER_END,0)==-EPERM && !bind_machine.owner,
+          "attach, wait and end need CAP_SYS_ADMIN");
+    check(!machine_op(&first,MOONWATER_STATUS,0) && !machine_op(&first,MOONWATER_DETACH,0),
+          "and status and detach do not");
+    power_admin=1;
+    check(machine_op(&first,MOONWATER_END+1,0)==-EINVAL &&
+          machine_op(&first,0xffffffffu,0)==-EINVAL,
+          "an op that is not one is refused");
+    for (unsigned op=MOONWATER_ATTACH;op<=MOONWATER_END;op++) {
+        memset(&raw,0,sizeof raw); raw.op=op; raw.reserved[1]=1;
+        check(report_machine(&first,&raw)==-EINVAL,"a reserved word that is set is refused (1)");
+        memset(&raw,0,sizeof raw); raw.op=op; raw.reserved[2]=1;
+        check(report_machine(&first,&raw)==-EINVAL,"a reserved word that is set is refused (2)");
+        check(machine_op(&first,op,op==MOONWATER_WAIT?0:7)==(op==MOONWATER_WAIT?-EPIPE:-EINVAL) ||
+              op==MOONWATER_WAIT,
+              "only a wait takes a timeout; any other op that names one is refused");
+    }
+    check(!bind_machine.owner,"none of the refusals attached anything");
+
+    /*  A wait: the timeout is the caller's up to a minute, and a queue with
+        nothing in it times out rather than blocking for good. */
+    task_current.tgid=100;
+    machine_op(&first,MOONWATER_ATTACH,0);
+    check(machine_op(&first,MOONWATER_WAIT,50)==-ETIMEDOUT && wait_timeout==50,
+          "a wait with nothing to read times out after what was asked");
+    check(machine_op(&first,MOONWATER_WAIT,0xffffffffu)==-ETIMEDOUT && wait_timeout==60000,
+          "and no longer than a minute however much was asked");
+    check(machine_op(&first,MOONWATER_WAIT,0)==-EINTR,
+          "a wait with no timeout is the one a signal ends");
+
+    /*  A pair is one state, the last said: the queue never holds a tablet
+        turned on and then off for a process that was busy while both. */
+    bind_machine.count=0;
+    bind_fire(SPARK_BIND_TABLET_ON);
+    bind_fire(SPARK_BIND_TABLET_OFF);
+    check(bind_machine.count==1 && bind_machine.event[0]==SPARK_BIND_TABLET_OFF,
+          "an on and an off of the same pair leave the later one");
+    bind_fire(SPARK_BIND_HEADPHONE_ON);
+    bind_fire(SPARK_BIND_TABLET_ON);
+    check(bind_machine.count==2 && bind_machine.event[0]==SPARK_BIND_TABLET_ON &&
+          bind_machine.event[1]==SPARK_BIND_HEADPHONE_ON,
+          "pairs do not swallow each other, and the pair keeps its first place");
+    check(!machine_op(&first,MOONWATER_WAIT,5) && machine_answer.event==SPARK_BIND_TABLET_ON &&
+          machine_answer.extra==1 && !strcmp(machine_answer.name,"tablet on") &&
+          machine_answer.queued==1,
+          "a wait answers the event, which side of its pair, its name and what is left");
+    machine_op(&first,MOONWATER_WAIT,5);
+
+    /*  A full queue gives up its oldest event that may be given up, never a
+        stop; and the three switches are heard by value, both ways. */
+    for (unsigned at=0;at<BIND_MACHINE_QUEUE;at++) bind_machine.event[at]=SPARK_BIND_MUTE;
+    bind_machine.count=BIND_MACHINE_QUEUE;
+    bind_machine.event[0]=SPARK_BIND_RESET;
+    bind_fire(SPARK_BIND_VOLUME_UP);
+    check(bind_machine.count==BIND_MACHINE_QUEUE && bind_machine.event[0]==SPARK_BIND_RESET &&
+          bind_machine.event[BIND_MACHINE_QUEUE-1]==SPARK_BIND_VOLUME_UP,
+          "a full queue drops the oldest event that is not a stop, and takes the new one");
+    bind_machine.count=0;
+    {
+        static const struct { unsigned code,on,off; } switches[]={
+            {SW_TABLET_MODE,SPARK_BIND_TABLET_ON,SPARK_BIND_TABLET_OFF},
+            {SW_HEADPHONE_INSERT,SPARK_BIND_HEADPHONE_ON,SPARK_BIND_HEADPHONE_OFF},
+            {SW_DOCK,SPARK_BIND_DOCK_ON,SPARK_BIND_DOCK_OFF},
+        };
+        for (unsigned at=0;at<sizeof switches/sizeof switches[0];at++) {
+            bind_row(switches[at].on)->last=bind_row(switches[at].off)->last=0;
+            bind_send(EV_SW,switches[at].code,1);
+            check(bind_machine.count==1 && bind_machine.event[0]==switches[at].on,
+                  "a switch that closes is the on event of its pair");
+            machine_op(&first,MOONWATER_WAIT,5);
+            bind_row(switches[at].off)->last=0; jiffies+=5000;
+            bind_send(EV_SW,switches[at].code,0);
+            check(bind_machine.count==1 && bind_machine.event[0]==switches[at].off,
+                  "and one that opens is the off event");
+            machine_op(&first,MOONWATER_WAIT,5);
+            bind_send(EV_SW,switches[at].code,2);
+            check(!bind_machine.count,"a switch value that is neither is not an event");
+        }
+    }
+
+    /*  The end: a wait after it answers it, once, and the rest of the queue
+        is never read. */
+    bind_machine.count=0;
+    check(!machine_op(&first,MOONWATER_END,0) && bind_machine.ending,
+          "the machine process is told to end");
+    check(!machine_op(&first,MOONWATER_WAIT,5) && !machine_answer.event &&
+          !strcmp(machine_answer.name,"end"),
+          "and its next wait is answered with the end");
+    machine_op(&first,MOONWATER_DETACH,0);
+    check(!bind_machine.owner && !bind_machine.ending,
+          "and the detach that follows clears the end");
+    check(machine_op(&first,MOONWATER_END,0)==-EPIPE,
+          "telling a machine nobody holds to end is a broken pipe");
+
+    /*  The script: how big it may be, and what the request may carry. */
+    {
+        static char big[MOONWATER_SCRIPT_BYTES+1];
+        struct machine_script request;
+
+        memset(big,'#',sizeof big);
+        memset(&request,0,sizeof request);
+        request.op=MOONWATER_SCRIPT_SET; request.length=MOONWATER_SCRIPT_BYTES;
+        request.address=(unsigned long)big;
+        check(!report_machine_script(&request) && machine_script_length==MOONWATER_SCRIPT_BYTES,
+              "a script of exactly 64 KiB is taken");
+        request.length=MOONWATER_SCRIPT_BYTES+1;
+        check(report_machine_script(&request)==-EINVAL &&
+              machine_script_length==MOONWATER_SCRIPT_BYTES,
+              "one byte more is refused and the live script stays");
+        memset(&request,0,sizeof request);
+        request.op=MOONWATER_SCRIPT_SET; request.length=16;
+        check(report_machine_script(&request)==-EINVAL,
+              "bytes with no address are refused");
+        memset(&request,0,sizeof request);
+        request.op=MOONWATER_SCRIPT_SET; request.flags=1;
+        check(report_machine_script(&request)==-EINVAL,
+              "a flag nobody defined is refused");
+        memset(&request,0,sizeof request);
+        request.op=MOONWATER_SCRIPT_SET+1;
+        check(report_machine_script(&request)==-EINVAL,"an op that is not one is refused");
+        power_admin=0;
+        memset(&request,0,sizeof request);
+        request.op=MOONWATER_SCRIPT_SET;
+        check(report_machine_script(&request)==-EPERM &&
+              machine_script_length==MOONWATER_SCRIPT_BYTES,
+              "a set needs CAP_SYS_ADMIN and changes nothing without it");
+        power_admin=1;
+        memset(&request,0,sizeof request);
+        request.op=MOONWATER_SCRIPT_GET;
+        check(!report_machine_script(&request) && !request.overlay.pad && !request.overlay.spare &&
+              !request.overlay.hooks,
+              "the overlay answers with its padding clear");
+        memset(&request,0,sizeof request);
+        request.op=MOONWATER_SCRIPT_SET;
+        check(!report_machine_script(&request) && machine_script_length==machine_script_builtin,
+              "and an empty set puts the built-in script back");
+    }
+    task_current.tgid=0; task_current.flags=0;
 }
 
 static void check_settings_sum(void) {
@@ -27656,6 +27924,7 @@ int main(void) {
     check_input_reports();
     check_machine_script();
     check_machine_events();
+    check_machine_owner();
     check_settings_sum();
     check_input_suspension();
     check(!copies_under_lock,

@@ -315,11 +315,18 @@ static int device_open(struct inode *inode, struct file *file)
         return 0;
 }
 
+// Every close of a descriptor, not the last: see bind_machine_flush.
+static int device_flush(struct file *file, fl_owner_t files)
+{
+        bind_machine_flush(file);
+        return 0;
+}
+
 static int device_close(struct inode *inode, struct file *file)
 {
         struct device_context *context = file->private_data;
 
-        bind_machine_detach(file);
+        bind_machine_detach(file, NULL);
 #ifdef CONFIG_MOONWATER_CANVAS
         window_release(file);
 #endif
@@ -332,6 +339,7 @@ static const struct file_operations device_ops = {
     .owner = THIS_MODULE,
     .open = device_open,
     .unlocked_ioctl = device_ioctl,
+    .flush = device_flush,
     .release = device_close,
 #ifdef CONFIG_MOONWATER_CANVAS
     .mmap = window_mmap,

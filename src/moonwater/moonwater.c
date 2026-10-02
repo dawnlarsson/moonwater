@@ -737,6 +737,7 @@ static struct {
         unsigned int event[BIND_MACHINE_QUEUE];
         unsigned int count;
         struct file *owner;
+        struct pid *process; // the thread group that attached it
         wait_queue_head_t wait;
         _Bool ending;
 } bind_machine;
@@ -863,9 +864,21 @@ static void bind_watch_code(unsigned int code, unsigned int event, _Bool on)
         WRITE_ONCE(bind_code_event[code], on ? (u8)event : 0);
 }
 
-static void bind_watch_row(struct bind_row *row, _Bool on)
+/*
+        A row somebody hears: one that has a line, or every row while a machine
+        process is attached, because the process's script may name any of them.
+        Read where the watch is written, under bind_lock, so a detach that
+        lands after another attach reads that attach's state and not its own.
+*/
+static _Bool bind_row_bound(struct bind_row *row)
+{
+        return row && (atomic_read(&bind_machine_live) || atomic_read(&row->bound));
+}
+
+static void bind_watch_row(struct bind_row *row)
 {
         unsigned int i, event = row->event;
+        _Bool on = bind_row_bound(row);
 
         for (i = 0; i < BIND_CODES_PER; i++)
                 bind_watch_code(bind_spec[event - 1].code[i], event, on);
@@ -971,15 +984,14 @@ static void bind_machine_shift(unsigned int at)
                         n * sizeof(bind_machine.event[0]));
 }
 
-static void bind_machine_watch_all(_Bool on)
+static void bind_machine_watch_all(void)
 {
         unsigned at;
         unsigned long flags;
 
         spin_lock_irqsave(&bind_lock, flags);
         for (at = 0; at < SPARK_BIND_EVENTS; at++)
-                bind_watch_row(bind_table + at,
-                               on || atomic_read(&bind_table[at].bound));
+                bind_watch_row(bind_table + at);
         spin_unlock_irqrestore(&bind_lock, flags);
 }
 
@@ -1096,11 +1108,6 @@ static void bind_queue(struct bind_row *row)
                 atomic_fetch_add(1, &row->runs);
 }
 
-static _Bool bind_row_bound(struct bind_row *row)
-{
-        return row && (atomic_read(&bind_machine_live) || atomic_read(&row->bound));
-}
-
 static void bind_fire(unsigned int event)
 {
         struct bind_row *row = bind_row(event);
@@ -1112,29 +1119,52 @@ static void bind_fire(unsigned int event)
                 bind_queue(row);
 }
 
-static void bind_machine_detach(struct file *file)
+/*
+        Nobody holds the machine: no owner, nothing queued, no ending in
+        progress. With bind_machine_lock held; the process it returns is the
+        caller's to put once the lock is let go.
+*/
+static struct pid *bind_machine_reset(void)
+{
+        struct pid *process = bind_machine.process;
+
+        bind_machine.owner = NULL;
+        bind_machine.process = NULL;
+        bind_machine.ending = false;
+        bind_machine.count = 0;
+        atomic_set(&bind_machine_live, 0);
+        return process;
+}
+
+/*
+        Let go of the machine, if file holds it -- and, when process is named,
+        only if that thread group is the one that attached, which is how a
+        flush from a process that is not the machine process's own is told
+        apart from the real thing.
+*/
+static void bind_machine_detach(struct file *file, struct pid *process)
 {
         unsigned long flags;
         unsigned int drain[BIND_MACHINE_QUEUE], n = 0, i;
+        struct pid *gone = NULL;
         _Bool was_owner = false;
 
         spin_lock_irqsave(&bind_machine_lock, flags);
-        if (bind_machine.owner == file) {
+        if (bind_machine.owner == file &&
+            (!process || bind_machine.process == process)) {
                 was_owner = true;
                 if (!bind_machine.ending)
                         for (i = 0; i < bind_machine.count; i++)
                                 drain[n++] = bind_machine.event[i];
-                bind_machine.owner = NULL;
-                bind_machine.ending = false;
-                bind_machine.count = 0;
-                atomic_set(&bind_machine_live, 0);
+                gone = bind_machine_reset();
         }
         spin_unlock_irqrestore(&bind_machine_lock, flags);
 
         if (!was_owner)
                 return;
 
-        bind_machine_watch_all(false);
+        put_pid(gone);
+        bind_machine_watch_all();
         wake_up(&bind_machine.wait);
         for (i = 0; i < n; i++) {
                 struct bind_row *row = bind_row(drain[i]);
@@ -1142,6 +1172,31 @@ static void bind_machine_detach(struct file *file)
                 if (row)
                         bind_queue(row);
         }
+}
+
+/*
+        Called when a descriptor of the device is closed, by whoever closes it:
+        every spawn device a shell opens comes through here, so the common
+        answer costs one load.
+
+        The machine process's attach is its open file, and an open file is let
+        go of only when the last reference to it is. A process that forks and
+        does not exec -- a background function in the script, a subshell, the
+        wifi and time children -- hands each child a copy of the descriptor,
+        so killing the machine process left the file open for as long as any
+        of them lived. The owner stayed set, the next machine process was
+        answered EBUSY, and the rows it had claimed went to a queue nobody
+        read. The machine process dying is what ends its attach, and it ends
+        it here, as its descriptors are closed on the way out: not a close by
+        anyone else, and not a close by the machine process itself of a copy
+        it made, which is its own business and does not end anything.
+*/
+static void bind_machine_flush(struct file *file)
+{
+        if (likely(READ_ONCE(bind_machine.owner) != file) ||
+            !(current->flags & PF_EXITING))
+                return;
+        bind_machine_detach(file, task_tgid(current));
 }
 
 static void bind_machine_fill(struct machine_control *request, unsigned int event)
@@ -1277,26 +1332,34 @@ static long report_machine(struct file *file, struct machine_control __user *out
                 return -EPERM;
 
         switch (request.op) {
-        case MOONWATER_ATTACH:
+        case MOONWATER_ATTACH: {
+                struct pid *process = get_pid(task_tgid(current));
+                struct pid *before;
+
                 spin_lock_irqsave(&bind_machine_lock, flags);
                 if (bind_machine.owner && bind_machine.owner != file) {
                         spin_unlock_irqrestore(&bind_machine_lock, flags);
+                        put_pid(process);
                         return -EBUSY;
                 }
+                before = bind_machine.process;
+                bind_machine.process = process;
                 bind_machine.owner = file;
                 bind_machine.ending = false;
                 request.queued = bind_machine.count;
                 atomic_set(&bind_machine_live, 1);
                 spin_unlock_irqrestore(&bind_machine_lock, flags);
-                bind_machine_watch_all(true);
+                put_pid(before);
+                bind_machine_watch_all();
 #ifdef CONFIG_MOONWATER_CANVAS
                 if (!atomic_read(&bind_canvas_told) && canvas_is_on())
                         bind_fire(SPARK_BIND_CANVAS_ON);
 #endif
                 request.flags = MOONWATER_ATTACHED;
                 break;
+        }
         case MOONWATER_DETACH:
-                bind_machine_detach(file);
+                bind_machine_detach(file, NULL);
                 request.flags = 0;
                 request.queued = 0;
                 break;
@@ -1673,10 +1736,9 @@ static void bind_start(void)
         INIT_WORK(&bind_canvas_work, bind_canvas_run);
         init_waitqueue_head(&bind_machine.wait);
         machine_script_reset();
-        bind_machine.owner = NULL;
-        bind_machine.ending = false;
-        bind_machine.count = 0;
-        atomic_set(&bind_machine_live, 0);
+        spin_lock_irq(&bind_machine_lock);
+        bind_machine_reset();
+        spin_unlock_irq(&bind_machine_lock);
         atomic_set(&bind_ctrl, 0);
         atomic_set(&bind_alt, 0);
         bind_held_n = 0;
@@ -1697,7 +1759,7 @@ static void bind_start(void)
                 atomic_set(&row->busy, 0);
                 row->last = 0;
                 INIT_WORK(&row->work, bind_work);
-                bind_watch_row(row, row->def[0] != 0);
+                bind_watch_row(row);
         }
         atomic_set(&bind_alive, 1);
         if (input_register_handler(&bind_handler))
@@ -1714,15 +1776,14 @@ static void bind_start(void)
 
 static void bind_stop(void)
 {
+        struct pid *gone;
         unsigned at;
 
         atomic_set(&bind_alive, 0);
         spin_lock_irq(&bind_machine_lock);
-        bind_machine.owner = NULL;
-        bind_machine.ending = false;
-        bind_machine.count = 0;
-        atomic_set(&bind_machine_live, 0);
+        gone = bind_machine_reset();
         spin_unlock_irq(&bind_machine_lock);
+        put_pid(gone);
         wake_up_all(&bind_machine.wait);
 
 #ifdef CONFIG_VT
@@ -1820,8 +1881,7 @@ static long report_bind(struct bind_control __user *out)
                         request.command[0] ? request.command : row->def,
                         sizeof(row->command));
                 atomic_set(&row->bound, row->command[0] != 0);
-                bind_watch_row(row, row->command[0] != 0 ||
-                                            atomic_read(&bind_machine_live));
+                bind_watch_row(row);
                 spin_unlock_irqrestore(&bind_lock, flags);
         }
 
