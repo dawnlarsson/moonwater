@@ -693,8 +693,8 @@ static fn link_pair_begin(positive group, p8 address_to address, p16 port,
         memory_copy(hello + WATERLINK_STAMP_BYTES, link_nearby.name,
                     WATERLINK_NAME_MAX);
         //      Counted whether or not it could be sent: the curve work is
-        //      done, and a place that refuses it (port zero, say) is neither
-        //      greeted again at once nor outside the budget.
+        //      done, and a place that refuses it is neither greeted again at
+        //      once nor outside the budget.
         if (waterlink_initiate(address_of noise, address_of link_self.me,
                                keys->identity.public, keys->psk, ephemeral,
                                hello, datagram))
@@ -793,10 +793,11 @@ static fn link_nearby_heard(p8 address_to packet, positive length,
                         found.instance + at;
                 p8 ours[23];
 
-                //      Our own, back through the loop.
+                //      Our own, back through the loop. A port of zero is
+                //      nowhere to greet, and no datagram goes there.
                 memory_copy(ours, "wl-", 3);
                 memory_into_hex(ours + 3, link_nearby.instance, 10);
-                if (!instance->has_port ||
+                if (!instance->has_port || !instance->port ||
                     (instance->label_length == sizeof ours &&
                      !memory_compare(instance->label, ours, sizeof ours)))
                         continue;
@@ -835,6 +836,11 @@ static fn link_nearby_heard(p8 address_to packet, positive length,
                                 link_pair_begin(group, address, instance->port,
                                                 now, false);
                 }
+                //      A machine announces the one instance that is it, so the
+                //      first a packet names is where it is greeted: a packet
+                //      that names eight is eight handshakes to the address it
+                //      came from, which a spoofed one made somebody else's.
+                break;
         }
 }
 

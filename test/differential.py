@@ -63691,8 +63691,9 @@ WATERLINK_PRE_DRIVER = r'''
           - a handshake that completes agrees on its keys at both ends;
           - every name pairing saves is one link_name_good takes;
           - greetings an mDNS packet provoked number at most LINK_GREETED in
-            any LINK_GREET_AGAIN, and one-shot answers at most one in any
-            LINK_ANSWER_AGAIN: nothing a spoofed packet says makes this an
+            any LINK_GREET_AGAIN, at most one to a group from a packet that
+            names many, none to port zero, and one-shot answers at most one in
+            any LINK_ANSWER_AGAIN: nothing a spoofed packet says makes this an
             amplifier;
           - an initiation answered with a cookie reply spent no curve, and a
             cookie reply is WATERLINK_COOKIE_DATAGRAM bytes, a sixteenth of
@@ -63854,6 +63855,9 @@ static bipolar socket_send(b32 socket, const void *bytes, positive size, b32 fla
                     wl_answered_count < array_count(wl_answered_at))
                         wl_answered_at[wl_answered_count++] = wl_clock / 1000;
         }
+        if (socket == 3 && kind == WATERLINK_KIND_INITIATE && wl_phase == 1)
+                wl_check(((const socket_address_internet *)to)->port,
+                         "an announcement made a greeting for port zero");
         if (socket == 3 && kind == WATERLINK_KIND_INITIATE && wl_phase == 1 &&
             wl_greeted_count < array_count(wl_greeted_at))
                 wl_greeted_at[wl_greeted_count++] = wl_clock / 1000;
@@ -64199,6 +64203,10 @@ static void wl_step(bool server)
                         wl_phase = 1;
                         link_nearby_heard(raw, length, wl_addresses[0], port, 0, now);
                         wl_phase = 0;
+                        //      A machine announces one instance: a packet is at most a
+                        //      greeting to each group, however many it names.
+                        wl_check(wl_greeted_count - greeted <= link_nearby.groups.count,
+                                 "an announcement was more than one greeting to a group");
                         //      A code that is used up, or waits for a named
                         //      machine, only answers: it greets nobody.
                         wl_check(!((record->flags & LINK_GROUP_ONCE) &&
@@ -64256,9 +64264,16 @@ static void wl_step(bool server)
                         memcpy(run->address, wl_addresses[take8() % 3], 16);
                         run->port = take8() & 1 ? WATERLINK_MDNS_PORT : take16();
                 }
-                wl_phase = 1;
-                link_nearby_receive(now);
-                wl_phase = 0;
+                {
+                        positive greeted = wl_greeted_count;
+
+                        wl_phase = 1;
+                        link_nearby_receive(now);
+                        wl_phase = 0;
+                        wl_check(wl_greeted_count - greeted <=
+                                         packets * link_nearby.groups.count,
+                                 "an announcement was more than one greeting to a group");
+                }
                 for (positive r = 0; r < packets; r++)
                         free(bytes[r]);
                 wl_mdns_count = wl_mdns_next = 0;
@@ -64473,6 +64488,8 @@ def waterlink_pre_seeds():
         "announcements_many_ports.bin": b"\x00" + b"".join(op5(m) for m in many),
         "announcements_port_zero.bin": b"\x00" + b"".join(
             op5(announce([0] * 8, k)) for k in range(4)),
+        "announcements_zero_first.bin": b"\x00" + b"".join(
+            op5(announce([0, 0, 5000 + k, 5001 + k], k)) for k in range(4)),
         "one_shot_questions.bin": b"\x00" + b"".join(op5(query, 40000) for _ in range(4)),
         "coalesced_run.bin": b"\x00" + run,
         "mdns_socket.bin": b"\x00" + socket_mdns,

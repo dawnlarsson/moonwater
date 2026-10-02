@@ -73411,8 +73411,8 @@ static fn mdns_amplification(void)
               greeted == LINK_GREETED);
 
         //      A place that refuses the greeting (port zero, from any
-        //      address) costs the curve work all the same, so it spends the
-        //      same budget.
+        //      address) is nowhere to greet: no curve work is spent on it and
+        //      none of the budget is taken.
         wls_group();
         greeted = entropy_draws;
         for (positive at = 0; at < LINK_GREETED + 8; at++)
@@ -73429,8 +73429,8 @@ static fn mdns_amplification(void)
                                   0, 5000000 + at);
         }
         check("sec: announcements naming a place that refuses a greeting "
-              "spend the same budget",
-              entropy_draws - greeted == LINK_GREETED);
+              "spend none of the budget",
+              entropy_draws == greeted && link_nearby.greeted_next == 0);
 
         link_nearby.socket = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC |
                                                          SOCK_NONBLOCK, 0);
@@ -73527,6 +73527,93 @@ static fn mdns_hop_limit(void)
         system_close(asker);
         socket_close((b32)link_nearby.socket);
         link_nearby.socket = -1;
+}
+
+/*
+        An announcement as a stranger could make one: the instances it names,
+        each with the port it says, whatever they are. A machine's own
+        names one.
+*/
+static positive wls_mdns_naming(p8 address_to packet, const p16 address_to ports,
+                                positive count)
+{
+        positive at = 12;
+
+        memory_zero(packet, 12);
+        packet[2] = 0x84;
+        packet[7] = (p8)count;
+        for (positive one = 0; one < count; one++)
+        {
+                packet[at++] = 5;
+                memory_copy(packet + at, "wl-x", 4);
+                packet[at + 4] = (p8)('a' + one);
+                at += 5;
+                memory_copy(packet + at, waterlink_service_name,
+                            WATERLINK_SERVICE_BYTES);
+                at += WATERLINK_SERVICE_BYTES;
+                memory_copy(packet + at,
+                            "\x00\x21\x80\x01\x00\x00\x11\x94\x00\x09\x00\x00\x00\x00",
+                            14);
+                at += 14;
+                network_store_16(packet + at, ports[one]);
+                memory_copy(packet + at + 2, "\x01h", 3);
+                at += 5;
+        }
+        return at;
+}
+
+/*
+        What one announcement is worth to whoever sent it. A machine says one
+        instance, so a packet that names eight is eight handshakes of 1200
+        bytes to the address it came from, which a spoofed one made somebody
+        else's: the first instance it names that has a port is greeted, and
+        the rest are not. A port of zero is nowhere to greet and costs no
+        curve work and no place in the ring that budgets them.
+*/
+static fn mdns_names_one(void)
+{
+        static const p16 many[] = {41000, 41001, 41002, 41003,
+                                   41004, 41005, 41006, 41007};
+        static const p16 zeros[] = {0, 0, 0, 0, 0, 0, 0, 0};
+        static const p16 mixed[] = {0, 0, 41100, 41101};
+        p8 packet[WATERLINK_MDNS_MAX];
+        positive length;
+        positive before;
+
+        wls_group();
+        before = entropy_draws;
+        length = wls_mdns_naming(packet, many, 8);
+        link_nearby_heard(packet, length, wls_loopback, WATERLINK_MDNS_PORT, 0,
+                          6000000);
+        check("sec: an announcement naming eight instances is one greeting, "
+              "to the first",
+              entropy_draws - before == 1 &&
+                      link_greeted_lately(wls_office.mark, wls_loopback, 41000,
+                                          6000001) &&
+                      !link_greeted_lately(wls_office.mark, wls_loopback, 41001,
+                                           6000001));
+
+        wls_group();
+        before = entropy_draws;
+        length = wls_mdns_naming(packet, zeros, 8);
+        link_nearby_heard(packet, length, wls_loopback, WATERLINK_MDNS_PORT, 0,
+                          6100000);
+        check("sec: eight instances at port zero are greeted not at all, and "
+              "take nothing of the ring",
+              entropy_draws == before && link_nearby.greeted_next == 0);
+
+        wls_group();
+        before = entropy_draws;
+        length = wls_mdns_naming(packet, mixed, 4);
+        link_nearby_heard(packet, length, wls_loopback, WATERLINK_MDNS_PORT, 0,
+                          6200000);
+        check("sec: the first instance with a port is the one greeted, past "
+              "those without",
+              entropy_draws - before == 1 &&
+                      link_greeted_lately(wls_office.mark, wls_loopback, 41100,
+                                          6200001) &&
+                      !link_greeted_lately(wls_office.mark, wls_loopback, 41101,
+                                           6200001));
 }
 
 //      Discovery labels are published only when every one was drawn.
@@ -74056,6 +74143,7 @@ b32 main(void)
         control_records_are_canonical();
         greetings(listener, port);
         mdns_amplification();
+        mdns_names_one();
         mdns_hop_limit();
         labels();
         wpa_key();
