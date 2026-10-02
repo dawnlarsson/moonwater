@@ -59799,6 +59799,15 @@ def wifi_scan_fuzz_seeds():
     seeds["nest_overlong.bin"] = b"\x00" + struct.pack("<HH", 0x7000, 6) + ssid
     seeds["body.bin"] = b"\x02" + attribute(47 | 0x8000, bss)
     seeds["body_two.bin"] = b"\x02" + attribute(47 | 0x8000, bss) + attribute(47 | 0x8000, bss)
+    # Mode 4, rows of three bytes (name, signal, joined and security): a
+    # hundred weak forged names before the real ones, a joined row weaker
+    # than all of them, a twin louder than the joined one, and names over.
+    rng = random.Random(6581)
+    weak = b"".join(bytes((name, 39, 0x11)) for name in range(86))
+    strong = b"".join(bytes((name, rng.randrange(20), 0x31)) for name in range(70, 86))
+    seeds["air_forged_first.bin"] = b"\x04" + weak + strong + bytes((3, 39, 0x30, 3, 1, 0x31))
+    seeds["air_churn.bin"] = b"\x04" + bytes(rng.getrandbits(8) for _ in range(900))
+    seeds["air_hidden.bin"] = b"\x04" + bytes((86, 0, 0x10, 87, 0, 0x10, 88, 5, 0x10, 89, 6, 0x00))
     return seeds
 
 
@@ -59931,6 +59940,123 @@ static void check_one(netlink_header *header)
         }
 }
 
+/* A scan's rows kept as radio_air_keep keeps them, against the model: one
+   row a name, no hidden name; every field of a row from one access point;
+   a name joined through keeps its joined row, the strongest joined; any
+   other name its strongest; and with the air full, no name left out that
+   is stronger than the weakest row kept that is not joined. */
+#define AIR_NAMES 90
+static void air_model(const p8 *data, positive size)
+{
+        static radio_heard rows[1024];
+        bool any[AIR_NAMES] = {0}, joined[AIR_NAMES] = {0}, kept[AIR_NAMES] = {0};
+        b32 best[AIR_NAMES], best_joined[AIR_NAMES];
+        positive count = 0, names = 0, joins = 0, nonjoined = 0;
+        b32 weakest = 0;
+        radio_air air;
+
+        memset(&air, 0, sizeof air);
+        for (positive at = 0; at + 3 <= size && count < 1024; at += 3, count++)
+        {
+                radio_heard *one = rows + count;
+                p8 name = data[at] % AIR_NAMES;
+
+                memset(one, 0, sizeof *one);
+                //      Names n0 to n85; 86 empty and 87 three zero bytes,
+                //      which are hidden; 88 and 89 the longest there is.
+                if (name < 86)
+                        one->ssid_length = (p8)snprintf((char *)one->ssid, sizeof one->ssid, "n%u", name);
+                else if (name == 87)
+                        one->ssid_length = 3;
+                else if (name > 87)
+                {
+                        one->ssid_length = RADIO_SSID_MOST;
+                        memset(one->ssid, 'x' + (name - 88), RADIO_SSID_MOST);
+                }
+                //      Signals in whole dB from 0 to -39, so ties are common.
+                one->mbm = -100 * (b32)(data[at + 1] % 40);
+                one->joined = (data[at + 2] & 15) == 0;
+                one->security = (p8)((data[at + 2] >> 4) % 8);
+                one->beacon_security = (p8)(data[at + 2] >> 7);
+                //      The row's own identity, in every field that is not
+                //      the name, the signal or the joined bit.
+                one->frequency = 2412 + (p32)count;
+                one->seen = (p32)count * 7;
+                one->bssid[0] = 2;
+                one->bssid[4] = (p8)(count >> 8);
+                one->bssid[5] = (p8)count;
+                radio_air_keep(&air, one);
+                if (name == 86 || name == 87)
+                        continue;
+                if (!any[name])
+                        names++, best[name] = one->mbm;
+                any[name] = true;
+                if (one->mbm > best[name])
+                        best[name] = one->mbm;
+                if (one->joined && (!joined[name] || one->mbm > best_joined[name]))
+                {
+                        joins += !joined[name];
+                        joined[name] = true;
+                        best_joined[name] = one->mbm;
+                }
+        }
+
+        if (air.count != (names < RADIO_AIR_MOST ? names : RADIO_AIR_MOST))
+        {
+                fprintf(stderr, "the air keeps %zu rows of %zu names\n", (size_t)air.count, (size_t)names);
+                abort();
+        }
+        for (positive at = 0; at < air.count; at++)
+        {
+                const radio_heard *have = air.heard + at;
+                const radio_heard *from = null;
+                p8 name;
+
+                for (positive row = 0; row < count && !from; row++)
+                        if (rows[row].frequency == have->frequency)
+                                from = rows + row;
+                if (!from || from->ssid_length != have->ssid_length ||
+                    memcmp(from->ssid, have->ssid, have->ssid_length) ||
+                    from->security != have->security ||
+                    from->beacon_security != have->beacon_security ||
+                    from->joined != have->joined || from->mbm != have->mbm ||
+                    from->seen != have->seen || memcmp(from->bssid, have->bssid, 6))
+                {
+                        fprintf(stderr, "a row is not one access point's\n");
+                        abort();
+                }
+                name = (p8)(have->ssid_length == RADIO_SSID_MOST ? 88 + (have->ssid[0] - 'x')
+                            : !have->ssid[0] ? 86 : atoi((const char *)have->ssid + 1));
+                if (name == 86 || kept[name])
+                {
+                        fprintf(stderr, "a hidden or doubled name is kept\n");
+                        abort();
+                }
+                kept[name] = true;
+                if (joins <= RADIO_AIR_MOST && joined[name] &&
+                    (!have->joined || have->mbm != best_joined[name]))
+                {
+                        fprintf(stderr, "a joined name lost its strongest joined row\n");
+                        abort();
+                }
+                if (!joined[name] && have->mbm != best[name])
+                {
+                        fprintf(stderr, "a name is not its strongest row\n");
+                        abort();
+                }
+                if (!have->joined && (!nonjoined++ || have->mbm < weakest))
+                        weakest = have->mbm;
+        }
+        for (p8 name = 0; name < AIR_NAMES; name++)
+                if (any[name] && !kept[name] &&
+                    ((joined[name] && joins <= RADIO_AIR_MOST) ||
+                     (air.count == RADIO_AIR_MOST && nonjoined && best[name] > weakest)))
+                {
+                        fprintf(stderr, "n%u is left out over a weaker row\n", name);
+                        abort();
+                }
+}
+
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
         p8 mode;
@@ -59939,9 +60065,14 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 
         if (!size)
                 return 0;
-        mode = data[0] % 4;
+        mode = data[0] % 5;
         data++;
         size--;
+        if (mode == 4)
+        {
+                air_model(data, size);
+                return 0;
+        }
         if (mode == 3)
         {
                 /* An RSN element alone, against the model. */
