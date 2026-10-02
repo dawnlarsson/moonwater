@@ -60230,12 +60230,48 @@ static void pick_model(const p8 *data, positive size)
         }
 }
 
+/* radio_channel against the channel plan, once: every frequency from 0 to
+   80 GHz that is a channel's centre gives that channel, and none gives a
+   number no band has. */
+static void channel_model(void)
+{
+        static p8 plan[80001];
+        static bool done;
+        static const struct { p32 first, last, base, step; } bands[] = {
+            {1, 13, 2407, 5}, {14, 14, 2414, 5}, {182, 196, 4000, 5},
+            {1, 184, 5000, 5}, {1, 233, 5950, 5}, {1, 6, 56160, 2160}};
+
+        if (done)
+                return;
+        done = true;
+        for (positive band = 0; band < sizeof bands / sizeof bands[0]; band++)
+                for (p32 channel = bands[band].first; channel <= bands[band].last; channel++)
+                {
+                        p32 mhz = bands[band].base + bands[band].step * channel;
+
+                        if (mhz < 4910 || mhz > 4980 || bands[band].base == 4000)
+                                plan[mhz] = (p8)channel;
+                }
+        plan[2484] = 14;
+        plan[5935] = 2;
+        for (p32 mhz = 0; mhz <= 80000; mhz++)
+                if ((plan[mhz] && radio_channel(mhz) != plan[mhz]) || radio_channel(mhz) > 233)
+                {
+                        fprintf(stderr, "%u MHz is channel %u, not %u\n", mhz, radio_channel(mhz),
+                                plan[mhz]);
+                        abort();
+                }
+        if (radio_channel(~(p32)0) || radio_channel(0x80000000u))
+                abort();
+}
+
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
         p8 mode;
         positive whole;
         p8 *message;
 
+        channel_model();
         if (!size)
                 return 0;
         mode = data[0] % 6;

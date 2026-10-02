@@ -7075,6 +7075,23 @@ static COLD bipolar radio_bss_choose(nl80211 address_to session, p32 index,
         return 1;
 }
 
+/* A channel's number from its frequency, as the kernel numbers it
+   (ieee80211_freq_khz_to_channel), and 0 off every band. The sum here
+   before took 5000 from anything at 4900 MHz or over in unsigned
+   arithmetic: the 4.9 GHz band printed as channel 858993439, the 6 GHz
+   band's channel 2 as 187 and 60 GHz as 6 GHz channels by the thousand. */
+static p32 radio_channel(p32 mhz)
+{
+        return mhz == 2484                    ? 14
+               : mhz >= 2407 && mhz < 2484    ? (mhz - 2407) / 5
+               : mhz >= 4910 && mhz <= 4980   ? (mhz - 4000) / 5
+               : mhz >= 5000 && mhz < 5925    ? (mhz - 5000) / 5
+               : mhz == 5935                  ? 2
+               : mhz >= 5950 && mhz <= 7115   ? (mhz - 5950) / 5
+               : mhz >= 58320 && mhz <= 70200 ? (mhz - 56160) / 2160
+                                              : 0;
+}
+
 static radio_heard address_to radio_air_find(radio_air address_to air, string_address ssid)
 {
         positive length = string_length(ssid);
@@ -7148,14 +7165,11 @@ static fn radio_air_row(radio_heard address_to heard, positive width, bool saved
         bipolar dbm = heard->mbm / 100;
         p32 mhz = heard->frequency;
         positive bars = dbm >= -55 ? 4 : dbm >= -67 ? 3 : dbm >= -75 ? 2 : dbm >= -85 ? 1 : 0;
-        string_address band = mhz >= 5925   ? (string_address) "6 GHz"
+        string_address band = mhz >= 58320  ? (string_address) "60 GHz"
+                              : mhz >= 5925 ? (string_address) "6 GHz"
                               : mhz >= 4900 ? (string_address) "5 GHz"
                                             : (string_address) "2.4 GHz";
-        p32 channel = mhz == 2484   ? 14
-                      : mhz >= 5950 ? (mhz - 5950) / 5
-                      : mhz >= 4900 ? (mhz - 5000) / 5
-                      : mhz >= 2407 ? (mhz - 2407) / 5
-                                    : 0;
+        p32 channel = radio_channel(mhz);
 
         radio_line(line, sizeof(line), heard->joined ? (string_address) "* "
                                        : saved       ? (string_address) "+ "
