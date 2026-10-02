@@ -40438,6 +40438,10 @@ def harness_dhcp_fuzz(argv):
 #define ERROR_NO_DEVICE 19
 #define NETWORK_NANOSECONDS 1000000000
 static positive clock_monotonic_nanoseconds(void) { return 0; }
+/* net_seconds reads CLOCK_BOOTTIME; here, as the monotonic clock above, it
+   is a clock that will not answer. */
+typedef struct { long tv_sec; long tv_nsec; } timespec;
+#define clock_gettime(which, at) ((void)(which), (void)(at), -1)
 """ + head + walk + clock + r"""
 static const p8 fuzz_hardware[6] = {2, 0, 0, 0, 0, 1};
 

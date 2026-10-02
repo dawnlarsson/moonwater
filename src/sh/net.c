@@ -1100,14 +1100,27 @@ typedef struct
         p32 carrier_downs;
 } net_holding;
 
+/* The lease clock is CLOCK_BOOTTIME: a lease runs out on the server's clock
+   while this machine sleeps, and the monotonic clock stops for a suspend, so
+   an hour's lease taken before a night asleep still looked half new in the
+   morning and the address stayed on the wire after the server had given it
+   to somebody else. */
+#define NET_CLOCK_BOOTTIME 7
+
 static positive net_seconds(void)
 {
-        positive now = clock_monotonic_nanoseconds();
+        timespec stamp = {0, 0};
+        positive now = 0;
+
+        if (clock_gettime(NET_CLOCK_BOOTTIME, address_of stamp) >= 0 &&
+            stamp.tv_sec >= 0)
+                now = (positive)stamp.tv_sec * NETWORK_NANOSECONDS +
+                      (positive)stamp.tv_nsec;
 
         //      A clock that will not answer leaves every lease looking
         //      expired, so an address is never kept beyond an unknown
-        //      deadline. Zero is that answer, and the monotonic clock's
-        //      first second is when a boot takes its lease, so it reads 1.
+        //      deadline. Zero is that answer, and the clock's first second
+        //      is when a boot takes its lease, so it reads 1.
         return now ? now / NETWORK_NANOSECONDS + 1 : 0;
 }
 
@@ -2559,6 +2572,8 @@ static COLD fn net_kernel_defaults(void)
 }
 #endif
 
+#define NET_RESUME_LOOK_SECONDS 60
+
 static COLD b32 net_watch(void)
 {
         netlink_buffer message = {0};
@@ -2633,10 +2648,25 @@ static COLD b32 net_watch(void)
                         positive count = 1;
 
                         positive declined = 0;
+                        bool looking = false;
 
                         if (held.index && held.lease.seconds)
+                        {
                                 due = net_lease_due_in(address_of held,
                                                        net_seconds());
+                                /* The wait below is the monotonic clock's
+                                   and sleeps through a suspend, so a lease
+                                   due in an hour is looked at every
+                                   NET_RESUME_LOOK_SECONDS: a machine that
+                                   woke past its lease's end finds out
+                                   within that, not an hour of being awake
+                                   later. */
+                                if (due > NET_RESUME_LOOK_SECONDS)
+                                {
+                                        due = NET_RESUME_LOOK_SECONDS;
+                                        looking = true;
+                                }
+                        }
                         else
                         {
                                 due = retry_seconds;
@@ -2697,6 +2727,9 @@ static COLD b32 net_watch(void)
                                         wake = net_wake_listen();
                                         net_wake_watch = wake;
                                 }
+
+                                if (looking)
+                                        continue;
 
                                 if (!held.index || !held.lease.seconds)
                                 {

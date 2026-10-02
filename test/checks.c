@@ -81185,6 +81185,16 @@ static bool storage_test_not_run(b32 status, string_address what,
         return true;
 }
 
+static positive storage_test_boottime(void)
+{
+        timespec stamp = {0, 0};
+
+        return clock_gettime(NET_CLOCK_BOOTTIME, address_of stamp) < 0
+                   ? 0
+                   : (positive)stamp.tv_sec * NETWORK_NANOSECONDS +
+                         (positive)stamp.tv_nsec;
+}
+
 /* The lease clock's first second.  A boot takes its lease there, and zero is
    what net_seconds says for a clock that failed -- which expires every lease
    at once.  A time namespace whose monotonic clock starts about now puts a
@@ -81196,16 +81206,16 @@ static fn storage_test_lease_clock_origin(void)
 
         if (child == 0)
         {
-                p8 offsets[48] = "monotonic -";
-                positive at = 11;
-                positive now = clock_monotonic_nanoseconds();
+                p8 offsets[48] = "boottime -";
+                positive at = 10;
+                positive now = storage_test_boottime();
                 timespec pause = {0, 250000000};
                 b32 inner = 0;
 
                 if (now % NETWORK_NANOSECONDS > 700000000)
                 {
                         system_call_2(syscall(nanosleep), (positive)address_of pause, 0);
-                        now = clock_monotonic_nanoseconds();
+                        now = storage_test_boottime();
                 }
                 bipolar unshared = system_call_1(syscall(unshare),
                                                  CLONE_NEWUSER | CLONE_NEWTIME);
@@ -81232,6 +81242,96 @@ static fn storage_test_lease_clock_origin(void)
                                    "no time namespace")))
                 check("a lease taken in the clock's first second is not a failed clock",
                       child > 0 && status == 0);
+}
+
+/* A lease held across a suspend. A time namespace moves the clocks a child
+   reads: boottime two hours on is a machine that slept two hours (the
+   monotonic clock does not count a suspend, CLOCK_BOOTTIME does), and its
+   hour's lease has run out; boottime a hundred seconds on is a lease with
+   1,700 seconds to its renewal; and the monotonic clock two hours on with
+   boottime where it was is not a suspend at all. Exit bits over 16, so 2
+   and the threaded runner's 7 stay NOT RUN. */
+static fn storage_test_lease_asleep(void)
+{
+        static const struct
+        {
+                string_address offsets;
+                bool expired;
+                positive due;
+        } cases[] = {{"boottime 7200 0\n", true, 1},
+                     {"boottime 100 0\n", false, 1700},
+                     {"monotonic 7200 0\n", false, 1800}};
+        b32 wrong = 16;
+        b32 status = 0;
+
+        for (positive at = 0; at < array_count(cases); at++)
+        {
+                bipolar child = system_fork();
+
+                if (child == 0)
+                {
+                        net_holding held = {.index = 1};
+                        b32 inner = 0;
+
+                        held.lease.seconds = 3600;
+                        held.lease.renewal = 1800;
+                        held.lease.rebinding = 3150;
+                        held.retry = 1800;
+                        held.taken = net_seconds();
+                        bipolar unshared = system_call_1(
+                            syscall(unshare), CLONE_NEWUSER | CLONE_NEWTIME);
+                        if (unshared < 0)
+                                system_call_1(syscall(exit_group),
+                                              unshared == -EINVAL
+                                                  ? STORAGE_TEST_THREADED
+                                                  : 2);
+                        if (!storage_test_write_text(
+                                "/proc/self/timens_offsets", cases[at].offsets,
+                                string_length(cases[at].offsets)))
+                                system_call_1(syscall(exit_group), 2);
+                        bipolar grandchild = system_fork();
+                        if (grandchild == 0)
+                        {
+                                positive now = net_seconds();
+                                positive due = net_lease_due_in(address_of held,
+                                                                now);
+
+                                //      A second of slack for the clock
+                                //      moving between the two readings.
+                                system_call_1(
+                                    syscall(exit_group),
+                                    net_lease_expired_at(address_of held, now) ==
+                                                cases[at].expired &&
+                                            due <= cases[at].due &&
+                                            due + 1 >= cases[at].due
+                                        ? 0
+                                        : 1);
+                        }
+                        system_call_4(syscall(wait4), (positive)grandchild,
+                                      (positive)address_of inner, 0, 0);
+                        system_call_1(syscall(exit_group), (inner >> 8) & 0xff);
+                }
+                if (child > 0)
+                        system_call_4(syscall(wait4), (positive)child,
+                                      (positive)address_of status, 0, 0);
+                status = child > 0 && !(status & 0x7f) ? (status >> 8) & 0xff : 1;
+                if (status == 2 || status == STORAGE_TEST_THREADED)
+                        break;
+                if (status)
+                        wrong |= 1 << at;
+        }
+        if (!storage_test_not_run(status == 2 || status == STORAGE_TEST_THREADED
+                                      ? status
+                                      : wrong,
+                                  "lease across a suspend", "no time namespace"))
+        {
+                check("a lease runs out while the machine sleeps",
+                      !(wrong & 1));
+                check("time asleep short of the renewal moves it nearer, no more",
+                      !(wrong & 2));
+                check("a monotonic clock that jumps is not time asleep",
+                      !(wrong & 4));
+        }
 }
 
 static fn storage_test_arp_claims(void)
@@ -82471,6 +82571,7 @@ b32 main(void)
         storage_test_script_rollback();
         storage_test_link_state();
         storage_test_lease_clock_origin();
+        storage_test_lease_asleep();
         storage_test_dhcp_apart();
         storage_test_decline_hold();
         storage_test_arp_claims();
