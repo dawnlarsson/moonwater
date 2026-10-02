@@ -35050,6 +35050,17 @@ def harness_image_nodes(argv):
               '%s spells a bowl root out for itself instead of asking bowl'
               % path.relative_to(ROOT))
 
+    # The initramfs carries each directory's owner into the guest, and mkdir
+    # -p keeps one the building user made: a /etc owned by uid 1000 made the
+    # shell refuse to replace /etc/resolv.conf (file_name_stable), and ip took
+    # every lease after the first back. The setup that makes the image
+    # directories gives them to root after it, when the build is root.
+    setup = build[build.index('build_setting_get("image_directories")'):
+                  build.index('build_setting_get("image_nodes")')]
+    check('"mkdir"' in setup and '"chown"' in setup and '"0:0"' in setup and
+          'build_root()' in setup and setup.index('"mkdir"') < setup.index('"chown"'),
+          'image directories are given to root after mkdir -p, so the guest\'s /etc is root\'s')
+
     return check.verdict('image nodes', 'image_nodes')
 
 
