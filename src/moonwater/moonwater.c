@@ -1468,7 +1468,7 @@ static struct bind_row *bind_match(unsigned int type, unsigned int code, int val
                 return NULL;
 
         event = READ_ONCE(bind_code_event[code]);
-        if (!event)
+        if (likely(!event))
                 return NULL;
         if ((bind_spec[event - 1].flags & BIND_CAD) &&
             !(atomic_read(&bind_ctrl) > 0 && atomic_read(&bind_alt) > 0))
@@ -1492,7 +1492,7 @@ static _Bool bind_key_swallowed(unsigned int code, int value)
         unsigned long flags;
         _Bool swallow = false;
 
-        if (!bind_watched(code) && (value == 1 || !READ_ONCE(bind_held_n)))
+        if (likely(!bind_watched(code) && (value == 1 || !READ_ONCE(bind_held_n))))
                 return false;
 
         spin_lock_irqsave(&bind_lock, flags);
@@ -1536,12 +1536,16 @@ static void bind_event(struct input_handle *handle, unsigned int type,
         struct bind_handle *bind = container_of(handle, struct bind_handle, handle);
         struct bind_row *row;
 
+        // A mouse is a device with keys, so this hears every count it moves by
+        // and every report that ends one; most of what arrives is neither.
+        if (likely(type != EV_KEY && type != EV_SW))
+                return;
+
         if (type == EV_KEY) {
                 bind_mods(bind, code, value);
                 if (value != 1)
                         return;
-        } else if (type != EV_SW)
-                return;
+        }
 
         row = bind_match(type, code, value);
         if (!row || (type == EV_SW && !bind_row_bound(row)) || !bind_debounce(row))

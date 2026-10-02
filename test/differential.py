@@ -25165,13 +25165,14 @@ static void *spawn_handed;
 #define SIG_IGN ((void *)1)
 #define atomic_long_add(n, p) ((void)(n), (void)(p))
 #define atomic_long_inc(p) ((void)(p))
+#define this_cpu_add(p, n) ((void)(n))
+#define this_cpu_inc(p) ((void)0)
 /* The counter the environments kept on a device are held to is a real one:
    the budget is a number that has to add up. */
 typedef long atomic_long_t;
 #define ATOMIC_LONG_INIT(v) (v)
 static long atomic_long_add_return(long n, atomic_long_t *p) { *p += n; return *p; }
 static void atomic_long_sub(long n, atomic_long_t *p) { *p -= n; }
-static long stat_task_ns, stat_spawns;
 #define user_mode_thread(fn, arg, sig) \
         ((void)(sig), spawn_handed=(arg), spawn_entered++, spawn_pid)
 '''

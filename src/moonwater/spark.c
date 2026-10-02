@@ -834,13 +834,23 @@ _Static_assert(sizeof(struct spark_settings_request) == 16,
 */
 #ifdef SPARK_KERNEL
 
-// Callers and spawned workers update these counters concurrently.
-static atomic_long_t stat_spawns = ATOMIC_LONG_INIT(0);
-static atomic_long_t stat_task_ns = ATOMIC_LONG_INIT(0);
-static atomic_long_t stat_exec_ns = ATOMIC_LONG_INIT(0);
-static atomic_long_t stat_loader_ns = ATOMIC_LONG_INIT(0);
-static atomic_long_t stat_loads = ATOMIC_LONG_INIT(0);
-static atomic_long_t stat_map_ns = ATOMIC_LONG_INIT(0);
+/*
+        Callers and spawned workers count concurrently, and a spawn is asked
+        for on one processor and loaded on another: six atomics in one cache
+        line went back and forth between the two on every start. Each
+        processor counts into a line of its own and the report adds them up.
+*/
+struct spark_tally
+{
+        unsigned long spawns;
+        unsigned long task_ns;
+        unsigned long exec_ns;
+        unsigned long loader_ns;
+        unsigned long loads;
+        unsigned long map_ns;
+};
+
+static DEFINE_PER_CPU_ALIGNED(struct spark_tally, spark_tally);
 
 static int execute_spark(struct linux_binprm *bprm);
 
@@ -1167,31 +1177,33 @@ int execute_spark(struct linux_binprm *bprm)
         // The kernel has already read the first BINPRM_BUF_SIZE bytes for us.
         header = (const struct header *)bprm->buf;
 
-        if (header->magic != SPARK_MAGIC)
+        if (unlikely(header->magic != SPARK_MAGIC))
                 return -ENOEXEC;
 
         loader_started = ktime_get_ns();
         regs = task_pt_regs(current);
 
-        if (header->version != SPARK_VERSION)
+        if (unlikely(header->version != SPARK_VERSION))
         {
                 pr_alert_ratelimited("[moonwater] " "unsupported spark version %u\n", header->version);
                 return -ENOEXEC;
         }
 
-        if (header->flags != 0)
+        if (unlikely(header->flags != 0))
                 return -ENOEXEC;
 
         // Every region is a page multiple by construction, and the entry has
         // to land inside the text it points into. A malformed image must fail
         // here rather than after the mm has been torn down.
-        if (header->base == 0 || (header->base & (SPARK_PAGE - 1)))
+        if (unlikely(header->base == 0 || (header->base & (SPARK_PAGE - 1))))
                 return -ENOEXEC;
 
-        if (header->text_size == 0 || (header->text_size & (SPARK_PAGE - 1)))
+        if (unlikely(header->text_size == 0 ||
+                     (header->text_size & (SPARK_PAGE - 1))))
                 return -ENOEXEC;
 
-        if ((header->data_size & (SPARK_PAGE - 1)) || (header->bss_size & (SPARK_PAGE - 1)))
+        if (unlikely((header->data_size & (SPARK_PAGE - 1)) ||
+                     (header->bss_size & (SPARK_PAGE - 1))))
                 return -ENOEXEC;
 
         /*
@@ -1205,19 +1217,19 @@ int execute_spark(struct linux_binprm *bprm)
                 than a flat binary has any business being, and it means the
                 sums below cannot come near overflowing.
         */
-        if (header->text_size > SPARK_MAX_IMAGE ||
-            header->data_size > SPARK_MAX_IMAGE ||
-            header->bss_size > SPARK_MAX_IMAGE)
+        if (unlikely(header->text_size > SPARK_MAX_IMAGE ||
+                     header->data_size > SPARK_MAX_IMAGE ||
+                     header->bss_size > SPARK_MAX_IMAGE))
                 return -ENOEXEC;
 
         span = header->text_size + header->data_size + header->bss_size;
 
-        if (span > SPARK_MAX_IMAGE)
+        if (unlikely(span > SPARK_MAX_IMAGE))
                 return -ENOEXEC;
 
         // The whole image has to fit above base without wrapping, and inside
         // the address space the process will actually have.
-        if (header->base > TASK_SIZE || span > TASK_SIZE - header->base)
+        if (unlikely(header->base > TASK_SIZE || span > TASK_SIZE - header->base))
                 return -ENOEXEC;
 
         /*
@@ -1249,24 +1261,24 @@ int execute_spark(struct linux_binprm *bprm)
                 unsigned long floor = STACK_TOP - SPARK_STACK_ROOM -
                                       SPARK_STACK_SLIDE;
 
-                if (header->base >= floor || span > floor - header->base)
+                if (unlikely(header->base >= floor || span > floor - header->base))
                         return -ENOEXEC;
         }
 
-        if (header->entry < header->base ||
-            header->entry - header->base >= header->text_size)
+        if (unlikely(header->entry < header->base ||
+                     header->entry - header->base >= header->text_size))
                 return -ENOEXEC;
 
         // What must be present in the file, as opposed to zero filled.
-        if (i_size_read(file_inode(bprm->file)) <
-            (loff_t)(header->text_size + header->data_size))
+        if (unlikely(i_size_read(file_inode(bprm->file)) <
+                     (loff_t)(header->text_size + header->data_size)))
                 return -ENOEXEC;
 
         // Past this point the old mm is gone. Nothing below may return a plain
         // error code -- there is no process left to return it to -- so every
         // failure has to kill the task instead.
         ret = begin_new_exec(bprm);
-        if (ret)
+        if (unlikely(ret))
                 return ret;
 
         spark_personality();
@@ -1275,7 +1287,7 @@ int execute_spark(struct linux_binprm *bprm)
         setup_new_exec(bprm);
 
         ret = setup_arg_pages(bprm, spark_stack_top(), EXSTACK_DEFAULT);
-        if (ret < 0)
+        if (unlikely(ret < 0))
         {
                 pr_alert_ratelimited("[moonwater] " "setup_arg_pages failed: %d\n", ret);
                 goto fatal;
@@ -1291,7 +1303,7 @@ int execute_spark(struct linux_binprm *bprm)
         // do_mmap does not populate; it reports how much wants populating and
         // the caller does it after dropping the lock.
         ret = mmap_write_lock_killable(current->mm);
-        if (ret)
+        if (unlikely(ret))
                 goto fatal;
 
         const unsigned long sizes[] = {
@@ -1331,12 +1343,12 @@ int execute_spark(struct linux_binprm *bprm)
         address = header->base;
         for (unsigned int i = 0; i < array_count(sizes); i++)
         {
-                if (populate[i])
+                if (unlikely(populate[i]))
                         mm_populate(address, populate[i]);
                 address += sizes[i];
         }
 
-        atomic_long_add(ktime_get_ns() - map_started, &stat_map_ns);
+        this_cpu_add(spark_tally.map_ns, ktime_get_ns() - map_started);
 
         /*
                 The vDSO, mapped the way the ELF loader maps it, after the
@@ -1355,7 +1367,7 @@ int execute_spark(struct linux_binprm *bprm)
                 does when x86_64 boots with vdso=0 and nothing is mapped.
         */
         ret = arch_setup_additional_pages(bprm, 0);
-        if (ret)
+        if (unlikely(ret))
         {
                 pr_alert_ratelimited("[moonwater] " "mapping the vDSO failed: %d\n", ret);
                 if (IS_ENABLED(CONFIG_RISCV))
@@ -1373,7 +1385,7 @@ int execute_spark(struct linux_binprm *bprm)
 
         ret = spark_stack(bprm, &stack_addr);
 
-        if (ret)
+        if (unlikely(ret))
         {
                 pr_alert_ratelimited("[moonwater] " "could not lay out the arguments: %d\n", ret);
                 goto fatal;
@@ -1431,8 +1443,8 @@ int execute_spark(struct linux_binprm *bprm)
         // Everything before this in kernel_execve is the generic prologue:
         // allocating a bprm, opening the file, building a throwaway mm to hold
         // argv and then transplanting its stack. This counter is only our part.
-        atomic_long_add(ktime_get_ns() - loader_started, &stat_loader_ns);
-        atomic_long_inc(&stat_loads);
+        this_cpu_add(spark_tally.loader_ns, ktime_get_ns() - loader_started);
+        this_cpu_inc(spark_tally.loads);
 
         return 0;
 fatal:
@@ -1606,7 +1618,7 @@ static void spawn_default_signals(unsigned int keep)
         spin_lock_irq(&current->sighand->siglock);
 
         for (signal = 0; signal < _NSIG; signal++)
-                if (action[signal].sa.sa_handler == SIG_IGN &&
+                if (unlikely(action[signal].sa.sa_handler == SIG_IGN) &&
                     !spawn_keeps(keep, signal + 1))
                         action[signal].sa.sa_handler = SIG_DFL;
 
@@ -1633,7 +1645,7 @@ static int spawn_enter(void *data)
                 ahead of that window; a newer terminal replaces one that never
                 opened a window at all.
         */
-        if (work->terminal)
+        if (unlikely(work->terminal))
                 put_pid(xchg(&canvas_spawned, get_pid(task_tgid(current))));
 #endif
 
@@ -1641,7 +1653,8 @@ static int spawn_enter(void *data)
            while every other descriptor the caller happened to hold does
            not. A pipeline's other ends are among those. */
         for (unsigned int i = 0; i < array_count(work->stdio); i++)
-                if (work->stdio[i] && (ret = replace_fd(i, work->stdio[i], 0)))
+                if (work->stdio[i] &&
+                    unlikely(ret = replace_fd(i, work->stdio[i], 0)))
                         goto finished;
 
         ret = kernel_execve(work->path,
@@ -1657,7 +1670,7 @@ static int spawn_enter(void *data)
          * argv becomes { /bin/sh, script, original arguments after argv[0] }.
          * The raw spawn opcode never takes this branch.
          */
-        if (ret == -ENOEXEC && work->shell_fallback)
+        if (unlikely(ret == -ENOEXEC && work->shell_fallback))
         {
                 const char **script_argv;
 
@@ -1681,13 +1694,13 @@ static int spawn_enter(void *data)
         }
 
 finished:
-        atomic_long_add(ktime_get_ns() - started, &stat_exec_ns);
+        this_cpu_add(spark_tally.exec_ns, ktime_get_ns() - started);
 
         // kernel_execve has copied everything it needs by now, so the request
         // can go before anything else touches it.
         spawn_free(work);
 
-        if (ret)
+        if (unlikely(ret))
         {
                 // The task exists by the time exec is attempted, so a bad path
                 // cannot come back as an ioctl error. Exiting 127 is what a
@@ -1713,8 +1726,8 @@ static int copy_strings(unsigned long user_block, unsigned int bytes,
         size_t pointer_bytes;
         unsigned int i;
 
-        if (count == 0 || count > SPARK_SPAWN_MAX_STRINGS || bytes == 0 ||
-            bytes > SPARK_SPAWN_MAX_BYTES)
+        if (unlikely(count == 0 || count > SPARK_SPAWN_MAX_STRINGS ||
+                     bytes == 0 || bytes > SPARK_SPAWN_MAX_BYTES))
                 return -EINVAL;
 
         /* The limits above put this below 3 MiB on every supported 64-bit
@@ -1728,7 +1741,7 @@ static int copy_strings(unsigned long user_block, unsigned int bytes,
         /* A generated environment can remain pinned to an open descriptor. */
         strings = kvmalloc(sizeof(*strings) + pointer_bytes + bytes,
                            GFP_KERNEL_ACCOUNT);
-        if (!strings)
+        if (unlikely(!strings))
                 return -ENOMEM;
 
         refcount_set(&strings->references, 1);
@@ -1737,7 +1750,7 @@ static int copy_strings(unsigned long user_block, unsigned int bytes,
         strings->vector = vector;
         block = (char *)vector + pointer_bytes;
 
-        if (copy_from_user(block, (const void __user *)user_block, bytes))
+        if (unlikely(copy_from_user(block, (const void __user *)user_block, bytes)))
         {
                 kvfree(strings);
                 return -EFAULT;
@@ -1749,7 +1762,7 @@ static int copy_strings(unsigned long user_block, unsigned int bytes,
                 size_t remaining = (size_t)(block + bytes - walk);
                 size_t length = string_length_max(walk, remaining);
 
-                if (length == remaining)
+                if (unlikely(length == remaining))
                 {
                         kvfree(strings);
                         return -EINVAL;
@@ -1793,19 +1806,19 @@ static long do_spawn(struct file *file, struct spawn __user *request)
         long ret;
         pid_t pid;
 
-        if (copy_from_user(&args, request, sizeof(args)))
+        if (unlikely(copy_from_user(&args, request, sizeof(args))))
                 return -EFAULT;
 
         /* Refusing what this kernel does not define keeps a flag added later
            from meaning "ignored" on an older loader. */
-        if (args.flags & ~SPARK_SPAWN_FLAGS)
+        if (unlikely(args.flags & ~SPARK_SPAWN_FLAGS))
                 return -EINVAL;
 
         shell_fallback = args.flags & SPARK_SPAWN_SHELL;
         fixed_path = args.flags & SPARK_SPAWN_TOOL ? SPARK_TOOL_PROGRAM : NULL;
 
         work = kzalloc(sizeof(*work), GFP_KERNEL);
-        if (!work)
+        if (unlikely(!work))
                 return -ENOMEM;
         work->keep = args.flags;
 
@@ -1814,7 +1827,8 @@ static long do_spawn(struct file *file, struct spawn __user *request)
                 if (args.stdio[i] < 0)
                         continue;
 
-                if (!(work->stdio[i] = fget(args.stdio[i])))
+                work->stdio[i] = fget(args.stdio[i]);
+                if (unlikely(!work->stdio[i]))
                 {
                         ret = -EBADF;
                         goto fail;
@@ -1827,7 +1841,7 @@ static long do_spawn(struct file *file, struct spawn __user *request)
         {
                 work->path = strndup_user((const char __user *)args.path,
                                           PATH_MAX);
-                if (IS_ERR(work->path))
+                if (unlikely(IS_ERR(work->path)))
                 {
                         ret = PTR_ERR(work->path);
                         work->path = NULL;
@@ -1839,10 +1853,10 @@ static long do_spawn(struct file *file, struct spawn __user *request)
 
         ret = copy_strings(args.argv, args.argv_bytes, args.argv_count,
                            &work->arguments);
-        if (ret)
+        if (unlikely(ret))
                 goto fail;
 
-        if (args.envp && args.envp_count)
+        if (likely(args.envp && args.envp_count))
         {
                 mutex_lock(&context->spawn_lock);
                 /* clone inherits the open file description and the shell's
@@ -1850,22 +1864,22 @@ static long do_spawn(struct file *file, struct spawn __user *request)
                    branches is not the same environment, so identity is part
                    of the key.  Holding struct pid prevents numeric PID reuse
                    from making stale bytes look current later. */
-                if (args.envp_generation && context->environment &&
-                    context->environment_owner == task_tgid(current) &&
-                    context->environment_cred == current_cred() &&
-                    context->environment_generation == args.envp_generation)
+                if (likely(args.envp_generation && context->environment &&
+                           context->environment_owner == task_tgid(current) &&
+                           context->environment_cred == current_cred() &&
+                           context->environment_generation == args.envp_generation))
                 {
                         refcount_inc(&context->environment->references);
                         work->environment = context->environment;
                 }
                 mutex_unlock(&context->spawn_lock);
 
-                if (!work->environment)
+                if (unlikely(!work->environment))
                 {
                         ret = copy_strings(args.envp, args.envp_bytes,
                                            args.envp_count,
                                            &work->environment);
-                        if (ret)
+                        if (unlikely(ret))
                                 goto fail;
 
                         if (args.envp_generation)
@@ -1914,11 +1928,11 @@ static long do_spawn(struct file *file, struct spawn __user *request)
         {
                 u64 started = ktime_get_ns();
                 pid = user_mode_thread(spawn_enter, work, SIGCHLD);
-                atomic_long_add(ktime_get_ns() - started, &stat_task_ns);
-                atomic_long_inc(&stat_spawns);
+                this_cpu_add(spark_tally.task_ns, ktime_get_ns() - started);
+                this_cpu_inc(spark_tally.spawns);
         }
 
-        if (pid < 0)
+        if (unlikely(pid < 0))
         {
                 ret = pid;
                 goto fail;
@@ -1934,14 +1948,20 @@ fail:
 
 static long report_stats(struct stats __user *out)
 {
-        struct stats stats = {
-            .spawns = atomic_long_read(&stat_spawns),
-            .task_ns = atomic_long_read(&stat_task_ns),
-            .exec_ns = atomic_long_read(&stat_exec_ns),
-            .loader_ns = atomic_long_read(&stat_loader_ns),
-            .loads = atomic_long_read(&stat_loads),
-            .map_ns = atomic_long_read(&stat_map_ns),
-        };
+        struct stats stats = {};
+        int cpu;
+
+        for_each_possible_cpu(cpu)
+        {
+                const struct spark_tally *tally = per_cpu_ptr(&spark_tally, cpu);
+
+                stats.spawns += READ_ONCE(tally->spawns);
+                stats.task_ns += READ_ONCE(tally->task_ns);
+                stats.exec_ns += READ_ONCE(tally->exec_ns);
+                stats.loader_ns += READ_ONCE(tally->loader_ns);
+                stats.loads += READ_ONCE(tally->loads);
+                stats.map_ns += READ_ONCE(tally->map_ns);
+        }
 
         return copy_to_user(out, &stats, sizeof(stats)) ? -EFAULT : 0;
 }

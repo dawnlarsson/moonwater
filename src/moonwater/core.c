@@ -255,10 +255,14 @@ IOCTL_IS(WINDOW_IOCTL_STRIDE, IOCTL_NONE, 16, 0);
 
 static long device_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
+        // Every program a shell starts without a fork comes through here, and
+        // the rest of the numbers are a monitor's or a window's: one compare
+        // for the first, not the walk of a dozen for it.
+        if (likely(cmd == SPARK_IOCTL_SPAWN))
+                return do_spawn(file, (struct spawn __user *)arg);
+
         switch (cmd)
         {
-        case SPARK_IOCTL_SPAWN:
-                return do_spawn(file, (struct spawn __user *)arg);
         case SPARK_IOCTL_STATS:
                 return report_stats((struct stats __user *)arg);
         case SPARK_IOCTL_SNAPSHOT:
@@ -303,7 +307,7 @@ static int device_open(struct inode *inode, struct file *file)
 {
         struct device_context *context = kzalloc(sizeof(*context), GFP_KERNEL);
 
-        if (!context)
+        if (unlikely(!context))
                 return -ENOMEM;
 
         mutex_init(&context->spawn_lock);
