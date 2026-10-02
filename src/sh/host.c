@@ -8596,6 +8596,14 @@ static bipolar tune_keep(string_address key, string_address value)
         return failed;
 }
 
+/* tune_keep, with what it could not do said: 0, or 1 when it was. */
+static b32 tune_remember(string_address key, string_address value)
+{
+        bipolar failed = tune_keep(key, value);
+
+        return failed < 0 ? host_fail(TUNE_KEPT, failed) : 0;
+}
+
 /* A whole percent, "N", "N%", "+N" or "-N": the sign says relative. */
 static bool tune_percent(string_address text, bool address_to relative, bool address_to lower,
                          positive address_to value)
@@ -8835,9 +8843,8 @@ static b32 tune_charge(string_address address_to arguments, positive count)
                                                  ? host_refuse("this battery has no charge limit%s\n", "")
                                                  : host_fail("charge", failed);
                         //      A limit of a full charge is the default: nothing to bring back.
-                        failed = tune_keep("charge.limit", number == 100 ? (string_address)"" : (string_address)text);
-                        if (failed < 0)
-                                return host_fail(TUNE_KEPT, failed);
+                        if (tune_remember("charge.limit", number == 100 ? (string_address)"" : (string_address)text))
+                                return 1;
                 }
                 host_say(log, host_label "charging stops at %p%%\n", number);
                 return 0;
@@ -8916,8 +8923,6 @@ static bool tune_power_apply(string_address profile)
 /* moonwater power [performance|balanced|powersave] */
 static b32 tune_power(string_address address_to arguments, positive count)
 {
-        bipolar kept;
-
         if (count == 2)
         {
                 p8 profile[32];
@@ -8951,9 +8956,8 @@ static b32 tune_power(string_address address_to arguments, positive count)
         host_need_root("moonwater power");
         if (!tune_power_apply(arguments[2]))
                 return host_refuse("this machine has no power profile to set%s\n", "");
-        kept = tune_keep("power", arguments[2]);
-        if (kept < 0)
-                return host_fail(TUNE_KEPT, kept);
+        if (tune_remember("power", arguments[2]))
+                return 1;
         host_say(log, host_label "power %s\n", arguments[2]);
         return 0;
 }
@@ -9027,9 +9031,8 @@ static b32 tune_cpu(string_address address_to arguments, positive count)
                 if (failed < 0)
                         return host_fail(boost ? "cpu boost" : "cpu smt", failed);
                 //      Both default to on: nothing to bring back then.
-                failed = tune_keep(boost ? "cpu.boost" : "cpu.smt", on ? "" : "off");
-                if (failed < 0)
-                        return host_fail(TUNE_KEPT, failed);
+                if (tune_remember(boost ? "cpu.boost" : "cpu.smt", on ? "" : "off"))
+                        return 1;
                 host_say(log, host_label "cpu %s %s\n", arguments[2], arguments[3]);
                 return 0;
         }
