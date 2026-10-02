@@ -58023,6 +58023,49 @@ say(b"_waterlink" in heard, "the network carries waterlink announcements")
 say(all(word not in heard for word in (b"lab", b"box-a", b"box-b", b"box-c", secret.encode())),
     "and not the group, the machine names or the secret")
 
+#       What b greets: an announcement made here, of an instance on a port
+#       here, is greeted from b only when it is mDNS -- from port 5353, at IP
+#       TTL 255, with a record TTL that is not a goodbye. Every other corner
+#       of the three is announced too, each on a port of its own, and none
+#       of them may draw b's curve work or a 1,200-byte datagram.
+def announcement(port, ttl):
+    label = b"wl-" + os.urandom(10).hex().encode()
+    service = b"\x0a_waterlink\x04_udp\x05local\x00"
+    data = bytes([len(label)]) + label + b"\xc0\x0c"
+    srv = structure.pack(">HHH", 0, 0, port) + b"\x0fwl-" + os.urandom(6).hex().encode() + b"\x05local\x00"
+    return (structure.pack(">HHHHHH", 0, 0x8400, 0, 2, 0, 0) + service +
+            structure.pack(">HHIH", 12, 1, 4500, len(data)) + data + b"\xc0\x2d" +
+            structure.pack(">HHIH", 33, 0x8001, ttl, len(srv)) + srv)
+corners = {}
+for source_port in (5353, 40353):
+    for hops in (255, 64):
+        for ttl in (120, 0):
+            catch = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            catch.bind(("10.77.0.1", 0))
+            catch.settimeout(0.2)
+            sender = listen if source_port == 5353 else socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            if sender is not listen:
+                sender.bind(("10.77.0.1", source_port))
+            sender.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, hops)
+            sender.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton("10.77.0.1"))
+            sender.sendto(announcement(catch.getsockname()[1], ttl), ("224.0.0.251", 5353))
+            greeted = 0
+            end = time.time() + 1.5
+            while time.time() < end:
+                try:
+                    data, peer = catch.recvfrom(4096)
+                    greeted += peer[0] == "10.77.0.2"
+                except socket.timeout:
+                    pass
+            corners[source_port, hops, ttl] = greeted
+            catch.close()
+            if sender is not listen:
+                sender.close()
+say(corners[5353, 255, 120] > 0 and
+    all(not greeted for corner, greeted in corners.items() if corner != (5353, 255, 120)),
+    "sec: b greets an announcement only from port 5353 at TTL 255 and not a goodbye (%r)" %
+    (sorted(corners.items()),))
+
 #       A handshake flood. Anyone who knows the listener's public key can make
 #       an initiation that passes mac1, and a listener that did the curve for
 #       each would be kept busy by a sender with a few thousand source ports.
