@@ -70812,13 +70812,13 @@ static fn handshake(void)
               waterlink_admit(address_of admission, unproven, source, 7,
                               3000000) == 1);
 
-        check("a session is keyed again at two minutes",
-              !waterlink_rekey_due(119999999, 5) &&
-                      waterlink_rekey_due(120000000, 5) &&
-                      waterlink_rekey_due(1, WATERLINK_REKEY_MESSAGES));
-        check("and refused at three",
+        check("a session is refused at three minutes, or past its counter by "
+              "more than a rekey's room",
               !waterlink_session_spent(179999999, 5) &&
-                      waterlink_session_spent(180000000, 5));
+                      waterlink_session_spent(180000000, 5) &&
+                      !waterlink_session_spent(1, WATERLINK_REKEY_MESSAGES) &&
+                      waterlink_session_spent(1, WATERLINK_REKEY_MESSAGES +
+                                                         (1ull << 20)));
 }
 
 /*
@@ -73295,7 +73295,8 @@ static fn greetings(bipolar listener, p16 port)
                       link_self.stamps == stamps);
         }
 
-        wls_peers_with(wls_client.public, WATERLINK_MAY_VERBS);
+        wls_peers_with(wls_client.public, WATERLINK_MAY_LOG);
+        link_nearby.groups.record[0].may = WATERLINK_MAY_RUN | WATERLINK_MAY_SHELL;
         wls_greeting(address_of wls_client, address_of wls_office, "machine-a",
                      15, greeting);
         link_server_initiation(greeting, WATERLINK_DATAGRAM, wls_loopback,
@@ -73303,7 +73304,7 @@ static fn greetings(bipolar listener, p16 port)
         link_peers_load(address_of peers);
         check("sec: a record paired by hand is never replaced, moved or widened",
               peers.count == 1 && peers.peer[0].group == 0 &&
-                      peers.peer[0].may == WATERLINK_MAY_VERBS &&
+                      peers.peer[0].may == WATERLINK_MAY_LOG &&
                       string_equals(peers.peer[0].name, "client") &&
                       peers.peer[0].port != port + 2);
 

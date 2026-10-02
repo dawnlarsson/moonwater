@@ -778,17 +778,13 @@ bool waterlink_cookie_take(p8 address_to responder_public, p8 address_to mac1,
 }
 
 /*
-        When a session must be keyed again, and when it may no longer be
-        used at all -- waterlink.c's numbers. The initiator keys again at
-        REKEY; either side refuses a session past REJECT, so an initiator
-        that has gone quiet cannot keep one alive forever.
+        When a session may no longer be used at all -- waterlink.c's numbers:
+        either side refuses one past REJECT, so an initiator that has gone
+        quiet cannot keep one alive forever. The initiator keys again at
+        REKEY, a time and not a count: the count would take nine billion
+        datagrams a second to reach in that time, and the one past which a
+        session is refused is checked here all the same.
 */
-bool waterlink_rekey_due(p64 age, p64 sent)
-{
-        return age >= (p64)WATERLINK_REKEY_SECONDS * 1000000 ||
-               sent >= WATERLINK_REKEY_MESSAGES;
-}
-
 bool waterlink_session_spent(p64 age, p64 sent)
 {
         return age >= (p64)WATERLINK_REJECT_SECONDS * 1000000 ||

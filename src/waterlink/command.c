@@ -635,7 +635,7 @@ static p32 link_grants_of(string_address address_to words, positive count,
         PBKDF2 makes of it. Without one, the group already joined is joined
         again, or a new group gets a secret of 160 random bits, printed once
         for the other machines.
-        Members get the grants named here, and the verbs when none are. The
+        Members get the grants named here, and none when none are. The
         link is switched on.
 */
 static const char link_base32[] = "abcdefghijklmnopqrstuvwxyz234567";

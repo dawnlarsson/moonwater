@@ -420,9 +420,7 @@ static bool link_pair_keep(positive group, p8 address_to key,
                 memory_zero(peer, sizeof(address_to peer));
                 memory_copy(peer->key, key, 32);
                 memory_copy(peer->name, name, WATERLINK_NAME_MAX);
-                peer->may = link_nearby.groups.record[group].may
-                                    ? link_nearby.groups.record[group].may
-                                    : WATERLINK_MAY_DEFAULT;
+                peer->may = record->may;
                 peer->group = keys->mark;
                 new = changed = true;
         }

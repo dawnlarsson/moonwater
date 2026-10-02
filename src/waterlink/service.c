@@ -115,9 +115,7 @@
 #define LINK_SEGMENTS ((65535 - 40 - 8) / WATERLINK_DATAGRAM)
 
 /*      A grant by name, and what a request needs of one: ask is the
-        request byte that needs this grant. Only the grants a request asks
-        for have a name here: the verbs, screen and channels bits are in the
-        protocol for what comes later and nobody can be given them yet. */
+        request byte that needs this grant. */
 typedef struct
 {
         string_address name;
