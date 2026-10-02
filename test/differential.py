@@ -46707,6 +46707,13 @@ def harness_http_urls(argv):
     them before it asks, as GNU wget does (http_path_simplify, %2e spellings
     included), and the oracle by RFC 3986 5.2.4 over urllib's answer.
 
+    The same questions go to the lift built at MOONWATER_STRICT 2 as well,
+    which must answer every one as the default does but a URL that opens
+    with a scheme token not followed by "//" ("ftp:21", "h:81", "a+b:1"):
+    the default reads that as a schemeless host:port, the tight tier
+    refuses it, and both refuse "http:" and "https:" without "//". Both
+    halves have to be seen.
+
         python3 test/differential.py --harness http_urls
     """
     del argv
@@ -46793,6 +46800,7 @@ int main(void)
 }
 """
     source = http_fuzz_source(net, util, driver)
+    tight_source = http_fuzz_source(net, util, driver, tight=True)
     random_urls = random.Random(20260928)
     schemes = ["http://", "https://", "HTTP://", "hTtPs://", "", "ftp://", "http:",
                "web+x://", "https:/"]
@@ -46816,6 +46824,15 @@ int main(void)
     for _ in range(4000):
         urls.add(pick(schemes) + pick(users) + pick(hosts) + pick(ports) +
                  pick(paths) + pick(queries) + pick(fragments))
+    #       Scheme tokens with no "//": web schemes in any case, others of
+    #       every character RFC 3986 lets a scheme hold, before a port, a
+    #       path, a slash or nothing.
+    for _ in range(600):
+        token = pick(["http", "HTTPS", "hTTp", "ftp", "h", "a+b", "x-y.z", "web+x",
+                      "localhost", "abc1"])
+        urls.add(token + ":" + pick(["21", "81", "65535", "0", "", "/", "/p", "8080/a?b",
+                                     "x", "//"[:random_urls.randrange(2)]]) +
+                 pick(["", "", "/q", "#f"]))
     urls = sorted(urls)
     bases = ["http://example.com/dir/old", "https://example.com:8443/a/b?q=1",
              "http://h:80/", "https://h/x?y#z", "http://127.0.0.1:8080/d/e/f"]
@@ -46897,8 +46914,13 @@ int main(void)
         flags = [compiler, "-O1", "-g", "-std=gnu11", "-w"]
         if platform.system() == "Linux":
             flags.append("-fsanitize=address,undefined")
+        (work / "http_urls_tight.c").write_text(tight_source)
         built = subprocess.run(flags + [str(unit), "-o", str(work / "http_urls")],
                                capture_output=True, text=True)
+        if not built.returncode:
+            built = subprocess.run(flags + [str(work / "http_urls_tight.c"), "-o",
+                                            str(work / "http_urls_tight")],
+                                   capture_output=True, text=True)
         if built.returncode:
             print("  FAIL the URL lift did not build:\n" + built.stderr[-3000:])
             write_tally("http-urls", 0, 1)
@@ -46906,12 +46928,14 @@ int main(void)
         questions = ["S %s" % encode(url) for url in urls]
         pairs = [(base, reference) for base in bases for reference in references]
         questions += ["A %s %s" % (encode(base), encode(reference)) for base, reference in pairs]
-        ran = subprocess.run([str(work / "http_urls")], input="\n".join(questions) + "\n",
-                             capture_output=True, text=True, timeout=120,
-                             env=dict(os.environ, ASAN_OPTIONS="detect_leaks=0"))
-        answers = ran.stdout.splitlines()
-        if ran.returncode or len(answers) != len(questions):
-            print("  FAIL the URL lift stopped:\n" + ran.stderr[-3000:])
+        runs = [subprocess.run([str(work / name)], input="\n".join(questions) + "\n",
+                               capture_output=True, text=True, timeout=120,
+                               env=dict(os.environ, ASAN_OPTIONS="detect_leaks=0"))
+                for name in ("http_urls", "http_urls_tight")]
+        answers, tight_answers = (ran.stdout.splitlines() for ran in runs)
+        if any(ran.returncode for ran in runs) or len(answers) != len(questions) or \
+                len(tight_answers) != len(questions):
+            print("  FAIL the URL lift stopped:\n" + (runs[0].stderr + runs[1].stderr)[-3000:])
             write_tally("http-urls", 0, 1)
             return 1
 
@@ -46955,6 +46979,27 @@ int main(void)
                        % (base, reference, got, joined))
         for key, why in DELIBERATE.items():
             checks(seen[key] > 0, "DELIBERATE %s never generated (%s)" % (key, why))
+        #   The tight tier: the default's answer, but no scheme token
+        #   without "//" in front of the authority.
+        tiers = collections.Counter()
+        for url, default, tight in zip(urls, answers, tight_answers):
+            scheme = scheme_shape.match(url)
+            token = scheme is not None and not url[scheme.end():].startswith("//")
+            if token:
+                web = scheme.group(1).lower() in ("http", "https")
+                checks(tight == "BAD", "%r: the tight tier took a scheme token: %s" % (url, tight))
+                checks(not web or default == "BAD",
+                       "%r: http(s): without // was taken: %s" % (url, default))
+                tiers["default took, tight refused" if default != "BAD" else
+                      "both refused"] += 1
+            else:
+                checks(tight == default, "%r: the tiers differ: default %s, tight %s" % (
+                    url, default, tight))
+        for (base, reference), default, tight in zip(pairs, answers[len(urls):],
+                                                     tight_answers[len(urls):]):
+            checks(tight == default, "%r + %r: the tiers resolve differently" % (base, reference))
+        checks(tiers["default took, tight refused"] > 0 and tiers["both refused"] > 0,
+               "both halves of the scheme-token rule seen: %r" % dict(tiers))
 
     return checks.verdict("http urls", "http-urls")
 
