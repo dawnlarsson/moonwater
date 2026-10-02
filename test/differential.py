@@ -41780,6 +41780,48 @@ def harness_moonwater_cli(argv):
         check(left == ["mouse2"], "bluetooth remove takes one device out and leaves the other", repr(left))
         check(answers(got)["bluetooth remove kbd1"]["status"] == 1, "a forgotten device is refused a second time")
 
+        # What cannot be kept or applied is said, with the error the kernel
+        # gave, and answered with a failure: a /root that is read-only, one
+        # that is full, a sysfs file that refuses the write, an rfkill that
+        # does. The verbs printed success, or "Operation not permitted" in the
+        # place of every error, and a /run that says wifi over a /root that
+        # kept wired.
+        readonly = "mount --bind /root /root && mount -o remount,ro,bind /root\n"
+        got = tuned("rm -f /root/wifi /root/bluetooth /root/wifi.power /root/bluetooth.power /root/internet "
+                    "/run/moonwater/internet\n" + readonly +
+                    "".join(say(verb) for verb in (
+                        "wifi add ro-a passpass1", "bluetooth add ro-k", "wifi off", "bluetooth off", "airplane on",
+                        "wired off", "priority internet wifi", "charge limit 80", "cpu smt off", "power powersave")) +
+                    "echo \"@@ run $(cat /run/moonwater/internet 2>/dev/null)\"\n")
+        seen = answers(got)
+        for verb in ("wifi add ro-a passpass1", "bluetooth add ro-k", "wifi off", "bluetooth off", "airplane on",
+                     "wired off", "priority internet wifi", "charge limit 80", "cpu smt off", "power powersave"):
+            check(seen[verb]["status"] == 1 and any("Read-only file system" in line for line in seen[verb]["out"]),
+                  f"`{verb}` with /root read-only says so and fails", repr(seen[verb]))
+        check("@@ run " in got and "@@ run wifi" not in got,
+              "a preference that could not be kept is not put in /run either", got[-120:])
+
+        got = tuned("mount -t tmpfs -o size=16k tmpfs /root; dd if=/dev/zero of=/root/fill bs=4k count=4 2> /dev/null\n" +
+                    say("wifi add full-a passpass1") + say("bluetooth add full-k") + say("wifi off"))
+        seen = answers(got)
+        check(all(seen[verb]["status"] == 1 and any("No space left" in line for line in seen[verb]["out"])
+                  for verb in ("wifi add full-a passpass1", "bluetooth add full-k", "wifi off")),
+              "a full /root is said to be full", repr(seen))
+
+        got = tuned("mount --bind /dev/full /sys/class/power_supply/BAT0/charge_control_end_threshold\n" +
+                    say("charge limit 80"))
+        check(any("No space left" in line for line in answers(got)["charge limit 80"]["out"]),
+              "a sysfs write the kernel refuses is said with the kernel's error", repr(answers(got)))
+        got = tuned("mount --bind /dev/full /dev/rfkill\n" + say("bluetooth on") + say("wifi off"))
+        seen = answers(got)
+        check(all(seen[verb]["status"] == 1 and any("/dev/rfkill: No space left" in line for line in seen[verb]["out"])
+                  for verb in ("bluetooth on", "wifi off")),
+              "an rfkill that refuses the event is said, and the verb fails", repr(seen))
+        got = tuned("rm -f /dev/rfkill\n" + say("bluetooth off") + say("wifi off") + say("airplane on"))
+        seen = answers(got)
+        check(all(seen[verb]["status"] == 0 for verb in ("bluetooth off", "wifi off", "airplane on")),
+              "a machine with no rfkill has nothing to switch and nothing to say", repr(seen))
+
         # The saved lists survive a write cut short. RLIMIT_FSIZE 0 makes
         # every write fail and kills the writer with SIGXFSZ, the way a
         # crash part way through would: a list written in place was truncated

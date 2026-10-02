@@ -5758,12 +5758,35 @@ static bipolar radio_rfkill(p8 type, bool block)
                                         O_WRONLY | O_CLOEXEC | O_NONBLOCK);
         bipolar sent;
 
+        //      No /dev/rfkill is a machine with nothing to switch, and that
+        //      is no failure to say.
         if (handle < 0)
-                return handle;
+                return handle == -ENOENT ? 0 : handle;
 
         sent = ul_rfkill_send(handle, 0, type, RADIO_RFKILL_CHANGE_ALL, block);
         system_close(handle);
         return sent;
+}
+
+/* Whether a radio's word and its rfkill write both went through; when not,
+   the first that did not is said (to somebody waiting to hear it) and
+   answered. */
+static b32 radio_failed(bool report, string_address path, bipolar kept, bipolar sent)
+{
+        if (kept >= 0 && sent >= 0)
+                return 0;
+        if (report)
+                host_fail(kept < 0 ? path : (string_address) "/dev/rfkill", kept < 0 ? kept : sent);
+        return 1;
+}
+
+/* A radio's switch: the word that outlasts a boot, and the block that is the
+   radio itself. */
+static b32 radio_switch(string_address path, p8 type, bool on, bool report)
+{
+        bipolar kept = radio_write_word(path, on ? "on" : "off");
+
+        return radio_failed(report, path, kept, radio_rfkill(type, !on));
 }
 
 static bool radio_text_plain(string_address text, positive length)
@@ -7422,9 +7445,7 @@ static b32 radio_wifi_bring(bool say)
         positive at;
         bipolar failed = 0;
         bool joined = false;
-
-        radio_write_word(NET_WIFI_POWER, "on");
-        radio_rfkill(RADIO_RFKILL_WLAN, false);
+        b32 switched = radio_switch(NET_WIFI_POWER, RADIO_RFKILL_WLAN, true, say);
 
         if (!say && nl80211_associated())
         {
@@ -7455,13 +7476,13 @@ static b32 radio_wifi_bring(bool say)
 
         if (!count)
         {
-                if (say)
+                if (say && !switched)
                         host_say(log, host_label "wifi on\n");
-                return 0;
+                return switched;
         }
 
         if (joined)
-                return 0;
+                return switched;
 
         if (say && failed == -19)
         {
@@ -7491,20 +7512,23 @@ static b32 radio_wifi_on(bool say)
         return result;
 }
 
-static b32 radio_wifi_off(bool say)
+/* Wifi off: the word kept, the link left, the radio blocked. report is for
+   somebody waiting to hear what did not go through. */
+static b32 radio_wifi_off(bool report)
 {
         bipolar lock = radio_lock(true);
+        bipolar kept;
+        b32 failed;
 
         if (lock < 0)
-                return say ? host_fail("wifi", lock) : 1;
-        radio_write_word(NET_WIFI_POWER, "off");
+                return report ? host_fail("wifi", lock) : 1;
+        kept = radio_write_word(NET_WIFI_POWER, "off");
         radio_wifi_leave();
-        radio_rfkill(RADIO_RFKILL_WLAN, true);
+        failed = radio_failed(report, NET_WIFI_POWER, kept,
+                              radio_rfkill(RADIO_RFKILL_WLAN, true));
         radio_net_wake();
         radio_unlock(lock);
-        if (say)
-                host_say(log, host_label "wifi off\n");
-        return 0;
+        return failed;
 }
 
 /* The network put on the saved list, or put there again with the password it
@@ -7552,13 +7576,14 @@ static b32 radio_wifi_enter(string_address ssid, string_address pass)
         bipolar failed;
         p8 why[RADIO_WHY_ROOM];
 
+        b32 switched;
+
         if (stored == -E2BIG)
                 return host_refuse("too many saved networks%s\n", "");
         if (stored < 0)
-                return host_fail("wifi", -1);
+                return host_fail(NET_WIFI_LIST, stored);
 
-        radio_write_word(NET_WIFI_POWER, "on");
-        radio_rfkill(RADIO_RFKILL_WLAN, false);
+        switched = radio_switch(NET_WIFI_POWER, RADIO_RFKILL_WLAN, true, true);
 
         /*      What the air already says about it, from the last scan and
                 without asking for another: a network that asks for what the
@@ -7609,7 +7634,7 @@ static b32 radio_wifi_enter(string_address ssid, string_address pass)
                 crypto_forget((address_any)pass, string_length(pass));
 
         host_say(log, host_label "wifi joined %s\n", ssid);
-        return 0;
+        return switched;
 }
 
 static b32 radio_wifi_add(string_address ssid, string_address pass)
@@ -7684,7 +7709,7 @@ static b32 radio_wifi_forget(string_address ssid)
         failed = radio_wifi_save(networks, count);
         crypto_forget(networks, sizeof(networks));
         if (failed < 0)
-                return host_fail("wifi", -1);
+                return host_fail(NET_WIFI_LIST, failed);
 
         {
                 p8 last[RADIO_SSID_MOST + 1];
@@ -7748,7 +7773,7 @@ static b32 radio_wired_set(bool on)
         bipolar written = radio_write_word(NET_WIRED_POWER, on ? "on" : "off");
 
         if (written < 0)
-                return host_fail("wired", written);
+                return host_fail(NET_WIRED_POWER, written);
 
         handle = netlink_open_groups(0);
         if (handle < 0)
@@ -7897,17 +7922,11 @@ static b32 radio_wifi_status(void)
         return 0;
 }
 
-/* The remembered word and the rfkill switch, set together. say is for the
-   person who asked; restoring the machine's own choice stays quiet. */
-static b32 radio_bluetooth_power(bool on, bool say)
+/* The remembered word and the rfkill switch, set together. report is for
+   the person who asked; restoring the machine's own choice stays quiet. */
+static b32 radio_bluetooth_power(bool on, bool report)
 {
-        string_address word = on ? (string_address)"on" : (string_address)"off";
-
-        radio_write_word(NET_BLUETOOTH_POWER, word);
-        radio_rfkill(RADIO_RFKILL_BLUETOOTH, !on);
-        if (say)
-                host_say(log, host_label "bluetooth %s\n", word);
-        return 0;
+        return radio_switch(NET_BLUETOOTH_POWER, RADIO_RFKILL_BLUETOOTH, on, report);
 }
 
 /* Remember a device's name or forget it: the list is read, changed and
@@ -7955,7 +7974,7 @@ static b32 radio_bluetooth_edit(string_address identity, bool add)
         }
 
         //      1: nothing by that name to forget, 2: no room for another,
-        //      3: the list would not be written.
+        //      and the list's own error when it would not be written.
         if (!add && !found)
                 failed = 1;
         else if (add && !found && used + length + 1 >= sizeof(kept))
@@ -7968,7 +7987,7 @@ static b32 radio_bluetooth_edit(string_address identity, bool add)
                         kept[used += length] = '\n';
                         used++;
                 }
-                failed = host_write_file(NET_BLUETOOTH_LIST, kept, used, 0644, true) < 0 ? 3 : 0;
+                failed = host_write_file(NET_BLUETOOTH_LIST, kept, used, 0644, true);
         }
         radio_unlock(lock);
 
@@ -7977,11 +7996,11 @@ static b32 radio_bluetooth_edit(string_address identity, bool add)
         if (failed == 2)
                 return host_refuse("too many saved bluetooth devices%s\n", "");
         if (failed)
-                return host_fail("bluetooth", -1);
-        if (add)
-                radio_bluetooth_power(true, false);
+                return host_fail(NET_BLUETOOTH_LIST, failed);
+        //      A name remembered is for a radio that is on to find it.
+        failed = add ? radio_bluetooth_power(true, true) : 0;
         host_say(log, host_label "bluetooth %s %s\n", add ? "remembered" : "forgot", identity);
-        return 0;
+        return failed;
 }
 
 static b32 radio_bluetooth_status(void)
@@ -8018,21 +8037,33 @@ static string_address radio_internet_word(void)
                    : (string_address) "wired";
 }
 
-static b32 radio_internet_set(string_address which)
+/* The preference this session goes by, the copy of /root's that /run holds. */
+static bipolar radio_internet_run(string_address which)
 {
         p8 line[8];
-
-        if (!string_equals(which, "wired") && !string_equals(which, "wifi"))
-                return host_usage();
 
         string_copy_bounded(line, which, sizeof(line));
         string_append_bounded(line, "\n", sizeof(line));
         host_state_ready();
-        if (host_write_text(NET_INTERNET_RUN, line) < 0)
-                return host_fail("internet", -1);
-        if (host_write_file(NET_INTERNET_ROOT, line, string_length(line),
-                            0644, true) < 0)
-                return host_fail("internet", -1);
+        return host_write_text(NET_INTERNET_RUN, line);
+}
+
+/* What is kept comes first: a /run that said wifi over a /root that kept
+   wired was put back by radio_internet_copy a pass later. */
+static b32 radio_internet_set(string_address which)
+{
+        bipolar failed;
+
+        if (!string_equals(which, "wired") && !string_equals(which, "wifi"))
+                return host_usage();
+
+        host_state_ready();
+        failed = radio_write_word(NET_INTERNET_ROOT, which);
+        if (failed < 0)
+                return host_fail(NET_INTERNET_ROOT, failed);
+        failed = radio_internet_run(which);
+        if (failed < 0)
+                return host_fail(NET_INTERNET_RUN, failed);
         radio_net_wake();
 
         host_say(log, host_label "internet prefers %s\n", which);
@@ -8050,7 +8081,6 @@ static fn radio_internet_copy(void)
 {
         p8 text[16];
         p8 have[16];
-        p8 line[8];
 
         if (host_read_word(NET_INTERNET_ROOT, text, sizeof(text)) < 0)
                 return;
@@ -8058,10 +8088,7 @@ static fn radio_internet_copy(void)
             string_equals(have, text))
                 return;
 
-        string_copy_bounded(line, text, sizeof(line));
-        string_append_bounded(line, "\n", sizeof(line));
-        host_state_ready();
-        if (host_write_text(NET_INTERNET_RUN, line) >= 0)
+        if (radio_internet_run((string_address)text) >= 0)
                 radio_net_wake();
 }
 
@@ -8173,6 +8200,14 @@ static fn radio_recover(void)
                 radio_rfkill(RADIO_RFKILL_BLUETOOTH, false);
 }
 
+/* What a verb says it did, when it did not fail. */
+static b32 radio_done(b32 failed, string_address what)
+{
+        if (!failed)
+                host_say(log, host_label "%s\n", what);
+        return failed;
+}
+
 static b32 host_radio(string_address address_to arguments, positive count)
 {
         string_address verb = arguments[1];
@@ -8212,8 +8247,10 @@ static b32 host_radio(string_address address_to arguments, positive count)
         {
                 if (count < 3)
                         return radio_wifi_status();
-                if (power >= 0)
-                        return power ? radio_wifi_on(true) : radio_wifi_off(true);
+                if (power > 0)
+                        return radio_wifi_on(true);
+                if (power == 0)
+                        return radio_done(radio_wifi_off(true), "wifi off");
                 if (string_equals(word, "add") && count >= 4 && count <= 5)
                 {
                         p8 pass[256];
@@ -8256,7 +8293,8 @@ static b32 host_radio(string_address address_to arguments, positive count)
         if (count < 3)
                 return radio_bluetooth_status();
         if (power >= 0)
-                return radio_bluetooth_power(power, true);
+                return radio_done(radio_bluetooth_power(power, true),
+                                  power ? "bluetooth on" : "bluetooth off");
         if ((string_equals(word, "add") || string_equals(word, "remove")) && count == 4)
                 return radio_bluetooth_edit(arguments[3], string_equals(word, "add"));
         return host_usage();
@@ -8353,16 +8391,13 @@ static bipolar tune_write(string_address path, string_address text)
         bipolar handle = system_open_at(AT_FDCWD, path,
                                         O_WRONLY | FILE_TRUNCATE | O_CLOEXEC | O_NOFOLLOW);
         positive length = string_length(text);
+        system_write_result wrote;
 
         if (handle < 0)
                 return handle;
-        if (system_write_all((positive)handle, (const address_any)text, length) != length)
-        {
-                system_close((positive)handle);
-                return -EIO;
-        }
+        wrote = system_write_all_checked((positive)handle, (const address_any)text, length);
         system_close((positive)handle);
-        return 0;
+        return wrote.bytes == length ? 0 : wrote.error ? wrote.error : -ERROR_INPUT_OUTPUT;
 }
 
 static bipolar tune_write_number(string_address path, positive value)
@@ -8444,8 +8479,9 @@ static bool tune_kept(string_address key, p8 address_to into, positive room)
         return got > 0 && tune_find(text, (positive)got, key, into, room);
 }
 
-/* Keep a value for a key: the other lines stay, and an empty value drops the key. */
-static bool tune_keep(string_address key, string_address value)
+/* Keep a value for a key: the other lines stay, and an empty value drops the
+   key. 0, or the error that kept it from being kept. */
+static bipolar tune_keep(string_address key, string_address value)
 {
         p8 text[512];
         p8 out[640];
@@ -8464,7 +8500,7 @@ static bool tune_keep(string_address key, string_address value)
                 if (tune_line_is(text + start, length, key))
                         continue;
                 if (used + length + 1 >= sizeof(out))
-                        return false;
+                        return -EFBIG;
                 memory_copy(out + used, text + start, length);
                 used += length;
                 out[used++] = '\n';
@@ -8472,7 +8508,7 @@ static bool tune_keep(string_address key, string_address value)
         if (value[0])
         {
                 if (used + size + string_length(value) + 2 >= sizeof(out))
-                        return false;
+                        return -EFBIG;
                 memory_copy(out + used, key, size);
                 used += size;
                 out[used++] = ' ';
@@ -8481,7 +8517,7 @@ static bool tune_keep(string_address key, string_address value)
                 out[used++] = '\n';
         }
         host_state_ready();
-        return host_write_file(TUNE_KEPT, out, used, 0644, true) >= 0;
+        return host_write_file(TUNE_KEPT, out, used, 0644, true);
 }
 
 /* A whole percent, "N", "N%", "+N" or "-N": the sign says relative. */
@@ -8517,6 +8553,9 @@ static b32 tune_airplane(string_address address_to arguments, positive count)
 {
         bool wifi_off = radio_power(NET_WIFI_POWER) == 0;
         bool bluetooth_off = radio_power(NET_BLUETOOTH_POWER) == 0;
+        bool on;
+        b32 failed;
+        bipolar sent;
 
         if (count == 2)
         {
@@ -8527,22 +8566,24 @@ static b32 tune_airplane(string_address address_to arguments, positive count)
         if (count != 3 || host_onoff(arguments[2]) < 0)
                 return host_usage();
         host_need_root("moonwater airplane");
+        on = host_onoff(arguments[2]) > 0;
 
-        if (host_onoff(arguments[2]))
+        //      Type zero is every radio, the modem included.
+        if (on)
         {
-                (void)radio_wifi_off(false);
-                (void)radio_bluetooth_power(false, false);
-                //      Type zero is every radio, the modem included.
-                (void)radio_rfkill(0, true);
+                failed = radio_wifi_off(true);
+                failed |= radio_bluetooth_power(false, true);
+                sent = radio_rfkill(0, true);
         }
         else
         {
-                (void)radio_rfkill(0, false);
+                sent = radio_rfkill(0, false);
+                failed = radio_switch(NET_WIFI_POWER, RADIO_RFKILL_WLAN, true, true);
                 (void)radio_wifi_on(false);
-                (void)radio_bluetooth_power(true, false);
+                failed |= radio_bluetooth_power(true, true);
         }
-        host_say(log, host_label "airplane %s\n", arguments[2]);
-        return 0;
+        failed |= sent < 0 ? host_fail("/dev/rfkill", sent) : 0;
+        return radio_done(failed, on ? "airplane on" : "airplane off");
 }
 
 /* moonwater brightness [N|N%|+N|-N]: the first backlight, in percent. */
@@ -8691,7 +8732,9 @@ static b32 tune_charge(string_address address_to arguments, positive count)
                                                  ? host_refuse("this battery has no charge limit%s\n", "")
                                                  : host_fail("charge", failed);
                         //      A limit of a full charge is the default: nothing to bring back.
-                        (void)tune_keep("charge.limit", number == 100 ? (string_address)"" : (string_address)text);
+                        failed = tune_keep("charge.limit", number == 100 ? (string_address)"" : (string_address)text);
+                        if (failed < 0)
+                                return host_fail(TUNE_KEPT, failed);
                 }
                 host_say(log, host_label "charging stops at %p%%\n", number);
                 return 0;
@@ -8764,6 +8807,8 @@ static bool tune_power_apply(string_address profile)
 /* moonwater power [performance|balanced|powersave] */
 static b32 tune_power(string_address address_to arguments, positive count)
 {
+        bipolar kept;
+
         if (count == 2)
         {
                 p8 profile[32];
@@ -8797,7 +8842,9 @@ static b32 tune_power(string_address address_to arguments, positive count)
         host_need_root("moonwater power");
         if (!tune_power_apply(arguments[2]))
                 return host_refuse("this machine has no power profile to set%s\n", "");
-        (void)tune_keep("power", arguments[2]);
+        kept = tune_keep("power", arguments[2]);
+        if (kept < 0)
+                return host_fail(TUNE_KEPT, kept);
         host_say(log, host_label "power %s\n", arguments[2]);
         return 0;
 }
@@ -8813,19 +8860,18 @@ static bool tune_exists(string_address path)
         return true;
 }
 
-static bool tune_cpu_boost(bool on)
+/* The boost switch the machine has, or -ENOENT when it has neither. */
+static bipolar tune_cpu_boost(bool on)
 {
-        if (tune_exists(TUNE_SYS_CPU "/cpufreq/boost"))
-                return tune_write(TUNE_SYS_CPU "/cpufreq/boost", on ? "1" : "0") >= 0;
-        if (tune_exists(TUNE_SYS_CPU "/intel_pstate/no_turbo"))
-                return tune_write(TUNE_SYS_CPU "/intel_pstate/no_turbo", on ? "0" : "1") >= 0;
-        return false;
+        bipolar failed = tune_write(TUNE_SYS_CPU "/cpufreq/boost", on ? "1" : "0");
+
+        return failed == -ENOENT ? tune_write(TUNE_SYS_CPU "/intel_pstate/no_turbo", on ? "0" : "1")
+                                 : failed;
 }
 
-static bool tune_cpu_smt(bool on)
+static bipolar tune_cpu_smt(bool on)
 {
-        return tune_exists(TUNE_SYS_CPU "/smt/control") &&
-               tune_write(TUNE_SYS_CPU "/smt/control", on ? "on" : "off") >= 0;
+        return tune_write(TUNE_SYS_CPU "/smt/control", on ? "on" : "off");
 }
 
 /* moonwater cpu [boost|smt on|off] [online|offline N] */
@@ -8871,13 +8917,19 @@ static b32 tune_cpu(string_address address_to arguments, positive count)
         {
                 bool on = host_onoff(arguments[3]);
                 bool boost = string_equals(arguments[2], "boost");
+                bipolar failed;
 
                 host_need_root("moonwater cpu");
-                if (!(boost ? tune_cpu_boost(on) : tune_cpu_smt(on)))
+                failed = boost ? tune_cpu_boost(on) : tune_cpu_smt(on);
+                if (failed == -ENOENT)
                         return host_refuse(boost ? "this machine has no boost switch%s\n"
                                                  : "this machine has no SMT switch%s\n", "");
+                if (failed < 0)
+                        return host_fail(boost ? "cpu boost" : "cpu smt", failed);
                 //      Both default to on: nothing to bring back then.
-                (void)tune_keep(boost ? "cpu.boost" : "cpu.smt", on ? "" : "off");
+                failed = tune_keep(boost ? "cpu.boost" : "cpu.smt", on ? "" : "off");
+                if (failed < 0)
+                        return host_fail(TUNE_KEPT, failed);
                 host_say(log, host_label "cpu %s %s\n", arguments[2], arguments[3]);
                 return 0;
         }
@@ -8894,10 +8946,16 @@ static b32 tune_cpu(string_address address_to arguments, positive count)
                         number = number * 10 + (arguments[3][at++] - '0');
                 if (arguments[3][at] || number == 0)
                         return host_refuse("cpu 0 stays, and a cpu is a number%s\n", "");
+                bipolar failed;
+
                 positive_into_string(text, number);
-                if (!tune_path(path, sizeof(path), TUNE_SYS_CPU "/cpu", (string_address)text, "/online") ||
-                    tune_write(path, string_equals(arguments[2], "online") ? "1" : "0") < 0)
+                failed = tune_path(path, sizeof(path), TUNE_SYS_CPU "/cpu", (string_address)text, "/online")
+                             ? tune_write(path, string_equals(arguments[2], "online") ? "1" : "0")
+                             : -ENOENT;
+                if (failed == -ENOENT)
                         return host_refuse("that cpu cannot be switched%s\n", "");
+                if (failed < 0)
+                        return host_fail("cpu", failed);
                 host_say(log, host_label "cpu %s %p\n", arguments[2], number);
                 return 0;
         }
