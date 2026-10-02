@@ -17408,6 +17408,37 @@ typedef struct
 static floodlight_row floodlight_rows[FLOODLIGHT_ROWS];
 static positive floodlight_row_count HOT_STATE;
 
+/*
+        The register, kept open, and the number it said before these rows were
+        read.
+
+        floodlight.c's FLOODLIGHT_ANSWER is _IOR('f', 1, {u64, u64}): how many
+        writes the register has taken, and a token that only this open file
+        can give. A launch asks again, which is one call, and reads and
+        parses the report again only when the number is not the one it kept
+        -- reading seven kilobytes of text and walking it at every command
+        was a fifth of a command's start. The handle is close-on-exec, and a
+        redirection can claim any number, so it counts for the answer only
+        while the token is the one it gave when it was opened: a file put in
+        its place cannot say it. It is checked against the register's
+        character device when it is let go of, so that a number somebody's
+        own file has taken is not closed. The number a call leaves untouched,
+        as a forged success would, is the one no register says.
+*/
+#define FLOODLIGHT_IOCTL_ANSWER 0x80106601u
+#define FLOODLIGHT_GENERATION_NONE positive_max
+
+typedef struct
+{
+        positive token;
+        positive generation;
+} floodlight_answer;
+
+static bool floodlight_register_held HOT_STATE;
+static bipolar floodlight_register_handle HOT_STATE;
+static positive floodlight_register_token HOT_STATE;
+static positive floodlight_generation HOT_STATE;
+
 /* A missing device means something different on a stock kernel and in an
    image the Spark loader started.  The latter promises both Moonwater devices
    exist, so silently using defaults there would turn removing or replacing
@@ -18054,6 +18085,7 @@ static fn floodlight_load()
         bipolar got;
         positive used = 0;
         positive parsed_count = 0;
+        floodlight_answer answer = {0, FLOODLIGHT_GENERATION_NONE};
         p8 state = FLOODLIGHT_REPORT_REFUSED;
 
         if (floodlight_report_state != FLOODLIGHT_REPORT_UNREAD)
@@ -18068,7 +18100,8 @@ static fn floodlight_load()
                 and fails closed there, so a masked or missing /proc refuses
                 what a policy restricts and nothing else.
         */
-        handle = system_open_at(AT_FDCWD, FLOODLIGHT_PATH, FILE_READ);
+        handle = system_open_at(AT_FDCWD, FLOODLIGHT_PATH,
+                                FILE_READ | O_CLOEXEC);
 
         /*
                 The register, and not something wearing its name.
@@ -18120,6 +18153,18 @@ static fn floodlight_load()
                 goto publish;
         }
 
+        /*
+                The number before the report, not after: a write between the
+                two leaves a report newer than its number, which the next
+                launch finds out and reads again, where the other order
+                would keep an old report under a new number for ever. A
+                register that does not answer, or whose answer is the one
+                nothing says, is read at every launch as before.
+        */
+        if (system_control(handle, FLOODLIGHT_IOCTL_ANSWER,
+                           address_of answer) != 0)
+                answer.generation = FLOODLIGHT_GENERATION_NONE;
+
         /* seq_file reads may be short without being complete. Keep going to
            EOF, with system_read_retry owning EINTR, and reject a report that
            cannot be proved whole inside the fixed bound. */
@@ -18134,7 +18179,18 @@ static fn floodlight_load()
                 used += (positive)got;
         }
 
-        system_close(handle);
+        /* Kept, with its number, unless it is not worth keeping or one is
+           kept already (the reload lets go of the old one first). */
+        if (answer.generation != FLOODLIGHT_GENERATION_NONE &&
+            answer.token && !floodlight_register_held)
+        {
+                floodlight_register_handle = handle;
+                floodlight_register_held = true;
+                floodlight_register_token = answer.token;
+                floodlight_generation = answer.generation;
+        }
+        else
+                system_close(handle);
 
         /* An authenticated register that will not give a whole report is the
            kernel saying it was tampered with, or something between the two
@@ -18426,14 +18482,62 @@ static bool floodlight_entry_unfiltered()
         return floodlight_entry_proved;
 }
 
+/* Whether the kept handle is still the file that gave the token, which the
+   register alone can say: a number somebody has put a file in since answers
+   with no token or with another's. */
+static bool floodlight_register_ours(floodlight_answer address_to answer)
+{
+        return floodlight_register_held &&
+               system_control(floodlight_register_handle,
+                              FLOODLIGHT_IOCTL_ANSWER,
+                              answer) == 0 &&
+               answer->generation != FLOODLIGHT_GENERATION_NONE &&
+               answer->token == floodlight_register_token;
+}
+
+/* The handle given up: closed when it is still ours, and only forgotten when
+   it is not, because closing a number somebody has taken over would close
+   their file. */
+static fn floodlight_register_release()
+{
+        floodlight_answer answer = {0, FLOODLIGHT_GENERATION_NONE};
+
+        if (floodlight_register_ours(address_of answer))
+                system_close(floodlight_register_handle);
+
+        floodlight_register_held = false;
+}
+
+/* Nothing has been written to the register since the rows were read: the
+   kept handle gives the token it gave when it was opened, which no other file
+   can, and the number it said before that read. A call that answers without
+   writing the number -- a forged success -- leaves the one nothing says,
+   which is never the kept number. */
+static bool floodlight_fresh()
+{
+        floodlight_answer answer = {0, FLOODLIGHT_GENERATION_NONE};
+
+        return floodlight_register_ours(address_of answer) &&
+               answer.generation == floodlight_generation;
+}
+
 /* Read one coherent policy snapshot for every launch decision.  Keeping the
    loaded state through floodlight_may makes every setting for that launch
    agree; clearing it only here means a later command sees changes and
    revocations.  The rows are left for the load to replace: once a real
    register has answered, losing it keeps the last answers it gave rather
-   than returning to the ones this shell was built with. */
+   than returning to the ones this shell was built with.
+
+   A report that is whole and was read before the register's last write is
+   the report again: asking is one call, and reading and parsing it is what
+   a launch used to cost a fifth of its start for. */
 static fn floodlight_reload()
 {
+        if (floodlight_report_state == FLOODLIGHT_REPORT_VALID &&
+            floodlight_fresh())
+                return;
+
+        floodlight_register_release();
         floodlight_report_state = FLOODLIGHT_REPORT_UNREAD;
         floodlight_load();
 }

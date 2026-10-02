@@ -65,6 +65,7 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/seq_file.h>
+#include <linux/siphash.h>
 #include <linux/timekeeping.h>
 #include <linux/uaccess.h>
 
@@ -284,6 +285,34 @@ struct light {
 static struct light changed[CHANGES];
 
 static DEFINE_MUTEX(lock);
+
+/*
+ * How many writes have reached the register since boot, under the lock.
+ *
+ * A reader that has the report and the number it had before it read can ask
+ * for the number again instead of for the report again: the same number is
+ * the same report, and a different one -- any write, the seal included, even
+ * one that changed nothing -- is the cue to read it. The shell asks at every
+ * launch, and until it could ask this it read and parsed seven kilobytes of
+ * text at every one, which was a fifth of a command's start.
+ */
+static unsigned long long generation;
+
+/*
+ * What the register tells a reader besides the number: a token that only this
+ * open file has. The shell keeps the handle between launches and a script can
+ * put any file in its number, so the answer has to be one that file alone can
+ * give -- and the token is the file's own address under a keyed hash of the
+ * kernel's (siphash, the key drawn at boot and never shown), which nobody who
+ * has not been told it by the register on this handle can work out, and a
+ * file that is not this register cannot say at all.
+ */
+static siphash_key_t token_key __ro_after_init;
+
+struct floodlight_answer {
+	unsigned long long token;
+	unsigned long long generation;
+};
 
 /* One way. Nothing here clears it and no parameter relaxes it: a seal that
  * something can undo is a seal in name only. */
@@ -517,19 +546,19 @@ static bool intact(void)
 
 	lockdep_assert_held(&lock);
 
-	if (compromised || configured_invalid)
+	if (unlikely(compromised || configured_invalid))
 		return false;
 
-	if (baseline_seal() != baseline_sum) {
+	if (unlikely(baseline_seal() != baseline_sum)) {
 		compromised = true;
 		pr_alert("floodlight: the built-in answers have been altered in memory; refusing to answer further\n");
 		return false;
 	}
 
 	for (i = 0; i < CHANGES; i++) {
-		if (!changed[i].subject[0])
+		if (likely(!changed[i].subject[0]))
 			continue;
-		if (seal_of(&changed[i]) == changed[i].seal)
+		if (likely(seal_of(&changed[i]) == changed[i].seal))
 			continue;
 
 		compromised = true;
@@ -537,13 +566,13 @@ static bool intact(void)
 		return false;
 	}
 
-	if (!guard_intact()) {
+	if (unlikely(!guard_intact())) {
 		compromised = true;
 		pr_alert("floodlight: the parse buffer was overrun; refusing to answer further\n");
 		return false;
 	}
 
-	if (shown_len && (shown_len > REPORT || shown_seal() != shown_sum)) {
+	if (shown_len && unlikely(shown_len > REPORT || shown_seal() != shown_sum)) {
 		compromised = true;
 		pr_alert("floodlight: the kept report has been altered in memory; refusing to answer further\n");
 		return false;
@@ -717,19 +746,19 @@ static int floodlight_show(struct seq_file *seq, void *unused)
 
 	/* Nobody tampered with anything; the configuration said something that
 	 * does not read, and the only honest answer to that is none. */
-	if (configured_invalid) {
+	if (unlikely(configured_invalid)) {
 		seq_puts(seq, "# floodlight: the configured policy does not read; refusing to answer until it is fixed\n");
 		mutex_unlock(&lock);
 		return 0;
 	}
 
-	if (!intact()) {
+	if (unlikely(!intact())) {
 		seq_puts(seq, "# floodlight: TAMPERED -- this register has been written to behind its own back and no longer answers\n");
 		mutex_unlock(&lock);
 		return 0;
 	}
 
-	if (shown_len) {
+	if (likely(shown_len)) {
 		seq_write(seq, shown, shown_len);
 		mutex_unlock(&lock);
 		return 0;
@@ -1103,8 +1132,9 @@ static ssize_t floodlight_write(struct file *file, const char __user *from,
 
 out:
 	/* Whatever was written, the kept report is no longer known to be what
-	 * the register would say. */
+	 * the register would say, and nobody holding the last one is either. */
 	shown_len = 0;
+	generation++;
 
 	/* Nothing is left in it between commands: the line held a policy
 	 * somebody typed, and there is no reason for it to still be here. */
@@ -1129,6 +1159,45 @@ static int floodlight_open(struct inode *inode, struct file *file)
 	return single_open(file, floodlight_show, NULL);
 }
 
+/*
+ * _IOR('f', 1, struct floodlight_answer): the number of writes and this open
+ * file's token, for a reader that kept what it read. Spelled out for the
+ * reason spark's numbers are -- the shell has its own copy and the floodlight
+ * harness holds the two to this encoding. (Not the size of a long: that
+ * number is FS_IOC_GETFLAGS, which every filesystem answers.)
+ *
+ * Answered only by a register that is whole: the seals are checked here as
+ * they are at every read, so a machine that has been tampered with stops
+ * answering the cheap question the same moment it stops answering the full
+ * one, and the reader that gets the refusal goes and reads the report, which
+ * says so.
+ */
+#define FLOODLIGHT_ANSWER 0x80106601u
+
+static long floodlight_ioctl(struct file *file, unsigned int command,
+			     unsigned long argument)
+{
+	struct floodlight_answer answer;
+	bool whole;
+
+	if (command != FLOODLIGHT_ANSWER)
+		return -ENOTTY;
+
+	mutex_lock(&lock);
+	whole = intact();
+	answer.generation = generation;
+	mutex_unlock(&lock);
+
+	if (unlikely(!whole))
+		return -EIO;
+
+	answer.token = siphash_1u64((unsigned long)file, &token_key);
+
+	return copy_to_user((void __user *)argument, &answer, sizeof(answer))
+		       ? -EFAULT
+		       : 0;
+}
+
 static const struct file_operations floodlight_ops = {
 	.owner = THIS_MODULE,
 	.open = floodlight_open,
@@ -1136,6 +1205,7 @@ static const struct file_operations floodlight_ops = {
 	.llseek = seq_lseek,
 	.release = single_release,
 	.write = floodlight_write,
+	.unlocked_ioctl = floodlight_ioctl,
 };
 
 /*
@@ -1171,6 +1241,7 @@ static int __init floodlight_start(void)
 	/* Before the device exists, so nothing can be answered or written
 	 * until the seals it will be checked against are in place. */
 	secret = get_random_u32();
+	get_random_bytes(&token_key, sizeof(token_key));
 	guard_arm();
 
 	configured_invalid = !configure(configured_text);

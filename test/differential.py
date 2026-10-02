@@ -31141,7 +31141,8 @@ def harness_floodlight(argv):
     #   vocabularies genuinely collide: EPERM is the kernel's and Moonwater
     #   spells its copy the same way because there is only one spelling for it.
     forbidden = {n for n in forbidden if n.upper() != n}
-    forbidden -= {'bool', 'true', 'false', 'null', 'min', 'max', 'container_of'}
+    forbidden -= {'bool', 'true', 'false', 'null', 'min', 'max', 'container_of',
+                  'likely', 'unlikely'}
     own = {item.name for item in c_bodies(str(FILE), text)}
 
     #   In call position only. A local named `start` is this file's own word,
@@ -31181,7 +31182,8 @@ def harness_floodlight(argv):
         'lockdep_assert_held', 'late_initcall', 'ARRAY_SIZE',
         'MODULE_DESCRIPTION', 'MODULE_AUTHOR', 'MODULE_LICENSE',
         'device_initcall', 'sizeof', 'seq_write', 'seq_has_overflowed',
-        'memcpy', '__aligned',
+        'memcpy', '__aligned', 'likely', 'unlikely', 'copy_to_user',
+        'siphash_1u64', 'get_random_bytes',
     }
 
     called = set()
@@ -31540,6 +31542,49 @@ def harness_floodlight(argv):
              'each launch reloads one coherent policy snapshot'),
             (calls('floodlight_report_state', '=', 'state', ';'),
              'the reader publishes one explicit final report state'),
+            #   The number of writes, in place of the report, while it lasts.
+            (bool(re.search(
+                r'static fn floodlight_reload\(\)\s*\{\s*'
+                r'if \(floodlight_report_state == FLOODLIGHT_REPORT_VALID &&\s*'
+                r'floodlight_fresh\(\)\)\s*return;\s*'
+                r'floodlight_register_release\(\);\s*'
+                r'floodlight_report_state = FLOODLIGHT_REPORT_UNREAD;\s*'
+                r'floodlight_load\(\);', shell)),
+             'a launch that finds the register unwritten since its report was '
+             'read asks the number and does not read the report again'),
+            (load_body.index('system_control') < load_body.index('system_read_retry'),
+             'the number is asked before the report is read, so a write '
+             'between the two is found by the next launch and not hidden by it'),
+            ('FILE_READ | O_CLOEXEC' in load_body,
+             'the register is opened close-on-exec, so the handle it is kept '
+             'on reaches no program that is started'),
+            (bool(re.search(
+                r'static bool floodlight_register_ours\(floodlight_answer address_to answer\)\s*\{\s*'
+                r'return floodlight_register_held &&\s*'
+                r'system_control\(floodlight_register_handle,\s*'
+                r'FLOODLIGHT_IOCTL_ANSWER,\s*answer\) == 0 &&\s*'
+                r'answer->generation != FLOODLIGHT_GENERATION_NONE &&\s*'
+                r'answer->token == floodlight_register_token;', shell)) and
+             bool(re.search(
+                r'static bool floodlight_fresh\(\)\s*\{[^;]*;\s*'
+                r'return floodlight_register_ours\(address_of answer\) &&\s*'
+                r'answer\.generation == floodlight_generation;', shell)),
+             'the kept handle is believed only while it gives the token it gave '
+             'when it was opened, and a call that wrote no number is never fresh'),
+            (bool(re.search(
+                r'static fn floodlight_register_release\(\)\s*\{[^;]*;\s*'
+                r'if \(floodlight_register_ours\(address_of answer\)\)\s*'
+                r'system_close\(floodlight_register_handle\);\s*'
+                r'floodlight_register_held = false;', shell)),
+             'a handle that is not the register opened here is not closed, '
+             "because it is somebody's file now"),
+            (bool(re.search(r'shown_len = 0;\s*generation\+\+;', text)),
+             'every write that reaches the register moves its number'),
+            (re.search(r'#define FLOODLIGHT_ANSWER (0x[0-9a-f]+)u', text).group(1) ==
+             re.search(r'#define FLOODLIGHT_IOCTL_ANSWER (0x[0-9a-f]+)u', shell).group(1) ==
+             hex((2 << 30) | (16 << 16) | (ord('f') << 8) | 1),
+             "the register's number and the shell's are _IOR('f', 1, two u64), "
+             "which is not the number every filesystem answers"),
             (calls('if', '(', '!', 'floodlight_external_final', '(', 'path',
                    ',', 'arguments', ',', 'count', ',', '&', 'pinned', ')',
                    ')'),
@@ -31937,7 +31982,7 @@ def harness_floodlight(argv):
     show = show[:show.index('\nstatic ')]
 
     for guard, where, what in (
-            (r'if \(!intact\(\)\) \{\s*\n\s*seq_puts\(seq, "# floodlight: TAMPERED', show,
+            (r'if \(unlikely\(!intact\(\)\)\) \{\s*\n\s*seq_puts\(seq, "# floodlight: TAMPERED', show,
              'the report refuses to speak for a machine that has been tampered with'),
             #   misc_open leaves the miscdevice in private_data and seq_open
             #   warns on anything found there, so every reader of the register
@@ -31979,7 +32024,7 @@ def harness_floodlight(argv):
         shell.index('/* execveat with an empty path')]
     entry_source = shell[
         shell.index('static bool floodlight_entry_prove()\n{'):
-        shell.index('/* Read one coherent policy snapshot',
+        shell.index('/* Whether the kept handle is still the file that gave',
                     shell.index('static bool floodlight_entry_prove()\n{'))]
     silent_stop_source = shell[
         shell.index('static DEAD_END fn floodlight_silent_stop()\n{'):
@@ -33024,6 +33069,98 @@ static bipolar floodlight_descriptor_read_link(bipolar handle, p8 *into, positiv
 }
 """
 
+    #   The shell's own load, check and reload, run against the module: the
+    #   real text of each, renamed so the stubs above stay what the rest of the
+    #   checks call, with the open, the statx, the number and the read answered
+    #   by mocks that are a stub or a redirection of the real module.
+    live_names = ('floodlight_load', 'floodlight_register_ours',
+                  'floodlight_register_release', 'floodlight_fresh',
+                  'floodlight_reload')
+    live = ''
+    for header in ('static fn floodlight_load()\n{',
+                   'static bool floodlight_register_ours(floodlight_answer address_to answer)\n{',
+                   'static fn floodlight_register_release()\n{',
+                   'static bool floodlight_fresh()\n{',
+                   'static fn floodlight_reload()\n{'):
+        at = shell.index(header)
+        live += shell[at:shell.index('\n}\n', at) + 3] + '\n'
+    live = re.sub(r'\b(%s)\b' % '|'.join(live_names), r'live_\1', live)
+    live = r"""
+typedef struct { unsigned mask; unsigned mode; unsigned rdev_major;
+                 unsigned rdev_minor; unsigned long mount_id; } file_facts;
+#define STATX_BASIC 0x7ffu
+#define STATX_MOUNT_ID 0x1000u
+#define MODE_FORMAT 0170000
+#define MODE_CHARACTER 0020000
+#define FILE_READ 0
+#define FLOODLIGHT_PATH "/dev/floodlight"
+#define FLOODLIGHT_DEVICE_MAJOR 10
+#ifndef AT_EMPTY_PATH
+#define AT_EMPTY_PATH 0x1000
+#endif
+#define positive_max ((positive)-1)
+_Static_assert(FLOODLIGHT_IOCTL_ANSWER == FLOODLIGHT_ANSWER,
+               "the shell and the register name the number the same");
+_Static_assert(sizeof(floodlight_answer) == sizeof(struct floodlight_answer),
+               "and the answer the same size");
+static const char *report(void);
+static unsigned mock_asks, mock_reads;
+static bool mock_forged;
+/* Each handle is an open file of its own, so each has a token of its own;
+   mock_other_fd is a number a script has put a separate open of the register
+   in, which answers the real number with another file's token. */
+static struct file mock_files[1001];
+static bipolar mock_other_fd;
+static bool floodlight_facts_complete(const file_facts *facts, bool mount)
+{
+        return (facts->mask & STATX_BASIC) == STATX_BASIC &&
+               (!mount || (facts->mask & STATX_MOUNT_ID));
+}
+static bool file_look(bipolar fd, string_address path, positive flags,
+                      file_facts *facts)
+{
+        (void)path; (void)flags;
+        memset(facts, 0, sizeof(*facts));
+        if (fd <= MOCK_REGISTER_FD || fd >= MOCK_REGISTER_FD + 1000 ||
+            mock_closed_fd[fd - MOCK_REGISTER_FD])
+                return false;
+        facts->mask = STATX_BASIC;
+        facts->mode = fd == mock_swapped_fd ? 0100000 : MODE_CHARACTER;
+        facts->rdev_major = 10;
+        facts->rdev_minor = 249;
+        return true;
+}
+static bipolar system_control(bipolar fd, unsigned request, void *argument)
+{
+        mock_asks++;
+        if (fd == mock_swapped_fd || fd <= MOCK_REGISTER_FD)
+                return -25;
+        if (mock_forged)
+                return 0;
+        return floodlight_ioctl(fd == mock_other_fd ? &mock_files[1000]
+                                                    : &mock_files[fd - MOCK_REGISTER_FD],
+                                request, (unsigned long)argument);
+}
+static bipolar system_read_retry(positive fd, p8 *into, positive room)
+{
+        const char *text;
+        positive length;
+
+        if ((bipolar)fd <= MOCK_REGISTER_FD)
+                return -1;
+        mock_reads++;
+        if (mock_eof)
+                return 0;
+        text = report();
+        length = strlen(text);
+        if (length > room)
+                length = room;
+        memcpy(into, text, length);
+        mock_eof = true;
+        return (bipolar)length;
+}
+""" + live
+
     #   The reader is shell code, so it wants the shell's spellings.
     reader_mock = r"""
 typedef unsigned char p8;
@@ -33070,15 +33207,41 @@ static positive positive_into_string(p8 *into, positive value)
         int length = sprintf((char *)into, "%lu", value);
         return length > 0 ? (positive)length : 0;
 }
+/* The register as a process sees it: each open of its path hands out a
+   handle number of its own (1001, 1002, ...), and the test can hide the path,
+   turn one handle into somebody's file, or close one. */
+#define MOCK_REGISTER_FD 1000
+static bool mock_hidden;
+static bool mock_eof;
+static bipolar mock_swapped_fd;
+static unsigned mock_opens, mock_closes;
+static bool mock_closed_fd[2048];
 static bipolar test_open_at(bipolar directory, string_address path,
                             positive flags)
 {
         (void)directory;
+        if (!strcmp((char *)path, "/dev/floodlight"))
+        {
+                if (mock_hidden)
+                        return -1;
+                mock_eof = false;
+                return MOCK_REGISTER_FD + (bipolar)++mock_opens;
+        }
         return open((char *)path, O_RDONLY | (flags & O_CLOEXEC));
 }
 #define system_open_at(directory, path, flags) \
         test_open_at((directory), (path), (flags))
-#define system_close(handle) close(handle)
+static int test_close(bipolar handle)
+{
+        if (handle > MOCK_REGISTER_FD && handle < MOCK_REGISTER_FD + 1000)
+        {
+                mock_closes++;
+                mock_closed_fd[handle - MOCK_REGISTER_FD] = true;
+                return 0;
+        }
+        return close(handle);
+}
+#define system_close(handle) test_close(handle)
 static bipolar test_read_link_at(bipolar directory, string_address path,
                                  p8 *into, positive room)
 {
@@ -33174,6 +33337,8 @@ typedef long long loff_t;
 #define __init
 #define __ro_after_init
 #define __aligned(n) __attribute__((aligned(n)))
+#define likely(x) (x)
+#define unlikely(x) (x)
 #define THIS_MODULE 0
 #define MISC_DYNAMIC_MINOR 255
 #define CAP_SYS_ADMIN 21
@@ -33181,6 +33346,9 @@ typedef long long loff_t;
 #define EINVAL 22
 #define EFAULT 14
 #define ENOSPC 28
+#define ENOTTY 25
+#define EIO 5
+
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 #define DEFINE_MUTEX(name) int name
 #define lockdep_assert_held(x) ((void)(x))
@@ -33196,7 +33364,7 @@ typedef long long loff_t;
 
 struct inode;
 struct file { void *private_data; };
-struct file_operations { int owner; void *open, *read, *llseek, *release, *write; };
+struct file_operations { int owner; void *open, *read, *llseek, *release, *write, *unlocked_ioctl; };
 struct miscdevice { int minor; const char *name; const struct file_operations *fops; int mode; };
 struct seq_file { char *buf; unsigned long count; };
 
@@ -33218,10 +33386,26 @@ static unsigned current_uid(void) { return mock_uid; }
 static unsigned from_kuid(int *ns, unsigned uid) { (void)ns; return uid; }
 static unsigned long long ktime_get_real_seconds(void) { return mock_now; }
 static u32 get_random_u32(void) { return mock_random; }
+typedef struct { unsigned long long key[2]; } siphash_key_t;
+static unsigned long long siphash_1u64(unsigned long long v, const siphash_key_t *k)
+{
+        return ((v ^ k->key[0]) * 0x9e3779b97f4a7c15ull) ^ k->key[1];
+}
+static void get_random_bytes(void *to, unsigned long n)
+{
+        unsigned char *at = to;
+        while (n--) *at++ = (unsigned char)(mock_random >> (8 * (n & 3)));
+}
 static int misc_register(struct miscdevice *d) { (void)d; return 0; }
 static int single_open(struct file *f, void *show, void *p) { (void)f;(void)show;(void)p; return 0; }
 
 static unsigned long copy_from_user(void *to, const void *from, unsigned long n)
+{
+        if (mock_copy_fails) return n;
+        memcpy(to, from, n);
+        return 0;
+}
+static unsigned long copy_to_user(void *to, const void *from, unsigned long n)
 {
         if (mock_copy_fails) return n;
         memcpy(to, from, n);
@@ -33342,7 +33526,8 @@ static bool shows(const char *needle) { return strstr(report(), needle) != NULL;
 static void reset(u32 random)
 {
         memset(changed, 0, sizeof(changed));
-        sealed = false; compromised = false; shown_len = 0;
+        sealed = false; compromised = false; shown_len = 0; generation = 0;
+        token_key.key[0] = 0x0123456789abcdefull ^ random; token_key.key[1] = 0xfedcba9876543210ull + random;
         mock_root = true; mock_uid = 0; mock_now = 1000;
         mock_copy_fails = false;
         shell_parser_source_kind = SHELL_PARSER_SOURCE_MEMORY;
@@ -33599,6 +33784,173 @@ int main(void)
                 }
                 check(every_byte, "the word fold notices one byte changed at any offset of any length, "
                                   "and a different start");
+        }
+
+        /* The number of writes and the file's token, and the shell's own
+           reader run against them: a launch that finds what it kept reads
+           nothing, a write of any kind is seen by the next launch, and the
+           ways of lying to the reader (a handle that became somebody's file,
+           a separate open of the register put in its number, a call that
+           answers without answering, a register that stopped being whole, a
+           path that was hidden) are each answered as the policy says. */
+        reset(0x11223344);
+        {
+                struct file one = {0}, two = {0};
+                struct floodlight_answer first = {7, 7}, second = {7, 7}, third = {7, 7};
+                long refused;
+
+                check(floodlight_ioctl(&one, FLOODLIGHT_ANSWER, (unsigned long)&first) == 0 &&
+                      first.generation == 0, "the register says how many writes it has taken");
+                report(); report();
+                check(floodlight_ioctl(&one, FLOODLIGHT_ANSWER, (unsigned long)&second) == 0 &&
+                      second.generation == first.generation && second.token == first.token,
+                      "and the same number and token after any number of reads");
+                check(floodlight_ioctl(&two, FLOODLIGHT_ANSWER, (unsigned long)&third) == 0 &&
+                      third.token != first.token,
+                      "another open file gives another token");
+                put("awk spawn deny");
+                floodlight_ioctl(&one, FLOODLIGHT_ANSWER, (unsigned long)&second);
+                check(second.generation == first.generation + 1 && second.token == first.token,
+                      "one more after a write, and the same token");
+                put("awk spawn deny");
+                floodlight_ioctl(&one, FLOODLIGHT_ANSWER, (unsigned long)&first);
+                check(first.generation == second.generation + 1,
+                      "and after one that said what was already true");
+                put("seal");
+                floodlight_ioctl(&one, FLOODLIGHT_ANSWER, (unsigned long)&second);
+                check(second.generation == first.generation + 1, "and after the seal");
+                mock_root = false;
+                put("awk spawn allow");
+                floodlight_ioctl(&one, FLOODLIGHT_ANSWER, (unsigned long)&first);
+                check(first.generation == second.generation,
+                      "but not after one that was refused for want of privilege");
+                mock_root = true;
+                check(floodlight_ioctl(&one, FLOODLIGHT_ANSWER + 1, (unsigned long)&first) == -ENOTTY &&
+                      floodlight_ioctl(&one, 0x80086601u, (unsigned long)&first) == -ENOTTY,
+                      "a number the register does not know is not answered, "
+                      "the filesystems' own among them");
+                mock_copy_fails = true;
+                check(floodlight_ioctl(&one, FLOODLIGHT_ANSWER, (unsigned long)&first) == -EFAULT,
+                      "an address that cannot be written is refused");
+                mock_copy_fails = false;
+                reset(0x11223344);
+                changed[0].subject[0] = 'x';
+                third.token = 9; third.generation = 9;
+                refused = floodlight_ioctl(&one, FLOODLIGHT_ANSWER, (unsigned long)&third);
+                check(refused == -EIO && third.token == 9 && third.generation == 9,
+                      "a register that is not whole refuses the answer and writes none");
+        }
+
+        reset(0x11223344);
+        {
+                unsigned reads, opens, closes, asks, round;
+
+                mock_hidden = false; mock_forged = false; mock_swapped_fd = 0;
+                mock_other_fd = 0;
+                mock_opens = mock_closes = mock_reads = mock_asks = 0;
+                memset(mock_closed_fd, 0, sizeof(mock_closed_fd));
+                floodlight_register_held = false; floodlight_row_count = 0;
+                floodlight_report_promised = false;
+                floodlight_report_state = FLOODLIGHT_REPORT_UNREAD;
+
+                live_floodlight_reload();
+                check(floodlight_report_state == FLOODLIGHT_REPORT_VALID &&
+                      mock_opens == 1 && mock_reads > 0,
+                      "the first launch reads the report");
+                check(floodlight_register_held && floodlight_generation == 0 &&
+                      floodlight_register_token != 0,
+                      "and keeps the register open with the number and token it gave");
+
+                reads = mock_reads; opens = mock_opens; asks = mock_asks;
+                for (round = 0; round < 5; round++)
+                        live_floodlight_reload();
+                check(mock_reads == reads && mock_opens == opens && mock_asks == asks + 5,
+                      "a launch with nothing written since asks once and reads nothing");
+
+                put("find spawn deny");
+                reads = mock_reads;
+                live_floodlight_reload();
+                check(mock_reads > reads && floodlight_row_count == 1 &&
+                      !strcmp((char *)floodlight_rows[0].subject, "find") &&
+                      !floodlight_rows[0].allowed,
+                      "a write is seen by the next launch");
+                check(mock_closes == 1 && mock_closed_fd[1],
+                      "and the handle the old report came through is given back");
+
+                reads = mock_reads;
+                live_floodlight_reload();
+                check(mock_reads == reads, "after which it is asked again, not read again");
+
+                put("awk spawn deny");
+                live_floodlight_reload();
+                check(floodlight_row_count == 2, "a second write is seen the same way");
+
+                /* The handle a script took over: a file that is not the
+                   register at all. */
+                mock_swapped_fd = MOCK_REGISTER_FD + (bipolar)mock_opens;
+                closes = mock_closes; opens = mock_opens; reads = mock_reads;
+                live_floodlight_reload();
+                check(!mock_closed_fd[mock_swapped_fd - MOCK_REGISTER_FD] &&
+                      mock_closes == closes,
+                      "a handle that has become somebody's file is not closed");
+                check(mock_opens == opens + 1 && mock_reads > reads &&
+                      floodlight_register_held && floodlight_row_count == 2,
+                      "and the register is opened again and read");
+                mock_swapped_fd = 0;
+
+                /* A separate open of the register put in its number: it says
+                   the right number and the wrong token. */
+                mock_other_fd = MOCK_REGISTER_FD + (bipolar)mock_opens;
+                closes = mock_closes; opens = mock_opens; reads = mock_reads;
+                live_floodlight_reload();
+                check(!mock_closed_fd[mock_other_fd - MOCK_REGISTER_FD] &&
+                      mock_closes == closes,
+                      "a script's own open of the register in its number is not closed");
+                check(mock_opens == opens + 1 && mock_reads > reads &&
+                      floodlight_register_held,
+                      "and is not taken for the kept one: the register is read again");
+                mock_other_fd = 0;
+
+                /* A call that says it worked and wrote nothing. */
+                mock_forged = true;
+                reads = mock_reads;
+                live_floodlight_reload();
+                live_floodlight_reload();
+                check(mock_reads >= reads + 2 && floodlight_row_count == 2,
+                      "a forged answer never makes the rows look fresh");
+                check(!floodlight_register_held,
+                      "and an answer nothing wrote is not kept");
+                mock_forged = false;
+                live_floodlight_reload();
+                check(floodlight_register_held, "an honest answer is kept again");
+
+                /* The register stops being whole: the shell is told by the
+                   report, and refuses everything. */
+                changed[0].allowed ^= 1;
+                live_floodlight_reload();
+                check(floodlight_report_state == FLOODLIGHT_REPORT_REFUSED,
+                      "a register that is not whole refuses the next launch");
+                check(!floodlight_register_held,
+                      "and nothing is kept of it");
+                changed[0].allowed ^= 1;
+                compromised = false;
+                live_floodlight_reload();
+                check(floodlight_report_state == FLOODLIGHT_REPORT_VALID,
+                      "a launch asks again whatever the last one was told");
+
+                /* The path hidden from a running shell: what it has read
+                   stands, and the handle it holds goes on answering. */
+                mock_hidden = true;
+                reads = mock_reads; opens = mock_opens;
+                live_floodlight_reload();
+                check(mock_reads == reads && floodlight_report_state == FLOODLIGHT_REPORT_VALID,
+                      "a hidden path costs a launch nothing while nothing is written");
+                put("env spawn deny");
+                live_floodlight_reload();
+                check(floodlight_report_state == FLOODLIGHT_REPORT_VALID &&
+                      floodlight_row_count == 2,
+                      "and keeps the last answers it read once the handle goes");
+                mock_hidden = false;
         }
 
         reset(0x11223344);
@@ -34306,7 +34658,7 @@ static b32 reader_tool_launch(char **arguments, bool final)
             (work_path / executable).chmod(0o755)
         binary, _ = build_c(Path(work) / 'run.c',
                             mock + runnable + bridge + reader_mock + descriptor +
-                            reader + decision + round_trip + corpus + driver,
+                            reader + decision + live + round_trip + corpus + driver,
                             ('-std=gnu11', '-O1', '-g', '-w'))
         ran = subprocess.run([str(binary)], cwd=work, text=True,
                              capture_output=True)
