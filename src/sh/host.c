@@ -8367,41 +8367,6 @@ static b32 host_radio(string_address address_to arguments, positive count)
 #define TUNE_SYS_PROFILE "/sys/firmware/acpi/platform_profile"
 #define TUNE_SYS_POWER "/sys/power"
 
-/* The nth entry of a directory that is not . or .., and whether there is one. */
-static bool tune_entry(string_address directory, positive want, p8 address_to name,
-                       positive room)
-{
-        bipolar handle = system_open_at(AT_FDCWD, directory,
-                                        FILE_READ | O_DIRECTORY | O_CLOEXEC);
-        p8 records[2048];
-        positive have = 0;
-        positive at = 0;
-        positive seen = 0;
-        bipolar error = 0;
-        struct linux_dirent64 address_to record;
-
-        if (handle < 0)
-                return false;
-        while ((record = file_directory_next(handle, records, sizeof(records),
-                                             address_of have, address_of at,
-                                             address_of error)))
-        {
-                string_address entry = (string_address)record->d_name;
-
-                if (file_is_dot(entry))
-                        continue;
-                if (seen++ == want)
-                {
-                        bool fits = string_copy_bounded(name, entry, room) < room;
-
-                        system_close((positive)handle);
-                        return fits;
-                }
-        }
-        system_close((positive)handle);
-        return false;
-}
-
 static bool tune_path(p8 address_to into, positive room, string_address first,
                       string_address second, string_address third)
 {
@@ -8419,6 +8384,12 @@ static bool tune_exists(string_address path)
                 return false;
         system_close((positive)handle);
         return true;
+}
+
+/* Whether a name in the cpu directory is a processor's: cpu and its number. */
+static bool tune_is_cpu(string_address name)
+{
+        return name[0] == 'c' && name[1] == 'p' && name[2] == 'u' && byte_is_digit(name[3]);
 }
 
 /* The best of a directory's entries, by the rank a visitor gives each, and the
@@ -8867,34 +8838,44 @@ static b32 tune_charge(string_address address_to arguments, positive count)
         return host_usage();
 }
 
-/* The governor and preference a profile means, where the machine has them. */
+typedef struct
+{
+        string_address governor;
+        string_address preference;
+        positive written;
+} tune_profile;
+
+static bool tune_profile_visit(string_address directory, string_address name, address_any context)
+{
+        tune_profile address_to profile = (tune_profile address_to)context;
+        p8 path[160];
+        p8 policy[160];
+
+        if (!tune_is_cpu(name) ||
+            !tune_path(policy, sizeof(policy), directory, "/", name) ||
+            string_append_bounded(policy, "/cpufreq/", sizeof(policy)) >= sizeof(policy))
+                return true;
+        if (profile->governor && tune_path(path, sizeof(path), (string_address)policy,
+                                           "scaling_available_governors", "") &&
+            tune_lists(path, profile->governor) &&
+            tune_path(path, sizeof(path), (string_address)policy, "scaling_governor", ""))
+                profile->written += tune_write(path, profile->governor) >= 0;
+        if (profile->preference && tune_path(path, sizeof(path), (string_address)policy,
+                                             "energy_performance_available_preferences", "") &&
+            tune_lists(path, profile->preference) &&
+            tune_path(path, sizeof(path), (string_address)policy,
+                      "energy_performance_preference", ""))
+                profile->written += tune_write(path, profile->preference) >= 0;
+        return true;
+}
+
+/* The governor and preference a profile means, on every processor that has them: how many writes went through. */
 static positive tune_profile_cpus(string_address governor, string_address preference)
 {
-        p8 name[32];
-        positive written = 0;
+        tune_profile profile = {governor, preference, 0};
 
-        for (positive at = 0; tune_entry(TUNE_SYS_CPU, at, name, sizeof(name)); at++)
-        {
-                p8 path[160];
-                p8 policy[160];
-
-                if (name[0] != 'c' || name[1] != 'p' || name[2] != 'u' || !byte_is_digit(name[3]))
-                        continue;
-                if (!tune_path(policy, sizeof(policy), TUNE_SYS_CPU "/", (string_address)name, "/cpufreq/"))
-                        continue;
-                if (governor && tune_path(path, sizeof(path), (string_address)policy,
-                                          "scaling_available_governors", "") &&
-                    tune_lists(path, governor) &&
-                    tune_path(path, sizeof(path), (string_address)policy, "scaling_governor", ""))
-                        written += tune_write(path, governor) >= 0;
-                if (preference && tune_path(path, sizeof(path), (string_address)policy,
-                                            "energy_performance_available_preferences", "") &&
-                    tune_lists(path, preference) &&
-                    tune_path(path, sizeof(path), (string_address)policy,
-                              "energy_performance_preference", ""))
-                        written += tune_write(path, preference) >= 0;
-        }
-        return written;
+        host_each_entry(TUNE_SYS_CPU, tune_profile_visit, address_of profile);
+        return profile.written;
 }
 
 /* Apply one of performance, balanced and powersave; false when the machine has no way to. */
@@ -8984,6 +8965,19 @@ static bipolar tune_cpu_smt(bool on)
         return tune_write(TUNE_SYS_CPU "/smt/control", on ? "on" : "off");
 }
 
+/* A processor with no switch to read is online: cpu0 has none. */
+static bool tune_online_visit(string_address directory, string_address name, address_any context)
+{
+        p8 path[160];
+        p8 word[4];
+
+        if (tune_is_cpu(name))
+                *(positive address_to)context += !tune_path(path, sizeof(path), directory, "/", name) ||
+                                                 string_append_bounded(path, "/online", sizeof(path)) >= sizeof(path) ||
+                                                 !tune_word(path, word, sizeof(word)) || word[0] == '1';
+        return true;
+}
+
 /* moonwater cpu [boost|smt on|off] [online|offline N] */
 static b32 tune_cpu(string_address address_to arguments, positive count)
 {
@@ -8992,8 +8986,6 @@ static b32 tune_cpu(string_address address_to arguments, positive count)
                 p8 smt[24];
                 p8 boost[8];
                 positive online = 0;
-                positive at = 0;
-                p8 name[32];
 
                 boost[0] = smt[0] = end;
                 if (tune_exists(TUNE_SYS_CPU "/cpufreq/boost"))
@@ -9004,16 +8996,7 @@ static b32 tune_cpu(string_address address_to arguments, positive count)
                         boost[0] = boost[0] == '0' ? '1' : '0';
                 }
                 (void)tune_word(TUNE_SYS_CPU "/smt/control", smt, sizeof(smt));
-                while (tune_entry(TUNE_SYS_CPU, at++, name, sizeof(name)))
-                        if (name[0] == 'c' && name[1] == 'p' && name[2] == 'u' && byte_is_digit(name[3]))
-                        {
-                                p8 path[160];
-                                p8 word[4];
-
-                                online += !tune_path(path, sizeof(path), TUNE_SYS_CPU "/", (string_address)name,
-                                                     "/online") ||
-                                          !tune_word(path, word, sizeof(word)) || word[0] == '1';
-                        }
+                host_each_entry(TUNE_SYS_CPU, tune_online_visit, address_of online);
                 string_format(log, host_label "cpu: %p online", online);
                 if (boost[0])
                         string_format(log, "; boost %s", boost[0] == '1' ? "on" : "off");
@@ -9105,81 +9088,103 @@ static bool tune_usb_keyboard(string_address bus, string_address name)
         return false;
 }
 
-static fn tune_wake_arm(string_address bus, bool usb)
+/* What is armed to wake the machine: a PS/2 port, or a USB device with a boot keyboard on it. */
+static bool tune_wake_visit(string_address directory, string_address name, address_any context)
 {
-        p8 name[64];
+        p8 path[192];
+        p8 word[16];
 
-        for (positive at = 0; tune_entry(bus, at, name, sizeof(name)); at++)
-        {
-                p8 path[192];
-                p8 word[16];
-
-                //      An interface's own name, 1-2:1.0, has no wakeup file.
-                if (usb && (string_first_of((string_address)name, ':') ||
-                            !tune_usb_keyboard(bus, (string_address)name)))
-                        continue;
-                if (!tune_path(path, sizeof(path), bus, "/", (string_address)name) ||
-                    string_append_bounded(path, "/power/wakeup", sizeof(path)) >= sizeof(path))
-                        continue;
-                if (tune_word(path, word, sizeof(word)) && string_equals((string_address)word, "disabled") &&
-                    tune_write(path, "enabled") >= 0)
-                        host_say(log, host_label "wakes on %s\n", (string_address)name);
-        }
+        //      An interface's own name, 1-2:1.0, has no wakeup file.
+        if (*(bool address_to)context && (string_first_of(name, ':') || !tune_usb_keyboard(directory, name)))
+                return true;
+        if (!tune_path(path, sizeof(path), directory, "/", name) ||
+            string_append_bounded(path, "/power/wakeup", sizeof(path)) >= sizeof(path))
+                return true;
+        if (tune_word(path, word, sizeof(word)) && string_equals((string_address)word, "disabled") &&
+            tune_write(path, "enabled") >= 0)
+                host_say(log, host_label "wakes on %s\n", name);
+        return true;
 }
 
-#define TUNE_WAKE_MOST 64
+static fn tune_wake_arm(string_address bus, bool usb)
+{
+        host_each_entry(bus, tune_wake_visit, address_of usb);
+}
+
+#define TUNE_WAKE_MOST 128
 #define TUNE_WAKE_CLASS "/sys/class/wakeup"
 
-/* The event count of every wakeup source, in directory order. */
-static positive tune_wake_counts(positive address_to counts)
+typedef struct
 {
         p8 name[48];
-        positive n = 0;
+        positive count;
+} tune_source;
 
-        for (positive at = 0; n < TUNE_WAKE_MOST && tune_entry(TUNE_WAKE_CLASS, at, name, sizeof(name)); at++)
-        {
-                p8 path[160];
-                positive value = 0;
+typedef struct
+{
+        tune_source source[TUNE_WAKE_MOST];
+        positive kept;
+        positive seen;
+} tune_sources;
 
-                if (tune_path(path, sizeof(path), TUNE_WAKE_CLASS "/", (string_address)name, "/event_count") &&
-                    tune_number(path, address_of value))
-                        counts[n] = value;
-                else
-                        counts[n] = 0;
-                n++;
-        }
-        return n;
+static bool tune_source_visit(string_address directory, string_address name, address_any context)
+{
+        tune_sources address_to sources = (tune_sources address_to)context;
+        tune_source address_to source = sources->source + sources->kept;
+        p8 path[160];
+
+        sources->seen++;
+        if (sources->kept == TUNE_WAKE_MOST || string_length(name) >= sizeof(source->name))
+                return true;
+        string_copy(source->name, name);
+        if (!radio_sys_path(path, sizeof(path), directory, name, "/event_count") ||
+            !tune_number(path, address_of source->count))
+                source->count = 0;
+        sources->kept++;
+        return true;
+}
+
+/* The event count of every wakeup source there is, by name. */
+static fn tune_wake_counts(tune_sources address_to sources)
+{
+        sources->kept = sources->seen = 0;
+        host_each_entry(TUNE_WAKE_CLASS, tune_source_visit, sources);
 }
 
 #define TUNE_LOG_LINES 60
 #define TUNE_LOG_WIDTH 160
 #define TUNE_LOG_ROOM (TUNE_LOG_LINES * TUNE_LOG_WIDTH + 512)
 
-/* The wakeup sources that fired since the counts were taken, said and put first in text for /root/sleep.log. */
-static fn tune_wake_report(positive address_to before, positive n, p8 address_to text)
+/* The wakeup sources that fired since the counts were taken, said and put first in text for /root/sleep.log. A source is the one of its name: one that came or went while the machine slept is not matched with whatever stood where it did in the directory. */
+static fn tune_wake_report(tune_sources address_to before, p8 address_to text)
 {
-        p8 name[48];
-        positive after[TUNE_WAKE_MOST];
-        positive seen = tune_wake_counts(after);
+        tune_sources after;
         bool any = false;
 
+        tune_wake_counts(address_of after);
         string_copy_bounded(text, "woken by:", TUNE_LOG_ROOM);
-        for (positive at = 0; at < n && at < seen && tune_entry(TUNE_WAKE_CLASS, at, name, sizeof(name)); at++)
+        for (positive at = 0; at < after.kept; at++)
         {
                 p8 path[160];
                 p8 label[48];
+                positive was = 0;
 
-                if (after[at] == before[at])
+                for (positive then = 0; then < before->kept; then++)
+                        if (string_equals(before->source[then].name, after.source[at].name))
+                                was = before->source[then].count;
+                if (after.source[at].count == was)
                         continue;
-                if (!tune_path(path, sizeof(path), TUNE_WAKE_CLASS "/", (string_address)name, "/name") ||
+                if (!radio_sys_path(path, sizeof(path), TUNE_WAKE_CLASS, after.source[at].name, "/name") ||
                     !tune_word(path, label, sizeof(label)))
-                        string_copy_bounded(label, name, sizeof(label));
+                        string_copy_bounded(label, after.source[at].name, sizeof(label));
                 string_append_bounded(text, " ", TUNE_LOG_ROOM);
                 string_append_bounded(text, (string_address)label, TUNE_LOG_ROOM);
                 any = true;
         }
         if (!any)
                 string_append_bounded(text, " nothing the kernel counted", TUNE_LOG_ROOM);
+        if (after.seen > after.kept || before->seen > before->kept)
+                string_append_bounded(text, " (some sources past the room were not counted)", TUNE_LOG_ROOM);
         host_say(log, host_label "%s\n", (string_address)text);
         string_append_bounded(text, "\n", TUNE_LOG_ROOM);
 }
@@ -9283,23 +9288,39 @@ static fn tune_sleep_stats(p8 address_to text)
 #define TUNE_BACKLIGHTS 4
 #define TUNE_NO_LEVEL ((positive)-1)
 
-/* Each backlight's level, in directory order, before the machine sleeps. */
-static positive tune_backlight_save(positive address_to levels)
+typedef struct
 {
         p8 name[64];
-        positive n = 0;
+        positive level;
+} tune_light;
 
-        for (positive at = 0; n < TUNE_BACKLIGHTS && tune_entry(TUNE_SYS_BACKLIGHT, at, name, sizeof(name)); at++)
-        {
-                p8 path[160];
-                positive level = TUNE_NO_LEVEL;
+typedef struct
+{
+        tune_light light[TUNE_BACKLIGHTS];
+        positive kept;
+} tune_lights;
 
-                if (!tune_path(path, sizeof(path), TUNE_SYS_BACKLIGHT "/", (string_address)name, "/brightness") ||
-                    !tune_number(path, address_of level))
-                        level = TUNE_NO_LEVEL;
-                levels[n++] = level;
-        }
-        return n;
+static bool tune_light_visit(string_address directory, string_address name, address_any context)
+{
+        tune_lights address_to lights = (tune_lights address_to)context;
+        tune_light address_to light = lights->light + lights->kept;
+        p8 path[160];
+
+        if (lights->kept == TUNE_BACKLIGHTS || string_length(name) >= sizeof(light->name))
+                return true;
+        string_copy(light->name, name);
+        if (!radio_sys_path(path, sizeof(path), directory, name, "/brightness") ||
+            !tune_number(path, address_of light->level))
+                light->level = TUNE_NO_LEVEL;
+        lights->kept++;
+        return true;
+}
+
+/* Each backlight's level, by name, before the machine sleeps. */
+static fn tune_backlight_save(tune_lights address_to lights)
+{
+        lights->kept = 0;
+        host_each_entry(TUNE_SYS_BACKLIGHT, tune_light_visit, lights);
 }
 
 /*
@@ -9308,39 +9329,37 @@ static positive tune_backlight_save(positive address_to levels)
         backlight off or at nought (bl_power still blanked, or a level the
         firmware picked) is a screen that is on and dark. The level is written
         back whatever the file says: it is what the class device last stored,
-        and after a wake the panel may not be doing it.
+        and after a wake the panel may not be doing it. Each by its name, so a
+        panel that came or went while the machine slept is not given another's.
 */
-static fn tune_backlight_restore(positive address_to levels, positive n)
+static fn tune_backlight_restore(tune_lights address_to lights)
 {
-        p8 name[64];
-
-        for (positive at = 0; at < n && tune_entry(TUNE_SYS_BACKLIGHT, at, name, sizeof(name)); at++)
+        for (positive at = 0; at < lights->kept; at++)
         {
+                string_address name = (string_address)lights->light[at].name;
                 p8 path[160];
                 positive blank = 0;
 
-                if (tune_path(path, sizeof(path), TUNE_SYS_BACKLIGHT "/", (string_address)name, "/bl_power") &&
+                if (radio_sys_path(path, sizeof(path), TUNE_SYS_BACKLIGHT, name, "/bl_power") &&
                     tune_number(path, address_of blank) && blank &&
                     tune_write(path, "0") >= 0)
-                        host_say(log, host_label "backlight %s was blanked, unblanked\n", (string_address)name);
-                if (levels[at] == TUNE_NO_LEVEL ||
-                    !tune_path(path, sizeof(path), TUNE_SYS_BACKLIGHT "/", (string_address)name, "/brightness"))
+                        host_say(log, host_label "backlight %s was blanked, unblanked\n", name);
+                if (lights->light[at].level == TUNE_NO_LEVEL ||
+                    !radio_sys_path(path, sizeof(path), TUNE_SYS_BACKLIGHT, name, "/brightness"))
                         continue;
                 //      Written even when the file already says so: it is the value
                 //      the class device last stored, not what the panel is doing.
-                if (tune_write_number(path, levels[at]) >= 0)
-                        host_say(log, host_label "backlight %s set to %p\n", (string_address)name, levels[at]);
+                if (tune_write_number(path, lights->light[at].level) >= 0)
+                        host_say(log, host_label "backlight %s set to %p\n", name, lights->light[at].level);
         }
 }
 
 /* moonwater sleep and moonwater hibernate: the kernel's own suspend and hibernate. */
 static b32 tune_suspend(string_address verb, string_address state)
 {
-        positive before[TUNE_WAKE_MOST];
-        positive levels[TUNE_BACKLIGHTS];
+        tune_sources sources;
+        tune_lights lights;
         p8 text[TUNE_LOG_ROOM];
-        positive lights;
-        positive sources;
 
         if (!tune_lists(TUNE_SYS_POWER "/state", state))
                 return host_refuse(string_equals(state, "mem")
@@ -9360,8 +9379,8 @@ static b32 tune_suspend(string_address verb, string_address state)
                 if (tune_word(TUNE_SYS_POWER "/mem_sleep", mode, sizeof(mode)))
                         host_say(log, host_label "sleeping, mem_sleep %s\n", (string_address)mode);
         }
-        sources = tune_wake_counts(before);
-        lights = tune_backlight_save(levels);
+        tune_wake_counts(address_of sources);
+        tune_backlight_save(address_of lights);
         system_call(syscall(sync));
         {
                 bipolar failed = tune_write(TUNE_SYS_POWER "/state", state);
@@ -9377,13 +9396,13 @@ static b32 tune_suspend(string_address verb, string_address state)
                 }
         }
         //      Reached again once the machine has woken.
-        tune_wake_report(before, sources, text);
+        tune_wake_report(address_of sources, text);
         host_say(log, host_label "awake again\n");
         //      What a sleep can leave behind: the panel's level, the link (the
         //      watcher is asked to look again, since a carrier that came back
         //      before it was listening is news it never heard), and the
         //      settings the machine put in place at boot.
-        tune_backlight_restore(levels, lights);
+        tune_backlight_restore(address_of lights);
         radio_net_wake();
         tune_restore();
         tune_sleep_stats(text);

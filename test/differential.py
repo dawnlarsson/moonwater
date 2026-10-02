@@ -42025,6 +42025,42 @@ def harness_moonwater_cli(argv):
               "a cpu that is too long a number, cpu 0 and a cpu that is not there are each said so",
               repr(seen))
 
+        # What a sleep reports and puts back is by name. The wakeup sources and
+        # the backlights were paired with what they were before by their place
+        # in the directory, so a source that went while the machine slept
+        # moved every one after it a place, and each was reported as having
+        # woken the machine; a panel that went had its level written onto the
+        # next. A hundred sources are counted (sixty-four were), one goes,
+        # one counts an event, and one of two panels goes. The sandbox's
+        # power/state is a FIFO read once as the list of what it offers, and
+        # the change is made before a reader lets the write of "mem" through.
+        sys_reset()
+        shutil.rmtree(fake / "class/backlight")
+        for name, level in (("panel_a", 30), ("panel_b", 60)):
+            sys_file(f"class/backlight/{name}/brightness", f"{level}\n")
+            sys_file(f"class/backlight/{name}/max_brightness", "100\n")
+        got, done = session(
+            "rm -f /root/tune /sys/power/state; mkfifo /sys/power/state\n"
+            "for i in $(seq 100 199); do d=/sys/class/wakeup/wk$i; mkdir -p $d; "
+            "echo label-wk$i > $d/name; echo $((i * 3)) > $d/event_count; done\n"
+            "( echo 'freeze mem disk' > /sys/power/state ) &\n"
+            "( sleep 3; first=$(ls -U /sys/class/wakeup | head -1); last=$(ls -U /sys/class/wakeup | tail -1)\n"
+            "  rm -r /sys/class/wakeup/$first; echo 7 > /sys/class/wakeup/$last/event_count\n"
+            "  echo \"$first $last\" > /tmp/moved; light=$(ls -U /sys/class/backlight | head -1)\n"
+            "  rm -r /sys/class/backlight/$light; echo $light > /tmp/light; cat /sys/power/state > /dev/null ) &\n"
+            "timeout 30 /tmp/moonwater sleep 2>&1 | grep 'woken by'; wait\n"
+            "echo \"@@ moved $(cat /tmp/moved)\"; echo \"@@ light $(cat /tmp/light)\"\n")
+        joined = "\n".join(got)
+        moved = [line.split()[2:] for line in got if line.startswith("@@ moved ")]
+        light = [line.split()[2] for line in got if line.startswith("@@ light ")]
+        woken = [line for line in got if "woken by" in line]
+        check(done and moved and woken and woken[0].endswith("woken by: label-" + moved[0][1]),
+              "only the source that counted an event woke the machine", (woken, moved))
+        survivor = "panel_b" if light and light[0] == "panel_a" else "panel_a"
+        check(light and sys_read(f"class/backlight/{survivor}/brightness") ==
+              ("60" if survivor == "panel_b" else "30"),
+              "a panel keeps its own level when another went while the machine slept", (light, joined[-200:]))
+
         # The saved lists survive a write cut short. RLIMIT_FSIZE 0 makes
         # every write fail and kills the writer with SIGXFSZ, the way a
         # crash part way through would: a list written in place was truncated
