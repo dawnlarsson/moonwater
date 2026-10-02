@@ -515,7 +515,7 @@ static COLD fn exec_bash_command_from(parse_node address_to node)
                         used = exec_bash_command_add(
                             used, (string_address) "in ", 3);
                 used = exec_bash_command_add(used, parse_words[word],
-                                             parse_word_lengths[word]);
+                                             parse_word_rows[word].length);
                 if (node->kind == NODE_CASE)
                         break;
         }
@@ -1204,7 +1204,7 @@ static positive job_text_node(p8 address_to address_to into,
 
                         used = job_text_add(into, room, used,
                                             parse_words[word],
-                                            parse_word_lengths[word]);
+                                            parse_word_rows[word].length);
                 }
 
                 return used;
@@ -1295,7 +1295,7 @@ static positive job_text_node(p8 address_to address_to into,
                 {
                         used = job_text_add(into, room, used,
                                             parse_words[parse_nodes[node].word],
-                                            parse_word_lengths[parse_nodes[node].word]);
+                                            parse_word_rows[parse_nodes[node].word].length);
                         used = job_text_add(into, room, used, (string_address) " ", 1);
                 }
                 return job_text_node(into, room, used, parse_nodes[node].left,
@@ -7933,7 +7933,7 @@ static bool exec_function_text_words(exec_function_text address_to made,
                 if (at != first)
                         exec_function_text_literal(made, " ");
                 exec_function_text_add(made, parse_words[word],
-                                       parse_word_lengths[word]);
+                                       parse_word_rows[word].length);
         }
 
         return !made->failed;
@@ -8083,7 +8083,7 @@ static bool exec_function_text_node(exec_function_text address_to made,
                         if (node->word_count)
                                 exec_function_text_add(
                                     made, parse_words[word],
-                                    parse_word_lengths[word]);
+                                    parse_word_rows[word].length);
                         if (node->flags)
                         {
                                 exec_function_text_literal(made, " in");
@@ -8113,7 +8113,7 @@ static bool exec_function_text_node(exec_function_text address_to made,
                                 if (at)
                                         exec_function_text_literal(made, "|");
                                 exec_function_text_add(made, parse_words[word],
-                                                       parse_word_lengths[word]);
+                                                       parse_word_rows[word].length);
                         }
                         exec_function_text_literal(made, ") ");
                         if (!exec_function_text_node(made, item->right,
@@ -8582,7 +8582,7 @@ static bool exec_function_import_one(string_address entry)
                                 b32 word = function->word;
 
                                 if (function->word_count != 1 ||
-                                    parse_word_lengths[word] != name_length ||
+                                    parse_word_rows[word].length != name_length ||
                                     memory_compare(
                                         parse_words[word],
                                         entry + sizeof(prefix) - 1,
@@ -9824,7 +9824,7 @@ static fn exec_trace_for_header(parse_node address_to node, bool selecting)
                   selecting ? 7 : 4);
         if (node->word_count)
                 log_error(parse_words[node->word],
-                          parse_word_lengths[node->word]);
+                          parse_word_rows[node->word].length);
         if (node->flags)
         {
                 log_error((string_address) " in", 3);
@@ -9832,7 +9832,7 @@ static fn exec_trace_for_header(parse_node address_to node, bool selecting)
                 {
                         log_error((string_address) " ", 1);
                         log_error(parse_words[node->word + at],
-                                  parse_word_lengths[node->word + at]);
+                                  parse_word_rows[node->word + at].length);
                 }
         }
         else
@@ -9849,7 +9849,7 @@ static fn exec_trace_case_header(parse_node address_to node)
         log_error((string_address) "case ", 5);
         if (node->word_count)
                 log_error(parse_words[node->word],
-                          parse_word_lengths[node->word]);
+                          parse_word_rows[node->word].length);
         log_error((string_address) " in", 3);
         log_error((string_address) "\n", 1);
 }
@@ -10982,7 +10982,7 @@ static bool exec_declaration_name(b32 word)
             "export", "readonly", "local", "declare", "typeset",
         };
 
-        if (!(parse_word_flags[word] & PARSE_WORD_LITERAL))
+        if (!(parse_word_rows[word].flags & PARSE_WORD_LITERAL))
                 return false;
 
         return string_table_find(parse_words[word], names, sizeof(names[0]),
@@ -11008,7 +11008,7 @@ static bool exec_declaration_compound(string_address word)
                 if (at == parse_word_used)
                         at = parse_word_top;
                 if (at < PARSE_WORDS && parse_words[at] == word)
-                        return (parse_word_flags[at] & PARSE_WORD_COMPOUND) != 0;
+                        return (parse_word_rows[at].flags & PARSE_WORD_COMPOUND) != 0;
         }
         return false;
 }
@@ -11043,7 +11043,7 @@ static PURE b32 exec_declaration_from(parse_node address_to node)
         b32 stop = at + node->word_count;
 
         while (at < stop &&
-               (parse_word_flags[at] & PARSE_WORD_ASSIGNMENT))
+               (parse_word_rows[at].flags & PARSE_WORD_ASSIGNMENT))
                 at++;
 
         while (at < stop)
@@ -11051,7 +11051,7 @@ static PURE b32 exec_declaration_from(parse_node address_to node)
                 if (exec_declaration_name(at))
                         return at + 1;
 
-                if (!(parse_word_flags[at] & PARSE_WORD_LITERAL) ||
+                if (!(parse_word_rows[at].flags & PARSE_WORD_LITERAL) ||
                     !word_is(parse_words[at], "command"))
                         return stop;
 
@@ -11064,7 +11064,7 @@ static PURE b32 exec_declaration_from(parse_node address_to node)
                 {
                         string_address option;
 
-                        if (!(parse_word_flags[at] & PARSE_WORD_LITERAL))
+                        if (!(parse_word_rows[at].flags & PARSE_WORD_LITERAL))
                                 return stop;
 
                         option = parse_words[at];
@@ -11375,7 +11375,7 @@ static HOT b32 exec_dispatch(b32 command_word)
 
         shell_command_name_stable =
             parse_words[command_word] == name &&
-            (parse_word_flags[command_word] & PARSE_WORD_LITERAL);
+            (parse_word_rows[command_word].flags & PARSE_WORD_LITERAL);
 
         if (shell_command_name_stable)
         {
@@ -11383,13 +11383,13 @@ static HOT b32 exec_dispatch(b32 command_word)
                    literal word's otherwise-unused assignment-name hash slot
                    can cache the complete command hash for every later pass
                    through a kept loop tree. */
-                named.x = parse_word_name_hashes[command_word];
-                named.y = parse_word_lengths[command_word];
+                named.x = parse_word_rows[command_word].name_hash;
+                named.y = parse_word_rows[command_word].length;
 
                 if (!named.x)
                 {
                         named.x = memory_hash_33(name, named.y);
-                        parse_word_name_hashes[command_word] = named.x;
+                        parse_word_rows[command_word].name_hash = named.x;
                 }
 
                 shell_command_name_address = name;
@@ -11725,7 +11725,7 @@ static COLD b32 address_to exec_keyword_order(parse_node address_to node,
         b32 address_to order;
 
         for (b32 at = 0; at < node->word_count; at++)
-                assignments += (parse_word_flags[node->word + at] &
+                assignments += (parse_word_rows[node->word + at].flags &
                                   PARSE_WORD_ASSIGNMENT) != 0;
         if (assignments == *leading)
                 return null;
@@ -11743,7 +11743,7 @@ static COLD b32 address_to exec_keyword_order(parse_node address_to node,
         for (b32 at = 0; at < node->word_count; at++)
         {
                 b32 word = node->word + at;
-                order[(parse_word_flags[word] & PARSE_WORD_ASSIGNMENT)
+                order[(parse_word_rows[word].flags & PARSE_WORD_ASSIGNMENT)
                           ? next_assignment++ : next_argument++] = word;
         }
         *leading = assignments;
@@ -11821,15 +11821,15 @@ static HOT b32 exec_simple(b32 index)
                 b32 at = 0;
 
                 while (at < words &&
-                       (parse_word_flags[node->word + at] & PARSE_WORD_ASSIGNMENT))
+                       (parse_word_rows[node->word + at].flags & PARSE_WORD_ASSIGNMENT))
                         at++;
                 if (words && at == words)
                         for (at = 0; at < words; at++)
-                                if (parse_word_flags[node->word + at] &
+                                if (parse_word_rows[node->word + at].flags &
                                     PARSE_WORD_NEWLINE)
                                         exec_line += (b32)memory_count(
                                             parse_words[node->word + at],
-                                            parse_word_lengths[node->word + at],
+                                            parse_word_rows[node->word + at].length,
                                             '\n');
         }
         exec_wait_node = index;
@@ -11844,7 +11844,7 @@ static HOT b32 exec_simple(b32 index)
            reserved argv prefix is filled afterwards; provisional assignments
            still run left to right so `a=one b=$a` sees the preceding value. */
         while (leading < node->word_count &&
-               (parse_word_flags[node->word + leading] &
+               (parse_word_rows[node->word + leading].flags &
                 PARSE_WORD_ASSIGNMENT))
         {
                 /*
@@ -11858,7 +11858,7 @@ static HOT b32 exec_simple(b32 index)
                 */
                 if (!shell_bash_compat &&
                     parse_words[node->word + leading][
-                        parse_word_name_lengths[node->word + leading] - 1] == ']')
+                        parse_word_rows[node->word + leading].name_length - 1] == ']')
                         break;
 
                 leading++;
@@ -11885,7 +11885,7 @@ static HOT b32 exec_simple(b32 index)
                 b32 step = 0;
 
                 while (step < words &&
-                       (parse_word_flags[word + step] & PARSE_WORD_LITERAL))
+                       (parse_word_rows[word + step].flags & PARSE_WORD_LITERAL))
                         step++;
 
                 if (step == words)
@@ -11927,7 +11927,7 @@ static HOT b32 exec_simple(b32 index)
         {
                 b32 word_index = EXEC_WORD(at);
                 string_address word = parse_words[word_index];
-                p8 word_flags = parse_word_flags[word_index];
+                p8 word_flags = parse_word_rows[word_index].flags;
                 bool literal = word_flags & PARSE_WORD_LITERAL;
                 bool assignment = word_flags & PARSE_WORD_ASSIGNMENT;
 
@@ -11948,7 +11948,7 @@ static HOT b32 exec_simple(b32 index)
                                 : word_index >= declaration_from)
                         {
                                 positive value_at =
-                                    parse_word_name_lengths[word_index] + 1 +
+                                    parse_word_rows[word_index].name_length + 1 +
                                     ((word_flags & PARSE_WORD_APPEND) != 0);
 
                                 if (!shell_words_add(
@@ -12025,10 +12025,10 @@ static HOT b32 exec_simple(b32 index)
         for (at = 0; at < leading && !exec_line_aborted(); at++)
         {
                 b32 word_index = EXEC_WORD(at);
-                p8 flags = parse_word_flags[word_index];
+                p8 flags = parse_word_rows[word_index].flags;
                 string_address word = parse_words[word_index];
                 if (!assignments_only &&
-                    word[parse_word_name_lengths[word_index] - 1] == ']')
+                    word[parse_word_rows[word_index].name_length - 1] == ']')
                 {
                         shell_argv[at] = word;
                         /*
@@ -12047,7 +12047,7 @@ static HOT b32 exec_simple(b32 index)
                                 whoever is holding the shell domain.
                         */
                         {
-                                positive named = parse_word_name_lengths[word_index];
+                                positive named = parse_word_rows[word_index].name_length;
                                 p8 shown[FILE_NAME_MAX];
                                 positive kept = min(named, (positive)FILE_NAME_MAX - 1);
 
@@ -12061,7 +12061,7 @@ static HOT b32 exec_simple(b32 index)
                 }
                 positive substitution_generation =
                     shell_substitution_generation;
-                positive value_at = parse_word_name_lengths[word_index] + 1 +
+                positive value_at = parse_word_rows[word_index].name_length + 1 +
                                       ((flags & PARSE_WORD_APPEND) != 0);
                 bool held_commit = expand_assignment_commit;
                 string_address trial;
@@ -12099,19 +12099,19 @@ static HOT b32 exec_simple(b32 index)
                    takes it too. */
                 if (trial && assignments_only && leading == 1 &&
                     !(flags & PARSE_WORD_COMPOUND) &&
-                    trial[parse_word_name_lengths[word_index] - 1] != ']')
+                    trial[parse_word_rows[word_index].name_length - 1] != ']')
                 {
                         exec_kept_value plain = {0};
 
                         env_saved_state(address_of plain.binding, trial,
-                                        parse_word_name_lengths[word_index]);
+                                        parse_word_rows[word_index].name_length);
                         if (!(plain.binding.variable.attributes &
                               SHELL_ARRAY_NAMEREF))
                         {
                                 shell_argv[at] = trial;
                                 if (!exec_assign_value(
-                                        trial, parse_word_name_lengths[word_index],
-                                        parse_word_name_hashes[word_index],
+                                        trial, parse_word_rows[word_index].name_length,
+                                        parse_word_rows[word_index].name_hash,
                                         (flags & PARSE_WORD_APPEND) != 0, false,
                                         address_of plain,
                                         exec_assignment_error_status(true, null)))
@@ -12124,7 +12124,7 @@ static HOT b32 exec_simple(b32 index)
                 }
                 if (!trial ||
                     !exec_keep_value(expanded_kept + expanded_count, trial,
-                        parse_word_name_lengths[word_index], assignments_only ? EXEC_KEEP_TARGET : EXEC_KEEP_PREFIX))
+                        parse_word_rows[word_index].name_length, assignments_only ? EXEC_KEEP_TARGET : EXEC_KEEP_PREFIX))
                 {
                         status = exec_line_aborted() ? shell_status : 2;
                         goto fail;
@@ -12135,10 +12135,10 @@ static HOT b32 exec_simple(b32 index)
                 b32 error = exec_assignment_error_status(assignments_only,
                     assignments_only ? null : shell_argv[first]);
                 bool accepted = !assignments_only && !saved->key
-                    ? exec_prefix_assign(saved, &trial, parse_word_name_lengths[word_index],
+                    ? exec_prefix_assign(saved, &trial, parse_word_rows[word_index].name_length,
                         trial + value_at, (flags & PARSE_WORD_APPEND) != 0, false, error)
-                    : exec_assign_value(trial, parse_word_name_lengths[word_index],
-                        parse_word_name_hashes[word_index], (flags & PARSE_WORD_APPEND) != 0,
+                    : exec_assign_value(trial, parse_word_rows[word_index].name_length,
+                        parse_word_rows[word_index].name_hash, (flags & PARSE_WORD_APPEND) != 0,
                         (flags & PARSE_WORD_COMPOUND) != 0, saved, error);
                 if (!accepted)
                 {
@@ -14359,7 +14359,7 @@ static COLD fn exec_pretty_words(exec_function_text address_to made,
                 if (at != first)
                         exec_pretty_add(made, between);
                 exec_pretty_word(made, parse_words[word],
-                                 parse_word_lengths[word]);
+                                 parse_word_rows[word].length);
         }
 }
 
@@ -14548,7 +14548,7 @@ static COLD fn exec_pretty_arithmetic_for(exec_function_text address_to made,
                                      b32 index)
 {
         string_address whole = parse_words[parse_nodes[index].word];
-        positive length = parse_word_lengths[parse_nodes[index].word];
+        positive length = parse_word_rows[parse_nodes[index].word].length;
         string_address at = whole + 2;
         string_address stop = whole + length - 2;
 
@@ -14816,7 +14816,7 @@ static COLD bool exec_pretty_body(exec_function_text address_to made, b32 index)
                                                   ? "select " : "for ");
                         if (node->word_count)
                                 exec_pretty_word(made, parse_words[node->word],
-                                                 parse_word_lengths[node->word]);
+                                                 parse_word_rows[node->word].length);
                         exec_function_text_literal(made, " in ");
                         if (node->flags)
                                 exec_pretty_words(made, node, 1, " ");
@@ -14873,7 +14873,7 @@ static COLD bool exec_pretty_body(exec_function_text address_to made, b32 index)
         case NODE_FUNCTION:
                 return exec_pretty_function(made, node->right,
                                             parse_words[node->word],
-                                            parse_word_lengths[node->word],
+                                            parse_word_rows[node->word].length,
                                             true) &&
                        exec_pretty_closed(made, node);
 
@@ -15175,13 +15175,13 @@ static bool exec_literal_tool(b32 index, string_address address_to name,
                 return false;
 
         while (at < node->word_count &&
-               (parse_word_flags[node->word + at] & PARSE_WORD_ASSIGNMENT))
+               (parse_word_rows[node->word + at].flags & PARSE_WORD_ASSIGNMENT))
                 at++;
         if (at >= node->word_count)
                 return false;
 
         word = node->word + at;
-        if (!(parse_word_flags[word] & PARSE_WORD_LITERAL) ||
+        if (!(parse_word_rows[word].flags & PARSE_WORD_LITERAL) ||
             string_first_of(parse_words[word], '/'))
                 return false;
 
@@ -15362,8 +15362,8 @@ static bipolar exec_stage_spawn(b32 index, b32 input, b32 output)
                 b32 word = node->word + at;
                 string_address text = parse_words[word];
 
-                if (!(parse_word_flags[word] & PARSE_WORD_LITERAL) ||
-                    (parse_word_flags[word] & PARSE_WORD_ASSIGNMENT))
+                if (!(parse_word_rows[word].flags & PARSE_WORD_LITERAL) ||
+                    (parse_word_rows[word].flags & PARSE_WORD_ASSIGNMENT))
                         return -1;
 
                 words[at] = text;
@@ -15772,8 +15772,8 @@ static PURE bool exec_pipe_lastpipes(b32 index)
         if (!node->word_count)
                 return true;
 
-        if (!(parse_word_flags[node->word] & PARSE_WORD_LITERAL) ||
-            (parse_word_flags[node->word] & PARSE_WORD_ASSIGNMENT))
+        if (!(parse_word_rows[node->word].flags & PARSE_WORD_LITERAL) ||
+            (parse_word_rows[node->word].flags & PARSE_WORD_ASSIGNMENT))
                 return true;
 
         name = parse_words[node->word];
@@ -16863,7 +16863,7 @@ static b32 exec_node_kind(b32 index)
 
                 while (!expand_scratch && word_at < word_stop)
                 {
-                        if (!(parse_word_flags[word_at] & PARSE_WORD_LITERAL))
+                        if (!(parse_word_rows[word_at].flags & PARSE_WORD_LITERAL))
                                 expand_scratch = true;
                         word_at++;
                 }

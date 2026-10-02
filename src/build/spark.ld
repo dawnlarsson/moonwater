@@ -606,6 +606,9 @@ SECTIONS
                   .bss.program_vdso_clock .bss.program_entry_identity .bss.program_words
                   .bss.cpu_has_* .bss.cpu_hash_probed
                   .bss.program_words_count .bss.log_writer_buffer)
+                /* The pool tables and store blocks are carved from (lib.c), after
+                   the statics so that its first page is the last of theirs. */
+                *(.bss.memory_pool_block)
                 *(.bss .bss.*)
                 *(.sbss .sbss.*)
                 *(COMMON)

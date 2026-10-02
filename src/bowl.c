@@ -1542,15 +1542,52 @@ static fn bowl_session_prepare_at(string_address home, string_address runtime,
                 if (sockets)
                         bowl_chmod_directory("/tmp/.X11-unix", 01777);
         }
-        if (system_access_at(AT_FDCWD, "/dev/shm", 0) < 0)
-                bowl_mkdir("/dev/shm");
-        if (system_access_at(AT_FDCWD, "/run/lock", 0) < 0)
-                bowl_mkdir("/run/lock");
-        if (system_access_at(AT_FDCWD, "/var", 0) < 0)
-                bowl_mkdir("/var");
-        bowl_dev_link("/run", "/var/run");
-        bowl_dev_link("/run/lock", "/var/lock");
-        bowl_session_identity();
+        /*  The rest is the machine's and not a session's: /dev/shm, /run/lock
+            and /var, the two links and the three identity files are there or
+            not for every shell after the first, until the machine is
+            started again. The first to finish them says so, in a file in the
+            runtime directory this file names for itself (/run/user/<uid>,
+            which is on /run and so is new at every boot, and in a bowl's
+            fresh /run, new at every entry), and the shells after it ask for
+            that one file where they asked nine questions. A runtime
+            directory the environment chose does not carry the mark, since
+            it may be on a disk that outlives the boot and say it is done
+            for a machine that is not; /tmp and its socket directory, which
+            anyone may take away, are asked at every start above. */
+        {
+                p8 stamp[BOWL_PATH_LIMIT];
+                positive length = string_length(runtime);
+                bool marked = false;
+                bool markable = !string_compare_max(runtime, (string_address)bowl_runtime_path,
+                                                    sizeof(bowl_runtime_path)) &&
+                                length + sizeof("/.session") < sizeof(stamp);
+
+                if (markable)
+                {
+                        memory_copy(stamp, runtime, length);
+                        memory_copy(stamp + length, "/.session",
+                                    sizeof("/.session"));
+                        marked = system_access_at(AT_FDCWD, stamp, 0) >= 0;
+                }
+                if (!marked)
+                {
+                        if (system_access_at(AT_FDCWD, "/dev/shm", 0) < 0)
+                                bowl_mkdir("/dev/shm");
+                        if (system_access_at(AT_FDCWD, "/run/lock", 0) < 0)
+                                bowl_mkdir("/run/lock");
+                        if (system_access_at(AT_FDCWD, "/var", 0) < 0)
+                                bowl_mkdir("/var");
+                        bowl_dev_link("/run", "/var/run");
+                        bowl_dev_link("/run/lock", "/var/lock");
+                        bowl_session_identity();
+                        if (markable)
+                        {
+                                bowl_quiet = true;
+                                bowl_write_bytes(stamp, "1\n", 2);
+                                bowl_quiet = false;
+                        }
+                }
+        }
         if (!user_dirs)
                 return;
         if (!home || bowl_path_steps(home) || bowl_session_host_path(home))

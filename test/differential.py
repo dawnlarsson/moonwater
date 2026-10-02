@@ -30007,6 +30007,11 @@ call-frame lifetime are covered separately by harness shell_functions.
                                     (int)(flags & ~(positive)0x4000) | MAP_NORESERVE, (int)handle, (off_t)offset);
         return at == MAP_FAILED ? -12 : (bipolar)at;
     }
+    /* madvise on the reservation: advice, which the checks do not ask about. */
+    static bipolar system_call_3(positive call, positive first, positive second, positive third) {
+        (void)call; (void)first; (void)second; (void)third;
+        return 0;
+    }
     '''
     state=r'''
     static b32 parse_node_used,parse_word_used,parse_redirect_used;
@@ -30023,8 +30028,8 @@ call-frame lifetime are covered separately by harness shell_functions.
         parse_nodes[2]=(parse_node){.kind=1,.word=0,.word_count=count,.redirect=0,.redirect_count=redirected};
         for(int i=0;i<count;i++) {
             snprintf(words[i],sizeof(words[i]),"word-%d-%d",serial,i);
-            parse_words[i]=words[i];parse_word_lengths[i]=strlen(words[i]);
-            parse_word_name_lengths[i]=i;parse_word_name_hashes[i]=serial+i;parse_word_flags[i]=(unsigned char)i;
+            parse_words[i]=words[i];parse_word_rows[i].length=strlen(words[i]);
+            parse_word_rows[i].name_length=i;parse_word_rows[i].name_hash=serial+i;parse_word_rows[i].flags=(unsigned char)i;
         }
         if(redirected) {
             snprintf(here_text,sizeof(here_text),"body-%d",serial);
@@ -30038,8 +30043,8 @@ call-frame lifetime are covered separately by harness shell_functions.
         for(int i=0;i<count;i++) {
             char wanted[128];snprintf(wanted,sizeof(wanted),"word-%d-%d",serial,i);
             int w=node->word+i;
-            CHECK(!strcmp(parse_words[w],wanted));CHECK(parse_word_lengths[w]==strlen(wanted));
-            CHECK(parse_word_name_lengths[w]==(positive)i&&parse_word_name_hashes[w]==(positive)(serial+i)&&parse_word_flags[w]==i);
+            CHECK(!strcmp(parse_words[w],wanted));CHECK(parse_word_rows[w].length==strlen(wanted));
+            CHECK(parse_word_rows[w].name_length==(positive)i&&parse_word_rows[w].name_hash==(positive)(serial+i)&&parse_word_rows[w].flags==(positive)i);
         }
         if(redirected) {
             char wanted[128];snprintf(wanted,sizeof(wanted),"body-%d",serial);
@@ -30052,7 +30057,7 @@ call-frame lifetime are covered separately by harness shell_functions.
         uint64_t h=1469598103934665603ULL;
     #define HASH(x) h=hash_bytes(x,sizeof(x),h)
     #define HASHN(x,n) h=hash_bytes(x,(n)*sizeof((x)[0]),h)
-        HASHN(parse_nodes,PARSE_NODES);HASHN(parse_words,PARSE_WORDS);HASHN(parse_word_lengths,PARSE_WORDS);HASHN(parse_word_name_lengths,PARSE_WORDS);HASHN(parse_word_name_hashes,PARSE_WORDS);HASHN(parse_word_flags,PARSE_WORDS);HASHN(parse_redirects,PARSE_REDIRECTS);HASHN(parse_kept_text,PARSE_KEPT_TEXT);HASHN(parse_kept_bodies,PARSE_NODES);
+        HASHN(parse_nodes,PARSE_NODES);HASHN(parse_words,PARSE_WORDS);HASHN(parse_word_rows,PARSE_WORDS);HASHN(parse_redirects,PARSE_REDIRECTS);HASHN(parse_kept_text,PARSE_KEPT_TEXT);HASHN(parse_kept_bodies,PARSE_NODES);
         for(size_t a=0;a<array_count(parse_kept_arenas);a++)h=hash_bytes(parse_kept_arenas[a].occupied,parse_kept_arenas[a].room,h);
     #undef HASHN
     #undef HASH
@@ -30102,7 +30107,7 @@ call-frame lifetime are covered separately by harness shell_functions.
             CHECK(!n);CHECK(snapshot()==held);check_body(old,1,3,1);
         }
         injected_failure=-1;
-        prepare(3,1,0);parse_word_lengths[0]=UINTPTR_MAX;uint64_t held=snapshot();
+        prepare(3,1,0);parse_word_rows[0].length=UINTPTR_MAX;uint64_t held=snapshot();
         CHECK(!parse_keep(1,old));CHECK(snapshot()==held);check_body(old,1,3,1);
         parse_release(old);empty();
         // Active versions retain their bytes despite later definitions and return in arbitrary order.

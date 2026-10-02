@@ -170,10 +170,19 @@ typedef struct
 
 static parse_node address_to parse_nodes;
 static string_address address_to parse_words;
-static positive address_to parse_word_lengths;
-static positive address_to parse_word_name_lengths;
-static positive address_to parse_word_name_hashes;
-static p8 address_to parse_word_flags;
+/* What a word is besides its text, in one row: a command reads its words'
+   rows together, a parse writes them together, and one array is one page of
+   a start where four arrays were four (each in a window of its own, so each
+   with page tables of its own). The text stays an array of its own because a
+   command's words are handed on as the argument vector. */
+typedef struct
+{
+        positive length;
+        positive name_length;
+        positive name_hash;
+        positive flags;
+} parse_word_row;
+static parse_word_row address_to parse_word_rows;
 static parse_redirect address_to parse_redirects;
 
 #define PARSE_WORD_LITERAL 1
@@ -1708,7 +1717,7 @@ static HOT b32 parse_word_new(string_address text, positive length)
         }
 
         parse_words[parse_word_used] = text;
-        parse_word_lengths[parse_word_used] = length;
+        parse_word_rows[parse_word_used].length = length;
         expand_sets_prepare();
         assignment = parse_word_kind(text, length, address_of name_length);
         flags = assignment & 4 ? PARSE_WORD_LITERAL : 0;
@@ -1734,17 +1743,17 @@ static HOT b32 parse_word_new(string_address text, positive length)
                                 parse_state = PARSE_COMPOUND_SYNTAX;
                 }
 
-                parse_word_name_hashes[parse_word_used] =
+                parse_word_rows[parse_word_used].name_hash =
                     memory_hash_33(text, name_length);
 
                 if (memory_first_of(text, '\n', length))
                         flags |= PARSE_WORD_NEWLINE;
         }
         else
-                parse_word_name_hashes[parse_word_used] = 0;
+                parse_word_rows[parse_word_used].name_hash = 0;
 
-        parse_word_name_lengths[parse_word_used] = name_length;
-        parse_word_flags[parse_word_used] = flags;
+        parse_word_rows[parse_word_used].name_length = name_length;
+        parse_word_rows[parse_word_used].flags = flags;
 
         return parse_word_used++;
 }
@@ -2438,7 +2447,7 @@ static COLD __attribute__((noinline)) bool parse_compound_placed(b32 index)
 
         for (; at < stop; at++)
         {
-                p8 flags = parse_word_flags[at];
+                p8 flags = parse_word_rows[at].flags;
 
                 if (flags & PARSE_WORD_COMPOUND)
                 {
@@ -2504,7 +2513,7 @@ static b32 parse_simple()
 
                 if (!parse_state && parse_word_used)
                 {
-                        p8 flags = parse_word_flags[parse_word_used - 1];
+                        p8 flags = parse_word_rows[parse_word_used - 1].flags;
 
                         commanded |= !(flags & PARSE_WORD_ASSIGNMENT);
                         compound_seen |= (flags & PARSE_WORD_COMPOUND) != 0;
@@ -2710,7 +2719,7 @@ static b32 parse_for(b32 kind)
                         parse_take_word(index);
 
                         if (!parse_state && parse_word_used &&
-                            (parse_word_flags[parse_word_used - 1] &
+                            (parse_word_rows[parse_word_used - 1].flags &
                              PARSE_WORD_COMPOUND))
                         {
                                 parse_fail();
@@ -3686,21 +3695,18 @@ static bool parse_arenas()
 {
         positive sizes[] = {
             PARSE_NODES * sizeof(parse_node), PARSE_NODES * sizeof(parse_kept_body),
-            PARSE_WORDS * sizeof(string_address), PARSE_WORDS * sizeof(positive),
-            PARSE_WORDS * sizeof(positive), PARSE_WORDS * sizeof(positive),
+            PARSE_WORDS * sizeof(string_address),
+            PARSE_WORDS * sizeof(parse_word_row),
             PARSE_REDIRECTS * sizeof(parse_redirect), PARSE_KEPT_TEXT,
-            PARSE_WORDS, PARSE_NODES, PARSE_WORDS, PARSE_REDIRECTS, PARSE_KEPT_TEXT,
+            PARSE_NODES, PARSE_WORDS, PARSE_REDIRECTS, PARSE_KEPT_TEXT,
         };
         address_any address_to places[] = {
             (address_any address_to)address_of parse_nodes,
             (address_any address_to)address_of parse_kept_bodies,
             (address_any address_to)address_of parse_words,
-            (address_any address_to)address_of parse_word_lengths,
-            (address_any address_to)address_of parse_word_name_lengths,
-            (address_any address_to)address_of parse_word_name_hashes,
+            (address_any address_to)address_of parse_word_rows,
             (address_any address_to)address_of parse_redirects,
             (address_any address_to)address_of parse_kept_text,
-            (address_any address_to)address_of parse_word_flags,
             (address_any address_to)address_of parse_kept_arenas[0].occupied,
             (address_any address_to)address_of parse_kept_arenas[1].occupied,
             (address_any address_to)address_of parse_kept_arenas[2].occupied,
@@ -3796,7 +3802,7 @@ static bool parse_keep_measure(b32 index, parse_kept_body address_to body)
                         return false;
                 for (b32 i = 0; i < node->word_count; i++)
                 {
-                        positive length = parse_word_lengths[node->word + i];
+                        positive length = parse_word_rows[node->word + i].length;
                         if (length >= PARSE_KEPT_TEXT || !parse_keep_amount(body, 3, length + 1))
                                 return false;
                 }
@@ -3876,11 +3882,11 @@ static b32 parse_keep_tree(b32 index, b32 address_to cursor)
                         b32 source = from->word + i;
                         b32 target = cursor[1]++;
                         parse_words[target] = parse_keep_text(cursor, parse_words[source],
-                                                               parse_word_lengths[source]);
-                        parse_word_lengths[target] = parse_word_lengths[source];
-                        parse_word_name_lengths[target] = parse_word_name_lengths[source];
-                        parse_word_name_hashes[target] = parse_word_name_hashes[source];
-                        parse_word_flags[target] = parse_word_flags[source];
+                                                               parse_word_rows[source].length);
+                        parse_word_rows[target].length = parse_word_rows[source].length;
+                        parse_word_rows[target].name_length = parse_word_rows[source].name_length;
+                        parse_word_rows[target].name_hash = parse_word_rows[source].name_hash;
+                        parse_word_rows[target].flags = parse_word_rows[source].flags;
                 }
                 if (from->redirect_count)
                         into->redirect = cursor[2];

@@ -295,8 +295,61 @@ static bool shell_memory_failed;
    doing large work; its final expansion is not its working set. */
 static bool shell_large_request;
 
+/*
+        The first of everything the shell holds comes out of one block.
+
+        A command's tables (the variables, their index, the expansion text, the
+        tokens) and its first store block each began as a mapping of their own:
+        six mmaps, six pages, six sets of page tables to build and tear down,
+        for a few kilobytes that nearly every command uses. memory_pool_block
+        is the program's bss for exactly that, so they are carved from it, in
+        the order they are asked, onto the pages the last one left half empty.
+        A piece is never given back (memory_free of one is nothing, which
+        lib.c arranges) and never at a page boundary, so a store that grows
+        past its piece is moved by a copy into a mapping of its own, as it was
+        always going to be. A request the block cannot hold, a big one or one
+        after it has run out, is a mapping as before.
+*/
+#if defined(LINUX) && !defined(KERNEL_MODE)
+static positive shell_pool_used HOT_STATE;
+
+static address_any shell_pool_take(positive size)
+{
+        positive rounded = (size + 15) & ~(positive)15;
+        positive start;
+
+        if (size >= MEMORY_POOL_BYTES || rounded + 16 > MEMORY_POOL_BYTES)
+                return null;
+
+        /* A piece and the sixteen bytes that keep it off a page boundary. */
+        start = __atomic_fetch_add(&shell_pool_used, rounded + 16,
+                                   __ATOMIC_RELAXED);
+
+        if (start + rounded + 16 > MEMORY_POOL_BYTES)
+                return null;
+
+        if (!((positive)(memory_pool_block + start) & 4095))
+                start += 16;
+
+        return memory_pool_block + start;
+}
+#else
+static address_any shell_pool_take(positive size)
+{
+        (void)size;
+        return null;
+}
+#endif
+
 static HOT address_any shell_map(positive size)
 {
+        {
+                address_any carved = shell_pool_take(size);
+
+                if (carved)
+                        return carved;
+        }
+
         //      memory_checked answers null for the kernel's own negative
         //      errno as well, which as an address is the top page of the
         //      space and never a mapping.
@@ -322,6 +375,25 @@ static __attribute__((noinline)) COLD bool
 shell_room_grow(address_any address_to held, positive address_to have,
                 positive want, positive unit)
 {
+        /* A table's first room is carved from the pool (see shell_pool_take),
+           with the capacity memory_reserve would have given it. */
+        if (!address_to held && !address_to have && unit)
+        {
+                positive room = memory_growth(0, want, 64);
+
+                if (room && room <= (positive)-1 / unit)
+                {
+                        address_any carved = shell_pool_take(room * unit);
+
+                        if (carved)
+                        {
+                                address_to held = carved;
+                                address_to have = room;
+                                return true;
+                        }
+                }
+        }
+
         if (memory_reserve(held, have, *have, want, unit, 64))
                 return true;
 
