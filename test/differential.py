@@ -41923,68 +41923,108 @@ def harness_moonwater_cli(argv):
         # moonwater time sync against a server that answers what it is
         # told: a local one inside the namespace's own loopback, every field
         # an SNTP client has to judge walked -- the version, the mode, the
-        # stratum and a kiss-o-death's code, the leap alarm, a short packet,
-        # a transmit stamp of zero, an origin that does not echo ours. What
-        # RFC 4330 has a client take is taken (and then refused by a kernel
-        # that will not let a namespace set the clock), RATE is reported as
-        # asked too often, and everything else is no answer at all.
+        # stratum and a kiss-o-death's code, the leap indicator, a short or a
+        # long packet, a transmit stamp of zero, a reference stamp of zero or
+        # one that is not the server's to have, an origin that does not echo
+        # ours (one bit out, or the last request's), and a clock a few
+        # seconds, a day or a year from ours. What RFC 4330 has a client take
+        # is taken (and then refused by a kernel that will not let a namespace
+        # set the clock), RATE is reported as asked too often, DENY and RSTR
+        # as the server saying no, and everything else is no answer at all.
+        # A person who asks for the time takes a server's word for a year,
+        # where the machine itself never steps a clock that is set by more
+        # than a day.
         server = r"""
 import json, socket, struct, time
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.bind(("127.0.0.1", 123))
 s.settimeout(120)
+last = bytes(8)
 while True:
     try:
         data, peer = s.recvfrom(512)
     except socket.timeout:
         break
     spec = json.load(open("/tmp/ntp.spec"))
-    now = time.time()
+    now = time.time() + spec["offset"]
     def stamp(t):
         return struct.pack("!II", (int(t) + 2208988800) & 0xffffffff, int((t % 1) * 2**32))
     head = (spec["li"] << 6) | (spec["vn"] << 3) | spec["mode"]
     packet = struct.pack("!BBbb", head, spec["stratum"], 4, -20) + bytes(8) + spec["refid"].encode()
-    packet += stamp(now - 10) + (data[40:48] if spec["echo"] else bytes([1]) * 8)
+    packet += {"now": stamp(now - 10), "zero": bytes(8), "future": stamp(now + 5),
+               "old": stamp(1000)}[spec["reference"]]
+    packet += {True: data[40:48], False: bytes([1]) * 8, "flip": bytes([data[40] ^ 1]) + data[41:48],
+               "replay": last}[spec["echo"]]
+    last = data[40:48]
     # Received and sent in the same instant: a server that claims to have
     # held a request longer than the round trip gives a negative delay,
     # which a client is right to refuse.
     packet += stamp(now) + (stamp(now) if spec["transmit"] else bytes(8))
-    s.sendto(packet[:spec["length"]], peer)
+    s.sendto((packet + bytes(64))[:spec["length"]], peer)
 """
         (sandbox / "tmp/ntpd.py").write_text(server)
         answers_ntp = []
         script = ("ip link set lo up\npython3 /tmp/ntpd.py &\nntp_server=$!\nsleep 1\n"
                   "echo 127.0.0.1 > /root/ntp.server\necho off > /root/ntp.sampling\n")
         fields = {"vn": (0, 1, 3, 4, 5, 7), "mode": (3, 4, 5), "stratum": (0, 1, 15, 16),
-                  "li": (0, 1, 3), "refid": ("RATE", "DENY", "GPS\0"), "length": (47, 48, 60),
-                  "transmit": (True, False), "echo": (True, False)}
+                  "li": (0, 1, 2, 3), "refid": ("RATE", "DENY", "RSTR", "GPS\0"),
+                  "length": (47, 48, 60, 68), "transmit": (True, False),
+                  "echo": (True, False, "flip", "replay"),
+                  "reference": ("now", "zero", "future", "old"),
+                  "offset": (0.0002, 0.5, -0.5, 2.5, 90000, 400 * 86400, -400 * 86400,
+                             4000 * 86400)}
         base = {"vn": 4, "mode": 4, "stratum": 2, "li": 0, "refid": "GPS\0", "length": 48,
-                "transmit": True, "echo": True}
+                "transmit": True, "echo": True, "reference": "now", "offset": 0}
         specs = [dict(base, **{name: value}) for name, values in fields.items() for value in values]
+        #   A kiss-o-death is a stratum 0 with its code in the reference id.
+        specs += [dict(base, stratum=0, refid=code) for code in ("RATE", "DENY", "RSTR", "XXXX")]
         specs += [dict(base, **{name: rng.choice(values) for name, values in fields.items()})
                   for _ in range(40)]
         for number, spec in enumerate(specs):
             script += (f"printf '%s' {shlex.quote(json.dumps(spec))} > /tmp/ntp.spec\n"
                        f"echo '@@ ntp{number}'; timeout 20 /tmp/moonwater time sync 2>&1 | head -1\n")
-        script += "kill $ntp_server\n"
+        #   With nobody on the port the kernel says so at once, by ICMP, and the
+        #   query is over with it: it used to wait out its two seconds, and
+        #   the next sample's too.
+        script += ("kill $ntp_server\nwait $ntp_server 2>/dev/null\nt0=$(date +%s%N)\n"
+                   "echo '@@ closed'; timeout 20 /tmp/moonwater time sync 2>&1 | head -1\n"
+                   "t1=$(date +%s%N)\necho \"@@ms $(( (t1 - t0) / 1000000 ))\"\n")
         lines, finished = session(script)
         check(finished, "the time sync walk finished", "")
         said = {}
         current = None
+        closed_ms = 10**9
         for line in lines:
             if line.startswith("@@ ntp"):
                 current = int(line[6:])
+            elif line.startswith("@@ closed"):
+                current = "closed"
+            elif line.startswith("@@ms "):
+                current = None
+                closed_ms = int(line.split()[1])
             elif current is not None and current not in said:
                 said[current] = line
+        check("no server answered" in said.get("closed", "") and closed_ms < 1800,
+              "time sync against a port nobody listens on is over at once", f"{closed_ms} ms: {said.get('closed')}")
+        least = int(re.search(r"#define SNTP_WALL_LEAST (\d+)ll",
+                              (HARNESS_ROOT / "src/sh/host.c").read_text()).group(1))
+        most = int(re.search(r"#define SNTP_WALL_MOST (\d+)ll",
+                             (HARNESS_ROOT / "src/sh/host.c").read_text()).group(1))
         for number, spec in enumerate(specs):
-            valid = spec["length"] >= 48 and spec["mode"] == 4 and 1 <= spec["vn"] <= 4 and spec["echo"]
-            taken = valid and 1 <= spec["stratum"] <= 15 and spec["li"] != 3 and spec["transmit"]
+            valid = (spec["length"] >= 48 and spec["mode"] == 4 and 1 <= spec["vn"] <= 4
+                     and spec["echo"] is True)
+            #   The time it tells is inside the years the machine accepts.
+            inside = least <= time.time() + spec["offset"] <= most
+            taken = (valid and 1 <= spec["stratum"] <= 15 and spec["li"] != 3 and spec["transmit"]
+                     and spec["reference"] in ("now", "zero") and inside)
             rated = valid and spec["stratum"] == 0 and spec["refid"] == "RATE"
+            denied = valid and spec["stratum"] == 0 and spec["refid"] in ("DENY", "RSTR")
             answer = said.get(number, "")
             got = ("taken" if "answered, but" in answer else
                    "rated" if "asked too often" in answer else
+                   "denied" if "stay away" in answer else
                    "none" if "no server answered" in answer else answer)
-            want = "taken" if taken else "rated" if rated else "none"
+            want = "taken" if taken else "rated" if rated else "denied" if denied else "none"
             check(got == want, f"time sync against {spec} is {want}", got)
 
         # The machine's name: two lists of words with nothing wrong in them, a
@@ -50711,7 +50751,9 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                 if (flags & 1)
                         memcpy(reply + 24, request + 40, 8);
                 memset(heard + heard_count, 0, sizeof heard[0]);
-                if (sntp_reply_sample(reply, request, t1, t4, flags & 2,
+                if (sntp_reply_sample(reply, request, t1, t4,
+                                      flags & 2 ? SNTP_OFFSET_SYNCED_NS
+                                                : SNTP_OFFSET_MOST_NS,
                                       heard + heard_count) == SNTP_OK)
                 {
                         heard[heard_count].address = (p32)(heard_count + 1);
@@ -50740,8 +50782,6 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                 }
                 bipolar now = t4 < 0 ? 0 : t4;
                 bipolar target = 0;
-                bipolar sec = 0;
-                bipolar nsec = 0;
                 /* the kernel's state as locale_ntp_apply_offset reads it:
                    a pending slew within half a second, a frequency the
                    kernel holds to 500 ppm, and an elapsed boot time */
@@ -50752,9 +50792,8 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 
                 if (sntp_target_ok(now, offset, &target))
                 {
-                        sntp_split_offset(offset, &sec, &nsec);
                         locale_ntp_first = flags & 8;
-                        locale_ntp_discipline_words(offset, sec, nsec,
+                        locale_ntp_discipline_words(offset,
                                 locale_ntp_error_us(heard[chosen].distance_ns), words);
                         (void)locale_ntp_learned(offset - pending, elapsed, frequency);
                 }
@@ -50830,7 +50869,9 @@ def sntp_fuzz_source(host):
     """host.c's SNTP parse, selection and discipline arithmetic, lifted whole
     by the literal anchors below, behind SNTP_FUZZ_SHIM."""
     sec = src_slice
+    lib = (HARNESS_ROOT / "src/lib.util.c").read_text()
     parts = (
+        sec(lib, "static bipolar clock_floor_divide(", "/*\n        The calendar, closed form"),
         sec(host, "#define SNTP_PORT 123", "static inline INLINE bipolar sntp_now_ns(void)"),
         sec(host, "static inline INLINE PURE bipolar sntp_load_stamp",
             "/*\n        t4 is meant to be"),
@@ -50887,7 +50928,8 @@ int main(void)
                 era_put(reply + 40, server, 1000000);
                 verdict = sntp_reply_sample(
                     reply, request, sntp_timespec_ns((p64)client, 0),
-                    sntp_timespec_ns((p64)client, 2000000), tight, &sample);
+                    sntp_timespec_ns((p64)client, 2000000),
+                    tight ? SNTP_OFFSET_SYNCED_NS : SNTP_OFFSET_MOST_NS, &sample);
                 printf("%lld %lld %ld %ld %ld\n", client, server, (long)verdict,
                        verdict == SNTP_OK ? (long)sample.offset_ns : 0,
                        verdict == SNTP_OK ? (long)sample.delay_ns : 0);

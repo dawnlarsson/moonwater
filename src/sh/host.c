@@ -9404,12 +9404,18 @@ static b32 host_tune(string_address address_to arguments, positive count)
 #define SNTP_LI_VN_MODE 0x23
 #define SNTP_NANOSECONDS 1000000000ull
 #define SNTP_OK 0
-#define SNTP_NO_SERVER (-1)
-#define SNTP_NO_REPLY (-2)
-#define SNTP_MALFORMED (-3)
-#define SNTP_BAD_SERVER (-4)
-#define SNTP_RATE_LIMITED (-5)
-#define SNTP_UNCONFIRMED (-6)
+//      A query's answers are numbers of their own, far from the errors a
+//      system call gives: the clock's refusal to be set is one of those, and
+//      -EPERM was SNTP_NO_SERVER and -EIO was SNTP_RATE_LIMITED, so file_reason
+//      said "No such process" of an answer out of range.
+#define SNTP_ANSWER (-100000)
+#define SNTP_NO_SERVER (SNTP_ANSWER - 1)
+#define SNTP_NO_REPLY (SNTP_ANSWER - 2)
+#define SNTP_MALFORMED (SNTP_ANSWER - 3)
+#define SNTP_BAD_SERVER (SNTP_ANSWER - 4)
+#define SNTP_RATE_LIMITED (SNTP_ANSWER - 5)
+#define SNTP_UNCONFIRMED (SNTP_ANSWER - 6)
+#define SNTP_DENIED (SNTP_ANSWER - 7)
 #define SNTP_KISS_RATE 0x52415445u /* "RATE" */
 #define SNTP_KISS_DENY 0x44454e59u /* "DENY" */
 #define SNTP_KISS_RSTR 0x52535452u /* "RSTR" */
@@ -9422,6 +9428,9 @@ static b32 host_tune(string_address address_to arguments, positive count)
         ((bipolar)SNTP_WALL_LEAST * (bipolar)SNTP_NANOSECONDS)
 #define SNTP_WALL_MOST_NS \
         ((bipolar)SNTP_WALL_MOST * (bipolar)SNTP_NANOSECONDS)
+//      What a person who asks for the time by hand may be told to step by:
+//      anything the window holds.
+#define SNTP_OFFSET_ANY_NS (SNTP_WALL_MOST_NS - SNTP_WALL_LEAST_NS)
 #define SNTP_TIMESPEC_SECONDS_MOST 9223372035ull
 #define SNTP_ERA ((bipolar)4294967296)
 #define SNTP_SHORT_SECOND 0x10000u
@@ -9431,7 +9440,8 @@ static b32 host_tune(string_address address_to arguments, positive count)
 #define SNTP_ERRQUEUE 0x2000
 #define SNTP_DONTWAIT 0x40
 #define SNTP_MESSAGE_WORDS 7
-#define SNTP_CONTROL_WORDS 16
+#define SNTP_CONTROL_WORDS 24
+#define SNTP_MSG_CTRUNC 0x8
 #define SNTP_CONTROL_HEAD (sizeof(positive) + 8)
 #define SNTP_ERRQUEUE_MOST 4
 #define SNTP_SOL_IP 0
@@ -9560,21 +9570,6 @@ static inline INLINE CONST bipolar sntp_distance_ns(bipolar delay_ns,
                sntp_short_ns(root_dispersion);
 }
 
-static COLD fn sntp_split_offset(bipolar ns, bipolar address_to seconds,
-                            bipolar address_to nanoseconds)
-{
-        bipolar sec = ns / (bipolar)SNTP_NANOSECONDS;
-        bipolar nsec = ns % (bipolar)SNTP_NANOSECONDS;
-
-        if (nsec < 0)
-        {
-                sec -= 1;
-                nsec += (bipolar)SNTP_NANOSECONDS;
-        }
-        address_to seconds = sec;
-        address_to nanoseconds = nsec;
-}
-
 static inline INLINE fn sntp_offset_delay(bipolar t1, bipolar t2, bipolar t3,
                                           bipolar t4,
                                           bipolar address_to offset_ns,
@@ -9586,7 +9581,7 @@ static inline INLINE fn sntp_offset_delay(bipolar t1, bipolar t2, bipolar t3,
 
 static CONST COLD bool sntp_sample_sane(bipolar t1, bipolar t2, bipolar t3,
                                    bipolar t4, bipolar offset_ns,
-                                   bipolar delay_ns, bool tight)
+                                   bipolar delay_ns, bipolar most)
 {
         if (t1 < 0 || t4 < t1 || t3 < t2)
                 return false;
@@ -9594,9 +9589,12 @@ static CONST COLD bool sntp_sample_sane(bipolar t1, bipolar t2, bipolar t3,
                 return false;
         if (delay_ns < 0 || delay_ns > SNTP_DELAY_MOST_NS)
                 return false;
-        if (tight)
-                return sntp_within(offset_ns, SNTP_OFFSET_SYNCED_NS);
-        return !sntp_wall_ok(t1) || sntp_within(offset_ns, SNTP_OFFSET_MOST_NS);
+        //      A clock that tells the time already is moved by at most
+        //      what was asked; one that does not has nothing to be moved
+        //      from, and the window bounds what it can be told.
+        if (most <= SNTP_OFFSET_SYNCED_NS)
+                return sntp_within(offset_ns, most);
+        return !sntp_wall_ok(t1) || sntp_within(offset_ns, most);
 }
 
 static COLD bool sntp_target_ok(bipolar now, bipolar offset_ns,
@@ -9760,6 +9758,20 @@ static bool sntp_control_stamp(p8 address_to control, positive length,
 }
 
 /*
+        What of the control buffer is to be believed. The kernel says when
+        it had more to put in than there was room for, and the stamps and
+        the id are read in pairs, so a buffer it cut short is not read at
+        all: the exchange takes its stamps from the clock, as it does with
+        none. The buffer holds the three messages a send and a receive
+        can leave, 32, 64 and 48 bytes, with room to spare.
+*/
+static inline INLINE CONST positive sntp_control_held(positive flags,
+                                                      positive filled)
+{
+        return flags & SNTP_MSG_CTRUNC ? 0 : filled;
+}
+
+/*
         recvmsg into one buffer and the control words beside it, with the
         control length the kernel filled put in held.
 */
@@ -9781,7 +9793,7 @@ static HOT bipolar sntp_receive_message(b32 handle, p8 address_to into,
         message[5] = SNTP_CONTROL_WORDS * sizeof(positive);
         got = system_call_3(syscall(recvmsg), (positive)handle,
                             (positive)message, flags);
-        address_to held = got < 0 ? 0 : message[5];
+        address_to held = got < 0 ? 0 : sntp_control_held(message[6], message[5]);
         return got;
 }
 
@@ -9904,9 +9916,10 @@ static HOT bool sntp_transmit_stamp(b32 handle, p32 wanted,
 
         Stratum zero is a kiss-o-death and the four bytes at 12 say which.
         RATE is the server asking to be asked less often, which is a
-        different answer from DENY and RSTR: it is reported separately so
-        the policy above can wait instead of walking to the next server
-        and asking again immediately.
+        different answer from DENY and RSTR, which tell this machine to
+        stay away: each is reported separately so the policy above can wait
+        instead of walking to the next server and asking again immediately,
+        and wait longer for the one that says no.
 */
 static COLD bipolar sntp_reply_ok(p8 address_to reply, p8 address_to request)
 {
@@ -9917,9 +9930,14 @@ static COLD bipolar sntp_reply_ok(p8 address_to reply, p8 address_to request)
         if ((reply[0] & 0x7) != 4 || !((reply[0] >> 3) & 7) || ((reply[0] >> 3) & 7) > 4)
                 return SNTP_BAD_SERVER;
         if (!reply[1])
-                return network_load_32(reply + 12) == SNTP_KISS_RATE
-                           ? SNTP_RATE_LIMITED
+        {
+                p32 kiss = network_load_32(reply + 12);
+
+                return kiss == SNTP_KISS_RATE ? SNTP_RATE_LIMITED
+                       : kiss == SNTP_KISS_DENY || kiss == SNTP_KISS_RSTR
+                           ? SNTP_DENIED
                            : SNTP_BAD_SERVER;
+        }
         if ((reply[0] >> 6) == 3 || reply[1] >= 16)
                 return SNTP_BAD_SERVER;
         if (!sntp_short_ok(network_load_32(reply + 4)) ||
@@ -9935,13 +9953,12 @@ static COLD bipolar sntp_reply_ok(p8 address_to reply, p8 address_to request)
 */
 static COLD bipolar sntp_reply_sample(p8 address_to reply,
                                       p8 address_to request, bipolar t1,
-                                      bipolar t4, bool tight,
+                                      bipolar t4, bipolar most,
                                       sntp_sample address_to into)
 {
         bipolar verdict = sntp_reply_ok(reply, request);
         bipolar t2;
         bipolar t3;
-        bipolar reference;
         bipolar offset = 0;
         bipolar delay = 0;
 
@@ -9958,14 +9975,20 @@ static COLD bipolar sntp_reply_sample(p8 address_to reply,
                 moments and a server whose reference is one tick the wrong
                 side of transmit would otherwise be refused for ever: the
                 sample loop stops on BAD_SERVER, so that server is not asked
-                again.
+                again. A reference of all zeros is a server that does not
+                say: RFC 5905 reads it as never synchronised, and a server
+                that keeps no such clock sends it at stratum 1 all the same.
+                The echo of our own stamp is what says the reply is ours,
+                so it is no reason to refuse one, and only one that states a
+                time is held to the window.
         */
-        reference = sntp_load_stamp(reply + 16);
-        if_rare (!sntp_wall_ok(reference) ||
-                 reference > t3 + (bipolar)SNTP_NANOSECONDS)
+        if_rare ((network_load_32(reply + 16) | network_load_32(reply + 20)) &&
+                 (!sntp_wall_ok(sntp_load_stamp(reply + 16)) ||
+                  sntp_load_stamp(reply + 16) >
+                      t3 + (bipolar)SNTP_NANOSECONDS))
                 return SNTP_BAD_SERVER;
         sntp_offset_delay(t1, t2, t3, t4, address_of offset, address_of delay);
-        if_rare (!sntp_sample_sane(t1, t2, t3, t4, offset, delay, tight))
+        if_rare (!sntp_sample_sane(t1, t2, t3, t4, offset, delay, most))
                 return SNTP_MALFORMED;
         into->offset_ns = offset;
         into->delay_ns = delay;
@@ -9986,6 +10009,15 @@ static COLD fn sntp_test_message(p8 address_to at, positive size, b32 level,
         address_to(p64 address_to)(at + SNTP_CONTROL_DATA) = seconds;
         address_to(p64 address_to)(at + SNTP_CONTROL_DATA + sizeof(p64)) =
             nanoseconds;
+}
+
+//      A stamp, as the wire has it, for a time before 2036.
+static COLD fn sntp_test_stamp(p8 address_to at, bipolar ns)
+{
+        network_store_32(at, (p32)(ns / (bipolar)SNTP_NANOSECONDS + SNTP_UNIX));
+        network_store_32(at + 4,
+                         (p32)((p64)(ns % (bipolar)SNTP_NANOSECONDS) *
+                               4294967296ull / SNTP_NANOSECONDS));
 }
 
 static COLD bool sntp_math_ok(void)
@@ -10052,9 +10084,11 @@ static COLD bool sntp_math_ok(void)
             {0x3c, 2, 0, 0, 0, true, SNTP_BAD_SERVER},
             /* stratum 0 carries a kiss code in the reference id */
             {0x24, 0, 0, 0, SNTP_KISS_RATE, true, SNTP_RATE_LIMITED},
-            {0x24, 0, 0, 0, SNTP_KISS_DENY, true, SNTP_BAD_SERVER},
-            {0x24, 0, 0, 0, SNTP_KISS_RSTR, true, SNTP_BAD_SERVER},
+            {0x24, 0, 0, 0, SNTP_KISS_DENY, true, SNTP_DENIED},
+            {0x24, 0, 0, 0, SNTP_KISS_RSTR, true, SNTP_DENIED},
             {0x24, 0, 0, 0, 0, true, SNTP_BAD_SERVER},
+            /* and a kiss that is none of the three tells us nothing */
+            {0x24, 0, 0, 0, 0x58595a5au, true, SNTP_BAD_SERVER},
             /* RATE is still RATE when the alarm bit is set with it */
             {0xe4, 0, 0, 0, SNTP_KISS_RATE, true, SNTP_RATE_LIMITED},
             /* stratum 16 is unsynchronised, and the alarm says so too */
@@ -10092,12 +10126,6 @@ static COLD bool sntp_math_ok(void)
             {0, 0, (bipolar)2085978496 * (bipolar)SNTP_NANOSECONDS},
             {1, 0, (bipolar)2085978497 * (bipolar)SNTP_NANOSECONDS},
         };
-        static const bipolar split_case[][3] = {
-            {1500000000, 1, 500000000},
-            {-1500000000, -2, 500000000},
-            {-1, -1, 999999999},
-            {0, 0, 0},
-        };
         static const struct
         {
                 bipolar t1;
@@ -10106,27 +10134,45 @@ static COLD bool sntp_math_ok(void)
                 bipolar t4;
                 bipolar off;
                 bipolar del;
-                bool tight;
+                bipolar most;
                 bool want;
         } sane_case[] = {
             {SNTP_TEST_NOW, SNTP_TEST_NOW + 1000000000,
              SNTP_TEST_NOW + 1000000000, SNTP_TEST_NOW + 2000000000, 0,
-             2000000000, false, true},
+             2000000000, SNTP_OFFSET_MOST_NS, true},
             {SNTP_TEST_NOW, SNTP_TEST_NOW + 1000000000,
              SNTP_TEST_NOW + 1000000000, SNTP_TEST_NOW + 2000000000, 0,
-             2000000000, true, true},
+             2000000000, SNTP_OFFSET_SYNCED_NS, true},
             {SNTP_TEST_NOW, SNTP_TEST_NOW + 1000000000,
              SNTP_TEST_NOW + 1000000000, SNTP_TEST_NOW + 3000000001, 0,
-             3000000001, false, false},
+             3000000001, SNTP_OFFSET_MOST_NS, false},
             {SNTP_TEST_NOW, SNTP_TEST_NOW + 1000000000,
              SNTP_TEST_NOW + 1000000000, SNTP_TEST_NOW + 500000000, 0,
-             -500000000, false, false},
+             -500000000, SNTP_OFFSET_MOST_NS, false},
             {SNTP_TEST_NOW, SNTP_TEST_NOW + 3000000000,
              SNTP_TEST_NOW + 3000000000, SNTP_TEST_NOW + 50000000, 2975000000,
-             50000000, true, false},
+             50000000, SNTP_OFFSET_SYNCED_NS, false},
             {SNTP_TEST_NOW, SNTP_TEST_NOW + 2000000000,
              SNTP_TEST_NOW + 1000000000, SNTP_TEST_NOW + 50000000, 0, 50000000,
-             false, false},
+             SNTP_OFFSET_MOST_NS, false},
+            /* a clock that is 2.5 s out is stepped by an unsynchronised
+               clock and by a hand, and left to a synchronised one */
+            {SNTP_TEST_NOW, SNTP_TEST_NOW + 2500000000,
+             SNTP_TEST_NOW + 2500000000, SNTP_TEST_NOW + 2000000, 2499000000,
+             2000000, SNTP_OFFSET_SYNCED_NS, false},
+            {SNTP_TEST_NOW, SNTP_TEST_NOW + 2500000000,
+             SNTP_TEST_NOW + 2500000000, SNTP_TEST_NOW + 2000000, 2499000000,
+             2000000, SNTP_OFFSET_MOST_NS, true},
+            /* and one 25 h out only by a hand, which the window bounds */
+            {SNTP_TEST_NOW, SNTP_TEST_NOW + 90000000000000,
+             SNTP_TEST_NOW + 90000000000000, SNTP_TEST_NOW + 2000000,
+             89999999000000, 2000000, SNTP_OFFSET_MOST_NS, false},
+            {SNTP_TEST_NOW, SNTP_TEST_NOW + 90000000000000,
+             SNTP_TEST_NOW + 90000000000000, SNTP_TEST_NOW + 2000000,
+             89999999000000, 2000000, SNTP_OFFSET_SYNCED_NS, false},
+            {SNTP_TEST_NOW, SNTP_TEST_NOW + 90000000000000,
+             SNTP_TEST_NOW + 90000000000000, SNTP_TEST_NOW + 2000000,
+             89999999000000, 2000000, SNTP_OFFSET_ANY_NS, true},
         };
 
         for (at = 0; at < array_count(delay_case); at++)
@@ -10142,7 +10188,7 @@ static COLD bool sntp_math_ok(void)
                 if (sntp_sample_sane(sane_case[at].t1, sane_case[at].t2,
                                      sane_case[at].t3, sane_case[at].t4,
                                      sane_case[at].off, sane_case[at].del,
-                                     sane_case[at].tight) != sane_case[at].want)
+                                     sane_case[at].most) != sane_case[at].want)
                         return false;
 
         sntp_offset_delay(0, SNTP_TEST_NOW + 1000000000,
@@ -10150,10 +10196,10 @@ static COLD bool sntp_math_ok(void)
                           address_of offset, address_of delay);
         if (!sntp_sample_sane(0, SNTP_TEST_NOW + 1000000000,
                               SNTP_TEST_NOW + 1000000000, 100000000, offset,
-                              delay, false) ||
+                              delay, SNTP_OFFSET_MOST_NS) ||
             sntp_sample_sane(0, SNTP_TEST_NOW + 1000000000,
                              SNTP_TEST_NOW + 1000000000, 100000000, offset,
-                             delay, true) ||
+                             delay, SNTP_OFFSET_SYNCED_NS) ||
             !sntp_target_ok(0, offset, address_of target) ||
             target < SNTP_TEST_NOW || target > SNTP_TEST_NOW + 1000000000)
                 return false;
@@ -10164,7 +10210,8 @@ static COLD bool sntp_math_ok(void)
                           address_of delay);
         if (sntp_sample_sane(SNTP_TEST_NOW, SNTP_TEST_NOW + two_days,
                              SNTP_TEST_NOW + two_days,
-                             SNTP_TEST_NOW + 50000000, offset, delay, false))
+                             SNTP_TEST_NOW + 50000000, offset, delay,
+                             SNTP_OFFSET_MOST_NS))
                 return false;
 
         if (!sntp_short_ok(0) || !sntp_short_ok(SNTP_SHORT_SECOND) ||
@@ -10197,14 +10244,6 @@ static COLD bool sntp_math_ok(void)
                         return false;
         }
 
-        for (at = 0; at < array_count(split_case); at++)
-        {
-                sntp_split_offset(split_case[at][0], address_of offset,
-                                  address_of delay);
-                if (offset != split_case[at][1] || delay != split_case[at][2])
-                        return false;
-        }
-
         memory_fill(request, 0, sizeof(request));
         request[0] = SNTP_LI_VN_MODE;
         network_store_32(request + 40, 0xc0ffee00u);
@@ -10222,6 +10261,62 @@ static COLD bool sntp_math_ok(void)
                 if (sntp_reply_ok(reply, request) != reply_case[at].want)
                         return false;
         }
+
+        /*
+                The reference stamp: all zeros is a server that does not
+                say, and is the same server for all that; one that says is
+                held to the window and to what the server sent.
+        */
+        {
+                static const struct
+                {
+                        bipolar reference; /* unix seconds; -1 for all zeros */
+                        bipolar want;
+                } reference_case[] = {
+                    {-1, SNTP_OK},
+                    {SNTP_TEST_NOW / (bipolar)SNTP_NANOSECONDS - 10, SNTP_OK},
+                    {SNTP_TEST_NOW / (bipolar)SNTP_NANOSECONDS + 1, SNTP_OK},
+                    {SNTP_TEST_NOW / (bipolar)SNTP_NANOSECONDS + 5,
+                     SNTP_BAD_SERVER},
+                    {SNTP_WALL_LEAST - 1, SNTP_BAD_SERVER},
+                    {1, SNTP_BAD_SERVER},
+                };
+                sntp_sample taken;
+
+                for (at = 0; at < array_count(reference_case); at++)
+                {
+                        memory_fill(reply, 0, sizeof(reply));
+                        reply[0] = 0x24;
+                        reply[1] = 2;
+                        memory_copy(reply + 24, request + 40, 8);
+                        sntp_test_stamp(reply + 32, SNTP_TEST_NOW + 1000000);
+                        sntp_test_stamp(reply + 40, SNTP_TEST_NOW + 1000000);
+                        if (reference_case[at].reference >= 0)
+                                sntp_test_stamp(reply + 16,
+                                                reference_case[at].reference *
+                                                    (bipolar)SNTP_NANOSECONDS);
+                        memory_zero(address_of taken, sizeof(taken));
+                        if (sntp_reply_sample(reply, request, SNTP_TEST_NOW,
+                                              SNTP_TEST_NOW + 2000000,
+                                              SNTP_OFFSET_MOST_NS,
+                                              address_of taken) !=
+                            reference_case[at].want)
+                                return false;
+                }
+        }
+
+        /*
+                A control buffer the kernel says it filled short is read
+                for nothing, the error queue's own flag is not that, and
+                the buffer takes the arrival stamp, the departure stamp and
+                the error header with the address behind it at once.
+        */
+        if (sntp_control_held(0, 144) != 144 ||
+            sntp_control_held(SNTP_MSG_CTRUNC, 144) ||
+            sntp_control_held(SNTP_MSG_CTRUNC | SNTP_ERRQUEUE, 128) ||
+            sntp_control_held(SNTP_ERRQUEUE, 96) != 96 ||
+            SNTP_CONTROL_WORDS * sizeof(positive) < 32 + 64 + 48)
+                return false;
 
         for (at = 0; at < array_count(control_case); at++)
         {
@@ -10434,7 +10529,7 @@ static COLD bool sntp_math_ok(void)
 
 static HOT bipolar sntp_exchange(b32 handle,
                                  network_deadline address_to deadline,
-                                 bool tight, p32 address_to sequence,
+                                 bipolar most, p32 address_to sequence,
                                  sntp_sample address_to into)
 {
         p8 request[SNTP_PACKET];
@@ -10480,6 +10575,11 @@ static HOT bipolar sntp_exchange(b32 handle,
                          system_call_2(syscall(clock_gettime), CLOCK_REALTIME,
                                        (positive)got) < 0)
                         return SNTP_NO_REPLY;
+                if_rare (received == -ECONNREFUSED || received == -EHOSTUNREACH ||
+                         received == -ENETUNREACH)
+                        //      ICMP says nobody is there; waiting out the
+                        //      deadline would not make it so.
+                        return SNTP_NO_SERVER;
                 if_rare (received < 0)
                 {
                         /*
@@ -10507,7 +10607,7 @@ static HOT bipolar sntp_exchange(b32 handle,
                 }
                 verdict = sntp_reply_sample(reply, request, t1,
                                             sntp_timespec_ns(got[0], got[1]),
-                                            tight, into);
+                                            most, into);
                 if_rare (verdict == SNTP_NO_REPLY)
                 {
                         if (discarded++ == SNTP_DISCARD_MAX)
@@ -10518,7 +10618,7 @@ static HOT bipolar sntp_exchange(b32 handle,
         }
 }
 
-static COLD bipolar sntp_query_at(p32 server, bool filter, bool tight,
+static COLD bipolar sntp_query_at(p32 server, bool filter, bipolar most,
                                   sntp_sample address_to answer)
 {
         socket_address_internet where = {
@@ -10536,9 +10636,6 @@ static COLD bipolar sntp_query_at(p32 server, bool filter, bool tight,
         bipolar handle;
         bipolar best;
         bipolar failed = SNTP_NO_REPLY;
-
-        if (!sntp_math_ok())
-                return SNTP_MALFORMED;
 
         handle = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
         if (handle < 0)
@@ -10565,9 +10662,12 @@ static COLD bipolar sntp_query_at(p32 server, bool filter, bool tight,
                 if (!network_deadline_begin(address_of deadline, SNTP_SECONDS,
                                             0))
                         break;
-                failed = sntp_exchange((b32)handle, address_of deadline, tight,
+                failed = sntp_exchange((b32)handle, address_of deadline, most,
                                        address_of sequence, row + at);
-                if (failed == SNTP_BAD_SERVER || failed == SNTP_RATE_LIMITED)
+                //      A server that is not there, or has said no, is not
+                //      asked again for the rest of the samples.
+                if (failed == SNTP_NO_SERVER || failed == SNTP_BAD_SERVER ||
+                    failed == SNTP_RATE_LIMITED || failed == SNTP_DENIED)
                         break;
         }
         socket_close((b32)handle);
@@ -10580,7 +10680,7 @@ static COLD bipolar sntp_query_at(p32 server, bool filter, bool tight,
         return SNTP_OK;
 }
 
-static COLD bipolar sntp_query(string_address name, bool filter, bool tight,
+static COLD bipolar sntp_query(string_address name, bool filter, bipolar most,
                                sntp_sample address_to answer)
 {
         bipolar numeric;
@@ -10591,13 +10691,13 @@ static COLD bipolar sntp_query(string_address name, bool filter, bool tight,
                 return SNTP_NO_SERVER;
         numeric = string_to_host(name);
         if (numeric >= 0)
-                return sntp_query_at((p32)numeric, filter, tight, answer);
+                return sntp_query_at((p32)numeric, filter, most, answer);
 
         found = dns_resolve_any((string_address) "/etc/resolv.conf", name,
                                 address_of host, SNTP_SECONDS);
         if (found != DNS_OK)
                 return SNTP_NO_SERVER;
-        return sntp_query_at(host, filter, tight, answer);
+        return sntp_query_at(host, filter, most, answer);
 }
 
 #endif
@@ -10742,7 +10842,7 @@ static positive locale_ntp_every = LOCALE_NTP_AGAIN_FIRST;
 static locale_child locale_ntp_child = {0, -1};
 
 static fn locale_ntp_keep(void);
-static bipolar locale_ntp_apply(void);
+static bipolar locale_ntp_apply(bool by_hand);
 
 //      What the last answer moved the clock by, and who gave it, for the
 //      person who asked by hand. The scheduled queries run in a child and
@@ -11696,11 +11796,16 @@ static b32 locale_time_sync(void)
 
         locale_ntp_moved_ns = 0;
         locale_ntp_answered[0] = end;
-        failed = locale_ntp_apply();
+        failed = locale_ntp_apply(true);
         if (failed < 0 && locale_ntp_answered[0])
                 string_format(log, host_label "time: %s answered, but the "
                                    "clock could not be set: %s\n",
-                              locale_ntp_answered, file_reason(failed));
+                              locale_ntp_answered,
+                              failed == SNTP_MALFORMED
+                                  ? (string_address) "the time it gave is "
+                                                     "outside the years this "
+                                                     "machine accepts"
+                                  : file_reason(failed));
         else if (failed == SNTP_UNCONFIRMED)
                 string_format(log, host_label "time: no second server agreed "
                                    "with a step past 2 s, so the clock was "
@@ -11709,6 +11814,8 @@ static b32 locale_time_sync(void)
                 string_format(log, host_label "time: no server answered%s\n",
                               failed == SNTP_RATE_LIMITED
                                   ? " -- asked too often, try in a minute"
+                              : failed == SNTP_DENIED
+                                  ? " -- a server told this machine to stay away"
                                   : "");
         else
         {
@@ -11887,10 +11994,14 @@ static CONST bipolar locale_ntp_learned(bipolar offset_ns, bipolar elapsed_ns,
         return learned;
 }
 
-static fn locale_ntp_discipline_words(bipolar offset_ns, bipolar seconds,
-                                      bipolar nanoseconds, positive error_us,
+static fn locale_ntp_discipline_words(bipolar offset_ns, positive error_us,
                                       positive address_to words)
 {
+        //      The time of a step is whole seconds and the nanoseconds left
+        //      after them, which are not negative: a second short is -1 and
+        //      999999999 and not 0 and -1.
+        bipolar seconds = clock_floor_divide(offset_ns, (bipolar)SNTP_NANOSECONDS);
+
         memory_zero(words, LOGGER_TIMEX_WORDS * sizeof(positive));
         words[LOGGER_TIMEX_STATUS] = STA_PLL | STA_FREQHOLD;
         words[LOGGER_TIMEX_MAXERROR] = error_us;
@@ -11901,7 +12012,8 @@ static fn locale_ntp_discipline_words(bipolar offset_ns, bipolar seconds,
                            ADJ_MAXERROR | ADJ_ESTERROR;
                 words[LOCALE_TIMEX_OFFSET] = 0;
                 words[LOGGER_TIMEX_TIME_SEC] = (positive)seconds;
-                words[LOGGER_TIMEX_TIME_NSEC] = (positive)nanoseconds;
+                words[LOGGER_TIMEX_TIME_NSEC] =
+                    (positive)(offset_ns - seconds * (bipolar)SNTP_NANOSECONDS);
                 return;
         }
         words[0] = ADJ_OFFSET | ADJ_TIMECONST | ADJ_NANO | ADJ_STATUS |
@@ -11924,28 +12036,33 @@ static COLD bool locale_discipline_ok(void)
         {
                 bipolar offset_ns;
                 bool step;
+                bipolar sec; /* what a step carries, floored */
+                bipolar nsec;
         } discipline_case[] = {
-            {0, false},
-            {1000000, false},
-            {-1000000, false},
-            {LOCALE_NTP_STEP_NS - 1, false},
-            {-(LOCALE_NTP_STEP_NS - 1), false},
-            {LOCALE_NTP_STEP_NS, true},
-            {-LOCALE_NTP_STEP_NS, true},
-            {(bipolar)86400 * 1000000000, true},
-            {-(bipolar)86400 * 1000000000, true},
+            {0, false, 0, 0},
+            {1000000, false, 0, 0},
+            {-1000000, false, 0, 0},
+            {LOCALE_NTP_STEP_NS - 1, false, 0, 0},
+            {-(LOCALE_NTP_STEP_NS - 1), false, 0, 0},
+            {LOCALE_NTP_STEP_NS, true, 0, LOCALE_NTP_STEP_NS},
+            {-LOCALE_NTP_STEP_NS, true, -1,
+             (bipolar)SNTP_NANOSECONDS - LOCALE_NTP_STEP_NS},
+            {1500000000, true, 1, 500000000},
+            {-1500000000, true, -2, 500000000},
+            {(bipolar)86400 * 1000000000, true, 86400, 0},
+            {-(bipolar)86400 * 1000000000, true, -86400, 0},
+            {(bipolar)3 * 86400 * 1000000000 + 1, true, 259200, 1},
+            {-((bipolar)3 * 86400 * 1000000000 + 1), true, -259201,
+             (bipolar)SNTP_NANOSECONDS - 1},
         };
 
         for (at = 0; at < array_count(discipline_case); at++)
         {
                 bipolar offset = discipline_case[at].offset_ns;
-                bipolar sec = 0;
-                bipolar nsec = 0;
 
-                sntp_split_offset(offset, address_of sec, address_of nsec);
                 /* a 20 ms round trip to a server at the root of its
                    tree is a 10 ms root distance */
-                locale_ntp_discipline_words(offset, sec, nsec,
+                locale_ntp_discipline_words(offset,
                                             locale_ntp_error_us(
                                                 sntp_distance_ns(20000000, 0, 0)),
                                             words);
@@ -11971,8 +12088,10 @@ static COLD bool locale_discipline_ok(void)
                         if (!(words[0] & ADJ_SETOFFSET) ||
                             words[0] & ADJ_TIMECONST ||
                             words[LOCALE_TIMEX_OFFSET] != 0 ||
-                            (bipolar)words[LOGGER_TIMEX_TIME_SEC] != sec ||
-                            (bipolar)words[LOGGER_TIMEX_TIME_NSEC] != nsec)
+                            (bipolar)words[LOGGER_TIMEX_TIME_SEC] !=
+                                discipline_case[at].sec ||
+                            (bipolar)words[LOGGER_TIMEX_TIME_NSEC] !=
+                                discipline_case[at].nsec)
                                 return false;
                 }
                 else
@@ -12041,8 +12160,6 @@ static bipolar locale_ntp_apply_offset(bipolar offset_ns, bipolar distance_ns)
 {
         bipolar now;
         bipolar target = 0;
-        bipolar sec = 0;
-        bipolar nsec = 0;
         positive words[LOGGER_TIMEX_WORDS];
         p64 stamp[2];
         bipolar failed;
@@ -12053,10 +12170,9 @@ static bipolar locale_ntp_apply_offset(bipolar offset_ns, bipolar distance_ns)
         if (!sntp_target_ok(now, offset_ns, address_of target))
                 return SNTP_MALFORMED;
 
-        sntp_split_offset(offset_ns, address_of sec, address_of nsec);
         locale_ntp_first = !locale_ntp_synced;
-        locale_ntp_discipline_words(offset_ns, sec, nsec,
-                                    locale_ntp_error_us(distance_ns), words);
+        locale_ntp_discipline_words(offset_ns, locale_ntp_error_us(distance_ns),
+                                    words);
         if (locale_ntp_synced)
         {
                 positive state[LOGGER_TIMEX_WORDS] = {0};
@@ -12089,9 +12205,9 @@ static bipolar locale_ntp_apply_offset(bipolar offset_ns, bipolar distance_ns)
                 return now;
         if (!sntp_target_ok(now, offset_ns, address_of target))
                 return SNTP_MALFORMED;
-        sntp_split_offset(target, address_of sec, address_of nsec);
-        stamp[0] = (p64)sec;
-        stamp[1] = (p64)nsec;
+        //      A time in the window is after 1970, so it needs no flooring.
+        stamp[0] = (p64)(target / (bipolar)SNTP_NANOSECONDS);
+        stamp[1] = (p64)(target % (bipolar)SNTP_NANOSECONDS);
         failed = system_call_2(syscall(clock_settime), CLOCK_REALTIME,
                                (positive)stamp);
         if (failed < 0)
@@ -12105,13 +12221,13 @@ static bipolar locale_ntp_apply_offset(bipolar offset_ns, bipolar distance_ns)
         return 0;
 }
 
-static bipolar locale_ntp_ask(string_address server, bool filter, bool tight,
+static bipolar locale_ntp_ask(string_address server, bool filter, bipolar most,
                               sntp_sample address_to answer)
 {
         if (!server || !server[0] ||
             !radio_text_plain(server, string_length(server)))
                 return SNTP_NO_SERVER;
-        return sntp_query(server, filter, tight, answer);
+        return sntp_query(server, filter, most, answer);
 }
 
 static bipolar locale_ntp_take(string_address server,
@@ -12138,16 +12254,31 @@ static bipolar locale_ntp_take(string_address server,
         /root/ntp.server is believed on its own, as before, and sampling off
         takes the first answer -- unless it would step the clock more than
         two seconds, when a second is asked for, since sntp_choose believes
-        no such step on one word.
+        no such step on one word. A clock nobody has set takes the first
+        answer there is, with sampling or not: it has no time to be moved
+        from, and waiting for the others is a minute on a machine whose
+        network is slow to come.
 */
-static bipolar locale_ntp_apply(void)
+static bipolar locale_ntp_apply(bool by_hand)
 {
         p8 server[80];
         bipolar failed = SNTP_NO_SERVER;
         positive at;
         bool filter = locale_ntp_sampling_wanted();
-        bool tight = locale_clock_synced();
+        bipolar now = sntp_now_ns();
+        //      A clock nobody has set has no time of its own to be moved
+        //      from, and the window bounds what it can be told.
+        bool unset = now >= 0 && !sntp_wall_ok(now);
+        //      How far an answer may move the clock: two seconds when it
+        //      tells the time, a day when it does not, and for a person who
+        //      asked, anything the window holds -- a clock that is a week
+        //      out is refused by every sample otherwise, with nothing to
+        //      bring it back.
+        bipolar most = by_hand ? SNTP_OFFSET_ANY_NS
+                       : locale_clock_synced() ? SNTP_OFFSET_SYNCED_NS
+                                               : SNTP_OFFSET_MOST_NS;
         bool rated = false;
+        bool denied = false;
         sntp_sample heard[SNTP_SERVERS];
         b32 heard_from[SNTP_SERVERS];
         positive heard_count = 0;
@@ -12156,14 +12287,15 @@ static bipolar locale_ntp_apply(void)
         locale_word(LOCALE_NTP_SERVER_PATH, server, sizeof(server));
         if (server[0])
         {
-                failed = locale_ntp_ask((string_address)server, filter, tight,
+                failed = locale_ntp_ask((string_address)server, filter, most,
                                         heard);
                 if (failed >= 0)
                         return locale_ntp_take((string_address)server, heard);
                 rated = failed == SNTP_RATE_LIMITED;
+                denied = failed == SNTP_DENIED;
         }
 
-        wanted = filter && !server[0] ? SNTP_SERVERS : 1;
+        wanted = filter && !server[0] && !unset ? SNTP_SERVERS : 1;
         for (at = 0; at < array_count(locale_ntp_fallback) &&
                      heard_count < wanted; at++)
         {
@@ -12172,7 +12304,7 @@ static bipolar locale_ntp_apply(void)
                                   (string_address)locale_ntp_fallback[at]))
                         continue;
                 failed = locale_ntp_ask((string_address)locale_ntp_fallback[at],
-                                        filter, tight, heard + heard_count);
+                                        filter, most, heard + heard_count);
                 if (failed >= 0)
                 {
                         bool again = false;
@@ -12190,8 +12322,10 @@ static bipolar locale_ntp_apply(void)
                 }
                 else if (failed == SNTP_RATE_LIMITED)
                         rated = true;
+                else if (failed == SNTP_DENIED)
+                        denied = true;
                 //      A far step is not taken on one server's word.
-                if (heard_count == 1 && wanted < 2 &&
+                if (heard_count == 1 && wanted < 2 && !unset &&
                     !sntp_within(heard[0].offset_ns, SNTP_OFFSET_SYNCED_NS))
                         wanted = 2;
         }
@@ -12199,12 +12333,8 @@ static bipolar locale_ntp_apply(void)
         if (heard_count)
         {
                 bipolar chosen = sntp_choose(heard, heard_count);
-                bipolar now = sntp_now_ns();
 
-                //      A clock nobody has set takes the one server there is:
-                //      it has no time of its own to be moved from, and the
-                //      window bounds what it can be told.
-                if (chosen < 0 && heard_count == 1 && now >= 0 && !sntp_wall_ok(now))
+                if (chosen < 0 && heard_count == 1 && unset)
                         chosen = 0;
                 if (chosen < 0)
                         return SNTP_UNCONFIRMED;
@@ -12212,7 +12342,7 @@ static bipolar locale_ntp_apply(void)
                     (string_address)locale_ntp_fallback[heard_from[chosen]],
                     heard + chosen);
         }
-        return rated ? SNTP_RATE_LIMITED : failed;
+        return denied ? SNTP_DENIED : rated ? SNTP_RATE_LIMITED : failed;
 }
 
 static b32 locale_ntp_status(void)
@@ -12251,7 +12381,7 @@ static b32 locale_ntp_set(bool sampling, string_address word)
         if (!sampling && string_equals(word, "on"))
         {
                 locale_ntp_next = 0;
-                if (locale_ntp_apply() < 0)
+                if (locale_ntp_apply(true) < 0)
                         word = "on, waiting for a reply";
         }
         host_say(log, host_label "ntp %s%s\n", sampling ? "sampling " : "",
@@ -12425,7 +12555,7 @@ static fn locale_ntp_keep(void)
         locale_ntp_asked = now;
         if (!locale_child_fork(address_of locale_ntp_child))
         {
-                bipolar failed = locale_ntp_apply();
+                bipolar failed = locale_ntp_apply(false);
 
                 locale_child_end(address_of locale_ntp_child,
                                  failed >= 0 ? 0
