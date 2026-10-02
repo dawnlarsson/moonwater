@@ -236,13 +236,10 @@ static fn host_pause(p64 nanoseconds)
 static bipolar host_read_text(string_address path, p8 address_to into,
                               positive room)
 {
-        bipolar got = file_slurp_once_at(AT_FDCWD, path, into, room);
+        bipolar got = file_slurp_regular_at(AT_FDCWD, path, into, room, 0);
 
         if (got < 0)
-        {
-                into[0] = end;
                 return got;
-        }
 
         while (got > 0 && (into[got - 1] == '\n' || into[got - 1] == ' '))
                 got--;
@@ -258,29 +255,7 @@ static bipolar host_read_text(string_address path, p8 address_to into,
 static bipolar host_read_state(string_address path, p8 address_to into,
                                positive capacity)
 {
-        struct stat facts;
-        bipolar handle;
-        bipolar got;
-
-        if (!capacity)
-                return -1;
-        handle = system_open_at(AT_FDCWD, path,
-                                FILE_READ | O_NONBLOCK | O_NOFOLLOW |
-                                    O_CLOEXEC);
-        if (handle < 0)
-                return handle;
-        if (system_file_status(handle, address_of facts) < 0 ||
-            !S_ISREG(facts.st_mode))
-        {
-                system_close(handle);
-                into[0] = end;
-                return -22;
-        }
-        got = system_read_retry((positive)handle, into, capacity - 1);
-        system_close(handle);
-        if (got >= 0)
-                into[got] = end;
-        return got;
+        return file_slurp_regular_at(AT_FDCWD, path, into, capacity, O_NOFOLLOW);
 }
 
 /*
@@ -2420,7 +2395,8 @@ static b32 host_settings_image(string_address path, host_settings address_to int
 
 static bool host_settings_kept(host_settings address_to into)
 {
-        bipolar handle = system_open_at(AT_FDCWD, HOST_SETTINGS, FILE_READ | O_CLOEXEC);
+        bipolar handle = system_open_at(AT_FDCWD, HOST_SETTINGS,
+                                        FILE_READ | O_NONBLOCK | O_CLOEXEC);
         bipolar got;
 
         if (handle < 0)
@@ -8426,7 +8402,7 @@ static bool tune_lists(string_address path, string_address word)
 static bool tune_kept(string_address key, p8 address_to into, positive room)
 {
         p8 text[512];
-        bipolar got = file_slurp_once_at(AT_FDCWD, TUNE_KEPT, text, sizeof(text) - 1);
+        bipolar got = file_slurp_regular_at(AT_FDCWD, TUNE_KEPT, text, sizeof(text) - 1, 0);
         positive at = 0;
         positive length = string_length(key);
 
@@ -8456,7 +8432,7 @@ static bool tune_keep(string_address key, string_address value)
 {
         p8 text[512];
         p8 out[640];
-        bipolar got = file_slurp_once_at(AT_FDCWD, TUNE_KEPT, text, sizeof(text) - 1);
+        bipolar got = file_slurp_regular_at(AT_FDCWD, TUNE_KEPT, text, sizeof(text) - 1, 0);
         positive at = 0;
         positive used = 0;
         positive length = string_length(key);

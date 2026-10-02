@@ -1548,7 +1548,7 @@ failed:
 static COLD bool net_wired_off(void)
 {
         p8 text[8];
-        bipolar got = file_slurp_once_at(AT_FDCWD, NET_WIRED_POWER, text, sizeof(text));
+        bipolar got = file_slurp_regular_at(AT_FDCWD, NET_WIRED_POWER, text, sizeof(text), 0);
 
         while (got > 0 && (text[got - 1] == '\n' || text[got - 1] == ' '))
                 got--;
@@ -1561,12 +1561,12 @@ static COLD bool net_wired_off(void)
 static COLD p8 net_internet_prefer(void)
 {
         p8 text[16];
-        bipolar got = file_slurp_once_at(AT_FDCWD, NET_INTERNET_RUN, text,
-                                         sizeof(text));
+        bipolar got = file_slurp_regular_at(AT_FDCWD, NET_INTERNET_RUN, text,
+                                            sizeof(text), 0);
 
         if (got < 0)
-                got = file_slurp_once_at(AT_FDCWD, NET_INTERNET_ROOT, text,
-                                         sizeof(text));
+                got = file_slurp_regular_at(AT_FDCWD, NET_INTERNET_ROOT, text,
+                                            sizeof(text), 0);
         if (got < 0)
                 return NETLINK_PREFER_WIRED;
 

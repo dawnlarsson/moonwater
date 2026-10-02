@@ -41844,6 +41844,63 @@ while True:
                   f"moonwater {command} does not write through a link at /root/{state}",
                   [line for line in lines if f"@@planted {state}" in line])
 
+        # Every state file under /root, replaced before a verb that writes it
+        # and one that reads it by every kind of thing a name can be: a link
+        # to a file, a link to nowhere, a FIFO with nobody on the other end,
+        # a directory, and a character device mounted over the name. A verb
+        # must answer within its five seconds, never write through to what a
+        # link names or into the directory, and leave the device a device.
+        states = [("wifi", "wifi add plantnet passpass1", "wifi"),
+                  ("wifi.power", "wifi on", "wifi"),
+                  ("wired.power", "wired off", "wired"),
+                  ("bluetooth", "bluetooth add plantdev", "bluetooth"),
+                  ("bluetooth.power", "bluetooth off", "bluetooth"),
+                  ("internet", "priority internet wifi", "priority internet"),
+                  ("ntp", "ntp off", "ntp"),
+                  ("ntp.sampling", "ntp sampling off", "ntp"),
+                  ("keyboard", "keyboard de", "keyboard"),
+                  ("timezone", "timezone se", "timezone"),
+                  ("timezone.mode", "timezone se", "timezone"),
+                  ("name", "name random", "name"),
+                  ("tune", "charge limit 80", "charge"),
+                  ("link", "link off", "link"),
+                  ("link.key", "link key", "link"),
+                  ("link.peers", "link forget nobody", "link"),
+                  ("link.groups", "link join plantlab allow run", "link")]
+        kinds = {"link": "ln -s /tmp/victim {p}",
+                 "dangling": "ln -s /tmp/nowhere/victim {p}",
+                 "fifo": "mkfifo {p}",
+                 "directory": "mkdir {p} && echo SAFE > {p}/inner",
+                 "device": ": > {p} && mount --bind /dev/null {p}"}
+        script = "mkdir -p /tmp/nowhere\n"
+        for state, writer, reader in states:
+            for kind, plant in kinds.items():
+                for role, verb in (("writes", writer), ("reads", reader)):
+                    path = "/root/" + state
+                    script += (f"umount {path} 2>/dev/null; rm -rf {path} /tmp/nowhere/victim; "
+                               f"echo SAFE > /tmp/victim; {plant.format(p=path)}\n"
+                               f"timeout 5 /tmp/moonwater {verb} > /dev/null 2>&1 < /dev/null; "
+                               f"echo \"@@object {state} {kind} {role} $? $(cat /tmp/victim) "
+                               f"$(cat {path}/inner 2>/dev/null || echo -) "
+                               f"$(test -e /tmp/nowhere/victim && echo made || echo -) "
+                               f"$(test -c {path} && echo char || echo -)\"\n"
+                               f"umount {path} 2>/dev/null; rm -rf {path}\n")
+        sys_reset()
+        lines, finished = session(script)
+        check(finished, "the planted objects run finished", "")
+        for state, writer, reader in states:
+            for kind in kinds:
+                for role, verb in (("writes", writer), ("reads", reader)):
+                    row = [line.split() for line in lines
+                           if line.startswith(f"@@object {state} {kind} {role} ")]
+                    status, victim, inner, made, device = (row[0][4:9] if row and len(row[0]) >= 9
+                                                           else ("-",) * 5)
+                    check(row and status != "124" and victim == "SAFE" and made == "-" and
+                          (kind != "directory" or inner == "SAFE") and
+                          (kind != "device" or device == "char"),
+                          f"moonwater {verb} with a {kind} at /root/{state}",
+                          row[0] if row else "no answer")
+
         # A secret on the command line is in /proc/PID/cmdline, which every
         # user reads, for as long as the command lives. Each verb that takes
         # one writes into a pipe already full, so it stops at its first word

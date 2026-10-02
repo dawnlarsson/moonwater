@@ -186,11 +186,8 @@ static b32 link_status(void)
         link_groups_load(address_of groups);
         {
                 p8 script[16384];
-                bipolar script_length = file_slurp_once_at(
-                        AT_FDCWD, "/root/main.moonwater.sh", script,
-                        sizeof script - 1);
-
-                script[script_length > 0 ? script_length : 0] = 0;
+                (void)file_slurp_regular_at(AT_FDCWD, "/root/main.moonwater.sh",
+                                            script, sizeof script, 0);
 
                 for (positive g = 0; g < groups.count; g++)
                 {
@@ -221,6 +218,7 @@ static b32 link_status(void)
                                               "there\n",
                                               (string_address)groups.record[g].namespace);
                 }
+                crypto_forget(script, sizeof script);
         }
 
         link_peers_load(address_of peers);

@@ -1908,7 +1908,8 @@ static p8 host_machine_read_file(string_address path, p8 address_to text,
             !host_machine_file_allowed(facts.mode, facts.owner))
                 return HOST_MACHINE_REFUSED;
 
-        handle = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC | O_NOFOLLOW);
+        handle = system_open_at(AT_FDCWD, path,
+                                FILE_READ | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
         if (handle < 0)
                 return HOST_MACHINE_REFUSED;
         if (!file_look(handle, (string_address)"", AT_EMPTY_PATH, address_of opened) ||
