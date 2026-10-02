@@ -75381,13 +75381,21 @@ static fn downloads(void)
         bowl_setup_fetch runs the real one. Every length up to the ceiling
         is taken whole, every length past it, by one byte or by a lot, is a
         refused download that never grew the file past the ceiling, and
-        every row's ceiling holds the download it measured.
+        every row's ceiling holds the download it measured. The writer
+        keeps its own status: SIGXFSZ is ignored, so the write past the
+        ceiling fails with EFBIG and the writer says so and exits 1 rather
+        than dying of the signal (153 from sh); an ignored signal stays
+        ignored across exec, under qemu-user as natively.
 */
 static fn download_ceiling(void)
 {
-        static const p8 writer[] = "#!/bin/sh\nhead -c \"$4\" /dev/zero > \"$3\"\n";
+        static const p8 writer[] =
+            "#!/bin/sh\nhead -c \"$4\" /dev/zero > \"$3\"\nstatus=$?\n"
+            "echo $status > \"$0.status\"\nexit $status\n";
         string_address fake = BOWL_ROOT_DIRECTORY "/fake-wget";
+        string_address said = BOWL_ROOT_DIRECTORY "/fake-wget.status";
         string_address part = BOWL_ROOT_DIRECTORY "/fetched.part";
+        bool named = true;
         static const struct { string_address bytes; p64 ceiling; bool whole; } rows[] = {
             {"0", 4096, true},       {"1", 4096, true},     {"4095", 4096, true},
             {"4096", 4096, true},    {"4097", 4096, false}, {"8192", 4096, false},
@@ -75416,16 +75424,26 @@ static fn download_ceiling(void)
                         whole &= !failed && there &&
                                  size == (p64)string_to_positive(rows[at].bytes);
                 else
+                {
+                        p8 status[8] = {0};
+
                         held &= failed && size <= rows[at].ceiling;
+                        named &= file_read_once_at(AT_FDCWD, said, status,
+                                                   sizeof(status) - 1) > 0 &&
+                                 string_equals((string_address)status, "1\n");
+                }
         }
         check("A download no longer than its ceiling is taken whole", whole);
         check("A download past its ceiling is refused and stops at the ceiling", held);
+        check("A write past the ceiling fails with EFBIG and is not killed by SIGXFSZ",
+              named);
         for (positive at = 0; at < array_count(bowl_distros); at++)
                 check("A row's ceiling holds the download it measured",
                       bowl_download_ceiling(bowl_distros + at) >
                           bowl_distros[at].archive_bytes);
         system_remove_at(AT_FDCWD, part, 0);
         system_remove_at(AT_FDCWD, fake, 0);
+        system_remove_at(AT_FDCWD, said, 0);
 }
 
 b32 main(void)
