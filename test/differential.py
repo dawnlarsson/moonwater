@@ -54902,7 +54902,7 @@ static void expect_dns(const char *label, const p8 *msg, positive size,
         p8 into[256];
         positive ended = 0;
         bipolar used = dns_copy_name((p8 address_to)msg, size, at, into,
-                                     sizeof into, address_of ended);
+                                     sizeof into, address_of ended, null);
         int ok = used >= 0;
         if (ok != want_ok) {
                 fprintf(stderr, "msan wire lift: FAIL dns %s (used=%ld)\n",
@@ -60263,14 +60263,17 @@ def mdns_model_name(packet, at, steps=None):
             return bytes(out), ended if ended is not None else position
 
 
-def mdns_model_read(packet, budget=False):
+def mdns_model_read(packet, budget=True):
     """waterlink_mdns_read as a model written from its comments and the
     RFCs it cites: (read, asked, ports of the instances found, steps the
-    names took). The reader in the binary must say the same of every packet."""
+    names took). The reader in the binary must say the same of every packet.
+    The names of a packet may take one step, a label or a pointer, for each
+    byte of it; without the budget the steps are only counted."""
     import struct
-    steps = [len(packet)] if budget else None
+    allowed = len(packet) if budget else 1 << 40
+    steps = [allowed]
     asked, found = False, []
-    took = lambda: len(packet) - steps[0] if steps else 0
+    took = lambda: allowed - steps[0]
 
     def refused():
         return False, asked, [f[2] for f in found if f[1] and f[2]], took()
@@ -60420,6 +60423,57 @@ def struct_unpack(form, data):
     return struct.unpack(form, data)
 
 
+def mdns_flood(rng, depth, place, kind, labels, records, pad):
+    """What a sender on the link can make a reader's names cost: a long name
+    -- a chain of depth pointers each two bytes before the last, or labels
+    labels of one byte -- held as a TXT record's data with pad bytes after
+    it, then records records of kind whose owner (place 1), data (2) or both
+    (3) name its end, and one record after them that names the service, so a
+    budget that runs out in the last name of the flood still refuses it.
+    Everything else in the packet is well formed."""
+    out = bytearray(struct_pack(">HHHHHH", 0, 0x8400, 0, 0, 0, 0)) + MDNS_SERVICE_WIRE
+    if labels:
+        held = b"".join(b"\x01" + bytes([0x61 + n % 26]) for n in range(labels)) + b"\xc0\x0c"
+        tail = len(out) + 10
+    else:
+        held = struct_pack(">H", 0xc00c) + b"".join(
+            struct_pack(">H", 0xc000 | (len(out) + 10 + 2 * hop)) for hop in range(depth - 1))
+        tail = len(out) + 10 + 2 * (depth - 1)
+    out += struct_pack(">HHIH", 16, 1, 4500, len(held) + pad) + held + bytes(pad)
+    for _ in range(records):
+        out += struct_pack(">H", 0xc000 | (tail if place & 1 else 12))
+        name = struct_pack(">H", 0xc000 | tail) if place & 2 else b"\0"
+        data = {12: name, 33: struct_pack(">HHH", 0, 0, 22348) + name,
+                16: b"\0" + name, 1: bytes(4)}[kind]
+        out += struct_pack(">HHIH", kind, 0x8001, 120, len(data)) + data
+    out += struct_pack(">HHHIH", 0xc00c, 16, 0x8001, 120, 1) + b"\0"
+    out[6:8] = struct_pack(">H", records + 2)
+    return bytes(out)
+
+
+def mdns_floods(rng, count):
+    """Floods of every shape, and for each the packet whose names take
+    exactly as many steps as it has bytes and the one that takes one more,
+    made by the padding alone: (packet, steps its names take)."""
+    for _ in range(count):
+        depth = rng.choice((1, 2, 4, 16, 64, 126, 127, rng.randint(1, 127)))
+        labels = rng.choice((0, 0, 0, rng.randint(1, 120)))
+        place = rng.choice((1, 2, 3))
+        kind = rng.choice((12, 33, 16, 1))
+        records = rng.randint(1, 110)
+        for pad in (0,):
+            packet = mdns_flood(rng, depth, place, kind, labels, records, pad)
+            if len(packet) > 1500:
+                continue
+            took = mdns_model_read(packet, budget=False)[3]
+            yield packet, took
+            pad = took - len(packet)
+            if 0 < pad and took <= 1500:
+                for less in (0, 1):
+                    packet = mdns_flood(rng, depth, place, kind, labels, records, pad - less)
+                    yield packet, took
+
+
 def mdns_mutated(rng, packet, wire):
     """A packet a parser has to survive: header bits, counts, record fields
     the reader decides on, pointers, label types, cuts and flips."""
@@ -60545,6 +60599,10 @@ def harness_waterlink_mdns(argv):
     #       Generated packets, mutated packets, and dnspython's own.
     rng = random.Random(0x5353)
     packets, kinds, intents = [], [], []
+    for packet, took in mdns_floods(rng, args.count // 8):
+        packets.append(packet)
+        kinds.append("flood")
+        intents.append(took)
     while len(packets) < args.count:
         for kind, packet, wire, ports in mdns_generated(rng):
             packets.append(packet)
@@ -60595,7 +60653,7 @@ def harness_waterlink_mdns(argv):
                 shown += 1
                 print("    %s: binary %r, model %r: %s" % (kind, answer, model[:3], packet.hex()))
     print("  mdns cases: " + ", ".join("%s %s %d" % (k[0], k[1], n) for k, n in sorted(tally.items(), key=str)))
-    for kind in ("response", "query", "mutated", "dnspython"):
+    for kind in ("response", "query", "mutated", "flood", "dnspython"):
         if kind != "dnspython" or have_dnspython:
             checks(tally["disagree", kind] == 0 and tally[kind, True] > 0,
                    "the binary and the model read every %s packet alike (%d disagree)" %
@@ -60609,6 +60667,22 @@ def harness_waterlink_mdns(argv):
     checks(meant == kinds.count("response"),
            "every generated response reads, with the instances it was written with (%d of %d)" %
            (meant, kinds.count("response")))
+    #       What a packet costs: a flood whose names take exactly as many
+    #       steps as it has bytes reads and one step over is refused; and
+    #       what responders and browsers write is well inside it.
+    edge = collections.Counter()
+    for packet, kind, answer, took in zip(packets, kinds, answers, intents):
+        if kind == "flood" and took - len(packet) in (0, 1):
+            edge[took - len(packet), answer.startswith("ok")] += 1
+    dearest = max(mdns_model_read(p)[3] / len(p) for p, k in zip(packets, kinds)
+                  if k in ("response", "query", "dnspython"))
+    print("  mdns floods at exactly their bytes in steps: %d read, %d refused; one step over: "
+          "%d read, %d refused" % (edge[0, True], edge[0, False], edge[1, True], edge[1, False]))
+    checks(edge[0, True] > 10 and edge[1, False] > 10 and not edge[0, False] and not edge[1, True],
+           "a flood whose names take exactly its bytes in steps reads, one step more is refused")
+    checks(dearest < 0.75, "the dearest packet a responder or browser wrote took %.2f steps a byte" %
+           dearest)
+    print("  mdns steps: the dearest generated response or question took %.2f a byte" % dearest)
     return checks.verdict("waterlink mdns:", "waterlink-mdns")
 
 

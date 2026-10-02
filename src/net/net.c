@@ -1372,11 +1372,15 @@ static COLD bipolar dns_write_name(p8 address_to into, positive room, string_add
         and a reply of names at the end of such a chain four milliseconds, so
         the jumps are counted too. A name longer than 255 bytes is refused
         whatever the room (RFC 1035 3.1). The spelling is kept as sent; DNS
-        names compare without regard to ASCII case.
+        names compare without regard to ASCII case. A caller that reads many
+        names out of one message may pass steps, the labels and pointers they
+        may take between them, which each one taken lowers; a name that would
+        take one more is refused.
 */
 static COLD bipolar dns_copy_name(p8 address_to message, positive size,
                              positive at, p8 address_to into, positive room,
-                             positive address_to ended)
+                             positive address_to ended,
+                             positive address_to steps)
 {
         byte_reader reader = byte_reader_open(message, size);
         byte_store name = {into, min(room, (positive)DNS_NAME_MAX), 0};
@@ -1393,8 +1397,10 @@ static COLD bipolar dns_copy_name(p8 address_to message, positive size,
                 p8 length = byte_reader_u8(&reader);
                 const p8 address_to label;
 
-                if (!byte_reader_ok(&reader))
+                if (!byte_reader_ok(&reader) || (steps && !address_to steps))
                         return DNS_MALFORMED;
+                if (steps)
+                        address_to steps -= 1;
 
                 if ((length & 0xc0) == 0xc0)
                 {
@@ -1443,7 +1449,7 @@ static COLD bipolar dns_skip_name(p8 address_to message, positive size, positive
         positive ended;
 
         return dns_copy_name(message, size, at, name, sizeof name,
-                             address_of ended) < 0
+                             address_of ended, null) < 0
                    ? DNS_MALFORMED : (bipolar)ended;
 }
 
@@ -1473,7 +1479,7 @@ static COLD bipolar dns_answer_address(p8 address_to message, positive size,
         positive ended;
         bipolar wanted_length = dns_copy_name(message, size, question_at,
                                               wanted, sizeof wanted,
-                                              address_of ended);
+                                              address_of ended, null);
 
         if (wanted_length < 0)
                 return DNS_MALFORMED;
@@ -1497,7 +1503,8 @@ static COLD bipolar dns_answer_address(p8 address_to message, positive size,
                         p8 owner[256];
                         //      at moves on to where the owner name ended.
                         bipolar owner_length = dns_copy_name(
-                            message, size, at, owner, sizeof owner, address_of at);
+                            message, size, at, owner, sizeof owner, address_of at,
+                            null);
                         byte_reader tail = dns_message_at(message, size, at);
                         byte_reader data;
                         positive data_length;
@@ -1541,7 +1548,7 @@ static COLD bipolar dns_answer_address(p8 address_to message, positive size,
 
                                 alias_length = dns_copy_name(
                                     message, size, at, alias, sizeof alias,
-                                    address_of target_end);
+                                    address_of target_end, null);
 
                                 if (alias_length < 0 ||
                                     target_end != at + data_length)
