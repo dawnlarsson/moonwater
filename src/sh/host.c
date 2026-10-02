@@ -12506,6 +12506,7 @@ static fn locale_recover(void)
 #define NAME_ROOM 80
 #define NAME_LONGEST 63
 #define NAME_WORDS 512
+#define NAME_LETTERS "abcdefghijklmnopqrstuvwxyz0123456789-"
 
 static const p8 name_adjectives[] =
     "ample aqua arctic ashen astral azure balmy bashful bold brave bright brisk "
@@ -12628,23 +12629,15 @@ static fn name_word(const p8 address_to list, positive index, p8 address_to into
 
 static fn name_roll(p8 address_to into, positive room)
 {
-        p8 random[4];
         p8 noun[16];
-        positive bits;
+        p32 bits;
 
-        system_random_fill(random, sizeof(random), 0);
-        bits = random[0] | random[1] << 8 | random[2] << 16 |
-               (positive)random[3] << 24;
+        system_random_fill(address_of bits, sizeof(bits), 0);
 
         name_word(name_adjectives, bits & (NAME_WORDS - 1), into, room);
         string_append_bounded(into, "-", room);
         name_word(name_nouns, (bits >> 9) & (NAME_WORDS - 1), noun, sizeof(noun));
         string_append_bounded(into, noun, room);
-}
-
-static bool name_edge(p8 byte)
-{
-        return (byte >= 'a' && byte <= 'z') || (byte >= '0' && byte <= '9');
 }
 
 /* Lowercase letters, digits and hyphens, a letter or digit at each end: one
@@ -12653,15 +12646,10 @@ static bool name_valid(string_address name)
 {
         positive length = string_length(name);
 
-        if (!length || length > NAME_LONGEST || !name_edge(name[0]) ||
-            !name_edge(name[length - 1]))
-                return false;
-
-        for (positive at = 1; at + 1 < length; at++)
-                if (!name_edge(name[at]) && name[at] != '-')
-                        return false;
-
-        return !string_equals(name, "random");
+        return length && length <= NAME_LONGEST &&
+               string_span_of_set(name, NAME_LETTERS) == length &&
+               name[0] != '-' && name[length - 1] != '-' &&
+               !string_equals(name, "random");
 }
 
 static bool name_apply(string_address name)
@@ -12734,8 +12722,7 @@ static b32 host_name(string_address address_to arguments, positive count)
         {
                 string_copy_bounded(name, arguments[2], sizeof(name));
                 for (positive at = 0; name[at]; at++)
-                        if (name[at] >= 'A' && name[at] <= 'Z')
-                                name[at] = (p8)(name[at] + ('a' - 'A'));
+                        name[at] = byte_to_lower(name[at]);
 
                 if (!name_valid(name))
                         return host_refuse("%s is not a machine name: lowercase "
