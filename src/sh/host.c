@@ -8410,18 +8410,54 @@ static bool tune_path(p8 address_to into, positive room, string_address first,
                string_append_bounded(into, third, room) < room;
 }
 
+/* Whether a file can be opened to be read, closing it. */
+static bool tune_exists(string_address path)
+{
+        bipolar handle = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC);
+
+        if (handle < 0)
+                return false;
+        system_close((positive)handle);
+        return true;
+}
+
+/* The best of a directory's entries, by the rank a visitor gives each, and the
+   first in the directory among equals. */
+typedef struct
+{
+        p8 name[64];
+        positive rank;
+} tune_choice;
+
+static fn tune_choose(tune_choice address_to choice, string_address name, positive rank)
+{
+        if (rank > choice->rank && string_length(name) < sizeof(choice->name))
+        {
+                choice->rank = rank;
+                string_copy(choice->name, name);
+        }
+}
+
+/* A kernel file's word is the one asked for. */
+static bool tune_says(string_address directory, string_address name, string_address leaf,
+                      string_address want)
+{
+        p8 text[16];
+
+        return radio_sys_read(directory, name, leaf, text, sizeof(text)) > 0 &&
+               string_equals((string_address)text, want);
+}
+
 /* One decimal number from a kernel file; false when it is not there or not one. */
 static bool tune_number(string_address path, positive address_to value)
 {
         p8 text[32];
-        positive digits = 0;
+        positive used;
 
         if (host_read_text(path, text, sizeof(text)) <= 0)
                 return false;
-        *value = 0;
-        while (byte_is_digit(text[digits]) && digits < 18)
-                *value = *value * 10 + (text[digits++] - '0');
-        return digits > 0 && !text[digits];
+        *value = string_digits_max(text, 18, address_of used);
+        return used && !text[used];
 }
 
 static bool tune_word(string_address path, p8 address_to into, positive room)
@@ -8587,7 +8623,8 @@ static bool tune_percent(string_address text, bool address_to relative, bool add
                          positive address_to value)
 {
         positive at = 0;
-        positive number = 0;
+        positive number;
+        positive used;
 
         *relative = *lower = false;
         if (text[at] == '+' || text[at] == '-')
@@ -8598,12 +8635,12 @@ static bool tune_percent(string_address text, bool address_to relative, bool add
         }
         if (!byte_is_digit(text[at]))
                 return false;
-        while (byte_is_digit(text[at]))
-        {
-                number = number * 10 + (text[at++] - '0');
-                if (number > 100000)
-                        return false;
-        }
+        //      Nineteen digits is as many as a word holds, and more is not a
+        //      percent whatever it starts with.
+        number = string_digits_max(text + at, 19, address_of used);
+        at += used;
+        if (number > 100000)
+                return false;
         if (text[at] == '%')
                 at++;
         *value = number;
@@ -8648,7 +8685,18 @@ static b32 tune_airplane(string_address address_to arguments, positive count)
         return radio_done(failed, on ? "airplane on" : "airplane off");
 }
 
-/* moonwater brightness [N|N%|+N|-N]: the first backlight, in percent. */
+/* The panel's own backlight before a raw one the driver also offers, the way
+   systemd-backlight orders them: firmware's, then the platform's, then raw. */
+static bool tune_backlight_visit(string_address directory, string_address name,
+                                 address_any context)
+{
+        tune_choose((tune_choice address_to)context, name,
+                    tune_says(directory, name, "/type", "firmware") ? 3
+                    : tune_says(directory, name, "/type", "platform") ? 2 : 1);
+        return true;
+}
+
+/* moonwater brightness [N|N%|+N|-N]: the panel's backlight, in percent. */
 static b32 tune_brightness(string_address address_to arguments, positive count)
 {
         p8 name[64];
@@ -8662,7 +8710,11 @@ static b32 tune_brightness(string_address address_to arguments, positive count)
 
         if (count > 3)
                 return host_usage();
-        if (!tune_entry(TUNE_SYS_BACKLIGHT, 0, name, sizeof(name)) ||
+        tune_choice panel = {.rank = 0};
+
+        host_each_entry(TUNE_SYS_BACKLIGHT, tune_backlight_visit, address_of panel);
+        string_copy(name, panel.name);
+        if (!panel.rank ||
             !tune_path(maximum_path, sizeof(maximum_path), TUNE_SYS_BACKLIGHT "/", (string_address)name,
                        "/max_brightness") ||
             !tune_path(current_path, sizeof(current_path), TUNE_SYS_BACKLIGHT "/", (string_address)name,
@@ -8704,19 +8756,32 @@ static b32 tune_brightness(string_address address_to arguments, positive count)
         return 0;
 }
 
-/* The first battery, by name. */
+/* A battery of the machine's own, and best the one that can limit its charge.
+   A mouse or a keyboard reports its battery here too, with the scope Device,
+   and is not the one a charge limit is for. */
+static bool tune_battery_visit(string_address directory, string_address name, address_any context)
+{
+        p8 path[160];
+
+        if (tune_says(directory, name, "/type", "Battery") &&
+            !tune_says(directory, name, "/scope", "Device"))
+        {
+                bool limited = radio_sys_path(path, sizeof(path), directory, name,
+                                              "/charge_control_end_threshold") &&
+                               tune_exists(path);
+
+                tune_choose((tune_choice address_to)context, name, limited ? 2 : 1);
+        }
+        return true;
+}
+
 static bool tune_battery(p8 address_to name, positive room)
 {
-        for (positive at = 0; tune_entry(TUNE_SYS_BATTERY, at, name, room); at++)
-        {
-                p8 path[160];
-                p8 type[16];
+        tune_choice battery = {.rank = 0};
 
-                if (tune_path(path, sizeof(path), TUNE_SYS_BATTERY "/", (string_address)name, "/type") &&
-                    tune_word(path, type, sizeof(type)) && string_equals((string_address)type, "Battery"))
-                        return true;
-        }
-        return false;
+        host_each_entry(TUNE_SYS_BATTERY, tune_battery_visit, address_of battery);
+        return battery.rank && string_length(battery.name) < room &&
+               (string_copy(name, battery.name), true);
 }
 
 static bipolar tune_charge_apply(string_address percent_text)
@@ -8774,12 +8839,10 @@ static b32 tune_charge(string_address address_to arguments, positive count)
                 host_need_root("moonwater charge");
                 if (!string_equals(arguments[3], "off"))
                 {
-                        positive at = 0;
+                        positive used;
 
-                        number = 0;
-                        while (byte_is_digit(arguments[3][at]) && at < 4)
-                                number = number * 10 + (arguments[3][at++] - '0');
-                        if (arguments[3][at] || number < 20 || number > 100)
+                        number = string_digits_max(arguments[3], 4, address_of used);
+                        if (arguments[3][used] || number < 20 || number > 100)
                                 return host_refuse("a charge limit is 20 to 100 percent%s\n", "");
                 }
                 {
@@ -8805,9 +8868,10 @@ static b32 tune_charge(string_address address_to arguments, positive count)
 }
 
 /* The governor and preference a profile means, where the machine has them. */
-static fn tune_profile_cpus(string_address governor, string_address preference)
+static positive tune_profile_cpus(string_address governor, string_address preference)
 {
         p8 name[32];
+        positive written = 0;
 
         for (positive at = 0; tune_entry(TUNE_SYS_CPU, at, name, sizeof(name)); at++)
         {
@@ -8822,14 +8886,15 @@ static fn tune_profile_cpus(string_address governor, string_address preference)
                                           "scaling_available_governors", "") &&
                     tune_lists(path, governor) &&
                     tune_path(path, sizeof(path), (string_address)policy, "scaling_governor", ""))
-                        (void)tune_write(path, governor);
+                        written += tune_write(path, governor) >= 0;
                 if (preference && tune_path(path, sizeof(path), (string_address)policy,
                                             "energy_performance_available_preferences", "") &&
                     tune_lists(path, preference) &&
                     tune_path(path, sizeof(path), (string_address)policy,
                               "energy_performance_preference", ""))
-                        (void)tune_write(path, preference);
+                        written += tune_write(path, preference) >= 0;
         }
+        return written;
 }
 
 /* Apply one of performance, balanced and powersave; false when the machine has no way to. */
@@ -8851,18 +8916,12 @@ static bool tune_power_apply(string_address profile)
         if (tune_lists(TUNE_SYS_PROFILE "_choices", platform))
                 any = tune_write(TUNE_SYS_PROFILE, platform) >= 0;
 
-        tune_profile_cpus(performance ? (string_address)"performance"
-                          : balanced ? (string_address)"schedutil" : (string_address)"powersave",
-                          performance ? (string_address)"performance"
-                          : balanced ? (string_address)"balance_performance" : (string_address)"power");
-        {
-                p8 path[160];
-                p8 word[32];
-
-                //      A governor the machine has counts as a way to, too.
-                any |= tune_path(path, sizeof(path), TUNE_SYS_CPU, "/cpu0/cpufreq/scaling_governor", "") &&
-                       tune_word(path, word, sizeof(word));
-        }
+        //      A way to is a write that went through: a governor that can be read
+        //      and never set is no profile applied.
+        any |= tune_profile_cpus(performance ? (string_address)"performance"
+                                 : balanced ? (string_address)"schedutil" : (string_address)"powersave",
+                                 performance ? (string_address)"performance"
+                                 : balanced ? (string_address)"balance_performance" : (string_address)"power") > 0;
         return any;
 }
 
@@ -8909,17 +8968,6 @@ static b32 tune_power(string_address address_to arguments, positive count)
                 return host_fail(TUNE_KEPT, kept);
         host_say(log, host_label "power %s\n", arguments[2]);
         return 0;
-}
-
-/* Whether a file can be opened to be read, closing it. */
-static bool tune_exists(string_address path)
-{
-        bipolar handle = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC);
-
-        if (handle < 0)
-                return false;
-        system_close((positive)handle);
-        return true;
 }
 
 /* The boost switch the machine has, or -ENOENT when it has neither. */
@@ -8999,15 +9047,16 @@ static b32 tune_cpu(string_address address_to arguments, positive count)
             byte_is_digit(arguments[3][0]))
         {
                 p8 path[160];
-                positive number = 0;
-                positive at = 0;
+                positive number;
+                positive used;
                 p8 text[8];
 
                 host_need_root("moonwater cpu");
-                while (byte_is_digit(arguments[3][at]) && at < 5)
-                        number = number * 10 + (arguments[3][at++] - '0');
-                if (arguments[3][at] || number == 0)
-                        return host_refuse("cpu 0 stays, and a cpu is a number%s\n", "");
+                number = string_digits_max(arguments[3], 5, address_of used);
+                if (arguments[3][used])
+                        return host_refuse("a cpu is a number of at most five digits%s\n", "");
+                if (!number)
+                        return host_refuse("cpu 0 stays%s\n", "");
                 bipolar failed;
 
                 positive_into_string(text, number);

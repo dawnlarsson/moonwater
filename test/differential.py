@@ -41937,6 +41937,94 @@ def harness_moonwater_cli(argv):
             check(rows[:len(want)] == want, f"{verb} shows each saved name as the display spells it",
                   [(a, b) for a, b in zip(rows, want) if a != b][:3])
 
+        # The machine's own battery and panel are the ones the verbs go to. A
+        # mouse or a keyboard lists its battery under the same type with the
+        # scope Device, and one of them listed first was "the battery": its
+        # charge was shown and no limit could be set. A panel's own backlight
+        # is firmware's, then the platform's, then a raw one the driver also
+        # offers. Names are added until the one that should lose is listed
+        # first, whatever order this file system lists a directory in.
+        def listed_first(directory, loser, winner, make):
+            for count in range(1, 200):
+                make(count - 1)
+                order = os.listdir(directory)
+                if min(order.index(loser(n)) for n in range(count)) < order.index(winner):
+                    return
+
+        sys_reset()
+
+        def peripheral(n):
+            for leaf, text in (("type", "Battery"), ("scope", "Device"), ("capacity", "55"),
+                               ("status", "Discharging")):
+                sys_file(f"class/power_supply/hidpp_battery_{n}/{leaf}", text + "\n")
+        listed_first(fake / "class/power_supply", lambda n: f"hidpp_battery_{n}", "BAT0", peripheral)
+        got, done = session("rm -f /root/tune\n" + say("charge") + say("charge limit 80"))
+        seen = answers(got)
+        check(done and any("battery 73%" in line and "stops at 100%" in line for line in seen["charge"]["out"]),
+              "charge is the machine's battery and not a peripheral's", repr(seen["charge"]))
+        check(seen["charge limit 80"]["status"] == 0 and
+              sys_read("class/power_supply/BAT0/charge_control_end_threshold") == "80" and
+              not any(path.name == "charge_control_end_threshold" for path in (fake / "class/power_supply").glob("hidpp*/*")),
+              "and its limit is the one that is set", repr(seen["charge limit 80"]))
+
+        for kind, others in (("firmware", "raw"), ("platform", "raw")):
+            sys_reset()
+            shutil.rmtree(fake / "class/backlight")
+            for leaf, text in (("type", kind), ("brightness", "50"), ("max_brightness", "200")):
+                sys_file(f"class/backlight/panel0/{leaf}", text + "\n")
+
+            def raw(n):
+                for leaf, text in (("type", others), ("brightness", "50"), ("max_brightness", "100")):
+                    sys_file(f"class/backlight/{others}_{n}/{leaf}", text + "\n")
+            listed_first(fake / "class/backlight", lambda n: f"{others}_{n}", "panel0", raw)
+            got, done = session("rm -f /root/tune\n" + say("brightness 75"))
+            raws = [sys_read(f"class/backlight/{path.name}/brightness")
+                    for path in (fake / "class/backlight").iterdir() if path.name != "panel0"]
+            check(done and sys_read("class/backlight/panel0/brightness") == "150" and set(raws) == {"50"},
+                  f"brightness goes to the {kind} backlight before a raw one", (answers(got), raws))
+
+        # A profile counts as applied when a write went through: a governor
+        # that can be read, with no schedutil in its list and no platform
+        # profile, was "balanced", kept for the next boot, and said so.
+        sys_reset()
+        (fake / "firmware/acpi/platform_profile").unlink()
+        (fake / "firmware/acpi/platform_profile_choices").unlink()
+        (fake / "devices/system/cpu/cpu0/cpufreq/energy_performance_available_preferences").unlink()
+        sys_file("devices/system/cpu/cpu0/cpufreq/scaling_available_governors", "performance powersave\n")
+        got, done = session("rm -f /root/tune\n" + say("power balanced") + "cat /root/tune 2>/dev/null; echo '@@ tune'\n" +
+                            say("power powersave") + "echo '@@ kept'; cat /root/tune; echo '@@end'\n")
+        seen = answers(got)
+        check(done and seen["power balanced"]["status"] == 1 and
+              any("no power profile" in line for line in seen["power balanced"]["out"]) and
+              "power balanced" not in got,
+              "a profile nothing could apply is refused and not kept", repr(seen["power balanced"]))
+        check(seen["power powersave"]["status"] == 0 and "power powersave" in got and
+              sys_read("devices/system/cpu/cpu0/cpufreq/scaling_governor") == "powersave",
+              "a profile the machine has is applied and kept", repr(seen["power powersave"]))
+
+        # The numbers the verbs take, at their edges.
+        edges = {"brightness 100000": 0, "brightness 100001": 2, "brightness +0": 0, "brightness -0": 0,
+                 "brightness 0050": 0, "brightness 0000050": 0, "brightness 00000000000000000050": 2,
+                 "brightness 50%": 0, "brightness %": 2, "brightness 5%%": 2, "brightness +": 2,
+                 "charge limit 0080": 0, "charge limit 00080": 1, "charge limit 00000000000000000080": 1,
+                 "charge limit 100": 0, "charge limit 19": 1, "charge limit 101": 1, "charge limit 80x": 1,
+                 "cpu online 99999": 1, "cpu online 100000": 1, "cpu online 0": 1, "cpu online 1x": 1,
+                 "cpu offline 2": 0}
+        got = tuned("".join(say(verb) for verb in edges))
+        seen = answers(got)
+        for verb, status in edges.items():
+            check(seen[verb]["status"] == status, f"{verb} is {'refused' if status else 'taken'}", repr(seen[verb])[:200])
+        got = tuned(say("brightness 0000050") + "echo \"@@ now $(cat /sys/class/backlight/fake0/brightness)\"\n" +
+                    say("charge limit 0080") + "echo \"@@ limit $(cat /sys/class/power_supply/BAT0/charge_control_end_threshold)\"\n" +
+                    say("cpu online 100000") + say("cpu online 0") + say("cpu online 99999"))
+        seen = answers(got)
+        check("@@ now 100" in got and "@@ limit 80" in got, "leading zeros are the number they spell", got[-300:])
+        check(any("at most five digits" in line for line in seen["cpu online 100000"]["out"]) and
+              any("cpu 0 stays" in line for line in seen["cpu online 0"]["out"]) and
+              any("cannot be switched" in line for line in seen["cpu online 99999"]["out"]),
+              "a cpu that is too long a number, cpu 0 and a cpu that is not there are each said so",
+              repr(seen))
+
         # The saved lists survive a write cut short. RLIMIT_FSIZE 0 makes
         # every write fail and kills the writer with SIGXFSZ, the way a
         # crash part way through would: a list written in place was truncated
