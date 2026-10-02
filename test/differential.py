@@ -57172,6 +57172,99 @@ int main(int argc, char **argv)
                 checks(bool(fields[5 + index]) == want,
                        f"{path.name}: event {event!r} owned {bool(fields[5 + index])}, "
                        f"bash and the arms say {want}\n{text}")
+
+    #   The machine process's other side, lifted out of the CLI half and run
+    #   against a device that is a few variables: the stop that asks it to
+    #   end. A caller who may not (END is root's) must not wait ten seconds
+    #   for a detach that is not coming, and a process that never let go is
+    #   not one that ran moonwater_end.
+    stop_source = r"""
+#include <stdio.h>
+#include <string.h>
+#include <stdbool.h>
+typedef unsigned long long p64;
+typedef long bipolar;
+typedef unsigned long positive;
+#define address_of &
+#define address_to *
+#define SPARK_DEVICE "/dev/spark"
+#define FILE_READ 0
+#define O_CLOEXEC 0
+#define AT_FDCWD (-100)
+#define HOST_CLOCK_BOOTTIME 7
+#define HOST_EXIT_EACH_NS ((p64)10000000000)
+#define HOST_EVENT_POLL_NS ((p64)20000000)
+#define SPARK_BIND_NAME_MAX 24
+#define memory_zero(at, n) memset(at, 0, n)
+""" + section(machine, "#define MOONWATER_ATTACH 0u", "#define MOONWATER_HOOK_INIT") + r"""
+static p64 now_ns;
+static bool host_machine_self, attached, may_end, leaves;
+static unsigned ended, polls, runs, opened;
+static bipolar system_open_at(int at, const char *path, int flags) { (void)at;(void)path;(void)flags;opened++;return 3; }
+static void system_close(bipolar h) { (void)h; }
+static p64 system_clock_ns(int c) { (void)c;return now_ns; }
+static void host_pause(p64 ns) { now_ns += ns; }
+static void host_machine_end_run(void) { runs++; }
+static bipolar system_control(bipolar d, unsigned op, void *p) {
+    struct machine_control *c = p; (void)d;(void)op;
+    if (c->op == MOONWATER_END) {
+        if (!may_end) return -1;
+        ended++;
+        return 0;
+    }
+    if (c->op == MOONWATER_STATUS) {
+        polls++;
+        c->flags = attached && !(ended && leaves && polls > 4) ? MOONWATER_ATTACHED : 0;
+        return 0;
+    }
+    return -1;
+}
+""" + section(machine, "static bipolar host_machine_ioctl(", "#define HOST_RADIO_WAIT_MS") + section(machine, "static bool host_machine_stop(void)", "static b32 host_machine_source(void)") + r"""
+static unsigned bad, total;
+static void check(int ok, const char *name) { total++; if (!ok) { bad++; printf("FAIL %s\n", name); } }
+static void world(bool a, bool m, bool l, bool s) {
+    now_ns = 0; polls = ended = runs = 0; attached = a; may_end = m; leaves = l; host_machine_self = s;
+}
+int main(void)
+{
+    bool got;
+    world(false, true, true, false);
+    got = host_machine_stop();
+    check(!got && !ended, "with no machine process attached there is nothing to end and it is not a stop it ran");
+    world(true, false, true, false);
+    got = host_machine_stop();
+    check(!got && !ended && now_ns < 1000000000ull, "a caller who may not end it is refused at once, not after ten seconds");
+    world(true, true, true, false);
+    got = host_machine_stop();
+    check(got && ended == 1 && now_ns < 1000000000ull, "a machine process that is told and leaves is a stop it ran");
+    world(true, true, false, false);
+    got = host_machine_stop();
+    check(!got && ended == 1 && now_ns >= HOST_EXIT_EACH_NS, "one that stays attached for ten seconds is not");
+    world(true, true, true, true);
+    got = host_machine_stop();
+    check(got && runs == 1 && !ended && !polls, "the machine process itself runs moonwater_end and waits for nobody");
+    printf("%u %u\n", total, bad);
+    return bad != 0;
+}
+"""
+    with tempfile.TemporaryDirectory(prefix="machine-stop-") as temporary:
+        work = Path(temporary)
+        (work / "stop.c").write_text(stop_source)
+        built = subprocess.run([cc, "-O1", "-g", "-fsanitize=address,undefined", "-w", "-o",
+                                str(work / "stop"), str(work / "stop.c")],
+                               capture_output=True, text=True)
+        if built.returncode:
+            print(built.stderr[-3000:])
+            return 1
+        ran = subprocess.run([str(work / "stop")], capture_output=True, text=True, timeout=60)
+        lines = ran.stdout.strip().split("\n")
+        for line in lines:
+            if line.startswith("FAIL"):
+                checks(False, "machine stop: " + line[5:])
+        total = int(lines[-1].split()[0]) if lines and lines[-1][:1].isdigit() else 0
+        for _ in range(total - sum(1 for line in lines if line.startswith("FAIL"))):
+            checks(True, "machine stop")
+        checks(total == 5 and ran.returncode == 0, "the stop checks ran: " + ran.stderr[-300:])
     return checks.verdict("machine scan", "machine-scan")
 
 

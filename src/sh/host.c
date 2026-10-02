@@ -3359,11 +3359,17 @@ fn host_exit_run(void)
         positive at = 0;
         p64 started = system_clock_ns(HOST_CLOCK_BOOTTIME);
 
-        bool machine = host_machine_stop();
+        bool machine;
 
-        if (!bowl_is_root() ||
-            (!host_settings_kept(address_of settings) &&
-             !host_settings_booted(address_of settings)))
+        //      Before the machine process is asked anything: END is root's, a
+        //      refusal left the stop polling ten seconds for a detach that
+        //      was never coming, and the list is root's too.
+        if (!bowl_is_root())
+                return;
+
+        machine = host_machine_stop();
+        if (!host_settings_kept(address_of settings) &&
+            !host_settings_booted(address_of settings))
                 return;
 
         if (machine && host_machine_hook_line(MOONWATER_HOOK_END))

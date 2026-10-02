@@ -2320,7 +2320,13 @@ static fn host_machine_end_run(void)
 }
 
 /*
-        Waiting for the machine process to let go, unless we are it.
+        Telling the machine process the machine is stopping, and waiting for
+        it to let go -- unless we are it. True once moonwater_end has had its
+        turn: the process was told, and was seen to leave. False when there
+        was no process to tell, when it would not be told (the caller is not
+        root: END is CAP_SYS_ADMIN's), and when it was still attached after
+        ten seconds, which is a machine process that never ran moonwater_end,
+        so the stop must not behave as though it had.
 
         host_machine_self is set the moment this process owns the attach, not
         when it is told to stop: its own moonwater_poweroff calls poweroff,
@@ -2334,6 +2340,7 @@ static bool host_machine_stop(void)
         struct machine_control control;
         bipolar device;
         p64 started;
+        bool left = false;
 
         if (host_machine_self) {
                 host_machine_end_run();
@@ -2342,21 +2349,21 @@ static bool host_machine_stop(void)
         device = system_open_at(AT_FDCWD, SPARK_DEVICE, FILE_READ | O_CLOEXEC);
         if (device < 0)
                 return false;
-        if (host_machine_ioctl(device, MOONWATER_STATUS, address_of control) < 0 ||
-            !(control.flags & MOONWATER_ATTACHED)) {
-                system_close(device);
-                return false;
-        }
-        (void)host_machine_ioctl(device, MOONWATER_END, address_of control);
-        started = system_clock_ns(HOST_CLOCK_BOOTTIME);
-        while (system_clock_ns(HOST_CLOCK_BOOTTIME) - started < HOST_EXIT_EACH_NS) {
-                if (host_machine_ioctl(device, MOONWATER_STATUS, address_of control) < 0 ||
-                    !(control.flags & MOONWATER_ATTACHED))
-                        break;
-                host_pause(HOST_EVENT_POLL_NS);
+        if (host_machine_ioctl(device, MOONWATER_STATUS, address_of control) >= 0 &&
+            (control.flags & MOONWATER_ATTACHED) &&
+            host_machine_ioctl(device, MOONWATER_END, address_of control) >= 0) {
+                started = system_clock_ns(HOST_CLOCK_BOOTTIME);
+                while (!left &&
+                       system_clock_ns(HOST_CLOCK_BOOTTIME) - started < HOST_EXIT_EACH_NS) {
+                        left = host_machine_ioctl(device, MOONWATER_STATUS,
+                                                  address_of control) < 0 ||
+                               !(control.flags & MOONWATER_ATTACHED);
+                        if (!left)
+                                host_pause(HOST_EVENT_POLL_NS);
+                }
         }
         system_close(device);
-        return true;
+        return left;
 }
 
 static b32 host_machine_source(void)
