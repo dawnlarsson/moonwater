@@ -57831,6 +57831,27 @@ say(out.split() == [str(len(want)).encode(), hashlib.sha256(want).hexdigest().en
     "a stalled reader is handed all of the output, the last 400 KB of it after the command ended (%r)" %
     (out[:90],))
 
+#       A client that ends while its command runs, here by TERM from timeout,
+#       says goodbye, and the listener hangs up on the command and waits for
+#       it: none is left a zombie of the listener.
+def zombies_of(pid):
+    found = 0
+    for entry in os.listdir("/proc"):
+        if entry.isdigit():
+            try:
+                fields = open("/proc/%s/stat" % entry).read().rsplit(")", 1)[1].split()
+            except (OSError, IndexError):
+                continue
+            found += fields[0] == "Z" and int(fields[1]) == pid
+    return found
+
+for _ in range(3):
+    on("a", "timeout 2 " + moon + " link run b 'sleep 100'", timeout=30)
+time.sleep(1.5)
+say(zombies_of(server.pid) == 0,
+    "sec: commands of sessions that ended are waited for, no zombie is left in the listener (%d)" %
+    zombies_of(server.pid))
+
 status, out, err = on("a", moon + " link run b 'for i in $(seq 1 25); do echo line $i; sleep 0.2; done'",
                       extra={"WATERLINK_REKEY_SECONDS": "1"}, timeout=60)
 keyed = [int(w) for w in err.split() if w.isdigit()]

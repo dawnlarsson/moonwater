@@ -71672,6 +71672,140 @@ static fn publication(void)
 }
 
 /*
+        A command for a session to hang up on: one that hears the hangup and
+        ends with it, or one that ignores it and ends on its own a moment
+        later. Answers its pidfd, which the session closes with.
+*/
+static bipolar wls_command(struct link_session address_to s, bool deaf)
+{
+        bipolar child = system_fork();
+
+        if (!child)
+        {
+                timespec pause = {deaf ? 0 : 30, deaf ? 300000000 : 0};
+                p64 ignore[4] = {1, 0, 0, 0};
+
+                if (deaf)
+                        (void)system_call_4(syscall(rt_sigaction), 1,
+                                            (positive)ignore, 0, 8);
+                (void)system_call_2(syscall(nanosleep),
+                                    (positive)address_of pause, 0);
+                exit(0);
+        }
+        if (child < 0 || !link_session_open(s))
+                return -1;
+        s->kind = LINK_KIND_RUN;
+        s->pid = child;
+        s->pidfd = system_call_2(syscall(pidfd_open), (positive)child, 0);
+        return child;
+}
+
+//      Whether a process is still in the table, a zombie or not.
+static bool wls_present(bipolar pid)
+{
+        return system_call_2(syscall(kill), (positive)pid, 0) == 0;
+}
+
+//      Until nothing waits to be waited for, or a few seconds.
+static fn wls_reaped(void)
+{
+        timespec pause = {0, 20000000};
+
+        for (positive tick = 0; tick < 250 && link_reaping_count; tick++)
+        {
+                link_reap();
+                (void)system_call_2(syscall(nanosleep),
+                                    (positive)address_of pause, 0);
+        }
+}
+
+/*
+        A session that ends hangs up on its command, and the command is
+        waited for however it ends: not left a zombie in the listener's table
+        of processes, as every one was.
+*/
+static fn reaped_commands(void)
+{
+        struct link_session address_to s = link_self.session;
+        bipolar child;
+        bipolar deaf;
+        bipolar group;
+        bipolar many[LINK_REAPING + 4];
+        positive before = link_reaping_count;
+        bool all = true;
+
+        child = wls_command(s, false);
+        link_session_close(s);
+        wls_reaped();
+        check("sec: a command hung up on at the close of its session is "
+              "waited for, and gone",
+              child > 0 && link_reaping_count == before && !wls_present(child));
+
+        deaf = wls_command(s, true);
+        link_session_close(s);
+        check("sec: one that ignores the hangup is kept to be waited for",
+              deaf > 0 && link_reaping_count == before + 1 &&
+                      wls_present(deaf));
+        wls_reaped();
+        check("sec: and is waited for when it ends",
+              link_reaping_count == before && !wls_present(deaf));
+
+        //      A session the listener gave up on: nothing heard in 45
+        //      seconds, as when its client was killed and said nothing.
+        link_self.server = true;
+        child = wls_command(s, false);
+        s->heard = link_now() - LINK_DEAD - 1;
+        (void)link_sessions_turn(link_now());
+        link_self.server = false;
+        wls_reaped();
+        check("sec: so is the command of a session that went silent",
+              child > 0 && !s->used && link_reaping_count == before &&
+                      !wls_present(child));
+
+        //      A command already waited for is not signalled again by the
+        //      number it had: it may be somebody else's by now.
+        group = system_fork();
+        if (!group)
+        {
+                timespec pause = {30, 0};
+
+                (void)system_call(syscall(setsid));
+                (void)system_call_2(syscall(nanosleep),
+                                    (positive)address_of pause, 0);
+                exit(0);
+        }
+        if (link_session_open(s))
+        {
+                s->kind = LINK_KIND_RUN;
+                s->pid = group;
+                s->exited = true;
+                link_session_close(s);
+        }
+        check("sec: and the group of one that has exited is not hung up on",
+              group > 0 && wls_present(group));
+        (void)system_call_2(syscall(kill), (positive)group, 9);
+        (void)system_wait4_retry((b32)group, null, 0, null);
+
+        //      More hung up on than there are places to wait in: the table
+        //      does not grow past its end, and every command is still hung
+        //      up on.
+        for (positive at = 0; at < array_count(many); at++)
+        {
+                many[at] = wls_command(s, true);
+                all &= many[at] > 0;
+                link_session_close(s);
+        }
+        check("sec: the commands waiting to be waited for are bounded",
+              all && link_reaping_count == LINK_REAPING);
+        wls_reaped();
+        check("sec: and those that stayed in it are all waited for",
+              link_reaping_count == 0);
+        for (positive at = 0; at < array_count(many); at++)
+                if (many[at] > 0)
+                        (void)system_wait4_retry((b32)many[at], null, 0, null);
+}
+
+/*
         A request for a file, as a peer holding `files` and nothing else would
         send it: the answer is whether the machine took it up.
 */
@@ -73676,6 +73810,7 @@ b32 main(void)
         staging();
         publication();
         own_files();
+        reaped_commands();
         responder(listener, port);
         cookies(listener, port);
         stamps_outlive(listener, port);

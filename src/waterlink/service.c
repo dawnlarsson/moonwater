@@ -983,18 +983,100 @@ static bool link_part_publish(bipolar handle, p8 address_to part,
         return false;
 }
 
+/*
+        Whether the command behind a pidfd has ended, and taken off the
+        kernel's table when it has, with the status a shell would give it. A
+        command that cannot be waited for is as ended as it will be known.
+*/
+static bool link_command_ended(bipolar pidfd, b32 address_to status)
+{
+        p8 information[128];
+        bipolar waited;
+
+        memory_zero(information, sizeof information);
+        waited = system_call_5(syscall(waitid), 3, (positive)pidfd,
+                               (positive)information, 4 | 1, 0);
+        if (waited == -ECHILD)
+        {
+                address_to status = LINK_FAILED;
+                return true;
+        }
+        //      siginfo: code at 8, the pid at 16 (zero while it runs, under
+        //      WNOHANG), the status at 24.
+        if (waited < 0 || !((b32 address_to)information)[4])
+                return false;
+        address_to status = ((b32 address_to)information)[2] == 1
+                                    ? ((b32 address_to)information)[6]
+                                    : 128 + ((b32 address_to)information)[6];
+        return true;
+}
+
+/*
+        A session that ends hangs up on its command, which is not yet gone
+        when it does, and a child nobody waits for stays a zombie until the
+        listener ends: a `run` peer could fill the machine's table of
+        processes with them. So the pidfd of a command that is still there
+        waits here, and every turn asks after each. A command that ignores
+        the hangup is waited for when it does end, and past the last place
+        the oldest is let go, as every one was before.
+*/
+#define LINK_REAPING 16
+static bipolar link_reaping[LINK_REAPING];
+static positive link_reaping_count;
+
+static fn link_reap_keep(bipolar pidfd)
+{
+        b32 status;
+
+        if (link_command_ended(pidfd, address_of status))
+        {
+                system_close(pidfd);
+                return;
+        }
+        if (link_reaping_count == LINK_REAPING)
+        {
+                system_close(link_reaping[0]);
+                memory_copy(link_reaping, link_reaping + 1,
+                            (LINK_REAPING - 1) * sizeof link_reaping[0]);
+                link_reaping_count--;
+        }
+        link_reaping[link_reaping_count++] = pidfd;
+}
+
+static fn link_reap(void)
+{
+        for (positive at = 0; at < link_reaping_count;)
+        {
+                b32 status;
+
+                if (!link_command_ended(link_reaping[at], address_of status))
+                {
+                        at++;
+                        continue;
+                }
+                system_close(link_reaping[at]);
+                link_reaping[at] = link_reaping[--link_reaping_count];
+        }
+}
+
 static fn link_session_close(struct link_session address_to s)
 {
         if (s->part[0])
                 link_part_discard(s->writes[0].fd, s->part);
         if (s->pidfd >= 0)
-        {
                 (void)system_call_4(syscall(pidfd_send_signal),
                                     (positive)s->pidfd, 1, 0, 0);
-                system_close(s->pidfd);
-        }
-        if (s->pid > 0)
+        //      The group too, while the command is not yet waited for: once
+        //      it is, its number may be some other process's.
+        if (s->pid > 0 && !s->exited)
                 (void)system_call_2(syscall(kill), (positive)-s->pid, 1);
+        if (s->pidfd >= 0)
+        {
+                if (s->exited)
+                        system_close(s->pidfd);
+                else
+                        link_reap_keep(s->pidfd);
+        }
         for (positive at = 0; at < 2; at++)
         {
                 if (s->reads[at].fd > 2 && s->reads[at].fd != s->terminal)
@@ -2000,20 +2082,10 @@ static fn link_session_streams(struct link_session address_to s, p64 now)
         //      asked when the pidfd says it is there.
         if (s->pidfd >= 0 && !s->exited && !s->pid_quiet)
         {
-                p8 information[128];
+                b32 status;
 
-                memory_zero(information, sizeof information);
-                //      siginfo: code at 8, the pid at 16 (zero while it
-                //      runs, under WNOHANG), the status at 24.
-                if (system_call_5(syscall(waitid), 3, (positive)s->pidfd,
-                                  (positive)information, 4 | 1, 0) >= 0 &&
-                    ((b32 address_to)information)[4])
-                {
-                        b32 code = ((b32 address_to)information)[2];
-                        b32 value = ((b32 address_to)information)[6];
-
-                        link_exited(s, code == 1 ? value : 128 + value, now);
-                }
+                if (link_command_ended(s->pidfd, address_of status))
+                        link_exited(s, status, now);
                 else
                         s->pid_quiet = true;
         }
@@ -2876,6 +2948,7 @@ static b32 link_serve(void)
                         break;
 
                 wake = link_sessions_turn(now);
+                link_reap();
                 link_state_write(now);
                 due = link_nearby_tick(now);
                 link_wait(watch, quiet,
