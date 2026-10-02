@@ -42982,6 +42982,12 @@ def harness_tls_peer(argv):
     certificate = b"\0" + (len(leaf) + 5).to_bytes(3, "big") + len(leaf).to_bytes(
         3, "big") + leaf + b"\0\0"
 
+    def entry_with(extensions):
+        """The leaf's Certificate with extensions in its one entry."""
+        return (b"\0" + (len(leaf) + 5 + len(extensions)).to_bytes(3, "big") +
+                len(leaf).to_bytes(3, "big") + leaf + len(extensions).to_bytes(2, "big") +
+                extensions)
+
     body = b"hello, record layer"
     length_head = b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n" % len(body)
     close_head = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n"
@@ -43091,6 +43097,17 @@ def harness_tls_peer(argv):
          [app(length_head + body), close]),
         ("EncryptedExtensions answering unasked ALPN", {"ee": b"\0\x10\0\5\0\3\2h2"},
          [app(length_head + body), close]),
+        #   RFC 8446 4.4.2: a CertificateEntry's extensions answer the
+        #   ClientHello's, which asks for no OCSP status and no SCT.
+        ("an unasked OCSP status in a CertificateEntry",
+         {"certificate": entry_with(b"\0\5\0\5\1\0\0\0\1\0")},
+         [app(length_head + body), close]),
+        ("an unasked SCT list in a CertificateEntry",
+         {"certificate": entry_with(b"\0\x12\0\4\0\2\0\0")},
+         [app(length_head + body), close]),
+        ("an unknown extension in a CertificateEntry",
+         {"certificate": entry_with(b"\xfa\xfa\0\0")},
+         [app(length_head + body), close]),
         ("CertificateRequest in the flight", {"request": True},
          [app(length_head + body), close]),
         ("CertificateRequest with a context", {"request": True,
@@ -43166,6 +43183,10 @@ def harness_tls_peer(argv):
     }
     # Where OpenSSL 3.6's client accepts what the RFC says to refuse.
     OPENSSL_LENIENT = {
+        "an unknown extension in a CertificateEntry":
+            "4.2 makes every unasked extension response unsupported_extension; "
+            "OpenSSL refuses the OCSP status and SCT list it knows and passes "
+            "over one it does not",
         "TLS 1.2 HelloRequest":
             "RFC 5246 7.4.1.1 lets a client ignore a HelloRequest or answer "
             "it; OpenSSL renegotiates",
@@ -43503,7 +43524,7 @@ def harness_tls_peer(argv):
         request = message(13, flight.get("request_body", b"\0\0\x08\0\x0d\0\4\0\2\4\3"))
         if flight.get("request"):
             messages.append(request)
-        messages.append(message(11, certificate))
+        messages.append(message(11, flight.get("certificate", certificate)))
         if flight.get("request_late"):
             messages.append(request)
         for part in messages:

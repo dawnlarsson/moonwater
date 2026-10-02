@@ -7428,14 +7428,16 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
         if (!tls_certificate_body_open(body, body_length, address_of list))
                 return false;
 
-        //      Each entry is a certificate and its extensions, which nothing
-        //      here reads.
+        //      Each entry is a certificate and its extensions, which can only
+        //      answer what a ClientHello asked for (RFC 8446 4.2, 4.4.2): an
+        //      OCSP status or an SCT list, neither of which this client asks
+        //      for, so an entry with any is refused, as OpenSSL refuses both.
         while (byte_reader_left(&list) && count < 8)
         {
                 byte_reader entry = byte_reader_vector24(&list);
+                byte_reader extensions = byte_reader_vector16(&list);
 
-                (void)byte_reader_vector16(&list);
-                if (!byte_reader_ok(&list))
+                if (!byte_reader_ok(&list) || byte_reader_left(&extensions))
                         return false;
                 if (tls_parse_cert((p8 address_to)byte_reader_here(&entry),
                                    byte_reader_left(&entry), certs + count,
