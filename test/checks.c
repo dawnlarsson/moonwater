@@ -81191,7 +81191,7 @@ static fn storage_test_arp_claims(void)
         p32 offered = 0xc0a80164;
 
         network_store_16(packet, 1);
-        network_store_16(packet + 2, NET_IP_PROTOCOL);
+        network_store_16(packet + 2, ETH_P_IP);
         packet[4] = 6;
         packet[5] = 4;
         network_store_16(packet + 6, 2);
@@ -81210,9 +81210,8 @@ static fn storage_test_arp_claims(void)
         check("our own ARP packet is not an address conflict",
               !net_arp_claims(packet, sizeof packet, mine, offered));
         memory_copy(packet + 8, other, 6);
-        network_store_32(packet + 14, offered);
-        network_store_32(packet + 24, 0);
         network_store_32(packet + 14, offered + 1);
+        network_store_32(packet + 24, 0);
         check("a claim for another address is irrelevant",
               !net_arp_claims(packet, sizeof packet, mine, offered));
         check("a truncated ARP claim is refused",
@@ -83642,8 +83641,8 @@ static fn machine_ntp_schedule(void)
 static fn sntp_datagram_framing(void)
 {
         b32 pair[2] = {-1, -1};
-        p8 sent[SNTP_PACKET + 1];
-        p8 received[SNTP_PACKET + 1];
+        p8 sent[SNTP_REPLY_ROOM];
+        p8 received[SNTP_REPLY_ROOM];
         positive control[SNTP_CONTROL_WORDS];
         positive held = 0;
         bipolar got;
@@ -83659,15 +83658,15 @@ static fn sntp_datagram_framing(void)
               socket_send(pair[0], sent, SNTP_PACKET, 0, 0, 0) == SNTP_PACKET);
         got = sntp_receive_message(pair[1], received, sizeof received, control,
                                    address_of held, 0);
-        check("SNTP exact reply datagram is accepted",
-              sntp_reply_length_ok(got));
+        check("SNTP exact reply datagram is the one shape taken",
+              got == SNTP_PACKET);
 
         check("SNTP oversized reply datagram sends",
               socket_send(pair[0], sent, sizeof sent, 0, 0, 0) == sizeof sent);
         got = sntp_receive_message(pair[1], received, sizeof received, control,
                                    address_of held, 0);
         check("SNTP trailing wire byte is refused",
-              got == SNTP_PACKET + 1 && !sntp_reply_length_ok(got));
+              got == SNTP_REPLY_ROOM && got != SNTP_PACKET);
 
         socket_close(pair[0]);
         socket_close(pair[1]);

@@ -4587,26 +4587,6 @@ static COLD bipolar nl80211_authorize(nl80211 address_to session, p32 index,
                                 null, null);
 }
 
-static COLD bipolar nl80211_eapol_open(p32 index)
-{
-        socket_address_packet self = {
-            .family = AF_PACKET,
-            .protocol = network_order_16(ETH_P_PAE),
-            .index = index,
-        };
-        bipolar handle = socket_new(AF_PACKET, SOCK_DGRAM | SOCK_CLOEXEC,
-                                    (b32)network_order_16(ETH_P_PAE));
-
-        if (handle < 0)
-                return handle;
-        if (socket_bind((b32)handle, address_of self, sizeof(self)) < 0)
-        {
-                socket_close((b32)handle);
-                return -1;
-        }
-        return handle;
-}
-
 /*
         The joined link's keys, and one EAPOL-Key state machine that serves
         both the join's four-way handshake and every rekey the access point
@@ -5542,7 +5522,7 @@ static COLD bipolar nl80211_join(p8 address_to ssid, positive ssid_length, p8 ad
         {
                 if (pmk && !offload && link->eapol < 0)
                 {
-                        failed = nl80211_eapol_open(iface.index);
+                        failed = net_packet_open(iface.index, ETH_P_PAE);
                         if (failed < 0)
                                 break;
                         link->eapol = (b32)failed;
@@ -9415,6 +9395,12 @@ static b32 host_tune(string_address address_to arguments, positive count)
 
 #define SNTP_PORT 123
 #define SNTP_PACKET 48
+/* One byte beyond the only wire shape this client understands lets recvmsg
+   tell an exact 48-byte reply from a longer datagram.  Receiving into exactly
+   SNTP_PACKET bytes silently truncates UDP: the return value is then 48 for
+   both shapes, and attacker-chosen trailing data is accepted without ever
+   being parsed. */
+#define SNTP_REPLY_ROOM (SNTP_PACKET + 1)
 #define SNTP_SECONDS 2
 #define SNTP_SAMPLES 5
 #define SNTP_SERVERS 3
@@ -10451,23 +10437,13 @@ static COLD bool sntp_math_ok(void)
         return sntp_pick(row, 5) == 2 && row[2].offset_ns == 2000000;
 }
 
-static CONST bool sntp_reply_length_ok(bipolar received)
-{
-        return received == SNTP_PACKET;
-}
-
 static HOT bipolar sntp_exchange(b32 handle,
                                  network_deadline address_to deadline,
                                  bool tight, p32 address_to sequence,
                                  sntp_sample address_to into)
 {
         p8 request[SNTP_PACKET];
-        /* One byte beyond the only wire shape this client understands lets
-           recvmsg distinguish an exact 48-byte reply from a longer datagram.
-           Receiving into exactly SNTP_PACKET bytes silently truncates UDP:
-           the return value is then 48 for both shapes, and attacker-chosen
-           trailing data is accepted without ever being parsed. */
-        p8 reply[SNTP_PACKET + 1];
+        p8 reply[SNTP_REPLY_ROOM];
         p64 sent[2];
         p64 got[2];
         p64 spare[2];
@@ -10528,7 +10504,7 @@ static HOT bipolar sntp_exchange(b32 handle,
                                 return SNTP_NO_REPLY;
                         continue;
                 }
-                if_rare (!sntp_reply_length_ok(received))
+                if_rare (received != SNTP_PACKET)
                 {
                         if (discarded++ == SNTP_DISCARD_MAX)
                                 return SNTP_NO_REPLY;

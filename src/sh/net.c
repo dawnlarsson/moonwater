@@ -1776,8 +1776,6 @@ static COLD fn radio_links_unleased(netlink_search address_to search);
 /* RFC 5227-style probes before installing a newly leased address.  DHCP is
    not proof that the address is unused: a stale lease, a broken server, or a
    hostile responder can hand out an address already active on the link. */
-#define NET_ARP_PROTOCOL 0x0806
-#define NET_IP_PROTOCOL 0x0800
 #define NET_ARP_PACKET 28
 #define NET_ARP_PROBES 3
 
@@ -1785,7 +1783,7 @@ static bool net_arp_claims(p8 address_to packet, positive size,
                            p8 address_to hardware, p32 address)
 {
         return size >= NET_ARP_PACKET && network_load_16(packet) == 1 &&
-               network_load_16(packet + 2) == NET_IP_PROTOCOL &&
+               network_load_16(packet + 2) == ETH_P_IP &&
                packet[4] == 6 && packet[5] == 4 &&
                (network_load_16(packet + 6) == 1 ||
                 network_load_16(packet + 6) == 2) &&
@@ -1793,6 +1791,26 @@ static bool net_arp_claims(p8 address_to packet, positive size,
                 (!network_load_32(packet + 14) &&
                  network_load_32(packet + 24) == address)) &&
                memory_compare(packet + 8, hardware, 6);
+}
+
+/* A packet socket of one ethertype on one interface: the cooked link header
+   is the kernel's, the payload is ours. */
+static COLD bipolar net_packet_open(p32 index, p16 protocol)
+{
+        socket_address_packet self = {
+            .family = AF_PACKET,
+            .protocol = network_order_16(protocol),
+            .index = index};
+        bipolar handle = socket_new(AF_PACKET, SOCK_DGRAM | SOCK_CLOEXEC,
+                                    (b32)network_order_16(protocol));
+
+        if (handle >= 0 &&
+            socket_bind((b32)handle, address_of self, sizeof self) < 0)
+        {
+                socket_close((b32)handle);
+                return -1;
+        }
+        return handle;
 }
 
 /* 0 means quiet, 1 means another station claims the address, and -1 means
@@ -1803,21 +1821,18 @@ static COLD bipolar net_arp_conflict(p32 index, p8 address_to hardware,
 {
         p8 probe[NET_ARP_PACKET] = {0};
         p8 reply[64];
-        socket_address_packet self = {
+        socket_address_packet all = {
             .family = AF_PACKET,
-            .protocol = network_order_16(NET_ARP_PROTOCOL),
-            .index = index};
-        socket_address_packet all = self;
-        bipolar handle = socket_new(AF_PACKET, SOCK_DGRAM | SOCK_CLOEXEC,
-                                    network_order_16(NET_ARP_PROTOCOL));
+            .protocol = network_order_16(ETH_P_ARP),
+            .index = index,
+            .halen = 6};
+        bipolar handle = net_packet_open(index, ETH_P_ARP);
 
-        if (handle < 0 || socket_bind((b32)handle, address_of self,
-                                      sizeof self) < 0)
-                goto failed;
-        all.halen = 6;
+        if (handle < 0)
+                return -1;
         memory_fill(all.addr, 0xff, 6);
         network_store_16(probe, 1);
-        network_store_16(probe + 2, NET_IP_PROTOCOL);
+        network_store_16(probe + 2, ETH_P_IP);
         probe[4] = 6;
         probe[5] = 4;
         network_store_16(probe + 6, 1);
@@ -1843,7 +1858,9 @@ static COLD bipolar net_arp_conflict(p32 index, p8 address_to hardware,
                         if (!ready)
                                 break;
                         got = socket_receive((b32)handle, reply, sizeof reply,
-                                             MSG_TRUNC, 0, 0);
+                                             0, 0, 0);
+                        if (got == NETWORK_INTERRUPTED)
+                                continue;
                         if (got < 0)
                                 goto failed;
                         if (net_arp_claims(reply, (positive)got, hardware,
@@ -1858,8 +1875,7 @@ static COLD bipolar net_arp_conflict(p32 index, p8 address_to hardware,
         return 0;
 
 failed:
-        if (handle >= 0)
-                socket_close((b32)handle);
+        socket_close((b32)handle);
         return -1;
 }
 

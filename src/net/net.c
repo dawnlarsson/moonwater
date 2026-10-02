@@ -9783,9 +9783,6 @@ static bipolar http_body_read(http_body address_to body, p8 address_to into,
         positive seconds;
         positive nanoseconds;
 
-        if (!http_body_wait(body, address_of seconds, address_of nanoseconds))
-                return HTTP_NO_REPLY;
-
         if (body->stash_used || (body->link && body->link->tls))
         {
                 p8 address_to data = null;
@@ -9800,6 +9797,8 @@ static bipolar http_body_read(http_body address_to body, p8 address_to into,
                 address_to got = 0;
                 return HTTP_OK;
         }
+        if (!http_body_wait(body, address_of seconds, address_of nanoseconds))
+                return HTTP_NO_REPLY;
 
         n = network_stream_read_some_for(body->link->handle, into, room,
                                          seconds, nanoseconds);
@@ -10722,9 +10721,14 @@ static bipolar http_run(string_address start, const http_manners address_to how,
 
                         /* The idle timer catches a stopped peer; this absolute
                            timer catches one which sends the next byte just
-                           before every idle expiry. Both tiers need the same
-                           resource bound even where their syntax differs. */
-                        if (!network_deadline_begin(address_of body.deadline,
+                           before every idle expiry.  A body held in memory
+                           always has it, in every tier.  A download written
+                           as it arrives has it at the tight tier only: GNU
+                           wget, the default's reference, puts no total time
+                           on one, and a large file over a slow link is not an
+                           attack. */
+                        if ((into || MOONWATER_STRICT >= STRICT_TIGHT) &&
+                            !network_deadline_begin(address_of body.deadline,
                                                     HTTP_BODY_SECONDS, 0))
                                 status = HTTP_NO_REPLY;
                         else

@@ -62,6 +62,9 @@ never a pass.
   prove ownership or bounds; guard pages, sanitizers, fuzzing, fault injection
   and three architectures compensate. Limits stop one connection from growing
   without bound, not a distributed flood.
+- **ARP probe:** a new lease is installed only after three probes, 200 ms apart,
+  find nobody else on the address (+0.6 s to a first lease; renewals and
+  rebinds skip it). A probe that cannot be sent refuses the lease.
 - **Bad URL spellings:** `http:` and `https:` without `//` are refused in every
   tier (a host named `https` is not worth a plaintext connection to the wrong
   place); the tight tier refuses every leading scheme token (`ftp:21`).
@@ -81,7 +84,7 @@ ARM64 and RISC-V mandatory with UBSan trapping.
 | Bytes, memory | `byte_reader` cursors (`security_hygiene` forbids listed parsers from indexing their input); `MSG_TRUNC`; guard pages (`codec`, `socket`, `standard`); ASan/UBSan fuzz `sh test/run fuzz`; MSan `sh test/run msan`; `net_math_proof` (DHCP masks, AES field and S-box, HKDF counter, netlink widths) | `tls_parse_cert` index reads are guarded by hand and fuzzed; no corpus beyond generated seeds |
 | Netlink | sender, port, sequence, alignment, multipart, `NETLINK_DISCARD_MAX`; `netlink_fuzz` | nested attributes beyond the bounded fuzz |
 | DNS | exact question, ID, peer; per-query source port, 0x20, EDNS0 with fallbacks; own resolver first; `DNS_DISCARD_MAX`; `dns_fuzz`, `sh test/run net` | independent packet oracle |
-| DHCPv4 | xid, MAC, server and OFFER-peer binding; option overload, END and zero padding; lease sanity; ARP probes before install; watcher cut once per link news; `dhcp_fuzz`, `sh test/run netem net machine` | DHCP over a raw socket (`rp_filter`); no DHCPDECLINE after an ARP conflict |
+| DHCPv4 | xid, MAC, server and OFFER-peer binding; option overload, END and zero padding; lease sanity; ARP probes before install; watcher cut once per link news; `dhcp_fuzz`, `sh test/run netem net machine` | DHCP over a raw socket (`rp_filter`); no DHCPDECLINE after an ARP conflict, so the server keeps offering the same address until its lease ends |
 | SNTP | 64-bit nonce, peer, mode, stratum, timing, exactly 48 bytes; each sample its own wait; `sntp_fuzz`, `sntp_era` (2036, 2038, 2104), `sh test/run netem machine` | unauthenticated; NTS is a separate branch |
 | HTTP, URL | sink-side validation of host, target, headers; userinfo, schemes, fragments refused; one framing reading; redirect and HTTPS-downgrade bounds; body deadline; per-hop host, address, SNI and Host identity; `http_response_framing` (with `http.client` and curl), `wget_mutation` and `wget_hostile` (GNU wget and curl as live oracles), `https_downgrade`, `http_fuzz` | CNAME, multi-address and interface-scope identity |
 | TLS, X.509 | transcript, Finished, AEAD, record sequence, state ordering; strict DER; SAN and name constraints, key usage, EKU, dates; chains against OpenSSL and Go `crypto/x509`; `tls_chains`, `tls_hostnames`, `tls_dates`, `public_suffixes`, `anchors`, `tls_peer`, `tls_der_fuzz`, `tls_hs_fuzz`, `tls_verify_fuzz`; `x509_corpus` by hand over 643 hosts | name constraints in more shapes |
