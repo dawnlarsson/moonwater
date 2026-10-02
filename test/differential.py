@@ -56077,7 +56077,7 @@ def harness_security_hygiene(argv):
                 "http_fuzz", "http_urls", "wifi_eapol_fuzz", "wifi_scan_fuzz",
                 "bowl_sig_fuzz", "wget_mutation", "wget_hostile", "sntp_era", "net_netem",
                 "net_dependency_closure", "net_math_proof", "net_clock_fault",
-                "protected_links", "hostile_strings")
+                "protected_links", "hostile_strings", "state_cuts")
     for name in security + ("tls_verify_fuzz",):
         checks(name in HARNESS_CHECKS, "differential.py: %s is not registered" % name)
     table = re.search(r"^HARNESS_CHECKS = \{$(.*?)^\}$", source, re.M | re.S)
@@ -56570,6 +56570,392 @@ def harness_hostile_strings(argv):
           "show them too in a UTF-8 locale)%s" % (len(bidi), ": " + ", ".join(sorted(set(bidi)))[:300]
                                                   if bidi else ""))
     return checks.verdict("hostile strings", "hostile-strings")
+
+
+class SyscallTracer:
+    """One program under ptrace on x86_64, its children followed, every
+    system call that touches a state directory seen at its exit, and at the
+    k-th of them one thing done to it: the program killed, the call made to
+    fail with an errno, or a write cut short."""
+
+    PATHS = (b"/root", b"/run/moonwater")
+    WRITES = {1, 18, 20, 77}            # write, pwrite64, writev, ftruncate
+    SYNCS = {74, 75}                    # fsync, fdatasync
+    RENAMES = {82: (0, 1), 264: (1, 3), 316: (1, 3), 265: (1, 3)}  # rename(at)(2), linkat
+    REMOVES = {87: 0, 263: 1}           # unlink, unlinkat
+    OPENS = {2: (0, 1), 257: (1, 2)}    # open, openat: path argument, flags argument
+
+    def __init__(self):
+        import ctypes
+        self.ctypes = ctypes
+        self.libc = ctypes.CDLL(None, use_errno=True)
+        self.libc.ptrace.argtypes = [ctypes.c_long, ctypes.c_long, ctypes.c_void_p,
+                                     ctypes.c_void_p]
+        self.libc.ptrace.restype = ctypes.c_long
+
+    def ptrace(self, request, pid, address=0, data=0):
+        return self.libc.ptrace(request, pid, self.ctypes.c_void_p(address),
+                                self.ctypes.c_void_p(data))
+
+    def registers(self, pid):
+        block = (self.ctypes.c_ulong * 27)()
+        self.ptrace(12, pid, 0, self.ctypes.addressof(block))
+        return block
+
+    def text(self, pid, address):
+        try:
+            with open("/proc/%d/mem" % pid, "rb") as memory:
+                memory.seek(address)
+                return memory.read(4096).split(b"\0", 1)[0]
+        except (OSError, ValueError, OverflowError):
+            return b""
+
+    def where(self, pid, directory, name):
+        if name.startswith(b"/"):
+            return name
+        try:
+            base = (os.readlink("/proc/%d/cwd" % pid) if directory in (-100, 2 ** 64 - 100)
+                    else os.readlink("/proc/%d/fd/%d" % (pid, directory)))
+        except OSError:
+            return name
+        return base.encode() + b"/" + name
+
+    def descriptor(self, pid, number):
+        try:
+            return os.readlink("/proc/%d/fd/%d" % (pid, number)).encode()
+        except OSError:
+            return b""
+
+    def state(self, path):
+        return any(path == top or path.startswith(top + b"/") for top in self.PATHS)
+
+    def classify(self, pid, regs):
+        """What a call is about to do, as (kind, paths), or None."""
+        number, a = regs[15], (regs[14], regs[13], regs[12], regs[7])
+        if number in self.OPENS:
+            path_at, flags_at = self.OPENS[number]
+            directory = a[0] if number == 257 else -100
+            path = self.where(pid, self.ctypes.c_long(directory).value,
+                              self.text(pid, a[path_at]))
+            if self.state(path) and a[flags_at] & 0o1103:   # O_WRONLY|O_RDWR|O_CREAT|O_TRUNC
+                return ("open", (path,))
+        elif number in self.WRITES or number in self.SYNCS:
+            path = self.descriptor(pid, a[0])
+            if self.state(path):
+                return ("sync" if number in self.SYNCS else "write", (path,))
+        elif number in self.RENAMES:
+            old, new = self.RENAMES[number]
+            directories = (-100, -100) if number == 82 else (a[0], a[2])
+            paths = (self.where(pid, self.ctypes.c_long(directories[0]).value, self.text(pid, a[old])),
+                     self.where(pid, self.ctypes.c_long(directories[1]).value, self.text(pid, a[new])))
+            if any(self.state(path) for path in paths):
+                return ("link" if number == 265 else "rename", paths)
+        elif number in self.REMOVES:
+            at = self.REMOVES[number]
+            path = self.where(pid, self.ctypes.c_long(a[0] if at else -100).value,
+                              self.text(pid, a[at]))
+            if self.state(path):
+                return ("remove", (path,))
+        return None
+
+    def run(self, argv, cut=None, action=None, environment=None, limit=30.0):
+        """The program run to its end, or cut at its cut-th state call.
+        Answers (status, calls), calls being (pid, kind, paths, result)."""
+        import signal as signals
+        import time as clock
+        devnull = os.open("/dev/null", os.O_RDWR)
+        child = os.fork()
+        if not child:
+            try:
+                for number in (0, 1, 2):
+                    os.dup2(devnull, number)
+                self.ptrace(0, 0)
+                os.execve(argv[0], argv, environment or {"PATH": "/usr/bin:/bin"})
+            finally:
+                os._exit(127)
+        os.close(devnull)
+        os.waitpid(child, 0)
+        self.ptrace(0x4200, child, 0, 0x1 | 0x2 | 0x4 | 0x8 | 0x100000)
+        self.ptrace(24, child, 0, 0)
+        live = {child}
+        inside = {}
+        calls = []
+        status = None
+        started = clock.monotonic()
+        while live:
+            if clock.monotonic() - started > limit:
+                for pid in live:
+                    os.kill(pid, signals.SIGKILL)
+                limit = 1e9
+            try:
+                pid, wait = os.waitpid(-1, 0x40000000)   # __WALL
+            except ChildProcessError:
+                break
+            if os.WIFEXITED(wait) or os.WIFSIGNALED(wait):
+                live.discard(pid)
+                if pid == child:
+                    status = os.waitstatus_to_exitcode(wait)
+                    for other in live:
+                        os.kill(other, signals.SIGKILL)
+                continue
+            if not os.WIFSTOPPED(wait):
+                continue
+            stop = os.WSTOPSIG(wait)
+            event = wait >> 16
+            deliver = 0
+            live.add(pid)
+            if event in (1, 2, 3):
+                message = self.ctypes.c_ulong()
+                self.ptrace(0x4201, pid, 0, self.ctypes.addressof(message))
+                live.add(message.value)
+            elif stop == (signals.SIGTRAP | 0x80):
+                regs = self.registers(pid)
+                if pid not in inside:
+                    seen = self.classify(pid, regs)
+                    inside[pid] = seen
+                    if seen and cut is not None and len(calls) == cut - 1 and action:
+                        if action[0] == "fail":
+                            self.ptrace(6, pid, 120, 2 ** 64 - 1)   # orig_rax -1: not made
+                        elif action[0] == "short" and seen[0] == "write" and \
+                                regs[15] in (1, 18) and regs[12] > 1:
+                            self.ptrace(6, pid, 96, regs[12] // 2)  # rdx: half the count
+                else:
+                    seen = inside.pop(pid)
+                    if seen:
+                        result = self.ctypes.c_long(regs[10]).value
+                        calls.append((pid, seen[0], seen[1], result))
+                        if cut is not None and len(calls) == cut and action:
+                            if action[0] == "kill":
+                                for other in list(live):
+                                    os.kill(other, signals.SIGKILL)
+                            elif action[0] == "fail":
+                                self.ptrace(6, pid, 80, 2 ** 64 - action[1])
+                            elif action[0] == "signal":
+                                os.kill(pid, action[1])
+            elif stop != signals.SIGSTOP or pid == child:
+                deliver = stop if stop not in (signals.SIGTRAP, signals.SIGSTOP) else 0
+            self.ptrace(24, pid, 0, deliver)
+        return status, calls
+
+
+def harness_state_cuts(argv):
+    """Every write of saved state cut at every system call it makes.
+
+    The moonwater command keeps the wifi list (passwords and all), the
+    bluetooth list, the zone, the keyboard, ntp, the internet preference and
+    waterlink's groups and peers under /root. In a sandbox like moonwater_cli's,
+    each verb that changes one of them runs under ptrace (SyscallTracer) from
+    a state made by the verbs before it; every call that opens for writing,
+    writes, syncs, renames, links or removes under /root or /run/moonwater is
+    a place to cut, and at each one the verb is killed (with its children), or
+    the call fails with ENOSPC (EIO for a sync), or a write comes back short.
+    After any cut every file is what it was or what the verb makes it, a
+    leftover is no wider than 0600 when the file holds a secret, a second run
+    of the verb arrives at what an uncut run does and leaves no leftover, and
+    a cut that failed a call does not end in status 0 with the state
+    unchanged. And a synced replacement is durable: after the last rename
+    onto a /root name, the directory /root is synced before the verb ends.
+
+        python3 test/differential.py --harness state_cuts --shell PATH
+        MOONWATER_CUTS_ALL=1 ... every cut of every action (default: every
+        kill, and the failures and short writes at a stride)
+
+    x86_64 Linux only (registers are read as x86_64's); NOT RUN elsewhere.
+    """
+    import platform
+    parser = argparse.ArgumentParser(prog="differential.py --harness state_cuts")
+    parser.add_argument("--shell", required=True)
+    parser.add_argument("--inside", action="store_true", help=argparse.SUPPRESS)
+    args = parser.parse_args(argv)
+    if platform.system() != "Linux" or platform.machine() != "x86_64":
+        print("state cuts: NOT RUN -- ptrace registers are read as x86_64's")
+        return 2
+
+    if not args.inside:
+        import tempfile
+        probe = subprocess.run(["unshare", "-Urmnu", "--fork", "true"], capture_output=True)
+        if probe.returncode:
+            print("state cuts: NOT RUN -- no unprivileged user namespaces here")
+            return 2
+        with tempfile.TemporaryDirectory(prefix="state-cuts-") as temporary:
+            sandbox = Path(temporary) / "root"
+            for name in ("usr", "dev", "proc", "root", "run/moonwater", "etc", "home", "tmp"):
+                (sandbox / name).mkdir(parents=True, exist_ok=True)
+            for name, target in (("bin", "usr/bin"), ("lib", "usr/lib"), ("lib64", "usr/lib"),
+                                 ("sbin", "usr/bin")):
+                (sandbox / name).symlink_to(target)
+            for name in ("passwd", "group"):
+                if Path("/etc", name).exists():
+                    shutil.copy(Path("/etc", name), sandbox / "etc" / name)
+            shutil.copy(args.shell, sandbox / "tmp/moonwater")
+            shutil.copy(Path(__file__).resolve(), sandbox / "tmp/differential.py")
+            wrapper = (f"mount --rbind /usr {sandbox}/usr && mount --rbind /dev {sandbox}/dev && "
+                       f"mount --rbind /proc {sandbox}/proc && "
+                       f"exec chroot {sandbox} /usr/bin/python3 /tmp/differential.py "
+                       f"--harness state_cuts --inside --shell /tmp/moonwater")
+            environment = {"PATH": "/usr/bin:/bin", "LC_ALL": "C",
+                           "MOONWATER_CUTS_ALL": os.environ.get("MOONWATER_CUTS_ALL", "")}
+            try:
+                ran = subprocess.run(["unshare", "-Urmnpu", "--fork", "--mount-proc", "sh", "-c",
+                                      wrapper], capture_output=True, text=True, timeout=1500,
+                                     env=environment)
+            except subprocess.TimeoutExpired:
+                print("state cuts: FAIL -- ran past 1500 s")
+                write_tally("state-cuts", 0, 1)
+                return 1
+            print(ran.stdout, end="")
+            tally = re.search(r"^state cuts (\d+)/(\d+)$", ran.stdout, re.M)
+            if not tally:
+                print("state cuts: FAIL -- the sandbox run did not finish\n" + ran.stderr[-1500:])
+                write_tally("state-cuts", 0, 1)
+                return 1
+            write_tally("state-cuts", int(tally.group(1)), int(tally.group(2)))
+            return 0 if tally.group(1) == tally.group(2) else 1
+
+    tracer = SyscallTracer()
+    checks = Checks()
+    everything = bool(os.environ.get("MOONWATER_CUTS_ALL"))
+    moonwater = args.shell
+    key = "bZOZjGi3+wRTI3dKplm7TSptcD6cjFeYxvDqPYCDSnI="
+    other_key = "kL8Wk4yX3lq2pCq2HfV1m4mJm7m6Zl0Q4Q2c0jV3m2c="
+    #   (name, verbs that make the state before, the verb cut, a secret it keeps)
+    scenes = [
+        ("wifi add", ["wifi add oldnet oldpass11"], "wifi add plantnet passpass1", b"passpass1"),
+        ("wifi remove", ["wifi add oldnet oldpass11", "wifi add second pass2222"],
+         "wifi remove oldnet", b"pass2222"),
+        ("bluetooth add", ["bluetooth add dev1"], "bluetooth add dev2", None),
+        ("timezone", ["timezone de"], "timezone se", None),
+        ("keyboard", ["keyboard us"], "keyboard de", None),
+        ("ntp", ["ntp on"], "ntp off", None),
+        ("internet", ["priority internet wired"], "priority internet wifi", None),
+        ("link join", ["link join lab S3cretOne11 allow run"],
+         "link join lab2 S3cretTwo22 allow run", None),
+        ("link leave", ["link join lab S3cretOne11 allow run",
+                        "link join lab2 S3cretTwo22 allow run"], "link leave lab", None),
+        ("link pair", ["link pair peera " + key], "link pair peerb " + other_key, None),
+        ("link forget", ["link pair peera " + key], "link forget peera", None),
+    ]
+
+    def clear():
+        for top in (Path("/root"), Path("/run/moonwater")):
+            for entry in list(top.iterdir()):
+                if entry.is_dir() and not entry.is_symlink():
+                    shutil.rmtree(entry, ignore_errors=True)
+                else:
+                    entry.unlink(missing_ok=True)
+
+    def snapshot():
+        seen = {}
+        for entry in sorted(Path("/root").rglob("*")):
+            if entry.is_file() and not entry.is_symlink():
+                info = entry.stat()
+                seen[str(entry)] = (entry.read_bytes(), info.st_mode & 0o7777)
+        return seen
+
+    def restore(state):
+        clear()
+        for name, (data, mode) in state.items():
+            Path(name).parent.mkdir(parents=True, exist_ok=True)
+            Path(name).write_bytes(data)
+            os.chmod(name, mode)
+
+    def quiet(verb):
+        return subprocess.run([moonwater] + verb.split(), capture_output=True, timeout=60,
+                              env={"PATH": "/usr/bin:/bin"}).returncode
+
+    def temporary(name):
+        return bool(re.search(r"\.(new|next|next\.new)$|/\.link\.key\.", name))
+
+    def settle():
+        #   A listener or keeper a verb started outlives it; the next run
+        #   must not find it, nor its writes. This is the first process of
+        #   a pid namespace of its own, so every other one in it is ours.
+        import signal as signals
+        for entry in Path("/proc").iterdir():
+            if entry.name.isdigit() and int(entry.name) != os.getpid():
+                try:
+                    os.kill(int(entry.name), signals.SIGKILL)
+                except OSError:
+                    pass
+        while True:
+            try:
+                if os.waitpid(-1, os.WNOHANG) == (0, 0):
+                    break
+            except ChildProcessError:
+                break
+
+    cut_total = 0
+    for name, before, verb, secret in scenes:
+        settle()
+        clear()
+        for step in before:
+            quiet(step)
+        settle()
+        old = snapshot()
+        restore(old)
+        argv_cut = [moonwater] + verb.split()
+        status, calls = tracer.run(argv_cut)
+        settle()
+        new = snapshot()
+        if status is None or new == old:
+            restore(old)
+            said = subprocess.run([moonwater] + verb.split(), capture_output=True, timeout=60,
+                                  env={"PATH": "/usr/bin:/bin"})
+            settle()
+            checks(False, "%s: an uncut run changes the state (traced %s, untraced %s: %r)"
+                   % (name, status, said.returncode, (said.stdout + said.stderr)[-200:]))
+            continue
+        #   Durability: a rename onto a kept /root name, then /root synced.
+        finals = [at for at, call in enumerate(calls)
+                  if call[1] == "rename" and call[3] == 0 and
+                  call[2][1].decode() in new and not temporary(call[2][1].decode()) and
+                  new.get(call[2][1].decode()) != old.get(call[2][1].decode()) and
+                  not call[2][1].endswith(b"/link.stamps")]
+        if finals:
+            synced = any(call[1] == "sync" and call[2][0] == b"/root" and call[3] == 0
+                         for call in calls[finals[-1] + 1:])
+            checks(synced, "%s: %s is renamed into /root and /root is never synced after"
+                   % (name, calls[finals[-1]][2][1].decode()))
+        count = len(calls)
+        stride = 1 if everything else max(1, count // 6)
+        plan = [(cut, ("kill",)) for cut in range(1, count + 1)]
+        for cut in range(1, count + 1, stride):
+            kind = calls[cut - 1][1]
+            plan.append((cut, ("fail", 5 if kind == "sync" else 28)))
+            if kind == "write":
+                plan.append((cut, ("short",)))
+        for cut, action in plan:
+            restore(old)
+            cut_status, _ = tracer.run(argv_cut, cut, action)
+            settle()
+            after = snapshot()
+            cut_total += 1
+            where = "%s: %s at call %d of %d (%s %s)" % (
+                name, action[0], cut, count, calls[cut - 1][1],
+                b" ".join(calls[cut - 1][2]).decode(errors="replace"))
+            half = [path for path in set(old) | set(new) | set(after)
+                    if not temporary(path) and after.get(path) not in (old.get(path), new.get(path))]
+            checks(not half, "%s leaves %s neither as it was nor as it is to be" % (
+                where, ", ".join(sorted(half))))
+            wide = [path for path in after if temporary(path) and secret and
+                    secret in after[path][0] and after[path][1] & 0o077]
+            checks(not wide, "%s leaves %s holding the secret readable by others" % (
+                where, ", ".join(wide)))
+            if action[0] in ("fail", "short"):
+                lost = [path for path in new if not temporary(path) and
+                        after.get(path) != new.get(path)]
+                checks(not (cut_status == 0 and lost),
+                       "%s ends 0 with %s not written" % (where, ", ".join(sorted(lost))))
+            quiet(verb)
+            settle()
+            again = snapshot()
+            checks({path: value for path, value in again.items() if not temporary(path)} ==
+                   {path: value for path, value in new.items() if not temporary(path)} and
+                   not [path for path in again if temporary(path)],
+                   "%s: a second run does not arrive at the uncut state (%s)" % (
+                       where, ", ".join(sorted(set(again) ^ set(new)))[:200]))
+    print("state cuts: %d scenes, %d cut runs" % (len(scenes), cut_total))
+    return checks.verdict("state cuts", "state-cuts-inside")
 
 
 def harness_protected_links(argv):
@@ -66416,6 +66802,7 @@ HARNESS_CHECKS = {
     "pathname_race": harness_pathname_race,
     "protected_links": harness_protected_links,
     "hostile_strings": harness_hostile_strings,
+    "state_cuts": harness_state_cuts,
     "machine_scan": harness_machine_scan,
     "waterlink_noise": harness_waterlink_noise,
     "waterlink_mdns": harness_waterlink_mdns,

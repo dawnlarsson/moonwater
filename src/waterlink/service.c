@@ -269,14 +269,17 @@ static bipolar link_read_private_records(string_address path,
         return 0;
 }
 
-// Written beside its name and renamed over it: whole or not at all.
+/* Written beside its name and renamed over it: whole or not at all. Synced,
+   that is host_write_file's own staging, which syncs /root after its rename:
+   the second rename from next, unsynced, let a power cut bring back the peers
+   or the groups from before, a forgotten peer or a left group included. */
 static bipolar link_file_replace(string_address next, string_address path,
                                  address_any bytes, positive length, bool sync)
 {
-        bipolar failed = host_write_file(next, (p8 address_to)bytes, length,
-                                         0600, sync);
+        bipolar failed = host_write_file(sync ? path : next, (p8 address_to)bytes,
+                                         length, 0600, sync);
 
-        if (failed < 0)
+        if (failed < 0 || sync)
                 return failed;
         return system_rename_at(AT_FDCWD, next, AT_FDCWD, path, 0);
 }

@@ -2873,6 +2873,14 @@ lane_cli()
 {
         need_shell || return 1
         python3 test/differential.py --harness moonwater_cli --shell "$shell_binary"
+        cli_outcome=$?
+        python3 test/differential.py --harness state_cuts --shell "$shell_binary"
+        case $? in
+        0) ;;
+        2) [ "$cli_outcome" != 0 ] || cli_outcome=2 ;;
+        *) cli_outcome=1 ;;
+        esac
+        return "$cli_outcome"
 }
 lane_leaving()   { freestanding_checks_lane leaving leaving; }
 #       strtod and strtof against glibc, over generated text.
