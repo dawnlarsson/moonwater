@@ -3915,6 +3915,15 @@ lane_net()
         2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
         *) net_outcome=1 ;;
         esac
+        #       Delivery schedules and FIN/RST cuts under the record layer;
+        #       MOONWATER_TLS_SCHEDULES lengthens it.
+        python3 test/differential.py --harness tls_peer --shell "$shell_binary" \
+                --schedule "${MOONWATER_TLS_SCHEDULES:-40}"
+        case $? in
+        0) ;;
+        2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
+        *) net_outcome=1 ;;
+        esac
         python3 test/differential.py --harness https_downgrade
         case $? in
         0) ;;

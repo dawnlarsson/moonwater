@@ -42832,6 +42832,17 @@ def harness_tls_peer(argv):
     (MUST_ACCEPT) and with each other, except where this client refuses by
     design what OpenSSL accepts, which DELIBERATE names with its reason.
 
+    With --schedule N the same accepted scripts are served N times more with
+    the server's bytes delivered by a schedule below the record layer: one
+    byte at a time, cut into pieces a seeded generator picks, held back and
+    coalesced until the server next reads, or ended by FIN or RST after a
+    drawn number of bytes. A whole delivery must be taken exactly as the
+    unscheduled one was; an ended one may fail but must fail without
+    publishing (the -O file is the whole body or is not there), and every run
+    is held to a wall clock and a CPU budget, so a client that spins on
+    single bytes or waits out an idle timer for a peer that already hung up
+    shows. MOONWATER_TLS_SCHEDULES lengthens it.
+
     With --mutate N the verdicts are set aside: N seeded flights are served to
     wget with EncryptedExtensions, Certificate, CertificateRequest,
     CertificateVerify, tickets and KeyUpdate mutated before they are sealed,
@@ -42839,18 +42850,25 @@ def harness_tls_peer(argv):
     ends by a signal or hangs fails. Built with UBSan in trap mode, a shell
     turns undefined behaviour into that signal.
     """
+    import collections
     import datetime
     import hashlib
     import hmac as hmac_module
+    import resource
     import shutil
     import socket
     import ssl
     import subprocess
     import tempfile
     import threading
+    import time
     parser = argparse.ArgumentParser(prog="differential.py --harness tls_peer")
     parser.add_argument("--cc", default=os.environ.get("CC", "gcc"))
     parser.add_argument("--shell", help="a built shell to use instead of building one")
+    parser.add_argument("--schedule", type=int,
+                        default=int(os.environ.get("MOONWATER_TLS_SCHEDULES", "0")),
+                        help="serve the accepted scripts N times under delivery "
+                             "schedules and FIN/RST cuts, with time and CPU budgets")
     parser.add_argument("--mutate", type=int, default=0,
                         help="instead of the verdicts, serve N flights whose "
                              "handshake messages are mutated to wget and demand "
@@ -43297,7 +43315,69 @@ def harness_tls_peer(argv):
         except OSError:
             pass
 
-    def serve(listener, flight, steps, outcome):
+    class Scheduled:
+        """The server's end of one connection, its bytes delivered by a
+        schedule: "byte" one at a time, "split" in pieces a seeded generator
+        cuts, "coalesce" held until the server next reads or stops, and
+        "fin" or "rst" ending the stream after cut bytes whatever the script
+        meant to say. Each piece goes out alone (TCP_NODELAY) with a short
+        gap, so the client's reads see the pieces rather than their sum."""
+
+        def __init__(self, sock, kind, rng, cut, seen):
+            import struct
+            self.sock, self.kind, self.rng, self.cut = sock, kind, rng, cut
+            seen.append(self)
+            self.sent, self.held, self.ended = 0, b"", False
+            self.linger = struct.pack("ii", 1, 0)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
+        def settimeout(self, value):
+            self.sock.settimeout(value)
+
+        def out(self, data):
+            if self.ended:
+                raise ConnectionError("the schedule ended the stream")
+            ending = self.cut is not None and self.sent + len(data) >= self.cut
+            if ending:
+                data = data[:self.cut - self.sent]
+            at = 0
+            while at < len(data):
+                step = 1 if self.kind == "byte" else (
+                    len(data) if self.kind == "coalesce" else self.rng.randint(1, 700))
+                self.sock.sendall(data[at:at + step])
+                at += step
+                if self.kind != "coalesce":
+                    time.sleep(0.0002)
+            self.sent += len(data)
+            if ending:
+                self.ended = True
+                if self.kind == "rst":
+                    self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, self.linger)
+                    self.sock.close()
+                else:
+                    self.sock.shutdown(socket.SHUT_WR)
+                raise ConnectionError("the schedule ended the stream")
+
+        def sendall(self, data):
+            if self.kind == "coalesce":
+                self.held += data
+            else:
+                self.out(data)
+
+        def flush(self):
+            data, self.held = self.held, b""
+            if data:
+                self.out(data)
+
+        def recv(self, size):
+            self.flush()
+            return self.sock.recv(size)
+
+        def shutdown(self, how):
+            self.flush()
+            self.sock.shutdown(how)
+
+    def serve(listener, flight, steps, outcome, schedule=None):
         try:
             raw, _ = listener.accept()
         except OSError:
@@ -43305,7 +43385,8 @@ def harness_tls_peer(argv):
         raw.settimeout(20)
         try:
             with raw:
-                (run12 if flight.get("tls12") else run)(raw, flight, steps)
+                (run12 if flight.get("tls12") else run)(
+                    Scheduled(raw, *schedule) if schedule else raw, flight, steps)
                 outcome.append("served")
         except Exception as error:  # the client hung up or refused
             outcome.append("server: %r" % error)
@@ -43558,6 +43639,75 @@ def harness_tls_peer(argv):
                 print(built.stderr[-3000:])
                 return 1
         (work / "wget").symlink_to(shell)
+
+        if args.schedule:
+            accepted = [one for one in SCRIPTS if one[0] in MUST_ACCEPT and
+                        one[0] not in DELIBERATE and one[0] not in WGET_LENIENT]
+            rng = random.Random(0x5c4e)
+            kinds = ("byte", "split", "coalesce", "fin", "rst")
+            lengths = {}
+            tally = collections.Counter()
+            slowest = (0.0, "")
+            costliest = (0.0, "")
+            for number in range(args.schedule):
+                script, flight, steps = rng.choice(accepted)
+                kind = kinds[number % len(kinds)]
+                if kind in ("fin", "rst") and script not in lengths:
+                    kind = "split"
+                #   A cut falls inside what the whole delivery sent.
+                cut = rng.randrange(1, lengths[script]) if kind in ("fin", "rst") else None
+                seen = []
+                label = "%s under %s%s" % (script, kind, "@%d" % cut if cut else "")
+                listener = socket.socket()
+                listener.bind(("127.0.0.1", 0))
+                listener.listen(1)
+                listener.settimeout(20)
+                port = listener.getsockname()[1]
+                outcome = []
+                server = threading.Thread(
+                    target=serve, args=(listener, dict(flight, answer_deferred=False), steps,
+                                        outcome, (kind, random.Random(number), cut, seen)),
+                    daemon=True)
+                server.start()
+                folder = Path(tempfile.mkdtemp(dir=work))
+                before = resource.getrusage(resource.RUSAGE_CHILDREN)
+                began = time.monotonic()
+                try:
+                    code = subprocess.run(
+                        [str(work / "wget"), "-q", "--no-check-certificate", "-O", "saved",
+                         "https://127.0.0.1:%d/" % port], capture_output=True, timeout=40,
+                        cwd=str(folder), env={"PATH": "/usr/bin:/bin", "HOME": str(work)}
+                    ).returncode
+                except subprocess.TimeoutExpired:
+                    code = "timeout"
+                elapsed = time.monotonic() - began
+                after = resource.getrusage(resource.RUSAGE_CHILDREN)
+                cpu = (after.ru_utime - before.ru_utime) + (after.ru_stime - before.ru_stime)
+                server.join(25)
+                listener.close()
+                saved = folder / "saved"
+                have = saved.read_bytes() if saved.exists() else None
+                want = flight.get("body", body)
+                tally["%s exit %s" % (kind, code)] += 1
+                slowest = max(slowest, (elapsed, label))
+                costliest = max(costliest, (cpu, label))
+                checks(code != "timeout" and code < 128,
+                       "%s: wget ended with %s" % (label, code))
+                if cut is None:
+                    checks(code == 0 and have == want, "%s: exit %s, saved %r, wanted %r" % (
+                        label, code, have and have[:40], want[:40]))
+                    if seen and code == 0:
+                        lengths[script] = seen[0].sent
+                else:
+                    checks(have == want if code == 0 else have is None,
+                           "%s: exit %s published %r" % (label, code, have and have[:40]))
+                checks(elapsed < 10, "%s: took %.1f s" % (label, elapsed))
+                checks(cpu < 1, "%s: took %.2f s of CPU" % (label, cpu))
+            print("tls peer schedule: %d deliveries, %s; slowest %.2f s (%s), most CPU "
+                  "%.3f s (%s)" % (args.schedule, ", ".join(
+                      "%s x%d" % kv for kv in sorted(tally.items())), slowest[0], slowest[1],
+                      costliest[0], costliest[1]))
+            return checks.verdict("tls peer schedule", "tls-peer-schedule")
 
         if args.mutate:
             mutation["rng"] = random.Random(0x7157)
