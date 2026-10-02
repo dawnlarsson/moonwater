@@ -6919,13 +6919,23 @@ static bool radio_air_take(radio_air address_to air, p8 fresh)
 }
 
 /*
-        The access points given up on in the last minute: sent the machine
+        The access points given up on in the last hour: sent the machine
         away, stopped answering, or failed a join. The next join tries any
-        other that answers to the same name before one of these.
+        other that answers to the same name before one of these, and of
+        these the one given up on longest ago first. Anybody in range can
+        beacon twins of a saved network that ask for WPA2 and fail every
+        join, and louder than the real one: with four remembered for a
+        minute and the loudest first among those not remembered, five that
+        failed quickly or four that failed slowly took turns falling off the
+        list and being tried again, and the real one never was. Sixty-four
+        kept for an hour hold sixty-three twins that each take the longest a
+        join can, so each is tried once before the real one is, and again
+        only after it; more twins than that are the limit of any list this
+        size.
 */
 #define RADIO_AVOID_PATH NET_STATE_DIR "/wifi.avoid"
-#define RADIO_AVOID_MOST 4
-#define RADIO_AVOID_MS 60000u
+#define RADIO_AVOID_MOST 64
+#define RADIO_AVOID_MS 3600000u
 
 typedef struct
 {
@@ -6975,8 +6985,9 @@ typedef struct
         radio_avoid address_to avoid;
         positive avoid_count;
         radio_heard best;
+        //      When the best was given up on until, 0 for never.
+        p64 until;
         bool found;
-        bool avoided;
         bool secured;
         bool fits;
 } radio_pick;
@@ -6990,12 +7001,12 @@ static bool radio_security_fits(bool secured, p8 security)
 }
 
 /* The strongest the kernel still lists by the name, one given up on only
-   if no other is. */
+   if no other is, and the one given up on longest ago before the rest. */
 static bool radio_pick_seen(netlink_header address_to header, address_any context)
 {
         radio_pick address_to pick = (radio_pick address_to)context;
         radio_heard one;
-        bool avoided = false;
+        p64 until = 0;
         bool fits;
 
         if (!radio_bss_read(header, address_of one) || one.seen > RADIO_AIR_STALE_MS ||
@@ -7003,7 +7014,8 @@ static bool radio_pick_seen(netlink_header address_to header, address_any contex
             memory_compare(one.ssid, pick->ssid, pick->ssid_length))
                 return true;
         for (positive at = 0; at < pick->avoid_count; at++)
-                avoided |= !memory_compare(pick->avoid[at].bssid, one.bssid, 6);
+                if (!memory_compare(pick->avoid[at].bssid, one.bssid, 6))
+                        until = pick->avoid[at].until;
         //      What the saved network asks of an access point: WPA2 for one
         //      with a password, nothing for one without. A twin by the same
         //      name that offers anything else, and beacons louder than the
@@ -7018,12 +7030,12 @@ static bool radio_pick_seen(netlink_header address_to header, address_any contex
                radio_security_fits(pick->secured, one.beacon_security);
         if (pick->found && (fits < pick->fits ||
                             (fits == pick->fits &&
-                             (avoided > pick->avoided ||
-                              (avoided == pick->avoided && one.mbm <= pick->best.mbm)))))
+                             (until > pick->until ||
+                              (until == pick->until && one.mbm <= pick->best.mbm)))))
                 return true;
         pick->best = one;
         pick->found = true;
-        pick->avoided = avoided;
+        pick->until = until;
         pick->fits = fits;
         return true;
 }
@@ -7050,7 +7062,7 @@ static COLD bipolar radio_bss_choose(nl80211 address_to session, p32 index,
 
         pick.avoid_count = radio_avoid_load(avoid);
         radio_air_dump(session, index, radio_pick_seen, address_of pick);
-        if (!pick.found || pick.avoided || !pick.fits)
+        if (!pick.found || pick.until || !pick.fits)
         {
                 heard = radio_air_scan(session, index, ssid, ssid_length, true) ? 1 : -1;
                 pick.found = false;
@@ -7061,6 +7073,23 @@ static COLD bipolar radio_bss_choose(nl80211 address_to session, p32 index,
         memory_copy(bssid, pick.best.bssid, 6);
         address_to frequency = pick.best.frequency;
         return 1;
+}
+
+/* A channel's number from its frequency, as the kernel numbers it
+   (ieee80211_freq_khz_to_channel), and 0 off every band. The sum here
+   before took 5000 from anything at 4900 MHz or over in unsigned
+   arithmetic: the 4.9 GHz band printed as channel 858993439, the 6 GHz
+   band's channel 2 as 187 and 60 GHz as 6 GHz channels by the thousand. */
+static p32 radio_channel(p32 mhz)
+{
+        return mhz == 2484                    ? 14
+               : mhz >= 2407 && mhz < 2484    ? (mhz - 2407) / 5
+               : mhz >= 4910 && mhz <= 4980   ? (mhz - 4000) / 5
+               : mhz >= 5000 && mhz < 5925    ? (mhz - 5000) / 5
+               : mhz == 5935                  ? 2
+               : mhz >= 5950 && mhz <= 7115   ? (mhz - 5950) / 5
+               : mhz >= 58320 && mhz <= 70200 ? (mhz - 56160) / 2160
+                                              : 0;
 }
 
 static radio_heard address_to radio_air_find(radio_air address_to air, string_address ssid)
@@ -7136,14 +7165,11 @@ static fn radio_air_row(radio_heard address_to heard, positive width, bool saved
         bipolar dbm = heard->mbm / 100;
         p32 mhz = heard->frequency;
         positive bars = dbm >= -55 ? 4 : dbm >= -67 ? 3 : dbm >= -75 ? 2 : dbm >= -85 ? 1 : 0;
-        string_address band = mhz >= 5925   ? (string_address) "6 GHz"
+        string_address band = mhz >= 58320  ? (string_address) "60 GHz"
+                              : mhz >= 5925 ? (string_address) "6 GHz"
                               : mhz >= 4900 ? (string_address) "5 GHz"
                                             : (string_address) "2.4 GHz";
-        p32 channel = mhz == 2484   ? 14
-                      : mhz >= 5950 ? (mhz - 5950) / 5
-                      : mhz >= 4900 ? (mhz - 5000) / 5
-                      : mhz >= 2407 ? (mhz - 2407) / 5
-                                    : 0;
+        p32 channel = radio_channel(mhz);
 
         radio_line(line, sizeof(line), heard->joined ? (string_address) "* "
                                        : saved       ? (string_address) "+ "

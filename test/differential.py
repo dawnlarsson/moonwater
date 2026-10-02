@@ -59370,28 +59370,38 @@ static p8 fz_sent[512];
 static positive fz_sent_length;
 static int fz_sends;
 static p8 fz_ap_tk[16], fz_ap_gtk[16], fz_ap_gtk_idx;
-/* Every key the access point has put in a message 3 or group message 1:
-   an old message 3 let through before any handshake completed is still
-   the access point's, and its key may go in. */
-static p8 fz_made[32][17];
-static positive fz_made_count;
+/* Every key the access point has put in a message 3 or group message 1,
+   and when it last did: an old message 3 let through before any handshake
+   completed is still the access point's, and its key may go in, but no key
+   goes in over one the access point made after it. */
+static p8 fz_made[64][17];
+static positive fz_made_order[64];
+static positive fz_made_count, fz_order;
 static void fz_made_add(p8 idx, const p8 *key)
 {
-        if (fz_made_count < 32)
+        if (fz_made_count < 64)
         {
                 fz_made[fz_made_count][0] = idx;
-                memcpy(fz_made[fz_made_count++] + 1, key, 16);
+                memcpy(fz_made[fz_made_count] + 1, key, 16);
+                fz_made_order[fz_made_count++] = ++fz_order;
         }
 }
-static bool fz_made_by_ap(p8 idx, const p8 *key)
+/* When the access point last made this key under this id; 0 for never. */
+static positive fz_made_when(p8 idx, const p8 *key)
 {
+        positive when = 0;
+
         for (positive at = 0; at < fz_made_count; at++)
-                if (fz_made[at][0] == idx && !memcmp(fz_made[at] + 1, key, 16))
-                        return true;
-        return false;
+                if (fz_made[at][0] == idx && !memcmp(fz_made[at] + 1, key, 16) &&
+                    fz_made_order[at] > when)
+                        when = fz_made_order[at];
+        return when;
 }
 static p8 fz_sta_tk[16], fz_sta_gtk[4][16];
+static positive fz_sta_tk_when, fz_sta_gtk_when[4];
 static bool fz_sta_tk_set, fz_sta_gtk_set[4], fz_authorized;
+static int fz_installs;
+static const p8 fz_ap[6] = {2, 0, 0, 0, 1, 0}, fz_sta[6] = {2, 0, 0, 0, 2, 0};
 
 static bipolar socket_send(b32 handle, const void *data, positive size, b32 flags,
                            const void *to, positive to_size)
@@ -59399,52 +59409,92 @@ static bipolar socket_send(b32 handle, const void *data, positive size, b32 flag
         const socket_address_packet *packet = to;
 
         (void)handle, (void)flags;
-        if (size > sizeof fz_sent || !to || to_size != sizeof *packet || packet->halen != 6)
+        if (size > sizeof fz_sent || !to || to_size != sizeof *packet || packet->halen != 6 ||
+            memcmp(packet->addr, fz_ap, 6))
                 abort();
         memcpy(fz_sent, data, size);
         fz_sent_length = size;
         fz_sends++;
         return (bipolar)size;
 }
+
+/* One datagram on the EAPOL socket, with the sender address the kernel
+   would give: the frame cut to the room, as a datagram is without
+   MSG_TRUNC, and the address cut to the room it was given. */
+#define MSG_DONTWAIT 0x40
+static const p8 *fz_rx;
+static positive fz_rx_length;
+static socket_address_packet fz_rx_from;
+static p32 fz_rx_from_size;
+static bipolar socket_receive(b32 handle, void *into, positive room, b32 flags, void *from,
+                              p32 *size)
+{
+        positive length = fz_rx_length < room ? fz_rx_length : room;
+
+        (void)handle, (void)flags;
+        memcpy(into, fz_rx, length);
+        memcpy(from, &fz_rx_from, *size < fz_rx_from_size ? *size : fz_rx_from_size);
+        *size = fz_rx_from_size;
+        return (bipolar)length;
+}
 static void socket_close(b32 handle) { (void)handle; }
 static void nl80211_close(nl80211 *session) { session->handle = -1; }
+/* The input's bytes, with a draw count over the first eight: the kernel's
+   generator never repeats a nonce, and an input that made it repeat one
+   would only show a station that trusts it not to (a message 3 resent
+   from a handshake long done, under the same SNonce again, is fresh). */
+static p64 fz_draws;
 static bipolar system_random_fill(address_any into, positive length, positive flags)
 {
+        p8 *bytes = into;
+
         (void)flags;
         fz_take(into, length);
+        fz_draws++;
+        for (positive at = 0; at < 8 && at < length; at++)
+                bytes[at] ^= (p8)(fz_draws >> (8 * at));
         return 0;
 }
 
-/* A key goes in only as the access point made it, and never twice the
-   same: a reinstalled key is a reset nonce (KRACK). */
+/* A key goes in only as the access point made it, for the access point,
+   never twice the same (a reinstalled key is a reset nonce: KRACK) and
+   never back over a key the access point made after it (an old group key
+   in again is the same reset, of a key it has moved on from). */
 static bipolar nl80211_new_key(nl80211 *session, p32 index, p8 idx, p32 type, p8 *mac,
                                p8 *key, positive key_length, p8 *seq, positive seq_length,
                                bool group_default)
 {
-        (void)session, (void)index, (void)mac, (void)seq;
+        positive when;
+
+        (void)session, (void)index, (void)seq;
         if (key_length != 16)
                 abort();
+        fz_installs++;
         if (type == NL80211_KEYTYPE_PAIRWISE)
         {
-                if (idx || !mac || group_default || !fz_made_by_ap(0, key) ||
-                    (fz_sta_tk_set && !memcmp(key, fz_sta_tk, 16)))
+                when = fz_made_when(0, key);
+                if (idx || !mac || memcmp(mac, fz_ap, 6) || group_default || !when ||
+                    (fz_sta_tk_set && (!memcmp(key, fz_sta_tk, 16) || when <= fz_sta_tk_when)))
                         abort();
                 memcpy(fz_sta_tk, key, 16);
                 fz_sta_tk_set = true;
+                fz_sta_tk_when = when;
                 return 0;
         }
-        if (!idx || idx > 3 || !fz_made_by_ap(idx, key) ||
-            seq_length != 6 || !group_default ||
-            (fz_sta_gtk_set[idx] && !memcmp(key, fz_sta_gtk[idx], 16)))
+        when = idx && idx <= 3 ? fz_made_when(idx, key) : 0;
+        if (!when || mac || seq_length != 6 || !group_default ||
+            (fz_sta_gtk_set[idx] &&
+             (!memcmp(key, fz_sta_gtk[idx], 16) || when <= fz_sta_gtk_when[idx])))
                 abort();
         memcpy(fz_sta_gtk[idx], key, 16);
         fz_sta_gtk_set[idx] = true;
+        fz_sta_gtk_when[idx] = when;
         return 0;
 }
 static bipolar nl80211_authorize(nl80211 *session, p32 index, p8 *mac)
 {
-        (void)session, (void)index, (void)mac;
-        if (!fz_sta_tk_set)
+        (void)session, (void)index;
+        if (!fz_sta_tk_set || !mac || memcmp(mac, fz_ap, 6))
                 abort();
         fz_authorized = true;
         return 0;
@@ -59480,9 +59530,13 @@ static void fz_wrap(const p8 *kek, const p8 *plain, positive n, p8 *out)
 
 static wifi_link fz_link;
 static p8 fz_pmk[32], fz_anonce[32], fz_ptk[64], fz_pending[64], fz_rsc[8];
-static const p8 fz_ap[6] = {2, 0, 0, 0, 1, 0}, fz_sta[6] = {2, 0, 0, 0, 2, 0};
 static p64 fz_replay, fz_verified;
 static bool fz_pending_set, fz_ptk_set, fz_clean;
+/* A message 1 in the access point's name with another ANonce, answered as
+   wpa_supplicant answers it: the handshake in progress cannot finish, and
+   only a message 1 of the access point's own starts one that can. What is
+   installed is not touched, so the rekeys of a link already up still work. */
+static bool fz_pending_bent;
 /* A replayed, bent or raw frame the station answered leaves it where the
    model cannot follow; the rules on installs still hold, the expectations
    of each answer no longer do. */
@@ -59520,21 +59574,65 @@ static positive fz_frame(p8 *f, p16 info, const p8 *nonce, const p8 *data, posit
         return 99 + n;
 }
 
+/* What the station holds that only a frame whose MIC checked may move: the
+   replay counter, the keys and whether they are in. */
+static bool fz_held_moved(const wifi_link *before)
+{
+        return memcmp(before->replay, fz_link.replay, 8) ||
+               before->replay_set != fz_link.replay_set ||
+               before->installed != fz_link.installed ||
+               memcmp(before->ptk, fz_link.ptk, 64) || memcmp(before->gtk, fz_link.gtk, 64);
+}
+
+/* After any frame: one the station did not answer moved nothing it holds and
+   put no key in, and the replay counter moved only with an answer. */
+static void fz_after(const wifi_link *before, int installs)
+{
+        if ((!fz_sends && (installs != fz_installs || fz_held_moved(before))) ||
+            (memcmp(before->replay, fz_link.replay, 8) && fz_sends != 1))
+                abort();
+}
+
 /* One frame through the station, from a heap block exactly its length. */
 static bipolar fz_deliver(const p8 *frame, positive length)
 {
         p8 *copy = malloc(length ? length : 1);
+        wifi_link before;
+        int installs = fz_installs;
         bipolar step;
 
+        memcpy(&before, &fz_link, sizeof before);
         memcpy(copy, frame, length);
         fz_sends = 0;
         step = wifi_eapol_step(&fz_link, copy, length);
         free(copy);
+        fz_after(&before, installs);
         if (fz_frame_count < 8 && length <= 512)
         {
                 memcpy(fz_frames[fz_frame_count], frame, length);
                 fz_frame_length[fz_frame_count++] = length;
         }
+        return step;
+}
+
+/* One frame off the socket, from the sender address given: what came from
+   anyone but the access point changes nothing at all. */
+static bipolar fz_receive(const p8 *frame, positive length, const socket_address_packet *from,
+                          p32 from_size, bool ap)
+{
+        wifi_link before;
+        int installs = fz_installs;
+        bipolar step;
+
+        memcpy(&before, &fz_link, sizeof before);
+        fz_rx = frame, fz_rx_length = length;
+        memcpy(&fz_rx_from, from, sizeof fz_rx_from);
+        fz_rx_from_size = from_size;
+        fz_sends = 0;
+        step = wifi_eapol_take(&fz_link);
+        fz_after(&before, installs);
+        if (!ap && (step || fz_sends || memcmp(&before, &fz_link, sizeof before)))
+                abort();
         return step;
 }
 
@@ -59607,16 +59705,19 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
         fz_clean = true;
         fz_lost = false;
         fz_frame_count = fz_m3_length = fz_g1_length = 0;
-        fz_sta_tk_set = fz_authorized = false;
-        fz_made_count = 0;
+        fz_sta_tk_set = fz_authorized = fz_pending_bent = false;
+        fz_made_count = fz_order = fz_sta_tk_when = 0;
+        fz_installs = 0;
+        fz_draws = 0;
         memset(fz_sta_gtk_set, 0, sizeof fz_sta_gtk_set);
+        memset(fz_sta_gtk_when, 0, sizeof fz_sta_gtk_when);
         fz_ap_gtk_idx = 2;
         fz_new_gtk();
 
         for (int ops = 0; fz_left && ops < 24; ops++)
         {
-                p8 op = fz_byte() % 8;
-                p8 frame[512], wrapped[80];
+                p8 op = fz_byte() % 11;
+                p8 frame[512], wrapped[WIFI_WRAP_MOST + 8];
                 positive n;
                 bipolar step;
 
@@ -59634,6 +59735,7 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                                  fz_pending);
                         fz_answer(0x010a, fz_pending);
                         fz_pending_set = true;
+                        fz_pending_bent = false;
                         fz_clean = !fz_lost;
                 }
                 else if (op == 1 && fz_pending_set)     /* message 3 */
@@ -59645,8 +59747,9 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                         n = fz_key_data(wrapped, fz_pending + 16, true);
                         n = fz_frame(frame, 0x13ca, fz_anonce, wrapped, n, fz_pending);
                         step = fz_deliver(frame, n);
-                        if (fz_clean && (step != 1 || !fz_authorized ||
-                                         memcmp(fz_sta_tk, fz_pending + 32, 16)))
+                        if (fz_clean && !fz_pending_bent &&
+                            (step != 1 || !fz_authorized ||
+                             memcmp(fz_sta_tk, fz_pending + 32, 16)))
                                 abort();
                         if (step == 1)
                         {
@@ -59747,6 +59850,280 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                         fz_lost |= fz_deliver(frame, n) != 0 || fz_sends;
                         fz_clean = false;
                 }
+                else if (op == 8)       /* a message 1 from a sender of the input's choosing */
+                {
+                        p8 how = fz_byte();
+                        p8 nonce[32];
+                        p64 counter = fz_replay;
+                        socket_address_packet from;
+                        p32 from_size = sizeof from;
+                        bool ap = (how & 7) < 2;
+
+                        memset(&from, 0, sizeof from);
+                        from.family = AF_PACKET;
+                        from.protocol = network_order_16(ETH_P_PAE);
+                        from.index = 7;
+                        from.halen = 6;
+                        memcpy(from.addr, fz_ap, 6);
+                        switch (how & 7)
+                        {
+                        case 0: /* the access point, the whole address */
+                                break;
+                        case 1: /* the access point, the address as the kernel cuts it */
+                                from_size = 18;
+                                break;
+                        case 2: /* one bit off the access point */
+                        {
+                                p8 bit = fz_byte();
+
+                                from.addr[bit % 6] ^= (p8)(1u << (bit / 6 % 8));
+                                break;
+                        }
+                        case 3: /* the station's own address */
+                                memcpy(from.addr, fz_sta, 6);
+                                break;
+                        case 4: /* broadcast */
+                                memset(from.addr, 0xff, 6);
+                                break;
+                        case 5: /* the access point's bytes, another address length */
+                                from.halen = (p8)(fz_byte() % 6);
+                                break;
+                        case 6: /* the address cut short */
+                                from_size = 12 + fz_byte() % 6;
+                                break;
+                        default: /* no address at all */
+                                from_size = 0;
+                                break;
+                        }
+                        if (how & 8)
+                                memcpy(nonce, fz_anonce, 32);
+                        else
+                                fz_take(nonce, 32);
+                        //      The forger's replay counter: the access point's
+                        //      next, past it, or the last there is. A message 1
+                        //      is answered without a MIC, so its counter must
+                        //      not hold back the access point's next frames.
+                        fz_replay = (how >> 4) == 15 ? ~(p64)0 : counter + 1 + (how >> 4);
+                        n = fz_frame(frame, 0x008a, nonce, 0, 0, 0);
+                        fz_replay = counter;
+                        step = fz_receive(frame, n, &from, from_size, ap);
+                        if (ap && (step || fz_sends != 1))
+                                abort();
+                        if (ap && (!fz_pending_set || memcmp(nonce, fz_anonce, 32)))
+                                fz_pending_bent = true;
+                }
+                else if (op == 9 && (fz_ptk_set || fz_pending_set))     /* key data of every shape */
+                {
+                        p8 how = fz_byte();
+                        bool group = fz_ptk_set && (!fz_pending_set || (how & 1));
+                        p8 *keys = group ? fz_ptk : fz_pending;
+                        positive mode = (how >> 1) % 4;
+                        positive items = 1 + fz_byte() % 6;
+                        bool unwraps = mode == 0;
+                        bool clean = fz_clean && (group || !fz_pending_bent);
+                        bool want = false, cut = false;
+                        p8 plain[WIFI_WRAP_MOST], kek[16], want_key[16], want_idx = 0;
+
+                        //      The key data, element by element: what the
+                        //      station must take is the first GTK KDE whose
+                        //      key id is not 0, before anything cut short.
+                        n = 0;
+                        for (positive item = 0; item < items && !cut; item++)
+                        {
+                                p8 kind = fz_byte() % 9;
+
+                                if (kind == 0 || kind == 1 || kind == 8)
+                                {
+                                        //      A GTK KDE; one a byte short
+                                        //      or long; the suite in an
+                                        //      element that is no KDE.
+                                        positive span = kind == 1 ? (fz_byte() & 1 ? 21 : 23) : 22;
+                                        positive body = span - 6;
+                                        p8 id = fz_byte();
+                                        p8 key[16];
+
+                                        fz_take(key, 16);
+                                        key[0] |= 0x80;
+                                        plain[n++] = kind == 8 ? 0xdc : 0xdd;
+                                        plain[n++] = (p8)span;
+                                        plain[n++] = 0x00, plain[n++] = 0x0f;
+                                        plain[n++] = 0xac, plain[n++] = 0x01;
+                                        plain[n++] = id, plain[n++] = 0;
+                                        memcpy(plain + n, key, body < 16 ? body : 16);
+                                        if (body > 16)
+                                                plain[n + 16] = fz_byte();
+                                        n += body;
+                                        if (kind == 0 && (id & 3) && !want)
+                                        {
+                                                want = true;
+                                                want_idx = id & 3;
+                                                memcpy(want_key, key, 16);
+                                        }
+                                }
+                                else if (kind == 2)     /* the IGTK KDE */
+                                {
+                                        plain[n++] = 0xdd, plain[n++] = 28;
+                                        plain[n++] = 0x00, plain[n++] = 0x0f;
+                                        plain[n++] = 0xac, plain[n++] = 0x09;
+                                        fz_take(plain + n, 24);
+                                        n += 24;
+                                }
+                                else if (kind == 3)     /* the RSN element */
+                                {
+                                        memcpy(plain + n, wifi_rsn_ie, sizeof wifi_rsn_ie);
+                                        n += sizeof wifi_rsn_ie;
+                                }
+                                else if (kind == 4)     /* padding */
+                                        plain[n++] = 0xdd, plain[n++] = 0;
+                                else if (kind == 5)     /* a vendor element, never a GTK KDE */
+                                {
+                                        p8 span = fz_byte() % 24;
+
+                                        plain[n++] = 0xdd, plain[n++] = span;
+                                        fz_take(plain + n, span);
+                                        if (span >= 4 && !plain[n] && plain[n + 1] == 0x0f &&
+                                            plain[n + 2] == 0xac && plain[n + 3] == 1)
+                                                plain[n] = 1;
+                                        n += span;
+                                }
+                                else if (kind == 6)     /* longer than what is left */
+                                {
+                                        plain[n++] = (p8)(fz_byte() | 1);
+                                        plain[n++] = 0xff;
+                                        cut = true;
+                                }
+                                else                    /* the WPA vendor element */
+                                {
+                                        static const p8 wpa[] = {0xdd, 6, 0x00, 0x50, 0xf2, 0x01, 1, 0};
+
+                                        memcpy(plain + n, wpa, sizeof wpa);
+                                        n += sizeof wpa;
+                                }
+                        }
+                        if (n % 8 || n < 16)
+                        {
+                                plain[n++] = 0xdd;
+                                while (n % 8 || n < 16)
+                                        plain[n++] = 0;
+                        }
+
+                        //      Wrapped under the KEK; under a KEK a bit off;
+                        //      wrapped and cut; or not wrapped at all.
+                        memcpy(kek, keys + 16, 16);
+                        if (mode == 1)
+                        {
+                                p8 bit = fz_byte();
+
+                                kek[bit % 16] ^= (p8)(1u << (bit / 16 % 8));
+                        }
+                        if (mode == 3)
+                                memcpy(wrapped, plain, n);
+                        else
+                        {
+                                fz_wrap(kek, plain, n, wrapped);
+                                n += 8;
+                                if (mode == 2)
+                                        n -= 1 + fz_byte() % 7;
+                        }
+
+                        fz_replay++;
+                        if (group)
+                        {
+                                if (unwraps && want)
+                                {
+                                        fz_made_add(want_idx, want_key);
+                                        memcpy(fz_ap_gtk, want_key, 16);
+                                        fz_ap_gtk_idx = want_idx;
+                                }
+                                n = fz_frame(frame, 0x1382, 0, wrapped, n, fz_ptk);
+                                step = fz_deliver(frame, n);
+                                if (clean && step != (unwraps && want ? 2 : 0))
+                                        abort();
+                                if (step == 2)
+                                {
+                                        fz_answer(0x0302, fz_ptk);
+                                        fz_verified = fz_replay;
+                                        fz_g1_length = n;
+                                }
+                        }
+                        else
+                        {
+                                memcpy(fz_ap_tk, fz_pending + 32, 16);
+                                if (unwraps)
+                                {
+                                        fz_made_add(0, fz_ap_tk);
+                                        if (want)
+                                                fz_made_add(want_idx, want_key);
+                                }
+                                n = fz_frame(frame, 0x13ca, fz_anonce, wrapped, n, fz_pending);
+                                step = fz_deliver(frame, n);
+                                if (clean && (step != (unwraps ? 1 : 0) ||
+                                              (unwraps && (!fz_authorized ||
+                                                           memcmp(fz_sta_tk, fz_pending + 32, 16) ||
+                                                           (want && (!fz_sta_gtk_set[want_idx] ||
+                                                                     memcmp(fz_sta_gtk[want_idx],
+                                                                            want_key, 16)))))))
+                                        abort();
+                                if (step == 1)
+                                {
+                                        fz_answer(0x030a, fz_pending);
+                                        memcpy(fz_ptk, fz_pending, 64);
+                                        memcpy(fz_m3, frame, n);
+                                        fz_m3_length = n;
+                                        fz_verified = fz_replay;
+                                        fz_ptk_set = true;
+                                        fz_pending_set = false;
+                                        if (want)
+                                        {
+                                                memcpy(fz_ap_gtk, want_key, 16);
+                                                fz_ap_gtk_idx = want_idx;
+                                        }
+                                }
+                        }
+                }
+                else if (op == 10)      /* a message 1 framed every way */
+                {
+                        p8 how = fz_byte();
+                        positive extra = fz_byte() % 24;
+                        positive tail = fz_byte() % 24;
+                        positive got = 99 + extra + tail;
+                        positive declared = 95 + extra + (how & 7);
+                        p16 key_data;
+                        bool takes;
+                        p8 nonce[32];
+
+                        fz_take(nonce, 32);
+                        fz_replay++;
+                        fz_frame(frame, 0x008a, nonce, 0, 0, 0);
+                        fz_take(frame + 99, extra + tail);
+                        switch ((how >> 3) % 5)
+                        {
+                        case 0: key_data = 0; break;
+                        case 1: key_data = (p16)extra; break;
+                        case 2: key_data = (p16)(extra + 1); break;
+                        case 3: key_data = 0xffff; break;
+                        default: key_data = (p16)(fz_byte() | fz_byte() << 8); break;
+                        }
+                        network_store_16(frame + 2, (p16)(declared - 4));
+                        network_store_16(frame + 97, key_data);
+                        //      Its own length, never past what arrived, and
+                        //      key data inside it; bytes after it are the
+                        //      link's padding and nothing of the frame's.
+                        takes = declared >= 99 && declared <= got && key_data <= declared - 99;
+                        step = fz_deliver(frame, got);
+                        if (step || fz_sends != (takes ? 1 : 0))
+                                abort();
+                        if (takes)
+                        {
+                                memcpy(fz_anonce, nonce, 32);
+                                wifi_ptk(fz_pmk, (p8 *)fz_ap, (p8 *)fz_sta, fz_anonce, fz_sent + 17,
+                                         fz_pending);
+                                fz_answer(0x010a, fz_pending);
+                                fz_pending_set = true;
+                                fz_pending_bent = false;
+                                fz_clean = !fz_lost;
+                        }
+                }
         }
         return 0;
 }
@@ -59768,8 +60145,10 @@ def wifi_eapol_fuzz_source(net, host, checks):
                                "/* The replay counter and keys for a driver")
     step = src_slice(host, "/*\n        One EAPOL-Key frame from the access point",
                                "/* The link's news on the mlme socket")
+    take = src_slice(host, "/* Whether a frame on the EAPOL socket came from",
+                               "/*\n        The join's four-way handshake")
     return "\n".join((crypto, "#include <ctype.h>", WIFI_EAPOL_FUZZ_SHIM, derive, link,
-                      "static void wifi_rekey_offload(wifi_link *link);", step,
+                      "static void wifi_rekey_offload(wifi_link *link);", step, take,
                       WIFI_EAPOL_FUZZ_DRIVER))
 
 
@@ -59804,6 +60183,45 @@ def wifi_eapol_fuzz_seeds():
     seeds["everything.bin"] = (start + handshake() + op(2, draw(16)) + op(0, draw(32), draw(32)) +
                                op(1) + op(3) + op(4) + op(5, b"\x03") + op(6, b"\x02", b"\x10\x00") +
                                op(2, draw(16)) + op(7, b"\x20\x00", draw(32)))
+    # Rollback: two group rekeys move both key ids on, then message 3 is
+    # resent carrying the first group key.
+    seeds["rollback.bin"] = (start + handshake() + op(2, draw(16)) + op(2, draw(16)) + op(3) +
+                             op(2, draw(16)) + op(3) + op(4))
+    # Message 1 in the access point's name, with another ANonce, its own,
+    # and the last replay counter there is; then from every other sender.
+    seeds["forged_m1.bin"] = (start + handshake() + op(8, b"\x00", draw(32)) + op(2, draw(16)) +
+                              op(3) + op(8, b"\xf9") + op(2, draw(16)) +
+                              op(0, draw(32), draw(32)) + op(1))
+    seeds["forged_m1_midway.bin"] = (start + op(0, draw(32), draw(32)) + op(8, b"\x01", draw(32)) +
+                                     op(1) + op(0, draw(32)) + op(1))
+    seeds["senders.bin"] = (start + handshake() + op(8, b"\x02\x0d", draw(32)) +
+                            op(8, b"\x03", draw(32)) + op(8, b"\x04", draw(32)) +
+                            op(8, b"\x05\x05", draw(32)) + op(8, b"\x06\x05", draw(32)) +
+                            op(8, b"\x07", draw(32)) + op(2, draw(16)))
+
+    def gtk(kind, key_id, *more):
+        return bytes((kind, key_id)) + draw(16) + b"".join(more)
+
+    # Key data of every shape: the GTK KDE among other elements, cut,
+    # under another KEK, not wrapped, in message 3 and in a group message.
+    seeds["key_data.bin"] = (start + op(0, draw(32), draw(32)) +
+                             op(9, b"\x00", b"\x03", b"\x03", b"\x04", gtk(0, 1)) +
+                             op(9, b"\x01", b"\x05", b"\x02" + draw(24), gtk(0, 0), b"\x05\x16" + draw(22),
+                                gtk(0, 6), gtk(0, 1)) +
+                             op(9, b"\x03", b"\x02", b"\x06\x31", gtk(0, 2)) +
+                             op(9, b"\x05", b"\x01", gtk(0, 3), b"\x05") +
+                             op(9, b"\x07", b"\x01", gtk(0, 2)) +
+                             op(9, b"\x01", b"\x02", b"\x01\x01\x01" + draw(17), gtk(8, 2)) +
+                             op(9, b"\x01", b"\x01", b"\x07"))
+    # Message 1 with its lengths every way, and padding after it.
+    seeds["framing.bin"] = (start + op(10, b"\x04\x00\x00", draw(32)) +
+                            op(10, b"\x04\x05\x07", draw(32), draw(12)) +
+                            op(10, b"\x05\x00\x03", draw(32), draw(3)) +
+                            op(10, b"\x0c\x08\x00", draw(32), draw(8)) +
+                            op(10, b"\x14\x08\x00", draw(32), draw(8)) +
+                            op(10, b"\x1c\x00\x00", draw(32)) +
+                            op(10, b"\x24\x04\x00", draw(32), draw(4), b"\x00\x04") +
+                            op(10, b"\x00\x00\x00", draw(32)) + op(1))
     return seeds
 
 
@@ -59811,14 +60229,23 @@ def harness_wifi_eapol_fuzz(argv):
     """libFuzzer over host.c's EAPOL-Key state machine, the one the join's
     four-way handshake and the keeper's rekeys both run: wifi_eapol_step
     and the frame, MIC, unwrap and GTK helpers under it, lifted by their
-    anchors over net.c's hosted crypto. The input drives a model access
-    point -- message 1, message 3, group message 1, each resent, old frames
-    replayed, bits bent, raw frames -- whose MICs and wrapped keys are
-    real, so the whole machine is reached. Every key the station installs
-    has to be the access point's current one and never the one already in
-    (KRACK); every answer has to carry the right key information, replay
-    counter and MIC; a replayed frame has to go unanswered. Bounded
-    fixed-seed; 2 when clang/libFuzzer is absent.
+    anchors over net.c's hosted crypto, with wifi_eapol_take and the
+    sender test in front of it. The input drives a model access point --
+    message 1, message 3, group message 1, each resent, old frames
+    replayed, bits bent, raw frames, key data built from a grammar of KDEs
+    and wrapped, wrapped wrong, cut or bare, message 1 framed every way --
+    and a forger, whose message 1 comes in the access point's name or from
+    any other sender. The MICs and wrapped keys are real, so the whole
+    machine is reached. Every key the station installs has to be one the
+    access point made, for the access point, never the one already in and
+    never older than it (KRACK, and its group key rollback); a frame it
+    does not answer moves nothing it holds and puts no key in, and the
+    replay counter moves only with an answer; every answer has to carry the
+    right key information, replay counter and MIC; a replayed frame has to
+    go unanswered; a frame from anyone but the access point changes nothing
+    at all; a forged message 1 never stops the link's own rekeys; the GTK
+    taken is the model's first good KDE. Bounded fixed-seed; 2 when
+    clang/libFuzzer is absent.
 
         python3 test/differential.py --harness wifi_eapol_fuzz
     """
@@ -59886,6 +60313,23 @@ def wifi_scan_fuzz_seeds():
     seeds["nest_overlong.bin"] = b"\x00" + struct.pack("<HH", 0x7000, 6) + ssid
     seeds["body.bin"] = b"\x02" + attribute(47 | 0x8000, bss)
     seeds["body_two.bin"] = b"\x02" + attribute(47 | 0x8000, bss) + attribute(47 | 0x8000, bss)
+    # Mode 4, rows of three bytes (name, signal, joined and security): a
+    # hundred weak forged names before the real ones, a joined row weaker
+    # than all of them, a twin louder than the joined one, and names over.
+    rng = random.Random(6581)
+    weak = b"".join(bytes((name, 39, 0x11)) for name in range(86))
+    strong = b"".join(bytes((name, rng.randrange(20), 0x31)) for name in range(70, 86))
+    seeds["air_forged_first.bin"] = b"\x04" + weak + strong + bytes((3, 39, 0x30, 3, 1, 0x31))
+    seeds["air_churn.bin"] = b"\x04" + bytes(rng.getrandbits(8) for _ in range(900))
+    seeds["air_hidden.bin"] = b"\x04" + bytes((86, 0, 0x10, 87, 0, 0x10, 88, 5, 0x10, 89, 6, 0x00))
+    # Mode 5: twins (count, then whether the real one was given up on and
+    # where it sits, then each twin's signal and seconds to fail): five
+    # louder and quick, four louder and slow, the real one given up on
+    # first, and sixty-three of every kind.
+    seeds["pick_five_quick.bin"] = b"\x05" + bytes((4, 0)) + bytes((10, 0)) * 5
+    seeds["pick_four_slow.bin"] = b"\x05" + bytes((3, 6)) + bytes((10, 19)) * 4
+    seeds["pick_given_up.bin"] = b"\x05" + bytes((2, 1)) + bytes((20, 3, 69, 0, 5, 39))
+    seeds["pick_many.bin"] = b"\x05" + bytes((62, 9)) + bytes(rng.getrandbits(8) for _ in range(126))
     return seeds
 
 
@@ -59893,6 +60337,65 @@ WIFI_SCAN_FUZZ_PRELUDE = r"""
 #define GENL_HEADER 4
 #define RADIO_SSID_MOST 32
 """ + HOSTED_SPAN_BYTE + r"""
+"""
+
+#       What radio_avoid_load, radio_avoid_add, radio_pick_seen and
+#       radio_bss_choose stand on: a clock, the avoid file and the kernel's
+#       list of access points, all the driver's.
+WIFI_PICK_FUZZ_PRELUDE = r"""
+#define NET_STATE_DIR "/run/moonwater"
+#define HOST_CLOCK_BOOTTIME 7
+#ifndef AT_FDCWD
+#define AT_FDCWD (-100)
+#endif
+typedef struct
+{
+        b32 handle;
+        p16 family;
+        p32 mlme;
+        p32 scan;
+} nl80211;
+static p64 air_now_ms;
+static p64 system_clock_ns(b32 clock)
+{
+        (void)clock;
+        return (air_now_ms + 86400000ull) * 1000000ull;
+}
+static p8 air_avoid_file[4096];
+static positive air_avoid_size;
+static bool air_avoid_there;
+static bipolar file_read_once_at(b32 directory, const void *path, address_any into, positive room)
+{
+        (void)directory, (void)path;
+        if (!air_avoid_there)
+                return -2;
+        memcpy(into, air_avoid_file, air_avoid_size < room ? air_avoid_size : room);
+        return (bipolar)(air_avoid_size < room ? air_avoid_size : room);
+}
+static void host_state_ready(void) {}
+static bipolar host_write_file(const void *path, const p8 *bytes, positive length,
+                               positive mode, bool sync)
+{
+        (void)path, (void)mode, (void)sync;
+        if (length > sizeof air_avoid_file)
+                abort();
+        memcpy(air_avoid_file, bytes, length);
+        air_avoid_size = length;
+        air_avoid_there = true;
+        return 0;
+}
+static bool wifi_mac_set(p8 *mac)
+{
+        return (mac[0] | mac[1] | mac[2] | mac[3] | mac[4] | mac[5]) != 0;
+}
+static void radio_air_dump(nl80211 *session, p32 index, netlink_visitor visit,
+                           address_any context);
+static bool radio_air_scan(nl80211 *session, p32 index, p8 *ssid, positive ssid_length,
+                           bool joinable)
+{
+        (void)session, (void)index, (void)ssid, (void)ssid_length, (void)joinable;
+        return true;
+}
 """
 
 WIFI_SCAN_FUZZ_DRIVER = r"""
@@ -60018,17 +60521,286 @@ static void check_one(netlink_header *header)
         }
 }
 
+/* A scan's rows kept as radio_air_keep keeps them, against the model: one
+   row a name, no hidden name; every field of a row from one access point;
+   a name joined through keeps its joined row, the strongest joined; any
+   other name its strongest; and with the air full, no name left out that
+   is stronger than the weakest row kept that is not joined. */
+#define AIR_NAMES 90
+static void air_model(const p8 *data, positive size)
+{
+        static radio_heard rows[1024];
+        bool any[AIR_NAMES] = {0}, joined[AIR_NAMES] = {0}, kept[AIR_NAMES] = {0};
+        b32 best[AIR_NAMES], best_joined[AIR_NAMES];
+        positive count = 0, names = 0, joins = 0, nonjoined = 0;
+        b32 weakest = 0;
+        radio_air air;
+
+        memset(&air, 0, sizeof air);
+        for (positive at = 0; at + 3 <= size && count < 1024; at += 3, count++)
+        {
+                radio_heard *one = rows + count;
+                p8 name = data[at] % AIR_NAMES;
+
+                memset(one, 0, sizeof *one);
+                //      Names n0 to n85; 86 empty and 87 three zero bytes,
+                //      which are hidden; 88 and 89 the longest there is.
+                if (name < 86)
+                        one->ssid_length = (p8)snprintf((char *)one->ssid, sizeof one->ssid, "n%u", name);
+                else if (name == 87)
+                        one->ssid_length = 3;
+                else if (name > 87)
+                {
+                        one->ssid_length = RADIO_SSID_MOST;
+                        memset(one->ssid, 'x' + (name - 88), RADIO_SSID_MOST);
+                }
+                //      Signals in whole dB from 0 to -39, so ties are common.
+                one->mbm = -100 * (b32)(data[at + 1] % 40);
+                one->joined = (data[at + 2] & 15) == 0;
+                one->security = (p8)((data[at + 2] >> 4) % 8);
+                one->beacon_security = (p8)(data[at + 2] >> 7);
+                //      The row's own identity, in every field that is not
+                //      the name, the signal or the joined bit.
+                one->frequency = 2412 + (p32)count;
+                one->seen = (p32)count * 7;
+                one->bssid[0] = 2;
+                one->bssid[4] = (p8)(count >> 8);
+                one->bssid[5] = (p8)count;
+                radio_air_keep(&air, one);
+                if (name == 86 || name == 87)
+                        continue;
+                if (!any[name])
+                        names++, best[name] = one->mbm;
+                any[name] = true;
+                if (one->mbm > best[name])
+                        best[name] = one->mbm;
+                if (one->joined && (!joined[name] || one->mbm > best_joined[name]))
+                {
+                        joins += !joined[name];
+                        joined[name] = true;
+                        best_joined[name] = one->mbm;
+                }
+        }
+
+        if (air.count != (names < RADIO_AIR_MOST ? names : RADIO_AIR_MOST))
+        {
+                fprintf(stderr, "the air keeps %zu rows of %zu names\n", (size_t)air.count, (size_t)names);
+                abort();
+        }
+        for (positive at = 0; at < air.count; at++)
+        {
+                const radio_heard *have = air.heard + at;
+                const radio_heard *from = null;
+                p8 name;
+
+                for (positive row = 0; row < count && !from; row++)
+                        if (rows[row].frequency == have->frequency)
+                                from = rows + row;
+                if (!from || from->ssid_length != have->ssid_length ||
+                    memcmp(from->ssid, have->ssid, have->ssid_length) ||
+                    from->security != have->security ||
+                    from->beacon_security != have->beacon_security ||
+                    from->joined != have->joined || from->mbm != have->mbm ||
+                    from->seen != have->seen || memcmp(from->bssid, have->bssid, 6))
+                {
+                        fprintf(stderr, "a row is not one access point's\n");
+                        abort();
+                }
+                name = (p8)(have->ssid_length == RADIO_SSID_MOST ? 88 + (have->ssid[0] - 'x')
+                            : !have->ssid[0] ? 86 : atoi((const char *)have->ssid + 1));
+                if (name == 86 || kept[name])
+                {
+                        fprintf(stderr, "a hidden or doubled name is kept\n");
+                        abort();
+                }
+                kept[name] = true;
+                if (joins <= RADIO_AIR_MOST && joined[name] &&
+                    (!have->joined || have->mbm != best_joined[name]))
+                {
+                        fprintf(stderr, "a joined name lost its strongest joined row\n");
+                        abort();
+                }
+                if (!joined[name] && have->mbm != best[name])
+                {
+                        fprintf(stderr, "a name is not its strongest row\n");
+                        abort();
+                }
+                if (!have->joined && (!nonjoined++ || have->mbm < weakest))
+                        weakest = have->mbm;
+        }
+        for (p8 name = 0; name < AIR_NAMES; name++)
+                if (any[name] && !kept[name] &&
+                    ((joined[name] && joins <= RADIO_AIR_MOST) ||
+                     (air.count == RADIO_AIR_MOST && nonjoined && best[name] > weakest)))
+                {
+                        fprintf(stderr, "n%u is left out over a weaker row\n", name);
+                        abort();
+                }
+}
+
+/* Mode 5: the air a join chooses from. The real access point, at -70 dBm,
+   and up to sixty-three twins by its name, louder or quieter as the input
+   says, all asking for WPA2 as it does; a twin fails every join it is given
+   after a time of its own, one to forty seconds, as a twin without the
+   password does. The machine joins, gives up on what failed
+   (radio_avoid_add) and joins again a second later, and the real one has to
+   be tried within one join more than there are twins, whether or not it was
+   given up on first (the deauthentication anybody can forge). Before, five
+   louder twins that failed quickly, or four that failed slowly, kept it from
+   ever being tried: one given up on fell off the end of the list, or out of
+   its minute, and was louder than the real one again. */
+#define AIR_TWINS 63
+typedef struct
+{
+        p8 bssid[6];
+        b32 mbm;
+        p32 fail_ms;
+        p32 frequency;
+} air_station;
+static air_station air_world[AIR_TWINS + 1];
+static positive air_world_count;
+
+static void radio_air_dump(nl80211 *session, p32 index, netlink_visitor visit,
+                           address_any context)
+{
+        static const p8 ies[] = {0, 9, 'm', 'o', 'o', 'n', 'w', 'a', 't', 'e', 'r',
+                                 48, 20, 1, 0, 0, 0x0f, 0xac, 4, 1, 0, 0, 0x0f, 0xac, 4,
+                                 1, 0, 0, 0x0f, 0xac, 2, 0, 0};
+
+        (void)session, (void)index;
+        for (positive at = 0; at < air_world_count; at++)
+        {
+                p8 nest[160], body[200], *stop, *message;
+                p8 *put = nest;
+                p32 seen = 100;
+                positive whole;
+
+                put = put_attribute(put, NL80211_BSS_BSSID, air_world[at].bssid, 6);
+                put = put_attribute(put, NL80211_BSS_FREQUENCY, (p8 *)&air_world[at].frequency, 4);
+                put = put_attribute(put, NL80211_BSS_SIGNAL_MBM, (p8 *)&air_world[at].mbm, 4);
+                put = put_attribute(put, NL80211_BSS_SEEN_MS_AGO, (p8 *)&seen, 4);
+                put = put_attribute(put, NL80211_BSS_INFORMATION_ELEMENTS, ies, sizeof ies);
+                stop = put_attribute(body, NL80211_ATTR_BSS | 0x8000, nest, (positive)(put - nest));
+                message = wrap_message(body, (positive)(stop - body), &whole, 34);
+                visit((netlink_header *)message, context);
+                free(message);
+        }
+}
+
+static void pick_model(const p8 *data, positive size)
+{
+        positive twins = size ? 1 + data[0] % AIR_TWINS : 1;
+        bool given_up = size > 1 && (data[1] & 1);
+        positive turn = size > 1 ? data[1] >> 1 : 0;
+        positive joins = 0;
+        nl80211 session = {0};
+
+        air_now_ms = 0;
+        air_avoid_there = false;
+        air_avoid_size = 0;
+        air_world_count = twins + 1;
+        for (positive at = 0; at <= twins; at++)
+        {
+                //      The kernel's list is in no order a twin cannot
+                //      choose: the real one's place in it is the input's.
+                air_station *one = air_world + (at + turn) % (twins + 1);
+                positive from = 2 * at;
+
+                memset(one, 0, sizeof *one);
+                one->bssid[0] = 2;
+                one->bssid[4] = 0x5a;
+                one->bssid[5] = (p8)at;
+                one->frequency = 2412 + 5 * (p32)(at % 13);
+                one->mbm = !at ? -7000 : -100 * (b32)(from < size ? data[from] % 70 : 30);
+                one->fail_ms = !at ? 0 : 1000 * (1 + (from + 1 < size ? data[from + 1] % 40 : 7));
+        }
+        if (given_up)
+                radio_avoid_add(air_world[turn % (twins + 1)].bssid);
+        for (;;)
+        {
+                p8 chosen[6];
+                p32 frequency = 0;
+                air_station *one = null;
+
+                if (radio_bss_choose(&session, 7, (p8 *)"moonwater", 9, true, chosen, &frequency) != 1)
+                        abort();
+                for (positive at = 0; at <= twins && !one; at++)
+                        if (!memcmp(air_world[at].bssid, chosen, 6))
+                                one = air_world + at;
+                if (!one || frequency != one->frequency)
+                        abort();
+                joins++;
+                if (one->bssid[5] == 0)
+                        return;
+                if (joins > twins)
+                {
+                        fprintf(stderr, "the real access point is not tried in %zu joins against %zu twins\n",
+                                (size_t)joins, (size_t)twins);
+                        abort();
+                }
+                air_now_ms += one->fail_ms;
+                radio_avoid_add(chosen);
+                air_now_ms += 1000;
+        }
+}
+
+/* radio_channel against the channel plan, once: every frequency from 0 to
+   80 GHz that is a channel's centre gives that channel, and none gives a
+   number no band has. */
+static void channel_model(void)
+{
+        static p8 plan[80001];
+        static bool done;
+        static const struct { p32 first, last, base, step; } bands[] = {
+            {1, 13, 2407, 5}, {14, 14, 2414, 5}, {182, 196, 4000, 5},
+            {1, 184, 5000, 5}, {1, 233, 5950, 5}, {1, 6, 56160, 2160}};
+
+        if (done)
+                return;
+        done = true;
+        for (positive band = 0; band < sizeof bands / sizeof bands[0]; band++)
+                for (p32 channel = bands[band].first; channel <= bands[band].last; channel++)
+                {
+                        p32 mhz = bands[band].base + bands[band].step * channel;
+
+                        if (mhz < 4910 || mhz > 4980 || bands[band].base == 4000)
+                                plan[mhz] = (p8)channel;
+                }
+        plan[2484] = 14;
+        plan[5935] = 2;
+        for (p32 mhz = 0; mhz <= 80000; mhz++)
+                if ((plan[mhz] && radio_channel(mhz) != plan[mhz]) || radio_channel(mhz) > 233)
+                {
+                        fprintf(stderr, "%u MHz is channel %u, not %u\n", mhz, radio_channel(mhz),
+                                plan[mhz]);
+                        abort();
+                }
+        if (radio_channel(~(p32)0) || radio_channel(0x80000000u))
+                abort();
+}
+
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
         p8 mode;
         positive whole;
         p8 *message;
 
+        channel_model();
         if (!size)
                 return 0;
-        mode = data[0] % 4;
+        mode = data[0] % 6;
         data++;
         size--;
+        if (mode == 5)
+        {
+                pick_model(data, size);
+                return 0;
+        }
+        if (mode == 4)
+        {
+                air_model(data, size);
+                return 0;
+        }
         if (mode == 3)
         {
                 /* An RSN element alone, against the model. */
@@ -60159,6 +60931,14 @@ def harness_wifi_scan_fuzz(argv):
     stay in range, the air never holds more than it may, and a beacon that
     is well formed reads as the model built from its elements the long way
     says -- the name, the key management, the capability's privacy bit.
+    Mode 4 runs a scan's rows through radio_air_keep against a model of the
+    strongest sixty-four names, the joined row never evicted and every field
+    of a row from one access point. Mode 5 lifts radio_avoid_load,
+    radio_avoid_add, radio_pick_seen and radio_bss_choose over a clock, an
+    avoid file and a kernel list of the driver's: up to sixty-three twins of
+    a saved WPA2 network, louder or quieter, each failing every join after
+    its own one to forty seconds, and the real access point, given up on
+    first or not, has to be tried within one join more than there are twins.
     Seeds from wifi_scan_fuzz_seeds(). Exit 2 (NOT RUN) without
     clang/libFuzzer.
 
@@ -60173,13 +60953,16 @@ def harness_wifi_scan_fuzz(argv):
         wait = net_zone_fuzz_wait()
         scan = src_slice(host, "#define NL80211_CMD_NEW_SCAN_RESULTS 34",
                                    "/* Whether the station the machine is associated through is authorized")
+        pick = src_slice(host, "/*\n        The access points given up on",
+                                   "static radio_heard address_to radio_air_find(")
     except ValueError as error:
         print("  FAIL wifi scan fuzz lift: " + str(error))
         write_tally("wifi-scan-fuzz", 0, 1)
         return 1
     return tls_fuzz_run("wifi scan", wifi_scan_fuzz_seeds(),
                         NET_ZONE_FUZZ_SHIM + byte_reader_source() + wait + netlink +
-                        WIFI_SCAN_FUZZ_PRELUDE + scan + WIFI_SCAN_FUZZ_DRIVER, 4096)
+                        WIFI_SCAN_FUZZ_PRELUDE + scan + WIFI_PICK_FUZZ_PRELUDE + pick +
+                        WIFI_SCAN_FUZZ_DRIVER, 4096)
 
 
 
@@ -60541,6 +61324,45 @@ def harness_wifi_air(argv):
     lines.append("kill $(cat /tmp/twin0.pid) $(cat /tmp/twin1.pid); rm -f /root/wifi")
     family("twin", lines)
 
+    # ---- starve: twins of the saved WPA2 network that ask for WPA2 as it
+    # does, every one louder, under another password: each takes message 2
+    # and gives the machine up. The real one is left at the bottom of the
+    # air and the machine has to reach it having tried each twin once.
+    # With four given up on for a minute and the loudest first, five such
+    # twins took turns and the real one was never tried.
+    lines = []
+    other = good["password"] + "-not"
+    lines.append("moonwater wifi remove \"$ap0\" > /dev/null 2>&1; rm -f /root/wifi /run/moonwater/wifi.avoid /run/moonwater/wifi.last")
+    lines.append("$A /mnt/stick/hwsim_radio power $i0 2")
+    starve = 5
+    for at in range(starve):
+        body = ["network={", "ssid=%s" % good["ssid"].hex(), "mode=2",
+                "frequency=%d" % (2407 + 5 * (1, 6, 11, 3, 9)[at]),
+                "proto=RSN", "pairwise=CCMP", "group=CCMP", "key_mgmt=WPA-PSK",
+                "psk=\"%s\"" % other, "}"]
+        lines.append("/mnt/stick/hwsim_radio new > /dev/null; tn=$(station $S); sm%d=$(cat /sys/class/net/$tn/address); "
+                     "is%d=$(/mnt/stick/hwsim_radio move $NS $tn)" % (at, at))
+        lines.append("printf '%%s\\n' %s > /tmp/starve%d.conf" % (" ".join(q(line) for line in body), at))
+        lines.append("$A $W -B -i $is%d -c /tmp/starve%d.conf -D nl80211 -f /tmp/starve%d.log -P /tmp/starve%d.pid" % (at, at, at, at))
+        lines.append("for i in $(seq 40); do grep -q AP-ENABLED /tmp/starve%d.log 2>/dev/null && break; sleep 0.25; done" % at)
+        lines.append("$A /mnt/stick/hwsim_radio power $is%d %d" % (at, 20 - at))
+        lines.append("c%d=$(dmesg | grep -c \"$S: authenticate with $sm%d\")" % (at, at))
+    lines.append("scen_count 'starve five twins up' %d \"$(grep -l AP-ENABLED /tmp/starve*.log | wc -l)\"" % starve)
+    # A whole scan once the last scan has expired, so the kernel lists every
+    # twin and not only those on the channel the machine was on.
+    lines.append("sleep 31; moonwater wifi > /dev/null 2>&1")
+    lines.append("t0=$(uptime_now); printf '%%s\\n' %s | moonwater wifi add \"$ap0\" - > /tmp/sc.got 2>&1" % q(good["password"]))
+    lines.append("for i in $(seq 720); do [ \"$(joined \"$ap0\")\" = 1 ] && break; sleep 0.25; done; echo \"wifi-time starve $(took $t0)\"")
+    lines.append("scen_count 'starve joined past five louder twins' 1 \"$(joined \"$ap0\")\"")
+    lines.append("scen_count 'starve joined through the real one' 1 \"$([ \"$(dmesg | grep -a \"$S: authenticate with\" | tail -1 | sed 's/.*authenticate with \\([0-9a-f:]*\\).*/\\1/')\" = \"$rm0\" ] && echo 1 || echo 0)\"")
+    lines.append("tried=0; once=0; for k in %s; do eval \"m=\\$sm$k c=\\$c$k\"; n=$(( $(dmesg | grep -c \"$S: authenticate with $m\") - c )); [ $n -gt $tried ] && tried=$n; [ $n = 1 ] && once=$((once + 1)); done" % " ".join(str(at) for at in range(starve)))
+    lines.append("scen_count 'starve no twin tried twice' 1 \"$([ $tried -le 1 ] && echo 1 || echo 0)\"")
+    lines.append("scen_count 'starve every twin tried once first' %d \"$once\"" % starve)
+    lines.append("od -An -tx1 /run/moonwater/wifi.avoid 2>/dev/null | head -12 | sed 's/^/starve-avoid /'; cat /tmp/sc.got | sed 's/^/starve-add /'")
+    lines.append("dmesg | grep -a -e \"$S: authenticate with\" | tail -12 | sed 's/^/starve-log /'")
+    lines.append("kill %s; rm -f /root/wifi" % " ".join("$(cat /tmp/starve%d.pid)" % at for at in range(starve)))
+    family("starve", lines)
+
     # ---- rekey: hostapd, whose control socket starts rekeys on demand.
     # Two access points by one name, the first much the stronger, each
     # with its own DHCP server; a lease of 20 s, so a renewal every ten
@@ -60579,6 +61401,21 @@ def harness_wifi_air(argv):
         lines.append("scen_count 'rekey no handshake timeout' \"$h0\" \"$(dmesg | grep -c -e 4WAY_HANDSHAKE_TIMEOUT -e GROUP_KEY_HANDSHAKE_TIMEOUT)\"")
         lines.append("n0=$(dmesg | grep -c \"lease renewed on $S\"); for i in $(seq 60); do [ \"$(dmesg | grep -c \"lease renewed on $S\")\" -gt \"$n0\" ] && break; sleep 0.5; done")
         lines.append("scen_count 'rekey data through the new keys' 1 \"$([ \"$(dmesg | grep -c \"lease renewed on $S\")\" -gt \"$n0\" ] && echo 1 || echo 0)\"")
+        # A message 1 in the access point's own name, with an ANonce of
+        # nobody's and the last replay counter there is: answered, as
+        # wpa_supplicant answers it, and nothing more. Its counter is not
+        # kept, so the access point's next group and pairwise rekeys, at
+        # counters far below it, still go through.
+        anonce = bytes(rng.getrandbits(8) for _ in range(32))
+        forged = (bytes((2, 3)) + (95).to_bytes(2, "big") + bytes((2,)) + (0x008a).to_bytes(2, "big") +
+                  (16).to_bytes(2, "big") + b"\xff" * 8 + anonce + bytes(16 + 8 + 8 + 16) + bytes(2))
+        lines.append("g1=$(grep -c 'group key handshake completed' /tmp/rk0.log); p1=$(grep -c 'pairwise key handshake completed' /tmp/rk0.log)")
+        lines.append("$HC -i $j0 raw EAPOL_TX $mac %s > /dev/null; sleep 2" % forged.hex())
+        lines.append("$HC -i $j0 raw REKEY_GTK > /dev/null; sleep 6")
+        lines.append("scen_count 'rekey after a forged message 1, group key handshake completed' 1 \"$(( $(grep -c 'group key handshake completed' /tmp/rk0.log) - g1 ))\"")
+        lines.append("$HC -i $j0 raw REKEY_PTK $mac > /dev/null; sleep 6")
+        lines.append("scen_count 'rekey after a forged message 1, pairwise key handshake completed' 1 \"$(( $(grep -c 'pairwise key handshake completed' /tmp/rk0.log) - p1 ))\"")
+        lines.append("scen_count 'rekey after a forged message 1, still joined' 1 \"$(joined \"$rk\")\"")
         # No message 1 from either: hostapd hands its EAPOL frames to the
         # control socket instead of the air, then gives up on its own
         # schedule and sends the machine away.
