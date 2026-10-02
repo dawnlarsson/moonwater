@@ -60171,25 +60171,323 @@ def harness_inventory_mutations(argv):
     return 0 if passed == len(cases) else 1
 
 
-def harness_waterlink_mdns(argv):
-    """waterlink's mDNS against dnspython, both ways.
+MDNS_SERVICE = (b"_waterlink", b"_udp", b"local")
+MDNS_SERVICE_WIRE = b"\x0a_waterlink\x04_udp\x05local\x00"
 
-    dnspython reads the announcement and the question the check binary
-    builds and must find real DNS-SD in them: the PTR from the service to
-    the instance, SRV on the port with the cache-flush bit, an empty TXT,
-    the host's A record, no cache-flush on the PTR. Then dnspython builds
-    announcements in the same shape -- compressed its way, cases mixed,
-    records reordered, TXT of any content, extra records about other
-    services around them -- and questions of every type, and the binary's
-    reader must find the instances and ports dnspython put there and
-    nothing else. The
-    hostile half is CHECK_waterlink's; this is the interoperating half. Found
-    through WATERLINK_NOISE_PATH, like the Noise reference.
+
+class MdnsWire:
+    """A DNS message written the way a responder writes one: names
+    compressed against every suffix already in the packet (or not at all),
+    records with their fields where a mutation can find them again."""
+
+    def __init__(self, flags, compress=True):
+        import struct
+        self.pack = struct.pack
+        self.out = bytearray(self.pack(">HHHHHH", 0, flags, 0, 0, 0, 0))
+        self.table = {}
+        self.compress = compress
+        self.fields = []          # (type, class, ttl, rdlength) offsets of each record
+        self.questions = self.records = 0
+
+    def name(self, labels):
+        for at in range(len(labels)):
+            suffix = tuple(labels[at:])
+            if self.compress and suffix in self.table:
+                self.out += self.pack(">H", 0xc000 | self.table[suffix])
+                return
+            if len(self.out) < 0x3fff:
+                self.table[suffix] = len(self.out)
+            self.out.append(len(labels[at]))
+            self.out += labels[at]
+        self.out.append(0)
+
+    def question(self, labels, kind, klass):
+        self.name(labels)
+        self.out += self.pack(">HH", kind, klass)
+        self.questions += 1
+
+    def record(self, labels, kind, klass, ttl, data):
+        """data is bytes, or a list of bytes and name tuples written in turn."""
+        self.name(labels)
+        at = len(self.out)
+        self.out += self.pack(">HHIH", kind, klass, ttl, 0)
+        for piece in (data if isinstance(data, list) else [data]):
+            if isinstance(piece, tuple):
+                self.name(piece)
+            else:
+                self.out += piece
+        self.out[at + 8:at + 10] = self.pack(">H", len(self.out) - at - 10)
+        self.fields.append(at)
+        self.records += 1
+
+    def wire(self, sections=None):
+        out = bytearray(self.out)
+        counts = sections or (self.records, 0, 0)
+        out[4:12] = self.pack(">HHHH", self.questions, *counts)
+        return bytes(out)
+
+
+def mdns_model_name(packet, at, steps=None):
+    """net.c's dns_copy_name, step for step, as the reader calls it: the
+    name and the offset just past it, or None. A step is taken for each
+    label and pointer once its first byte is read."""
+    ceiling, position, jumps, ended, out = len(packet), at, 0, None, bytearray()
+    while True:
+        here = position
+        if position >= ceiling:
+            return None
+        length = packet[position]
+        position += 1
+        if steps is not None:
+            if steps[0] == 0:
+                return None
+            steps[0] -= 1
+        if length & 0xc0 == 0xc0:
+            if position >= ceiling:
+                return None
+            target = (length & 0x3f) << 8 | packet[position]
+            position += 1
+            if ended is None:
+                ended = here + 2
+            jumps += 1
+            if target >= here or jumps > 127:
+                return None
+            ceiling, position = here, target
+            continue
+        if length & 0xc0 or position + length > ceiling or len(out) + 1 + length > 255:
+            return None
+        out.append(length)
+        out += packet[position:position + length]
+        position += length
+        if not length:
+            return bytes(out), ended if ended is not None else position
+
+
+def mdns_model_read(packet, budget=False):
+    """waterlink_mdns_read as a model written from its comments and the
+    RFCs it cites: (read, asked, ports of the instances found, steps the
+    names took). The reader in the binary must say the same of every packet."""
+    import struct
+    steps = [len(packet)] if budget else None
+    asked, found = False, []
+    took = lambda: len(packet) - steps[0] if steps else 0
+
+    def refused():
+        return False, asked, [f[2] for f in found if f[1] and f[2]], took()
+    if len(packet) < 12 or len(packet) > 1500:
+        return refused()
+    _, flags, questions, a, b, c = struct.unpack(">HHHHHH", packet[:12])
+    records = a + b + c
+    response = bool(flags & 0x8000)
+    if flags & 0x780f or questions * 5 + records * 11 > len(packet) - 12:
+        return refused()
+
+    def service(name):
+        return len(name) == 23 and name.lower() == MDNS_SERVICE_WIRE
+
+    def instance(name):
+        first = name[0]
+        if not first or 1 + first >= len(name) or not service(name[1 + first:]):
+            return None
+        return name[1:1 + first]
+
+    def slot(label):
+        for one in found:
+            if one[0] == label:
+                return one
+        if len(found) == 8:
+            return None
+        found.append([label, False, 0])
+        return found[-1]
+    at = 12
+    for _ in range(questions):
+        got = mdns_model_name(packet, at, steps)
+        if got is None or got[1] + 4 > len(packet):
+            return refused()
+        kind, klass = struct.unpack(">HH", packet[got[1]:got[1] + 4])
+        if not response and service(got[0]) and kind in (12, 255) and klass & 0x7fff == 1:
+            asked = True
+        at = got[1] + 4
+    for _ in range(records):
+        got = mdns_model_name(packet, at, steps)
+        if got is None or got[1] + 10 > len(packet):
+            return refused()
+        kind, klass, ttl, size = struct.unpack(">HHIH", packet[got[1]:got[1] + 10])
+        data = got[1] + 10
+        if data + size > len(packet):
+            return refused()
+        at = data + size
+        if not response:
+            continue
+        name = got[0]
+        if kind == 12 and ttl and klass & 0x7fff == 1 and service(name):
+            target = mdns_model_name(packet, data, steps)
+            if target and target[1] == at and instance(target[0]) is not None:
+                one = slot(instance(target[0]))
+                if one:
+                    one[1] = True
+            continue
+        label = instance(name)
+        if label is None:
+            continue
+        if kind == 33 and ttl and klass & 0x7fff == 1 and size >= 7:
+            port = struct.unpack(">H", packet[data + 4:data + 6])[0]
+            if not port:
+                continue
+            target = mdns_model_name(packet, data + 6, steps)
+            if not target or target[1] != at or len(target[0]) <= 1:
+                continue
+            one = slot(label)
+            if one:
+                one[2] = port
+    if at != len(packet):
+        return refused()
+    return True, asked, [f[2] for f in found if f[1] and f[2]], took()
+
+
+def mdns_generated(rng):
+    """The DNS-SD a link carries, as responders and browsers write it,
+    each with what it says: (kind, packet, ports a reader must find)."""
+    host = (b"wl-%012x" % rng.getrandbits(48), b"local")
+
+    def flip(labels):
+        if rng.random() < 0.3:
+            return tuple(bytes(ch ^ 0x20 if 0x61 <= (ch | 0x20) <= 0x7a and rng.random() < 0.5
+                               else ch for ch in label) for label in labels)
+        return labels
+    #       A response: waterlink instances, other services, hosts, all
+    #       compressed as far as they go (or not at all), any order, any
+    #       section, until the next record would not fit.
+    wire = MdnsWire(0x8400, compress=rng.random() < 0.85)
+    pieces, ports = [], {}
+    for at in range(rng.choice((0, 1, 1, 2, 3, 5, 8))):
+        label = b"wl-%020x" % rng.getrandbits(80)
+        name = (label,) + flip(MDNS_SERVICE)
+        ports[label] = rng.randint(1, 65535)
+        ttl = rng.choice((120, 4500, 1))
+        flush = rng.choice((0x8001, 0x0001))
+        txt = rng.choice((b"\0", b"\x03v=1", b"\x09txtvers=1\x06path=/"))
+        pieces.append([(flip(MDNS_SERVICE), 12, rng.choice((1, 1, 0x8001)), 4500, [name]),
+                       (name, 33, flush, ttl, [struct_pack(">HHH", 0, 0, ports[label]), host]),
+                       (name, 16, flush, ttl, txt)])
+    for at in range(rng.randint(0, 12)):
+        kind = rng.choice((b"_ipp", b"_http", b"_airplay", b"_raop", b"_smb", b"_ssh"))
+        other = (b"Device %d" % rng.randint(0, 999), kind, rng.choice((b"_tcp", b"_udp")), b"local")
+        pieces.append([(other[1:], 12, 1, 4500, [other]),
+                       (other, 33, 0x8001, 120, [struct_pack(">HHH", 0, 0, rng.randint(1, 65535)), host]),
+                       (other, 16, 0x8001, 4500, bytes([5]) + b"rp=ab")])
+    pieces.append([(host, 1, 0x8001, 120, bytes(rng.getrandbits(8) for _ in range(4)))])
+    if rng.random() < 0.5:
+        pieces.append([(host, 28, 0x8001, 120, bytes(16))])
+    rng.shuffle(pieces)
+    records = [record for piece in pieces for record in piece]
+    if rng.random() < 0.3:
+        rng.shuffle(records)
+    written = collections.Counter()
+    for record in records:
+        before = (bytearray(wire.out), dict(wire.table), list(wire.fields), wire.records)
+        wire.record(*record)
+        if len(wire.out) > 1500:
+            wire.out, wire.table, wire.fields, wire.records = before
+            continue
+        label = record[4][0][0] if record[1] == 12 else record[0][0]
+        if label in ports and record[1] in (12, 33):
+            written[label] += 1
+    split = sorted(rng.randint(0, wire.records) for _ in range(2))
+    sections = (split[0], split[1] - split[0], wire.records - split[1])
+    yield "response", wire.wire(sections), wire, sorted(ports[k] for k in ports if written[k] == 2)
+    #       A browser's question, with what it knows already, and others.
+    wire = MdnsWire(0, compress=rng.random() < 0.85)
+    asked = False
+    for at in range(rng.randint(1, 6)):
+        if rng.random() < 0.4:
+            wire.question(flip(MDNS_SERVICE), rng.choice((12, 255, 33, 16)),
+                          rng.choice((1, 0x8001, 3)))
+        else:
+            wire.question((rng.choice((b"_ipp", b"_http", b"_ssh")), b"_tcp", b"local"), 12, 1)
+    for at in range(rng.randint(0, 6)):
+        wire.record(MDNS_SERVICE, 12, 1, 4500, [(b"wl-%020x" % rng.getrandbits(80),) + MDNS_SERVICE])
+    yield "query", wire.wire(), wire, []
+
+
+def struct_pack(form, *values):
+    import struct
+    return struct.pack(form, *values)
+
+
+def struct_unpack(form, data):
+    import struct
+    return struct.unpack(form, data)
+
+
+def mdns_mutated(rng, packet, wire):
+    """A packet a parser has to survive: header bits, counts, record fields
+    the reader decides on, pointers, label types, cuts and flips."""
+    out = bytearray(packet)
+    for _ in range(rng.randint(1, 4)):
+        roll = rng.randrange(10)
+        if roll == 0 and len(out) >= 4:
+            out[2 + rng.randrange(2)] ^= 1 << rng.randrange(8)
+        elif roll == 1 and len(out) >= 12:
+            at = 4 + 2 * rng.randrange(4)
+            value = max(0, (out[at] << 8 | out[at + 1]) + rng.choice((-1, 1, 2, 300)))
+            out[at:at + 2] = struct_pack(">H", value & 0xffff)
+        elif roll in (2, 3, 4) and wire.fields:
+            at = rng.choice(wire.fields)
+            if at + 10 > len(out):
+                continue
+            field = rng.choice(("type", "class", "ttl", "length"))
+            if field == "type":
+                out[at:at + 2] = struct_pack(">H", rng.choice((1, 12, 16, 28, 33, 255, 47)))
+            elif field == "class":
+                out[at + 2:at + 4] = struct_pack(">H", rng.choice((1, 0x8001, 3, 0x8003, 255, 0xfe)))
+            elif field == "ttl":
+                out[at + 4:at + 8] = struct_pack(">I", rng.choice((0, 1, 0x80000000, 0xffffffff)))
+            else:
+                size = out[at + 8] << 8 | out[at + 9]
+                out[at + 8:at + 10] = struct_pack(">H", max(0, size + rng.choice((-1, 1, -6, 7))) & 0xffff)
+        elif roll == 5 and len(out) > 13:
+            at = rng.randrange(12, len(out) - 1)
+            out[at:at + 2] = struct_pack(">H", 0xc000 | rng.randrange(min(len(out) + 4, 0x3fff)))
+        elif roll == 6 and len(out) > 12:
+            out[rng.randrange(12, len(out))] = rng.choice((0x40, 0x80, 0x3f, 0, 63, 64))
+        elif roll == 7:
+            del out[rng.randrange(len(out) + 1):]
+        elif roll == 8 and out:
+            out[rng.randrange(len(out))] ^= 1 << rng.randrange(8)
+        elif roll == 9 and wire.fields:
+            at = rng.choice(wire.fields)
+            if at + 16 <= len(out):
+                out[at + 14:at + 16] = b"\0\0"   # an SRV's port, or bytes like it
+    return bytes(out[:1500 + rng.choice((0, 0, 1))])
+
+
+def harness_waterlink_mdns(argv):
+    """waterlink's mDNS against a second reader, both ways.
+
+    The announcement and the question the check binary builds are read by an
+    independent DNS reader written here (and by dnspython where it is
+    importable) and must be real DNS-SD: the PTR from the service to the
+    instance, SRV on the port with the cache-flush bit, an empty TXT, the
+    host's A record, no cache-flush on the PTR. Then a generator writes the
+    DNS-SD a link carries -- responses with waterlink instances among other
+    services and hosts, compressed as far as it goes or not at all, cases
+    mixed, any order and section; browsers' questions with known answers --
+    and an AFL-style grammar mutates them where the reader decides (header
+    bits, opcode, RCODE, counts, every record's type, class, TTL and length,
+    SRV ports, pointers, label types, cuts, flips). For every packet the
+    binary's reader and a model of it written from the RFCs say the same:
+    read or refused, asked or not, which ports. Nothing here needs a package;
+    dnspython, found through WATERLINK_NOISE_PATH like the Noise reference,
+    adds its own reading and its own packets when it is there.
     """
     import random
+    import struct
     import subprocess
     parser = argparse.ArgumentParser(prog="differential.py --harness waterlink_mdns")
     parser.add_argument("--binary", required=True)
+    parser.add_argument("--count", type=int,
+                        default=int(os.environ.get("MOONWATER_MDNS_CASES", "12000")))
     args = parser.parse_args(argv)
     extra = os.environ.get("WATERLINK_NOISE_PATH")
     if extra:
@@ -60201,100 +60499,116 @@ def harness_waterlink_mdns(argv):
         import dns.rdatatype
         import dns.rdataclass
         import dns.flags
+        have_dnspython = True
     except ImportError:
-        print("waterlink mdns: NOT RUN -- dnspython is not importable")
-        return 2
+        have_dnspython = False
     checks = Checks()
 
     built = subprocess.run([args.binary, "mdns-announce"], capture_output=True, timeout=60)
     lines = built.stdout.decode().split()
     checks(built.returncode == 0 and len(lines) == 2, "the binary built an announcement and a question")
     if len(lines) == 2:
-        announcement = dns.message.from_wire(bytes.fromhex(lines[0]))
-        question = dns.message.from_wire(bytes.fromhex(lines[1]))
-        service = dns.name.from_text("_waterlink._udp.local.")
-        ptr = [r for r in announcement.answer if r.rdtype == dns.rdatatype.PTR and r.name == service]
-        srv = [r for r in announcement.answer if r.rdtype == dns.rdatatype.SRV]
-        txt = [r for r in announcement.answer if r.rdtype == dns.rdatatype.TXT]
-        a = [r for r in announcement.answer if r.rdtype == dns.rdatatype.A]
-        checks(announcement.flags & dns.flags.QR and announcement.flags & dns.flags.AA,
-               "dnspython reads an authoritative response")
-        checks(len(ptr) == 1 and len(ptr[0]) == 1 and ptr[0].rdclass == dns.rdataclass.IN,
-               "one PTR from the service to the instance, no cache-flush bit")
-        #       dnspython knows no cache-flush bit, so a record in class
-        #       0x8001 comes back as raw rdata, read here by the RFC's layout.
-        def raw(record):
-            return list(record)[0].to_wire() if not hasattr(list(record)[0], "data") else list(record)[0].data
+        announcement, question = bytes.fromhex(lines[0]), bytes.fromhex(lines[1])
+        #       Read here, record by record, by the model's name reader.
+        rows, at = [], 12
+        _, flags, qd, an, ns, ar = struct.unpack(">HHHHHH", announcement[:12])
+        for _ in range(qd + an + ns + ar):
+            name, at = mdns_model_name(announcement, at)
+            kind, klass, ttl, size = struct.unpack(">HHIH", announcement[at:at + 10])
+            rows.append((name, kind, klass, ttl, announcement[at + 10:at + 10 + size], at + 10))
+            at += 10 + size
+        service = MDNS_SERVICE_WIRE
+        ptr = [r for r in rows if r[1] == 12 and r[0] == service]
+        srv = [r for r in rows if r[1] == 33]
+        txt = [r for r in rows if r[1] == 16]
+        a = [r for r in rows if r[1] == 1]
+        checks(at == len(announcement) and flags == 0x8400 and qd == 0,
+               "an authoritative response, read to its last byte")
+        checks(len(ptr) == 1 and ptr[0][2] == 1 and
+               mdns_model_name(announcement, ptr[0][5])[0][24:] == service and
+               srv and srv[0][0] == mdns_model_name(announcement, ptr[0][5])[0],
+               "one PTR from the service to the instance the SRV is about, no cache-flush bit")
+        checks(len(srv) == 1 and srv[0][4][4:6] == (22348).to_bytes(2, "big") and srv[0][2] == 0x8001,
+               "SRV on the port with cache-flush")
+        checks(len(txt) == 1 and txt[0][4] == b"\0" and txt[0][2] == 0x8001,
+               "an empty TXT, with cache-flush")
+        checks(len(a) == 1 and a[0][4] == bytes([10, 77, 0, 2]), "the host's A record")
+        checks(question[12:] == service + b"\0\x0c\0\x01", "the question is PTR for the service")
+        if have_dnspython:
+            message = dns.message.from_wire(announcement)
+            name = dns.name.from_text("_waterlink._udp.local.")
+            checks(message.flags & dns.flags.QR and message.flags & dns.flags.AA and
+                   len([r for r in message.answer if r.rdtype == dns.rdatatype.PTR and r.name == name]) == 1 and
+                   dns.message.from_wire(question).question[0].name == name,
+                   "dnspython reads the announcement and the question the same way")
 
-        def strings(data):
-            out, at = [], 0
-            while at < len(data):
-                out.append(data[at + 1:at + 1 + data[at]])
-                at += 1 + data[at]
-            return out
-        checks(len(srv) == 1 and all(raw(r)[4:6] == (22348).to_bytes(2, "big") for r in srv) and
-               all(r.rdclass == 0x8001 for r in srv), "SRV on the port with cache-flush")
-        checks(len(txt) == 1 and all(strings(raw(r)) == [b""] for r in txt) and
-               all(r.rdclass == 0x8001 for r in txt), "an empty TXT, with cache-flush")
-        checks(len(a) == 1 and raw(a[0]) == bytes([10, 77, 0, 2]), "the host's A record")
-        checks(len(question.question) == 1 and question.question[0].name == service and
-               question.question[0].rdtype == dns.rdatatype.PTR, "the question is PTR for the service")
-
-    #       dnspython's own announcements, for the binary to read.
+    #       Generated packets, mutated packets, and dnspython's own.
     rng = random.Random(0x5353)
-    packets = []
-    expect = []
-    for round in range(300):
-        message = dns.message.Message()
-        message.flags = dns.flags.QR | dns.flags.AA
-        count = rng.randint(0, 3)
-        want = []
-        records = []
-        for at in range(count):
-            label = "wl-%020x" % rng.getrandbits(80)
-            base = "_waterlink._udp.local."
-            if rng.random() < 0.3:
-                base = "_WaterLink._UDP.Local."
-            instance = dns.name.from_text(label + "." + base)
-            port = rng.randint(1, 65535)
-            fields = rng.choice([[""], ["v=1"], ["txtvers=1", "path=/"]])
-            records.append(dns.rrset.from_text(dns.name.from_text(base), 4500, "IN", "PTR", instance.to_text()))
-            records.append(dns.rrset.from_text(instance, 120, "IN", "SRV", "0 0 %d wl-host.local." % port))
-            records.append(dns.rrset.from_text(instance, 4500, "IN", "TXT", " ".join('"%s"' % f for f in fields)))
-            want.append(port)
-        for at in range(rng.randint(0, 3)):
-            other = dns.name.from_text("printer%d._ipp._tcp.local." % at)
-            records.append(dns.rrset.from_text(other, 120, "IN", "SRV", "0 0 631 printer.local."))
-            records.append(dns.rrset.from_text(other, 120, "IN", "TXT", '"rp=ipp/print"'))
-        rng.shuffle(records)
-        for record in records:
-            message.answer.append(record)
-        packets.append(message.to_wire().hex())
-        expect.append(("response", sorted(want)))
-    for kind in ("PTR", "ANY", "SRV", "A"):
-        query = dns.message.make_query("_waterlink._udp.local.", kind)
-        query.id = 0
-        packets.append(query.to_wire().hex())
-        expect.append(("asked" if kind in ("PTR", "ANY") else "quiet", []))
+    packets, kinds, intents = [], [], []
+    while len(packets) < args.count:
+        for kind, packet, wire, ports in mdns_generated(rng):
+            packets.append(packet)
+            kinds.append(kind)
+            intents.append(ports)
+            for _ in range(3):
+                packets.append(mdns_mutated(rng, packet, wire))
+                kinds.append("mutated")
+                intents.append(None)
+    if have_dnspython:
+        for round in range(300):
+            message = dns.message.Message()
+            message.flags = dns.flags.QR | dns.flags.AA
+            records = []
+            for at in range(rng.randint(0, 3)):
+                label = "wl-%020x" % rng.getrandbits(80)
+                base = rng.choice(("_waterlink._udp.local.", "_WaterLink._UDP.Local."))
+                instance = dns.name.from_text(label + "." + base)
+                records.append(dns.rrset.from_text(dns.name.from_text(base), 4500, "IN", "PTR", instance.to_text()))
+                records.append(dns.rrset.from_text(instance, 120, "IN", "SRV",
+                                                   "0 0 %d wl-host.local." % rng.randint(1, 65535)))
+                records.append(dns.rrset.from_text(instance, 4500, "IN", "TXT", '"v=1"'))
+            rng.shuffle(records)
+            for record in records:
+                message.answer.append(record)
+            packets.append(message.to_wire())
+            kinds.append("dnspython")
+            intents.append(None)
 
-    read = subprocess.run([args.binary, "mdns-read"], input=("\n".join(packets) + "\n").encode(),
-                          capture_output=True, timeout=60)
+    read = subprocess.run([args.binary, "mdns-read"],
+                          input=("\n".join(p.hex() for p in packets) + "\n").encode(),
+                          capture_output=True, timeout=600)
     answers = read.stdout.decode().splitlines()
-    agreed = 0
-    for (kind, want), answer in zip(expect, answers):
+    checks(len(answers) == len(packets), "the binary answered every packet (%d of %d)" %
+           (len(answers), len(packets)))
+    tally = collections.Counter()
+    shown = 0
+    for packet, kind, answer in zip(packets, kinds, answers):
+        model = mdns_model_read(packet)
         words = answer.split()
-        if len(words) < 3 or words[0] != "ok":
-            continue
-        found = [int(item) for item in words[3:] if item.isdigit()]
-        if kind == "response" and sorted(found) == want and words[1] == "-":
-            agreed += 1
-        elif kind == "asked" and words[1] == "asked" and not found:
-            agreed += 1
-        elif kind == "quiet" and words[1] == "-" and not found:
-            agreed += 1
-    checks(len(answers) == len(packets) and agreed == len(packets),
-           "the binary reads dnspython's packets as dnspython wrote them (%d of %d)" %
-           (agreed, len(packets)))
+        said = (words[:1] == ["ok"], words[1:2] == ["asked"],
+                [int(w) for w in words[3:]] if words[:1] == ["ok"] else None)
+        wanted = (model[0], model[1] if model[0] else said[1], model[2] if model[0] else None)
+        tally[kind, model[0]] += 1
+        if said != wanted:
+            tally["disagree", kind] += 1
+            if shown < 5:
+                shown += 1
+                print("    %s: binary %r, model %r: %s" % (kind, answer, model[:3], packet.hex()))
+    print("  mdns cases: " + ", ".join("%s %s %d" % (k[0], k[1], n) for k, n in sorted(tally.items(), key=str)))
+    for kind in ("response", "query", "mutated", "dnspython"):
+        if kind != "dnspython" or have_dnspython:
+            checks(tally["disagree", kind] == 0 and tally[kind, True] > 0,
+                   "the binary and the model read every %s packet alike (%d disagree)" %
+                   (kind, tally["disagree", kind]))
+    checks(tally["mutated", False] > args.count // 8 and tally["mutated", True] > args.count // 8,
+           "the mutations make packets that are read and packets that are refused")
+    #       What each generated response was written to say, whatever
+    #       either reader thinks: every instance whose PTR and SRV fit.
+    meant = sum(answer.startswith("ok") and sorted(int(w) for w in answer.split()[3:]) == ports
+                for kind, answer, ports in zip(kinds, answers, intents) if kind == "response")
+    checks(meant == kinds.count("response"),
+           "every generated response reads, with the instances it was written with (%d of %d)" %
+           (meant, kinds.count("response")))
     return checks.verdict("waterlink mdns:", "waterlink-mdns")
 
 
