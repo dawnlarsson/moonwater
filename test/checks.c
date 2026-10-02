@@ -70966,8 +70966,8 @@ static fn mdns_parse(void)
         for (positive cut = 0; cut < length; cut++)
         {
                 tries++;
-                (void)mdns_read_edge(packet, cut, address_of found);
-                survived += found.count <= WATERLINK_FOUND_MAX;
+                survived += !mdns_read_edge(packet, cut, address_of found) &&
+                            !found.count && !found.asked && !found.id;
         }
         traffic_state = 0x51a7e5ull;
         for (positive round = 0; round < 20000; round++)
@@ -70998,11 +70998,13 @@ static fn mdns_parse(void)
                         }
                 }
                 tries++;
-                (void)mdns_read_edge(broken, size, address_of found);
-                survived += found.count <= WATERLINK_FOUND_MAX;
+                survived += mdns_read_edge(broken, size, address_of found)
+                                ? found.count <= WATERLINK_FOUND_MAX
+                                : !found.count && !found.asked && !found.id;
         }
         check("every cut and 20,000 random edits of an announcement are read "
-              "at a page's edge without reading past it",
+              "at a page's edge without reading past it, and every one "
+              "refused says nothing was found",
               survived == tries);
 }
 

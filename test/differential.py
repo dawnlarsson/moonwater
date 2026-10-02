@@ -60276,7 +60276,7 @@ def mdns_model_read(packet, budget=True):
     took = lambda: allowed - steps[0]
 
     def refused():
-        return False, asked, [f[2] for f in found if f[1] and f[2]], took()
+        return False, False, [], took()
     if len(packet) < 12 or len(packet) > 1500:
         return refused()
     _, flags, questions, a, b, c = struct.unpack(">HHHHHH", packet[:12])
@@ -60644,8 +60644,8 @@ def harness_waterlink_mdns(argv):
         model = mdns_model_read(packet)
         words = answer.split()
         said = (words[:1] == ["ok"], words[1:2] == ["asked"],
-                [int(w) for w in words[3:]] if words[:1] == ["ok"] else None)
-        wanted = (model[0], model[1] if model[0] else said[1], model[2] if model[0] else None)
+                [int(w) for w in words[3:]] if words[:1] == ["ok"] else words[2:3])
+        wanted = (model[0], model[1], model[2] if model[0] else ["0"])
         tally[kind, model[0]] += 1
         if said != wanted:
             tally["disagree", kind] += 1
