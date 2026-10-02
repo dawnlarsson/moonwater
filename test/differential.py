@@ -63296,6 +63296,10 @@ static p32 network_load_32(const p8 *at)
 {
         return (p32)at[0] << 24 | (p32)at[1] << 16 | (p32)at[2] << 8 | at[3];
 }
+static p64 network_load_64(const p8 *at)
+{
+        return (p64)network_load_32(at) << 32 | network_load_32(at + 4);
+}
 static void network_store_64(p8 *at, p64 v)
 {
         for (int i = 0; i < 8; i++)
@@ -63465,6 +63469,7 @@ static bool crypto_aesgcm_open(crypto_aesgcm_key *key, const p8 *iv, const p8 *a
         off, and system calls answered from what the driver queued. */
 static p64 wl_clock = 1000000000ull;
 static p64 wl_wall = 1700000000000000000ull;
+static bool wl_clock_set; // the wall clock reads a time, which freshness is asked of
 static bool wl_entropy_down;
 static p64 wl_random_state = 1;
 static p64 system_clock_ns(int which) { return which ? wl_clock : wl_wall + wl_clock; }
@@ -63695,6 +63700,8 @@ WATERLINK_PRE_DRIVER = r'''
             names many, none to port zero, and one-shot answers at most one in
             any LINK_ANSWER_AGAIN: nothing a spoofed packet says makes this an
             amplifier;
+          - where the clock reads a time, a greeting to a group that stays
+            and dated more than LINK_GREET_FRESH from it keeps nobody;
           - an initiation answered with a cookie reply spent no curve, and a
             cookie reply is WATERLINK_COOKIE_DATAGRAM bytes, a sixteenth of
             what provoked it.
@@ -63953,6 +63960,7 @@ static void wl_reset(bool server)
         wl_run_count = wl_run_next = wl_mdns_count = wl_mdns_next = 0;
         wl_have_respond = wl_have_cookie = false;
         wl_clock = 1000000000ull;
+        wl_wall = (wl_clock_set ? 1790000000ull : 1700000000ull) * 1000000000ull;
         wl_random_state = 1;
         for (int i = 0; i < 3; i++)
         {
@@ -63998,7 +64006,7 @@ static void wl_initiation(p8 *datagram, int who, bool group, p32 delta,
         p8 ephemeral[32];
 
         memset(hello, 0, sizeof hello);
-        waterlink_stamp(hello, 1700000000ull + delta, 0);
+        waterlink_stamp(hello, wl_wall / 1000000000ull + delta - (wl_clock_set ? 32768 : 0), 0);
         if (group)
         {
                 positive n = take_bytes(hello + WATERLINK_STAMP_BYTES,
@@ -64121,6 +64129,17 @@ static void wl_step(bool server)
                 wl_have_respond = false;
                 if (server)
                         link_datagram(datagram, WATERLINK_DATAGRAM, address, port, now);
+                if (server && group && wl_clock_set && !(mode & 1))
+                {
+                        //      A greeting to a group that stays, dated far from the
+                        //      clock the machine has, is a recording.
+                        p64 wall = system_clock_ns(0) / 1000000000ull;
+                        p64 sent = wl_wall / 1000000000ull + delta - 32768;
+
+                        if (sent + LINK_GREET_FRESH < wall || sent > wall + LINK_GREET_FRESH)
+                                wl_check(wl_file.count <= peers_before,
+                                         "a greeting dated far from the clock kept a member");
+                }
                 if (server && group && (mode & 1) &&
                     ((mode & 2) || (mode & 4) || ((mode & 8) && !(mode & 16))))
                         wl_check(wl_file.count <= peers_before,
@@ -64417,6 +64436,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         wl_in = data;
         wl_left = size;
         server = !(take8() & 1);
+        wl_clock_set = size && (data[0] & 2);
         wl_reset(server);
         if (!server && link_session_open(link_self.session))
         {
@@ -64478,6 +64498,13 @@ def waterlink_pre_seeds():
     socket_mdns = head(7) + b"\x00" + len(query).to_bytes(2, "big") + b"\x01" + query + \
         b"\x00\x01"
     many = [announce(range(1000 + 8 * k, 1008 + 8 * k)) for k in range(4)]
+
+    #   A group's greeting from the stranger, dated delta seconds from the
+    #   driver's clock (32768 is now) when the clock reads a time, to a group
+    #   that stays or a one-use code (mode 1).
+    def greet(delta, mode, index):
+        return head(2) + bytes([2, 0]) + index.to_bytes(4, "big") + \
+            delta.to_bytes(2, "big") + b"\x00" + bytes([mode, 6]) + b"office"
     return {
         "handshake_then_carried.bin": b"\x00" + initiation(0) + carried,
         "rekey_and_replay.bin": b"\x00" + initiation(0) + initiation(0, delta=6) +
@@ -64494,6 +64521,12 @@ def waterlink_pre_seeds():
         "coalesced_run.bin": b"\x00" + run,
         "mdns_socket.bin": b"\x00" + socket_mdns,
         "client_answer.bin": b"\x01" + head(8) + head(8) + b"\x00\x00\x00\x07\x00",
+        "greetings_dated.bin": b"\x02" + b"".join(
+            greet(32768 + shift, 0, 0x1000 + at) for at, shift in
+            enumerate((0, -5000, 5000, -3000, 3000, -4000, 60, -60))),
+        "greetings_dated_code.bin": b"\x02" + b"".join(
+            greet(32768 + shift, 1, 0x2000 + at) for at, shift in
+            enumerate((-30000, 30000, 0))),
         "raw.bin": b"\x00" + head(0) + (64).to_bytes(2, "big") + bytes(range(64)),
         "flood_then_cookie.bin": b"\x00" + head(9) + bytes([40, 0]) + b"".join(
             (i + 1).to_bytes(2, "big") + bytes([i & 3]) + (0x100 + i).to_bytes(4, "big")

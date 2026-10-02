@@ -714,6 +714,33 @@ static fn link_pair_begin(positive group, p8 address_to address, p16 port,
         crypto_forget(address_of noise, sizeof noise);
 }
 
+/*
+        A greeting says when its sender sent it, and one that is not about now
+        is a recording played back: from a member that was forgotten, and
+        whose marker has been dropped since, it would keep that member again,
+        at the address of whoever played it, with what the group grants. So
+        once this machine's clock reads a time -- a machine that was never
+        told it reads 1970 and its uptime, and the floor is a date after this
+        was written -- a greeting to a group that stays is dated within
+        LINK_GREET_FRESH seconds of it, either way. A code is single use and
+        its own end bounds what is played back, and a machine that has no
+        time to give is greeted again when it has: its announcement is heard
+        every minute.
+*/
+#define LINK_CLOCK_FLOOR 1767225600ull // 2026-01-01
+#define LINK_GREET_FRESH 3600
+
+static bool link_greeting_fresh(positive group, p8 address_to hello)
+{
+        p64 wall = system_clock_ns(0) / 1000000000ull;
+        p64 sent = network_load_64(hello) - (1ull << 62);
+
+        return (link_nearby.groups.record[group].flags & LINK_GROUP_ONCE) ||
+               wall < LINK_CLOCK_FLOOR ||
+               (link_age(wall, sent) <= LINK_GREET_FRESH &&
+                link_age(sent, wall) <= LINK_GREET_FRESH);
+}
+
 //      A greeting that opened: the member is kept, and greeted back if new.
 static bool link_pair_greeted(positive group, p8 address_to key,
                               p8 address_to hello, p8 address_to address,
@@ -721,6 +748,8 @@ static bool link_pair_greeted(positive group, p8 address_to key,
 {
         bool accepted;
 
+        if (!link_greeting_fresh(group, hello))
+                return false;
         if (link_pair_keep(group, key, hello + WATERLINK_STAMP_BYTES,
                            network_load_32(hello + 4), address, port,
                            address_of accepted))

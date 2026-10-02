@@ -73616,6 +73616,107 @@ static fn mdns_names_one(void)
                                            6200001));
 }
 
+//      A group the greeted machine has, in memory and as the file: one that
+//      stays (flags and expect zero) or a one-use code.
+static fn wls_group_file(p32 flags, p64 expires, p32 expect)
+{
+        wls_group();
+        link_nearby.groups.record[0].flags = flags;
+        link_nearby.groups.record[0].expires = expires;
+        link_nearby.groups.record[0].expect = expect;
+        (void)wls_write(LINK_GROUPS_PATH,
+                        address_of link_nearby.groups.record[0],
+                        sizeof(struct link_group_record), 0600);
+}
+
+//      A greeting that arrives, from this machine's loopback: the peers file
+//      as it leaves it is the answer.
+static fn wls_greeted(struct waterlink_identity address_to from,
+                      string_address name, p64 ahead, p16 port, p64 now)
+{
+        p8 greeting[WATERLINK_DATAGRAM];
+
+        memory_zero(address_of link_self.admission, sizeof link_self.admission);
+        wls_greeting(from, address_of wls_office, name, ahead, greeting);
+        link_server_initiation(greeting, WATERLINK_DATAGRAM, wls_loopback, port,
+                               now);
+}
+
+/*
+        A greeting is its sender's clock when it was sent, and one that is
+        not about now is a recording: from a member that was forgotten and
+        whose marker was dropped since, it brought that member back at the
+        address of whoever played it, with the group's grants. Where this
+        machine's clock reads a time, a greeting to a group that stays must
+        be dated within an hour of it, either way; a code is single use and
+        ends on its own.
+*/
+static fn greeting_freshness(bipolar listener, p16 port)
+{
+        static const struct
+        {
+                long ahead;
+                bool kept;
+        } dated[] = {
+            {0, true},         {-60, true},        {-3500, true},
+            {3500, true},      {-3700, false},     {3700, false},
+            {-7200, false},    {7200, false},      {-86400 * 30, false},
+            {86400 * 365, false}, {-1700000000, false},
+        };
+        p64 wall = system_clock_ns(0) / 1000000000ull;
+        p8 back[WATERLINK_DATAGRAM + 16];
+        positive kept = 0, refused = 0, mistaken = 0, answered = 0;
+
+        if (wall < LINK_CLOCK_FLOOR)
+                return;
+        link_self.me = wls_b;
+        for (positive at = 0; at < array_count(dated); at++)
+        {
+                wls_group_file(0, 0, 0);
+                (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
+                link_self.stamps = 0;
+                wls_drain(listener);
+                wls_greeted(address_of wls_client, "machine-a",
+                            (p64)(bipolar)dated[at].ahead, port, 7000000 + at);
+                kept += dated[at].kept;
+                refused += !dated[at].kept;
+                mistaken += (wls_peers_count() == 1) != dated[at].kept;
+                answered += dated[at].kept &&
+                            wls_heard(listener, back) == WATERLINK_DATAGRAM;
+        }
+        check("sec: a greeting to a group that stays is kept when it is dated "
+              "within an hour of this machine's clock, and not otherwise",
+              mistaken == 0 && kept == 4 && refused == 7);
+        check("and one that is kept is greeted back", answered == kept);
+
+        //      The member that was forgotten: its marker is gone, a recording
+        //      of its greeting from two hours ago is played, and it is not
+        //      back; it greets now and is.
+        wls_group_file(0, 0, 0);
+        (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
+        link_self.stamps = 0;
+        wls_greeted(address_of wls_client, "machine-a", (p64)(bipolar)-7200,
+                    port, 7100000);
+        check("sec: a recorded greeting of a forgotten member, its marker "
+              "dropped, does not bring it back",
+              wls_peers_count() == 0 && link_self.stamps == 0);
+        wls_greeted(address_of wls_client, "machine-a", 5, port, 7200000);
+        check("while the member's own greeting does", wls_peers_count() == 1);
+
+        //      A code ends by itself and its own greeting may come from a
+        //      machine that has not been told the time.
+        wls_group_file(LINK_GROUP_ONCE, link_boot_seconds() + 300, 0);
+        (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
+        link_self.stamps = 0;
+        wls_greeted(address_of wls_client, "machine-a", (p64)(bipolar)-1700000000,
+                    port, 7300000);
+        check("sec: a greeting to a code is not held to the clock: the "
+              "machine pairing may have none",
+              wls_peers_count() == 1);
+        (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
+        (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
+}
+
 //      Discovery labels are published only when every one was drawn.
 static fn labels(void)
 {
@@ -74142,6 +74243,7 @@ b32 main(void)
         quiet_streams();
         control_records_are_canonical();
         greetings(listener, port);
+        greeting_freshness(listener, port);
         mdns_amplification();
         mdns_names_one();
         mdns_hop_limit();
