@@ -81241,6 +81241,33 @@ static fn storage_test_arp_claims(void)
               !net_arp_claims(packet, sizeof packet, mine, offered));
         check("a truncated ARP claim is refused",
               !net_arp_claims(packet, NET_ARP_PACKET - 1, mine, offered));
+
+        //      Every field that says what the packet is, wrong one at a
+        //      time, is not a claim; the frame's padding is not a field.
+        {
+                p8 padded[46] = {0};
+                static const struct { p8 at, value; } wrong[] = {
+                    {1, 6}, {3, 0x06}, {4, 8}, {5, 16}, {7, 3}, {7, 0}};
+
+                memory_copy(padded, packet, NET_ARP_PACKET);
+                network_store_32(padded + 14, offered);
+                check("an ARP claim padded to the frame minimum is a claim",
+                      net_arp_claims(padded, sizeof padded, mine, offered));
+                for (positive at = 0; at < array_count(wrong); at++)
+                {
+                        p8 copy[46];
+
+                        memory_copy(copy, padded, sizeof copy);
+                        copy[wrong[at].at] = wrong[at].value;
+                        check("an ARP packet of another medium, protocol, length or operation is no claim",
+                              !net_arp_claims(copy, sizeof copy, mine, offered));
+                }
+                bool refused = true;
+
+                for (positive length = 0; length < NET_ARP_PACKET; length++)
+                        refused &= !net_arp_claims(padded, length, mine, offered);
+                check("an ARP claim cut at any byte is refused", refused);
+        }
 }
 
 /* A renewal with nothing to renew answers DHCP_NO_OFFER from inside the

@@ -1779,18 +1779,31 @@ static COLD fn radio_links_unleased(netlink_search address_to search);
 #define NET_ARP_PACKET 28
 #define NET_ARP_PROBES 3
 
-static bool net_arp_claims(p8 address_to packet, positive size,
-                           p8 address_to hardware, p32 address)
+/* An ARP packet (cooked: the link header is the kernel's) that says another
+   station holds the address: it sends from it, or probes for it as this one
+   does (RFC 5227 2.1.1). Ethernet's frame minimum pads the 28 bytes, so a
+   longer packet is the same packet. */
+static bool net_arp_claims(const p8 address_to packet, positive size,
+                           const p8 address_to hardware, p32 address)
 {
-        return size >= NET_ARP_PACKET && network_load_16(packet) == 1 &&
-               network_load_16(packet + 2) == ETH_P_IP &&
-               packet[4] == 6 && packet[5] == 4 &&
-               (network_load_16(packet + 6) == 1 ||
-                network_load_16(packet + 6) == 2) &&
-               (network_load_32(packet + 14) == address ||
-                (!network_load_32(packet + 14) &&
-                 network_load_32(packet + 24) == address)) &&
-               memory_compare(packet + 8, hardware, 6);
+        byte_reader reader = byte_reader_open(packet, size);
+        p16 medium = byte_reader_u16(address_of reader);
+        p16 protocol = byte_reader_u16(address_of reader);
+        p8 hardware_length = byte_reader_u8(address_of reader);
+        p8 protocol_length = byte_reader_u8(address_of reader);
+        p16 operation = byte_reader_u16(address_of reader);
+        const p8 address_to sender = byte_reader_take(address_of reader, 6);
+        p32 sender_address = byte_reader_u32(address_of reader);
+        p32 target_address = byte_reader_skip(address_of reader, 6)
+                                 ? byte_reader_u32(address_of reader)
+                                 : 0;
+
+        return byte_reader_ok(address_of reader) && medium == 1 &&
+               protocol == ETH_P_IP && hardware_length == 6 &&
+               protocol_length == 4 && (operation == 1 || operation == 2) &&
+               (sender_address == address ||
+                (!sender_address && target_address == address)) &&
+               memory_compare(sender, hardware, 6);
 }
 
 /* A packet socket of one ethertype on one interface: the cooked link header

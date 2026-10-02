@@ -56099,8 +56099,10 @@ def harness_security_hygiene(argv):
         ("radio_rsn_security", ("element",)),
         ("radio_bss_read", ("elements",)),
         ("bowl_signature_read", ("bytes",)),
+        ("net_arp_claims", ("packet",)),
     )
     wire_source = (net + (HARNESS_ROOT / "src/sh/host.c").read_text() +
+                   (HARNESS_ROOT / "src/sh/net.c").read_text() +
                    (HARNESS_ROOT / "src/waterlink/discover.c").read_text() +
                    (HARNESS_ROOT / "src/bowl.c").read_text())
     try:
@@ -56111,7 +56113,7 @@ def harness_security_hygiene(argv):
         found = re.search(r"^[a-z][^\n(;]*\b%s\([^;{]*?\)\s*\n\{.*?^\}$" % name,
                           wire_source, re.M | re.S)
         checks(found is not None,
-               "reader-only: cannot find %s in net.c, host.c, discover.c or bowl.c" % name)
+               "reader-only: cannot find %s in net.c, host.c, sh/net.c, discover.c or bowl.c" % name)
         if not found:
             continue
         body = re.sub(r"//[^\n]*", "", re.sub(r"/\*.*?\*/", "", found.group(0), flags=re.S))
