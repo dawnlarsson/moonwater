@@ -72794,8 +72794,8 @@ static fn mdns_amplification(void)
                 waterlink_group_keys_from(address_of second, derived, "second");
                 link_nearby.groups.count = 2;
                 link_nearby.keys[1] = second;
-                link_pair_begin(0, wls_loopback, 9, 1000000);
-                link_pair_begin(1, wls_loopback, 9, 1000001);
+                link_pair_begin(0, wls_loopback, 9, 1000000, false);
+                link_pair_begin(1, wls_loopback, 9, 1000001, false);
                 check("sec: one place is greeted immediately for each group, "
                       "not throttled as if groups shared an identity",
                       entropy_draws - before == 2 &&
