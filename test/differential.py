@@ -62675,14 +62675,52 @@ static WL_QUIET bool invariants(struct waterlink_link *link, const char *where)
                         printf("  FAIL %s: held free list broken\n", where);
                         return false;
                 }
+        /*      Each key's chain is in order, its stream frames within a window
+                of what was taken and the bits of held_mask, and held_last is
+                where it ends: what hold answers without a walk is what a walk
+                would find. */
         for (p32 key = 0; key < WATERLINK_KEYS; key++)
-                for (at = link->receiving[key].first; at != WATERLINK_NONE;
-                     at = link->held[at].next)
+        {
+                struct waterlink_receiving *live = link->receiving + key;
+                p64 mask = 0;
+                p32 last = WATERLINK_NONE;
+
+                for (at = live->first; at != WATERLINK_NONE; at = link->held[at].next)
+                {
+                        struct waterlink_frame *head;
+
                         if (at >= WATERLINK_HELD || ++seen > WATERLINK_HELD)
                         {
                                 printf("  FAIL %s: held key list broken\n", where);
                                 return false;
                         }
+                        head = &link->held[at].head;
+                        if (head->key != key ||
+                            (last != WATERLINK_NONE &&
+                             head->sequence <= link->held[last].head.sequence))
+                        {
+                                printf("  FAIL %s: held key %u out of order\n", where, key);
+                                return false;
+                        }
+                        if (head->flags & WATERLINK_FRAME_DURABLE)
+                        {
+                                if (head->sequence - live->delivered > WATERLINK_KEY_WINDOW)
+                                {
+                                        printf("  FAIL %s: key %u holds a stream frame %u past %u\n",
+                                               where, key, head->sequence, live->delivered);
+                                        return false;
+                                }
+                                mask |= 1ull << (head->sequence & 63);
+                        }
+                        last = at;
+                }
+                if (mask != link->held_mask[key] ||
+                    (last != WATERLINK_NONE && last != link->held_last[key]))
+                {
+                        printf("  FAIL %s: held key %u bits or end wrong\n", where, key);
+                        return false;
+                }
+        }
         if (seen != WATERLINK_HELD)
         {
                 printf("  FAIL %s: held pool accounts for %u of %u\n", where, seen, WATERLINK_HELD);
@@ -64521,10 +64559,45 @@ def waterlink_fuzz_seeds():
                        for how in (0, 0x10, 3)) + b"".join(
         bytes([12, how, 7, 9]) for how in (1, 9, 0x11, 0x19)) + \
         post(1, 0, 20) + send_a + bytes([12, 2, 0, 3, 77])
+    #   What a peer that may do nothing can still send: bodies of frames with
+    #   no payload on keys the model does not follow, handed to B as the
+    #   script's own bytes -- some in the window past what was taken, some the
+    #   same again, some far ahead, then the one that was missing -- and a
+    #   register's reader that refuses while the same value is sent and
+    #   repeated, so what the hold-back keeps is walked and compared.
+    def number(value):
+        out = b""
+        while value >= 0x80:
+            out += bytes([value & 0x7f | 0x80])
+            value >>= 7
+        return out + bytes([value])
+
+    def flood(key, flags, sequences):
+        body = b""
+        for sequence in sequences:
+            frame = bytes([flags, key]) + number(sequence) + b"\x00"
+            if len(body) + len(frame) > 1165:
+                break
+            body += frame
+        body += bytes(-len(body) % 5)
+        return bytes([12, 0x12, len(body) // 5]) + body
+
+    window = list(range(2, 66))
+    held_ahead = (flood(40, 2, window) + flood(40, 2, range(200, 600)) +
+                  flood(40, 2, range(66, 400)) + flood(40, 2, [1]))
+    held_copies = (flood(41, 2, window) + flood(41, 2, window * 5) +
+                   flood(41, 2, window[::-1] * 5) + flood(41, 2, [1]) +
+                   flood(41, 2, range(66, 130)) + flood(41, 2, window * 5))
+    paused = toggle + b"".join(post(2, 1, i % 48) + send_a + arrive(0, 0, 3)
+                               for i in range(40)) + toggle + b"\x0b\x02" + \
+        send_a + arrive(0, 0) + send_b + arrive(1, 0)
     seeds = {"waterlink_empty.bin": b"", "waterlink_stream.bin": stream,
              "waterlink_lossy.bin": lossy, "waterlink_register.bin": register,
              "waterlink_keys_paused.bin": keys, "waterlink_ended.bin": ended,
-             "waterlink_replay.bin": replay, "waterlink_hostile.bin": hostile}
+             "waterlink_replay.bin": replay, "waterlink_hostile.bin": hostile,
+             "waterlink_held_ahead.bin": held_ahead,
+             "waterlink_held_copies.bin": held_copies,
+             "waterlink_register_paused.bin": paused}
     generator = random.Random(0x3a7e)
     for index in range(6):
         seeds["waterlink_mix_%d.bin" % index] = bytes(

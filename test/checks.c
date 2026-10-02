@@ -68276,6 +68276,57 @@ static fn fill_procedural(void)
 }
 
 /*
+        What the hold-back says of itself: each key's chain in order, ending
+        where held_last says, its stream frames the bits of held_mask and none
+        of them further past what was taken than a window, and the pool's free
+        list and the chains the whole of it. The count it returns is how many
+        frames the link holds.
+*/
+static bool held_consistent(struct waterlink_link address_to link,
+                            positive address_to total)
+{
+        positive free = 0;
+        positive used = 0;
+
+        for (p32 at = link->held_free; at != WATERLINK_NONE;
+             at = link->held[at].next)
+                if (at >= WATERLINK_HELD || ++free > WATERLINK_HELD)
+                        return false;
+        for (p32 key = 0; key < WATERLINK_KEYS; key++)
+        {
+                struct waterlink_receiving address_to live = link->receiving + key;
+                p64 mask = 0;
+                p32 last = WATERLINK_NONE;
+
+                for (p32 at = live->first; at != WATERLINK_NONE;
+                     at = link->held[at].next)
+                {
+                        struct waterlink_frame address_to head =
+                                address_of link->held[at].head;
+
+                        if (at >= WATERLINK_HELD || ++used > WATERLINK_HELD ||
+                            head->key != key ||
+                            (last != WATERLINK_NONE &&
+                             head->sequence <= link->held[last].head.sequence))
+                                return false;
+                        if (head->flags & WATERLINK_FRAME_DURABLE)
+                        {
+                                if (head->sequence - live->delivered >
+                                    WATERLINK_KEY_WINDOW)
+                                        return false;
+                                mask |= 1ull << (head->sequence & 63);
+                        }
+                        last = at;
+                }
+                if (mask != link->held_mask[key] ||
+                    (last != WATERLINK_NONE && last != link->held_last[key]))
+                        return false;
+        }
+        address_to total = used;
+        return free + used == WATERLINK_HELD;
+}
+
+/*
         Applying against the C it replaced, on the links fill's changes make
         and bodies a judge could have passed: acknowledgements at and around
         each key's chain with every kind of mask, frames stale, next, ahead
@@ -68415,6 +68466,8 @@ static fn apply_procedural(void)
         p64 state = 0x13198a2e03707344ull;
         positive runs = 0, calls = 0, apart = 0, heard = 0, missed = 0;
         positive miscounted = 0;
+        positive inconsistent = 0;
+        positive total;
 
         memory_zero(apply_seen, sizeof apply_seen);
         for (positive run = 0; run < 240; run++)
@@ -68469,6 +68522,8 @@ static fn apply_procedural(void)
                                         sink, (address_any)2);
                         calls++;
                         miscounted += !band_counts_hold(address_of fill_two);
+                        inconsistent +=
+                                !held_consistent(address_of fill_two, address_of total);
                         apart += memory_compare(address_of fill_one.sending,
                                                 address_of fill_two.sending,
                                                 sizeof fill_one -
@@ -68518,6 +68573,9 @@ static fn apply_procedural(void)
         check("and the normal band's tally by key is the band after every "
               "apply",
               miscounted == 0);
+        check("and every key's held frames are in order, within a window of "
+              "what was taken, and the ones its chain's end and bits say",
+              inconsistent == 0);
 }
 
 static fn replay(void)
@@ -69337,6 +69395,178 @@ static fn reader_credit(void)
         check("and the rest follows, with the link left idle",
               one.delivered == 101 && waterlink_idle(address_of one) &&
                       one.retransmitted == 0);
+}
+
+/*      A body of frames with no payload on one key, as many as it holds: the
+        sequences first, first + 1, and so on round to first again after span
+        of them. Nothing a peer sends costs it less. */
+static positive flood_body(p8 address_to body, p8 key, p8 flags, p32 first,
+                           p32 span, positive most)
+{
+        positive used = 0;
+
+        memory_zero(body, WATERLINK_PAYLOAD);
+        for (positive frame = 0; frame < most; frame++)
+        {
+                p32 sequence = first + frame % span;
+
+                if (used + 3 + memory_vli_size(sequence) > WATERLINK_PAYLOAD)
+                        break;
+                body[used++] = flags;
+                body[used++] = key;
+                used += memory_vli_put(body + used, sequence);
+                body[used++] = 0;
+        }
+        return used;
+}
+
+/*
+        An authenticated peer that may do nothing still has its frames held:
+        the listener that serves it is one thread, so a datagram of frames
+        that are of no use to anyone must cost about what a datagram in order
+        does. Held are the stream frames ahead of what was taken -- none past
+        the window the sender would keep to -- and the registers newer than
+        any held; a copy is a bit and an older register is dropped on arrival.
+        The cost is read as a ratio to a body of the same size in order, the
+        least of many in the same process, so a loaded machine or an emulator
+        moves both alike: it was 7 to 17 times when the hold-back walked a
+        chain of up to 128 frames to find where a frame went, and a copy
+        walked it to the copy.
+*/
+static positive flood_ticks(positive shape)
+{
+        p8 body[WATERLINK_PAYLOAD];
+        p8 first[WATERLINK_PAYLOAD];
+        positive used;
+        positive least = ~0ull;
+
+        for (positive round = 0; round < 64; round++)
+        {
+                p64 start, took;
+
+                waterlink_link_reset(address_of one);
+                refusing = shape == 3;
+                switch (shape)
+                {
+                case 1: // sixty four held, behind the one that is missing
+                        (void)waterlink_deliver(
+                                address_of one, first,
+                                flood_body(first, 5, WATERLINK_FRAME_DURABLE, 2, 64, 64),
+                                1000, hear, null);
+                        used = flood_body(body, 5, WATERLINK_FRAME_DURABLE, 2, 64, 1000);
+                        break;
+                case 2: // far ahead of anything taken
+                        used = flood_body(body, 5, WATERLINK_FRAME_DURABLE, 200, ~0u - 400, 1000);
+                        break;
+                case 3: // a register's reader that will not take it, then newer values
+                        (void)waterlink_deliver(
+                                address_of one, first,
+                                flood_body(first, 6, WATERLINK_FRAME_REPLACEABLE, 1, 1, 1),
+                                1000, hear_or_refuse, null);
+                        used = flood_body(body, 6, WATERLINK_FRAME_REPLACEABLE, 1000, ~0u - 2000, 1000);
+                        break;
+                default: // in order, every frame taken
+                        used = flood_body(body, 5, WATERLINK_FRAME_DURABLE, 1, ~0u - 2, 1000);
+                }
+                start = get_cpu_time();
+                (void)waterlink_deliver(address_of one, body, used, 1001 + round,
+                                        hear_or_refuse, null);
+                took = get_cpu_time() - start;
+                if (took < least)
+                        least = took;
+        }
+        refusing = false;
+        return least;
+}
+
+//      One frame of that, delivered to the link under test.
+static bool flood_one(p8 key, p8 flags, p32 sequence, positive copies)
+{
+        p8 body[WATERLINK_PAYLOAD];
+
+        return waterlink_deliver(address_of one, body,
+                                 flood_body(body, key, flags, sequence, 1,
+                                            copies),
+                                 1000, hear_or_refuse, null);
+}
+
+static fn held_floods(void)
+{
+        positive total;
+        positive in_order = flood_ticks(0);
+        positive copies = flood_ticks(1);
+        positive ahead = flood_ticks(2);
+        positive registers = flood_ticks(3);
+
+        string_format(log, "  held floods, ticks a body: in order %p, copies %p, "
+                           "ahead %p, registers %p\n",
+                      in_order, copies, ahead, registers);
+        check("sec: a body of copies of what a key holds costs about what one "
+              "in order does",
+              copies < 3 * in_order);
+        check("sec: a body of stream frames far ahead of what was taken costs "
+              "about what one in order does",
+              ahead < 3 * in_order);
+        check("sec: a body of registers newer than what is held costs about "
+              "what one in order does",
+              registers < 3 * in_order);
+
+        waterlink_link_reset(address_of one);
+        heard = 0;
+        check("a stream frame a window past what was taken is held",
+              flood_one(5, WATERLINK_FRAME_DURABLE, WATERLINK_KEY_WINDOW, 1) &&
+                      held_consistent(address_of one, address_of total) &&
+                      total == 1 && one.kept == 1 && heard == 0);
+        check("sec: one past that is dropped, and counted with what the pool "
+              "could not take",
+              flood_one(5, WATERLINK_FRAME_DURABLE, WATERLINK_KEY_WINDOW + 1, 1) &&
+                      held_consistent(address_of one, address_of total) &&
+                      total == 1 && one.kept == 1 && one.spilled == 1);
+        check("sec: copies of a frame held take nothing more of the pool",
+              flood_one(5, WATERLINK_FRAME_DURABLE, WATERLINK_KEY_WINDOW, 3) &&
+                      held_consistent(address_of one, address_of total) &&
+                      total == 1 && one.kept == 1 && one.spilled == 1);
+        {
+                p8 body[WATERLINK_PAYLOAD];
+
+                check("and the frames before it, arriving, are handed on in "
+                      "order with it, and the pool is empty",
+                      waterlink_deliver(address_of one, body,
+                                        flood_body(body, 5,
+                                                   WATERLINK_FRAME_DURABLE, 1,
+                                                   0x7fffffffu,
+                                                   WATERLINK_KEY_WINDOW - 1),
+                                        1000, hear, null) &&
+                              held_consistent(address_of one,
+                                              address_of total) &&
+                              total == 0 && heard == WATERLINK_KEY_WINDOW &&
+                              heard_sequence[WATERLINK_KEY_WINDOW - 1] ==
+                                      WATERLINK_KEY_WINDOW);
+        }
+        check("sec: a window past what was taken is held again once more is "
+              "taken, though its low bits are those of a frame that left",
+              flood_one(5, WATERLINK_FRAME_DURABLE, 2 * WATERLINK_KEY_WINDOW, 1) &&
+                      held_consistent(address_of one, address_of total) &&
+                      total == 1 && one.held_mask[5] == 1);
+
+        //      A register the reader would not take, and newer ones: only the
+        //      newest is ever handed on, so an older one is not kept.
+        waterlink_link_reset(address_of one);
+        heard = 0;
+        refusing = true;
+        (void)flood_one(6, WATERLINK_FRAME_REPLACEABLE, 5, 1);
+        (void)flood_one(6, WATERLINK_FRAME_REPLACEABLE, 9, 1);
+        (void)flood_one(6, WATERLINK_FRAME_REPLACEABLE, 7, 1);
+        check("sec: a register older than one held is not kept",
+              held_consistent(address_of one, address_of total) &&
+                      total == 2 && one.stale == 1 && heard == 0);
+        refusing = false;
+        waterlink_resume(address_of one, 6, hear_or_refuse, null);
+        check("and the newest is the only one handed on once the reader "
+              "comes back",
+              heard == 1 && heard_sequence[0] == 9 &&
+                      held_consistent(address_of one, address_of total) &&
+                      total == 0);
 }
 
 /*      Two ends, and the one acknowledgement that would free what the far
@@ -71193,6 +71423,7 @@ b32 main(void)
         superseded_in_flight();
         full_frame_beside_owed_ack();
         reader_credit();
+        held_floods();
         held_answer_lost();
         held_after_losses();
         register_behind_its_newest();

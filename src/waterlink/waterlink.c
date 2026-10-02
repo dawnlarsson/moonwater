@@ -86,7 +86,8 @@
         so a stream frame arrives exactly once and in order however the
         network reorders, loses or repeats datagrams. The hold-back is a
         fixed pool; a frame that finds it full is dropped unacknowledged and
-        comes again.
+        comes again, and so is a stream frame further past what was taken than
+        a key's window, which a sender that keeps to it never makes.
 
         A key's sequence counts from one and never wraps: a key carries at
         most 2^32 - 2 frames. LAST ends a key for good, and the receiver
