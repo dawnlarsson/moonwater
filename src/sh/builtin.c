@@ -5634,7 +5634,11 @@ static inline bool shell_inventory_sorted(
    name. An empty-environment shell can therefore publish the getcwd result as
    `PWD=value` without a second buffer or allocation. On the first cd or PWD
    assignment the ordinary borrowed-record COW path takes ownership. */
-static p8 shell_directory_assignment[SHELL_DIRECTORY_MAX + 4] HOT_STATE;
+/* A path's worth of room, of which a start writes the first few dozen bytes:
+   after the small statics (spark.ld), so that its first page is the last of
+   theirs and the room behind it is not between them. */
+static p8 shell_directory_assignment[SHELL_DIRECTORY_MAX + 4]
+    __attribute__((section(".bss.hot.tail")));
 p8 address_to shell_directory HOT_DATA = shell_directory_assignment + 4;
 static p8 shell_directory_was[SHELL_DIRECTORY_MAX];
 static PURE bool shell_physical_on();

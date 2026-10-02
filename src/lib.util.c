@@ -16476,7 +16476,7 @@ static positive stdlib_quick_count = 0;
 
 //      Set by the stream family, if there is one linked. Called after the
 //      atexit handlers and before the trap.
-fn(address_to stdlib_exit_flush_hook)(void) = null;
+fn(address_to stdlib_exit_flush_hook)(void) HOT_STATE = null;
 
 /*
         Whose bytes are in the buffer.

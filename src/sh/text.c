@@ -69,7 +69,7 @@ static p8 text_out_buffer[TEXT_OUT_MAX];
 static positive text_out_used HOT_STATE;
 static positive text_out_handle HOT_DATA = 1;
 static string_address text_name HOT_DATA = "text";
-static b32 text_status;
+static b32 text_status HOT_STATE;
 static bool text_out_failed HOT_STATE;
 // Whether cat could look at its output at all: text_done words a failure
 // there the way GNU's look at standard output does.
@@ -104,12 +104,12 @@ static bool cat_output_known;
 static bipolar text_out_error HOT_STATE;
 static positive text_out_offered HOT_STATE;
 static positive text_out_error_offered HOT_STATE;
-static positive text_out_error_handle;
-static positive text_out_error_buffer;
+static positive text_out_error_handle HOT_STATE;
+static positive text_out_error_buffer HOT_STATE;
 // The buffer glibc would give standard output, sized at the first write --
 // which a tool makes after opening its first input, so it is looked at then:
 // a closed descriptor that input reopened is a page, one still closed BUFSIZ.
-static positive text_out_stdio_size;
+static positive text_out_stdio_size HOT_STATE;
 
 static bool text_handle_facts(positive handle, file_facts address_to facts);
 
@@ -548,7 +548,7 @@ static text_reader text_input;
 /* pr -r is the one line tool which deliberately suppresses an open
    diagnostic.  Keep that policy at the shared reader boundary so its merge
    cursors do not grow a second open path. */
-static bool text_quiet_open;
+static bool text_quiet_open HOT_STATE;
 /* sed reads a script file, and R a line at a time, without a word about a
    file that will not open or read -- as GNU passes over both. */
 static bool text_quiet_read HOT_STATE;
@@ -586,7 +586,7 @@ static bool text_line_ended;
         those on a newline whatever -z says. Assigning it in the switch would
         make grep -z -f and grep -f -z two different commands.
 */
-static p8 text_delimiter = '\n';
+static p8 text_delimiter HOT_DATA = '\n';
 
 /*
         Opening one, which every tool here does the same way: no name at all
@@ -1104,8 +1104,8 @@ static bool text_line_view_refill(p8 address_to address_to line,
         view answers false with text_line_stream_now set and the line left
         unread, for the tool to take it as it comes.
 */
-static bool text_line_stream_ok;
-static bool text_line_stream_now;
+static bool text_line_stream_ok HOT_STATE;
+static bool text_line_stream_now HOT_STATE;
 
 /*
         A line that is whole in the reader is the common answer and needs
@@ -1319,7 +1319,7 @@ static b32 text_argument_count HOT_STATE;
 static positive text_files_count HOT_STATE;
 static bool text_files_failed HOT_STATE;
 // --files0-from replaces the operand list with names cut from a file.
-static string_address address_to text_file_list;
+static string_address address_to text_file_list HOT_STATE;
 static positive text_files_from_bad;
 // GNU sort's reading of a list: the first name it refuses ends it, and "-" is
 // refused in any list, not only in one read from standard input.

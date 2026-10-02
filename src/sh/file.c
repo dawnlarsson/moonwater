@@ -5742,7 +5742,21 @@ bool shell_environment_is_initialized();
 
 static string_address address_to file_environment_all()
 {
-        string_address address_to shell = shell_environment();
+        string_address address_to shell;
+
+        /* A farm-linked utility has no shell state to flatten: before shell
+           startup the vector it was started with is the answer, and asking
+           shell_environment first built an empty one (a page of the pool, a
+           handful of statics on pages of their own) to be ignored. */
+        if (!shell_environment_is_initialized())
+        {
+                string_address address_to process = program_environment_list();
+
+                if (process)
+                        return process;
+        }
+
+        shell = shell_environment();
 
         /* Once the shell owns export state, even an intentionally empty
            vector is authoritative and allocation failure must stay visible.

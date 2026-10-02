@@ -64954,7 +64954,7 @@ def harness_hot_order(argv):
     maps sixteen pages of the file and the exit unmaps them: about a
     microsecond a 64 KB window, measured, and a start went from seventeen
     windows to eleven with this list in front. Assembly routines are left to
-    their own list in the script (riscv64's jal reaches a megabyte).
+    their own block in the script (riscv64's jal reaches a megabyte), ordered the same way.
     Without --write the block is printed."""
     args = [a for a in argv if not a.startswith("--")]
     if len(args) != 2:
@@ -65002,22 +65002,33 @@ def harness_hot_order(argv):
         return None
 
     ordered = []
+    ordered_asm = []
     for name, ran in sorted(count.items(), key=lambda item: (-item[1], item[0])):
         if re.sub(r"(\.(part|constprop|isra|cold)(\.[0-9]+)*)+$", "", name) in asm or name in asm:
+            found = ".text." + name
+            if found in sections and found not in ordered_asm:
+                ordered_asm.append(found)
             continue
         found = section_for(name)
         if found and found not in ordered:
             ordered.append(found)
     block = "".join("                *(%s)\n" % found for found in ordered)
+    block_asm = "".join("                *(%s)\n" % found for found in ordered_asm)
     if "--write" not in argv:
         print(block, end="")
+        print("# assembly")
+        print(block_asm, end="")
         return 0
     path = HARNESS_ROOT / "src/build/spark.ld"
     text = path.read_text()
     begin = text.index("/* hot_order begin */\n") + len("/* hot_order begin */\n")
     end = text.index("                /* hot_order end */")
-    path.write_text(text[:begin] + block + text[end:])
-    print("hot order: %d functions of %d executed, written" % (len(ordered), len(count)))
+    text = text[:begin] + block + text[end:]
+    begin = text.index("/* hot_asm begin */\n") + len("/* hot_asm begin */\n")
+    end = text.index("                /* hot_asm end */")
+    path.write_text(text[:begin] + block_asm + text[end:])
+    print("hot order: %d functions and %d assembly routines of %d executed, written"
+          % (len(ordered), len(ordered_asm), len(count)))
     return 0
 
 
