@@ -16884,7 +16884,7 @@ typedef struct
         a name goes into the first free slot of an index that has no
         tombstones to reuse.
 */
-static COLD fn shell_name_index_build(address_any table, positive stride,
+static COLD fn shell_name_index_build(const void address_to table, positive stride,
                                       positive count, shell_name_slot address_to slots,
                                       positive room, const positive address_to hashes,
                                       const p8 (address_to keys)[2])
@@ -16900,7 +16900,7 @@ static COLD fn shell_name_index_build(address_any table, positive stride,
                         answer = (positive2){{hashes[index], keys[index][1]}};
                 else
                         answer = string_hash_33_length(
-                            *(string_address address_to)((p8 address_to)table +
+                            *(string_address address_to)((const p8 address_to)table +
                                                           index * stride));
                 at = answer.x & (room - 1);
                 while (slots[at].index_plus_one)
@@ -16930,7 +16930,7 @@ static COLD fn shell_name_index_build(address_any table, positive stride,
 */
 positive shell_name_index_probe(string_address name, positive length,
                                 positive hash, const shell_name_slot address_to slots,
-                                positive mask, address_any table);
+                                positive mask, const void address_to table);
 
 _Static_assert(sizeof(shell_name_slot) == 8 && __builtin_offsetof(shell_name_slot, length) == 4 &&
                __builtin_offsetof(shell_name_slot, index_plus_one) == 6 &&
@@ -17259,7 +17259,7 @@ static p8 shell_tool_asks HOT_STATE;
 */
 static HOT positive shell_name_scan(string_address name, positive length,
                                 const p8 (address_to keys)[2], positive count,
-                                address_any table)
+                                const void address_to table)
 {
         positive key;
 
@@ -17271,7 +17271,7 @@ static HOT positive shell_name_scan(string_address name, positive length,
         for (positive at = shell_key_next(keys, count, 0, key); at < count;
              at = shell_key_next(keys, count, at + 1, key))
                 if (!memory_compare(name,
-                                    *(string_address address_to)((p8 address_to)table + at * 16),
+                                    *(string_address address_to)((const p8 address_to)table + at * 16),
                                     length))
                         return at;
 

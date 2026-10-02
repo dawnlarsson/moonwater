@@ -31179,7 +31179,8 @@ def harness_floodlight(argv):
         'copy_from_user', 'get_random_u32', 'pr_alert', 'offsetof',
         'lockdep_assert_held', 'late_initcall', 'ARRAY_SIZE',
         'MODULE_DESCRIPTION', 'MODULE_AUTHOR', 'MODULE_LICENSE',
-        'device_initcall', 'sizeof',
+        'device_initcall', 'sizeof', 'seq_write', 'seq_has_overflowed',
+        'memcpy', '__aligned',
     }
 
     called = set()
@@ -31948,8 +31949,8 @@ def harness_floodlight(argv):
              'the register has a fixed minor, so it needs no devtmpfs'),
             (r'return fold\(secret \^ [0-9]+u, row,', text,
              'a row seal is folded with the boot secret'),
-            (r'u32 sum = fold\(secret \^ [0-9]+u, baseline, sizeof\(baseline\)\);'
-             r'[^}]*sum = fold\(sum, configured, sizeof\(configured\)\);'
+            (r'u32 sum = fold_wide\(secret \^ [0-9]+u, baseline, sizeof\(baseline\)\);'
+             r'[^}]*sum = fold_wide\(sum, configured, sizeof\(configured\)\);'
              r'\s*return fold\(sum, &configured_count, sizeof\(configured_count\)\);',
              text,
              'the built-in and configured answers are summed with the boot secret'),
@@ -33171,6 +33172,7 @@ typedef long long loff_t;
 #define __user
 #define __init
 #define __ro_after_init
+#define __aligned(n) __attribute__((aligned(n)))
 #define THIS_MODULE 0
 #define MISC_DYNAMIC_MINOR 255
 #define CAP_SYS_ADMIN 21
@@ -33195,7 +33197,7 @@ struct inode;
 struct file { void *private_data; };
 struct file_operations { int owner; void *open, *read, *llseek, *release, *write; };
 struct miscdevice { int minor; const char *name; const struct file_operations *fops; int mode; };
-struct seq_file { char *at; unsigned room; };
+struct seq_file { char *buf; unsigned long count; };
 
 static int mock_ns;
 static int mock_lock_depth;
@@ -33274,6 +33276,16 @@ static void seq_printf(struct seq_file *s, const char *fmt, ...)
         wrote = vsnprintf(mock_report + mock_report_length, room, fmt, a);
         va_end(a);
         if (wrote > 0) mock_report_length += (unsigned)wrote < room ? (unsigned)wrote : room;
+        s->buf = mock_report; s->count = mock_report_length;
+}
+static bool seq_has_overflowed(struct seq_file *s) { (void)s; return !mock_report_room(); }
+static void seq_write(struct seq_file *s, const void *from, unsigned long bytes)
+{
+        unsigned room = mock_report_room();
+        unsigned take = bytes < room ? (unsigned)bytes : room;
+        memcpy(mock_report + mock_report_length, from, take);
+        mock_report_length += take;
+        s->buf = mock_report; s->count = mock_report_length;
 }
 static void seq_puts(struct seq_file *s, const char *text)
 {
@@ -33283,6 +33295,7 @@ static void seq_puts(struct seq_file *s, const char *text)
         if (!room) return;
         wrote = snprintf(mock_report + mock_report_length, room, "%s", text);
         if (wrote > 0) mock_report_length += (unsigned)wrote < room ? (unsigned)wrote : room;
+        s->buf = mock_report; s->count = mock_report_length;
 }
 '''
 
@@ -33328,7 +33341,7 @@ static bool shows(const char *needle) { return strstr(report(), needle) != NULL;
 static void reset(u32 random)
 {
         memset(changed, 0, sizeof(changed));
-        sealed = false; compromised = false;
+        sealed = false; compromised = false; shown_len = 0;
         mock_root = true; mock_uid = 0; mock_now = 1000;
         mock_copy_fails = false;
         shell_parser_source_kind = SHELL_PARSER_SOURCE_MEMORY;
@@ -33507,6 +33520,35 @@ int main(void)
                 check(!intact_public(), "a built-in answer altered in memory is caught");
                 check(shows("TAMPERED"), "and the report stops answering");
                 writable[0].allowed = was;
+        }
+
+        /* The report kept for the next reader: the same text while nothing is
+           written, dropped by every write, never kept with a clock in it, and
+           sealed like the rest. */
+        reset(0x11223344);
+        {
+                char first[sizeof(mock_report)];
+                strcpy(first, report());
+                check(shown_len == strlen(first), "an untouched machine's report is kept");
+                check(!strcmp(report(), first), "and the next reader gets the same text");
+                put("awk spawn deny");
+                check(shown_len == 0, "a write drops it");
+                check(strstr(report(), "changed") && shown_len == 0,
+                      "a report with a deviation in it is not kept");
+                put("awk spawn allow");
+                check(!strcmp(report(), first) && shown_len == strlen(first),
+                      "back to built in, the report is the first one again and kept");
+                put("seal");
+                check(strstr(report(), "(sealed)") != NULL, "a seal drops it too");
+                reset(0x11223344);
+                report();
+                shown[3] ^= 1;
+                check(!intact_public(), "a kept report altered in memory is caught");
+                check(shows("TAMPERED"), "and the register stops answering");
+                reset(0x11223344);
+                report();
+                shown_len -= 1;
+                check(!intact_public(), "a kept report cut short in memory is caught");
         }
 
         reset(0x11223344);

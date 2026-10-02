@@ -250,7 +250,7 @@ struct configured {
 	unsigned char allowed;
 };
 
-static struct configured configured[CONFIGURED] __ro_after_init;
+static struct configured configured[CONFIGURED] __ro_after_init __aligned(8);
 static unsigned int configured_count __ro_after_init;
 static bool configured_invalid __ro_after_init;
 
@@ -337,6 +337,42 @@ static u32 fold(u32 hash, const void *from, unsigned int bytes)
 	return hash;
 }
 
+/*
+ * The same job at a word a step, for the big arrays: the built-in answers and
+ * the configured rows are seven kilobytes, checked on every read, and the
+ * byte at a time fold above is a multiply on one chain per byte -- most of what
+ * a read of this register cost. Four chains side by side, each a xor, a
+ * multiply by an odd constant and a rotate, all of them one-to-one, so a
+ * changed word changes its chain's end state and the secret in the start of
+ * every chain is what an attacker without it cannot reproduce. What does not
+ * fill a whole step goes through the byte fold. The source is aligned for it.
+ */
+static u32 fold_wide(u32 hash, const void *from, unsigned int bytes)
+{
+	const unsigned long long *at = from;
+	unsigned long long a = hash, b = hash ^ 0x9e3779b97f4a7c15ull;
+	unsigned long long c = hash ^ 0xc2b2ae3d27d4eb4full;
+	unsigned long long d = hash ^ 0x165667b19e3779f9ull;
+	unsigned int steps = bytes / 32;
+
+	for (; steps; steps--, at += 4) {
+		a = (a ^ at[0]) * 0xff51afd7ed558ccdull;
+		b = (b ^ at[1]) * 0xff51afd7ed558ccdull;
+		c = (c ^ at[2]) * 0xff51afd7ed558ccdull;
+		d = (d ^ at[3]) * 0xff51afd7ed558ccdull;
+		a = a << 31 | a >> 33;
+		b = b << 31 | b >> 33;
+		c = c << 31 | c >> 33;
+		d = d << 31 | d >> 33;
+	}
+
+	a = (a ^ (b << 17 | b >> 47)) * 0xc4ceb9fe1a85ec53ull;
+	a = (a ^ (c << 29 | c >> 35)) * 0xc4ceb9fe1a85ec53ull;
+	a = (a ^ (d << 43 | d >> 21)) * 0xc4ceb9fe1a85ec53ull;
+
+	return fold((u32)(a >> 32) ^ (u32)a, at, bytes % 32);
+}
+
 /* A row's seal covers everything about it except the seal itself. */
 static u32 seal_of(const struct light *row)
 {
@@ -353,12 +389,33 @@ static u32 baseline_sum __ro_after_init;
 
 static u32 baseline_seal(void)
 {
-	u32 sum = fold(secret ^ 2166136261u, baseline, sizeof(baseline));
+	u32 sum = fold_wide(secret ^ 2166136261u, baseline, sizeof(baseline));
 
 	/* The configured rows are built-in answers too, and written once at
 	 * boot like the secret; the same sum covers them and how many there are. */
-	sum = fold(sum, configured, sizeof(configured));
+	sum = fold_wide(sum, configured, sizeof(configured));
 	return fold(sum, &configured_count, sizeof(configured_count));
+}
+
+/*
+ * The report as it was last rendered, kept for the next reader.
+ *
+ * Formatting every row is most of what is left of a read once the seals are
+ * cheap, and the text is the same until something is written: nothing in it
+ * depends on the clock but the "changed Ns ago" of a deviation, so it is kept
+ * only while there are none, and every write drops it (the label out: of the
+ * write). It is sealed like everything else here -- a copy that could be edited
+ * is a report that could be made to lie -- and checked with the rest.
+ */
+#define REPORT 4096
+
+static char shown[REPORT] __aligned(8);
+static unsigned int shown_len;
+static u32 shown_sum;
+
+static u32 shown_seal(void)
+{
+	return fold_wide(secret ^ shown_len, shown, shown_len);
 }
 
 /*
@@ -456,6 +513,12 @@ static bool intact(void)
 	if (!guard_intact()) {
 		compromised = true;
 		pr_alert("floodlight: the parse buffer was overrun; refusing to answer further\n");
+		return false;
+	}
+
+	if (shown_len && (shown_len > REPORT || shown_seal() != shown_sum)) {
+		compromised = true;
+		pr_alert("floodlight: the kept report has been altered in memory; refusing to answer further\n");
 		return false;
 	}
 
@@ -620,7 +683,8 @@ static void say(struct seq_file *seq, const char *subject, unsigned int setting,
  */
 static int floodlight_show(struct seq_file *seq, void *unused)
 {
-	unsigned int i;
+	unsigned int i, deviations = 0;
+	size_t start;
 
 	mutex_lock(&lock);
 
@@ -638,6 +702,13 @@ static int floodlight_show(struct seq_file *seq, void *unused)
 		return 0;
 	}
 
+	if (shown_len) {
+		seq_write(seq, shown, shown_len);
+		mutex_unlock(&lock);
+		return 0;
+	}
+
+	start = seq->count;
 	seq_printf(seq, "# floodlight%s\n", sealed ? " (sealed)" : "");
 
 	for (i = 0; i < ARRAY_SIZE(baseline); i++) {
@@ -648,6 +719,7 @@ static int floodlight_show(struct seq_file *seq, void *unused)
 		if (configured_row(rule->subject, rule->setting, ""))
 			continue;
 
+		deviations += row != NULL;
 		say(seq, rule->subject, rule->setting, "",
 		    row ? row->allowed : rule->allowed, row);
 	}
@@ -657,6 +729,7 @@ static int floodlight_show(struct seq_file *seq, void *unused)
 		struct light *row = find(rule->subject, rule->setting,
 					 rule->detail);
 
+		deviations += row != NULL;
 		say(seq, rule->subject, rule->setting, rule->detail,
 		    row ? row->allowed : rule->allowed, row);
 	}
@@ -670,8 +743,19 @@ static int floodlight_show(struct seq_file *seq, void *unused)
 		if (built(row->subject, row->setting, row->detail) >= 0)
 			continue;
 
+		deviations++;
 		say(seq, row->subject, row->setting, row->detail,
 		    row->allowed, row);
+	}
+
+	/* Kept for the next reader when it says nothing about the clock, fits,
+	 * and was not cut short: a reader that has to be handed a larger buffer
+	 * is asked again, and only the render that completed is kept. */
+	if (!deviations && !seq_has_overflowed(seq) && !start &&
+	    seq->count <= REPORT) {
+		memcpy(shown, seq->buf, seq->count);
+		shown_len = seq->count;
+		shown_sum = shown_seal();
 	}
 
 	mutex_unlock(&lock);
@@ -991,6 +1075,10 @@ static ssize_t floodlight_write(struct file *file, const char __user *from,
 		subject, row->who);
 
 out:
+	/* Whatever was written, the kept report is no longer known to be what
+	 * the register would say. */
+	shown_len = 0;
+
 	/* Nothing is left in it between commands: the line held a policy
 	 * somebody typed, and there is no reason for it to still be here. */
 	memset(parse.line, 0, LINE);
