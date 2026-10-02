@@ -27734,6 +27734,8 @@ int main(void) {
                 "\t\t     loff_t offset, u64 ino, unsigned int d_type)\n{\n\treturn true;\n}\n",
             "linux/arch/x86/kernel/asm-offsets.c":
                 "#include <linux/kbuild.h>\n\nstatic void __used common(void)\n{\n}\n",
+            "linux/mm/memory.c":
+                "static unsigned long fault_around_pages __read_mostly =\n\t65536 >> PAGE_SHIFT;\n",
             "linux/kernel/sched/fair.c":
                 "static int\nselect_task_rq_fair(struct task_struct *p, int prev_cpu, int wake_flags)\n{\n"
                 "\tlockdep_assert_held(&p->pi_lock);\n\tif (wake_flags & WF_TTWU) {\n\t}\n}\n"
@@ -27757,7 +27759,9 @@ int main(void) {
                     header.index('".mwset') < header.index('".data') and
                     "textsize, ZO__mwset" in header and "textsize, ZO__data" not in header and
                     "_e\\?mwset" in read("linux/arch/x86/boot/Makefile") and
-                    scheduler_placed(read("linux/kernel/sched/fair.c")))
+                    scheduler_placed(read("linux/kernel/sched/fair.c")) and
+                    "16384 >> PAGE_SHIFT; /* Moonwater: fault-around" in read("linux/mm/memory.c") and
+                    "65536 >> PAGE_SHIFT" not in read("linux/mm/memory.c"))
 
         # kernel/kernel.c's tags made real: the C original retired to a prototype,
         # the function the asm calls made global with one, the literal asserted,

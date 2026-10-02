@@ -858,6 +858,31 @@ EOF
 settings_insert linux/kernel/sched/fair.c "Moonwater: nor does it preempt that task" \
         "${tab}if (test_tsk_need_resched(rq->curr))" before "$settings_work/yield" scheduler
 
+#       Fault-around, sixteen pages to four.
+#
+#       A fault on a page of a file maps the sixteen pages around it that the
+#       page cache already holds, and the exit unmaps the same sixteen. A
+#       process of ours touches a few dozen pages of an image of a few
+#       thousand, in windows that are dense where the hot functions are laid
+#       out together and sparse everywhere else (spark.ld), so most of what
+#       sixteen maps is never used and costs a mapping and an unmapping each:
+#       measured with the knob this sets, on a start of the shell's image, a
+#       utility is 10 percent faster at four pages (33.5 to 30.3 microseconds
+#       for cat), the shell itself 2 percent, and eight or fewer pages is
+#       worse for the shell again (44.8 at one page). A program that walks a
+#       large file through mmap faults four times as often for the same
+#       pages, each cheaper; the knob is still /sys/kernel/debug/fault_around_bytes.
+#
+fault_around_marker="Moonwater: fault-around"
+if ! grep -q -F -- "$fault_around_marker" linux/mm/memory.c; then
+        grep -q "^${tab}65536 >> PAGE_SHIFT;" linux/mm/memory.c ||
+                die "mm: fault_around_pages no longer starts at 65536 >> PAGE_SHIFT"
+        settings_replace linux/mm/memory.c \
+                "s|^${tab}65536 >> PAGE_SHIFT;|${tab}16384 >> PAGE_SHIFT; /* $fault_around_marker: see kernel/patch/apply */|" ||
+                die "mm: fault_around_pages edit failed"
+        echo "  mm: memory.c fault-around is four pages"
+fi
+
 #
 #       KERNEL FUNCTIONS IN ASSEMBLY
 #
