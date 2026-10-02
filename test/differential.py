@@ -56372,11 +56372,15 @@ def harness_hostile_strings(argv):
     seed = int(os.environ.get("MOONWATER_HOSTILE_SEED", "2026"))
     many = int(os.environ.get("MOONWATER_HOSTILE_COUNT", "6"))
 
+    bidi = []
+
     def shown(row, command, ran):
         data = ran.stdout + ran.stderr
         bad = hostile_scan(data)
         checks(not bad and ran.returncode is not None,
                "%s: %s shows %s: %r" % (row, command, ", ".join(bad), data[:160]))
+        if re.search("[\u202a-\u202e\u2066-\u2069]", data.decode("utf-8", "replace")):
+            bidi.append("%s: %s" % (row, command))
 
     if args.inside:
         #   In a user and network namespace: interfaces named by the grammar,
@@ -56562,6 +56566,9 @@ def harness_hostile_strings(argv):
             print("hostile strings: ifname NOT RUN -- no unshare or ip")
     finally:
         shutil.rmtree(farm_dir, ignore_errors=True)
+    print("hostile strings: a BiDi control shown as it is by %d commands (GNU's tools "
+          "show them too in a UTF-8 locale)%s" % (len(bidi), ": " + ", ".join(sorted(set(bidi)))[:300]
+                                                  if bidi else ""))
     return checks.verdict("hostile strings", "hostile-strings")
 
 
@@ -56569,7 +56576,7 @@ def harness_protected_links(argv):
     """A write through a planted link meets fs.protected_symlinks, as the
     kernel's own open would.
 
-    The staged writers (wget -O, tar -cf, split) walk a chain of links in
+    The staged writers (wget -O, tar -cf, split, csplit, shuf -o) walk a chain of links in
     userspace so that the reference's write-through survives their atomic
     publication, and that walk never asked the question the kernel asks:
     root's `wget -O /tmp/x` went through the link another user left at
@@ -56662,7 +56669,7 @@ def harness_protected_links(argv):
                    check=True)
     farm = scratch / "farm"
     farm.mkdir()
-    for tool in ("wget", "tar", "split"):
+    for tool in ("wget", "tar", "split", "csplit", "shuf"):
         (farm / tool).symlink_to(binary)
 
     def as_other(work, pointed, leaf):
@@ -56679,7 +56686,7 @@ def harness_protected_links(argv):
                   ("sticky-theirs", 0o1777, other), ("plain", 0o755, 0))
     owners = (("mine", 0), ("theirs", other))
     targets = ("file", "missing", "chain", "chain-mine")
-    tools = ("wget", "tar", "split")
+    tools = ("wget", "tar", "split", "csplit", "shuf")
     number = 0
     for (place, mode, place_owner) in placements:
         for (owner_name, owner) in owners:
@@ -56701,7 +56708,7 @@ def harness_protected_links(argv):
                     os.chown(holder, place_owner, place_owner)
                     victim = safe / "victim"
                     victim.write_bytes(b"precious\n")
-                    leaf = "out" + ("aa" if tool == "split" else "")
+                    leaf = "out" + {"split": "aa", "csplit": "00"}.get(tool, "")
                     pointed = {"file": str(victim), "missing": str(safe / "new")}.get(
                         target, str(shared / "hop"))
                     if target == "chain":
@@ -56737,14 +56744,19 @@ def harness_protected_links(argv):
                             "refuses" if refuse else "follows"))
 
                     source = scene / "input"
-                    source.write_bytes(b"xy")
+                    source.write_bytes(b"x\ny\n")
                     if tool == "wget":
                         argv_tool = [str(farm / "wget"), "-q", "-O", str(link), url]
                     elif tool == "tar":
                         argv_tool = [str(farm / "tar"), "-cf", str(link), "input"]
-                    else:
+                    elif tool == "split":
                         argv_tool = [str(farm / "split"), "-b", "2", "input",
                                      str(holder / "out")]
+                    elif tool == "csplit":
+                        argv_tool = [str(farm / "csplit"), "-s", "-f", str(holder / "out"),
+                                     "input", "2"]
+                    else:
+                        argv_tool = [str(farm / "shuf"), "-o", str(link), "input"]
                     try:
                         ran = subprocess.run(argv_tool, cwd=scene, capture_output=True,
                                              timeout=20)
