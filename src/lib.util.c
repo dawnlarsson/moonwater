@@ -21044,23 +21044,8 @@ static const struct
         {"uk", "Europe/London"},
 };
 
-//      Lower-case order, which is the order the generator sorts in.
-static b32 clock_zone_order(string_address a, string_address b)
-{
-        for (;; a++, b++)
-        {
-                p8 ca = (p8)a[0];
-                p8 cb = (p8)b[0];
-
-                if (ca >= 'A' && ca <= 'Z')
-                        ca += 32;
-                if (cb >= 'A' && cb <= 'Z')
-                        cb += 32;
-                if (ca != cb || !ca)
-                        return (b32)ca - (b32)cb;
-        }
-}
-
+//      The tables are sorted in lower-case order, the order
+//      string_compare_folded gives.
 #define CLOCK_ZONE_BISECT(table, field, name, found)                          \
         do                                                                    \
         {                                                                     \
@@ -21071,7 +21056,7 @@ static b32 clock_zone_order(string_address a, string_address b)
                 while (low < high)                                            \
                 {                                                             \
                         positive middle = low + (high - low) / 2;             \
-                        b32 way = clock_zone_order(                           \
+                        b32 way = string_compare_folded(                      \
                             name, (string_address)table[middle].field);       \
                                                                               \
                         if (!way)                                             \
@@ -21102,8 +21087,8 @@ static bipolar clock_zone_row(string_address name)
         if (name[1] && !name[2])
         {
                 for (positive at = 0; at < array_count(clock_zone_words); at++)
-                        if (!clock_zone_order(name,
-                                              (string_address)clock_zone_words[at].word))
+                        if (!string_compare_folded(
+                                name, (string_address)clock_zone_words[at].word))
                         {
                                 name = (string_address)clock_zone_words[at].zone;
                                 goto zone;
@@ -21378,8 +21363,24 @@ static bool clock_tz_offset(const char address_to address_to at,
                                 return false;
                 }
         }
+        //      The limit is hours of the day, so 24:01 is past it.
+        if (hours == most_hours && (minutes || seconds))
+                return false;
         address_to west = sign * (hours * 3600 + minutes * 60 + seconds);
         address_to at = s;
+        return true;
+}
+
+//      A run of digits as a number, which is not the number its low digits
+//      make when it is too long to be one.
+static bool clock_tz_number(const char address_to address_to at,
+                            positive address_to number)
+{
+        string_address s = (string_address)address_to at;
+
+        if (!string_digits_checked(address_of s, 10, number))
+                return false;
+        address_to at = (const char address_to)s;
         return true;
 }
 
@@ -21387,57 +21388,43 @@ static bool clock_tz_rule(const char address_to address_to at, p8 which)
 {
         const char address_to s = address_to at;
         bipolar time = 2 * 3600;
+        positive number;
 
         clock_dst_at[which] = time;
         if (s[0] == 'M')
         {
-                bipolar month = 0;
-                bipolar week = 0;
-                bipolar dow = 0;
+                positive week;
+                positive dow;
 
                 s++;
-                while (s[0] >= '0' && s[0] <= '9')
-                        month = month * 10 + (s++[0] - '0');
-                if (s[0] != '.' || month < 1 || month > 12)
+                if (!clock_tz_number(address_of s, address_of number) ||
+                    s[0] != '.' || number < 1 || number > 12)
                         return false;
                 s++;
-                while (s[0] >= '0' && s[0] <= '9')
-                        week = week * 10 + (s++[0] - '0');
-                if (s[0] != '.' || week < 1 || week > 5)
+                if (!clock_tz_number(address_of s, address_of week) ||
+                    s[0] != '.' || week < 1 || week > 5)
                         return false;
                 s++;
                 if (s[0] < '0' || s[0] > '6')
                         return false;
-                dow = s++[0] - '0';
+                dow = (positive)(s++[0] - '0');
                 clock_dst_kind[which] = 2;
-                clock_dst_month[which] = (p8)month;
+                clock_dst_month[which] = (p8)number;
                 clock_dst_week[which] = (p8)week;
                 clock_dst_dow[which] = (p8)dow;
         }
-        else if (s[0] == 'J')
-        {
-                bipolar day = 0;
-
-                s++;
-                while (s[0] >= '0' && s[0] <= '9')
-                        day = day * 10 + (s++[0] - '0');
-                if (day < 1 || day > 365)
-                        return false;
-                clock_dst_kind[which] = 1;
-                clock_dst_day[which] = (p16)day;
-        }
         else
         {
-                bipolar day = 0;
+                //      Jn counts days from 1 and never has a 29th of
+                //      February; n counts from 0 and does.
+                bool julian = s[0] == 'J';
 
-                if (s[0] < '0' || s[0] > '9')
+                s += julian;
+                if (!clock_tz_number(address_of s, address_of number) ||
+                    number > 365 || (julian && !number))
                         return false;
-                while (s[0] >= '0' && s[0] <= '9')
-                        day = day * 10 + (s++[0] - '0');
-                if (day > 365)
-                        return false;
-                clock_dst_kind[which] = 0;
-                clock_dst_day[which] = (p16)day;
+                clock_dst_kind[which] = julian;
+                clock_dst_day[which] = (p16)number;
         }
         if (s[0] == '/')
         {
@@ -21451,10 +21438,18 @@ static bool clock_tz_rule(const char address_to address_to at, p8 which)
         return true;
 }
 
-static bool clock_tz_parse(string_address text)
+/*
+        Where the text read stops is told in rest, because glibc takes a TZ
+        whose summer name it cannot read as the standard zone alone and so
+        does tzset, and a zone this machine is to keep -- one every bowl is
+        written -- is the whole of what it was given.
+*/
+static bool clock_tz_parse_to(string_address text,
+                              string_address address_to rest)
 {
         const char address_to s = (const char address_to)text;
 
+        address_to rest = "";
         clock_has_dst = false;
         clock_std_west = 0;
         clock_dst_west = 0;
@@ -21482,6 +21477,7 @@ static bool clock_tz_parse(string_address text)
                                     CLOCK_TZ_NAME);
                 timezone = clock_std_west;
                 daylight = 0;
+                address_to rest = s;
                 return true;
         }
         if (s[0] && s[0] != ',')
@@ -21509,6 +21505,20 @@ static bool clock_tz_parse(string_address text)
         daylight = 1;
         timezone = clock_std_west;
         return true;
+}
+
+static bool clock_tz_parse(string_address text)
+{
+        string_address rest;
+
+        return clock_tz_parse_to(text, address_of rest);
+}
+
+static bool clock_tz_whole(string_address text)
+{
+        string_address rest;
+
+        return clock_tz_parse_to(text, address_of rest) && !rest[0];
 }
 
 static bipolar clock_tz_local_seconds(bipolar year, p8 which)
@@ -22035,7 +22045,7 @@ positive clock_zone_tzif(string_address zone, p8 address_to into,
 
         if (!posix)
                 posix = zone;
-        if (!clock_tz_parse(posix))
+        if (!clock_tz_whole(posix))
         {
                 tzset();
                 return 0;

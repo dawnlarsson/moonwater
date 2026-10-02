@@ -42998,16 +42998,16 @@ static fn check_live(void)
                         bool spoken = true;
 
                         for (positive at = 1; at < array_count(clock_zones); at++)
-                                if (clock_zone_order((string_address)clock_zones[at - 1].name,
-                                                     (string_address)clock_zones[at].name) >= 0)
+                                if (string_compare_folded((string_address)clock_zones[at - 1].name,
+                                                          (string_address)clock_zones[at].name) >= 0)
                                         sorted = false;
                         for (positive at = 1; at < array_count(clock_zone_links); at++)
-                                if (clock_zone_order((string_address)clock_zone_links[at - 1].name,
-                                                     (string_address)clock_zone_links[at].name) >= 0)
+                                if (string_compare_folded((string_address)clock_zone_links[at - 1].name,
+                                                          (string_address)clock_zone_links[at].name) >= 0)
                                         sorted = false;
                         for (positive at = 1; at < array_count(clock_zone_codes); at++)
-                                if (clock_zone_order((string_address)clock_zone_codes[at - 1].code,
-                                                     (string_address)clock_zone_codes[at].code) >= 0)
+                                if (string_compare_folded((string_address)clock_zone_codes[at - 1].code,
+                                                          (string_address)clock_zone_codes[at].code) >= 0)
                                         sorted = false;
                         for (positive at = 0; at < array_count(clock_zones); at++)
                         {
@@ -43166,6 +43166,105 @@ static fn check_live(void)
                                                 sizeof(zone)) &&
                                  !clock_zone_offset((string_address) "+5:3",
                                                     zone, sizeof(zone)));
+                }
+
+                //      A POSIX zone string, as tzset reads a TZ and as a zone
+                //      is kept for every bowl to read. Whole: what the parser
+                //      leaves unread is junk in a file every bowl copies, and
+                //      glibc's leniency (a summer name it cannot read leaves
+                //      the standard zone standing) is for a TZ and no more.
+                //      A number too long for a word is not read as the number
+                //      its low digits make.
+                {
+                        static const struct
+                        {
+                                char text[56];
+                                bool read;  //  tzset's parse takes it
+                                bool whole; //  and it is all of the text
+                        } strings[] = {
+                                {"CET-1", true, true},
+                                {"CET-1CEST", true, true},
+                                {"CET-1CEST,M3.5.0,M10.5.0/3", true, true},
+                                {"<+0530>-5:30", true, true},
+                                {"<-03>3", true, true},
+                                {"EST5EDT,M3.2.0,M11.1.0", true, true},
+                                {"CET-1CEST,J60/-167,J365/167", true, true},
+                                {"CET-1CEST,59,M10.5.0", true, true},
+                                {"CET-24", true, true},
+                                {"CET-24:00:00", true, true},
+                                {"CET-1CEST,M3.4.4/26,M10.5.0", true, true},
+                                //      junk after the standard offset
+                                {"CET-1 xyz", true, false},
+                                {"CET-1\x7f", true, false},
+                                {"CET-1\xff", true, false},
+                                {"CET-1\n", true, false},
+                                {"CET-1CE", true, false},
+                                {"CET-1CEST x", false, false},
+                                //      too long for a word, wrapping to a good one
+                                {"CET-1CEST,M18446744073709551619.1.0,M10.5.0", false, false},
+                                {"CET-1CEST,M3.18446744073709551621.0,M10.5.0", false, false},
+                                {"CET-1CEST,J18446744073709551617,M10.5.0", false, false},
+                                {"CET-1CEST,18446744073709551617,M10.5.0", false, false},
+                                {"CET-1CEST,M3.5.0,M99999999999999999999999.5.0", false, false},
+                                //      outside the grammar
+                                {"<>-1", false, false},
+                                {"<ab>-1", false, false},
+                                {"<+0530-5:30", false, false},
+                                {"CET", false, false},
+                                {"CET-25", false, false},
+                                {"CET-24:01", false, false},
+                                {"CET-24:00:01", false, false},
+                                {"CET-1CEST,M3.5.0", false, false},
+                                {"CET-1CEST,M13.1.0,M10.5.0", false, false},
+                                {"CET-1CEST,M0.1.0,M10.5.0", false, false},
+                                {"CET-1CEST,M3.0.0,M10.5.0", false, false},
+                                {"CET-1CEST,M3.6.0,M10.5.0", false, false},
+                                {"CET-1CEST,M3.5.7,M10.5.0", false, false},
+                                {"CET-1CEST,J0,M10.5.0", false, false},
+                                {"CET-1CEST,J366,M10.5.0", false, false},
+                                {"CET-1CEST,366,M10.5.0", false, false},
+                                {"CET-1CEST,J,M10.5.0", false, false},
+                                {"CET-1CEST,M3.5.0/-168,M10.5.0", false, false},
+                                {"CET-1CEST,M3.5.0/168,M10.5.0", false, false},
+                                {"CET-1CEST,M3.5.0,M10.5.0,", false, false},
+                                {"CET-1CEST,M3.5.0,M10.5.0x", false, false},
+                        };
+                        bool all = true;
+                        bool whole = true;
+
+                        for (positive at = 0; at < array_count(strings); at++)
+                        {
+                                if (clock_tz_parse((string_address)strings[at].text) !=
+                                    strings[at].read)
+                                {
+                                        all = false;
+                                        string_format(log, "  tzset read of %s\n",
+                                                      (string_address)strings[at].text);
+                                }
+                                if (clock_tz_whole((string_address)strings[at].text) !=
+                                    strings[at].whole)
+                                {
+                                        whole = false;
+                                        string_format(log, "  kept whole: %s\n",
+                                                      (string_address)strings[at].text);
+                                }
+                        }
+                        tzset();
+                        good((string_address) "a TZ is read as glibc reads it, and a number is not wrapped",
+                             all);
+                        good((string_address) "a zone to keep is the whole of its text and is in the grammar",
+                             whole);
+                        {
+                                static p8 tzif[512];
+
+                                good((string_address) "a zone with junk after it is no TZif footer for a bowl",
+                                     !clock_zone_tzif((string_address) "CET-1 xyz",
+                                                      tzif, sizeof(tzif)) &&
+                                         !clock_zone_tzif((string_address) "CET-1\x7f",
+                                                          tzif, sizeof(tzif)) &&
+                                         clock_zone_tzif((string_address) "CET-1",
+                                                         tzif, sizeof(tzif)));
+                        }
                 }
 
                 setenv((string_address) "TZ", (string_address) "UTC", 1);

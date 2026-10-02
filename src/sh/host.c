@@ -10559,7 +10559,6 @@ static COLD bipolar sntp_query(string_address name, bool filter, bool tight,
 #endif
 
 
-#define LOCALE_ZONE_PATH "/root/timezone"
 #define LOCALE_ZONE_MODE_PATH "/root/timezone.mode"
 #define LOCALE_ZONE_NETWORK_PATH HOST_STATE "/timezone.network"
 #define LOCALE_NTP_PATH "/root/ntp"
@@ -10806,9 +10805,11 @@ static bool locale_zone_resolve(string_address name, p8 address_to into,
         if (clock_zone_offset(name, into, room))
                 return true;
 
-        //      clock_tz_parse leaves the process's zone set to what it read,
-        //      so the one in force is put back whichever way it goes.
-        parsed = string_length(name) < room && clock_tz_parse(name);
+        //      Read whole: what the grammar leaves over is kept as typed in
+        //      the file every bowl copies. clock_tz_whole leaves the
+        //      process's zone set to what it read, so the one in force is put
+        //      back whichever way it goes.
+        parsed = string_length(name) < room && clock_tz_whole(name);
         tzset();
         if (!parsed)
                 return false;
@@ -10921,7 +10922,7 @@ static fn locale_zone_mode(p8 address_to into, positive room)
         locale_word(LOCALE_ZONE_MODE_PATH, into, room);
         if (into[0])
                 return;
-        locale_word(LOCALE_ZONE_PATH, zone, sizeof(zone));
+        locale_word(CLOCK_ZONE_PATH, zone, sizeof(zone));
         if (zone[0])
                 string_copy_bounded(into, "manual", room);
 }
@@ -10961,7 +10962,7 @@ static b32 locale_zone_status(void)
         p8 how[48];
         p8 when[48];
 
-        locale_word(LOCALE_ZONE_PATH, zone, sizeof(zone));
+        locale_word(CLOCK_ZONE_PATH, zone, sizeof(zone));
         locale_zone_title(zone, title, sizeof(title));
         locale_zone_how(how, sizeof(how));
         locale_zone_moment(when, sizeof(when));
@@ -11090,11 +11091,11 @@ static b32 locale_zone_store(string_address zone, string_address mode)
         p8 how[48];
         p8 old_shown[80];
 
-        locale_word(LOCALE_ZONE_PATH, was, sizeof(was));
+        locale_word(CLOCK_ZONE_PATH, was, sizeof(was));
         locale_zone_describe(was, old_shown, sizeof(old_shown));
         locale_zone_moment(before, sizeof(before));
 
-        if (radio_write_word(LOCALE_ZONE_PATH, zone) < 0 ||
+        if (radio_write_word(CLOCK_ZONE_PATH, zone) < 0 ||
             radio_write_word(LOCALE_ZONE_MODE_PATH, mode) < 0)
                 return host_fail("timezone", -1);
 
@@ -11512,14 +11513,14 @@ static bipolar locale_auto_take(locale_auto_answer address_to answer,
         p8 was[80];
         p8 mode[48];
 
-        locale_word(LOCALE_ZONE_PATH, was, sizeof(was));
+        locale_word(CLOCK_ZONE_PATH, was, sizeof(was));
         locale_word(LOCALE_ZONE_MODE_PATH, mode, sizeof(mode));
         if (loud)
                 return locale_zone_store(answer->zone, answer->mode) ? -1 : 0;
         if (string_equals(was, answer->zone) &&
             string_equals(mode, answer->mode))
                 return 0;
-        if (radio_write_word(LOCALE_ZONE_PATH, answer->zone) < 0 ||
+        if (radio_write_word(CLOCK_ZONE_PATH, answer->zone) < 0 ||
             radio_write_word(LOCALE_ZONE_MODE_PATH, answer->mode) < 0)
                 return -1;
         tzset();
@@ -11550,7 +11551,7 @@ static b32 locale_zone_auto(void)
         if (status)
         {
                 locale_auto_asked(null);
-                locale_word(LOCALE_ZONE_PATH, zone, sizeof(zone));
+                locale_word(CLOCK_ZONE_PATH, zone, sizeof(zone));
                 host_say(log_error, host_label "timezone auto: Cloudflare "
                                     "could not be asked (%s); keeping %s "
                                     "until the network answers\n",
@@ -12296,7 +12297,7 @@ static fn locale_restore(void)
         p8 zone[80];
         p8 keyboard[16];
 
-        locale_word(LOCALE_ZONE_PATH, zone, sizeof(zone));
+        locale_word(CLOCK_ZONE_PATH, zone, sizeof(zone));
         if (zone[0])
         {
                 tzset();
@@ -13341,7 +13342,7 @@ static b32 host_status(void)
                 p8 shown[128];
                 p8 how[48];
 
-                locale_word(LOCALE_ZONE_PATH, zone, sizeof(zone));
+                locale_word(CLOCK_ZONE_PATH, zone, sizeof(zone));
                 locale_word(LOCALE_KEYBOARD_PATH, keyboard, sizeof(keyboard));
                 locale_zone_title(zone, shown, sizeof(shown));
                 locale_zone_how(how, sizeof(how));
