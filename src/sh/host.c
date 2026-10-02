@@ -7977,7 +7977,9 @@ static b32 radio_bluetooth_power(bool on, bool report)
         return radio_switch(NET_BLUETOOTH_POWER, RADIO_RFKILL_BLUETOOTH, on, report);
 }
 
-/* Remember a device's name or forget it: the list is read, changed and
+/* Remember a device's name or forget it. Nothing here pairs or connects: the
+   list is the names a person keeps, shown by `moonwater bluetooth`, and a name
+   added turns the radio on for whatever does pair. It is read, changed and
    written back whole under the lock the wifi verbs take, so two runs at once
    cannot lose each other's names. */
 static b32 radio_bluetooth_edit(string_address identity, bool add)
@@ -8246,9 +8248,6 @@ static fn radio_recover(void)
 
         if (radio_wifi_wanted(radio_power(NET_WIFI_POWER)))
                 radio_wifi_keep();
-
-        if (radio_power(NET_BLUETOOTH_POWER) == 1)
-                radio_rfkill(RADIO_RFKILL_BLUETOOTH, false);
 }
 
 /* What a verb says it did, when it did not fail. */
@@ -8362,8 +8361,9 @@ static b32 host_radio(string_address address_to arguments, positive count)
         line that says so.
 
         What should outlast a boot -- the profile, the CPU switches, the
-        charge limit -- is kept on /root/tune, one "key value" line each, and
-        put back by tune_restore when the machine starts. Brightness is not
+        charge limit, and what airplane mode switched off -- is kept on
+        /root/tune, one "key value" line each, and put back by tune_restore
+        when the machine starts. Brightness is not
         kept: the screen is the thing being looked at, and the last level is
         what the firmware brings it back at.
 */
@@ -8466,15 +8466,12 @@ static bipolar tune_write_number(string_address path, positive value)
         return tune_write(path, (string_address)number);
 }
 
-/* Whether a word is in a file's blank-separated list. */
-static bool tune_lists(string_address path, string_address word)
+/* Whether a word is in a blank-separated list. */
+static bool tune_has(p8 address_to text, string_address word)
 {
-        p8 text[256];
         positive at = 0;
         positive length = string_length(word);
 
-        if (!tune_word(path, text, sizeof(text)))
-                return false;
         while (text[at])
         {
                 positive start = at;
@@ -8487,6 +8484,14 @@ static bool tune_lists(string_address path, string_address word)
                         at++;
         }
         return false;
+}
+
+/* Whether a word is in a file's blank-separated list. */
+static bool tune_lists(string_address path, string_address word)
+{
+        p8 text[256];
+
+        return tune_word(path, text, sizeof(text)) && tune_has(text, word);
 }
 
 /* Whether a line of the kept settings is the one for a key: the key, a blank,
@@ -8633,11 +8638,16 @@ static bool tune_percent(string_address text, bool address_to relative, bool add
         return !text[at];
 }
 
-/* moonwater airplane [on|off]: every radio, at once. */
+/* moonwater airplane [on|off]: every radio, at once, and back as they were.
+   What was on is kept in /root/tune as the key airplane, so that a radio that
+   was off before stays off after, and the block of every radio, the modem
+   included, outlasts a boot. With nothing kept both come back. */
 static b32 tune_airplane(string_address address_to arguments, positive count)
 {
         bool wifi_off = radio_power(NET_WIFI_POWER) == 0;
         bool bluetooth_off = radio_power(NET_BLUETOOTH_POWER) == 0;
+        p8 was[24];
+        bool kept;
         bool on;
         b32 failed;
         bipolar sent;
@@ -8652,20 +8662,33 @@ static b32 tune_airplane(string_address address_to arguments, positive count)
                 return host_usage();
         host_need_root("moonwater airplane");
         on = host_onoff(arguments[2]) > 0;
+        kept = tune_kept("airplane", was, sizeof(was));
 
         //      Type zero is every radio, the modem included.
         if (on)
         {
-                failed = radio_wifi_off(true);
+                //      Already in airplane mode is nothing to remember.
+                failed = !wifi_off || !bluetooth_off
+                             ? tune_remember("airplane", wifi_off ? "bluetooth"
+                                                         : bluetooth_off ? "wifi" : "wifi bluetooth")
+                             : 0;
+                failed |= radio_wifi_off(true);
                 failed |= radio_bluetooth_power(false, true);
                 sent = radio_rfkill(0, true);
         }
         else
         {
                 sent = radio_rfkill(0, false);
-                failed = radio_switch(NET_WIFI_POWER, RADIO_RFKILL_WLAN, true, true);
-                (void)radio_wifi_on(false);
-                failed |= radio_bluetooth_power(true, true);
+                failed = 0;
+                if (!kept || tune_has(was, "wifi"))
+                {
+                        failed |= radio_switch(NET_WIFI_POWER, RADIO_RFKILL_WLAN, true, true);
+                        (void)radio_wifi_on(false);
+                }
+                if (!kept || tune_has(was, "bluetooth"))
+                        failed |= radio_bluetooth_power(true, true);
+                if (kept)
+                        failed |= tune_remember("airplane", "");
         }
         failed |= sent < 0 ? host_fail("/dev/rfkill", sent) : 0;
         return radio_done(failed, on ? "airplane on" : "airplane off");
@@ -9364,11 +9387,35 @@ static fn tune_backlight_restore(tune_lights address_to lights)
         }
 }
 
+/* A kernel switch turned on for the length of a sleep, and what it was. */
+typedef struct
+{
+        string_address path;
+        p8 was[8];
+        bool changed;
+} tune_flag;
+
+static fn tune_flag_on(tune_flag address_to flag, string_address path)
+{
+        flag->path = path;
+        flag->changed = tune_word(path, flag->was, sizeof(flag->was)) &&
+                        !string_equals((string_address)flag->was, "1") &&
+                        tune_write(path, "1") >= 0;
+}
+
+static fn tune_flag_back(tune_flag address_to flag)
+{
+        if (flag->changed)
+                (void)tune_write(flag->path, (string_address)flag->was);
+}
+
 /* moonwater sleep and moonwater hibernate: the kernel's own suspend and hibernate. */
 static b32 tune_suspend(string_address verb, string_address state)
 {
         tune_sources sources;
         tune_lights lights;
+        tune_flag messages;
+        tune_flag times;
         p8 text[TUNE_LOG_ROOM];
 
         if (!tune_lists(TUNE_SYS_POWER "/state", state))
@@ -9376,9 +9423,10 @@ static b32 tune_suspend(string_address verb, string_address state)
                                        ? "this kernel does not offer sleep%s\n"
                                        : "this kernel does not offer hibernate%s\n", "");
         host_need_root(string_equals(state, "mem") ? "moonwater sleep" : "moonwater hibernate");
-        //      So a sleep that never wakes leaves the device it stopped at in the log.
-        (void)tune_write(TUNE_SYS_POWER "/pm_debug_messages", "1");
-        (void)tune_write(TUNE_SYS_POWER "/pm_print_times", "1");
+        //      So a sleep that never wakes leaves the device it stopped at in the
+        //      log, and what they were is put back when it is over.
+        tune_flag_on(address_of messages, TUNE_SYS_POWER "/pm_debug_messages");
+        tune_flag_on(address_of times, TUNE_SYS_POWER "/pm_print_times");
         tune_wake_arm("/sys/bus/usb/devices", true);
         tune_wake_arm("/sys/bus/serio/devices", false);
         if (string_equals(state, "mem"))
@@ -9402,6 +9450,8 @@ static b32 tune_suspend(string_address verb, string_address state)
                         tune_sleep_stats(text);
                         tune_kernel_lines(text);
                         (void)host_write_text("/root/sleep.log", (string_address)text);
+                        tune_flag_back(address_of messages);
+                        tune_flag_back(address_of times);
                         return host_fail(verb, failed);
                 }
         }
@@ -9418,6 +9468,8 @@ static b32 tune_suspend(string_address verb, string_address state)
         tune_sleep_stats(text);
         tune_kernel_lines(text);
         (void)host_write_text("/root/sleep.log", (string_address)text);
+        tune_flag_back(address_of messages);
+        tune_flag_back(address_of times);
         return 0;
 }
 
@@ -9440,6 +9492,10 @@ static fn tune_restore(void)
                 (void)tune_cpu_smt(false);
         if (tune_find(text, (positive)got, "charge.limit", value, sizeof(value)))
                 (void)tune_charge_apply((string_address)value);
+        //      Airplane mode is every radio off, and the modem has no word of its own.
+        if (tune_find(text, (positive)got, "airplane", value, sizeof(value)) &&
+            radio_power(NET_WIFI_POWER) == 0 && radio_power(NET_BLUETOOTH_POWER) == 0)
+                (void)radio_rfkill(0, true);
 }
 
 static b32 host_tune(string_address address_to arguments, positive count)

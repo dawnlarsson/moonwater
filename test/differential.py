@@ -41740,6 +41740,7 @@ def harness_moonwater_cli(argv):
         sys_file("class/wakeup/wakeup0/event_count", "3\n")
         sys_file("bus/usb/devices/1-3/power/wakeup", "disabled\n")
         sys_file("bus/usb/devices/1-3:1.0/bInterfaceClass", "e0\n")
+        os.utime(fake / "power/pm_debug_messages", (1e9, 1e9))
         got, done = session("rm -f /root/tune\n" + say("sleep"))
         check(done and sys_read("power/state") == "mem", "sleep with wake sources still writes mem", sys_read("power/state"))
         check(sys_read("bus/serio/devices/serio0/power/wakeup") == "enabled", "sleep arms the PS/2 keyboard's wakeup")
@@ -41747,7 +41748,8 @@ def harness_moonwater_cli(argv):
         check(sys_read("bus/usb/devices/1-3/power/wakeup") == "disabled", "sleep leaves a USB radio's wakeup alone")
         check(sys_read("bus/usb/devices/1-4/power/wakeup") == "disabled", "sleep leaves a controller's wakeup alone")
         check("woken by:" in "\n".join(got), "sleep says what woke the machine", "\n".join(got)[-200:])
-        check(sys_read("power/pm_debug_messages") == "1", "sleep asks the kernel to log each device it suspends")
+        check(sys_read("power/pm_debug_messages") == "0" and (fake / "power/pm_debug_messages").stat().st_mtime > 1e9 + 1000,
+              "sleep asks the kernel to log each device it suspends, and puts the switch back as it was")
         check("mem_sleep [s2idle] deep" in "\n".join(got), "sleep says which kind of sleep it is", "\n".join(got)[-200:])
 
         got = tuned("rm -f /root/wifi.power /root/bluetooth.power\n" + say("airplane on") +
@@ -42060,6 +42062,44 @@ def harness_moonwater_cli(argv):
         check(light and sys_read(f"class/backlight/{survivor}/brightness") ==
               ("60" if survivor == "panel_b" else "30"),
               "a panel keeps its own level when another went while the machine slept", (light, joined[-200:]))
+
+        # A switch the sleep found on is not touched, one it found off is put
+        # back, and airplane mode is remembered: bluetooth off before it was
+        # still off after it, where `airplane off` switched both on; and the
+        # block of every radio, the modem with it, is put back with the rest
+        # of what is kept (after a sleep here, as at boot).
+        sys_reset()
+        sys_file("power/pm_debug_messages", "1\n")
+        sys_file("power/pm_print_times", "0\n")
+        for leaf in ("pm_debug_messages", "pm_print_times"):
+            os.utime(fake / "power" / leaf, (1e9, 1e9))
+        got, done = session("rm -f /root/tune\n" + say("sleep"))
+        check(done and sys_read("power/pm_debug_messages") == "1" and
+              (fake / "power/pm_debug_messages").stat().st_mtime == 1e9 and
+              sys_read("power/pm_print_times") == "0" and
+              (fake / "power/pm_print_times").stat().st_mtime > 1e9 + 1000,
+              "a sleep leaves alone a switch that was on and puts back one that was off", repr(got[-6:]))
+
+        got = tuned("rm -f /root/wifi.power /root/bluetooth.power\n" + say("bluetooth off") + say("airplane on") +
+                    "echo '@@ kept'; cat /root/tune; echo '@@end'\n" + say("airplane") + say("airplane on") +
+                    "echo '@@ again'; cat /root/tune; echo '@@end'\n" +
+                    ": > /dev/rfkill\n" + say("sleep") +
+                    "echo \"@@ after-sleep $(od -An -tx1 /dev/rfkill | tr -s ' ' | sed 's/^ //')\"\n" +
+                    say("airplane off") + "echo '@@ words'; cat /root/wifi.power /root/bluetooth.power; echo '@@end'\n"
+                    "echo '@@ left'; cat /root/tune 2>/dev/null; echo '@@end'\n" + say("airplane"))
+        seen = answers(got)
+
+        def between(got, mark):
+            text = "\n".join(got)
+            return text.split(f"@@ {mark}\n", 1)[1].split("@@end", 1)[0].split() if f"@@ {mark}\n" in text else None
+        check(between(got, "kept") == ["airplane", "wifi"] and between(got, "again") == ["airplane", "wifi"],
+              "airplane on keeps the radios that were on, and a second airplane on keeps them", repr(between(got, "kept")))
+        check(any("airplane on" in line for line in seen["airplane"]["out"]), "and airplane says it is on")
+        check("@@ after-sleep 00 00 00 00 00 03 01 00" in got,
+              "the block of every radio is put back with what is kept", "\n".join(got)[-300:])
+        check(between(got, "words") == ["on", "off"] and between(got, "left") in ([], None) and
+              got[-3:] == ["@@ airplane", "[Moonwater] airplane off", "@@status 0"],
+              "airplane off turns back on only what was on, and forgets", repr((between(got, "words"), between(got, "left"), got[-3:])))
 
         # The saved lists survive a write cut short. RLIMIT_FSIZE 0 makes
         # every write fail and kills the writer with SIGXFSZ, the way a
@@ -42626,26 +42666,61 @@ def harness_machine_reap(argv):
     pipe, and a job the machine script puts in the background still found
     no child to wait for. This compiles radio_reap as src/sh/host.c has it,
     starts one such job and one join, and holds the loop to leaving the job
-    to its owner while the join is reaped.
+    to its owner while the join is reaped. And radio_recover, the rest of the
+    pass: the saved network's join is the keeper's when wifi is wanted, and
+    bluetooth is not unblocked on every pass, which undid a `rfkill block
+    bluetooth` (or the radio key) within three seconds; it is unblocked when
+    it is asked to be on.
     """
     import subprocess
     import tempfile
     host = (HARNESS_ROOT / "src/sh/host.c").read_text()
     first = host.index("static bipolar radio_child;")
     body = host[first:host.index("static fn radio_wifi_keep(void)", first)]
+    recover = host[host.index("static fn radio_recover(void)\n{"):host.index("/* What a verb says it did")]
     source = r"""
 #include <signal.h>
 #include <stdio.h>
+#include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
 typedef unsigned long positive;
 typedef long bipolar;
+typedef unsigned char p8;
+typedef const unsigned char *string_address;
 #define fn void
 #define address_of &
+#define address_to *
 #define syscall(name) 0
 #define system_call_4(number, a, b, c, d) \
         ((long)wait4((pid_t)(a), (int *)(b), (int)(c), 0))
-""" + body + r"""
+#define HOST_NAME_ROOM 32
+#define HOST_VERDICT "verdict"
+#define NET_WIFI_POWER "wifi"
+#define NET_BLUETOOTH_POWER "bluetooth"
+#define RADIO_RFKILL_BLUETOOTH 2
+static int asked, kept, copied, unblocked;
+static long wifi_power, bluetooth_power;
+static bipolar host_read_text(string_address path, p8 *into, positive room)
+{
+        if (!asked)
+                return -1;
+        strcpy((char *)into, "ask disk");
+        return 8;
+}
+static int host_starts(string_address text, string_address prefix)
+{
+        return !strncmp((const char *)text, (const char *)prefix, strlen((const char *)prefix));
+}
+static void radio_internet_copy(void) { copied++; }
+static long radio_power(string_address path)
+{
+        return !strcmp((const char *)path, "bluetooth") ? bluetooth_power : wifi_power;
+}
+static int radio_wifi_wanted(long power) { return power != 0; }
+static void radio_wifi_keep(void) { kept++; }
+static bipolar radio_rfkill(int type, int block) { unblocked++; return 0; }
+""" + body + recover + r"""
 int main(void)
 {
         int status = 0, passed = 0;
@@ -42661,8 +42736,19 @@ int main(void)
         passed += waitpid(job, &status, 0) == job && WIFEXITED(status) &&
                   WEXITSTATUS(status) == 7;
         passed += radio_child == 0 && waitpid(join, &status, WNOHANG) < 0;
-        printf("machine reap %d/2\n", passed);
-        return passed != 2;
+        wifi_power = bluetooth_power = 1;
+        radio_recover();
+        passed += kept == 1 && copied == 1 && unblocked == 0;
+        kept = copied = unblocked = 0;
+        asked = 1;
+        radio_recover();
+        passed += !kept && !copied && !unblocked;
+        asked = 0;
+        wifi_power = 0;
+        radio_recover();
+        passed += !kept && copied == 1 && !unblocked;
+        printf("machine reap %d/5\n", passed);
+        return passed != 5;
 }
 """
     with tempfile.TemporaryDirectory(prefix="machine-reap-") as work:
@@ -42673,12 +42759,12 @@ int main(void)
                                capture_output=True, text=True)
         if built.returncode:
             print(built.stderr[-2000:])
-            write_tally("machine-reap", 0, 2)
+            write_tally("machine-reap", 0, 5)
             return 1
         ran = subprocess.run([str(Path(work) / "reap")], capture_output=True, text=True)
         print(ran.stdout, end="")
-        found = re.search(r"(\d)/2", ran.stdout)
-        write_tally("machine-reap", int(found.group(1)) if found else 0, 2)
+        found = re.search(r"(\d)/5", ran.stdout)
+        write_tally("machine-reap", int(found.group(1)) if found else 0, 5)
         return ran.returncode
 
 
