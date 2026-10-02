@@ -41209,6 +41209,17 @@ def harness_moonwater_cli(argv):
         check("(manual)" in joined.split("@@ timezone", 3)[2].split("@@status")[0],
                      "a zone with no mode beside it is manual", joined[:400])
 
+        # A saved network on a machine with no wireless interface is not
+        # waited for: boot and `wifi on` come back at once, where they once
+        # held for eight seconds each.
+        lines, finished = session(
+            "rm -f /root/wifi\n" + say("wifi add timed-a passpass1") +
+            "s=$(date +%s)\n" + say("wifi on") + "echo \"@@seconds $(( $(date +%s) - s ))\"\n")
+        seconds = [int(line.split()[1]) for line in lines if line.startswith("@@seconds ")]
+        check(finished and seconds and seconds[0] <= 3,
+              "wifi on with a saved network and no wireless interface does not wait for one",
+              repr(seconds))
+
         # A saved network is forgotten, and only that one; wired keeps its
         # word across runs and says what it did to the links it found.
         lines, finished = session(

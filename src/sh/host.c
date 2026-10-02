@@ -7371,7 +7371,12 @@ static bipolar radio_wifi_join(string_address ssid, string_address pass)
                                       secured ? pmk : null, address_of radio_joined);
                 if (failed != -19)
                         break;
-                if (system_clock_ns(HOST_CLOCK_BOOTTIME) - started >= 8000000000)
+                //      No wireless interface yet: waited for only where the
+                //      machine shows a card on its way. A machine with none
+                //      would hold every boot, and every `wifi on`, for the
+                //      whole wait, and the keeper joins when a card arrives.
+                if (!radio_has_interface() ||
+                    system_clock_ns(HOST_CLOCK_BOOTTIME) - started >= 8000000000)
                         break;
                 host_pause(200000000);
         }
