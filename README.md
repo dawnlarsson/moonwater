@@ -43,6 +43,7 @@ moonwater cpu [boost|smt on|off]       turbo and SMT, kept across boots; cpu onl
 moonwater charge [limit N|off]         where the battery stops charging (20 to 100); kept across boots
 moonwater sleep | hibernate            suspend to RAM or to disk
 moonwater keyboard [LAYOUT]            us uk de se no dk fi fr es it [us]
+moonwater name [NEW|random]            what this machine is called; one is rolled at first boot, like space-wizard
 
 moonwater wired [on|off]                the wired links, and which have carrier; off keeps them down across a reboot
 moonwater wifi                         the radio, saved networks and networks in range, or why there are none
@@ -82,8 +83,9 @@ Commands given to `moonwater` run as root through the shell, as if typed.
 **Settings.** Binds, init and exit live in the boot image: set them on a live
 stick and `install` carries them to the disk, while `update` keeps the disk's
 own. Wifi, wired, bluetooth, internet preference, power and charge settings,
-timezone, NTP, keyboard and link settings live in `/root` on the data
-partition, so `update` and `wipe` keep them.
+timezone, NTP, keyboard, name and link settings live in `/root` on the data
+partition, so `update` and `wipe` keep them. A machine gets its name the first
+time it boots, from a live stick too, and `install` carries it to the disk.
 
 **Events.** Besides the power button and Canvas, `bind` covers `reset`, `mute`,
 `micmute`, `volume_up`/`down`, `brightness_up`/`down`, `lid_close`/`open`,
