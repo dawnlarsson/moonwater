@@ -10394,6 +10394,23 @@ static bool http_transport_allowed(bool address_to secure, bool tls)
         return true;
 }
 
+/* localhost, and every name under it, is this machine (RFC 6761 6.3), in
+   any case and with or without the absolute name's dot. curl answers those
+   names itself and the C library GNU wget asks answers them from its own
+   tables, so neither lets a resolver choose where "localhost" goes; one
+   that asked the network's DNS server would fetch whatever that server
+   pointed localhost at, and tell it the name besides. */
+static bool http_host_loopback(string_address host)
+{
+        positive length = string_length(host);
+
+        if (length && host[length - 1] == '.')
+                length--;
+        return length >= 9 &&
+               !memory_compare_ascii_case(host + length - 9, "localhost", 9) &&
+               (length == 9 || host[length - 10] == '.');
+}
+
 static bipolar http_status_code(p8 address_to bytes, positive size, b32 address_to code)
 {
         if (size < 13)
@@ -10418,6 +10435,8 @@ static p32 http_lookup(string_address host)
 
         if (server >= 0)
                 return (p32)server;
+        if (http_host_loopback(host))
+                return HOST_LOOPBACK;
         if (dns_resolve_any((string_address) "/etc/resolv.conf", host, address_of ip,
                             3) != DNS_OK)
                 return 0;

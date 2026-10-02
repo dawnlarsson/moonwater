@@ -46190,6 +46190,7 @@ def harness_wget_hostile(argv):
             self.script = script
             self.lines = []
             self.hosts = []
+            self.locals = []
             self.listener = socket.socket()
             self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self.listener.bind((address, 0))
@@ -46208,6 +46209,7 @@ def harness_wget_hostile(argv):
         def serve(self, peer):
             try:
                 peer.settimeout(5)
+                self.locals.append(peer.getsockname()[0])
                 head = b""
                 while b"\r\n\r\n" not in head:
                     more = peer.recv(4096)
@@ -46267,13 +46269,47 @@ def harness_wget_hostile(argv):
     #   never left the inside may go anywhere.  The default follows all of it,
     #   as GNU wget and curl do.
     if args.netns:
+        import struct
         farm = Path(tempfile.mkdtemp(prefix="wget-netns-"))
         (farm / "wget").symlink_to(args.netns)
+        #   The network's resolver, played by a stub on this namespace's own
+        #   127.0.0.1:53 (resolv.conf is bound over in a mount namespace of
+        #   its own): every A question is answered 8.8.4.4, a public address
+        #   that is a loopback one here, and every name asked is kept.
+        (farm / "resolv.conf").write_text("nameserver 127.0.0.1\n")
+        subprocess.run(["mount", "--bind", str(farm / "resolv.conf"), "/etc/resolv.conf"],
+                       check=True)
+        asked = []
+        resolver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        resolver.bind(("127.0.0.1", 53))
+
+        def resolve():
+            while True:
+                try:
+                    data, peer = resolver.recvfrom(4096)
+                    at, labels = 12, []
+                    while data[at]:
+                        labels.append(data[at + 1:at + 1 + data[at]])
+                        at += 1 + data[at]
+                    kind = struct.unpack("!H", data[at + 1:at + 3])[0]
+                    asked.append(b".".join(labels).decode("latin1").lower())
+                    answer = (b"\xc0\x0c" + struct.pack("!HHIH", 1, 1, 60, 4) +
+                              bytes([8, 8, 4, 4])) if kind == 1 else b""
+                    resolver.sendto(struct.pack("!HHHHHH", struct.unpack("!H", data[:2])[0],
+                                                0x8180, 1, int(kind == 1), 0, 0) +
+                                    data[12:at + 5] + answer, peer)
+                except (OSError, IndexError, struct.error):
+                    continue
+        threading.Thread(target=resolve, daemon=True).start()
         rows = [
             ("public to loopback", "8.8.8.8", b"http://127.0.0.1:PORT/z", False),
             ("public to public", "8.8.8.8", b"http://8.8.4.4:PORT/z", True),
             ("loopback to loopback", "127.0.0.1", b"http://127.0.0.1:PORT/z", True),
             ("loopback to public", "127.0.0.1", b"http://8.8.8.8:PORT/z", True),
+            #   localhost is this machine whatever the resolver says, so the
+            #   tight tier refuses it after public space as it refuses
+            #   127.0.0.1; a resolver that said 8.8.4.4 once made it public.
+            ("public to localhost", "8.8.8.8", b"http://LocalHost.:PORT/z", False),
         ]
         failures = 0
         for name, first, location, follows in rows:
@@ -46291,7 +46327,44 @@ def harness_wget_hostile(argv):
                 print("FAIL %s %s: lines %r exit %d (%s)" % (
                     "tight" if args.tight else "default", name, server.lines,
                     done.returncode, done.stderr[-120:]))
-        print("PASS %d" % (len(rows) - failures))
+        #   RFC 6761 6.3: localhost and every name under it, in any case and
+        #   with or without the root's dot, reaches 127.0.0.1 and is never
+        #   asked of the resolver; a name that only looks like one is asked
+        #   like any other. The spellings are generated; curl, which answers
+        #   these names itself, is held to the same rows when it is here.
+        spell = random.Random(0x6761)
+
+        def cased(text):
+            return "".join(c.upper() if spell.randrange(2) else c for c in text)
+        loopback = ["localhost", "localhost.", "LOCALHOST"] + [
+            cased(".".join(["".join(spell.choice("ab-_0") for _ in range(spell.randint(1, 4)))
+                            .strip("-") or "a" for _ in range(spell.randint(1, 3))] +
+                           ["localhost"]) + spell.choice(["", "."])) for _ in range(9)]
+        elsewhere = [cased(name) for name in (
+            "localhostx", "xlocalhost", "localhost.example", "localhost-a.example",
+            "a-localhost", "localhos", "localhost.localhost.example", "ocalhost")]
+        curl = shutil.which("curl") if not args.tight else None
+        for host, inside in [(h, True) for h in loopback] + [(h, False) for h in elsewhere]:
+            row_failed = False
+            for who in ("mw", "curl") if curl else ("mw",):
+                del asked[:]
+                server = Server(answer(ok()), "0.0.0.0")
+                url = "http://%s:%d/y" % (host, server.port)
+                command = ([str(farm / "wget"), "-q", "-O", "saved", url] if who == "mw" else
+                           [curl, "-s", "--max-time", "10", "-o", "saved", url])
+                done = subprocess.run(command, capture_output=True, timeout=60, cwd=str(farm))
+                server.close()
+                want_asked = [] if inside else [host.lower().rstrip(".")]
+                want_local = ["127.0.0.1"] if inside else ["8.8.4.4"]
+                good = (done.returncode == 0 and server.locals == want_local and
+                        sorted(set(asked)) == want_asked)
+                if not good:
+                    row_failed = True
+                    print("FAIL %s %s %r: exit %d, reached %r, resolver asked %r" % (
+                        "tight" if args.tight else "default", who, host, done.returncode,
+                        server.locals, asked))
+            failures += row_failed
+        print("PASS %d" % (len(rows) + len(loopback) + len(elsewhere) - failures))
         return 1 if failures else 0
 
     checks = Checks()
@@ -46342,12 +46415,12 @@ def harness_wget_hostile(argv):
                     checks(have == one["saved"], "%s: saved %r, wanted %r" % (
                         label, have, one["saved"]))
         #   The address policy, by the default shell and by a tight-tier build.
-        probe = subprocess.run(["unshare", "-Urn", "sh", "-c",
+        probe = subprocess.run(["unshare", "-Urnm", "sh", "-c",
                                 "ip link set lo up && ip addr add 8.8.8.8/32 dev lo"],
                                capture_output=True) if shutil.which("unshare") and shutil.which("ip") \
             else None
         if probe is None or probe.returncode:
-            print("wget hostile: address policy rows skipped (no unshare -Urn with ip)")
+            print("wget hostile: address policy rows skipped (no unshare -Urnm with ip)")
         else:
             tight = Path(args.tight_shell) if args.tight_shell else work / "tight"
             if not args.tight_shell:
@@ -46360,7 +46433,7 @@ def harness_wget_hostile(argv):
                 if not path.exists():
                     continue
                 inside = subprocess.run(
-                    ["unshare", "-Urn", "sh", "-c",
+                    ["unshare", "-Urnm", "sh", "-c",
                      'ip link set lo up && ip addr add 8.8.8.8/32 dev lo && '
                      'ip addr add 8.8.4.4/32 dev lo && exec "$0" "$@"',
                      sys.executable, str(Path(__file__).resolve()), "--harness",
@@ -46372,7 +46445,7 @@ def harness_wget_hostile(argv):
                         checks(False, line)
                 passed = [int(line.split()[1]) for line in inside.stdout.splitlines()
                           if line.startswith("PASS")]
-                checks(inside.returncode == 0 and passed == [4],
+                checks(inside.returncode == 0 and passed == [25],
                        "address policy, %s shell: exit %d, %s" % (
                            level, inside.returncode, inside.stderr[-300:] or inside.stdout[-300:]))
     return checks.verdict("wget hostile", "wget-hostile")
