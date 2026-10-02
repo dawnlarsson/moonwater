@@ -41865,6 +41865,78 @@ def harness_moonwater_cli(argv):
         check(len(kept) == 12 and all(line == want for line in kept),
               "four verbs at once keep all four values", repr(kept))
 
+        # What is stored is what the display can show: a name or password with
+        # a control byte, DEL, a C1 control, a byte that starts no character
+        # or half of one is refused, and a name in UTF-8 is kept as it is.
+        # DEL and C1 were stored, and a NUL from standard input ended the
+        # password it came in where it was saved, so "abcdefgh" was kept for
+        # a line of "abcdefgh\0ijkl".
+        hostile = (("DEL", "a\\177b"), ("C1", "a\\302\\233b"), ("latin1", "a\\377b"), ("tab", "a\\tb"),
+                   ("escape", "\\033[31mred"), ("cut", "a\\343\\201"), ("surrogate", "a\\355\\240\\200b"))
+        script = "rm -f /root/wifi /root/bluetooth\n"
+        for label, octal in hostile:
+            script += (f"echo \"@@ wifi {label} $(timeout 20 /tmp/moonwater wifi add \"$(printf '{octal}')\" passpass1 2>&1 | grep -c 'cannot be stored')\"\n"
+                       f"echo \"@@ pass {label} $(timeout 20 /tmp/moonwater wifi add okname \"$(printf 'password{octal}')\" 2>&1 | grep -c 'cannot be stored')\"\n"
+                       f"echo \"@@ bluetooth {label} $(timeout 20 /tmp/moonwater bluetooth add \"$(printf '{octal}')\" 2>&1 | grep -c 'cannot be stored')\"\n")
+        script += ("timeout 20 /tmp/moonwater wifi add \"$(printf 'caf\\303\\251')\" passpass1 > /dev/null 2>&1\n"
+                   "timeout 20 /tmp/moonwater bluetooth add \"$(printf 'na\\303\\257ve')\" > /dev/null 2>&1\n"
+                   "echo \"@@ nul $(printf 'abcdefgh\\0ijkl\\n' | timeout 20 /tmp/moonwater wifi add nul-pass - 2>&1 | grep -c 'nothing saved')\"\n"
+                   "echo \"@@ tabbed $(printf 'abcdefgh\\tijkl\\n' | timeout 20 /tmp/moonwater wifi add tab-pass - 2>&1 | grep -c 'nothing saved')\"\n"
+                   "echo '@@ saved'; od -An -c /root/wifi | tr -s ' ' ; echo '@@ devices'; cat /root/bluetooth; echo '@@end'\n")
+        got = tuned(script)
+        joined = "\n".join(got)
+        for label, _ in hostile:
+            for kind in ("wifi", "pass", "bluetooth"):
+                check(f"@@ {kind} {label} 1" in got, f"a {kind} with a {label} byte is refused as one that cannot be stored", joined[-300:])
+        check("@@ nul 1" in got and "@@ tabbed 1" in got, "a password from standard input with a NUL or a tab in it is refused",
+              joined[-300:])
+        saved = joined.split("@@ saved\n", 1)[1].split("@@ devices", 1)[0] if "@@ saved" in joined else ""
+        check(saved.split() == ["c", "a", "f", "303", "251", "\\n"] + list("passpass1") + ["\\n"],
+              "only the name in UTF-8 was kept, with its password", repr(saved))
+        check("na\u00efve" in got, "a bluetooth name in UTF-8 is kept as it is", joined[-200:])
+
+        # A list somebody wrote by hand may hold bytes the verbs would refuse;
+        # status shows every name as radio_display does, the escapes and the
+        # valid characters alike, instead of putting the raw bytes on the
+        # terminal. The model is the display's rule, over names from a grammar.
+        pieces = [b"a", b"Z", b" ", b"-", b"9", b"\\", "\u00e9".encode(), "\u65e5\u672c".encode(), "\U0001f642".encode(),
+                  b"\x7f", b"\xc2\x9b", b"\xff", b"\xe3\x81", b"\xed\xa0\x80", b"\xc0\x80", b"\xf4\x90\x80\x80", b"\x80"]
+        rng_names = random.Random(0xd15)
+        names = []
+        while len(names) < 24:
+            data = b"".join(rng_names.choice(pieces) for _ in range(rng_names.randrange(1, 7)))[:32]
+            if data and data.strip(b" ") == data and data not in names:
+                names.append(data)
+
+        def shown(data):
+            text, at = "", 0
+            while at < len(data):
+                for width in (4, 3, 2, 1):
+                    try:
+                        char = data[at:at + width].decode("utf-8")
+                    except UnicodeDecodeError:
+                        continue
+                    if len(char) == 1 and (width == 1 and 0x20 <= ord(char) < 0x7f or width > 1 and ord(char) >= 0xa0):
+                        text += char
+                        at += width
+                        break
+                else:
+                    text += "\\x%02x" % data[at]
+                    at += 1
+            return text
+
+        octal = lambda data: "".join("\\%03o" % byte for byte in data)
+        got = tuned("printf '" + "".join(octal(name) + "\\npasspass1\\n" for name in names[:16]) + "' > /root/wifi\n" +
+                    "printf '" + "".join(octal(name) + "\\n" for name in names) + "' > /root/bluetooth\n" +
+                    "rm -f /root/wifi.power /root/bluetooth.power\n" + say("wifi") + say("bluetooth"))
+        seen = answers(got)
+        for verb, listed in (("wifi", names[:16]), ("bluetooth", names)):
+            rows = [line[len("[Moonwater]   "):] for line in seen[verb]["out"] if line.startswith("[Moonwater]   ")]
+            rows = [row for row in rows if not row.startswith(("* joined", "wifi:", "no networks"))]
+            want = [shown(name) for name in listed]
+            check(rows[:len(want)] == want, f"{verb} shows each saved name as the display spells it",
+                  [(a, b) for a, b in zip(rows, want) if a != b][:3])
+
         # The saved lists survive a write cut short. RLIMIT_FSIZE 0 makes
         # every write fail and kills the writer with SIGXFSZ, the way a
         # crash part way through would: a list written in place was truncated

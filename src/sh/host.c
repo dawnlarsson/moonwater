@@ -5789,6 +5789,8 @@ static b32 radio_switch(string_address path, p8 type, bool on, bool report)
         return radio_failed(report, path, kept, radio_rfkill(type, !on));
 }
 
+/* Whether a line has no control byte: what a saved list may hold and still be
+   read, and the zone and server names of the clock. */
 static bool radio_text_plain(string_address text, positive length)
 {
         positive at;
@@ -5796,6 +5798,26 @@ static bool radio_text_plain(string_address text, positive length)
         for (at = 0; at < length; at++)
                 if (text[at] < 32)
                         return false;
+        return true;
+}
+
+/* Whether a name is one radio_display shows as it is, character for character:
+   printable ASCII and whole UTF-8 characters from U+00A0 up, and no control
+   byte, DEL, C1 control or byte that starts no character. What the verbs
+   store is held to what is shown. */
+static bool radio_text_shown(string_address text)
+{
+        positive length = string_length(text);
+
+        for (positive at = 0; at < length;)
+        {
+                bool printable;
+
+                at += file_terminal_step((const p8 address_to)text + at, length - at, true,
+                                         address_of printable);
+                if (!printable)
+                        return false;
+        }
         return true;
 }
 
@@ -7119,41 +7141,22 @@ static positive radio_display(p8 address_to into, positive room, p8 address_to n
 
         while (at < length && used + 5 < room)
         {
-                p8 byte = name[at];
-                positive span = byte >= 0xf0 && byte < 0xf5 ? 4
-                                : byte >= 0xe0              ? 3
-                                : byte >= 0xc2 && byte < 0xe0 ? 2
-                                                              : 1;
-                p32 point = 0;
-                bool good = byte >= 0x20 && byte < 0x7f;
+                bool printable;
+                positive step = file_terminal_step(name + at, length - at, true,
+                                                   address_of printable);
 
-                if (span > 1 && at + span <= length && byte >= 0xc2 && byte < 0xf5)
+                if (printable && used + step < room)
                 {
-                        point = byte & (0x7f >> span);
-                        good = true;
-                        for (positive next = 1; next < span; next++)
-                        {
-                                good &= (name[at + next] & 0xc0) == 0x80;
-                                point = (point << 6) | (name[at + next] & 0x3f);
-                        }
-                        good &= point >= 0xa0 && (point < 0xd800 || point > 0xdfff) &&
-                                point < 0x110000 &&
-                                point >= (span == 3 ? 0x800u : span == 4 ? 0x10000u : 0x80u);
-                }
-                else
-                        span = 1;
-
-                if (good && used + span < room)
-                {
-                        memory_copy(into + used, name + at, span);
-                        used += span;
-                        at += span;
+                        memory_copy(into + used, name + at, step);
+                        used += step;
                         columns++;
+                        at += step;
                         continue;
                 }
+                //      What is not shown is spelled a byte at a time.
                 into[used++] = '\\';
                 into[used++] = 'x';
-                used += memory_into_hex(into + used, address_of byte, 1);
+                used += memory_into_hex(into + used, name + at, 1);
                 columns += 4;
                 at++;
         }
@@ -7363,6 +7366,14 @@ static bipolar radio_password_read(p8 address_to into, positive room,
                         if (byte < 32)
                                 continue;
                 }
+                else if (byte < 32)
+                {
+                        //      Not what somebody typed: a NUL would end it
+                        //      where it is kept, and what lay before the NUL
+                        //      would be saved as the password.
+                        result = -1;
+                        break;
+                }
                 if (used + 1 < room)
                         into[used++] = byte;
         }
@@ -7470,8 +7481,13 @@ static b32 radio_wifi_bring(bool say)
                 {
                         joined = true;
                         if (say)
-                                host_say(log, host_label "wifi joined %s\n",
-                                         (string_address)networks[at].ssid);
+                        {
+                                p8 shown[RADIO_SSID_MOST * 4 + 1];
+
+                                radio_display(shown, sizeof(shown), networks[at].ssid,
+                                              networks[at].ssid_length);
+                                host_say(log, host_label "wifi joined %s\n", (string_address)shown);
+                        }
                         break;
                 }
                 if (failed == -19)
@@ -7667,8 +7683,7 @@ static b32 radio_wifi_add(string_address ssid, string_address pass)
                 return host_refuse("a WPA password is 8 to 63 characters, "
                                    "or a key of 64 hex digits%s\n",
                                    "");
-        if (!radio_text_plain(ssid, ssid_length) ||
-            (pass_length && !radio_text_plain(pass, pass_length)))
+        if (!radio_text_shown(ssid) || (pass_length && !radio_text_shown(pass)))
                 return host_refuse("that network name cannot be stored%s\n", "");
 
         /*      The radio lock from here, before the network is saved: the
@@ -7855,8 +7870,13 @@ static b32 radio_wifi_status(void)
         string_format(log, host_label "wifi %s\n",
                       off ? (string_address) "off" : (string_address) "on");
         for (at = 0; at < count; at++)
-                string_format(log, host_label "  %s\n",
-                              (string_address)networks[at].ssid);
+        {
+                p8 shown[RADIO_SSID_MOST * 4 + 1];
+
+                radio_display(shown, sizeof(shown), networks[at].ssid,
+                              networks[at].ssid_length);
+                string_format(log, host_label "  %s\n", (string_address)shown);
+        }
 
         if (radio_wifi_why(why, sizeof(why)) ||
             !radio_air_take(address_of air, RADIO_AIR_STALE))
@@ -7970,7 +7990,7 @@ static b32 radio_bluetooth_edit(string_address identity, bool add)
         if (!length || length > 128)
                 return host_refuse("that bluetooth name is empty or too long%s\n",
                                    "");
-        if (add && !radio_text_plain(identity, length))
+        if (add && !radio_text_shown(identity))
                 return host_refuse("that bluetooth name cannot be stored%s\n", "");
 
         lock = radio_lock(true);
@@ -8044,13 +8064,11 @@ static b32 radio_bluetooth_status(void)
                                          address_of start, address_of length))
                 if (length)
                 {
-                        p8 name[129];
+                        p8 shown[128 * 4 + 1];
 
-                        if (length > 128)
-                                length = 128;
-                        memory_copy(name, text + start, length);
-                        name[length] = end;
-                        string_format(log, host_label "  %s\n", (string_address)name);
+                        radio_display(shown, sizeof(shown), text + start,
+                                      length > 128 ? 128 : length);
+                        string_format(log, host_label "  %s\n", (string_address)shown);
                 }
         log_flush();
         return 0;
