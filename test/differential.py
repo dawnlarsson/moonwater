@@ -59808,6 +59808,14 @@ def wifi_scan_fuzz_seeds():
     seeds["air_forged_first.bin"] = b"\x04" + weak + strong + bytes((3, 39, 0x30, 3, 1, 0x31))
     seeds["air_churn.bin"] = b"\x04" + bytes(rng.getrandbits(8) for _ in range(900))
     seeds["air_hidden.bin"] = b"\x04" + bytes((86, 0, 0x10, 87, 0, 0x10, 88, 5, 0x10, 89, 6, 0x00))
+    # Mode 5: twins (count, then whether the real one was given up on and
+    # where it sits, then each twin's signal and seconds to fail): five
+    # louder and quick, four louder and slow, the real one given up on
+    # first, and sixty-three of every kind.
+    seeds["pick_five_quick.bin"] = b"\x05" + bytes((4, 0)) + bytes((10, 0)) * 5
+    seeds["pick_four_slow.bin"] = b"\x05" + bytes((3, 6)) + bytes((10, 19)) * 4
+    seeds["pick_given_up.bin"] = b"\x05" + bytes((2, 1)) + bytes((20, 3, 69, 0, 5, 39))
+    seeds["pick_many.bin"] = b"\x05" + bytes((62, 9)) + bytes(rng.getrandbits(8) for _ in range(126))
     return seeds
 
 
@@ -59815,6 +59823,65 @@ WIFI_SCAN_FUZZ_PRELUDE = r"""
 #define GENL_HEADER 4
 #define RADIO_SSID_MOST 32
 """ + HOSTED_SPAN_BYTE + r"""
+"""
+
+#       What radio_avoid_load, radio_avoid_add, radio_pick_seen and
+#       radio_bss_choose stand on: a clock, the avoid file and the kernel's
+#       list of access points, all the driver's.
+WIFI_PICK_FUZZ_PRELUDE = r"""
+#define NET_STATE_DIR "/run/moonwater"
+#define HOST_CLOCK_BOOTTIME 7
+#ifndef AT_FDCWD
+#define AT_FDCWD (-100)
+#endif
+typedef struct
+{
+        b32 handle;
+        p16 family;
+        p32 mlme;
+        p32 scan;
+} nl80211;
+static p64 air_now_ms;
+static p64 system_clock_ns(b32 clock)
+{
+        (void)clock;
+        return (air_now_ms + 86400000ull) * 1000000ull;
+}
+static p8 air_avoid_file[4096];
+static positive air_avoid_size;
+static bool air_avoid_there;
+static bipolar file_read_once_at(b32 directory, const void *path, address_any into, positive room)
+{
+        (void)directory, (void)path;
+        if (!air_avoid_there)
+                return -2;
+        memcpy(into, air_avoid_file, air_avoid_size < room ? air_avoid_size : room);
+        return (bipolar)(air_avoid_size < room ? air_avoid_size : room);
+}
+static void host_state_ready(void) {}
+static bipolar host_write_file(const void *path, const p8 *bytes, positive length,
+                               positive mode, bool sync)
+{
+        (void)path, (void)mode, (void)sync;
+        if (length > sizeof air_avoid_file)
+                abort();
+        memcpy(air_avoid_file, bytes, length);
+        air_avoid_size = length;
+        air_avoid_there = true;
+        return 0;
+}
+static bool wifi_mac_set(p8 *mac)
+{
+        return (mac[0] | mac[1] | mac[2] | mac[3] | mac[4] | mac[5]) != 0;
+}
+static void radio_air_dump(nl80211 *session, p32 index, netlink_visitor visit,
+                           address_any context);
+static bool radio_air_scan(nl80211 *session, p32 index, p8 *ssid, positive ssid_length,
+                           bool joinable)
+{
+        (void)session, (void)index, (void)ssid, (void)ssid_length, (void)joinable;
+        return true;
+}
 """
 
 WIFI_SCAN_FUZZ_DRIVER = r"""
@@ -60057,6 +60124,112 @@ static void air_model(const p8 *data, positive size)
                 }
 }
 
+/* Mode 5: the air a join chooses from. The real access point, at -70 dBm,
+   and up to sixty-three twins by its name, louder or quieter as the input
+   says, all asking for WPA2 as it does; a twin fails every join it is given
+   after a time of its own, one to forty seconds, as a twin without the
+   password does. The machine joins, gives up on what failed
+   (radio_avoid_add) and joins again a second later, and the real one has to
+   be tried within one join more than there are twins, whether or not it was
+   given up on first (the deauthentication anybody can forge). Before, five
+   louder twins that failed quickly, or four that failed slowly, kept it from
+   ever being tried: one given up on fell off the end of the list, or out of
+   its minute, and was louder than the real one again. */
+#define AIR_TWINS 63
+typedef struct
+{
+        p8 bssid[6];
+        b32 mbm;
+        p32 fail_ms;
+        p32 frequency;
+} air_station;
+static air_station air_world[AIR_TWINS + 1];
+static positive air_world_count;
+
+static void radio_air_dump(nl80211 *session, p32 index, netlink_visitor visit,
+                           address_any context)
+{
+        static const p8 ies[] = {0, 9, 'm', 'o', 'o', 'n', 'w', 'a', 't', 'e', 'r',
+                                 48, 20, 1, 0, 0, 0x0f, 0xac, 4, 1, 0, 0, 0x0f, 0xac, 4,
+                                 1, 0, 0, 0x0f, 0xac, 2, 0, 0};
+
+        (void)session, (void)index;
+        for (positive at = 0; at < air_world_count; at++)
+        {
+                p8 nest[160], body[200], *stop, *message;
+                p8 *put = nest;
+                p32 seen = 100;
+                positive whole;
+
+                put = put_attribute(put, NL80211_BSS_BSSID, air_world[at].bssid, 6);
+                put = put_attribute(put, NL80211_BSS_FREQUENCY, (p8 *)&air_world[at].frequency, 4);
+                put = put_attribute(put, NL80211_BSS_SIGNAL_MBM, (p8 *)&air_world[at].mbm, 4);
+                put = put_attribute(put, NL80211_BSS_SEEN_MS_AGO, (p8 *)&seen, 4);
+                put = put_attribute(put, NL80211_BSS_INFORMATION_ELEMENTS, ies, sizeof ies);
+                stop = put_attribute(body, NL80211_ATTR_BSS | 0x8000, nest, (positive)(put - nest));
+                message = wrap_message(body, (positive)(stop - body), &whole, 34);
+                visit((netlink_header *)message, context);
+                free(message);
+        }
+}
+
+static void pick_model(const p8 *data, positive size)
+{
+        positive twins = size ? 1 + data[0] % AIR_TWINS : 1;
+        bool given_up = size > 1 && (data[1] & 1);
+        positive turn = size > 1 ? data[1] >> 1 : 0;
+        positive joins = 0;
+        nl80211 session = {0};
+
+        air_now_ms = 0;
+        air_avoid_there = false;
+        air_avoid_size = 0;
+        air_world_count = twins + 1;
+        for (positive at = 0; at <= twins; at++)
+        {
+                //      The kernel's list is in no order a twin cannot
+                //      choose: the real one's place in it is the input's.
+                air_station *one = air_world + (at + turn) % (twins + 1);
+                positive from = 2 * at;
+
+                memset(one, 0, sizeof *one);
+                one->bssid[0] = 2;
+                one->bssid[4] = 0x5a;
+                one->bssid[5] = (p8)at;
+                one->frequency = 2412 + 5 * (p32)(at % 13);
+                one->mbm = !at ? -7000 : -100 * (b32)(from < size ? data[from] % 70 : 30);
+                one->fail_ms = !at ? 0 : 1000 * (1 + (from + 1 < size ? data[from + 1] % 40 : 7));
+        }
+        if (given_up)
+                radio_avoid_add(air_world[turn % (twins + 1)].bssid);
+        for (;;)
+        {
+                p8 chosen[6];
+                p32 frequency = 0;
+                air_station *one = null;
+
+                if (radio_bss_choose(&session, 7, (p8 *)"moonwater", 9, true, chosen, &frequency) != 1)
+                        abort();
+                for (positive at = 0; at <= twins && !one; at++)
+                        if (!memcmp(air_world[at].bssid, chosen, 6))
+                                one = air_world + at;
+                if (!one || frequency != one->frequency)
+                        abort();
+                joins++;
+                if (one->bssid[5] == 0)
+                        return;
+                if (joins > twins)
+                {
+                        fprintf(stderr, "the real access point is not tried in %zu joins against %zu twins\n",
+                                (size_t)joins, (size_t)twins);
+                        abort();
+                }
+                air_now_ms += one->fail_ms;
+                radio_avoid_add(chosen);
+                air_now_ms += 1000;
+        }
+}
+
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
         p8 mode;
@@ -60065,9 +60238,14 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 
         if (!size)
                 return 0;
-        mode = data[0] % 5;
+        mode = data[0] % 6;
         data++;
         size--;
+        if (mode == 5)
+        {
+                pick_model(data, size);
+                return 0;
+        }
         if (mode == 4)
         {
                 air_model(data, size);
@@ -60203,6 +60381,14 @@ def harness_wifi_scan_fuzz(argv):
     stay in range, the air never holds more than it may, and a beacon that
     is well formed reads as the model built from its elements the long way
     says -- the name, the key management, the capability's privacy bit.
+    Mode 4 runs a scan's rows through radio_air_keep against a model of the
+    strongest sixty-four names, the joined row never evicted and every field
+    of a row from one access point. Mode 5 lifts radio_avoid_load,
+    radio_avoid_add, radio_pick_seen and radio_bss_choose over a clock, an
+    avoid file and a kernel list of the driver's: up to sixty-three twins of
+    a saved WPA2 network, louder or quieter, each failing every join after
+    its own one to forty seconds, and the real access point, given up on
+    first or not, has to be tried within one join more than there are twins.
     Seeds from wifi_scan_fuzz_seeds(). Exit 2 (NOT RUN) without
     clang/libFuzzer.
 
@@ -60217,13 +60403,16 @@ def harness_wifi_scan_fuzz(argv):
         wait = net_zone_fuzz_wait()
         scan = src_slice(host, "#define NL80211_CMD_NEW_SCAN_RESULTS 34",
                                    "/* Whether the station the machine is associated through is authorized")
+        pick = src_slice(host, "/*\n        The access points given up on",
+                                   "static radio_heard address_to radio_air_find(")
     except ValueError as error:
         print("  FAIL wifi scan fuzz lift: " + str(error))
         write_tally("wifi-scan-fuzz", 0, 1)
         return 1
     return tls_fuzz_run("wifi scan", wifi_scan_fuzz_seeds(),
                         NET_ZONE_FUZZ_SHIM + byte_reader_source() + wait + netlink +
-                        WIFI_SCAN_FUZZ_PRELUDE + scan + WIFI_SCAN_FUZZ_DRIVER, 4096)
+                        WIFI_SCAN_FUZZ_PRELUDE + scan + WIFI_PICK_FUZZ_PRELUDE + pick +
+                        WIFI_SCAN_FUZZ_DRIVER, 4096)
 
 
 
