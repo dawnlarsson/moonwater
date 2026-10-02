@@ -2085,32 +2085,7 @@ static fn link_stamp_keep(p8 address_to key, p8 address_to stamp)
         link_self.stamps_dirty = true;
 }
 
-/*
-        An authenticated initiation proves possession of peer even when its
-        authorization record has just been removed.  Do not merely refuse
-        that rekey and leave the old traffic keys usable: close every live
-        conversation for the identity before another queued datagram can use
-        them.  Unknown identities still cost only the fixed session-table
-        walk and close nothing.
-*/
-static fn link_sessions_forget_peer(p8 address_to peer)
-{
-        for (positive at = 0; at < LINK_SESSIONS; at++)
-                if (link_self.session[at].used &&
-                    crypto_same(link_self.session[at].peer, peer, 32))
-                {
-                        struct link_session address_to s =
-                                link_self.session + at;
-
-                        /* Make queued carry datagrams unaddressable now;
-                           link_sessions_turn performs the descriptor/process
-                           teardown at the next turn. */
-                        crypto_forget(address_of s->now, sizeof(s->now));
-                        crypto_forget(address_of s->next, sizeof(s->next));
-                        crypto_forget(address_of s->before, sizeof(s->before));
-                        s->finished = true;
-                }
-}
+static fn link_sessions_granted(p64 now);
 
 static fn link_server_initiation(p8 address_to datagram, positive length,
                                  p8 address_to address, p16 port, p64 now)
@@ -2180,9 +2155,12 @@ static fn link_server_initiation(p8 address_to datagram, positive length,
         peer = link_peer_keyed(address_of peers, who);
         memory_copy(address_of conversation, hello + WATERLINK_STAMP_BYTES, 8);
         memory_copy(address_of theirs, hello + WATERLINK_STAMP_BYTES + 8, 4);
+        /*      Proof of a key no longer paired: what it has open ends now,
+                before a datagram queued behind this one can use its keys. */
         if (!peer)
         {
-                link_sessions_forget_peer(who);
+                link_self.granted = 0;
+                link_sessions_granted(now);
                 goto forget;
         }
         /* Zero is not a session index: link_index_new deliberately never
@@ -2263,7 +2241,7 @@ static struct link_keys address_to link_keys_for(p32 index,
         {
                 struct link_session address_to s = link_self.session + at;
 
-                if (!s->used)
+                if (!s->used || s->finished)
                         continue;
                 address_to found = s;
                 if (s->now.live && s->now.ours == index)

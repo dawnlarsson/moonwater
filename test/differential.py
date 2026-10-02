@@ -63072,6 +63072,9 @@ static fn link_peers_unlock(bipolar handle) { (void)handle; }
         sec(hs, "#define WATERLINK_PROTOCOL", "#endif // WATERLINK_HANDSHAKE_INCLUDED"),
         sec(disc, "#define WATERLINK_MDNS_PORT 5353", "#endif // WATERLINK_DISCOVER_INCLUDED"),
         sec(svc, "#define LINK_PORT 22348", "/*      A grant by name"),
+        sec(svc, "typedef struct\n{\n        string_address name;",
+            "// The grant a word names, or 0."),
+        sec(svc, "// The grant a request byte needs", "static p64 link_now(void)"),
         sec(svc, "static p64 link_now(void)", "// All digits and nothing else"),
         sec(svc, "static bool link_name_good(", "/* Everything waterlink keeps"),
         sec(svc, "typedef struct\n{\n        struct waterlink_peer peer[LINK_PEERS_MAX];",
@@ -63102,6 +63105,8 @@ static fn link_peers_unlock(bipolar handle) { (void)handle; }
         "p8 *payload)\n{\n        (void)context; (void)head; (void)payload;\n"
         "        return true;\n}\n",
         sec(svc, "// The handshake, at the machine's end", "// The state file, for"),
+        sec(svc, "/*      Grants as they are now for what is open",
+            "static p64 link_sessions_turn(p64 now)"),
         sec(svc, "static fn link_note_seen(struct link_session address_to s, p64 wall)\n{",
             "//      Never more than once a fifth"),
         sec(svc, "typedef struct\n{\n        struct waterlink_noise noise;",

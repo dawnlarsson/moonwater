@@ -71826,17 +71826,30 @@ static fn responder(bipolar listener, p16 port)
         wls_initiation(datagram, 12, 1001, 0x01020305);
         link_server_initiation(datagram, WATERLINK_DATAGRAM, wls_loopback, port,
                                3000000);
-        check("sec: forgetting makes every traffic-key epoch unaddressable "
-              "before queued carry datagrams are dispatched",
-              link_self.session[0].finished && !link_self.session[0].now.live &&
-                      !link_self.session[0].next.live &&
-                      !link_self.session[0].before.live);
+        {
+                struct link_session address_to s = link_self.session;
+                struct link_session address_to found;
+
+                check("sec: forgetting makes every traffic-key epoch unaddressable "
+                      "before queued carry datagrams are dispatched",
+                      s->finished && !link_keys_for(s->now.ours, address_of found) &&
+                              !link_keys_for(s->next.ours, address_of found) &&
+                              !link_keys_for(s->before.ours, address_of found));
+        }
         link_self.server = true;
         (void)link_sessions_turn(3000001);
         link_self.server = false;
-        check("sec: a forgotten peer's authenticated rekey closes its live "
-              "session and is not answered",
-              wls_sessions_used() == 0 && wls_heard(listener, answer) <= 0);
+        {
+                bipolar heard;
+                bool answered = false;
+
+                //      Told the session is closed, and nothing else.
+                while ((heard = wls_heard(listener, answer)) > 0)
+                        answered |= heard == WATERLINK_DATAGRAM;
+                check("sec: a forgotten peer's authenticated rekey closes its "
+                      "live session and is not answered",
+                      wls_sessions_used() == 0 && !answered);
+        }
 
         for (positive at = 0; at < LINK_SESSIONS; at++)
                 if (link_self.session[at].used)
@@ -73878,6 +73891,7 @@ static fn epochs_generated(void)
                 if (!link_session_open(s))
                         return;
                 wls_seeded(s->peer, 32, (p8)seed);
+                wls_peers_with(s->peer, WATERLINK_MAY_RUN);
                 last_port = 0;
                 waterlink_link_reset(tx);
                 base = link_now();
@@ -73917,7 +73931,12 @@ static fn epochs_generated(void)
                         }
                         if (!again && roll < 15 && op > 600 && !forgotten)
                         {
-                                link_sessions_forget_peer(s->peer);
+                                p8 other[32];
+
+                                memory_fill(other, 0x77, sizeof other);
+                                wls_peers_with(other, WATERLINK_MAY_RUN);
+                                link_self.granted = 0;
+                                link_sessions_granted(base + at);
                                 forgotten = true;
                                 continue;
                         }
