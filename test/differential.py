@@ -38549,6 +38549,18 @@ static bipolar system_open_output_at(bipolar d, string_address p, int replace, p
 static bipolar system_make_directory_at(bipolar d, string_address p, positive m) {
         return answer(mkdirat((int)d, p, (mode_t)m));
 }
+typedef struct { unsigned short mode; } system_path_identity;
+#define address_of &
+#define SYSTEM_PATH_AT_EMPTY_PATH AT_EMPTY_PATH
+#define SYSTEM_PATH_STATX_TYPE 1
+static bipolar system_path_identity_at(bipolar d, string_address p, positive f, positive r,
+                                       system_path_identity *into) {
+        struct stat seen;
+        (void)r;
+        if (fstatat((int)d, p, &seen, (int)f) < 0) return -errno;
+        into->mode = (unsigned short)seen.st_mode;
+        return 0;
+}
 static bipolar system_remove_at(bipolar d, string_address p, positive f) {
         return answer(unlinkat((int)d, p, (int)f));
 }
@@ -41844,13 +41856,15 @@ while True:
                   f"moonwater {command} does not write through a link at /root/{state}",
                   [line for line in lines if f"@@planted {state}" in line])
 
-        # Every state file under /root, replaced before a verb that writes it
-        # and one that reads it by every kind of thing a name can be: a link
-        # to a file, a link to nowhere, a FIFO with nobody on the other end,
-        # a directory, and a character device mounted over the name. A verb
-        # must answer within its five seconds, never write through to what a
-        # link names or into the directory, and leave the device a device.
-        states = [("wifi", "wifi add plantnet passpass1", "wifi"),
+        # Every state file under /root and /run/moonwater, replaced before a
+        # verb that writes it and one that reads it by every kind of thing a
+        # name can be: a link to a file, a link to nowhere, a FIFO with nobody
+        # on the other end, a directory, and a character device mounted over
+        # the name. A verb must answer within its five seconds, never write
+        # through to what a link names or into the directory, and leave the
+        # device a device.
+        states = [(f"/root/{name}", writer, reader) for name, writer, reader in (
+                  ("wifi", "wifi add plantnet passpass1", "wifi"),
                   ("wifi.power", "wifi on", "wifi"),
                   ("wired.power", "wired off", "wired"),
                   ("bluetooth", "bluetooth add plantdev", "bluetooth"),
@@ -41866,21 +41880,22 @@ while True:
                   ("link", "link off", "link"),
                   ("link.key", "link key", "link"),
                   ("link.peers", "link forget nobody", "link"),
-                  ("link.groups", "link join plantlab allow run", "link")]
+                  ("link.groups", "link join plantlab allow run", "link"))] + [
+                  ("/run/moonwater/settings.next", "bind init add true", "bind init"),
+                  ("/run/moonwater/settings", "bind init add true", "bind init")]
         kinds = {"link": "ln -s /tmp/victim {p}",
                  "dangling": "ln -s /tmp/nowhere/victim {p}",
                  "fifo": "mkfifo {p}",
                  "directory": "mkdir {p} && echo SAFE > {p}/inner",
                  "device": ": > {p} && mount --bind /dev/null {p}"}
-        script = "mkdir -p /tmp/nowhere\n"
-        for state, writer, reader in states:
+        script = "mkdir -p /tmp/nowhere /run/moonwater\n"
+        for path, writer, reader in states:
             for kind, plant in kinds.items():
                 for role, verb in (("writes", writer), ("reads", reader)):
-                    path = "/root/" + state
                     script += (f"umount {path} 2>/dev/null; rm -rf {path} /tmp/nowhere/victim; "
                                f"echo SAFE > /tmp/victim; {plant.format(p=path)}\n"
                                f"timeout 5 /tmp/moonwater {verb} > /dev/null 2>&1 < /dev/null; "
-                               f"echo \"@@object {state} {kind} {role} $? $(cat /tmp/victim) "
+                               f"echo \"@@object {path} {kind} {role} $? $(cat /tmp/victim) "
                                f"$(cat {path}/inner 2>/dev/null || echo -) "
                                f"$(test -e /tmp/nowhere/victim && echo made || echo -) "
                                f"$(test -c {path} && echo char || echo -)\"\n"
@@ -41888,17 +41903,17 @@ while True:
         sys_reset()
         lines, finished = session(script)
         check(finished, "the planted objects run finished", "")
-        for state, writer, reader in states:
+        for path, writer, reader in states:
             for kind in kinds:
                 for role, verb in (("writes", writer), ("reads", reader)):
                     row = [line.split() for line in lines
-                           if line.startswith(f"@@object {state} {kind} {role} ")]
+                           if line.startswith(f"@@object {path} {kind} {role} ")]
                     status, victim, inner, made, device = (row[0][4:9] if row and len(row[0]) >= 9
                                                            else ("-",) * 5)
                     check(row and status != "124" and victim == "SAFE" and made == "-" and
                           (kind != "directory" or inner == "SAFE") and
                           (kind != "device" or device == "char"),
-                          f"moonwater {verb} with a {kind} at /root/{state}",
+                          f"moonwater {verb} with a {kind} at {path}",
                           row[0] if row else "no answer")
 
         # A secret on the command line is in /proc/PID/cmdline, which every

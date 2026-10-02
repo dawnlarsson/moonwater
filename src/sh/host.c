@@ -270,13 +270,25 @@ static bipolar host_read_state(string_address path, p8 address_to into,
 static bipolar host_open_state(bipolar directory, string_address path,
                                positive mode)
 {
-        bipolar handle = system_open_output_at(directory, path, true, mode);
+        //      Nonblocking, and a file or nothing: a FIFO at the name held the
+        //      writer until a reader came, and a device took the mode.
+        bipolar handle = system_open_at_mode(directory, path,
+                                             FILE_WRITE | O_CLOEXEC | O_NOFOLLOW |
+                                                 O_NONBLOCK,
+                                             mode);
+        system_path_identity facts;
         bipolar moded;
 
         if (handle < 0)
                 return handle;
 
-        moded = system_call_2(syscall(fchmod), (positive)handle, mode);
+        moded = system_path_identity_at(handle, (string_address) "",
+                                        SYSTEM_PATH_AT_EMPTY_PATH,
+                                        SYSTEM_PATH_STATX_TYPE, address_of facts);
+        if (moded >= 0)
+                moded = (facts.mode & 0170000) == 0100000
+                            ? system_call_2(syscall(fchmod), (positive)handle, mode)
+                            : -22;
         if (moded < 0)
         {
                 system_close(handle);
