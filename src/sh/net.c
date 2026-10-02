@@ -1277,6 +1277,27 @@ static COLD fn net_lease_retry_after(net_holding address_to held, positive now,
         held->retry = (p32)(gone + delay);
 }
 
+/* A lease's default route. The router is on the leased prefix, or the lease
+   is a /32 whose router is off it, which dhcp_lease_usable allows because
+   the clouds hand them out: then the kernel is told the router is on the
+   link, as dhclient's script and systemd-networkd do, since it refuses a
+   gateway no address covers ("Nexthop has invalid gateway"), and that
+   refusal rolled the whole lease back. */
+static COLD bipolar net_lease_route(b32 handle, const dhcp_lease address_to lease,
+                                    p32 index, bool exclusive)
+{
+        p32 mask = lease->mask ? lease->mask : 0xffffff00u;
+
+        return netlink_route_change(
+            handle, RTM_NEWROUTE,
+            NLM_REQUEST | NLM_ACK | NLM_CREATE |
+                (exclusive ? NLM_EXCLUSIVE : NLM_REPLACE),
+            0, 0, lease->router, index,
+            (lease->router & mask) != (lease->address & mask)
+                ? NETLINK_ROUTE_ONLINK
+                : 0);
+}
+
 static COLD fn net_rollback_record(bipolar status,
                               bipolar address_to first)
 {
@@ -1347,9 +1368,9 @@ static COLD bipolar net_lease_rollback(
 
                 if (net_owns_route(previous))
                 {
-                        bipolar status = netlink_route_add(
-                            handle, 0, 0, previous->lease.router,
-                            previous->index);
+                        bipolar status = net_lease_route(
+                            handle, address_of previous->lease,
+                            previous->index, false);
                         if (status < 0 && !failed)
                                 failed = status;
                         same = lease->router == previous->lease.router &&
@@ -1444,11 +1465,8 @@ static COLD b32 net_apply_lease(b32 handle, p32 index, string_address name,
 
         if (route_changed && lease->router)
         {
-                status = net_owns_route(previous)
-                             ? netlink_route_add(handle, 0, 0, lease->router,
-                                                 index)
-                             : netlink_route_acquire(handle, 0, 0,
-                                                     lease->router, index);
+                status = net_lease_route(handle, lease, index,
+                                         !net_owns_route(previous));
                 route_applied = status >= 0;
                 if (status < 0 && status != -EEXIST)
                 {

@@ -1098,11 +1098,15 @@ static bipolar netlink_address_change(b32 handle, p16 type, p16 flags,
         The gateway has to be reachable already, which for a default route
         means the address added above has to cover it. The kernel says ENETUNREACH
         when it does not, which reads as a network problem and is really an
-        ordering one.
+        ordering one -- except for a gateway said to be on the link
+        (NETLINK_ROUTE_ONLINK), which the kernel takes without an address
+        that covers it: a /32 lease and its router.
 */
+#define NETLINK_ROUTE_ONLINK 4 // RTNH_F_ONLINK
+
 static bipolar netlink_route_change(b32 handle, p16 type, p16 flags,
                                     p32 destination, p8 bits, p32 gateway,
-                                    p32 index)
+                                    p32 index, p32 route_flags)
 {
         netlink_buffer request = {0};
         netlink_route address_to body;
@@ -1121,6 +1125,7 @@ static bipolar netlink_route_change(b32 handle, p16 type, p16 flags,
         body->protocol = RTPROT_BOOT;
         body->scope = gateway ? RT_SCOPE_UNIVERSE : RT_SCOPE_LINK;
         body->kind = RTN_UNICAST;
+        body->flags = route_flags;
 
         if (bits)
                 netlink_attribute_add(address_of request, RTA_DST,
@@ -1144,17 +1149,17 @@ static bipolar netlink_route_change(b32 handle, p16 type, p16 flags,
 //      EEXIST.
 #define netlink_route_add(handle, destination, bits, gateway, index) netlink_route_change( \
         handle, RTM_NEWROUTE, NLM_REQUEST | NLM_ACK | NLM_CREATE | NLM_REPLACE,            \
-        destination, bits, gateway, index)
+        destination, bits, gateway, index, 0)
 
 /* An existing route is state, not spare capacity.  Initial DHCP acquisition
    uses EXCLUSIVE so a pre-existing default route is reported as a conflict
    and remains byte-for-byte kernel state owned by whoever installed it. */
 #define netlink_route_acquire(handle, destination, bits, gateway, index) netlink_route_change( \
         handle, RTM_NEWROUTE, NLM_REQUEST | NLM_ACK | NLM_CREATE | NLM_EXCLUSIVE,              \
-        destination, bits, gateway, index)
+        destination, bits, gateway, index, 0)
 
 #define netlink_route_delete(handle, destination, bits, gateway, index) netlink_route_change( \
-        handle, RTM_DELROUTE, NLM_REQUEST | NLM_ACK, destination, bits, gateway, index)
+        handle, RTM_DELROUTE, NLM_REQUEST | NLM_ACK, destination, bits, gateway, index, 0)
 
 /*
         Everything of one kind, walked.
