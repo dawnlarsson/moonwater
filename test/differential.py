@@ -60810,6 +60810,45 @@ def harness_wifi_air(argv):
     lines.append("kill $(cat /tmp/twin0.pid) $(cat /tmp/twin1.pid); rm -f /root/wifi")
     family("twin", lines)
 
+    # ---- starve: twins of the saved WPA2 network that ask for WPA2 as it
+    # does, every one louder, under another password: each takes message 2
+    # and gives the machine up. The real one is left at the bottom of the
+    # air and the machine has to reach it having tried each twin once.
+    # With four given up on for a minute and the loudest first, five such
+    # twins took turns and the real one was never tried.
+    lines = []
+    other = good["password"] + "-not"
+    lines.append("moonwater wifi remove \"$ap0\" > /dev/null 2>&1; rm -f /root/wifi /run/moonwater/wifi.avoid /run/moonwater/wifi.last")
+    lines.append("$A /mnt/stick/hwsim_radio power $i0 2")
+    starve = 5
+    for at in range(starve):
+        body = ["network={", "ssid=%s" % good["ssid"].hex(), "mode=2",
+                "frequency=%d" % (2407 + 5 * (1, 6, 11, 3, 9)[at]),
+                "proto=RSN", "pairwise=CCMP", "group=CCMP", "key_mgmt=WPA-PSK",
+                "psk=\"%s\"" % other, "}"]
+        lines.append("/mnt/stick/hwsim_radio new > /dev/null; tn=$(station $S); sm%d=$(cat /sys/class/net/$tn/address); "
+                     "is%d=$(/mnt/stick/hwsim_radio move $NS $tn)" % (at, at))
+        lines.append("printf '%%s\\n' %s > /tmp/starve%d.conf" % (" ".join(q(line) for line in body), at))
+        lines.append("$A $W -B -i $is%d -c /tmp/starve%d.conf -D nl80211 -f /tmp/starve%d.log -P /tmp/starve%d.pid" % (at, at, at, at))
+        lines.append("for i in $(seq 40); do grep -q AP-ENABLED /tmp/starve%d.log 2>/dev/null && break; sleep 0.25; done" % at)
+        lines.append("$A /mnt/stick/hwsim_radio power $is%d %d" % (at, 20 - at))
+        lines.append("c%d=$(dmesg | grep -c \"$S: authenticate with $sm%d\")" % (at, at))
+    lines.append("scen_count 'starve five twins up' %d \"$(grep -l AP-ENABLED /tmp/starve*.log | wc -l)\"" % starve)
+    # A whole scan once the last scan has expired, so the kernel lists every
+    # twin and not only those on the channel the machine was on.
+    lines.append("sleep 31; moonwater wifi > /dev/null 2>&1")
+    lines.append("t0=$(uptime_now); printf '%%s\\n' %s | moonwater wifi add \"$ap0\" - > /tmp/sc.got 2>&1" % q(good["password"]))
+    lines.append("for i in $(seq 720); do [ \"$(joined \"$ap0\")\" = 1 ] && break; sleep 0.25; done; echo \"wifi-time starve $(took $t0)\"")
+    lines.append("scen_count 'starve joined past five louder twins' 1 \"$(joined \"$ap0\")\"")
+    lines.append("scen_count 'starve joined through the real one' 1 \"$([ \"$(dmesg | grep -a \"$S: authenticate with\" | tail -1 | sed 's/.*authenticate with \\([0-9a-f:]*\\).*/\\1/')\" = \"$rm0\" ] && echo 1 || echo 0)\"")
+    lines.append("tried=0; once=0; for k in %s; do eval \"m=\\$sm$k c=\\$c$k\"; n=$(( $(dmesg | grep -c \"$S: authenticate with $m\") - c )); [ $n -gt $tried ] && tried=$n; [ $n = 1 ] && once=$((once + 1)); done" % " ".join(str(at) for at in range(starve)))
+    lines.append("scen_count 'starve no twin tried twice' 1 \"$([ $tried -le 1 ] && echo 1 || echo 0)\"")
+    lines.append("scen_count 'starve every twin tried once first' %d \"$once\"" % starve)
+    lines.append("od -An -tx1 /run/moonwater/wifi.avoid 2>/dev/null | head -12 | sed 's/^/starve-avoid /'; cat /tmp/sc.got | sed 's/^/starve-add /'")
+    lines.append("dmesg | grep -a -e \"$S: authenticate with\" | tail -12 | sed 's/^/starve-log /'")
+    lines.append("kill %s; rm -f /root/wifi" % " ".join("$(cat /tmp/starve%d.pid)" % at for at in range(starve)))
+    family("starve", lines)
+
     # ---- rekey: hostapd, whose control socket starts rekeys on demand.
     # Two access points by one name, the first much the stronger, each
     # with its own DHCP server; a lease of 20 s, so a renewal every ten
@@ -60848,6 +60887,21 @@ def harness_wifi_air(argv):
         lines.append("scen_count 'rekey no handshake timeout' \"$h0\" \"$(dmesg | grep -c -e 4WAY_HANDSHAKE_TIMEOUT -e GROUP_KEY_HANDSHAKE_TIMEOUT)\"")
         lines.append("n0=$(dmesg | grep -c \"lease renewed on $S\"); for i in $(seq 60); do [ \"$(dmesg | grep -c \"lease renewed on $S\")\" -gt \"$n0\" ] && break; sleep 0.5; done")
         lines.append("scen_count 'rekey data through the new keys' 1 \"$([ \"$(dmesg | grep -c \"lease renewed on $S\")\" -gt \"$n0\" ] && echo 1 || echo 0)\"")
+        # A message 1 in the access point's own name, with an ANonce of
+        # nobody's and the last replay counter there is: answered, as
+        # wpa_supplicant answers it, and nothing more. Its counter is not
+        # kept, so the access point's next group and pairwise rekeys, at
+        # counters far below it, still go through.
+        anonce = bytes(rng.getrandbits(8) for _ in range(32))
+        forged = (bytes((2, 3)) + (95).to_bytes(2, "big") + bytes((2,)) + (0x008a).to_bytes(2, "big") +
+                  (16).to_bytes(2, "big") + b"\xff" * 8 + anonce + bytes(16 + 8 + 8 + 16) + bytes(2))
+        lines.append("g1=$(grep -c 'group key handshake completed' /tmp/rk0.log); p1=$(grep -c 'pairwise key handshake completed' /tmp/rk0.log)")
+        lines.append("$HC -i $j0 raw EAPOL_TX $mac %s > /dev/null; sleep 2" % forged.hex())
+        lines.append("$HC -i $j0 raw REKEY_GTK > /dev/null; sleep 6")
+        lines.append("scen_count 'rekey after a forged message 1, group key handshake completed' 1 \"$(( $(grep -c 'group key handshake completed' /tmp/rk0.log) - g1 ))\"")
+        lines.append("$HC -i $j0 raw REKEY_PTK $mac > /dev/null; sleep 6")
+        lines.append("scen_count 'rekey after a forged message 1, pairwise key handshake completed' 1 \"$(( $(grep -c 'pairwise key handshake completed' /tmp/rk0.log) - p1 ))\"")
+        lines.append("scen_count 'rekey after a forged message 1, still joined' 1 \"$(joined \"$rk\")\"")
         # No message 1 from either: hostapd hands its EAPOL frames to the
         # control socket instead of the air, then gives up on its own
         # schedule and sends the machine away.
