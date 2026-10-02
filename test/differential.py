@@ -61577,6 +61577,10 @@ static struct waterlink_peer *link_peer_keyed(link_peers *peers, p8 *key)
         return &one;
 }
 
+/*      Whether a path is the link's own: what the machine's files say,
+        which this does not have. */
+static bool link_path_is_own(string_address path) { (void)path; return false; }
+
 static bool link_post(struct link_session *s, p8 key, p8 flags, p8 type,
                       p8 *data, positive length)
 {
@@ -63325,7 +63329,7 @@ static bipolar link_groups_save(link_groups address_to groups)
         sec(svc, "typedef struct\n{\n        address_any base;", "static fn link_batch_flush(void)"),
         sec(svc, "// A sealed datagram of nothing", "static bool link_post("),
         SERVICE_STUBS,
-        sec(near, "#define LINK_GROUPS_PATH", "fn link_groups_load("),
+        sec(near, "#define LINK_PEERS_LOCK", "fn link_groups_load("),
         NEARBY_STUBS,
         sec(near, "static p64 link_boot_seconds(void)", "/*\n        The peers file has two writers now"),
         sec(near, "static fn link_name_for(", "// The listener's side of it"),
