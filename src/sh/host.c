@@ -2296,13 +2296,14 @@ static bool host_settings_find(host_settings address_to settings, p8 list,
         p8 text[SPARK_SETTINGS_TEXT_MOST + 1];
         positive id = 0;
         positive at = 0;
-        bool by_id = *wanted != end;
+        string_address stop = wanted;
+        b32 range = 0;
+        bool by_id = byte_is_digit(*wanted);
 
-        for (string_address digit = wanted; *digit && by_id; digit++)
-        {
-                by_id = byte_is_digit(*digit) && id <= 0xffff;
-                id = id * 10 + (positive)(*digit - '0');
-        }
+        if (by_id)
+                id = string_to_number_unsigned_checked(wanted, address_of stop, 10,
+                                                       address_of range);
+        by_id = by_id && !*stop && !range && id <= 0xffff;
 
         while (host_settings_next(settings, address_of at, into))
         {
@@ -3253,10 +3254,10 @@ static fn host_event_shown(p8 address_to into, string_address text)
 static fn host_event_ending(p8 address_to into, positive room, positive status)
 {
         p8 number[24];
+        positive code = (positive)wait_status_code_base((p32)status, 256);
 
-        positive_into_string(number,
-                             status & 0x7f ? status & 0x7f : status >> 8 & 0xff);
-        string_copy_bounded(into, status & 0x7f ? "killed by signal " : "exited ", room);
+        positive_into_string(number, code >= 256 ? code & 0xff : code);
+        string_copy_bounded(into, code >= 256 ? "killed by signal " : "exited ", room);
         string_append_bounded(into, number, room);
 }
 
@@ -3279,35 +3280,49 @@ static fn host_kmsg(string_address address_to parts)
         system_close(handle);
 }
 
-/* /shell -c text in a session of its own, from /root, its output where asked or inherited. */
-static bipolar host_event_start(string_address text, bipolar output,
-                                string_address address_to environment)
+/*
+        /shell in a session of its own, from /root, with the environment init's
+        entries get. Its input is /dev/null and its output stays what the
+        caller has unless output is a descriptor to put there. Given a
+        terminal, all three are that terminal, opened here, after the session
+        is made, so that it is the shell's own and its controlling one.
+*/
+static bipolar host_shell_start(string_address address_to argv, positive count,
+                                string_address terminal, bipolar output)
 {
         bipolar child = system_fork();
+        bipolar handle;
 
         if (child)
                 return child;
 
+        system_call(syscall(setsid));
+        handle = system_open_at(AT_FDCWD, terminal ? terminal : (string_address) "/dev/null",
+                                FILE_READ_WRITE | O_CLOEXEC | O_NOFOLLOW);
+        if (terminal && handle < 3)
+                system_call_1(syscall(exit), 126);
+
+        if (handle > 0)
+                for (positive at = 0; at < (terminal ? 3 : 1); at++)
+                        system_call_3(syscall(dup3), (positive)handle, at, 0);
+        if (!terminal && output > 2)
         {
-                string_address argv[] = {HOST_EVENT_SHELL, "-c", text, null};
-                bipolar quiet = system_open_at(AT_FDCWD, "/dev/null",
-                                               FILE_READ_WRITE | O_CLOEXEC);
-
-                system_call(syscall(setsid));
-                if (quiet > 0)
-                        system_call_3(syscall(dup3), (positive)quiet, 0, 0);
-                if (output > 2)
-                {
-                        system_call_3(syscall(dup3), (positive)output, 1, 0);
-                        system_call_3(syscall(dup3), (positive)output, 2, 0);
-                }
-
-                system_call_1(syscall(chdir), (positive)(string_address)"/root");
-                (void)shell_exec_file(HOST_EVENT_SHELL, argv, 3, environment);
-                system_call_1(syscall(exit), 127);
+                system_call_3(syscall(dup3), (positive)output, 1, 0);
+                system_call_3(syscall(dup3), (positive)output, 2, 0);
         }
 
+        system_call_1(syscall(chdir), (positive)(string_address) "/root");
+        (void)shell_exec_file(HOST_EVENT_SHELL, argv, count, host_event_environment());
+        system_call_1(syscall(exit), 127);
         return -1;
+}
+
+/* /shell -c text, its output where asked or inherited. */
+static bipolar host_event_start(string_address text, bipolar output)
+{
+        string_address argv[] = {HOST_EVENT_SHELL, "-c", text, null};
+
+        return host_shell_start(argv, 3, null, output);
 }
 
 /*
@@ -3407,7 +3422,7 @@ static fn host_events_boot(host_settings address_to settings)
 
                 host_write_text(status_path, "running\n");
                 output = host_open_state(AT_FDCWD, path, 0600);
-                child = host_event_start(text, output, host_event_environment());
+                child = host_event_start(text, output);
                 if (output >= 0)
                         system_close(output);
 
@@ -3477,7 +3492,7 @@ fn host_exit_run(void)
 
                 //      The environment init's entries get, not the stopping
                 //      shell's: a bound poweroff has almost none.
-                child = host_event_start(text, -1, host_event_environment());
+                child = host_event_start(text, -1);
                 if (child < 0)
                         continue;
 
@@ -3571,8 +3586,7 @@ static bool host_console_is_screen(void)
 
         for (string_address at = (string_address)active; *at;)
         {
-                if (at[0] == 't' && at[1] == 't' && at[2] == 'y' &&
-                    at[3] >= '0' && at[3] <= '9')
+                if (host_starts(at, "tty") && byte_is_digit(at[3]))
                         return true;
 
                 at = string_first_of_or_end(at, ' ');
@@ -3585,88 +3599,29 @@ static bool host_console_is_screen(void)
 /* Whether a process that is not gone is on tty1: its controlling terminal is 4:1. */
 static bool host_tty1_held(void)
 {
-        bipolar handle = system_open_at(AT_FDCWD, "/proc", FILE_READ | O_DIRECTORY | O_CLOEXEC);
-        p8 records[2048];
-        positive have = 0;
-        positive at = 0;
-        bipolar error = 0;
-        struct linux_dirent64 address_to record;
+        static system_snapshot sample;
         bool held = false;
 
-        if (handle < 0)
+        if (!system_snapshot_take(address_of sample, SPARK_SNAPSHOT_PROCESS, false))
                 return false;
-        while (!held && (record = file_directory_next(handle, records, sizeof(records),
-                                                      address_of have, address_of at,
-                                                      address_of error)))
-        {
-                string_address name = (string_address)record->d_name;
-                p8 path[48];
-                p8 text[512];
-                bipolar got;
-                positive bracket = 0;
 
-                if (!byte_is_digit(name[0]) ||
-                    !host_join(path, sizeof(path), "/proc/", name) ||
-                    string_append_bounded(path, "/stat", sizeof(path)) >= sizeof(path))
-                        continue;
-                got = file_slurp_once_at(AT_FDCWD, path, text, sizeof(text) - 1);
-                if (got <= 0)
-                        continue;
-                text[got] = end;
+        for (positive at = 0; at < sample.header.process_count; at++)
+                held |= sample.processes[at].tty == (4 << 8 | 1) &&
+                        sample.processes[at].state != 'Z';
 
-                //      "pid (comm) S ppid pgrp session tty_nr": the name may hold
-                //      anything, so the fields are counted from its last bracket.
-                for (positive scan = 0; text[scan]; scan++)
-                        if (text[scan] == ')')
-                                bracket = scan;
-                if (!bracket || text[bracket + 1] != ' ' || text[bracket + 2] == 'Z')
-                        continue;
-                {
-                        string_address field = (string_address)text + bracket + 3;
-                        positive skipped = 0;
-
-                        while (skipped < 4 && *field)
-                                skipped += *field++ == ' ';
-                        held = skipped == 4 && field[0] == '1' && field[1] == '0' &&
-                               field[2] == '2' && field[3] == '5' && field[4] == ' ';
-                }
-        }
-        system_close((positive)handle);
         return held;
 }
 
 /* A shell on tty1, in a session of its own, for a console that has none. */
 static fn host_tty1_shell(void)
 {
-        bipolar child;
+        string_address argv[] = {HOST_EVENT_SHELL, null};
 
         //      One is enough: each canvas off over a console that is not a
         //      screen forked another, and none ended, so after a few round
         //      trips tty1 had as many shells splitting its keys.
-        if (host_tty1_held())
-                return;
-
-        child = system_fork();
-
-        if (child)
-                return;
-
-        {
-                string_address argv[] = {HOST_EVENT_SHELL, null};
-                bipolar tty;
-
-                system_call(syscall(setsid));
-                tty = system_open_at(AT_FDCWD, "/dev/tty1", FILE_READ_WRITE);
-                if (tty < 3)
-                        system_call_1(syscall(exit), 126);
-
-                for (positive at = 0; at < 3; at++)
-                        system_call_3(syscall(dup3), (positive)tty, at, 0);
-
-                system_call_1(syscall(chdir), (positive)(string_address)"/root");
-                (void)shell_exec_file(HOST_EVENT_SHELL, argv, 1, host_event_environment());
-                system_call_1(syscall(exit), 127);
-        }
+        if (!host_tty1_held())
+                host_shell_start(argv, 1, "/dev/tty1", -1);
 }
 
 /*

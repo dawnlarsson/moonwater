@@ -2241,13 +2241,9 @@ static b32 host_machine_call(positive slot, string_address name,
 
 static fn host_machine_bind_fn(p8 address_to into, positive room, string_address rest)
 {
-        positive i;
-
         string_copy_bounded(into, "moonwater_", room);
         string_append_bounded(into, rest, room);
-        for (i = 0; into[i]; i++)
-                if (into[i] == ' ')
-                        into[i] = '_';
+        string_replace_all(into, ' ', '_');
 }
 
 static bool host_machine_try(string_address rest, string_address first,
@@ -2305,12 +2301,15 @@ static fn host_machine_lock_fns(bool lock)
         the byte count, every line number and the same set of functions, and
         that leaves a stale body rather than an event nobody runs.
 */
-static bool host_machine_changed(void)
+static bool host_machine_changed(bipolar device)
 {
         struct machine_script held = host_machine;
 
+        //      On the descriptor this process already holds: the device was
+        //      opened and closed again for every event.
         memory_zero(address_of host_machine, sizeof(host_machine));
-        if (host_machine_script(MOONWATER_SCRIPT_GET) < 0) {
+        host_machine.op = MOONWATER_SCRIPT_GET;
+        if (system_control(device, MOONWATER_IOCTL_SCRIPT, address_of host_machine) < 0) {
                 host_machine = held;
                 return false;
         }
@@ -2466,7 +2465,6 @@ static b32 host_machine_source(void)
         string_address argv[3];
         string_address address_to saved_argv;
         positive saved_argc;
-        bipolar handle;
         bipolar failed;
 
         memory_zero(address_of host_machine, sizeof(host_machine));
@@ -2478,12 +2476,8 @@ static b32 host_machine_source(void)
         host_machine_fresh = 1;
 
         host_state_ready();
-        handle = host_open_state(AT_FDCWD, HOST_MACHINE_RUNTIME, 0600);
-        if (handle < 0)
-                return handle;
-        failed = storage_format_write(handle, host_machine_text, host_machine.length,
-                                      0);
-        system_close(handle);
+        failed = host_write_file(HOST_MACHINE_RUNTIME, host_machine_text,
+                                 host_machine.length, 0600, false);
         if (failed < 0)
                 return failed;
 
@@ -2686,7 +2680,7 @@ static b32 host_machine_run(void)
                 //      Before the event is named, because naming it is how
                 //      the new overlay decides whether the script owns it,
                 //      and the functions have to be the new ones by then.
-                if (host_machine_changed())
+                if (host_machine_changed(device))
                         host_machine_reload(slot);
                 pair = moonwater_paired(control.event);
                 if (pair) {
