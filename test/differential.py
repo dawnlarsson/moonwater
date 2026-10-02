@@ -59529,6 +59529,10 @@ def harness_guest_scenarios(argv):
                     networks.append(current)
             current = None
             want_ssid = True
+        # More than the sixteen rows read, or past the room they are read into:
+        # a list the verbs would write back short is not rewritten, and is said
+        # to be too long to change.
+        cut = len(networks) >= 16 and at < len(text) or len(data) >= 8191
         if not want_ssid and len(networks) < 16 and current is not None:
             networks.append(current)
         lines.append("printf %s > /root/wifi" % fmt(data))
@@ -59556,7 +59560,8 @@ def harness_guest_scenarios(argv):
         else:
             pw = q(password) if password else ""
         if len(networks) >= 16 and rng.random() < 0.5:
-            ssid_arg, pw, message = "brandnew", "", "too many saved networks"
+            ssid_arg, pw, message = ("brandnew", "",
+                                     "is too long to change here" if cut else "too many saved networks")
         lines.append("cp /root/wifi /tmp/sc.file 2>/dev/null || : > /tmp/sc.file")
         lines.append("moonwater wifi add %s %s > /tmp/sc.got 2>&1; scen_status %s 1 $?"
                      % (ssid_arg if ssid_arg.startswith(("'", '"')) else q(ssid_arg), pw,
