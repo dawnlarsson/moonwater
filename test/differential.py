@@ -57801,6 +57801,33 @@ say(status == 0 and out.strip() == b"88895" and b"closed" not in err,
     "sec: output held for a slow reader is not dropped when the command ends "
     "(%r %r)" % (out.strip(), err[-80:]))
 
+#       The same reader with more behind it than the link holds. The command
+#       is done long before the last of its output has crossed, and what the
+#       pipe still has is the command's output and not something left behind
+#       it: all but 400 KB is read, then nothing for three seconds. That is
+#       more than the window's slots and the client's pipe hold, so the
+#       command runs on to its end, and less than they and its own pipe hold
+#       together, so it ends in the stall with the last of it still in there.
+with open(top + "/consume.py", "w") as f:
+    f.write("import hashlib, os, sys, time\n"
+            "first, wait = int(sys.argv[1]), float(sys.argv[2])\n"
+            "digest, total = hashlib.sha256(), 0\n"
+            "for stop in (first, None):\n"
+            "    while stop is None or total < stop:\n"
+            "        data = os.read(0, 65536 if stop is None else min(65536, stop - total))\n"
+            "        if not data:\n"
+            "            break\n"
+            "        total += len(data)\n"
+            "        digest.update(data)\n"
+            "    time.sleep(wait if stop else 0)\n"
+            "print(total, digest.hexdigest())\n")
+want = "".join("%d\n" % i for i in range(1, 400001)).encode()
+status, out, err = on("a", moon + " link run b 'seq 1 400000' | python3 %s/consume.py %d 3" %
+                      (top, len(want) - 400000), timeout=120)
+say(out.split() == [str(len(want)).encode(), hashlib.sha256(want).hexdigest().encode()],
+    "a stalled reader is handed all of the output, the last 400 KB of it after the command ended (%r)" %
+    (out[:90],))
+
 status, out, err = on("a", moon + " link run b 'for i in $(seq 1 25); do echo line $i; sleep 0.2; done'",
                       extra={"WATERLINK_REKEY_SECONDS": "1"}, timeout=60)
 keyed = [int(w) for w in err.split() if w.isdigit()]
@@ -57897,6 +57924,24 @@ for dev, where in (("wb0", None), ("wb", netns)):
     subprocess.run((["nsenter", "--net=" + where] if where else []) + command, check=True)
 runs("lossy: ")
 shell("lossy: ")
+for dev, where in (("wb0", None), ("wb", netns)):
+    subprocess.run((["nsenter", "--net=" + where] if where else []) +
+                   ["tc", "qdisc", "del", "dev", dev, "root"], check=True)
+
+#       A path that is slow and loses nothing: a megabyte at four megabits is
+#       two seconds, and the command that sends it is done in a tenth of one.
+#       What is in its pipe when it ends is still to cross.
+big = os.urandom(1000000)
+with open(top + "/b/root/big", "wb") as f:
+    f.write(big)
+for dev, where in (("wb0", None), ("wb", netns)):
+    subprocess.run((["nsenter", "--net=" + where] if where else []) +
+                   ["tc", "qdisc", "add", "dev", dev, "root", "netem", "rate", "4mbit"], check=True)
+status, out, err = on("a", moon + " link pull b /root/big /root/bigslow", timeout=120)
+back = open(top + "/a/root/bigslow", "rb").read() if os.path.exists(top + "/a/root/bigslow") else b""
+say(status == 0 and back == big, "a pull over a slow path is whole (%r, %d of %d bytes)" % (status, len(back), len(big)))
+status, out, err = on("a", moon + " link run b 'cat /root/big'", timeout=120)
+say(status == 0 and out == big, "and so is a command's output (%r, %d of %d bytes)" % (status, len(out), len(big)))
 for dev, where in (("wb0", None), ("wb", netns)):
     subprocess.run((["nsenter", "--net=" + where] if where else []) +
                    ["tc", "qdisc", "del", "dev", dev, "root"], check=True)

@@ -1321,6 +1321,9 @@ static fn link_exited(struct link_session address_to s, b32 status, p64 now)
         s->exited = true;
         s->exited_at = now;
         s->status = status;
+        //      What was said of the output before the end says nothing of
+        //      what the command left in the pipe: it is asked again.
+        s->reads[0].quiet = s->reads[1].quiet = false;
 }
 
 static fn link_push_done(struct link_session address_to s, p64 now)
@@ -1979,9 +1982,13 @@ static fn link_session_streams(struct link_session address_to s, p64 now)
 
         //      A terminal can stay open behind a command that left something
         //      running in the background; a moment after the command ends, the
-        //      session ends with it, as ssh's does.
+        //      session ends with it, as ssh's does. Only a stream that has
+        //      said "not now" since the end is let go: what the link has not
+        //      yet taken from a pipe is the command's output still, however
+        //      long a slow path or a stopped reader keeps it waiting.
         if (s->exited && link_age(now, s->exited_at) > 300000)
-                s->reads[0].done = s->reads[1].done = true;
+                for (positive at = 0; at < 2; at++)
+                        s->reads[at].done |= s->reads[at].quiet;
 
         if (s->exited && s->reads[0].done && s->reads[1].done && !s->exit_sent &&
             waterlink_room(s->link) >= 2)
@@ -2694,6 +2701,7 @@ static p64 link_sessions_turn(p64 now)
 
                 due = waterlink_wake(s->link, now);
                 if (link_self.server && s->exited && !s->exit_sent &&
+                    s->exited_at + 300000 >= now &&
                     s->exited_at + 300000 < due)
                         due = s->exited_at + 300000;
                 if (due < wake)
