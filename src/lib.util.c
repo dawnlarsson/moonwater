@@ -13202,7 +13202,7 @@ typedef struct
         const char address_to cutoff;
 } numbers_cheat;
 
-static const numbers_cheat numbers_cheats[NUMBERS_SHIFT_MAX + 1] = {
+static const numbers_cheat numbers_cheats[NUMBERS_SHIFT_MAX + 1] HOT_RODATA = {
         { 0, ""},
         { 1, "5"},
         { 1, "25"},
@@ -16640,7 +16640,10 @@ extern p8 __bss_end[] WEAK;
 fn stdlib_program_starting(void)
 {
 #if defined(LINUX) && !defined(KERNEL_MODE)
-        if (__bss_start && &__bss_end[0] > &__bss_start[0])
+        /* A Spark loader that mapped the bss without huge pages said so
+           (SPARK_ENTRY_BSS_NOHUGE): there is nothing to ask of it. */
+        if (!(program_entry_facts & SPARK_ENTRY_BSS_NOHUGE) &&
+            __bss_start && &__bss_end[0] > &__bss_start[0])
                 system_call_3(syscall(madvise),
                               (positive)(address_any)__bss_start,
                               (positive)(__bss_end - __bss_start),

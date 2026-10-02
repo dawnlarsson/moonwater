@@ -48,6 +48,12 @@ SECTIONS
                    hot_order SHELL MAP --write, between the two markers); a
                    name that is not in a program is ignored, and an asm routine stays in its own list below
                    (riscv64's jal between them reaches a megabyte). */
+                /* What a start reads, first, so that it is on the pages of the
+                   first functions: the tables it indexes (HOT_RODATA) and the
+                   byte-class and case tables the library keeps in assembly. */
+                *(.rodata.hot)
+                *(.rodata.byte_commonness .rodata.unicode_case_tab)
+                *(.rodata.string_set_*)
                 *(.text.exit)
                 /* hot_order begin */
                 *(.text.startup.main)
@@ -672,7 +678,8 @@ SECTIONS
                 *(.bss.program_stack_base .bss.thread_main .bss.threads_live
                   .bss.log_writer_buffer_length .bss.log_writer_failed
                   .bss.writer_stderr_failed
-                  .bss.program_vdso_clock .bss.program_entry_identity .bss.program_words
+                  .bss.program_vdso_clock .bss.program_entry_identity .bss.program_entry_facts
+                  .bss.program_words
                   .bss.cpu_has_* .bss.cpu_hash_probed
                   .bss.program_words_count)
                 /* The big ones last, each written at its first bytes: they

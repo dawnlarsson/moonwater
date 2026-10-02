@@ -869,11 +869,12 @@ static inline pid_t spark_entry_process(void)
 static unsigned long spark_entry_facts(void)
 {
 #ifdef CONFIG_SECCOMP
-        return SPARK_ENTRY_AUXV |
+        return SPARK_ENTRY_AUXV | SPARK_ENTRY_BSS_NOHUGE |
                (current->seccomp.mode == SECCOMP_MODE_DISABLED
                     ? SPARK_ENTRY_UNFILTERED : 0);
 #else
-        return SPARK_ENTRY_AUXV | SPARK_ENTRY_UNFILTERED;
+        return SPARK_ENTRY_AUXV | SPARK_ENTRY_BSS_NOHUGE |
+               SPARK_ENTRY_UNFILTERED;
 #endif
 }
 
@@ -1308,7 +1309,11 @@ int execute_spark(struct linux_binprm *bprm)
                 unsigned long mapped = do_mmap(i == 2 ? NULL : bprm->file,
                     address, sizes[i], PROT_READ | (i ? PROT_WRITE : PROT_EXEC),
                     MAP_PRIVATE | MAP_FIXED | (i == 2 ? MAP_ANONYMOUS : 0),
-                    0, i == 2 ? 0 : (address - header->base) >> PAGE_SHIFT,
+                    // The bss is fixed per-tool arenas of which a program
+                    // touches a few pages (see lib.util.c's start): ordinary
+                    // pages, said once here rather than by a call per start.
+                    i == 2 ? VM_NOHUGEPAGE : 0,
+                    i == 2 ? 0 : (address - header->base) >> PAGE_SHIFT,
                     &populate[i], NULL);
                 if (IS_ERR_VALUE(mapped))
                 {

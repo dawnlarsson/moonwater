@@ -19,6 +19,11 @@
    does for an ELF: AT_SYSINFO_EHDR (when a vDSO was mapped), AT_PAGESZ and
    AT_NULL. Older loaders put nothing there but the strings. */
 #define SPARK_ENTRY_AUXV 0x02UL
+/* The bss is already VM_NOHUGEPAGE: the loader mapped it so, and a program
+   that would otherwise madvise its whole bss to say the same (a kernel with
+   transparent huge pages at "always" answers each first touch of a sparse
+   region with two megabytes of zeroed memory) has nothing to ask. */
+#define SPARK_ENTRY_BSS_NOHUGE 0x04UL
 /* Version 2 changes the feature word from packed bits to Boolean byte lanes.
    Keeping that change in the magic makes either side of a mixed old/new pair
    reject the private handoff and use the ordinary CPUID fallback instead of

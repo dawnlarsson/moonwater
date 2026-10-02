@@ -17143,7 +17143,7 @@ __asm__(
 #define SHELL_TOOL(category, name, function) \
         SHELL_TOOL_##category(name, function)
 
-static const shell_tool shell_tools[] = {
+static const shell_tool shell_tools[] HOT_RODATA = {
 #define SHELL_TOOL_KEEP(name, function) {#name, function},
 #include "tools.inc"
 #undef SHELL_TOOL_KEEP
@@ -17174,7 +17174,7 @@ static const shell_tool shell_tools[] = {
         which the largest is six, so what survives the filter is a handful of
         candidates rather than a shorter list of the same kind.
 */
-static const p8 shell_tool_key[][2] __attribute__((aligned(8))) = {
+static const p8 shell_tool_key[][2] HOT_RODATA __attribute__((aligned(8))) = {
 #define SHELL_TOOL_KEEP(name, function) \
         {(p8)(#name)[0], (p8)(sizeof(#name) - 1)},
 #include "tools.inc"

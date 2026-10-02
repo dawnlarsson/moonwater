@@ -1218,7 +1218,9 @@ static b32 bowl_path_same(string_address path, string_address want)
 
 static b32 bowl_session_host_path(string_address path)
 {
-        static string_address trees[] = {
+        /* Read by every shell start (session preparation), so with the other
+           tables a start reads (spark.ld). */
+        static string_address const trees[] __attribute__((section(".rodata.hot"))) = {
             "/etc", "/usr", "/bin", "/sbin", "/boot", "/lib", "/lib64",
             "/proc", "/sys", null};
         positive i;
@@ -1340,10 +1342,20 @@ static fn bowl_session_assign(p8 address_to into, positive room,
         memory_copy(into + n + 1, value, v + 1);
 }
 
+/*  What the last fill was made from is still true until the process has
+    changed who it is. A shell start asks four times (the three assignments
+    and the preparation) and the answer cannot have changed between them, so
+    those ask bowl_session_fill_started, which fills once; everything that
+    can be reached after a user namespace or a setuid asks bowl_session_fill
+    and gets the uid as it is. */
+static bool bowl_fill_valid __attribute__((section(".bss.hot")));
+
 static fn bowl_session_fill(void)
 {
         /* Weston stats getuid, not geteuid, against the directory owner. */
         positive uid = (positive)system_call(syscall(getuid));
+
+        bowl_fill_valid = true;
         p8 digits[24];
         string_address user;
 
@@ -1371,21 +1383,27 @@ static fn bowl_session_fill(void)
                             sizeof(bowl_logname_assignment), "LOGNAME", user);
 }
 
+static fn bowl_session_fill_started(void)
+{
+        if (!bowl_fill_valid)
+                bowl_session_fill();
+}
+
 static string_address bowl_session_runtime_assignment(void)
 {
-        bowl_session_fill();
+        bowl_session_fill_started();
         return bowl_runtime_assignment;
 }
 
 static string_address bowl_session_user_assignment(void)
 {
-        bowl_session_fill();
+        bowl_session_fill_started();
         return bowl_user_assignment;
 }
 
 static string_address bowl_session_logname_assignment(void)
 {
-        bowl_session_fill();
+        bowl_session_fill_started();
         return bowl_logname_assignment;
 }
 
@@ -1471,7 +1489,12 @@ static fn bowl_session_prepare_at(string_address home, string_address runtime,
         bool made = false;
         bool sockets = false;
 
-        bowl_session_fill();
+        /* A shell start (no home directories asked for) is the one that may
+           ask for what its own start already filled. */
+        if (user_dirs)
+                bowl_session_fill();
+        else
+                bowl_session_fill_started();
 
         if (!runtime || bowl_path_steps(runtime) ||
             bowl_session_host_path(runtime))

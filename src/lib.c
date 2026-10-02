@@ -634,6 +634,13 @@
 #else
 #define HOT_DATA __attribute__((section(".data.hot")))
 #endif
+//      And the tables read at start, which spark.ld lays first in the image
+//      so that they are on the pages the first functions are on.
+#if defined(KERNEL_MODE) || defined(__APPLE__)
+#define HOT_RODATA
+#else
+#define HOT_RODATA __attribute__((section(".rodata.hot")))
+#endif
 #define INLINE __attribute__((always_inline))
 #define NO_FRAME __attribute__((noframe))
 #define KEEP __attribute__((used))
