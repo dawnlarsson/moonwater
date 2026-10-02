@@ -890,8 +890,8 @@ static int bind_spawn_enter(void *data)
         char command[SPARK_BIND_COMMAND_MAX];
         char event_env[sizeof("MOONWATER_EVENT=") + SPARK_BIND_NAME_MAX];
         char *argv[] = { SPARK_TOOL_PROGRAM, "-c", command, NULL };
-        char *envp[] = { "HOME=/root", "PATH=/bin:/sbin:/usr/bin:/usr/sbin",
-                         "TERM=linux", event_env, NULL };
+        char *envp[] = { SPARK_COMMAND_ENVIRONMENT(SPARK_ENVIRONMENT_ENTRY)
+                         event_env, NULL };
         int ret;
 
         strscpy(command, spawn->command, sizeof(command));
@@ -903,13 +903,34 @@ static int bind_spawn_enter(void *data)
         return 0;
 }
 
+/*
+        How a command that did not answer 0 ended, said as the shell says it.
+        ret is a wait status, or an error number when the command never got
+        to run or be waited for; the number is the exit code, the signal or
+        the error, whichever the words are about.
+*/
+static const char *bind_ending(int ret, int *number)
+{
+        if (ret < 0) {
+                *number = -ret;
+                return "could not be run, error";
+        }
+        if (ret & 0x7f) {
+                *number = ret & 0x7f;
+                return "was killed by signal";
+        }
+        *number = (ret >> 8) & 0xff;
+        return "exited";
+}
+
 static void bind_run(struct bind_row *row)
 {
         struct bind_spawn spawn;
         const char *name = spark_bind_event_name[row->event - 1];
+        const char *how;
         _Bool poweroff, reboot;
         pid_t pid;
-        int ret = 0, stat = 0;
+        int ret = 0, stat = 0, number, shown;
         unsigned long flags;
 
         spin_lock_irqsave(&bind_lock, flags);
@@ -925,7 +946,9 @@ static void bind_run(struct bind_row *row)
 
         poweroff = !strcmp(spawn.command, "poweroff");
         reboot = !strcmp(spawn.command, "reboot");
-        pr_info("[moonwater] %s: %s\n", name, spawn.command);
+        //      %*pE: the line is somebody's text, and a log is not a terminal.
+        shown = (int)strlen(spawn.command);
+        pr_info("[moonwater] %s: %*pE\n", name, shown, spawn.command);
 
         kernel_sigaction(SIGCHLD, SIG_DFL);
         pid = user_mode_thread(bind_spawn_enter, &spawn, SIGCHLD);
@@ -939,14 +962,15 @@ static void bind_run(struct bind_row *row)
 
         if (!ret)
                 goto done;
+        how = bind_ending(ret, &number);
         if (!poweroff && !reboot) {
-                pr_warn("[moonwater] %s: %s did not start (%d)\n",
-                        name, spawn.command, ret);
+                pr_warn("[moonwater] %s: %*pE %s %d\n", name, shown, spawn.command,
+                        how, number);
                 goto done;
         }
 
-        pr_warn("[moonwater] %s: %s answered %d, stopping the machine anyway\n",
-                name, spawn.command, ret);
+        pr_warn("[moonwater] %s: %*pE %s %d, stopping the machine anyway\n",
+                name, shown, spawn.command, how, number);
         if (reboot)
                 orderly_reboot();
         else
@@ -1937,15 +1961,7 @@ static bool host_machine_self;
 //      moonwater_end has run; it runs once however the machine stops.
 static bool host_machine_ended;
 
-static const struct {
-        string_address name;
-        string_address value;
-} host_machine_env[] = {
-        { "HOME", "/root" },
-        { "TERM", "dumb" },
-        { "PATH", BOWL_DEFAULT_PATH },
-        { "LANG", "C.UTF-8" },
-};
+#define HOST_MACHINE_ASSIGN(name, value) env_assign(name, value);
 
 static bool host_machine_file_allowed(p16 mode, p32 owner)
 {
@@ -2488,7 +2504,6 @@ static b32 host_machine_run(void)
         bipolar failed;
         p8 dirty[8];
         positive slot[MOONWATER_HOOKS];
-        unsigned int i;
         bool marked = false;
         b32 answer = HOST_MACHINE_ENDED;
 
@@ -2498,8 +2513,7 @@ static b32 host_machine_run(void)
         host_state_ready();
         system_call_1(syscall(chdir), (positive)(string_address) "/root");
         bowl_session_prepare("/root", null);
-        for (i = 0; i < sizeof(host_machine_env) / sizeof(host_machine_env[0]); i++)
-                env_assign(host_machine_env[i].name, host_machine_env[i].value);
+        SPARK_COMMAND_ENVIRONMENT(HOST_MACHINE_ASSIGN)
 
         device = system_open_at(AT_FDCWD, SPARK_DEVICE, FILE_READ | O_CLOEXEC);
         if (device < 0) {

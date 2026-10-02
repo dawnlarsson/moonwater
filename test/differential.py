@@ -25577,8 +25577,11 @@ static void desktop_set_awake(_Bool awake) { assert(desktop.lock);desktop.awake=
 #ifndef WRITE_ONCE
 #define WRITE_ONCE(x, val) do { (x) = (val); } while (0)
 #endif
+/* The last warning the module printed: what a command that failed is said to
+   have done is part of what the log is for. */
+static char last_warn[300];
 #ifndef pr_warn
-#define pr_warn(...) ((void)0)
+#define pr_warn(...) snprintf(last_warn,sizeof last_warn,__VA_ARGS__)
 #endif
 #ifndef pr_alert
 #define pr_alert(...) ((void)0)
@@ -25623,8 +25626,13 @@ static void orderly_reboot(void) { bind_reboots++; }
 static pid_t user_mode_thread(int (*fn)(void *), void *arg, unsigned long sig);
 static int kernel_wait(pid_t pid, int *stat);
 static void kernel_sigaction(int sig, void *act) { (void)sig;(void)act; }
+static char bind_env[8][160];
+static unsigned bind_env_count;
 static int kernel_execve(const char *path, const char *const *argv, const char *const *envp) {
-    (void)path;(void)argv;(void)envp; return 0;
+    (void)path;(void)argv;
+    for (bind_env_count=0;envp[bind_env_count] && bind_env_count<8;bind_env_count++)
+        snprintf(bind_env[bind_env_count],sizeof bind_env[0],"%s",envp[bind_env_count]);
+    return 0;
 }
 __attribute__((noreturn)) static void do_exit(long code) { (void)code; abort(); }
 #define CAP_SYS_ADMIN 21
@@ -26254,6 +26262,64 @@ static void check_bind(void) {
     check(bind_queued==queued,"nothing is queued once bindings have stopped");
     atomic_set(&bind_alive,1);
 }
+/*
+        What a bound line is given to run in, and what the log says when it
+        does not do well. The environment is the one an init entry gets, so a
+        bowl's launcher is found from every place a line can run; and a line
+        that exited, was killed or never ran says which, in the shell's
+        words, and not a wait status as though it were a number of its own.
+*/
+static void check_bind_report(void) {
+    struct bind_spawn spawn;
+    struct bind_row *mute=bind_row(SPARK_BIND_MUTE);
+    struct bind_row *power=bind_row(SPARK_BIND_POWEROFF);
+    static const char *want[]={"HOME=/root",("PATH=" SPARK_COMMAND_PATH),"TERM=dumb",
+                               "LANG=C.UTF-8","MOONWATER_EVENT=volume_up"};
+    char expected[64];
+    unsigned found=0;
+
+    memset(&spawn,0,sizeof spawn);
+    snprintf(spawn.command,sizeof spawn.command,"pactl set-sink-mute 0 toggle");
+    snprintf(spawn.event,sizeof spawn.event,"volume_up");
+    check(bind_spawn_enter(&spawn)==0 && bind_env_count==sizeof want/sizeof want[0],
+          "a bound line is run with the five variables it is given and no more");
+    for (unsigned at=0;at<sizeof want/sizeof want[0];at++)
+        for (unsigned seen=0;seen<bind_env_count;seen++)
+            found+=!strcmp(want[at],bind_env[seen]);
+    check(found==sizeof want/sizeof want[0],
+          "a bound line gets the PATH a terminal gives its shell, the home, TERM and LANG, and the event");
+
+    last_warn[0]=0;
+    bind_press(SPARK_BIND_MUTE,"false",42,1<<8);
+    check(strstr(last_warn,"mute: ") && strstr(last_warn," exited 1") != NULL,
+          "a line that exits 1 is said to have exited 1");
+    bind_idle(mute);
+    bind_press(SPARK_BIND_MUTE,"loop",42,9);
+    check(strstr(last_warn," was killed by signal 9") != NULL,
+          "a line that was killed is said to have been killed, and by what");
+    bind_idle(mute);
+    bind_press(SPARK_BIND_MUTE,"nothing",0,0);
+    snprintf(expected,sizeof expected," could not be run, error %d",EAGAIN);
+    check(strstr(last_warn,expected) != NULL,
+          "a line that could not be started says the error, not that it exited");
+    bind_idle(mute);
+    bind_press(SPARK_BIND_MUTE,"",42,0);
+    bind_idle(mute);
+    last_warn[0]=0;
+    bind_press(SPARK_BIND_POWEROFF,"poweroff",42,2<<8);
+    check(strstr(last_warn," exited 2, stopping the machine anyway") && bind_offs==1,
+          "a poweroff that fails is said to have, and the machine is stopped anyway");
+    bind_idle(power);
+    snprintf(power->command,sizeof power->command,"poweroff");
+    snprintf(mute->command,sizeof mute->command,"x");
+    bind_press(SPARK_BIND_MUTE,"echo 'a\033[2Jb",42,1<<8);
+    check(strstr(last_warn,"mute:") != NULL && !strchr(last_warn,'\033'),
+          "the line that is printed is the line, with what a terminal would act on kept out");
+    bind_idle(mute);
+    bind_press(SPARK_BIND_MUTE,"",42,0);
+    bind_idle(mute);
+}
+
 static void check_bind_edges(void) {
     struct bind_control request;
     struct bind_row *row;
@@ -27920,6 +27986,7 @@ int main(void) {
     check_console_keyboard();
     check_bind();
     check_bind_edges();
+    check_bind_report();
     check_canvas_control();
     check_input_reports();
     check_machine_script();
@@ -35259,6 +35326,17 @@ def harness_image_nodes(argv):
         check(wanted in made,
               'the image makes %s, where bowl expose writes (%s)'
               % (wanted, ' '.join(made[-3:])))
+
+    #   The kernel cannot include bowl.c, and the line a bound event runs is
+    #   run by the kernel, so the PATH it gets is spelled out in spark.c:
+    #   the one a terminal gives its shell, or a bowl's launcher is found
+    #   from `bind init` and not from `bind volume_up`.
+    check(define(bowl, 'BOWL_DEFAULT_PATH') == '"/bin:/usr/bin:" BOWL_EXPOSE_DIRECTORY ":/"',
+          'bowl says what its default PATH is (%s)' % define(bowl, 'BOWL_DEFAULT_PATH'))
+    if root:
+        check(define(spark, 'SPARK_COMMAND_PATH') == '"/bin:/usr/bin:%s/bin:/"' % root.strip('"'),
+              'a bound event runs with bowl\'s default PATH (%s)'
+              % define(spark, 'SPARK_COMMAND_PATH'))
 
     #   The compositor's first program, which is the one crossing here with
     #   no compiler behind it at all. The kernel execs a path; the path is a

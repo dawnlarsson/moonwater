@@ -3154,8 +3154,7 @@ static bool host_settings_install(host_install address_to install,
 static string_address address_to host_event_environment(void)
 {
         static string_address seed[] = {
-            "TERM=dumb", "HOME=/root", "PATH=" BOWL_DEFAULT_PATH, "LANG=C.UTF-8",
-            null};
+            SPARK_COMMAND_ENVIRONMENT(SPARK_ENVIRONMENT_ENTRY) null};
 
         bowl_session_prepare("/root", null);
         return bowl_environment(seed);
