@@ -7610,7 +7610,16 @@ static bipolar file_direct_endpoint_open(
 /* The directory that holds the last name of a chain of links, and that name
    in leaf, or -1 when leaf is not a link (or the chain is too long). A name
    that leads nowhere still has a place to be made: GNU's open goes through
-   the link to make it. */
+   the link to make it.
+
+   Followed as the kernel's fs.protected_symlinks follows for the open this
+   stands in for: in a sticky directory anybody can write, a link is taken
+   only when it is the caller's or the directory owner's, and otherwise the
+   answer is the open's EACCES. Walked here without that, root's `wget -O
+   /tmp/x URL` went through the link another user left at /tmp/x and put the
+   download over what it named, /etc/passwd as well as anything, where GNU
+   wget's open is refused. In a sticky directory nobody else can swap a
+   link that passed, so the facts read here are the ones followed. */
 static HOT bipolar file_link_chain_open(bipolar directory, p8 address_to leaf,
                                     positive room)
 {
@@ -7619,12 +7628,23 @@ static HOT bipolar file_link_chain_open(bipolar directory, p8 address_to leaf,
         for (positive hops = 0; hops < 40; hops++)
         {
                 file_facts entry;
+                file_facts holder;
                 p8 target[FILE_PATH_MAX];
 
                 if (file_look_code(directory, (string_address)leaf, AT_SYMLINK_NOFOLLOW,
                                    address_of entry) < 0 ||
                     (entry.mode & MODE_FORMAT) != MODE_LINK)
                         return held;
+                if (file_look_code(directory, (string_address) "", AT_EMPTY_PATH,
+                                   address_of holder) < 0 ||
+                    ((holder.mode & 01002) == 01002 &&
+                     entry.owner != system_effective_user() &&
+                     entry.owner != holder.owner))
+                {
+                        if (held >= 0)
+                                system_close(held);
+                        return -ERROR_ACCESS;
+                }
 
                 bipolar length = system_read_link_at(directory, (string_address)leaf, target,
                                                      sizeof(target) - 1);
@@ -7665,7 +7685,7 @@ static HOT bipolar file_staged_name_open_at(
                 bipolar through = file_link_chain_open(stage->directory, stage->leaf,
                                                        FILE_PATH_MAX);
 
-                if (through >= 0)
+                if (through >= 0 || through == -ERROR_ACCESS)
                 {
                         system_close(stage->directory);
                         stage->directory = through;

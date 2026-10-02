@@ -4051,6 +4051,13 @@ lane_tar()
         2) note "pathname_race: skipped (soft) -- threads/rename unavailable" ;;
         *) tar_outcome=1 ;;
         esac
+        python3 test/differential.py --harness protected_links \
+                --binary "ours=$shell_binary"
+        case $? in
+        0) ;;
+        2) note "protected_links: NOT RUN -- no second uid for the namespace" ;;
+        *) tar_outcome=1 ;;
+        esac
         return "$tar_outcome"
 }
 lane_zstd() { freestanding_checks_lane zstd zstd; }

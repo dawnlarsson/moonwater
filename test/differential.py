@@ -55980,7 +55980,8 @@ def harness_security_hygiene(argv):
                 "dhcp_fuzz", "sntp_fuzz", "dns_fuzz", "netlink_fuzz", "tls_peer",
                 "http_fuzz", "http_urls", "wifi_eapol_fuzz", "wifi_scan_fuzz",
                 "bowl_sig_fuzz", "wget_mutation", "wget_hostile", "sntp_era", "net_netem",
-                "net_dependency_closure", "net_math_proof", "net_clock_fault")
+                "net_dependency_closure", "net_math_proof", "net_clock_fault",
+                "protected_links")
     for name in security + ("tls_verify_fuzz",):
         checks(name in HARNESS_CHECKS, "differential.py: %s is not registered" % name)
     table = re.search(r"^HARNESS_CHECKS = \{$(.*?)^\}$", source, re.M | re.S)
@@ -56133,6 +56134,212 @@ def harness_security_hygiene(argv):
 
     print("security hygiene %d/%d" % (checks.checks - checks.failures, checks.checks))
     return 1 if checks.failures else 0
+
+
+def harness_protected_links(argv):
+    """A write through a planted link meets fs.protected_symlinks, as the
+    kernel's own open would.
+
+    The staged writers (wget -O, tar -cf, split) walk a chain of links in
+    userspace so that the reference's write-through survives their atomic
+    publication, and that walk never asked the question the kernel asks:
+    root's `wget -O /tmp/x` went through the link another user left at
+    /tmp/x and replaced what it named. In a user namespace with a second
+    uid, every link placement (sticky and world-writable, world-writable,
+    sticky and owned by the link's owner, an ordinary directory) times every
+    link owner (the writer, another user) times every target (a file, a name
+    that is not there, a second link another user owns in a sticky
+    directory) is written through by every tool, as root. A placement the
+    rule refuses must refuse with the victim and the link untouched and the
+    missing name never made; every other one is written through, as GNU's
+    open does. When the host's fs.protected_symlinks is on, the kernel's
+    own O_PATH open of each link is a second oracle for the rule.
+
+        python3 test/differential.py --harness protected_links --binary ours=PATH
+
+    Returns 2 (NOT RUN) without newuidmap, a subordinate id range or unshare.
+    """
+    import argparse
+    import shutil
+    import tempfile
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    parser = argparse.ArgumentParser(prog="protected_links")
+    parser.add_argument("--binary", required=True, metavar="LABEL=PATH")
+    parser.add_argument("--inside", action="store_true", help=argparse.SUPPRESS)
+    opts = parser.parse_args(argv)
+    label, _, binary = opts.binary.partition("=")
+    binary = str(Path(binary).resolve())
+    other = 1000
+
+    if not opts.inside:
+        user = os.getuid()
+        pwd_name = None
+        try:
+            import pwd
+            pwd_name = pwd.getpwuid(user).pw_name
+        except (ImportError, KeyError):
+            pass
+        ranges = {}
+        for kind in ("uid", "gid"):
+            try:
+                for line in Path("/etc/sub" + kind).read_text().splitlines():
+                    owner, _, rest = line.partition(":")
+                    if owner in (pwd_name, str(user)) and rest.count(":") == 1:
+                        ranges[kind] = rest.split(":")
+                        break
+            except OSError:
+                pass
+        if (len(ranges) != 2 or not shutil.which("newuidmap") or
+                not shutil.which("unshare") or not shutil.which("ip")):
+            print("protected links: NOT RUN -- no newuidmap, subordinate ids, unshare or ip")
+            return 2
+        command = ["unshare", "-U",
+                   "--map-users", "0:%d:1" % user,
+                   "--map-users", "1:%s:%s" % tuple(ranges["uid"]),
+                   "--map-groups", "0:%d:1" % os.getgid(),
+                   "--map-groups", "1:%s:%s" % tuple(ranges["gid"]),
+                   "-n", "-m", "-p", "-f", "--mount-proc",
+                   sys.executable, str(Path(__file__).resolve()),
+                   "--harness", "protected_links", "--inside",
+                   "--binary", label + "=" + binary]
+        try:
+            return subprocess.run(command, timeout=120).returncode
+        except subprocess.TimeoutExpired:
+            print("protected links: FAIL -- the scene ran past 120 s")
+            return 1
+
+    checks = Checks()
+    subprocess.run(["ip", "link", "set", "lo", "up"], check=True)
+    body = b"downloaded\n"
+
+    class Serve(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Serve)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = "http://127.0.0.1:%d/f" % server.server_address[1]
+
+    scratch = Path(tempfile.mkdtemp(prefix="protected-links."))
+    subprocess.run(["mount", "-t", "tmpfs", "-o", "mode=0755", "none", str(scratch)],
+                   check=True)
+    farm = scratch / "farm"
+    farm.mkdir()
+    for tool in ("wget", "tar", "split"):
+        (farm / tool).symlink_to(binary)
+
+    def as_other(work, pointed, leaf):
+        return subprocess.run(["ln", "-s", pointed, leaf], cwd=work, user=other,
+                              group=other, extra_groups=[]).returncode == 0
+
+    try:
+        protected = Path("/proc/sys/fs/protected_symlinks").read_text().strip() == "1"
+    except OSError:
+        protected = False
+
+    #   (placement, its mode, its owner)
+    placements = (("sticky-shared", 0o1777, 0), ("shared", 0o777, 0),
+                  ("sticky-theirs", 0o1777, other), ("plain", 0o755, 0))
+    owners = (("mine", 0), ("theirs", other))
+    targets = ("file", "missing", "chain", "chain-mine")
+    tools = ("wget", "tar", "split")
+    number = 0
+    for (place, mode, place_owner) in placements:
+        for (owner_name, owner) in owners:
+            if place == "plain" and owner:
+                continue  # nobody else can make a link in a 0755 root directory
+            for target in targets:
+                for tool in tools:
+                    number += 1
+                    scene = scratch / ("s%d" % number)
+                    holder = scene / "holder"
+                    safe = scene / "safe"
+                    shared = scene / "shared"
+                    for directory in (holder, safe, shared):
+                        directory.mkdir(parents=True)
+                    os.chmod(scene, 0o755)
+                    os.chmod(safe, 0o755)
+                    os.chmod(shared, 0o1777)
+                    os.chmod(holder, mode)
+                    os.chown(holder, place_owner, place_owner)
+                    victim = safe / "victim"
+                    victim.write_bytes(b"precious\n")
+                    leaf = "out" + ("aa" if tool == "split" else "")
+                    pointed = {"file": str(victim), "missing": str(safe / "new")}.get(
+                        target, str(shared / "hop"))
+                    if target == "chain":
+                        made = as_other(shared, str(victim), "hop")
+                        checks(made, "%s: cannot plant the second hop" % scene.name)
+                    elif target == "chain-mine":
+                        os.symlink(str(victim), shared / "hop")
+                    if owner:
+                        made = as_other(holder, pointed, leaf)
+                    else:
+                        os.symlink(pointed, holder / leaf)
+                        made = True
+                    checks(made, "%s: cannot plant the link" % scene.name)
+                    link = holder / leaf
+
+                    #   The rule, hop by hop, as may_follow_link applies it.
+                    def refused_at(link_owner, directory_mode, directory_owner):
+                        return ((directory_mode & 0o1002) == 0o1002 and
+                                link_owner != 0 and link_owner != directory_owner)
+                    refuse = refused_at(owner, mode, place_owner)
+                    if target == "chain" and not refuse:
+                        refuse = refused_at(other, 0o1777, 0)
+                    if protected:
+                        try:
+                            os.close(os.open(link, os.O_PATH))
+                            kernel = False
+                        except PermissionError:
+                            kernel = True
+                        except FileNotFoundError:
+                            kernel = False
+                        checks(kernel == refuse, "%s/%s/%s: the kernel %s, the rule %s" % (
+                            place, owner_name, target, "refuses" if kernel else "follows",
+                            "refuses" if refuse else "follows"))
+
+                    source = scene / "input"
+                    source.write_bytes(b"xy")
+                    if tool == "wget":
+                        argv_tool = [str(farm / "wget"), "-q", "-O", str(link), url]
+                    elif tool == "tar":
+                        argv_tool = [str(farm / "tar"), "-cf", str(link), "input"]
+                    else:
+                        argv_tool = [str(farm / "split"), "-b", "2", "input",
+                                     str(holder / "out")]
+                    try:
+                        ran = subprocess.run(argv_tool, cwd=scene, capture_output=True,
+                                             timeout=20)
+                        status = ran.returncode
+                    except subprocess.TimeoutExpired:
+                        status = None
+                    row = "%s %s link in %s to a %s" % (tool, owner_name, place, target)
+                    kept = victim.read_bytes() == b"precious\n"
+                    still = link.is_symlink() and os.readlink(link) == pointed
+                    made_new = (safe / "new").exists()
+                    if refuse:
+                        checks(status not in (0, None) and kept and still and not made_new,
+                               "%s: wrote through a link the kernel refuses "
+                               "(status %s, victim kept %s, link kept %s, new name %s)"
+                               % (row, status, kept, still, made_new))
+                    else:
+                        wrote = (not kept) if target != "missing" else made_new
+                        checks(status == 0 and wrote,
+                               "%s: refused a link the kernel follows (status %s, %s)"
+                               % (row, status, ran.stderr[-200:] if status is not None else "timeout"))
+    server.shutdown()
+    subprocess.run(["umount", "-l", str(scratch)])
+    shutil.rmtree(scratch, ignore_errors=True)
+    return checks.verdict("protected links", "protected_links")
 
 
 def pathname_race_budget(default_rounds=80, default_seconds=2.0):
@@ -65766,6 +65973,7 @@ HARNESS_CHECKS = {
     "net_dependency_closure": harness_net_dependency_closure,
     "security_hygiene": harness_security_hygiene,
     "pathname_race": harness_pathname_race,
+    "protected_links": harness_protected_links,
     "machine_scan": harness_machine_scan,
     "waterlink_noise": harness_waterlink_noise,
     "waterlink_mdns": harness_waterlink_mdns,
