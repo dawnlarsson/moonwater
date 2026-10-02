@@ -65736,6 +65736,38 @@ static fn leasing(void)
                           held.seconds == 60 && held.renewal == 30 &&
                           held.rebinding == 52);
         }
+        {
+                /* REBINDING's ACK from another server: what the first one
+                   said about the mask, router, resolver and lifetime is
+                   not carried into the second one's lease, and an ACK with
+                   no lifetime of its own is not a lease. The same server
+                   leaving its resolver out keeps it. */
+                dhcp_lease held = {.address = 0x0a00020f, .mask = 0xffffff00,
+                                   .router = 0x0a000201, .nameserver = 0x0a000201,
+                                   .server = 0x0a000202, .seconds = 3600};
+                dhcp_lease mine = held;
+                dhcp_lease other = {.address = 0x0a00020f,
+                                    .server = 0x0a000263, .seconds = 600};
+                dhcp_lease same = {.address = 0x0a00020f,
+                                   .router = 0x0a000203,
+                                   .server = 0x0a000202, .seconds = 600};
+                dhcp_lease bare = {.address = 0x0a00020f, .server = 0x0a000263};
+
+                check("another server's ACK starts a lease without the first one's mask, router or resolver",
+                      dhcp_lease_take(address_of held, address_of other) &&
+                          held.server == 0x0a000263 && !held.mask &&
+                          !held.router && !held.nameserver &&
+                          held.seconds == 600 && held.address == 0x0a00020f);
+                check("the same server's ACK keeps what it left out",
+                      dhcp_lease_take(address_of mine, address_of same) &&
+                          mine.mask == 0xffffff00 && mine.router == 0x0a000203 &&
+                          mine.nameserver == 0x0a000201 && mine.seconds == 600);
+                held = mine;
+                check("another server's ACK without a lifetime is not a lease, and changes nothing",
+                      !dhcp_lease_take(address_of held, address_of bare) &&
+                          !memory_compare(address_of held, address_of mine,
+                                          sizeof held));
+        }
         for (positive bits = 0; bits < 256; bits++)
         {
                 dhcp_lease held = {1, 2, 3, 4, 5, 6, 7, 8};

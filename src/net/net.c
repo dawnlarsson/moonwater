@@ -11275,6 +11275,33 @@ static COLD bool dhcp_lease_acknowledge(dhcp_lease address_to lease,
         return dhcp_lease_timers(lease);
 }
 
+/* An ACK that completes a REQUEST, taken into the lease it answers. The same
+   server's ACK may leave out what it said before (RFC 2131 4.3.1 lets a
+   renewal answer carry only what changed), and that is kept. Another
+   server's -- which only REBINDING accepts -- starts a lease of its own: the
+   mask, router, resolver and lifetime the old server gave are not this
+   one's, and an ACK that leaves them out has none of them, as a client that
+   reads each lease whole (systemd-networkd, dhclient) has none. An ACK that
+   is no lease leaves the lease as it was, for the next answer to be judged
+   against. */
+static COLD bool dhcp_lease_take(dhcp_lease address_to lease,
+                                 const dhcp_lease address_to answer)
+{
+        dhcp_lease next = *lease;
+
+        if (answer->server != next.server)
+        {
+                next.mask = 0;
+                next.router = 0;
+                next.nameserver = 0;
+                next.seconds = 0;
+        }
+        if (!dhcp_lease_acknowledge(address_of next, answer))
+                return false;
+        *lease = next;
+        return true;
+}
+
 /* OFFER, ACK and NAK all carry a mandatory server identifier; xid and chaddr
    identify the client, not the server.  Completing a selected OFFER and
    RENEWING are bound to that server, and an ACK must name the offered or held
@@ -11506,7 +11533,7 @@ static COLD bipolar dhcp_complete(bipolar handle, p8 address_to packet,
                 if (dhcp_reacquisition_answer_matches(kind, address_of answer,
                                                       lease, rebinding) &&
                     (kind == DHCP_NAK ||
-                     dhcp_lease_acknowledge(lease, address_of answer)))
+                     dhcp_lease_take(lease, address_of answer)))
                         return kind == DHCP_ACK ? DHCP_OK : DHCP_REFUSED;
                 else if (discarded++ == DHCP_DISCARD_MAX)
                         break;
