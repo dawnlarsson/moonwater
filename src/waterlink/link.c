@@ -218,6 +218,15 @@ struct waterlink_link {
 #define WATERLINK_ACK_DELAY 1000ull
 #define WATERLINK_PACE_BURST 16         // datagrams the pacer lets go at once
 
+/*      Elapsed monotonic time, including a timestamp made after the caller's
+        snapshot.  The receive loop can install keys while draining one batch;
+        a later datagram in that batch must not turn the small ordering gap
+        into nearly 2^64 microseconds through unsigned subtraction. */
+static p64 link_age(p64 now, p64 then)
+{
+        return now > then ? now - then : 0;
+}
+
 fn waterlink_link_reset(struct waterlink_link address_to link)
 {
         memory_zero(link, sizeof(address_to link));
@@ -653,7 +662,7 @@ static KEEP fn waterlink_losses(struct waterlink_link address_to link, p64 now)
                 if (slot->serial >= link->largest)
                         break;
                 if (slot->serial + WATERLINK_REORDER <= link->largest ||
-                    (now >= slot->sent && now - slot->sent >= threshold))
+                    link_age(now, slot->sent) >= threshold)
                 {
                         if (slot->serial > link->recovery)
                                 waterlink_congested(link);
@@ -664,8 +673,7 @@ static KEEP fn waterlink_losses(struct waterlink_link address_to link, p64 now)
 
         at = link->flight_head;
         if (at == WATERLINK_NONE ||
-            now < link->slot[at].sent ||
-            now - link->slot[at].sent < waterlink_timeout(link))
+            link_age(now, link->slot[at].sent) < waterlink_timeout(link))
                 return;
 
         link->timeouts++;
@@ -727,8 +735,7 @@ static bool waterlink_ack_due(struct waterlink_link address_to link, p64 now)
 {
         return link->acking &&
                (link->owed_now || link->owed_count >= WATERLINK_ACK_EVERY ||
-                (now >= link->owed &&
-                 now - link->owed >= WATERLINK_ACK_DELAY));
+                link_age(now, link->owed) >= WATERLINK_ACK_DELAY);
 }
 
 /*
@@ -1480,7 +1487,7 @@ static p64 waterlink_held_probes(struct waterlink_link address_to link,
                        << (slot->probed < 15 ? slot->probed : 15);
                 if (wait > WATERLINK_HELD_MOST)
                         wait = WATERLINK_HELD_MOST;
-                if (now >= slot->sent && now - slot->sent >= wait)
+                if (link_age(now, slot->sent) >= wait)
                 {
                         slot->probed += slot->probed < 255;
                         waterlink_band_requeue(link, at);

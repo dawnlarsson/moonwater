@@ -67880,8 +67880,7 @@ static positive fill_walk(struct waterlink_link address_to link,
                 fill_seen[link->owed_now ? FILL_ACK_NOW
                           : link->owed_count >= WATERLINK_ACK_EVERY
                                   ? FILL_ACK_COUNT
-                          : now >= link->owed &&
-                                    now - link->owed >= WATERLINK_ACK_DELAY
+                          : link_age(now, link->owed) >= WATERLINK_ACK_DELAY
                                   ? FILL_ACK_DELAY
                                   : FILL_ACK_NOT_DUE]++;
         if (link->acking && (used || waterlink_ack_due(link, now)))
@@ -70251,6 +70250,20 @@ static fn clock_ordering(void)
         link.owed = 2000000;
         check("sec: a clock sample before an owed acknowledgement cannot make it due",
               !waterlink_ack_due(address_of link, 1000000));
+        {
+                //      The same through waterlink_fill, which is assembly on
+                //      every machine: its own compare of now with owed.
+                p8 body[WATERLINK_PAYLOAD];
+                bool alone = false;
+
+                check("sec: a body filled before an owed acknowledgement carries none",
+                      waterlink_fill(address_of link, body, 1000000,
+                                     address_of alone) == 0);
+                check("the same acknowledgement is written once it is due",
+                      waterlink_fill(address_of link, body,
+                                     2000000 + WATERLINK_ACK_DELAY,
+                                     address_of alone) > 0);
+        }
 
         waterlink_link_reset(address_of link);
         link.free_count--;
@@ -71584,7 +71597,10 @@ static fn authorization_files(void)
                 if (full >= 0)
                 {
                         check("sec: a refused positional scrub is reported, not mistaken for migration",
-                              !link_pwrite_all(full, zeros, sizeof zeros, 0));
+                              file_transfer_exact(syscall(pwrite64), full,
+                                                  (p8 address_to)zeros,
+                                                  sizeof zeros, 0) !=
+                                  (bipolar)sizeof zeros);
                         system_close(full);
                 }
         }
@@ -72905,8 +72921,8 @@ static fn greetings(bipolar listener, p16 port)
         check("sec: with no entropy a member is still kept, but not greeted "
               "back, and not marked as greeted",
               wls_peers_count() == 1 && wls_heard(listener, back) <= 0 &&
-                      !link_greeted_lately(wls_office.mark, wls_loopback, port,
-                                           1700001));
+                      !link_greeted_recent(wls_loopback, wls_office.mark, port,
+                                           true, 1700001));
         (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
 }
 
@@ -72965,10 +72981,10 @@ static fn mdns_amplification(void)
                 check("sec: one place is greeted immediately for each group, "
                       "not throttled as if groups shared an identity",
                       entropy_draws - before == 2 &&
-                          link_greeted_lately(wls_office.mark, wls_loopback, 9,
-                                               1000002) &&
-                          link_greeted_lately(second.mark, wls_loopback, 9,
-                                               1000002));
+                          link_greeted_recent(wls_loopback, wls_office.mark, 9,
+                                              true, 1000002) &&
+                          link_greeted_recent(wls_loopback, second.mark, 9,
+                                              true, 1000002));
                 wls_group();
         }
         (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);

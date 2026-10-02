@@ -61856,7 +61856,7 @@ int main(int argc, char **argv)
 
     mdns_source = "\n".join([
         SHIM, waterlink_lift_cursors(), wl,
-        sec(net, "//      A wire name is at most 255 bytes", "\n#define DNS_OK 0"),
+        sec(net, "#define DNS_PORT 53", "\n#define DNS_OK 0"),
         sec(net, "static COLD bipolar dns_copy_name(",
             "//      Where a name ends, for a caller"),
         sec(disc, "#define WATERLINK_MDNS_PORT 5353", "struct waterlink_group_keys {"),
@@ -62474,7 +62474,7 @@ static fn link_peers_unlock(bipolar handle) { (void)handle; }
         sec(link, "struct waterlink_part\n{", "/*\n        Judge an authenticated body whole"),
         sec(link, "#define WATERLINK_REPLAY_BLOCKS", "#endif // WATERLINK_LINK_INCLUDED"),
         LINK_STUBS,
-        sec(net, "//      A wire name is at most 255 bytes", "\n#define DNS_OK 0"),
+        sec(net, "#define DNS_PORT 53", "\n#define DNS_OK 0"),
         sec(net, "static COLD bipolar dns_copy_name(",
             "//      Where a name ends, for a caller"),
         sec(hs, "#define WATERLINK_PROTOCOL", "#endif // WATERLINK_HANDSHAKE_INCLUDED"),
@@ -62495,7 +62495,7 @@ static fn link_peers_unlock(bipolar handle) { (void)handle; }
         sec(svc, "typedef struct\n{\n        address_any base;", "static fn link_batch_flush(void)"),
         sec(svc, "// A sealed datagram of nothing", "static bool link_post("),
         SERVICE_STUBS,
-        sec(near, "#define LINK_GROUPS_PATH", "fn link_groups_load("),
+        sec(near, "#define LINK_GROUPS_PATH", "bool link_groups_load("),
         NEARBY_STUBS,
         sec(near, "static fn link_name_for(", "// The listener's side of it"),
         sec(near, "// The listener's side of it", "typedef struct\n{\n        p32 multiaddr;"),

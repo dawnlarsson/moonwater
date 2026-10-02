@@ -73,7 +73,11 @@ typedef struct
 
 static bool link_groups_scrub(positive records);
 
-fn link_groups_load(link_groups address_to groups)
+/* False when an old file's fast verifier could not be removed durably.  The
+   groups stay loaded, because a command that goes on to save them rewrites the
+   file whole and that is the scrub; only the listener, which never saves,
+   refuses to act on them. */
+bool link_groups_load(link_groups address_to groups)
 {
         positive got = 0;
         bool old = false;
@@ -84,7 +88,7 @@ fn link_groups_load(link_groups address_to groups)
                                       sizeof(groups->record),
                                       sizeof(struct link_group_record),
                                       address_of got) < 0)
-                return;
+                return true;
         groups->count = got / sizeof(struct link_group_record);
         for (positive at = 0; at < groups->count; at++)
         {
@@ -99,12 +103,7 @@ fn link_groups_load(link_groups address_to groups)
                         at--;
                 }
         }
-        if (old && !link_groups_scrub(got / sizeof(struct link_group_record)))
-        {
-                /* Do not activate a secret whose fast verifier could not be
-                   removed durably. A later load retries the migration. */
-                crypto_forget(groups, sizeof(address_to groups));
-        }
+        return !old || link_groups_scrub(got / sizeof(struct link_group_record));
 }
 
 /*
@@ -117,27 +116,6 @@ fn link_groups_load(link_groups address_to groups)
         reads the field and a file written now has nothing in it, so a record
         that was replaced since it was read loses nothing but old bytes.
 */
-static bool link_pwrite_all(bipolar handle, const p8 address_to bytes,
-                            positive length, p64 offset)
-{
-        positive written = 0;
-
-        while (written < length)
-        {
-                bipolar one = system_call_4(
-                    syscall(pwrite64), (positive)handle,
-                    (positive)(bytes + written), length - written,
-                    offset + written);
-
-                if (one == NETWORK_INTERRUPTED)
-                        continue;
-                if (one <= 0 || (positive)one > length - written)
-                        return false;
-                written += (positive)one;
-        }
-        return true;
-}
-
 static bool link_groups_scrub(positive records)
 {
         static const p8 zeros[32];
@@ -160,11 +138,13 @@ static bool link_groups_scrub(positive records)
                      at < records &&
                      (at + 1) * sizeof(struct link_group_record) <= facts.size;
                      at++)
-                        scrubbed &= link_pwrite_all(
-                            handle, zeros, sizeof zeros,
+                        scrubbed &= file_transfer_exact(
+                            syscall(pwrite64), handle, (p8 address_to)zeros,
+                            sizeof zeros,
                             at * sizeof(struct link_group_record) +
                                 __builtin_offsetof(struct link_group_record,
-                                                   check));
+                                                   check)) ==
+                                    (bipolar)sizeof zeros;
                 scrubbed &= system_call_1(syscall(fsync), (positive)handle) >= 0;
         }
         system_close(handle);
@@ -500,7 +480,14 @@ static fn link_nearby_reload(p64 now)
                 return;
         link_nearby.groups_changed = changed;
 
-        link_groups_load(address_of link_nearby.groups);
+        if (!link_groups_load(address_of link_nearby.groups))
+        {
+                /* Do not activate a secret whose fast verifier could not be
+                   removed durably; the next look retries the migration. */
+                crypto_forget(address_of link_nearby.groups,
+                              sizeof link_nearby.groups);
+                link_nearby.groups_changed = 0;
+        }
         for (positive at = 0; at < link_nearby.groups.count; at++)
                 waterlink_group_keys_from(link_nearby.keys + at,
                                           link_nearby.groups.record[at].key,
@@ -575,40 +562,39 @@ static fn link_nearby_stop(void)
 }
 
 // The same place is greeted once in a while, not at every announcement.
-static bool link_greeted_lately(p32 group, p8 address_to address, p16 port,
-                                p64 now)
-{
-        for (positive at = 0; at < LINK_GREETED; at++)
-        {
-                struct link_greeted address_to greeted = link_nearby.greeted + at;
-
-                if (greeted->at &&
-                    link_age(now, greeted->at) < LINK_GREET_AGAIN &&
-                    greeted->group == group &&
-                    greeted->port == port &&
-                    !memory_compare(greeted->address, address, 16))
-                        return true;
-        }
-        return false;
-}
-
-/* An unauthenticated announcement from one address may not consume the whole
-   machine-wide greeting ring. Keep enough private capacity for one machine to
-   be greeted in every possible group, while leaving half the global ring for
-   another source. Raw address rotation still meets the global bound below. */
-static bool link_greeted_source_full(p8 address_to address, p64 now)
+/* How many greetings of this address are still inside LINK_GREET_AGAIN; with
+   exact, only those to this group and port. */
+static positive link_greeted_recent(p8 address_to address, p32 group, p16 port,
+                                    bool exact, p64 now)
 {
         positive recent = 0;
 
         for (positive at = 0; at < LINK_GREETED; at++)
-                if (link_nearby.greeted[at].at &&
-                    link_age(now, link_nearby.greeted[at].at) <
-                        LINK_GREET_AGAIN &&
-                    !memory_compare(link_nearby.greeted[at].address,
-                                    address, 16) &&
-                    ++recent >= LINK_GREET_SOURCE)
-                        return true;
-        return false;
+        {
+                struct link_greeted address_to greeted = link_nearby.greeted + at;
+
+                recent += greeted->at &&
+                          link_age(now, greeted->at) < LINK_GREET_AGAIN &&
+                          (!exact || (greeted->group == group &&
+                                      greeted->port == port)) &&
+                          !memory_compare(greeted->address, address, 16);
+        }
+        return recent;
+}
+
+/* An announcement may start a greeting when the ring has a slot that has aged
+   out, and the source has not already spent LINK_GREET_SOURCE of them. An
+   unauthenticated address may not consume the whole machine-wide ring: this
+   keeps enough private capacity to greet one machine in every possible group
+   and leaves half the ring for another source. Raw address rotation still
+   meets the global bound. */
+static bool link_greet_allowed(p8 address_to address, p64 now)
+{
+        p64 oldest = link_nearby.greeted[link_nearby.greeted_next].at;
+
+        return (!oldest || link_age(now, oldest) >= LINK_GREET_AGAIN) &&
+               link_greeted_recent(address, 0, 0, false, now) <
+                   LINK_GREET_SOURCE;
 }
 
 /*
@@ -626,7 +612,7 @@ static fn link_pair_begin(positive group, p8 address_to address, p16 port,
         p8 ephemeral[32];
         p64 wall = system_clock_ns(0);
 
-        if (link_greeted_lately(keys->mark, address, port, now) ||
+        if (link_greeted_recent(address, keys->mark, port, true, now) ||
             system_random_fill(ephemeral, 32, 0) < 0)
                 return;
         waterlink_stamp(hello, wall / 1000000000ull,
@@ -763,7 +749,6 @@ static fn link_nearby_heard(p8 address_to packet, positive length,
                 for (positive group = 0; group < link_nearby.groups.count; group++)
                 {
                         bool known = false;
-                        p64 oldest = link_nearby.greeted[link_nearby.greeted_next].at;
 
                         for (positive p = 0; p < peers.count && !known; p++)
                                 known = peers.peer[p].group ==
@@ -778,10 +763,7 @@ static fn link_nearby_heard(p8 address_to packet, positive length,
                         //      cannot turn this machine into a sprayer of
                         //      handshakes. A greeting back to a member whose
                         //      own greeting opened is not held to it.
-                        if (!known &&
-                            !link_greeted_source_full(address, now) &&
-                            (!oldest || link_age(now, oldest) >=
-                                            LINK_GREET_AGAIN))
+                        if (!known && link_greet_allowed(address, now))
                                 link_pair_begin(group, address, instance->port,
                                                 now);
                 }
