@@ -41822,6 +41822,49 @@ def harness_moonwater_cli(argv):
         check(all(seen[verb]["status"] == 0 for verb in ("bluetooth off", "wifi off", "airplane on")),
               "a machine with no rfkill has nothing to switch and nothing to say", repr(seen))
 
+        # A list that is more than the verbs read is not written back short:
+        # twenty networks and one forgotten left fifteen, sixty bluetooth
+        # names (past the room they are read into) and one forgotten left
+        # thirty-nine, and a /root/tune past its room lost whatever lay
+        # beyond. They are said to be too long, and left as they were.
+        bluetooth_name = "".join(
+            f"printf 'device-{n:02d}-{'p' * 80}\\n' >> /root/bluetooth\n" for n in range(60))
+        got = tuned("rm -f /root/wifi /root/bluetooth\n" +
+                    "".join(f"printf 'net{n:02d}\\npassword{n:02d}\\n' >> /root/wifi\n" for n in range(20)) +
+                    bluetooth_name + "cp /root/wifi /tmp/wifi.long; cp /root/bluetooth /tmp/bluetooth.long\n" +
+                    say("wifi remove net01") + say("wifi add net03 newpassword") +
+                    say("wifi add brand-new passpass1") + say(f"bluetooth remove device-01-{'p' * 80}") +
+                    say("bluetooth add another") +
+                    "cmp /root/wifi /tmp/wifi.long && echo '@@ wifi whole'\n"
+                    "cmp /root/bluetooth /tmp/bluetooth.long && echo '@@ bluetooth whole'\n")
+        seen = answers(got)
+        joined = "\n".join(got)
+        check(all(seen[verb]["status"] == 1 and any("too long to change here" in line for line in seen[verb]["out"])
+                  for verb in ("wifi remove net01", "wifi add net03 newpassword", "wifi add brand-new passpass1",
+                               f"bluetooth remove device-01-{'p' * 80}", "bluetooth add another")),
+              "a list longer than is read is refused by every verb that would rewrite it", repr(seen)[:400])
+        check("@@ wifi whole" in joined and "@@ bluetooth whole" in joined,
+              "and is left as it was", joined[-200:])
+        got = tuned("for n in $(seq 1 40); do echo \"fill.$n value-number-$n\" >> /root/tune; done\n"
+                    "cp /root/tune /tmp/tune.long\n" + say("power balanced") +
+                    "cmp /root/tune /tmp/tune.long && echo '@@ tune whole'\n")
+        seen = answers(got)
+        check(seen["power balanced"]["status"] == 1 and "@@ tune whole" in got and
+              any("File too large" in line for line in seen["power balanced"]["out"]),
+              "a /root/tune longer than is read is not written back short", repr(seen))
+
+        # Four verbs at once each keep a value in /root/tune: it is read,
+        # changed and written whole, and without the radio lock the last
+        # writer's key was all that was left of the four.
+        got = tuned("".join(
+            "rm -f /root/tune\n(/tmp/moonwater charge limit 80 & /tmp/moonwater cpu smt off & "
+            "/tmp/moonwater cpu boost off & /tmp/moonwater power powersave & wait) > /dev/null 2>&1\n"
+            f"echo \"@@ keys {n} $(sort /root/tune | tr '\\n' '|')\"\n" for n in range(12)))
+        want = "charge.limit 80|cpu.boost off|cpu.smt off|power powersave|"
+        kept = [line.split(" ", 3)[3] for line in got if line.startswith("@@ keys ")]
+        check(len(kept) == 12 and all(line == want for line in kept),
+              "four verbs at once keep all four values", repr(kept))
+
         # The saved lists survive a write cut short. RLIMIT_FSIZE 0 makes
         # every write fail and kills the writer with SIGXFSZ, the way a
         # crash part way through would: a list written in place was truncated

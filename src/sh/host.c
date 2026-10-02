@@ -5812,7 +5812,10 @@ static bool host_line_next(p8 address_to text, positive size, positive address_t
         return true;
 }
 
-static positive radio_wifi_load(radio_network address_to into, positive room)
+/* The saved networks, up to room of them. cut, when asked for, says that
+   there was more than this read: a full buffer, or rows left over. */
+static positive radio_wifi_load(radio_network address_to into, positive room,
+                                bool address_to cut)
 {
         p8 text[8192];
         bipolar got = host_read_state(NET_WIFI_LIST, text, sizeof(text));
@@ -5823,6 +5826,8 @@ static positive radio_wifi_load(radio_network address_to into, positive room)
         bool want_ssid = true;
 
         memory_fill(into, 0, sizeof(radio_network) * room);
+        if (cut)
+                *cut = false;
         if (got <= 0)
                 return 0;
         /* text holds the saved passphrases in the clear, exactly as the
@@ -5873,6 +5878,8 @@ static positive radio_wifi_load(radio_network address_to into, positive room)
                 want_ssid = true;
         }
 
+        if (cut)
+                *cut = got >= (bipolar)sizeof(text) - 1 || (count == room && at < (positive)got);
         if (!want_ssid && count < room && into[count].ssid_length)
                 count++;
 
@@ -7441,7 +7448,7 @@ static bipolar radio_wifi_leave(void)
 static b32 radio_wifi_bring(bool say)
 {
         radio_network networks[RADIO_WIFI_MOST];
-        positive count = radio_wifi_load(networks, RADIO_WIFI_MOST);
+        positive count = radio_wifi_load(networks, RADIO_WIFI_MOST, null);
         positive at;
         bipolar failed = 0;
         bool joined = false;
@@ -7532,11 +7539,13 @@ static b32 radio_wifi_off(bool report)
 }
 
 /* The network put on the saved list, or put there again with the password it
-   was last given. -E2BIG when the list is full. */
+   was last given. -E2BIG when the list is full, -EFBIG when it is more than
+   this reads and would be written back short. */
 static bipolar radio_wifi_store(string_address ssid, string_address pass)
 {
         radio_network networks[RADIO_WIFI_MOST];
-        positive count = radio_wifi_load(networks, RADIO_WIFI_MOST);
+        bool cut;
+        positive count = radio_wifi_load(networks, RADIO_WIFI_MOST, address_of cut);
         positive at;
         positive ssid_length = string_length(ssid);
         positive pass_length = pass ? string_length(pass) : 0;
@@ -7546,7 +7555,9 @@ static bipolar radio_wifi_store(string_address ssid, string_address pass)
                 if (string_equals((string_address)networks[at].ssid, ssid))
                         break;
 
-        if (at == count && count++ == RADIO_WIFI_MOST)
+        if (cut)
+                failed = -EFBIG;
+        else if (at == count && count++ == RADIO_WIFI_MOST)
                 failed = -E2BIG;
         else
         {
@@ -7580,6 +7591,8 @@ static b32 radio_wifi_enter(string_address ssid, string_address pass)
 
         if (stored == -E2BIG)
                 return host_refuse("too many saved networks%s\n", "");
+        if (stored == -EFBIG)
+                return host_refuse("%s is too long to change here\n", NET_WIFI_LIST);
         if (stored < 0)
                 return host_fail(NET_WIFI_LIST, stored);
 
@@ -7674,7 +7687,8 @@ static b32 radio_wifi_add(string_address ssid, string_address pass)
 static b32 radio_wifi_forget(string_address ssid)
 {
         radio_network networks[RADIO_WIFI_MOST];
-        positive count = radio_wifi_load(networks, RADIO_WIFI_MOST);
+        bool cut;
+        positive count = radio_wifi_load(networks, RADIO_WIFI_MOST, address_of cut);
         positive at;
         bool was_joined = false;
         bipolar failed;
@@ -7683,6 +7697,13 @@ static b32 radio_wifi_forget(string_address ssid)
                 if (string_equals((string_address)networks[at].ssid, ssid))
                         break;
 
+        //      A list longer than the rows read would be written back without
+        //      what was not read: twenty networks, one forgotten, and fifteen left.
+        if (cut)
+        {
+                crypto_forget(networks, sizeof(networks));
+                return host_refuse("%s is too long to change here\n", NET_WIFI_LIST);
+        }
         if (at == count)
         {
                 crypto_forget(networks, sizeof(networks));
@@ -7822,7 +7843,7 @@ static b32 radio_wired_status(void)
 static b32 radio_wifi_status(void)
 {
         radio_network networks[RADIO_WIFI_MOST];
-        positive count = radio_wifi_load(networks, RADIO_WIFI_MOST);
+        positive count = radio_wifi_load(networks, RADIO_WIFI_MOST, null);
         positive at;
         bool off = radio_power(NET_WIFI_POWER) == 0;
         bool joined = false;
@@ -7974,8 +7995,11 @@ static b32 radio_bluetooth_edit(string_address identity, bool add)
         }
 
         //      1: nothing by that name to forget, 2: no room for another,
-        //      and the list's own error when it would not be written.
-        if (!add && !found)
+        //      4: more of a list than was read, which would be written back
+        //      short; or the list's own error when it would not be written.
+        if (got >= (bipolar)sizeof(text) - 1)
+                failed = 4;
+        else if (!add && !found)
                 failed = 1;
         else if (add && !found && used + length + 1 >= sizeof(kept))
                 failed = 2;
@@ -7995,6 +8019,8 @@ static b32 radio_bluetooth_edit(string_address identity, bool add)
                 return host_refuse("no remembered bluetooth device is called %s\n", identity);
         if (failed == 2)
                 return host_refuse("too many saved bluetooth devices%s\n", "");
+        if (failed == 4)
+                return host_refuse("%s is too long to change here\n", NET_BLUETOOTH_LIST);
         if (failed)
                 return host_fail(NET_BLUETOOTH_LIST, failed);
         //      A name remembered is for a radio that is on to find it.
@@ -8099,7 +8125,7 @@ static bool radio_wifi_wanted(bipolar power)
 
         if (power >= 0)
                 return power;
-        wanted = radio_wifi_load(networks, 1) != 0;
+        wanted = radio_wifi_load(networks, 1, null) != 0;
         crypto_forget(networks, sizeof(networks));
         return wanted;
 }
@@ -8479,9 +8505,8 @@ static bool tune_kept(string_address key, p8 address_to into, positive room)
         return got > 0 && tune_find(text, (positive)got, key, into, room);
 }
 
-/* Keep a value for a key: the other lines stay, and an empty value drops the
-   key. 0, or the error that kept it from being kept. */
-static bipolar tune_keep(string_address key, string_address value)
+/* The keeping itself: the other lines stay, and an empty value drops the key. */
+static bipolar tune_store(string_address key, string_address value)
 {
         p8 text[512];
         p8 out[640];
@@ -8492,6 +8517,10 @@ static bipolar tune_keep(string_address key, string_address value)
         positive length;
         positive size = string_length(key);
 
+        //      A file that filled the room is longer than this has read, and
+        //      would be written back without the rest of it.
+        if (got >= (bipolar)sizeof(text) - 1)
+                return -EFBIG;
         if (got < 0)
                 got = 0;
         while (host_line_next(text, (positive)got, address_of at, address_of start,
@@ -8518,6 +8547,21 @@ static bipolar tune_keep(string_address key, string_address value)
         }
         host_state_ready();
         return host_write_file(TUNE_KEPT, out, used, 0644, true);
+}
+
+/* Keep a value for a key: 0, or the error that kept it from being kept. Four
+   verbs at once each read the file and wrote it whole, and what was left was
+   the last one's key, so they take turns on the lock the radio verbs use. */
+static bipolar tune_keep(string_address key, string_address value)
+{
+        bipolar lock = radio_lock(true);
+        bipolar failed;
+
+        if (lock < 0)
+                return lock;
+        failed = tune_store(key, value);
+        radio_unlock(lock);
+        return failed;
 }
 
 /* A whole percent, "N", "N%", "+N" or "-N": the sign says relative. */
