@@ -593,7 +593,7 @@ static b32 link_join(string_address address_to words, positive count)
         string_address secret = null;
         link_groups groups;
         struct link_group_record address_to record = null;
-        p8 made[40];
+        p8 made[256];
         bool generated = false;
         bool granted = false;
         bool good;
@@ -619,6 +619,22 @@ static b32 link_join(string_address address_to words, positive count)
                                            "log screen channels verbs%s\n",
                                            "");
                 granted = true;
+        }
+        /*      A secret typed here is in /proc/PID/cmdline, which every user
+                reads, for as long as the command lives: through the slow
+                derivation and the listener's start, seconds. It is taken
+                into this function's own bytes and the argument wiped, as
+                wifi add does with a password. */
+        if (secret)
+        {
+                positive length = string_length(secret);
+
+                if (length < sizeof made)
+                        memory_copy(made, secret, length + 1);
+                crypto_forget(secret, length);
+                if (length >= sizeof made)
+                        return host_refuse("that secret is too long%s\n", "");
+                secret = (string_address)made;
         }
 
         link_groups_load(address_of groups);

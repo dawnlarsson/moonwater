@@ -41844,6 +41844,30 @@ while True:
                   f"moonwater {command} does not write through a link at /root/{state}",
                   [line for line in lines if f"@@planted {state}" in line])
 
+        # A secret on the command line is in /proc/PID/cmdline, which every
+        # user reads, for as long as the command lives. Each verb that takes
+        # one writes into a pipe already full, so it stops at its first word
+        # of output, after the secret has been used, and its cmdline is read
+        # there: the secret must be gone from it.
+        carried = [("link join lab S3cretOnTheLine77", "S3cretOnTheLine77"),
+                   ("link join lab2 S3cretOnTheLine78 allow run", "S3cretOnTheLine78"),
+                   ("wifi add argvnet S3cretOnTheLine79", "S3cretOnTheLine79")]
+        script = "rm -f /tmp/full; mkfifo /tmp/full\n"
+        for command, secret in carried:
+            script += ("exec 3<>/tmp/full; head -c 65536 /dev/zero >&3\n"
+                       f"/tmp/moonwater {command} >&3 2>&3 & pid=$!\n"
+                       "sleep 0.5; tr '\\000' ' ' < /proc/$pid/cmdline > /tmp/line\n"
+                       "kill $pid; exec 3>&-; wait $pid\n"
+                       f"echo \"@@argv {secret} $(grep -c {secret} /tmp/line)"
+                       " $(grep -c moonwater /tmp/line)\"\n")
+        lines, finished = session(script)
+        for command, secret in carried:
+            row = [line.split() for line in lines if line.startswith("@@argv " + secret)]
+            seen, alive = (int(row[0][2]), int(row[0][3])) if row else (-1, 0)
+            check(finished and seen == 0 and alive == 1,
+                  f"moonwater {command.replace(secret, 'SECRET')} keeps the secret out of "
+                  "its command line", f"secret in it {seen}, command line read {alive}")
+
         # Canvas with no kernel desktop to ask: off and on say why and say
         # nothing about windows closing.
         lines, finished = session(say("canvas off") + say("canvas on") + say("canvas"))
