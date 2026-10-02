@@ -83279,6 +83279,11 @@ static b32 settings_run(string_address first, string_address second,
         while (arguments[count])
                 count++;
 
+        //      The command asks the shape first, so that what is not one is
+        //      usage before anything is read.
+        if (!host_settings_shaped(arguments, count))
+                return HOST_SETTINGS_USAGE;
+
         //      A change leaves its line for saving to finish, and nothing is
         //      saved here: end it, or the verdict lands on the same line.
         outcome = host_settings_apply(address_of settings_slot, arguments, count);

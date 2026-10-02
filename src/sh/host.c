@@ -147,8 +147,8 @@ static b32 host_settings_image(string_address path, host_settings address_to int
 static bipolar host_settings_stamp(string_address path, host_settings address_to settings);
 static bool host_settings_booted(host_settings address_to into);
 static bool host_settings_kept(host_settings address_to into);
-static fn host_settings_session(host_settings address_to settings);
-static fn host_settings_keep(host_settings address_to settings);
+static bool host_settings_session(host_settings address_to settings);
+static bool host_settings_keep(host_settings address_to settings);
 static bool host_settings_install(host_install address_to install,
                                   host_settings address_to into);
 static fn host_events_boot(host_settings address_to settings);
@@ -2036,11 +2036,9 @@ static bipolar host_spark_once(unsigned int command, void *request, unsigned int
         return failed;
 }
 
-static bipolar host_bind_ioctl(bipolar device, unsigned int op, unsigned int event,
-                               string_address command,
-                               struct bind_control address_to control)
+static fn host_bind_fill(unsigned int op, unsigned int event, string_address command,
+                         struct bind_control address_to control)
 {
-        bipolar failed;
         positive length;
 
         memory_zero(control, sizeof(address_to control));
@@ -2054,26 +2052,32 @@ static bipolar host_bind_ioctl(bipolar device, unsigned int op, unsigned int eve
                             length < SPARK_BIND_COMMAND_MAX ? length + 1
                                                             : SPARK_BIND_COMMAND_MAX);
         }
+}
 
-        failed = system_control(device, SPARK_IOCTL_BIND, control);
+//      What the kernel answers is ended here, whatever it left at the end.
+static bipolar host_bind_finish(bipolar failed, struct bind_control address_to control)
+{
         control->command[SPARK_BIND_COMMAND_MAX - 1] = end;
         control->name[SPARK_BIND_NAME_MAX - 1] = end;
         return failed < 0 ? failed : 0;
+}
+
+static bipolar host_bind_ioctl(bipolar device, unsigned int op, unsigned int event,
+                               string_address command,
+                               struct bind_control address_to control)
+{
+        host_bind_fill(op, event, command, control);
+        return host_bind_finish(system_control(device, SPARK_IOCTL_BIND, control),
+                                control);
 }
 
 static bipolar host_bind_request(unsigned int op, unsigned int event,
                                  string_address command,
                                  struct bind_control address_to control)
 {
-        bipolar device = system_open_at(AT_FDCWD, SPARK_DEVICE, FILE_READ | O_CLOEXEC);
-        bipolar failed;
-
-        if (device < 0)
-                return device;
-
-        failed = host_bind_ioctl(device, op, event, command, control);
-        system_close(device);
-        return failed;
+        host_bind_fill(op, event, command, control);
+        return host_bind_finish(host_spark_once(SPARK_IOCTL_BIND, control, FILE_READ),
+                                control);
 }
 
 // Settings ------------------------------------------------------
@@ -2176,6 +2180,11 @@ static bool host_settings_next(host_settings address_to settings,
         into->at = address_to at;
         memory_copy_apart(address_of into->entry, settings->payload + into->at,
                           SPARK_SETTINGS_ENTRY);
+        //      Every caller copies the text into a buffer of the most an
+        //      entry may hold, so an entry that says more is the end of the
+        //      list, whoever checked the block before it got here.
+        if (into->entry.length > SPARK_SETTINGS_TEXT_MOST)
+                return false;
         into->text = settings->payload + into->at + SPARK_SETTINGS_ENTRY;
         address_to at += SPARK_SETTINGS_ENTRY +
                          spark_settings_padded(into->entry.length);
@@ -2463,27 +2472,38 @@ static bool host_settings_booted(host_settings address_to into)
                spark_settings_check(into) >= 0;
 }
 
-/* This session's copy, root's alone because a command can carry a secret, and the kernel's. */
-static fn host_settings_keep(host_settings address_to settings)
+/*
+        This session's copy, root's alone because a command can carry a secret,
+        and the kernel's. True once both are as the caller has them: a kernel
+        with no /dev/spark has no copy to be out of step, and is the only
+        refusal that is not one. A copy that could not be written is not left
+        beside the old one.
+*/
+static bool host_settings_keep(host_settings address_to settings)
 {
         struct spark_settings_request request = {(unsigned long)settings, 0};
         bipolar handle;
+        bipolar set;
+        bool written = false;
 
         host_settings_seal(settings);
         host_state_ready();
-        (void)host_spark_once(SPARK_IOCTL_SETTINGS_SET, address_of request,
+        set = host_spark_once(SPARK_IOCTL_SETTINGS_SET, address_of request,
                               FILE_READ_WRITE);
 
         handle = host_open_state(AT_FDCWD, HOST_SETTINGS_NEXT, 0600);
-        if (handle < 0)
-                return;
+        if (handle >= 0)
+        {
+                written = !storage_format_write(handle, (p8 address_to)settings,
+                                                SPARK_SETTINGS_SLOT, 0) &&
+                          system_rename_at(AT_FDCWD, HOST_SETTINGS_NEXT, AT_FDCWD,
+                                           HOST_SETTINGS, 0) >= 0;
+                system_close(handle);
+                if (!written)
+                        system_remove_at(AT_FDCWD, HOST_SETTINGS_NEXT, 0);
+        }
 
-        if (!storage_format_write(handle, (p8 address_to)settings,
-                                  SPARK_SETTINGS_SLOT, 0))
-                system_rename_at(AT_FDCWD, HOST_SETTINGS_NEXT, AT_FDCWD,
-                                 HOST_SETTINGS, 0);
-
-        system_close(handle);
+        return written && (set >= 0 || set == -ENOENT || set == -ENODEV);
 }
 
 typedef struct
@@ -2559,36 +2579,46 @@ static fn host_settings_untrusted(host_settings address_to settings)
         host_settings_seal(settings);
 }
 
-/* This session's settings: its own copy, else the one image of this build a disk here has, else the defaults. */
-static fn host_settings_session(host_settings address_to settings)
+/*
+        This session's settings: its own copy, else the one image of this
+        build a disk here has, else the defaults. False when what came back
+        is not known to be anything: the copies are root's, so for anybody
+        else the defaults are an empty block and not a fact about this
+        machine.
+*/
+static bool host_settings_session(host_settings address_to settings)
 {
         host_settings_search search;
         p8 running[HOST_BUILD_ROOM];
 
         if (host_settings_kept(settings) || host_settings_booted(settings))
-                return;
+                return true;
 
         host_settings_empty(settings);
+
+        if (!bowl_is_root())
+                return false;
 
         /*  Tighter than safe hears nothing from a disk at all: the switches
             are only a nuisance, but a machine that wants no word from media
             somebody pushed in gets none. */
         if (MOONWATER_STRICT >= STRICT_TIGHT)
-                return;
+                return true;
 
         memory_zero(address_of search, sizeof(search));
 
         if (!host_running_build(running, sizeof(running)))
-                return;
+                return true;
 
         search.build = running;
         storage_each_device(host_settings_visit, address_of search);
 
         if (search.count != 1)
-                return;
+                return true;
 
         memory_copy_apart(settings, address_of search.found, SPARK_SETTINGS_SLOT);
         host_settings_untrusted(settings);
+        return true;
 }
 
 typedef struct
@@ -2773,8 +2803,13 @@ static string_address host_settings_write(string_address name,
         return null;
 }
 
-/* Writes this session's settings to its image where it can, ending the line with where they went. */
-static fn host_settings_save(host_settings address_to settings)
+/*
+        Writes this session's settings to its image where it can, ending the
+        line with where they went. False when the session could not keep its
+        own copy, which the line then says: the change is in the image or
+        nowhere, and the next command would read the old one.
+*/
+static bool host_settings_save(host_settings address_to settings)
 {
         host_settings_search search;
         p8 running[HOST_BUILD_ROOM];
@@ -2805,18 +2840,15 @@ static fn host_settings_save(host_settings address_to settings)
                                    "this session started from\n");
 
         log_flush();
-        host_settings_keep(settings);
+        if (host_settings_keep(settings))
+                return true;
+
+        host_say(log_error, host_label "this session could not keep its copy of "
+                                       "the settings; the next command reads the "
+                                       "ones from before\n");
+        return false;
 }
 
-/*
-        One list said twice.
-
-        `moonwater init` writes it as log lines of its own, and `moonwater
-        status` sets the same three answers -- the hook that took the list
-        away, the entries, or the sentence for an empty one -- under a
-        heading on the session page. Only the frame around them differs,
-        and a page is one block of output, so it does not flush per list.
-*/
 /*
         A saved command as it is shown: a script keeps its lines and tabs, and
         every other control byte, and bytes that are not valid text, are
@@ -2845,6 +2877,15 @@ static string_address host_plain(string_address text)
         return (string_address)shown;
 }
 
+/*
+        One list said twice.
+
+        `moonwater bind init` writes it as log lines of its own, and
+        `moonwater status` sets the same three answers -- the hook that took
+        the list away, the entries, or the sentence for an empty one -- under
+        a heading on the session page. Only the frame around them differs,
+        and a page is one block of output, so it does not flush per list.
+*/
 static fn host_settings_lines(host_settings address_to settings, positive which,
                               bool page)
 {
@@ -2900,10 +2941,37 @@ static b32 host_settings_refused(string_address verb, string_address why,
 }
 
 /*
+        Whether the words are a settings command at all: a list alone, a
+        switch alone or with on or off, add or remove with words. Said before
+        anything is read to answer them, so a mistyped line costs its usage
+        and not the search for a copy of the settings.
+*/
+static bool host_settings_shaped(string_address address_to arguments, positive count)
+{
+        if (string_table_find(arguments[1], host_lists, sizeof(host_lists[0]),
+                              array_count(host_lists)) == array_count(host_lists))
+                return false;
+
+        if (count == 2)
+                return true;
+
+        for (positive at = 0; at < array_count(host_switches); at++)
+                if (string_equals(arguments[1], host_switches[at].verb) &&
+                    string_equals(arguments[2], host_switches[at].word))
+                        return count == 3 ||
+                               (count == 4 && (string_equals(arguments[3], "on") ||
+                                               string_equals(arguments[3], "off")));
+
+        return count >= 4 && (string_equals(arguments[2], "add") ||
+                              string_equals(arguments[2], "remove"));
+}
+
+/*
         One settings command against a copy in memory, nothing read or written
-        but that copy: CHANGED once it printed what changed and wants the
-        line finished by saving, SHOWN once it printed what was asked, USAGE,
-        or REFUSED once it said why.
+        but that copy, once host_settings_shaped has said it is one: CHANGED
+        once it printed what changed and wants the line finished by saving,
+        SHOWN once it printed what was asked, USAGE for words that name
+        nothing to add or remove, or REFUSED once it said why.
 */
 static b32 host_settings_apply(host_settings address_to settings,
                                string_address address_to arguments, positive count)
@@ -2918,9 +2986,6 @@ static b32 host_settings_apply(host_settings address_to settings,
                                            array_count(host_lists));
         p16 id = 0;
         p8 list;
-
-        if (which == array_count(host_lists))
-                return HOST_SETTINGS_USAGE;
 
         list = host_lists[which].list;
 
@@ -2961,10 +3026,6 @@ static b32 host_settings_apply(host_settings address_to settings,
                         return HOST_SETTINGS_SHOWN;
                 }
 
-                if (count != 4 || (!string_equals(arguments[3], "on") &&
-                                   !string_equals(arguments[3], "off")))
-                        return HOST_SETTINGS_USAGE;
-
                 if (string_equals(arguments[3], "off"))
                         settings->flags |= flag;
                 else
@@ -2975,12 +3036,8 @@ static b32 host_settings_apply(host_settings address_to settings,
                 return HOST_SETTINGS_CHANGED;
         }
 
-        if (string_equals(arguments[2], "add") || string_equals(arguments[2], "remove"))
         {
                 bool adding = string_equals(arguments[2], "add");
-
-                if (count < 4)
-                        return HOST_SETTINGS_USAGE;
 
                 if (!host_settings_words(text, sizeof(text), arguments + 3, count - 3,
                                          address_of length))
@@ -3016,8 +3073,6 @@ static b32 host_settings_apply(host_settings address_to settings,
                               text);
                 return HOST_SETTINGS_CHANGED;
         }
-
-        return HOST_SETTINGS_USAGE;
 }
 
 /*
@@ -3074,6 +3129,9 @@ static b32 host_settings_command(string_address address_to arguments, positive c
 
         host_need_root("moonwater");
 
+        if (!host_settings_shaped(arguments, count))
+                return host_usage();
+
         host_state_ready();
         host_settings_session(address_of settings);
 
@@ -3083,7 +3141,8 @@ static b32 host_settings_command(string_address address_to arguments, positive c
         if (outcome != HOST_SETTINGS_CHANGED)
                 return outcome == HOST_SETTINGS_SHOWN ? 0 : 1;
 
-        host_settings_save(address_of settings);
+        if (!host_settings_save(address_of settings))
+                return 1;
 
         if (count > 3 && string_equals(arguments[2], "add") &&
             host_settings_words(text, sizeof(text), arguments + 3, count - 3,
@@ -13436,16 +13495,39 @@ static b32 host_wipe(void)
 static fn host_bind_say(string_address prefix, struct bind_control address_to control)
 {
         p16 line = host_machine_event_line(control->event);
+        string_address name = (string_address)control->name;
+        bool said = false;
 
         if (line)
-                string_format(log, "%s%s: %s:%p\n", prefix,
-                              (string_address)control->name, host_machine_where(),
+                string_format(log, "%s%s: %s:%p", prefix, name, host_machine_where(),
                               (positive)line);
-        else if (!control->command[0])
-                string_format(log, "%s%s\n", prefix, (string_address)control->name);
-        else
-                string_format(log, "%s%s: %s\n", prefix, (string_address)control->name,
+        else if (control->command[0])
+                string_format(log, "%s%s: %s", prefix, name,
                               host_plain((string_address)control->command));
+        else if (control->flags & SPARK_BIND_DEFAULT)
+                string_format(log, "%s%s", prefix, name);
+        else
+                //      The kernel keeps a line somebody set from anyone but
+                //      root, and clears the DEFAULT flag so that this can say so.
+                string_format(log, "%s%s: set, and root's to read", prefix, name);
+
+        if (control->runs)
+        {
+                string_format(log, "  (ran %p time%s", (positive)control->runs,
+                              control->runs == 1 ? "" : "s");
+                said = true;
+        }
+        if (control->flags & SPARK_BIND_RUNNING)
+        {
+                string_format(log, said ? ", running now" : "  (running now");
+                said = true;
+        }
+        if (control->flags & SPARK_BIND_PENDING)
+        {
+                string_format(log, said ? ", queued" : "  (queued");
+                said = true;
+        }
+        string_format(log, said ? ")\n" : "\n");
 }
 
 static fn host_bind_forget(host_settings address_to settings, p16 event)
@@ -13473,6 +13555,30 @@ static fn host_bind_forget(host_settings address_to settings, p16 event)
         }
 }
 
+/*
+        Whether the line to be set will fit in the block that keeps it, asked
+        before the kernel is: a block full of init and exit entries refused
+        the line after the kernel had taken it, and the command said refused
+        about a line that was live. An empty line puts the default back and
+        needs no room. Null when it fits or when there is no copy to ask --
+        the kernel's own refusal comes first for anyone it refuses.
+*/
+static string_address host_bind_fits(host_settings address_to settings,
+                                     unsigned int event, string_address command)
+{
+        p16 id = (p16)event;
+
+        if (!host_settings_session(settings))
+                return null;
+
+        host_bind_forget(settings, id);
+        if (!*command)
+                return null;
+
+        return host_settings_add(settings, SPARK_SETTINGS_BIND, SPARK_SETTINGS_COMMAND,
+                                 command, string_length(command), address_of id);
+}
+
 static b32 host_bind_keep(unsigned int event, struct bind_control address_to control)
 {
         host_settings settings;
@@ -13492,8 +13598,7 @@ static b32 host_bind_keep(unsigned int event, struct bind_control address_to con
                 if (failed)
                         return host_settings_refused("bind", failed, address_of settings);
         }
-        host_settings_save(address_of settings);
-        return 0;
+        return host_settings_save(address_of settings) ? 0 : 1;
 }
 
 static fn host_bind_apply(host_settings address_to settings)
@@ -13599,7 +13704,9 @@ static unsigned int host_bind_named(string_address first, string_address second)
 static b32 host_bind_tell(unsigned int event, string_address command)
 {
         struct bind_control control;
+        host_settings settings;
         p16 line = host_machine_event_line(event);
+        string_address full;
         bipolar failed;
 
         if (line)
@@ -13608,6 +13715,13 @@ static b32 host_bind_tell(unsigned int event, string_address command)
                                          ? (string_address)spark_bind_event_name[event - 1]
                                          : (string_address) "that event",
                                      line);
+                return 1;
+        }
+
+        full = host_bind_fits(address_of settings, event, command);
+        if (full)
+        {
+                host_settings_refused("bind", full, address_of settings);
                 return 1;
         }
 

@@ -42623,6 +42623,25 @@ while True:
               "with the bytes written out and the script's lines kept", repr(listed[:200]))
         check("\\x1b]0;title" in paged, "and status shows them the same way", repr(paged[:300]))
 
+        # A line that cannot be kept is refused before the kernel takes it:
+        # with the settings block full of init entries, a bind that needs
+        # room said refused after it had been set, and the command and the
+        # kernel disagreed about what the machine runs. Here there is no
+        # kernel to ask, so the room is the whole of the answer.
+        fill = "x" * 4000
+        lines, finished = session(
+            "rm -rf /run/moonwater\n" +
+            "for n in 1 2 3 4; do timeout 20 /tmp/moonwater bind init add \"" + fill + "\" > /dev/null 2>&1; done\n"
+            "timeout 20 /tmp/moonwater bind init add \"" + "y" * 250 + "\" > /dev/null 2>&1\n" +
+            say("bind mute " + "z" * 100) + say("bind mute z") +
+            "echo '@@ left'; timeout 20 /tmp/moonwater bind init | wc -l; echo '@@end'\n")
+        seen = answers(lines)
+        check(finished and seen.get("bind mute " + "z" * 100, {}).get("status") == 1 and
+              any("settings block is full" in line for line in seen.get("bind mute " + "z" * 100, {}).get("out", [])),
+              "a bound line the settings block has no room for is refused", repr(seen.get("bind mute " + "z" * 100)))
+        check(not any("settings block is full" in line for line in seen.get("bind mute z", {}).get("out", [])),
+              "and one that fits is not", repr(seen.get("bind mute z")))
+
         # A state file a verb writes, planted as a link to something else
         # before the verb runs: the verb may refuse or may replace the link,
         # and what the link pointed at is left as it was.
@@ -57778,6 +57797,127 @@ int main(void)
         for _ in range(total - sum(1 for line in lines if line.startswith("FAIL"))):
             checks(True, "machine stop")
         checks(total == 5 and ran.returncode == 0, "the stop checks ran: " + ran.stderr[-300:])
+
+    #   The CLI's side of the bind ioctl and of the settings block, lifted
+    #   and run: what is handed to the kernel for a command of every length
+    #   around its limit, what is made of an answer that is not terminated,
+    #   and an entry that claims more text than a buffer of the most an entry
+    #   may hold -- every caller copies it into one.
+    host = (root / "src/sh/host.c").read_text()
+    lift_source = r"""
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdbool.h>
+typedef unsigned char p8;
+typedef unsigned short p16;
+typedef unsigned int p32;
+typedef unsigned long long p64;
+typedef unsigned long positive;
+typedef long bipolar;
+typedef const char *string_address;
+#define address_of &
+#define address_to *
+#define end 0
+#define fn void
+#define memory_copy_apart memcpy
+#define memory_copy memcpy
+#define memory_zero(at, n) memset(at, 0, n)
+#define string_length strlen
+#define SPARK_EVENTS_UNUSED 0
+""" + section(spark, "#define SPARK_BIND_NAME_MAX", "#define SPARK_BIND_GET") + \
+        section(spark, "#define SPARK_BIND_POWEROFF", "static const unsigned char spark_bind_stop") + \
+        section(spark, "#define SPARK_BIND_COMMAND_MAX 256u", "#define SPARK_BIND_NAME_MAX") + \
+        section(spark, "struct bind_control {", "// _IOWR('s', 11, struct bind_control)") + \
+        section(spark, "#define SPARK_SETTINGS_MAGIC", "//      The sum a sealed slot carries") + r"""
+#define SPARK_IOCTL_BIND 0xc138730bu
+#define SPARK_BIND_GET 0u
+#define SPARK_BIND_SET 1u
+typedef struct spark_settings host_settings;
+""" + section(host, "typedef struct\n{\n        struct spark_settings_entry entry;",
+              "static const struct\n{\n        string_address verb;\n        p8 list;") + r"""
+static unsigned seen_op, seen_event, seen_length, seen_terminated;
+static char seen_command[SPARK_BIND_COMMAND_MAX];
+static int answer_loose, answer_fails;
+static bipolar system_control(bipolar device, unsigned long request, void *at) {
+    struct bind_control *c = at; (void)device;
+    seen_op = c->op; seen_event = c->event;
+    memcpy(seen_command, c->command, sizeof seen_command);
+    seen_terminated = memchr(c->command, 0, sizeof c->command) != NULL;
+    if (answer_loose) { memset(c->name, 'n', sizeof c->name); memset(c->command, 'c', sizeof c->command); }
+    return request == SPARK_IOCTL_BIND && !answer_fails ? 0 : -22;
+}
+""" + section(host, "static fn host_bind_fill(", "static bipolar host_bind_request(") + \
+        section(host, "/* The entry at at, stepping at past it", "/* An entry's words") + r"""
+static unsigned bad, total;
+static void check(int ok, const char *name) { total++; if (!ok) { bad++; printf("FAIL %s\n", name); } }
+int main(void)
+{
+    struct bind_control control;
+    char text[400];
+    static host_settings block;
+    host_setting entry;
+    positive at;
+    unsigned seen = 0;
+
+    for (unsigned length = 254; length <= 258; length++) {
+        memset(text, 'a', length); text[length] = 0;
+        memset(&control, 0xee, sizeof control);
+        answer_loose = answer_fails = 0;
+        check(host_bind_ioctl(3, SPARK_BIND_SET, 5, text, &control) == 0 && seen_op == SPARK_BIND_SET &&
+              seen_event == 5, "a set reaches the kernel as a set of that event");
+        check(!memcmp(seen_command, text, length < 256 ? length : 256) &&
+              (length < 256 ? seen_terminated : !seen_terminated),
+              length < 256 ? "a command that fits goes whole with its end" :
+                             "a command that is too long goes at the size, unended, so the kernel's refusal answers");
+    }
+    memset(&control, 0xee, sizeof control);
+    host_bind_ioctl(3, SPARK_BIND_GET, 7, NULL, &control);
+    check(seen_op == SPARK_BIND_GET && seen_event == 7 && seen_command[0] == 0 &&
+          !memchr(seen_command, 0xee, sizeof seen_command), "a get carries no command, and no stack");
+    answer_loose = 1;
+    check(host_bind_ioctl(3, SPARK_BIND_GET, 7, NULL, &control) == 0 &&
+          control.command[SPARK_BIND_COMMAND_MAX - 1] == 0 && control.name[SPARK_BIND_NAME_MAX - 1] == 0,
+          "an answer the kernel did not end is ended here");
+    answer_loose = 0; answer_fails = 1;
+    check(host_bind_ioctl(3, SPARK_BIND_GET, 7, NULL, &control) < 0, "a refusal is the caller's to see");
+
+    memset(&block, 0, sizeof block);
+    #define PUT(l_, k_, i_, n_) do { \
+        struct spark_settings_entry e = {0}; e.list = l_; e.kind = k_; e.id = i_; e.length = n_; \
+        memcpy(block.payload + block.length, &e, sizeof e); block.length += sizeof e; \
+        memset(block.payload + block.length, 'x', spark_settings_padded(n_)); \
+        block.length += spark_settings_padded(n_); } while (0)
+    PUT(1, 1, 1, 5); PUT(3, 1, 2, 4096); PUT(1, 1, 3, 0);
+    for (at = 0; host_settings_next(&block, &at, &entry); ) seen++;
+    check(seen == 3, "entries are walked by their padded size to the end of the block");
+    memset(&block, 0, sizeof block);
+    PUT(1, 1, 1, 7); PUT(1, 1, 2, 4097); PUT(1, 1, 3, 3);
+    seen = 0;
+    for (at = 0; host_settings_next(&block, &at, &entry); ) seen++;
+    check(seen == 1, "an entry that claims more than a buffer for one holds ends the list");
+    printf("%u %u\n", total, bad);
+    return bad != 0;
+}
+"""
+    with tempfile.TemporaryDirectory(prefix="machine-lift-") as temporary:
+        work = Path(temporary)
+        (work / "lift.c").write_text(lift_source)
+        built = subprocess.run([cc, "-O1", "-g", "-fsanitize=address,undefined", "-w", "-o",
+                                str(work / "lift"), str(work / "lift.c")],
+                               capture_output=True, text=True)
+        if built.returncode:
+            print(built.stderr[-3000:])
+            return 1
+        ran = subprocess.run([str(work / "lift")], capture_output=True, text=True, timeout=60)
+        lines = ran.stdout.strip().split("\n")
+        failed = [line for line in lines if line.startswith("FAIL")]
+        for line in failed:
+            checks(False, "bind and settings lift: " + line[5:])
+        total = int(lines[-1].split()[0]) if lines and lines[-1][:1].isdigit() else 0
+        for _ in range(total - len(failed)):
+            checks(True, "bind and settings lift")
+        checks(total == 15 and ran.returncode == 0, "the lifted checks ran: " + ran.stderr[-300:])
     return checks.verdict("machine scan", "machine-scan")
 
 

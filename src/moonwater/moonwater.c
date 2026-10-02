@@ -2062,6 +2062,9 @@ static struct moonwater_overlay host_machine_sourced_overlay;
 static bool host_machine_self;
 //      moonwater_end has run; it runs once however the machine stops.
 static bool host_machine_ended;
+//      The file the script is read from was there and was refused: its mode,
+//      its owner, a link, or too many bytes. The kernel then keeps what it had.
+static bool host_machine_rejected;
 
 #define HOST_MACHINE_ASSIGN(name, value) env_assign(name, value);
 
@@ -2071,15 +2074,13 @@ static bool host_machine_file_allowed(p16 mode, p32 owner)
                (mode & 0022) == 0;
 }
 
-static p8 host_machine_read_file(string_address path, p8 address_to text,
-                                 positive room, positive address_to used)
+static p8 host_machine_read_file(string_address path, byte_store address_to text)
 {
         file_facts facts;
         file_facts opened;
         bipolar handle;
         bipolar got;
 
-        address_to used = 0;
         if (!file_look(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW, address_of facts))
                 return HOST_MACHINE_ABSENT;
         if ((facts.mode & MODE_FORMAT) == MODE_LINK ||
@@ -2095,27 +2096,11 @@ static p8 host_machine_read_file(string_address path, p8 address_to text,
                 return HOST_MACHINE_REFUSED;
         }
 
-        for (;;) {
-                if (address_to used == room) {
-                        p8 extra;
-
-                        got = system_read_retry((positive)handle,
-                                                address_of extra, 1);
-                        system_close(handle);
-                        return (got < 0 || got) ? HOST_MACHINE_REFUSED : HOST_MACHINE_OK;
-                }
-                got = system_read_retry((positive)handle, text + address_to used,
-                                        room - address_to used);
-                if (got < 0) {
-                        system_close(handle);
-                        return HOST_MACHINE_REFUSED;
-                }
-                if (!got)
-                        break;
-                address_to used += (positive)got;
-        }
+        //      More than the kernel takes is refused rather than cut, and the
+        //      one probe past it is what tells a script that is exactly full.
+        got = file_store_read_limit((positive)handle, text, MOONWATER_SCRIPT_BYTES);
         system_close(handle);
-        return HOST_MACHINE_OK;
+        return got < 0 ? HOST_MACHINE_REFUSED : HOST_MACHINE_OK;
 }
 
 static bipolar host_machine_ioctl(bipolar device, unsigned int op,
@@ -2146,26 +2131,27 @@ static bipolar host_machine_script(unsigned int op)
 
 static fn host_machine_publish(void)
 {
-        positive used = 0;
+        byte_store text = {0};
         p8 loaded;
 
         if (!bowl_is_root())
                 return;
 
-        loaded = host_machine_read_file(HOST_MACHINE_SCRIPT, host_machine_text,
-                                        MOONWATER_SCRIPT_BYTES, address_of used);
-        if (loaded == HOST_MACHINE_REFUSED) {
+        loaded = host_machine_read_file(HOST_MACHINE_SCRIPT, address_of text);
+        host_machine_rejected = loaded == HOST_MACHINE_REFUSED;
+        if (host_machine_rejected) {
                 string_address line[] = { "machine script refused: ",
                                           HOST_MACHINE_SCRIPT, null };
 
+                byte_store_release(address_of text);
                 host_kmsg(line);
                 return;
         }
 
         memory_zero(address_of host_machine, sizeof(host_machine));
         if (loaded == HOST_MACHINE_OK) {
-                host_machine.length = (unsigned int)used;
-                host_machine.address = (unsigned long)host_machine_text;
+                host_machine.length = (unsigned int)text.used;
+                host_machine.address = (unsigned long)text.bytes;
         }
         if (host_machine_script(MOONWATER_SCRIPT_SET) >= 0)
                 host_machine_fresh = 1;
@@ -2188,6 +2174,12 @@ static fn host_machine_ask(void)
 static string_address host_machine_where(void)
 {
         host_machine_ask();
+        if (host_machine_rejected)
+                return host_machine.origin == MOONWATER_ORIGIN_DISK
+                           ? "the script from before " HOST_MACHINE_SCRIPT
+                             " was refused"
+                           : HOST_MACHINE_BUILTIN " (" HOST_MACHINE_SCRIPT
+                             " is refused)";
         return host_machine.origin == MOONWATER_ORIGIN_DISK
                    ? HOST_MACHINE_SCRIPT
                    : HOST_MACHINE_BUILTIN;
