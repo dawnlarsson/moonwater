@@ -57562,6 +57562,92 @@ finally:
 """
 
 
+#   Each one removes one step that keeps a lease's epoch whole, in
+#   src/sh/net.c, as (what it breaks, the text, what it becomes).
+NET_EPOCH_MUTANTS = (
+    ("a new route leaves the old one in place",
+     "        if (route_changed && net_owns_route(previous))\n        {\n                status = netlink_route_delete(",
+     "        if (false && route_changed && net_owns_route(previous))\n        {\n                status = netlink_route_delete("),
+    ("a new address leaves the old one in place",
+     "        if (address_changed && net_owns_address(previous))\n        {\n                status = netlink_address_delete(",
+     "        if (false && address_changed && net_owns_address(previous))\n        {\n                status = netlink_address_delete("),
+    ("a rollback does not put the old route back",
+     "                        bipolar status = net_lease_route(\n                            handle, address_of previous->lease,\n                            previous->index, false);",
+     "                        bipolar status = 0;"),
+    ("a rollback keeps the new address",
+     "        if (address_changed)\n                net_rollback_record(\n                    netlink_address_delete(handle, index, lease->address,",
+     "        if (false)\n                net_rollback_record(\n                    netlink_address_delete(handle, index, lease->address,"),
+    ("a release keeps the lease's resolver",
+     "                bipolar status = net_write_resolv(0);",
+     "                bipolar status = 0;"),
+    ("a release keeps the lease's route",
+     "        if (net_owns_route(held))\n                net_rollback_record(",
+     "        if (false)\n                net_rollback_record("),
+)
+
+
+def harness_net_epoch_mutants(argv):
+    """The lease epoch walk of storage_io (storage_test_lease_epochs) against
+    src/sh/net.c with one epoch step taken out at a time: each mutant must
+    break one of its two rows, or the walk would not have noticed that step
+    going. Built alone (-DSTORAGE_EPOCH_ONLY), natively, about a minute and a
+    half a mutant, so the lane asks the first; MOONWATER_EPOCH_MUTANTS=all asks
+    every one. NOT RUN (exit 2) off Linux, or where the walk's namespaces are
+    refused.
+
+        python3 test/differential.py --harness net_epoch_mutants [--all]
+    """
+    import shutil
+    import subprocess
+    import tempfile
+    parser = argparse.ArgumentParser(prog="differential.py --harness net_epoch_mutants")
+    parser.add_argument("--all", action="store_true")
+    parser.add_argument("--cc", default=os.environ.get("CC", "gcc"))
+    args = parser.parse_args(argv)
+    if platform.system() != "Linux" or platform.machine() not in ("x86_64", "AMD64"):
+        print("net epoch mutants: NOT RUN -- the walk runs natively on x86_64 Linux")
+        return 2
+    every = args.all or os.environ.get("MOONWATER_EPOCH_MUTANTS") == "all"
+    chosen = NET_EPOCH_MUTANTS if every else NET_EPOCH_MUTANTS[:1]
+    checks = Checks()
+    original = (HARNESS_ROOT / "src/sh/net.c").read_text()
+    with tempfile.TemporaryDirectory(prefix="net-epoch-") as temporary:
+        top = Path(temporary)
+        shutil.copytree(HARNESS_ROOT / "src", top / "src")
+        (top / "test").mkdir()
+        shutil.copy(HARNESS_ROOT / "test/checks.c", top / "test/checks.c")
+        for what, before, after in chosen:
+            checks(original.count(before) == 1,
+                   "mutant '%s': its text is in src/sh/net.c once" % what)
+            if original.count(before) != 1:
+                continue
+            (top / "src/sh/net.c").write_text(original.replace(before, after))
+            binary = top / "epoch"
+            built = subprocess.run(
+                [args.cc, "-O2", "-static", "-nostdlib", "-nostartfiles",
+                 "-fno-stack-protector", "-fno-builtin", "-march=x86-64", "-w",
+                 "-T", str(top / "src/build/spark.ld"), "-Wl,-e,_start",
+                 "-Wl,--build-id=none", "-Wl,--no-warn-rwx-segments",
+                 "-DCHECK_storage_io", "-DSTORAGE_EPOCH_ONLY", "-fwhole-program",
+                 "-o", str(binary), str(top / "test/checks.c")],
+                capture_output=True, text=True)
+            checks(built.returncode == 0, "mutant '%s' builds: %s" % (what, built.stderr[-400:]))
+            if built.returncode:
+                continue
+            ran = subprocess.run([str(binary)], capture_output=True, text=True,
+                                 cwd=temporary, timeout=600)
+            said = ran.stdout + ran.stderr
+            if "NOT RUN" in said:
+                print("net epoch mutants: NOT RUN -- " + said.strip().splitlines()[-1][:160])
+                return 2
+            verdict = re.search(r"^(\d+) checks, (\d+) failures$", said, re.M)
+            checks(verdict is not None and int(verdict.group(2)) > 0,
+                   "mutant '%s' is caught by the lease epoch walk: %s" % (
+                       what, " | ".join(line.strip() for line in said.splitlines()
+                                        if "epoch:" in line or "FAIL" in line)[:300] or said[-200:]))
+    return checks.verdict("net epoch mutants", "net-epoch-mutants")
+
+
 def harness_net_netem(argv):
     """The DHCP client and the SNTP client, as built, against a server that
     schedules its answers adversarially, over a veth pair in namespaces with
@@ -65858,6 +65944,7 @@ HARNESS_CHECKS = {
     "http_response_framing": harness_http_response_framing,
     "http_fuzz": harness_http_fuzz,
     "net_netem": harness_net_netem,
+    "net_epoch_mutants": harness_net_epoch_mutants,
     "sntp_era": harness_sntp_era,
     "http_urls": harness_http_urls,
     "tls_der_fuzz": harness_tls_der_fuzz,

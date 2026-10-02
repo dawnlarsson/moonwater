@@ -81859,6 +81859,332 @@ static fn storage_test_lease_off_prefix(void)
         }
 }
 
+/*
+        Lease epochs against the kernel.
+
+        Every sequence of events from an alphabet, two deep (three with
+        -DSTORAGE_EPOCH_DEPTH=3), each in a namespace of its own on a dummy
+        link: a lease applied as the watcher applies one (a first lease, a
+        renewal that moves the router, the resolver, the address, the prefix
+        to a /32 with its router off it, a lease with no router, another
+        server's lease) beside an address put on the link by hand, each of
+        those again with the resolver file refusing
+        to be written (/etc read-only for the one apply), and the release.
+        After every event the kernel's addresses and default routes on the
+        link and /etc/resolv.conf are read back and held to what the lease
+        the watcher now holds says, and nothing else: an applied lease is
+        all of the new lease's address, route and resolver, a refused one
+        leaves every one of them as they were before it (no old route with a
+        new resolver, no new address beside the old route), and a release
+        leaves no lease's address or route and the fallback resolver. The
+        first sequence that breaks one is printed, with the event, which part
+        and the state.
+*/
+#ifndef STORAGE_EPOCH_DEPTH
+#define STORAGE_EPOCH_DEPTH 2
+#endif
+#define STORAGE_EPOCH_LEASES 7
+#define STORAGE_EPOCH_EVENTS (2 * STORAGE_EPOCH_LEASES + 1)
+#define STORAGE_EPOCH_ROOM 8
+//      An address somebody put on the link by hand, which no lease owns and
+//      every event must leave; it also keeps the link holding an address
+//      when a lease's goes, so the kernel does not sweep a route the
+//      watcher forgot.
+#define STORAGE_EPOCH_OPERATOR 0x0a091e1e
+
+typedef struct
+{
+        p32 index;
+        positive addresses;
+        p32 address[STORAGE_EPOCH_ROOM];
+        p8 prefix[STORAGE_EPOCH_ROOM];
+        positive routes;
+        p32 router[STORAGE_EPOCH_ROOM];
+        p32 resolver;
+} storage_epoch_state;
+
+static bool storage_epoch_address(netlink_header address_to header,
+                                  address_any context)
+{
+        storage_epoch_state address_to state = context;
+        netlink_address address_to body =
+            netlink_message_body(header, sizeof(netlink_address));
+        positive size = 0;
+        p8 address_to named = netlink_find(header, sizeof(netlink_address),
+                                           IFA_LOCAL, address_of size);
+
+        if (body && named && size == 4 && body->index == state->index &&
+            state->addresses < STORAGE_EPOCH_ROOM)
+        {
+                state->address[state->addresses] =
+                    network_order_32(memory_load_unaligned(p32, named));
+                state->prefix[state->addresses++] = body->prefix;
+        }
+        return true;
+}
+
+static bool storage_epoch_route(netlink_header address_to header,
+                                address_any context)
+{
+        storage_epoch_state address_to state = context;
+        netlink_route address_to body =
+            netlink_message_body(header, sizeof(netlink_route));
+        positive size = 0;
+        p8 address_to gateway = netlink_find(header, sizeof(netlink_route),
+                                             RTA_GATEWAY, address_of size);
+        positive out_size = 0;
+        p8 address_to out = netlink_find(header, sizeof(netlink_route), RTA_OIF,
+                                         address_of out_size);
+
+        if (body && !body->destination_bits && body->table == RT_TABLE_MAIN &&
+            gateway && size == 4 && out && out_size == 4 &&
+            memory_load_unaligned(p32, out) == state->index &&
+            state->routes < STORAGE_EPOCH_ROOM)
+                state->router[state->routes++] =
+                    network_order_32(memory_load_unaligned(p32, gateway));
+        return true;
+}
+
+static bool storage_epoch_read(b32 handle, p32 index,
+                               storage_epoch_state address_to state)
+{
+        p8 text[128];
+        bipolar got;
+
+        memory_zero(state, sizeof *state);
+        state->index = index;
+        if (netlink_dump(handle, RTM_GETADDR, sizeof(netlink_address), AF_INET,
+                         storage_epoch_address, state) < 0 ||
+            netlink_dump(handle, RTM_GETROUTE, sizeof(netlink_route), AF_INET,
+                         storage_epoch_route, state) < 0)
+                return false;
+        got = file_slurp_once_at(AT_FDCWD, "/etc/resolv.conf", text,
+                                 sizeof text - 1);
+        if (got >= 11 && !memory_compare(text, "nameserver ", 11))
+        {
+                positive at = 11;
+                positive stop = at;
+                bipolar host;
+
+                text[got] = 0;
+                while (stop < (positive)got && text[stop] != '\n')
+                        stop++;
+                text[stop] = 0;
+                host = string_to_host((string_address)(text + at));
+                state->resolver = host >= 0 ? (p32)host : 1;
+        }
+        return true;
+}
+
+static bool storage_epoch_same(const storage_epoch_state address_to a,
+                               const storage_epoch_state address_to b)
+{
+        if (a->addresses != b->addresses || a->routes != b->routes ||
+            a->resolver != b->resolver)
+                return false;
+        for (positive at = 0; at < a->addresses; at++)
+        {
+                bool found = false;
+
+                for (positive other = 0; other < b->addresses; other++)
+                        found |= a->address[at] == b->address[other] &&
+                                 a->prefix[at] == b->prefix[other];
+                if (!found)
+                        return false;
+        }
+        for (positive at = 0; at < a->routes; at++)
+        {
+                bool found = false;
+
+                for (positive other = 0; other < b->routes; other++)
+                        found |= a->router[at] == b->router[other];
+                if (!found)
+                        return false;
+        }
+        return true;
+}
+
+//      What the kernel should hold for what the watcher holds.
+static fn storage_epoch_expected(const net_holding address_to held, p32 index,
+                                 p32 resolver_before,
+                                 storage_epoch_state address_to want)
+{
+        memory_zero(want, sizeof *want);
+        want->index = index;
+        want->address[want->addresses] = STORAGE_EPOCH_OPERATOR;
+        want->prefix[want->addresses++] = 24;
+        if (held->index)
+        {
+                want->address[want->addresses] = held->lease.address;
+                want->prefix[want->addresses++] = dhcp_prefix_of(held->lease.mask);
+                if (held->lease.router)
+                        want->router[want->routes++] = held->lease.router;
+                want->resolver = held->lease.nameserver ? held->lease.nameserver
+                                                        : DNS_FALLBACK;
+        }
+        else
+                want->resolver = resolver_before ? DNS_FALLBACK : 0;
+}
+
+static fn storage_epoch_say(const p8 address_to events, positive depth,
+                            positive step, string_address what,
+                            const storage_epoch_state address_to have)
+{
+        string_format(log, "  epoch: events");
+        for (positive at = 0; at < depth; at++)
+                string_format(log, " %p", (positive)events[at]);
+        string_format(log, ", after event %p: %s; have %p addresses, %p routes, resolver %p\n",
+                      step, what, have->addresses, have->routes,
+                      (positive)have->resolver);
+        log_flush();
+}
+
+static b32 storage_epoch_walk(const p8 address_to events, positive depth)
+{
+        static const dhcp_lease leases[STORAGE_EPOCH_LEASES] = {
+            //      the first lease
+            {0x0a09140a, 0xffffff00, 0x0a091401, 0x0a091401, 0x0a091401, 600, 300, 525},
+            //      the router moved
+            {0x0a09140a, 0xffffff00, 0x0a091402, 0x0a091401, 0x0a091401, 600, 300, 525},
+            //      the resolver moved
+            {0x0a09140a, 0xffffff00, 0x0a091401, 0x0a091403, 0x0a091401, 600, 300, 525},
+            //      another address
+            {0x0a09140b, 0xffffff00, 0x0a091401, 0x0a091401, 0x0a091401, 600, 300, 525},
+            //      a /32 with its router off it
+            {0x0a09140a, 0xffffffff, 0x0a091401, 0x0a091401, 0x0a091401, 600, 300, 525},
+            //      no router at all
+            {0x0a09140a, 0xffffff00, 0, 0x0a091401, 0x0a091401, 600, 300, 525},
+            //      another server's lease on another network
+            {0x0a09150c, 0xffffff00, 0x0a091501, 0x0a091505, 0x0a091501, 600, 300, 525}};
+        p8 hardware[6] = {2, 0, 0, 0, 0, 1};
+        bipolar handle = storage_test_net_namespace();
+        netlink_search link = {.wanted = (string_address) "wd4"};
+        net_holding held = {0};
+
+        if (storage_test_dummy((b32)handle, "wd4") < 0 ||
+            netlink_link_find((b32)handle, address_of link) < 0 ||
+            netlink_link_up((b32)handle, link.index) < 0 ||
+            netlink_address_add((b32)handle, link.index, STORAGE_EPOCH_OPERATOR,
+                                24) < 0)
+                return 2;
+        for (positive step = 0; step < depth; step++)
+        {
+                p8 event = events[step];
+                storage_epoch_state before;
+                storage_epoch_state after;
+                storage_epoch_state want;
+                net_holding was = held;
+                b32 refused = 0;
+
+                if (!storage_epoch_read((b32)handle, link.index, address_of before))
+                        return 2;
+                if (event == 2 * STORAGE_EPOCH_LEASES)
+                        refused = net_holding_release((b32)handle, address_of held) ? 1 : 0;
+                else
+                {
+                        bool fault = event >= STORAGE_EPOCH_LEASES;
+                        dhcp_lease lease = leases[event % STORAGE_EPOCH_LEASES];
+
+                        if (fault &&
+                            system_call_5(syscall(mount), 0, (positive) "/etc", 0,
+                                          MS_REMOUNT | MS_RDONLY, 0) < 0)
+                                return 2;
+                        refused = net_apply_lease((b32)handle, link.index, "wd4",
+                                                  hardware, address_of lease,
+                                                  address_of held, false);
+                        if (fault &&
+                            system_call_5(syscall(mount), 0, (positive) "/etc", 0,
+                                          MS_REMOUNT, 0) < 0)
+                                return 2;
+                        if (fault != (refused != 0))
+                        {
+                                storage_epoch_say(events, depth, step,
+                                                  fault ? "a refused resolver did not fail the lease"
+                                                         : "a lease failed to apply",
+                                                  address_of before);
+                                return 16 | 1;
+                        }
+                }
+                if (!storage_epoch_read((b32)handle, link.index, address_of after))
+                        return 2;
+                if (refused)
+                {
+                        if (held.lost ||
+                            memory_compare(address_of held, address_of was,
+                                           sizeof held))
+                        {
+                                storage_epoch_say(events, depth, step,
+                                                  "a refused lease changed what is held",
+                                                  address_of after);
+                                return 16 | 2;
+                        }
+                        if (!storage_epoch_same(address_of after, address_of before))
+                        {
+                                storage_epoch_say(events, depth, step,
+                                                  "a refused lease left the kernel or the resolver changed",
+                                                  address_of after);
+                                return 16 | 4;
+                        }
+                        continue;
+                }
+                storage_epoch_expected(address_of held, link.index,
+                                       before.resolver, address_of want);
+                if (!storage_epoch_same(address_of after, address_of want))
+                {
+                        storage_epoch_say(events, depth, step,
+                                          held.index ? "the kernel and resolver are not the held lease's"
+                                                     : "a release left a lease behind",
+                                          address_of after);
+                        return 16 | 8;
+                }
+        }
+        return 16;
+}
+
+static fn storage_test_lease_epochs(void)
+{
+        p8 events[STORAGE_EPOCH_DEPTH];
+        positive total = 1;
+        positive walked = 0;
+        b32 failed = 0;
+        b32 status = 0;
+
+        for (positive at = 0; at < STORAGE_EPOCH_DEPTH; at++)
+                total *= STORAGE_EPOCH_EVENTS;
+        for (positive sequence = 0; sequence < total; sequence++)
+        {
+                positive rest = sequence;
+                bipolar child;
+
+                for (positive at = 0; at < STORAGE_EPOCH_DEPTH; at++)
+                {
+                        events[at] = (p8)(rest % STORAGE_EPOCH_EVENTS);
+                        rest /= STORAGE_EPOCH_EVENTS;
+                }
+                child = system_fork();
+                if (child == 0)
+                        system_call_1(syscall(exit_group),
+                                      storage_epoch_walk(events,
+                                                         STORAGE_EPOCH_DEPTH));
+                status = storage_test_child_status(child);
+                if (status == 2 || status == STORAGE_TEST_THREADED)
+                        break;
+                walked++;
+                if (status != 16)
+                        failed |= status < 16 ? 16 | 15 : status;
+        }
+        if (!storage_test_not_run(status == 2 || status == STORAGE_TEST_THREADED
+                                      ? status
+                                      : 0,
+                                  "lease epochs", "no namespaces or dummy links"))
+        {
+                check("every lease sequence that applies leaves the kernel and the resolver the held lease's alone",
+                      walked == total && !(failed & 8) && !(failed & 1));
+                check("every refused lease leaves what is held, the kernel and the resolver as they were",
+                      walked == total && !(failed & 6));
+        }
+}
+
 /* The probe before a new lease, on a link nobody answers on: quiet after
    its three windows; cut at once by a byte on the wake pipe or by link news,
    as an exchange is (a cable pulled while it listens is not a quiet link);
@@ -82682,6 +83008,11 @@ static fn storage_test_net_files(void)
 
 b32 main(void)
 {
+#ifdef STORAGE_EPOCH_ONLY
+        //      net_epoch_mutants builds this alone, once for each mutant.
+        storage_test_lease_epochs();
+        return test_report(null);
+#endif
         storage_test_read(1, 32);
         storage_test_read(2, 7);
         storage_test_read(3, 0);
@@ -82707,6 +83038,7 @@ b32 main(void)
         storage_test_lease_inherited();
         storage_test_arp_probe();
         storage_test_lease_off_prefix();
+        storage_test_lease_epochs();
         storage_test_carrier_bounce();
         storage_test_link_news_overrun();
         storage_test_netlink_output();
