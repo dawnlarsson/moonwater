@@ -286,7 +286,7 @@ typedef struct
         struct waterlink_group_keys keys[LINK_GROUPS_MAX];
         p8 instance[10]; // this start's random labels
         p8 host[6];
-        p64 groups_changed; // inode and size of the file as last read
+        p64 groups_mark[6]; // what the file was when last read, or nothing
         p64 looked;
         bipolar socket;
         b32 interface[LINK_INTERFACES];
@@ -564,24 +564,34 @@ static fn link_nearby_open(void)
 static fn link_nearby_reload(p64 now)
 {
         file_facts facts;
-        p64 changed = 0;
+        p64 mark[6] = {0};
 
-        if (now - link_nearby.expiry_look >= 2000000)
+        if (link_age(now, link_nearby.expiry_look) >= 2000000)
         {
                 link_nearby.expiry_look = now;
                 link_groups_expire();
         }
 
         //      Twice a second at most. Every save is a rename, so the inode
-        //      says whether the file is the one already read.
-        if (link_nearby.looked && now - link_nearby.looked < 500000)
+        //      says whether the file is the one already read -- unless the
+        //      inode is one the save before freed and the same records make
+        //      it the same size, which the times it was changed and written,
+        //      to the nanosecond, tell apart.
+        if (link_nearby.looked && link_age(now, link_nearby.looked) < 500000)
                 return;
         link_nearby.looked = now;
         if (file_look_at(LINK_GROUPS_PATH, address_of facts))
-                changed = facts.inode * 31 + facts.size + 1;
-        if (changed == link_nearby.groups_changed)
+        {
+                mark[0] = facts.inode;
+                mark[1] = facts.size;
+                mark[2] = (p64)facts.changed.seconds;
+                mark[3] = facts.changed.nanoseconds;
+                mark[4] = (p64)facts.modified.seconds;
+                mark[5] = facts.modified.nanoseconds;
+        }
+        if (!memory_compare(mark, link_nearby.groups_mark, sizeof mark))
                 return;
-        link_nearby.groups_changed = changed;
+        memory_copy(link_nearby.groups_mark, mark, sizeof mark);
 
         link_groups_load(address_of link_nearby.groups);
         for (positive at = 0; at < link_nearby.groups.count; at++)
@@ -657,7 +667,8 @@ static bool link_greeted_lately(p32 group, p8 address_to address, p16 port,
         {
                 struct link_greeted address_to greeted = link_nearby.greeted + at;
 
-                if (greeted->at && now - greeted->at < LINK_GREET_AGAIN &&
+                if (greeted->at &&
+                    link_age(now, greeted->at) < LINK_GREET_AGAIN &&
                     greeted->group == group &&
                     greeted->port == port &&
                     !memory_compare(greeted->address, address, 16))
@@ -807,7 +818,7 @@ static fn link_nearby_heard(p8 address_to packet, positive length,
                                                   address_of to, sizeof to);
                         }
                 }
-                else if (now - link_nearby.last_answer > 1000000)
+                else if (link_age(now, link_nearby.last_answer) > 1000000)
                 {
                         link_nearby.last_answer = now;
                         link_nearby_announce(4500);
@@ -916,7 +927,7 @@ static p64 link_nearby_tick(p64 now)
         //      on a machine that boots straight into it. Every five seconds
         //      the memberships are asked for again, and an address that is
         //      new starts the quick announcements over.
-        if (now - link_nearby.interfaces_looked >= 5000000)
+        if (link_age(now, link_nearby.interfaces_looked) >= 5000000)
         {
                 p32 before[LINK_INTERFACES];
                 positive had = link_nearby.interfaces;

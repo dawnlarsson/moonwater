@@ -73717,6 +73717,455 @@ static fn greeting_freshness(bipolar listener, p16 port)
         (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
 }
 
+/*      A socket for the listener's mDNS that sends nothing: nothing in this
+        test may reach the link it runs on. A send on it is refused (the
+        write side is shut), and what joins a group on it is only the
+        kernel's own book. */
+static bipolar wls_quiet_socket(void)
+{
+        bipolar handle = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC |
+                                                     SOCK_NONBLOCK, 0);
+
+        if (handle >= 0)
+                (void)system_call_2(syscall(shutdown), (positive)handle, 1);
+        return handle;
+}
+
+/*
+        A code, and what keeps a member: it lets one machine in and is closed
+        to every other at once; it lets in no machine after its minutes, nor
+        one that is not the name it waits for; the member that came in is
+        still followed while it is closed, so a greeting back that was lost
+        can be answered; and what ran out is gone from the file whether or not
+        anything else changed it.
+*/
+static fn pairing_codes(bipolar listener, p16 port)
+{
+        link_groups groups;
+        p64 boot = link_boot_seconds();
+        p8 back[WATERLINK_DATAGRAM + 16];
+
+        link_self.me = wls_b;
+        wls_group_file(LINK_GROUP_ONCE, boot + 300, 0);
+        (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
+        link_self.stamps = 0;
+        wls_drain(listener);
+        wls_greeted(address_of wls_client, "machine-a", 20, port, 8000000);
+        link_groups_load(address_of groups);
+        check("a code lets the first machine in, and greets it back",
+              wls_peers_count() == 1 &&
+                      wls_heard(listener, back) == WATERLINK_DATAGRAM);
+        check("and is closed at once, in memory and in the file, for half a "
+              "minute more",
+              (link_nearby.groups.record[0].flags & LINK_GROUP_DONE) &&
+                      link_nearby.groups.record[0].expires <=
+                              link_boot_seconds() + LINK_PAIR_GRACE &&
+                      groups.count == 1 &&
+                      (groups.record[0].flags & LINK_GROUP_DONE) &&
+                      (groups.record[0].flags & LINK_GROUP_ONCE) &&
+                      groups.record[0].expires > boot &&
+                      groups.record[0].expires <=
+                              link_boot_seconds() + LINK_PAIR_GRACE);
+        wls_greeted(address_of wls_server, "machine-b", 21, port, 8100000);
+        check("sec: a second machine is not let in by a code that took one",
+              wls_peers_count() == 1);
+        wls_greeted(address_of wls_client, "machine-a", 22, port + 1, 8200000);
+        {
+                link_peers peers;
+
+                link_peers_load(address_of peers);
+                check("sec: the machine that came in is still followed, and "
+                      "is not greeted again as if it were new",
+                      peers.count == 1 && peers.peer[0].port == port + 1 &&
+                              wls_heard(listener, back) <= 0);
+        }
+
+        wls_group_file(LINK_GROUP_ONCE, boot, 0);
+        (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
+        link_self.stamps = 0;
+        wls_greeted(address_of wls_client, "machine-a", 23, port, 8300000);
+        check("sec: a code past its minutes lets nobody in", wls_peers_count() == 0);
+
+        wls_group_file(LINK_GROUP_ONCE, boot + 300,
+                       link_name_check("machine-a", WATERLINK_NAME_MAX));
+        link_self.stamps = 0;
+        wls_greeted(address_of wls_client, "machine-b", 24, port, 8400000);
+        check("sec: a code for one name lets in no other", wls_peers_count() == 0);
+        wls_greeted(address_of wls_client, "machine-a", 25, port, 8500000);
+        check("while the name it waits for is let in", wls_peers_count() == 1);
+
+        //      Runs out in the file as well, as the listener's turn finds it.
+        wls_group_file(LINK_GROUP_ONCE, boot, 0);
+        link_nearby.socket = wls_quiet_socket();
+        link_nearby_reload(20000000);
+        link_groups_load(address_of groups);
+        check("what ran out is dropped from the file, and the listener has "
+              "no group left",
+              groups.count == 0 && link_nearby.groups.count == 0 &&
+                      link_nearby.socket < 0);
+        wls_group_file(LINK_GROUP_ONCE, boot + 300, 0);
+        link_nearby.socket = wls_quiet_socket();
+        link_nearby_reload(30000000);
+        link_groups_load(address_of groups);
+        check("and what has not, is kept", groups.count == 1 &&
+                                               link_nearby.groups.count == 1);
+        link_nearby_close();
+        (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
+        (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
+}
+
+/*
+        The listener reads its groups again when the file has changed, at
+        most twice a second. A save is a rename, so the inode says which file
+        it is, and an inode that is freed and given to the next save, with the
+        same records the same size, would say nothing changed: what was
+        changed and written, to the nanosecond, says more. A file that is not
+        there is no groups, and takes the socket with it.
+*/
+static fn nearby_reload(void)
+{
+        struct link_group_record record;
+        struct waterlink_group_keys keys;
+        struct
+        {
+                p64 seconds;
+                p64 nanoseconds;
+        } times[2] = {{0, UTIME_OMIT}, {1000000000, 5}};
+        bipolar handle;
+        positive got;
+
+        memory_zero(address_of record, sizeof record);
+        string_copy(record.namespace, "office");
+        memory_fill(record.key, 0x5a, sizeof record.key);
+        record.may = WATERLINK_MAY_RUN;
+        waterlink_group_keys_from(address_of keys, record.key, "office");
+
+        memory_zero(address_of link_nearby, sizeof link_nearby);
+        (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
+        link_nearby.socket = wls_quiet_socket();
+        link_nearby_reload(10000000);
+        check("no file is no group, and nothing is opened or closed",
+              link_nearby.groups.count == 0 && link_nearby.socket >= 0 &&
+                      !link_nearby.labels_ready);
+
+        (void)wls_write(LINK_GROUPS_PATH, address_of record, sizeof record, 0600);
+        link_nearby_reload(10600000);
+        check("a file that is there is read: the group, its keys derived and "
+              "its labels drawn",
+              link_nearby.groups.count == 1 &&
+                      link_nearby.groups.record[0].may == WATERLINK_MAY_RUN &&
+                      link_nearby.keys[0].mark == keys.mark &&
+                      !memory_compare(link_nearby.keys[0].psk, keys.psk, 32) &&
+                      link_nearby.labels_ready && link_nearby.socket >= 0 &&
+                      link_nearby.next_announce == 10600000);
+
+        link_nearby.groups.record[0].may = 77;
+        link_nearby_reload(11200000);
+        check("sec: a file that has not changed is not read again",
+              link_nearby.groups.record[0].may == 77);
+
+        //      The same file, the same size, the same inode: a record's
+        //      grant changed in place, written at another time.
+        record.may = WATERLINK_MAY_FILES;
+        handle = system_open_at(AT_FDCWD, LINK_GROUPS_PATH, FILE_READ_WRITE);
+        got = handle >= 0 ? system_write_all((positive)handle, address_of record,
+                                             sizeof record)
+                          : 0;
+        if (handle >= 0)
+                system_close(handle);
+        (void)system_call_4(syscall(utimensat), (positive)(bipolar)AT_FDCWD,
+                            (positive)LINK_GROUPS_PATH,
+                            (positive)address_of times, 0);
+        link_nearby_reload(11500000);
+        check("sec: it is looked at twice a second at most",
+              got == sizeof record && link_nearby.groups.record[0].may == 77);
+        link_nearby_reload(12000000);
+        check("sec: and a file changed in place, with the inode and size it "
+              "had, is read again",
+              link_nearby.groups.record[0].may == WATERLINK_MAY_FILES);
+
+        //      A clock that was stepped back is not a reason to look at every
+        //      turn: a turn dated before the last look is the same turn.
+        record.may = WATERLINK_MAY_LOG;
+        times[1].nanoseconds = 7;
+        handle = system_open_at(AT_FDCWD, LINK_GROUPS_PATH, FILE_READ_WRITE);
+        if (handle >= 0)
+        {
+                (void)system_write_all((positive)handle, address_of record,
+                                       sizeof record);
+                system_close(handle);
+        }
+        (void)system_call_4(syscall(utimensat), (positive)(bipolar)AT_FDCWD,
+                            (positive)LINK_GROUPS_PATH,
+                            (positive)address_of times, 0);
+        link_nearby_reload(5000000);
+        check("sec: a turn dated before the last look neither looks nor "
+              "wraps into an age of years",
+              link_nearby.groups.record[0].may == WATERLINK_MAY_FILES);
+        link_nearby_reload(13000000);
+        check("and the next that is due looks",
+              link_nearby.groups.record[0].may == WATERLINK_MAY_LOG);
+
+        (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
+        link_nearby_reload(14000000);
+        check("a file that is gone is no group, and closes the socket",
+              link_nearby.groups.count == 0 && link_nearby.socket < 0);
+
+        (void)wls_write(LINK_GROUPS_PATH, address_of record, sizeof record, 0644);
+        link_nearby.socket = wls_quiet_socket();
+        link_nearby_reload(15000000);
+        check("sec: a file others can read is no group",
+              link_nearby.groups.count == 0 && link_nearby.socket < 0);
+        (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
+}
+
+/*
+        An address that comes to an interface after the listener started is
+        the ordinary case on a machine that boots straight into its lease:
+        the memberships are asked for again every five seconds, and a table
+        that changed starts the quick announcements over. The messages are the
+        kernel's, made here by hand, so a hostile or short one is as likely
+        as a good one.
+*/
+static fn nearby_address(void)
+{
+        p8 message[64];
+        netlink_header address_to header = (netlink_header address_to)message;
+        netlink_address address_to body = (netlink_address address_to)(message + 16);
+        bool refused_all = true;
+
+        wls_group();
+        link_nearby.socket = wls_quiet_socket();
+        memory_zero(message, sizeof message);
+        header->length = 16 + 8 + 8;
+        header->type = RTM_NEWADDR;
+        body->family = AF_INET;
+        body->index = 1;
+        memory_copy(message + 24, "\x08\x00\x02\x00\x7f\x00\x00\x01", 8);
+
+        check("an address of an interface is joined and kept, with its address",
+              link_nearby_address(header, null) &&
+                      link_nearby.interfaces == 1 &&
+                      link_nearby.interface[0] == 1 &&
+                      link_nearby.interface_address[0] == 0x7f000001);
+        (void)link_nearby_address(header, null);
+        check("sec: the same interface again is kept once",
+              link_nearby.interfaces == 1);
+
+        //      The refresh starts from nothing, and the group is joined on the
+        //      socket already: the kernel says so, and it is as good as new.
+        link_nearby.interfaces = 0;
+        (void)link_nearby_address(header, null);
+        check("an interface joined already is joined",
+              link_nearby.interfaces == 1);
+
+        link_nearby.interfaces = 0;
+        body->family = AF_INET6;
+        (void)link_nearby_address(header, null);
+        refused_all &= link_nearby.interfaces == 0;
+        body->family = AF_INET;
+        header->type = RTM_NEWADDR + 1;
+        (void)link_nearby_address(header, null);
+        refused_all &= link_nearby.interfaces == 0;
+        header->type = RTM_NEWADDR;
+        header->length = 16 + 8;
+        (void)link_nearby_address(header, null);
+        refused_all &= link_nearby.interfaces == 0;
+        header->length = 16 + 8 + 8;
+        message[26] = 3; // an attribute that is not the local address
+        (void)link_nearby_address(header, null);
+        refused_all &= link_nearby.interfaces == 0;
+        message[26] = 2;
+        message[24] = 4; // an address of two bytes
+        (void)link_nearby_address(header, null);
+        refused_all &= link_nearby.interfaces == 0;
+        message[24] = 8;
+        body->index = 0x7ffffff0; // an interface nobody has
+        (void)link_nearby_address(header, null);
+        refused_all &= link_nearby.interfaces == 0;
+        check("sec: another family, another message, a short one, another "
+              "attribute, a short address and an interface that is not there "
+              "are none of them kept",
+              refused_all);
+
+        body->index = 1;
+        link_nearby.interfaces = LINK_INTERFACES;
+        (void)link_nearby_address(header, null);
+        check("sec: a table that is full takes no more",
+              link_nearby.interfaces == LINK_INTERFACES);
+        link_nearby_close();
+}
+
+/*
+        The listener's turn: the groups first, then what is due -- three
+        announcements and questions a second apart, as RFC 6762 asks of a
+        responder, then every minute and every half a minute -- and when it
+        wants to be asked again. Nothing is sent: the interfaces it has are
+        none, or the quiet socket's, which refuses.
+*/
+static fn nearby_tick(void)
+{
+        struct link_group_record record;
+        p64 wake;
+
+        memory_zero(address_of record, sizeof record);
+        string_copy(record.namespace, "office");
+        memory_fill(record.key, 0x5a, sizeof record.key);
+
+        memory_zero(address_of link_nearby, sizeof link_nearby);
+        (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
+        link_nearby.socket = wls_quiet_socket();
+        wake = link_nearby_tick(20000000);
+        check("with no group there is nothing to send, and a second to wait",
+              wake == 21000000 && link_nearby.announced == 0);
+
+        (void)wls_write(LINK_GROUPS_PATH, address_of record, sizeof record, 0600);
+        link_nearby.interfaces_looked = 20000000; // not due
+        wake = link_nearby_tick(20600000);
+        check("a group is announced and asked about, once, and the next is a "
+              "second on",
+              link_nearby.groups.count == 1 && link_nearby.labels_ready &&
+                      link_nearby.announced == 1 && link_nearby.asked == 1 &&
+                      wake == 21600000);
+        wake = link_nearby_tick(21000000);
+        check("sec: asked again before it is due, it sends nothing",
+              link_nearby.announced == 1 && link_nearby.asked == 1 &&
+                      wake == 21600000);
+        (void)link_nearby_tick(21600000);
+        wake = link_nearby_tick(22600000);
+        check("the third is the last quick one; then a minute for announcing "
+              "and half of one for asking",
+              link_nearby.announced == 3 && link_nearby.asked == 3 &&
+                      link_nearby.next_announce == 22600000 + LINK_ANNOUNCE_EVERY &&
+                      link_nearby.next_ask == 22600000 + LINK_ASK_EVERY &&
+                      wake == 23600000);
+
+        //      The memberships are asked for again every five seconds, and a
+        //      table that is not the one it was starts the quick announcements
+        //      over: here the table it had names an interface nobody has.
+        link_nearby.interfaces = 1;
+        link_nearby.interface[0] = 0x7ffffff0;
+        link_nearby.interface_address[0] = 0x0a000001;
+        link_nearby.interfaces_looked = 22600000;
+        (void)link_nearby_tick(23700000);
+        check("sec: the table is asked for again every five seconds, and not "
+              "sooner",
+              link_nearby.interface[0] == 0x7ffffff0 &&
+                      link_nearby.announced == 3);
+        (void)link_nearby_tick(27700000);
+        check("and when it is not the table it was, the announcements start "
+              "again",
+              (link_nearby.interfaces != 1 ||
+               link_nearby.interface[0] != 0x7ffffff0) &&
+                      link_nearby.announced == 1 && link_nearby.asked == 1);
+
+        link_nearby_close();
+        (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
+}
+
+/*
+        A groups file is read as root's own, private, whole records. The old
+        check in each -- a hash of the secret, a guessing oracle at full speed
+        -- is taken out of the file as well as out of memory, and only from a
+        file that is what it was read as; the records it read are all it
+        changes.
+*/
+static fn groups_scrub_edges(void)
+{
+        struct link_group_record three[3];
+        struct link_group_record back[3];
+        link_groups groups;
+        bipolar handle;
+        positive got;
+        bool kept = true;
+
+        memory_zero(three, sizeof three);
+        for (positive at = 0; at < 3; at++)
+        {
+                string_copy(three[at].namespace, at == 1 ? "bad name" : "office");
+                memory_fill(three[at].key, 0x40 + at, sizeof three[at].key);
+                memory_fill(three[at].check, 0xa5, sizeof three[at].check);
+                three[at].may = 2 + 2 * (p32)at;
+        }
+
+        //      A record with a name that cannot be one is dropped, and its
+        //      old check is still taken out of the file.
+        (void)wls_write(LINK_GROUPS_PATH, three, sizeof three, 0600);
+        link_groups_load(address_of groups);
+        handle = system_open_at(AT_FDCWD, LINK_GROUPS_PATH, FILE_READ);
+        got = handle >= 0 ? (positive)system_read_retry((positive)handle, back,
+                                                        sizeof back)
+                          : 0;
+        if (handle >= 0)
+                system_close(handle);
+        for (positive at = 0; at < 3; at++)
+                kept &= memory_span_byte(back[at].check, 0,
+                                         sizeof back[at].check) ==
+                        sizeof back[at].check;
+        check("sec: a record with a name that is not one is dropped, the last "
+              "in its place, and every record's old check leaves the file",
+              groups.count == 2 && got == sizeof back && kept &&
+                      string_equals(groups.record[0].namespace, "office") &&
+                      string_equals(groups.record[1].namespace, "office") &&
+                      groups.record[1].may == 6 &&
+                      !memory_compare(groups.record[1].key, three[2].key, 32));
+
+        //      Not a file to write: others can read it, or it is not whole,
+        //      or it is a link to one.
+        (void)wls_write(LINK_GROUPS_PATH, three, sizeof three, 0644);
+        link_groups_scrub(3);
+        handle = system_open_at(AT_FDCWD, LINK_GROUPS_PATH, FILE_READ);
+        got = handle >= 0 ? (positive)system_read_retry((positive)handle, back,
+                                                        sizeof back)
+                          : 0;
+        if (handle >= 0)
+                system_close(handle);
+        check("sec: a file others can read is not written to",
+              got == sizeof back && back[0].check[0] == 0xa5);
+
+        (void)wls_write(LINK_GROUPS_PATH, three, sizeof three - 40, 0600);
+        link_groups_scrub(3);
+        handle = system_open_at(AT_FDCWD, LINK_GROUPS_PATH, FILE_READ);
+        got = handle >= 0 ? (positive)system_read_retry((positive)handle, back,
+                                                        sizeof three - 40)
+                          : 0;
+        if (handle >= 0)
+                system_close(handle);
+        check("sec: nor one that is not whole records",
+              got == sizeof three - 40 && back[0].check[0] == 0xa5);
+
+        (void)wls_write("/root/groups.elsewhere", three, sizeof three, 0600);
+        (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
+        (void)system_symbolic_link_at("/root/groups.elsewhere", AT_FDCWD,
+                                      LINK_GROUPS_PATH);
+        link_groups_scrub(3);
+        handle = system_open_at(AT_FDCWD, "/root/groups.elsewhere", FILE_READ);
+        got = handle >= 0 ? (positive)system_read_retry((positive)handle, back,
+                                                        sizeof back)
+                          : 0;
+        if (handle >= 0)
+                system_close(handle);
+        check("sec: nor one that is a link to another file",
+              got == sizeof back && back[2].check[0] == 0xa5);
+        (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
+        (void)system_remove_at(AT_FDCWD, "/root/groups.elsewhere", 0);
+
+        //      As many records as were read, and no more.
+        (void)wls_write(LINK_GROUPS_PATH, three, sizeof three, 0600);
+        link_groups_scrub(2);
+        handle = system_open_at(AT_FDCWD, LINK_GROUPS_PATH, FILE_READ);
+        got = handle >= 0 ? (positive)system_read_retry((positive)handle, back,
+                                                        sizeof back)
+                          : 0;
+        if (handle >= 0)
+                system_close(handle);
+        check("sec: the records the caller read are all it changes",
+              got == sizeof back && back[0].check[0] == 0 &&
+                      back[1].check[31] == 0 && back[2].check[0] == 0xa5 &&
+                      back[2].may == 6);
+        (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
+}
+
 //      Discovery labels are published only when every one was drawn.
 static fn labels(void)
 {
@@ -74247,6 +74696,11 @@ b32 main(void)
         mdns_amplification();
         mdns_names_one();
         mdns_hop_limit();
+        pairing_codes(listener, port);
+        nearby_reload();
+        nearby_address();
+        nearby_tick();
+        groups_scrub_edges();
         labels();
         wpa_key();
         wifi_source_checks();
