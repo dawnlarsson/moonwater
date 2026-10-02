@@ -2799,6 +2799,9 @@ static b32 link_serve(void)
         if (link_identity(address_of link_self.me, true) < 0)
                 return host_refuse("%s cannot be read or made\n", LINK_KEY_PATH);
 
+        //      A relative path in a push is where a command's is, in /root,
+        //      and not wherever whoever started the listener was.
+        (void)system_call_1(syscall(chdir), (positive)(string_address) "/root");
         lock = link_lock_take();
         if (lock < 0)
         {

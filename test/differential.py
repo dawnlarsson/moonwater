@@ -57695,7 +57695,10 @@ on("b", moon + " link remove c")
 
 #       Descriptor 7 open in the server stands for anything a hand-started
 #       `link serve` inherited; no remote command may see it.
-server = subprocess.Popen(argv_on("b", moon + " link serve 7</etc/hostname"), stdin=subprocess.DEVNULL,
+#       Started in /run, which is not where a command or a relative path of
+#       a push is meant to be.
+server = subprocess.Popen(argv_on("b", "sh -c 'cd /run && exec " + moon + " link serve' 7</etc/hostname"),
+                          stdin=subprocess.DEVNULL,
                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
 time.sleep(0.5)
 
@@ -57847,6 +57850,10 @@ status, out, err = on("a", moon + " link push b /root/blob /root/got", timeout=1
 got = open(top + "/b/root/got", "rb").read() if os.path.exists(top + "/b/root/got") else b""
 say(status == 0 and got == blob, "push carries 3 MB whole (%r, %d bytes)" % (status, len(got)))
 say(os.stat(top + "/b/root/got").st_mode & 0o777 == 0o640 if got else False, "and its mode")
+status, out, err = on("a", moon + " link push b /root/blob relative-push", timeout=120)
+say(status == 0 and os.path.exists(top + "/b/root/relative-push") and
+    not os.path.exists(top + "/b/run/relative-push"),
+    "a relative path in a push is /root's, as a command's is, and not where the listener was started")
 say(not os.path.exists(top + "/b/root/got.link-part"), "and leaves no part file")
 with open(top + "/b/root/guarded.link-part", "wb") as f:
     f.write(b"somebody else's staging file")
