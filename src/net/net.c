@@ -8924,6 +8924,7 @@ static bipolar tls_read_until(
 #define HTTP_HOPS 21
 #define HTTP_IDLE_SECONDS 30
 #define HTTP_HEAD_SECONDS 30
+#define HTTP_BODY_SECONDS 300
 
 #define HTTP_OK 0
 #define HTTP_BAD_URL (-1)
@@ -9003,12 +9004,21 @@ static bipolar http_split_into(string_address url, p8 address_to host, positive 
         if ((positive)(scan - url) >= HTTP_URL_MAX)
                 return HTTP_BAD_URL;
 
-        /* A spelling with an explicit scheme is not a schemeless HTTP URL.
-           Treating "gopher://host" as host "gopher" is a parser
-           differential: a policy and this client can appear to approve the
-           same string while naming different destinations.  A scheme with
-           no "//" after it is read as host:port, which fails unless the
-           rest is a port. */
+        /* A spelling with an explicit web scheme is never a schemeless
+           host:port.  In particular, "https:443" used to mean plaintext to
+           the DNS name "https" here while an RFC 3986 parser and a policy
+           layer read the same bytes as an HTTPS URI.  Keep the convenient
+           schemeless h:81 form, but reserve http: and https: in every case;
+           after either one only an authority introduced by "//" is a URL
+           this client implements.  The tight tier applies the URI rule to
+           every scheme token, removing the general `ftp:21`/host:port
+           ambiguity; the default retains non-web shorthand compatibility.
+           The same strict scheme rule already applies to redirects. Other
+           explicit schemes with an authority are always refused. */
+        if (scheme &&
+            (MOONWATER_STRICT >= STRICT_TIGHT || http_web_scheme(url, scheme)) &&
+            (url[scheme] != '/' || url[scheme + 1] != '/'))
+                return HTTP_SCHEME;
         if (scheme && url[scheme] == '/' && url[scheme + 1] == '/')
         {
                 if (!http_web_scheme(url, scheme))
@@ -9704,6 +9714,8 @@ typedef struct
         // Tests can shorten one logical progress wait; zero selects HTTP's idle limit.
         positive read_seconds;
         positive read_nanoseconds;
+        // Whole-body budget; zero began is reserved for bounded unit readers.
+        network_deadline deadline;
 } http_body;
 
 static bipolar http_body_read(http_body address_to body, p8 address_to into,
@@ -9726,11 +9738,36 @@ static bipolar http_copy_body(http_body address_to body, bipolar dest,
                          exact ? response->body_length : positive_max, exact);
 }
 
-//      The wait one read may take: a test's shorter one, else HTTP's.
-static positive http_body_seconds(const http_body address_to body)
+//      One progress wait, shortened by a whole-body budget when one is active;
+//      inline, because a read of an unbudgeted body asks only for the idle limit.
+static inline INLINE bool http_body_wait(
+    const http_body address_to body, positive address_to seconds,
+    positive address_to nanoseconds)
 {
-        return body->read_seconds || body->read_nanoseconds
-                   ? body->read_seconds : HTTP_IDLE_SECONDS;
+        positive idle_seconds = body->read_seconds || body->read_nanoseconds
+                                    ? body->read_seconds : HTTP_IDLE_SECONDS;
+        positive idle_nanoseconds = body->read_nanoseconds;
+
+        address_to seconds = idle_seconds;
+        address_to nanoseconds = idle_nanoseconds;
+        if (body->deadline.began)
+        {
+                positive left_seconds;
+                positive left_nanoseconds;
+
+                if (!network_deadline_left(address_of body->deadline,
+                                           address_of left_seconds,
+                                           address_of left_nanoseconds))
+                        return false;
+                if (left_seconds < idle_seconds ||
+                    (left_seconds == idle_seconds &&
+                     left_nanoseconds < idle_nanoseconds))
+                {
+                        address_to seconds = left_seconds;
+                        address_to nanoseconds = left_nanoseconds;
+                }
+        }
+        return address_to seconds || address_to nanoseconds;
 }
 
 static bipolar http_body_borrow(http_body address_to body, positive room,
@@ -9744,6 +9781,8 @@ static bipolar http_body_read(http_body address_to body, p8 address_to into,
                               positive room, positive address_to got)
 {
         bipolar n;
+        positive seconds;
+        positive nanoseconds;
 
         if (body->stash_used || (body->link && body->link->tls))
         {
@@ -9759,10 +9798,11 @@ static bipolar http_body_read(http_body address_to body, p8 address_to into,
                 address_to got = 0;
                 return HTTP_OK;
         }
+        if (!http_body_wait(body, address_of seconds, address_of nanoseconds))
+                return HTTP_NO_REPLY;
 
         n = network_stream_read_some_for(body->link->handle, into, room,
-                                         http_body_seconds(body),
-                                         body->read_nanoseconds);
+                                         seconds, nanoseconds);
         if (n < 0 || (positive)n > room)
                 return HTTP_NO_REPLY;
         address_to got = (positive)n;
@@ -9789,10 +9829,17 @@ static bipolar http_body_borrow(http_body address_to body, positive room,
         }
 
         if (body->link && body->link->tls)
+        {
+                positive seconds;
+                positive nanoseconds;
+
+                if (!http_body_wait(body, address_of seconds,
+                                    address_of nanoseconds))
+                        return HTTP_NO_REPLY;
                 return tls_borrow(address_of body->link->session, room, data,
-                                  got, http_body_seconds(body),
-                                  body->read_nanoseconds)
+                                  got, seconds, nanoseconds)
                            ? HTTP_NO_REPLY : HTTP_OK;
+        }
 
         address_to data = body->scratch;
         return http_body_read(body, body->scratch,
@@ -10673,7 +10720,21 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                             .store_limit = reset ? 0 : HTTP_FETCH_MAX,
                         };
 
-                        status = into &&
+                        /* The idle timer catches a stopped peer; this absolute
+                           timer catches one which sends the next byte just
+                           before every idle expiry.  A body held in memory
+                           always has it, in every tier.  A download written
+                           as it arrives has it at the tight tier only: GNU
+                           wget, the default's reference, puts no total time
+                           on one, and a large file over a slow link is not an
+                           attack. */
+                        if ((into || MOONWATER_STRICT >= STRICT_TIGHT) &&
+                            !network_deadline_begin(address_of body.deadline,
+                                                    HTTP_BODY_SECONDS, 0))
+                                status = HTTP_NO_REPLY;
+                        else
+                                status =
+                                    into &&
                                          response.body_kind == HTTP_BODY_LENGTH &&
                                          response.body_length > HTTP_FETCH_MAX
                                      ? HTTP_MALFORMED
@@ -10756,8 +10817,8 @@ static bipolar http_fetch_to(string_address start, bipolar dest, bool check_cert
         boot lane structurally cannot check -- it is set because a real
         network needs it, not because a test proved it here.
 
-        ARP conflict probing is not implemented. The network watcher schedules
-        dhcp_reacquire at half the lease lifetime.
+        The network watcher ARP-probes a newly acknowledged address before it
+        installs the lease and schedules dhcp_reacquire at half its lifetime.
 */
 
 #define DHCP_CLIENT_PORT 68

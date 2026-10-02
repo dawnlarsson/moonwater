@@ -57511,6 +57511,8 @@ __asm__(
 #define SOL_NETLINK 270
 #define NETLINK_ADD_MEMBERSHIP 1
 #define NETLINK_EXT_ACK 11
+#define ETH_P_IP 0x0800
+#define ETH_P_ARP 0x0806
 #define ETH_P_PAE 0x888e
 
 #define HOST_ANY 0x00000000u

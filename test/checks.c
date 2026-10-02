@@ -53893,6 +53893,26 @@ static fn fetching(void)
               http_split_into((string_address) "gopher://127.0.0.1/", name,
                          sizeof name, address_of port, address_of path,
                          address_of tls) == HTTP_SCHEME);
+        check("a bare HTTP scheme is not reinterpreted as a host and port",
+              http_split_into((string_address) "http:80", name, sizeof name,
+                         address_of port, address_of path,
+                         address_of tls) == HTTP_SCHEME);
+        check("a bare HTTPS scheme cannot turn into plaintext to a host named https",
+              http_split_into((string_address) "https:443", name, sizeof name,
+                         address_of port, address_of path,
+                         address_of tls) == HTTP_SCHEME);
+        check("the bare web-scheme refusal is ASCII case independent",
+              http_split_into((string_address) "HtTpS:443/x", name, sizeof name,
+                         address_of port, address_of path,
+                         address_of tls) == HTTP_SCHEME);
+        check("a bare unsupported scheme cannot become a host and port in the tight tier",
+              http_split_into((string_address) "ftp:21/x", name, sizeof name,
+                         address_of port, address_of path, address_of tls) ==
+                      (MOONWATER_STRICT >= STRICT_TIGHT ? HTTP_SCHEME : HTTP_OK));
+        check("another URI scheme cannot become plaintext SMTP in the tight tier",
+              http_split_into((string_address) "smtp:25/x", name, sizeof name,
+                         address_of port, address_of path, address_of tls) ==
+                      (MOONWATER_STRICT >= STRICT_TIGHT ? HTTP_SCHEME : HTTP_OK));
         check("userinfo cannot disguise the connected HTTP host",
               http_split_into((string_address) "http://allowed@127.0.0.1/", name,
                          sizeof name, address_of port, address_of path,
@@ -53923,8 +53943,10 @@ static fn fetching(void)
         check("a schemeless host with a port still parses",
               http_split_into((string_address) "h:81/x", name,
                          sizeof name, address_of port, address_of path,
-                         address_of tls) == HTTP_OK && port == 81 &&
-                  string_equals(path, (string_address) "/x"));
+                         address_of tls) ==
+                      (MOONWATER_STRICT >= STRICT_TIGHT ? HTTP_SCHEME : HTTP_OK) &&
+                  (MOONWATER_STRICT >= STRICT_TIGHT ||
+                   (port == 81 && string_equals(path, (string_address) "/x"))));
         {
                 p8 rejected_name[8];
                 string_address rejected_path = (string_address)"sentinel";
@@ -53965,13 +53987,17 @@ static fn fetching(void)
                                 memory_fill(name, 0x5a, sizeof name);
                                 bipolar result = http_split_into(input, name, capacity, &port, &path, &tls);
                                 bool fits = (length & 1) && length + 1 < capacity;
+                                bool scheme = (length & 1) && ending == 2 &&
+                                              MOONWATER_STRICT >= STRICT_TIGHT;
+                                bool accepted = fits && !scheme;
                                 bool intact = true;
                                 for (positive at = 0; at < sizeof name; at++)
-                                        intact &= name[at] == (fits && at <= length
+                                        intact &= name[at] == (accepted && at <= length
                                                 ? at == length ? 0 : byte : 0x5a);
                                 check("URL capacity matrix and untouched tail",
-                                      result == (fits ? HTTP_OK : HTTP_BAD_URL) && intact);
-                                check("URL terminator and port variants", !fits ||
+                                      result == (scheme ? HTTP_SCHEME
+                                                : accepted ? HTTP_OK : HTTP_BAD_URL) && intact);
+                                check("URL terminator and port variants", !accepted ||
                                       (port == (ending == 2 ? 81 : 80) &&
                                        string_equals(path, ending ? "/x" : "/")));
                         }
@@ -55258,6 +55284,56 @@ static fn http_header_deadlines(void)
                                 system_wait4_retry((b32)child, null, 0, null);
                 }
         }
+}
+
+static fn http_body_deadline(void)
+{
+        static p8 payload[] = "a body that never goes idle";
+        b32 pair[2];
+        bipolar opened = system_call_4(syscall(socketpair), AF_UNIX,
+                                        SOCK_STREAM, 0, (positive)pair);
+
+        check("slow-body socket pair opens", opened == 0);
+        if (opened)
+                return;
+
+        bipolar child = system_call_2(syscall(clone), SIGCHLD, 0);
+
+        if (!child)
+        {
+                socket_close(pair[0]);
+                network_trickle_and_exit(pair[1], payload,
+                                         sizeof(payload) - 1);
+        }
+        check("slow-body writer starts", child > 0);
+        socket_close(pair[1]);
+        if (child > 0)
+        {
+                p8 scratch[HTTP_HEAD_MAX];
+                p8 sink[sizeof payload];
+                http_link link = {.handle = pair[0]};
+                http_body body = {
+                    .link = address_of link,
+                    .scratch = scratch,
+                    .output = sink,
+                };
+                positive began;
+                positive elapsed;
+
+                check("HTTP whole-body deadline starts",
+                      network_deadline_begin(address_of body.deadline,
+                                             0, 100000000));
+                began = clock_monotonic_nanoseconds();
+                check("a trickled HTTP body cannot renew its total deadline",
+                      http_copy(address_of body, -1, sizeof(payload) - 1,
+                                true) == HTTP_NO_REPLY);
+                elapsed = clock_monotonic_nanoseconds() - began;
+                check("the HTTP whole-body deadline is bounded",
+                      elapsed < NETWORK_NANOSECONDS);
+        }
+        socket_close(pair[0]);
+        if (child > 0)
+                system_wait4_retry((b32)child, null, 0, null);
 }
 
 /* A body that cannot be written is the disk's failure, not the server's:
@@ -63984,9 +64060,9 @@ static fn redirect_urls(void)
                     {"ftp://h/x", 3, 0},
                     {"httpx://h/x", 3, 0},
                     {"web+x.y-z://h/x", 3, 0},
-                    {"javascript:alert(1)", 0, 0},
-                    {"http:x", 0, 0},
-                    {"h:81/x", 1, 0},
+                    {"javascript:alert(1)", MOONWATER_STRICT >= STRICT_TIGHT ? 3 : 0, 0},
+                    {"http:x", 3, 0},
+                    {"h:81/x", MOONWATER_STRICT >= STRICT_TIGHT ? 3 : 1, 0},
                     {"1http://h/x", 0, "https://h/dir/1http://h/x"},
                     {"//h2/x", 0, "https://h2/x"},
                     {"h_x://y", 0, "https://h/dir/h_x://y"},
@@ -65961,6 +66037,7 @@ b32 main(void)
         network_stream_timeouts();
         network_stream_send_timeout();
         http_header_deadlines();
+        http_body_deadline();
         http_body_write_failure();
         http_tls_resource_exhaustion();
         dns_dhcp_netlink_resource_exhaustion();
@@ -67803,7 +67880,7 @@ static positive fill_walk(struct waterlink_link address_to link,
                 fill_seen[link->owed_now ? FILL_ACK_NOW
                           : link->owed_count >= WATERLINK_ACK_EVERY
                                   ? FILL_ACK_COUNT
-                          : now - link->owed >= WATERLINK_ACK_DELAY
+                          : link_age(now, link->owed) >= WATERLINK_ACK_DELAY
                                   ? FILL_ACK_DELAY
                                   : FILL_ACK_NOT_DUE]++;
         if (link->acking && (used || waterlink_ack_due(link, now)))
@@ -70164,6 +70241,45 @@ static fn network_generated(void)
               sim_total.path_dropped * 10 <= sim_total.path_sent);
 }
 
+static fn clock_ordering(void)
+{
+        struct waterlink_link link;
+
+        waterlink_link_reset(address_of link);
+        link.acking = 1;
+        link.owed = 2000000;
+        check("sec: a clock sample before an owed acknowledgement cannot make it due",
+              !waterlink_ack_due(address_of link, 1000000));
+        {
+                //      The same through waterlink_fill, which is assembly on
+                //      every machine: its own compare of now with owed.
+                p8 body[WATERLINK_PAYLOAD];
+                bool alone = false;
+
+                check("sec: a body filled before an owed acknowledgement carries none",
+                      waterlink_fill(address_of link, body, 1000000,
+                                     address_of alone) == 0);
+                check("the same acknowledgement is written once it is due",
+                      waterlink_fill(address_of link, body,
+                                     2000000 + WATERLINK_ACK_DELAY,
+                                     address_of alone) > 0);
+        }
+
+        waterlink_link_reset(address_of link);
+        link.free_count--;
+        link.free = 1;
+        link.flight_head = link.flight_tail = 0;
+        link.slot[0].next = WATERLINK_NONE;
+        link.slot[0].state = WATERLINK_SLOT_FLIGHT;
+        link.slot[0].serial = 1;
+        link.slot[0].sent = 2000000;
+        link.largest = 2;
+        waterlink_losses(address_of link, 1000000);
+        check("sec: a clock sample before a flight cannot declare that frame lost",
+              link.flight_head == 0 && link.slot[0].state == WATERLINK_SLOT_FLIGHT &&
+                  !link.timeouts);
+}
+
 /*
         The handshake, both ends in one process: the keys agree, a wrong
         mac1, wrong padding or a message to the wrong key is refused at the
@@ -70694,11 +70810,47 @@ static fn mdns_parse(void)
                       found.response && found.count == 1 &&
                       found.instance[0].has_port &&
                       found.instance[0].port == 22348);
+        memory_copy(broken, packet, length);
+        network_store_16(broken + 12 + WATERLINK_SERVICE_BYTES, 16);
+        check("an orphan SRV without the service PTR is not discovery",
+              mdns_read_edge(broken, length, address_of found) &&
+                  found.response && !found.count);
+        {
+                positive target = 0;
+
+                for (positive at = 0; at + 4 < length; at++)
+                        if (packet[at] == 15 && packet[at + 1] == 'w' &&
+                            packet[at + 2] == 'l' && packet[at + 3] == '-')
+                                target = at;
+                check("the production announcement exposes one SRV target",
+                      target != 0);
+                if (target)
+                {
+                        memory_copy(broken, packet, length);
+                        broken[target] = 0;
+                        check("an unavailable root SRV target with trailing bytes is not live",
+                              mdns_read_edge(broken, length, address_of found) &&
+                                  !found.count);
+                        memory_copy(broken, packet, length);
+                        broken[target - 2] = broken[target - 1] = 0;
+                        check("an SRV destination on port zero is not live",
+                              mdns_read_edge(broken, length, address_of found) &&
+                                  !found.count);
+                }
+        }
+        length = waterlink_mdns_announce(packet, sizeof packet, instance, host,
+                                         22348, 0x0a000001, 0, 0, null, 0);
+        check("an mDNS goodbye cannot be rediscovered as a live endpoint",
+              length && mdns_read_edge(packet, length, address_of found) &&
+                  found.response && !found.count);
 
         //      Letter case: the service's name reads the same in capitals.
         {
                 positive names = 0;
 
+                length = waterlink_mdns_announce(packet, sizeof packet, instance,
+                                                 host, 22348, 0x0a000001, 4500,
+                                                 0, null, 0);
                 memory_copy(broken, packet, length);
                 for (positive at = 0; at + WATERLINK_SERVICE_BYTES <= length; at++)
                         if (!memory_compare(broken + at, waterlink_service_name,
@@ -70720,6 +70872,18 @@ static fn mdns_parse(void)
         check("a question for the service is one",
               mdns_read_edge(packet, length, address_of found) && found.asked &&
                       !found.response && found.question_length);
+        packet[length - 1] = 3; // CHAOS, not Internet class
+        check("a non-Internet question cannot make this responder an oracle",
+              mdns_read_edge(packet, length, address_of found) && !found.asked);
+        packet[length - 2] = 0x80; // QU is the one legal high class bit
+        packet[length - 1] = 1;
+        check("an Internet-class question may request a unicast response",
+              mdns_read_edge(packet, length, address_of found) && found.asked);
+        packet[length - 2] = 0;
+        packet[3] = 3;
+        check("a query cannot smuggle a response error code into the responder",
+              !mdns_read_edge(packet, length, address_of found));
+        packet[3] = 0;
 
         //      The shapes, by hand: each must be refused.
         {
@@ -71099,6 +71263,7 @@ b32 main(void)
         register_behind_its_newest();
         invalid_application_keys();
         network_generated();
+        clock_ordering();
         handshake();
         pbkdf2_vectors();
         group_derivation();
@@ -71421,6 +71586,23 @@ static fn authorization_files(void)
                           stored.may == 6 &&
                           string_equals(stored.namespace, "office"));
                 (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
+        }
+        {
+                static const p8 zeros[32];
+                bipolar full = system_open_at(AT_FDCWD,
+                                               (string_address)"/dev/full",
+                                               FILE_WRITE | O_CLOEXEC);
+
+                check("the legacy group scrub's fault sink opens", full >= 0);
+                if (full >= 0)
+                {
+                        check("sec: a refused positional scrub is reported, not mistaken for migration",
+                              file_transfer_exact(syscall(pwrite64), full,
+                                                  (p8 address_to)zeros,
+                                                  sizeof zeros, 0) !=
+                                  (bipolar)sizeof zeros);
+                        system_close(full);
+                }
         }
 }
 
@@ -72739,8 +72921,8 @@ static fn greetings(bipolar listener, p16 port)
         check("sec: with no entropy a member is still kept, but not greeted "
               "back, and not marked as greeted",
               wls_peers_count() == 1 && wls_heard(listener, back) <= 0 &&
-                      !link_greeted_lately(wls_office.mark, wls_loopback, port,
-                                           1700001));
+                      !link_greeted_recent(wls_loopback, wls_office.mark, port,
+                                           true, 1700001));
         (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
 }
 
@@ -72799,10 +72981,10 @@ static fn mdns_amplification(void)
                 check("sec: one place is greeted immediately for each group, "
                       "not throttled as if groups shared an identity",
                       entropy_draws - before == 2 &&
-                          link_greeted_lately(wls_office.mark, wls_loopback, 9,
-                                               1000002) &&
-                          link_greeted_lately(second.mark, wls_loopback, 9,
-                                               1000002));
+                          link_greeted_recent(wls_loopback, wls_office.mark, 9,
+                                              true, 1000002) &&
+                          link_greeted_recent(wls_loopback, second.mark, 9,
+                                              true, 1000002));
                 wls_group();
         }
         (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
@@ -72826,13 +73008,38 @@ static fn mdns_amplification(void)
                 if (socket[at] >= 0)
                         system_close(socket[at]);
         }
-        check("sec: made-up announcements are greeted at most LINK_GREETED "
-              "times in LINK_GREET_AGAIN",
-              greeted == LINK_GREETED);
+        check("sec: one source cannot spend the whole global greeting ring",
+              greeted == LINK_GREET_SOURCE &&
+                  LINK_GREET_SOURCE < LINK_GREETED);
+        {
+                p8 second_source[16];
+                positive before = entropy_draws;
 
-        //      A place that refuses the greeting (port zero, from any
-        //      address) costs the curve work all the same, so it spends the
-        //      same budget.
+                memory_copy(second_source, wls_loopback, 16);
+                second_source[15] = 2;
+                for (positive at = 0;
+                     at < LINK_GREETED - LINK_GREET_SOURCE; at++)
+                {
+                        p8 instance[10], host[6];
+
+                        wls_seeded(instance, 10, (p8)(at + 90));
+                        wls_seeded(host, 6, (p8)(at + 90));
+                        length = waterlink_mdns_announce(
+                            packet, sizeof packet, instance, host,
+                            (p16)(30000 + at), 0, 4500, 0, null, 0);
+                        link_nearby_heard(packet, length, second_source,
+                                          WATERLINK_MDNS_PORT, 0,
+                                          3000000 + at);
+                }
+                check("sec: the source ceiling leaves the other half for another address",
+                      entropy_draws - before ==
+                          LINK_GREETED - LINK_GREET_SOURCE);
+        }
+
+        //      Port zero is SRV's unusable destination and is rejected by
+        //      discovery before the curve or the greeting budget. A forged
+        //      nonzero port may still be unreachable, so the global budget
+        //      remains necessary for those announcements.
         wls_group();
         greeted = entropy_draws;
         for (positive at = 0; at < LINK_GREETED + 8; at++)
@@ -72848,9 +73055,8 @@ static fn mdns_amplification(void)
                 link_nearby_heard(packet, length, place, WATERLINK_MDNS_PORT,
                                   0, 5000000 + at);
         }
-        check("sec: announcements naming a place that refuses a greeting "
-              "spend the same budget",
-              entropy_draws - greeted == LINK_GREETED);
+        check("sec: port-zero SRV announcements spend no curve or greeting budget",
+              entropy_draws == greeted);
 
         link_nearby.socket = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC |
                                                          SOCK_NONBLOCK, 0);
@@ -72871,6 +73077,11 @@ static fn mdns_amplification(void)
         link_nearby.interface_address[0] = 0x0a000001;
         link_nearby.interface_address[1] = HOST_LOOPBACK;
         length = waterlink_mdns_query(packet, sizeof packet);
+        link_nearby_heard(packet, length, loopback4, 0, HOST_LOOPBACK,
+                          2999999);
+        check("sec: a forged source port the kernel cannot answer does not "
+              "spend the honest asker's reply budget",
+              link_nearby.last_reply != 2999999);
         for (positive at = 0; at < 8; at++)
                 link_nearby_heard(packet, length, loopback4,
                                   network_order_16(where.port), HOST_LOOPBACK,
@@ -72892,6 +73103,61 @@ static fn mdns_amplification(void)
               "the question, not the first interface", right_address);
         system_close(asker);
         socket_close((b32)link_nearby.socket);
+        link_nearby.socket = -1;
+
+        /* The multicast-answer side used to charge before attempting its
+           send, unlike the repaired legacy-unicast side. An invalid socket
+           is the deterministic kernel refusal: it must neither suppress a
+           later honest answer nor let a backward time sample wrap the age. */
+        link_nearby.last_answer = 7000000;
+        link_nearby_heard(packet, length, loopback4, WATERLINK_MDNS_PORT,
+                          HOST_LOOPBACK, 8000001);
+        check("sec: a refused multicast answer spends no shared answer budget",
+              link_nearby.last_answer == 7000000);
+        link_nearby_heard(packet, length, loopback4, WATERLINK_MDNS_PORT,
+                          HOST_LOOPBACK, 6000000);
+        check("sec: a backward clock sample cannot bypass the multicast answer interval",
+              link_nearby.last_answer == 7000000);
+}
+
+static fn mdns_interface_selection(void)
+{
+        netlink_search loopback = {.wanted = (string_address)"lo"};
+        bipolar netlink = netlink_open_groups(0);
+        bipolar sender = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+        p8 packet[64];
+        positive length = waterlink_mdns_query(packet, sizeof packet);
+
+        check("mDNS interface-selection sockets open", netlink >= 0 && sender >= 0);
+        if (netlink < 0 || sender < 0)
+        {
+                if (netlink >= 0)
+                        system_close((b32)netlink);
+                if (sender >= 0)
+                        socket_close((b32)sender);
+                return;
+        }
+        check("the loopback interface is found for mDNS selection",
+              netlink_link_find((b32)netlink, address_of loopback) == 0);
+        system_close((b32)netlink);
+        if (!loopback.found)
+        {
+                socket_close((b32)sender);
+                return;
+        }
+
+        link_nearby.socket = sender;
+        link_nearby.interface[0] = (b32)loopback.index;
+        check("an mDNS datagram selects and leaves on the requested interface",
+              link_nearby_send(packet, length, 0));
+
+        /* The failed option leaves the socket's previous (loopback) choice in
+           the kernel. The old helper sent anyway, leaking this interface's
+           packet over that stale choice. */
+        link_nearby.interface[0] = 0x7fffffff;
+        check("sec: a refused multicast interface cannot fall through to the stale one",
+              !link_nearby_send(packet, length, 0));
+        socket_close((b32)sender);
         link_nearby.socket = -1;
 }
 
@@ -72986,6 +73252,91 @@ static fn wifi_source_checks(void)
         from.halen = 6;
         check("the kernel's 18 bytes of it are enough", wifi_eapol_from(address_of link, address_of from, 18));
         check("one the kernel gave no address for is not", !wifi_eapol_from(address_of link, address_of from, 4));
+}
+
+static fn wifi_air_capacity(void)
+{
+        radio_air air;
+        radio_heard one;
+        bool real = false;
+        bool weak = false;
+        bool joined = false;
+
+        memory_zero(address_of air, sizeof air);
+        for (positive at = 0; at < RADIO_AIR_MOST; at++)
+        {
+                memory_zero(address_of one, sizeof one);
+                one.ssid[0] = 'x';
+                one.ssid[1] = (p8)(at + 1);
+                one.ssid_length = 2;
+                one.mbm = -9000 + (b32)at;
+                radio_air_keep(address_of air, address_of one);
+        }
+        memory_zero(address_of one, sizeof one);
+        memory_copy(one.ssid, "real", 4);
+        one.ssid_length = 4;
+        one.mbm = -3000;
+        radio_air_keep(address_of air, address_of one);
+        memory_zero(address_of one, sizeof one);
+        memory_copy(one.ssid, "weak", 4);
+        one.ssid_length = 4;
+        one.mbm = -10000;
+        radio_air_keep(address_of air, address_of one);
+        memory_zero(address_of one, sizeof one);
+        memory_copy(one.ssid, "joined", 6);
+        one.ssid_length = 6;
+        one.mbm = -11000;
+        one.joined = true;
+        radio_air_keep(address_of air, address_of one);
+        for (positive at = 0; at < air.count; at++)
+        {
+                real |= air.heard[at].ssid_length == 4 &&
+                        !memory_compare(air.heard[at].ssid, "real", 4);
+                weak |= air.heard[at].ssid_length == 4 &&
+                        !memory_compare(air.heard[at].ssid, "weak", 4);
+                joined |= air.heard[at].ssid_length == 6 &&
+                          !memory_compare(air.heard[at].ssid, "joined", 6);
+        }
+        check("sec: weak forged SSIDs cannot make a full scan hide a stronger network",
+              air.count == RADIO_AIR_MOST && real && !weak);
+        check("sec: a joined network survives the bounded scan even when weakest",
+              joined);
+
+        /* The joined bit and the metadata must come from the same BSSID. A
+           louder twin by the same name used to lend its OPEN classification,
+           frequency and address to the weaker associated row. */
+        memory_zero(address_of air, sizeof air);
+        memory_zero(address_of one, sizeof one);
+        memory_copy(one.ssid, "same", 4);
+        one.ssid_length = 4;
+        one.mbm = -2000;
+        one.security = RADIO_OPEN;
+        one.frequency = 2412;
+        memory_copy(one.bssid, "\x02\x00\x00\x00\x00\x01", 6);
+        radio_air_keep(address_of air, address_of one);
+        one.mbm = -7000;
+        one.security = RADIO_WPA2;
+        one.frequency = 5180;
+        one.joined = true;
+        memory_copy(one.bssid, "\x02\x00\x00\x00\x00\x02", 6);
+        radio_air_keep(address_of air, address_of one);
+        check("sec: association and security metadata stay on the same BSSID",
+              air.count == 1 && air.heard[0].joined &&
+                  air.heard[0].security == RADIO_WPA2 &&
+                  air.heard[0].frequency == 5180 &&
+                  !memory_compare(air.heard[0].bssid,
+                                  "\x02\x00\x00\x00\x00\x02", 6));
+        one.mbm = -1000;
+        one.security = RADIO_OPEN;
+        one.frequency = 2462;
+        one.joined = false;
+        memory_copy(one.bssid, "\x02\x00\x00\x00\x00\x03", 6);
+        radio_air_keep(address_of air, address_of one);
+        check("sec: a louder unassociated twin cannot rewrite the joined row",
+              air.heard[0].joined && air.heard[0].security == RADIO_WPA2 &&
+                  air.heard[0].frequency == 5180 &&
+                  !memory_compare(air.heard[0].bssid,
+                                  "\x02\x00\x00\x00\x00\x02", 6));
 }
 
 static fn wpa_key(void)
@@ -73474,10 +73825,12 @@ b32 main(void)
         control_records_are_canonical();
         greetings(listener, port);
         mdns_amplification();
+        mdns_interface_selection();
         mdns_hop_limit();
         labels();
         wpa_key();
         wifi_source_checks();
+        wifi_air_capacity();
         key_text();
         places();
         ipv4_only();
@@ -80830,6 +81183,41 @@ static fn storage_test_lease_clock_origin(void)
                       child > 0 && status == 0);
 }
 
+static fn storage_test_arp_claims(void)
+{
+        p8 packet[NET_ARP_PACKET] = {0};
+        p8 mine[6] = {2, 0, 0, 0, 0, 1};
+        p8 other[6] = {2, 0, 0, 0, 0, 2};
+        p32 offered = 0xc0a80164;
+
+        network_store_16(packet, 1);
+        network_store_16(packet + 2, ETH_P_IP);
+        packet[4] = 6;
+        packet[5] = 4;
+        network_store_16(packet + 6, 2);
+        memory_copy(packet + 8, other, 6);
+        network_store_32(packet + 14, offered);
+        check("another station's ARP reply conflicts with a DHCP offer",
+              net_arp_claims(packet, sizeof packet, mine, offered));
+        network_store_16(packet + 6, 1);
+        check("another station's ARP request also defends its address",
+              net_arp_claims(packet, sizeof packet, mine, offered));
+        network_store_32(packet + 14, 0);
+        network_store_32(packet + 24, offered);
+        check("a simultaneous ARP probe conflicts with a DHCP offer",
+              net_arp_claims(packet, sizeof packet, mine, offered));
+        memory_copy(packet + 8, mine, 6);
+        check("our own ARP packet is not an address conflict",
+              !net_arp_claims(packet, sizeof packet, mine, offered));
+        memory_copy(packet + 8, other, 6);
+        network_store_32(packet + 14, offered + 1);
+        network_store_32(packet + 24, 0);
+        check("a claim for another address is irrelevant",
+              !net_arp_claims(packet, sizeof packet, mine, offered));
+        check("a truncated ARP claim is refused",
+              !net_arp_claims(packet, NET_ARP_PACKET - 1, mine, offered));
+}
+
 /* A renewal with nothing to renew answers DHCP_NO_OFFER from inside the
    child, so the status crossed the pipe; the child is reaped and no
    descriptor is left behind. */
@@ -81893,6 +82281,7 @@ b32 main(void)
         storage_test_link_state();
         storage_test_lease_clock_origin();
         storage_test_dhcp_apart();
+        storage_test_arp_claims();
         storage_test_lease_over_existing();
         storage_test_lease_inherited();
         storage_test_carrier_bounce();
@@ -83245,12 +83634,51 @@ static fn machine_ntp_schedule(void)
         locale_ntp_every = every;
 }
 
+/* UDP does not preserve a too-small receive buffer as evidence of the wire
+   length unless the caller leaves room to observe the first trailing byte.
+   Exercise the same recvmsg helper as the client so this cannot regress into
+   accepting a 48-byte prefix of an oversized datagram. */
+static fn sntp_datagram_framing(void)
+{
+        b32 pair[2] = {-1, -1};
+        p8 sent[SNTP_REPLY_ROOM];
+        p8 received[SNTP_REPLY_ROOM];
+        positive control[SNTP_CONTROL_WORDS];
+        positive held = 0;
+        bipolar got;
+
+        memory_fill(sent, 0xa5, sizeof sent);
+        check("SNTP datagram framing socket opens",
+              system_call_4(syscall(socketpair), AF_UNIX, SOCK_DGRAM, 0,
+                            (positive)pair) == 0);
+        if (pair[0] < 0 || pair[1] < 0)
+                return;
+
+        check("SNTP exact reply datagram sends",
+              socket_send(pair[0], sent, SNTP_PACKET, 0, 0, 0) == SNTP_PACKET);
+        got = sntp_receive_message(pair[1], received, sizeof received, control,
+                                   address_of held, 0);
+        check("SNTP exact reply datagram is the one shape taken",
+              got == SNTP_PACKET);
+
+        check("SNTP oversized reply datagram sends",
+              socket_send(pair[0], sent, sizeof sent, 0, 0, 0) == sizeof sent);
+        got = sntp_receive_message(pair[1], received, sizeof received, control,
+                                   address_of held, 0);
+        check("SNTP trailing wire byte is refused",
+              got == SNTP_REPLY_ROOM && got != SNTP_PACKET);
+
+        socket_close(pair[0]);
+        socket_close(pair[1]);
+}
+
 static fn machine_sntp(void)
 {
         check("RFC 5905 offset, min-delay pick and poison guards hold",
               sntp_math_ok());
         check("the clock is stepped when far out and slewed when near",
               locale_discipline_ok());
+        sntp_datagram_framing();
         machine_ntp_schedule();
 
         /* Case 0 refuses blocking getrandom: the stamp fails untouched and

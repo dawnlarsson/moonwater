@@ -147,15 +147,6 @@ static p64 link_now(void)
         return system_clock_ns(1) / 1000;
 }
 
-/*      Elapsed monotonic time, including a timestamp made after the caller's
-        snapshot.  The receive loop can install keys while draining one batch;
-        a later datagram in that batch must not turn the small ordering gap
-        into nearly 2^64 microseconds through unsigned subtraction. */
-static p64 link_age(p64 now, p64 then)
-{
-        return now > then ? now - then : 0;
-}
-
 // All digits and nothing else, below a million; -1 otherwise.
 static bipolar link_decimal(string_address text)
 {

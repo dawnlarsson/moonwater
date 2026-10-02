@@ -1773,6 +1773,112 @@ static COLD bipolar net_dhcp_apart(string_address device, p8 address_to hardware
 
 static COLD fn radio_links_unleased(netlink_search address_to search);
 
+/* RFC 5227-style probes before installing a newly leased address.  DHCP is
+   not proof that the address is unused: a stale lease, a broken server, or a
+   hostile responder can hand out an address already active on the link. */
+#define NET_ARP_PACKET 28
+#define NET_ARP_PROBES 3
+
+static bool net_arp_claims(p8 address_to packet, positive size,
+                           p8 address_to hardware, p32 address)
+{
+        return size >= NET_ARP_PACKET && network_load_16(packet) == 1 &&
+               network_load_16(packet + 2) == ETH_P_IP &&
+               packet[4] == 6 && packet[5] == 4 &&
+               (network_load_16(packet + 6) == 1 ||
+                network_load_16(packet + 6) == 2) &&
+               (network_load_32(packet + 14) == address ||
+                (!network_load_32(packet + 14) &&
+                 network_load_32(packet + 24) == address)) &&
+               memory_compare(packet + 8, hardware, 6);
+}
+
+/* A packet socket of one ethertype on one interface: the cooked link header
+   is the kernel's, the payload is ours. */
+static COLD bipolar net_packet_open(p32 index, p16 protocol)
+{
+        socket_address_packet self = {
+            .family = AF_PACKET,
+            .protocol = network_order_16(protocol),
+            .index = index};
+        bipolar handle = socket_new(AF_PACKET, SOCK_DGRAM | SOCK_CLOEXEC,
+                                    (b32)network_order_16(protocol));
+
+        if (handle >= 0 &&
+            socket_bind((b32)handle, address_of self, sizeof self) < 0)
+        {
+                socket_close((b32)handle);
+                return -1;
+        }
+        return handle;
+}
+
+/* 0 means quiet, 1 means another station claims the address, and -1 means
+   the probe could not be performed.  Failure is not permission to configure
+   an address whose ownership was never checked. */
+static COLD bipolar net_arp_conflict(p32 index, p8 address_to hardware,
+                                     p32 address)
+{
+        p8 probe[NET_ARP_PACKET] = {0};
+        p8 reply[64];
+        socket_address_packet all = {
+            .family = AF_PACKET,
+            .protocol = network_order_16(ETH_P_ARP),
+            .index = index,
+            .halen = 6};
+        bipolar handle = net_packet_open(index, ETH_P_ARP);
+
+        if (handle < 0)
+                return -1;
+        memory_fill(all.addr, 0xff, 6);
+        network_store_16(probe, 1);
+        network_store_16(probe + 2, ETH_P_IP);
+        probe[4] = 6;
+        probe[5] = 4;
+        network_store_16(probe + 6, 1);
+        memory_copy(probe + 8, hardware, 6);
+        network_store_32(probe + 24, address);
+
+        for (positive attempt = 0; attempt < NET_ARP_PROBES; attempt++)
+        {
+                network_deadline deadline;
+
+                if (socket_send((b32)handle, probe, sizeof probe, 0,
+                                address_of all, sizeof all) != sizeof probe ||
+                    !network_deadline_begin(address_of deadline, 0, 200000000))
+                        goto failed;
+                for (;;)
+                {
+                        bipolar ready = network_wait_readable_until(
+                            (b32)handle, address_of deadline);
+                        bipolar got;
+
+                        if (ready < 0)
+                                goto failed;
+                        if (!ready)
+                                break;
+                        got = socket_receive((b32)handle, reply, sizeof reply,
+                                             0, 0, 0);
+                        if (got == NETWORK_INTERRUPTED)
+                                continue;
+                        if (got < 0)
+                                goto failed;
+                        if (net_arp_claims(reply, (positive)got, hardware,
+                                           address))
+                        {
+                                socket_close((b32)handle);
+                                return 1;
+                        }
+                }
+        }
+        socket_close((b32)handle);
+        return 0;
+
+failed:
+        socket_close((b32)handle);
+        return -1;
+}
+
 static COLD b32 net_auto(b32 handle, net_holding address_to held)
 {
         netlink_search search;
@@ -1864,6 +1970,17 @@ static COLD b32 net_auto(b32 handle, net_holding address_to held)
                 else
                         string_format(net_out, "ip: could not ask for a lease\n");
 
+                net_flush();
+                return 1;
+        }
+
+        status = net_arp_conflict(search.index, search.hardware, lease.address);
+        if (status)
+        {
+                string_format(net_out,
+                              status > 0
+                                  ? "ip: the offered address is already in use\n"
+                                  : "ip: could not check the offered address\n");
                 net_flush();
                 return 1;
         }
