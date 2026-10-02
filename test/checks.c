@@ -81137,6 +81137,28 @@ static bool storage_test_write_text(string_address path, const void address_to t
         return written;
 }
 
+/* A namespace row's child that could not have its namespaces says why: 2
+   when the kernel will not give them, STORAGE_TEST_THREADED when unshare
+   answered EINVAL for a new user namespace, which the kernel gives only to a
+   process of one thread. qemu-user runs every program beside threads of its
+   own (and starts them again in a forked child), so the arm64 and riscv64
+   runs cannot ask these rows; the native run on the box does. */
+#define STORAGE_TEST_THREADED 7
+
+static bool storage_test_not_run(b32 status, string_address what,
+                                 string_address otherwise)
+{
+        if (status != 2 && status != STORAGE_TEST_THREADED)
+                return false;
+        string_format(log, "storage_io: %s NOT RUN -- %s\n", what,
+                      status == 2 ? otherwise
+                                  : (string_address) "a multithreaded runner "
+                                                     "(qemu-user) gets no new "
+                                                     "user namespace");
+        log_flush();
+        return true;
+}
+
 /* The lease clock's first second.  A boot takes its lease there, and zero is
    what net_seconds says for a clock that failed -- which expires every lease
    at once.  A time namespace whose monotonic clock starts about now puts a
@@ -81159,8 +81181,11 @@ static fn storage_test_lease_clock_origin(void)
                         system_call_2(syscall(nanosleep), (positive)address_of pause, 0);
                         now = clock_monotonic_nanoseconds();
                 }
-                if (system_call_1(syscall(unshare), CLONE_NEWUSER | CLONE_NEWTIME) < 0)
-                        system_call_1(syscall(exit_group), 2);
+                bipolar unshared = system_call_1(syscall(unshare),
+                                                 CLONE_NEWUSER | CLONE_NEWTIME);
+                if (unshared < 0)
+                        system_call_1(syscall(exit_group),
+                                      unshared == -EINVAL ? STORAGE_TEST_THREADED : 2);
                 at += positive_into(offsets + at, now / NETWORK_NANOSECONDS);
                 memory_copy(offsets + at, " 0\n", 3);
                 at += 3;
@@ -81176,9 +81201,9 @@ static fn storage_test_lease_clock_origin(void)
         if (child > 0)
                 system_call_4(syscall(wait4), (positive)child,
                               (positive)address_of status, 0, 0);
-        if (child > 0 && (status & 0x7f) == 0 && ((status >> 8) & 0xff) == 2)
-                log_direct(str("storage_io: lease clock origin NOT RUN -- no time namespace\n"));
-        else
+        if (!(child > 0 && (status & 0x7f) == 0 &&
+              storage_test_not_run((status >> 8) & 0xff, "lease clock origin",
+                                   "no time namespace")))
                 check("a lease taken in the clock's first second is not a failed clock",
                       child > 0 && status == 0);
 }
@@ -81256,9 +81281,12 @@ static bipolar storage_test_net_namespace(void)
         positive group = 2 + positive_into(
             groups + 2, (positive)system_call_1(syscall(getgid), 0));
 
-        if (system_call_1(syscall(unshare), CLONE_NEWUSER | CLONE_NEWNET |
-                                                CLONE_NEWNS) < 0)
-                system_call_1(syscall(exit_group), 2);
+        bipolar unshared = system_call_1(syscall(unshare), CLONE_NEWUSER |
+                                                               CLONE_NEWNET |
+                                                               CLONE_NEWNS);
+        if (unshared < 0)
+                system_call_1(syscall(exit_group),
+                              unshared == -EINVAL ? STORAGE_TEST_THREADED : 2);
         memory_copy(map + at, " 1\n", 4);
         memory_copy(groups + group, " 1\n", 4);
         if (!storage_test_write_text("/proc/self/uid_map", map, at + 3) ||
@@ -81315,9 +81343,8 @@ static fn storage_test_lease_over_existing(void)
                                   ? 0 : 3);
         }
         b32 status = storage_test_child_status(child);
-        if (status == 2)
-                log_direct(str("storage_io: lease over an existing address NOT RUN -- no namespaces\n"));
-        else
+        if (!storage_test_not_run(status, "lease over an existing address",
+                                 "no namespaces"))
                 check("a lease over an address already there is taken, held unowned and left",
                       status == 0);
 }
@@ -81413,9 +81440,8 @@ static fn storage_test_lease_inherited(void)
                 system_call_1(syscall(exit_group), 0);
         }
         b32 status = storage_test_child_status(child);
-        if (status == 2)
-                log_direct(str("storage_io: inherited lease NOT RUN -- no namespaces\n"));
-        else
+        if (!storage_test_not_run(status, "inherited lease",
+                                 "no namespaces"))
         {
                 check("a leased address carries the lease's lifetime",
                       status != 4 && status != 1);
@@ -81545,9 +81571,8 @@ static fn storage_test_carrier_bounce(void)
                 system_call_1(syscall(exit_group), held.lost ? 0 : 5);
         }
         b32 status = storage_test_child_status(child);
-        if (status == 2)
-                log_direct(str("storage_io: carrier bounce NOT RUN -- no namespaces or dummy links\n"));
-        else
+        if (!storage_test_not_run(status, "carrier bounce",
+                                 "no namespaces or dummy links"))
         {
                 check("other news about the held link keeps the lease",
                       status != 4 && status != 1);
@@ -81607,9 +81632,8 @@ static fn storage_test_link_news_overrun(void)
                 system_call_1(syscall(exit_group), net_states.used ? 5 : 0);
         }
         b32 status = storage_test_child_status(child);
-        if (status == 2)
-                log_direct(str("storage_io: link news overrun NOT RUN -- no namespaces or dummy links\n"));
-        else
+        if (!storage_test_not_run(status, "link news overrun",
+                                 "no namespaces or dummy links"))
                 check("dropped link news resyncs the watcher instead of ending it",
                       status == 0);
 }
