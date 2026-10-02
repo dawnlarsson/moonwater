@@ -55889,8 +55889,8 @@ def harness_security_hygiene(argv):
       sits in test/ (they are written to each run's temporary directory)
     - tls_verify_fuzz calls production tls_verify_one with the WR2/GTS prove
       over the hosted crypto lift, and CHECK_net keeps its freestanding proves
-    - the security docs never say tls_verify_fuzz's signatures are mocked, and
-      the harness names SECURITY_TEST_MATRIX.md gives are registered
+    - .github/SECURITY.md exists, never says tls_verify_fuzz's signatures are
+      mocked, and every harness it names is registered
     - http_response_framing's CASES / MUST_ACCEPT / DELIBERATE agree, and its
       DELIBERATE rows keep the must-disagree assert against http.client
     - https_downgrade keeps several Location shapes
@@ -55957,20 +55957,22 @@ def harness_security_hygiene(argv):
         checks(start >= 0 and needle in region,
                "CHECK_net: missing freestanding verify proof: " + needle[:60])
 
-    for doc in ("SECURITY_CHECKLIST.md", "SECURITY_TEST_MATRIX.md"):
-        path = HARNESS_ROOT / doc
-        lower = path.read_text().lower() if path.is_file() else ""
-        for phrase in ("signatures mocked", "mocked signature", "mocked refuse",
-                       "signatures always refuse"):
-            for found in re.finditer(re.escape(phrase), lower):
-                window = lower[max(0, found.start() - 120):found.end() + 120]
-                checks("tls_verify" not in window and "verify_fuzz" not in window,
-                       "%s: still says %r near tls_verify_fuzz" % (doc, phrase))
-    matrix = HARNESS_ROOT / "SECURITY_TEST_MATRIX.md"
-    named = set(re.findall(r"`([a-z][a-z0-9_]*(?:_fuzz|_race))`",
-                           matrix.read_text() if matrix.is_file() else ""))
+    #   The whole security record is one file; a missing or empty one fails
+    #   the row instead of letting the checks below read nothing.
+    record = HARNESS_ROOT / ".github/SECURITY.md"
+    text = record.read_text() if record.is_file() else ""
+    checks(len(text) > 1000, ".github/SECURITY.md: the security record is missing")
+    lower = text.lower()
+    for phrase in ("signatures mocked", "mocked signature", "mocked refuse",
+                   "signatures always refuse"):
+        for found in re.finditer(re.escape(phrase), lower):
+            window = lower[max(0, found.start() - 120):found.end() + 120]
+            checks("tls_verify" not in window and "verify_fuzz" not in window,
+                   ".github/SECURITY.md: still says %r near tls_verify_fuzz" % phrase)
+    named = set(re.findall(r"`([a-z][a-z0-9_]*(?:_fuzz|_race))`", text))
+    named.update(re.findall(r"--harness ([a-z][a-z0-9_]*)", text))
     unknown = sorted(named - set(HARNESS_CHECKS))
-    checks(not unknown, "SECURITY_TEST_MATRIX.md names unregistered harnesses: "
+    checks(not unknown, ".github/SECURITY.md names unregistered harnesses: "
            + ", ".join(unknown))
 
     framing = inspect.getsource(harness_http_response_framing)
