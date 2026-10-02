@@ -9738,10 +9738,11 @@ static bipolar http_copy_body(http_body address_to body, bipolar dest,
                          exact ? response->body_length : positive_max, exact);
 }
 
-//      One progress wait, shortened by a whole-body budget when one is active.
-static bool http_body_wait(const http_body address_to body,
-                           positive address_to seconds,
-                           positive address_to nanoseconds)
+//      One progress wait, shortened by a whole-body budget when one is active;
+//      inline, because a read of an unbudgeted body asks only for the idle limit.
+static inline INLINE bool http_body_wait(
+    const http_body address_to body, positive address_to seconds,
+    positive address_to nanoseconds)
 {
         positive idle_seconds = body->read_seconds || body->read_nanoseconds
                                     ? body->read_seconds : HTTP_IDLE_SECONDS;

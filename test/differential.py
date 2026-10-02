@@ -24436,6 +24436,7 @@ typedef void *address_any;
 typedef char *string_address;
 typedef const char *const_string;
 #define COLD
+#define INLINE
 #define CONST
 #define PURE
 #define fn void
@@ -44041,6 +44042,7 @@ typedef void *address_any;
 typedef char *string_address;
 typedef const char *const_string;
 #define COLD
+#define INLINE
 #define CONST
 #define PURE
 #define fn void
