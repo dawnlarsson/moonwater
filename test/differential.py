@@ -31950,7 +31950,7 @@ def harness_floodlight(argv):
             (r'return fold\(secret \^ [0-9]+u, row,', text,
              'a row seal is folded with the boot secret'),
             (r'u32 sum = fold_wide\(secret \^ [0-9]+u, baseline, sizeof\(baseline\)\);'
-             r'[^}]*sum = fold_wide\(sum, configured, sizeof\(configured\)\);'
+             r'[^}]*sum = fold_wide\(sum, configured,[^;]*sizeof\(\*configured\)\);'
              r'\s*return fold\(sum, &configured_count, sizeof\(configured_count\)\);',
              text,
              'the built-in and configured answers are summed with the boot secret'),
@@ -33549,6 +33549,55 @@ int main(void)
                 report();
                 shown_len -= 1;
                 check(!intact_public(), "a kept report cut short in memory is caught");
+        }
+
+        /* The sum covers the configured rows that are there and how many
+           there are, and the word fold covers every byte of whatever it is
+           given: a row altered, a row added past the count, and a count
+           changed are each caught, and so is one flipped byte at every
+           offset of every length the fold has a path for (whole steps, whole
+           words after them, the bytes after those). */
+        reset(0x11223344);
+        check(configure("find spawn deny; awk spawn deny; env flag -S deny"),
+              "three configured rows read");
+        baseline_sum = baseline_seal();
+        check(intact_public(), "and are summed");
+        configured[2].allowed ^= 1;
+        check(!intact_public(), "a configured row altered in memory is caught");
+        reset(0x11223344);
+        check(configure("find spawn deny; awk spawn deny; env flag -S deny"),
+              "three configured rows read again");
+        baseline_sum = baseline_seal();
+        configured_count -= 1;
+        check(!intact_public(), "a configured row dropped from the count is caught");
+        reset(0x11223344);
+        check(configure("find spawn deny; awk spawn deny"), "two rows read");
+        baseline_sum = baseline_seal();
+        configured_count += 1;
+        check(!intact_public(), "a count that grew over a row never written is caught");
+        {
+                static unsigned long long block[48];
+                unsigned char *bytes = (unsigned char *)block;
+                unsigned int length, at, seed = 0x2545f491;
+                bool every_byte = true;
+
+                for (at = 0; at < sizeof(block); at++)
+                        bytes[at] = (unsigned char)((seed = seed * 1103515245u + 12345u) >> 16);
+
+                for (length = 1; length <= 300; length++) {
+                        u32 was = fold_wide(0x9e3779b9u, block, length);
+
+                        for (at = 0; at < length; at++) {
+                                bytes[at] ^= 0x10;
+                                every_byte = every_byte &&
+                                             fold_wide(0x9e3779b9u, block, length) != was;
+                                bytes[at] ^= 0x10;
+                        }
+                        every_byte = every_byte &&
+                                     fold_wide(0x9e3779b8u, block, length) != was;
+                }
+                check(every_byte, "the word fold notices one byte changed at any offset of any length, "
+                                  "and a different start");
         }
 
         reset(0x11223344);

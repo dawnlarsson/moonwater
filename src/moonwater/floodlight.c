@@ -339,38 +339,59 @@ static u32 fold(u32 hash, const void *from, unsigned int bytes)
 
 /*
  * The same job at a word a step, for the big arrays: the built-in answers and
- * the configured rows are seven kilobytes, checked on every read, and the
- * byte at a time fold above is a multiply on one chain per byte -- most of what
- * a read of this register cost. Four chains side by side, each a xor, a
- * multiply by an odd constant and a rotate, all of them one-to-one, so a
- * changed word changes its chain's end state and the secret in the start of
- * every chain is what an attacker without it cannot reproduce. What does not
- * fill a whole step goes through the byte fold. The source is aligned for it.
+ * the configured rows are checked on every read, and the byte at a time fold
+ * above is a multiply on one chain per byte -- most of what a read of this
+ * register cost. Eight chains side by side, each a xor, a multiply by an odd
+ * constant and a rotate, all of them one-to-one, so a changed word changes its
+ * chain's end state and the secret in the start of every chain is what an
+ * attacker without it cannot reproduce. A multiply takes three cycles and a
+ * chain waits for its own, so eight of them keep the multiplier busy where
+ * four left it idle. What does not fill a step is taken a word at a time down
+ * one chain and the last few bytes through the byte fold, so every byte is
+ * covered. The source is aligned for it.
  */
+static inline unsigned long long fold_step(unsigned long long chain,
+					   unsigned long long word)
+{
+	chain = (chain ^ word) * 0xff51afd7ed558ccdull;
+	return chain << 31 | chain >> 33;
+}
+
 static u32 fold_wide(u32 hash, const void *from, unsigned int bytes)
 {
 	const unsigned long long *at = from;
 	unsigned long long a = hash, b = hash ^ 0x9e3779b97f4a7c15ull;
 	unsigned long long c = hash ^ 0xc2b2ae3d27d4eb4full;
 	unsigned long long d = hash ^ 0x165667b19e3779f9ull;
-	unsigned int steps = bytes / 32;
+	unsigned long long e = hash ^ 0x27d4eb2f165667c5ull;
+	unsigned long long f = hash ^ 0x85ebca77c2b2ae63ull;
+	unsigned long long g = hash ^ 0xd6e8feb86659fd93ull;
+	unsigned long long h = hash ^ 0xa0761d6478bd642full;
+	unsigned int steps = bytes / 64, words = bytes % 64 / 8;
 
-	for (; steps; steps--, at += 4) {
-		a = (a ^ at[0]) * 0xff51afd7ed558ccdull;
-		b = (b ^ at[1]) * 0xff51afd7ed558ccdull;
-		c = (c ^ at[2]) * 0xff51afd7ed558ccdull;
-		d = (d ^ at[3]) * 0xff51afd7ed558ccdull;
-		a = a << 31 | a >> 33;
-		b = b << 31 | b >> 33;
-		c = c << 31 | c >> 33;
-		d = d << 31 | d >> 33;
+	for (; steps; steps--, at += 8) {
+		a = fold_step(a, at[0]);
+		b = fold_step(b, at[1]);
+		c = fold_step(c, at[2]);
+		d = fold_step(d, at[3]);
+		e = fold_step(e, at[4]);
+		f = fold_step(f, at[5]);
+		g = fold_step(g, at[6]);
+		h = fold_step(h, at[7]);
 	}
 
-	a = (a ^ (b << 17 | b >> 47)) * 0xc4ceb9fe1a85ec53ull;
-	a = (a ^ (c << 29 | c >> 35)) * 0xc4ceb9fe1a85ec53ull;
-	a = (a ^ (d << 43 | d >> 21)) * 0xc4ceb9fe1a85ec53ull;
+	a = (a ^ (b << 11 | b >> 53)) * 0xc4ceb9fe1a85ec53ull;
+	a = (a ^ (c << 17 | c >> 47)) * 0xc4ceb9fe1a85ec53ull;
+	a = (a ^ (d << 23 | d >> 41)) * 0xc4ceb9fe1a85ec53ull;
+	a = (a ^ (e << 29 | e >> 35)) * 0xc4ceb9fe1a85ec53ull;
+	a = (a ^ (f << 37 | f >> 27)) * 0xc4ceb9fe1a85ec53ull;
+	a = (a ^ (g << 43 | g >> 21)) * 0xc4ceb9fe1a85ec53ull;
+	a = (a ^ (h << 53 | h >> 11)) * 0xc4ceb9fe1a85ec53ull;
 
-	return fold((u32)(a >> 32) ^ (u32)a, at, bytes % 32);
+	for (; words; words--)
+		a = fold_step(a, *at++);
+
+	return fold((u32)(a >> 32) ^ (u32)a, at, bytes % 8);
 }
 
 /* A row's seal covers everything about it except the seal itself. */
@@ -392,8 +413,14 @@ static u32 baseline_seal(void)
 	u32 sum = fold_wide(secret ^ 2166136261u, baseline, sizeof(baseline));
 
 	/* The configured rows are built-in answers too, and written once at
-	 * boot like the secret; the same sum covers them and how many there are. */
-	sum = fold_wide(sum, configured, sizeof(configured));
+	 * boot like the secret; the same sum covers them and how many there are.
+	 * Only the rows that are there: every reader stops at the count, which
+	 * the sum covers, so a row past it is not an answer and is not read --
+	 * and most of the sixty-four are not there. */
+	sum = fold_wide(sum, configured,
+			(configured_count < CONFIGURED ? configured_count
+						       : CONFIGURED) *
+				sizeof(*configured));
 	return fold(sum, &configured_count, sizeof(configured_count));
 }
 
