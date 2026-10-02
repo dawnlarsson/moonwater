@@ -92,7 +92,7 @@ static inline INLINE fn env_locale_touch(const_string name, positive length)
                 env_locale_generation++;
 }
 
-static bool shell_utf8_on()
+static HOT bool shell_utf8_on()
 {
         string_address locale;
         string_address code;
@@ -288,7 +288,7 @@ extern positive shell_options;
         before the command until the command itself finishes.
 */
 b32 shell_substitution_status;
-positive shell_substitution_generation;
+positive shell_substitution_generation HOT_STATE;
 
 #define EXPAND_LOCAL_NAME 128
 #define EXPAND_LOCAL_TEXT 1024
@@ -356,12 +356,12 @@ static p8 address_to expand_text;
 static positive expand_text_room;
 static p8 address_to expand_mark;
 static positive expand_mark_room;
-static positive expand_length;
-static bool expand_overflow;
-static bool expand_quoted_seen;
+static positive expand_length HOT_STATE;
+static bool expand_overflow HOT_STATE;
+static bool expand_quoted_seen HOT_STATE;
 // How many of the bytes in the buffer are empty marks and not bytes of the
 // word, so that "the word expanded to nothing" can still be asked.
-static positive expand_empty_count;
+static positive expand_empty_count HOT_STATE;
 static bool expand_failed HOT_STATE;
 // A here-document expanded in this process (dash) turns ${x?} into the
 // command's status rather than ending the script, so ${x:=} can still stick.
@@ -389,16 +389,16 @@ static inline INLINE fn expand_fail_state()
         beginning when it filled, which did not truncate a long line so much as
         quietly write its later words on top of its earlier ones.
 */
-static shell_store expand_store;
+static shell_store expand_store HOT_STATE;
 
 //      What a substitution running in this shell must not free: the words
 //      the command that holds it has already made. Its lines end with the
 //      store rewound to here and not to the start.
 static shell_mark expand_store_floor;
-static bool expand_store_floored;
+static bool expand_store_floored HOT_STATE;
 
 // The line is over and every word it made is dead with it.
-fn shell_expand_reset()
+HOT fn shell_expand_reset()
 {
         if (expand_store_floored)
                 shell_store_rewind(address_of expand_store, expand_store_floor);
@@ -426,7 +426,7 @@ static fn expand_push(p8 value, p8 mark)
 }
 
 // A run that all comes out the same way, which is a copy and a fill.
-static fn expand_push_run(const_string text, positive length, p8 mark)
+static HOT fn expand_push_run(const_string text, positive length, p8 mark)
 {
         if_rare(!expand_room(expand_length + length + 2))
         {
@@ -518,12 +518,12 @@ static fn expand_push_string(string_address text, p8 mark)
         plain    outside quotes: not an escape, a quote, a dollar or a backtick
         inside   within a double quote, where the single quote is a byte again
 */
-static b8 expand_plain_set[STRING_SET_BYTES];
-static b8 expand_inside_set[STRING_SET_BYTES];
+static b8 expand_plain_set[STRING_SET_BYTES] HOT_STATE;
+static b8 expand_inside_set[STRING_SET_BYTES] HOT_STATE;
 KEEP __attribute__((externally_visible)) b8 expand_literal_set[STRING_SET_BYTES];
-static b32 expand_sets_ready;
+static b32 expand_sets_ready HOT_STATE;
 
-static fn expand_sets_prepare()
+static HOT fn expand_sets_prepare()
 {
         if (expand_sets_ready)
                 return;
@@ -1815,13 +1815,13 @@ PURE bool shell_match_extended(string_address pattern, string_address text,
 //      every name in a directory, so neither the table nor the bytes behind it
 //      is allowed a fixed size.
 string_address address_to shell_parameter;
-static positive shell_parameter_room;
+static positive shell_parameter_room HOT_STATE;
 positive shell_parameter_count;
-string_address shell_script_name = (string_address) "sh";
+string_address shell_script_name HOT_DATA = (string_address) "sh";
 // Entry-only flags seed the options `set` can subsequently change. A no-arg
 // shell reads standard input and begins with s; a script file resets it and
 // -c has its own entry marker.
-string_address shell_option_flags = (string_address) "s";
+string_address shell_option_flags HOT_DATA = (string_address) "s";
 
 static p8 address_to shell_parameter_bytes;
 static positive shell_parameter_bytes_room;
@@ -1834,7 +1834,7 @@ static positive shell_parameter_staging_room;
         The copy goes through a staging block because "set -- $@" hands back the
         very bytes it is about to be written over.
 */
-bool shell_parameters_set(string_address address_to words, positive count)
+HOT bool shell_parameters_set(string_address address_to words, positive count)
 {
         static string_address empty[1];
         positive used = 0;
@@ -2029,7 +2029,7 @@ fn shell_pid_ensure()
 
 /* A child may perform its first $$ expansion after the clone. Capture the
    shell's identity on the parent side while leaving no-fork startup lazy. */
-bipolar shell_clone_raw()
+HOT bipolar shell_clone_raw()
 {
         shell_pid_ensure();
         return system_fork();
@@ -2104,7 +2104,7 @@ static PURE bool expand_ifs_blank(p8 value)
         table; a multibyte IFS character is one separator, not each of
         its bytes.
 */
-static positive expand_ifs_span(string_address text, positive left)
+static HOT positive expand_ifs_span(string_address text, positive left)
 {
         p8 value;
         positive width;
@@ -2206,7 +2206,7 @@ static COLD string_address expand_absent_value(string_address name,
         return shell_dynamic_value(name, answer.y, value_length);
 }
 
-static string_address expand_value_of(expand_reference reference, p8 address_to scratch,
+static HOT string_address expand_value_of(expand_reference reference, p8 address_to scratch,
                                       bool address_to present,
                                       positive address_to value_length)
 {
@@ -2456,7 +2456,7 @@ static string_address expand_tilde(string_address step, bool assignment);
         Only when IFS is empty is there no byte to join on, and there the
         boundaries have to be put in or every parameter runs together.
 */
-static bool expand_push_parameter_as(expand_reference reference, bool quoted,
+static HOT bool expand_push_parameter_as(expand_reference reference, bool quoted,
                                      b32 mode)
 {
         string_address name = reference.name;
@@ -5355,7 +5355,7 @@ static positive expand_substitutions_count HOT_STATE;
 /* Whether this shell has ever made one. Almost no script does, and the
    executor asks after every command it runs, so one byte in the common case
    is worth having instead of the two the mark and its comparison cost. */
-static bool expand_substitutions_ever;
+static bool expand_substitutions_ever HOT_STATE;
 
 #define EXPAND_WAIT_NO_HANG 1
 #define EXPAND_DUPLICATE_FROM 0
@@ -9863,7 +9863,7 @@ static string_address expand_braced_body_run(string_address step,
         return close + 1;
 }
 
-static string_address expand_simple(string_address step, bool quoted)
+static HOT string_address expand_simple(string_address step, bool quoted)
 {
         string_address start;
         p8 name_local[EXPAND_LOCAL_NAME];
@@ -9948,7 +9948,7 @@ static string_address expand_dollar_single(string_address step)
         return string_get(at) ? at + 1 : at;
 }
 
-static string_address expand_dollar(string_address step, bool quoted)
+static HOT string_address expand_dollar(string_address step, bool quoted)
 {
         p8 next = string_get(step + 1);
         string_address result;
@@ -10133,7 +10133,7 @@ static string_address expand_double(string_address step)
 */
 static string_address expand_tilde(string_address step, bool assignment);
 
-static fn expand_into(string_address text, bool quoted, p8 plain,
+static HOT fn expand_into(string_address text, bool quoted, p8 plain,
                       bool assignment)
 {
         string_address step = text;
@@ -10483,7 +10483,7 @@ static bool shell_expand_document(writer write, string_address body,
         return true;
 }
 
-static fn expand_word(string_address word)
+static HOT fn expand_word(string_address word)
 {
         string_address step = word;
 
@@ -10531,7 +10531,7 @@ static fn expand_word(string_address word)
         }
 }
 
-static bool expand_word_ready(string_address word)
+static HOT bool expand_word_ready(string_address word)
 {
         expand_word(word);
 
@@ -11020,7 +11020,7 @@ static inline INLINE string_address expand_keep_bytes(string_address text,
 
 // One field's bytes, kept: the common word has no empty marks in it and is
 // one copy, and the rare one is copied a byte at a time around them.
-static string_address expand_keep_field(positive at, positive stop)
+static HOT string_address expand_keep_field(positive at, positive stop)
 {
         p8 address_to result;
         positive used = 0;
@@ -11063,7 +11063,7 @@ static inline INLINE bool glob_quoted_special(p8 byte)
                                      byte == ')' || byte == '|'));
 }
 
-static bool expand_emit(positive at, positive stop, shell_words address_to out)
+static HOT bool expand_emit(positive at, positive stop, shell_words address_to out)
 {
         p8 address_to pattern;
         positive room = 1;
@@ -11262,7 +11262,7 @@ static bool expand_emit(positive at, positive stop, shell_words address_to out)
         separator; anything else in IFS is a separator on its own, with the
         whitespace around it swallowed.
 */
-static positive expand_split(shell_words address_to out)
+static HOT positive expand_split(shell_words address_to out)
 {
         positive at = 0;
         positive start;
@@ -11700,7 +11700,7 @@ static bool expand_brace_range(string_address word, string_address open,
         return false;
 }
 
-static positive shell_expand_braces(string_address word,
+static HOT positive shell_expand_braces(string_address word,
                                     shell_words address_to out, bool split)
 {
         string_address open = word;
@@ -11926,7 +11926,7 @@ static inline INLINE bool expand_simple_dollar_word(string_address word,
         -- which is the difference between "rm $file" deleting one thing and
         deleting the working directory.
 */
-positive shell_expand_fields(string_address word, shell_words address_to out)
+HOT positive shell_expand_fields(string_address word, shell_words address_to out)
 {
         positive count;
 
@@ -11952,7 +11952,7 @@ positive shell_expand_fields(string_address word, shell_words address_to out)
         two places POSIX does not split and does not glob, and this is what they
         are supposed to call.
 */
-RETURNS_NONNULL string_address shell_expand_word(string_address word)
+HOT RETURNS_NONNULL string_address shell_expand_word(string_address word)
 {
         string_address result;
         bool quoted;

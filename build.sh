@@ -12,6 +12,11 @@
 #           sh build.sh --clean               remove what a build produced
 #           sh build.sh --host box            build on another machine over ssh
 #           sh build.sh --arch arm64 --run    build and boot another architecture
+#           sh build.sh --run --ram 8         boot with 8 GB of memory (default 4)
+#
+#       Memory is what a live image keeps its bowls in, so it is the room a
+#       setup has: Arch's tree is 0.6 GB on x86-64 and 2.1 GB on arm64, with
+#       the download beside it, and a tmpfs holds half of the memory by default.
 #
 #       The architecture defaults to the machine that will run the image. A
 #       build that boots (--run, --boot) is for this machine, so on an Apple
@@ -192,6 +197,17 @@ do_clean=0
 do_usb=0
 console=0
 image=""
+ram=4
+
+# Whole gigabytes, 1 to 4096, as "8" or "8G"; says the number or fails.
+ram_gigs() {
+        gigs=${1%[Gg]}
+        case "$gigs" in
+        '' | *[!0-9]* | 0*) return 1 ;;
+        esac
+        [ "${#gigs}" -le 4 ] && [ "$gigs" -le 4096 ] || return 1
+        printf '%s' "$gigs"
+}
 
 remaining=$#
 while [ "$remaining" -gt 0 ]; do
@@ -220,6 +236,16 @@ while [ "$remaining" -gt 0 ]; do
         --arch=*)
                 arch_asked=$(arch_name "${argument#--arch=}") ||
                         die "unknown architecture ${argument#--arch=} -- x64, arm64 or riscv64"
+                ;;
+        --ram)
+                [ "$remaining" -gt 0 ] || die "--ram wants gigabytes of memory, 1 to 4096"
+                ram=$(ram_gigs "$1") || die "--ram $1 is not 1 to 4096 gigabytes"
+                shift
+                remaining=$((remaining - 1))
+                ;;
+        --ram=*)
+                ram=$(ram_gigs "${argument#--ram=}") ||
+                        die "--ram ${argument#--ram=} is not 1 to 4096 gigabytes"
                 ;;
         -h | --help) usage; exit 0 ;;
         --*) die "unknown option $argument" ;;
@@ -822,7 +848,7 @@ riscv64)
 esac
 
 set -- "$@" \
-        -m 2G \
+        -m "${ram}G" \
         -smp 2 \
         -kernel "$image" \
         -device "$gpu_device" \

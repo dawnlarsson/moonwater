@@ -30565,7 +30565,7 @@ static b32 tools_stderr_status(string_address name, b32 answered)
 
 // Whether any word before a -- could be one of the two: most starts carry
 // neither, and this is a byte or three per operand.
-static bool tools_meta_asked(string_address address_to arguments, positive count)
+static HOT bool tools_meta_asked(string_address address_to arguments, positive count)
 {
         positive seen = 1;
 

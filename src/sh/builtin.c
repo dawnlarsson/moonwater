@@ -452,7 +452,7 @@ static fn exec_input_finish();
 static fn exec_wait_background(bipolar child);
 /* The name this shell was started under, less any directory and a login
    dash, which a prompt's \s says. */
-string_address shell_invocation_name;
+string_address shell_invocation_name HOT_STATE;
 /* Whether FUNCNEST was ever given a value: a function call asks for it
    only then, rather than looking the name up on every call. */
 bool shell_funcnest_seen;
@@ -1065,7 +1065,7 @@ static bipolar floodlight_exec_interpreter(
         return answered;
 }
 
-static bipolar shell_exec_file_depth(
+static HOT bipolar shell_exec_file_depth(
     string_address path, string_address address_to arguments, positive count,
     string_address address_to environment, positive depth)
 {
@@ -1226,7 +1226,7 @@ typedef struct env_cell
         positive room;
 } env_cell;
 
-static shell_store env_store;
+static shell_store env_store HOT_STATE;
 static env_cell address_to env_free;
 
 /*
@@ -1261,7 +1261,7 @@ typedef struct
 } env_variable;
 
 KEEP __attribute__((externally_visible)) env_variable address_to shell_vars;
-static positive shell_vars_room;
+static positive shell_vars_room HOT_STATE;
 KEEP __attribute__((externally_visible)) positive shell_var_count;
 /*
         The last name that was found.
@@ -1285,8 +1285,8 @@ KEEP __attribute__((externally_visible)) struct
 // Fast negative answer for the overwhelmingly common shell with no readonly
 // declarations. The names themselves remain in the indexed variable table;
 // this is only a count, not a second registry.
-static positive readonly_count;
-static bool shell_bashpid_cleared;
+static positive readonly_count HOT_STATE;
+static bool shell_bashpid_cleared HOT_STATE;
 
 /*
         The pointer vector above is the form execve and the utilities need,
@@ -1311,7 +1311,7 @@ typedef struct
 KEEP __attribute__((externally_visible)) name_index_slot address_to env_index;
 static positive env_index_room;
 KEEP __attribute__((externally_visible)) positive env_index_slots;
-static positive env_index_tombstones;
+static positive env_index_tombstones HOT_STATE;
 
 static inline INLINE fn env_index_touch()
 {
@@ -1325,13 +1325,13 @@ static inline INLINE fn env_index_touch()
 
 // Rebuilt lazily for execve and the in-process utilities that spawn children.
 string_address address_to shell_envp;
-static positive shell_envp_room;
-KEEP __attribute__((externally_visible)) bool shell_envp_dirty = true;
-static positive shell_envp_generation;
+static positive shell_envp_room HOT_STATE;
+KEEP __attribute__((externally_visible)) bool shell_envp_dirty HOT_DATA = true;
+static positive shell_envp_generation HOT_STATE;
 static positive shell_envp_function_generation;
-static bool shell_env_initialized;
+static bool shell_env_initialized HOT_STATE;
 
-static bool env_table_room(positive want)
+static HOT bool env_table_room(positive want)
 {
         return shell_array_room(shell_vars, shell_vars_room, want);
 }
@@ -1349,7 +1349,7 @@ static positive env_name_hash(const_string name, positive length)
         growing from 64 halfway through startup used to hash every name again
         at each rebuild.
 */
-static bool name_index_prepare(name_index_slot address_to address_to table,
+static HOT bool name_index_prepare(name_index_slot address_to address_to table,
                                positive address_to room,
                                positive address_to slot_count,
                                positive address_to tombstones,
@@ -1388,7 +1388,7 @@ static bool name_index_prepare(name_index_slot address_to address_to table,
         return true;
 }
 
-static fn name_index_put(name_index_slot address_to table, positive slots,
+static HOT fn name_index_put(name_index_slot address_to table, positive slots,
                          positive hash, positive length, positive index,
                          positive address_to tombstones)
 {
@@ -1644,7 +1644,7 @@ __asm__(
 );
 #endif
 
-static positive env_find_hashed_span(const_string name, positive length,
+static HOT positive env_find_hashed_span(const_string name, positive length,
                                      positive hash)
 {
         if (env_lookup.hit_generation &&
@@ -1668,7 +1668,7 @@ static positive env_find_span(const_string name, positive length)
                                     env_name_hash(name, length));
 }
 
-static env_cell address_to env_cell_take(positive needed)
+static HOT env_cell address_to env_cell_take(positive needed)
 {
         env_cell address_to cell = env_free;
         env_cell address_to before = null;
@@ -2067,7 +2067,7 @@ static bool env_variable_exports(env_variable address_to variable)
                variable->permanent;
 }
 
-static fn env_variable_drop(positive index)
+static HOT fn env_variable_drop(positive index)
 {
         positive left = shell_var_count - index - 1;
         env_variable dropped = shell_vars[index];
@@ -2119,7 +2119,7 @@ static fn env_variable_drop(positive index)
         hand. The caller has already made room in the table; what differs
         between them is only who owns the text and whether it is exported.
 */
-static env_variable address_to env_record_append(string_address text,
+static HOT env_variable address_to env_record_append(string_address text,
                                                   positive hash,
                                                   positive name_length,
                                                   positive value_length,
@@ -2322,7 +2322,7 @@ static fn env_mark_restore(string_address name, bool enabled, bool export_mark)
 #define env_declare_restore(name, enabled)                                  \
         env_mark_restore((name), (enabled), false)
 
-static bool env_export_mark_span(const_string name, positive length,
+static HOT bool env_export_mark_span(const_string name, positive length,
                                       bool direct)
 {
         const_string target = name;
@@ -2416,7 +2416,7 @@ static COLD string_address shell_optlist_environment(bool shopts)
         return into;
 }
 
-string_address address_to shell_environment()
+HOT string_address address_to shell_environment()
 {
         static string_address empty[1];
         positive count = 0;
@@ -2503,7 +2503,7 @@ static COLD string_address shell_optlist_value(bool shopts,
                                                positive address_to value_length);
 
 /* Adopt a process-lifetime assignment without copying its bytes. */
-static bool env_borrow_assignment(string_address entry, bool replace)
+static HOT bool env_borrow_assignment(string_address entry, bool replace)
 {
         string_address mark = string_first_of(entry, '=');
         positive length;
@@ -2591,7 +2591,7 @@ static PURE bool env_function_assignment(string_address entry)
 
 bool shell_directory_holds();
 
-fn shell_env_init(string_address address_to process_environment)
+HOT fn shell_env_init(string_address address_to process_environment)
 {
         positive inherited = 0;
 
@@ -2971,7 +2971,7 @@ static COLD bool shell_reference_assign_destination(env_reference resolved,
    Keep element-bound references on their own record here: Bash gives those a
    separate invalid-identifier policy, and treating their containing array as
    an ordinary scalar target would silently mark the wrong object. */
-static bool env_attribute_target_span(
+static HOT bool env_attribute_target_span(
     const_string name, positive length, const_string address_to target,
     positive address_to target_length, positive address_to target_index)
 {
@@ -3028,7 +3028,7 @@ static COLD string_address env_get_hashed_miss(const_string name, positive lengt
         return shell_vars[index].text + length + 1;
 }
 
-string_address env_get_hashed_span(const_string name, positive length,
+HOT string_address env_get_hashed_span(const_string name, positive length,
                                    positive hash,
                                    positive address_to value_length)
 {
@@ -3242,7 +3242,7 @@ positive env_names_prefix(string_address prefix, positive length,
 #define ENV_ATTRIBUTE_VALUE                                                  \
         (SHELL_ARRAY_INTEGER | SHELL_ARRAY_LOWER | SHELL_ARRAY_UPPER)
 
-static bool env_write_noted(const_string name, positive length, bool written)
+static HOT bool env_write_noted(const_string name, positive length, bool written)
 {
         if (written)
                 env_locale_touch(name, length);
@@ -4917,7 +4917,7 @@ static COLD string_address shell_machine_name()
 */
 static p8 shell_last_argument[256] HOT_STATE;
 
-fn shell_last_argument_set(string_address word)
+HOT fn shell_last_argument_set(string_address word)
 {
         positive at = 0;
 
@@ -5634,8 +5634,12 @@ static inline bool shell_inventory_sorted(
    name. An empty-environment shell can therefore publish the getcwd result as
    `PWD=value` without a second buffer or allocation. On the first cd or PWD
    assignment the ordinary borrowed-record COW path takes ownership. */
-static p8 shell_directory_assignment[SHELL_DIRECTORY_MAX + 4];
-p8 address_to shell_directory = shell_directory_assignment + 4;
+/* A path's worth of room, of which a start writes the first few dozen bytes:
+   after the small statics (spark.ld), so that its first page is the last of
+   theirs and the room behind it is not between them. */
+static p8 shell_directory_assignment[SHELL_DIRECTORY_MAX + 4]
+    __attribute__((section(".bss.hot.tail")));
+p8 address_to shell_directory HOT_DATA = shell_directory_assignment + 4;
 static p8 shell_directory_was[SHELL_DIRECTORY_MAX];
 static PURE bool shell_physical_on();
 
@@ -5714,7 +5718,7 @@ fn shell_path_tidy(p8 address_to path)
 
 // PWD is only worth believing while it still names the directory the shell is
 // actually in; a chdir anywhere else leaves it a lie.
-bool shell_directory_holds()
+HOT bool shell_directory_holds()
 {
         file_facts named;
         file_facts here;
@@ -6681,7 +6685,7 @@ COLD fn shell_clear(writer write, string_address input)
 // echo and printf %b share the shell escape language. The implementation sits
 // with printf below; these two flags also let \c stop echo's remaining words
 // and final newline.
-static bool printf_cut;
+static bool printf_cut HOT_STATE;
 static bool printf_in_b;
 // bash's echo -e takes only \0nnn as octal: \101 and \1 are the bytes as
 // written, where its printf %b and dash's echo read them as octal too.
@@ -6850,7 +6854,7 @@ static inline INLINE bool shell_echo_backslash(positive first)
         takes a single exact -n; Bash takes runs of n/e/E options, unless
         POSIX mode together with xpg_echo makes every word an operand.
 */
-fn shell_echo(writer write, string_address input)
+HOT fn shell_echo(writer write, string_address input)
 {
         positive index = 1;
         bool newline = true;
@@ -7370,7 +7374,7 @@ COLD fn shell_poweroff(writer write, string_address input)
 // has already been read.
 #define BUILTIN_TCGETS 0x5401u
 
-PURE bool word_is(string_address word, string_address text)
+HOT PURE bool word_is(string_address word, string_address text)
 {
         return word && string_equals(word, text);
 }
@@ -7400,7 +7404,7 @@ static fn env_unset_span(string_address name, positive length)
         }
 }
 
-fn env_unset(string_address name)
+HOT fn env_unset(string_address name)
 {
         env_unset_span(name, string_length(env_reading(name)));
 }
@@ -7660,8 +7664,8 @@ PURE bool shell_onecmd_on()
 static p32 shell_real_uid, shell_real_gid;
 static bool shell_privilege_known;
 static bool shell_privilege_resettable;
-static bool shell_privilege_mismatched;
-static bool shell_startup_privileged;
+static bool shell_privilege_mismatched HOT_STATE;
+static bool shell_startup_privileged HOT_STATE;
 
 static fn shell_privilege_prepare()
 {
@@ -7804,7 +7808,7 @@ static bool shell_extra_letter(p8 letter, bool on)
 #define SHELL_OPTION_NOCLOBBER 11
 #define SHELL_OPTION_PIPEFAIL 16
 
-static positive shell_options_named;
+static positive shell_options_named HOT_STATE;
 
 PURE bool shell_option_on(positive index)
 {
@@ -7944,7 +7948,7 @@ RETURNS_NONNULL string_address shell_flags_current()
 
 // Entry mode supplies the initial s/i state. From this point on they are
 // ordinary set options: `set +s` and `set +i` must also disappear from `$-`.
-fn shell_options_started(bool interactive, b32 monitor)
+HOT fn shell_options_started(bool interactive, b32 monitor)
 {
         if (string_first_of(shell_option_flags, 's'))
                 shell_options |= SHELL_FLAG('s');
@@ -11752,7 +11756,7 @@ bool test_facts(string_address path, file_facts address_to out, bool follow)
                               STATX_BASIC, out) == 0;
 }
 
-bool test_unary(p8 op, string_address value)
+HOT bool test_unary(p8 op, string_address value)
 {
         file_facts facts;
 
@@ -15710,7 +15714,7 @@ static PURE positive trap_index(positive number)
         return at;
 }
 
-PURE bool trap_ignored(positive number)
+HOT PURE bool trap_ignored(positive number)
 {
         positive at = trap_index(number);
 
@@ -15757,7 +15761,7 @@ static bipolar trap_pending_number()
         stays in the table and still lists. Bash keeps every entry: listing
         through a pipe still names them.
 */
-fn trap_default_all()
+HOT fn trap_default_all()
 {
         positive at = 0;
         positive kept = 0;
@@ -15806,7 +15810,7 @@ fn trap_default_all()
         trap_caught = false;
 }
 
-static string_address trap_detach(positive number, positive address_to room)
+static HOT string_address trap_detach(positive number, positive address_to room)
 {
         positive index = trap_index(number);
         string_address action;
@@ -16376,7 +16380,7 @@ typedef struct
 
 static shell_alias_entry address_to alias_table;
 static positive alias_room;
-static positive alias_count;
+static positive alias_count HOT_STATE;
 
 static bool shell_alias_entry_at(positive at, string_address address_to name,
                                  string_address address_to value)
@@ -16880,7 +16884,7 @@ typedef struct
         a name goes into the first free slot of an index that has no
         tombstones to reuse.
 */
-static COLD fn shell_name_index_build(address_any table, positive stride,
+static COLD fn shell_name_index_build(const void address_to table, positive stride,
                                       positive count, shell_name_slot address_to slots,
                                       positive room, const positive address_to hashes,
                                       const p8 (address_to keys)[2])
@@ -16896,7 +16900,7 @@ static COLD fn shell_name_index_build(address_any table, positive stride,
                         answer = (positive2){{hashes[index], keys[index][1]}};
                 else
                         answer = string_hash_33_length(
-                            *(string_address address_to)((p8 address_to)table +
+                            *(string_address address_to)((const p8 address_to)table +
                                                           index * stride));
                 at = answer.x & (room - 1);
                 while (slots[at].index_plus_one)
@@ -16926,7 +16930,7 @@ static COLD fn shell_name_index_build(address_any table, positive stride,
 */
 positive shell_name_index_probe(string_address name, positive length,
                                 positive hash, const shell_name_slot address_to slots,
-                                positive mask, address_any table);
+                                positive mask, const void address_to table);
 
 _Static_assert(sizeof(shell_name_slot) == 8 && __builtin_offsetof(shell_name_slot, length) == 4 &&
                __builtin_offsetof(shell_name_slot, index_plus_one) == 6 &&
@@ -16999,6 +17003,87 @@ __asm__(
 #endif
 
 /*
+        The next key in a table of two byte keys that is a given one, from a
+        given place on, or the count when there is none.
+
+        A key is a halfword, the first byte of a name and its length, the
+        pair shell_tool_key holds for every tool: keys[i][0] | keys[i][1] << 8
+        on the little endian machines this runs on. The table is the one the
+        compiler wrote, aligned to eight bytes, and nothing is read beyond its
+        count: whole vectors only while a whole vector is left, the halfwords
+        after that one at a time. Sixteen keys a turn on x86_64 (SSE2, which
+        the architecture has) and on arm64 (NEON), four a word on riscv64,
+        where the exact lowest match of the word-at-a-time zero test is the
+        one asked for.
+
+        The index of a tool is a 260 name table filled once a process and a
+        process that runs one command asks it two or three times; this is the
+        ask without the fill, a hundred and ninety instructions a ask where
+        the C loop was eleven hundred.
+*/
+positive shell_key_next(const void address_to keys, positive count,
+                        positive from, positive key);
+
+#if X64
+__asm__(
+    ASM_FUNC(shell_key_next)
+    "movd %ecx, %xmm0\n   pshuflw $0, %xmm0, %xmm0\n   pshufd $0, %xmm0, %xmm0\n"
+    "mov %rdx, %rax\n"
+    "1: lea 16(%rax), %r8\n   cmp %rsi, %r8\n   ja 3f\n"
+    "movdqu (%rdi,%rax,2), %xmm1\n   movdqu 16(%rdi,%rax,2), %xmm2\n"
+    "pcmpeqw %xmm0, %xmm1\n   pcmpeqw %xmm0, %xmm2\n   packsswb %xmm2, %xmm1\n"
+    "pmovmskb %xmm1, %r9d\n   test %r9d, %r9d\n   jnz 2f\n"
+    "mov %r8, %rax\n   jmp 1b\n"
+    "2: bsf %r9d, %r9d\n   add %r9, %rax\n"
+    ASM_RET
+    "3: cmp %rsi, %rax\n   jae 4f\n   cmpw %cx, (%rdi,%rax,2)\n   je 4f\n"
+    "inc %rax\n   jmp 3b\n"
+    "4:\n"
+    ASM_RET
+    ASM_END(shell_key_next)
+);
+#elif ARM64
+__asm__(
+    ASM_FUNC(shell_key_next)
+    "dup v0.8h, w3\n   mov x4, x2\n"
+    "1: add x5, x4, #16\n   cmp x5, x1\n   b.hi 3f\n"
+    "add x6, x0, x4, lsl #1\n   ld1 {v1.8h, v2.8h}, [x6]\n"
+    "cmeq v1.8h, v1.8h, v0.8h\n   cmeq v2.8h, v2.8h, v0.8h\n"
+    "uzp1 v1.16b, v1.16b, v2.16b\n   shrn v1.8b, v1.8h, #4\n   fmov x7, d1\n"
+    "cbnz x7, 2f\n   mov x4, x5\n   b 1b\n"
+    "2: rbit x7, x7\n   clz x7, x7\n   add x0, x4, x7, lsr #2\n"
+    ASM_RET
+    "3: cmp x4, x1\n   b.hs 4f\n   ldrh w5, [x0, x4, lsl #1]\n   cmp w5, w3, uxth\n   b.eq 4f\n"
+    "add x4, x4, #1\n   b 3b\n"
+    "4: mov x0, x4\n"
+    ASM_RET
+    ASM_END(shell_key_next)
+);
+#elif RISCV64
+__asm__(
+    ASM_FUNC(shell_key_next)
+    // The key in all four halfwords of a word, the ones and the highs of the zero test.
+    "slli a3, a3, 48\n   srli a3, a3, 48\n   slli a4, a3, 16\n   or a4, a4, a3\n   slli a5, a4, 32\n   or a4, a4, a5\n"
+    "li a5, 0x0001000100010001\n   li a6, 0x8000800080008000\n"
+    "mv t0, a2\n"
+    // Halfwords until the index is a multiple of four, so the words are aligned.
+    "1: bgeu t0, a1, 9f\n   andi t1, t0, 3\n   beqz t1, 2f\n"
+    "slli t2, t0, 1\n   add t2, t2, a0\n   lhu t3, 0(t2)\n   beq t3, a3, 9f\n   addi t0, t0, 1\n   j 1b\n"
+    "2: addi t1, t0, 4\n   bltu a1, t1, 5f\n"
+    "slli t2, t0, 1\n   add t2, t2, a0\n   ld t3, 0(t2)\n   xor t3, t3, a4\n"
+    "sub t4, t3, a5\n   not t3, t3\n   and t4, t4, t3\n   and t4, t4, a6\n   bnez t4, 6f\n"
+    "mv t0, t1\n   j 2b\n"
+    "6: slli t1, t4, 48\n   bnez t1, 9f\n   addi t0, t0, 1\n   slli t1, t4, 32\n   bnez t1, 9f\n"
+    "addi t0, t0, 1\n   slli t1, t4, 16\n   bnez t1, 9f\n   addi t0, t0, 1\n   j 9f\n"
+    "5: bgeu t0, a1, 9f\n   slli t2, t0, 1\n   add t2, t2, a0\n   lhu t3, 0(t2)\n   beq t3, a3, 9f\n"
+    "addi t0, t0, 1\n   j 5b\n"
+    "9: mv a0, t0\n"
+    ASM_RET
+    ASM_END(shell_key_next)
+);
+#endif
+
+/*
         Which single tools this build keeps.
 
         The configuration header defines MOONWATER_TOOL_OFF_<name> as 1 for
@@ -17058,7 +17143,7 @@ __asm__(
 #define SHELL_TOOL(category, name, function) \
         SHELL_TOOL_##category(name, function)
 
-static shell_tool shell_tools[] = {
+static const shell_tool shell_tools[] HOT_RODATA = {
 #define SHELL_TOOL_KEEP(name, function) {#name, function},
 #include "tools.inc"
 #undef SHELL_TOOL_KEEP
@@ -17089,7 +17174,7 @@ static shell_tool shell_tools[] = {
         which the largest is six, so what survives the filter is a handful of
         candidates rather than a shorter list of the same kind.
 */
-static const p8 shell_tool_key[][2] = {
+static const p8 shell_tool_key[][2] HOT_RODATA __attribute__((aligned(8))) = {
 #define SHELL_TOOL_KEEP(name, function) \
         {(p8)(#name)[0], (p8)(sizeof(#name) - 1)},
 #include "tools.inc"
@@ -17152,12 +17237,58 @@ static const char moonwater_config_record[] KEEP
 static shell_name_slot shell_tool_index[SHELL_TOOL_INDEX_ROOM];
 _Static_assert(SHELL_TOOLS < SHELL_TOOL_INDEX_ROOM,
                "the tool index needs a free slot for every tool");
-static bool shell_tool_index_ready;
+static bool shell_tool_index_ready HOT_STATE;
 
-static positive shell_tool_find_hashed(string_address name, positive2 named)
+/*
+        How many names a process asks before it fills an index.
+
+        The fill is a few thousand instructions and a table's worth of
+        memory written, and a lookup that does not use an index is a scan of
+        keys at a hundred and ninety, or of a handful of names, so the index
+        is for a process that asks hundreds of times -- a script -- and not
+        for the one command that asks two or three times and is gone.
+*/
+#define SHELL_NAME_SCAN_ASKS 24
+
+static p8 shell_tool_asks HOT_STATE;
+
+/*
+        A name in a table of sixteen byte rows (the name first), by the keys
+        of the names: every row whose key agrees is compared, in table order,
+        which is the first the index would have found.
+*/
+static HOT positive shell_name_scan(string_address name, positive length,
+                                const p8 (address_to keys)[2], positive count,
+                                const void address_to table)
+{
+        positive key;
+
+        if (length > 255)
+                return count;
+
+        key = (p8)name[0] | length << 8;
+
+        for (positive at = shell_key_next(keys, count, 0, key); at < count;
+             at = shell_key_next(keys, count, at + 1, key))
+                if (!memory_compare(name,
+                                    *(string_address address_to)((const p8 address_to)table + at * 16),
+                                    length))
+                        return at;
+
+        return count;
+}
+
+static HOT positive shell_tool_find_hashed(string_address name, positive2 named)
 {
         if (!shell_tool_index_ready)
         {
+                if_common (shell_tool_asks < SHELL_NAME_SCAN_ASKS)
+                {
+                        shell_tool_asks++;
+                        return shell_name_scan(name, named.y, shell_tool_key,
+                                               SHELL_TOOLS, shell_tools);
+                }
+
                 shell_name_index_build(shell_tools, sizeof(shell_tools[0]),
                                        SHELL_TOOLS, shell_tool_index,
                                        SHELL_TOOL_INDEX_ROOM, shell_tool_hash,
@@ -17178,7 +17309,7 @@ static positive shell_tool_find_hashed(string_address name, positive2 named)
         What a program was called is the first thing on its stack, and for one
         binary answering to forty names it is the only thing that says which.
 */
-static string_address shell_tool_name(string_address path)
+static HOT string_address shell_tool_name(string_address path)
 {
         string_address slash;
 
@@ -17276,6 +17407,37 @@ typedef struct
 
 static floodlight_row floodlight_rows[FLOODLIGHT_ROWS];
 static positive floodlight_row_count HOT_STATE;
+
+/*
+        The register, kept open, and the number it said before these rows were
+        read.
+
+        floodlight.c's FLOODLIGHT_ANSWER is _IOR('f', 1, {u64, u64}): how many
+        writes the register has taken, and a token that only this open file
+        can give. A launch asks again, which is one call, and reads and
+        parses the report again only when the number is not the one it kept
+        -- reading seven kilobytes of text and walking it at every command
+        was a fifth of a command's start. The handle is close-on-exec, and a
+        redirection can claim any number, so it counts for the answer only
+        while the token is the one it gave when it was opened: a file put in
+        its place cannot say it. It is checked against the register's
+        character device when it is let go of, so that a number somebody's
+        own file has taken is not closed. The number a call leaves untouched,
+        as a forged success would, is the one no register says.
+*/
+#define FLOODLIGHT_IOCTL_ANSWER 0x80106601u
+#define FLOODLIGHT_GENERATION_NONE positive_max
+
+typedef struct
+{
+        positive token;
+        positive generation;
+} floodlight_answer;
+
+static bool floodlight_register_held HOT_STATE;
+static bipolar floodlight_register_handle HOT_STATE;
+static positive floodlight_register_token HOT_STATE;
+static positive floodlight_generation HOT_STATE;
 
 /* A missing device means something different on a stock kernel and in an
    image the Spark loader started.  The latter promises both Moonwater devices
@@ -17923,6 +18085,7 @@ static fn floodlight_load()
         bipolar got;
         positive used = 0;
         positive parsed_count = 0;
+        floodlight_answer answer = {0, FLOODLIGHT_GENERATION_NONE};
         p8 state = FLOODLIGHT_REPORT_REFUSED;
 
         if (floodlight_report_state != FLOODLIGHT_REPORT_UNREAD)
@@ -17937,7 +18100,8 @@ static fn floodlight_load()
                 and fails closed there, so a masked or missing /proc refuses
                 what a policy restricts and nothing else.
         */
-        handle = system_open_at(AT_FDCWD, FLOODLIGHT_PATH, FILE_READ);
+        handle = system_open_at(AT_FDCWD, FLOODLIGHT_PATH,
+                                FILE_READ | O_CLOEXEC);
 
         /*
                 The register, and not something wearing its name.
@@ -17989,6 +18153,18 @@ static fn floodlight_load()
                 goto publish;
         }
 
+        /*
+                The number before the report, not after: a write between the
+                two leaves a report newer than its number, which the next
+                launch finds out and reads again, where the other order
+                would keep an old report under a new number for ever. A
+                register that does not answer, or whose answer is the one
+                nothing says, is read at every launch as before.
+        */
+        if (system_control(handle, FLOODLIGHT_IOCTL_ANSWER,
+                           address_of answer) != 0)
+                answer.generation = FLOODLIGHT_GENERATION_NONE;
+
         /* seq_file reads may be short without being complete. Keep going to
            EOF, with system_read_retry owning EINTR, and reject a report that
            cannot be proved whole inside the fixed bound. */
@@ -18003,7 +18179,18 @@ static fn floodlight_load()
                 used += (positive)got;
         }
 
-        system_close(handle);
+        /* Kept, with its number, unless it is not worth keeping or one is
+           kept already (the reload lets go of the old one first). */
+        if (answer.generation != FLOODLIGHT_GENERATION_NONE &&
+            answer.token && !floodlight_register_held)
+        {
+                floodlight_register_handle = handle;
+                floodlight_register_held = true;
+                floodlight_register_token = answer.token;
+                floodlight_generation = answer.generation;
+        }
+        else
+                system_close(handle);
 
         /* An authenticated register that will not give a whole report is the
            kernel saying it was tampered with, or something between the two
@@ -18295,14 +18482,62 @@ static bool floodlight_entry_unfiltered()
         return floodlight_entry_proved;
 }
 
+/* Whether the kept handle is still the file that gave the token, which the
+   register alone can say: a number somebody has put a file in since answers
+   with no token or with another's. */
+static bool floodlight_register_ours(floodlight_answer address_to answer)
+{
+        return floodlight_register_held &&
+               system_control(floodlight_register_handle,
+                              FLOODLIGHT_IOCTL_ANSWER,
+                              answer) == 0 &&
+               answer->generation != FLOODLIGHT_GENERATION_NONE &&
+               answer->token == floodlight_register_token;
+}
+
+/* The handle given up: closed when it is still ours, and only forgotten when
+   it is not, because closing a number somebody has taken over would close
+   their file. */
+static fn floodlight_register_release()
+{
+        floodlight_answer answer = {0, FLOODLIGHT_GENERATION_NONE};
+
+        if (floodlight_register_ours(address_of answer))
+                system_close(floodlight_register_handle);
+
+        floodlight_register_held = false;
+}
+
+/* Nothing has been written to the register since the rows were read: the
+   kept handle gives the token it gave when it was opened, which no other file
+   can, and the number it said before that read. A call that answers without
+   writing the number -- a forged success -- leaves the one nothing says,
+   which is never the kept number. */
+static bool floodlight_fresh()
+{
+        floodlight_answer answer = {0, FLOODLIGHT_GENERATION_NONE};
+
+        return floodlight_register_ours(address_of answer) &&
+               answer.generation == floodlight_generation;
+}
+
 /* Read one coherent policy snapshot for every launch decision.  Keeping the
    loaded state through floodlight_may makes every setting for that launch
    agree; clearing it only here means a later command sees changes and
    revocations.  The rows are left for the load to replace: once a real
    register has answered, losing it keeps the last answers it gave rather
-   than returning to the ones this shell was built with. */
+   than returning to the ones this shell was built with.
+
+   A report that is whole and was read before the register's last write is
+   the report again: asking is one call, and reading and parsing it is what
+   a launch used to cost a fifth of its start for. */
 static fn floodlight_reload()
 {
+        if (floodlight_report_state == FLOODLIGHT_REPORT_VALID &&
+            floodlight_fresh())
+                return;
+
+        floodlight_register_release();
         floodlight_report_state = FLOODLIGHT_REPORT_UNREAD;
         floodlight_load();
 }
@@ -19566,7 +19801,7 @@ static b32 shell_tool_meta(positive which, string_address address_to arguments,
         return tools_meta(name, arguments, count);
 }
 
-static b32 shell_tool_call_in(positive which, bool own_process)
+static HOT b32 shell_tool_call_in(positive which, bool own_process)
 {
         string_address address_to arguments = program_argument_list();
         positive count = (positive)program_argument_count();
@@ -19611,34 +19846,14 @@ static b32 shell_tool_call(positive which)
         asks the two byte key first and only follows the pointer when the key
         matches, which for a name that is not a tool's -- the ordinary case,
         since a shell is what this binary usually is -- means the table is
-        walked without leaving this array at all.
-
-        The length is taken once. A name longer than a byte can hold is not
-        any tool's, and stopping on it here keeps the comparison below from
-        having to describe what it would mean.
+        walked without leaving this array at all, sixteen keys a step
+        (shell_key_next). A name longer than a byte can hold is not any
+        tool's and is answered before the walk.
 */
 static positive shell_tool_key_find(string_address name)
 {
-        positive length = string_length(name);
-        p8 first = (p8)name[0];
-
-        if (length > 255)
-                return SHELL_TOOLS;
-
-        for (positive at = 0; at < SHELL_TOOLS; at++)
-        {
-                if (shell_tool_key[at][0] != first ||
-                    shell_tool_key[at][1] != (p8)length)
-                        continue;
-
-                /* The key already agreed about the first byte and the
-                   length, so the terminator is what the length says it is
-                   and comparing it again would prove nothing. */
-                if (!memory_compare(name, shell_tools[at].name, length))
-                        return at;
-        }
-
-        return SHELL_TOOLS;
+        return shell_name_scan(name, string_length(name), shell_tool_key,
+                               SHELL_TOOLS, shell_tools);
 }
 
 /*
@@ -19660,7 +19875,7 @@ static positive shell_tool_key_find(string_address name)
         second left the build unable to exec anything, and a refused exec says
         EPERM and prints nothing -- so the build failed with no error at all.
 */
-static b32 shell_tool_named_in(string_address name, bool own_process)
+static HOT b32 shell_tool_named_in(string_address name, bool own_process)
 {
         positive which;
 
@@ -19893,7 +20108,7 @@ fn trap_entered(bool inside)
 fn history_leaving();
 fn history_enabled();
 
-fn shell_trap_exit()
+HOT fn shell_trap_exit()
 {
         positive action_room = 0;
         string_address action = trap_detach(0, address_of action_room);
@@ -19944,7 +20159,7 @@ fn shell_trap_exit()
         is one command, and the parser says so by staying incomplete, which is
         the same thing the reader in programs/shell.c listens to.
 */
-static bool shell_path_wanted(string_address value, positive name_length,
+static HOT bool shell_path_wanted(string_address value, positive name_length,
                               positive address_to wanted)
 {
         path_walk walk = {value, null, 0, false};
@@ -20096,9 +20311,9 @@ static bipolar shell_source_read(bipolar handle,
         An eval body is bash's only: lima 5.2 reprints it, dash does not,
         and the walker that runs those lines is told so beside eval.
 */
-static bool shell_verbose_from_string;
+static bool shell_verbose_from_string HOT_STATE;
 
-static fn shell_verbose_line(string_address line)
+static HOT fn shell_verbose_line(string_address line)
 {
         if (shell_verbose_from_string && !shell_bash_compat)
                 return;
@@ -22813,18 +23028,50 @@ _Static_assert(sizeof(shell_command) == 16 && __builtin_offsetof(shell_command, 
                "shell_name_index_probe reads a command row as it reads a tool row");
 _Static_assert(SHELL_COMMAND_COUNT < SHELL_COMMAND_INDEX_ROOM,
                "the command index needs a free slot for every builtin");
-static bool shell_command_index_ready;
+static bool shell_command_index_ready HOT_STATE;
 
 /* Disabled state follows registry identity, so aliases remain independent
    and repeated enable/disable cycles need no copied names or capacity limit. */
-static bool shell_disabled[SHELL_COMMAND_COUNT];
-static positive shell_disabled_count;
+static bool shell_disabled[SHELL_COMMAND_COUNT] HOT_STATE;
+static positive shell_disabled_count HOT_STATE;
 
-static positive shell_command_index_hashed(string_address name,
+static p8 shell_command_asks HOT_STATE;
+
+/*
+        A builtin by its first byte and then its whole name, in table order,
+        for a process that has asked too few times to be worth an index (see
+        SHELL_NAME_SCAN_ASKS). The names are one run of string literals, so
+        the walk is a few cache lines.
+*/
+static positive shell_command_scan(string_address name, positive length)
+{
+        p8 first = (p8)name[0];
+
+        if (length > 255)
+                return SHELL_COMMAND_COUNT;
+
+        for (positive at = 0; at < SHELL_COMMAND_COUNT; at++)
+        {
+                string_address row = shell_commands[at].name;
+
+                if ((p8)row[0] == first && !string_compare(row, name))
+                        return at;
+        }
+
+        return SHELL_COMMAND_COUNT;
+}
+
+static HOT positive shell_command_index_hashed(string_address name,
                                             positive2 named)
 {
         if (!shell_command_index_ready)
         {
+                if_common (shell_command_asks < SHELL_NAME_SCAN_ASKS)
+                {
+                        shell_command_asks++;
+                        return shell_command_scan(name, named.y);
+                }
+
                 shell_name_index_build(shell_commands, sizeof(shell_commands[0]),
                                        SHELL_COMMAND_COUNT, shell_command_index,
                                        SHELL_COMMAND_INDEX_ROOM, null, null);
@@ -23119,7 +23366,7 @@ PURE string_address hash_find(string_address name)
         return at < hash_count ? hash_path[at] : null;
 }
 
-fn hash_remember(string_address name, string_address path)
+HOT fn hash_remember(string_address name, string_address path)
 {
         positive name_length = string_length(name);
         positive path_length = string_length(path);
@@ -23421,7 +23668,7 @@ static bool shell_find_directories;
 //      alone.
 static bool shell_find_asking;
 
-static b32 shell_find_in_path_mode(string_address name, p8 address_to into,
+static HOT b32 shell_find_in_path_mode(string_address name, p8 address_to into,
                                    positive room, positive access,
                                    bool use_hash, string_address value)
 {
@@ -23507,7 +23754,7 @@ static b32 shell_find_in_path_mode(string_address name, p8 address_to into,
         the actual inputs and keep allocation failure distinct from "not
         found", so callers never turn memory pressure into a plausible 127.
 */
-static bipolar shell_find_in_path_alloc_mode(string_address name,
+static HOT bipolar shell_find_in_path_alloc_mode(string_address name,
                                               p8 address_to address_to into,
                                               positive address_to room,
                                               positive access, bool query,

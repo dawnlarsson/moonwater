@@ -189,7 +189,7 @@ KEEP __attribute__((externally_visible)) b8 lex_ordinary[STRING_SET_BYTES];
 KEEP __attribute__((externally_visible)) b8 lex_operator[STRING_SET_BYTES];
 // What decides nothing inside a double quote: wider than lex_ordinary,
 // because a blank means nothing in there.
-static b8 lex_in_double[STRING_SET_BYTES];
+static b8 lex_in_double[STRING_SET_BYTES] HOT_STATE;
 /*
         Bytes that cannot open a line continuation. parse_feed used to walk
         every line twice -- lex_unfinished, then lex_line -- and the second
@@ -198,8 +198,8 @@ static b8 lex_in_double[STRING_SET_BYTES];
         process substitution or an a=( list might still be open; this set lets one
         string_span prove the common line has none of those.
 */
-static b8 lex_closed[STRING_SET_BYTES];
-static b32 lex_ready;
+static b8 lex_closed[STRING_SET_BYTES] HOT_STATE;
+static b32 lex_ready HOT_STATE;
 
 /* expand.c is included later in this translation unit.  Its substitution
    child parses a fresh, non-interactive shell source even when the containing
@@ -232,7 +232,7 @@ PURE bool exec_in_function();
 PURE bool exec_compound_now();
 positive exec_line_exchange(positive line);
 
-fn lex_prepare()
+HOT fn lex_prepare()
 {
         if (lex_ready)
                 return;
@@ -276,7 +276,7 @@ fn lex_prepare()
 
 static KEEP positive lex_at;
 
-static KEEP b32 lex_add(b32 kind, b32 op, string_address text, positive length)
+static HOT KEEP b32 lex_add(b32 kind, b32 op, string_address text, positive length)
 {
         if (!shell_array_room(lex_tokens, lex_token_room, (positive)lex_count + 2))
                 return false;
@@ -292,7 +292,7 @@ static KEEP b32 lex_add(b32 kind, b32 op, string_address text, positive length)
 }
 
 /* The token floor grows through here; LTO cannot see that call. */
-static KEEP bool lex_grow(void)
+static HOT KEEP bool lex_grow(void)
 {
         return shell_array_room(lex_tokens, lex_token_room, (positive)lex_count + 2);
 }
@@ -500,7 +500,7 @@ static b32 lex_skip_held(string_address address_to at)
         that reaches this is a syntax error already.
 */
 #define LEX_SCAN_FAILURES 8
-static positive lex_scan_failed;
+static positive lex_scan_failed HOT_STATE;
 
 // One Bash arithmetic command token. Keeping its interior whole prevents the
 // shell operators inside ((...)) -- notably ;, &&, < and > -- from becoming
@@ -608,7 +608,7 @@ static KEEP string_address lex_conditional_end(string_address start)
         call site is the same: the byte lex_nesting has to be pointed at, which
         is the bracket and not the dollar in front of it.
 */
-static string_address lex_nested_at(string_address at)
+static HOT string_address lex_nested_at(string_address at)
 {
         if (string_get(at) == '`')
                 return at;
@@ -1202,7 +1202,7 @@ static bool lex_line_closed(string_address line)
 static PURE bool lex_assignment_head(string_address text, positive length);
 static bool lex_subscript_unclosed(string_address at);
 
-b32 lex_unfinished(string_address line)
+HOT b32 lex_unfinished(string_address line)
 {
         string_address step = line;
 
@@ -1621,7 +1621,7 @@ static bool lex_subscript_unclosed(string_address at)
         return true;
 }
 
-static KEEP b32 lex_word(string_address address_to at)
+static HOT KEEP b32 lex_word(string_address address_to at)
 {
         string_address step = address_to at;
         string_address start = step;

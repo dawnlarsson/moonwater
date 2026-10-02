@@ -34,6 +34,7 @@ the random tier happened upon is run every time after.
 import argparse
 import ast
 import base64
+import bisect
 import collections
 import dataclasses
 import hashlib
@@ -25164,13 +25165,14 @@ static void *spawn_handed;
 #define SIG_IGN ((void *)1)
 #define atomic_long_add(n, p) ((void)(n), (void)(p))
 #define atomic_long_inc(p) ((void)(p))
+#define this_cpu_add(p, n) ((void)(n))
+#define this_cpu_inc(p) ((void)0)
 /* The counter the environments kept on a device are held to is a real one:
    the budget is a number that has to add up. */
 typedef long atomic_long_t;
 #define ATOMIC_LONG_INIT(v) (v)
 static long atomic_long_add_return(long n, atomic_long_t *p) { *p += n; return *p; }
 static void atomic_long_sub(long n, atomic_long_t *p) { *p -= n; }
-static long stat_task_ns, stat_spawns;
 #define user_mode_thread(fn, arg, sig) \
         ((void)(sig), spawn_handed=(arg), spawn_entered++, spawn_pid)
 '''
@@ -27733,6 +27735,8 @@ int main(void) {
                 "\t\t     loff_t offset, u64 ino, unsigned int d_type)\n{\n\treturn true;\n}\n",
             "linux/arch/x86/kernel/asm-offsets.c":
                 "#include <linux/kbuild.h>\n\nstatic void __used common(void)\n{\n}\n",
+            "linux/mm/memory.c":
+                "static unsigned long fault_around_pages __read_mostly =\n\t65536 >> PAGE_SHIFT;\n",
             "linux/kernel/sched/fair.c":
                 "static int\nselect_task_rq_fair(struct task_struct *p, int prev_cpu, int wake_flags)\n{\n"
                 "\tlockdep_assert_held(&p->pi_lock);\n\tif (wake_flags & WF_TTWU) {\n\t}\n}\n"
@@ -27756,7 +27760,9 @@ int main(void) {
                     header.index('".mwset') < header.index('".data') and
                     "textsize, ZO__mwset" in header and "textsize, ZO__data" not in header and
                     "_e\\?mwset" in read("linux/arch/x86/boot/Makefile") and
-                    scheduler_placed(read("linux/kernel/sched/fair.c")))
+                    scheduler_placed(read("linux/kernel/sched/fair.c")) and
+                    "16384 >> PAGE_SHIFT; /* Moonwater: fault-around" in read("linux/mm/memory.c") and
+                    "65536 >> PAGE_SHIFT" not in read("linux/mm/memory.c"))
 
         # kernel/kernel.c's tags made real: the C original retired to a prototype,
         # the function the asm calls made global with one, the literal asserted,
@@ -30006,6 +30012,11 @@ call-frame lifetime are covered separately by harness shell_functions.
                                     (int)(flags & ~(positive)0x4000) | MAP_NORESERVE, (int)handle, (off_t)offset);
         return at == MAP_FAILED ? -12 : (bipolar)at;
     }
+    /* madvise on the reservation: advice, which the checks do not ask about. */
+    static bipolar system_call_3(positive call, positive first, positive second, positive third) {
+        (void)call; (void)first; (void)second; (void)third;
+        return 0;
+    }
     '''
     state=r'''
     static b32 parse_node_used,parse_word_used,parse_redirect_used;
@@ -30022,8 +30033,8 @@ call-frame lifetime are covered separately by harness shell_functions.
         parse_nodes[2]=(parse_node){.kind=1,.word=0,.word_count=count,.redirect=0,.redirect_count=redirected};
         for(int i=0;i<count;i++) {
             snprintf(words[i],sizeof(words[i]),"word-%d-%d",serial,i);
-            parse_words[i]=words[i];parse_word_lengths[i]=strlen(words[i]);
-            parse_word_name_lengths[i]=i;parse_word_name_hashes[i]=serial+i;parse_word_flags[i]=(unsigned char)i;
+            parse_words[i]=words[i];parse_word_rows[i].length=strlen(words[i]);
+            parse_word_rows[i].name_length=i;parse_word_rows[i].name_hash=serial+i;parse_word_rows[i].flags=(unsigned char)i;
         }
         if(redirected) {
             snprintf(here_text,sizeof(here_text),"body-%d",serial);
@@ -30037,8 +30048,8 @@ call-frame lifetime are covered separately by harness shell_functions.
         for(int i=0;i<count;i++) {
             char wanted[128];snprintf(wanted,sizeof(wanted),"word-%d-%d",serial,i);
             int w=node->word+i;
-            CHECK(!strcmp(parse_words[w],wanted));CHECK(parse_word_lengths[w]==strlen(wanted));
-            CHECK(parse_word_name_lengths[w]==(positive)i&&parse_word_name_hashes[w]==(positive)(serial+i)&&parse_word_flags[w]==i);
+            CHECK(!strcmp(parse_words[w],wanted));CHECK(parse_word_rows[w].length==strlen(wanted));
+            CHECK(parse_word_rows[w].name_length==(positive)i&&parse_word_rows[w].name_hash==(positive)(serial+i)&&parse_word_rows[w].flags==(positive)i);
         }
         if(redirected) {
             char wanted[128];snprintf(wanted,sizeof(wanted),"body-%d",serial);
@@ -30051,7 +30062,7 @@ call-frame lifetime are covered separately by harness shell_functions.
         uint64_t h=1469598103934665603ULL;
     #define HASH(x) h=hash_bytes(x,sizeof(x),h)
     #define HASHN(x,n) h=hash_bytes(x,(n)*sizeof((x)[0]),h)
-        HASHN(parse_nodes,PARSE_NODES);HASHN(parse_words,PARSE_WORDS);HASHN(parse_word_lengths,PARSE_WORDS);HASHN(parse_word_name_lengths,PARSE_WORDS);HASHN(parse_word_name_hashes,PARSE_WORDS);HASHN(parse_word_flags,PARSE_WORDS);HASHN(parse_redirects,PARSE_REDIRECTS);HASHN(parse_kept_text,PARSE_KEPT_TEXT);HASHN(parse_kept_bodies,PARSE_NODES);
+        HASHN(parse_nodes,PARSE_NODES);HASHN(parse_words,PARSE_WORDS);HASHN(parse_word_rows,PARSE_WORDS);HASHN(parse_redirects,PARSE_REDIRECTS);HASHN(parse_kept_text,PARSE_KEPT_TEXT);HASHN(parse_kept_bodies,PARSE_NODES);
         for(size_t a=0;a<array_count(parse_kept_arenas);a++)h=hash_bytes(parse_kept_arenas[a].occupied,parse_kept_arenas[a].room,h);
     #undef HASHN
     #undef HASH
@@ -30101,7 +30112,7 @@ call-frame lifetime are covered separately by harness shell_functions.
             CHECK(!n);CHECK(snapshot()==held);check_body(old,1,3,1);
         }
         injected_failure=-1;
-        prepare(3,1,0);parse_word_lengths[0]=UINTPTR_MAX;uint64_t held=snapshot();
+        prepare(3,1,0);parse_word_rows[0].length=UINTPTR_MAX;uint64_t held=snapshot();
         CHECK(!parse_keep(1,old));CHECK(snapshot()==held);check_body(old,1,3,1);
         parse_release(old);empty();
         // Active versions retain their bytes despite later definitions and return in arbitrary order.
@@ -31130,7 +31141,8 @@ def harness_floodlight(argv):
     #   vocabularies genuinely collide: EPERM is the kernel's and Moonwater
     #   spells its copy the same way because there is only one spelling for it.
     forbidden = {n for n in forbidden if n.upper() != n}
-    forbidden -= {'bool', 'true', 'false', 'null', 'min', 'max', 'container_of'}
+    forbidden -= {'bool', 'true', 'false', 'null', 'min', 'max', 'container_of',
+                  'likely', 'unlikely'}
     own = {item.name for item in c_bodies(str(FILE), text)}
 
     #   In call position only. A local named `start` is this file's own word,
@@ -31169,7 +31181,9 @@ def harness_floodlight(argv):
         'copy_from_user', 'get_random_u32', 'pr_alert', 'offsetof',
         'lockdep_assert_held', 'late_initcall', 'ARRAY_SIZE',
         'MODULE_DESCRIPTION', 'MODULE_AUTHOR', 'MODULE_LICENSE',
-        'device_initcall', 'sizeof',
+        'device_initcall', 'sizeof', 'seq_write', 'seq_has_overflowed',
+        'memcpy', '__aligned', 'likely', 'unlikely', 'copy_to_user',
+        'siphash_1u64', 'get_random_bytes',
     }
 
     called = set()
@@ -31437,9 +31451,9 @@ def harness_floodlight(argv):
                    for i in range(len(tokens) - window))
 
     exec_simple_source = exec_source[
-        exec_source.index('static b32 exec_simple('):
+        exec_source.index('static HOT b32 exec_simple('):
         exec_source.index('\nstatic bool exec_loop_again()',
-                          exec_source.index('static b32 exec_simple('))]
+                          exec_source.index('static HOT b32 exec_simple('))]
     exec_simple_tokens = [token.value for token in lex(exec_simple_source)[0]]
 
     for ok, what in (
@@ -31528,6 +31542,49 @@ def harness_floodlight(argv):
              'each launch reloads one coherent policy snapshot'),
             (calls('floodlight_report_state', '=', 'state', ';'),
              'the reader publishes one explicit final report state'),
+            #   The number of writes, in place of the report, while it lasts.
+            (bool(re.search(
+                r'static fn floodlight_reload\(\)\s*\{\s*'
+                r'if \(floodlight_report_state == FLOODLIGHT_REPORT_VALID &&\s*'
+                r'floodlight_fresh\(\)\)\s*return;\s*'
+                r'floodlight_register_release\(\);\s*'
+                r'floodlight_report_state = FLOODLIGHT_REPORT_UNREAD;\s*'
+                r'floodlight_load\(\);', shell)),
+             'a launch that finds the register unwritten since its report was '
+             'read asks the number and does not read the report again'),
+            (load_body.index('system_control') < load_body.index('system_read_retry'),
+             'the number is asked before the report is read, so a write '
+             'between the two is found by the next launch and not hidden by it'),
+            ('FILE_READ | O_CLOEXEC' in load_body,
+             'the register is opened close-on-exec, so the handle it is kept '
+             'on reaches no program that is started'),
+            (bool(re.search(
+                r'static bool floodlight_register_ours\(floodlight_answer address_to answer\)\s*\{\s*'
+                r'return floodlight_register_held &&\s*'
+                r'system_control\(floodlight_register_handle,\s*'
+                r'FLOODLIGHT_IOCTL_ANSWER,\s*answer\) == 0 &&\s*'
+                r'answer->generation != FLOODLIGHT_GENERATION_NONE &&\s*'
+                r'answer->token == floodlight_register_token;', shell)) and
+             bool(re.search(
+                r'static bool floodlight_fresh\(\)\s*\{[^;]*;\s*'
+                r'return floodlight_register_ours\(address_of answer\) &&\s*'
+                r'answer\.generation == floodlight_generation;', shell)),
+             'the kept handle is believed only while it gives the token it gave '
+             'when it was opened, and a call that wrote no number is never fresh'),
+            (bool(re.search(
+                r'static fn floodlight_register_release\(\)\s*\{[^;]*;\s*'
+                r'if \(floodlight_register_ours\(address_of answer\)\)\s*'
+                r'system_close\(floodlight_register_handle\);\s*'
+                r'floodlight_register_held = false;', shell)),
+             'a handle that is not the register opened here is not closed, '
+             "because it is somebody's file now"),
+            (bool(re.search(r'shown_len = 0;\s*generation\+\+;', text)),
+             'every write that reaches the register moves its number'),
+            (re.search(r'#define FLOODLIGHT_ANSWER (0x[0-9a-f]+)u', text).group(1) ==
+             re.search(r'#define FLOODLIGHT_IOCTL_ANSWER (0x[0-9a-f]+)u', shell).group(1) ==
+             hex((2 << 30) | (16 << 16) | (ord('f') << 8) | 1),
+             "the register's number and the shell's are _IOR('f', 1, two u64), "
+             "which is not the number every filesystem answers"),
             (calls('if', '(', '!', 'floodlight_external_final', '(', 'path',
                    ',', 'arguments', ',', 'count', ',', '&', 'pinned', ')',
                    ')'),
@@ -31925,7 +31982,7 @@ def harness_floodlight(argv):
     show = show[:show.index('\nstatic ')]
 
     for guard, where, what in (
-            (r'if \(!intact\(\)\) \{\s*\n\s*seq_puts\(seq, "# floodlight: TAMPERED', show,
+            (r'if \(unlikely\(!intact\(\)\)\) \{\s*\n\s*seq_puts\(seq, "# floodlight: TAMPERED', show,
              'the report refuses to speak for a machine that has been tampered with'),
             #   misc_open leaves the miscdevice in private_data and seq_open
             #   warns on anything found there, so every reader of the register
@@ -31938,8 +31995,8 @@ def harness_floodlight(argv):
              'the register has a fixed minor, so it needs no devtmpfs'),
             (r'return fold\(secret \^ [0-9]+u, row,', text,
              'a row seal is folded with the boot secret'),
-            (r'u32 sum = fold\(secret \^ [0-9]+u, baseline, sizeof\(baseline\)\);'
-             r'[^}]*sum = fold\(sum, configured, sizeof\(configured\)\);'
+            (r'u32 sum = fold_wide\(secret \^ [0-9]+u, baseline, sizeof\(baseline\)\);'
+             r'[^}]*sum = fold_wide\(sum, configured,[^;]*sizeof\(\*configured\)\);'
              r'\s*return fold\(sum, &configured_count, sizeof\(configured_count\)\);',
              text,
              'the built-in and configured answers are summed with the boot secret'),
@@ -31967,7 +32024,7 @@ def harness_floodlight(argv):
         shell.index('/* execveat with an empty path')]
     entry_source = shell[
         shell.index('static bool floodlight_entry_prove()\n{'):
-        shell.index('/* Read one coherent policy snapshot',
+        shell.index('/* Whether the kept handle is still the file that gave',
                     shell.index('static bool floodlight_entry_prove()\n{'))]
     silent_stop_source = shell[
         shell.index('static DEAD_END fn floodlight_silent_stop()\n{'):
@@ -33012,6 +33069,98 @@ static bipolar floodlight_descriptor_read_link(bipolar handle, p8 *into, positiv
 }
 """
 
+    #   The shell's own load, check and reload, run against the module: the
+    #   real text of each, renamed so the stubs above stay what the rest of the
+    #   checks call, with the open, the statx, the number and the read answered
+    #   by mocks that are a stub or a redirection of the real module.
+    live_names = ('floodlight_load', 'floodlight_register_ours',
+                  'floodlight_register_release', 'floodlight_fresh',
+                  'floodlight_reload')
+    live = ''
+    for header in ('static fn floodlight_load()\n{',
+                   'static bool floodlight_register_ours(floodlight_answer address_to answer)\n{',
+                   'static fn floodlight_register_release()\n{',
+                   'static bool floodlight_fresh()\n{',
+                   'static fn floodlight_reload()\n{'):
+        at = shell.index(header)
+        live += shell[at:shell.index('\n}\n', at) + 3] + '\n'
+    live = re.sub(r'\b(%s)\b' % '|'.join(live_names), r'live_\1', live)
+    live = r"""
+typedef struct { unsigned mask; unsigned mode; unsigned rdev_major;
+                 unsigned rdev_minor; unsigned long mount_id; } file_facts;
+#define STATX_BASIC 0x7ffu
+#define STATX_MOUNT_ID 0x1000u
+#define MODE_FORMAT 0170000
+#define MODE_CHARACTER 0020000
+#define FILE_READ 0
+#define FLOODLIGHT_PATH "/dev/floodlight"
+#define FLOODLIGHT_DEVICE_MAJOR 10
+#ifndef AT_EMPTY_PATH
+#define AT_EMPTY_PATH 0x1000
+#endif
+#define positive_max ((positive)-1)
+_Static_assert(FLOODLIGHT_IOCTL_ANSWER == FLOODLIGHT_ANSWER,
+               "the shell and the register name the number the same");
+_Static_assert(sizeof(floodlight_answer) == sizeof(struct floodlight_answer),
+               "and the answer the same size");
+static const char *report(void);
+static unsigned mock_asks, mock_reads;
+static bool mock_forged;
+/* Each handle is an open file of its own, so each has a token of its own;
+   mock_other_fd is a number a script has put a separate open of the register
+   in, which answers the real number with another file's token. */
+static struct file mock_files[1001];
+static bipolar mock_other_fd;
+static bool floodlight_facts_complete(const file_facts *facts, bool mount)
+{
+        return (facts->mask & STATX_BASIC) == STATX_BASIC &&
+               (!mount || (facts->mask & STATX_MOUNT_ID));
+}
+static bool file_look(bipolar fd, string_address path, positive flags,
+                      file_facts *facts)
+{
+        (void)path; (void)flags;
+        memset(facts, 0, sizeof(*facts));
+        if (fd <= MOCK_REGISTER_FD || fd >= MOCK_REGISTER_FD + 1000 ||
+            mock_closed_fd[fd - MOCK_REGISTER_FD])
+                return false;
+        facts->mask = STATX_BASIC;
+        facts->mode = fd == mock_swapped_fd ? 0100000 : MODE_CHARACTER;
+        facts->rdev_major = 10;
+        facts->rdev_minor = 249;
+        return true;
+}
+static bipolar system_control(bipolar fd, unsigned request, void *argument)
+{
+        mock_asks++;
+        if (fd == mock_swapped_fd || fd <= MOCK_REGISTER_FD)
+                return -25;
+        if (mock_forged)
+                return 0;
+        return floodlight_ioctl(fd == mock_other_fd ? &mock_files[1000]
+                                                    : &mock_files[fd - MOCK_REGISTER_FD],
+                                request, (unsigned long)argument);
+}
+static bipolar system_read_retry(positive fd, p8 *into, positive room)
+{
+        const char *text;
+        positive length;
+
+        if ((bipolar)fd <= MOCK_REGISTER_FD)
+                return -1;
+        mock_reads++;
+        if (mock_eof)
+                return 0;
+        text = report();
+        length = strlen(text);
+        if (length > room)
+                length = room;
+        memcpy(into, text, length);
+        mock_eof = true;
+        return (bipolar)length;
+}
+""" + live
+
     #   The reader is shell code, so it wants the shell's spellings.
     reader_mock = r"""
 typedef unsigned char p8;
@@ -33058,15 +33207,41 @@ static positive positive_into_string(p8 *into, positive value)
         int length = sprintf((char *)into, "%lu", value);
         return length > 0 ? (positive)length : 0;
 }
+/* The register as a process sees it: each open of its path hands out a
+   handle number of its own (1001, 1002, ...), and the test can hide the path,
+   turn one handle into somebody's file, or close one. */
+#define MOCK_REGISTER_FD 1000
+static bool mock_hidden;
+static bool mock_eof;
+static bipolar mock_swapped_fd;
+static unsigned mock_opens, mock_closes;
+static bool mock_closed_fd[2048];
 static bipolar test_open_at(bipolar directory, string_address path,
                             positive flags)
 {
         (void)directory;
+        if (!strcmp((char *)path, "/dev/floodlight"))
+        {
+                if (mock_hidden)
+                        return -1;
+                mock_eof = false;
+                return MOCK_REGISTER_FD + (bipolar)++mock_opens;
+        }
         return open((char *)path, O_RDONLY | (flags & O_CLOEXEC));
 }
 #define system_open_at(directory, path, flags) \
         test_open_at((directory), (path), (flags))
-#define system_close(handle) close(handle)
+static int test_close(bipolar handle)
+{
+        if (handle > MOCK_REGISTER_FD && handle < MOCK_REGISTER_FD + 1000)
+        {
+                mock_closes++;
+                mock_closed_fd[handle - MOCK_REGISTER_FD] = true;
+                return 0;
+        }
+        return close(handle);
+}
+#define system_close(handle) test_close(handle)
 static bipolar test_read_link_at(bipolar directory, string_address path,
                                  p8 *into, positive room)
 {
@@ -33161,6 +33336,9 @@ typedef long long loff_t;
 #define __user
 #define __init
 #define __ro_after_init
+#define __aligned(n) __attribute__((aligned(n)))
+#define likely(x) (x)
+#define unlikely(x) (x)
 #define THIS_MODULE 0
 #define MISC_DYNAMIC_MINOR 255
 #define CAP_SYS_ADMIN 21
@@ -33168,6 +33346,9 @@ typedef long long loff_t;
 #define EINVAL 22
 #define EFAULT 14
 #define ENOSPC 28
+#define ENOTTY 25
+#define EIO 5
+
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 #define DEFINE_MUTEX(name) int name
 #define lockdep_assert_held(x) ((void)(x))
@@ -33183,9 +33364,9 @@ typedef long long loff_t;
 
 struct inode;
 struct file { void *private_data; };
-struct file_operations { int owner; void *open, *read, *llseek, *release, *write; };
+struct file_operations { int owner; void *open, *read, *llseek, *release, *write, *unlocked_ioctl; };
 struct miscdevice { int minor; const char *name; const struct file_operations *fops; int mode; };
-struct seq_file { char *at; unsigned room; };
+struct seq_file { char *buf; unsigned long count; };
 
 static int mock_ns;
 static int mock_lock_depth;
@@ -33205,10 +33386,26 @@ static unsigned current_uid(void) { return mock_uid; }
 static unsigned from_kuid(int *ns, unsigned uid) { (void)ns; return uid; }
 static unsigned long long ktime_get_real_seconds(void) { return mock_now; }
 static u32 get_random_u32(void) { return mock_random; }
+typedef struct { unsigned long long key[2]; } siphash_key_t;
+static unsigned long long siphash_1u64(unsigned long long v, const siphash_key_t *k)
+{
+        return ((v ^ k->key[0]) * 0x9e3779b97f4a7c15ull) ^ k->key[1];
+}
+static void get_random_bytes(void *to, unsigned long n)
+{
+        unsigned char *at = to;
+        while (n--) *at++ = (unsigned char)(mock_random >> (8 * (n & 3)));
+}
 static int misc_register(struct miscdevice *d) { (void)d; return 0; }
 static int single_open(struct file *f, void *show, void *p) { (void)f;(void)show;(void)p; return 0; }
 
 static unsigned long copy_from_user(void *to, const void *from, unsigned long n)
+{
+        if (mock_copy_fails) return n;
+        memcpy(to, from, n);
+        return 0;
+}
+static unsigned long copy_to_user(void *to, const void *from, unsigned long n)
 {
         if (mock_copy_fails) return n;
         memcpy(to, from, n);
@@ -33264,6 +33461,16 @@ static void seq_printf(struct seq_file *s, const char *fmt, ...)
         wrote = vsnprintf(mock_report + mock_report_length, room, fmt, a);
         va_end(a);
         if (wrote > 0) mock_report_length += (unsigned)wrote < room ? (unsigned)wrote : room;
+        s->buf = mock_report; s->count = mock_report_length;
+}
+static bool seq_has_overflowed(struct seq_file *s) { (void)s; return !mock_report_room(); }
+static void seq_write(struct seq_file *s, const void *from, unsigned long bytes)
+{
+        unsigned room = mock_report_room();
+        unsigned take = bytes < room ? (unsigned)bytes : room;
+        memcpy(mock_report + mock_report_length, from, take);
+        mock_report_length += take;
+        s->buf = mock_report; s->count = mock_report_length;
 }
 static void seq_puts(struct seq_file *s, const char *text)
 {
@@ -33273,6 +33480,7 @@ static void seq_puts(struct seq_file *s, const char *text)
         if (!room) return;
         wrote = snprintf(mock_report + mock_report_length, room, "%s", text);
         if (wrote > 0) mock_report_length += (unsigned)wrote < room ? (unsigned)wrote : room;
+        s->buf = mock_report; s->count = mock_report_length;
 }
 '''
 
@@ -33318,7 +33526,8 @@ static bool shows(const char *needle) { return strstr(report(), needle) != NULL;
 static void reset(u32 random)
 {
         memset(changed, 0, sizeof(changed));
-        sealed = false; compromised = false;
+        sealed = false; compromised = false; shown_len = 0; generation = 0;
+        token_key.key[0] = 0x0123456789abcdefull ^ random; token_key.key[1] = 0xfedcba9876543210ull + random;
         mock_root = true; mock_uid = 0; mock_now = 1000;
         mock_copy_fails = false;
         shell_parser_source_kind = SHELL_PARSER_SOURCE_MEMORY;
@@ -33497,6 +33706,251 @@ int main(void)
                 check(!intact_public(), "a built-in answer altered in memory is caught");
                 check(shows("TAMPERED"), "and the report stops answering");
                 writable[0].allowed = was;
+        }
+
+        /* The report kept for the next reader: the same text while nothing is
+           written, dropped by every write, never kept with a clock in it, and
+           sealed like the rest. */
+        reset(0x11223344);
+        {
+                char first[sizeof(mock_report)];
+                strcpy(first, report());
+                check(shown_len == strlen(first), "an untouched machine's report is kept");
+                check(!strcmp(report(), first), "and the next reader gets the same text");
+                put("awk spawn deny");
+                check(shown_len == 0, "a write drops it");
+                check(strstr(report(), "changed") && shown_len == 0,
+                      "a report with a deviation in it is not kept");
+                put("awk spawn allow");
+                check(!strcmp(report(), first) && shown_len == strlen(first),
+                      "back to built in, the report is the first one again and kept");
+                put("seal");
+                check(strstr(report(), "(sealed)") != NULL, "a seal drops it too");
+                reset(0x11223344);
+                report();
+                shown[3] ^= 1;
+                check(!intact_public(), "a kept report altered in memory is caught");
+                check(shows("TAMPERED"), "and the register stops answering");
+                reset(0x11223344);
+                report();
+                shown_len -= 1;
+                check(!intact_public(), "a kept report cut short in memory is caught");
+        }
+
+        /* The sum covers the configured rows that are there and how many
+           there are, and the word fold covers every byte of whatever it is
+           given: a row altered, a row added past the count, and a count
+           changed are each caught, and so is one flipped byte at every
+           offset of every length the fold has a path for (whole steps, whole
+           words after them, the bytes after those). */
+        reset(0x11223344);
+        check(configure("find spawn deny; awk spawn deny; env flag -S deny"),
+              "three configured rows read");
+        baseline_sum = baseline_seal();
+        check(intact_public(), "and are summed");
+        configured[2].allowed ^= 1;
+        check(!intact_public(), "a configured row altered in memory is caught");
+        reset(0x11223344);
+        check(configure("find spawn deny; awk spawn deny; env flag -S deny"),
+              "three configured rows read again");
+        baseline_sum = baseline_seal();
+        configured_count -= 1;
+        check(!intact_public(), "a configured row dropped from the count is caught");
+        reset(0x11223344);
+        check(configure("find spawn deny; awk spawn deny"), "two rows read");
+        baseline_sum = baseline_seal();
+        configured_count += 1;
+        check(!intact_public(), "a count that grew over a row never written is caught");
+        {
+                static unsigned long long block[48];
+                unsigned char *bytes = (unsigned char *)block;
+                unsigned int length, at, seed = 0x2545f491;
+                bool every_byte = true;
+
+                for (at = 0; at < sizeof(block); at++)
+                        bytes[at] = (unsigned char)((seed = seed * 1103515245u + 12345u) >> 16);
+
+                for (length = 1; length <= 300; length++) {
+                        u32 was = fold_wide(0x9e3779b9u, block, length);
+
+                        for (at = 0; at < length; at++) {
+                                bytes[at] ^= 0x10;
+                                every_byte = every_byte &&
+                                             fold_wide(0x9e3779b9u, block, length) != was;
+                                bytes[at] ^= 0x10;
+                        }
+                        every_byte = every_byte &&
+                                     fold_wide(0x9e3779b8u, block, length) != was;
+                }
+                check(every_byte, "the word fold notices one byte changed at any offset of any length, "
+                                  "and a different start");
+        }
+
+        /* The number of writes and the file's token, and the shell's own
+           reader run against them: a launch that finds what it kept reads
+           nothing, a write of any kind is seen by the next launch, and the
+           ways of lying to the reader (a handle that became somebody's file,
+           a separate open of the register put in its number, a call that
+           answers without answering, a register that stopped being whole, a
+           path that was hidden) are each answered as the policy says. */
+        reset(0x11223344);
+        {
+                struct file one = {0}, two = {0};
+                struct floodlight_answer first = {7, 7}, second = {7, 7}, third = {7, 7};
+                long refused;
+
+                check(floodlight_ioctl(&one, FLOODLIGHT_ANSWER, (unsigned long)&first) == 0 &&
+                      first.generation == 0, "the register says how many writes it has taken");
+                report(); report();
+                check(floodlight_ioctl(&one, FLOODLIGHT_ANSWER, (unsigned long)&second) == 0 &&
+                      second.generation == first.generation && second.token == first.token,
+                      "and the same number and token after any number of reads");
+                check(floodlight_ioctl(&two, FLOODLIGHT_ANSWER, (unsigned long)&third) == 0 &&
+                      third.token != first.token,
+                      "another open file gives another token");
+                put("awk spawn deny");
+                floodlight_ioctl(&one, FLOODLIGHT_ANSWER, (unsigned long)&second);
+                check(second.generation == first.generation + 1 && second.token == first.token,
+                      "one more after a write, and the same token");
+                put("awk spawn deny");
+                floodlight_ioctl(&one, FLOODLIGHT_ANSWER, (unsigned long)&first);
+                check(first.generation == second.generation + 1,
+                      "and after one that said what was already true");
+                put("seal");
+                floodlight_ioctl(&one, FLOODLIGHT_ANSWER, (unsigned long)&second);
+                check(second.generation == first.generation + 1, "and after the seal");
+                mock_root = false;
+                put("awk spawn allow");
+                floodlight_ioctl(&one, FLOODLIGHT_ANSWER, (unsigned long)&first);
+                check(first.generation == second.generation,
+                      "but not after one that was refused for want of privilege");
+                mock_root = true;
+                check(floodlight_ioctl(&one, FLOODLIGHT_ANSWER + 1, (unsigned long)&first) == -ENOTTY &&
+                      floodlight_ioctl(&one, 0x80086601u, (unsigned long)&first) == -ENOTTY,
+                      "a number the register does not know is not answered, "
+                      "the filesystems' own among them");
+                mock_copy_fails = true;
+                check(floodlight_ioctl(&one, FLOODLIGHT_ANSWER, (unsigned long)&first) == -EFAULT,
+                      "an address that cannot be written is refused");
+                mock_copy_fails = false;
+                reset(0x11223344);
+                changed[0].subject[0] = 'x';
+                third.token = 9; third.generation = 9;
+                refused = floodlight_ioctl(&one, FLOODLIGHT_ANSWER, (unsigned long)&third);
+                check(refused == -EIO && third.token == 9 && third.generation == 9,
+                      "a register that is not whole refuses the answer and writes none");
+        }
+
+        reset(0x11223344);
+        {
+                unsigned reads, opens, closes, asks, round;
+
+                mock_hidden = false; mock_forged = false; mock_swapped_fd = 0;
+                mock_other_fd = 0;
+                mock_opens = mock_closes = mock_reads = mock_asks = 0;
+                memset(mock_closed_fd, 0, sizeof(mock_closed_fd));
+                floodlight_register_held = false; floodlight_row_count = 0;
+                floodlight_report_promised = false;
+                floodlight_report_state = FLOODLIGHT_REPORT_UNREAD;
+
+                live_floodlight_reload();
+                check(floodlight_report_state == FLOODLIGHT_REPORT_VALID &&
+                      mock_opens == 1 && mock_reads > 0,
+                      "the first launch reads the report");
+                check(floodlight_register_held && floodlight_generation == 0 &&
+                      floodlight_register_token != 0,
+                      "and keeps the register open with the number and token it gave");
+
+                reads = mock_reads; opens = mock_opens; asks = mock_asks;
+                for (round = 0; round < 5; round++)
+                        live_floodlight_reload();
+                check(mock_reads == reads && mock_opens == opens && mock_asks == asks + 5,
+                      "a launch with nothing written since asks once and reads nothing");
+
+                put("find spawn deny");
+                reads = mock_reads;
+                live_floodlight_reload();
+                check(mock_reads > reads && floodlight_row_count == 1 &&
+                      !strcmp((char *)floodlight_rows[0].subject, "find") &&
+                      !floodlight_rows[0].allowed,
+                      "a write is seen by the next launch");
+                check(mock_closes == 1 && mock_closed_fd[1],
+                      "and the handle the old report came through is given back");
+
+                reads = mock_reads;
+                live_floodlight_reload();
+                check(mock_reads == reads, "after which it is asked again, not read again");
+
+                put("awk spawn deny");
+                live_floodlight_reload();
+                check(floodlight_row_count == 2, "a second write is seen the same way");
+
+                /* The handle a script took over: a file that is not the
+                   register at all. */
+                mock_swapped_fd = MOCK_REGISTER_FD + (bipolar)mock_opens;
+                closes = mock_closes; opens = mock_opens; reads = mock_reads;
+                live_floodlight_reload();
+                check(!mock_closed_fd[mock_swapped_fd - MOCK_REGISTER_FD] &&
+                      mock_closes == closes,
+                      "a handle that has become somebody's file is not closed");
+                check(mock_opens == opens + 1 && mock_reads > reads &&
+                      floodlight_register_held && floodlight_row_count == 2,
+                      "and the register is opened again and read");
+                mock_swapped_fd = 0;
+
+                /* A separate open of the register put in its number: it says
+                   the right number and the wrong token. */
+                mock_other_fd = MOCK_REGISTER_FD + (bipolar)mock_opens;
+                closes = mock_closes; opens = mock_opens; reads = mock_reads;
+                live_floodlight_reload();
+                check(!mock_closed_fd[mock_other_fd - MOCK_REGISTER_FD] &&
+                      mock_closes == closes,
+                      "a script's own open of the register in its number is not closed");
+                check(mock_opens == opens + 1 && mock_reads > reads &&
+                      floodlight_register_held,
+                      "and is not taken for the kept one: the register is read again");
+                mock_other_fd = 0;
+
+                /* A call that says it worked and wrote nothing. */
+                mock_forged = true;
+                reads = mock_reads;
+                live_floodlight_reload();
+                live_floodlight_reload();
+                check(mock_reads >= reads + 2 && floodlight_row_count == 2,
+                      "a forged answer never makes the rows look fresh");
+                check(!floodlight_register_held,
+                      "and an answer nothing wrote is not kept");
+                mock_forged = false;
+                live_floodlight_reload();
+                check(floodlight_register_held, "an honest answer is kept again");
+
+                /* The register stops being whole: the shell is told by the
+                   report, and refuses everything. */
+                changed[0].allowed ^= 1;
+                live_floodlight_reload();
+                check(floodlight_report_state == FLOODLIGHT_REPORT_REFUSED,
+                      "a register that is not whole refuses the next launch");
+                check(!floodlight_register_held,
+                      "and nothing is kept of it");
+                changed[0].allowed ^= 1;
+                compromised = false;
+                live_floodlight_reload();
+                check(floodlight_report_state == FLOODLIGHT_REPORT_VALID,
+                      "a launch asks again whatever the last one was told");
+
+                /* The path hidden from a running shell: what it has read
+                   stands, and the handle it holds goes on answering. */
+                mock_hidden = true;
+                reads = mock_reads; opens = mock_opens;
+                live_floodlight_reload();
+                check(mock_reads == reads && floodlight_report_state == FLOODLIGHT_REPORT_VALID,
+                      "a hidden path costs a launch nothing while nothing is written");
+                put("env spawn deny");
+                live_floodlight_reload();
+                check(floodlight_report_state == FLOODLIGHT_REPORT_VALID &&
+                      floodlight_row_count == 2,
+                      "and keeps the last answers it read once the handle goes");
+                mock_hidden = false;
         }
 
         reset(0x11223344);
@@ -34204,7 +34658,7 @@ static b32 reader_tool_launch(char **arguments, bool final)
             (work_path / executable).chmod(0o755)
         binary, _ = build_c(Path(work) / 'run.c',
                             mock + runnable + bridge + reader_mock + descriptor +
-                            reader + decision + round_trip + corpus + driver,
+                            reader + decision + live + round_trip + corpus + driver,
                             ('-std=gnu11', '-O1', '-g', '-w'))
         ran = subprocess.run([str(binary)], cwd=work, text=True,
                              capture_output=True)
@@ -37213,6 +37667,27 @@ static bipolar system_open_at(bipolar dir, string_address path, positive flags) 
     return 3;
 }
 static void system_close(bipolar handle) { (void)handle; }
+/* The identity files are already there, so session prep asks once and stops;
+   what it writes when they are not is the bowl lane's to check. */
+#define array_count(list) (sizeof(list) / sizeof((list)[0]))
+/*  The identity files are there; every directory is not, so that session prep
+    takes the walk that makes it, which is what this window counts. */
+static bipolar system_access_at(bipolar dir, string_address path, positive mode) {
+    (void)dir; (void)mode;
+    return !strncmp(path, "/etc/", 5) ? 0 : -2;
+}
+static bipolar system_stat_at_stub(void) { return -2; }
+#define system_stat_at(dir, path, flags, mask, into) system_stat_at_stub()
+#define AT_SYMLINK_NOFOLLOW 0x100
+static bipolar system_random_fill(void *into, positive length, positive flags) {
+    (void)into; (void)length; (void)flags;
+    return 0;
+}
+static b32 bowl_write_bytes(string_address path, string_address text, positive length) {
+    (void)path; (void)text; (void)length;
+    return 0;
+}
+static bool bowl_quiet;
 static bipolar bowl_mkdir(string_address path) {
     if (mkdirs < 32) snprintf(made[mkdirs], sizeof(made[0]), "%s", path);
     mkdirs++;
@@ -64999,6 +65474,114 @@ def g_table_text(source):
     return "\n".join(out)
 
 
+HOT_ORDER_COMMANDS = [
+    ":", "echo hi", "echo hi | cat > /dev/null", "ls /tmp > /dev/null",
+    "x=$(echo a); echo $x > /dev/null", "for i in 1 2 3; do echo $i; done > /dev/null",
+    "cat /etc/hostname > /dev/null", "wget -q -O /dev/null http://127.0.0.1:1/ 2> /dev/null",
+    "[ -f /etc/hostname ] && echo yes > /dev/null", "grep -c a /etc/hostname > /dev/null",
+    "sed s/a/b/ /etc/hostname > /dev/null", "sort /etc/hostname > /dev/null",
+    "cp /etc/hostname /tmp/hot-order.$$; rm /tmp/hot-order.$$", "date > /dev/null",
+    "find /tmp -maxdepth 1 > /dev/null", "awk '{print}' /etc/hostname > /dev/null",
+    "printf '%s\\n' a > /dev/null", "test -n a", "wc -l /etc/hostname > /dev/null",
+    "mkdir -p /tmp/hot-order; rmdir /tmp/hot-order", "head -1 /etc/hostname > /dev/null",
+    "tr a b < /etc/hostname > /dev/null", "if true; then echo a; fi > /dev/null",
+    "case a in a) echo b;; esac > /dev/null", "f() { echo $1; }; f x > /dev/null",
+    "export A=1; env > /dev/null",
+]
+
+
+def harness_hot_order(argv):
+    """Write the order of the hot functions in src/build/spark.ld.
+
+        python3 test/differential.py --harness hot_order SHELL MAP [--write]
+
+    SHELL is a shell built for x86_64 with symbols and -ffunction-sections,
+    MAP its link map (-Wl,-Map=MAP). Every command of HOT_ORDER_COMMANDS is
+    run under qemu-user with its translation blocks logged (exact, where
+    perf's instruction sampling is throttled), each block address is named by
+    nm, and the functions come out ordered by how many of the commands
+    executed them, each as its own input section from the map. A text fault
+    maps sixteen pages of the file and the exit unmaps them: about a
+    microsecond a 64 KB window, measured, and a start went from seventeen
+    windows to eleven with this list in front. Assembly routines are left to
+    their own block in the script (riscv64's jal reaches a megabyte), ordered the same way.
+    Without --write the block is printed."""
+    args = [a for a in argv if not a.startswith("--")]
+    if len(args) != 2:
+        print("hot_order: SHELL MAP [--write]", file=sys.stderr)
+        return 2
+    shell, mapfile = args
+    symbols = []
+    for line in subprocess.run(["nm", "-n", "-S", shell], text=True,
+                               stdout=subprocess.PIPE).stdout.splitlines():
+        part = line.split()
+        if len(part) == 4 and part[2] in "tTwW":
+            symbols.append((int(part[0], 16), int(part[1], 16), part[3]))
+    symbols.sort()
+    starts = [entry[0] for entry in symbols]
+    sections = set(re.findall(r"^ (\.text[^\s]*)", Path(mapfile).read_text(errors="replace"),
+                              re.M))
+    asm = set()
+    for source in (HARNESS_ROOT / "src").rglob("*"):
+        if source.suffix in (".c", ".inc"):
+            asm.update(re.findall(r"ASM_(?:LOCAL_)?FUNC\((\w+)\)", source.read_text(errors="replace")))
+    count = {}
+    with tempfile.TemporaryDirectory(prefix="moonwater-hot-order-") as temporary:
+        log = Path(temporary) / "blocks"
+        for command in HOT_ORDER_COMMANDS:
+            log.unlink(missing_ok=True)
+            subprocess.run(["qemu-x86_64", "-cpu", "max", "-d", "exec,nochain", "-D", str(log),
+                            shell, "-c", command], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=120)
+            seen = set()
+            for address in set(re.findall(r"\[[0-9a-f]+/([0-9a-f]+)/", log.read_text(errors="replace"))):
+                at = int(address, 16)
+                found = bisect.bisect_right(starts, at) - 1
+                if found >= 0 and at < symbols[found][0] + max(symbols[found][1], 1):
+                    seen.add(symbols[found][2])
+            for name in seen:
+                count[name] = count.get(name, 0) + 1
+
+    def section_for(name):
+        base = name[:-5] if name.endswith(".cold") else name
+        for candidate in ([".text.unlikely." + base] if name.endswith(".cold") else
+                          [".text.hot." + base, ".text." + base, ".text.startup." + base,
+                           ".text.unlikely." + base]):
+            if candidate in sections:
+                return candidate
+        return None
+
+    ordered = []
+    ordered_asm = []
+    for name, ran in sorted(count.items(), key=lambda item: (-item[1], item[0])):
+        if re.sub(r"(\.(part|constprop|isra|cold)(\.[0-9]+)*)+$", "", name) in asm or name in asm:
+            found = ".text." + name
+            if found in sections and found not in ordered_asm:
+                ordered_asm.append(found)
+            continue
+        found = section_for(name)
+        if found and found not in ordered:
+            ordered.append(found)
+    block = "".join("                *(%s)\n" % found for found in ordered)
+    block_asm = "".join("                *(%s)\n" % found for found in ordered_asm)
+    if "--write" not in argv:
+        print(block, end="")
+        print("# assembly")
+        print(block_asm, end="")
+        return 0
+    path = HARNESS_ROOT / "src/build/spark.ld"
+    text = path.read_text()
+    begin = text.index("/* hot_order begin */\n") + len("/* hot_order begin */\n")
+    end = text.index("                /* hot_order end */")
+    text = text[:begin] + block + text[end:]
+    begin = text.index("/* hot_asm begin */\n") + len("/* hot_asm begin */\n")
+    end = text.index("                /* hot_asm end */")
+    path.write_text(text[:begin] + block_asm + text[end:])
+    print("hot order: %d functions and %d assembly routines of %d executed, written"
+          % (len(ordered), len(ordered_asm), len(count)))
+    return 0
+
+
 def harness_g_tables(argv):
     """Check (or with --write, write) the table of the generator's odd
     multiples in src/net/net.c against what Python's own arithmetic gives.
@@ -65029,6 +65612,7 @@ def harness_g_tables(argv):
 
 HARNESS_CHECKS = {
     "g_tables": harness_g_tables,
+    "hot_order": harness_hot_order,
     "https_bench": harness_https_bench,
     "compression": harness_compression,
     "engines": harness_engines_main,

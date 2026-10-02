@@ -31663,6 +31663,81 @@ static fn shell_asm_names(p8 address_to pages)
 }
 
 /*
+        shell_key_next from src/sh/builtin.c against the loop it replaces,
+        over tables of every count to 300 (and every count that is a whole
+        number of vectors, of words and one short of them), from every place
+        in the table, with keys drawn from a few values so that matches repeat,
+        values one apart and differing in one bit so the borrow of the word
+        test has something to be wrong about, the high bit of a halfword and
+        all ones, a key with garbage above its sixteen bits, and the table
+        ending on the last byte before a page nobody may read.
+*/
+positive shell_key_next(const void address_to keys, positive count, positive from, positive key);
+
+static fn shell_asm_keys(p8 address_to pages)
+{
+        static p16 own[320] __attribute__((aligned(8)));
+        static p16 pool[48];
+
+        for (positive round = 0; round < 6000; round++)
+        {
+                positive count = shell_asm_next() % 301;
+                positive alphabet = 1 + shell_asm_next() % 40;
+                p16 address_to keys = own;
+
+                if (round % 4 == 0)
+                        count &= ~(positive)15;
+                else if (round % 4 == 1)
+                        count = (count & ~(positive)3) + 3;
+                if (count > 300)
+                        count = 300;
+                if (pages && round % 2)
+                        keys = (p16 address_to)(((positive)(pages + 8192 - count * 2)) & ~(positive)7);
+                for (positive j = 0; j < alphabet; j++)
+                {
+                        p64 roll = shell_asm_next();
+
+                        pool[j] = j % 4 == 0 ? (p16)roll
+                                : j % 4 == 1 ? (p16)(pool[j - 1] + 1)
+                                : j % 4 == 2 ? (p16)(pool[j - 2] ^ 0x8000)
+                                             : (p16)(pool[j - 3] - 1);
+                        if (roll >> 60 == 0)
+                                pool[j] = 0xffff;
+                        else if (roll >> 60 == 1)
+                                pool[j] = 0;
+                }
+                for (positive i = 0; i < count; i++)
+                        keys[i] = pool[shell_asm_next() % alphabet];
+
+                positive key = pool[shell_asm_next() % alphabet];
+                positive step = count < 40 ? 1 : 1 + shell_asm_next() % 13;
+
+                for (positive from = 0; from <= count; from += step)
+                {
+                        positive want = count;
+                        positive ask = shell_asm_next() % 3 ? key : (key | shell_asm_next() << 16);
+
+                        for (positive i = from; i < count; i++)
+                                if (keys[i] == key)
+                                {
+                                        want = i;
+                                        break;
+                                }
+                        positive got = shell_key_next(keys, count, from, ask);
+
+                        checks++;
+                        if (got != want)
+                        {
+                                failures++;
+                                if (failures < 10)
+                                        string_format(log, "FAIL shell_key_next count %p from %p key %p: %p want %p\n",
+                                                      count, from, key, got, want);
+                        }
+                }
+        }
+}
+
+/*
         arith_plain_natural from src/sh/expand.c against the C it replaced,
         which asked at every digit whether the next would overflow: every
         byte after 7, 0 and 123, every pair and triple of bytes a literal,
@@ -32031,6 +32106,7 @@ b32 main(void)
         shell_asm_binaries((bipolar)(positive)pages > 0 ? pages : null);
         shell_asm_writes((bipolar)(positive)pages > 0 ? pages : null);
         shell_asm_names((bipolar)(positive)pages > 0 ? pages : null);
+        shell_asm_keys((bipolar)(positive)pages > 0 ? pages : null);
         shell_asm_naturals((bipolar)(positive)pages > 0 ? pages : null);
         shell_asm_scalars((bipolar)(positive)pages > 0 ? pages : null);
 
@@ -74450,6 +74526,194 @@ static fn distros(void)
                   nix->prime == BOWL_PRIME_NIX);
 }
 
+/*
+        Profiles are several bowls' worth of packages behind one name, so the
+        table is checked for the mistakes that cost an install halfway through
+        (a distribution with no manager words, a package that is an option, an
+        argv that cannot hold the list), the words for what a person types,
+        and the two things remove must never get wrong: it takes only the
+        launchers that still name the bowl the profile put them in, and the
+        session script it writes is a new file, never a write through a link.
+*/
+static fn profiles(void)
+{
+        const struct bowl_profile address_to profile = null;
+        bool remove = false;
+        static string_address plain[] = {"bowl", "profile", "desktop", null};
+        static string_address install[] = {"bowl", "profile", "desktop", "install", null};
+        static string_address drop[] = {"bowl", "profile", "desktop", "remove", null};
+        static string_address front[] = {"bowl", "profile", "remove", "desktop", null};
+        static string_address odd[] = {"bowl", "profile", "desktop", "frob", null};
+        static string_address none[] = {"bowl", "profile", "nosuch", null};
+        static string_address both[] = {"bowl", "profile", "remove", "remove", null};
+        static string_address many[] = {"bowl", "profile", "a", "b", "c", null};
+
+        for (positive at = 0; at < array_count(bowl_profiles); at++)
+        {
+                const struct bowl_profile address_to row = bowl_profiles + at;
+                bool packages = true;
+                bool session = row->session && row->session[0];
+                positive words = 0;
+
+                for (const struct bowl_component address_to part = row->components;
+                     part->distro; part++)
+                {
+                        const struct bowl_distro address_to distro =
+                            bowl_find_distro(part->distro);
+                        positive used = 0;
+
+                        packages &= distro && distro->install && distro->remove &&
+                                    part->packages && part->packages[0];
+                        for (string_address address_to word =
+                                 distro ? distro->install : null;
+                             word && *word; word++)
+                                used++;
+                        for (string_address address_to word = part->packages;
+                             word && *word; word++)
+                        {
+                                packages &= (*word)[0] && (*word)[0] != '-';
+                                used++;
+                        }
+                        packages &= used + 1 <= BOWL_PROFILE_ARGV;
+                        words++;
+                }
+
+                for (string_address address_to line = row->session;
+                     line && *line; line++)
+                        session &= !string_first_of(*line, '\n');
+
+                check("A profile names a launcher no distribution or reserved name has",
+                      bowl_name(row->name, true) && !bowl_find_distro(row->name) &&
+                          !string_equals(row->name, "bin") && row->label && row->next);
+                check("A profile's components are bowls with a manager and packages",
+                      words && packages);
+                check("A profile's session is lines of a shell script", session);
+        }
+
+        check("bowl profile NAME installs, and says which with an action",
+              bowl_profile_words(3, plain, address_of profile, address_of remove) == 0 &&
+                  profile && !remove &&
+                  bowl_profile_words(4, install, address_of profile, address_of remove) == 0 &&
+                  !remove);
+        check("bowl profile NAME remove, and remove NAME, remove",
+              bowl_profile_words(4, drop, address_of profile, address_of remove) == 0 &&
+                  remove &&
+                  bowl_profile_words(4, front, address_of profile, address_of remove) == 0 &&
+                  remove && profile);
+        check("An action nobody knows, a missing or extra word, are usage",
+              bowl_profile_words(4, odd, address_of profile, address_of remove) ==
+                      BOWL_PROFILE_WORDS_USAGE &&
+                  bowl_profile_words(2, plain, address_of profile, address_of remove) ==
+                      BOWL_PROFILE_WORDS_USAGE &&
+                  bowl_profile_words(5, many, address_of profile, address_of remove) ==
+                      BOWL_PROFILE_WORDS_USAGE);
+        check("A profile nobody has is unknown, not usage",
+              bowl_profile_words(3, none, address_of profile, address_of remove) ==
+                      BOWL_PROFILE_WORDS_UNKNOWN &&
+                  bowl_profile_words(4, both, address_of profile, address_of remove) ==
+                      BOWL_PROFILE_WORDS_UNKNOWN);
+
+        p8 header[96];
+        check("The script's first lines name the profile that wrote it",
+              bowl_profile_header(header, sizeof header, "desktop") &&
+                  string_equals(header, "#!/bin/sh\n# bowl profile desktop\n") &&
+                  !bowl_profile_header(header, 20, "desktop"));
+
+        check("A name /bin has is taken, one it lacks is not",
+              bowl_bin_taken("sh") && !bowl_bin_taken("moonwater-no-such-program"));
+
+        /*
+                Two bowls each hold a program. Marker lines name both, a name
+                that climbs out of the directory, one nothing was exposed
+                under and one too long to be a name. Only the first goes.
+        */
+        p8 first[256];
+        p8 second[256];
+        p8 marker[256];
+        p8 long_name[BOWL_SHEBANG_LIMIT + 8];
+        p8 text[BOWL_SHEBANG_LIMIT * 2];
+
+        unpack_path(first, "profa", "");
+        unpack_path(second, "profb", "");
+        unpack_path(marker, "profa", "/marker");
+        unpack_directory(first, "/usr/bin");
+        unpack_directory(second, "/usr/bin");
+        bool made = unpack_write(first, "/usr/bin/tool", "#!/bin/sh\n", 0755) &&
+                    unpack_write(second, "/usr/bin/tool", "#!/bin/sh\n", 0755) &&
+                    bowl_expose_program(first, "/usr/bin/tool", "profatool", false) == 0 &&
+                    bowl_expose_program(second, "/usr/bin/tool", "profbtool", false) == 0;
+        memory_fill(long_name, 'x', sizeof long_name - 1);
+        long_name[sizeof long_name - 1] = end;
+        string_copy_bounded(text, "profatool\nprofbtool\n../profbtool\nprofnone\n", sizeof text);
+        string_append_bounded(text, long_name, sizeof text);
+        string_append_bounded(text, "\n", sizeof text);
+        made &= unpack_write(first, "/marker", text, 0644);
+
+        check("Two bowls' launchers stand before a remove", made);
+        check("Remove reads a marker without error", bowl_profile_unexpose(first, marker) == 0);
+        check("Remove takes a launcher that still names this bowl",
+              system_access_at(AT_FDCWD, BOWL_EXPOSE_DIRECTORY "/profatool", 0) < 0);
+        check("Remove leaves another bowl's launcher alone, named or climbed to",
+              system_access_at(AT_FDCWD, BOWL_EXPOSE_DIRECTORY "/profbtool", 0) == 0);
+        p8 kept[256];
+        unpack_path(kept, "profa", "/kept");
+        made = unpack_write(first, "/kept", "one\n", 0644);
+        bipolar noted = bowl_profile_marker_open(kept);
+        bowl_profile_note(noted, "two");
+        if (noted >= 0)
+                system_close(noted);
+        check("A marker is added to by a second install, not started over",
+              made && noted >= 0 && unpack_says(first, "/kept", "one\ntwo\n"));
+        p8 aimed[256];
+        p8 pointer[256];
+        unpack_path(aimed, "profa", "/aimed");
+        unpack_path(pointer, "profa", "/pointer");
+        made = unpack_write(first, "/aimed", "keep\n", 0644) &&
+               system_symbolic_link_at(aimed, AT_FDCWD, pointer) == 0;
+        bipolar through = bowl_profile_marker_open(pointer);
+        if (through >= 0)
+        {
+                bowl_profile_note(through, "evil");
+                system_close(through);
+        }
+        check("A marker the bowl made a link is not written through",
+              made && through < 0 && unpack_says(first, "/aimed", "keep\n"));
+        check("A marker that is missing is a profile that exposed nothing",
+              bowl_profile_unexpose(first, "/tmp/moonwater-bowl-check/no-such-marker") == 0);
+
+        /*
+                The script is written where a link may have been planted: the
+                link goes and the file it pointed at is not written to.
+        */
+        static string_address session[] = {"exec true", null};
+        static const struct bowl_component part[] = {{null, null}};
+        struct bowl_profile planted = {"profplant", "Planted", "next", part, session};
+        p8 decoy[256];
+        p8 link[256];
+
+        unpack_path(decoy, "profdecoy", "");
+        string_copy_bounded(link, BOWL_EXPOSE_DIRECTORY "/profplant", sizeof link);
+        system_remove_at(AT_FDCWD, link, 0);
+        made = unpack_write(decoy, "", "decoy\n", 0644) &&
+               system_symbolic_link_at(decoy, AT_FDCWD, link) == 0;
+        check("A link stands at the script's name before it is written", made);
+        check("Writing the script succeeds over a planted link",
+              bowl_profile_script(address_of planted) == 0);
+        check("The planted link's target was not written to",
+              unpack_says(decoy, "", "decoy\n"));
+        check("The script is a new executable file with the profile's lines",
+              unpack_says("", BOWL_EXPOSE_DIRECTORY "/profplant",
+                          "#!/bin/sh\n# bowl profile profplant\nexec true\n") &&
+                  (unpack_mode("", BOWL_EXPOSE_DIRECTORY "/profplant") & 0111));
+
+        system_remove_at(AT_FDCWD, link, 0);
+        system_remove_at(AT_FDCWD, decoy, 0);
+        system_remove_at(AT_FDCWD, BOWL_EXPOSE_DIRECTORY "/profbtool", 0);
+        system_remove_at(AT_FDCWD, BOWL_EXPOSE_DIRECTORY "/profatool", 0);
+        bowl_forget_path(first);
+        bowl_forget_path(second);
+}
+
 static fn json(void)
 {
         //      Fedora 44's own index.json and manifest, as published.
@@ -75106,6 +75370,7 @@ b32 main(void)
         archive_policy();
         landing();
         distros();
+        profiles();
         downloads();
         json();
         oci();

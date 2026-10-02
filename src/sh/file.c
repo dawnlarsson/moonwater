@@ -704,7 +704,7 @@ static bool file_mode_masked(string_address specification, positive current,
 
 // The kernel's own code, for the callers that report why a look failed; the
 // bool form below is what the tests of existence and kind read.
-static bipolar file_look_code(bipolar directory, string_address path,
+static HOT bipolar file_look_code(bipolar directory, string_address path,
                               positive flags, file_facts address_to out)
 {
         memory_fill(out, 0, sizeof(file_facts));
@@ -1259,7 +1259,7 @@ static bool path_walk_next(path_walk address_to walk)
         for cd.  A candidate that does not fit is refused rather than cut,
         for the reason file_path_join gives.
 */
-static bool path_walk_join(p8 address_to into, positive room,
+static HOT bool path_walk_join(p8 address_to into, positive room,
                            string_address segment, positive length,
                            string_address name, string_address empty_as)
 {
@@ -5481,7 +5481,7 @@ static p8 file_long_letter(file_taking address_to taking, string_address name,
 
 static string_address file_environment(string_address name);
 
-static bool file_take_from(file_taking address_to taking, positive index)
+static HOT bool file_take_from(file_taking address_to taking, positive index)
 {
         argument_cursor cursor = {
             .argc = taking->argv ? taking->argc
@@ -5742,7 +5742,21 @@ bool shell_environment_is_initialized();
 
 static string_address address_to file_environment_all()
 {
-        string_address address_to shell = shell_environment();
+        string_address address_to shell;
+
+        /* A farm-linked utility has no shell state to flatten: before shell
+           startup the vector it was started with is the answer, and asking
+           shell_environment first built an empty one (a page of the pool, a
+           handful of statics on pages of their own) to be ignored. */
+        if (!shell_environment_is_initialized())
+        {
+                string_address address_to process = program_environment_list();
+
+                if (process)
+                        return process;
+        }
+
+        shell = shell_environment();
 
         /* Once the shell owns export state, even an intentionally empty
            vector is authoritative and allocation failure must stay visible.
@@ -5759,7 +5773,7 @@ static string_address address_to file_environment_all()
         return process ? process : shell;
 }
 
-static string_address file_environment(string_address name)
+static HOT string_address file_environment(string_address name)
 {
         string_address address_to environment = file_environment_all();
 
@@ -5827,7 +5841,7 @@ static string_address locale_category_names[LOCALE_CATEGORIES] = {
 
 // The name the environment gives a category: LC_ALL, then the category's own
 // variable, then LANG, the first that is set and not empty; null when none is.
-static string_address locale_environment(string_address category)
+static HOT string_address locale_environment(string_address category)
 {
         string_address name = file_environment((string_address) "LC_ALL");
 
@@ -5839,7 +5853,7 @@ static string_address locale_environment(string_address category)
 }
 
 // That name, null for C and POSIX as well.
-static string_address locale_named(positive category)
+static HOT string_address locale_named(positive category)
 {
         string_address name = locale_environment(locale_category_names[category]);
 
@@ -5951,7 +5965,7 @@ static fn locale_join(p8 address_to into, positive room, string_address a,
 }
 
 // The category's file for the locale the environment names, or null.
-static locale_category address_to locale_open(positive category)
+static HOT locale_category address_to locale_open(positive category)
 {
         locale_category address_to one = locale_categories + category;
         string_address name = locale_named(category);
@@ -6579,7 +6593,7 @@ static string_address locale_number_text(string_address text)
         block, so a line in is a line out on a pipe. A size (-o4K) keeps
         the ordinary buffering.
 */
-static bool stdbuf_prompt()
+static HOT bool stdbuf_prompt()
 {
         static b32 decided = -1;
 
@@ -7124,7 +7138,7 @@ static bipolar file_copy_sparse(bipolar in, bipolar out,
 /* The open proven to be the object that was looked at, and what the kernel
    says about it once opened, for a caller that wants the facts as they are
    now rather than as they were at the look. */
-static bipolar file_open_same_facts(bipolar directory, string_address name,
+static HOT bipolar file_open_same_facts(bipolar directory, string_address name,
                                     file_facts address_to expected,
                                     positive flags,
                                     file_facts address_to opened)
@@ -7597,7 +7611,7 @@ static bipolar file_direct_endpoint_open(
    in leaf, or -1 when leaf is not a link (or the chain is too long). A name
    that leads nowhere still has a place to be made: GNU's open goes through
    the link to make it. */
-static bipolar file_link_chain_open(bipolar directory, p8 address_to leaf,
+static HOT bipolar file_link_chain_open(bipolar directory, p8 address_to leaf,
                                     positive room)
 {
         bipolar held = -1;
@@ -7635,7 +7649,7 @@ static bipolar file_link_chain_open(bipolar directory, p8 address_to leaf,
 }
 #endif
 
-static bipolar file_staged_name_open_at(
+static HOT bipolar file_staged_name_open_at(
     file_staged_name address_to stage, bipolar base, string_address path,
     positive mode, positive behavior, file_facts address_to input)
 {
@@ -7725,7 +7739,7 @@ static bipolar file_staged_name_open_at(
         return reason;
 }
 
-static bipolar file_staged_name_open(file_staged_name address_to stage,
+static HOT bipolar file_staged_name_open(file_staged_name address_to stage,
                                      string_address path, positive mode,
                                      positive behavior)
 {
@@ -7733,7 +7747,7 @@ static bipolar file_staged_name_open(file_staged_name address_to stage,
                                         null);
 }
 
-static bipolar file_staged_name_prepare(file_staged_name address_to stage)
+static HOT bipolar file_staged_name_prepare(file_staged_name address_to stage)
 {
         if (stage->direct || stage->prepared)
                 return 0;
@@ -7753,7 +7767,7 @@ static bipolar file_staged_name_prepare(file_staged_name address_to stage)
         return result;
 }
 
-static bipolar file_staged_name_finish(file_staged_name address_to stage,
+static HOT bipolar file_staged_name_finish(file_staged_name address_to stage,
                                        bool publish, positive flags)
 {
         bipolar result = publish ? 0 : -ERROR_INPUT_OUTPUT;
@@ -7849,7 +7863,7 @@ static bipolar file_directory_empty_same(bipolar directory,
    is therefore usable only while that parent is controlled by this process's
    security principal (or by the host root), with sticky-directory ownership
    protecting an entry in an otherwise shared parent. */
-static bool file_name_stable(bipolar directory,
+static HOT bool file_name_stable(bipolar directory,
                              file_facts address_to entry)
 {
         file_facts parent;
@@ -7874,7 +7888,7 @@ static bool file_name_stable(bipolar directory,
    Bind that exception to an endpoint owned by the effective principal (or
    by root for shared host devices such as /dev/null), and require a parent
    in which another principal cannot exchange the approved name. */
-static bool file_direct_endpoint_authorized(
+static HOT bool file_direct_endpoint_authorized(
     bipolar directory, file_facts address_to entry)
 {
         p32 effective = system_effective_user();
@@ -7884,7 +7898,7 @@ static bool file_direct_endpoint_authorized(
                file_name_stable(directory, entry);
 }
 
-static bipolar file_direct_endpoint_open(
+static HOT bipolar file_direct_endpoint_open(
     bipolar directory, string_address name,
     file_facts address_to entry, positive flags)
 {

@@ -627,6 +627,20 @@
 #else
 #define HOT_STATE __attribute__((section(".bss.hot")))
 #endif
+//      The same for what is written at start but is not zero: .data.hot
+//      is the first of .data, so a fork copies the one page of it.
+#if defined(KERNEL_MODE) || defined(__APPLE__)
+#define HOT_DATA
+#else
+#define HOT_DATA __attribute__((section(".data.hot")))
+#endif
+//      And the tables read at start, which spark.ld lays first in the image
+//      so that they are on the pages the first functions are on.
+#if defined(KERNEL_MODE) || defined(__APPLE__)
+#define HOT_RODATA
+#else
+#define HOT_RODATA __attribute__((section(".rodata.hot")))
+#endif
 #define INLINE __attribute__((always_inline))
 #define NO_FRAME __attribute__((noframe))
 #define KEEP __attribute__((used))
@@ -61251,6 +61265,48 @@ __asm__(
 
 ALLOCATES ALLOCATES_SIZE(1) address_any memory(positive size);
 fn memory_free(address_any address, positive size);
+
+/*
+        The pool: memory a program reserves at link time and takes small
+        mappings from instead of asking the kernel for each.
+
+        A shell start made six mmaps for tables of two to six kilobytes, each
+        its own page and its own call, and the page tables, faults and unmaps
+        that go with them. They are carved from this block now (a program
+        that wants to: see shell_pool_take), which is bss, so a page of it is
+        memory only once something has written there, and the pages that are
+        written are shared by everything carved. memory_free of an address
+        inside it does nothing, since the block is the program's own and a
+        carved piece is never given back; and nothing is carved at a page
+        boundary, which is what keeps mremap (memory_reserve grows a store
+        that way) from being handed a piece of the pool to move: it answers
+        EINVAL for an address that is not a page's, and the copy it falls back
+        to is the grow.
+*/
+#if defined(LINUX) && !defined(KERNEL_MODE)
+#define MEMORY_POOL_BYTES 262144
+extern p8 memory_pool_block[MEMORY_POOL_BYTES];
+__asm__(
+    ASM_BSS_OBJECT_BEGIN(memory_pool_block, 4096)
+    ASM_ZERO(MEMORY_POOL_BYTES)
+    ASM_OBJECT_END(memory_pool_block)
+);
+// What memory_free asks first: is the address in the pool, and so nothing to unmap.
+#define MEMORY_POOL_SKIP_X64                                                   \
+    "lea memory_pool_block(%rip), %rax\n   mov %rdi, %rcx\n   sub %rax, %rcx\n" \
+    "cmp $" MOONWATER_NUMBER(MEMORY_POOL_BYTES) ", %rcx\n   jb 1f\n"
+#define MEMORY_POOL_SKIP_ARM64                                                 \
+    "adrp x2, memory_pool_block\n   add x2, x2, :lo12:memory_pool_block\n"     \
+    "sub x3, x0, x2\n   mov x4, #" MOONWATER_NUMBER(MEMORY_POOL_BYTES) "\n"    \
+    "cmp x3, x4\n   b.lo 1f\n"
+#define MEMORY_POOL_SKIP_RISCV64                                               \
+    "lla t0, memory_pool_block\n   sub t1, a0, t0\n"                           \
+    "li t2, " MOONWATER_NUMBER(MEMORY_POOL_BYTES) "\n   bltu t1, t2, 1f\n"
+#else
+#define MEMORY_POOL_SKIP_X64 ""
+#define MEMORY_POOL_SKIP_ARM64 ""
+#define MEMORY_POOL_SKIP_RISCV64 ""
+#endif
 CONST positive memory_growth(positive have, positive want, positive first);
 /* Owned mmap-backed movable storage, not an allocator block. Only the used
    elements must survive growth; unused capacity has no zero-fill contract.
@@ -63868,6 +63924,7 @@ __asm__(
     //
     ASM_FUNC(memory_free)
     "test %rdi, %rdi\n   jz 1f\n   test %rsi, %rsi\n   jz 1f\n"
+    MEMORY_POOL_SKIP_X64
     "        mov     $" MOONWATER_NUMBER(syscall(munmap)) ", %eax\n"
     "syscall\n"
     "1:\n"
@@ -63952,6 +64009,7 @@ __asm__(
     ASM_END(memory)
     ASM_FUNC(memory_free)
     "cbz x0, 1f\n   cbz x1, 1f\n"
+    MEMORY_POOL_SKIP_ARM64
     "        mov     " SYSCALL_NUMBER_REGISTER ", #" MOONWATER_NUMBER(syscall(munmap)) "\n"
     "        " SYSCALL_INSTRUCTION "\n"
     "1:\n"
@@ -64026,6 +64084,7 @@ __asm__(
     ASM_END(memory)
     ASM_FUNC(memory_free)
     "beqz a0, 1f\n   beqz a1, 1f\n"
+    MEMORY_POOL_SKIP_RISCV64
     "        li      a7, " MOONWATER_NUMBER(syscall(munmap)) "\n"
     "ecall\n"
     "1:\n"

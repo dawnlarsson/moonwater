@@ -206,6 +206,39 @@ global path. A bowl is not a security sandbox: its programs run as root.
 `bowl setup` checks for room before downloading. On a live stick bowls live in
 memory; `moonwater install` puts them on a data partition.
 
+### Profiles
+
+```sh
+bowl profile                     # what there is, and what is installed
+bowl profile desktop             # same as: bowl profile desktop install
+bowl profile desktop remove
+```
+
+A profile is what a machine is for, built from components that each come from
+the bowl best placed to supply them. Every program runs against its own bowl's
+loader and libraries, and they meet over the host's `/run`, `/tmp` and `/dev`,
+which every fast view shares, so a Wayland client from one bowl draws on a
+compositor from another. `desktop` is KDE Plasma from Alpine, where it runs
+on musl.
+
+Install lands the component bowls it needs, has each distribution's own
+manager add the packages, and does the glue: every program the bowl holds gets
+a launcher in `/bowls/bin` and a link in `/bin`, so `dbus-run-session` finding
+`dbus-daemon`, or Plasma starting `/usr/bin/kwin_wayland`, works without a
+shell in between. A name `/bin` already has stays Moonwater's. It then writes
+a session script named for the profile (`desktop`, also in `/bin`). Every
+bowl launch also makes what a guest assumes the host has and Moonwater's `/etc`
+does not: root's passwd and group lines, a machine id, `/tmp/.X11-unix`. What was exposed is
+recorded in the bowl, and remove undoes exactly that: launchers that still
+name the bowl, the profile's packages and the dependencies nothing else needs,
+the script.
+
+The `desktop` session has been run on a stock Linux kernel with no display:
+KWin `--virtual` and plasmashell on a session bus, and `desktop` itself as far
+as KWin's DRM backend. It has not been booted on Moonwater with a display,
+input devices, a running logind or PipeWire, and only the x86-64 Alpine
+packages have been installed.
+
 ## gzip
 
 `gzip` is GNU gzip's command line: `-1` to `-9`, `--fast`, `--best`, and
