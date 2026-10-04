@@ -199,9 +199,9 @@ static b32 link_status(void)
         link_groups_load(address_of groups);
         {
                 p8 script[16384];
-                bipolar script_length = file_slurp_once_at(
+                bipolar script_length = file_slurp_regular_at(
                         AT_FDCWD, HOST_MACHINE_SCRIPT, script,
-                        sizeof script - 1);
+                        sizeof script - 1, 0);
 
                 script[script_length > 0 ? script_length : 0] = 0;
 
@@ -252,6 +252,7 @@ static b32 link_status(void)
                                               "there\n",
                                               (string_address)groups.record[g].namespace);
                 }
+                crypto_forget(script, sizeof script);
         }
 
         link_peers_load(address_of peers);
@@ -402,8 +403,11 @@ static b32 link_add_locked(string_address name, string_address text,
                                            text);
         }
 
-        if (link_identity(address_of me, false) >= 0 &&
-            crypto_same(me.public, peer.key, 32))
+        bool own = link_identity(address_of me, false) >= 0 &&
+                   crypto_same(me.public, peer.key, 32);
+
+        crypto_forget(address_of me, sizeof me);
+        if (own)
                 return host_refuse("that is this machine's own key%s\n", "");
 
         if (place && !link_parse_place(place, peer.address, address_of peer.port))
@@ -591,6 +595,8 @@ static b32 link_switch(bool on, bool say)
 
         if (link_identity(address_of me, true) < 0)
                 return host_refuse("%s cannot be read or made\n", LINK_KEY_PATH);
+        link_key_text(me.public, key);
+        crypto_forget(address_of me, sizeof me);
 
         if (link_lock_owner() <= 0)
                 link_serve_start(true);
@@ -646,7 +652,7 @@ static b32 link_group_join(string_address address_to words, positive count)
         string_address secret = null;
         link_groups groups;
         struct link_group_record address_to record = null;
-        p8 made[40];
+        p8 made[256];
         bool generated = false;
         bool granted = false;
         bool good;
@@ -674,6 +680,22 @@ static b32 link_group_join(string_address address_to words, positive count)
                                            "log%s\n",
                                            "");
                 granted = true;
+        }
+        /*      A secret typed here is in /proc/PID/cmdline, which every user
+                reads, for as long as the command lives: through the slow
+                derivation and the listener's start, seconds. It is taken
+                into this function's own bytes and the argument wiped, as
+                wifi add does with a password. */
+        if (secret)
+        {
+                positive length = string_length(secret);
+
+                if (length < sizeof made)
+                        memory_copy(made, secret, length + 1);
+                crypto_forget(secret, length);
+                if (length >= sizeof made)
+                        return host_refuse("that secret is too long%s\n", "");
+                secret = (string_address)made;
         }
 
         lock = link_peers_lock();

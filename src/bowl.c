@@ -4671,10 +4671,17 @@ static bool bowl_archive_trusted(const struct bowl_distro address_to distro,
         return distro->key && bowl_signature_ok(archive, signature, distro->key);
 }
 
+/* A download is checked only once it is whole, so until then the mirror
+   decides how much of /bowls it fills, and /bowls is memory on a live
+   session. The wget that fetches one is held to ceiling bytes by the kernel
+   (RLIMIT_FSIZE) with SIGXFSZ ignored, so a write past it fails with EFBIG,
+   wget reports it and abandons its unnamed stage, and the setup refuses the
+   download with nothing left behind. */
 static b32 bowl_setup_fetch(string_address self, string_address into,
-                            string_address url)
+                            string_address url, p64 ceiling)
 {
         string_address argv[6];
+        bipolar child;
 
         system_remove_at(AT_FDCWD, into, 0);
 
@@ -4685,7 +4692,30 @@ static b32 bowl_setup_fetch(string_address self, string_address into,
         argv[4] = url;
         argv[5] = null;
 
-        return bowl_setup_run(self, argv, "download failed\n");
+        child = system_fork();
+        if (child == 0)
+        {
+                p64 limit[2] = {ceiling, ceiling};
+
+                if (system_call_4(syscall(prlimit64), 0, 1, (positive)limit, 0) < 0 ||
+                    !system_signal_install(SIGXFSZ, (positive)SIG_IGN, 0, 0, null))
+                        exit(126);
+                system_execute(self, argv, file_environment_all());
+                exit(127);
+        }
+
+        return bowl_wait_applet(child, "download failed\n");
+}
+
+/* What a row's download may take: twice what it measured and 64 MiB more,
+   so a release that has grown is never refused here (a digest row refuses
+   any other bytes anyway) while a mirror that never stops stops there. A
+   detached signature is a few hundred bytes. */
+#define BOWL_SIGNATURE_CEILING ((p64)65536)
+
+static p64 bowl_download_ceiling(const struct bowl_distro address_to distro)
+{
+        return 2 * distro->archive_bytes + 64 * BOWL_MEBIBYTE;
 }
 
 static b32 bowl_setup_download(const struct bowl_distro address_to distro)
@@ -4713,7 +4743,8 @@ static b32 bowl_setup_download(const struct bowl_distro address_to distro)
         if (bowl_setup_self(self, sizeof(self)))
                 return 1;
 
-        if (bowl_setup_fetch(self, part, distro->url))
+        if (bowl_setup_fetch(self, part, distro->url,
+                             bowl_download_ceiling(distro)))
         {
                 // Asked while the part that filled it is still there.
                 bowl_room_say_low(BOWL_ROOT_DIRECTORY);
@@ -4722,7 +4753,7 @@ static b32 bowl_setup_download(const struct bowl_distro address_to distro)
         }
 
         if (distro->key && !distro->sha256 &&
-            bowl_setup_fetch(self, sign_part, sign_url))
+            bowl_setup_fetch(self, sign_part, sign_url, BOWL_SIGNATURE_CEILING))
         {
                 system_remove_at(AT_FDCWD, part, 0);
                 system_remove_at(AT_FDCWD, sign_part, 0);

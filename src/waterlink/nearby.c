@@ -44,6 +44,7 @@
 #define LINK_GROUPS_MAX 8
 #define LINK_INTERFACES 16
 #define LINK_GREETED 16
+#define LINK_GREET_SOURCE LINK_GROUPS_MAX
 
 #define LINK_ANNOUNCE_EVERY 60000000ull  // after the first three
 #define LINK_ASK_EVERY 30000000ull
@@ -86,9 +87,13 @@ typedef struct
         positive count;
 } link_groups;
 
-static fn link_groups_scrub(positive records);
+static bool link_groups_scrub(positive records);
 
-fn link_groups_load(link_groups address_to groups)
+/* False when an old file's fast verifier could not be removed durably.  The
+   groups stay loaded, because a command that goes on to save them rewrites the
+   file whole and that is the scrub; only the listener, which never saves,
+   refuses to act on them. */
+bool link_groups_load(link_groups address_to groups)
 {
         positive got = 0;
         bool old = false;
@@ -99,7 +104,7 @@ fn link_groups_load(link_groups address_to groups)
                                       sizeof(groups->record),
                                       sizeof(struct link_group_record),
                                       address_of got) < 0)
-                return;
+                return true;
         groups->count = got / sizeof(struct link_group_record);
         for (positive at = 0; at < groups->count; at++)
         {
@@ -114,8 +119,7 @@ fn link_groups_load(link_groups address_to groups)
                         at--;
                 }
         }
-        if (old)
-                link_groups_scrub(got / sizeof(struct link_group_record));
+        return !old || link_groups_scrub(got / sizeof(struct link_group_record));
 }
 
 /*
@@ -128,35 +132,39 @@ fn link_groups_load(link_groups address_to groups)
         reads the field and a file written now has nothing in it, so a record
         that was replaced since it was read loses nothing but old bytes.
 */
-static fn link_groups_scrub(positive records)
+static bool link_groups_scrub(positive records)
 {
         static const p8 zeros[32];
         file_facts facts;
         bipolar handle = system_open_at(AT_FDCWD, LINK_GROUPS_PATH,
                                         FILE_READ_WRITE | O_NOFOLLOW |
                                                 O_CLOEXEC);
+        bool scrubbed = false;
 
         if (handle < 0)
-                return;
+                return false;
         if (file_look(handle, (string_address) "", AT_EMPTY_PATH,
                       address_of facts) &&
             (facts.mode & MODE_FORMAT) == MODE_FILE && facts.owner == 0 &&
             !(facts.mode & 077) &&
             !(facts.size % sizeof(struct link_group_record)))
         {
+                scrubbed = true;
                 for (positive at = 0;
                      at < records &&
                      (at + 1) * sizeof(struct link_group_record) <= facts.size;
                      at++)
-                        (void)system_call_4(
-                            syscall(pwrite64), (positive)handle,
-                            (positive)zeros, sizeof zeros,
+                        scrubbed &= file_transfer_exact(
+                            syscall(pwrite64), handle, (p8 address_to)zeros,
+                            sizeof zeros,
                             at * sizeof(struct link_group_record) +
                                 __builtin_offsetof(struct link_group_record,
-                                                   check));
-                (void)system_call_1(syscall(fsync), (positive)handle);
+                                                   check)) ==
+                                    (bipolar)sizeof zeros;
+                scrubbed &= system_call_1(syscall(fsync), (positive)handle) >= 0;
         }
         system_close(handle);
+        return scrubbed;
 }
 
 static bipolar link_groups_save(link_groups address_to groups)
@@ -591,7 +599,14 @@ static fn link_nearby_reload(p64 now)
                 return;
         memory_copy(link_nearby.groups_mark, mark, sizeof mark);
 
-        link_groups_load(address_of link_nearby.groups);
+        if (!link_groups_load(address_of link_nearby.groups))
+        {
+                /* Do not activate a secret whose fast verifier could not be
+                   removed durably; the next look retries the migration. */
+                crypto_forget(address_of link_nearby.groups,
+                              sizeof link_nearby.groups);
+                memory_zero(link_nearby.groups_mark, sizeof mark);
+        }
         for (positive at = 0; at < link_nearby.groups.count; at++)
                 waterlink_group_keys_from(link_nearby.keys + at,
                                           link_nearby.groups.record[at].key,
@@ -610,23 +625,30 @@ static fn link_nearby_reload(p64 now)
         link_nearby.next_ask = now;
 }
 
-static fn link_nearby_send(p8 address_to packet, positive length,
-                           positive interface_at)
+static bool link_nearby_send(p8 address_to packet, positive length,
+                             positive interface_at)
 {
         link_mreqn out = {0, 0, link_nearby.interface[interface_at]};
         socket_address_internet to = {
             .family = AF_INET, .port = network_order_16(WATERLINK_MDNS_PORT),
             .host = network_order_32(WATERLINK_MDNS_GROUP)};
 
-        (void)socket_option_set((b32)link_nearby.socket, 0, 32, // MULTICAST_IF
-                                address_of out, sizeof out);
-        (void)socket_send((b32)link_nearby.socket, packet, length,
-                          MSG_NOSIGNAL, address_of to, sizeof to);
+        /* IP_MULTICAST_IF is part of the destination, not a best-effort hint.
+           If it fails, send would retain the preceding interface selection
+           and put this interface's announcement onto another link. */
+        if (socket_option_set((b32)link_nearby.socket, 0,
+                              32, // IP_MULTICAST_IF
+                              address_of out, sizeof out) < 0)
+                return false;
+        return socket_send((b32)link_nearby.socket, packet, length,
+                           MSG_NOSIGNAL, address_of to, sizeof to) ==
+               (bipolar)length;
 }
 
-static fn link_nearby_announce(p32 ttl)
+static bool link_nearby_announce(p32 ttl)
 {
         p8 packet[WATERLINK_MDNS_MAX];
+        bool sent = false;
 
         for (positive at = 0; at < link_nearby.interfaces; at++)
         {
@@ -636,8 +658,9 @@ static fn link_nearby_announce(p32 ttl)
                         link_nearby.interface_address[at], ttl, 0, null, 0);
 
                 if (length)
-                        link_nearby_send(packet, length, at);
+                        sent |= link_nearby_send(packet, length, at);
         }
+        return sent;
 }
 
 static fn link_nearby_ask(void)
@@ -658,21 +681,39 @@ static fn link_nearby_stop(void)
 }
 
 // The same place is greeted once in a while, not at every announcement.
-static bool link_greeted_lately(p32 group, p8 address_to address, p16 port,
-                                p64 now)
+/* How many greetings of this address are still inside LINK_GREET_AGAIN; with
+   exact, only those to this group and port. */
+static positive link_greeted_recent(p8 address_to address, p32 group, p16 port,
+                                    bool exact, p64 now)
 {
+        positive recent = 0;
+
         for (positive at = 0; at < LINK_GREETED; at++)
         {
                 struct link_greeted address_to greeted = link_nearby.greeted + at;
 
-                if (greeted->at &&
-                    link_age(now, greeted->at) < LINK_GREET_AGAIN &&
-                    greeted->group == group &&
-                    greeted->port == port &&
-                    !memory_compare(greeted->address, address, 16))
-                        return true;
+                recent += greeted->at &&
+                          link_age(now, greeted->at) < LINK_GREET_AGAIN &&
+                          (!exact || (greeted->group == group &&
+                                      greeted->port == port)) &&
+                          !memory_compare(greeted->address, address, 16);
         }
-        return false;
+        return recent;
+}
+
+/* An announcement may start a greeting when the ring has a slot that has aged
+   out, and the source has not already spent LINK_GREET_SOURCE of them. An
+   unauthenticated address may not consume the whole machine-wide ring: this
+   keeps enough private capacity to greet one machine in every possible group
+   and leaves half the ring for another source. Raw address rotation still
+   meets the global bound. */
+static bool link_greet_allowed(p8 address_to address, p64 now)
+{
+        p64 oldest = link_nearby.greeted[link_nearby.greeted_next].at;
+
+        return (!oldest || link_age(now, oldest) >= LINK_GREET_AGAIN) &&
+               link_greeted_recent(address, 0, 0, false, now) <
+                   LINK_GREET_SOURCE;
 }
 
 /*
@@ -694,7 +735,7 @@ static fn link_pair_begin(positive group, p8 address_to address, p16 port,
         p8 ephemeral[32];
         p64 wall = system_clock_ns(0);
 
-        if ((!answer && link_greeted_lately(keys->mark, address, port, now)) ||
+        if ((!answer && link_greeted_recent(address, keys->mark, port, true, now)) ||
             system_random_fill(ephemeral, 32, 0) < 0)
                 return;
         waterlink_stamp(hello, wall / 1000000000ull,
@@ -787,7 +828,8 @@ static fn link_nearby_heard(p8 address_to packet, positive length,
                 //      nobody checked: a few a second, or a stream of spoofed
                 //      questions is a stream of answers four times their size
                 //      at somebody else.
-                if (source_port != WATERLINK_MDNS_PORT && found.question_length)
+                if (source_port && source_port != WATERLINK_MDNS_PORT &&
+                    found.question_length)
                 {
                         //      A one-shot asker gets the answer back to
                         //      itself, its ID and question with it.
@@ -810,19 +852,40 @@ static fn link_nearby_heard(p8 address_to packet, positive length,
                         if (reply_length &&
                             link_age(now, link_nearby.last_reply) >= LINK_ANSWER_AGAIN)
                         {
-                                link_nearby.last_reply = now;
-                                (void)socket_send((b32)link_nearby.socket, reply,
-                                                  reply_length, MSG_NOSIGNAL,
-                                                  address_of to, sizeof to);
+                                /* Charge the shared amplification budget only
+                                   when a reply actually left.  Source port
+                                   zero is refused above: a raw same-link
+                                   sender can forge it, but Linux cannot send
+                                   the reply it requests.  Advancing last_reply
+                                   before send let packets which produced no
+                                   answer suppress every honest legacy-unicast
+                                   mDNS answer.  A successful spoofed reflection
+                                   is still held by this global budget; a failed
+                                   reflection gets no authority over it. */
+                                bipolar sent = socket_send(
+                                    (b32)link_nearby.socket, reply,
+                                    reply_length, MSG_NOSIGNAL,
+                                    address_of to, sizeof to);
+
+                                if (sent == (bipolar)reply_length)
+                                        link_nearby.last_reply = now;
                         }
                 }
-                else if (link_age(now, link_nearby.last_answer) > 1000000)
+                else if (source_port == WATERLINK_MDNS_PORT &&
+                         link_age(now, link_nearby.last_answer) > 1000000)
                 {
-                        link_nearby.last_answer = now;
-                        link_nearby_announce(4500);
+                        /* As with legacy-unicast replies above, a refused
+                           send has emitted no amplification and owns no part
+                           of the shared answer budget. */
+                        if (link_nearby_announce(4500))
+                                link_nearby.last_answer = now;
                 }
         }
 
+        /* RFC 6762 6: a response from any port but 5353 is not mDNS, and
+           what it announces is not greeted (Avahi drops it the same way). */
+        if (source_port != WATERLINK_MDNS_PORT)
+                found.count = 0;
         if (found.count)
                 link_peers_load(address_of peers);
         for (positive at = 0; at < found.count; at++)
@@ -843,7 +906,6 @@ static fn link_nearby_heard(p8 address_to packet, positive length,
                 for (positive group = 0; group < link_nearby.groups.count; group++)
                 {
                         bool known = false;
-                        p64 oldest = link_nearby.greeted[link_nearby.greeted_next].at;
                         p32 once = link_nearby.groups.record[group].flags;
 
                         //      A code that is used up greets nobody, and one that
@@ -869,8 +931,7 @@ static fn link_nearby_heard(p8 address_to packet, positive length,
                         //      cannot turn this machine into a sprayer of
                         //      handshakes. A greeting back to a member whose
                         //      own greeting opened is not held to it.
-                        if (!known && (!oldest || link_age(now, oldest) >=
-                                                          LINK_GREET_AGAIN))
+                        if (!known && link_greet_allowed(address, now))
                                 link_pair_begin(group, address, instance->port,
                                                 now, false);
                 }

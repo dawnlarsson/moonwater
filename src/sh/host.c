@@ -234,9 +234,11 @@ static fn host_pause(p64 nanoseconds)
         sleep(address_of span);
 }
 
-/* A small sysfs or state file, without its trailing newline. */
-static bipolar host_read_text(string_address path, p8 address_to into,
-                              positive room)
+/* A small kernel file (sysfs), without its trailing newline: the kernel's, not
+   a name anybody plants, and a test's sandbox stands a FIFO at one to hold a
+   sleep until its reader is ready, so it is read as it always was. */
+static bipolar host_read_kernel(string_address path, p8 address_to into,
+                                positive room)
 {
         bipolar got = file_slurp_once_at(AT_FDCWD, path, into, room);
 
@@ -253,6 +255,22 @@ static bipolar host_read_text(string_address path, p8 address_to into,
         return got;
 }
 
+/* A small state file, without its trailing newline; regular files only. */
+static bipolar host_read_text(string_address path, p8 address_to into,
+                              positive room)
+{
+        bipolar got = file_slurp_regular_at(AT_FDCWD, path, into, room, 0);
+
+        if (got < 0)
+                return got;
+
+        while (got > 0 && (into[got - 1] == '\n' || into[got - 1] == ' '))
+                got--;
+
+        into[got] = end;
+        return got;
+}
+
 /* Persistent state is a regular file owned by this program. Opening it
    nonblocking first means a FIFO planted at a state name cannot stop a root
    command before it has a chance to reject the object; O_NOFOLLOW gives a
@@ -260,29 +278,7 @@ static bipolar host_read_text(string_address path, p8 address_to into,
 static bipolar host_read_state(string_address path, p8 address_to into,
                                positive capacity)
 {
-        struct stat facts;
-        bipolar handle;
-        bipolar got;
-
-        if (!capacity)
-                return -1;
-        handle = system_open_at(AT_FDCWD, path,
-                                FILE_READ | O_NONBLOCK | O_NOFOLLOW |
-                                    O_CLOEXEC);
-        if (handle < 0)
-                return handle;
-        if (system_file_status(handle, address_of facts) < 0 ||
-            !S_ISREG(facts.st_mode))
-        {
-                system_close(handle);
-                into[0] = end;
-                return -22;
-        }
-        got = system_read_retry((positive)handle, into, capacity - 1);
-        system_close(handle);
-        if (got >= 0)
-                into[got] = end;
-        return got;
+        return file_slurp_regular_at(AT_FDCWD, path, into, capacity, O_NOFOLLOW);
 }
 
 /* A state word as host_read_state reads it, without its newline or the blanks
@@ -313,13 +309,25 @@ static bipolar host_read_word(string_address path, p8 address_to into, positive 
 static bipolar host_open_state(bipolar directory, string_address path,
                                positive mode)
 {
-        bipolar handle = system_open_output_at(directory, path, true, mode);
+        //      Nonblocking, and a file or nothing: a FIFO at the name held the
+        //      writer until a reader came, and a device took the mode.
+        bipolar handle = system_open_at_mode(directory, path,
+                                             FILE_WRITE | O_CLOEXEC | O_NOFOLLOW |
+                                                 O_NONBLOCK,
+                                             mode);
+        system_path_identity facts;
         bipolar moded;
 
         if (handle < 0)
                 return handle;
 
-        moded = system_call_2(syscall(fchmod), (positive)handle, mode);
+        moded = system_path_identity_at(handle, (string_address) "",
+                                        SYSTEM_PATH_AT_EMPTY_PATH,
+                                        SYSTEM_PATH_STATX_TYPE, address_of facts);
+        if (moded >= 0)
+                moded = (facts.mode & 0170000) == 0100000
+                            ? system_call_2(syscall(fchmod), (positive)handle, mode)
+                            : -22;
         if (moded < 0)
         {
                 system_close(handle);
@@ -2448,7 +2456,8 @@ static b32 host_settings_image(string_address path, host_settings address_to int
 
 static bool host_settings_kept(host_settings address_to into)
 {
-        bipolar handle = system_open_at(AT_FDCWD, HOST_SETTINGS, FILE_READ | O_CLOEXEC);
+        bipolar handle = system_open_at(AT_FDCWD, HOST_SETTINGS,
+                                        FILE_READ | O_NONBLOCK | O_CLOEXEC);
         bipolar got;
 
         if (handle < 0)
@@ -3212,8 +3221,12 @@ static bool host_settings_install(host_install address_to install,
         its question when it asked one, so a command reads the /root and the
         bowls it will be using. Each entry's output goes to
         /run/moonwater/init/ID.log and how it ended to ID.status, the kernel
-        log -- the kernel log window -- says when each starts and ends, and
-        neither the prompt nor the desktop waits for any of it.
+        log -- the kernel log window -- says when each starts and ends, by
+        its number and never its text, and neither the prompt nor the
+        desktop waits for any of it. The text is root's alone, because a
+        command can carry a secret (`link join NS SECRET`), and anybody can
+        read the kernel log on this image: its first eighty characters went
+        there with every boot.
 
         exit runs when the machine stops, before anything is remounted
         read-only, with its output on the terminal that stopped it. Each
@@ -3227,7 +3240,6 @@ static bool host_settings_install(host_install address_to install,
 #define HOST_EXIT_EACH_NS ((p64)10000000000)
 #define HOST_EXIT_ALL_NS ((p64)30000000000)
 #define HOST_EVENT_POLL_NS ((p64)20000000)
-#define HOST_EVENT_SHOWN 80
 
 static string_address address_to host_event_environment(void)
 {
@@ -3236,19 +3248,6 @@ static string_address address_to host_event_environment(void)
 
         bowl_session_prepare("/root", null);
         return bowl_environment(seed);
-}
-
-/* A command as one short line: control bytes as spaces, and cut with ... past eighty. */
-static fn host_event_shown(p8 address_to into, string_address text)
-{
-        positive at = 0;
-
-        for (; text[at] && at < HOST_EVENT_SHOWN; at++)
-                into[at] = (p8)text[at] < ' ' || text[at] == 0x7f ? ' ' : (p8)text[at];
-
-        into[at] = end;
-        if (text[at])
-                string_append_bounded(into, "...", HOST_EVENT_SHOWN + 4);
 }
 
 static fn host_event_ending(p8 address_to into, positive room, positive status)
@@ -3392,7 +3391,6 @@ static fn host_events_boot(host_settings address_to settings)
         while (host_settings_next(settings, address_of at, address_of setting))
         {
                 p8 text[SPARK_SETTINGS_TEXT_MOST + 1];
-                p8 shown[HOST_EVENT_SHOWN + 4];
                 p8 id[8];
                 p8 path[HOST_PATH_ROOM];
                 p8 status_path[HOST_PATH_ROOM];
@@ -3406,7 +3404,6 @@ static fn host_events_boot(host_settings address_to settings)
                         continue;
 
                 host_settings_text(text, address_of setting);
-                host_event_shown(shown, text);
                 positive_into_string(id, setting.entry.id);
 
                 if (!host_join(path, sizeof(path), HOST_EVENTS_INIT "/", id) ||
@@ -3415,7 +3412,7 @@ static fn host_events_boot(host_settings address_to settings)
                         continue;
 
                 {
-                        string_address line[] = {"init ", id, " started: ", shown, null};
+                        string_address line[] = {"init ", id, " started", null};
 
                         host_kmsg(line);
                 }
@@ -4640,26 +4637,6 @@ static COLD bipolar nl80211_authorize(nl80211 address_to session, p32 index,
                                 null, null);
 }
 
-static COLD bipolar nl80211_eapol_open(p32 index)
-{
-        socket_address_packet self = {
-            .family = AF_PACKET,
-            .protocol = network_order_16(ETH_P_PAE),
-            .index = index,
-        };
-        bipolar handle = socket_new(AF_PACKET, SOCK_DGRAM | SOCK_CLOEXEC,
-                                    (b32)network_order_16(ETH_P_PAE));
-
-        if (handle < 0)
-                return handle;
-        if (socket_bind((b32)handle, address_of self, sizeof(self)) < 0)
-        {
-                socket_close((b32)handle);
-                return -1;
-        }
-        return handle;
-}
-
 /*
         The joined link's keys, and one EAPOL-Key state machine that serves
         both the join's four-way handshake and every rekey the access point
@@ -5595,7 +5572,7 @@ static COLD bipolar nl80211_join(p8 address_to ssid, positive ssid_length, p8 ad
         {
                 if (pmk && !offload && link->eapol < 0)
                 {
-                        failed = nl80211_eapol_open(iface.index);
+                        failed = net_packet_open(iface.index, ETH_P_PAE);
                         if (failed < 0)
                                 break;
                         link->eapol = (b32)failed;
@@ -6677,6 +6654,53 @@ static bool radio_bss_read(netlink_header address_to header, radio_heard address
         return true;
 }
 
+/* Keep one row per name and, when the bounded display is full, the strongest
+   rows rather than whichever names the kernel happened to dump first.  Scan
+   dump order is not signal order: sixty-four weak forged names used to hide a
+   stronger real network merely by arriving before it.  The associated row is
+   never evicted, even when its current signal is the weakest. */
+static fn radio_air_keep(radio_air address_to air,
+                         const radio_heard address_to one)
+{
+        // A hidden network's name is empty or zeros; it has no row.
+        if (memory_span_byte(one->ssid, 0, one->ssid_length) == one->ssid_length)
+                return;
+
+        for (positive at = 0; at < air->count; at++)
+        {
+                radio_heard address_to have = air->heard + at;
+
+                if (have->ssid_length != one->ssid_length ||
+                    memory_compare(have->ssid, one->ssid, one->ssid_length))
+                        continue;
+                /* `joined` belongs to one BSSID, not to the SSID aggregate.
+                   Never combine an associated row's bit with a stronger
+                   twin's security, channel and address: that presents the
+                   twin as the network carrying the live association.  An
+                   associated BSS owns the row; otherwise the strongest BSS
+                   owns the whole row, not three selected fields from it. */
+                if ((one->joined && !have->joined) ||
+                    (one->joined == have->joined && one->mbm > have->mbm))
+                        *have = *one;
+                return;
+        }
+        if (air->count < RADIO_AIR_MOST)
+                air->heard[air->count++] = *one;
+        else
+        {
+                positive weakest = positive_max;
+
+                for (positive at = 0; at < air->count; at++)
+                        if (!air->heard[at].joined &&
+                            (weakest == positive_max ||
+                             air->heard[at].mbm < air->heard[weakest].mbm))
+                                weakest = at;
+                if (weakest != positive_max &&
+                    (one->joined || one->mbm > air->heard[weakest].mbm))
+                        air->heard[weakest] = *one;
+        }
+}
+
 static bool radio_air_seen(netlink_header address_to header, address_any context)
 {
         radio_air address_to air = (radio_air address_to)context;
@@ -6694,28 +6718,7 @@ static bool radio_air_seen(netlink_header address_to header, address_any context
                 air->any = true;
         }
 
-        // A hidden network's name is empty or zeros; it has no row.
-        if (memory_span_byte(one.ssid, 0, one.ssid_length) == one.ssid_length)
-                return true;
-
-        for (positive at = 0; at < air->count; at++)
-        {
-                radio_heard address_to have = air->heard + at;
-
-                if (have->ssid_length != one.ssid_length ||
-                    memory_compare(have->ssid, one.ssid, one.ssid_length))
-                        continue;
-                have->joined |= one.joined;
-                if (one.mbm > have->mbm)
-                {
-                        have->mbm = one.mbm;
-                        have->frequency = one.frequency;
-                        have->security = one.security;
-                }
-                return true;
-        }
-        if (air->count < RADIO_AIR_MOST)
-                air->heard[air->count++] = one;
+        radio_air_keep(air, address_of one);
         return true;
 }
 
@@ -6997,13 +7000,23 @@ static bool radio_air_take(radio_air address_to air, p8 fresh)
 }
 
 /*
-        The access points given up on in the last minute: sent the machine
+        The access points given up on in the last hour: sent the machine
         away, stopped answering, or failed a join. The next join tries any
-        other that answers to the same name before one of these.
+        other that answers to the same name before one of these, and of
+        these the one given up on longest ago first. Anybody in range can
+        beacon twins of a saved network that ask for WPA2 and fail every
+        join, and louder than the real one: with four remembered for a
+        minute and the loudest first among those not remembered, five that
+        failed quickly or four that failed slowly took turns falling off the
+        list and being tried again, and the real one never was. Sixty-four
+        kept for an hour hold sixty-three twins that each take the longest a
+        join can, so each is tried once before the real one is, and again
+        only after it; more twins than that are the limit of any list this
+        size.
 */
 #define RADIO_AVOID_PATH NET_STATE_DIR "/wifi.avoid"
-#define RADIO_AVOID_MOST 4
-#define RADIO_AVOID_MS 60000u
+#define RADIO_AVOID_MOST 64
+#define RADIO_AVOID_MS 3600000u
 
 typedef struct
 {
@@ -7053,8 +7066,9 @@ typedef struct
         radio_avoid address_to avoid;
         positive avoid_count;
         radio_heard best;
+        //      When the best was given up on until, 0 for never.
+        p64 until;
         bool found;
-        bool avoided;
         bool secured;
         bool fits;
 } radio_pick;
@@ -7068,12 +7082,12 @@ static bool radio_security_fits(bool secured, p8 security)
 }
 
 /* The strongest the kernel still lists by the name, one given up on only
-   if no other is. */
+   if no other is, and the one given up on longest ago before the rest. */
 static bool radio_pick_seen(netlink_header address_to header, address_any context)
 {
         radio_pick address_to pick = (radio_pick address_to)context;
         radio_heard one;
-        bool avoided = false;
+        p64 until = 0;
         bool fits;
 
         if (!radio_bss_read(header, address_of one) || one.seen > RADIO_AIR_STALE_MS ||
@@ -7081,7 +7095,8 @@ static bool radio_pick_seen(netlink_header address_to header, address_any contex
             memory_compare(one.ssid, pick->ssid, pick->ssid_length))
                 return true;
         for (positive at = 0; at < pick->avoid_count; at++)
-                avoided |= !memory_compare(pick->avoid[at].bssid, one.bssid, 6);
+                if (!memory_compare(pick->avoid[at].bssid, one.bssid, 6))
+                        until = pick->avoid[at].until;
         //      What the saved network asks of an access point: WPA2 for one
         //      with a password, nothing for one without. A twin by the same
         //      name that offers anything else, and beacons louder than the
@@ -7096,12 +7111,12 @@ static bool radio_pick_seen(netlink_header address_to header, address_any contex
                radio_security_fits(pick->secured, one.beacon_security);
         if (pick->found && (fits < pick->fits ||
                             (fits == pick->fits &&
-                             (avoided > pick->avoided ||
-                              (avoided == pick->avoided && one.mbm <= pick->best.mbm)))))
+                             (until > pick->until ||
+                              (until == pick->until && one.mbm <= pick->best.mbm)))))
                 return true;
         pick->best = one;
         pick->found = true;
-        pick->avoided = avoided;
+        pick->until = until;
         pick->fits = fits;
         return true;
 }
@@ -7128,7 +7143,7 @@ static COLD bipolar radio_bss_choose(nl80211 address_to session, p32 index,
 
         pick.avoid_count = radio_avoid_load(avoid);
         radio_air_dump(session, index, radio_pick_seen, address_of pick);
-        if (!pick.found || pick.avoided || !pick.fits)
+        if (!pick.found || pick.until || !pick.fits)
         {
                 heard = radio_air_scan(session, index, ssid, ssid_length, true) ? 1 : -1;
                 pick.found = false;
@@ -7139,6 +7154,23 @@ static COLD bipolar radio_bss_choose(nl80211 address_to session, p32 index,
         memory_copy(bssid, pick.best.bssid, 6);
         address_to frequency = pick.best.frequency;
         return 1;
+}
+
+/* A channel's number from its frequency, as the kernel numbers it
+   (ieee80211_freq_khz_to_channel), and 0 off every band. The sum here
+   before took 5000 from anything at 4900 MHz or over in unsigned
+   arithmetic: the 4.9 GHz band printed as channel 858993439, the 6 GHz
+   band's channel 2 as 187 and 60 GHz as 6 GHz channels by the thousand. */
+static p32 radio_channel(p32 mhz)
+{
+        return mhz == 2484                    ? 14
+               : mhz >= 2407 && mhz < 2484    ? (mhz - 2407) / 5
+               : mhz >= 4910 && mhz <= 4980   ? (mhz - 4000) / 5
+               : mhz >= 5000 && mhz < 5925    ? (mhz - 5000) / 5
+               : mhz == 5935                  ? 2
+               : mhz >= 5950 && mhz <= 7115   ? (mhz - 5950) / 5
+               : mhz >= 58320 && mhz <= 70200 ? (mhz - 56160) / 2160
+                                              : 0;
 }
 
 static radio_heard address_to radio_air_find(radio_air address_to air, string_address ssid)
@@ -7195,14 +7227,11 @@ static fn radio_air_row(radio_heard address_to heard, positive width, bool saved
         bipolar dbm = heard->mbm / 100;
         p32 mhz = heard->frequency;
         positive bars = dbm >= -55 ? 4 : dbm >= -67 ? 3 : dbm >= -75 ? 2 : dbm >= -85 ? 1 : 0;
-        string_address band = mhz >= 5925   ? (string_address) "6 GHz"
+        string_address band = mhz >= 58320  ? (string_address) "60 GHz"
+                              : mhz >= 5925 ? (string_address) "6 GHz"
                               : mhz >= 4900 ? (string_address) "5 GHz"
                                             : (string_address) "2.4 GHz";
-        p32 channel = mhz == 2484   ? 14
-                      : mhz >= 5950 ? (mhz - 5950) / 5
-                      : mhz >= 4900 ? (mhz - 5000) / 5
-                      : mhz >= 2407 ? (mhz - 2407) / 5
-                                    : 0;
+        p32 channel = radio_channel(mhz);
 
         radio_line(line, sizeof(line), heard->joined ? (string_address) "* "
                                        : saved       ? (string_address) "+ "
@@ -7862,7 +7891,8 @@ static b32 radio_wired_status(void)
         string_format(log, host_label "wired %s\n", net_wired_off() ? "off" : "on");
         if (failed >= 0)
                 for (positive at = 0; at < wired.count; at++)
-                        string_format(log, host_label "  %s: %s, %s\n", wired.link[at].name,
+                        string_format(log, host_label "  %w: %s, %s\n",
+                                      writer_terminal_name, wired.link[at].name,
                                       (wired.link[at].flags & IFF_UP) ? "up" : "down",
                                       (wired.link[at].flags & IFF_RUNNING) ? "carrier"
                                                                            : "no carrier");
@@ -8446,7 +8476,7 @@ static bool tune_number(string_address path, positive address_to value)
         p8 text[32];
         positive used;
 
-        if (host_read_text(path, text, sizeof(text)) <= 0)
+        if (host_read_kernel(path, text, sizeof(text)) <= 0)
                 return false;
         *value = string_digits_max(text, 18, address_of used);
         return used && !text[used];
@@ -8454,7 +8484,7 @@ static bool tune_number(string_address path, positive address_to value)
 
 static bool tune_word(string_address path, p8 address_to into, positive room)
 {
-        return host_read_text(path, into, room) > 0;
+        return host_read_kernel(path, into, room) > 0;
 }
 
 /* Write a value to a sysfs attribute. The name is never followed if it is a link. */
@@ -9663,6 +9693,12 @@ static b32 host_tune(string_address address_to arguments, positive count)
 
 #define SNTP_PORT 123
 #define SNTP_PACKET 48
+/* One byte beyond the 48-byte message lets recvmsg tell an exact reply from a
+   longer datagram.  The default reads the first 48 bytes of a longer one, as
+   ntpd and chrony do (extension fields, a MAC); the tight tier takes only the
+   exact shape, because bytes after the message are otherwise accepted without
+   being parsed.  A buffer of exactly SNTP_PACKET would make both read 48. */
+#define SNTP_REPLY_ROOM (SNTP_PACKET + 1)
 #define SNTP_SECONDS 2
 #define SNTP_SAMPLES 5
 #define SNTP_SERVERS 3
@@ -10800,7 +10836,7 @@ static HOT bipolar sntp_exchange(b32 handle,
                                  sntp_sample address_to into)
 {
         p8 request[SNTP_PACKET];
-        p8 reply[SNTP_PACKET];
+        p8 reply[SNTP_REPLY_ROOM];
         p64 sent[2];
         p64 got[2];
         p64 spare[2];
@@ -10866,7 +10902,7 @@ static HOT bipolar sntp_exchange(b32 handle,
                                 return SNTP_NO_REPLY;
                         continue;
                 }
-                if_rare (received < SNTP_PACKET)
+                if_rare (received < SNTP_PACKET || (MOONWATER_STRICT >= STRICT_TIGHT && received != SNTP_PACKET))
                 {
                         if (discarded++ == SNTP_DISCARD_MAX)
                                 return SNTP_NO_REPLY;
@@ -13273,7 +13309,9 @@ static b32 host_name(string_address address_to arguments, positive count)
                 else
                         return host_fail("name", -EIO);
 
-                host_say(log, "%s\n", name);
+                //      What the kernel says can be whatever the root of a
+                //      UTS namespace set, escape and bell included.
+                host_say(log, "%w\n", writer_terminal_name, name);
                 return 0;
         }
 

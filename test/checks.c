@@ -53992,6 +53992,26 @@ static fn fetching(void)
               http_split_into((string_address) "gopher://127.0.0.1/", name,
                          sizeof name, address_of port, address_of path,
                          address_of tls) == HTTP_SCHEME);
+        check("a bare HTTP scheme is not reinterpreted as a host and port",
+              http_split_into((string_address) "http:80", name, sizeof name,
+                         address_of port, address_of path,
+                         address_of tls) == HTTP_SCHEME);
+        check("a bare HTTPS scheme cannot turn into plaintext to a host named https",
+              http_split_into((string_address) "https:443", name, sizeof name,
+                         address_of port, address_of path,
+                         address_of tls) == HTTP_SCHEME);
+        check("the bare web-scheme refusal is ASCII case independent",
+              http_split_into((string_address) "HtTpS:443/x", name, sizeof name,
+                         address_of port, address_of path,
+                         address_of tls) == HTTP_SCHEME);
+        check("a bare unsupported scheme cannot become a host and port in the tight tier",
+              http_split_into((string_address) "ftp:21/x", name, sizeof name,
+                         address_of port, address_of path, address_of tls) ==
+                      (MOONWATER_STRICT >= STRICT_TIGHT ? HTTP_SCHEME : HTTP_OK));
+        check("another URI scheme cannot become plaintext SMTP in the tight tier",
+              http_split_into((string_address) "smtp:25/x", name, sizeof name,
+                         address_of port, address_of path, address_of tls) ==
+                      (MOONWATER_STRICT >= STRICT_TIGHT ? HTTP_SCHEME : HTTP_OK));
         check("userinfo cannot disguise the connected HTTP host",
               http_split_into((string_address) "http://allowed@127.0.0.1/", name,
                          sizeof name, address_of port, address_of path,
@@ -54022,8 +54042,10 @@ static fn fetching(void)
         check("a schemeless host with a port still parses",
               http_split_into((string_address) "h:81/x", name,
                          sizeof name, address_of port, address_of path,
-                         address_of tls) == HTTP_OK && port == 81 &&
-                  string_equals(path, (string_address) "/x"));
+                         address_of tls) ==
+                      (MOONWATER_STRICT >= STRICT_TIGHT ? HTTP_SCHEME : HTTP_OK) &&
+                  (MOONWATER_STRICT >= STRICT_TIGHT ||
+                   (port == 81 && string_equals(path, (string_address) "/x"))));
         {
                 p8 rejected_name[8];
                 string_address rejected_path = (string_address)"sentinel";
@@ -54064,13 +54086,17 @@ static fn fetching(void)
                                 memory_fill(name, 0x5a, sizeof name);
                                 bipolar result = http_split_into(input, name, capacity, &port, &path, &tls);
                                 bool fits = (length & 1) && length + 1 < capacity;
+                                bool scheme = (length & 1) && ending == 2 &&
+                                              MOONWATER_STRICT >= STRICT_TIGHT;
+                                bool accepted = fits && !scheme;
                                 bool intact = true;
                                 for (positive at = 0; at < sizeof name; at++)
-                                        intact &= name[at] == (fits && at <= length
+                                        intact &= name[at] == (accepted && at <= length
                                                 ? at == length ? 0 : byte : 0x5a);
                                 check("URL capacity matrix and untouched tail",
-                                      result == (fits ? HTTP_OK : HTTP_BAD_URL) && intact);
-                                check("URL terminator and port variants", !fits ||
+                                      result == (scheme ? HTTP_SCHEME
+                                                : accepted ? HTTP_OK : HTTP_BAD_URL) && intact);
+                                check("URL terminator and port variants", !accepted ||
                                       (port == (ending == 2 ? 81 : 80) &&
                                        string_equals(path, ending ? "/x" : "/")));
                         }
@@ -55357,6 +55383,56 @@ static fn http_header_deadlines(void)
                                 system_wait4_retry((b32)child, null, 0, null);
                 }
         }
+}
+
+static fn http_body_deadline(void)
+{
+        static p8 payload[] = "a body that never goes idle";
+        b32 pair[2];
+        bipolar opened = system_call_4(syscall(socketpair), AF_UNIX,
+                                        SOCK_STREAM, 0, (positive)pair);
+
+        check("slow-body socket pair opens", opened == 0);
+        if (opened)
+                return;
+
+        bipolar child = system_call_2(syscall(clone), SIGCHLD, 0);
+
+        if (!child)
+        {
+                socket_close(pair[0]);
+                network_trickle_and_exit(pair[1], payload,
+                                         sizeof(payload) - 1);
+        }
+        check("slow-body writer starts", child > 0);
+        socket_close(pair[1]);
+        if (child > 0)
+        {
+                p8 scratch[HTTP_HEAD_MAX];
+                p8 sink[sizeof payload];
+                http_link link = {.handle = pair[0]};
+                http_body body = {
+                    .link = address_of link,
+                    .scratch = scratch,
+                    .output = sink,
+                };
+                positive began;
+                positive elapsed;
+
+                check("HTTP whole-body deadline starts",
+                      network_deadline_begin(address_of body.deadline,
+                                             0, 100000000));
+                began = clock_monotonic_nanoseconds();
+                check("a trickled HTTP body cannot renew its total deadline",
+                      http_copy(address_of body, -1, sizeof(payload) - 1,
+                                true) == HTTP_NO_REPLY);
+                elapsed = clock_monotonic_nanoseconds() - began;
+                check("the HTTP whole-body deadline is bounded",
+                      elapsed < NETWORK_NANOSECONDS);
+        }
+        socket_close(pair[0]);
+        if (child > 0)
+                system_wait4_retry((b32)child, null, 0, null);
 }
 
 /* A body that cannot be written is the disk's failure, not the server's:
@@ -59964,6 +60040,31 @@ static fn tls_key_update_rounds(void)
         refused and the output wiped, where the one-byte counter used to
         wrap to zero and restart the chain.
 */
+/*
+        The two constants the TLS 1.3 key schedule starts from, against what
+        they are (RFC 8446 7.1): SHA-256 of nothing, and the "derived" secret
+        of the early secret a handshake without a PSK has. They are written
+        out as bytes, so a byte of either that is wrong is a handshake secret
+        that no server shares, and nothing below the peer harness would see
+        it: both directions of every check here derive from the same table.
+*/
+static fn tls_key_schedule_constants(void)
+{
+        p8 zeros[32];
+        p8 empty[32];
+        p8 early[32];
+        p8 derived[32];
+
+        memory_fill(zeros, 0, sizeof zeros);
+        crypto_sha256_of(zeros, 0, empty);
+        crypto_hkdf_extract(zeros, 32, zeros, 32, early);
+        tls_expand_label(early, "derived", empty, 32, derived, 32);
+        check("tls_empty_sha256 is SHA-256 of nothing",
+              !memory_compare(empty, tls_empty_sha256, 32));
+        check("tls_derived_early is Derive-Secret(early secret, \"derived\", \"\") with no PSK",
+              !memory_compare(derived, tls_derived_early, 32));
+}
+
 static p8 tls_hkdf_long[255 * 32 + 1];
 
 static fn tls_hkdf_expand_ceiling(void)
@@ -64083,9 +64184,9 @@ static fn redirect_urls(void)
                     {"ftp://h/x", 3, 0},
                     {"httpx://h/x", 3, 0},
                     {"web+x.y-z://h/x", 3, 0},
-                    {"javascript:alert(1)", 0, 0},
-                    {"http:x", 0, 0},
-                    {"h:81/x", 1, 0},
+                    {"javascript:alert(1)", MOONWATER_STRICT >= STRICT_TIGHT ? 3 : 0, 0},
+                    {"http:x", 3, 0},
+                    {"h:81/x", MOONWATER_STRICT >= STRICT_TIGHT ? 3 : 1, 0},
                     {"1http://h/x", 0, "https://h/dir/1http://h/x"},
                     {"//h2/x", 0, "https://h2/x"},
                     {"h_x://y", 0, "https://h/dir/h_x://y"},
@@ -65263,6 +65364,23 @@ static fn leasing(void)
         check("a broadcast reply is asked for", (packet[10] & 0x80) != 0);
         check("the hardware address is in it",
               memory_compare(packet + 28, hardware, 6) == 0);
+        {
+                //      Six bytes of chaddr are the address and not one more:
+                //      the byte after the caller's six is not zero here, so
+                //      a copy that ran over would put it on the wire, and
+                //      the rest of chaddr, sname and file must stay clear.
+                p8 wide[8] = {0x52, 0x54, 0x00, 0x12, 0x34, 0x56, 0xee, 0xee};
+                p8 built[400];
+                bool clear = true;
+
+                memory_fill(built, 0xa5, sizeof built);
+                dhcp_build(built, sizeof built, DHCP_DISCOVER, 7, wide, 0, 0, 0,
+                           true);
+                for (positive at = 34; at < DHCP_HEAD; at++)
+                        clear = clear && !built[at];
+                check("a built packet copies six address bytes and leaves the rest of chaddr, sname and file zero",
+                      memory_compare(built + 28, wide, 6) == 0 && clear);
+        }
         check("the cookie says these options are dhcp's",
               network_load_32(packet + DHCP_HEAD) == DHCP_COOKIE);
         check("the first option is the message type",
@@ -65279,6 +65397,32 @@ static fn leasing(void)
         check("and who offered it",
               packet[249] == DHCP_OPTION_SERVER && packet[250] == 4 &&
               network_load_32(packet + 251) == 0x0a000202);
+
+        //      A DECLINE (RFC 2131 table 5) names the address and the server
+        //      the same way, has no ciaddr and asks for no broadcast reply,
+        //      since none comes, and carries no parameter list: END follows
+        //      the server at once and the rest is padding.
+        memory_fill(packet, 0xa5, sizeof packet);
+        length = dhcp_build(packet, sizeof packet, DHCP_DECLINE, 0x01020304,
+                            hardware, 0x0a00020f, 0x0a000202, 0, false);
+        {
+                bool padded = true;
+
+                for (positive at = 256; at < 300; at++)
+                        padded &= packet[at] == 0;
+                check("a decline names the address, the server and nothing else",
+                      length == 300 && packet[0] == 1 &&
+                          network_load_32(packet + 4) == 0x01020304 &&
+                          !network_load_16(packet + 10) &&
+                          !network_load_32(packet + 12) &&
+                          !memory_compare(packet + 28, hardware, 6) &&
+                          packet[242] == DHCP_DECLINE &&
+                          packet[243] == DHCP_OPTION_REQUESTED &&
+                          network_load_32(packet + 245) == 0x0a00020f &&
+                          packet[249] == DHCP_OPTION_SERVER &&
+                          network_load_32(packet + 251) == 0x0a000202 &&
+                          packet[255] == DHCP_OPTION_END && padded);
+        }
 
         /*
                 An offer, in the shape qemu's own server sends one: the
@@ -65694,6 +65838,48 @@ static fn leasing(void)
                           !wrong);
         }
         {
+                //      Every first octet in each of the three fields the
+                //      unicast rule guards, the others held honest: the
+                //      server (which the grid above never moves), the router
+                //      of a /32 lease (where nothing else checks it is on
+                //      the link) and the address of a /32. A rule off by one
+                //      bit in its shift or its bound moves one octet -- 1/8,
+                //      126/8, 128/8, 223/8 -- and the list above names none.
+                positive wrong[3] = {0, 0, 0};
+
+                for (positive o = 0; o < 512; o++)
+                {
+                        //      Each octet twice: inside its /8 and at its
+                        //      first address, where 224.0.0.0 is the bound.
+                        p32 spot = (p32)(o & 255) << 24 | (o < 256 ? 0x00010203u : 0);
+                        bool want = (o & 255) && (o & 255) != 127 && (o & 255) < 224;
+                        dhcp_lease server = {.address = 0x0a00020f,
+                                             .mask = 0xffffff00,
+                                             .server = spot,
+                                             .seconds = 3600};
+                        dhcp_lease router = {.address = 0x0a00020f,
+                                             .mask = 0xffffffff,
+                                             .router = spot,
+                                             .server = 0x0a000202,
+                                             .seconds = 3600};
+                        dhcp_lease own = {.address = spot,
+                                          .mask = 0xffffffff,
+                                          .server = 0x0a000202,
+                                          .seconds = 3600};
+
+                        wrong[0] += dhcp_lease_usable(address_of server) != want;
+                        //      A router of 0.0.0.0 is no router at all.
+                        wrong[1] += dhcp_lease_usable(address_of router) != (want || !spot);
+                        wrong[2] += dhcp_lease_usable(address_of own) != want;
+                }
+                check("a DHCP server identifier from 0/8, 127/8 or 224/3 refuses the lease, every other first octet keeps it",
+                      !wrong[0]);
+                check("a /32 lease's off-link router is refused in 0/8, 127/8 and 224/3 and kept everywhere else",
+                      !wrong[1]);
+                check("a /32 lease address is unicast for exactly the first octets 1-126 and 128-223",
+                      !wrong[2]);
+        }
+        {
                 dhcp_lease timed = {.seconds = 3600};
 
                 check("omitted DHCP timers use RFC defaults",
@@ -65732,6 +65918,38 @@ static fn leasing(void)
                                              address_of answer) &&
                           held.seconds == 60 && held.renewal == 30 &&
                           held.rebinding == 52);
+        }
+        {
+                /* REBINDING's ACK from another server: what the first one
+                   said about the mask, router, resolver and lifetime is
+                   not carried into the second one's lease, and an ACK with
+                   no lifetime of its own is not a lease. The same server
+                   leaving its resolver out keeps it. */
+                dhcp_lease held = {.address = 0x0a00020f, .mask = 0xffffff00,
+                                   .router = 0x0a000201, .nameserver = 0x0a000201,
+                                   .server = 0x0a000202, .seconds = 3600};
+                dhcp_lease mine = held;
+                dhcp_lease other = {.address = 0x0a00020f,
+                                    .server = 0x0a000263, .seconds = 600};
+                dhcp_lease same = {.address = 0x0a00020f,
+                                   .router = 0x0a000203,
+                                   .server = 0x0a000202, .seconds = 600};
+                dhcp_lease bare = {.address = 0x0a00020f, .server = 0x0a000263};
+
+                check("another server's ACK starts a lease without the first one's mask, router or resolver",
+                      dhcp_lease_take(address_of held, address_of other) &&
+                          held.server == 0x0a000263 && !held.mask &&
+                          !held.router && !held.nameserver &&
+                          held.seconds == 600 && held.address == 0x0a00020f);
+                check("the same server's ACK keeps what it left out",
+                      dhcp_lease_take(address_of mine, address_of same) &&
+                          mine.mask == 0xffffff00 && mine.router == 0x0a000203 &&
+                          mine.nameserver == 0x0a000201 && mine.seconds == 600);
+                held = mine;
+                check("another server's ACK without a lifetime is not a lease, and changes nothing",
+                      !dhcp_lease_take(address_of held, address_of bare) &&
+                          !memory_compare(address_of held, address_of mine,
+                                          sizeof held));
         }
         for (positive bits = 0; bits < 256; bits++)
         {
@@ -65944,6 +66162,39 @@ static fn leasing_datagrams(void)
               !dhcp_receive(receiver, received, sizeof received, 123, hardware,
                             &lease, &kind, address_of sender_at, false, null,
                             address_of deadline));
+
+        /* A renewal's answer: the ACK keeps the lease and the NAK gives it
+           up, from the server that holds it. dhcp_complete is the one place
+           the two are told apart once the answer matched, and only the
+           interface-bound renewal reaches it, which no namespace-free check
+           can open; its verdict is asked here over the same loopback pair. */
+        for (positive nak = 0; nak < 2; nak++)
+        {
+                dhcp_lease held = {.address = 0x0a00020f, .mask = 0xffffff00,
+                                   .server = 0x0a000202, .seconds = 3600};
+                bipolar status;
+
+                dhcp_build(packet, sizeof packet, nak ? DHCP_NAK : DHCP_ACK, 123,
+                           hardware, 0, 0x0a000202, 0, false);
+                packet[0] = 2;
+                if (!nak)
+                        network_store_32(packet + 16, 0x0a00020f);
+                check("a renewal answer queues",
+                      socket_send((b32)sender, packet, 300, 0,
+                                  address_of receiver_at,
+                                  sizeof receiver_at) == 300);
+                check("a renewal answer deadline starts",
+                      network_deadline_begin(address_of deadline, 1, 0));
+                status = dhcp_complete(receiver, received, sizeof received, 123,
+                                       hardware, &held, address_of sender_at,
+                                       false, address_of deadline);
+                if (nak)
+                        check("a renewal NAK from the lease's server refuses the lease",
+                              status == DHCP_REFUSED);
+                else
+                        check("a renewal ACK from the lease's server keeps the lease",
+                              status == DHCP_OK && held.address == 0x0a00020f);
+        }
         socket_close((b32)receiver);
         socket_close((b32)sender);
         socket_close((b32)other);
@@ -66037,84 +66288,126 @@ static fn dhcp_transaction_randomness(void)
         }
 }
 
+/*
+        Every group gives back each descriptor it opened.
+
+        A socket, a pipe or a confined child's end that a path forgets to
+        close is invisible in any answer a check compares: the exchange
+        still says what it said. The only place it shows is the table, so
+        the walk below counts the open descriptors (fcntl F_GETFD answers
+        for an open one and EBADF for a free one) before and after each
+        group, and a group that ends with more than it began with has
+        dropped a close on some path it took -- the error paths most of
+        all, since those are the ones the fault arms drive. The count is
+        the low 1024, which is past any group's high-water mark here; under
+        qemu-user its own descriptors are in the same table and do not move.
+*/
+static positive net_descriptors_open(void)
+{
+        positive open = 0;
+
+        for (positive fd = 0; fd < 1024; fd++)
+                open += system_call_3(syscall(fcntl), fd, 1, 0) >= 0;
+        return open;
+}
+
+typedef fn (*net_group_body)(void);
+
+static fn net_group(string_address name, net_group_body body)
+{
+        positive before = net_descriptors_open();
+
+        body();
+        checks++;
+        if (net_descriptors_open() > before)
+        {
+                failures++;
+                string_format(log, "  FAIL %s leaves a descriptor open\n", name);
+        }
+}
+
+#define net_group(body) net_group(#body, body)
+
 b32 main(void)
 {
-        arithmetic();
-        building();
-        padding();
-        oversized();
-        attribute_growth();
-        userspace_source_progress();
-        error_frames();
-        link_candidates();
-        talking();
-        resolving();
-        resolving_edges();
-        resolving_truncated();
-        resolving_policy();
-        resolving_walk();
-        resolving_servers();
-        fetching();
-        streaming_chunk_boundaries();
-        http_bounded_store();
-        network_stream_timeouts();
-        network_stream_send_timeout();
-        http_header_deadlines();
-        http_body_write_failure();
-        http_tls_resource_exhaustion();
-        dns_dhcp_netlink_resource_exhaustion();
-        http_body_store_midpath_exhaustion();
-        http_body_store_midpath_reserve_fault();
-        http_body_store_large_growth_reserve_fault();
-        net_room_midpath_reserve_fault();
-        http_body_copy_midpath_fault();
-        http_write_spans_partial();
-        http_write_spans_midpath_fault();
-        dns_dhcp_midpath_faults();
-        network_stream_sigpipe();
-        tls_closure_boundaries();
-        tls_record_payload_ceiling();
-        tls_receive_whole_room();
-        tls_sensitive_state_erasure();
-        tls_certificate_dates();
-        tls_certificate_identity_rules();
-        tls_certificate_extension_adversarial();
-        tls_parse_cert_adversarial();
-        tls_certificate_list_depth();
-        tls_client_hello_bounds();
-        tls_client_hello_groups();
-        tls_server_hello_validation();
-        tls_hello_retry_rows();
-        tls_server_flight_validation();
-        tls_encrypted_flight_hs_reassembly();
-        tls_post_handshake_framing();
-        tls_key_update_rounds();
-        tls_hkdf_expand_ceiling();
-        tls_certificate_framing();
-        byte_reader_rows();
-        crypto_floor();
-        crypto_floor_ghash();
-        crypto_floor_field();
-        crypto_floor_montgomery();
-        crypto_floor_inverse();
-        crypto_floor_field_bodies();
-        crypto_floor_wnaf();
-        crypto_floor_g_table();
-        crypto_floor_x25519();
-        crypto_floor_aes();
-        crypto_rsa_served_sizes();
-        tls_name_constraint_rules();
-        tls_ca_issuers_rules();
-        tls_trust_anchor_chains();
-        tls12_pieces();
-        redirect_urls();
-        fetching_for_real();
-        leasing();
-        dhcp_confinement();
-        dhcp_reacquisition_state_matrix();
-        leasing_datagrams();
-        dhcp_transaction_randomness();
-        userspace_route_source_in_namespace();
+        net_group(arithmetic);
+        net_group(building);
+        net_group(padding);
+        net_group(oversized);
+        net_group(attribute_growth);
+        net_group(userspace_source_progress);
+        net_group(error_frames);
+        net_group(link_candidates);
+        net_group(talking);
+        net_group(resolving);
+        net_group(resolving_edges);
+        net_group(resolving_truncated);
+        net_group(resolving_policy);
+        net_group(resolving_walk);
+        net_group(resolving_servers);
+        net_group(fetching);
+        net_group(streaming_chunk_boundaries);
+        net_group(http_bounded_store);
+        net_group(network_stream_timeouts);
+        net_group(network_stream_send_timeout);
+        net_group(http_header_deadlines);
+        net_group(http_body_deadline);
+        net_group(http_body_write_failure);
+        net_group(http_tls_resource_exhaustion);
+        net_group(dns_dhcp_netlink_resource_exhaustion);
+        net_group(http_body_store_midpath_exhaustion);
+        net_group(http_body_store_midpath_reserve_fault);
+        net_group(http_body_store_large_growth_reserve_fault);
+        net_group(net_room_midpath_reserve_fault);
+        net_group(http_body_copy_midpath_fault);
+        net_group(http_write_spans_partial);
+        net_group(http_write_spans_midpath_fault);
+        net_group(dns_dhcp_midpath_faults);
+        net_group(network_stream_sigpipe);
+        net_group(tls_closure_boundaries);
+        net_group(tls_record_payload_ceiling);
+        net_group(tls_receive_whole_room);
+        net_group(tls_sensitive_state_erasure);
+        net_group(tls_certificate_dates);
+        net_group(tls_certificate_identity_rules);
+        net_group(tls_certificate_extension_adversarial);
+        net_group(tls_parse_cert_adversarial);
+        net_group(tls_certificate_list_depth);
+        net_group(tls_client_hello_bounds);
+        net_group(tls_client_hello_groups);
+        net_group(tls_server_hello_validation);
+        net_group(tls_hello_retry_rows);
+        net_group(tls_server_flight_validation);
+        net_group(tls_encrypted_flight_hs_reassembly);
+        net_group(tls_post_handshake_framing);
+        net_group(tls_key_update_rounds);
+        net_group(tls_hkdf_expand_ceiling);
+        net_group(tls_key_schedule_constants);
+        net_group(tls_certificate_framing);
+        net_group(byte_reader_rows);
+        net_group(crypto_floor);
+        net_group(crypto_floor_ghash);
+        net_group(crypto_floor_field);
+        net_group(crypto_floor_montgomery);
+        net_group(crypto_floor_inverse);
+        net_group(crypto_floor_field_bodies);
+        net_group(crypto_floor_wnaf);
+        net_group(crypto_floor_g_table);
+        net_group(crypto_floor_x25519);
+        net_group(crypto_floor_aes);
+        net_group(crypto_rsa_served_sizes);
+        net_group(tls_name_constraint_rules);
+        net_group(tls_ca_issuers_rules);
+        net_group(tls_trust_anchor_chains);
+        net_group(tls12_pieces);
+        net_group(redirect_urls);
+        net_group(fetching_for_real);
+        net_group(leasing);
+        net_group(dhcp_confinement);
+        net_group(dhcp_reacquisition_state_matrix);
+        net_group(leasing_datagrams);
+        net_group(dhcp_transaction_randomness);
+        net_group(userspace_route_source_in_namespace);
 
         return test_report(null);
 }
@@ -67902,7 +68195,7 @@ static positive fill_walk(struct waterlink_link address_to link,
                 fill_seen[link->owed_now ? FILL_ACK_NOW
                           : link->owed_count >= WATERLINK_ACK_EVERY
                                   ? FILL_ACK_COUNT
-                          : now - link->owed >= WATERLINK_ACK_DELAY
+                          : link_age(now, link->owed) >= WATERLINK_ACK_DELAY
                                   ? FILL_ACK_DELAY
                                   : FILL_ACK_NOT_DUE]++;
         if (link->acking && (used || waterlink_ack_due(link, now)))
@@ -70493,6 +70786,45 @@ static fn network_generated(void)
               sim_total.path_dropped * 10 <= sim_total.path_sent);
 }
 
+static fn clock_ordering(void)
+{
+        struct waterlink_link link;
+
+        waterlink_link_reset(address_of link);
+        link.acking = 1;
+        link.owed = 2000000;
+        check("sec: a clock sample before an owed acknowledgement cannot make it due",
+              !waterlink_ack_due(address_of link, 1000000));
+        {
+                //      The same through waterlink_fill, which is assembly on
+                //      every machine: its own compare of now with owed.
+                p8 body[WATERLINK_PAYLOAD];
+                bool alone = false;
+
+                check("sec: a body filled before an owed acknowledgement carries none",
+                      waterlink_fill(address_of link, body, 1000000,
+                                     address_of alone) == 0);
+                check("the same acknowledgement is written once it is due",
+                      waterlink_fill(address_of link, body,
+                                     2000000 + WATERLINK_ACK_DELAY,
+                                     address_of alone) > 0);
+        }
+
+        waterlink_link_reset(address_of link);
+        link.free_count--;
+        link.free = 1;
+        link.flight_head = link.flight_tail = 0;
+        link.slot[0].next = WATERLINK_NONE;
+        link.slot[0].state = WATERLINK_SLOT_FLIGHT;
+        link.slot[0].serial = 1;
+        link.slot[0].sent = 2000000;
+        link.largest = 2;
+        waterlink_losses(address_of link, 1000000);
+        check("sec: a clock sample before a flight cannot declare that frame lost",
+              link.flight_head == 0 && link.slot[0].state == WATERLINK_SLOT_FLIGHT &&
+                  !link.timeouts);
+}
+
 /*
         The handshake, both ends in one process: the keys agree, a wrong
         mac1, wrong padding or a message to the wrong key is refused at the
@@ -71002,6 +71334,191 @@ static bool mdns_read_edge(const p8 address_to packet, positive length,
         return waterlink_mdns_read(at, length, found);
 }
 
+/*
+        What this machine puts on the link, spelled a second time.
+
+        The reader above reads only the PTR and the SRV, so a wrong TTL on
+        the TXT, a TXT whose one byte claims a 255-byte string, a header
+        whose authority count is left as whatever the stack held, or a
+        label one byte out are all invisible to it -- and to every peer
+        check that reads with the same code. Here the packet is built again
+        from RFC 6762/6763 by hand, byte for byte, for every combination of
+        a live announcement and a goodbye, with and without an address, and
+        with and without an echoed question, and the two must be equal.
+*/
+static positive mdns_expected(p8 address_to out, const p8 address_to instance,
+                              const p8 address_to host, p16 port, p32 address,
+                              p32 ttl, p16 id, const p8 address_to question,
+                              positive question_length)
+{
+        static const p8 hex[] = "0123456789abcdef";
+        positive at = 0;
+        positive service, named, machine;
+
+#define PUT16(v) (out[at] = (p8)((v) >> 8), out[at + 1] = (p8)(v), at += 2)
+#define PUT32(v) (PUT16((p32)(v) >> 16), PUT16((p32)(v) & 0xffff))
+        PUT16(id);
+        PUT16(0x8400);
+        PUT16(question ? 1 : 0);
+        PUT16(address ? 4 : 3);
+        PUT16(0);
+        PUT16(0);
+        for (positive i = 0; i < question_length; i++)
+                out[at++] = question[i];
+        service = at;
+        for (positive i = 0; i < WATERLINK_SERVICE_BYTES; i++)
+                out[at++] = waterlink_service_name[i];
+        PUT16(12); PUT16(1); PUT32(ttl ? 4500 : 0); PUT16(26);
+        named = at;
+        out[at++] = 23; out[at++] = 'w'; out[at++] = 'l'; out[at++] = '-';
+        for (positive i = 0; i < 10; i++)
+        {
+                out[at++] = hex[instance[i] >> 4];
+                out[at++] = hex[instance[i] & 15];
+        }
+        PUT16(0xc000 | service);
+        PUT16(0xc000 | named);
+        PUT16(33); PUT16(0x8001); PUT32(ttl); PUT16(29);
+        PUT16(0); PUT16(0); PUT16(port);
+        machine = at;
+        out[at++] = 15; out[at++] = 'w'; out[at++] = 'l'; out[at++] = '-';
+        for (positive i = 0; i < 6; i++)
+        {
+                out[at++] = hex[host[i] >> 4];
+                out[at++] = hex[host[i] & 15];
+        }
+        out[at++] = 5;
+        for (positive i = 0; i < 5; i++)
+                out[at++] = (p8) "local"[i];
+        out[at++] = 0;
+        PUT16(0xc000 | named);
+        PUT16(16); PUT16(0x8001); PUT32(ttl ? 4500 : 0); PUT16(1);
+        out[at++] = 0;
+        if (address)
+        {
+                PUT16(0xc000 | machine);
+                PUT16(1); PUT16(0x8001); PUT32(ttl); PUT16(4);
+                PUT32(address);
+        }
+#undef PUT32
+#undef PUT16
+        return at;
+}
+
+static fn mdns_wire_exact(void)
+{
+        p8 instance[10];
+        p8 host[6] = {0x01, 0x23, 0x45, 0x67, 0x89, 0xab};
+        p8 packet[WATERLINK_MDNS_MAX];
+        p8 expected[WATERLINK_MDNS_MAX];
+        p8 question[WATERLINK_SERVICE_BYTES + 4];
+        positive question_length;
+        positive wrong = 0;
+        positive rows = 0;
+        struct waterlink_found found;
+
+        random_seeded(instance, 10, 7);
+        question_length = waterlink_mdns_query(packet, sizeof packet) - 12;
+        memory_copy(question, packet + 12, question_length);
+        for (positive shape = 0; shape < 8; shape++)
+        {
+                p32 ttl = shape & 1 ? 0 : 120;
+                p32 address = shape & 2 ? 0 : 0x0a000105;
+                bool asked = shape & 4;
+                positive want, got;
+
+                //      Poisoned first, so a field the builder leaves alone
+                //      shows as the poison rather than as a lucky zero.
+                memory_fill(packet, 0xa5, sizeof packet);
+                got = waterlink_mdns_announce(packet, sizeof packet, instance,
+                                              host, 22348, address, ttl,
+                                              asked ? 0x1234 : 0,
+                                              asked ? question : null,
+                                              asked ? question_length : 0);
+                want = mdns_expected(expected, instance, host, 22348, address,
+                                     ttl, asked ? 0x1234 : 0,
+                                     asked ? question : null,
+                                     asked ? question_length : 0);
+                rows++;
+                wrong += got != want || memory_compare(packet, expected, want);
+        }
+        check("every announcement and goodbye is byte for byte the DNS-SD records it means",
+              rows == 8 && !wrong);
+
+        //      The question a one-shot asker sent is kept whole, to be echoed:
+        //      its name, its type and its class, and not a byte more.
+        question_length = waterlink_mdns_query(packet, sizeof packet);
+        check("a question is kept exactly as it was asked",
+              waterlink_mdns_read(packet, question_length, address_of found) &&
+                  found.asked &&
+                  found.question_length == question_length - 12 &&
+                  !memory_compare(found.question, packet + 12,
+                                  question_length - 12));
+
+        //      The smallest question there is, the root name: exactly the five
+        //      bytes the count bound allows for one, which it must not refuse.
+        {
+                static const p8 smallest[] = {0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0,
+                                              0, 0, 12, 0, 1};
+
+                check("a question of the root name, at the count bound exactly, is read",
+                      waterlink_mdns_read(smallest, sizeof smallest,
+                                          address_of found) &&
+                          !found.asked);
+        }
+
+        //      An SRV whose target is the root, framed exactly (RFC 2782:
+        //      the service is decidedly not available), beside the same
+        //      record with a real one-label target.
+        for (positive root = 0; root < 2; root++)
+        {
+                positive at = 0;
+                positive named;
+
+                memory_fill(packet, 0, sizeof packet);
+                packet[2] = 0x84;
+                packet[7] = 2;
+                at = 12;
+                memory_copy(packet + at, waterlink_service_name,
+                            WATERLINK_SERVICE_BYTES);
+                at += WATERLINK_SERVICE_BYTES;
+                network_store_16(packet + at, 12);
+                network_store_16(packet + at + 2, 1);
+                network_store_32(packet + at + 4, 120);
+                network_store_16(packet + at + 8, 6);
+                at += 10;
+                named = at;
+                packet[at++] = 3;
+                memory_copy(packet + at, "abc", 3);
+                at += 3;
+                network_store_16(packet + at, 0xc00c);
+                at += 2;
+                network_store_16(packet + at, 0xc000 | named);
+                network_store_16(packet + at + 2, 33);
+                network_store_16(packet + at + 4, 0x8001);
+                network_store_32(packet + at + 6, 120);
+                network_store_16(packet + at + 10, root ? 7 : 9);
+                at += 12;
+                network_store_16(packet + at + 4, 22348);
+                at += 6;
+                if (!root)
+                {
+                        packet[at++] = 1;
+                        packet[at++] = 'h';
+                }
+                packet[at++] = 0;
+                if (root)
+                        check("an SRV to the root target is read but is no endpoint",
+                              waterlink_mdns_read(packet, at, address_of found) &&
+                                  !found.count);
+                else
+                        check("the same SRV to a real target is an endpoint",
+                              waterlink_mdns_read(packet, at, address_of found) &&
+                                  found.count == 1 &&
+                                  found.instance[0].port == 22348);
+        }
+}
+
 static fn mdns_parse(void)
 {
         p8 instance[10];
@@ -71023,11 +71540,47 @@ static fn mdns_parse(void)
                       found.response && found.count == 1 &&
                       found.instance[0].has_port &&
                       found.instance[0].port == 22348);
+        memory_copy(broken, packet, length);
+        network_store_16(broken + 12 + WATERLINK_SERVICE_BYTES, 16);
+        check("an orphan SRV without the service PTR is not discovery",
+              mdns_read_edge(broken, length, address_of found) &&
+                  found.response && !found.count);
+        {
+                positive target = 0;
+
+                for (positive at = 0; at + 4 < length; at++)
+                        if (packet[at] == 15 && packet[at + 1] == 'w' &&
+                            packet[at + 2] == 'l' && packet[at + 3] == '-')
+                                target = at;
+                check("the production announcement exposes one SRV target",
+                      target != 0);
+                if (target)
+                {
+                        memory_copy(broken, packet, length);
+                        broken[target] = 0;
+                        check("an unavailable root SRV target with trailing bytes is not live",
+                              mdns_read_edge(broken, length, address_of found) &&
+                                  !found.count);
+                        memory_copy(broken, packet, length);
+                        broken[target - 2] = broken[target - 1] = 0;
+                        check("an SRV destination on port zero is not live",
+                              mdns_read_edge(broken, length, address_of found) &&
+                                  !found.count);
+                }
+        }
+        length = waterlink_mdns_announce(packet, sizeof packet, instance, host,
+                                         22348, 0x0a000001, 0, 0, null, 0);
+        check("an mDNS goodbye cannot be rediscovered as a live endpoint",
+              length && mdns_read_edge(packet, length, address_of found) &&
+                  found.response && !found.count);
 
         //      Letter case: the service's name reads the same in capitals.
         {
                 positive names = 0;
 
+                length = waterlink_mdns_announce(packet, sizeof packet, instance,
+                                                 host, 22348, 0x0a000001, 4500,
+                                                 0, null, 0);
                 memory_copy(broken, packet, length);
                 for (positive at = 0; at + WATERLINK_SERVICE_BYTES <= length; at++)
                         if (!memory_compare(broken + at, waterlink_service_name,
@@ -71049,6 +71602,18 @@ static fn mdns_parse(void)
         check("a question for the service is one",
               mdns_read_edge(packet, length, address_of found) && found.asked &&
                       !found.response && found.question_length);
+        packet[length - 1] = 3; // CHAOS, not Internet class
+        check("a non-Internet question cannot make this responder an oracle",
+              mdns_read_edge(packet, length, address_of found) && !found.asked);
+        packet[length - 2] = 0x80; // QU is the one legal high class bit
+        packet[length - 1] = 1;
+        check("an Internet-class question may request a unicast response",
+              mdns_read_edge(packet, length, address_of found) && found.asked);
+        packet[length - 2] = 0;
+        packet[3] = 3;
+        check("a query cannot smuggle a response error code into the responder",
+              !mdns_read_edge(packet, length, address_of found));
+        packet[3] = 0;
 
         //      The shapes, by hand: each must be refused.
         {
@@ -71131,8 +71696,8 @@ static fn mdns_parse(void)
         for (positive cut = 0; cut < length; cut++)
         {
                 tries++;
-                (void)mdns_read_edge(packet, cut, address_of found);
-                survived += found.count <= WATERLINK_FOUND_MAX;
+                survived += !mdns_read_edge(packet, cut, address_of found) &&
+                            !found.count && !found.asked && !found.id;
         }
         traffic_state = 0x51a7e5ull;
         for (positive round = 0; round < 20000; round++)
@@ -71163,11 +71728,13 @@ static fn mdns_parse(void)
                         }
                 }
                 tries++;
-                (void)mdns_read_edge(broken, size, address_of found);
-                survived += found.count <= WATERLINK_FOUND_MAX;
+                survived += mdns_read_edge(broken, size, address_of found)
+                                ? found.count <= WATERLINK_FOUND_MAX
+                                : !found.count && !found.asked && !found.id;
         }
         check("every cut and 20,000 random edits of an announcement are read "
-              "at a page's edge without reading past it",
+              "at a page's edge without reading past it, and every one "
+              "refused says nothing was found",
               survived == tries);
 }
 
@@ -71429,12 +71996,14 @@ b32 main(void)
         register_behind_its_newest();
         invalid_application_keys();
         network_generated();
+        clock_ordering();
         handshake();
         pbkdf2_vectors();
         group_derivation();
         group_identity();
         group_pairing();
         mdns_parse();
+        mdns_wire_exact();
         return test_report(null);
 }
 #endif /* CHECK_waterlink */
@@ -71751,6 +72320,23 @@ static fn authorization_files(void)
                           stored.may == 6 &&
                           string_equals(stored.namespace, "office"));
                 (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
+        }
+        {
+                static const p8 zeros[32];
+                bipolar full = system_open_at(AT_FDCWD,
+                                               (string_address)"/dev/full",
+                                               FILE_WRITE | O_CLOEXEC);
+
+                check("the legacy group scrub's fault sink opens", full >= 0);
+                if (full >= 0)
+                {
+                        check("sec: a refused positional scrub is reported, not mistaken for migration",
+                              file_transfer_exact(syscall(pwrite64), full,
+                                                  (p8 address_to)zeros,
+                                                  sizeof zeros, 0) !=
+                                  (bipolar)sizeof zeros);
+                        system_close(full);
+                }
         }
 }
 
@@ -72222,17 +72808,30 @@ static fn responder(bipolar listener, p16 port)
         wls_initiation(datagram, 12, 1001, 0x01020305);
         link_server_initiation(datagram, WATERLINK_DATAGRAM, wls_loopback, port,
                                3000000);
-        check("sec: forgetting makes every traffic-key epoch unaddressable "
-              "before queued carry datagrams are dispatched",
-              link_self.session[0].finished && !link_self.session[0].now.live &&
-                      !link_self.session[0].next.live &&
-                      !link_self.session[0].before.live);
+        {
+                struct link_session address_to s = link_self.session;
+                struct link_session address_to found;
+
+                check("sec: forgetting makes every traffic-key epoch unaddressable "
+                      "before queued carry datagrams are dispatched",
+                      s->finished && !link_keys_for(s->now.ours, address_of found) &&
+                              !link_keys_for(s->next.ours, address_of found) &&
+                              !link_keys_for(s->before.ours, address_of found));
+        }
         link_self.server = true;
         (void)link_sessions_turn(3000001);
         link_self.server = false;
-        check("sec: a forgotten peer's authenticated rekey closes its live "
-              "session and is not answered",
-              wls_sessions_used() == 0 && wls_heard(listener, answer) <= 0);
+        {
+                bipolar heard;
+                bool answered = false;
+
+                //      Told the session is closed, and nothing else.
+                while ((heard = wls_heard(listener, answer)) > 0)
+                        answered |= heard == WATERLINK_DATAGRAM;
+                check("sec: a forgotten peer's authenticated rekey closes its "
+                      "live session and is not answered",
+                      wls_sessions_used() == 0 && !answered);
+        }
 
         for (positive at = 0; at < LINK_SESSIONS; at++)
                 if (link_self.session[at].used)
@@ -73320,8 +73919,8 @@ static fn greetings(bipolar listener, p16 port)
         check("sec: with no entropy a member is still kept, but not greeted "
               "back, and not marked as greeted",
               wls_peers_count() == 1 && wls_heard(listener, back) <= 0 &&
-                      !link_greeted_lately(wls_office.mark, wls_loopback, port,
-                                           1700001));
+                      !link_greeted_recent(wls_loopback, wls_office.mark, port,
+                                           true, 1700001));
         (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
 }
 
@@ -73380,10 +73979,10 @@ static fn mdns_amplification(void)
                 check("sec: one place is greeted immediately for each group, "
                       "not throttled as if groups shared an identity",
                       entropy_draws - before == 2 &&
-                          link_greeted_lately(wls_office.mark, wls_loopback, 9,
-                                               1000002) &&
-                          link_greeted_lately(second.mark, wls_loopback, 9,
-                                               1000002));
+                          link_greeted_recent(wls_loopback, wls_office.mark, 9,
+                                              true, 1000002) &&
+                          link_greeted_recent(wls_loopback, second.mark, 9,
+                                              true, 1000002));
                 wls_group();
         }
         (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
@@ -73407,9 +74006,33 @@ static fn mdns_amplification(void)
                 if (socket[at] >= 0)
                         system_close(socket[at]);
         }
-        check("sec: made-up announcements are greeted at most LINK_GREETED "
-              "times in LINK_GREET_AGAIN",
-              greeted == LINK_GREETED);
+        check("sec: one source cannot spend the whole global greeting ring",
+              greeted == LINK_GREET_SOURCE &&
+                  LINK_GREET_SOURCE < LINK_GREETED);
+        {
+                p8 second_source[16];
+                positive before = entropy_draws;
+
+                memory_copy(second_source, wls_loopback, 16);
+                second_source[15] = 2;
+                for (positive at = 0;
+                     at < LINK_GREETED - LINK_GREET_SOURCE; at++)
+                {
+                        p8 instance[10], host[6];
+
+                        wls_seeded(instance, 10, (p8)(at + 90));
+                        wls_seeded(host, 6, (p8)(at + 90));
+                        length = waterlink_mdns_announce(
+                            packet, sizeof packet, instance, host,
+                            (p16)(30000 + at), 0, 4500, 0, null, 0);
+                        link_nearby_heard(packet, length, second_source,
+                                          WATERLINK_MDNS_PORT, 0,
+                                          3000000 + at);
+                }
+                check("sec: the source ceiling leaves the other half for another address",
+                      entropy_draws - before ==
+                          LINK_GREETED - LINK_GREET_SOURCE);
+        }
 
         //      A place that refuses the greeting (port zero, from any
         //      address) is nowhere to greet: no curve work is spent on it and
@@ -73452,6 +74075,11 @@ static fn mdns_amplification(void)
         link_nearby.interface_address[0] = 0x0a000001;
         link_nearby.interface_address[1] = HOST_LOOPBACK;
         length = waterlink_mdns_query(packet, sizeof packet);
+        link_nearby_heard(packet, length, loopback4, 0, HOST_LOOPBACK,
+                          2999999);
+        check("sec: a forged source port the kernel cannot answer does not "
+              "spend the honest asker's reply budget",
+              link_nearby.last_reply != 2999999);
         for (positive at = 0; at < 8; at++)
                 link_nearby_heard(packet, length, loopback4,
                                   network_order_16(where.port), HOST_LOOPBACK,
@@ -73473,6 +74101,61 @@ static fn mdns_amplification(void)
               "the question, not the first interface", right_address);
         system_close(asker);
         socket_close((b32)link_nearby.socket);
+        link_nearby.socket = -1;
+
+        /* The multicast-answer side used to charge before attempting its
+           send, unlike the repaired legacy-unicast side. An invalid socket
+           is the deterministic kernel refusal: it must neither suppress a
+           later honest answer nor let a backward time sample wrap the age. */
+        link_nearby.last_answer = 7000000;
+        link_nearby_heard(packet, length, loopback4, WATERLINK_MDNS_PORT,
+                          HOST_LOOPBACK, 8000001);
+        check("sec: a refused multicast answer spends no shared answer budget",
+              link_nearby.last_answer == 7000000);
+        link_nearby_heard(packet, length, loopback4, WATERLINK_MDNS_PORT,
+                          HOST_LOOPBACK, 6000000);
+        check("sec: a backward clock sample cannot bypass the multicast answer interval",
+              link_nearby.last_answer == 7000000);
+}
+
+static fn mdns_interface_selection(void)
+{
+        netlink_search loopback = {.wanted = (string_address)"lo"};
+        bipolar netlink = netlink_open_groups(0);
+        bipolar sender = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+        p8 packet[64];
+        positive length = waterlink_mdns_query(packet, sizeof packet);
+
+        check("mDNS interface-selection sockets open", netlink >= 0 && sender >= 0);
+        if (netlink < 0 || sender < 0)
+        {
+                if (netlink >= 0)
+                        system_close((b32)netlink);
+                if (sender >= 0)
+                        socket_close((b32)sender);
+                return;
+        }
+        check("the loopback interface is found for mDNS selection",
+              netlink_link_find((b32)netlink, address_of loopback) == 0);
+        system_close((b32)netlink);
+        if (!loopback.found)
+        {
+                socket_close((b32)sender);
+                return;
+        }
+
+        link_nearby.socket = sender;
+        link_nearby.interface[0] = (b32)loopback.index;
+        check("an mDNS datagram selects and leaves on the requested interface",
+              link_nearby_send(packet, length, 0));
+
+        /* The failed option leaves the socket's previous (loopback) choice in
+           the kernel. The old helper sent anyway, leaking this interface's
+           packet over that stale choice. */
+        link_nearby.interface[0] = 0x7fffffff;
+        check("sec: a refused multicast interface cannot fall through to the stale one",
+              !link_nearby_send(packet, length, 0));
+        socket_close((b32)sender);
         link_nearby.socket = -1;
 }
 
@@ -73542,9 +74225,26 @@ static positive wls_mdns_naming(p8 address_to packet, const p16 address_to ports
 
         memory_zero(packet, 12);
         packet[2] = 0x84;
-        packet[7] = (p8)count;
+        packet[7] = (p8)(2 * count);
         for (positive one = 0; one < count; one++)
         {
+                //      The service's PTR to the instance: an SRV nobody
+                //      advertises is not discovery.
+                memory_copy(packet + at, waterlink_service_name,
+                            WATERLINK_SERVICE_BYTES);
+                at += WATERLINK_SERVICE_BYTES;
+                memory_copy(packet + at, "\x00\x0c\x80\x01\x00\x00\x11\x94", 8);
+                at += 8;
+                network_store_16(packet + at, 6 + WATERLINK_SERVICE_BYTES);
+                at += 2;
+                packet[at++] = 5;
+                memory_copy(packet + at, "wl-x", 4);
+                packet[at + 4] = (p8)('a' + one);
+                at += 5;
+                memory_copy(packet + at, waterlink_service_name,
+                            WATERLINK_SERVICE_BYTES);
+                at += WATERLINK_SERVICE_BYTES;
+
                 packet[at++] = 5;
                 memory_copy(packet + at, "wl-x", 4);
                 packet[at + 4] = (p8)('a' + one);
@@ -73589,10 +74289,10 @@ static fn mdns_names_one(void)
         check("sec: an announcement naming eight instances is one greeting, "
               "to the first",
               entropy_draws - before == 1 &&
-                      link_greeted_lately(wls_office.mark, wls_loopback, 41000,
-                                          6000001) &&
-                      !link_greeted_lately(wls_office.mark, wls_loopback, 41001,
-                                           6000001));
+                      link_greeted_recent(wls_loopback, wls_office.mark, 41000,
+                                          true, 6000001) &&
+                      !link_greeted_recent(wls_loopback, wls_office.mark, 41001,
+                                           true, 6000001));
 
         wls_group();
         before = entropy_draws;
@@ -73611,10 +74311,23 @@ static fn mdns_names_one(void)
         check("sec: the first instance with a port is the one greeted, past "
               "those without",
               entropy_draws - before == 1 &&
-                      link_greeted_lately(wls_office.mark, wls_loopback, 41100,
-                                          6200001) &&
-                      !link_greeted_lately(wls_office.mark, wls_loopback, 41101,
-                                           6200001));
+                      link_greeted_recent(wls_loopback, wls_office.mark, 41100,
+                                          true, 6200001) &&
+                      !link_greeted_recent(wls_loopback, wls_office.mark, 41101,
+                                           true, 6200001));
+
+        //      Only mDNS is greeted: the same announcement from a source port
+        //      other than 5353 draws no curve work (RFC 6762 section 6).
+        wls_group();
+        before = entropy_draws;
+        length = wls_mdns_naming(packet, many, 1);
+        link_nearby_heard(packet, length, wls_loopback, 40353, 0, 6300000);
+        check("sec: an announcement from a port other than 5353 is not greeted",
+              entropy_draws == before);
+        link_nearby_heard(packet, length, wls_loopback, WATERLINK_MDNS_PORT, 0,
+                          6300001);
+        check("and the same announcement from 5353 is",
+              entropy_draws - before == 1);
 }
 
 //      A group the greeted machine has, in memory and as the file: one that
@@ -74206,6 +74919,91 @@ static fn wifi_source_checks(void)
         check("one the kernel gave no address for is not", !wifi_eapol_from(address_of link, address_of from, 4));
 }
 
+static fn wifi_air_capacity(void)
+{
+        radio_air air;
+        radio_heard one;
+        bool real = false;
+        bool weak = false;
+        bool joined = false;
+
+        memory_zero(address_of air, sizeof air);
+        for (positive at = 0; at < RADIO_AIR_MOST; at++)
+        {
+                memory_zero(address_of one, sizeof one);
+                one.ssid[0] = 'x';
+                one.ssid[1] = (p8)(at + 1);
+                one.ssid_length = 2;
+                one.mbm = -9000 + (b32)at;
+                radio_air_keep(address_of air, address_of one);
+        }
+        memory_zero(address_of one, sizeof one);
+        memory_copy(one.ssid, "real", 4);
+        one.ssid_length = 4;
+        one.mbm = -3000;
+        radio_air_keep(address_of air, address_of one);
+        memory_zero(address_of one, sizeof one);
+        memory_copy(one.ssid, "weak", 4);
+        one.ssid_length = 4;
+        one.mbm = -10000;
+        radio_air_keep(address_of air, address_of one);
+        memory_zero(address_of one, sizeof one);
+        memory_copy(one.ssid, "joined", 6);
+        one.ssid_length = 6;
+        one.mbm = -11000;
+        one.joined = true;
+        radio_air_keep(address_of air, address_of one);
+        for (positive at = 0; at < air.count; at++)
+        {
+                real |= air.heard[at].ssid_length == 4 &&
+                        !memory_compare(air.heard[at].ssid, "real", 4);
+                weak |= air.heard[at].ssid_length == 4 &&
+                        !memory_compare(air.heard[at].ssid, "weak", 4);
+                joined |= air.heard[at].ssid_length == 6 &&
+                          !memory_compare(air.heard[at].ssid, "joined", 6);
+        }
+        check("sec: weak forged SSIDs cannot make a full scan hide a stronger network",
+              air.count == RADIO_AIR_MOST && real && !weak);
+        check("sec: a joined network survives the bounded scan even when weakest",
+              joined);
+
+        /* The joined bit and the metadata must come from the same BSSID. A
+           louder twin by the same name used to lend its OPEN classification,
+           frequency and address to the weaker associated row. */
+        memory_zero(address_of air, sizeof air);
+        memory_zero(address_of one, sizeof one);
+        memory_copy(one.ssid, "same", 4);
+        one.ssid_length = 4;
+        one.mbm = -2000;
+        one.security = RADIO_OPEN;
+        one.frequency = 2412;
+        memory_copy(one.bssid, "\x02\x00\x00\x00\x00\x01", 6);
+        radio_air_keep(address_of air, address_of one);
+        one.mbm = -7000;
+        one.security = RADIO_WPA2;
+        one.frequency = 5180;
+        one.joined = true;
+        memory_copy(one.bssid, "\x02\x00\x00\x00\x00\x02", 6);
+        radio_air_keep(address_of air, address_of one);
+        check("sec: association and security metadata stay on the same BSSID",
+              air.count == 1 && air.heard[0].joined &&
+                  air.heard[0].security == RADIO_WPA2 &&
+                  air.heard[0].frequency == 5180 &&
+                  !memory_compare(air.heard[0].bssid,
+                                  "\x02\x00\x00\x00\x00\x02", 6));
+        one.mbm = -1000;
+        one.security = RADIO_OPEN;
+        one.frequency = 2462;
+        one.joined = false;
+        memory_copy(one.bssid, "\x02\x00\x00\x00\x00\x03", 6);
+        radio_air_keep(address_of air, address_of one);
+        check("sec: a louder unassociated twin cannot rewrite the joined row",
+              air.heard[0].joined && air.heard[0].security == RADIO_WPA2 &&
+                  air.heard[0].frequency == 5180 &&
+                  !memory_compare(air.heard[0].bssid,
+                                  "\x02\x00\x00\x00\x00\x02", 6));
+}
+
 static fn wpa_key(void)
 {
         p8 pmk[32];
@@ -74648,6 +75446,309 @@ static fn indexes_and_commands(void)
         }
 }
 
+/*
+        Keys over time, generated: a session rekeyed again and again, its
+        datagrams sealed under the keys it has now, the ones a confirmed
+        rekey replaced, ones waiting to be confirmed, ones a later rekey
+        overwrote before they were used, and ones from before the peer was
+        forgotten; counters fresh, replayed, at both edges of the window,
+        far ahead, at the message limit and one under it; bodies new and
+        ones already delivered under another key; a bit flipped and then
+        the same datagram whole; time moving a little, past the grace an
+        old key has and past the age no key outlives. A model of what
+        link_carried promises says which are taken, and whatever it says,
+        no frame is delivered twice and nothing is taken under a key that
+        is gone.
+*/
+#define EPOCHS_MOST 48
+#define EPOCH_TAKEN 1024
+
+static positive epoch_delivered[32768];
+static p64 epoch_state;
+
+static p64 epoch_next(void)
+{
+        XORSHIFT64(epoch_state);
+        return epoch_state;
+}
+static positive epoch_twice;
+
+static bool epoch_sink(address_any context, struct waterlink_frame address_to head,
+                       p8 address_to payload)
+{
+        p32 id;
+
+        (void)context;
+        if (head->length != 4)
+                return true;
+        memory_copy(address_of id, payload, 4);
+        if (id < 32768 && epoch_delivered[id]++)
+                epoch_twice++;
+        return true;
+}
+
+static fn epochs_generated(void)
+{
+        struct epoch {
+                p8 raw[16];
+                crypto_aesgcm_key key;
+                p32 index;
+                p64 made;
+                p64 sent;
+                p64 top;
+                positive taken;
+                p64 seen[EPOCH_TAKEN];
+        };
+        static struct epoch epoch[EPOCHS_MOST];
+        static p8 body[64][WATERLINK_PAYLOAD];
+        static positive body_used[64];
+        struct link_session address_to s = link_self.session;
+        struct waterlink_link address_to tx;
+        p8 from[16];
+        p8 datagram[WATERLINK_DATAGRAM];
+        positive asked = 0, wrong = 0, taken = 0, after_forget = 0,
+                 dead_taken = 0, edges = 0, limits = 0, graced = 0,
+                 bodies = 0, malformed = 0, promoted = 0, misplaced = 0,
+                 roamed = 0;
+        p8 last[16];
+        p16 last_port = 0;
+        p64 limit = WATERLINK_REKEY_MESSAGES + (1ull << 20);
+        bipolar mapped = system_call_6(syscall(mmap), 0,
+                                       sizeof(struct waterlink_link), 3, 0x22,
+                                       (positive)(bipolar)-1, 0);
+
+        if (mapped < 0 && mapped > -4096)
+                return;
+        tx = (struct waterlink_link address_to)mapped;
+        memory_copy(from, wls_loopback, sizeof from);
+        from[15] = 3;
+        memory_zero(epoch_delivered, sizeof epoch_delivered);
+        epoch_twice = 0;
+
+        for (positive seed = 1; seed <= 24; seed++)
+        {
+                bipolar slot[3] = {-1, -1, -1}; // now, next, before
+                positive epochs = 0;
+                p64 base;
+                p64 at = 0;
+                bool forgotten = false;
+                bool again = false;
+                p64 again_counter = 0;
+                positive again_epoch = 0;
+                positive again_body = 0;
+
+                epoch_state = 0x7a3c9e1bull * seed;
+                if (!link_session_open(s))
+                        return;
+                wls_seeded(s->peer, 32, (p8)seed);
+                wls_peers_with(s->peer, WATERLINK_MAY_RUN);
+                last_port = 0;
+                waterlink_link_reset(tx);
+                base = link_now();
+                bodies = 0;
+
+                for (positive op = 0; op < 900; op++)
+                {
+                        p64 roll = epoch_next() % 100;
+
+                        //      A rekey: the first keys are the session's,
+                        //      every later one waits in next.
+                        if (!again && (op == 0 || (roll < 6 && epochs < EPOCHS_MOST && !forgotten)))
+                        {
+                                struct epoch address_to e = epoch + epochs;
+                                struct link_keys address_to keys =
+                                        s->now.live ? address_of s->next : address_of s->now;
+
+                                memory_zero(e, sizeof(address_to e));
+                                wls_seeded(e->raw, 16, (p8)(seed * 64 + epochs));
+                                crypto_aesgcm_prepare(address_of e->key, e->raw);
+                                e->index = (p32)(0x10000 * seed + epochs + 1);
+                                e->made = base + at;
+                                link_keys_install(keys, e->raw, e->raw, e->index, 7);
+                                keys->made = e->made;
+                                slot[keys == address_of s->now ? 0 : 1] = (bipolar)epochs;
+                                epochs++;
+                                continue;
+                        }
+                        if (!again && roll < 14)
+                        {
+                                p64 jump = epoch_next() % 4;
+
+                                at += jump == 0 ? LINK_GRACE + 1000
+                                    : jump == 1 ? (p64)WATERLINK_REJECT_SECONDS * 1000000 / 3
+                                                : 1 + epoch_next() % 2000000;
+                                continue;
+                        }
+                        if (!again && roll < 15 && op > 600 && !forgotten)
+                        {
+                                p8 other[32];
+
+                                memory_fill(other, 0x77, sizeof other);
+                                wls_peers_with(other, WATERLINK_MAY_RUN);
+                                link_self.granted = 0;
+                                link_sessions_granted(base + at);
+                                forgotten = true;
+                                continue;
+                        }
+
+                        //      A datagram.
+                        {
+                                positive which;
+                                positive b;
+                                p64 counter;
+                                bool flip = false;
+                                struct epoch address_to e;
+                                struct waterlink_datagram head = {WATERLINK_KIND_CARRY, 0, 0};
+                                positive length;
+                                bipolar in = -1;
+                                bool want = false;
+                                bool got;
+                                bool duplicate;
+
+                                if (again)
+                                {
+                                        which = again_epoch;
+                                        counter = again_counter;
+                                        b = again_body;
+                                        again = false;
+                                }
+                                else
+                                {
+                                        p64 pick = epoch_next() % 10;
+                                        p64 how = epoch_next() % 12;
+
+                                        which = pick < 5 && slot[0] >= 0 ? (positive)slot[0]
+                                              : pick < 7 && slot[1] >= 0 ? (positive)slot[1]
+                                              : pick < 9 && slot[2] >= 0 ? (positive)slot[2]
+                                                                         : (positive)(epoch_next() % epochs);
+                                        e = epoch + which;
+                                        counter = how < 5 ? e->sent++
+                                                : how == 5 && e->taken ? e->seen[epoch_next() % e->taken]
+                                                : how == 6 && e->top >= WATERLINK_REPLAY_WINDOW
+                                                        ? e->top - WATERLINK_REPLAY_WINDOW
+                                                : how == 7 && e->top + 1 >= WATERLINK_REPLAY_WINDOW
+                                                        ? e->top + 1 - WATERLINK_REPLAY_WINDOW
+                                                : how == 8 ? (e->sent += 1 + epoch_next() % 3000)
+                                                : how == 9 ? limit + 1 - epoch_next() % 3
+                                                : how == 10 ? (e->top + 1 + epoch_next() % 64)
+                                                            : 0;
+                                        edges += how == 6 || how == 7;
+                                        limits += how == 9;
+                                        duplicate = bodies && epoch_next() % 4 == 0;
+                                        if (duplicate)
+                                                b = (positive)(epoch_next() % (bodies < 64 ? bodies : 64));
+                                        else
+                                        {
+                                                p32 id = (p32)(seed * 1000 + bodies);
+                                                bool alone = false;
+
+                                                b = bodies % 64;
+                                                (void)waterlink_post(tx, (p8)(1 + bodies % 8), WATERLINK_FRAME_DURABLE,
+                                                                     address_of id, 4, base + at);
+                                                body_used[b] = waterlink_fill(tx, body[b], base + at,
+                                                                              address_of alone);
+                                                bodies++;
+                                        }
+                                        flip = epoch_next() % 8 == 0;
+                                        if (flip)
+                                        {
+                                                again = true;
+                                                again_epoch = which;
+                                                again_counter = counter;
+                                                again_body = b;
+                                        }
+                                }
+                                e = epoch + which;
+                                head.receiver = e->index;
+                                head.counter = counter;
+                                memory_copy(datagram, address_of head, sizeof head);
+                                memory_copy(datagram + 16, body[b], body_used[b]);
+                                length = waterlink_seal(address_of e->key, datagram, body_used[b]);
+                                if (flip)
+                                {
+                                        datagram[16 + epoch_next() % (length - 16)] ^=
+                                                (p8)(1u << epoch_next() % 8);
+                                        malformed++;
+                                }
+
+                                //      The model.
+                                for (positive k = 0; k < 3; k++)
+                                        if (slot[k] == (bipolar)which)
+                                                in = (bipolar)k;
+                                if (in >= 0 && !forgotten && !flip &&
+                                    base + at - e->made < (p64)WATERLINK_REJECT_SECONDS * 1000000 &&
+                                    counter < limit &&
+                                    !(in == 2 && base + at - epoch[slot[0]].made > LINK_GRACE))
+                                {
+                                        want = true;
+                                        if (counter <= e->top && (e->taken || counter))
+                                        {
+                                                want = e->top - counter < WATERLINK_REPLAY_WINDOW;
+                                                for (positive t = 0; want && t < e->taken; t++)
+                                                        want = e->seen[t] != counter;
+                                        }
+                                        graced += in == 2;
+                                }
+
+                                {
+                                        p8 place = (p8)(epoch_next() % 3);
+                                        p16 port = (p16)(4000 + place);
+
+                                        from[15] = (p8)(3 + place);
+                                        got = link_carried(datagram, length, from, port,
+                                                           base + at, epoch_sink);
+                                        if (got)
+                                        {
+                                                roamed += last_port && last_port != port;
+                                                memory_copy(last, from, 16);
+                                                last_port = port;
+                                        }
+                                        misplaced += last_port &&
+                                                     (memory_compare(s->address, last, 16) ||
+                                                      s->port != last_port);
+                                }
+                                asked++;
+                                wrong += got != want;
+                                taken += got;
+                                after_forget += got && forgotten;
+                                dead_taken += got && in < 0;
+                                if (want && e->taken < EPOCH_TAKEN)
+                                {
+                                        if (counter > e->top || !e->taken)
+                                                e->top = counter > e->top ? counter : e->top;
+                                        e->seen[e->taken++] = counter;
+                                }
+                                if (want && in == 1)
+                                {
+                                        slot[2] = slot[0];
+                                        slot[0] = slot[1];
+                                        slot[1] = -1;
+                                        promoted++;
+                                }
+                        }
+                }
+                link_session_close(s);
+        }
+        system_call_2(syscall(munmap), (positive)tx, sizeof(struct waterlink_link));
+
+        string_format(log, "  epochs: %p datagrams, %p taken, %p promotions, %p under "
+                           "old keys in grace, %p window edges, %p at the limit, %p flipped, "
+                           "%p moves\n",
+                      asked, taken, promoted, graced, edges, limits, malformed, roamed);
+        check("sec: generated rekeys, replays, window edges, limits, flips and "
+              "a forgotten peer: link_carried takes exactly what the model of "
+              "its keys and windows takes", wrong == 0);
+        check("sec: no frame is delivered twice across rekeys and duplicates",
+              epoch_twice == 0);
+        check("sec: nothing is taken under a key that was replaced, overwritten "
+              "or forgotten", after_forget == 0 && dead_taken == 0);
+        check("sec: a session is where its last datagram taken came from, and "
+              "no refused one moves it", misplaced == 0 && roamed > 100);
+        check("and the generator reached every corner it means to",
+              promoted > 24 && graced > 0 && edges > 0 && limits > 0 &&
+                  malformed > 0 && taken > 1000);
+}
+
 b32 main(void)
 {
         bipolar listener;
@@ -74686,6 +75787,7 @@ b32 main(void)
         client_cookie(listener, port);
         initiator_answer();
         carried_is_atomic();
+        epochs_generated();
         seen_once_a_second();
         segment_runs(listener, port);
         in_order_sends(listener, port);
@@ -74695,6 +75797,7 @@ b32 main(void)
         greetings(listener, port);
         greeting_freshness(listener, port);
         mdns_amplification();
+        mdns_interface_selection();
         mdns_names_one();
         mdns_hop_limit();
         pairing_codes(listener, port);
@@ -74705,6 +75808,7 @@ b32 main(void)
         labels();
         wpa_key();
         wifi_source_checks();
+        wifi_air_capacity();
         key_text();
         places();
         ipv4_only();
@@ -76249,6 +77353,77 @@ static fn downloads(void)
         system_remove_at(AT_FDCWD, sign, 0);
 }
 
+/*
+        A mirror that never stops sending, against the fetch child: a "wget"
+        that is a script writing as many bytes as its URL says, run the way
+        bowl_setup_fetch runs the real one. Every length up to the ceiling
+        is taken whole, every length past it, by one byte or by a lot, is a
+        refused download that never grew the file past the ceiling, and
+        every row's ceiling holds the download it measured. The writer
+        keeps its own status: SIGXFSZ is ignored, so the write past the
+        ceiling fails with EFBIG and the writer says so and exits 1 rather
+        than dying of the signal (153 from sh); an ignored signal stays
+        ignored across exec, under qemu-user as natively.
+*/
+static fn download_ceiling(void)
+{
+        static const p8 writer[] =
+            "#!/bin/sh\nhead -c \"$4\" /dev/zero > \"$3\"\nstatus=$?\n"
+            "echo $status > \"$0.status\"\nexit $status\n";
+        string_address fake = BOWL_ROOT_DIRECTORY "/fake-wget";
+        string_address said = BOWL_ROOT_DIRECTORY "/fake-wget.status";
+        string_address part = BOWL_ROOT_DIRECTORY "/fetched.part";
+        bool named = true;
+        static const struct { string_address bytes; p64 ceiling; bool whole; } rows[] = {
+            {"0", 4096, true},       {"1", 4096, true},     {"4095", 4096, true},
+            {"4096", 4096, true},    {"4097", 4096, false}, {"8192", 4096, false},
+            {"1048576", 4096, false}, {"65536", 65536, true}, {"65537", 65536, false},
+            {"200000", 65536, false},
+        };
+        bool held = true;
+        bool whole = true;
+
+        system_make_directory_at(AT_FDCWD, BOWL_ROOT_DIRECTORY, 0755);
+        if (!put_file(fake, writer, sizeof(writer) - 1) ||
+            system_change_mode_at(AT_FDCWD, fake, 0755) < 0)
+        {
+                check("The fake wget for the ceiling rows was made", false);
+                return;
+        }
+        for (positive at = 0; at < array_count(rows); at++)
+        {
+                file_facts facts;
+                b32 failed = bowl_setup_fetch(fake, part, rows[at].bytes,
+                                              rows[at].ceiling);
+                bool there = file_look_code(AT_FDCWD, part, 0, address_of facts) >= 0;
+                p64 size = there ? facts.size : 0;
+
+                if (rows[at].whole)
+                        whole &= !failed && there &&
+                                 size == (p64)string_to_positive(rows[at].bytes);
+                else
+                {
+                        p8 status[8] = {0};
+
+                        held &= failed && size <= rows[at].ceiling;
+                        named &= file_read_once_at(AT_FDCWD, said, status,
+                                                   sizeof(status) - 1) > 0 &&
+                                 string_equals((string_address)status, "1\n");
+                }
+        }
+        check("A download no longer than its ceiling is taken whole", whole);
+        check("A download past its ceiling is refused and stops at the ceiling", held);
+        check("A write past the ceiling fails with EFBIG and is not killed by SIGXFSZ",
+              named);
+        for (positive at = 0; at < array_count(bowl_distros); at++)
+                check("A row's ceiling holds the download it measured",
+                      bowl_download_ceiling(bowl_distros + at) >
+                          bowl_distros[at].archive_bytes);
+        system_remove_at(AT_FDCWD, part, 0);
+        system_remove_at(AT_FDCWD, fake, 0);
+        system_remove_at(AT_FDCWD, said, 0);
+}
+
 b32 main(void)
 {
         names();
@@ -76262,6 +77437,7 @@ b32 main(void)
         distros();
         profiles();
         downloads();
+        download_ceiling();
         json();
         oci();
         nix();
@@ -82011,6 +83187,38 @@ static bool storage_test_write_text(string_address path, const void address_to t
         return written;
 }
 
+/* A namespace row's child that could not have its namespaces says why: 2
+   when the kernel will not give them, STORAGE_TEST_THREADED when unshare
+   answered EINVAL for a new user namespace, which the kernel gives only to a
+   process of one thread. qemu-user runs every program beside threads of its
+   own (and starts them again in a forked child), so the arm64 and riscv64
+   runs cannot ask these rows; the native run on the box does. */
+#define STORAGE_TEST_THREADED 7
+
+static bool storage_test_not_run(b32 status, string_address what,
+                                 string_address otherwise)
+{
+        if (status != 2 && status != STORAGE_TEST_THREADED)
+                return false;
+        string_format(log, "storage_io: %s NOT RUN -- %s\n", what,
+                      status == 2 ? otherwise
+                                  : (string_address) "a multithreaded runner "
+                                                     "(qemu-user) gets no new "
+                                                     "user namespace");
+        log_flush();
+        return true;
+}
+
+static positive storage_test_boottime(void)
+{
+        timespec stamp = {0, 0};
+
+        return clock_gettime(NET_CLOCK_BOOTTIME, address_of stamp) < 0
+                   ? 0
+                   : (positive)stamp.tv_sec * NETWORK_NANOSECONDS +
+                         (positive)stamp.tv_nsec;
+}
+
 /* The lease clock's first second.  A boot takes its lease there, and zero is
    what net_seconds says for a clock that failed -- which expires every lease
    at once.  A time namespace whose monotonic clock starts about now puts a
@@ -82022,19 +83230,22 @@ static fn storage_test_lease_clock_origin(void)
 
         if (child == 0)
         {
-                p8 offsets[48] = "monotonic -";
-                positive at = 11;
-                positive now = clock_monotonic_nanoseconds();
+                p8 offsets[48] = "boottime -";
+                positive at = 10;
+                positive now = storage_test_boottime();
                 timespec pause = {0, 250000000};
                 b32 inner = 0;
 
                 if (now % NETWORK_NANOSECONDS > 700000000)
                 {
                         system_call_2(syscall(nanosleep), (positive)address_of pause, 0);
-                        now = clock_monotonic_nanoseconds();
+                        now = storage_test_boottime();
                 }
-                if (system_call_1(syscall(unshare), CLONE_NEWUSER | CLONE_NEWTIME) < 0)
-                        system_call_1(syscall(exit_group), 2);
+                bipolar unshared = system_call_1(syscall(unshare),
+                                                 CLONE_NEWUSER | CLONE_NEWTIME);
+                if (unshared < 0)
+                        system_call_1(syscall(exit_group),
+                                      unshared == -EINVAL ? STORAGE_TEST_THREADED : 2);
                 at += positive_into(offsets + at, now / NETWORK_NANOSECONDS);
                 memory_copy(offsets + at, " 0\n", 3);
                 at += 3;
@@ -82050,11 +83261,163 @@ static fn storage_test_lease_clock_origin(void)
         if (child > 0)
                 system_call_4(syscall(wait4), (positive)child,
                               (positive)address_of status, 0, 0);
-        if (child > 0 && (status & 0x7f) == 0 && ((status >> 8) & 0xff) == 2)
-                log_direct(str("storage_io: lease clock origin NOT RUN -- no time namespace\n"));
-        else
+        if (!(child > 0 && (status & 0x7f) == 0 &&
+              storage_test_not_run((status >> 8) & 0xff, "lease clock origin",
+                                   "no time namespace")))
                 check("a lease taken in the clock's first second is not a failed clock",
                       child > 0 && status == 0);
+}
+
+/* A lease held across a suspend. A time namespace moves the clocks a child
+   reads: boottime two hours on is a machine that slept two hours (the
+   monotonic clock does not count a suspend, CLOCK_BOOTTIME does), and its
+   hour's lease has run out; boottime a hundred seconds on is a lease with
+   1,700 seconds to its renewal; and the monotonic clock two hours on with
+   boottime where it was is not a suspend at all. Exit bits over 16, so 2
+   and the threaded runner's 7 stay NOT RUN. */
+static fn storage_test_lease_asleep(void)
+{
+        static const struct
+        {
+                string_address offsets;
+                bool expired;
+                positive due;
+        } cases[] = {{"boottime 7200 0\n", true, 1},
+                     {"boottime 100 0\n", false, 1700},
+                     {"monotonic 7200 0\n", false, 1800}};
+        b32 wrong = 16;
+        b32 status = 0;
+
+        for (positive at = 0; at < array_count(cases); at++)
+        {
+                bipolar child = system_fork();
+
+                if (child == 0)
+                {
+                        net_holding held = {.index = 1};
+                        b32 inner = 0;
+
+                        held.lease.seconds = 3600;
+                        held.lease.renewal = 1800;
+                        held.lease.rebinding = 3150;
+                        held.retry = 1800;
+                        held.taken = net_seconds();
+                        bipolar unshared = system_call_1(
+                            syscall(unshare), CLONE_NEWUSER | CLONE_NEWTIME);
+                        if (unshared < 0)
+                                system_call_1(syscall(exit_group),
+                                              unshared == -EINVAL
+                                                  ? STORAGE_TEST_THREADED
+                                                  : 2);
+                        if (!storage_test_write_text(
+                                "/proc/self/timens_offsets", cases[at].offsets,
+                                string_length(cases[at].offsets)))
+                                system_call_1(syscall(exit_group), 2);
+                        bipolar grandchild = system_fork();
+                        if (grandchild == 0)
+                        {
+                                positive now = net_seconds();
+                                positive due = net_lease_due_in(address_of held,
+                                                                now);
+
+                                //      A second of slack for the clock
+                                //      moving between the two readings.
+                                system_call_1(
+                                    syscall(exit_group),
+                                    net_lease_expired_at(address_of held, now) ==
+                                                cases[at].expired &&
+                                            due <= cases[at].due &&
+                                            due + 1 >= cases[at].due
+                                        ? 0
+                                        : 1);
+                        }
+                        system_call_4(syscall(wait4), (positive)grandchild,
+                                      (positive)address_of inner, 0, 0);
+                        system_call_1(syscall(exit_group), (inner >> 8) & 0xff);
+                }
+                if (child > 0)
+                        system_call_4(syscall(wait4), (positive)child,
+                                      (positive)address_of status, 0, 0);
+                status = child > 0 && !(status & 0x7f) ? (status >> 8) & 0xff : 1;
+                if (status == 2 || status == STORAGE_TEST_THREADED)
+                        break;
+                if (status)
+                        wrong |= 1 << at;
+        }
+        if (!storage_test_not_run(status == 2 || status == STORAGE_TEST_THREADED
+                                      ? status
+                                      : wrong,
+                                  "lease across a suspend", "no time namespace"))
+        {
+                check("a lease runs out while the machine sleeps",
+                      !(wrong & 1));
+                check("time asleep short of the renewal moves it nearer, no more",
+                      !(wrong & 2));
+                check("a monotonic clock that jumps is not time asleep",
+                      !(wrong & 4));
+        }
+}
+
+static fn storage_test_arp_claims(void)
+{
+        p8 packet[NET_ARP_PACKET] = {0};
+        p8 mine[6] = {2, 0, 0, 0, 0, 1};
+        p8 other[6] = {2, 0, 0, 0, 0, 2};
+        p32 offered = 0xc0a80164;
+
+        network_store_16(packet, 1);
+        network_store_16(packet + 2, ETH_P_IP);
+        packet[4] = 6;
+        packet[5] = 4;
+        network_store_16(packet + 6, 2);
+        memory_copy(packet + 8, other, 6);
+        network_store_32(packet + 14, offered);
+        check("another station's ARP reply conflicts with a DHCP offer",
+              net_arp_claims(packet, sizeof packet, mine, offered));
+        network_store_16(packet + 6, 1);
+        check("another station's ARP request also defends its address",
+              net_arp_claims(packet, sizeof packet, mine, offered));
+        network_store_32(packet + 14, 0);
+        network_store_32(packet + 24, offered);
+        check("a simultaneous ARP probe conflicts with a DHCP offer",
+              net_arp_claims(packet, sizeof packet, mine, offered));
+        memory_copy(packet + 8, mine, 6);
+        check("our own ARP packet is not an address conflict",
+              !net_arp_claims(packet, sizeof packet, mine, offered));
+        memory_copy(packet + 8, other, 6);
+        network_store_32(packet + 14, offered + 1);
+        network_store_32(packet + 24, 0);
+        check("a claim for another address is irrelevant",
+              !net_arp_claims(packet, sizeof packet, mine, offered));
+        check("a truncated ARP claim is refused",
+              !net_arp_claims(packet, NET_ARP_PACKET - 1, mine, offered));
+
+        //      Every field that says what the packet is, wrong one at a
+        //      time, is not a claim; the frame's padding is not a field.
+        {
+                p8 padded[46] = {0};
+                static const struct { p8 at, value; } wrong[] = {
+                    {1, 6}, {3, 0x06}, {4, 8}, {5, 16}, {7, 3}, {7, 0}};
+
+                memory_copy(padded, packet, NET_ARP_PACKET);
+                network_store_32(padded + 14, offered);
+                check("an ARP claim padded to the frame minimum is a claim",
+                      net_arp_claims(padded, sizeof padded, mine, offered));
+                for (positive at = 0; at < array_count(wrong); at++)
+                {
+                        p8 copy[46];
+
+                        memory_copy(copy, padded, sizeof copy);
+                        copy[wrong[at].at] = wrong[at].value;
+                        check("an ARP packet of another medium, protocol, length or operation is no claim",
+                              !net_arp_claims(copy, sizeof copy, mine, offered));
+                }
+                bool refused = true;
+
+                for (positive length = 0; length < NET_ARP_PACKET; length++)
+                        refused &= !net_arp_claims(padded, length, mine, offered);
+                check("an ARP claim cut at any byte is refused", refused);
+        }
 }
 
 /* A renewal with nothing to renew answers DHCP_NO_OFFER from inside the
@@ -82069,7 +83432,7 @@ static fn storage_test_dhcp_apart(void)
         if (before >= 0)
                 system_close(before);
         bipolar status = net_dhcp_apart("moonwater-no-interface", hardware,
-                                        address_of lease, true, false, 1);
+                                        address_of lease, NET_DHCP_RENEW, 1);
         bipolar after = system_open_at(AT_FDCWD, "/", FILE_READ | O_CLOEXEC);
 
         if (after >= 0)
@@ -82078,6 +83441,57 @@ static fn storage_test_dhcp_apart(void)
               status == DHCP_NO_OFFER && before >= 0 && after == before &&
                   system_call_4(syscall(wait4), (positive)-1, 0, 1, 0) ==
                       -ECHILD);
+
+        //      A DECLINE goes through the same child: nothing to send from
+        //      on a link that is not there, and nothing to name without a
+        //      server, and neither leaves a child or a descriptor.
+        lease.address = 0x0a090909;
+        lease.server = 0x0a090901;
+        status = net_dhcp_apart("moonwater-no-interface", hardware,
+                                address_of lease, NET_DHCP_DECLINE, 0);
+        lease.server = 0;
+        bipolar unnamed = net_dhcp_apart("lo", hardware, address_of lease,
+                                         NET_DHCP_DECLINE, 0);
+        after = system_open_at(AT_FDCWD, "/", FILE_READ | O_CLOEXEC);
+        if (after >= 0)
+                system_close(after);
+        check("a DECLINE apart without a link or a server sends nothing and leaves nothing",
+              status == DHCP_NO_SOCKET && unnamed == DHCP_NO_SOCKET &&
+                  after == before &&
+                  system_call_4(syscall(wait4), (positive)-1, 0, 1, 0) ==
+                      -ECHILD);
+}
+
+/* The wait after a DECLINE is the declined link's, at least ten seconds, and
+   the slots it is kept in never lose a link that is still waiting to one
+   that is not. */
+static fn storage_test_decline_hold(void)
+{
+        memory_zero(net_declined, sizeof net_declined);
+        check("no link waits before anything was declined",
+              !net_decline_waiting(3) && !net_decline_left(0));
+        net_decline_hold(3);
+        positive left = net_decline_left(3);
+        check("a declined link waits ten seconds before it asks again",
+              net_decline_waiting(3) && left > 9900 &&
+                  left <= NET_DECLINE_HOLDOFF_SECONDS * 1000 + 1);
+        check("and only that link waits", !net_decline_waiting(4) &&
+                                              !net_decline_waiting(0));
+        net_decline_hold(3);
+        positive held = 0;
+        for (positive at = 0; at < NET_DECLINE_LINKS; at++)
+                held += net_declined[at].index == 3;
+        check("declining the same link again keeps one wait for it", held == 1);
+        for (p32 index = 10; index < 10 + NET_DECLINE_LINKS + 2; index++)
+                net_decline_hold(index);
+        check("more declined links than slots keep the latest ones waiting",
+              net_decline_waiting(10 + NET_DECLINE_LINKS + 1) &&
+                  net_decline_waiting(10 + NET_DECLINE_LINKS));
+        net_declined[0].until.began -= 11 * NETWORK_NANOSECONDS;
+        p32 expired = net_declined[0].index;
+        check("a wait that has run out is over and frees its slot",
+              !net_decline_waiting(expired) && !net_declined[0].index);
+        memory_zero(net_declined, sizeof net_declined);
 }
 
 /* A user, network and mount namespace of the caller's own, which must be
@@ -82095,9 +83509,12 @@ static bipolar storage_test_net_namespace(void)
         positive group = 2 + positive_into(
             groups + 2, (positive)system_call_1(syscall(getgid), 0));
 
-        if (system_call_1(syscall(unshare), CLONE_NEWUSER | CLONE_NEWNET |
-                                                CLONE_NEWNS) < 0)
-                system_call_1(syscall(exit_group), 2);
+        bipolar unshared = system_call_1(syscall(unshare), CLONE_NEWUSER |
+                                                               CLONE_NEWNET |
+                                                               CLONE_NEWNS);
+        if (unshared < 0)
+                system_call_1(syscall(exit_group),
+                              unshared == -EINVAL ? STORAGE_TEST_THREADED : 2);
         memory_copy(map + at, " 1\n", 4);
         memory_copy(groups + group, " 1\n", 4);
         if (!storage_test_write_text("/proc/self/uid_map", map, at + 3) ||
@@ -82154,9 +83571,8 @@ static fn storage_test_lease_over_existing(void)
                                   ? 0 : 3);
         }
         b32 status = storage_test_child_status(child);
-        if (status == 2)
-                log_direct(str("storage_io: lease over an existing address NOT RUN -- no namespaces\n"));
-        else
+        if (!storage_test_not_run(status, "lease over an existing address",
+                                 "no namespaces"))
                 check("a lease over an address already there is taken, held unowned and left",
                       status == 0);
 }
@@ -82252,9 +83668,8 @@ static fn storage_test_lease_inherited(void)
                 system_call_1(syscall(exit_group), 0);
         }
         b32 status = storage_test_child_status(child);
-        if (status == 2)
-                log_direct(str("storage_io: inherited lease NOT RUN -- no namespaces\n"));
-        else
+        if (!storage_test_not_run(status, "inherited lease",
+                                 "no namespaces"))
         {
                 check("a leased address carries the lease's lifetime",
                       status != 4 && status != 1);
@@ -82340,6 +83755,491 @@ static fn storage_test_link_news(b32 events, net_holding address_to held,
         netlink_forget(address_of message);
 }
 
+typedef struct
+{
+        p32 gateway;
+        bool found;
+        p32 flags;
+} storage_test_route_facts;
+
+static bool storage_test_route_seen(netlink_header address_to header,
+                                    address_any context)
+{
+        storage_test_route_facts address_to facts = context;
+        netlink_route address_to route =
+            netlink_message_body(header, sizeof(netlink_route));
+        positive size = 0;
+        p8 address_to gateway = netlink_find(header, sizeof(netlink_route),
+                                             RTA_GATEWAY, address_of size);
+
+        if (route && !route->destination_bits && gateway && size == 4 &&
+            memory_load_unaligned(p32, gateway) ==
+                network_order_32(facts->gateway))
+        {
+                facts->found = true;
+                facts->flags = route->flags;
+        }
+        return true;
+}
+
+/* A /32 lease and its router off the prefix, as clouds hand them out, which
+   dhcp_lease_usable takes: the default route goes in, through a router the
+   kernel is told is on the link, and goes with the release; a /24 lease's
+   router is on its prefix and is asked of the kernel as before. Exit bits
+   over 16, so 2 and the threaded runner's 7 stay NOT RUN. */
+static fn storage_test_lease_off_prefix(void)
+{
+        bipolar child = system_fork();
+
+        if (child == 0)
+        {
+                p8 hardware[6] = {2, 0, 0, 0, 0, 1};
+                bipolar handle = storage_test_net_namespace();
+                netlink_search link = {.wanted = (string_address) "wd3"};
+                dhcp_lease host = {.address = 0x0a090d0d, .mask = 0xffffffff,
+                                   .router = 0x0a090d01, .server = 0x0a090d01,
+                                   .seconds = 60, .renewal = 30,
+                                   .rebinding = 52};
+                dhcp_lease wide = {.address = 0x0a090e0e, .mask = 0xffffff00,
+                                   .router = 0x0a090e01, .server = 0x0a090e01,
+                                   .seconds = 60, .renewal = 30,
+                                   .rebinding = 52};
+                storage_test_route_facts facts = {.gateway = host.router};
+                net_holding held = {0};
+                b32 wrong = 16;
+
+                if (storage_test_dummy((b32)handle, "wd3") < 0 ||
+                    netlink_link_find((b32)handle, address_of link) < 0 ||
+                    netlink_link_up((b32)handle, link.index) < 0)
+                        system_call_1(syscall(exit_group), 2);
+                if (!dhcp_lease_usable(address_of host) ||
+                    net_apply_lease((b32)handle, link.index, "wd3", hardware,
+                                    address_of host, address_of held, false) != 0 ||
+                    !held.route_owned ||
+                    netlink_dump((b32)handle, RTM_GETROUTE, sizeof(netlink_route),
+                                 AF_INET, storage_test_route_seen,
+                                 address_of facts) < 0 ||
+                    !facts.found || !(facts.flags & NETLINK_ROUTE_ONLINK))
+                        wrong |= 1;
+                facts.found = false;
+                if (net_holding_release((b32)handle, address_of held) != 0 ||
+                    netlink_dump((b32)handle, RTM_GETROUTE, sizeof(netlink_route),
+                                 AF_INET, storage_test_route_seen,
+                                 address_of facts) < 0 ||
+                    facts.found)
+                        wrong |= 2;
+                facts.gateway = wide.router;
+                if (net_apply_lease((b32)handle, link.index, "wd3", hardware,
+                                    address_of wide, address_of held, false) != 0 ||
+                    netlink_dump((b32)handle, RTM_GETROUTE, sizeof(netlink_route),
+                                 AF_INET, storage_test_route_seen,
+                                 address_of facts) < 0 ||
+                    !facts.found || (facts.flags & NETLINK_ROUTE_ONLINK))
+                        wrong |= 4;
+                system_call_1(syscall(exit_group), wrong);
+        }
+        b32 status = storage_test_child_status(child);
+        if (!storage_test_not_run(status, "lease off its prefix",
+                                  "no namespaces or dummy links"))
+        {
+                check("a /32 lease installs its default route through a router on the link",
+                      status >= 16 && !(status & 1));
+                check("and the release takes that route away",
+                      status >= 16 && !(status & 2));
+                check("a router on the lease's prefix is asked of the kernel as before",
+                      status >= 16 && !(status & 4));
+        }
+}
+
+/*
+        Lease epochs against the kernel.
+
+        Every sequence of events from an alphabet, two deep (three with
+        -DSTORAGE_EPOCH_DEPTH=3), each in a namespace of its own on a dummy
+        link: a lease applied as the watcher applies one (a first lease, a
+        renewal that moves the router, the resolver, the address, the prefix
+        to a /32 with its router off it, a lease with no router, another
+        server's lease) beside an address put on the link by hand, each of
+        those again with the resolver file refusing
+        to be written (/etc read-only for the one apply), and the release.
+        After every event the kernel's addresses and default routes on the
+        link and /etc/resolv.conf are read back and held to what the lease
+        the watcher now holds says, and nothing else: an applied lease is
+        all of the new lease's address, route and resolver, a refused one
+        leaves every one of them as they were before it (no old route with a
+        new resolver, no new address beside the old route), and a release
+        leaves no lease's address or route and the fallback resolver. The
+        first sequence that breaks one is printed, with the event, which part
+        and the state.
+*/
+#ifndef STORAGE_EPOCH_DEPTH
+#define STORAGE_EPOCH_DEPTH 2
+#endif
+#define STORAGE_EPOCH_LEASES 7
+#define STORAGE_EPOCH_EVENTS (2 * STORAGE_EPOCH_LEASES + 1)
+#define STORAGE_EPOCH_ROOM 8
+//      An address somebody put on the link by hand, which no lease owns and
+//      every event must leave; it also keeps the link holding an address
+//      when a lease's goes, so the kernel does not sweep a route the
+//      watcher forgot.
+#define STORAGE_EPOCH_OPERATOR 0x0a091e1e
+
+typedef struct
+{
+        p32 index;
+        positive addresses;
+        p32 address[STORAGE_EPOCH_ROOM];
+        p8 prefix[STORAGE_EPOCH_ROOM];
+        positive routes;
+        p32 router[STORAGE_EPOCH_ROOM];
+        p32 resolver;
+} storage_epoch_state;
+
+static bool storage_epoch_address(netlink_header address_to header,
+                                  address_any context)
+{
+        storage_epoch_state address_to state = context;
+        netlink_address address_to body =
+            netlink_message_body(header, sizeof(netlink_address));
+        positive size = 0;
+        p8 address_to named = netlink_find(header, sizeof(netlink_address),
+                                           IFA_LOCAL, address_of size);
+
+        if (body && named && size == 4 && body->index == state->index &&
+            state->addresses < STORAGE_EPOCH_ROOM)
+        {
+                state->address[state->addresses] =
+                    network_order_32(memory_load_unaligned(p32, named));
+                state->prefix[state->addresses++] = body->prefix;
+        }
+        return true;
+}
+
+static bool storage_epoch_route(netlink_header address_to header,
+                                address_any context)
+{
+        storage_epoch_state address_to state = context;
+        netlink_route address_to body =
+            netlink_message_body(header, sizeof(netlink_route));
+        positive size = 0;
+        p8 address_to gateway = netlink_find(header, sizeof(netlink_route),
+                                             RTA_GATEWAY, address_of size);
+        positive out_size = 0;
+        p8 address_to out = netlink_find(header, sizeof(netlink_route), RTA_OIF,
+                                         address_of out_size);
+
+        if (body && !body->destination_bits && body->table == RT_TABLE_MAIN &&
+            gateway && size == 4 && out && out_size == 4 &&
+            memory_load_unaligned(p32, out) == state->index &&
+            state->routes < STORAGE_EPOCH_ROOM)
+                state->router[state->routes++] =
+                    network_order_32(memory_load_unaligned(p32, gateway));
+        return true;
+}
+
+static bool storage_epoch_read(b32 handle, p32 index,
+                               storage_epoch_state address_to state)
+{
+        p8 text[128];
+        bipolar got;
+
+        memory_zero(state, sizeof *state);
+        state->index = index;
+        if (netlink_dump(handle, RTM_GETADDR, sizeof(netlink_address), AF_INET,
+                         storage_epoch_address, state) < 0 ||
+            netlink_dump(handle, RTM_GETROUTE, sizeof(netlink_route), AF_INET,
+                         storage_epoch_route, state) < 0)
+                return false;
+        got = file_slurp_once_at(AT_FDCWD, "/etc/resolv.conf", text,
+                                 sizeof text - 1);
+        if (got >= 11 && !memory_compare(text, "nameserver ", 11))
+        {
+                positive at = 11;
+                positive stop = at;
+                bipolar host;
+
+                text[got] = 0;
+                while (stop < (positive)got && text[stop] != '\n')
+                        stop++;
+                text[stop] = 0;
+                host = string_to_host((string_address)(text + at));
+                state->resolver = host >= 0 ? (p32)host : 1;
+        }
+        return true;
+}
+
+static bool storage_epoch_same(const storage_epoch_state address_to a,
+                               const storage_epoch_state address_to b)
+{
+        if (a->addresses != b->addresses || a->routes != b->routes ||
+            a->resolver != b->resolver)
+                return false;
+        for (positive at = 0; at < a->addresses; at++)
+        {
+                bool found = false;
+
+                for (positive other = 0; other < b->addresses; other++)
+                        found |= a->address[at] == b->address[other] &&
+                                 a->prefix[at] == b->prefix[other];
+                if (!found)
+                        return false;
+        }
+        for (positive at = 0; at < a->routes; at++)
+        {
+                bool found = false;
+
+                for (positive other = 0; other < b->routes; other++)
+                        found |= a->router[at] == b->router[other];
+                if (!found)
+                        return false;
+        }
+        return true;
+}
+
+//      What the kernel should hold for what the watcher holds.
+static fn storage_epoch_expected(const net_holding address_to held, p32 index,
+                                 p32 resolver_before,
+                                 storage_epoch_state address_to want)
+{
+        memory_zero(want, sizeof *want);
+        want->index = index;
+        want->address[want->addresses] = STORAGE_EPOCH_OPERATOR;
+        want->prefix[want->addresses++] = 24;
+        if (held->index)
+        {
+                want->address[want->addresses] = held->lease.address;
+                want->prefix[want->addresses++] = dhcp_prefix_of(held->lease.mask);
+                if (held->lease.router)
+                        want->router[want->routes++] = held->lease.router;
+                want->resolver = held->lease.nameserver ? held->lease.nameserver
+                                                        : DNS_FALLBACK;
+        }
+        else
+                want->resolver = resolver_before ? DNS_FALLBACK : 0;
+}
+
+static fn storage_epoch_say(const p8 address_to events, positive depth,
+                            positive step, string_address what,
+                            const storage_epoch_state address_to have)
+{
+        string_format(log, "  epoch: events");
+        for (positive at = 0; at < depth; at++)
+                string_format(log, " %p", (positive)events[at]);
+        string_format(log, ", after event %p: %s; have %p addresses, %p routes, resolver %p\n",
+                      step, what, have->addresses, have->routes,
+                      (positive)have->resolver);
+        log_flush();
+}
+
+static b32 storage_epoch_walk(const p8 address_to events, positive depth)
+{
+        static const dhcp_lease leases[STORAGE_EPOCH_LEASES] = {
+            //      the first lease
+            {0x0a09140a, 0xffffff00, 0x0a091401, 0x0a091401, 0x0a091401, 600, 300, 525},
+            //      the router moved
+            {0x0a09140a, 0xffffff00, 0x0a091402, 0x0a091401, 0x0a091401, 600, 300, 525},
+            //      the resolver moved
+            {0x0a09140a, 0xffffff00, 0x0a091401, 0x0a091403, 0x0a091401, 600, 300, 525},
+            //      another address
+            {0x0a09140b, 0xffffff00, 0x0a091401, 0x0a091401, 0x0a091401, 600, 300, 525},
+            //      a /32 with its router off it
+            {0x0a09140a, 0xffffffff, 0x0a091401, 0x0a091401, 0x0a091401, 600, 300, 525},
+            //      no router at all
+            {0x0a09140a, 0xffffff00, 0, 0x0a091401, 0x0a091401, 600, 300, 525},
+            //      another server's lease on another network
+            {0x0a09150c, 0xffffff00, 0x0a091501, 0x0a091505, 0x0a091501, 600, 300, 525}};
+        p8 hardware[6] = {2, 0, 0, 0, 0, 1};
+        bipolar handle = storage_test_net_namespace();
+        netlink_search link = {.wanted = (string_address) "wd4"};
+        net_holding held = {0};
+
+        if (storage_test_dummy((b32)handle, "wd4") < 0 ||
+            netlink_link_find((b32)handle, address_of link) < 0 ||
+            netlink_link_up((b32)handle, link.index) < 0 ||
+            netlink_address_add((b32)handle, link.index, STORAGE_EPOCH_OPERATOR,
+                                24) < 0)
+                return 2;
+        for (positive step = 0; step < depth; step++)
+        {
+                p8 event = events[step];
+                storage_epoch_state before;
+                storage_epoch_state after;
+                storage_epoch_state want;
+                net_holding was = held;
+                b32 refused = 0;
+
+                if (!storage_epoch_read((b32)handle, link.index, address_of before))
+                        return 2;
+                if (event == 2 * STORAGE_EPOCH_LEASES)
+                        refused = net_holding_release((b32)handle, address_of held) ? 1 : 0;
+                else
+                {
+                        bool fault = event >= STORAGE_EPOCH_LEASES;
+                        dhcp_lease lease = leases[event % STORAGE_EPOCH_LEASES];
+
+                        if (fault &&
+                            system_call_5(syscall(mount), 0, (positive) "/etc", 0,
+                                          MS_REMOUNT | MS_RDONLY, 0) < 0)
+                                return 2;
+                        refused = net_apply_lease((b32)handle, link.index, "wd4",
+                                                  hardware, address_of lease,
+                                                  address_of held, false);
+                        if (fault &&
+                            system_call_5(syscall(mount), 0, (positive) "/etc", 0,
+                                          MS_REMOUNT, 0) < 0)
+                                return 2;
+                        if (fault != (refused != 0))
+                        {
+                                storage_epoch_say(events, depth, step,
+                                                  fault ? "a refused resolver did not fail the lease"
+                                                         : "a lease failed to apply",
+                                                  address_of before);
+                                return 16 | 1;
+                        }
+                }
+                if (!storage_epoch_read((b32)handle, link.index, address_of after))
+                        return 2;
+                if (refused)
+                {
+                        if (held.lost ||
+                            memory_compare(address_of held, address_of was,
+                                           sizeof held))
+                        {
+                                storage_epoch_say(events, depth, step,
+                                                  "a refused lease changed what is held",
+                                                  address_of after);
+                                return 16 | 2;
+                        }
+                        if (!storage_epoch_same(address_of after, address_of before))
+                        {
+                                storage_epoch_say(events, depth, step,
+                                                  "a refused lease left the kernel or the resolver changed",
+                                                  address_of after);
+                                return 16 | 4;
+                        }
+                        continue;
+                }
+                storage_epoch_expected(address_of held, link.index,
+                                       before.resolver, address_of want);
+                if (!storage_epoch_same(address_of after, address_of want))
+                {
+                        storage_epoch_say(events, depth, step,
+                                          held.index ? "the kernel and resolver are not the held lease's"
+                                                     : "a release left a lease behind",
+                                          address_of after);
+                        return 16 | 8;
+                }
+        }
+        return 16;
+}
+
+static fn storage_test_lease_epochs(void)
+{
+        p8 events[STORAGE_EPOCH_DEPTH];
+        positive total = 1;
+        positive walked = 0;
+        b32 failed = 0;
+        b32 status = 0;
+
+        for (positive at = 0; at < STORAGE_EPOCH_DEPTH; at++)
+                total *= STORAGE_EPOCH_EVENTS;
+        for (positive sequence = 0; sequence < total; sequence++)
+        {
+                positive rest = sequence;
+                bipolar child;
+
+                for (positive at = 0; at < STORAGE_EPOCH_DEPTH; at++)
+                {
+                        events[at] = (p8)(rest % STORAGE_EPOCH_EVENTS);
+                        rest /= STORAGE_EPOCH_EVENTS;
+                }
+                child = system_fork();
+                if (child == 0)
+                        system_call_1(syscall(exit_group),
+                                      storage_epoch_walk(events,
+                                                         STORAGE_EPOCH_DEPTH));
+                status = storage_test_child_status(child);
+                if (status == 2 || status == STORAGE_TEST_THREADED)
+                        break;
+                walked++;
+                if (status != 16)
+                        failed |= status < 16 ? 16 | 15 : status;
+        }
+        if (!storage_test_not_run(status == 2 || status == STORAGE_TEST_THREADED
+                                      ? status
+                                      : 0,
+                                  "lease epochs", "no namespaces or dummy links"))
+        {
+                check("every lease sequence that applies leaves the kernel and the resolver the held lease's alone",
+                      walked == total && !(failed & 8) && !(failed & 1));
+                check("every refused lease leaves what is held, the kernel and the resolver as they were",
+                      walked == total && !(failed & 6));
+        }
+}
+
+/* The probe before a new lease, on a link nobody answers on: quiet after
+   its three windows; cut at once by a byte on the wake pipe or by link news,
+   as an exchange is (a cable pulled while it listens is not a quiet link);
+   and never performed on a link that is not there. The child says which by
+   bits over 16, so 2 and the threaded runner's 7 stay NOT RUN. */
+static fn storage_test_arp_probe(void)
+{
+        bipolar child = system_fork();
+
+        if (child == 0)
+        {
+                bipolar handle = storage_test_net_namespace();
+                netlink_search link = {.wanted = (string_address) "wd2"};
+                p8 hardware[6] = {2, 0, 0, 0, 0, 1};
+                b32 ends[2];
+                bipolar events;
+                bipolar quiet, woken, news, missing;
+                positive began, quiet_took, woken_took;
+                b32 wrong = 16;
+
+                if (storage_test_dummy((b32)handle, "wd2") < 0 ||
+                    netlink_link_find((b32)handle, address_of link) < 0 ||
+                    netlink_link_up((b32)handle, link.index) < 0 ||
+                    system_call_2(syscall(pipe2), (positive)ends, O_CLOEXEC) < 0 ||
+                    (events = netlink_open_groups(RTNLGRP_LINK_MASK)) < 0)
+                        system_call_1(syscall(exit_group), 2);
+                began = clock_monotonic_nanoseconds();
+                quiet = net_arp_conflict(link.index, hardware, 0x0a090c0c);
+                quiet_took = clock_monotonic_nanoseconds() - began;
+                system_write_all((positive)ends[1], "x", 1);
+                net_wake_watch = ends[0];
+                began = clock_monotonic_nanoseconds();
+                woken = net_arp_conflict(link.index, hardware, 0x0a090c0c);
+                woken_took = clock_monotonic_nanoseconds() - began;
+                net_wake_watch = -1;
+                net_events_watch = events;
+                net_news_holdoff_until = 0;
+                storage_test_link_set((b32)handle, link.index, IFLA_MTU, 1400);
+                news = net_arp_conflict(link.index, hardware, 0x0a090c0c);
+                net_events_watch = -1;
+                missing = net_arp_conflict(link.index + 1000, hardware,
+                                           0x0a090c0c);
+                if (quiet != 0 || quiet_took < 590000000)
+                        wrong |= 1;
+                if (woken != -2 || woken_took > 100000000 || news != -2)
+                        wrong |= 2;
+                if (missing != -1)
+                        wrong |= 4;
+                system_call_1(syscall(exit_group), wrong);
+        }
+        b32 status = storage_test_child_status(child);
+        if (!storage_test_not_run(status, "ARP probe",
+                                  "no namespaces or dummy links"))
+        {
+                check("a probe nobody answers listens its three windows and finds the address free",
+                      status >= 16 && !(status & 1));
+                check("the wake pipe and link news cut a probe at once",
+                      status >= 16 && !(status & 2));
+                check("a probe on a link that is not there is not performed",
+                      status >= 16 && !(status & 4));
+        }
+}
+
 /* A cable pulled and put back while the watcher was busy: both events are
    read after the carrier is back, and only the kernel's count of carrier
    losses says the link went away -- perhaps into another network. Other
@@ -82384,9 +84284,8 @@ static fn storage_test_carrier_bounce(void)
                 system_call_1(syscall(exit_group), held.lost ? 0 : 5);
         }
         b32 status = storage_test_child_status(child);
-        if (status == 2)
-                log_direct(str("storage_io: carrier bounce NOT RUN -- no namespaces or dummy links\n"));
-        else
+        if (!storage_test_not_run(status, "carrier bounce",
+                                 "no namespaces or dummy links"))
         {
                 check("other news about the held link keeps the lease",
                       status != 4 && status != 1);
@@ -82446,9 +84345,8 @@ static fn storage_test_link_news_overrun(void)
                 system_call_1(syscall(exit_group), net_states.used ? 5 : 0);
         }
         b32 status = storage_test_child_status(child);
-        if (status == 2)
-                log_direct(str("storage_io: link news overrun NOT RUN -- no namespaces or dummy links\n"));
-        else
+        if (!storage_test_not_run(status, "link news overrun",
+                                 "no namespaces or dummy links"))
                 check("dropped link news resyncs the watcher instead of ending it",
                       status == 0);
 }
@@ -83102,6 +85000,11 @@ static fn storage_test_net_files(void)
 
 b32 main(void)
 {
+#ifdef STORAGE_EPOCH_ONLY
+        //      net_epoch_mutants builds this alone, once for each mutant.
+        storage_test_lease_epochs();
+        return test_report(null);
+#endif
         storage_test_read(1, 32);
         storage_test_read(2, 7);
         storage_test_read(3, 0);
@@ -83119,9 +85022,15 @@ b32 main(void)
         storage_test_script_rollback();
         storage_test_link_state();
         storage_test_lease_clock_origin();
+        storage_test_lease_asleep();
         storage_test_dhcp_apart();
+        storage_test_decline_hold();
+        storage_test_arp_claims();
         storage_test_lease_over_existing();
         storage_test_lease_inherited();
+        storage_test_arp_probe();
+        storage_test_lease_off_prefix();
+        storage_test_lease_epochs();
         storage_test_carrier_bounce();
         storage_test_link_news_overrun();
         storage_test_netlink_output();
@@ -84523,6 +86432,44 @@ static fn machine_ntp_schedule(void)
         locale_ntp_every = every;
 }
 
+/* UDP does not preserve a too-small receive buffer as evidence of the wire
+   length unless the caller leaves room to observe the first trailing byte.
+   Exercise the same recvmsg helper as the client so this cannot regress into
+   accepting a 48-byte prefix of an oversized datagram. */
+static fn sntp_datagram_framing(void)
+{
+        b32 pair[2] = {-1, -1};
+        p8 sent[SNTP_REPLY_ROOM];
+        p8 received[SNTP_REPLY_ROOM];
+        positive control[SNTP_CONTROL_WORDS];
+        positive held = 0;
+        bipolar got;
+
+        memory_fill(sent, 0xa5, sizeof sent);
+        check("SNTP datagram framing socket opens",
+              system_call_4(syscall(socketpair), AF_UNIX, SOCK_DGRAM, 0,
+                            (positive)pair) == 0);
+        if (pair[0] < 0 || pair[1] < 0)
+                return;
+
+        check("SNTP exact reply datagram sends",
+              socket_send(pair[0], sent, SNTP_PACKET, 0, 0, 0) == SNTP_PACKET);
+        got = sntp_receive_message(pair[1], received, sizeof received, control,
+                                   address_of held, 0);
+        check("SNTP exact reply datagram is the one shape taken",
+              got == SNTP_PACKET);
+
+        check("SNTP oversized reply datagram sends",
+              socket_send(pair[0], sent, sizeof sent, 0, 0, 0) == sizeof sent);
+        got = sntp_receive_message(pair[1], received, sizeof received, control,
+                                   address_of held, 0);
+        check("SNTP trailing wire byte is refused",
+              got == SNTP_REPLY_ROOM && got != SNTP_PACKET);
+
+        socket_close(pair[0]);
+        socket_close(pair[1]);
+}
+
 /*
         The query the machine forks and what becomes of it: every answer
         byte read once and the child waited for, so that none is left a
@@ -84605,6 +86552,7 @@ static fn machine_sntp(void)
               sntp_math_ok());
         check("the clock is stepped when far out and slewed when near",
               locale_discipline_ok());
+        sntp_datagram_framing();
         machine_ntp_schedule();
         machine_ntp_child();
 

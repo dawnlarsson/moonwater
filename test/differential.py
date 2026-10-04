@@ -24436,6 +24436,7 @@ typedef void *address_any;
 typedef char *string_address;
 typedef const char *const_string;
 #define COLD
+#define INLINE
 #define CONST
 #define PURE
 #define fn void
@@ -35396,6 +35397,17 @@ def harness_image_nodes(argv):
               '%s spells a bowl root out for itself instead of asking bowl'
               % path.relative_to(ROOT))
 
+    # The initramfs carries each directory's owner into the guest, and mkdir
+    # -p keeps one the building user made: a /etc owned by uid 1000 made the
+    # shell refuse to replace /etc/resolv.conf (file_name_stable), and ip took
+    # every lease after the first back. The setup that makes the image
+    # directories gives them to root after it, when the build is root.
+    setup = build[build.index('build_setting_get("image_directories")'):
+                  build.index('build_setting_get("image_nodes")')]
+    check('"mkdir"' in setup and '"chown"' in setup and '"0:0"' in setup and
+          'build_root()' in setup and setup.index('"mkdir"') < setup.index('"chown"'),
+          'image directories are given to root after mkdir -p, so the guest\'s /etc is root\'s')
+
     return check.verdict('image nodes', 'image_nodes')
 
 
@@ -38895,6 +38907,18 @@ static bipolar system_open_output_at(bipolar d, string_address p, int replace, p
 static bipolar system_make_directory_at(bipolar d, string_address p, positive m) {
         return answer(mkdirat((int)d, p, (mode_t)m));
 }
+typedef struct { unsigned short mode; } system_path_identity;
+#define address_of &
+#define SYSTEM_PATH_AT_EMPTY_PATH AT_EMPTY_PATH
+#define SYSTEM_PATH_STATX_TYPE 1
+static bipolar system_path_identity_at(bipolar d, string_address p, positive f, positive r,
+                                       system_path_identity *into) {
+        struct stat seen;
+        (void)r;
+        if (fstatat((int)d, p, &seen, (int)f) < 0) return -errno;
+        into->mode = (unsigned short)seen.st_mode;
+        return 0;
+}
 static bipolar system_remove_at(bipolar d, string_address p, positive f) {
         return answer(unlinkat((int)d, p, (int)f));
 }
@@ -40776,7 +40800,7 @@ def harness_dhcp_fuzz(argv):
     shim, head, walk = dhcp_lift()
     shell = (HARNESS_ROOT / "src/sh/net.c").read_text()
     clock = src_slice(shell, "/*\n        What this machine is holding, and since when.",
-                         "static COLD fn net_rollback_record(")
+                         "/* A lease's default route.")
     source = shim + r"""
 #define IFNAME_SIZE 16
 #define ERROR_NO_ENTRY 2
@@ -40784,6 +40808,10 @@ def harness_dhcp_fuzz(argv):
 #define ERROR_NO_DEVICE 19
 #define NETWORK_NANOSECONDS 1000000000
 static positive clock_monotonic_nanoseconds(void) { return 0; }
+/* net_seconds reads CLOCK_BOOTTIME; here, as the monotonic clock above, it
+   is a clock that will not answer. */
+typedef struct { long tv_sec; long tv_nsec; } timespec;
+#define clock_gettime(which, at) ((void)(which), (void)(at), -1)
 """ + head + walk + clock + r"""
 static const p8 fuzz_hardware[6] = {2, 0, 0, 0, 0, 1};
 
@@ -42664,6 +42692,90 @@ while True:
                   f"moonwater {command} does not write through a link at /root/{state}",
                   [line for line in lines if f"@@planted {state}" in line])
 
+        # Every state file under /root and /run/moonwater, replaced before a
+        # verb that writes it and one that reads it by every kind of thing a
+        # name can be: a link to a file, a link to nowhere, a FIFO with nobody
+        # on the other end, a directory, and a character device mounted over
+        # the name. A verb must answer within its five seconds, never write
+        # through to what a link names or into the directory, and leave the
+        # device a device.
+        states = [(f"/root/{name}", writer, reader) for name, writer, reader in (
+                  ("wifi", "wifi add plantnet passpass1", "wifi"),
+                  ("wifi.power", "wifi on", "wifi"),
+                  ("wired.power", "wired off", "wired"),
+                  ("bluetooth", "bluetooth add plantdev", "bluetooth"),
+                  ("bluetooth.power", "bluetooth off", "bluetooth"),
+                  ("internet", "priority internet wifi", "priority internet"),
+                  ("ntp", "ntp off", "ntp"),
+                  ("ntp.sampling", "ntp sampling off", "ntp"),
+                  ("keyboard", "keyboard de", "keyboard"),
+                  ("timezone", "timezone se", "timezone"),
+                  ("timezone.mode", "timezone se", "timezone"),
+                  ("name", "name random", "name"),
+                  ("tune", "charge limit 80", "charge"),
+                  ("link", "link off", "link"),
+                  ("link.key", "link key", "link"),
+                  ("link.peers", "link remove nobody", "link"),
+                  ("link.groups", "link group plantlab allow run", "link"))] + [
+                  ("/run/moonwater/settings.next", "bind init add true", "bind init"),
+                  ("/run/moonwater/settings", "bind init add true", "bind init")]
+        kinds = {"link": "ln -s /tmp/victim {p}",
+                 "dangling": "ln -s /tmp/nowhere/victim {p}",
+                 "fifo": "mkfifo {p}",
+                 "directory": "mkdir {p} && echo SAFE > {p}/inner",
+                 "device": ": > {p} && mount --bind /dev/null {p}"}
+        script = "mkdir -p /tmp/nowhere /run/moonwater\n"
+        for path, writer, reader in states:
+            for kind, plant in kinds.items():
+                for role, verb in (("writes", writer), ("reads", reader)):
+                    script += (f"umount {path} 2>/dev/null; rm -rf {path} /tmp/nowhere/victim; "
+                               f"echo SAFE > /tmp/victim; {plant.format(p=path)}\n"
+                               f"timeout 5 /tmp/moonwater {verb} > /dev/null 2>&1 < /dev/null; "
+                               f"echo \"@@object {path} {kind} {role} $? $(cat /tmp/victim) "
+                               f"$(cat {path}/inner 2>/dev/null || echo -) "
+                               f"$(test -e /tmp/nowhere/victim && echo made || echo -) "
+                               f"$(test -c {path} && echo char || echo -)\"\n"
+                               f"umount {path} 2>/dev/null; rm -rf {path}\n")
+        sys_reset()
+        lines, finished = session(script)
+        check(finished, "the planted objects run finished", "")
+        for path, writer, reader in states:
+            for kind in kinds:
+                for role, verb in (("writes", writer), ("reads", reader)):
+                    row = [line.split() for line in lines
+                           if line.startswith(f"@@object {path} {kind} {role} ")]
+                    status, victim, inner, made, device = (row[0][4:9] if row and len(row[0]) >= 9
+                                                           else ("-",) * 5)
+                    check(row and status != "124" and victim == "SAFE" and made == "-" and
+                          (kind != "directory" or inner == "SAFE") and
+                          (kind != "device" or device == "char"),
+                          f"moonwater {verb} with a {kind} at {path}",
+                          row[0] if row else "no answer")
+
+        # A secret on the command line is in /proc/PID/cmdline, which every
+        # user reads, for as long as the command lives. Each verb that takes
+        # one writes into a pipe already full, so it stops at its first word
+        # of output, after the secret has been used, and its cmdline is read
+        # there: the secret must be gone from it.
+        carried = [("link group lab S3cretOnTheLine77", "S3cretOnTheLine77"),
+                   ("link group lab2 S3cretOnTheLine78 allow run", "S3cretOnTheLine78"),
+                   ("wifi add argvnet S3cretOnTheLine79", "S3cretOnTheLine79")]
+        script = "rm -f /tmp/full; mkfifo /tmp/full\n"
+        for command, secret in carried:
+            script += ("exec 3<>/tmp/full; head -c 65536 /dev/zero >&3\n"
+                       f"/tmp/moonwater {command} >&3 2>&3 & pid=$!\n"
+                       "sleep 0.5; tr '\\000' ' ' < /proc/$pid/cmdline > /tmp/line\n"
+                       "kill $pid; exec 3>&-; wait $pid\n"
+                       f"echo \"@@argv {secret} $(grep -c {secret} /tmp/line)"
+                       " $(grep -c moonwater /tmp/line)\"\n")
+        lines, finished = session(script)
+        for command, secret in carried:
+            row = [line.split() for line in lines if line.startswith("@@argv " + secret)]
+            seen, alive = (int(row[0][2]), int(row[0][3])) if row else (-1, 0)
+            check(finished and seen == 0 and alive == 1,
+                  f"moonwater {command.replace(secret, 'SECRET')} keeps the secret out of "
+                  "its command line", f"secret in it {seen}, command line read {alive}")
+
         # Canvas with no kernel desktop to ask: off and on say why and say
         # nothing about windows closing.
         lines, finished = session(say("canvas off") + say("canvas on") + say("canvas"))
@@ -43698,6 +43810,17 @@ def harness_tls_peer(argv):
     (MUST_ACCEPT) and with each other, except where this client refuses by
     design what OpenSSL accepts, which DELIBERATE names with its reason.
 
+    With --schedule N the same accepted scripts are served N times more with
+    the server's bytes delivered by a schedule below the record layer: one
+    byte at a time, cut into pieces a seeded generator picks, held back and
+    coalesced until the server next reads, or ended by FIN or RST after a
+    drawn number of bytes. A whole delivery must be taken exactly as the
+    unscheduled one was; an ended one may fail but must fail without
+    publishing (the -O file is the whole body or is not there), and every run
+    is held to a wall clock and a CPU budget, so a client that spins on
+    single bytes or waits out an idle timer for a peer that already hung up
+    shows. MOONWATER_TLS_SCHEDULES lengthens it.
+
     With --mutate N the verdicts are set aside: N seeded flights are served to
     wget with EncryptedExtensions, Certificate, CertificateRequest,
     CertificateVerify, tickets and KeyUpdate mutated before they are sealed,
@@ -43705,18 +43828,25 @@ def harness_tls_peer(argv):
     ends by a signal or hangs fails. Built with UBSan in trap mode, a shell
     turns undefined behaviour into that signal.
     """
+    import collections
     import datetime
     import hashlib
     import hmac as hmac_module
+    import resource
     import shutil
     import socket
     import ssl
     import subprocess
     import tempfile
     import threading
+    import time
     parser = argparse.ArgumentParser(prog="differential.py --harness tls_peer")
     parser.add_argument("--cc", default=os.environ.get("CC", "gcc"))
     parser.add_argument("--shell", help="a built shell to use instead of building one")
+    parser.add_argument("--schedule", type=int,
+                        default=int(os.environ.get("MOONWATER_TLS_SCHEDULES", "0")),
+                        help="serve the accepted scripts N times under delivery "
+                             "schedules and FIN/RST cuts, with time and CPU budgets")
     parser.add_argument("--mutate", type=int, default=0,
                         help="instead of the verdicts, serve N flights whose "
                              "handshake messages are mutated to wget and demand "
@@ -43830,6 +43960,12 @@ def harness_tls_peer(argv):
     certificate = b"\0" + (len(leaf) + 5).to_bytes(3, "big") + len(leaf).to_bytes(
         3, "big") + leaf + b"\0\0"
 
+    def entry_with(extensions):
+        """The leaf's Certificate with extensions in its one entry."""
+        return (b"\0" + (len(leaf) + 5 + len(extensions)).to_bytes(3, "big") +
+                len(leaf).to_bytes(3, "big") + leaf + len(extensions).to_bytes(2, "big") +
+                extensions)
+
     body = b"hello, record layer"
     length_head = b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n" % len(body)
     close_head = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n"
@@ -43939,6 +44075,19 @@ def harness_tls_peer(argv):
          [app(length_head + body), close]),
         ("EncryptedExtensions answering unasked ALPN", {"ee": b"\0\x10\0\5\0\3\2h2"},
          [app(length_head + body), close]),
+        ("an unknown extension in EncryptedExtensions", {"ee": b"\xfa\xfa\0\0"},
+         [app(length_head + body), close]),
+        #   RFC 8446 4.4.2: a CertificateEntry's extensions answer the
+        #   ClientHello's, which asks for no OCSP status and no SCT.
+        ("an unasked OCSP status in a CertificateEntry",
+         {"certificate": entry_with(b"\0\5\0\5\1\0\0\0\1\0")},
+         [app(length_head + body), close]),
+        ("an unasked SCT list in a CertificateEntry",
+         {"certificate": entry_with(b"\0\x12\0\4\0\2\0\0")},
+         [app(length_head + body), close]),
+        ("an unknown extension in a CertificateEntry",
+         {"certificate": entry_with(b"\xfa\xfa\0\0")},
+         [app(length_head + body), close]),
         ("CertificateRequest in the flight", {"request": True},
          [app(length_head + body), close]),
         ("CertificateRequest with a context", {"request": True,
@@ -44014,6 +44163,13 @@ def harness_tls_peer(argv):
     }
     # Where OpenSSL 3.6's client accepts what the RFC says to refuse.
     OPENSSL_LENIENT = {
+        "an unknown extension in EncryptedExtensions":
+            "4.2 makes every unasked extension response unsupported_extension; "
+            "OpenSSL passes over one it does not know",
+        "an unknown extension in a CertificateEntry":
+            "4.2 makes every unasked extension response unsupported_extension; "
+            "OpenSSL refuses the OCSP status and SCT list it knows and passes "
+            "over one it does not",
         "TLS 1.2 HelloRequest":
             "RFC 5246 7.4.1.1 lets a client ignore a HelloRequest or answer "
             "it; OpenSSL renegotiates",
@@ -44163,7 +44319,69 @@ def harness_tls_peer(argv):
         except OSError:
             pass
 
-    def serve(listener, flight, steps, outcome):
+    class Scheduled:
+        """The server's end of one connection, its bytes delivered by a
+        schedule: "byte" one at a time, "split" in pieces a seeded generator
+        cuts, "coalesce" held until the server next reads or stops, and
+        "fin" or "rst" ending the stream after cut bytes whatever the script
+        meant to say. Each piece goes out alone (TCP_NODELAY) with a short
+        gap, so the client's reads see the pieces rather than their sum."""
+
+        def __init__(self, sock, kind, rng, cut, seen):
+            import struct
+            self.sock, self.kind, self.rng, self.cut = sock, kind, rng, cut
+            seen.append(self)
+            self.sent, self.held, self.ended = 0, b"", False
+            self.linger = struct.pack("ii", 1, 0)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
+        def settimeout(self, value):
+            self.sock.settimeout(value)
+
+        def out(self, data):
+            if self.ended:
+                raise ConnectionError("the schedule ended the stream")
+            ending = self.cut is not None and self.sent + len(data) >= self.cut
+            if ending:
+                data = data[:self.cut - self.sent]
+            at = 0
+            while at < len(data):
+                step = 1 if self.kind == "byte" else (
+                    len(data) if self.kind == "coalesce" else self.rng.randint(1, 700))
+                self.sock.sendall(data[at:at + step])
+                at += step
+                if self.kind != "coalesce":
+                    time.sleep(0.0002)
+            self.sent += len(data)
+            if ending:
+                self.ended = True
+                if self.kind == "rst":
+                    self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, self.linger)
+                    self.sock.close()
+                else:
+                    self.sock.shutdown(socket.SHUT_WR)
+                raise ConnectionError("the schedule ended the stream")
+
+        def sendall(self, data):
+            if self.kind == "coalesce":
+                self.held += data
+            else:
+                self.out(data)
+
+        def flush(self):
+            data, self.held = self.held, b""
+            if data:
+                self.out(data)
+
+        def recv(self, size):
+            self.flush()
+            return self.sock.recv(size)
+
+        def shutdown(self, how):
+            self.flush()
+            self.sock.shutdown(how)
+
+    def serve(listener, flight, steps, outcome, schedule=None):
         try:
             raw, _ = listener.accept()
         except OSError:
@@ -44171,7 +44389,8 @@ def harness_tls_peer(argv):
         raw.settimeout(20)
         try:
             with raw:
-                (run12 if flight.get("tls12") else run)(raw, flight, steps)
+                (run12 if flight.get("tls12") else run)(
+                    Scheduled(raw, *schedule) if schedule else raw, flight, steps)
                 outcome.append("served")
         except Exception as error:  # the client hung up or refused
             outcome.append("server: %r" % error)
@@ -44288,7 +44507,7 @@ def harness_tls_peer(argv):
         request = message(13, flight.get("request_body", b"\0\0\x08\0\x0d\0\4\0\2\4\3"))
         if flight.get("request"):
             messages.append(request)
-        messages.append(message(11, certificate))
+        messages.append(message(11, flight.get("certificate", certificate)))
         if flight.get("request_late"):
             messages.append(request)
         for part in messages:
@@ -44424,6 +44643,79 @@ def harness_tls_peer(argv):
                 print(built.stderr[-3000:])
                 return 1
         (work / "wget").symlink_to(shell)
+
+        if args.schedule:
+            accepted = [one for one in SCRIPTS if one[0] in MUST_ACCEPT and
+                        one[0] not in DELIBERATE and one[0] not in WGET_LENIENT]
+            rng = random.Random(0x5c4e)
+            kinds = ("byte", "split", "coalesce", "fin", "rst")
+            lengths = {}
+            tally = collections.Counter()
+            slowest = (0.0, "")
+            costliest = (0.0, "")
+            for number in range(args.schedule):
+                script, flight, steps = rng.choice(accepted)
+                kind = kinds[number % len(kinds)]
+                if kind in ("fin", "rst") and script not in lengths:
+                    kind = "split"
+                #   A cut falls inside what the whole delivery sent.
+                cut = rng.randrange(1, lengths[script]) if kind in ("fin", "rst") else None
+                seen = []
+                label = "%s under %s%s" % (script, kind, "@%d" % cut if cut else "")
+                listener = socket.socket()
+                listener.bind(("127.0.0.1", 0))
+                listener.listen(1)
+                listener.settimeout(20)
+                port = listener.getsockname()[1]
+                outcome = []
+                server = threading.Thread(
+                    target=serve, args=(listener, dict(flight, answer_deferred=False), steps,
+                                        outcome, (kind, random.Random(number), cut, seen)),
+                    daemon=True)
+                server.start()
+                folder = Path(tempfile.mkdtemp(dir=work))
+                before = resource.getrusage(resource.RUSAGE_CHILDREN)
+                began = time.monotonic()
+                try:
+                    code = subprocess.run(
+                        [str(work / "wget"), "-q", "--no-check-certificate", "-O", "saved",
+                         "https://127.0.0.1:%d/" % port], capture_output=True, timeout=120,
+                        cwd=str(folder), env={"PATH": "/usr/bin:/bin", "HOME": str(work)}
+                    ).returncode
+                except subprocess.TimeoutExpired:
+                    code = "timeout"
+                elapsed = time.monotonic() - began
+                after = resource.getrusage(resource.RUSAGE_CHILDREN)
+                cpu = (after.ru_utime - before.ru_utime) + (after.ru_stime - before.ru_stime)
+                server.join(25)
+                listener.close()
+                saved = folder / "saved"
+                have = saved.read_bytes() if saved.exists() else None
+                want = flight.get("body", body)
+                tally["%s exit %s" % (kind, code)] += 1
+                slowest = max(slowest, (elapsed, label))
+                costliest = max(costliest, (cpu, label))
+                checks(code != "timeout" and code < 128,
+                       "%s: wget ended with %s" % (label, code))
+                if cut is None:
+                    checks(code == 0 and have == want, "%s: exit %s, saved %r, wanted %r" % (
+                        label, code, have and have[:40], want[:40]))
+                    if seen and code == 0:
+                        lengths[script] = seen[0].sent
+                else:
+                    checks(have == want if code == 0 else have is None,
+                           "%s: exit %s published %r" % (label, code, have and have[:40]))
+                #   A cut has nothing to wait for, so 10 s proves it did not
+                #   wait out the idle timer; a whole delivery is paced by its
+                #   gaps, so its budget grows with the bytes it sent.
+                budget = 10 + (0.002 * seen[0].sent if seen and cut is None else 0)
+                checks(elapsed < budget, "%s: took %.1f s of %.1f" % (label, elapsed, budget))
+                checks(cpu < 1, "%s: took %.2f s of CPU" % (label, cpu))
+            print("tls peer schedule: %d deliveries, %s; slowest %.2f s (%s), most CPU "
+                  "%.3f s (%s)" % (args.schedule, ", ".join(
+                      "%s x%d" % kv for kv in sorted(tally.items())), slowest[0], slowest[1],
+                      costliest[0], costliest[1]))
+            return checks.verdict("tls peer schedule", "tls-peer-schedule")
 
         if args.mutate:
             mutation["rng"] = random.Random(0x7157)
@@ -44908,6 +45200,7 @@ typedef void *address_any;
 typedef char *string_address;
 typedef const char *const_string;
 #define COLD
+#define INLINE
 #define CONST
 #define PURE
 #define fn void
@@ -44970,7 +45263,7 @@ static positive string_digits_max(string_address source, positive bound,
 typedef struct { int handle; bool tls; } tls_conn;
 typedef struct { bipolar handle; bool tls; tls_conn session; } http_link;
 typedef struct { p8 *bytes; positive used; positive room; } http_buffer;
-typedef struct { int dummy; } network_deadline;
+typedef struct { positive began; positive budget; } network_deadline;
 #define TLS_AGAIN (-2)
 #define TLS_OK 0
 #define TLS_FAIL (-1)
@@ -44989,6 +45282,13 @@ static bipolar tls_lend(void *a, positive b, p8 **c, positive *d)
         return TLS_AGAIN;
 }
 static bool network_deadline_begin(network_deadline *d, positive s, positive n)
+{
+        (void)d; (void)s; (void)n;
+        abort();
+        return false;
+}
+static bool network_deadline_left(const network_deadline *d, positive *s,
+                                  positive *n)
 {
         (void)d; (void)s; (void)n;
         abort();
@@ -45849,6 +46149,11 @@ static positive fuzz_opened;
 static p32 fuzz_connected[32];
 static positive fuzz_connected_count;
 static positive fuzz_requests;
+static char fuzz_identity_host[256];
+static p32 fuzz_identity_ip;
+static p16 fuzz_identity_port;
+static bool fuzz_identity_tls;
+static bool fuzz_identity_pending;
 static p64 fuzz_random;
 static positive fuzz_largest;
 static bool fuzz_write_faults;
@@ -45893,7 +46198,7 @@ static positive fuzz_take(positive room)
 }
 
 typedef struct { p16 family; p16 port; p32 host; p64 pad; } socket_address_internet;
-typedef struct { int dummy; } network_deadline;
+typedef struct { positive began; positive budget; } network_deadline;
 #define AF_INET 2
 #define SOCK_STREAM 1
 #define SOCK_CLOEXEC 02000000
@@ -45917,17 +46222,32 @@ static bool network_stream_timeout(bipolar h, positive s, positive n)
 }
 static int socket_connect(b32 h, const void *where, positive size)
 {
-        (void)h; (void)size;
+        const socket_address_internet *to = where;
+        (void)h;
+        if (size != sizeof *to || !fuzz_identity_host[0] ||
+            to->host != fuzz_identity_ip)
+                fuzz_die("connect tuple differs from the resolved authority");
+        fuzz_identity_port = to->port;
+        fuzz_identity_tls = false;
+        fuzz_identity_pending = true;
         if (fuzz_connected_count < 32)
                 fuzz_connected[fuzz_connected_count++] =
-                    ((const socket_address_internet *)where)->host;
+                    to->host;
         return 0;
 }
 static int socket_close(b32 h) { (void)h; return 0; }
 static bool network_deadline_begin(network_deadline *d, positive s, positive n)
 {
-        (void)d; (void)s; (void)n;
+        d->began = 1;
+        d->budget = s * 1000000000UL + n;
         return true;
+}
+static bool network_deadline_left(const network_deadline *d, positive *s,
+                                  positive *n)
+{
+        *s = d->budget / 1000000000UL;
+        *n = d->budget % 1000000000UL;
+        return d->began && d->budget;
 }
 
 /* Every request this client writes: one request line and four fields, each
@@ -45956,6 +46276,27 @@ static void fuzz_request(const p8 *data, positive length)
         positive line = (positive)((const p8 *)memchr(data, '\r', length) - data);
         if (line < 14 || memchr(data + 4, ' ', line - 13))
                 fuzz_die("space inside the request target");
+        if (fuzz_identity_pending) {
+                const p8 *field = memmem(data, length, "\r\nHost: ", 8);
+                const p8 *stop;
+                char expected[264];
+                int expected_length;
+
+                if (!field || !(stop = memmem(field + 8,
+                                               length - (positive)(field + 8 - data),
+                                               "\r\n", 2)))
+                        fuzz_die("the connected request has no complete Host field");
+                expected_length = snprintf(
+                    expected, sizeof expected,
+                    fuzz_identity_port == (fuzz_identity_tls ? 443 : 80)
+                        ? "%s" : "%s:%u",
+                    fuzz_identity_host, (unsigned)fuzz_identity_port);
+                if (expected_length < 0 ||
+                    (positive)expected_length != (positive)(stop - field - 8) ||
+                    memcmp(field + 8, expected, (positive)expected_length))
+                        fuzz_die("Host differs from the connected authority");
+                fuzz_identity_pending = false;
+        }
 }
 
 static bool network_stream_send_all(bipolar h, const p8 *data, positive length)
@@ -46005,7 +46346,10 @@ typedef struct
 
 static bipolar tls_connect(tls_conn *tls, bipolar h, string_address host, bool check)
 {
-        (void)h; (void)host; (void)check;
+        (void)h; (void)check;
+        if (!fuzz_identity_pending || strcmp(host, fuzz_identity_host))
+                fuzz_die("TLS SNI/certificate host differs from the resolved authority");
+        fuzz_identity_tls = true;
         memset(tls, 0, sizeof *tls);
         return TLS_OK;
 }
@@ -46129,13 +46473,21 @@ static bipolar system_call_3(positive number, positive fd, positive spans,
    (10.0.0.1), and every other name and literal on this machine. */
 static p32 http_lookup(string_address host)
 {
+        p32 answer;
+
         if (!strcmp(host, "unknown.invalid"))
                 return 0;
         if (!strcmp(host, "public.example"))
-                return 0x08080808;
-        if (!strcmp(host, "inside.example"))
-                return 0x0a000001;
-        return 0x7f000001;
+                answer = 0x08080808;
+        else if (!strcmp(host, "inside.example"))
+                answer = 0x0a000001;
+        else
+                answer = 0x7f000001;
+        if (strlen(host) >= sizeof fuzz_identity_host)
+                fuzz_die("resolved host exceeds the identity transcript");
+        strcpy(fuzz_identity_host, host);
+        fuzz_identity_ip = answer;
+        return answer;
 }
 """
     if tight:
@@ -46249,11 +46601,15 @@ static void fuzz_run(const p8 *data, positive size, int lane)
         fuzz_opened = 0;
         fuzz_connected_count = 0;
         fuzz_requests = 0;
+        fuzz_identity_host[0] = 0;
+        fuzz_identity_pending = false;
         fuzz_sink_used = 0;
         status = fetch ? http_get((string_address)start, &store, &code)
                        : http_fetch_to((string_address)start, 7, true, &code, null);
         if (fuzz_requests != fuzz_opened)
                 fuzz_die("a connection was opened with no request written on it");
+        if (fuzz_identity_pending)
+                fuzz_die("a connected authority was not consumed by one request");
         /* At the tight tier a chain that has reached public space never
            connects inside again. */
         if (MOONWATER_STRICT >= STRICT_TIGHT)
@@ -46484,6 +46840,8 @@ def http_fuzz_seeds():
             ("port_zero", b"http://h:0/", b"/"),
             ("port_big", b"http://h:65536/", b"/"),
             ("scheme_only", b"gopher://h/", b"mailto:x"),
+            ("bare_web_scheme", b"https:443", b"http:80"),
+            ("bare_other_scheme", b"ftp:21", b"smtp:25"),
             ("long", b"http://h/" + b"a" * 2100, b"b" * 2100)):
         seeds["url_%s.bin" % name] = b"\x03\x00" + url + b"\x00" + location
     return seeds
@@ -46990,6 +47348,7 @@ def harness_wget_hostile(argv):
             self.script = script
             self.lines = []
             self.hosts = []
+            self.locals = []
             self.listener = socket.socket()
             self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self.listener.bind((address, 0))
@@ -47008,6 +47367,7 @@ def harness_wget_hostile(argv):
         def serve(self, peer):
             try:
                 peer.settimeout(5)
+                self.locals.append(peer.getsockname()[0])
                 head = b""
                 while b"\r\n\r\n" not in head:
                     more = peer.recv(4096)
@@ -47067,13 +47427,47 @@ def harness_wget_hostile(argv):
     #   never left the inside may go anywhere.  The default follows all of it,
     #   as GNU wget and curl do.
     if args.netns:
+        import struct
         farm = Path(tempfile.mkdtemp(prefix="wget-netns-"))
         (farm / "wget").symlink_to(args.netns)
+        #   The network's resolver, played by a stub on this namespace's own
+        #   127.0.0.1:53 (resolv.conf is bound over in a mount namespace of
+        #   its own): every A question is answered 8.8.4.4, a public address
+        #   that is a loopback one here, and every name asked is kept.
+        (farm / "resolv.conf").write_text("nameserver 127.0.0.1\n")
+        subprocess.run(["mount", "--bind", str(farm / "resolv.conf"), "/etc/resolv.conf"],
+                       check=True)
+        asked = []
+        resolver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        resolver.bind(("127.0.0.1", 53))
+
+        def resolve():
+            while True:
+                try:
+                    data, peer = resolver.recvfrom(4096)
+                    at, labels = 12, []
+                    while data[at]:
+                        labels.append(data[at + 1:at + 1 + data[at]])
+                        at += 1 + data[at]
+                    kind = struct.unpack("!H", data[at + 1:at + 3])[0]
+                    asked.append(b".".join(labels).decode("latin1").lower())
+                    answer = (b"\xc0\x0c" + struct.pack("!HHIH", 1, 1, 60, 4) +
+                              bytes([8, 8, 4, 4])) if kind == 1 else b""
+                    resolver.sendto(struct.pack("!HHHHHH", struct.unpack("!H", data[:2])[0],
+                                                0x8180, 1, int(kind == 1), 0, 0) +
+                                    data[12:at + 5] + answer, peer)
+                except (OSError, IndexError, struct.error):
+                    continue
+        threading.Thread(target=resolve, daemon=True).start()
         rows = [
             ("public to loopback", "8.8.8.8", b"http://127.0.0.1:PORT/z", False),
             ("public to public", "8.8.8.8", b"http://8.8.4.4:PORT/z", True),
             ("loopback to loopback", "127.0.0.1", b"http://127.0.0.1:PORT/z", True),
             ("loopback to public", "127.0.0.1", b"http://8.8.8.8:PORT/z", True),
+            #   localhost is this machine whatever the resolver says, so the
+            #   tight tier refuses it after public space as it refuses
+            #   127.0.0.1; a resolver that said 8.8.4.4 once made it public.
+            ("public to localhost", "8.8.8.8", b"http://LocalHost.:PORT/z", False),
         ]
         failures = 0
         for name, first, location, follows in rows:
@@ -47091,7 +47485,129 @@ def harness_wget_hostile(argv):
                 print("FAIL %s %s: lines %r exit %d (%s)" % (
                     "tight" if args.tight else "default", name, server.lines,
                     done.returncode, done.stderr[-120:]))
-        print("PASS %d" % (len(rows) - failures))
+        #   RFC 6761 6.3: localhost and every name under it, in any case and
+        #   with or without the root's dot, reaches 127.0.0.1 and is never
+        #   asked of the resolver; a name that only looks like one is asked
+        #   like any other. The spellings are generated; curl, which answers
+        #   these names itself, is held to the same rows when it is here.
+        spell = random.Random(0x6761)
+
+        def cased(text):
+            return "".join(c.upper() if spell.randrange(2) else c for c in text)
+        loopback = ["localhost", "localhost.", "LOCALHOST"] + [
+            cased(".".join(["".join(spell.choice("ab-_0") for _ in range(spell.randint(1, 4)))
+                            .strip("-") or "a" for _ in range(spell.randint(1, 3))] +
+                           ["localhost"]) + spell.choice(["", "."])) for _ in range(9)]
+        elsewhere = [cased(name) for name in (
+            "localhostx", "xlocalhost", "localhost.example", "localhost-a.example",
+            "a-localhost", "localhos", "localhost.localhost.example", "ocalhost")]
+        curl = shutil.which("curl") if not args.tight else None
+        for host, inside in [(h, True) for h in loopback] + [(h, False) for h in elsewhere]:
+            row_failed = False
+            for who in ("mw", "curl") if curl else ("mw",):
+                del asked[:]
+                server = Server(answer(ok()), "0.0.0.0")
+                url = "http://%s:%d/y" % (host, server.port)
+                command = ([str(farm / "wget"), "-q", "-O", "saved", url] if who == "mw" else
+                           [curl, "-s", "--max-time", "10", "-o", "saved", url])
+                done = subprocess.run(command, capture_output=True, timeout=60, cwd=str(farm))
+                server.close()
+                want_asked = [] if inside else [host.lower().rstrip(".")]
+                want_local = ["127.0.0.1"] if inside else ["8.8.4.4"]
+                good = (done.returncode == 0 and server.locals == want_local and
+                        sorted(set(asked)) == want_asked)
+                if not good:
+                    row_failed = True
+                    print("FAIL %s %s %r: exit %d, reached %r, resolver asked %r" % (
+                        "tight" if args.tight else "default", who, host, done.returncode,
+                        server.locals, asked))
+            failures += row_failed
+        #   Host spellings against the references, at the default tier: how
+        #   each client reads 127.0.0.1 spelled the ways inet_aton reads it
+        #   (fewer parts, hex, octal, one number, the root's dot), and the
+        #   authority forms this client refuses. A row says what this client
+        #   does -- "literal" (127.0.0.1 reached, nobody asked), "name" (the
+        #   resolver asked, 8.8.4.4 reached) or "refused" (nothing asked or
+        #   reached) -- and why, where GNU wget or curl is known to differ.
+        #   This client is held to its column; the references' answers are
+        #   printed, and one that has come to agree is said.
+        spelled = []
+        if not args.tight:
+            quad = [127, 0, 0, 1]
+
+            def octet(value, form):
+                return {"dec": "%d" % value, "zero": "0%d" % value, "hex": "0x%x" % value,
+                        "HEX": "0X%X" % value, "oct": "0%o" % value}[form]
+            numeric = set()
+            while len(numeric) < 10:
+                parts = spell.choice([quad, [127, 0, 1], [127, 1], [0x7f000001]])
+                forms = [spell.choice(["dec", "dec", "zero", "hex", "HEX", "oct"])
+                         for _ in parts]
+                text = ".".join(octet(v, f) for v, f in zip(parts, forms))
+                try:
+                    same = socket.inet_aton(text) == bytes(quad)
+                except OSError:
+                    same = False
+                if text != "127.0.0.1" and same:
+                    numeric.add(text + spell.choice(["", "", "."]))
+            shorthand = ("a host that is not four plain decimal octets is a name to this "
+                         "client, as the resolver is asked; inet_aton, under GNU wget and "
+                         "curl, reads it as 127.0.0.1 (needs a decision: parity would "
+                         "canonicalize it once in http_split_into)")
+            spelled = [("http://127.0.0.1:PORT/", "literal", None)] + [
+                ("http://%s:PORT/" % text, "name", shorthand) for text in sorted(numeric)] + [
+                ("http://u@127.0.0.1:PORT/", "refused",
+                 "userinfo is refused; both send it as Authorization or drop it"),
+                ("http://127.0.0.1:PORT\\@x/", "refused",
+                 "a backslash is refused; both read x as the host"),
+                ("http://ex%61mple.com:PORT/", "refused",
+                 "a percent-encoded host is refused; both decode it"),
+                ("http://b\u00fccher.example:PORT/", "refused",
+                 "a host outside the DNS alphabet is refused; both apply IDNA"),
+                ("http:PORT", "refused",
+                 "http: without // is refused (SECURITY.md); both reach a host named http"),
+                ("http:/127.0.0.1:PORT/", "refused", "curl reads one slash as two"),
+                ("http://127.0.0.1.:PORT/", "name",
+                 "the root's dot makes a name, as GNU wget reads it; curl reads the address"),
+                ("HTTP://127.0.0.1:PORT/", "literal", None),
+                ("http://Example.COM.:PORT/", "name", None),
+            ]
+        references = [(who, path) for who, path in (("wget", shutil.which("wget")),
+                                                    ("curl", shutil.which("curl"))) if path]
+        for url, want, why in spelled:
+            answers = {}
+            for who, path in [("mw", str(farm / "wget"))] + references:
+                del asked[:]
+                server = Server(answer(ok()), "0.0.0.0")
+                text = url.replace("PORT", str(server.port))
+                command = {"mw": [path, "-q", "-O", "saved", text],
+                           "wget": [path, "-q", "--tries=1", "--timeout=5", "-O", "saved", text],
+                           "curl": [path, "-s", "--max-time", "5", "-o", "saved", text]}[who]
+                try:
+                    done = subprocess.run(command, capture_output=True, timeout=30,
+                                          cwd=str(farm)).returncode
+                except subprocess.TimeoutExpired:
+                    done = None
+                server.close()
+                answers[who] = ("literal" if done == 0 and server.locals == ["127.0.0.1"]
+                                and not asked else
+                                "name" if done == 0 and server.locals == ["8.8.4.4"] and asked
+                                else "refused" if not server.locals and not asked else
+                                "other: exit %s reached %r asked %r" % (done, server.locals,
+                                                                         asked))
+            if answers["mw"] != want:
+                failures += 1
+                print("FAIL default spelling %r: this client %s, wanted %s" % (
+                    url, answers["mw"], want))
+            others = {who: seen for who, seen in answers.items() if who != "mw"}
+            if any(seen != want for seen in others.values()):
+                print("NOTE spelling %r: this client %s; %s%s" % (
+                    url, want, ", ".join("%s %s" % kv for kv in sorted(others.items())),
+                    " -- " + why if why else " -- no reason recorded"))
+            elif why:
+                print("NOTE spelling %r: every reference now agrees (%s)" % (url, why))
+        total = len(rows) + len(loopback) + len(elsewhere) + len(spelled)
+        print("PASS %d of %d" % (total - failures, total))
         return 1 if failures else 0
 
     checks = Checks()
@@ -47142,12 +47658,12 @@ def harness_wget_hostile(argv):
                     checks(have == one["saved"], "%s: saved %r, wanted %r" % (
                         label, have, one["saved"]))
         #   The address policy, by the default shell and by a tight-tier build.
-        probe = subprocess.run(["unshare", "-Urn", "sh", "-c",
+        probe = subprocess.run(["unshare", "-Urnm", "sh", "-c",
                                 "ip link set lo up && ip addr add 8.8.8.8/32 dev lo"],
                                capture_output=True) if shutil.which("unshare") and shutil.which("ip") \
             else None
         if probe is None or probe.returncode:
-            print("wget hostile: address policy rows skipped (no unshare -Urn with ip)")
+            print("wget hostile: address policy rows skipped (no unshare -Urnm with ip)")
         else:
             tight = Path(args.tight_shell) if args.tight_shell else work / "tight"
             if not args.tight_shell:
@@ -47160,7 +47676,7 @@ def harness_wget_hostile(argv):
                 if not path.exists():
                     continue
                 inside = subprocess.run(
-                    ["unshare", "-Urn", "sh", "-c",
+                    ["unshare", "-Urnm", "sh", "-c",
                      'ip link set lo up && ip addr add 8.8.8.8/32 dev lo && '
                      'ip addr add 8.8.4.4/32 dev lo && exec "$0" "$@"',
                      sys.executable, str(Path(__file__).resolve()), "--harness",
@@ -47170,9 +47686,13 @@ def harness_wget_hostile(argv):
                 for line in inside.stdout.splitlines():
                     if line.startswith("FAIL"):
                         checks(False, line)
-                passed = [int(line.split()[1]) for line in inside.stdout.splitlines()
+                for line in inside.stdout.splitlines():
+                    if line.startswith("NOTE"):
+                        print("  " + line)
+                passed = [line.split()[1:4:2] for line in inside.stdout.splitlines()
                           if line.startswith("PASS")]
-                checks(inside.returncode == 0 and passed == [4],
+                checks(inside.returncode == 0 and len(passed) == 1 and
+                       passed[0][0] == passed[0][1] and int(passed[0][1]) >= 25,
                        "address policy, %s shell: exit %d, %s" % (
                            level, inside.returncode, inside.stderr[-300:] or inside.stdout[-300:]))
     return checks.verdict("wget hostile", "wget-hostile")
@@ -47194,6 +47714,13 @@ def harness_http_urls(argv):
     takes. Paths and references carry dot segments too: the client resolves
     them before it asks, as GNU wget does (http_path_simplify, %2e spellings
     included), and the oracle by RFC 3986 5.2.4 over urllib's answer.
+
+    The same questions go to the lift built at MOONWATER_STRICT 2 as well,
+    which must answer every one as the default does but a URL that opens
+    with a scheme token not followed by "//" ("ftp:21", "h:81", "a+b:1"):
+    the default reads that as a schemeless host:port, the tight tier
+    refuses it, and both refuse "http:" and "https:" without "//". Both
+    halves have to be seen.
 
         python3 test/differential.py --harness http_urls
     """
@@ -47281,6 +47808,7 @@ int main(void)
 }
 """
     source = http_fuzz_source(net, util, driver)
+    tight_source = http_fuzz_source(net, util, driver, tight=True)
     random_urls = random.Random(20260928)
     schemes = ["http://", "https://", "HTTP://", "hTtPs://", "", "ftp://", "http:",
                "web+x://", "https:/"]
@@ -47304,6 +47832,15 @@ int main(void)
     for _ in range(4000):
         urls.add(pick(schemes) + pick(users) + pick(hosts) + pick(ports) +
                  pick(paths) + pick(queries) + pick(fragments))
+    #       Scheme tokens with no "//": web schemes in any case, others of
+    #       every character RFC 3986 lets a scheme hold, before a port, a
+    #       path, a slash or nothing.
+    for _ in range(600):
+        token = pick(["http", "HTTPS", "hTTp", "ftp", "h", "a+b", "x-y.z", "web+x",
+                      "localhost", "abc1"])
+        urls.add(token + ":" + pick(["21", "81", "65535", "0", "", "/", "/p", "8080/a?b",
+                                     "x", "//"[:random_urls.randrange(2)]]) +
+                 pick(["", "", "/q", "#f"]))
     urls = sorted(urls)
     bases = ["http://example.com/dir/old", "https://example.com:8443/a/b?q=1",
              "http://h:80/", "https://h/x?y#z", "http://127.0.0.1:8080/d/e/f"]
@@ -47385,8 +47922,13 @@ int main(void)
         flags = [compiler, "-O1", "-g", "-std=gnu11", "-w"]
         if platform.system() == "Linux":
             flags.append("-fsanitize=address,undefined")
+        (work / "http_urls_tight.c").write_text(tight_source)
         built = subprocess.run(flags + [str(unit), "-o", str(work / "http_urls")],
                                capture_output=True, text=True)
+        if not built.returncode:
+            built = subprocess.run(flags + [str(work / "http_urls_tight.c"), "-o",
+                                            str(work / "http_urls_tight")],
+                                   capture_output=True, text=True)
         if built.returncode:
             print("  FAIL the URL lift did not build:\n" + built.stderr[-3000:])
             write_tally("http-urls", 0, 1)
@@ -47394,12 +47936,14 @@ int main(void)
         questions = ["S %s" % encode(url) for url in urls]
         pairs = [(base, reference) for base in bases for reference in references]
         questions += ["A %s %s" % (encode(base), encode(reference)) for base, reference in pairs]
-        ran = subprocess.run([str(work / "http_urls")], input="\n".join(questions) + "\n",
-                             capture_output=True, text=True, timeout=120,
-                             env=dict(os.environ, ASAN_OPTIONS="detect_leaks=0"))
-        answers = ran.stdout.splitlines()
-        if ran.returncode or len(answers) != len(questions):
-            print("  FAIL the URL lift stopped:\n" + ran.stderr[-3000:])
+        runs = [subprocess.run([str(work / name)], input="\n".join(questions) + "\n",
+                               capture_output=True, text=True, timeout=120,
+                               env=dict(os.environ, ASAN_OPTIONS="detect_leaks=0"))
+                for name in ("http_urls", "http_urls_tight")]
+        answers, tight_answers = (ran.stdout.splitlines() for ran in runs)
+        if any(ran.returncode for ran in runs) or len(answers) != len(questions) or \
+                len(tight_answers) != len(questions):
+            print("  FAIL the URL lift stopped:\n" + (runs[0].stderr + runs[1].stderr)[-3000:])
             write_tally("http-urls", 0, 1)
             return 1
 
@@ -47443,6 +47987,27 @@ int main(void)
                        % (base, reference, got, joined))
         for key, why in DELIBERATE.items():
             checks(seen[key] > 0, "DELIBERATE %s never generated (%s)" % (key, why))
+        #   The tight tier: the default's answer, but no scheme token
+        #   without "//" in front of the authority.
+        tiers = collections.Counter()
+        for url, default, tight in zip(urls, answers, tight_answers):
+            scheme = scheme_shape.match(url)
+            token = scheme is not None and not url[scheme.end():].startswith("//")
+            if token:
+                web = scheme.group(1).lower() in ("http", "https")
+                checks(tight == "BAD", "%r: the tight tier took a scheme token: %s" % (url, tight))
+                checks(not web or default == "BAD",
+                       "%r: http(s): without // was taken: %s" % (url, default))
+                tiers["default took, tight refused" if default != "BAD" else
+                      "both refused"] += 1
+            else:
+                checks(tight == default, "%r: the tiers differ: default %s, tight %s" % (
+                    url, default, tight))
+        for (base, reference), default, tight in zip(pairs, answers[len(urls):],
+                                                     tight_answers[len(urls):]):
+            checks(tight == default, "%r + %r: the tiers resolve differently" % (base, reference))
+        checks(tiers["default took, tight refused"] > 0 and tiers["both refused"] > 0,
+               "both halves of the scheme-token rule seen: %r" % dict(tiers))
 
     return checks.verdict("http urls", "http-urls")
 
@@ -55704,7 +56269,7 @@ static void expect_dns(const char *label, const p8 *msg, positive size,
         p8 into[256];
         positive ended = 0;
         bipolar used = dns_copy_name((p8 address_to)msg, size, at, into,
-                                     sizeof into, address_of ended);
+                                     sizeof into, address_of ended, null);
         int ok = used >= 0;
         if (ok != want_ok) {
                 fprintf(stderr, "msan wire lift: FAIL dns %s (used=%ld)\n",
@@ -56700,6 +57265,112 @@ system_random_fill system_read_retry
 """.split())
 
 
+#       The network stack's own spelling of a kernel number, and the uapi
+#       name the kernel spells it with. Every other number is matched by its
+#       own name; these are the ones written shorter here.
+WIRE_ALIASES = {
+    "NLM_REQUEST": "NLM_F_REQUEST", "NLM_ACK": "NLM_F_ACK", "NLM_DUMP": "NLM_F_DUMP",
+    "NLM_DUMP_INTERRUPTED": "NLM_F_DUMP_INTR", "NLM_REPLACE": "NLM_F_REPLACE",
+    "NLM_EXCLUSIVE": "NLM_F_EXCL", "NLM_CREATE": "NLM_F_CREATE",
+    "NLMSG_IS_NOOP": "NLMSG_NOOP", "NLMSG_IS_ERROR": "NLMSG_ERROR",
+    "NLMSG_IS_DONE": "NLMSG_DONE", "NETLINK_HEADER": "NLMSG_HDRLEN",
+    "IFNAME_SIZE": "IFNAMSIZ",
+}
+
+#       Families of names the uapi headers own. A define here whose name is
+#       in one of them and that the headers also declare is a number the
+#       kernel reads off the wire, and it must be the kernel's.
+WIRE_FAMILIES = ("NLM_", "NLMSG_", "NLA_", "RTM_", "RTA_", "RT_", "RTN_", "RTPROT_",
+                 "RTNLGRP_", "IFLA_", "IFA_", "IFF_", "NDA_", "NUD_", "NL80211_",
+                 "CTRL_", "GENL_", "ETH_", "ARPHRD_", "AUDIT_ARCH_", "SECCOMP_",
+                 "IPPROTO_", "IP_", "SO_", "SOL_", "AF_", "MSG_", "TCP_", "PR_")
+
+WIRE_FILES = ("src/net/net.c", "src/net/wait.c", "src/sh/net.c", "src/sh/host.c",
+              "src/waterlink/waterlink.c", "src/waterlink/discover.c",
+              "src/waterlink/nearby.c", "src/waterlink/link.c",
+              "src/waterlink/service.c")
+
+
+def harness_wire_constants(argv):
+    """Every kernel number the network stack writes as its own #define, against
+    the kernel's uapi headers.
+
+    The netlink flags, message and attribute types, nl80211 commands and
+    attributes, genetlink control and the socket-level numbers are written
+    out by hand in net.c, sh/net.c and host.c, because a spark program has no
+    libc headers. A number off by one there is a request the kernel reads as
+    something else (NLM_DUMP 0x0300 one less is a request that matches and
+    echoes and acknowledges but never dumps), and no check that talks to a
+    mock netlink can see it: the mock was written from the same number. The
+    headers are the second spelling. Names are taken from the source, so a
+    new define in one of the families is compared without anybody listing it;
+    a name the headers do not declare is the stack's own and is left alone.
+    """
+    del argv
+    checks = Checks()
+    pattern = re.compile(r"^#define ([A-Z][A-Z0-9_]+)[ \t]+\(?(0x[0-9a-fA-F]+|\d+)[uUlL]*\)?"
+                         r"[ \t]*(?://[^\n]*|/\*[^\n]*)?$", re.M)
+    seen = {}
+    for path in WIRE_FILES:
+        for name, raw in pattern.findall((HARNESS_ROOT / path).read_text()):
+            value = int(raw, 0)
+            kernel = WIRE_ALIASES.get(name, name)
+            if name not in WIRE_ALIASES and not name.startswith(WIRE_FAMILIES):
+                continue
+            if kernel in seen and seen[kernel][1] != value:
+                checks(False, "%s is %d in %s and %d in %s" % (
+                    name, value, path, seen[kernel][1], seen[kernel][0]))
+            seen.setdefault(kernel, (path, value, name))
+    headers = ("sys/socket.h", "netinet/in.h", "netinet/tcp.h", "sys/prctl.h",
+               "linux/netlink.h", "linux/rtnetlink.h", "linux/genetlink.h",
+               "linux/nl80211.h", "linux/if.h", "linux/if_ether.h", "linux/if_arp.h",
+               "linux/audit.h", "linux/seccomp.h", "linux/filter.h")
+    head = "".join("#include <%s>\n" % h for h in headers) + "#include <stdio.h>\n"
+
+    def program(names):
+        return head + "int main(void)\n{\n" + "".join(
+            '        printf("%s %%lld\\n", (long long)(%s));\n' % (n, n)
+            for n in names) + "        return 0;\n}\n"
+
+    with tempfile.TemporaryDirectory(prefix="wire-constants-") as work:
+        unit = Path(work) / "wire.c"
+        names = sorted(seen)
+        #   The first compile says which names the headers do not declare,
+        #   and those are the stack's own.
+        unit.write_text(program(names))
+        probe = subprocess.run(["cc", "-fsyntax-only", "-w", str(unit)],
+                               capture_output=True, text=True)
+        missing = set(re.findall(r"[‘'](\w+)[’'] undeclared", probe.stderr))
+        known = [n for n in names if n not in missing]
+        unit.write_text(program(known))
+        built = subprocess.run(["cc", "-w", str(unit), "-o", str(Path(work) / "wire")],
+                               capture_output=True, text=True)
+        if built.returncode:
+            print("  FAIL wire constants did not build:\n" + built.stderr[-2000:])
+            write_tally("wire-constants", 0, 1)
+            return 1
+        said = subprocess.run([str(Path(work) / "wire")], capture_output=True,
+                              text=True, check=True).stdout
+    kernel = {n: int(v) for n, v in (line.split() for line in said.splitlines())}
+    for name in known:
+        path, value, ours = seen[name]
+        #   A mask the headers spell as a complement (NLA_TYPE_MASK is
+        #   ~(NLA_F_NESTED | NLA_F_NET_BYTEORDER), a negative int) is the
+        #   same bits in the 16-bit field it masks.
+        theirs = kernel[name] & 0xffff if kernel[name] < 0 and value <= 0xffff \
+            else kernel[name]
+        checks(theirs == value,
+               "%s (%s) is %d in %s but %d in the kernel's headers" % (
+                   ours, name, value, path, kernel[name]))
+    #   A parse that found nothing would agree with everything: the source
+    #   has well over a hundred of these, and every alias must be one.
+    checks(len(known) >= 120, "only %d kernel numbers were compared" % len(known))
+    checks(all(WIRE_ALIASES[a] in kernel for a in WIRE_ALIASES if a in
+               {s[2] for s in seen.values()}),
+           "an alias names something the kernel's headers do not declare")
+    return checks.verdict("wire constants", "wire-constants")
+
+
 def harness_net_dependency_closure(argv):
     """Fail when net.c gains a shared primitive without reviewed evidence.
 
@@ -56766,8 +57437,8 @@ def harness_security_hygiene(argv):
       sits in test/ (they are written to each run's temporary directory)
     - tls_verify_fuzz calls production tls_verify_one with the WR2/GTS prove
       over the hosted crypto lift, and CHECK_net keeps its freestanding proves
-    - the security docs never say tls_verify_fuzz's signatures are mocked, and
-      the harness names SECURITY_TEST_MATRIX.md gives are registered
+    - .github/SECURITY.md exists, never says tls_verify_fuzz's signatures are
+      mocked, and every harness it names is registered
     - http_response_framing's CASES / MUST_ACCEPT / DELIBERATE agree, and its
       DELIBERATE rows keep the must-disagree assert against http.client
     - https_downgrade keeps several Location shapes
@@ -56782,7 +57453,8 @@ def harness_security_hygiene(argv):
                 "dhcp_fuzz", "sntp_fuzz", "dns_fuzz", "netlink_fuzz", "tls_peer",
                 "http_fuzz", "http_urls", "wifi_eapol_fuzz", "wifi_scan_fuzz",
                 "bowl_sig_fuzz", "wget_mutation", "wget_hostile", "sntp_era", "net_netem",
-                "net_dependency_closure", "net_math_proof", "net_clock_fault")
+                "net_dependency_closure", "net_math_proof", "net_clock_fault",
+                "protected_links", "hostile_strings", "state_cuts")
     for name in security + ("tls_verify_fuzz",):
         checks(name in HARNESS_CHECKS, "differential.py: %s is not registered" % name)
     table = re.search(r"^HARNESS_CHECKS = \{$(.*?)^\}$", source, re.M | re.S)
@@ -56834,20 +57506,22 @@ def harness_security_hygiene(argv):
         checks(start >= 0 and needle in region,
                "CHECK_net: missing freestanding verify proof: " + needle[:60])
 
-    for doc in ("SECURITY_CHECKLIST.md", "SECURITY_TEST_MATRIX.md"):
-        path = HARNESS_ROOT / doc
-        lower = path.read_text().lower() if path.is_file() else ""
-        for phrase in ("signatures mocked", "mocked signature", "mocked refuse",
-                       "signatures always refuse"):
-            for found in re.finditer(re.escape(phrase), lower):
-                window = lower[max(0, found.start() - 120):found.end() + 120]
-                checks("tls_verify" not in window and "verify_fuzz" not in window,
-                       "%s: still says %r near tls_verify_fuzz" % (doc, phrase))
-    matrix = HARNESS_ROOT / "SECURITY_TEST_MATRIX.md"
-    named = set(re.findall(r"`([a-z][a-z0-9_]*(?:_fuzz|_race))`",
-                           matrix.read_text() if matrix.is_file() else ""))
+    #   The whole security record is one file; a missing or empty one fails
+    #   the row instead of letting the checks below read nothing.
+    record = HARNESS_ROOT / ".github/SECURITY.md"
+    text = record.read_text() if record.is_file() else ""
+    checks(len(text) > 1000, ".github/SECURITY.md: the security record is missing")
+    lower = text.lower()
+    for phrase in ("signatures mocked", "mocked signature", "mocked refuse",
+                   "signatures always refuse"):
+        for found in re.finditer(re.escape(phrase), lower):
+            window = lower[max(0, found.start() - 120):found.end() + 120]
+            checks("tls_verify" not in window and "verify_fuzz" not in window,
+                   ".github/SECURITY.md: still says %r near tls_verify_fuzz" % phrase)
+    named = set(re.findall(r"`([a-z][a-z0-9_]*(?:_fuzz|_race))`", text))
+    named.update(re.findall(r"--harness ([a-z][a-z0-9_]*)", text))
     unknown = sorted(named - set(HARNESS_CHECKS))
-    checks(not unknown, "SECURITY_TEST_MATRIX.md names unregistered harnesses: "
+    checks(not unknown, ".github/SECURITY.md names unregistered harnesses: "
            + ", ".join(unknown))
 
     framing = inspect.getsource(harness_http_response_framing)
@@ -56899,8 +57573,30 @@ def harness_security_hygiene(argv):
         ("radio_rsn_security", ("element",)),
         ("radio_bss_read", ("elements",)),
         ("bowl_signature_read", ("bytes",)),
+        ("net_arp_claims", ("packet",)),
     )
+    #   The kernel log is anybody's to read on this image (DMESG_RESTRICT is
+    #   off) and the ring-0 terminal draws it, so every part of a host_kmsg
+    #   line that is not a literal is named here: a saved init command went
+    #   there whole, secrets and all, where its settings are root's alone. A
+    #   new part is a review before it is a leak.
+    kmsg_parts = {"id", "ending", "path", "answer->zone", "answer->mode",
+                  "HOST_MACHINE_SCRIPT", "name"}
+    for file in ("src/sh/host.c", "src/moonwater/moonwater.c"):
+        text = (HARNESS_ROOT / file).read_text()
+        lines = re.findall(r"string_address line\[\] = \{(.*?)\};\s*host_kmsg\(line\);",
+                           text, re.S)
+        calls = len(re.findall(r"\bhost_kmsg\(", text)) - len(
+            re.findall(r"^static fn host_kmsg\(", text, re.M))
+        checks(len(lines) == calls,
+               "%s: a host_kmsg call whose parts this cannot read" % file)
+        for parts in lines:
+            names = {part.strip() for part in
+                     re.sub(r'"(?:[^"\\]|\\.)*"', "", parts).split(",")} - {"", "null"}
+            checks(names <= kmsg_parts, "%s: a kernel log line carries %s"
+                   % (file, ", ".join(sorted(names - kmsg_parts))))
     wire_source = (net + (HARNESS_ROOT / "src/sh/host.c").read_text() +
+                   (HARNESS_ROOT / "src/sh/net.c").read_text() +
                    (HARNESS_ROOT / "src/waterlink/discover.c").read_text() +
                    (HARNESS_ROOT / "src/bowl.c").read_text())
     try:
@@ -56911,7 +57607,7 @@ def harness_security_hygiene(argv):
         found = re.search(r"^[a-z][^\n(;]*\b%s\([^;{]*?\)\s*\n\{.*?^\}$" % name,
                           wire_source, re.M | re.S)
         checks(found is not None,
-               "reader-only: cannot find %s in net.c, host.c, discover.c or bowl.c" % name)
+               "reader-only: cannot find %s in net.c, host.c, sh/net.c, discover.c or bowl.c" % name)
         if not found:
             continue
         body = re.sub(r"//[^\n]*", "", re.sub(r"/\*.*?\*/", "", found.group(0), flags=re.S))
@@ -56933,6 +57629,923 @@ def harness_security_hygiene(argv):
 
     print("security hygiene %d/%d" % (checks.checks - checks.failures, checks.checks))
     return 1 if checks.failures else 0
+
+
+#       Where bytes somebody else chose enter a program, and every function
+#       that reads them there: each caller is a row hostile_strings drives,
+#       or the reason it needs none. A new caller of a source fails the gate
+#       until it is given one or the other.
+HOSTILE_SOURCES = {
+    "netlink_link_name": {
+        "netlink_link_seen": "row ifname (ip link, ip addr)",
+        "netlink_wired_seen": "row ifname (moonwater wired)",
+        "net_link_line": "row ifname (ip link)",
+        "net_name_seen": "row ifname (ip route)",
+    },
+    "radio_bss_read": {
+        "radio_air_seen": "SSIDs are shown through radio_display only (wifi_scan_fuzz, wifi_air)",
+        "radio_pick_seen": "picks a network; prints nothing",
+    },
+    "dns_copy_name": {
+        "dns_answer_address": "compares names; only addresses are printed",
+        "dns_skip_name": "skips a name",
+        "waterlink_dns_name": "names pass link_name_good before use",
+    },
+    "http_header": {
+        "http_response_framing_from": "row http (Location, reason, headers through wget and fetch)",
+        "locale_auto_from_headers": "words pass locale_auto_word and must name a zone in the table",
+    },
+    "waterlink_mdns_read": {
+        "link_nearby_heard": "names pass link_name_for (link_name_good)",
+    },
+    "file_machine_read": {
+        "build_arch_here": "build tool, the machine field only",
+        "build_local": "build tool, the machine field only",
+        "file_hostname": "hostname prints the node name raw, as GNU's does",
+        "file_ls_as": "ls's own use, the release",
+        "file_uname": "uname prints the fields raw, as GNU's does",
+        "host_name": "row nodename (moonwater name, not root)",
+        "host_running_build": "the release field only",
+        "tools_monitor": "monitor's header; the node name is set by root only",
+        "tools_hostid_value": "hostid hashes it",
+        "tools_hostname": "hostname prints it raw, as GNU's does",
+        "ul_lscpu_take": "lscpu, the machine field only",
+    },
+}
+
+#       What a terminal acts on, found in output: C0 but newline and tab, DEL,
+#       C1 once decoded, bytes that are not UTF-8, and a line a payload
+#       started (FORGED). The program's own bold, dim and reset are not.
+HOSTILE_PIECES = (b"\x1b]0;PWNED\x07", b"\x1b[31;5m", b"\x1bP$qm\x1b\\", b"\x1b_apc\x1b\\",
+                  b"\x1b[6n", b"\x9b6n", b"\xc2\x9b31m", b"\x7f", b"\r", b"\x08", b"\x07",
+                  b"\x0bv", b"\nFORGED: ok", "‮bidi".encode(), b"\xff\xfe", b"\x1bc")
+
+
+def hostile_payloads(seed, count, room, banned=b""):
+    import random
+    generator = random.Random(seed)
+    found = []
+    while len(found) < count:
+        pieces = [generator.choice(HOSTILE_PIECES)
+                  for _ in range(generator.randint(1, 3))]
+        text = b"a" + b"".join(pieces) + b"z"
+        text = bytes(byte for byte in text if byte not in banned)
+        if len(text) <= room and text not in found and len(text) > 2:
+            found.append(text)
+    return found
+
+
+def hostile_scan(data):
+    """What in data a terminal would act on, as a short list of reasons."""
+    own = re.sub(rb"\x1b\[[012]?m", b"", data)
+    found = []
+    for at, byte in enumerate(own):
+        if (byte < 0x20 and byte not in (0x0a, 0x09)) or byte == 0x7f:
+            found.append("byte 0x%02x at %d" % (byte, at))
+            break
+    try:
+        text = own.decode("utf-8")
+        for character in text:
+            if 0x80 <= ord(character) <= 0x9f:
+                found.append("C1 U+%04X" % ord(character))
+                break
+    except UnicodeDecodeError as error:
+        found.append("not UTF-8 at %d" % error.start)
+    if re.search(rb"(^|\n)FORGED", own):
+        found.append("a forged line")
+    return found
+
+
+def harness_hostile_strings(argv):
+    """Bytes somebody else chose, through every source that carries them to a
+    terminal, and nothing a terminal acts on comes out.
+
+    The sources are names: an interface's (IFLA_IFNAME, which the kernel
+    takes with escape and bell in it from anybody with CAP_NET_ADMIN in a
+    namespace), the node name, an archive's member, link, owner and
+    extended attribute names, and an HTTP server's status line, Location
+    and headers. Each gets payloads from a grammar of escape, CSI, OSC, DCS
+    (DECRQSS, which makes a terminal answer), APC, C1 both raw and in UTF-8,
+    DEL, carriage return, backspace, bell, a newline that starts a forged
+    line, a BiDi override and bytes that are not UTF-8, cut to what the
+    source can hold; every command that shows it is run and its standard
+    output and error scanned (hostile_scan). The table HOSTILE_SOURCES names
+    every function that reads such a source and the row that drives it or
+    why none is needed; a new caller fails here first. BiDi controls are
+    counted, not refused: GNU's tools print them in a UTF-8 locale.
+
+        python3 test/differential.py --harness hostile_strings --shell PATH
+    """
+    import io
+    import shutil
+    import socket
+    import tarfile
+    import tempfile
+    import threading
+    parser = argparse.ArgumentParser(prog="differential.py --harness hostile_strings")
+    parser.add_argument("--shell", required=True)
+    parser.add_argument("--inside", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--farm", help=argparse.SUPPRESS)
+    args = parser.parse_args(argv)
+    checks = Checks()
+    seed = int(os.environ.get("MOONWATER_HOSTILE_SEED", "2026"))
+    many = int(os.environ.get("MOONWATER_HOSTILE_COUNT", "6"))
+
+    bidi = []
+
+    def shown(row, command, ran):
+        data = ran.stdout + ran.stderr
+        bad = hostile_scan(data)
+        checks(not bad and ran.returncode is not None,
+               "%s: %s shows %s: %r" % (row, command, ", ".join(bad), data[:160]))
+        if re.search("[\u202a-\u202e\u2066-\u2069]", data.decode("utf-8", "replace")):
+            bidi.append("%s: %s" % (row, command))
+
+    if args.inside:
+        #   In a user and network namespace: interfaces named by the grammar,
+        #   made with the host's iproute2, shown by ours.
+        farm = Path(args.farm)
+        system_ip = shutil.which("ip", path="/usr/sbin:/usr/bin:/sbin:/bin")
+        names = hostile_payloads(seed, many, 15, banned=b"/: \t\n\r\x0b\x0c\x00")
+        made = []
+        for number, name in enumerate(names):
+            if subprocess.run([system_ip, "link", "add", name, "type", "dummy"],
+                              capture_output=True).returncode == 0:
+                subprocess.run([system_ip, "link", "set", name, "up"], capture_output=True)
+                subprocess.run([system_ip, "addr", "add", "10.77.%d.1/24" % number, "dev", name],
+                               capture_output=True)
+                made.append(name)
+        checks(len(made) == len(names), "ifname: the kernel took %d of %d names"
+               % (len(made), len(names)))
+        for words in (["ip", "link"], ["ip", "addr"], ["ip", "route"], ["moonwater", "wired"]):
+            ran = subprocess.run([str(farm / words[0])] + words[1:], capture_output=True,
+                                 timeout=20, env={"PATH": "/usr/bin:/bin"})
+            shown("ifname", " ".join(words), ran)
+            checks(ran.returncode == 0 and b"10.77.0" in ran.stdout if words[1] == "route"
+                   else ran.returncode == 0, "ifname: %s answered (%d)"
+                   % (" ".join(words), ran.returncode))
+        return checks.verdict("hostile strings (namespace)", "hostile-strings-inside")
+
+    #   The gate: every caller of a source has a row or a reason.
+    sources = {}
+    for path in sorted(list((HARNESS_ROOT / "src").rglob("*.c")) +
+                       list((HARNESS_ROOT / "src").rglob("*.inc"))):
+        current = None
+        for line in path.read_text(errors="replace").splitlines():
+            head = re.match(r"^(?:static|fn|b32|bool|bipolar|positive|p\d+|void|int|"
+                            r"string_address)\b[^;=]*?\b(\w+)\(", line)
+            if head:
+                current = head.group(1)
+            for name in HOSTILE_SOURCES:
+                if re.search(r"\b%s\(" % name, line) and current != name:
+                    sources.setdefault(name, set()).add(current)
+    for name, rows in HOSTILE_SOURCES.items():
+        found = sources.get(name, set())
+        checks(found, "gate: %s has no caller any more" % name)
+        for caller in sorted(found - set(rows)):
+            checks(False, "gate: %s reads %s and has no row or reason in HOSTILE_SOURCES"
+                   % (caller, name))
+
+    farm_dir = tempfile.mkdtemp(prefix="hostile-strings.")
+    try:
+        farm = Path(farm_dir)
+        for tool in ("ip", "moonwater", "tar", "wget", "fetch"):
+            (farm / tool).symlink_to(Path(args.shell).resolve())
+        work = farm / "work"
+        work.mkdir()
+        quiet = {"PATH": "/usr/bin:/bin", "LC_ALL": "C.UTF-8", "HOME": str(work)}
+
+        #   The node name, as somebody who is not root asks for it: a user
+        #   namespace of one's own uid and a UTS namespace whose name is set
+        #   before the exec that drops the capability.
+        for name in hostile_payloads(seed + 1, many, 64, banned=b"\x00"):
+            def named(name=name):
+                user, group = os.getuid(), os.getgid()
+                os.unshare(os.CLONE_NEWUSER | os.CLONE_NEWUTS)
+                Path("/proc/self/setgroups").write_text("deny")
+                Path("/proc/self/uid_map").write_text("%d %d 1" % (user, user))
+                Path("/proc/self/gid_map").write_text("%d %d 1" % (group, group))
+                socket.sethostname(name)
+            try:
+                ran = subprocess.run([str(farm / "moonwater"), "name"], capture_output=True,
+                                     timeout=20, env=quiet, preexec_fn=named)
+            except (subprocess.SubprocessError, OSError) as error:
+                print("hostile strings: nodename NOT RUN -- %s" % error)
+                break
+            shown("nodename", "moonwater name", ran)
+
+        #   Archives: member, link, owner and attribute names, listed,
+        #   extracted, compared.
+        for number, name in enumerate(hostile_payloads(seed + 2, many, 200, banned=b"\x00")):
+            text = name.decode("utf-8", "surrogateescape")
+            archive = work / ("a%d.tar" % number)
+            stream = io.BytesIO()
+            with tarfile.open(fileobj=stream, mode="w", format=tarfile.PAX_FORMAT,
+                              encoding="utf-8", errors="surrogateescape") as tar:
+                for member_name in (text, text + "/../escape", "plain"):
+                    info = tarfile.TarInfo(member_name)
+                    info.size = 2
+                    info.uname = info.gname = text[:31]
+                    info.pax_headers = {"SCHILY.xattr.user." + name.decode("utf-8", "ignore") +
+                                        "x" * 250: "v"}
+                    tar.addfile(info, io.BytesIO(b"hi"))
+                link = tarfile.TarInfo("link")
+                link.type = tarfile.SYMTYPE
+                link.linkname = text
+                tar.addfile(link)
+            archive.write_bytes(stream.getvalue())
+            for words in (["-tf"], ["-tvf"], ["-xf"], ["-xvf"], ["--xattrs", "-xf"],
+                          ["-df"]):
+                target = work / ("x%d" % number)
+                target.mkdir(exist_ok=True)
+                ran = subprocess.run([str(farm / "tar")] + words + [str(archive)], cwd=target,
+                                     capture_output=True, timeout=20, env=quiet)
+                shown("tar", "tar " + " ".join(words), ran)
+
+        #   HTTP: a status line, a Location and headers chosen by the server,
+        #   through wget and fetch, followed or refused.
+        class Server(threading.Thread):
+            def __init__(self, answers):
+                super().__init__(daemon=True)
+                self.answers = answers
+                self.listener = socket.socket()
+                self.listener.bind(("127.0.0.1", 0))
+                self.listener.listen(16)
+                self.port = self.listener.getsockname()[1]
+                self.start()
+
+            def run(self):
+                while True:
+                    try:
+                        peer, _ = self.listener.accept()
+                    except OSError:
+                        return
+                    with peer:
+                        peer.settimeout(5)
+                        head = b""
+                        try:
+                            while b"\r\n\r\n" not in head:
+                                more = peer.recv(4096)
+                                if not more:
+                                    break
+                                head += more
+                            path = head.split(b" ")[1] if head.count(b" ") > 1 else b"/"
+                            peer.sendall(self.answers(path, self.port))
+                        except OSError:
+                            pass
+
+        def http_answers(payload):
+            def answer(path, port):
+                if path.startswith(b"/loop"):
+                    return (b"HTTP/1.1 302 Found\r\nLocation: /loop" + payload +
+                            b"\r\nContent-Length: 0\r\n\r\n")
+                if path.startswith(b"/far"):
+                    return (b"HTTP/1.1 301 " + payload + b"\r\nLocation: http://" + payload +
+                            b".invalid/x\r\nContent-Length: 0\r\n\r\n")
+                if path.startswith(b"/down"):
+                    return (b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:%d/" % port +
+                            payload + b"\r\nContent-Length: 0\r\n\r\n")
+                return (b"HTTP/1.1 404 " + payload + b"\r\nServer: " + payload +
+                        b"\r\nContent-Disposition: attachment; filename=\"" + payload +
+                        b"\"\r\nContent-Length: 2\r\n\r\nno")
+            return answer
+
+        for payload in hostile_payloads(seed + 3, many, 120, banned=b"\x00\r\n"):
+            server = Server(http_answers(payload))
+            for tool, path, words in (("wget", b"/loop", []), ("wget", b"/far", []),
+                                      ("wget", b"/down", ["-O", "out"]),
+                                      ("wget", b"/gone", []), ("fetch", b"/down", []),
+                                      ("fetch", b"/gone", [])):
+                url = "http://127.0.0.1:%d%s" % (server.port, path.decode())
+                ran = subprocess.run([str(farm / tool)] + words + [url], cwd=work,
+                                     capture_output=True, timeout=60, env=quiet)
+                shown("http", "%s %s" % (tool, path.decode()), ran)
+            server.listener.close()
+        made = [entry.name for entry in work.iterdir()]
+        checks(not any(hostile_scan(name.encode("utf-8", "surrogateescape")) for name in made),
+               "http: a saved file's name carries what a terminal acts on: %r" % made[:6])
+
+        #   Interfaces, in a namespace of their own.
+        if shutil.which("unshare") and shutil.which("ip", path="/usr/sbin:/usr/bin:/sbin:/bin"):
+            inner = subprocess.run(
+                ["unshare", "-Urn", sys.executable, str(Path(__file__).resolve()),
+                 "--harness", "hostile_strings", "--inside", "--farm", str(farm),
+                 "--shell", args.shell], capture_output=True, text=True, timeout=300,
+                env=dict(os.environ, MOONWATER_HOSTILE_SEED=str(seed + 4)))
+            tally = re.search(r"^hostile strings \(namespace\) (\d+)/(\d+)$", inner.stdout, re.M)
+            for line in inner.stdout.splitlines():
+                if line.startswith("  FAIL"):
+                    print(line)
+            checks(inner.returncode in (0, 1) and tally,
+                   "ifname: the namespace run did not finish (%s)" % inner.stderr[-200:])
+            if tally:
+                checks.checks += int(tally.group(2))
+                checks.failures += int(tally.group(2)) - int(tally.group(1))
+        else:
+            print("hostile strings: ifname NOT RUN -- no unshare or ip")
+    finally:
+        shutil.rmtree(farm_dir, ignore_errors=True)
+    print("hostile strings: a BiDi control shown as it is by %d commands (GNU's tools "
+          "show them too in a UTF-8 locale)%s" % (len(bidi), ": " + ", ".join(sorted(set(bidi)))[:300]
+                                                  if bidi else ""))
+    return checks.verdict("hostile strings", "hostile-strings")
+
+
+class SyscallTracer:
+    """One program under ptrace on x86_64, its children followed, every
+    system call that touches a state directory seen at its exit, and at the
+    k-th of them one thing done to it: the program killed, the call made to
+    fail with an errno, or a write cut short."""
+
+    PATHS = (b"/root", b"/run/moonwater")
+    WRITES = {1, 18, 20, 77}            # write, pwrite64, writev, ftruncate
+    SYNCS = {74, 75}                    # fsync, fdatasync
+    RENAMES = {82: (0, 1), 264: (1, 3), 316: (1, 3), 265: (1, 3)}  # rename(at)(2), linkat
+    REMOVES = {87: 0, 263: 1}           # unlink, unlinkat
+    OPENS = {2: (0, 1), 257: (1, 2)}    # open, openat: path argument, flags argument
+
+    def __init__(self):
+        import ctypes
+        self.ctypes = ctypes
+        self.libc = ctypes.CDLL(None, use_errno=True)
+        self.libc.ptrace.argtypes = [ctypes.c_long, ctypes.c_long, ctypes.c_void_p,
+                                     ctypes.c_void_p]
+        self.libc.ptrace.restype = ctypes.c_long
+
+    def ptrace(self, request, pid, address=0, data=0):
+        return self.libc.ptrace(request, pid, self.ctypes.c_void_p(address),
+                                self.ctypes.c_void_p(data))
+
+    def registers(self, pid):
+        block = (self.ctypes.c_ulong * 27)()
+        self.ptrace(12, pid, 0, self.ctypes.addressof(block))
+        return block
+
+    def text(self, pid, address):
+        try:
+            with open("/proc/%d/mem" % pid, "rb") as memory:
+                memory.seek(address)
+                return memory.read(4096).split(b"\0", 1)[0]
+        except (OSError, ValueError, OverflowError):
+            return b""
+
+    def where(self, pid, directory, name):
+        if name.startswith(b"/"):
+            return name
+        try:
+            base = (os.readlink("/proc/%d/cwd" % pid) if directory in (-100, 2 ** 64 - 100)
+                    else os.readlink("/proc/%d/fd/%d" % (pid, directory)))
+        except OSError:
+            return name
+        return base.encode() + b"/" + name
+
+    def descriptor(self, pid, number):
+        try:
+            return os.readlink("/proc/%d/fd/%d" % (pid, number)).encode()
+        except OSError:
+            return b""
+
+    def state(self, path):
+        return any(path == top or path.startswith(top + b"/") for top in self.PATHS)
+
+    def classify(self, pid, regs):
+        """What a call is about to do, as (kind, paths), or None."""
+        number, a = regs[15], (regs[14], regs[13], regs[12], regs[7])
+        if number in self.OPENS:
+            path_at, flags_at = self.OPENS[number]
+            directory = a[0] if number == 257 else -100
+            path = self.where(pid, self.ctypes.c_long(directory).value,
+                              self.text(pid, a[path_at]))
+            if self.state(path) and a[flags_at] & 0o1103:   # O_WRONLY|O_RDWR|O_CREAT|O_TRUNC
+                return ("open", (path,))
+        elif number in self.WRITES or number in self.SYNCS:
+            path = self.descriptor(pid, a[0])
+            if self.state(path):
+                return ("sync" if number in self.SYNCS else "write", (path,))
+        elif number in self.RENAMES:
+            old, new = self.RENAMES[number]
+            directories = (-100, -100) if number == 82 else (a[0], a[2])
+            paths = (self.where(pid, self.ctypes.c_long(directories[0]).value, self.text(pid, a[old])),
+                     self.where(pid, self.ctypes.c_long(directories[1]).value, self.text(pid, a[new])))
+            if any(self.state(path) for path in paths):
+                return ("link" if number == 265 else "rename", paths)
+        elif number in self.REMOVES:
+            at = self.REMOVES[number]
+            path = self.where(pid, self.ctypes.c_long(a[0] if at else -100).value,
+                              self.text(pid, a[at]))
+            if self.state(path):
+                return ("remove", (path,))
+        return None
+
+    def run(self, argv, cut=None, action=None, environment=None, limit=30.0):
+        """The program run to its end, or cut at its cut-th state call.
+        Answers (status, calls), calls being (pid, kind, paths, result)."""
+        import signal as signals
+        import time as clock
+        devnull = os.open("/dev/null", os.O_RDWR)
+        child = os.fork()
+        if not child:
+            try:
+                for number in (0, 1, 2):
+                    os.dup2(devnull, number)
+                self.ptrace(0, 0)
+                os.execve(argv[0], argv, environment or {"PATH": "/usr/bin:/bin"})
+            finally:
+                os._exit(127)
+        os.close(devnull)
+        os.waitpid(child, 0)
+        self.ptrace(0x4200, child, 0, 0x1 | 0x2 | 0x4 | 0x8 | 0x100000)
+        self.ptrace(24, child, 0, 0)
+        live = {child}
+        inside = {}
+        calls = []
+        status = None
+        started = clock.monotonic()
+        while live:
+            if clock.monotonic() - started > limit:
+                for pid in live:
+                    os.kill(pid, signals.SIGKILL)
+                limit = 1e9
+            try:
+                pid, wait = os.waitpid(-1, 0x40000000)   # __WALL
+            except ChildProcessError:
+                break
+            if os.WIFEXITED(wait) or os.WIFSIGNALED(wait):
+                live.discard(pid)
+                if pid == child:
+                    status = os.waitstatus_to_exitcode(wait)
+                    for other in live:
+                        os.kill(other, signals.SIGKILL)
+                continue
+            if not os.WIFSTOPPED(wait):
+                continue
+            stop = os.WSTOPSIG(wait)
+            event = wait >> 16
+            deliver = 0
+            live.add(pid)
+            if event in (1, 2, 3):
+                message = self.ctypes.c_ulong()
+                self.ptrace(0x4201, pid, 0, self.ctypes.addressof(message))
+                live.add(message.value)
+            elif stop == (signals.SIGTRAP | 0x80):
+                regs = self.registers(pid)
+                if pid not in inside:
+                    seen = self.classify(pid, regs)
+                    inside[pid] = seen
+                    if seen and cut is not None and len(calls) == cut - 1 and action:
+                        if action[0] == "fail":
+                            self.ptrace(6, pid, 120, 2 ** 64 - 1)   # orig_rax -1: not made
+                        elif action[0] == "short" and seen[0] == "write" and \
+                                regs[15] in (1, 18) and regs[12] > 1:
+                            self.ptrace(6, pid, 96, regs[12] // 2)  # rdx: half the count
+                else:
+                    seen = inside.pop(pid)
+                    if seen:
+                        result = self.ctypes.c_long(regs[10]).value
+                        calls.append((pid, seen[0], seen[1], result))
+                        if cut is not None and len(calls) == cut and action:
+                            if action[0] == "kill":
+                                for other in list(live):
+                                    os.kill(other, signals.SIGKILL)
+                            elif action[0] == "fail":
+                                self.ptrace(6, pid, 80, 2 ** 64 - action[1])
+                            elif action[0] == "signal":
+                                os.kill(pid, action[1])
+            elif stop != signals.SIGSTOP or pid == child:
+                deliver = stop if stop not in (signals.SIGTRAP, signals.SIGSTOP) else 0
+            self.ptrace(24, pid, 0, deliver)
+        return status, calls
+
+
+def harness_state_cuts(argv):
+    """Every write of saved state cut at every system call it makes.
+
+    The moonwater command keeps the wifi list (passwords and all), the
+    bluetooth list, the zone, the keyboard, ntp, the internet preference and
+    waterlink's groups and peers under /root. In a sandbox like moonwater_cli's,
+    each verb that changes one of them runs under ptrace (SyscallTracer) from
+    a state made by the verbs before it; every call that opens for writing,
+    writes, syncs, renames, links or removes under /root or /run/moonwater is
+    a place to cut, and at each one the verb is killed (with its children), or
+    the call fails with ENOSPC (EIO for a sync), or a write comes back short.
+    After any cut every file is what it was or what the verb makes it, a
+    leftover is no wider than 0600 when the file holds a secret, a second run
+    of the verb arrives at what an uncut run does and leaves no leftover, and
+    a cut that failed a call does not end in status 0 with the state
+    unchanged. And a synced replacement is durable: after the last rename
+    onto a /root name, the directory /root is synced before the verb ends.
+
+        python3 test/differential.py --harness state_cuts --shell PATH
+        MOONWATER_CUTS_ALL=1 ... every cut of every action (default: every
+        kill, and the failures and short writes at a stride)
+
+    x86_64 Linux only (registers are read as x86_64's); NOT RUN elsewhere.
+    """
+    import platform
+    parser = argparse.ArgumentParser(prog="differential.py --harness state_cuts")
+    parser.add_argument("--shell", required=True)
+    parser.add_argument("--inside", action="store_true", help=argparse.SUPPRESS)
+    args = parser.parse_args(argv)
+    if platform.system() != "Linux" or platform.machine() != "x86_64":
+        print("state cuts: NOT RUN -- ptrace registers are read as x86_64's")
+        return 2
+
+    if not args.inside:
+        import tempfile
+        probe = subprocess.run(["unshare", "-Urmnu", "--fork", "true"], capture_output=True)
+        if probe.returncode:
+            print("state cuts: NOT RUN -- no unprivileged user namespaces here")
+            return 2
+        with tempfile.TemporaryDirectory(prefix="state-cuts-") as temporary:
+            sandbox = Path(temporary) / "root"
+            for name in ("usr", "dev", "proc", "root", "run/moonwater", "etc", "home", "tmp"):
+                (sandbox / name).mkdir(parents=True, exist_ok=True)
+            for name, target in (("bin", "usr/bin"), ("lib", "usr/lib"), ("lib64", "usr/lib"),
+                                 ("sbin", "usr/bin")):
+                (sandbox / name).symlink_to(target)
+            for name in ("passwd", "group"):
+                if Path("/etc", name).exists():
+                    shutil.copy(Path("/etc", name), sandbox / "etc" / name)
+            shutil.copy(args.shell, sandbox / "tmp/moonwater")
+            shutil.copy(Path(__file__).resolve(), sandbox / "tmp/differential.py")
+            wrapper = (f"mount --rbind /usr {sandbox}/usr && mount --rbind /dev {sandbox}/dev && "
+                       f"mount --rbind /proc {sandbox}/proc && "
+                       f"exec chroot {sandbox} /usr/bin/python3 /tmp/differential.py "
+                       f"--harness state_cuts --inside --shell /tmp/moonwater")
+            environment = {"PATH": "/usr/bin:/bin", "LC_ALL": "C",
+                           "MOONWATER_CUTS_ALL": os.environ.get("MOONWATER_CUTS_ALL", "")}
+            try:
+                ran = subprocess.run(["unshare", "-Urmnpu", "--fork", "--mount-proc", "sh", "-c",
+                                      wrapper], capture_output=True, text=True, timeout=1500,
+                                     env=environment)
+            except subprocess.TimeoutExpired:
+                print("state cuts: FAIL -- ran past 1500 s")
+                write_tally("state-cuts", 0, 1)
+                return 1
+            print(ran.stdout, end="")
+            tally = re.search(r"^state cuts (\d+)/(\d+)$", ran.stdout, re.M)
+            if not tally:
+                print("state cuts: FAIL -- the sandbox run did not finish\n" + ran.stderr[-1500:])
+                write_tally("state-cuts", 0, 1)
+                return 1
+            write_tally("state-cuts", int(tally.group(1)), int(tally.group(2)))
+            return 0 if tally.group(1) == tally.group(2) else 1
+
+    tracer = SyscallTracer()
+    checks = Checks()
+    everything = bool(os.environ.get("MOONWATER_CUTS_ALL"))
+    moonwater = args.shell
+    key = "bZOZjGi3+wRTI3dKplm7TSptcD6cjFeYxvDqPYCDSnI="
+    other_key = "kL8Wk4yX3lq2pCq2HfV1m4mJm7m6Zl0Q4Q2c0jV3m2c="
+    #   (name, verbs that make the state before, the verb cut, a secret it keeps)
+    scenes = [
+        ("wifi add", ["wifi add oldnet oldpass11"], "wifi add plantnet passpass1", b"passpass1"),
+        ("wifi remove", ["wifi add oldnet oldpass11", "wifi add second pass2222"],
+         "wifi remove oldnet", b"pass2222"),
+        ("bluetooth add", ["bluetooth add dev1"], "bluetooth add dev2", None),
+        ("timezone", ["timezone de"], "timezone se", None),
+        ("keyboard", ["keyboard us"], "keyboard de", None),
+        ("ntp", ["ntp on"], "ntp off", None),
+        ("internet", ["priority internet wired"], "priority internet wifi", None),
+        ("link join", ["link group lab S3cretOne11 allow run"],
+         "link group lab2 S3cretTwo22 allow run", None),
+        ("link leave", ["link group lab S3cretOne11 allow run",
+                        "link group lab2 S3cretTwo22 allow run"], "link group leave lab", None),
+        ("link pair", ["link add peera " + key], "link add peerb " + other_key, None),
+        ("link forget", ["link add peera " + key], "link remove peera", None),
+    ]
+
+    def clear():
+        for top in (Path("/root"), Path("/run/moonwater")):
+            for entry in list(top.iterdir()):
+                if entry.is_dir() and not entry.is_symlink():
+                    shutil.rmtree(entry, ignore_errors=True)
+                else:
+                    entry.unlink(missing_ok=True)
+
+    def snapshot():
+        seen = {}
+        for entry in sorted(Path("/root").rglob("*")):
+            if entry.is_file() and not entry.is_symlink():
+                info = entry.stat()
+                seen[str(entry)] = (entry.read_bytes(), info.st_mode & 0o7777)
+        return seen
+
+    def restore(state):
+        clear()
+        for name, (data, mode) in state.items():
+            Path(name).parent.mkdir(parents=True, exist_ok=True)
+            Path(name).write_bytes(data)
+            os.chmod(name, mode)
+
+    def quiet(verb):
+        return subprocess.run([moonwater] + verb.split(), capture_output=True, timeout=60,
+                              env={"PATH": "/usr/bin:/bin"}).returncode
+
+    def temporary(name):
+        return bool(re.search(r"\.(new|next|next\.new)$|/\.link\.key\.", name))
+
+    def settle():
+        #   A listener or keeper a verb started outlives it; the next run
+        #   must not find it, nor its writes. This is the first process of
+        #   a pid namespace of its own, so every other one in it is ours.
+        import signal as signals
+        for entry in Path("/proc").iterdir():
+            if entry.name.isdigit() and int(entry.name) != os.getpid():
+                try:
+                    os.kill(int(entry.name), signals.SIGKILL)
+                except OSError:
+                    pass
+        while True:
+            try:
+                if os.waitpid(-1, os.WNOHANG) == (0, 0):
+                    break
+            except ChildProcessError:
+                break
+
+    cut_total = 0
+    for name, before, verb, secret in scenes:
+        settle()
+        clear()
+        for step in before:
+            quiet(step)
+        settle()
+        old = snapshot()
+        restore(old)
+        argv_cut = [moonwater] + verb.split()
+        status, calls = tracer.run(argv_cut)
+        settle()
+        new = snapshot()
+        if status is None or new == old:
+            restore(old)
+            said = subprocess.run([moonwater] + verb.split(), capture_output=True, timeout=60,
+                                  env={"PATH": "/usr/bin:/bin"})
+            settle()
+            checks(False, "%s: an uncut run changes the state (traced %s, untraced %s: %r)"
+                   % (name, status, said.returncode, (said.stdout + said.stderr)[-200:]))
+            continue
+        #   Durability: a rename onto a kept /root name, then /root synced.
+        finals = [at for at, call in enumerate(calls)
+                  if call[1] == "rename" and call[3] == 0 and
+                  call[2][1].decode() in new and not temporary(call[2][1].decode()) and
+                  new.get(call[2][1].decode()) != old.get(call[2][1].decode()) and
+                  not call[2][1].endswith(b"/link.stamps")]
+        if finals:
+            synced = any(call[1] == "sync" and call[2][0] == b"/root" and call[3] == 0
+                         for call in calls[finals[-1] + 1:])
+            checks(synced, "%s: %s is renamed into /root and /root is never synced after"
+                   % (name, calls[finals[-1]][2][1].decode()))
+        count = len(calls)
+        stride = 1 if everything else max(1, count // 6)
+        plan = [(cut, ("kill",)) for cut in range(1, count + 1)]
+        for cut in range(1, count + 1, stride):
+            kind = calls[cut - 1][1]
+            plan.append((cut, ("fail", 5 if kind == "sync" else 28)))
+            if kind == "write":
+                plan.append((cut, ("short",)))
+        for cut, action in plan:
+            restore(old)
+            cut_status, _ = tracer.run(argv_cut, cut, action)
+            settle()
+            after = snapshot()
+            cut_total += 1
+            where = "%s: %s at call %d of %d (%s %s)" % (
+                name, action[0], cut, count, calls[cut - 1][1],
+                b" ".join(calls[cut - 1][2]).decode(errors="replace"))
+            half = [path for path in set(old) | set(new) | set(after)
+                    if not temporary(path) and after.get(path) not in (old.get(path), new.get(path))]
+            checks(not half, "%s leaves %s neither as it was nor as it is to be" % (
+                where, ", ".join(sorted(half))))
+            wide = [path for path in after if temporary(path) and secret and
+                    secret in after[path][0] and after[path][1] & 0o077]
+            checks(not wide, "%s leaves %s holding the secret readable by others" % (
+                where, ", ".join(wide)))
+            if action[0] in ("fail", "short"):
+                lost = [path for path in new if not temporary(path) and
+                        after.get(path) != new.get(path)]
+                checks(not (cut_status == 0 and lost),
+                       "%s ends 0 with %s not written" % (where, ", ".join(sorted(lost))))
+            quiet(verb)
+            settle()
+            again = snapshot()
+            checks({path: value for path, value in again.items() if not temporary(path)} ==
+                   {path: value for path, value in new.items() if not temporary(path)} and
+                   not [path for path in again if temporary(path)],
+                   "%s: a second run does not arrive at the uncut state (%s)" % (
+                       where, ", ".join(sorted(set(again) ^ set(new)))[:200]))
+    print("state cuts: %d scenes, %d cut runs" % (len(scenes), cut_total))
+    return checks.verdict("state cuts", "state-cuts-inside")
+
+
+def harness_protected_links(argv):
+    """A write through a planted link meets fs.protected_symlinks, as the
+    kernel's own open would.
+
+    The staged writers (wget -O, tar -cf, split, csplit, shuf -o) walk a chain of links in
+    userspace so that the reference's write-through survives their atomic
+    publication, and that walk never asked the question the kernel asks:
+    root's `wget -O /tmp/x` went through the link another user left at
+    /tmp/x and replaced what it named. In a user namespace with a second
+    uid, every link placement (sticky and world-writable, world-writable,
+    sticky and owned by the link's owner, an ordinary directory) times every
+    link owner (the writer, another user) times every target (a file, a name
+    that is not there, a second link another user owns in a sticky
+    directory) is written through by every tool, as root. A placement the
+    rule refuses must refuse with the victim and the link untouched and the
+    missing name never made; every other one is written through, as GNU's
+    open does. When the host's fs.protected_symlinks is on, the kernel's
+    own O_PATH open of each link is a second oracle for the rule.
+
+        python3 test/differential.py --harness protected_links --binary ours=PATH
+
+    Returns 2 (NOT RUN) without newuidmap, a subordinate id range or unshare.
+    """
+    import argparse
+    import shutil
+    import tempfile
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    parser = argparse.ArgumentParser(prog="protected_links")
+    parser.add_argument("--binary", required=True, metavar="LABEL=PATH")
+    parser.add_argument("--inside", action="store_true", help=argparse.SUPPRESS)
+    opts = parser.parse_args(argv)
+    label, _, binary = opts.binary.partition("=")
+    binary = str(Path(binary).resolve())
+    other = 1000
+
+    if not opts.inside:
+        user = os.getuid()
+        pwd_name = None
+        try:
+            import pwd
+            pwd_name = pwd.getpwuid(user).pw_name
+        except (ImportError, KeyError):
+            pass
+        ranges = {}
+        for kind in ("uid", "gid"):
+            try:
+                for line in Path("/etc/sub" + kind).read_text().splitlines():
+                    owner, _, rest = line.partition(":")
+                    if owner in (pwd_name, str(user)) and rest.count(":") == 1:
+                        ranges[kind] = rest.split(":")
+                        break
+            except OSError:
+                pass
+        if (len(ranges) != 2 or not shutil.which("newuidmap") or
+                not shutil.which("unshare") or not shutil.which("ip")):
+            print("protected links: NOT RUN -- no newuidmap, subordinate ids, unshare or ip")
+            return 2
+        command = ["unshare", "-U",
+                   "--map-users", "0:%d:1" % user,
+                   "--map-users", "1:%s:%s" % tuple(ranges["uid"]),
+                   "--map-groups", "0:%d:1" % os.getgid(),
+                   "--map-groups", "1:%s:%s" % tuple(ranges["gid"]),
+                   "-n", "-m", "-p", "-f", "--mount-proc",
+                   sys.executable, str(Path(__file__).resolve()),
+                   "--harness", "protected_links", "--inside",
+                   "--binary", label + "=" + binary]
+        try:
+            return subprocess.run(command, timeout=120).returncode
+        except subprocess.TimeoutExpired:
+            print("protected links: FAIL -- the scene ran past 120 s")
+            return 1
+
+    checks = Checks()
+    subprocess.run(["ip", "link", "set", "lo", "up"], check=True)
+    body = b"downloaded\n"
+
+    class Serve(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Serve)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = "http://127.0.0.1:%d/f" % server.server_address[1]
+
+    scratch = Path(tempfile.mkdtemp(prefix="protected-links."))
+    subprocess.run(["mount", "-t", "tmpfs", "-o", "mode=0755", "none", str(scratch)],
+                   check=True)
+    farm = scratch / "farm"
+    farm.mkdir()
+    for tool in ("wget", "tar", "split", "csplit", "shuf"):
+        (farm / tool).symlink_to(binary)
+
+    def as_other(work, pointed, leaf):
+        return subprocess.run(["ln", "-s", pointed, leaf], cwd=work, user=other,
+                              group=other, extra_groups=[]).returncode == 0
+
+    try:
+        protected = Path("/proc/sys/fs/protected_symlinks").read_text().strip() == "1"
+    except OSError:
+        protected = False
+
+    #   (placement, its mode, its owner)
+    placements = (("sticky-shared", 0o1777, 0), ("shared", 0o777, 0),
+                  ("sticky-theirs", 0o1777, other), ("plain", 0o755, 0))
+    owners = (("mine", 0), ("theirs", other))
+    targets = ("file", "missing", "chain", "chain-mine")
+    tools = ("wget", "tar", "split", "csplit", "shuf")
+    number = 0
+    for (place, mode, place_owner) in placements:
+        for (owner_name, owner) in owners:
+            if place == "plain" and owner:
+                continue  # nobody else can make a link in a 0755 root directory
+            for target in targets:
+                for tool in tools:
+                    number += 1
+                    scene = scratch / ("s%d" % number)
+                    holder = scene / "holder"
+                    safe = scene / "safe"
+                    shared = scene / "shared"
+                    for directory in (holder, safe, shared):
+                        directory.mkdir(parents=True)
+                    os.chmod(scene, 0o755)
+                    os.chmod(safe, 0o755)
+                    os.chmod(shared, 0o1777)
+                    os.chmod(holder, mode)
+                    os.chown(holder, place_owner, place_owner)
+                    victim = safe / "victim"
+                    victim.write_bytes(b"precious\n")
+                    leaf = "out" + {"split": "aa", "csplit": "00"}.get(tool, "")
+                    pointed = {"file": str(victim), "missing": str(safe / "new")}.get(
+                        target, str(shared / "hop"))
+                    if target == "chain":
+                        made = as_other(shared, str(victim), "hop")
+                        checks(made, "%s: cannot plant the second hop" % scene.name)
+                    elif target == "chain-mine":
+                        os.symlink(str(victim), shared / "hop")
+                    if owner:
+                        made = as_other(holder, pointed, leaf)
+                    else:
+                        os.symlink(pointed, holder / leaf)
+                        made = True
+                    checks(made, "%s: cannot plant the link" % scene.name)
+                    link = holder / leaf
+
+                    #   The rule, hop by hop, as may_follow_link applies it.
+                    def refused_at(link_owner, directory_mode, directory_owner):
+                        return ((directory_mode & 0o1002) == 0o1002 and
+                                link_owner != 0 and link_owner != directory_owner)
+                    refuse = refused_at(owner, mode, place_owner)
+                    if target == "chain" and not refuse:
+                        refuse = refused_at(other, 0o1777, 0)
+                    if protected:
+                        try:
+                            os.close(os.open(link, os.O_PATH))
+                            kernel = False
+                        except PermissionError:
+                            kernel = True
+                        except FileNotFoundError:
+                            kernel = False
+                        checks(kernel == refuse, "%s/%s/%s: the kernel %s, the rule %s" % (
+                            place, owner_name, target, "refuses" if kernel else "follows",
+                            "refuses" if refuse else "follows"))
+
+                    source = scene / "input"
+                    source.write_bytes(b"x\ny\n")
+                    if tool == "wget":
+                        argv_tool = [str(farm / "wget"), "-q", "-O", str(link), url]
+                    elif tool == "tar":
+                        argv_tool = [str(farm / "tar"), "-cf", str(link), "input"]
+                    elif tool == "split":
+                        argv_tool = [str(farm / "split"), "-b", "2", "input",
+                                     str(holder / "out")]
+                    elif tool == "csplit":
+                        argv_tool = [str(farm / "csplit"), "-s", "-f", str(holder / "out"),
+                                     "input", "2"]
+                    else:
+                        argv_tool = [str(farm / "shuf"), "-o", str(link), "input"]
+                    try:
+                        ran = subprocess.run(argv_tool, cwd=scene, capture_output=True,
+                                             timeout=20)
+                        status = ran.returncode
+                    except subprocess.TimeoutExpired:
+                        status = None
+                    row = "%s %s link in %s to a %s" % (tool, owner_name, place, target)
+                    kept = victim.read_bytes() == b"precious\n"
+                    still = link.is_symlink() and os.readlink(link) == pointed
+                    made_new = (safe / "new").exists()
+                    if refuse:
+                        checks(status not in (0, None) and kept and still and not made_new,
+                               "%s: wrote through a link the kernel refuses "
+                               "(status %s, victim kept %s, link kept %s, new name %s)"
+                               % (row, status, kept, still, made_new))
+                    else:
+                        wrote = (not kept) if target != "missing" else made_new
+                        checks(status == 0 and wrote,
+                               "%s: refused a link the kernel follows (status %s, %s)"
+                               % (row, status, ran.stderr[-200:] if status is not None else "timeout"))
+    server.shutdown()
+    subprocess.run(["umount", "-l", str(scratch)])
+    shutil.rmtree(scratch, ignore_errors=True)
+    return checks.verdict("protected links", "protected_links")
 
 
 def pathname_race_budget(default_rounds=80, default_seconds=2.0):
@@ -58324,6 +59937,11 @@ def harness_waterlink_noise(argv):
 NET_NETEM_DHCP_SERVER = r"""import socket, struct, sys, time, threading
 mode = sys.argv[1]
 OFFER_IP = "10.88.0.50"; BAD_IP = "10.88.0.66"; SERVER = "10.88.0.2"
+#   The pool: an address a client DECLINEs (RFC 2131 4.4.1) is marked in use
+#   and the next one offered, as a server does.
+POOL = ["10.88.0.50", "10.88.0.51", "10.88.0.52"]; declined = set()
+def current():
+    return next((a for a in POOL if a not in declined), BAD_IP)
 def parse(data):
     xid = data[4:8]; chaddr = data[28:34]
     opts = {}
@@ -58357,13 +59975,23 @@ while True:
     if len(data) < 241 or data[0] != 1: continue
     xid, chaddr, opts = parse(data)
     t = opts.get(53, b"\0")[0]
+    if t == 4:
+        asked = opts.get(50, b""); named = opts.get(54, b"")
+        log.write("%.3f rx type 4 xid %s req %s sid %s ciaddr %s flags %d ask %s\n" % (
+            time.time(), xid.hex(), socket.inet_ntoa(asked) if len(asked) == 4 else "-",
+            socket.inet_ntoa(named) if len(named) == 4 else "-", socket.inet_ntoa(data[12:16]),
+            struct.unpack("!H", data[10:12])[0], "yes" if 55 in opts else "-"))
+        if len(asked) == 4 and named == socket.inet_aton(SERVER):
+            declined.add(socket.inet_ntoa(asked))
+        continue
     log.write("%.3f rx type %d xid %s\n" % (time.time(), t, xid.hex()))
+    if mode == "mute-watch": continue
     if t == 1:
         seen_discover += 1
         if mode == "drop3" and seen_discover <= 3: continue
         msgs = []
         if mode == "stale":  msgs.append(reply(bytes(a ^ 0xff for a in xid), chaddr, 2, BAD_IP))
-        msgs.append(reply(xid, chaddr, 2, OFFER_IP))
+        msgs.append(reply(xid, chaddr, 2, current()))
         d = 1.5 if mode == "late" else 0.0
         for m in msgs:
             for _ in range(3 if mode == "dup" else 1): send(m, d)
@@ -58372,7 +60000,7 @@ while True:
             naked = True; send(reply(xid, chaddr, 6, "0.0.0.0")); continue
         msgs = []
         if mode == "stale": msgs.append(reply(bytes(a ^ 0xff for a in xid), chaddr, 5, BAD_IP))
-        msgs.append(reply(xid, chaddr, 5, OFFER_IP))
+        msgs.append(reply(xid, chaddr, 5, current()))
         for m in msgs:
             for _ in range(3 if mode == "dup" else 1): send(m, 1.5 if mode == "late" else 0)
         if mode == "dup":
@@ -58476,10 +60104,85 @@ try:
                            " rp_filter " + os.environ["NETEM_RP_FILTER"]
                            if os.environ.get("NETEM_RP_FILTER", "0") != "0" else "")
     if kind == "dhcp":
+        want = "10.88.0.51" if mode.startswith("conflict") else "10.88.0.50"
+        if mode.startswith("conflict"):
+            #   A station already on the offered address: the far namespace's
+            #   kernel answers the client's ARP probes for it.
+            there("ip", "addr", "add", "10.88.0.50/24", "dev", "cb")
         server("dhcpsrv.py", mode, top + "/dhcp.log")
         began = time.time()
-        client = run(top + "/ip", "auto", env=env, timeout=150)
-        if mode == "nak":
+
+        def dhcp_log():
+            return open(top + "/dhcp.log").read() if os.path.exists(top + "/dhcp.log") else ""
+
+        def decline_checks():
+            lines = dhcp_log().splitlines()
+            declines = [line for line in lines if " rx type 4 " in line]
+            say(len(declines) == 1, "%s: one DHCPDECLINE reached the server (%d)" % (label, len(declines)))
+            if not declines:
+                return None
+            say(declines[0].split(" xid ")[1].split()[1:] ==
+                ["req", "10.88.0.50", "sid", "10.88.0.2", "ciaddr", "0.0.0.0", "flags", "0", "ask", "-"],
+                "%s: the DECLINE names the address and the server, no ciaddr, no parameter list (%s)" % (
+                    label, declines[0]))
+            requests = [line.split(" xid ")[1].split()[0] for line in lines[:lines.index(declines[0])]
+                        if " rx type 3 " in line]
+            say(requests and declines[0].split(" xid ")[1].split()[0] not in requests,
+                "%s: the DECLINE has a transaction id of its own" % label)
+            return float(declines[0].split()[0])
+
+        if mode == "conflict":
+            first = run(top + "/ip", "auto", env=env, timeout=150)
+            said_first = first.stdout + first.stderr
+            say(first.returncode != 0 and address() is None and "already in use; declined" in said_first,
+                "%s: an address another station answers for is declined, not installed (%d, %s, %s)" % (
+                    label, first.returncode, address(), said_first.strip().replace("\n", " | ")[-160:]))
+            decline_checks()
+            client = run(top + "/ip", "auto", env=env, timeout=150)
+        elif mode == "conflict-watch":
+            sink = open(top + "/watch.out", "w")
+            watcher = subprocess.Popen([top + "/ip", "watch"], env=env, stdin=subprocess.DEVNULL,
+                                       stdout=sink, stderr=sink)
+            procs.append(watcher)
+            while time.time() - began < 60 and address() != want:
+                time.sleep(0.2)
+            declined_at = decline_checks()
+            after = [float(line.split()[0]) for line in dhcp_log().splitlines()
+                     if " rx type 1 " in line and declined_at is not None and
+                     float(line.split()[0]) > declined_at]
+            say(bool(after) and after[0] - declined_at >= 10.0,
+                "%s: the watcher waits ten seconds after a DECLINE before it asks again (%s)" % (
+                    label, "%.2f s" % (after[0] - declined_at) if after else "no DISCOVER after it"))
+            watcher.kill()
+            watcher.wait()
+            sink.close()
+            client = subprocess.CompletedProcess([], 0 if address() == want else 1,
+                                                 open(top + "/watch.out").read(), "")
+        elif mode == "mute-watch":
+            #   Nobody answers: the backoff after the first three seconds of
+            #   a pass (2 s, then 4 s) moves by up to a second either way
+            #   (RFC 2131 4.1), where it used to be the same to the
+            #   millisecond on every machine that lost the server together.
+            sink = open(top + "/watch.out", "w")
+            watcher = subprocess.Popen([top + "/ip", "watch"], env=env, stdin=subprocess.DEVNULL,
+                                       stdout=sink, stderr=sink)
+            procs.append(watcher)
+            time.sleep(27)
+            watcher.kill()
+            watcher.wait()
+            sink.close()
+            times = [float(line.split()[0]) for line in dhcp_log().splitlines() if " rx type 1 " in line]
+            gaps = [b - a for a, b in zip(times, times[1:]) if 1.5 < b - a < 5.5]
+            say(len(gaps) >= 2 and any(min(abs(g - 2), abs(g - 4)) > 0.05 for g in gaps),
+                "%s: the DISCOVER backoff is spread, not in step (%s)" % (
+                    label, " ".join("%.3f" % g for g in gaps)))
+            say(len(times) >= 12, "%s: the watcher kept asking a silent link (%d DISCOVERs in 27 s)" % (
+                label, len(times)))
+        else:
+            client = run(top + "/ip", "auto", env=env, timeout=150)
+        if mode == "mute-watch":
+            pass
+        elif mode == "nak":
             #   The one-shot ip auto reports a refused REQUEST and leaves
             #   nothing configured; the watcher asks again, which is a second
             #   run here, and the server answers that one.
@@ -58488,11 +60191,13 @@ try:
                     label, client.returncode, address()))
             client = run(top + "/ip", "auto", env=env, timeout=150)
         took = time.time() - began
+        if mode == "mute-watch":
+            raise SystemExit(0)
         route = open("/proc/net/route").read().splitlines()[1:]
         default = [line.split() for line in route if line.split()[1] == "00000000"]
         say(client.returncode == 0, "%s: ip auto took a lease (status %d, %.1f s: %s)" % (
             label, client.returncode, took, (client.stdout + client.stderr).strip().replace("\n", " | ")[-160:]))
-        say(address() == "10.88.0.50", "%s: the address is the real server's, not a forged one (%s)" % (label, address()))
+        say(address() == want, "%s: the address is the real server's, not a forged one (%s)" % (label, address()))
         say(bool(default) and default[0][2] == "0200580A", "%s: the default route is via the server" % label)
         say("nameserver 10.88.0.2" in open("/etc/resolv.conf").read() if os.path.exists("/etc/resolv.conf") else False,
             "%s: the resolver is the server's" % label)
@@ -58528,6 +60233,92 @@ finally:
 """
 
 
+#   Each one removes one step that keeps a lease's epoch whole, in
+#   src/sh/net.c, as (what it breaks, the text, what it becomes).
+NET_EPOCH_MUTANTS = (
+    ("a new route leaves the old one in place",
+     "        if (route_changed && net_owns_route(previous))\n        {\n                status = netlink_route_delete(",
+     "        if (false && route_changed && net_owns_route(previous))\n        {\n                status = netlink_route_delete("),
+    ("a new address leaves the old one in place",
+     "        if (address_changed && net_owns_address(previous))\n        {\n                status = netlink_address_delete(",
+     "        if (false && address_changed && net_owns_address(previous))\n        {\n                status = netlink_address_delete("),
+    ("a rollback does not put the old route back",
+     "                        bipolar status = net_lease_route(\n                            handle, address_of previous->lease,\n                            previous->index, false);",
+     "                        bipolar status = 0;"),
+    ("a rollback keeps the new address",
+     "        if (address_changed)\n                net_rollback_record(\n                    netlink_address_delete(handle, index, lease->address,",
+     "        if (false)\n                net_rollback_record(\n                    netlink_address_delete(handle, index, lease->address,"),
+    ("a release keeps the lease's resolver",
+     "                bipolar status = net_write_resolv(0);",
+     "                bipolar status = 0;"),
+    ("a release keeps the lease's route",
+     "        if (net_owns_route(held))\n                net_rollback_record(",
+     "        if (false)\n                net_rollback_record("),
+)
+
+
+def harness_net_epoch_mutants(argv):
+    """The lease epoch walk of storage_io (storage_test_lease_epochs) against
+    src/sh/net.c with one epoch step taken out at a time: each mutant must
+    break one of its two rows, or the walk would not have noticed that step
+    going. Built alone (-DSTORAGE_EPOCH_ONLY), natively, about a minute and a
+    half a mutant, so the lane asks the first; MOONWATER_EPOCH_MUTANTS=all asks
+    every one. NOT RUN (exit 2) off Linux, or where the walk's namespaces are
+    refused.
+
+        python3 test/differential.py --harness net_epoch_mutants [--all]
+    """
+    import shutil
+    import subprocess
+    import tempfile
+    parser = argparse.ArgumentParser(prog="differential.py --harness net_epoch_mutants")
+    parser.add_argument("--all", action="store_true")
+    parser.add_argument("--cc", default=os.environ.get("CC", "gcc"))
+    args = parser.parse_args(argv)
+    if platform.system() != "Linux" or platform.machine() not in ("x86_64", "AMD64"):
+        print("net epoch mutants: NOT RUN -- the walk runs natively on x86_64 Linux")
+        return 2
+    every = args.all or os.environ.get("MOONWATER_EPOCH_MUTANTS") == "all"
+    chosen = NET_EPOCH_MUTANTS if every else NET_EPOCH_MUTANTS[:1]
+    checks = Checks()
+    original = (HARNESS_ROOT / "src/sh/net.c").read_text()
+    with tempfile.TemporaryDirectory(prefix="net-epoch-") as temporary:
+        top = Path(temporary)
+        shutil.copytree(HARNESS_ROOT / "src", top / "src")
+        (top / "test").mkdir()
+        shutil.copy(HARNESS_ROOT / "test/checks.c", top / "test/checks.c")
+        for what, before, after in chosen:
+            checks(original.count(before) == 1,
+                   "mutant '%s': its text is in src/sh/net.c once" % what)
+            if original.count(before) != 1:
+                continue
+            (top / "src/sh/net.c").write_text(original.replace(before, after))
+            binary = top / "epoch"
+            built = subprocess.run(
+                [args.cc, "-O2", "-static", "-nostdlib", "-nostartfiles",
+                 "-fno-stack-protector", "-fno-builtin", "-march=x86-64", "-w",
+                 "-T", str(top / "src/build/spark.ld"), "-Wl,-e,_start",
+                 "-Wl,--build-id=none", "-Wl,--no-warn-rwx-segments",
+                 "-DCHECK_storage_io", "-DSTORAGE_EPOCH_ONLY", "-fwhole-program",
+                 "-o", str(binary), str(top / "test/checks.c")],
+                capture_output=True, text=True)
+            checks(built.returncode == 0, "mutant '%s' builds: %s" % (what, built.stderr[-400:]))
+            if built.returncode:
+                continue
+            ran = subprocess.run([str(binary)], capture_output=True, text=True,
+                                 cwd=temporary, timeout=600)
+            said = ran.stdout + ran.stderr
+            if "NOT RUN" in said:
+                print("net epoch mutants: NOT RUN -- " + said.strip().splitlines()[-1][:160])
+                return 2
+            verdict = re.search(r"^(\d+) checks, (\d+) failures$", said, re.M)
+            checks(verdict is not None and int(verdict.group(2)) > 0,
+                   "mutant '%s' is caught by the lease epoch walk: %s" % (
+                       what, " | ".join(line.strip() for line in said.splitlines()
+                                        if "epoch:" in line or "FAIL" in line)[:300] or said[-200:]))
+    return checks.verdict("net epoch mutants", "net-epoch-mutants")
+
+
 def harness_net_netem(argv):
     """The DHCP client and the SNTP client, as built, against a server that
     schedules its answers adversarially, over a veth pair in namespaces with
@@ -58541,7 +60332,13 @@ def harness_net_netem(argv):
     times over, with a forged reply (wrong transaction id, another address)
     before each real one, 1.5 s late, not at all for the first three
     DISCOVERs, or with a NAK for the first REQUEST, it has to end with the
-    real server's address, route and resolver and never a forged one.
+    real server's address, route and resolver and never a forged one. On a
+    clean wire, a station that already answers ARP for the offered address:
+    `ip auto` declines it (one DHCPDECLINE naming the address and the server,
+    no ciaddr, no parameter list, a transaction id of its own) and the next
+    `ip auto` takes the address the server offers instead, and `ip watch`
+    does the same by itself, waiting at least ten seconds before it asks
+    again.
     `moonwater time sync` is the SNTP client, with `/root/ntp.server` naming
     the far end: it has to take a clean, tripled, late or once-dropped answer,
     take the right one of a forged reply (wrong origin, three hours off) and
@@ -58590,6 +60387,10 @@ def harness_net_netem(argv):
         (top / "inner.py").write_text(NET_NETEM_INNER)
         scenes = [("dhcp", mode, netem, "0") for netem in ("", "netem")
                   for mode in ("clean", "dup", "stale", "late", "drop3", "nak")]
+        #   The ARP probe is three frames; netem's 25% loss on each leg would
+        #   miss the defender one run in twelve, so the conflict scenes are
+        #   asked on a clean wire.
+        scenes += [("dhcp", mode, "", "0") for mode in ("conflict", "conflict-watch", "mute-watch")]
         scenes += [("sntp", mode, netem, "0") for netem in ("", "netem")
                    for mode in ("clean", "dup", "spoof", "late", "drop2", "skewed", "kod")]
         checks = Checks()
@@ -59349,6 +61150,42 @@ say(b"_waterlink" in heard, "the network carries waterlink announcements")
 say(all(word not in heard for word in (b"lab", b"box-a", b"box-b", b"box-c", secret.encode())),
     "and not the group, the machine names or the secret")
 
+#       Two groups on one machine: b joins ops as well, granting it log
+#       alone, and c, whose lab secret was wrong, joins ops with the right one.
+#       What c may do on b is ops's grant and nothing of lab's, a's record
+#       stays lab's, and leaving ops with forget drops c and not a.
+ops_secret = "ops-secret-for-the-lane-2"
+on("b", "%s link group ops %s allow log" % (moon, ops_secret))
+on("c", "%s link group ops %s allow run" % (moon, ops_secret))
+c_on_b = None
+began = time.time()
+while time.time() - began < 25 and not c_on_b:
+    time.sleep(1)
+    status, out, err = on("b", moon + " link")
+    for line in out.decode(errors="replace").splitlines():
+        if line.startswith("  box-c") and "in group ops" in line:
+            c_on_b = line
+say(c_on_b is not None and "may log," in c_on_b and "run" not in c_on_b and "shell" not in c_on_b,
+    "sec: a member of a second group gets that group's grants alone (%r)" % (c_on_b,))
+status, out, err = on("b", moon + " link")
+a_line = [l for l in out.decode(errors="replace").splitlines() if l.startswith("  " + names.get("b", "?") + " ")]
+say(a_line and "may shell run, in group lab" in a_line[0],
+    "sec: and the first group's member keeps the first group's (%r)" % (a_line,))
+#       c paired b by hand above, and a record paired by hand is never
+#       taken over by a group: c asks b under that name.
+status, out, err = on("c", "%s link run b 'echo no'" % moon, timeout=30)
+say(status == 255 and b"run is not granted" in err,
+    "sec: the ops member may not run on b, which granted ops only log (%r)" % (err[-80:],))
+status, left, err = on("b", moon + " link group leave ops forget")
+time.sleep(1.5)
+status, out, err = on("b", moon + " link")
+say(b"box-c" not in out and b"in group lab" in out,
+    "sec: leaving ops with forget drops ops's member and keeps lab's (%r %r)" % (left, [l for l in out.splitlines() if b"box-" in l or b"paired" in l]))
+if len(names) == 2:
+    status, out, err = on("a", "%s link run %s 'echo still-lab'" % (moon, names["a"]))
+    say(status == 0 and out == b"still-lab\n", "and lab's member still runs on b")
+on("c", moon + " link group leave ops forget")
+
 #       A handshake flood. Anyone who knows the listener's public key can make
 #       an initiation that passes mac1, and a listener that did the curve for
 #       each would be kept busy by a sender with a few thousand source ports.
@@ -59449,6 +61286,58 @@ if match is not None and listener is not None and len(names) == 2:
     status, out, err = on("a", moon + " link run %s 'echo after-the-flood'" % far_name, timeout=60)
     say(status == 0 and out == b"after-the-flood\n" and time.time() - began_run < 5,
         "flood: and the first after it took %.1f s" % (time.time() - began_run))
+
+#       Revocation reaches what is already open: a command a runs on b that
+#       prints a tick every tenth of a second, and on b, a second into it, the
+#       grant it runs under is denied, or a forgotten. The ticks stop within
+#       a second or two and the far command's client ends, where a session
+#       already open went on under the grant it had (or, forgotten, until
+#       its keys aged out three minutes later). Then everything is put back.
+def revoked(revoke, restore, label):
+    if len(names) != 2:
+        return say(False, label + ": a and b are paired")
+    ticking = subprocess.Popen(argv_on("a", "%s link run %s 'i=0; while :; do i=$((i+1)); "
+                                       "echo tick $i; sleep 0.1; done'" % (moon, names["a"])),
+                               stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.DEVNULL, env=env)
+    fcntl.fcntl(ticking.stdout, fcntl.F_SETFL, os.O_NONBLOCK)
+    seen = [b""]
+    def drain(seconds):
+        end = time.time() + seconds
+        while time.time() < end:
+            select.select([ticking.stdout], [], [], 0.05)
+            try:
+                seen[0] += ticking.stdout.read() or b""
+            except (BlockingIOError, TypeError):
+                pass
+    drain(1.5)
+    before = seen[0].count(b"tick")
+    on("b", revoke)
+    drain(2.0)
+    settled = seen[0].count(b"tick")
+    drain(2.0)
+    after = seen[0].count(b"tick")
+    ended = ticking.poll()
+    if ended is None:
+        ticking.kill()
+    ticking.wait()
+    for command in restore:
+        on("b", command)
+    return say(before > 5 and after == settled and ended not in (None, 0),
+               "sec: %s ends the command already running under it (%d ticks before, %d more in "
+               "the 2 s after the first 2, status %r)" % (label, before, after - settled, ended))
+revoked("%s link deny %s run" % (moon, names.get("b", "a")),
+        ["%s link allow %s run" % (moon, names.get("b", "a"))], "denying run")
+revoked("%s link remove %s" % (moon, names.get("b", "a")),
+        ["%s link add %s %s 10.77.0.1" % (moon, names.get("b", "a"), keys["a"]),
+         "%s link allow %s run shell" % (moon, names.get("b", "a"))], "forgetting the peer")
+if len(names) == 2:
+    began = time.time()
+    status, out, err = 1, b"", b""
+    while time.time() - began < 30 and out != b"restored\n":
+        time.sleep(1)
+        status, out, err = on("a", "%s link run %s 'echo restored'" % (moon, names["a"]))
+    say(status == 0 and out == b"restored\n", "and a runs on b again once it is put back (%r)" % (err[-80:],))
 
 status, out, err = on("a", moon + " link group leave lab forget")
 say(status == 0 and b"removed the 1 machines" in out, "leave with forget drops what the group paired")
@@ -60187,28 +62076,38 @@ static p8 fz_sent[512];
 static positive fz_sent_length;
 static int fz_sends;
 static p8 fz_ap_tk[16], fz_ap_gtk[16], fz_ap_gtk_idx;
-/* Every key the access point has put in a message 3 or group message 1:
-   an old message 3 let through before any handshake completed is still
-   the access point's, and its key may go in. */
-static p8 fz_made[32][17];
-static positive fz_made_count;
+/* Every key the access point has put in a message 3 or group message 1,
+   and when it last did: an old message 3 let through before any handshake
+   completed is still the access point's, and its key may go in, but no key
+   goes in over one the access point made after it. */
+static p8 fz_made[64][17];
+static positive fz_made_order[64];
+static positive fz_made_count, fz_order;
 static void fz_made_add(p8 idx, const p8 *key)
 {
-        if (fz_made_count < 32)
+        if (fz_made_count < 64)
         {
                 fz_made[fz_made_count][0] = idx;
-                memcpy(fz_made[fz_made_count++] + 1, key, 16);
+                memcpy(fz_made[fz_made_count] + 1, key, 16);
+                fz_made_order[fz_made_count++] = ++fz_order;
         }
 }
-static bool fz_made_by_ap(p8 idx, const p8 *key)
+/* When the access point last made this key under this id; 0 for never. */
+static positive fz_made_when(p8 idx, const p8 *key)
 {
+        positive when = 0;
+
         for (positive at = 0; at < fz_made_count; at++)
-                if (fz_made[at][0] == idx && !memcmp(fz_made[at] + 1, key, 16))
-                        return true;
-        return false;
+                if (fz_made[at][0] == idx && !memcmp(fz_made[at] + 1, key, 16) &&
+                    fz_made_order[at] > when)
+                        when = fz_made_order[at];
+        return when;
 }
 static p8 fz_sta_tk[16], fz_sta_gtk[4][16];
+static positive fz_sta_tk_when, fz_sta_gtk_when[4];
 static bool fz_sta_tk_set, fz_sta_gtk_set[4], fz_authorized;
+static int fz_installs;
+static const p8 fz_ap[6] = {2, 0, 0, 0, 1, 0}, fz_sta[6] = {2, 0, 0, 0, 2, 0};
 
 static bipolar socket_send(b32 handle, const void *data, positive size, b32 flags,
                            const void *to, positive to_size)
@@ -60216,52 +62115,92 @@ static bipolar socket_send(b32 handle, const void *data, positive size, b32 flag
         const socket_address_packet *packet = to;
 
         (void)handle, (void)flags;
-        if (size > sizeof fz_sent || !to || to_size != sizeof *packet || packet->halen != 6)
+        if (size > sizeof fz_sent || !to || to_size != sizeof *packet || packet->halen != 6 ||
+            memcmp(packet->addr, fz_ap, 6))
                 abort();
         memcpy(fz_sent, data, size);
         fz_sent_length = size;
         fz_sends++;
         return (bipolar)size;
 }
+
+/* One datagram on the EAPOL socket, with the sender address the kernel
+   would give: the frame cut to the room, as a datagram is without
+   MSG_TRUNC, and the address cut to the room it was given. */
+#define MSG_DONTWAIT 0x40
+static const p8 *fz_rx;
+static positive fz_rx_length;
+static socket_address_packet fz_rx_from;
+static p32 fz_rx_from_size;
+static bipolar socket_receive(b32 handle, void *into, positive room, b32 flags, void *from,
+                              p32 *size)
+{
+        positive length = fz_rx_length < room ? fz_rx_length : room;
+
+        (void)handle, (void)flags;
+        memcpy(into, fz_rx, length);
+        memcpy(from, &fz_rx_from, *size < fz_rx_from_size ? *size : fz_rx_from_size);
+        *size = fz_rx_from_size;
+        return (bipolar)length;
+}
 static void socket_close(b32 handle) { (void)handle; }
 static void nl80211_close(nl80211 *session) { session->handle = -1; }
+/* The input's bytes, with a draw count over the first eight: the kernel's
+   generator never repeats a nonce, and an input that made it repeat one
+   would only show a station that trusts it not to (a message 3 resent
+   from a handshake long done, under the same SNonce again, is fresh). */
+static p64 fz_draws;
 static bipolar system_random_fill(address_any into, positive length, positive flags)
 {
+        p8 *bytes = into;
+
         (void)flags;
         fz_take(into, length);
+        fz_draws++;
+        for (positive at = 0; at < 8 && at < length; at++)
+                bytes[at] ^= (p8)(fz_draws >> (8 * at));
         return 0;
 }
 
-/* A key goes in only as the access point made it, and never twice the
-   same: a reinstalled key is a reset nonce (KRACK). */
+/* A key goes in only as the access point made it, for the access point,
+   never twice the same (a reinstalled key is a reset nonce: KRACK) and
+   never back over a key the access point made after it (an old group key
+   in again is the same reset, of a key it has moved on from). */
 static bipolar nl80211_new_key(nl80211 *session, p32 index, p8 idx, p32 type, p8 *mac,
                                p8 *key, positive key_length, p8 *seq, positive seq_length,
                                bool group_default)
 {
-        (void)session, (void)index, (void)mac, (void)seq;
+        positive when;
+
+        (void)session, (void)index, (void)seq;
         if (key_length != 16)
                 abort();
+        fz_installs++;
         if (type == NL80211_KEYTYPE_PAIRWISE)
         {
-                if (idx || !mac || group_default || !fz_made_by_ap(0, key) ||
-                    (fz_sta_tk_set && !memcmp(key, fz_sta_tk, 16)))
+                when = fz_made_when(0, key);
+                if (idx || !mac || memcmp(mac, fz_ap, 6) || group_default || !when ||
+                    (fz_sta_tk_set && (!memcmp(key, fz_sta_tk, 16) || when <= fz_sta_tk_when)))
                         abort();
                 memcpy(fz_sta_tk, key, 16);
                 fz_sta_tk_set = true;
+                fz_sta_tk_when = when;
                 return 0;
         }
-        if (!idx || idx > 3 || !fz_made_by_ap(idx, key) ||
-            seq_length != 6 || !group_default ||
-            (fz_sta_gtk_set[idx] && !memcmp(key, fz_sta_gtk[idx], 16)))
+        when = idx && idx <= 3 ? fz_made_when(idx, key) : 0;
+        if (!when || mac || seq_length != 6 || !group_default ||
+            (fz_sta_gtk_set[idx] &&
+             (!memcmp(key, fz_sta_gtk[idx], 16) || when <= fz_sta_gtk_when[idx])))
                 abort();
         memcpy(fz_sta_gtk[idx], key, 16);
         fz_sta_gtk_set[idx] = true;
+        fz_sta_gtk_when[idx] = when;
         return 0;
 }
 static bipolar nl80211_authorize(nl80211 *session, p32 index, p8 *mac)
 {
-        (void)session, (void)index, (void)mac;
-        if (!fz_sta_tk_set)
+        (void)session, (void)index;
+        if (!fz_sta_tk_set || !mac || memcmp(mac, fz_ap, 6))
                 abort();
         fz_authorized = true;
         return 0;
@@ -60297,9 +62236,13 @@ static void fz_wrap(const p8 *kek, const p8 *plain, positive n, p8 *out)
 
 static wifi_link fz_link;
 static p8 fz_pmk[32], fz_anonce[32], fz_ptk[64], fz_pending[64], fz_rsc[8];
-static const p8 fz_ap[6] = {2, 0, 0, 0, 1, 0}, fz_sta[6] = {2, 0, 0, 0, 2, 0};
 static p64 fz_replay, fz_verified;
 static bool fz_pending_set, fz_ptk_set, fz_clean;
+/* A message 1 in the access point's name with another ANonce, answered as
+   wpa_supplicant answers it: the handshake in progress cannot finish, and
+   only a message 1 of the access point's own starts one that can. What is
+   installed is not touched, so the rekeys of a link already up still work. */
+static bool fz_pending_bent;
 /* A replayed, bent or raw frame the station answered leaves it where the
    model cannot follow; the rules on installs still hold, the expectations
    of each answer no longer do. */
@@ -60337,21 +62280,65 @@ static positive fz_frame(p8 *f, p16 info, const p8 *nonce, const p8 *data, posit
         return 99 + n;
 }
 
+/* What the station holds that only a frame whose MIC checked may move: the
+   replay counter, the keys and whether they are in. */
+static bool fz_held_moved(const wifi_link *before)
+{
+        return memcmp(before->replay, fz_link.replay, 8) ||
+               before->replay_set != fz_link.replay_set ||
+               before->installed != fz_link.installed ||
+               memcmp(before->ptk, fz_link.ptk, 64) || memcmp(before->gtk, fz_link.gtk, 64);
+}
+
+/* After any frame: one the station did not answer moved nothing it holds and
+   put no key in, and the replay counter moved only with an answer. */
+static void fz_after(const wifi_link *before, int installs)
+{
+        if ((!fz_sends && (installs != fz_installs || fz_held_moved(before))) ||
+            (memcmp(before->replay, fz_link.replay, 8) && fz_sends != 1))
+                abort();
+}
+
 /* One frame through the station, from a heap block exactly its length. */
 static bipolar fz_deliver(const p8 *frame, positive length)
 {
         p8 *copy = malloc(length ? length : 1);
+        wifi_link before;
+        int installs = fz_installs;
         bipolar step;
 
+        memcpy(&before, &fz_link, sizeof before);
         memcpy(copy, frame, length);
         fz_sends = 0;
         step = wifi_eapol_step(&fz_link, copy, length);
         free(copy);
+        fz_after(&before, installs);
         if (fz_frame_count < 8 && length <= 512)
         {
                 memcpy(fz_frames[fz_frame_count], frame, length);
                 fz_frame_length[fz_frame_count++] = length;
         }
+        return step;
+}
+
+/* One frame off the socket, from the sender address given: what came from
+   anyone but the access point changes nothing at all. */
+static bipolar fz_receive(const p8 *frame, positive length, const socket_address_packet *from,
+                          p32 from_size, bool ap)
+{
+        wifi_link before;
+        int installs = fz_installs;
+        bipolar step;
+
+        memcpy(&before, &fz_link, sizeof before);
+        fz_rx = frame, fz_rx_length = length;
+        memcpy(&fz_rx_from, from, sizeof fz_rx_from);
+        fz_rx_from_size = from_size;
+        fz_sends = 0;
+        step = wifi_eapol_take(&fz_link);
+        fz_after(&before, installs);
+        if (!ap && (step || fz_sends || memcmp(&before, &fz_link, sizeof before)))
+                abort();
         return step;
 }
 
@@ -60424,16 +62411,19 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
         fz_clean = true;
         fz_lost = false;
         fz_frame_count = fz_m3_length = fz_g1_length = 0;
-        fz_sta_tk_set = fz_authorized = false;
-        fz_made_count = 0;
+        fz_sta_tk_set = fz_authorized = fz_pending_bent = false;
+        fz_made_count = fz_order = fz_sta_tk_when = 0;
+        fz_installs = 0;
+        fz_draws = 0;
         memset(fz_sta_gtk_set, 0, sizeof fz_sta_gtk_set);
+        memset(fz_sta_gtk_when, 0, sizeof fz_sta_gtk_when);
         fz_ap_gtk_idx = 2;
         fz_new_gtk();
 
         for (int ops = 0; fz_left && ops < 24; ops++)
         {
-                p8 op = fz_byte() % 8;
-                p8 frame[512], wrapped[80];
+                p8 op = fz_byte() % 11;
+                p8 frame[512], wrapped[WIFI_WRAP_MOST + 8];
                 positive n;
                 bipolar step;
 
@@ -60451,6 +62441,7 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                                  fz_pending);
                         fz_answer(0x010a, fz_pending);
                         fz_pending_set = true;
+                        fz_pending_bent = false;
                         fz_clean = !fz_lost;
                 }
                 else if (op == 1 && fz_pending_set)     /* message 3 */
@@ -60462,8 +62453,9 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                         n = fz_key_data(wrapped, fz_pending + 16, true);
                         n = fz_frame(frame, 0x13ca, fz_anonce, wrapped, n, fz_pending);
                         step = fz_deliver(frame, n);
-                        if (fz_clean && (step != 1 || !fz_authorized ||
-                                         memcmp(fz_sta_tk, fz_pending + 32, 16)))
+                        if (fz_clean && !fz_pending_bent &&
+                            (step != 1 || !fz_authorized ||
+                             memcmp(fz_sta_tk, fz_pending + 32, 16)))
                                 abort();
                         if (step == 1)
                         {
@@ -60564,6 +62556,280 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                         fz_lost |= fz_deliver(frame, n) != 0 || fz_sends;
                         fz_clean = false;
                 }
+                else if (op == 8)       /* a message 1 from a sender of the input's choosing */
+                {
+                        p8 how = fz_byte();
+                        p8 nonce[32];
+                        p64 counter = fz_replay;
+                        socket_address_packet from;
+                        p32 from_size = sizeof from;
+                        bool ap = (how & 7) < 2;
+
+                        memset(&from, 0, sizeof from);
+                        from.family = AF_PACKET;
+                        from.protocol = network_order_16(ETH_P_PAE);
+                        from.index = 7;
+                        from.halen = 6;
+                        memcpy(from.addr, fz_ap, 6);
+                        switch (how & 7)
+                        {
+                        case 0: /* the access point, the whole address */
+                                break;
+                        case 1: /* the access point, the address as the kernel cuts it */
+                                from_size = 18;
+                                break;
+                        case 2: /* one bit off the access point */
+                        {
+                                p8 bit = fz_byte();
+
+                                from.addr[bit % 6] ^= (p8)(1u << (bit / 6 % 8));
+                                break;
+                        }
+                        case 3: /* the station's own address */
+                                memcpy(from.addr, fz_sta, 6);
+                                break;
+                        case 4: /* broadcast */
+                                memset(from.addr, 0xff, 6);
+                                break;
+                        case 5: /* the access point's bytes, another address length */
+                                from.halen = (p8)(fz_byte() % 6);
+                                break;
+                        case 6: /* the address cut short */
+                                from_size = 12 + fz_byte() % 6;
+                                break;
+                        default: /* no address at all */
+                                from_size = 0;
+                                break;
+                        }
+                        if (how & 8)
+                                memcpy(nonce, fz_anonce, 32);
+                        else
+                                fz_take(nonce, 32);
+                        //      The forger's replay counter: the access point's
+                        //      next, past it, or the last there is. A message 1
+                        //      is answered without a MIC, so its counter must
+                        //      not hold back the access point's next frames.
+                        fz_replay = (how >> 4) == 15 ? ~(p64)0 : counter + 1 + (how >> 4);
+                        n = fz_frame(frame, 0x008a, nonce, 0, 0, 0);
+                        fz_replay = counter;
+                        step = fz_receive(frame, n, &from, from_size, ap);
+                        if (ap && (step || fz_sends != 1))
+                                abort();
+                        if (ap && (!fz_pending_set || memcmp(nonce, fz_anonce, 32)))
+                                fz_pending_bent = true;
+                }
+                else if (op == 9 && (fz_ptk_set || fz_pending_set))     /* key data of every shape */
+                {
+                        p8 how = fz_byte();
+                        bool group = fz_ptk_set && (!fz_pending_set || (how & 1));
+                        p8 *keys = group ? fz_ptk : fz_pending;
+                        positive mode = (how >> 1) % 4;
+                        positive items = 1 + fz_byte() % 6;
+                        bool unwraps = mode == 0;
+                        bool clean = fz_clean && (group || !fz_pending_bent);
+                        bool want = false, cut = false;
+                        p8 plain[WIFI_WRAP_MOST], kek[16], want_key[16], want_idx = 0;
+
+                        //      The key data, element by element: what the
+                        //      station must take is the first GTK KDE whose
+                        //      key id is not 0, before anything cut short.
+                        n = 0;
+                        for (positive item = 0; item < items && !cut; item++)
+                        {
+                                p8 kind = fz_byte() % 9;
+
+                                if (kind == 0 || kind == 1 || kind == 8)
+                                {
+                                        //      A GTK KDE; one a byte short
+                                        //      or long; the suite in an
+                                        //      element that is no KDE.
+                                        positive span = kind == 1 ? (fz_byte() & 1 ? 21 : 23) : 22;
+                                        positive body = span - 6;
+                                        p8 id = fz_byte();
+                                        p8 key[16];
+
+                                        fz_take(key, 16);
+                                        key[0] |= 0x80;
+                                        plain[n++] = kind == 8 ? 0xdc : 0xdd;
+                                        plain[n++] = (p8)span;
+                                        plain[n++] = 0x00, plain[n++] = 0x0f;
+                                        plain[n++] = 0xac, plain[n++] = 0x01;
+                                        plain[n++] = id, plain[n++] = 0;
+                                        memcpy(plain + n, key, body < 16 ? body : 16);
+                                        if (body > 16)
+                                                plain[n + 16] = fz_byte();
+                                        n += body;
+                                        if (kind == 0 && (id & 3) && !want)
+                                        {
+                                                want = true;
+                                                want_idx = id & 3;
+                                                memcpy(want_key, key, 16);
+                                        }
+                                }
+                                else if (kind == 2)     /* the IGTK KDE */
+                                {
+                                        plain[n++] = 0xdd, plain[n++] = 28;
+                                        plain[n++] = 0x00, plain[n++] = 0x0f;
+                                        plain[n++] = 0xac, plain[n++] = 0x09;
+                                        fz_take(plain + n, 24);
+                                        n += 24;
+                                }
+                                else if (kind == 3)     /* the RSN element */
+                                {
+                                        memcpy(plain + n, wifi_rsn_ie, sizeof wifi_rsn_ie);
+                                        n += sizeof wifi_rsn_ie;
+                                }
+                                else if (kind == 4)     /* padding */
+                                        plain[n++] = 0xdd, plain[n++] = 0;
+                                else if (kind == 5)     /* a vendor element, never a GTK KDE */
+                                {
+                                        p8 span = fz_byte() % 24;
+
+                                        plain[n++] = 0xdd, plain[n++] = span;
+                                        fz_take(plain + n, span);
+                                        if (span >= 4 && !plain[n] && plain[n + 1] == 0x0f &&
+                                            plain[n + 2] == 0xac && plain[n + 3] == 1)
+                                                plain[n] = 1;
+                                        n += span;
+                                }
+                                else if (kind == 6)     /* longer than what is left */
+                                {
+                                        plain[n++] = (p8)(fz_byte() | 1);
+                                        plain[n++] = 0xff;
+                                        cut = true;
+                                }
+                                else                    /* the WPA vendor element */
+                                {
+                                        static const p8 wpa[] = {0xdd, 6, 0x00, 0x50, 0xf2, 0x01, 1, 0};
+
+                                        memcpy(plain + n, wpa, sizeof wpa);
+                                        n += sizeof wpa;
+                                }
+                        }
+                        if (n % 8 || n < 16)
+                        {
+                                plain[n++] = 0xdd;
+                                while (n % 8 || n < 16)
+                                        plain[n++] = 0;
+                        }
+
+                        //      Wrapped under the KEK; under a KEK a bit off;
+                        //      wrapped and cut; or not wrapped at all.
+                        memcpy(kek, keys + 16, 16);
+                        if (mode == 1)
+                        {
+                                p8 bit = fz_byte();
+
+                                kek[bit % 16] ^= (p8)(1u << (bit / 16 % 8));
+                        }
+                        if (mode == 3)
+                                memcpy(wrapped, plain, n);
+                        else
+                        {
+                                fz_wrap(kek, plain, n, wrapped);
+                                n += 8;
+                                if (mode == 2)
+                                        n -= 1 + fz_byte() % 7;
+                        }
+
+                        fz_replay++;
+                        if (group)
+                        {
+                                if (unwraps && want)
+                                {
+                                        fz_made_add(want_idx, want_key);
+                                        memcpy(fz_ap_gtk, want_key, 16);
+                                        fz_ap_gtk_idx = want_idx;
+                                }
+                                n = fz_frame(frame, 0x1382, 0, wrapped, n, fz_ptk);
+                                step = fz_deliver(frame, n);
+                                if (clean && step != (unwraps && want ? 2 : 0))
+                                        abort();
+                                if (step == 2)
+                                {
+                                        fz_answer(0x0302, fz_ptk);
+                                        fz_verified = fz_replay;
+                                        fz_g1_length = n;
+                                }
+                        }
+                        else
+                        {
+                                memcpy(fz_ap_tk, fz_pending + 32, 16);
+                                if (unwraps)
+                                {
+                                        fz_made_add(0, fz_ap_tk);
+                                        if (want)
+                                                fz_made_add(want_idx, want_key);
+                                }
+                                n = fz_frame(frame, 0x13ca, fz_anonce, wrapped, n, fz_pending);
+                                step = fz_deliver(frame, n);
+                                if (clean && (step != (unwraps ? 1 : 0) ||
+                                              (unwraps && (!fz_authorized ||
+                                                           memcmp(fz_sta_tk, fz_pending + 32, 16) ||
+                                                           (want && (!fz_sta_gtk_set[want_idx] ||
+                                                                     memcmp(fz_sta_gtk[want_idx],
+                                                                            want_key, 16)))))))
+                                        abort();
+                                if (step == 1)
+                                {
+                                        fz_answer(0x030a, fz_pending);
+                                        memcpy(fz_ptk, fz_pending, 64);
+                                        memcpy(fz_m3, frame, n);
+                                        fz_m3_length = n;
+                                        fz_verified = fz_replay;
+                                        fz_ptk_set = true;
+                                        fz_pending_set = false;
+                                        if (want)
+                                        {
+                                                memcpy(fz_ap_gtk, want_key, 16);
+                                                fz_ap_gtk_idx = want_idx;
+                                        }
+                                }
+                        }
+                }
+                else if (op == 10)      /* a message 1 framed every way */
+                {
+                        p8 how = fz_byte();
+                        positive extra = fz_byte() % 24;
+                        positive tail = fz_byte() % 24;
+                        positive got = 99 + extra + tail;
+                        positive declared = 95 + extra + (how & 7);
+                        p16 key_data;
+                        bool takes;
+                        p8 nonce[32];
+
+                        fz_take(nonce, 32);
+                        fz_replay++;
+                        fz_frame(frame, 0x008a, nonce, 0, 0, 0);
+                        fz_take(frame + 99, extra + tail);
+                        switch ((how >> 3) % 5)
+                        {
+                        case 0: key_data = 0; break;
+                        case 1: key_data = (p16)extra; break;
+                        case 2: key_data = (p16)(extra + 1); break;
+                        case 3: key_data = 0xffff; break;
+                        default: key_data = (p16)(fz_byte() | fz_byte() << 8); break;
+                        }
+                        network_store_16(frame + 2, (p16)(declared - 4));
+                        network_store_16(frame + 97, key_data);
+                        //      Its own length, never past what arrived, and
+                        //      key data inside it; bytes after it are the
+                        //      link's padding and nothing of the frame's.
+                        takes = declared >= 99 && declared <= got && key_data <= declared - 99;
+                        step = fz_deliver(frame, got);
+                        if (step || fz_sends != (takes ? 1 : 0))
+                                abort();
+                        if (takes)
+                        {
+                                memcpy(fz_anonce, nonce, 32);
+                                wifi_ptk(fz_pmk, (p8 *)fz_ap, (p8 *)fz_sta, fz_anonce, fz_sent + 17,
+                                         fz_pending);
+                                fz_answer(0x010a, fz_pending);
+                                fz_pending_set = true;
+                                fz_pending_bent = false;
+                                fz_clean = !fz_lost;
+                        }
+                }
         }
         return 0;
 }
@@ -60585,8 +62851,10 @@ def wifi_eapol_fuzz_source(net, host, checks):
                                "/* The replay counter and keys for a driver")
     step = src_slice(host, "/*\n        One EAPOL-Key frame from the access point",
                                "/* The link's news on the mlme socket")
+    take = src_slice(host, "/* Whether a frame on the EAPOL socket came from",
+                               "/*\n        The join's four-way handshake")
     return "\n".join((crypto, "#include <ctype.h>", WIFI_EAPOL_FUZZ_SHIM, derive, link,
-                      "static void wifi_rekey_offload(wifi_link *link);", step,
+                      "static void wifi_rekey_offload(wifi_link *link);", step, take,
                       WIFI_EAPOL_FUZZ_DRIVER))
 
 
@@ -60621,6 +62889,45 @@ def wifi_eapol_fuzz_seeds():
     seeds["everything.bin"] = (start + handshake() + op(2, draw(16)) + op(0, draw(32), draw(32)) +
                                op(1) + op(3) + op(4) + op(5, b"\x03") + op(6, b"\x02", b"\x10\x00") +
                                op(2, draw(16)) + op(7, b"\x20\x00", draw(32)))
+    # Rollback: two group rekeys move both key ids on, then message 3 is
+    # resent carrying the first group key.
+    seeds["rollback.bin"] = (start + handshake() + op(2, draw(16)) + op(2, draw(16)) + op(3) +
+                             op(2, draw(16)) + op(3) + op(4))
+    # Message 1 in the access point's name, with another ANonce, its own,
+    # and the last replay counter there is; then from every other sender.
+    seeds["forged_m1.bin"] = (start + handshake() + op(8, b"\x00", draw(32)) + op(2, draw(16)) +
+                              op(3) + op(8, b"\xf9") + op(2, draw(16)) +
+                              op(0, draw(32), draw(32)) + op(1))
+    seeds["forged_m1_midway.bin"] = (start + op(0, draw(32), draw(32)) + op(8, b"\x01", draw(32)) +
+                                     op(1) + op(0, draw(32)) + op(1))
+    seeds["senders.bin"] = (start + handshake() + op(8, b"\x02\x0d", draw(32)) +
+                            op(8, b"\x03", draw(32)) + op(8, b"\x04", draw(32)) +
+                            op(8, b"\x05\x05", draw(32)) + op(8, b"\x06\x05", draw(32)) +
+                            op(8, b"\x07", draw(32)) + op(2, draw(16)))
+
+    def gtk(kind, key_id, *more):
+        return bytes((kind, key_id)) + draw(16) + b"".join(more)
+
+    # Key data of every shape: the GTK KDE among other elements, cut,
+    # under another KEK, not wrapped, in message 3 and in a group message.
+    seeds["key_data.bin"] = (start + op(0, draw(32), draw(32)) +
+                             op(9, b"\x00", b"\x03", b"\x03", b"\x04", gtk(0, 1)) +
+                             op(9, b"\x01", b"\x05", b"\x02" + draw(24), gtk(0, 0), b"\x05\x16" + draw(22),
+                                gtk(0, 6), gtk(0, 1)) +
+                             op(9, b"\x03", b"\x02", b"\x06\x31", gtk(0, 2)) +
+                             op(9, b"\x05", b"\x01", gtk(0, 3), b"\x05") +
+                             op(9, b"\x07", b"\x01", gtk(0, 2)) +
+                             op(9, b"\x01", b"\x02", b"\x01\x01\x01" + draw(17), gtk(8, 2)) +
+                             op(9, b"\x01", b"\x01", b"\x07"))
+    # Message 1 with its lengths every way, and padding after it.
+    seeds["framing.bin"] = (start + op(10, b"\x04\x00\x00", draw(32)) +
+                            op(10, b"\x04\x05\x07", draw(32), draw(12)) +
+                            op(10, b"\x05\x00\x03", draw(32), draw(3)) +
+                            op(10, b"\x0c\x08\x00", draw(32), draw(8)) +
+                            op(10, b"\x14\x08\x00", draw(32), draw(8)) +
+                            op(10, b"\x1c\x00\x00", draw(32)) +
+                            op(10, b"\x24\x04\x00", draw(32), draw(4), b"\x00\x04") +
+                            op(10, b"\x00\x00\x00", draw(32)) + op(1))
     return seeds
 
 
@@ -60628,14 +62935,23 @@ def harness_wifi_eapol_fuzz(argv):
     """libFuzzer over host.c's EAPOL-Key state machine, the one the join's
     four-way handshake and the keeper's rekeys both run: wifi_eapol_step
     and the frame, MIC, unwrap and GTK helpers under it, lifted by their
-    anchors over net.c's hosted crypto. The input drives a model access
-    point -- message 1, message 3, group message 1, each resent, old frames
-    replayed, bits bent, raw frames -- whose MICs and wrapped keys are
-    real, so the whole machine is reached. Every key the station installs
-    has to be the access point's current one and never the one already in
-    (KRACK); every answer has to carry the right key information, replay
-    counter and MIC; a replayed frame has to go unanswered. Bounded
-    fixed-seed; 2 when clang/libFuzzer is absent.
+    anchors over net.c's hosted crypto, with wifi_eapol_take and the
+    sender test in front of it. The input drives a model access point --
+    message 1, message 3, group message 1, each resent, old frames
+    replayed, bits bent, raw frames, key data built from a grammar of KDEs
+    and wrapped, wrapped wrong, cut or bare, message 1 framed every way --
+    and a forger, whose message 1 comes in the access point's name or from
+    any other sender. The MICs and wrapped keys are real, so the whole
+    machine is reached. Every key the station installs has to be one the
+    access point made, for the access point, never the one already in and
+    never older than it (KRACK, and its group key rollback); a frame it
+    does not answer moves nothing it holds and puts no key in, and the
+    replay counter moves only with an answer; every answer has to carry the
+    right key information, replay counter and MIC; a replayed frame has to
+    go unanswered; a frame from anyone but the access point changes nothing
+    at all; a forged message 1 never stops the link's own rekeys; the GTK
+    taken is the model's first good KDE. Bounded fixed-seed; 2 when
+    clang/libFuzzer is absent.
 
         python3 test/differential.py --harness wifi_eapol_fuzz
     """
@@ -60703,6 +63019,23 @@ def wifi_scan_fuzz_seeds():
     seeds["nest_overlong.bin"] = b"\x00" + struct.pack("<HH", 0x7000, 6) + ssid
     seeds["body.bin"] = b"\x02" + attribute(47 | 0x8000, bss)
     seeds["body_two.bin"] = b"\x02" + attribute(47 | 0x8000, bss) + attribute(47 | 0x8000, bss)
+    # Mode 4, rows of three bytes (name, signal, joined and security): a
+    # hundred weak forged names before the real ones, a joined row weaker
+    # than all of them, a twin louder than the joined one, and names over.
+    rng = random.Random(6581)
+    weak = b"".join(bytes((name, 39, 0x11)) for name in range(86))
+    strong = b"".join(bytes((name, rng.randrange(20), 0x31)) for name in range(70, 86))
+    seeds["air_forged_first.bin"] = b"\x04" + weak + strong + bytes((3, 39, 0x30, 3, 1, 0x31))
+    seeds["air_churn.bin"] = b"\x04" + bytes(rng.getrandbits(8) for _ in range(900))
+    seeds["air_hidden.bin"] = b"\x04" + bytes((86, 0, 0x10, 87, 0, 0x10, 88, 5, 0x10, 89, 6, 0x00))
+    # Mode 5: twins (count, then whether the real one was given up on and
+    # where it sits, then each twin's signal and seconds to fail): five
+    # louder and quick, four louder and slow, the real one given up on
+    # first, and sixty-three of every kind.
+    seeds["pick_five_quick.bin"] = b"\x05" + bytes((4, 0)) + bytes((10, 0)) * 5
+    seeds["pick_four_slow.bin"] = b"\x05" + bytes((3, 6)) + bytes((10, 19)) * 4
+    seeds["pick_given_up.bin"] = b"\x05" + bytes((2, 1)) + bytes((20, 3, 69, 0, 5, 39))
+    seeds["pick_many.bin"] = b"\x05" + bytes((62, 9)) + bytes(rng.getrandbits(8) for _ in range(126))
     return seeds
 
 
@@ -60710,6 +63043,65 @@ WIFI_SCAN_FUZZ_PRELUDE = r"""
 #define GENL_HEADER 4
 #define RADIO_SSID_MOST 32
 """ + HOSTED_SPAN_BYTE + r"""
+"""
+
+#       What radio_avoid_load, radio_avoid_add, radio_pick_seen and
+#       radio_bss_choose stand on: a clock, the avoid file and the kernel's
+#       list of access points, all the driver's.
+WIFI_PICK_FUZZ_PRELUDE = r"""
+#define NET_STATE_DIR "/run/moonwater"
+#define HOST_CLOCK_BOOTTIME 7
+#ifndef AT_FDCWD
+#define AT_FDCWD (-100)
+#endif
+typedef struct
+{
+        b32 handle;
+        p16 family;
+        p32 mlme;
+        p32 scan;
+} nl80211;
+static p64 air_now_ms;
+static p64 system_clock_ns(b32 clock)
+{
+        (void)clock;
+        return (air_now_ms + 86400000ull) * 1000000ull;
+}
+static p8 air_avoid_file[4096];
+static positive air_avoid_size;
+static bool air_avoid_there;
+static bipolar file_read_once_at(b32 directory, const void *path, address_any into, positive room)
+{
+        (void)directory, (void)path;
+        if (!air_avoid_there)
+                return -2;
+        memcpy(into, air_avoid_file, air_avoid_size < room ? air_avoid_size : room);
+        return (bipolar)(air_avoid_size < room ? air_avoid_size : room);
+}
+static void host_state_ready(void) {}
+static bipolar host_write_file(const void *path, const p8 *bytes, positive length,
+                               positive mode, bool sync)
+{
+        (void)path, (void)mode, (void)sync;
+        if (length > sizeof air_avoid_file)
+                abort();
+        memcpy(air_avoid_file, bytes, length);
+        air_avoid_size = length;
+        air_avoid_there = true;
+        return 0;
+}
+static bool wifi_mac_set(p8 *mac)
+{
+        return (mac[0] | mac[1] | mac[2] | mac[3] | mac[4] | mac[5]) != 0;
+}
+static void radio_air_dump(nl80211 *session, p32 index, netlink_visitor visit,
+                           address_any context);
+static bool radio_air_scan(nl80211 *session, p32 index, p8 *ssid, positive ssid_length,
+                           bool joinable)
+{
+        (void)session, (void)index, (void)ssid, (void)ssid_length, (void)joinable;
+        return true;
+}
 """
 
 WIFI_SCAN_FUZZ_DRIVER = r"""
@@ -60835,17 +63227,286 @@ static void check_one(netlink_header *header)
         }
 }
 
+/* A scan's rows kept as radio_air_keep keeps them, against the model: one
+   row a name, no hidden name; every field of a row from one access point;
+   a name joined through keeps its joined row, the strongest joined; any
+   other name its strongest; and with the air full, no name left out that
+   is stronger than the weakest row kept that is not joined. */
+#define AIR_NAMES 90
+static void air_model(const p8 *data, positive size)
+{
+        static radio_heard rows[1024];
+        bool any[AIR_NAMES] = {0}, joined[AIR_NAMES] = {0}, kept[AIR_NAMES] = {0};
+        b32 best[AIR_NAMES], best_joined[AIR_NAMES];
+        positive count = 0, names = 0, joins = 0, nonjoined = 0;
+        b32 weakest = 0;
+        radio_air air;
+
+        memset(&air, 0, sizeof air);
+        for (positive at = 0; at + 3 <= size && count < 1024; at += 3, count++)
+        {
+                radio_heard *one = rows + count;
+                p8 name = data[at] % AIR_NAMES;
+
+                memset(one, 0, sizeof *one);
+                //      Names n0 to n85; 86 empty and 87 three zero bytes,
+                //      which are hidden; 88 and 89 the longest there is.
+                if (name < 86)
+                        one->ssid_length = (p8)snprintf((char *)one->ssid, sizeof one->ssid, "n%u", name);
+                else if (name == 87)
+                        one->ssid_length = 3;
+                else if (name > 87)
+                {
+                        one->ssid_length = RADIO_SSID_MOST;
+                        memset(one->ssid, 'x' + (name - 88), RADIO_SSID_MOST);
+                }
+                //      Signals in whole dB from 0 to -39, so ties are common.
+                one->mbm = -100 * (b32)(data[at + 1] % 40);
+                one->joined = (data[at + 2] & 15) == 0;
+                one->security = (p8)((data[at + 2] >> 4) % 8);
+                one->beacon_security = (p8)(data[at + 2] >> 7);
+                //      The row's own identity, in every field that is not
+                //      the name, the signal or the joined bit.
+                one->frequency = 2412 + (p32)count;
+                one->seen = (p32)count * 7;
+                one->bssid[0] = 2;
+                one->bssid[4] = (p8)(count >> 8);
+                one->bssid[5] = (p8)count;
+                radio_air_keep(&air, one);
+                if (name == 86 || name == 87)
+                        continue;
+                if (!any[name])
+                        names++, best[name] = one->mbm;
+                any[name] = true;
+                if (one->mbm > best[name])
+                        best[name] = one->mbm;
+                if (one->joined && (!joined[name] || one->mbm > best_joined[name]))
+                {
+                        joins += !joined[name];
+                        joined[name] = true;
+                        best_joined[name] = one->mbm;
+                }
+        }
+
+        if (air.count != (names < RADIO_AIR_MOST ? names : RADIO_AIR_MOST))
+        {
+                fprintf(stderr, "the air keeps %zu rows of %zu names\n", (size_t)air.count, (size_t)names);
+                abort();
+        }
+        for (positive at = 0; at < air.count; at++)
+        {
+                const radio_heard *have = air.heard + at;
+                const radio_heard *from = null;
+                p8 name;
+
+                for (positive row = 0; row < count && !from; row++)
+                        if (rows[row].frequency == have->frequency)
+                                from = rows + row;
+                if (!from || from->ssid_length != have->ssid_length ||
+                    memcmp(from->ssid, have->ssid, have->ssid_length) ||
+                    from->security != have->security ||
+                    from->beacon_security != have->beacon_security ||
+                    from->joined != have->joined || from->mbm != have->mbm ||
+                    from->seen != have->seen || memcmp(from->bssid, have->bssid, 6))
+                {
+                        fprintf(stderr, "a row is not one access point's\n");
+                        abort();
+                }
+                name = (p8)(have->ssid_length == RADIO_SSID_MOST ? 88 + (have->ssid[0] - 'x')
+                            : !have->ssid[0] ? 86 : atoi((const char *)have->ssid + 1));
+                if (name == 86 || kept[name])
+                {
+                        fprintf(stderr, "a hidden or doubled name is kept\n");
+                        abort();
+                }
+                kept[name] = true;
+                if (joins <= RADIO_AIR_MOST && joined[name] &&
+                    (!have->joined || have->mbm != best_joined[name]))
+                {
+                        fprintf(stderr, "a joined name lost its strongest joined row\n");
+                        abort();
+                }
+                if (!joined[name] && have->mbm != best[name])
+                {
+                        fprintf(stderr, "a name is not its strongest row\n");
+                        abort();
+                }
+                if (!have->joined && (!nonjoined++ || have->mbm < weakest))
+                        weakest = have->mbm;
+        }
+        for (p8 name = 0; name < AIR_NAMES; name++)
+                if (any[name] && !kept[name] &&
+                    ((joined[name] && joins <= RADIO_AIR_MOST) ||
+                     (air.count == RADIO_AIR_MOST && nonjoined && best[name] > weakest)))
+                {
+                        fprintf(stderr, "n%u is left out over a weaker row\n", name);
+                        abort();
+                }
+}
+
+/* Mode 5: the air a join chooses from. The real access point, at -70 dBm,
+   and up to sixty-three twins by its name, louder or quieter as the input
+   says, all asking for WPA2 as it does; a twin fails every join it is given
+   after a time of its own, one to forty seconds, as a twin without the
+   password does. The machine joins, gives up on what failed
+   (radio_avoid_add) and joins again a second later, and the real one has to
+   be tried within one join more than there are twins, whether or not it was
+   given up on first (the deauthentication anybody can forge). Before, five
+   louder twins that failed quickly, or four that failed slowly, kept it from
+   ever being tried: one given up on fell off the end of the list, or out of
+   its minute, and was louder than the real one again. */
+#define AIR_TWINS 63
+typedef struct
+{
+        p8 bssid[6];
+        b32 mbm;
+        p32 fail_ms;
+        p32 frequency;
+} air_station;
+static air_station air_world[AIR_TWINS + 1];
+static positive air_world_count;
+
+static void radio_air_dump(nl80211 *session, p32 index, netlink_visitor visit,
+                           address_any context)
+{
+        static const p8 ies[] = {0, 9, 'm', 'o', 'o', 'n', 'w', 'a', 't', 'e', 'r',
+                                 48, 20, 1, 0, 0, 0x0f, 0xac, 4, 1, 0, 0, 0x0f, 0xac, 4,
+                                 1, 0, 0, 0x0f, 0xac, 2, 0, 0};
+
+        (void)session, (void)index;
+        for (positive at = 0; at < air_world_count; at++)
+        {
+                p8 nest[160], body[200], *stop, *message;
+                p8 *put = nest;
+                p32 seen = 100;
+                positive whole;
+
+                put = put_attribute(put, NL80211_BSS_BSSID, air_world[at].bssid, 6);
+                put = put_attribute(put, NL80211_BSS_FREQUENCY, (p8 *)&air_world[at].frequency, 4);
+                put = put_attribute(put, NL80211_BSS_SIGNAL_MBM, (p8 *)&air_world[at].mbm, 4);
+                put = put_attribute(put, NL80211_BSS_SEEN_MS_AGO, (p8 *)&seen, 4);
+                put = put_attribute(put, NL80211_BSS_INFORMATION_ELEMENTS, ies, sizeof ies);
+                stop = put_attribute(body, NL80211_ATTR_BSS | 0x8000, nest, (positive)(put - nest));
+                message = wrap_message(body, (positive)(stop - body), &whole, 34);
+                visit((netlink_header *)message, context);
+                free(message);
+        }
+}
+
+static void pick_model(const p8 *data, positive size)
+{
+        positive twins = size ? 1 + data[0] % AIR_TWINS : 1;
+        bool given_up = size > 1 && (data[1] & 1);
+        positive turn = size > 1 ? data[1] >> 1 : 0;
+        positive joins = 0;
+        nl80211 session = {0};
+
+        air_now_ms = 0;
+        air_avoid_there = false;
+        air_avoid_size = 0;
+        air_world_count = twins + 1;
+        for (positive at = 0; at <= twins; at++)
+        {
+                //      The kernel's list is in no order a twin cannot
+                //      choose: the real one's place in it is the input's.
+                air_station *one = air_world + (at + turn) % (twins + 1);
+                positive from = 2 * at;
+
+                memset(one, 0, sizeof *one);
+                one->bssid[0] = 2;
+                one->bssid[4] = 0x5a;
+                one->bssid[5] = (p8)at;
+                one->frequency = 2412 + 5 * (p32)(at % 13);
+                one->mbm = !at ? -7000 : -100 * (b32)(from < size ? data[from] % 70 : 30);
+                one->fail_ms = !at ? 0 : 1000 * (1 + (from + 1 < size ? data[from + 1] % 40 : 7));
+        }
+        if (given_up)
+                radio_avoid_add(air_world[turn % (twins + 1)].bssid);
+        for (;;)
+        {
+                p8 chosen[6];
+                p32 frequency = 0;
+                air_station *one = null;
+
+                if (radio_bss_choose(&session, 7, (p8 *)"moonwater", 9, true, chosen, &frequency) != 1)
+                        abort();
+                for (positive at = 0; at <= twins && !one; at++)
+                        if (!memcmp(air_world[at].bssid, chosen, 6))
+                                one = air_world + at;
+                if (!one || frequency != one->frequency)
+                        abort();
+                joins++;
+                if (one->bssid[5] == 0)
+                        return;
+                if (joins > twins)
+                {
+                        fprintf(stderr, "the real access point is not tried in %zu joins against %zu twins\n",
+                                (size_t)joins, (size_t)twins);
+                        abort();
+                }
+                air_now_ms += one->fail_ms;
+                radio_avoid_add(chosen);
+                air_now_ms += 1000;
+        }
+}
+
+/* radio_channel against the channel plan, once: every frequency from 0 to
+   80 GHz that is a channel's centre gives that channel, and none gives a
+   number no band has. */
+static void channel_model(void)
+{
+        static p8 plan[80001];
+        static bool done;
+        static const struct { p32 first, last, base, step; } bands[] = {
+            {1, 13, 2407, 5}, {14, 14, 2414, 5}, {182, 196, 4000, 5},
+            {1, 184, 5000, 5}, {1, 233, 5950, 5}, {1, 6, 56160, 2160}};
+
+        if (done)
+                return;
+        done = true;
+        for (positive band = 0; band < sizeof bands / sizeof bands[0]; band++)
+                for (p32 channel = bands[band].first; channel <= bands[band].last; channel++)
+                {
+                        p32 mhz = bands[band].base + bands[band].step * channel;
+
+                        if (mhz < 4910 || mhz > 4980 || bands[band].base == 4000)
+                                plan[mhz] = (p8)channel;
+                }
+        plan[2484] = 14;
+        plan[5935] = 2;
+        for (p32 mhz = 0; mhz <= 80000; mhz++)
+                if ((plan[mhz] && radio_channel(mhz) != plan[mhz]) || radio_channel(mhz) > 233)
+                {
+                        fprintf(stderr, "%u MHz is channel %u, not %u\n", mhz, radio_channel(mhz),
+                                plan[mhz]);
+                        abort();
+                }
+        if (radio_channel(~(p32)0) || radio_channel(0x80000000u))
+                abort();
+}
+
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
         p8 mode;
         positive whole;
         p8 *message;
 
+        channel_model();
         if (!size)
                 return 0;
-        mode = data[0] % 4;
+        mode = data[0] % 6;
         data++;
         size--;
+        if (mode == 5)
+        {
+                pick_model(data, size);
+                return 0;
+        }
+        if (mode == 4)
+        {
+                air_model(data, size);
+                return 0;
+        }
         if (mode == 3)
         {
                 /* An RSN element alone, against the model. */
@@ -60976,6 +63637,14 @@ def harness_wifi_scan_fuzz(argv):
     stay in range, the air never holds more than it may, and a beacon that
     is well formed reads as the model built from its elements the long way
     says -- the name, the key management, the capability's privacy bit.
+    Mode 4 runs a scan's rows through radio_air_keep against a model of the
+    strongest sixty-four names, the joined row never evicted and every field
+    of a row from one access point. Mode 5 lifts radio_avoid_load,
+    radio_avoid_add, radio_pick_seen and radio_bss_choose over a clock, an
+    avoid file and a kernel list of the driver's: up to sixty-three twins of
+    a saved WPA2 network, louder or quieter, each failing every join after
+    its own one to forty seconds, and the real access point, given up on
+    first or not, has to be tried within one join more than there are twins.
     Seeds from wifi_scan_fuzz_seeds(). Exit 2 (NOT RUN) without
     clang/libFuzzer.
 
@@ -60990,13 +63659,16 @@ def harness_wifi_scan_fuzz(argv):
         wait = net_zone_fuzz_wait()
         scan = src_slice(host, "#define NL80211_CMD_NEW_SCAN_RESULTS 34",
                                    "/* Whether the station the machine is associated through is authorized")
+        pick = src_slice(host, "/*\n        The access points given up on",
+                                   "static radio_heard address_to radio_air_find(")
     except ValueError as error:
         print("  FAIL wifi scan fuzz lift: " + str(error))
         write_tally("wifi-scan-fuzz", 0, 1)
         return 1
     return tls_fuzz_run("wifi scan", wifi_scan_fuzz_seeds(),
                         NET_ZONE_FUZZ_SHIM + byte_reader_source() + wait + netlink +
-                        WIFI_SCAN_FUZZ_PRELUDE + scan + WIFI_SCAN_FUZZ_DRIVER, 4096)
+                        WIFI_SCAN_FUZZ_PRELUDE + scan + WIFI_PICK_FUZZ_PRELUDE + pick +
+                        WIFI_SCAN_FUZZ_DRIVER, 4096)
 
 
 
@@ -61358,6 +64030,45 @@ def harness_wifi_air(argv):
     lines.append("kill $(cat /tmp/twin0.pid) $(cat /tmp/twin1.pid); rm -f /root/wifi")
     family("twin", lines)
 
+    # ---- starve: twins of the saved WPA2 network that ask for WPA2 as it
+    # does, every one louder, under another password: each takes message 2
+    # and gives the machine up. The real one is left at the bottom of the
+    # air and the machine has to reach it having tried each twin once.
+    # With four given up on for a minute and the loudest first, five such
+    # twins took turns and the real one was never tried.
+    lines = []
+    other = good["password"] + "-not"
+    lines.append("moonwater wifi remove \"$ap0\" > /dev/null 2>&1; rm -f /root/wifi /run/moonwater/wifi.avoid /run/moonwater/wifi.last")
+    lines.append("$A /mnt/stick/hwsim_radio power $i0 2")
+    starve = 5
+    for at in range(starve):
+        body = ["network={", "ssid=%s" % good["ssid"].hex(), "mode=2",
+                "frequency=%d" % (2407 + 5 * (1, 6, 11, 3, 9)[at]),
+                "proto=RSN", "pairwise=CCMP", "group=CCMP", "key_mgmt=WPA-PSK",
+                "psk=\"%s\"" % other, "}"]
+        lines.append("/mnt/stick/hwsim_radio new > /dev/null; tn=$(station $S); sm%d=$(cat /sys/class/net/$tn/address); "
+                     "is%d=$(/mnt/stick/hwsim_radio move $NS $tn)" % (at, at))
+        lines.append("printf '%%s\\n' %s > /tmp/starve%d.conf" % (" ".join(q(line) for line in body), at))
+        lines.append("$A $W -B -i $is%d -c /tmp/starve%d.conf -D nl80211 -f /tmp/starve%d.log -P /tmp/starve%d.pid" % (at, at, at, at))
+        lines.append("for i in $(seq 40); do grep -q AP-ENABLED /tmp/starve%d.log 2>/dev/null && break; sleep 0.25; done" % at)
+        lines.append("$A /mnt/stick/hwsim_radio power $is%d %d" % (at, 20 - at))
+        lines.append("c%d=$(dmesg | grep -c \"$S: authenticate with $sm%d\")" % (at, at))
+    lines.append("scen_count 'starve five twins up' %d \"$(grep -l AP-ENABLED /tmp/starve*.log | wc -l)\"" % starve)
+    # A whole scan once the last scan has expired, so the kernel lists every
+    # twin and not only those on the channel the machine was on.
+    lines.append("sleep 31; moonwater wifi > /dev/null 2>&1")
+    lines.append("t0=$(uptime_now); printf '%%s\\n' %s | moonwater wifi add \"$ap0\" - > /tmp/sc.got 2>&1" % q(good["password"]))
+    lines.append("for i in $(seq 720); do [ \"$(joined \"$ap0\")\" = 1 ] && break; sleep 0.25; done; echo \"wifi-time starve $(took $t0)\"")
+    lines.append("scen_count 'starve joined past five louder twins' 1 \"$(joined \"$ap0\")\"")
+    lines.append("scen_count 'starve joined through the real one' 1 \"$([ \"$(dmesg | grep -a \"$S: authenticate with\" | tail -1 | sed 's/.*authenticate with \\([0-9a-f:]*\\).*/\\1/')\" = \"$rm0\" ] && echo 1 || echo 0)\"")
+    lines.append("tried=0; once=0; for k in %s; do eval \"m=\\$sm$k c=\\$c$k\"; n=$(( $(dmesg | grep -c \"$S: authenticate with $m\") - c )); [ $n -gt $tried ] && tried=$n; [ $n = 1 ] && once=$((once + 1)); done" % " ".join(str(at) for at in range(starve)))
+    lines.append("scen_count 'starve no twin tried twice' 1 \"$([ $tried -le 1 ] && echo 1 || echo 0)\"")
+    lines.append("scen_count 'starve every twin tried once first' %d \"$once\"" % starve)
+    lines.append("od -An -tx1 /run/moonwater/wifi.avoid 2>/dev/null | head -12 | sed 's/^/starve-avoid /'; cat /tmp/sc.got | sed 's/^/starve-add /'")
+    lines.append("dmesg | grep -a -e \"$S: authenticate with\" | tail -12 | sed 's/^/starve-log /'")
+    lines.append("kill %s; rm -f /root/wifi" % " ".join("$(cat /tmp/starve%d.pid)" % at for at in range(starve)))
+    family("starve", lines)
+
     # ---- rekey: hostapd, whose control socket starts rekeys on demand.
     # Two access points by one name, the first much the stronger, each
     # with its own DHCP server; a lease of 20 s, so a renewal every ten
@@ -61396,6 +64107,21 @@ def harness_wifi_air(argv):
         lines.append("scen_count 'rekey no handshake timeout' \"$h0\" \"$(dmesg | grep -c -e 4WAY_HANDSHAKE_TIMEOUT -e GROUP_KEY_HANDSHAKE_TIMEOUT)\"")
         lines.append("n0=$(dmesg | grep -c \"lease renewed on $S\"); for i in $(seq 60); do [ \"$(dmesg | grep -c \"lease renewed on $S\")\" -gt \"$n0\" ] && break; sleep 0.5; done")
         lines.append("scen_count 'rekey data through the new keys' 1 \"$([ \"$(dmesg | grep -c \"lease renewed on $S\")\" -gt \"$n0\" ] && echo 1 || echo 0)\"")
+        # A message 1 in the access point's own name, with an ANonce of
+        # nobody's and the last replay counter there is: answered, as
+        # wpa_supplicant answers it, and nothing more. Its counter is not
+        # kept, so the access point's next group and pairwise rekeys, at
+        # counters far below it, still go through.
+        anonce = bytes(rng.getrandbits(8) for _ in range(32))
+        forged = (bytes((2, 3)) + (95).to_bytes(2, "big") + bytes((2,)) + (0x008a).to_bytes(2, "big") +
+                  (16).to_bytes(2, "big") + b"\xff" * 8 + anonce + bytes(16 + 8 + 8 + 16) + bytes(2))
+        lines.append("g1=$(grep -c 'group key handshake completed' /tmp/rk0.log); p1=$(grep -c 'pairwise key handshake completed' /tmp/rk0.log)")
+        lines.append("$HC -i $j0 raw EAPOL_TX $mac %s > /dev/null; sleep 2" % forged.hex())
+        lines.append("$HC -i $j0 raw REKEY_GTK > /dev/null; sleep 6")
+        lines.append("scen_count 'rekey after a forged message 1, group key handshake completed' 1 \"$(( $(grep -c 'group key handshake completed' /tmp/rk0.log) - g1 ))\"")
+        lines.append("$HC -i $j0 raw REKEY_PTK $mac > /dev/null; sleep 6")
+        lines.append("scen_count 'rekey after a forged message 1, pairwise key handshake completed' 1 \"$(( $(grep -c 'pairwise key handshake completed' /tmp/rk0.log) - p1 ))\"")
+        lines.append("scen_count 'rekey after a forged message 1, still joined' 1 \"$(joined \"$rk\")\"")
         # No message 1 from either: hostapd hands its EAPOL frames to the
         # control socket instead of the air, then gives up on its own
         # schedule and sends the machine away.
@@ -61502,25 +64228,377 @@ def harness_inventory_mutations(argv):
     return 0 if passed == len(cases) else 1
 
 
-def harness_waterlink_mdns(argv):
-    """waterlink's mDNS against dnspython, both ways.
+MDNS_SERVICE = (b"_waterlink", b"_udp", b"local")
+MDNS_SERVICE_WIRE = b"\x0a_waterlink\x04_udp\x05local\x00"
 
-    dnspython reads the announcement and the question the check binary
-    builds and must find real DNS-SD in them: the PTR from the service to
-    the instance, SRV on the port with the cache-flush bit, an empty TXT,
-    the host's A record, no cache-flush on the PTR. Then dnspython builds
-    announcements in the same shape -- compressed its way, cases mixed,
-    records reordered, TXT of any content, extra records about other
-    services around them -- and questions of every type, and the binary's
-    reader must find the instances and ports dnspython put there and
-    nothing else. The
-    hostile half is CHECK_waterlink's; this is the interoperating half. Found
-    through WATERLINK_NOISE_PATH, like the Noise reference.
+
+class MdnsWire:
+    """A DNS message written the way a responder writes one: names
+    compressed against every suffix already in the packet (or not at all),
+    records with their fields where a mutation can find them again."""
+
+    def __init__(self, flags, compress=True):
+        import struct
+        self.pack = struct.pack
+        self.out = bytearray(self.pack(">HHHHHH", 0, flags, 0, 0, 0, 0))
+        self.table = {}
+        self.compress = compress
+        self.fields = []          # (type, class, ttl, rdlength) offsets of each record
+        self.questions = self.records = 0
+
+    def name(self, labels):
+        for at in range(len(labels)):
+            suffix = tuple(labels[at:])
+            if self.compress and suffix in self.table:
+                self.out += self.pack(">H", 0xc000 | self.table[suffix])
+                return
+            if len(self.out) < 0x3fff:
+                self.table[suffix] = len(self.out)
+            self.out.append(len(labels[at]))
+            self.out += labels[at]
+        self.out.append(0)
+
+    def question(self, labels, kind, klass):
+        self.name(labels)
+        self.out += self.pack(">HH", kind, klass)
+        self.questions += 1
+
+    def record(self, labels, kind, klass, ttl, data):
+        """data is bytes, or a list of bytes and name tuples written in turn."""
+        self.name(labels)
+        at = len(self.out)
+        self.out += self.pack(">HHIH", kind, klass, ttl, 0)
+        for piece in (data if isinstance(data, list) else [data]):
+            if isinstance(piece, tuple):
+                self.name(piece)
+            else:
+                self.out += piece
+        self.out[at + 8:at + 10] = self.pack(">H", len(self.out) - at - 10)
+        self.fields.append(at)
+        self.records += 1
+
+    def wire(self, sections=None):
+        out = bytearray(self.out)
+        counts = sections or (self.records, 0, 0)
+        out[4:12] = self.pack(">HHHH", self.questions, *counts)
+        return bytes(out)
+
+
+def mdns_model_name(packet, at, steps=None):
+    """net.c's dns_copy_name, step for step, as the reader calls it: the
+    name and the offset just past it, or None. A step is taken for each
+    label and pointer once its first byte is read."""
+    ceiling, position, jumps, ended, out = len(packet), at, 0, None, bytearray()
+    while True:
+        here = position
+        if position >= ceiling:
+            return None
+        length = packet[position]
+        position += 1
+        if steps is not None:
+            if steps[0] == 0:
+                return None
+            steps[0] -= 1
+        if length & 0xc0 == 0xc0:
+            if position >= ceiling:
+                return None
+            target = (length & 0x3f) << 8 | packet[position]
+            position += 1
+            if ended is None:
+                ended = here + 2
+            jumps += 1
+            if target >= here or jumps > 127:
+                return None
+            ceiling, position = here, target
+            continue
+        if length & 0xc0 or position + length > ceiling or len(out) + 1 + length > 255:
+            return None
+        out.append(length)
+        out += packet[position:position + length]
+        position += length
+        if not length:
+            return bytes(out), ended if ended is not None else position
+
+
+def mdns_model_read(packet, budget=True):
+    """waterlink_mdns_read as a model written from its comments and the
+    RFCs it cites: (read, asked, ports of the instances found, steps the
+    names took). The reader in the binary must say the same of every packet.
+    The names of a packet may take one step, a label or a pointer, for each
+    byte of it; without the budget the steps are only counted."""
+    import struct
+    allowed = len(packet) if budget else 1 << 40
+    steps = [allowed]
+    asked, found = False, []
+    took = lambda: allowed - steps[0]
+
+    def refused():
+        return False, False, [], took()
+    if len(packet) < 12 or len(packet) > 1500:
+        return refused()
+    _, flags, questions, a, b, c = struct.unpack(">HHHHHH", packet[:12])
+    records = a + b + c
+    response = bool(flags & 0x8000)
+    if flags & 0x780f or questions * 5 + records * 11 > len(packet) - 12:
+        return refused()
+
+    def service(name):
+        return len(name) == 23 and name.lower() == MDNS_SERVICE_WIRE
+
+    def instance(name):
+        first = name[0]
+        if not first or 1 + first >= len(name) or not service(name[1 + first:]):
+            return None
+        return name[1:1 + first]
+
+    def slot(label):
+        for one in found:
+            if one[0] == label:
+                return one
+        if len(found) == 8:
+            return None
+        found.append([label, False, 0])
+        return found[-1]
+    at = 12
+    for _ in range(questions):
+        got = mdns_model_name(packet, at, steps)
+        if got is None or got[1] + 4 > len(packet):
+            return refused()
+        kind, klass = struct.unpack(">HH", packet[got[1]:got[1] + 4])
+        if not response and service(got[0]) and kind in (12, 255) and klass & 0x7fff == 1:
+            asked = True
+        at = got[1] + 4
+    for _ in range(records):
+        got = mdns_model_name(packet, at, steps)
+        if got is None or got[1] + 10 > len(packet):
+            return refused()
+        kind, klass, ttl, size = struct.unpack(">HHIH", packet[got[1]:got[1] + 10])
+        data = got[1] + 10
+        if data + size > len(packet):
+            return refused()
+        at = data + size
+        if not response:
+            continue
+        name = got[0]
+        if kind == 12 and ttl and klass & 0x7fff == 1 and service(name):
+            target = mdns_model_name(packet, data, steps)
+            if target and target[1] == at and instance(target[0]) is not None:
+                one = slot(instance(target[0]))
+                if one:
+                    one[1] = True
+            continue
+        label = instance(name)
+        if label is None:
+            continue
+        if kind == 33 and ttl and klass & 0x7fff == 1 and size >= 7:
+            port = struct.unpack(">H", packet[data + 4:data + 6])[0]
+            if not port:
+                continue
+            target = mdns_model_name(packet, data + 6, steps)
+            if not target or target[1] != at or len(target[0]) <= 1:
+                continue
+            one = slot(label)
+            if one:
+                one[2] = port
+    if at != len(packet):
+        return refused()
+    return True, asked, [f[2] for f in found if f[1] and f[2]], took()
+
+
+def mdns_generated(rng):
+    """The DNS-SD a link carries, as responders and browsers write it,
+    each with what it says: (kind, packet, ports a reader must find)."""
+    host = (b"wl-%012x" % rng.getrandbits(48), b"local")
+
+    def flip(labels):
+        if rng.random() < 0.3:
+            return tuple(bytes(ch ^ 0x20 if 0x61 <= (ch | 0x20) <= 0x7a and rng.random() < 0.5
+                               else ch for ch in label) for label in labels)
+        return labels
+    #       A response: waterlink instances, other services, hosts, all
+    #       compressed as far as they go (or not at all), any order, any
+    #       section, until the next record would not fit.
+    wire = MdnsWire(0x8400, compress=rng.random() < 0.85)
+    pieces, ports = [], {}
+    for at in range(rng.choice((0, 1, 1, 2, 3, 5, 8))):
+        label = b"wl-%020x" % rng.getrandbits(80)
+        name = (label,) + flip(MDNS_SERVICE)
+        ports[label] = rng.randint(1, 65535)
+        ttl = rng.choice((120, 4500, 1))
+        flush = rng.choice((0x8001, 0x0001))
+        txt = rng.choice((b"\0", b"\x03v=1", b"\x09txtvers=1\x06path=/"))
+        pieces.append([(flip(MDNS_SERVICE), 12, rng.choice((1, 1, 0x8001)), 4500, [name]),
+                       (name, 33, flush, ttl, [struct_pack(">HHH", 0, 0, ports[label]), host]),
+                       (name, 16, flush, ttl, txt)])
+    for at in range(rng.randint(0, 12)):
+        kind = rng.choice((b"_ipp", b"_http", b"_airplay", b"_raop", b"_smb", b"_ssh"))
+        other = (b"Device %d" % rng.randint(0, 999), kind, rng.choice((b"_tcp", b"_udp")), b"local")
+        pieces.append([(other[1:], 12, 1, 4500, [other]),
+                       (other, 33, 0x8001, 120, [struct_pack(">HHH", 0, 0, rng.randint(1, 65535)), host]),
+                       (other, 16, 0x8001, 4500, bytes([5]) + b"rp=ab")])
+    pieces.append([(host, 1, 0x8001, 120, bytes(rng.getrandbits(8) for _ in range(4)))])
+    if rng.random() < 0.5:
+        pieces.append([(host, 28, 0x8001, 120, bytes(16))])
+    rng.shuffle(pieces)
+    records = [record for piece in pieces for record in piece]
+    if rng.random() < 0.3:
+        rng.shuffle(records)
+    written = collections.Counter()
+    for record in records:
+        before = (bytearray(wire.out), dict(wire.table), list(wire.fields), wire.records)
+        wire.record(*record)
+        if len(wire.out) > 1500:
+            wire.out, wire.table, wire.fields, wire.records = before
+            continue
+        label = record[4][0][0] if record[1] == 12 else record[0][0]
+        if label in ports and record[1] in (12, 33):
+            written[label] += 1
+    split = sorted(rng.randint(0, wire.records) for _ in range(2))
+    sections = (split[0], split[1] - split[0], wire.records - split[1])
+    yield "response", wire.wire(sections), wire, sorted(ports[k] for k in ports if written[k] == 2)
+    #       A browser's question, with what it knows already, and others.
+    wire = MdnsWire(0, compress=rng.random() < 0.85)
+    asked = False
+    for at in range(rng.randint(1, 6)):
+        if rng.random() < 0.4:
+            wire.question(flip(MDNS_SERVICE), rng.choice((12, 255, 33, 16)),
+                          rng.choice((1, 0x8001, 3)))
+        else:
+            wire.question((rng.choice((b"_ipp", b"_http", b"_ssh")), b"_tcp", b"local"), 12, 1)
+    for at in range(rng.randint(0, 6)):
+        wire.record(MDNS_SERVICE, 12, 1, 4500, [(b"wl-%020x" % rng.getrandbits(80),) + MDNS_SERVICE])
+    yield "query", wire.wire(), wire, []
+
+
+def struct_pack(form, *values):
+    import struct
+    return struct.pack(form, *values)
+
+
+def struct_unpack(form, data):
+    import struct
+    return struct.unpack(form, data)
+
+
+def mdns_flood(rng, depth, place, kind, labels, records, pad):
+    """What a sender on the link can make a reader's names cost: a long name
+    -- a chain of depth pointers each two bytes before the last, or labels
+    labels of one byte -- held as a TXT record's data with pad bytes after
+    it, then records records of kind whose owner (place 1), data (2) or both
+    (3) name its end, and one record after them that names the service, so a
+    budget that runs out in the last name of the flood still refuses it.
+    Everything else in the packet is well formed."""
+    out = bytearray(struct_pack(">HHHHHH", 0, 0x8400, 0, 0, 0, 0)) + MDNS_SERVICE_WIRE
+    if labels:
+        held = b"".join(b"\x01" + bytes([0x61 + n % 26]) for n in range(labels)) + b"\xc0\x0c"
+        tail = len(out) + 10
+    else:
+        held = struct_pack(">H", 0xc00c) + b"".join(
+            struct_pack(">H", 0xc000 | (len(out) + 10 + 2 * hop)) for hop in range(depth - 1))
+        tail = len(out) + 10 + 2 * (depth - 1)
+    out += struct_pack(">HHIH", 16, 1, 4500, len(held) + pad) + held + bytes(pad)
+    for _ in range(records):
+        out += struct_pack(">H", 0xc000 | (tail if place & 1 else 12))
+        name = struct_pack(">H", 0xc000 | tail) if place & 2 else b"\0"
+        data = {12: name, 33: struct_pack(">HHH", 0, 0, 22348) + name,
+                16: b"\0" + name, 1: bytes(4)}[kind]
+        out += struct_pack(">HHIH", kind, 0x8001, 120, len(data)) + data
+    out += struct_pack(">HHHIH", 0xc00c, 16, 0x8001, 120, 1) + b"\0"
+    out[6:8] = struct_pack(">H", records + 2)
+    return bytes(out)
+
+
+def mdns_floods(rng, count):
+    """Floods of every shape, and for each the packet whose names take
+    exactly as many steps as it has bytes and the one that takes one more,
+    made by the padding alone: (packet, steps its names take)."""
+    for _ in range(count):
+        depth = rng.choice((1, 2, 4, 16, 64, 126, 127, rng.randint(1, 127)))
+        labels = rng.choice((0, 0, 0, rng.randint(1, 120)))
+        place = rng.choice((1, 2, 3))
+        kind = rng.choice((12, 33, 16, 1))
+        records = rng.randint(1, 110)
+        for pad in (0,):
+            packet = mdns_flood(rng, depth, place, kind, labels, records, pad)
+            if len(packet) > 1500:
+                continue
+            took = mdns_model_read(packet, budget=False)[3]
+            yield packet, took
+            pad = took - len(packet)
+            if 0 < pad and took <= 1500:
+                for less in (0, 1):
+                    packet = mdns_flood(rng, depth, place, kind, labels, records, pad - less)
+                    yield packet, took
+
+
+def mdns_mutated(rng, packet, wire):
+    """A packet a parser has to survive: header bits, counts, record fields
+    the reader decides on, pointers, label types, cuts and flips."""
+    out = bytearray(packet)
+    for _ in range(rng.randint(1, 4)):
+        roll = rng.randrange(10)
+        if roll == 0 and len(out) >= 4:
+            out[2 + rng.randrange(2)] ^= 1 << rng.randrange(8)
+        elif roll == 1 and len(out) >= 12:
+            at = 4 + 2 * rng.randrange(4)
+            value = max(0, (out[at] << 8 | out[at + 1]) + rng.choice((-1, 1, 2, 300)))
+            out[at:at + 2] = struct_pack(">H", value & 0xffff)
+        elif roll in (2, 3, 4) and wire.fields:
+            at = rng.choice(wire.fields)
+            if at + 10 > len(out):
+                continue
+            field = rng.choice(("type", "class", "ttl", "length"))
+            if field == "type":
+                out[at:at + 2] = struct_pack(">H", rng.choice((1, 12, 16, 28, 33, 255, 47)))
+            elif field == "class":
+                out[at + 2:at + 4] = struct_pack(">H", rng.choice((1, 0x8001, 3, 0x8003, 255, 0xfe)))
+            elif field == "ttl":
+                out[at + 4:at + 8] = struct_pack(">I", rng.choice((0, 1, 0x80000000, 0xffffffff)))
+            else:
+                size = out[at + 8] << 8 | out[at + 9]
+                out[at + 8:at + 10] = struct_pack(">H", max(0, size + rng.choice((-1, 1, -6, 7))) & 0xffff)
+        elif roll == 5 and len(out) > 13:
+            at = rng.randrange(12, len(out) - 1)
+            out[at:at + 2] = struct_pack(">H", 0xc000 | rng.randrange(min(len(out) + 4, 0x3fff)))
+        elif roll == 6 and len(out) > 12:
+            out[rng.randrange(12, len(out))] = rng.choice((0x40, 0x80, 0x3f, 0, 63, 64))
+        elif roll == 7:
+            del out[rng.randrange(len(out) + 1):]
+        elif roll == 8 and out:
+            out[rng.randrange(len(out))] ^= 1 << rng.randrange(8)
+        elif roll == 9 and wire.fields:
+            at = rng.choice(wire.fields)
+            if at + 16 <= len(out):
+                out[at + 14:at + 16] = b"\0\0"   # an SRV's port, or bytes like it
+    return bytes(out[:1500 + rng.choice((0, 0, 1))])
+
+
+def harness_waterlink_mdns(argv):
+    """waterlink's mDNS against a second reader, both ways.
+
+    The announcement and the question the check binary builds are read by an
+    independent DNS reader written here (and by dnspython where it is
+    importable) and must be real DNS-SD: the PTR from the service to the
+    instance, SRV on the port with the cache-flush bit, an empty TXT, the
+    host's A record, no cache-flush on the PTR. Then a generator writes the
+    DNS-SD a link carries -- responses with waterlink instances among other
+    services and hosts, compressed as far as it goes or not at all, cases
+    mixed, any order and section; browsers' questions with known answers --
+    and an AFL-style grammar mutates them where the reader decides (header
+    bits, opcode, RCODE, counts, every record's type, class, TTL and length,
+    SRV ports, pointers, label types, cuts, flips). For every packet the
+    binary's reader and a model of it written from the RFCs say the same:
+    read or refused, asked or not, which ports. Nothing here needs a package;
+    dnspython, found through WATERLINK_NOISE_PATH like the Noise reference,
+    adds its own reading and its own packets when it is there.
     """
     import random
+    import struct
     import subprocess
     parser = argparse.ArgumentParser(prog="differential.py --harness waterlink_mdns")
     parser.add_argument("--binary", required=True)
+    parser.add_argument("--count", type=int,
+                        default=int(os.environ.get("MOONWATER_MDNS_CASES", "12000")))
     args = parser.parse_args(argv)
     extra = os.environ.get("WATERLINK_NOISE_PATH")
     if extra:
@@ -61532,100 +64610,136 @@ def harness_waterlink_mdns(argv):
         import dns.rdatatype
         import dns.rdataclass
         import dns.flags
+        have_dnspython = True
     except ImportError:
-        print("waterlink mdns: NOT RUN -- dnspython is not importable")
-        return 2
+        have_dnspython = False
     checks = Checks()
 
     built = subprocess.run([args.binary, "mdns-announce"], capture_output=True, timeout=60)
     lines = built.stdout.decode().split()
     checks(built.returncode == 0 and len(lines) == 2, "the binary built an announcement and a question")
     if len(lines) == 2:
-        announcement = dns.message.from_wire(bytes.fromhex(lines[0]))
-        question = dns.message.from_wire(bytes.fromhex(lines[1]))
-        service = dns.name.from_text("_waterlink._udp.local.")
-        ptr = [r for r in announcement.answer if r.rdtype == dns.rdatatype.PTR and r.name == service]
-        srv = [r for r in announcement.answer if r.rdtype == dns.rdatatype.SRV]
-        txt = [r for r in announcement.answer if r.rdtype == dns.rdatatype.TXT]
-        a = [r for r in announcement.answer if r.rdtype == dns.rdatatype.A]
-        checks(announcement.flags & dns.flags.QR and announcement.flags & dns.flags.AA,
-               "dnspython reads an authoritative response")
-        checks(len(ptr) == 1 and len(ptr[0]) == 1 and ptr[0].rdclass == dns.rdataclass.IN,
-               "one PTR from the service to the instance, no cache-flush bit")
-        #       dnspython knows no cache-flush bit, so a record in class
-        #       0x8001 comes back as raw rdata, read here by the RFC's layout.
-        def raw(record):
-            return list(record)[0].to_wire() if not hasattr(list(record)[0], "data") else list(record)[0].data
+        announcement, question = bytes.fromhex(lines[0]), bytes.fromhex(lines[1])
+        #       Read here, record by record, by the model's name reader.
+        rows, at = [], 12
+        _, flags, qd, an, ns, ar = struct.unpack(">HHHHHH", announcement[:12])
+        for _ in range(qd + an + ns + ar):
+            name, at = mdns_model_name(announcement, at)
+            kind, klass, ttl, size = struct.unpack(">HHIH", announcement[at:at + 10])
+            rows.append((name, kind, klass, ttl, announcement[at + 10:at + 10 + size], at + 10))
+            at += 10 + size
+        service = MDNS_SERVICE_WIRE
+        ptr = [r for r in rows if r[1] == 12 and r[0] == service]
+        srv = [r for r in rows if r[1] == 33]
+        txt = [r for r in rows if r[1] == 16]
+        a = [r for r in rows if r[1] == 1]
+        checks(at == len(announcement) and flags == 0x8400 and qd == 0,
+               "an authoritative response, read to its last byte")
+        checks(len(ptr) == 1 and ptr[0][2] == 1 and
+               mdns_model_name(announcement, ptr[0][5])[0][24:] == service and
+               srv and srv[0][0] == mdns_model_name(announcement, ptr[0][5])[0],
+               "one PTR from the service to the instance the SRV is about, no cache-flush bit")
+        checks(len(srv) == 1 and srv[0][4][4:6] == (22348).to_bytes(2, "big") and srv[0][2] == 0x8001,
+               "SRV on the port with cache-flush")
+        checks(len(txt) == 1 and txt[0][4] == b"\0" and txt[0][2] == 0x8001,
+               "an empty TXT, with cache-flush")
+        checks(len(a) == 1 and a[0][4] == bytes([10, 77, 0, 2]), "the host's A record")
+        checks(question[12:] == service + b"\0\x0c\0\x01", "the question is PTR for the service")
+        if have_dnspython:
+            message = dns.message.from_wire(announcement)
+            name = dns.name.from_text("_waterlink._udp.local.")
+            checks(message.flags & dns.flags.QR and message.flags & dns.flags.AA and
+                   len([r for r in message.answer if r.rdtype == dns.rdatatype.PTR and r.name == name]) == 1 and
+                   dns.message.from_wire(question).question[0].name == name,
+                   "dnspython reads the announcement and the question the same way")
 
-        def strings(data):
-            out, at = [], 0
-            while at < len(data):
-                out.append(data[at + 1:at + 1 + data[at]])
-                at += 1 + data[at]
-            return out
-        checks(len(srv) == 1 and all(raw(r)[4:6] == (22348).to_bytes(2, "big") for r in srv) and
-               all(r.rdclass == 0x8001 for r in srv), "SRV on the port with cache-flush")
-        checks(len(txt) == 1 and all(strings(raw(r)) == [b""] for r in txt) and
-               all(r.rdclass == 0x8001 for r in txt), "an empty TXT, with cache-flush")
-        checks(len(a) == 1 and raw(a[0]) == bytes([10, 77, 0, 2]), "the host's A record")
-        checks(len(question.question) == 1 and question.question[0].name == service and
-               question.question[0].rdtype == dns.rdatatype.PTR, "the question is PTR for the service")
-
-    #       dnspython's own announcements, for the binary to read.
+    #       Generated packets, mutated packets, and dnspython's own.
     rng = random.Random(0x5353)
-    packets = []
-    expect = []
-    for round in range(300):
-        message = dns.message.Message()
-        message.flags = dns.flags.QR | dns.flags.AA
-        count = rng.randint(0, 3)
-        want = []
-        records = []
-        for at in range(count):
-            label = "wl-%020x" % rng.getrandbits(80)
-            base = "_waterlink._udp.local."
-            if rng.random() < 0.3:
-                base = "_WaterLink._UDP.Local."
-            instance = dns.name.from_text(label + "." + base)
-            port = rng.randint(1, 65535)
-            fields = rng.choice([[""], ["v=1"], ["txtvers=1", "path=/"]])
-            records.append(dns.rrset.from_text(dns.name.from_text(base), 4500, "IN", "PTR", instance.to_text()))
-            records.append(dns.rrset.from_text(instance, 120, "IN", "SRV", "0 0 %d wl-host.local." % port))
-            records.append(dns.rrset.from_text(instance, 4500, "IN", "TXT", " ".join('"%s"' % f for f in fields)))
-            want.append(port)
-        for at in range(rng.randint(0, 3)):
-            other = dns.name.from_text("printer%d._ipp._tcp.local." % at)
-            records.append(dns.rrset.from_text(other, 120, "IN", "SRV", "0 0 631 printer.local."))
-            records.append(dns.rrset.from_text(other, 120, "IN", "TXT", '"rp=ipp/print"'))
-        rng.shuffle(records)
-        for record in records:
-            message.answer.append(record)
-        packets.append(message.to_wire().hex())
-        expect.append(("response", sorted(want)))
-    for kind in ("PTR", "ANY", "SRV", "A"):
-        query = dns.message.make_query("_waterlink._udp.local.", kind)
-        query.id = 0
-        packets.append(query.to_wire().hex())
-        expect.append(("asked" if kind in ("PTR", "ANY") else "quiet", []))
+    packets, kinds, intents = [], [], []
+    for packet, took in mdns_floods(rng, args.count // 8):
+        packets.append(packet)
+        kinds.append("flood")
+        intents.append(took)
+    while len(packets) < args.count:
+        for kind, packet, wire, ports in mdns_generated(rng):
+            packets.append(packet)
+            kinds.append(kind)
+            intents.append(ports)
+            for _ in range(3):
+                packets.append(mdns_mutated(rng, packet, wire))
+                kinds.append("mutated")
+                intents.append(None)
+    if have_dnspython:
+        for round in range(300):
+            message = dns.message.Message()
+            message.flags = dns.flags.QR | dns.flags.AA
+            records = []
+            for at in range(rng.randint(0, 3)):
+                label = "wl-%020x" % rng.getrandbits(80)
+                base = rng.choice(("_waterlink._udp.local.", "_WaterLink._UDP.Local."))
+                instance = dns.name.from_text(label + "." + base)
+                records.append(dns.rrset.from_text(dns.name.from_text(base), 4500, "IN", "PTR", instance.to_text()))
+                records.append(dns.rrset.from_text(instance, 120, "IN", "SRV",
+                                                   "0 0 %d wl-host.local." % rng.randint(1, 65535)))
+                records.append(dns.rrset.from_text(instance, 4500, "IN", "TXT", '"v=1"'))
+            rng.shuffle(records)
+            for record in records:
+                message.answer.append(record)
+            packets.append(message.to_wire())
+            kinds.append("dnspython")
+            intents.append(None)
 
-    read = subprocess.run([args.binary, "mdns-read"], input=("\n".join(packets) + "\n").encode(),
-                          capture_output=True, timeout=60)
+    read = subprocess.run([args.binary, "mdns-read"],
+                          input=("\n".join(p.hex() for p in packets) + "\n").encode(),
+                          capture_output=True, timeout=600)
     answers = read.stdout.decode().splitlines()
-    agreed = 0
-    for (kind, want), answer in zip(expect, answers):
+    checks(len(answers) == len(packets), "the binary answered every packet (%d of %d)" %
+           (len(answers), len(packets)))
+    tally = collections.Counter()
+    shown = 0
+    for packet, kind, answer in zip(packets, kinds, answers):
+        model = mdns_model_read(packet)
         words = answer.split()
-        if len(words) < 3 or words[0] != "ok":
-            continue
-        found = [int(item) for item in words[3:] if item.isdigit()]
-        if kind == "response" and sorted(found) == want and words[1] == "-":
-            agreed += 1
-        elif kind == "asked" and words[1] == "asked" and not found:
-            agreed += 1
-        elif kind == "quiet" and words[1] == "-" and not found:
-            agreed += 1
-    checks(len(answers) == len(packets) and agreed == len(packets),
-           "the binary reads dnspython's packets as dnspython wrote them (%d of %d)" %
-           (agreed, len(packets)))
+        said = (words[:1] == ["ok"], words[1:2] == ["asked"],
+                [int(w) for w in words[3:]] if words[:1] == ["ok"] else words[2:3])
+        wanted = (model[0], model[1], model[2] if model[0] else ["0"])
+        tally[kind, model[0]] += 1
+        if said != wanted:
+            tally["disagree", kind] += 1
+            if shown < 5:
+                shown += 1
+                print("    %s: binary %r, model %r: %s" % (kind, answer, model[:3], packet.hex()))
+    print("  mdns cases: " + ", ".join("%s %s %d" % (k[0], k[1], n) for k, n in sorted(tally.items(), key=str)))
+    for kind in ("response", "query", "mutated", "flood", "dnspython"):
+        if kind != "dnspython" or have_dnspython:
+            checks(tally["disagree", kind] == 0 and tally[kind, True] > 0,
+                   "the binary and the model read every %s packet alike (%d disagree)" %
+                   (kind, tally["disagree", kind]))
+    checks(tally["mutated", False] > args.count // 8 and tally["mutated", True] > args.count // 8,
+           "the mutations make packets that are read and packets that are refused")
+    #       What each generated response was written to say, whatever
+    #       either reader thinks: every instance whose PTR and SRV fit.
+    meant = sum(answer.startswith("ok") and sorted(int(w) for w in answer.split()[3:]) == ports
+                for kind, answer, ports in zip(kinds, answers, intents) if kind == "response")
+    checks(meant == kinds.count("response"),
+           "every generated response reads, with the instances it was written with (%d of %d)" %
+           (meant, kinds.count("response")))
+    #       What a packet costs: a flood whose names take exactly as many
+    #       steps as it has bytes reads and one step over is refused; and
+    #       what responders and browsers write is well inside it.
+    edge = collections.Counter()
+    for packet, kind, answer, took in zip(packets, kinds, answers, intents):
+        if kind == "flood" and took - len(packet) in (0, 1):
+            edge[took - len(packet), answer.startswith("ok")] += 1
+    dearest = max(mdns_model_read(p)[3] / len(p) for p, k in zip(packets, kinds)
+                  if k in ("response", "query", "dnspython"))
+    print("  mdns floods at exactly their bytes in steps: %d read, %d refused; one step over: "
+          "%d read, %d refused" % (edge[0, True], edge[0, False], edge[1, True], edge[1, False]))
+    checks(edge[0, True] > 10 and edge[1, False] > 10 and not edge[0, False] and not edge[1, True],
+           "a flood whose names take exactly its bytes in steps reads, one step more is refused")
+    checks(dearest < 0.75, "the dearest packet a responder or browser wrote took %.2f steps a byte" %
+           dearest)
+    print("  mdns steps: the dearest generated response or question took %.2f a byte" % dearest)
     return checks.verdict("waterlink mdns:", "waterlink-mdns")
 
 
@@ -62447,10 +65561,43 @@ static positive put_instance(p8 *at, const char *label)
 
 struct model_instance { char label[64]; positive label_length; p16 port; };
 
-/*      A well-formed response carrying `k` SRV records for labels drawn from
-        a small pool, so labels repeat (found_at dedups, last port wins) and
-        overflow past WATERLINK_FOUND_MAX. Fills the model with the instances
-        the reader must find, in the order it will find them. */
+static positive put_ptr_record(p8 *packet, positive at, const char *label)
+{
+        positive owner = put_service(packet + at);
+        positive target;
+
+        at += owner;
+        network_store_16(packet + at, 12);
+        network_store_16(packet + at + 2, 0x8001);
+        network_store_32(packet + at + 4, 4500);
+        target = put_instance(packet + at + 10, label);
+        network_store_16(packet + at + 8, (p16)target);
+        return at + 10 + target;
+}
+
+static positive put_srv_record(p8 *packet, positive at, const char *label,
+                               p16 port)
+{
+        static const char *target[] = {"machine", "local"};
+        positive owner = put_instance(packet + at, label);
+        positive target_length;
+
+        at += owner;
+        network_store_16(packet + at, 33);
+        network_store_16(packet + at + 2, 0x8001);
+        network_store_32(packet + at + 4, 120);
+        target_length = put_name(packet + at + 16, target, 2);
+        network_store_16(packet + at + 8, (p16)(6 + target_length));
+        memset(packet + at + 10, 0, 4);
+        network_store_16(packet + at + 14, port);
+        return at + 16 + target_length;
+}
+
+/*      A well-formed response carrying `k` advertised PTR+SRV pairs for
+        labels drawn from a small pool. Their wire order varies, labels repeat
+        (found_at dedups, last SRV port wins), and the set can overflow
+        WATERLINK_FOUND_MAX. Fills the model with the PTR/SRV intersection the
+        production reader must expose. */
 static positive build_response(p8 *packet, struct model_instance *model,
                                positive *model_count)
 {
@@ -62473,28 +65620,22 @@ static positive build_response(p8 *packet, struct model_instance *model,
         {
                 const char *label = pool[draw(sizeof pool / sizeof pool[0])];
                 p16 port = (p16)(1 + draw(65534));
-                p32 type = draw(4) ? 33 : 16; // usually SRV, sometimes TXT
-                positive name_at = at;
-                positive rdlength;
+                bool advertised = draw(4) != 0;
 
-                at += put_instance(packet + at, label);
-                network_store_16(packet + at, (p16)type);
-                network_store_16(packet + at + 2, 0x8001);
-                network_store_32(packet + at + 4, 4500);
-                if (type == 33)
-                        rdlength = 6 + (draw(3) ? 1 + draw(8) : 0);
-                else
-                        rdlength = draw(6);
-                network_store_16(packet + at + 8, (p16)rdlength);
-                at += 10;
-                for (positive b = 0; b < rdlength; b++)
-                        packet[at + b] = (p8)draw(256);
-                if (type == 33 && rdlength >= 7)
+                if (advertised)
                 {
-                        packet[at + 4] = (p8)(port >> 8);
-                        packet[at + 5] = (p8)port;
-                        /*      Model: found_at dedups by label; the last SRV
-                                on a label sets its port. */
+                        if (draw(2))
+                        {
+                                at = put_ptr_record(packet, at, label);
+                                at = put_srv_record(packet, at, label, port);
+                        }
+                        else
+                        {
+                                at = put_srv_record(packet, at, label, port);
+                                at = put_ptr_record(packet, at, label);
+                        }
+                        ancount += 2;
+
                         positive m;
                         for (m = 0; m < found_count; m++)
                                 if (found[m].label_length == strlen(label) &&
@@ -62508,10 +65649,20 @@ static positive build_response(p8 *packet, struct model_instance *model,
                         }
                         if (m < 8)
                                 found[m < found_count ? m : found_count - 1].port = port;
-                        (void)name_at;
                 }
-                at += rdlength;
-                ancount++;
+                else
+                {
+                        positive owner = put_instance(packet + at, label);
+
+                        at += owner;
+                        network_store_16(packet + at, 16);
+                        network_store_16(packet + at + 2, 0x8001);
+                        network_store_32(packet + at + 4, 120);
+                        network_store_16(packet + at + 8, 1);
+                        packet[at + 10] = 0;
+                        at += 11;
+                        ancount++;
+                }
         }
         network_store_16(packet + 6, ancount);
         *model_count = found_count;
@@ -63274,6 +66425,8 @@ int main(int argc, char **argv)
             sec(svc, "#define LINK_PORT 22348", "/*      A grant by name"),
             sec(svc, "typedef struct\n{\n        string_address name;",
                 "// The grant a word names, or 0."),
+            sec(svc, "// The grant a request byte needs",
+                "static p64 link_now(void)"),
             sec(svc, "static const p8 link_kind_asks[] = {0, LINK_ASK_SHELL",
                 "typedef struct"),
             sec(svc, "static winsize link_size_unpack(", "// The streams"),
@@ -63282,7 +66435,7 @@ int main(int argc, char **argv)
 
     mdns_source = "\n".join([
         SHIM, waterlink_lift_cursors(), wl,
-        sec(net, "//      A wire name is at most 255 bytes", "\n#define DNS_OK 0"),
+        sec(net, "#define DNS_PORT 53", "\n#define DNS_OK 0"),
         sec(net, "static COLD bipolar dns_copy_name(",
             "//      Where a name ends, for a caller"),
         sec(disc, "#define WATERLINK_MDNS_PORT 5353", "struct waterlink_group_keys {"),
@@ -63952,12 +67105,15 @@ static bipolar link_groups_save(link_groups address_to groups)
         sec(link, "struct waterlink_part\n{", "/*\n        Judge an authenticated body whole"),
         sec(link, "#define WATERLINK_REPLAY_BLOCKS", "#endif // WATERLINK_LINK_INCLUDED"),
         LINK_STUBS,
-        sec(net, "//      A wire name is at most 255 bytes", "\n#define DNS_OK 0"),
+        sec(net, "#define DNS_PORT 53", "\n#define DNS_OK 0"),
         sec(net, "static COLD bipolar dns_copy_name(",
             "//      Where a name ends, for a caller"),
         sec(hs, "#define WATERLINK_PROTOCOL", "#endif // WATERLINK_HANDSHAKE_INCLUDED"),
         sec(disc, "#define WATERLINK_MDNS_PORT 5353", "#endif // WATERLINK_DISCOVER_INCLUDED"),
         sec(svc, "#define LINK_PORT 22348", "/*      A grant by name"),
+        sec(svc, "typedef struct\n{\n        string_address name;",
+            "// The grant a word names, or 0."),
+        sec(svc, "// The grant a request byte needs", "static p64 link_now(void)"),
         sec(svc, "static p64 link_now(void)", "// All digits and nothing else"),
         sec(svc, "static const string_address link_words[]", "/* Everything waterlink keeps"),
         sec(svc, "typedef struct\n{\n        struct waterlink_peer peer[LINK_PEERS_MAX];",
@@ -63973,7 +67129,7 @@ static bipolar link_groups_save(link_groups address_to groups)
         sec(svc, "typedef struct\n{\n        address_any base;", "static fn link_batch_flush(void)"),
         sec(svc, "// A sealed datagram of nothing", "static bool link_post("),
         SERVICE_STUBS,
-        sec(near, "#define LINK_PEERS_LOCK", "fn link_groups_load("),
+        sec(near, "#define LINK_PEERS_LOCK", "bool link_groups_load("),
         NEARBY_STUBS,
         sec(near, "static p64 link_boot_seconds(void)", "/*\n        The peers file has two writers now"),
         sec(near, "static fn link_name_for(", "// The listener's side of it"),
@@ -63981,7 +67137,7 @@ static bipolar link_groups_save(link_groups address_to groups)
         NEARBY_GROUP_STUBS,
         sec(near, "typedef struct\n{\n        p32 multiaddr;",
             "/*\n        Every interface with an IPv4 address"),
-        sec(near, "static fn link_nearby_send(", "// Goodbye, with TTL zero"),
+        sec(near, "static bool link_nearby_send(", "// Goodbye, with TTL zero"),
         sec(near, "// The same place is greeted once in a while",
             "/*\n        The listener's turn:"),
         sec(near, "// Read what is waiting on the mDNS socket",
@@ -63990,6 +67146,8 @@ static bipolar link_groups_save(link_groups address_to groups)
         "p8 *payload)\n{\n        (void)context; (void)head; (void)payload;\n"
         "        return true;\n}\n",
         sec(svc, "// The handshake, at the machine's end", "// The state file, for"),
+        sec(svc, "/*      Grants as they are now for what is open",
+            "static p64 link_sessions_turn(p64 now)"),
         sec(svc, "static fn link_note_seen(struct link_session address_to s, p64 wall)\n{",
             "//      Never more than once a fifth"),
         sec(svc, "typedef struct\n{\n        struct waterlink_noise noise;",
@@ -67285,6 +70443,7 @@ HARNESS_CHECKS = {
     "http_response_framing": harness_http_response_framing,
     "http_fuzz": harness_http_fuzz,
     "net_netem": harness_net_netem,
+    "net_epoch_mutants": harness_net_epoch_mutants,
     "sntp_era": harness_sntp_era,
     "http_urls": harness_http_urls,
     "tls_der_fuzz": harness_tls_der_fuzz,
@@ -67309,9 +70468,13 @@ HARNESS_CHECKS = {
     "msan_net": harness_msan_net,
     "net_clock_fault": harness_net_clock_fault,
     "net_math_proof": harness_net_math_proof,
+    "wire_constants": harness_wire_constants,
     "net_dependency_closure": harness_net_dependency_closure,
     "security_hygiene": harness_security_hygiene,
     "pathname_race": harness_pathname_race,
+    "protected_links": harness_protected_links,
+    "hostile_strings": harness_hostile_strings,
+    "state_cuts": harness_state_cuts,
     "machine_scan": harness_machine_scan,
     "waterlink_noise": harness_waterlink_noise,
     "waterlink_mdns": harness_waterlink_mdns,

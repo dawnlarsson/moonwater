@@ -2719,10 +2719,10 @@ lane_waterlink()
                 freestanding_checks_one waterlink_service waterlink_service ||
                         waterlink_outcome=1
         fi
-        #       dnspython and noiseprotocol are found through
-        #       WATERLINK_NOISE_PATH where the system has neither; without
-        #       dnspython the interop half says NOT RUN and the lane stands on
-        #       the rest.
+        #       noiseprotocol and dnspython are found through
+        #       WATERLINK_NOISE_PATH where the system has neither; the mDNS
+        #       half needs neither (its second reader is written in the
+        #       harness), and dnspython adds its own reading when it is there.
         #       Each harness named literally: the oracle proves every
         #       registered harness is asked for by finding its word here.
         if [ -x "$work/waterlink.$host_arch" ]; then
@@ -2770,7 +2770,15 @@ lane_link()
 lane_netem()
 {
         need_shell || return 1
-        python3 test/differential.py --harness net_netem --shell "$shell_binary"
+        netem_status=0
+        python3 test/differential.py --harness net_netem --shell "$shell_binary" ||
+                netem_status=$?
+        #       The lease epoch walk against sh/net.c with one step taken out:
+        #       the first mutant here, every one with MOONWATER_EPOCH_MUTANTS=all.
+        python3 test/differential.py --harness net_epoch_mutants || {
+                [ $? = 2 ] || netem_status=1
+        }
+        return "$netem_status"
 }
 #       qemu's default riscv64 cpu is its richest one, with V at a vector
 #       length of 128 bits, so the lane above runs the vector bodies at that
@@ -2889,6 +2897,14 @@ lane_cli()
 {
         need_shell || return 1
         python3 test/differential.py --harness moonwater_cli --shell "$shell_binary"
+        cli_outcome=$?
+        python3 test/differential.py --harness state_cuts --shell "$shell_binary"
+        case $? in
+        0) ;;
+        2) [ "$cli_outcome" != 0 ] || cli_outcome=2 ;;
+        *) cli_outcome=1 ;;
+        esac
+        return "$cli_outcome"
 }
 lane_leaving()   { freestanding_checks_lane leaving leaving; }
 #       strtod and strtof against glibc, over generated text.
@@ -3872,6 +3888,7 @@ lane_net()
 {
         python3 test/differential.py --harness net_clock_fault || return 1
         python3 test/differential.py --harness net_math_proof || return 1
+        python3 test/differential.py --harness wire_constants || return 1
         python3 test/differential.py --harness net_dependency_closure || return 1
         python3 test/differential.py --harness security_hygiene || return 1
         freestanding_checks_lane net net
@@ -3926,6 +3943,15 @@ lane_net()
         esac
         python3 test/differential.py --harness tls_peer --shell "$shell_binary" \
                 --mutate 100
+        case $? in
+        0) ;;
+        2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
+        *) net_outcome=1 ;;
+        esac
+        #       Delivery schedules and FIN/RST cuts under the record layer;
+        #       MOONWATER_TLS_SCHEDULES lengthens it.
+        python3 test/differential.py --harness tls_peer --shell "$shell_binary" \
+                --schedule "${MOONWATER_TLS_SCHEDULES:-40}"
         case $? in
         0) ;;
         2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
@@ -4016,6 +4042,12 @@ lane_net()
         2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
         *) net_outcome=1 ;;
         esac
+        python3 test/differential.py --harness hostile_strings --shell "$shell_binary"
+        case $? in
+        0) ;;
+        2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
+        *) net_outcome=1 ;;
+        esac
         python3 test/differential.py --harness http_fuzz
         case $? in
         0) ;;
@@ -4065,6 +4097,13 @@ lane_tar()
         case $? in
         0) ;;
         2) note "pathname_race: skipped (soft) -- threads/rename unavailable" ;;
+        *) tar_outcome=1 ;;
+        esac
+        python3 test/differential.py --harness protected_links \
+                --binary "ours=$shell_binary"
+        case $? in
+        0) ;;
+        2) note "protected_links: NOT RUN -- no second uid for the namespace" ;;
         *) tar_outcome=1 ;;
         esac
         return "$tar_outcome"
@@ -7587,6 +7626,35 @@ b32 main()
                         tell("]\n");
                         to_shell_length = 0;
                 }
+                /*
+                        ask N TEXT: TEXT handed over N times, as reads from a
+                        far end that never reads what is sent back; queued
+                        says how many bytes are then waiting, and the last
+                        one of them.
+                */
+                else if (string_compare(verb, (string_address) "ask") == 0 &&
+                         i + 2 < count)
+                {
+                        static p8 feed[4096];
+                        positive n = 0;
+                        positive at = 0;
+                        unsigned int times = number(argument);
+                        bipolar c;
+
+                        while ((c = next_byte(program_argument(i + 2), &at)) >= 0 &&
+                               n < sizeof(feed))
+                                feed[n++] = (p8)c;
+                        while (times--)
+                                term_bytes(feed, n);
+                        i += 2;
+                }
+                else if (string_compare(verb, (string_address) "queued") == 0)
+                {
+                        say_number((unsigned int)to_shell_length);
+                        say_byte(',');
+                        say_number(to_shell_length ? to_shell[to_shell_length - 1] : 0);
+                        say_byte('\n');
+                }
                 else if (string_compare(verb, (string_address) "wrote") == 0)
                 {
                         bipolar wrote;
@@ -8020,6 +8088,25 @@ same 'ink asked with st' '[\e]10;rgb:e5e5/e5e5/e5e5\e\]' 20 5 in '\e]10;?\e\\' s
 same 'ink then paper' '[\e]10;rgb:e5e5/e5e5/e5e5\x07\e]11;rgb:0000/0000/0000\x07]' 20 5 in '\e]10;?;?\x07' sent
 same 'palette asked' '[\e]4;196;rgb:ffff/0000/0000\x07\e]4;244;rgb:8080/8080/8080\x07]' 20 5 in '\e]4;196;?;244;?\x07' sent
 same 'setting a colour' '[]'                     20 5 in '\e]11;#ffffff\x07\e]4;300;?\x07' sent
+#       Every question the emulator answers, asked 200,000 times by a far end
+#       that reads none of the answers (a file of them on the screen while
+#       the program in front reads no input): what waits stays under the
+#       ceiling plus one answer, a key typed then still goes up whole, and a
+#       question asked once the far end has read is answered again.
+for question in '\e[6n' '\e[?6n' '\e[5n' '\e[c' '\e[>c' '\e[=c' '\e[?7$p' \
+                '\e[4$p' '\e[18t' '\e[14t' '\e[16t' '\e[19t' '\e]11;?\x07' \
+                '\e]10;?;?\e\\' '\e]4;1;?;2;?\x07' '\e[6n\e[c\e[18t'; do
+        once=$(term 20 5 in "$question" sent)
+        got=$(term 20 5 ask 200000 "$question" keys x queued wrote 99999999 \
+                   in "$question" sent)
+        held=${got%%,*}
+        rest=${got#*,}
+        if [ "$held" -le 4160 ] && [ "$rest" = "120|alive|$once" ] && [ "$once" != "[]" ]; then
+                won
+        else
+                lost "answers held for $question" "want at most 4160 then 120|alive|$once, got $got"
+        fi
+done
 
 #
 #       Erasing.

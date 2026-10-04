@@ -1100,14 +1100,27 @@ typedef struct
         p32 carrier_downs;
 } net_holding;
 
+/* The lease clock is CLOCK_BOOTTIME: a lease runs out on the server's clock
+   while this machine sleeps, and the monotonic clock stops for a suspend, so
+   an hour's lease taken before a night asleep still looked half new in the
+   morning and the address stayed on the wire after the server had given it
+   to somebody else. */
+#define NET_CLOCK_BOOTTIME 7
+
 static positive net_seconds(void)
 {
-        positive now = clock_monotonic_nanoseconds();
+        timespec stamp = {0, 0};
+        positive now = 0;
+
+        if (clock_gettime(NET_CLOCK_BOOTTIME, address_of stamp) >= 0 &&
+            stamp.tv_sec >= 0)
+                now = (positive)stamp.tv_sec * NETWORK_NANOSECONDS +
+                      (positive)stamp.tv_nsec;
 
         //      A clock that will not answer leaves every lease looking
         //      expired, so an address is never kept beyond an unknown
-        //      deadline. Zero is that answer, and the monotonic clock's
-        //      first second is when a boot takes its lease, so it reads 1.
+        //      deadline. Zero is that answer, and the clock's first second
+        //      is when a boot takes its lease, so it reads 1.
         return now ? now / NETWORK_NANOSECONDS + 1 : 0;
 }
 
@@ -1264,6 +1277,27 @@ static COLD fn net_lease_retry_after(net_holding address_to held, positive now,
         held->retry = (p32)(gone + delay);
 }
 
+/* A lease's default route. The router is on the leased prefix, or the lease
+   is a /32 whose router is off it, which dhcp_lease_usable allows because
+   the clouds hand them out: then the kernel is told the router is on the
+   link, as dhclient's script and systemd-networkd do, since it refuses a
+   gateway no address covers ("Nexthop has invalid gateway"), and that
+   refusal rolled the whole lease back. */
+static COLD bipolar net_lease_route(b32 handle, const dhcp_lease address_to lease,
+                                    p32 index, bool exclusive)
+{
+        p32 mask = lease->mask ? lease->mask : 0xffffff00u;
+
+        return netlink_route_change(
+            handle, RTM_NEWROUTE,
+            NLM_REQUEST | NLM_ACK | NLM_CREATE |
+                (exclusive ? NLM_EXCLUSIVE : NLM_REPLACE),
+            0, 0, lease->router, index,
+            (lease->router & mask) != (lease->address & mask)
+                ? NETLINK_ROUTE_ONLINK
+                : 0);
+}
+
 static COLD fn net_rollback_record(bipolar status,
                               bipolar address_to first)
 {
@@ -1334,9 +1368,9 @@ static COLD bipolar net_lease_rollback(
 
                 if (net_owns_route(previous))
                 {
-                        bipolar status = netlink_route_add(
-                            handle, 0, 0, previous->lease.router,
-                            previous->index);
+                        bipolar status = net_lease_route(
+                            handle, address_of previous->lease,
+                            previous->index, false);
                         if (status < 0 && !failed)
                                 failed = status;
                         same = lease->router == previous->lease.router &&
@@ -1431,11 +1465,8 @@ static COLD b32 net_apply_lease(b32 handle, p32 index, string_address name,
 
         if (route_changed && lease->router)
         {
-                status = net_owns_route(previous)
-                             ? netlink_route_add(handle, 0, 0, lease->router,
-                                                 index)
-                             : netlink_route_acquire(handle, 0, 0,
-                                                     lease->router, index);
+                status = net_lease_route(handle, lease, index,
+                                         !net_owns_route(previous));
                 route_applied = status >= 0;
                 if (status < 0 && status != -EEXIST)
                 {
@@ -1628,6 +1659,15 @@ static bool net_news_may_cut(positive now)
         return now >= net_news_holdoff_until;
 }
 
+//      An exchange the wake pipe or the link news cut: the loop asks again
+//      at once, and the news is left unread for the hold-off.
+static COLD bipolar net_exchange_was_cut(void)
+{
+        net_exchange_cut = true;
+        net_news_holdoff_until = net_seconds() + NET_NEWS_HOLDOFF_SECONDS;
+        return NET_DHCP_INTERRUPTED;
+}
+
 /* 1 when the exchange spoke, 0 when the budget ran out, -2 when the wake
    pipe or the link news did, negative for a broken descriptor. */
 static COLD bipolar net_exchange_wait(bipolar answer,
@@ -1686,13 +1726,21 @@ static COLD bipolar net_exchange_wait(bipolar answer,
         }
 }
 
+/* What the child is asked to do: discover, renew with the server that gave
+   the lease, rebind with any, or decline the lease it names. */
+#define NET_DHCP_DISCOVER 0
+#define NET_DHCP_RENEW 1
+#define NET_DHCP_REBIND 2
+#define NET_DHCP_DECLINE 3
+
 static COLD bipolar net_dhcp_apart(string_address device, p8 address_to hardware,
-                                   dhcp_lease address_to lease, bool renew,
-                                   bool rebinding, positive wait)
+                                   dhcp_lease address_to lease, p8 exchange,
+                                   positive wait)
 {
         b32 ends[2];
         net_dhcp_answer answer = {DHCP_NO_SOCKET, *lease};
         network_deadline deadline;
+        bool renew = exchange == NET_DHCP_RENEW || exchange == NET_DHCP_REBIND;
         bool heard;
 
         if (system_call_2(syscall(pipe2), (positive)ends, O_CLOEXEC) < 0)
@@ -1703,11 +1751,13 @@ static COLD bipolar net_dhcp_apart(string_address device, p8 address_to hardware
         if (child == 0)
         {
                 dhcp_apart = ends[1];
-                answer.status = renew ? dhcp_reacquire(device, hardware,
-                                                       address_of answer.lease,
-                                                       rebinding, wait)
-                                      : dhcp_ask(device, hardware,
-                                                 address_of answer.lease);
+                answer.status =
+                    renew ? dhcp_reacquire(device, hardware,
+                                           address_of answer.lease,
+                                           exchange == NET_DHCP_REBIND, wait)
+                    : exchange == NET_DHCP_DECLINE
+                        ? dhcp_decline(device, hardware, address_of answer.lease)
+                        : dhcp_ask(device, hardware, address_of answer.lease);
                 system_write_all((positive)dhcp_apart, address_of answer,
                                  sizeof answer);
                 system_call_1(syscall(exit_group), 0);
@@ -1716,15 +1766,17 @@ static COLD bipolar net_dhcp_apart(string_address device, p8 address_to hardware
         system_close(ends[1]);
         //      dhcp_ask's twenty attempts can each wait out a DISCOVER
         //      and a REQUEST, 150 s in all, after a CSPRNG that may take
-        //      a second; a renewal is its own wait.
-        bool watching = !renew && net_wake_watch >= 0;
+        //      a second; a renewal is its own wait, and a DECLINE is one
+        //      send after the same CSPRNG.
+        bool watching = exchange == NET_DHCP_DISCOVER && net_wake_watch >= 0;
         bipolar waited = -1;
 
         heard = child > 0 &&
                 network_deadline_begin(address_of deadline,
                                        renew ? wait + 5
-                                             : watching ? NET_DHCP_WATCH_SECONDS
-                                                        : 180, 0) &&
+                                       : exchange == NET_DHCP_DECLINE ? 5
+                                       : watching ? NET_DHCP_WATCH_SECONDS
+                                                  : 180, 0) &&
                 (watching
                      ? (waited = net_exchange_wait(ends[0], address_of deadline))
                      : network_wait_readable_until(ends[0], address_of deadline)) > 0 &&
@@ -1740,15 +1792,12 @@ static COLD bipolar net_dhcp_apart(string_address device, p8 address_to hardware
         if (!heard)
         {
                 if (watching && waited == -2)
-                {
-                        net_exchange_cut = true;
-                        net_news_holdoff_until = net_seconds() +
-                                                 NET_NEWS_HOLDOFF_SECONDS;
-                        return NET_DHCP_INTERRUPTED;
-                }
+                        return net_exchange_was_cut();
                 return watching && waited == 0 ? NET_DHCP_TIMED_OUT
                                                : DHCP_NO_SOCKET;
         }
+        if (exchange == NET_DHCP_DECLINE)
+                return answer.status == DHCP_OK ? DHCP_OK : DHCP_NO_SOCKET;
         if (answer.status != DHCP_OK)
                 return answer.status == DHCP_NO_OFFER ||
                                answer.status == DHCP_REFUSED ||
@@ -1764,6 +1813,214 @@ static COLD bipolar net_dhcp_apart(string_address device, p8 address_to hardware
 }
 
 static COLD fn radio_links_unleased(netlink_search address_to search);
+
+/*
+        A link that declined an address waits before it asks again.
+
+        RFC 2131 4.4.1: after a DHCPDECLINE the client waits at least ten
+        seconds before it starts over, so that a server with nothing else to
+        offer, or a station that answers for every address, does not turn
+        the link into a DISCOVER, REQUEST and probe as fast as the watcher
+        can loop. The wait is the declined link's: the watcher still asks on
+        any other link, and link news and the wake pipe do not end it. A
+        handful of links is kept; one more takes the slot whose wait is
+        nearest its end.
+*/
+#define NET_DECLINE_HOLDOFF_SECONDS 10
+#define NET_DECLINE_LINKS 4
+
+static struct
+{
+        p32 index;
+        network_deadline until;
+} net_declined[NET_DECLINE_LINKS];
+
+/* The milliseconds left of a link's wait (of the wait nearest its end when
+   index is zero), and 0 when there is none. */
+static COLD positive net_decline_left(p32 index)
+{
+        positive least = 0;
+
+        for (positive at = 0; at < NET_DECLINE_LINKS; at++)
+        {
+                positive seconds;
+                positive nanoseconds;
+                positive left;
+
+                if (!net_declined[at].index ||
+                    (index && net_declined[at].index != index))
+                        continue;
+                if (!network_deadline_left(address_of net_declined[at].until,
+                                           address_of seconds,
+                                           address_of nanoseconds))
+                {
+                        net_declined[at].index = 0;
+                        continue;
+                }
+                left = seconds * 1000 + nanoseconds / 1000000 + 1;
+                if (!least || left < least)
+                        least = left;
+        }
+        return least;
+}
+
+static COLD bool net_decline_waiting(p32 index)
+{
+        return index && net_decline_left(index) != 0;
+}
+
+static COLD fn net_decline_hold(p32 index)
+{
+        positive slot = NET_DECLINE_LINKS;
+
+        for (positive at = 0; at < NET_DECLINE_LINKS; at++)
+                if (net_declined[at].index == index)
+                        slot = at;
+        for (positive at = 0; slot == NET_DECLINE_LINKS && at < NET_DECLINE_LINKS;
+             at++)
+                if (!net_declined[at].index)
+                        slot = at;
+        //      Every slot taken: the wait that began first ends first.
+        if (slot == NET_DECLINE_LINKS)
+        {
+                slot = 0;
+                for (positive at = 1; at < NET_DECLINE_LINKS; at++)
+                        if (net_declined[at].until.began <
+                            net_declined[slot].until.began)
+                                slot = at;
+        }
+        net_declined[slot].index =
+            network_deadline_begin(address_of net_declined[slot].until,
+                                   NET_DECLINE_HOLDOFF_SECONDS, 0)
+                ? index
+                : 0;
+}
+
+/* RFC 5227-style probes before installing a newly leased address.  DHCP is
+   not proof that the address is unused: a stale lease, a broken server, or a
+   hostile responder can hand out an address already active on the link. */
+#define NET_ARP_PACKET 28
+#define NET_ARP_PROBES 3
+
+/* An ARP packet (cooked: the link header is the kernel's) that says another
+   station holds the address: it sends from it, or probes for it as this one
+   does (RFC 5227 2.1.1). Ethernet's frame minimum pads the 28 bytes, so a
+   longer packet is the same packet. */
+static bool net_arp_claims(const p8 address_to packet, positive size,
+                           const p8 address_to hardware, p32 address)
+{
+        byte_reader reader = byte_reader_open(packet, size);
+        p16 medium = byte_reader_u16(address_of reader);
+        p16 protocol = byte_reader_u16(address_of reader);
+        p8 hardware_length = byte_reader_u8(address_of reader);
+        p8 protocol_length = byte_reader_u8(address_of reader);
+        p16 operation = byte_reader_u16(address_of reader);
+        const p8 address_to sender = byte_reader_take(address_of reader, 6);
+        p32 sender_address = byte_reader_u32(address_of reader);
+        p32 target_address = byte_reader_skip(address_of reader, 6)
+                                 ? byte_reader_u32(address_of reader)
+                                 : 0;
+
+        return byte_reader_ok(address_of reader) && medium == 1 &&
+               protocol == ETH_P_IP && hardware_length == 6 &&
+               protocol_length == 4 && (operation == 1 || operation == 2) &&
+               (sender_address == address ||
+                (!sender_address && target_address == address)) &&
+               memory_compare(sender, hardware, 6);
+}
+
+/* A packet socket of one ethertype on one interface: the cooked link header
+   is the kernel's, the payload is ours. */
+static COLD bipolar net_packet_open(p32 index, p16 protocol)
+{
+        socket_address_packet self = {
+            .family = AF_PACKET,
+            .protocol = network_order_16(protocol),
+            .index = index};
+        bipolar handle = socket_new(AF_PACKET, SOCK_DGRAM | SOCK_CLOEXEC,
+                                    (b32)network_order_16(protocol));
+
+        if (handle >= 0 &&
+            socket_bind((b32)handle, address_of self, sizeof self) < 0)
+        {
+                socket_close((b32)handle);
+                return -1;
+        }
+        return handle;
+}
+
+/* 0 means quiet, 1 means another station claims the address, -1 means the
+   probe could not be performed, and -2 that the wake pipe or the link news
+   cut it, as they cut an exchange (net_exchange_wait): a cable pulled during
+   the probe is not a quiet link.  Failure is not permission to configure an
+   address whose ownership was never checked. */
+static COLD bipolar net_arp_conflict(p32 index, p8 address_to hardware,
+                                     p32 address)
+{
+        p8 probe[NET_ARP_PACKET] = {0};
+        p8 reply[64];
+        socket_address_packet all = {
+            .family = AF_PACKET,
+            .protocol = network_order_16(ETH_P_ARP),
+            .index = index,
+            .halen = 6};
+        bipolar handle = net_packet_open(index, ETH_P_ARP);
+
+        if (handle < 0)
+                return -1;
+        memory_fill(all.addr, 0xff, 6);
+        network_store_16(probe, 1);
+        network_store_16(probe + 2, ETH_P_IP);
+        probe[4] = 6;
+        probe[5] = 4;
+        network_store_16(probe + 6, 1);
+        memory_copy(probe + 8, hardware, 6);
+        network_store_32(probe + 24, address);
+
+        for (positive attempt = 0; attempt < NET_ARP_PROBES; attempt++)
+        {
+                network_deadline deadline;
+
+                if (socket_send((b32)handle, probe, sizeof probe, 0,
+                                address_of all, sizeof all) != sizeof probe ||
+                    !network_deadline_begin(address_of deadline, 0, 200000000))
+                        goto failed;
+                for (;;)
+                {
+                        bipolar ready = net_exchange_wait(
+                            handle, address_of deadline);
+                        bipolar got;
+
+                        if (ready == -2)
+                        {
+                                socket_close((b32)handle);
+                                return -2;
+                        }
+                        if (ready < 0)
+                                goto failed;
+                        if (!ready)
+                                break;
+                        got = socket_receive((b32)handle, reply, sizeof reply,
+                                             0, 0, 0);
+                        if (got == NETWORK_INTERRUPTED)
+                                continue;
+                        if (got < 0)
+                                goto failed;
+                        if (net_arp_claims(reply, (positive)got, hardware,
+                                           address))
+                        {
+                                socket_close((b32)handle);
+                                return 1;
+                        }
+                }
+        }
+        socket_close((b32)handle);
+        return 0;
+
+failed:
+        socket_close((b32)handle);
+        return -1;
+}
 
 static COLD b32 net_auto(b32 handle, net_holding address_to held)
 {
@@ -1803,6 +2060,14 @@ static COLD b32 net_auto(b32 handle, net_holding address_to held)
                 if (held && held->index == search.index && !held->lost)
                         return 0;
 
+                if (held && net_decline_waiting(search.index))
+                {
+                        if (search.skip_count >= 8)
+                                return 1;
+                        search.skip[search.skip_count++] = search.index;
+                        continue;
+                }
+
                 if (!search.has_hardware)
                 {
                         string_format(net_out, "ip: %w has no hardware address\n",
@@ -1826,7 +2091,7 @@ static COLD b32 net_auto(b32 handle, net_holding address_to held)
                 net_flush();
 
                 status = net_dhcp_apart(search.name, search.hardware,
-                                        address_of lease, false, false, 0);
+                                        address_of lease, NET_DHCP_DISCOVER, 0);
 
                 if (status == NET_DHCP_INTERRUPTED)
                         return 1;
@@ -1856,6 +2121,34 @@ static COLD b32 net_auto(b32 handle, net_holding address_to held)
                 else
                         string_format(net_out, "ip: could not ask for a lease\n");
 
+                net_flush();
+                return 1;
+        }
+
+        status = net_arp_conflict(search.index, search.hardware, lease.address);
+        if (status == -2)
+        {
+                (void)net_exchange_was_cut();
+                return 1;
+        }
+        if (status > 0)
+        {
+                bipolar declined = net_dhcp_apart(search.name, search.hardware,
+                                                  address_of lease,
+                                                  NET_DHCP_DECLINE, 0);
+
+                if (held)
+                        net_decline_hold(search.index);
+                string_format(net_out,
+                              declined == DHCP_OK
+                                  ? "ip: the offered address is already in use; declined\n"
+                                  : "ip: the offered address is already in use\n");
+                net_flush();
+                return 1;
+        }
+        if (status)
+        {
+                string_format(net_out, "ip: could not check the offered address\n");
                 net_flush();
                 return 1;
         }
@@ -2289,6 +2582,8 @@ static COLD fn net_kernel_defaults(void)
 }
 #endif
 
+#define NET_RESUME_LOOK_SECONDS 60
+
 static COLD b32 net_watch(void)
 {
         netlink_buffer message = {0};
@@ -2362,11 +2657,31 @@ static COLD b32 net_watch(void)
                         system_poll_descriptor waited[2];
                         positive count = 1;
 
+                        positive declined = 0;
+                        bool looking = false;
+
                         if (held.index && held.lease.seconds)
+                        {
                                 due = net_lease_due_in(address_of held,
                                                        net_seconds());
+                                /* The wait below is the monotonic clock's
+                                   and sleeps through a suspend, so a lease
+                                   due in an hour is looked at every
+                                   NET_RESUME_LOOK_SECONDS: a machine that
+                                   woke past its lease's end finds out
+                                   within that, not an hour of being awake
+                                   later. */
+                                if (due > NET_RESUME_LOOK_SECONDS)
+                                {
+                                        due = NET_RESUME_LOOK_SECONDS;
+                                        looking = true;
+                                }
+                        }
                         else
+                        {
                                 due = retry_seconds;
+                                declined = net_decline_left(0);
+                        }
 
                         waited[0].descriptor = (b32)events;
                         waited[0].events = SYSTEM_POLL_READ;
@@ -2381,6 +2696,31 @@ static COLD b32 net_watch(void)
 
                         limit.tv_sec = (b64)(due ? due : retry_seconds);
                         limit.tv_nsec = 0;
+                        //      With no lease, the next pass moves by up to a
+                        //      second either way, as dhcp_ask's backoff does:
+                        //      machines whose server went away together do
+                        //      not come back to it in step.
+                        if (!held.index || !held.lease.seconds)
+                        {
+                                p16 draw = 0;
+
+                                if (!system_random_fill(address_of draw,
+                                                        sizeof draw, 1))
+                                {
+                                        positive ms = retry_seconds * 1000 -
+                                                      1000 + draw % 2001;
+
+                                        limit.tv_sec = (b64)(ms / 1000);
+                                        limit.tv_nsec = (b64)(ms % 1000 * 1000000);
+                                }
+                        }
+                        //      A declined link is asked when its wait ends,
+                        //      not a backoff step later.
+                        if (declined && declined < (positive)limit.tv_sec * 1000)
+                        {
+                                limit.tv_sec = (b64)(declined / 1000);
+                                limit.tv_nsec = (b64)(declined % 1000 * 1000000);
+                        }
                         ready = system_poll_wait(waited, count, address_of limit,
                                                  null);
                         if (ready < 0)
@@ -2416,9 +2756,14 @@ static COLD b32 net_watch(void)
                                         net_wake_watch = wake;
                                 }
 
+                                if (looking)
+                                        continue;
+
                                 if (!held.index || !held.lease.seconds)
                                 {
                                         net_reconfigure_fresh(address_of held);
+                                        if (declined)
+                                                continue;
                                         if (!held.index || !held.lease.seconds)
                                         {
                                                 retry_seconds *= 2;
@@ -2450,7 +2795,8 @@ static COLD b32 net_watch(void)
                                 dhcp_lease renewed = held.lease;
                                 bipolar renewal = net_dhcp_apart(
                                     held.name, held.hardware,
-                                    address_of renewed, true, rebinding,
+                                    address_of renewed,
+                                    rebinding ? NET_DHCP_REBIND : NET_DHCP_RENEW,
                                     attempt);
 
                                 if (renewal == DHCP_OK)

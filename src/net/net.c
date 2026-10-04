@@ -1098,11 +1098,15 @@ static bipolar netlink_address_change(b32 handle, p16 type, p16 flags,
         The gateway has to be reachable already, which for a default route
         means the address added above has to cover it. The kernel says ENETUNREACH
         when it does not, which reads as a network problem and is really an
-        ordering one.
+        ordering one -- except for a gateway said to be on the link
+        (NETLINK_ROUTE_ONLINK), which the kernel takes without an address
+        that covers it: a /32 lease and its router.
 */
+#define NETLINK_ROUTE_ONLINK 4 // RTNH_F_ONLINK
+
 static bipolar netlink_route_change(b32 handle, p16 type, p16 flags,
                                     p32 destination, p8 bits, p32 gateway,
-                                    p32 index)
+                                    p32 index, p32 route_flags)
 {
         netlink_buffer request = {0};
         netlink_route address_to body;
@@ -1121,6 +1125,7 @@ static bipolar netlink_route_change(b32 handle, p16 type, p16 flags,
         body->protocol = RTPROT_BOOT;
         body->scope = gateway ? RT_SCOPE_UNIVERSE : RT_SCOPE_LINK;
         body->kind = RTN_UNICAST;
+        body->flags = route_flags;
 
         if (bits)
                 netlink_attribute_add(address_of request, RTA_DST,
@@ -1144,17 +1149,17 @@ static bipolar netlink_route_change(b32 handle, p16 type, p16 flags,
 //      EEXIST.
 #define netlink_route_add(handle, destination, bits, gateway, index) netlink_route_change( \
         handle, RTM_NEWROUTE, NLM_REQUEST | NLM_ACK | NLM_CREATE | NLM_REPLACE,            \
-        destination, bits, gateway, index)
+        destination, bits, gateway, index, 0)
 
 /* An existing route is state, not spare capacity.  Initial DHCP acquisition
    uses EXCLUSIVE so a pre-existing default route is reported as a conflict
    and remains byte-for-byte kernel state owned by whoever installed it. */
 #define netlink_route_acquire(handle, destination, bits, gateway, index) netlink_route_change( \
         handle, RTM_NEWROUTE, NLM_REQUEST | NLM_ACK | NLM_CREATE | NLM_EXCLUSIVE,              \
-        destination, bits, gateway, index)
+        destination, bits, gateway, index, 0)
 
 #define netlink_route_delete(handle, destination, bits, gateway, index) netlink_route_change( \
-        handle, RTM_DELROUTE, NLM_REQUEST | NLM_ACK, destination, bits, gateway, index)
+        handle, RTM_DELROUTE, NLM_REQUEST | NLM_ACK, destination, bits, gateway, index, 0)
 
 /*
         Everything of one kind, walked.
@@ -1372,11 +1377,15 @@ static COLD bipolar dns_write_name(p8 address_to into, positive room, string_add
         and a reply of names at the end of such a chain four milliseconds, so
         the jumps are counted too. A name longer than 255 bytes is refused
         whatever the room (RFC 1035 3.1). The spelling is kept as sent; DNS
-        names compare without regard to ASCII case.
+        names compare without regard to ASCII case. A caller that reads many
+        names out of one message may pass steps, the labels and pointers they
+        may take between them, which each one taken lowers; a name that would
+        take one more is refused.
 */
 static COLD bipolar dns_copy_name(p8 address_to message, positive size,
                              positive at, p8 address_to into, positive room,
-                             positive address_to ended)
+                             positive address_to ended,
+                             positive address_to steps)
 {
         byte_reader reader = byte_reader_open(message, size);
         byte_store name = {into, min(room, (positive)DNS_NAME_MAX), 0};
@@ -1393,8 +1402,10 @@ static COLD bipolar dns_copy_name(p8 address_to message, positive size,
                 p8 length = byte_reader_u8(&reader);
                 const p8 address_to label;
 
-                if (!byte_reader_ok(&reader))
+                if (!byte_reader_ok(&reader) || (steps && !address_to steps))
                         return DNS_MALFORMED;
+                if (steps)
+                        address_to steps -= 1;
 
                 if ((length & 0xc0) == 0xc0)
                 {
@@ -1443,7 +1454,7 @@ static COLD bipolar dns_skip_name(p8 address_to message, positive size, positive
         positive ended;
 
         return dns_copy_name(message, size, at, name, sizeof name,
-                             address_of ended) < 0
+                             address_of ended, null) < 0
                    ? DNS_MALFORMED : (bipolar)ended;
 }
 
@@ -1473,7 +1484,7 @@ static COLD bipolar dns_answer_address(p8 address_to message, positive size,
         positive ended;
         bipolar wanted_length = dns_copy_name(message, size, question_at,
                                               wanted, sizeof wanted,
-                                              address_of ended);
+                                              address_of ended, null);
 
         if (wanted_length < 0)
                 return DNS_MALFORMED;
@@ -1497,7 +1508,8 @@ static COLD bipolar dns_answer_address(p8 address_to message, positive size,
                         p8 owner[256];
                         //      at moves on to where the owner name ended.
                         bipolar owner_length = dns_copy_name(
-                            message, size, at, owner, sizeof owner, address_of at);
+                            message, size, at, owner, sizeof owner, address_of at,
+                            null);
                         byte_reader tail = dns_message_at(message, size, at);
                         byte_reader data;
                         positive data_length;
@@ -1541,7 +1553,7 @@ static COLD bipolar dns_answer_address(p8 address_to message, positive size,
 
                                 alias_length = dns_copy_name(
                                     message, size, at, alias, sizeof alias,
-                                    address_of target_end);
+                                    address_of target_end, null);
 
                                 if (alias_length < 0 ||
                                     target_end != at + data_length)
@@ -7465,14 +7477,16 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
         if (!tls_certificate_body_open(body, body_length, address_of list))
                 return false;
 
-        //      Each entry is a certificate and its extensions, which nothing
-        //      here reads.
+        //      Each entry is a certificate and its extensions, which can only
+        //      answer what a ClientHello asked for (RFC 8446 4.2, 4.4.2): an
+        //      OCSP status or an SCT list, neither of which this client asks
+        //      for, so an entry with any is refused, as OpenSSL refuses both.
         while (byte_reader_left(&list) && count < 8)
         {
                 byte_reader entry = byte_reader_vector24(&list);
+                byte_reader extensions = byte_reader_vector16(&list);
 
-                (void)byte_reader_vector16(&list);
-                if (!byte_reader_ok(&list))
+                if (!byte_reader_ok(&list) || byte_reader_left(&extensions))
                         return false;
                 if (tls_parse_cert((p8 address_to)byte_reader_here(&entry),
                                    byte_reader_left(&entry), certs + count,
@@ -8961,6 +8975,7 @@ static bipolar tls_read_until(
 #define HTTP_HOPS 21
 #define HTTP_IDLE_SECONDS 30
 #define HTTP_HEAD_SECONDS 30
+#define HTTP_BODY_SECONDS 300
 
 #define HTTP_OK 0
 #define HTTP_BAD_URL (-1)
@@ -9040,12 +9055,21 @@ static bipolar http_split_into(string_address url, p8 address_to host, positive 
         if ((positive)(scan - url) >= HTTP_URL_MAX)
                 return HTTP_BAD_URL;
 
-        /* A spelling with an explicit scheme is not a schemeless HTTP URL.
-           Treating "gopher://host" as host "gopher" is a parser
-           differential: a policy and this client can appear to approve the
-           same string while naming different destinations.  A scheme with
-           no "//" after it is read as host:port, which fails unless the
-           rest is a port. */
+        /* A spelling with an explicit web scheme is never a schemeless
+           host:port.  In particular, "https:443" used to mean plaintext to
+           the DNS name "https" here while an RFC 3986 parser and a policy
+           layer read the same bytes as an HTTPS URI.  Keep the convenient
+           schemeless h:81 form, but reserve http: and https: in every case;
+           after either one only an authority introduced by "//" is a URL
+           this client implements.  The tight tier applies the URI rule to
+           every scheme token, removing the general `ftp:21`/host:port
+           ambiguity; the default retains non-web shorthand compatibility.
+           The same strict scheme rule already applies to redirects. Other
+           explicit schemes with an authority are always refused. */
+        if (scheme &&
+            (MOONWATER_STRICT >= STRICT_TIGHT || http_web_scheme(url, scheme)) &&
+            (url[scheme] != '/' || url[scheme + 1] != '/'))
+                return HTTP_SCHEME;
         if (scheme && url[scheme] == '/' && url[scheme + 1] == '/')
         {
                 if (!http_web_scheme(url, scheme))
@@ -9741,6 +9765,8 @@ typedef struct
         // Tests can shorten one logical progress wait; zero selects HTTP's idle limit.
         positive read_seconds;
         positive read_nanoseconds;
+        // Whole-body budget; zero began is reserved for bounded unit readers.
+        network_deadline deadline;
 } http_body;
 
 static bipolar http_body_read(http_body address_to body, p8 address_to into,
@@ -9763,11 +9789,36 @@ static bipolar http_copy_body(http_body address_to body, bipolar dest,
                          exact ? response->body_length : positive_max, exact);
 }
 
-//      The wait one read may take: a test's shorter one, else HTTP's.
-static positive http_body_seconds(const http_body address_to body)
+//      One progress wait, shortened by a whole-body budget when one is active;
+//      inline, because a read of an unbudgeted body asks only for the idle limit.
+static inline INLINE bool http_body_wait(
+    const http_body address_to body, positive address_to seconds,
+    positive address_to nanoseconds)
 {
-        return body->read_seconds || body->read_nanoseconds
-                   ? body->read_seconds : HTTP_IDLE_SECONDS;
+        positive idle_seconds = body->read_seconds || body->read_nanoseconds
+                                    ? body->read_seconds : HTTP_IDLE_SECONDS;
+        positive idle_nanoseconds = body->read_nanoseconds;
+
+        address_to seconds = idle_seconds;
+        address_to nanoseconds = idle_nanoseconds;
+        if (body->deadline.began)
+        {
+                positive left_seconds;
+                positive left_nanoseconds;
+
+                if (!network_deadline_left(address_of body->deadline,
+                                           address_of left_seconds,
+                                           address_of left_nanoseconds))
+                        return false;
+                if (left_seconds < idle_seconds ||
+                    (left_seconds == idle_seconds &&
+                     left_nanoseconds < idle_nanoseconds))
+                {
+                        address_to seconds = left_seconds;
+                        address_to nanoseconds = left_nanoseconds;
+                }
+        }
+        return address_to seconds || address_to nanoseconds;
 }
 
 static bipolar http_body_borrow(http_body address_to body, positive room,
@@ -9781,6 +9832,8 @@ static bipolar http_body_read(http_body address_to body, p8 address_to into,
                               positive room, positive address_to got)
 {
         bipolar n;
+        positive seconds;
+        positive nanoseconds;
 
         if (body->stash_used || (body->link && body->link->tls))
         {
@@ -9796,10 +9849,11 @@ static bipolar http_body_read(http_body address_to body, p8 address_to into,
                 address_to got = 0;
                 return HTTP_OK;
         }
+        if (!http_body_wait(body, address_of seconds, address_of nanoseconds))
+                return HTTP_NO_REPLY;
 
         n = network_stream_read_some_for(body->link->handle, into, room,
-                                         http_body_seconds(body),
-                                         body->read_nanoseconds);
+                                         seconds, nanoseconds);
         if (n < 0 || (positive)n > room)
                 return HTTP_NO_REPLY;
         address_to got = (positive)n;
@@ -9826,10 +9880,17 @@ static bipolar http_body_borrow(http_body address_to body, positive room,
         }
 
         if (body->link && body->link->tls)
+        {
+                positive seconds;
+                positive nanoseconds;
+
+                if (!http_body_wait(body, address_of seconds,
+                                    address_of nanoseconds))
+                        return HTTP_NO_REPLY;
                 return tls_borrow(address_of body->link->session, room, data,
-                                  got, http_body_seconds(body),
-                                  body->read_nanoseconds)
+                                  got, seconds, nanoseconds)
                            ? HTTP_NO_REPLY : HTTP_OK;
+        }
 
         address_to data = body->scratch;
         return http_body_read(body, body->scratch,
@@ -10384,6 +10445,23 @@ static bool http_transport_allowed(bool address_to secure, bool tls)
         return true;
 }
 
+/* localhost, and every name under it, is this machine (RFC 6761 6.3), in
+   any case and with or without the absolute name's dot. curl answers those
+   names itself and the C library GNU wget asks answers them from its own
+   tables, so neither lets a resolver choose where "localhost" goes; one
+   that asked the network's DNS server would fetch whatever that server
+   pointed localhost at, and tell it the name besides. */
+static bool http_host_loopback(string_address host)
+{
+        positive length = string_length(host);
+
+        if (length && host[length - 1] == '.')
+                length--;
+        return length >= 9 &&
+               !memory_compare_ascii_case(host + length - 9, "localhost", 9) &&
+               (length == 9 || host[length - 10] == '.');
+}
+
 static bipolar http_status_code(p8 address_to bytes, positive size, b32 address_to code)
 {
         if (size < 13)
@@ -10408,6 +10486,8 @@ static p32 http_lookup(string_address host)
 
         if (server >= 0)
                 return (p32)server;
+        if (http_host_loopback(host))
+                return HOST_LOOPBACK;
         if (dns_resolve_any((string_address) "/etc/resolv.conf", host, address_of ip,
                             3) != DNS_OK)
                 return 0;
@@ -10710,7 +10790,21 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                             .store_limit = reset ? 0 : HTTP_FETCH_MAX,
                         };
 
-                        status = into &&
+                        /* The idle timer catches a stopped peer; this absolute
+                           timer catches one which sends the next byte just
+                           before every idle expiry.  A body held in memory
+                           always has it, in every tier.  A download written
+                           as it arrives has it at the tight tier only: GNU
+                           wget, the default's reference, puts no total time
+                           on one, and a large file over a slow link is not an
+                           attack. */
+                        if ((into || MOONWATER_STRICT >= STRICT_TIGHT) &&
+                            !network_deadline_begin(address_of body.deadline,
+                                                    HTTP_BODY_SECONDS, 0))
+                                status = HTTP_NO_REPLY;
+                        else
+                                status =
+                                    into &&
                                          response.body_kind == HTTP_BODY_LENGTH &&
                                          response.body_length > HTTP_FETCH_MAX
                                      ? HTTP_MALFORMED
@@ -10793,8 +10887,8 @@ static bipolar http_fetch_to(string_address start, bipolar dest, bool check_cert
         boot lane structurally cannot check -- it is set because a real
         network needs it, not because a test proved it here.
 
-        ARP conflict probing is not implemented. The network watcher schedules
-        dhcp_reacquire at half the lease lifetime.
+        The network watcher ARP-probes a newly acknowledged address before it
+        installs the lease and schedules dhcp_reacquire at half its lifetime.
 */
 
 #define DHCP_CLIENT_PORT 68
@@ -10807,6 +10901,7 @@ static bipolar http_fetch_to(string_address start, bipolar dest, bool check_cert
 #define DHCP_DISCOVER 1
 #define DHCP_OFFER 2
 #define DHCP_REQUEST 3
+#define DHCP_DECLINE 4
 #define DHCP_ACK 5
 #define DHCP_NAK 6
 
@@ -10981,12 +11076,16 @@ static COLD positive dhcp_build(p8 address_to into, positive room, p8 kind,
         //      What we would like to be told, which a server may ignore, and
         //      the end. Short packets are dropped by some servers and by some
         //      switches, so the 261 bytes at most written here are padded to
-        //      the length everything accepts.
+        //      the length everything accepts. A DECLINE asks for nothing: RFC
+        //      2131's table 5 says it MUST NOT carry a parameter list.
         static const p8 ask[] = {DHCP_OPTION_ASK, 3, DHCP_OPTION_MASK,
                                  DHCP_OPTION_ROUTER, DHCP_OPTION_DNS,
                                  DHCP_OPTION_END};
 
-        memory_copy(into + at, ask, sizeof ask);
+        if (kind == DHCP_DECLINE)
+                into[at] = DHCP_OPTION_END;
+        else
+                memory_copy(into + at, ask, sizeof ask);
         return 300;
 }
 
@@ -11246,6 +11345,33 @@ static COLD bool dhcp_lease_acknowledge(dhcp_lease address_to lease,
         return dhcp_lease_timers(lease);
 }
 
+/* An ACK that completes a REQUEST, taken into the lease it answers. The same
+   server's ACK may leave out what it said before (RFC 2131 4.3.1 lets a
+   renewal answer carry only what changed), and that is kept. Another
+   server's -- which only REBINDING accepts -- starts a lease of its own: the
+   mask, router, resolver and lifetime the old server gave are not this
+   one's, and an ACK that leaves them out has none of them, as a client that
+   reads each lease whole (systemd-networkd, dhclient) has none. An ACK that
+   is no lease leaves the lease as it was, for the next answer to be judged
+   against. */
+static COLD bool dhcp_lease_take(dhcp_lease address_to lease,
+                                 const dhcp_lease address_to answer)
+{
+        dhcp_lease next = *lease;
+
+        if (answer->server != next.server)
+        {
+                next.mask = 0;
+                next.router = 0;
+                next.nameserver = 0;
+                next.seconds = 0;
+        }
+        if (!dhcp_lease_acknowledge(address_of next, answer))
+                return false;
+        *lease = next;
+        return true;
+}
+
 /* OFFER, ACK and NAK all carry a mandatory server identifier; xid and chaddr
    identify the client, not the server.  Completing a selected OFFER and
    RENEWING are bound to that server, and an ACK must name the offered or held
@@ -11477,7 +11603,7 @@ static COLD bipolar dhcp_complete(bipolar handle, p8 address_to packet,
                 if (dhcp_reacquisition_answer_matches(kind, address_of answer,
                                                       lease, rebinding) &&
                     (kind == DHCP_NAK ||
-                     dhcp_lease_acknowledge(lease, address_of answer)))
+                     dhcp_lease_take(lease, address_of answer)))
                         return kind == DHCP_ACK ? DHCP_OK : DHCP_REFUSED;
                 else if (discarded++ == DHCP_DISCARD_MAX)
                         break;
@@ -11524,6 +11650,7 @@ static bipolar dhcp_ask(string_address device, p8 address_to hardware,
                         dhcp_lease address_to lease)
 {
         p8 packet[1024];
+        p8 spread[8];
         p32 transaction;
         bipolar handle;
         bipolar status;
@@ -11534,6 +11661,11 @@ static bipolar dhcp_ask(string_address device, p8 address_to hardware,
         memory_fill(lease, 0, sizeof(dhcp_lease));
         if (!dhcp_transaction_early(address_of transaction))
                 return DHCP_NO_RANDOM;
+        //      The backoff's spread, drawn now: the confined child may not
+        //      ask for randomness later. The pool answered for the
+        //      transaction, so it is ready; a refusal leaves no spread.
+        if (system_random_fill(spread, sizeof spread, 1))
+                memory_fill(spread, 128, sizeof spread);
         handle = dhcp_open(device, HOST_ANY, true);
 
         if (handle < 0)
@@ -11573,6 +11705,13 @@ static bipolar dhcp_ask(string_address device, p8 address_to hardware,
                         only the second) and took the lease 250 ms late.
                 */
                 wait = !attempt ? 50 : attempt < 12 ? 250 : (attempt - 11) * 2000;
+                //      The backoff, once a server has had three seconds
+                //      to answer, moves by up to a second either way (RFC
+                //      2131 4.1), so that machines that lost their server
+                //      together -- a power cut, a switch restarting -- do
+                //      not keep asking it in step.
+                if (attempt >= 12)
+                        wait = wait - 1000 + spread[attempt - 12] * 2000 / 255;
                 length = dhcp_build(packet, sizeof packet, DHCP_DISCOVER,
                                     transaction, hardware, 0, 0, 0, true);
 
@@ -11715,6 +11854,51 @@ static bipolar dhcp_reacquire(string_address device, p8 address_to hardware,
 done:
         socket_close((b32)handle);
         return status;
+}
+
+/*
+        Giving back an address somebody else answers for.
+
+        The watcher ARP-probes an acknowledged address before it installs it,
+        and a station that answers means the server handed out an address in
+        use: a stale lease, a machine configured by hand, or a host that says
+        so to keep this one off the network. RFC 2131 4.4.1 has the client
+        broadcast a DHCPDECLINE naming the address (option 50) and the server
+        that gave it (option 54), under a transaction id of its own, and wait
+        ten seconds before it asks again; the server marks the address in use
+        and offers another. Without it the server offered the same address on
+        every DISCOVER until its lease ran out, and the link had none.
+
+        Nothing answers a DECLINE, so this is one send, from the same confined
+        child as the other exchanges: its filter already allows sendto.
+*/
+static bipolar dhcp_decline(string_address device, p8 address_to hardware,
+                            const dhcp_lease address_to lease)
+{
+        p8 packet[300];
+        p32 transaction;
+        bipolar handle;
+        bipolar sent;
+        positive length;
+
+        if (!lease->address || !lease->server)
+                return DHCP_NO_OFFER;
+        if (!dhcp_transaction_early(address_of transaction))
+                return DHCP_NO_RANDOM;
+        handle = dhcp_open(device, HOST_ANY, true);
+        if (handle < 0)
+                return DHCP_NO_SOCKET;
+
+        socket_address_internet where = {
+            .family = AF_INET, .port = network_order_16(DHCP_SERVER_PORT),
+            .host = network_order_32(HOST_BROADCAST)};
+
+        length = dhcp_build(packet, sizeof packet, DHCP_DECLINE, transaction,
+                            hardware, lease->address, lease->server, 0, false);
+        sent = socket_send((b32)handle, packet, length, 0, address_of where,
+                           sizeof where);
+        socket_close((b32)handle);
+        return sent == (bipolar)length ? DHCP_OK : DHCP_NO_SOCKET;
 }
 
 #endif // STANDARD_MODERN_C_NET_DHCP

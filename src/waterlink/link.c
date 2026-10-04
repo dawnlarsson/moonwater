@@ -226,6 +226,15 @@ struct waterlink_link {
 #define WATERLINK_ACK_DELAY 1000ull
 #define WATERLINK_PACE_BURST 16         // datagrams the pacer lets go at once
 
+/*      Elapsed monotonic time, including a timestamp made after the caller's
+        snapshot.  The receive loop can install keys while draining one batch;
+        a later datagram in that batch must not turn the small ordering gap
+        into nearly 2^64 microseconds through unsigned subtraction. */
+static p64 link_age(p64 now, p64 then)
+{
+        return now > then ? now - then : 0;
+}
+
 fn waterlink_link_reset(struct waterlink_link address_to link)
 {
         memory_zero(link, sizeof(address_to link));
@@ -661,7 +670,7 @@ static KEEP fn waterlink_losses(struct waterlink_link address_to link, p64 now)
                 if (slot->serial >= link->largest)
                         break;
                 if (slot->serial + WATERLINK_REORDER <= link->largest ||
-                    now - slot->sent >= threshold)
+                    link_age(now, slot->sent) >= threshold)
                 {
                         if (slot->serial > link->recovery)
                                 waterlink_congested(link);
@@ -672,7 +681,7 @@ static KEEP fn waterlink_losses(struct waterlink_link address_to link, p64 now)
 
         at = link->flight_head;
         if (at == WATERLINK_NONE ||
-            now - link->slot[at].sent < waterlink_timeout(link))
+            link_age(now, link->slot[at].sent) < waterlink_timeout(link))
                 return;
 
         link->timeouts++;
@@ -734,7 +743,7 @@ static bool waterlink_ack_due(struct waterlink_link address_to link, p64 now)
 {
         return link->acking &&
                (link->owed_now || link->owed_count >= WATERLINK_ACK_EVERY ||
-                now - link->owed >= WATERLINK_ACK_DELAY);
+                link_age(now, link->owed) >= WATERLINK_ACK_DELAY);
 }
 
 /*
@@ -1004,6 +1013,7 @@ __asm__(
     "100: mov 0x70210(%rdi), %rax\n   test %rax, %rax\n   jz 119f\n"
     "test %r11, %r11\n   jnz 101f\n"
     "cmpb $0, 0x702ac(%rdi)\n   jne 101f\n   cmpl $2, 0x702a8(%rdi)\n   jae 101f\n"
+    "cmp 0x702a0(%rdi), %rdx\n   jb 119f\n"
     "sub 0x702a0(%rdi), %rdx\n   cmp $1000, %rdx\n   jb 119f\n"
     "101: bsf %rax, %rcx\n   lea (%rcx,%rcx,2), %r8\n   lea 0x6fe00(%rdi,%r8,4), %r8\n"
     "mov 4(%r8), %r9d\n   mov (%r8), %r8d\n   xor %r10d, %r10d\n"
@@ -1222,7 +1232,8 @@ __asm__(
     "100: ldr x10, [x4, #0xa10]\n   cbz x10, 119f\n   cbnz x5, 101f\n"
     "ldrb w11, [x4, #0xaac]\n   cbnz w11, 101f\n"
     "ldr w11, [x4, #0xaa8]\n   cmp w11, #2\n   b.hs 101f\n"
-    "ldr x11, [x4, #0xaa0]\n   sub x11, x2, x11\n   cmp x11, #1000\n   b.lo 119f\n"
+    "ldr x11, [x4, #0xaa0]\n   cmp x2, x11\n   b.lo 119f\n"
+    "sub x11, x2, x11\n   cmp x11, #1000\n   b.lo 119f\n"
     "101: add x16, x0, #0x4b, lsl #12\n   mov w17, #1172\n"
     "102: rbit x11, x10\n   clz x11, x11\n   add x12, x11, x11, lsl #1\n"
     "add x12, x4, x12, lsl #2\n   ldr w13, [x12, #0x604]\n   ldr w12, [x12, #0x600]\n"
@@ -1413,7 +1424,8 @@ __asm__(
     "100: ld t0, 784(a4)\n   beqz t0, 119f\n   bnez a5, 101f\n"
     "lbu t1, 940(a4)\n   bnez t1, 101f\n"
     "lwu t1, 936(a4)\n   li t2, 2\n   bgeu t1, t2, 101f\n"
-    "ld t1, 928(a4)\n   sub t1, a2, t1\n   li t2, 1000\n   bltu t1, t2, 119f\n"
+    "ld t1, 928(a4)\n   bltu a2, t1, 119f\n"
+    "sub t1, a2, t1\n   li t2, 1000\n   bltu t1, t2, 119f\n"
     "101: li t5, 1172\n   lui t6, 0x4b\n   add t6, a0, t6\n"
     "102: neg t1, t0\n   and t1, t0, t1\n   fcvt.d.lu ft0, t1\n   fmv.x.d t1, ft0\n"
     "srli t1, t1, 52\n   addi t1, t1, -1023\n"
@@ -1483,7 +1495,7 @@ static p64 waterlink_held_probes(struct waterlink_link address_to link,
                        << (slot->probed < 15 ? slot->probed : 15);
                 if (wait > WATERLINK_HELD_MOST)
                         wait = WATERLINK_HELD_MOST;
-                if (now >= slot->sent && now - slot->sent >= wait)
+                if (link_age(now, slot->sent) >= wait)
                 {
                         slot->probed += slot->probed < 255;
                         waterlink_band_requeue(link, at);
