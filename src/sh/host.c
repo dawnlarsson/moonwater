@@ -234,7 +234,28 @@ static fn host_pause(p64 nanoseconds)
         sleep(address_of span);
 }
 
-/* A small sysfs or state file, without its trailing newline. */
+/* A small kernel file (sysfs), without its trailing newline: the kernel's, not
+   a name anybody plants, and a test's sandbox stands a FIFO at one to hold a
+   sleep until its reader is ready, so it is read as it always was. */
+static bipolar host_read_kernel(string_address path, p8 address_to into,
+                                positive room)
+{
+        bipolar got = file_slurp_once_at(AT_FDCWD, path, into, room);
+
+        if (got < 0)
+        {
+                into[0] = end;
+                return got;
+        }
+
+        while (got > 0 && (into[got - 1] == '\n' || into[got - 1] == ' '))
+                got--;
+
+        into[got] = end;
+        return got;
+}
+
+/* A small state file, without its trailing newline; regular files only. */
 static bipolar host_read_text(string_address path, p8 address_to into,
                               positive room)
 {
@@ -8455,7 +8476,7 @@ static bool tune_number(string_address path, positive address_to value)
         p8 text[32];
         positive used;
 
-        if (host_read_text(path, text, sizeof(text)) <= 0)
+        if (host_read_kernel(path, text, sizeof(text)) <= 0)
                 return false;
         *value = string_digits_max(text, 18, address_of used);
         return used && !text[used];
@@ -8463,7 +8484,7 @@ static bool tune_number(string_address path, positive address_to value)
 
 static bool tune_word(string_address path, p8 address_to into, positive room)
 {
-        return host_read_text(path, into, room) > 0;
+        return host_read_kernel(path, into, room) > 0;
 }
 
 /* Write a value to a sysfs attribute. The name is never followed if it is a link. */
