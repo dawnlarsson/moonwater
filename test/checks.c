@@ -83099,6 +83099,7 @@ static fn storage_test_link_state(void)
               net_change_gone(0) && net_change_gone(-ERROR_NO_ENTRY) &&
                   net_change_gone(-ERROR_NO_PROCESS) &&
                   net_change_gone(-ERROR_NO_DEVICE) &&
+                  net_change_gone(-EADDRNOTAVAIL) &&
                   !net_change_gone(-ERROR_ACCESS));
 
         {
@@ -83494,14 +83495,14 @@ static fn storage_test_decline_hold(void)
         memory_zero(net_declined, sizeof net_declined);
 }
 
-/* A user, network and mount namespace of the caller's own, which must be
-   a child: lo up, a tmpfs over /etc for the resolver file a lease writes,
-   and a routing socket, or exit 2 (NOT RUN) where namespaces are refused. */
-static bipolar storage_test_net_namespace(void)
+/* A user and mount namespace of the caller's own (which maps the caller to
+   root and every other id on the host to nobody) with a tmpfs over /etc, and
+   what else `more` asks to be unshared, which must be a child: exit 2 (NOT
+   RUN) where namespaces are refused. */
+static fn storage_test_namespace(positive more)
 {
         p8 map[48] = "0 ";
         p8 groups[48] = "0 ";
-        bipolar handle;
         //      The ids outside, read before the namespace hides them; a
         //      file made under an unmapped id is EOVERFLOW.
         positive at = 2 + positive_into(
@@ -83510,8 +83511,8 @@ static bipolar storage_test_net_namespace(void)
             groups + 2, (positive)system_call_1(syscall(getgid), 0));
 
         bipolar unshared = system_call_1(syscall(unshare), CLONE_NEWUSER |
-                                                               CLONE_NEWNET |
-                                                               CLONE_NEWNS);
+                                                               CLONE_NEWNS |
+                                                               more);
         if (unshared < 0)
                 system_call_1(syscall(exit_group),
                               unshared == -EINVAL ? STORAGE_TEST_THREADED : 2);
@@ -83522,8 +83523,17 @@ static bipolar storage_test_net_namespace(void)
             !storage_test_write_text("/proc/self/gid_map", groups, group + 3) ||
             system_call_5(syscall(mount), 0, (positive) "/", 0, MS_REC | MS_PRIVATE, 0) < 0 ||
             system_call_5(syscall(mount), (positive) "tmpfs", (positive) "/etc",
-                          (positive) "tmpfs", 0, 0) < 0 ||
-            (handle = netlink_open_groups(0)) < 0 ||
+                          (positive) "tmpfs", 0, 0) < 0)
+                system_call_1(syscall(exit_group), 2);
+}
+
+//      The same with lo up and a routing socket to say so in.
+static bipolar storage_test_net_namespace(void)
+{
+        bipolar handle;
+
+        storage_test_namespace(CLONE_NEWNET);
+        if ((handle = netlink_open_groups(0)) < 0 ||
             netlink_link_up((b32)handle, 1) < 0)
                 system_call_1(syscall(exit_group), 2);
         return handle;
@@ -83782,6 +83792,273 @@ static bool storage_test_route_seen(netlink_header address_to header,
         return true;
 }
 
+static bipolar storage_test_file_read(string_address path,
+                                      p8 address_to into, positive room);
+
+/* What a lease does about the resolver file it cannot write, and about an
+   address the kernel took back at expiry. The first is a directory where the
+   file belongs, so every write of it fails. Exit 4: the lease was rolled
+   back over it; 5: the address was not the lease's; 6: it was not released
+   with the file unwritable; 7: an address already expired could not be
+   released; 8: nor a route; 9: an expired lease was held on by the watcher's
+   own reconfiguration, which asks for a new one only when the release is
+   done; 10: a second release found something to do or a refused one let go
+   of what it still owned. */
+static fn storage_test_lease_resolver(void)
+{
+        bipolar child = system_fork();
+
+        if (child == 0)
+        {
+                p8 hardware[6] = {2, 0, 0, 0, 0, 1};
+                dhcp_lease lease = {.address = 0x0a090c09, .mask = 0xffffff00,
+                                    .server = 0x0a090c01, .router = 0x0a090c01,
+                                    .seconds = 60, .renewal = 30,
+                                    .rebinding = 52};
+                net_holding held = {0};
+                storage_test_address_facts facts = {.host = lease.address};
+                bipolar handle = storage_test_net_namespace();
+
+                net_out = storage_test_capture;
+                if (system_make_directory_at(AT_FDCWD, "/etc/resolv.conf",
+                                             0755) < 0)
+                        system_call_1(syscall(exit_group), 2);
+                if (net_apply_lease((b32)handle, 1, "lo", hardware,
+                                    address_of lease, address_of held,
+                                    false) != 0 ||
+                    held.index != 1 || !held.address_owned)
+                        system_call_1(syscall(exit_group), 4);
+                netlink_dump((b32)handle, RTM_GETADDR, sizeof(netlink_address),
+                             AF_INET, storage_test_address_seen,
+                             address_of facts);
+                if (!facts.found)
+                        system_call_1(syscall(exit_group), 5);
+                if (net_holding_release((b32)handle, address_of held) != 0 ||
+                    held.index)
+                        system_call_1(syscall(exit_group), 6);
+                //      Nothing held is nothing to release, however often.
+                if (net_holding_release((b32)handle, address_of held) != 0 ||
+                    net_holding_release((b32)handle, null) != 0)
+                        system_call_1(syscall(exit_group), 10);
+
+                //      The kernel's own lifetime check removes a leased
+                //      address at expiry, and the watcher then lets go of
+                //      what it still holds.
+                memory_fill(address_of held, 0, sizeof held);
+                if (net_apply_lease((b32)handle, 1, "lo", hardware,
+                                    address_of lease, address_of held,
+                                    false) != 0 ||
+                    netlink_address_delete((b32)handle, 1, lease.address,
+                                           24) < 0)
+                        system_call_1(syscall(exit_group), 5);
+                if (net_holding_release((b32)handle, address_of held) != 0 ||
+                    held.index)
+                        system_call_1(syscall(exit_group), 7);
+
+                memory_fill(address_of held, 0, sizeof held);
+                if (net_apply_lease((b32)handle, 1, "lo", hardware,
+                                    address_of lease, address_of held,
+                                    false) != 0 ||
+                    !held.route_owned ||
+                    netlink_route_delete((b32)handle, 0, 0, lease.router, 1) < 0)
+                        system_call_1(syscall(exit_group), 5);
+                if (net_holding_release((b32)handle, address_of held) != 0 ||
+                    held.index)
+                        system_call_1(syscall(exit_group), 8);
+
+                //      A release the kernel refuses keeps what it did not
+                //      let go of: a socket that is not one is refused both.
+                memory_fill(address_of held, 0, sizeof held);
+                if (net_apply_lease((b32)handle, 1, "lo", hardware,
+                                    address_of lease, address_of held,
+                                    false) != 0 ||
+                    !held.address_owned || !held.route_owned)
+                        system_call_1(syscall(exit_group), 5);
+                if (net_holding_release(-1, address_of held) == 0 ||
+                    !held.index || !held.address_owned || !held.route_owned)
+                        system_call_1(syscall(exit_group), 10);
+
+                memory_fill(address_of held, 0, sizeof held);
+                if (net_apply_lease((b32)handle, 1, "lo", hardware,
+                                    address_of lease, address_of held,
+                                    false) != 0 ||
+                    netlink_address_delete((b32)handle, 1, lease.address,
+                                           24) < 0)
+                        system_call_1(syscall(exit_group), 5);
+                held.lost = true;
+                net_reconfigure((b32)handle, address_of held);
+                system_call_1(syscall(exit_group), held.index ? 9 : 0);
+        }
+        b32 status = storage_test_child_status(child);
+        if (!storage_test_not_run(status, "lease and resolver", "no namespaces"))
+        {
+                check("a lease is kept when its resolver file cannot be written",
+                      status != 4 && status != 5);
+                check("a lease is released when its resolver file cannot be written",
+                      status != 6 && status != 5 && status != 4);
+                check("a release done is done: nothing held is nothing to release",
+                      status != 10 && status != 6);
+                check("an address the kernel took back at expiry is released",
+                      status != 7 && status != 6 && status != 5 && status != 4);
+                check("a route that is already gone is released",
+                      status != 8 && status != 7 && status != 6 && status != 5 &&
+                          status != 4);
+                check("the watcher asks for a new lease once the old is released",
+                      status == 0);
+        }
+}
+
+/* The parents a rename or a replacement is trusted in. The namespace has the
+   caller for its only user, so the host's own directories belong to nobody in
+   it: a directory that is not the caller's and not root's, which is every
+   directory of an image whose build left them to the user who ran it. Below
+   the tight tier the kernel's permissions are the whole answer, as they are
+   for the reference; the tight tier also wants a parent no one else could
+   exchange the names of. Exit 100 and the bits of the cases that failed. */
+static fn storage_test_name_stable(void)
+{
+        bipolar child = system_fork();
+
+        if (child == 0)
+        {
+                file_facts entry;
+                file_facts blank = {0};
+                static const string_address parents[] = {
+                    "/etc", "/etc/open", "/etc/sticky", "/", "/etc/file"};
+                positive failed = 0;
+                bool trusted[5];
+                bipolar made;
+
+                storage_test_namespace(0);
+                made = system_open_at_mode(AT_FDCWD, "/etc/file",
+                                           FILE_WRITE | FILE_EXCLUSIVE |
+                                               O_CLOEXEC, 0644);
+                if (made < 0 ||
+                    system_make_directory_exact_at(AT_FDCWD, "/etc/open",
+                                                   0777) < 0 ||
+                    system_make_directory_exact_at(AT_FDCWD, "/etc/sticky",
+                                                   01777) < 0 ||
+                    !file_look(AT_FDCWD, "/etc/file", AT_SYMLINK_NOFOLLOW,
+                               address_of entry))
+                        system_call_1(syscall(exit_group), 2);
+                system_close(made);
+                for (positive at = 0; at < 5; at++)
+                {
+                        bipolar parent = system_open_at(
+                            AT_FDCWD, parents[at], FILE_READ | O_CLOEXEC);
+
+                        trusted[at] = parent >= 0 &&
+                                      file_name_stable(parent, address_of entry);
+                        if (parent >= 0)
+                                system_close(parent);
+                }
+                {
+                        bipolar parent = system_open_at(
+                            AT_FDCWD, "/etc", FILE_READ | O_CLOEXEC);
+
+                        //      Facts that were not asked for are no answer.
+                        if (parent >= 0 &&
+                            file_name_stable(parent, address_of blank))
+                                failed |= 32;
+                        if (parent >= 0)
+                                system_close(parent);
+                }
+                //      Its own directory, and a sticky one it has an entry in.
+                failed |= (trusted[0] ? 0 : 1) | (trusted[2] ? 0 : 4);
+                //      One anybody can rename in, and a user's other than ours.
+#if MOONWATER_STRICT < STRICT_TIGHT
+                failed |= (trusted[1] ? 0 : 2) | (trusted[3] ? 0 : 8);
+#else
+                failed |= (trusted[1] ? 2 : 0) | (trusted[3] ? 8 : 0);
+#endif
+                //      Never a file.
+                failed |= trusted[4] ? 16 : 0;
+                system_call_1(syscall(exit_group), failed ? 100 + failed : 0);
+        }
+        b32 status = storage_test_child_status(child);
+        if (!storage_test_not_run(status, "name stability", "no namespaces"))
+        {
+                positive failed = status >= 100 ? (positive)status - 100
+                                  : status ? 63 : 0;
+
+                check("a parent of the caller's own is trusted at every tier",
+                      !(failed & 1));
+                check("a sticky parent holding the caller's entry is trusted at every tier",
+                      !(failed & 4));
+#if MOONWATER_STRICT < STRICT_TIGHT
+                check("a parent that is another user's is trusted as the reference trusts it",
+                      !(failed & 8));
+                check("a parent anybody may write is trusted as the reference trusts it",
+                      !(failed & 2));
+#else
+                check("a parent that is another user's is refused by the tight tier",
+                      !(failed & 8));
+                check("a parent anybody may write, with no sticky bit, is refused by the tight tier",
+                      !(failed & 2));
+#endif
+                check("a file is never a parent", !(failed & 16));
+                check("facts that were not read are never a stable name", !(failed & 32));
+        }
+}
+
+/* The second writer of a name. A resolver file is replaced by every lease
+   after the first, and a restarted watcher meets the one its predecessor
+   wrote: in a directory the build left to somebody else (the namespace's
+   /tmp, which is nobody's) that was refused with Permission denied whatever
+   the tier asked, and the tight tier is the one that still may. */
+static fn storage_test_replace_foreign(void)
+{
+        bipolar child = system_fork();
+
+        if (child == 0)
+        {
+                p8 path[64] = "/tmp/moonwater-net-foreign-";
+                p8 bytes[64];
+                positive used = string_length((string_address)path);
+                bipolar first;
+                bipolar second;
+                bipolar got;
+                static p8 wanted[] = "nameserver 10.0.0.2\nnameserver 1.1.1.1\n";
+
+                storage_test_namespace(0);
+                used += positive_into(path + used, system_nonce());
+                path[used] = end;
+                first = net_write_resolv_to((string_address)path, 0x0a000001);
+                second = net_write_resolv_to((string_address)path, 0x0a000002);
+                got = storage_test_file_read((string_address)path, bytes,
+                                             sizeof bytes);
+                system_remove_at(AT_FDCWD, (string_address)path, 0);
+#if MOONWATER_STRICT < STRICT_TIGHT
+                if (first < 0 || second < 0)
+                        system_call_1(syscall(exit_group), 4);
+                system_call_1(syscall(exit_group),
+                              got == sizeof(wanted) - 1 &&
+                                      !memory_compare(bytes, wanted,
+                                                      sizeof(wanted) - 1)
+                                  ? 0 : 5);
+#else
+                //      Refused whole, or not written to begin with: never
+                //      a file with the second writer's bytes in a parent that
+                //      is nobody's.
+                system_call_1(syscall(exit_group),
+                              second >= 0 && first >= 0 ? 6 : 0);
+#endif
+        }
+        b32 status = storage_test_child_status(child);
+        if (!storage_test_not_run(status, "replacement in another's directory",
+                                  "no namespaces"))
+        {
+#if MOONWATER_STRICT < STRICT_TIGHT
+                check("a resolver file is replaced in a directory that is another user's",
+                      status != 4);
+                check("and is what the second writer wrote", status == 0);
+#else
+                check("a resolver file is not replaced in a directory that is another user's",
+                      status == 0);
+#endif
+        }
+}
+
 /* A /32 lease and its router off the prefix, as clouds hand them out, which
    dhcp_lease_usable takes: the default route goes in, through a router the
    kernel is told is on the link, and goes with the release; a /24 lease's
@@ -83860,8 +84137,9 @@ static fn storage_test_lease_off_prefix(void)
         renewal that moves the router, the resolver, the address, the prefix
         to a /32 with its router off it, a lease with no router, another
         server's lease) beside an address put on the link by hand, each of
-        those again with the resolver file refusing
-        to be written (/etc read-only for the one apply), and the release.
+        those again with a router the kernel refuses as a gateway (multicast,
+        which fails after the address went in; a resolver file that cannot be
+        written no longer fails a lease), and the release.
         After every event the kernel's addresses and default routes on the
         link and /etc/resolv.conf are read back and held to what the lease
         the watcher now holds says, and nothing else: an applied lease is
@@ -84077,21 +84355,18 @@ static b32 storage_epoch_walk(const p8 address_to events, positive depth)
                         bool fault = event >= STORAGE_EPOCH_LEASES;
                         dhcp_lease lease = leases[event % STORAGE_EPOCH_LEASES];
 
-                        if (fault &&
-                            system_call_5(syscall(mount), 0, (positive) "/etc", 0,
-                                          MS_REMOUNT | MS_RDONLY, 0) < 0)
-                                return 2;
+                        //      A multicast router is one the kernel refuses
+                        //      as a gateway, after the address went in: a
+                        //      lease that fails part way.
+                        if (fault)
+                                lease.router = 0xe0000001;
                         refused = net_apply_lease((b32)handle, link.index, "wd4",
                                                   hardware, address_of lease,
                                                   address_of held, false);
-                        if (fault &&
-                            system_call_5(syscall(mount), 0, (positive) "/etc", 0,
-                                          MS_REMOUNT, 0) < 0)
-                                return 2;
                         if (fault != (refused != 0))
                         {
                                 storage_epoch_say(events, depth, step,
-                                                  fault ? "a refused resolver did not fail the lease"
+                                                  fault ? "a refused route did not fail the lease"
                                                          : "a lease failed to apply",
                                                   address_of before);
                                 return 16 | 1;
@@ -84799,6 +85074,13 @@ static fn storage_test_net_files(void)
         bipolar link_output = file_staged_name_open(
             address_of link_stage, directory_link, 0644,
             FILE_STAGED_STREAM_SPECIAL);
+#if MOONWATER_STRICT < STRICT_TIGHT
+        //      A name that is a link is written through, as GNU's open does,
+        //      so a link to a directory is the directory and is refused;
+        //      only the tight tier replaces the link.
+        check("a stream output through a link to a directory is refused",
+              link_output == -ERROR_IS_DIRECTORY);
+#else
         check("stream staging never follows a final symlink",
               link_output >= 0 && !link_stage.direct);
         check("stream symlink replacement writes only to its private stage",
@@ -84808,6 +85090,7 @@ static fn storage_test_net_files(void)
               link_output >= 0 &&
                   file_staged_name_finish(
                       address_of link_stage, true, 0) == 0);
+#endif
 
         file_staged_name staged;
         bipolar handle = file_staged_name_open(
@@ -85028,6 +85311,9 @@ b32 main(void)
         storage_test_arp_claims();
         storage_test_lease_over_existing();
         storage_test_lease_inherited();
+        storage_test_lease_resolver();
+        storage_test_name_stable();
+        storage_test_replace_foreign();
         storage_test_arp_probe();
         storage_test_lease_off_prefix();
         storage_test_lease_epochs();

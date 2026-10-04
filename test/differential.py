@@ -35407,6 +35407,8 @@ def harness_image_nodes(argv):
     check('"mkdir"' in setup and '"chown"' in setup and '"0:0"' in setup and
           'build_root()' in setup and setup.index('"mkdir"') < setup.index('"chown"'),
           'image directories are given to root after mkdir -p, so the guest\'s /etc is root\'s')
+    check('words[at++] = image;' in setup and 'bowls bowls/bin' in build,
+          'and so are the image\'s own root and the parent of bowls/bin, which only mkdir -p makes')
 
     return check.verdict('image nodes', 'image_nodes')
 
@@ -40806,6 +40808,7 @@ def harness_dhcp_fuzz(argv):
 #define ERROR_NO_ENTRY 2
 #define ERROR_NO_PROCESS 3
 #define ERROR_NO_DEVICE 19
+#define EADDRNOTAVAIL 99
 #define NETWORK_NANOSECONDS 1000000000
 static positive clock_monotonic_nanoseconds(void) { return 0; }
 /* net_seconds reads CLOCK_BOOTTIME; here, as the monotonic clock above, it
@@ -60242,9 +60245,6 @@ NET_EPOCH_MUTANTS = (
     ("a new address leaves the old one in place",
      "        if (address_changed && net_owns_address(previous))\n        {\n                status = netlink_address_delete(",
      "        if (false && address_changed && net_owns_address(previous))\n        {\n                status = netlink_address_delete("),
-    ("a rollback does not put the old route back",
-     "                        bipolar status = net_lease_route(\n                            handle, address_of previous->lease,\n                            previous->index, false);",
-     "                        bipolar status = 0;"),
     ("a rollback keeps the new address",
      "        if (address_changed)\n                net_rollback_record(\n                    netlink_address_delete(handle, index, lease->address,",
      "        if (false)\n                net_rollback_record(\n                    netlink_address_delete(handle, index, lease->address,"),
@@ -60252,8 +60252,8 @@ NET_EPOCH_MUTANTS = (
      "                bipolar status = net_write_resolv(0);",
      "                bipolar status = 0;"),
     ("a release keeps the lease's route",
-     "        if (net_owns_route(held))\n                net_rollback_record(",
-     "        if (false)\n                net_rollback_record("),
+     "        if (net_owns_route(held))\n        {\n                bipolar status = netlink_route_delete(",
+     "        if (false)\n        {\n                bipolar status = netlink_route_delete("),
 )
 
 

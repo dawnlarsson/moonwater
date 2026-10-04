@@ -213,7 +213,7 @@ static build_setting build_settings[BUILD_SETTING_ROOM] = {
                 src/moonwater/floodlight.c. Both are fixed rather than allocated because
                 the node is made here, before there is a devtmpfs to make it. */
         {"image_directories",
-         "sys proc dev tmp run etc root bin sbin usr lib lib64 var opt bowls/bin"},
+         "sys proc dev tmp run etc root bin sbin usr lib lib64 var opt bowls bowls/bin"},
         {"image_nodes",
          "dev/tty c 5 0"
          " dev/console c 5 1"
@@ -4970,6 +4970,7 @@ static b32 build_local(string_address address_to profiles, positive count,
 
                 words[at++] = "mkdir";
                 words[at++] = "-p";
+                words[at++] = image;
 
                 for (positive which = 0; which < many; which++)
                         words[at++] = build_join(image, "/", names[which], null);
@@ -4985,13 +4986,15 @@ static b32 build_local(string_address address_to profiles, positive count,
                         carries each one's owner into the guest as it is: a
                         tree whose fs/ the building user made (a copy, an
                         rsync, a mkdir before sudo) booted with /etc, /root
-                        and /tmp owned by that uid. The shell will not
-                        replace a name in a directory another principal owns
-                        (file_name_stable), so every write of an existing
-                        /etc/resolv.conf after the first failed EACCES and
-                        ip took its lease back. A build that is not root
-                        cannot give them away, and makes no device nodes
-                        either; it is left as it was.
+                        and /tmp owned by that uid, and so did the image's
+                        own root and a parent only mkdir -p made (bowls).
+                        The tight tier will not replace a name in a
+                        directory another principal owns (file_name_stable),
+                        and this one once did at every tier, so every write
+                        of an existing /etc/resolv.conf after the first
+                        failed EACCES and ip took its lease back. A build
+                        that is not root cannot give them away, and makes no
+                        device nodes either; it is left as it was.
                 */
                 if (build_root())
                 {

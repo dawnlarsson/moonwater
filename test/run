@@ -12501,6 +12501,13 @@ export SPARK_OWNER=parent
 ls /monitor.sh | rev
 n=$(uname -n); r=$(cat /root/name); case $n in moonwater-box|'') k=default;; *-*) k=rolled;; *) k=odd;; esac; printf 'machine-%s-%s\n' "$k" "$([ "$n" = "$r" ] && echo saved || echo apart)"
 printf 'asked-%s\n' "$([ "$(moonwater name)" = "$(uname -n)" ] && echo same || echo different)"
+printf 'owners-%s-end\n' "$(stat -c %u / /etc /root /tmp /var /usr /bin /sbin /lib /lib64 /opt /bowls /bowls/bin | sort -u | tr -d '\n ')"
+mkdir /tmp/theirs && chown 1000:1000 /tmp/theirs && echo a > /tmp/theirs/a && echo b > /tmp/theirs/b && mv /tmp/theirs/a /tmp/theirs/b; printf 'replaced-%s-%s\n' $? "$(cat /tmp/theirs/b)"
+before=$(stat -c %i /etc/resolv.conf)
+n=0; for p in /proc/[0-9]*; do case $(tr '\0' ' ' < $p/cmdline 2>/dev/null) in *'ip watch'*) kill ${p#/proc/}; n=$((n+1));; esac; done
+w=0; while [ $w -lt 60 ]; do [ $n -gt 0 ] && [ "$(stat -c %i /etc/resolv.conf)" != "$before" ] && break; w=$((w+1)); /shell -c 'sleep 1'; done
+printf 'watch-killed-%s-back-%s\n' "$([ $n -gt 0 ] && echo yes || echo no)" "$(ip addr show eth0 2>/dev/null | grep -c 'inet ')"
+printf 'route-%s\n' "$(ip route 2>/dev/null | grep -c default)"
 #
 #       The kernel network settings the default tier asks of the network
 #       watcher when it starts, before the first lease: no redirects, no
@@ -12911,6 +12918,17 @@ says transcript 'a terminal opened'   'window grid 80x24'
 #
 says transcript 'the first boot rolled and saved a name' 'machine-rolled-saved'
 says transcript 'moonwater name says it'  'asked-same'
+
+#
+#       The image's directories are root's whatever the tree was made by,
+#       so root can replace a name in them, and a watcher that is killed
+#       and restarted takes its address and route again (its second write of
+#       /etc/resolv.conf is a replacement).
+#
+says transcript 'the image tree is root-owned'   'owners-0-end'
+says transcript 'root replaces a name in another user'"'"'s directory' 'replaced-0-a'
+says transcript 'the watcher came back with an address' 'watch-killed-yes-back-1'
+says transcript 'and a route' 'route-1'
 
 #
 #       Nothing the kernel felt the need to warn about.

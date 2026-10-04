@@ -1126,11 +1126,14 @@ static positive net_seconds(void)
 
 /* Deleting state which the kernel already discarded is the same outcome as
    deleting it ourselves. A vanished interface reports ENODEV; absent
-   addresses and routes are reported as ENOENT or ESRCH. */
+   routes are reported as ESRCH or ENOENT, and an absent address as
+   EADDRNOTAVAIL, which is what the kernel's own lifetime check leaves
+   behind when it removes a leased address at expiry. */
 static COLD bool net_change_gone(bipolar status)
 {
         return status >= 0 || status == -ERROR_NO_ENTRY ||
-               status == -ERROR_NO_PROCESS || status == -ERROR_NO_DEVICE;
+               status == -ERROR_NO_PROCESS || status == -ERROR_NO_DEVICE ||
+               status == -EADDRNOTAVAIL;
 }
 
 static COLD bool net_holds_address(const net_holding address_to held, p32 index,
@@ -1312,28 +1315,43 @@ static COLD bipolar net_holding_release(b32 handle, net_holding address_to held)
         if (!held || !held->index)
                 return 0;
 
+        /* Each object is let go of once: what is deleted is no longer owned,
+           so a release that stopped part way (the next step refused, the
+           kernel having taken the address back at expiry) resumes with what
+           is left instead of failing again on what is already done. */
         if (net_owns_route(held))
-                net_rollback_record(
-                    netlink_route_delete(handle, 0, 0, held->lease.router,
-                                         held->index),
-                    address_of failed);
+        {
+                bipolar status = netlink_route_delete(
+                    handle, 0, 0, held->lease.router, held->index);
+
+                net_rollback_record(status, address_of failed);
+                if (net_change_gone(status))
+                        held->route_owned = false;
+        }
 
         if (net_owns_address(held))
-                net_rollback_record(
-                    netlink_address_delete(handle, held->index,
-                                           held->lease.address,
-                                           dhcp_prefix_of(held->lease.mask)),
-                    address_of failed);
+        {
+                bipolar status = netlink_address_delete(
+                    handle, held->index, held->lease.address,
+                    dhcp_prefix_of(held->lease.mask));
+
+                net_rollback_record(status, address_of failed);
+                if (net_change_gone(status))
+                        held->address_owned = false;
+        }
 
         /* Once the address is no longer ours, a DHCP-provided resolver is no
            longer ours either.  Keep the always-available fallback as the
            complete resolver file, using the same checked atomic publication
-           path as lease installation. */
+           path as lease installation. A file that cannot be written is said
+           and left: holding the lease for the sake of a name server would
+           leave a machine that has let go of its address with neither. */
         {
                 bipolar status = net_write_resolv(0);
 
-                if (status < 0 && !failed)
-                        failed = status;
+                if (status < 0)
+                        (void)net_refused((string_address) "write resolv.conf",
+                                          status);
         }
 
         if (!failed)
@@ -1504,12 +1522,14 @@ static COLD b32 net_apply_lease(b32 handle, p32 index, string_address name,
                 }
         }
 
+        /* The lease is valid and held whether or not the resolver file
+           could be written: the resolver walks to DNS_FALLBACK when the
+           file names nothing, and a renewal writes it again. Rolling a
+           working address and route back over a file left the machine with
+           no network at all. */
         status = net_write_resolv(lease->nameserver);
         if (status < 0)
-        {
-                doing = (string_address) "write resolv.conf";
-                goto failed;
-        }
+                (void)net_refused((string_address) "write resolv.conf", status);
 
         if (announce)
         {
@@ -2025,7 +2045,7 @@ failed:
 static COLD b32 net_auto(b32 handle, net_holding address_to held)
 {
         netlink_search search;
-        dhcp_lease lease;
+        dhcp_lease lease = {0};
         bipolar status;
         positive tried;
 

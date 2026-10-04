@@ -7887,14 +7887,27 @@ static HOT bool file_name_stable(bipolar directory,
                              file_facts address_to entry)
 {
         file_facts parent;
-        p32 effective = system_effective_user();
 
         if (!entry || (entry->mask & STATX_BASIC) != STATX_BASIC ||
             !file_look(directory, (string_address)"", AT_EMPTY_PATH,
                        address_of parent) ||
             (parent.mask & STATX_BASIC) != STATX_BASIC ||
-            (parent.mode & MODE_FORMAT) != MODE_DIRECTORY ||
-            (parent.owner != effective && parent.owner != 0))
+            (parent.mode & MODE_FORMAT) != MODE_DIRECTORY)
+                return false;
+#if MOONWATER_STRICT < STRICT_TIGHT
+        /* What the reference does, and what system_path_parent_cleanup_safe
+           allows below the tight tier: a rename in any directory the kernel
+           lets this process write, root's in a user's included. Refusing it
+           here made the second writer of /etc/resolv.conf fail on an image
+           whose /etc was owned by whoever ran the build, and every `mv` of
+           a name that exists, for root, in a directory of anyone else's.
+           Only STRICT_TIGHT holds a rename to a parent nobody else can
+           exchange the names of. */
+        return true;
+#else
+        p32 effective = system_effective_user();
+
+        if (parent.owner != effective && parent.owner != 0)
                 return false;
 
         if (!(parent.mode & 0002))
@@ -7902,6 +7915,7 @@ static HOT bool file_name_stable(bipolar directory,
 
         return (parent.mode & MODE_STICKY) && entry &&
                (entry->owner == effective || entry->owner == 0);
+#endif
 }
 
 /* Direct stream and append destinations bypass private staging by design.
