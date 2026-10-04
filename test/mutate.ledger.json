@@ -1,1 +1,65 @@
-{}
+{
+ "discover|waterlink_dns_label|plusminus|3->4|520c97cf": {
+  "why": "Equivalent: copying \"wl-\" with its NUL writes at + 4, the first hex digit's place, which memory_into_hex overwrites on the next line."
+ },
+ "discover|waterlink_dns_name|plusminus|0->-1|35e9b53d": {
+  "why": "Equivalent: a failed name returning positive_max instead of 0 puts the reader past the packet, so byte_reader_ok fails and the packet is refused exactly as before."
+ },
+ "discover|waterlink_instance_of|logic|||->&&|85e129d5": {
+  "why": "Equivalent: with && the first two tests only matter together, and in every case they split, the remaining is_service test is handed a length of 0 or less (as positive, huge) or a root name and answers false, as the original does."
+ },
+ "discover|waterlink_instance_of|plusminus|0->-1|116754e5": {
+  "why": "Equivalent: sizeof(found->instance[-1]) is sizeof(found->instance[0]); the compiler built the same binary."
+ },
+ "discover|waterlink_instance_of|plusminus|1->2|604ee018": {
+  "why": "Equivalent: the one length it changes (first + 2) leaves a one-byte remainder, the root, which is not the 24-byte service name, so is_service refuses it too."
+ },
+ "discover|waterlink_instance_of|plusminus|4->3|bc530a41": {
+  "why": "Equivalent: question[] shrinks to 259 bytes and the longest flattened name (255) plus its four bytes of type and class is 259, so every question still fits."
+ },
+ "discover|waterlink_instance_of|plusminus|4->5|bc530a41": {
+  "why": "Equivalent: question[] one byte larger; the longest question kept is 259 bytes, so the extra byte is never written or read."
+ },
+ "discover|waterlink_instance_of|plusminus|63->64|9212fea4": {
+  "why": "Equivalent: label[] one byte larger; a label is at most 63 bytes, so the extra byte is never written or read (the compiler built the same binary)."
+ },
+ "discover|waterlink_mdns_announce|plusminus|12->11|b958792c": {
+  "why": "Equivalent in this build: every caller passes WATERLINK_MDNS_MAX (1500) and at most a 260-byte question, so the room test never binds; the compiler built the same binary."
+ },
+ "discover|waterlink_mdns_announce|plusminus|12->13|b958792c": {
+  "why": "Equivalent in this build: every caller passes WATERLINK_MDNS_MAX (1500) and at most a 260-byte question, so the room test never binds; the compiler built the same binary."
+ },
+ "discover|waterlink_mdns_announce|plusminus|160->161|043bb6ac": {
+  "why": "Equivalent in this build: every caller passes WATERLINK_MDNS_MAX (1500) and at most a 260-byte question, so the room test never binds; the compiler built the same binary."
+ },
+ "discover|waterlink_mdns_read|plusminus|0->-1|f5980a69": {
+  "why": "Equivalent: target_length is written by waterlink_rdata_name before any read of it, on every path that reads it."
+ },
+ "discover|waterlink_mdns_read|plusminus|12->11|5849309d": {
+  "why": "Equivalent: an 11-byte packet reads no counts, so the walk never moves past offset 12 and at == length refuses it either way."
+ },
+ "discover|waterlink_mdns_read|plusminus|12->11|8869fbe8": {
+  "why": "Verdict-equivalent: the count bound is only a cost cut before parsing; one byte looser still refuses every impossible count in the walk, and the work stays bounded by the packet's length."
+ },
+ "discover|waterlink_mdns_read|plusminus|4->5|888a31ad": {
+  "why": "Equivalent: a flattened name is at most 255 bytes, so name_length + 5 <= 260 = sizeof question holds whenever name_length + 4 <= 260 does."
+ },
+ "discover|waterlink_mdns_read|plusminus|7->6|33ee38de": {
+  "why": "Equivalent: a 6-byte SRV rdata has no byte left for a target, so no name can end at the record's end and waterlink_rdata_name refuses it."
+ },
+ "discover|waterlink_mdns_read|relation|<=-><|74a267d0": {
+  "why": "Equivalent: a flattened name is at most 255 bytes, so name_length + 4 is at most 259 and never equals sizeof question (260)."
+ },
+ "discover|waterlink_mdns_read|relation|>=->>|fe9a3773": {
+  "why": "Equivalent: a 7-byte SRV rdata ends in a 1-byte name, the root, which target_length <= 1 refuses on the next line anyway."
+ },
+ "net|dhcp_lease_timers|logic|&&->|||b1e1c696": {
+  "why": "Equivalent: after the default repair above it, every lease of 3 s or more has renewal = floor(s/2) >= 1, rebinding - renewal = ceil(s/2) - ceil(s/8) >= 1 and rebinding < s, so each conjunct of the return is true and && or || answers the same."
+ },
+ "net|dhcp_lease_timers|relation|<-><=|01962665": {
+  "why": "Equivalent: the repaired timers are strictly ordered for every lease of 3 s or more (renewal = floor(s/2), rebinding = s - ceil(s/8), whose difference is at least 1), so < and <= cannot differ."
+ },
+ "net|dhcp_read|plusminus|1->0|f5276973": {
+  "why": "Equivalent: dhcp_fields[0] is yiaddr with option 0, which is PAD; dhcp_walk never gathers PAD, so its gathered length is 0 and starting the loop at 0 stores nothing."
+ }
+}

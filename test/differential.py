@@ -57265,6 +57265,112 @@ system_random_fill system_read_retry
 """.split())
 
 
+#       The network stack's own spelling of a kernel number, and the uapi
+#       name the kernel spells it with. Every other number is matched by its
+#       own name; these are the ones written shorter here.
+WIRE_ALIASES = {
+    "NLM_REQUEST": "NLM_F_REQUEST", "NLM_ACK": "NLM_F_ACK", "NLM_DUMP": "NLM_F_DUMP",
+    "NLM_DUMP_INTERRUPTED": "NLM_F_DUMP_INTR", "NLM_REPLACE": "NLM_F_REPLACE",
+    "NLM_EXCLUSIVE": "NLM_F_EXCL", "NLM_CREATE": "NLM_F_CREATE",
+    "NLMSG_IS_NOOP": "NLMSG_NOOP", "NLMSG_IS_ERROR": "NLMSG_ERROR",
+    "NLMSG_IS_DONE": "NLMSG_DONE", "NETLINK_HEADER": "NLMSG_HDRLEN",
+    "IFNAME_SIZE": "IFNAMSIZ",
+}
+
+#       Families of names the uapi headers own. A define here whose name is
+#       in one of them and that the headers also declare is a number the
+#       kernel reads off the wire, and it must be the kernel's.
+WIRE_FAMILIES = ("NLM_", "NLMSG_", "NLA_", "RTM_", "RTA_", "RT_", "RTN_", "RTPROT_",
+                 "RTNLGRP_", "IFLA_", "IFA_", "IFF_", "NDA_", "NUD_", "NL80211_",
+                 "CTRL_", "GENL_", "ETH_", "ARPHRD_", "AUDIT_ARCH_", "SECCOMP_",
+                 "IPPROTO_", "IP_", "SO_", "SOL_", "AF_", "MSG_", "TCP_", "PR_")
+
+WIRE_FILES = ("src/net/net.c", "src/net/wait.c", "src/sh/net.c", "src/sh/host.c",
+              "src/waterlink/waterlink.c", "src/waterlink/discover.c",
+              "src/waterlink/nearby.c", "src/waterlink/link.c",
+              "src/waterlink/service.c")
+
+
+def harness_wire_constants(argv):
+    """Every kernel number the network stack writes as its own #define, against
+    the kernel's uapi headers.
+
+    The netlink flags, message and attribute types, nl80211 commands and
+    attributes, genetlink control and the socket-level numbers are written
+    out by hand in net.c, sh/net.c and host.c, because a spark program has no
+    libc headers. A number off by one there is a request the kernel reads as
+    something else (NLM_DUMP 0x0300 one less is a request that matches and
+    echoes and acknowledges but never dumps), and no check that talks to a
+    mock netlink can see it: the mock was written from the same number. The
+    headers are the second spelling. Names are taken from the source, so a
+    new define in one of the families is compared without anybody listing it;
+    a name the headers do not declare is the stack's own and is left alone.
+    """
+    del argv
+    checks = Checks()
+    pattern = re.compile(r"^#define ([A-Z][A-Z0-9_]+)[ \t]+\(?(0x[0-9a-fA-F]+|\d+)[uUlL]*\)?"
+                         r"[ \t]*(?://[^\n]*|/\*[^\n]*)?$", re.M)
+    seen = {}
+    for path in WIRE_FILES:
+        for name, raw in pattern.findall((HARNESS_ROOT / path).read_text()):
+            value = int(raw, 0)
+            kernel = WIRE_ALIASES.get(name, name)
+            if name not in WIRE_ALIASES and not name.startswith(WIRE_FAMILIES):
+                continue
+            if kernel in seen and seen[kernel][1] != value:
+                checks(False, "%s is %d in %s and %d in %s" % (
+                    name, value, path, seen[kernel][1], seen[kernel][0]))
+            seen.setdefault(kernel, (path, value, name))
+    headers = ("sys/socket.h", "netinet/in.h", "netinet/tcp.h", "sys/prctl.h",
+               "linux/netlink.h", "linux/rtnetlink.h", "linux/genetlink.h",
+               "linux/nl80211.h", "linux/if.h", "linux/if_ether.h", "linux/if_arp.h",
+               "linux/audit.h", "linux/seccomp.h", "linux/filter.h")
+    head = "".join("#include <%s>\n" % h for h in headers) + "#include <stdio.h>\n"
+
+    def program(names):
+        return head + "int main(void)\n{\n" + "".join(
+            '        printf("%s %%lld\\n", (long long)(%s));\n' % (n, n)
+            for n in names) + "        return 0;\n}\n"
+
+    with tempfile.TemporaryDirectory(prefix="wire-constants-") as work:
+        unit = Path(work) / "wire.c"
+        names = sorted(seen)
+        #   The first compile says which names the headers do not declare,
+        #   and those are the stack's own.
+        unit.write_text(program(names))
+        probe = subprocess.run(["cc", "-fsyntax-only", "-w", str(unit)],
+                               capture_output=True, text=True)
+        missing = set(re.findall(r"[‘'](\w+)[’'] undeclared", probe.stderr))
+        known = [n for n in names if n not in missing]
+        unit.write_text(program(known))
+        built = subprocess.run(["cc", "-w", str(unit), "-o", str(Path(work) / "wire")],
+                               capture_output=True, text=True)
+        if built.returncode:
+            print("  FAIL wire constants did not build:\n" + built.stderr[-2000:])
+            write_tally("wire-constants", 0, 1)
+            return 1
+        said = subprocess.run([str(Path(work) / "wire")], capture_output=True,
+                              text=True, check=True).stdout
+    kernel = {n: int(v) for n, v in (line.split() for line in said.splitlines())}
+    for name in known:
+        path, value, ours = seen[name]
+        #   A mask the headers spell as a complement (NLA_TYPE_MASK is
+        #   ~(NLA_F_NESTED | NLA_F_NET_BYTEORDER), a negative int) is the
+        #   same bits in the 16-bit field it masks.
+        theirs = kernel[name] & 0xffff if kernel[name] < 0 and value <= 0xffff \
+            else kernel[name]
+        checks(theirs == value,
+               "%s (%s) is %d in %s but %d in the kernel's headers" % (
+                   ours, name, value, path, kernel[name]))
+    #   A parse that found nothing would agree with everything: the source
+    #   has well over a hundred of these, and every alias must be one.
+    checks(len(known) >= 120, "only %d kernel numbers were compared" % len(known))
+    checks(all(WIRE_ALIASES[a] in kernel for a in WIRE_ALIASES if a in
+               {s[2] for s in seen.values()}),
+           "an alias names something the kernel's headers do not declare")
+    return checks.verdict("wire constants", "wire-constants")
+
+
 def harness_net_dependency_closure(argv):
     """Fail when net.c gains a shared primitive without reviewed evidence.
 
@@ -70362,6 +70468,7 @@ HARNESS_CHECKS = {
     "msan_net": harness_msan_net,
     "net_clock_fault": harness_net_clock_fault,
     "net_math_proof": harness_net_math_proof,
+    "wire_constants": harness_wire_constants,
     "net_dependency_closure": harness_net_dependency_closure,
     "security_hygiene": harness_security_hygiene,
     "pathname_race": harness_pathname_race,

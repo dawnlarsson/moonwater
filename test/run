@@ -3888,6 +3888,7 @@ lane_net()
 {
         python3 test/differential.py --harness net_clock_fault || return 1
         python3 test/differential.py --harness net_math_proof || return 1
+        python3 test/differential.py --harness wire_constants || return 1
         python3 test/differential.py --harness net_dependency_closure || return 1
         python3 test/differential.py --harness security_hygiene || return 1
         freestanding_checks_lane net net

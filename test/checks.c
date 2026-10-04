@@ -60040,6 +60040,31 @@ static fn tls_key_update_rounds(void)
         refused and the output wiped, where the one-byte counter used to
         wrap to zero and restart the chain.
 */
+/*
+        The two constants the TLS 1.3 key schedule starts from, against what
+        they are (RFC 8446 7.1): SHA-256 of nothing, and the "derived" secret
+        of the early secret a handshake without a PSK has. They are written
+        out as bytes, so a byte of either that is wrong is a handshake secret
+        that no server shares, and nothing below the peer harness would see
+        it: both directions of every check here derive from the same table.
+*/
+static fn tls_key_schedule_constants(void)
+{
+        p8 zeros[32];
+        p8 empty[32];
+        p8 early[32];
+        p8 derived[32];
+
+        memory_fill(zeros, 0, sizeof zeros);
+        crypto_sha256_of(zeros, 0, empty);
+        crypto_hkdf_extract(zeros, 32, zeros, 32, early);
+        tls_expand_label(early, "derived", empty, 32, derived, 32);
+        check("tls_empty_sha256 is SHA-256 of nothing",
+              !memory_compare(empty, tls_empty_sha256, 32));
+        check("tls_derived_early is Derive-Secret(early secret, \"derived\", \"\") with no PSK",
+              !memory_compare(derived, tls_derived_early, 32));
+}
+
 static p8 tls_hkdf_long[255 * 32 + 1];
 
 static fn tls_hkdf_expand_ceiling(void)
@@ -65339,6 +65364,23 @@ static fn leasing(void)
         check("a broadcast reply is asked for", (packet[10] & 0x80) != 0);
         check("the hardware address is in it",
               memory_compare(packet + 28, hardware, 6) == 0);
+        {
+                //      Six bytes of chaddr are the address and not one more:
+                //      the byte after the caller's six is not zero here, so
+                //      a copy that ran over would put it on the wire, and
+                //      the rest of chaddr, sname and file must stay clear.
+                p8 wide[8] = {0x52, 0x54, 0x00, 0x12, 0x34, 0x56, 0xee, 0xee};
+                p8 built[400];
+                bool clear = true;
+
+                memory_fill(built, 0xa5, sizeof built);
+                dhcp_build(built, sizeof built, DHCP_DISCOVER, 7, wide, 0, 0, 0,
+                           true);
+                for (positive at = 34; at < DHCP_HEAD; at++)
+                        clear = clear && !built[at];
+                check("a built packet copies six address bytes and leaves the rest of chaddr, sname and file zero",
+                      memory_compare(built + 28, wide, 6) == 0 && clear);
+        }
         check("the cookie says these options are dhcp's",
               network_load_32(packet + DHCP_HEAD) == DHCP_COOKIE);
         check("the first option is the message type",
@@ -65796,6 +65838,48 @@ static fn leasing(void)
                           !wrong);
         }
         {
+                //      Every first octet in each of the three fields the
+                //      unicast rule guards, the others held honest: the
+                //      server (which the grid above never moves), the router
+                //      of a /32 lease (where nothing else checks it is on
+                //      the link) and the address of a /32. A rule off by one
+                //      bit in its shift or its bound moves one octet -- 1/8,
+                //      126/8, 128/8, 223/8 -- and the list above names none.
+                positive wrong[3] = {0, 0, 0};
+
+                for (positive o = 0; o < 512; o++)
+                {
+                        //      Each octet twice: inside its /8 and at its
+                        //      first address, where 224.0.0.0 is the bound.
+                        p32 spot = (p32)(o & 255) << 24 | (o < 256 ? 0x00010203u : 0);
+                        bool want = (o & 255) && (o & 255) != 127 && (o & 255) < 224;
+                        dhcp_lease server = {.address = 0x0a00020f,
+                                             .mask = 0xffffff00,
+                                             .server = spot,
+                                             .seconds = 3600};
+                        dhcp_lease router = {.address = 0x0a00020f,
+                                             .mask = 0xffffffff,
+                                             .router = spot,
+                                             .server = 0x0a000202,
+                                             .seconds = 3600};
+                        dhcp_lease own = {.address = spot,
+                                          .mask = 0xffffffff,
+                                          .server = 0x0a000202,
+                                          .seconds = 3600};
+
+                        wrong[0] += dhcp_lease_usable(address_of server) != want;
+                        //      A router of 0.0.0.0 is no router at all.
+                        wrong[1] += dhcp_lease_usable(address_of router) != (want || !spot);
+                        wrong[2] += dhcp_lease_usable(address_of own) != want;
+                }
+                check("a DHCP server identifier from 0/8, 127/8 or 224/3 refuses the lease, every other first octet keeps it",
+                      !wrong[0]);
+                check("a /32 lease's off-link router is refused in 0/8, 127/8 and 224/3 and kept everywhere else",
+                      !wrong[1]);
+                check("a /32 lease address is unicast for exactly the first octets 1-126 and 128-223",
+                      !wrong[2]);
+        }
+        {
                 dhcp_lease timed = {.seconds = 3600};
 
                 check("omitted DHCP timers use RFC defaults",
@@ -66078,6 +66162,39 @@ static fn leasing_datagrams(void)
               !dhcp_receive(receiver, received, sizeof received, 123, hardware,
                             &lease, &kind, address_of sender_at, false, null,
                             address_of deadline));
+
+        /* A renewal's answer: the ACK keeps the lease and the NAK gives it
+           up, from the server that holds it. dhcp_complete is the one place
+           the two are told apart once the answer matched, and only the
+           interface-bound renewal reaches it, which no namespace-free check
+           can open; its verdict is asked here over the same loopback pair. */
+        for (positive nak = 0; nak < 2; nak++)
+        {
+                dhcp_lease held = {.address = 0x0a00020f, .mask = 0xffffff00,
+                                   .server = 0x0a000202, .seconds = 3600};
+                bipolar status;
+
+                dhcp_build(packet, sizeof packet, nak ? DHCP_NAK : DHCP_ACK, 123,
+                           hardware, 0, 0x0a000202, 0, false);
+                packet[0] = 2;
+                if (!nak)
+                        network_store_32(packet + 16, 0x0a00020f);
+                check("a renewal answer queues",
+                      socket_send((b32)sender, packet, 300, 0,
+                                  address_of receiver_at,
+                                  sizeof receiver_at) == 300);
+                check("a renewal answer deadline starts",
+                      network_deadline_begin(address_of deadline, 1, 0));
+                status = dhcp_complete(receiver, received, sizeof received, 123,
+                                       hardware, &held, address_of sender_at,
+                                       false, address_of deadline);
+                if (nak)
+                        check("a renewal NAK from the lease's server refuses the lease",
+                              status == DHCP_REFUSED);
+                else
+                        check("a renewal ACK from the lease's server keeps the lease",
+                              status == DHCP_OK && held.address == 0x0a00020f);
+        }
         socket_close((b32)receiver);
         socket_close((b32)sender);
         socket_close((b32)other);
@@ -66171,85 +66288,126 @@ static fn dhcp_transaction_randomness(void)
         }
 }
 
+/*
+        Every group gives back each descriptor it opened.
+
+        A socket, a pipe or a confined child's end that a path forgets to
+        close is invisible in any answer a check compares: the exchange
+        still says what it said. The only place it shows is the table, so
+        the walk below counts the open descriptors (fcntl F_GETFD answers
+        for an open one and EBADF for a free one) before and after each
+        group, and a group that ends with more than it began with has
+        dropped a close on some path it took -- the error paths most of
+        all, since those are the ones the fault arms drive. The count is
+        the low 1024, which is past any group's high-water mark here; under
+        qemu-user its own descriptors are in the same table and do not move.
+*/
+static positive net_descriptors_open(void)
+{
+        positive open = 0;
+
+        for (positive fd = 0; fd < 1024; fd++)
+                open += system_call_3(syscall(fcntl), fd, 1, 0) >= 0;
+        return open;
+}
+
+typedef fn (*net_group_body)(void);
+
+static fn net_group(string_address name, net_group_body body)
+{
+        positive before = net_descriptors_open();
+
+        body();
+        checks++;
+        if (net_descriptors_open() > before)
+        {
+                failures++;
+                string_format(log, "  FAIL %s leaves a descriptor open\n", name);
+        }
+}
+
+#define net_group(body) net_group(#body, body)
+
 b32 main(void)
 {
-        arithmetic();
-        building();
-        padding();
-        oversized();
-        attribute_growth();
-        userspace_source_progress();
-        error_frames();
-        link_candidates();
-        talking();
-        resolving();
-        resolving_edges();
-        resolving_truncated();
-        resolving_policy();
-        resolving_walk();
-        resolving_servers();
-        fetching();
-        streaming_chunk_boundaries();
-        http_bounded_store();
-        network_stream_timeouts();
-        network_stream_send_timeout();
-        http_header_deadlines();
-        http_body_deadline();
-        http_body_write_failure();
-        http_tls_resource_exhaustion();
-        dns_dhcp_netlink_resource_exhaustion();
-        http_body_store_midpath_exhaustion();
-        http_body_store_midpath_reserve_fault();
-        http_body_store_large_growth_reserve_fault();
-        net_room_midpath_reserve_fault();
-        http_body_copy_midpath_fault();
-        http_write_spans_partial();
-        http_write_spans_midpath_fault();
-        dns_dhcp_midpath_faults();
-        network_stream_sigpipe();
-        tls_closure_boundaries();
-        tls_record_payload_ceiling();
-        tls_receive_whole_room();
-        tls_sensitive_state_erasure();
-        tls_certificate_dates();
-        tls_certificate_identity_rules();
-        tls_certificate_extension_adversarial();
-        tls_parse_cert_adversarial();
-        tls_certificate_list_depth();
-        tls_client_hello_bounds();
-        tls_client_hello_groups();
-        tls_server_hello_validation();
-        tls_hello_retry_rows();
-        tls_server_flight_validation();
-        tls_encrypted_flight_hs_reassembly();
-        tls_post_handshake_framing();
-        tls_key_update_rounds();
-        tls_hkdf_expand_ceiling();
-        tls_certificate_framing();
-        byte_reader_rows();
-        crypto_floor();
-        crypto_floor_ghash();
-        crypto_floor_field();
-        crypto_floor_montgomery();
-        crypto_floor_inverse();
-        crypto_floor_field_bodies();
-        crypto_floor_wnaf();
-        crypto_floor_g_table();
-        crypto_floor_x25519();
-        crypto_floor_aes();
-        crypto_rsa_served_sizes();
-        tls_name_constraint_rules();
-        tls_ca_issuers_rules();
-        tls_trust_anchor_chains();
-        tls12_pieces();
-        redirect_urls();
-        fetching_for_real();
-        leasing();
-        dhcp_confinement();
-        dhcp_reacquisition_state_matrix();
-        leasing_datagrams();
-        dhcp_transaction_randomness();
-        userspace_route_source_in_namespace();
+        net_group(arithmetic);
+        net_group(building);
+        net_group(padding);
+        net_group(oversized);
+        net_group(attribute_growth);
+        net_group(userspace_source_progress);
+        net_group(error_frames);
+        net_group(link_candidates);
+        net_group(talking);
+        net_group(resolving);
+        net_group(resolving_edges);
+        net_group(resolving_truncated);
+        net_group(resolving_policy);
+        net_group(resolving_walk);
+        net_group(resolving_servers);
+        net_group(fetching);
+        net_group(streaming_chunk_boundaries);
+        net_group(http_bounded_store);
+        net_group(network_stream_timeouts);
+        net_group(network_stream_send_timeout);
+        net_group(http_header_deadlines);
+        net_group(http_body_deadline);
+        net_group(http_body_write_failure);
+        net_group(http_tls_resource_exhaustion);
+        net_group(dns_dhcp_netlink_resource_exhaustion);
+        net_group(http_body_store_midpath_exhaustion);
+        net_group(http_body_store_midpath_reserve_fault);
+        net_group(http_body_store_large_growth_reserve_fault);
+        net_group(net_room_midpath_reserve_fault);
+        net_group(http_body_copy_midpath_fault);
+        net_group(http_write_spans_partial);
+        net_group(http_write_spans_midpath_fault);
+        net_group(dns_dhcp_midpath_faults);
+        net_group(network_stream_sigpipe);
+        net_group(tls_closure_boundaries);
+        net_group(tls_record_payload_ceiling);
+        net_group(tls_receive_whole_room);
+        net_group(tls_sensitive_state_erasure);
+        net_group(tls_certificate_dates);
+        net_group(tls_certificate_identity_rules);
+        net_group(tls_certificate_extension_adversarial);
+        net_group(tls_parse_cert_adversarial);
+        net_group(tls_certificate_list_depth);
+        net_group(tls_client_hello_bounds);
+        net_group(tls_client_hello_groups);
+        net_group(tls_server_hello_validation);
+        net_group(tls_hello_retry_rows);
+        net_group(tls_server_flight_validation);
+        net_group(tls_encrypted_flight_hs_reassembly);
+        net_group(tls_post_handshake_framing);
+        net_group(tls_key_update_rounds);
+        net_group(tls_hkdf_expand_ceiling);
+        net_group(tls_key_schedule_constants);
+        net_group(tls_certificate_framing);
+        net_group(byte_reader_rows);
+        net_group(crypto_floor);
+        net_group(crypto_floor_ghash);
+        net_group(crypto_floor_field);
+        net_group(crypto_floor_montgomery);
+        net_group(crypto_floor_inverse);
+        net_group(crypto_floor_field_bodies);
+        net_group(crypto_floor_wnaf);
+        net_group(crypto_floor_g_table);
+        net_group(crypto_floor_x25519);
+        net_group(crypto_floor_aes);
+        net_group(crypto_rsa_served_sizes);
+        net_group(tls_name_constraint_rules);
+        net_group(tls_ca_issuers_rules);
+        net_group(tls_trust_anchor_chains);
+        net_group(tls12_pieces);
+        net_group(redirect_urls);
+        net_group(fetching_for_real);
+        net_group(leasing);
+        net_group(dhcp_confinement);
+        net_group(dhcp_reacquisition_state_matrix);
+        net_group(leasing_datagrams);
+        net_group(dhcp_transaction_randomness);
+        net_group(userspace_route_source_in_namespace);
 
         return test_report(null);
 }
@@ -71176,6 +71334,191 @@ static bool mdns_read_edge(const p8 address_to packet, positive length,
         return waterlink_mdns_read(at, length, found);
 }
 
+/*
+        What this machine puts on the link, spelled a second time.
+
+        The reader above reads only the PTR and the SRV, so a wrong TTL on
+        the TXT, a TXT whose one byte claims a 255-byte string, a header
+        whose authority count is left as whatever the stack held, or a
+        label one byte out are all invisible to it -- and to every peer
+        check that reads with the same code. Here the packet is built again
+        from RFC 6762/6763 by hand, byte for byte, for every combination of
+        a live announcement and a goodbye, with and without an address, and
+        with and without an echoed question, and the two must be equal.
+*/
+static positive mdns_expected(p8 address_to out, const p8 address_to instance,
+                              const p8 address_to host, p16 port, p32 address,
+                              p32 ttl, p16 id, const p8 address_to question,
+                              positive question_length)
+{
+        static const p8 hex[] = "0123456789abcdef";
+        positive at = 0;
+        positive service, named, machine;
+
+#define PUT16(v) (out[at] = (p8)((v) >> 8), out[at + 1] = (p8)(v), at += 2)
+#define PUT32(v) (PUT16((p32)(v) >> 16), PUT16((p32)(v) & 0xffff))
+        PUT16(id);
+        PUT16(0x8400);
+        PUT16(question ? 1 : 0);
+        PUT16(address ? 4 : 3);
+        PUT16(0);
+        PUT16(0);
+        for (positive i = 0; i < question_length; i++)
+                out[at++] = question[i];
+        service = at;
+        for (positive i = 0; i < WATERLINK_SERVICE_BYTES; i++)
+                out[at++] = waterlink_service_name[i];
+        PUT16(12); PUT16(1); PUT32(ttl ? 4500 : 0); PUT16(26);
+        named = at;
+        out[at++] = 23; out[at++] = 'w'; out[at++] = 'l'; out[at++] = '-';
+        for (positive i = 0; i < 10; i++)
+        {
+                out[at++] = hex[instance[i] >> 4];
+                out[at++] = hex[instance[i] & 15];
+        }
+        PUT16(0xc000 | service);
+        PUT16(0xc000 | named);
+        PUT16(33); PUT16(0x8001); PUT32(ttl); PUT16(29);
+        PUT16(0); PUT16(0); PUT16(port);
+        machine = at;
+        out[at++] = 15; out[at++] = 'w'; out[at++] = 'l'; out[at++] = '-';
+        for (positive i = 0; i < 6; i++)
+        {
+                out[at++] = hex[host[i] >> 4];
+                out[at++] = hex[host[i] & 15];
+        }
+        out[at++] = 5;
+        for (positive i = 0; i < 5; i++)
+                out[at++] = (p8) "local"[i];
+        out[at++] = 0;
+        PUT16(0xc000 | named);
+        PUT16(16); PUT16(0x8001); PUT32(ttl ? 4500 : 0); PUT16(1);
+        out[at++] = 0;
+        if (address)
+        {
+                PUT16(0xc000 | machine);
+                PUT16(1); PUT16(0x8001); PUT32(ttl); PUT16(4);
+                PUT32(address);
+        }
+#undef PUT32
+#undef PUT16
+        return at;
+}
+
+static fn mdns_wire_exact(void)
+{
+        p8 instance[10];
+        p8 host[6] = {0x01, 0x23, 0x45, 0x67, 0x89, 0xab};
+        p8 packet[WATERLINK_MDNS_MAX];
+        p8 expected[WATERLINK_MDNS_MAX];
+        p8 question[WATERLINK_SERVICE_BYTES + 4];
+        positive question_length;
+        positive wrong = 0;
+        positive rows = 0;
+        struct waterlink_found found;
+
+        random_seeded(instance, 10, 7);
+        question_length = waterlink_mdns_query(packet, sizeof packet) - 12;
+        memory_copy(question, packet + 12, question_length);
+        for (positive shape = 0; shape < 8; shape++)
+        {
+                p32 ttl = shape & 1 ? 0 : 120;
+                p32 address = shape & 2 ? 0 : 0x0a000105;
+                bool asked = shape & 4;
+                positive want, got;
+
+                //      Poisoned first, so a field the builder leaves alone
+                //      shows as the poison rather than as a lucky zero.
+                memory_fill(packet, 0xa5, sizeof packet);
+                got = waterlink_mdns_announce(packet, sizeof packet, instance,
+                                              host, 22348, address, ttl,
+                                              asked ? 0x1234 : 0,
+                                              asked ? question : null,
+                                              asked ? question_length : 0);
+                want = mdns_expected(expected, instance, host, 22348, address,
+                                     ttl, asked ? 0x1234 : 0,
+                                     asked ? question : null,
+                                     asked ? question_length : 0);
+                rows++;
+                wrong += got != want || memory_compare(packet, expected, want);
+        }
+        check("every announcement and goodbye is byte for byte the DNS-SD records it means",
+              rows == 8 && !wrong);
+
+        //      The question a one-shot asker sent is kept whole, to be echoed:
+        //      its name, its type and its class, and not a byte more.
+        question_length = waterlink_mdns_query(packet, sizeof packet);
+        check("a question is kept exactly as it was asked",
+              waterlink_mdns_read(packet, question_length, address_of found) &&
+                  found.asked &&
+                  found.question_length == question_length - 12 &&
+                  !memory_compare(found.question, packet + 12,
+                                  question_length - 12));
+
+        //      The smallest question there is, the root name: exactly the five
+        //      bytes the count bound allows for one, which it must not refuse.
+        {
+                static const p8 smallest[] = {0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0,
+                                              0, 0, 12, 0, 1};
+
+                check("a question of the root name, at the count bound exactly, is read",
+                      waterlink_mdns_read(smallest, sizeof smallest,
+                                          address_of found) &&
+                          !found.asked);
+        }
+
+        //      An SRV whose target is the root, framed exactly (RFC 2782:
+        //      the service is decidedly not available), beside the same
+        //      record with a real one-label target.
+        for (positive root = 0; root < 2; root++)
+        {
+                positive at = 0;
+                positive named;
+
+                memory_fill(packet, 0, sizeof packet);
+                packet[2] = 0x84;
+                packet[7] = 2;
+                at = 12;
+                memory_copy(packet + at, waterlink_service_name,
+                            WATERLINK_SERVICE_BYTES);
+                at += WATERLINK_SERVICE_BYTES;
+                network_store_16(packet + at, 12);
+                network_store_16(packet + at + 2, 1);
+                network_store_32(packet + at + 4, 120);
+                network_store_16(packet + at + 8, 6);
+                at += 10;
+                named = at;
+                packet[at++] = 3;
+                memory_copy(packet + at, "abc", 3);
+                at += 3;
+                network_store_16(packet + at, 0xc00c);
+                at += 2;
+                network_store_16(packet + at, 0xc000 | named);
+                network_store_16(packet + at + 2, 33);
+                network_store_16(packet + at + 4, 0x8001);
+                network_store_32(packet + at + 6, 120);
+                network_store_16(packet + at + 10, root ? 7 : 9);
+                at += 12;
+                network_store_16(packet + at + 4, 22348);
+                at += 6;
+                if (!root)
+                {
+                        packet[at++] = 1;
+                        packet[at++] = 'h';
+                }
+                packet[at++] = 0;
+                if (root)
+                        check("an SRV to the root target is read but is no endpoint",
+                              waterlink_mdns_read(packet, at, address_of found) &&
+                                  !found.count);
+                else
+                        check("the same SRV to a real target is an endpoint",
+                              waterlink_mdns_read(packet, at, address_of found) &&
+                                  found.count == 1 &&
+                                  found.instance[0].port == 22348);
+        }
+}
+
 static fn mdns_parse(void)
 {
         p8 instance[10];
@@ -71660,6 +72003,7 @@ b32 main(void)
         group_identity();
         group_pairing();
         mdns_parse();
+        mdns_wire_exact();
         return test_report(null);
 }
 #endif /* CHECK_waterlink */
