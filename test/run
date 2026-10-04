@@ -12506,7 +12506,8 @@ mkdir /tmp/theirs && chown 1000:1000 /tmp/theirs && echo a > /tmp/theirs/a && ec
 before=$(stat -c %i /etc/resolv.conf)
 n=0; for p in /proc/[0-9]*; do case $(tr '\0' ' ' < $p/cmdline 2>/dev/null) in *'ip watch'*) kill ${p#/proc/}; n=$((n+1));; esac; done
 w=0; while [ $w -lt 60 ]; do [ $n -gt 0 ] && [ "$(stat -c %i /etc/resolv.conf)" != "$before" ] && break; w=$((w+1)); /shell -c 'sleep 1'; done
-printf 'watch-killed-%s-back-%s\n' "$([ $n -gt 0 ] && echo yes || echo no)" "$(ip addr show eth0 2>/dev/null | grep -c 'inet ')"
+[ $n -gt 0 ] && [ "$(stat -c %i /etc/resolv.conf)" != "$before" ] && again=yes || again=no
+printf 'watch-killed-%s-back-%s\n' $again "$(ip addr show eth0 2>/dev/null | grep -c 'inet ')"
 printf 'route-%s\n' "$(ip route 2>/dev/null | grep -c default)"
 #
 #       The kernel network settings the default tier asks of the network
