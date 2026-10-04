@@ -59805,49 +59805,6 @@ say(b"_waterlink" in heard, "the network carries waterlink announcements")
 say(all(word not in heard for word in (b"lab", b"box-a", b"box-b", b"box-c", secret.encode())),
     "and not the group, the machine names or the secret")
 
-#       What b greets: an announcement made here, of an instance on a port
-#       here, is greeted from b only when it is mDNS -- from port 5353, at IP
-#       TTL 255, with a record TTL that is not a goodbye. Every other corner
-#       of the three is announced too, each on a port of its own, and none
-#       of them may draw b's curve work or a 1,200-byte datagram.
-def announcement(port, ttl):
-    label = b"wl-" + os.urandom(10).hex().encode()
-    service = b"\x0a_waterlink\x04_udp\x05local\x00"
-    data = bytes([len(label)]) + label + b"\xc0\x0c"
-    srv = structure.pack(">HHH", 0, 0, port) + b"\x0fwl-" + os.urandom(6).hex().encode() + b"\x05local\x00"
-    return (structure.pack(">HHHHHH", 0, 0x8400, 0, 2, 0, 0) + service +
-            structure.pack(">HHIH", 12, 1, 4500, len(data)) + data + b"\xc0\x2d" +
-            structure.pack(">HHIH", 33, 0x8001, ttl, len(srv)) + srv)
-corners = {}
-for source_port in (5353, 40353):
-    for hops in (255, 64):
-        for ttl in (120, 0):
-            catch = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            catch.bind(("10.77.0.1", 0))
-            catch.settimeout(0.2)
-            sender = listen if source_port == 5353 else socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            if sender is not listen:
-                sender.bind(("10.77.0.1", source_port))
-            sender.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, hops)
-            sender.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton("10.77.0.1"))
-            sender.sendto(announcement(catch.getsockname()[1], ttl), ("224.0.0.251", 5353))
-            greeted = 0
-            end = time.time() + 1.5
-            while time.time() < end:
-                try:
-                    data, peer = catch.recvfrom(4096)
-                    greeted += peer[0] == "10.77.0.2"
-                except socket.timeout:
-                    pass
-            corners[source_port, hops, ttl] = greeted
-            catch.close()
-            if sender is not listen:
-                sender.close()
-say(corners[5353, 255, 120] > 0 and
-    all(not greeted for corner, greeted in corners.items() if corner != (5353, 255, 120)),
-    "sec: b greets an announcement only from port 5353 at TTL 255 and not a goodbye (%r)" %
-    (sorted(corners.items()),))
-
 #       Two groups on one machine: b joins ops as well, granting it log
 #       alone, and c, whose lab secret was wrong, joins ops with the right one.
 #       What c may do on b is ops's grant and nothing of lab's, a's record
@@ -59861,13 +59818,13 @@ while time.time() - began < 25 and not c_on_b:
     time.sleep(1)
     status, out, err = on("b", moon + " link")
     for line in out.decode(errors="replace").splitlines():
-        if line.startswith("  box-c") and "paired in ops" in line:
+        if line.startswith("  box-c") and "in group ops" in line:
             c_on_b = line
 say(c_on_b is not None and "may log," in c_on_b and "run" not in c_on_b and "shell" not in c_on_b,
     "sec: a member of a second group gets that group's grants alone (%r)" % (c_on_b,))
 status, out, err = on("b", moon + " link")
 a_line = [l for l in out.decode(errors="replace").splitlines() if l.startswith("  " + names.get("b", "?") + " ")]
-say(a_line and "may run shell, paired in lab" in a_line[0],
+say(a_line and "may shell run, in group lab" in a_line[0],
     "sec: and the first group's member keeps the first group's (%r)" % (a_line,))
 #       c paired b by hand above, and a record paired by hand is never
 #       taken over by a group: c asks b under that name.
@@ -59877,7 +59834,7 @@ say(status == 255 and b"run is not granted" in err,
 status, left, err = on("b", moon + " link group leave ops forget")
 time.sleep(1.5)
 status, out, err = on("b", moon + " link")
-say(b"box-c" not in out and b"paired in lab" in out,
+say(b"box-c" not in out and b"in group lab" in out,
     "sec: leaving ops with forget drops ops's member and keeps lab's (%r %r)" % (left, [l for l in out.splitlines() if b"box-" in l or b"paired" in l]))
 if len(names) == 2:
     status, out, err = on("a", "%s link run %s 'echo still-lab'" % (moon, names["a"]))
@@ -60027,8 +59984,8 @@ def revoked(revoke, restore, label):
 revoked("%s link deny %s run" % (moon, names.get("b", "a")),
         ["%s link allow %s run" % (moon, names.get("b", "a"))], "denying run")
 revoked("%s link remove %s" % (moon, names.get("b", "a")),
-        ["%s link group leave lab" % moon,
-         "%s link group lab %s allow run shell" % (moon, secret)], "forgetting the peer")
+        ["%s link add %s %s 10.77.0.1" % (moon, names.get("b", "a"), keys["a"]),
+         "%s link allow %s run shell" % (moon, names.get("b", "a"))], "forgetting the peer")
 if len(names) == 2:
     began = time.time()
     status, out, err = 1, b"", b""

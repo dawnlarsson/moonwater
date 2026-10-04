@@ -73823,9 +73823,26 @@ static positive wls_mdns_naming(p8 address_to packet, const p16 address_to ports
 
         memory_zero(packet, 12);
         packet[2] = 0x84;
-        packet[7] = (p8)count;
+        packet[7] = (p8)(2 * count);
         for (positive one = 0; one < count; one++)
         {
+                //      The service's PTR to the instance: an SRV nobody
+                //      advertises is not discovery.
+                memory_copy(packet + at, waterlink_service_name,
+                            WATERLINK_SERVICE_BYTES);
+                at += WATERLINK_SERVICE_BYTES;
+                memory_copy(packet + at, "\x00\x0c\x80\x01\x00\x00\x11\x94", 8);
+                at += 8;
+                network_store_16(packet + at, 6 + WATERLINK_SERVICE_BYTES);
+                at += 2;
+                packet[at++] = 5;
+                memory_copy(packet + at, "wl-x", 4);
+                packet[at + 4] = (p8)('a' + one);
+                at += 5;
+                memory_copy(packet + at, waterlink_service_name,
+                            WATERLINK_SERVICE_BYTES);
+                at += WATERLINK_SERVICE_BYTES;
+
                 packet[at++] = 5;
                 memory_copy(packet + at, "wl-x", 4);
                 packet[at + 4] = (p8)('a' + one);
@@ -73892,10 +73909,23 @@ static fn mdns_names_one(void)
         check("sec: the first instance with a port is the one greeted, past "
               "those without",
               entropy_draws - before == 1 &&
-                      link_greeted_lately(wls_office.mark, wls_loopback, 41100,
-                                          6200001) &&
-                      !link_greeted_lately(wls_office.mark, wls_loopback, 41101,
-                                           6200001));
+                      link_greeted_recent(wls_loopback, wls_office.mark, 41100,
+                                          true, 6200001) &&
+                      !link_greeted_recent(wls_loopback, wls_office.mark, 41101,
+                                           true, 6200001));
+
+        //      Only mDNS is greeted: the same announcement from a source port
+        //      other than 5353 draws no curve work (RFC 6762 section 6).
+        wls_group();
+        before = entropy_draws;
+        length = wls_mdns_naming(packet, many, 1);
+        link_nearby_heard(packet, length, wls_loopback, 40353, 0, 6300000);
+        check("sec: an announcement from a port other than 5353 is not greeted",
+              entropy_draws == before);
+        link_nearby_heard(packet, length, wls_loopback, WATERLINK_MDNS_PORT, 0,
+                          6300001);
+        check("and the same announcement from 5353 is",
+              entropy_draws - before == 1);
 }
 
 //      A group the greeted machine has, in memory and as the file: one that
