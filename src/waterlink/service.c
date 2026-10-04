@@ -57,6 +57,8 @@
 #define LINK_KEY_PATH "/root/link.key"
 #define LINK_PEERS_PATH "/root/link.peers"
 #define LINK_PEERS_NEXT "/root/link.peers.next"
+#define LINK_GROUPS_PATH "/root/link.groups"
+#define LINK_GROUPS_NEXT "/root/link.groups.next"
 #define LINK_PORT_PATH "/root/link.port"
 #define LINK_LOCK_PATH HOST_STATE "/link.lock"
 #define LINK_STATE_PATH HOST_STATE "/link.state"
@@ -113,8 +115,7 @@
 #define LINK_SEGMENTS ((65535 - 40 - 8) / WATERLINK_DATAGRAM)
 
 /*      A grant by name, and what a request needs of one: ask is the
-        request byte that needs this grant, 0 for a grant no request asks
-        for yet. */
+        request byte that needs this grant. */
 typedef struct
 {
         string_address name;
@@ -124,13 +125,10 @@ typedef struct
 } link_grant;
 
 static const link_grant link_grants[] = {
-    {"verbs", WATERLINK_MAY_VERBS, 0, 0},
-    {"run", WATERLINK_MAY_RUN, LINK_ASK_RUN, 0},
     {"shell", WATERLINK_MAY_SHELL, LINK_ASK_SHELL, 0},
-    {"screen", WATERLINK_MAY_SCREEN, 0, 0},
+    {"run", WATERLINK_MAY_RUN, LINK_ASK_RUN, 0},
     {"files", WATERLINK_MAY_FILES, LINK_ASK_PUSH, LINK_ASK_PULL},
     {"log", WATERLINK_MAY_LOG, LINK_ASK_LOG, 0},
-    {"channels", WATERLINK_MAY_CHANNELS, 0, 0},
 };
 
 // The grant a word names, or 0.
@@ -224,12 +222,23 @@ static bool link_key_parse(string_address text, p8 address_to key)
         underscore, starting with a letter or digit: nothing a terminal would
         act on, nothing a shell word would split.
 */
+/*      The words `moonwater link` itself takes in the place of a machine's
+        name, which no machine or group may be called: link NAME is a
+        terminal on the one, and link log is not. */
+static const string_address link_words[] = {
+    "on",    "off",  "key",  "serve", "pair", "add",  "remove", "allow",
+    "deny",  "group", "leave", "push", "pull", "log",  "shell", "run",  "help",
+};
+
 static bool link_name_good(string_address name)
 {
         positive length = string_length(name);
 
         if (!length || length >= WATERLINK_NAME_MAX)
                 return false;
+        for (positive word = 0; word < array_count(link_words); word++)
+                if (string_equals(name, link_words[word]))
+                        return false;
 
         for (positive at = 0; at < length; at++)
         {
@@ -924,6 +933,36 @@ static bool link_part_owned(bipolar handle, p8 address_to path)
 }
 
 /*
+        Whether a path is one of the files the link is made of: its key, the
+        machines and groups it knows, the stamps it keeps and the script the
+        machine runs at boot. `files` is every file root has, bar these: the
+        key is this machine to every machine that knows it, and the rest say
+        who else may be anything here, which no peer is to be handed by a
+        grant for files. Looked at by inode, so a link, a second name or a
+        path spelled round one is the same file; a path that is not there is
+        not.
+*/
+static bool link_path_is_own(string_address path)
+{
+        static const string_address own[] = {
+            LINK_KEY_PATH, LINK_PEERS_PATH, LINK_GROUPS_PATH, LINK_STAMPS_PATH,
+            HOST_MACHINE_SCRIPT};
+        file_facts target;
+
+        if (!file_look_at(path, address_of target))
+                return false;
+        for (positive at = 0; at < array_count(own); at++)
+        {
+                file_facts named;
+
+                if (file_look_at(own[at], address_of named) &&
+                    file_same_identity(address_of target, address_of named))
+                        return true;
+        }
+        return false;
+}
+
+/*
         A staging file is removed, or renamed over its name, only while the
         name is still the inode the transfer holds open. A name replaced
         underneath it belongs to somebody else.
@@ -945,18 +984,100 @@ static bool link_part_publish(bipolar handle, p8 address_to part,
         return false;
 }
 
+/*
+        Whether the command behind a pidfd has ended, and taken off the
+        kernel's table when it has, with the status a shell would give it. A
+        command that cannot be waited for is as ended as it will be known.
+*/
+static bool link_command_ended(bipolar pidfd, b32 address_to status)
+{
+        p8 information[128];
+        bipolar waited;
+
+        memory_zero(information, sizeof information);
+        waited = system_call_5(syscall(waitid), 3, (positive)pidfd,
+                               (positive)information, 4 | 1, 0);
+        if (waited == -ECHILD)
+        {
+                address_to status = LINK_FAILED;
+                return true;
+        }
+        //      siginfo: code at 8, the pid at 16 (zero while it runs, under
+        //      WNOHANG), the status at 24.
+        if (waited < 0 || !((b32 address_to)information)[4])
+                return false;
+        address_to status = ((b32 address_to)information)[2] == 1
+                                    ? ((b32 address_to)information)[6]
+                                    : 128 + ((b32 address_to)information)[6];
+        return true;
+}
+
+/*
+        A session that ends hangs up on its command, which is not yet gone
+        when it does, and a child nobody waits for stays a zombie until the
+        listener ends: a `run` peer could fill the machine's table of
+        processes with them. So the pidfd of a command that is still there
+        waits here, and every turn asks after each. A command that ignores
+        the hangup is waited for when it does end, and past the last place
+        the oldest is let go, as every one was before.
+*/
+#define LINK_REAPING 16
+static bipolar link_reaping[LINK_REAPING];
+static positive link_reaping_count;
+
+static fn link_reap_keep(bipolar pidfd)
+{
+        b32 status;
+
+        if (link_command_ended(pidfd, address_of status))
+        {
+                system_close(pidfd);
+                return;
+        }
+        if (link_reaping_count == LINK_REAPING)
+        {
+                system_close(link_reaping[0]);
+                memory_copy(link_reaping, link_reaping + 1,
+                            (LINK_REAPING - 1) * sizeof link_reaping[0]);
+                link_reaping_count--;
+        }
+        link_reaping[link_reaping_count++] = pidfd;
+}
+
+static fn link_reap(void)
+{
+        for (positive at = 0; at < link_reaping_count;)
+        {
+                b32 status;
+
+                if (!link_command_ended(link_reaping[at], address_of status))
+                {
+                        at++;
+                        continue;
+                }
+                system_close(link_reaping[at]);
+                link_reaping[at] = link_reaping[--link_reaping_count];
+        }
+}
+
 static fn link_session_close(struct link_session address_to s)
 {
         if (s->part[0])
                 link_part_discard(s->writes[0].fd, s->part);
         if (s->pidfd >= 0)
-        {
                 (void)system_call_4(syscall(pidfd_send_signal),
                                     (positive)s->pidfd, 1, 0, 0);
-                system_close(s->pidfd);
-        }
-        if (s->pid > 0)
+        //      The group too, while the command is not yet waited for: once
+        //      it is, its number may be some other process's.
+        if (s->pid > 0 && !s->exited)
                 (void)system_call_2(syscall(kill), (positive)-s->pid, 1);
+        if (s->pidfd >= 0)
+        {
+                if (s->exited)
+                        system_close(s->pidfd);
+                else
+                        link_reap_keep(s->pidfd);
+        }
         for (positive at = 0; at < 2; at++)
         {
                 if (s->reads[at].fd > 2 && s->reads[at].fd != s->terminal)
@@ -1315,6 +1436,9 @@ static fn link_exited(struct link_session address_to s, b32 status, p64 now)
         s->exited = true;
         s->exited_at = now;
         s->status = status;
+        //      What was said of the output before the end says nothing of
+        //      what the command left in the pipe: it is asked again.
+        s->reads[0].quiet = s->reads[1].quiet = false;
 }
 
 static fn link_push_done(struct link_session address_to s, p64 now)
@@ -1654,6 +1778,12 @@ static fn link_request(struct link_session address_to s, p8 address_to payload,
         }
         if (s->kind == LINK_KIND_PUSH)
                 memory_copy(address_of mode, payload + 1, 4);
+        if ((s->kind == LINK_KIND_PUSH || s->kind == LINK_KIND_PULL) &&
+            link_path_is_own((string_address)text))
+        {
+                link_refuse(s, "that file is part of the link itself");
+                return;
+        }
 
         //      Pull and log are commands the machine already has, named here
         //      and never parsed by a shell.
@@ -1950,29 +2080,23 @@ static fn link_session_streams(struct link_session address_to s, p64 now)
         //      asked when the pidfd says it is there.
         if (s->pidfd >= 0 && !s->exited && !s->pid_quiet)
         {
-                p8 information[128];
+                b32 status;
 
-                memory_zero(information, sizeof information);
-                //      siginfo: code at 8, the pid at 16 (zero while it
-                //      runs, under WNOHANG), the status at 24.
-                if (system_call_5(syscall(waitid), 3, (positive)s->pidfd,
-                                  (positive)information, 4 | 1, 0) >= 0 &&
-                    ((b32 address_to)information)[4])
-                {
-                        b32 code = ((b32 address_to)information)[2];
-                        b32 value = ((b32 address_to)information)[6];
-
-                        link_exited(s, code == 1 ? value : 128 + value, now);
-                }
+                if (link_command_ended(s->pidfd, address_of status))
+                        link_exited(s, status, now);
                 else
                         s->pid_quiet = true;
         }
 
         //      A terminal can stay open behind a command that left something
         //      running in the background; a moment after the command ends, the
-        //      session ends with it, as ssh's does.
+        //      session ends with it, as ssh's does. Only a stream that has
+        //      said "not now" since the end is let go: what the link has not
+        //      yet taken from a pipe is the command's output still, however
+        //      long a slow path or a stopped reader keeps it waiting.
         if (s->exited && link_age(now, s->exited_at) > 300000)
-                s->reads[0].done = s->reads[1].done = true;
+                for (positive at = 0; at < 2; at++)
+                        s->reads[at].done |= s->reads[at].quiet;
 
         if (s->exited && s->reads[0].done && s->reads[1].done && !s->exit_sent &&
             waterlink_room(s->link) >= 2)
@@ -2030,7 +2154,7 @@ static positive link_stamp_at(p8 address_to key)
 }
 
 /* Peer removal must eventually release its replay slot. The listener may
-   outlive `link forget`, so compact stale markers when capacity matters
+   outlive `link remove`, so compact stale markers when capacity matters
    rather than letting forgotten peers permanently deny a new identity. */
 static fn link_stamps_prune(void)
 {
@@ -2691,6 +2815,7 @@ static p64 link_sessions_turn(p64 now)
 
                 due = waterlink_wake(s->link, now);
                 if (link_self.server && s->exited && !s->exit_sent &&
+                    s->exited_at + 300000 >= now &&
                     s->exited_at + 300000 < due)
                         due = s->exited_at + 300000;
                 if (due < wake)
@@ -2788,6 +2913,9 @@ static b32 link_serve(void)
         if (link_identity(address_of link_self.me, true) < 0)
                 return host_refuse("%s cannot be read or made\n", LINK_KEY_PATH);
 
+        //      A relative path in a push is where a command's is, in /root,
+        //      and not wherever whoever started the listener was.
+        (void)system_call_1(syscall(chdir), (positive)(string_address) "/root");
         lock = link_lock_take();
         if (lock < 0)
         {
@@ -2824,6 +2952,7 @@ static b32 link_serve(void)
                         break;
 
                 wake = link_sessions_turn(now);
+                link_reap();
                 link_state_write(now);
                 due = link_nearby_tick(now);
                 link_wait(watch, quiet,
@@ -3017,7 +3146,7 @@ static b32 link_client_run(string_address name, p8 kind,
 
         if (link_identity(address_of link_self.me, false) < 0)
                 return host_refuse("this machine has no link key; "
-                                   "moonwater link key makes one%s\n",
+                                   "moonwater link on makes one%s\n",
                                    "");
 
         link_peers_load(address_of peers);
@@ -3025,8 +3154,8 @@ static b32 link_client_run(string_address name, p8 kind,
         if (!peer)
                 return host_refuse("no peer is called %s\n", name);
         if (!peer->port)
-                return host_refuse("%s has no address; pair it again with "
-                                   "one\n",
+                return host_refuse("%s has no address: moonwater link add "
+                                   "it again with one\n",
                                    name);
 
         //      The request, before anything is sent: a command that cannot be

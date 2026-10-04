@@ -164,6 +164,23 @@ _Static_assert(sizeof(struct header) == SPARK_HEADER_SIZE,
    the kernel picks, so it is written here beside it and nowhere else. */
 #define SPARK_TOOL_PROGRAM "/shell"
 
+/*
+        The environment of a command the machine starts on its own account: a
+        bound event's line, which the kernel runs, an init or exit entry, and
+        the machine script. One list for all three, because a command found by
+        name in one and not in another is the bug that was here -- a bowl's
+        launcher ran from `bind init` and was not found from `bind volume_up`.
+        The PATH is the one a terminal gives its shell, bowl.c's
+        BOWL_DEFAULT_PATH, which the kernel cannot include; the image_nodes
+        harness holds the two equal.
+*/
+#define SPARK_COMMAND_PATH "/bin:/usr/bin:/bowls/bin:/"
+#define SPARK_COMMAND_ENVIRONMENT(each)                                       \
+        each("HOME", "/root") each("PATH", SPARK_COMMAND_PATH)                \
+        each("TERM", "dumb") each("LANG", "C.UTF-8")
+// One NAME=value string per variable, for an environment given as a vector.
+#define SPARK_ENVIRONMENT_ENTRY(name, value) name "=" value,
+
 /* What the compositor starts once it has a screen. A root-level link to the
    shell image, which the build makes for every applet the SYSTEM category
    holds -- so the name here has to stay one of those, and the image_nodes
@@ -360,9 +377,9 @@ _Static_assert(sizeof(struct snapshot_request) == 32,
         reading and setting the boot settings. 8 was never used and stays
         that way. 14 and 15 are Moonwater's machine process and script;
         they are defined in moonwater.c so Spark stays the image and spawn
-        device. The next request takes the next free number past the
-        highest, 16 at the time of writing, and a gap is never filled: an
-        old program sending an old number must never reach a new request
+        device. 16 is a window's stride (window.c). The next request takes
+        the number after the highest one in use, and a gap is never filled:
+        an old program sending an old number must never reach a new request
         that happens to share it.
 */
 

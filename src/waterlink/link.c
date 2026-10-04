@@ -186,6 +186,14 @@ struct waterlink_link {
                 is left in the band. */
         p64 banded;
         p16 queued[WATERLINK_KEYS];
+
+        /*      What hold asks of every frame that arrives ahead, answered
+                without a walk of the key's chain: where the chain ends (only
+                to be read while the key holds anything), and a bit, by the low
+                six bits of its sequence, for each stream frame it holds --
+                the sixty four after what was taken, so no two share one. */
+        p32 held_last[WATERLINK_KEYS];
+        p64 held_mask[WATERLINK_KEYS];
 };
 
 /*
@@ -1576,7 +1584,13 @@ bool waterlink_idle(struct waterlink_link address_to link)
 }
 
 /*
-        Hold a frame for its key: in the key's chain by sequence, once. With
+        Hold a frame for its key: in the key's chain by sequence, once. This
+        is where a peer's frames that are of no use to anyone land, so none
+        costs a walk of the chain it can avoid: a stream frame more than a
+        window past what was taken is one no honest sender makes, and a copy
+        of one held is a bit; a register frame no newer than one held is
+        never handed on, since only the newest is; and what goes at the end
+        of the chain, which is most of what arrives, is not looked for. With
         the pool full it is dropped unheld, and the sender, which never heard
         of it arriving, sends it again.
 */
@@ -1585,10 +1599,42 @@ static KEEP fn waterlink_hold(struct waterlink_link address_to link,
                               struct waterlink_frame address_to head,
                               p8 address_to payload)
 {
+        p8 key = head->key;
+        p64 bit = 1ull << (head->sequence & 63);
+        bool durable = (head->flags & WATERLINK_FRAME_DURABLE) != 0;
         p32 prior = WATERLINK_NONE;
         p32 look = live->first;
         p32 at;
 
+        if (durable)
+        {
+                if (head->sequence - live->delivered > WATERLINK_KEY_WINDOW)
+                {
+                        link->spilled++;
+                        return;
+                }
+                if (link->held_mask[key] & bit)
+                        return;
+        }
+        else if (look != WATERLINK_NONE &&
+                 head->sequence <= link->held[link->held_last[key]].head.sequence)
+        {
+                link->stale++;
+                return;
+        }
+
+        at = link->held_free;
+        if (at == WATERLINK_NONE)
+        {
+                link->spilled++;
+                return;
+        }
+        if (look != WATERLINK_NONE &&
+            head->sequence > link->held[link->held_last[key]].head.sequence)
+        {
+                prior = link->held_last[key];
+                look = WATERLINK_NONE;
+        }
         while (look != WATERLINK_NONE &&
                link->held[look].head.sequence < head->sequence)
         {
@@ -1599,12 +1645,6 @@ static KEEP fn waterlink_hold(struct waterlink_link address_to link,
             link->held[look].head.sequence == head->sequence)
                 return;
 
-        at = link->held_free;
-        if (at == WATERLINK_NONE)
-        {
-                link->spilled++;
-                return;
-        }
         link->held_free = link->held[at].next;
         link->held[at].head = address_to head;
         if (head->length)
@@ -1614,6 +1654,10 @@ static KEEP fn waterlink_hold(struct waterlink_link address_to link,
                 live->first = at;
         else
                 link->held[prior].next = at;
+        if (look == WATERLINK_NONE)
+                link->held_last[key] = at;
+        if (durable)
+                link->held_mask[key] |= bit;
         link->kept++;
 }
 
@@ -1641,7 +1685,10 @@ static fn waterlink_held_drop(struct waterlink_link address_to link,
                               struct waterlink_receiving address_to live)
 {
         p32 at = live->first;
+        struct waterlink_frame address_to head = address_of link->held[at].head;
 
+        if (head->flags & WATERLINK_FRAME_DURABLE)
+                link->held_mask[head->key] &= ~(1ull << (head->sequence & 63));
         live->first = link->held[at].next;
         link->held[at].next = link->held_free;
         link->held_free = at;

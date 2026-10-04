@@ -14,11 +14,13 @@ the whole system is meant to stay under 15 MB.
 what the machine's events do.
 
 ```sh
-moonwater                              where this session runs: live, from a disk, or waiting for an answer
-moonwater install DISK [--removable]   erase DISK and install Moonwater on it
-moonwater update [DISK]                write this build over an install, keeping its data and settings
-moonwater use [DISK]                   run this build with an install's /bowls, /root and /home
-moonwater live                         leave the disks alone this session
+moonwater                              the commands
+moonwater status                       this session as one page: build, disks, Canvas, binds, settings
+moonwater setup                        live or kept on a disk, and the installs found
+moonwater setup install DISK [removable]  erase DISK and install Moonwater on it
+moonwater setup update [DISK]          write this build over an install, keeping its data and settings
+moonwater setup use [DISK]             run this build with an install's /bowls, /root and /home
+moonwater setup live                   leave the disks alone this session
 moonwater wipe                         forget /home and extra /root; keep the machine
 
 moonwater bind                         the machine's events, and what each runs
@@ -60,32 +62,41 @@ moonwater timezone [auto|ZONE|list]    IANA name, country code, +1 or POSIX TZ s
 moonwater ntp [on|off]                 set the clock from the network [on]
 moonwater ntp sampling [on|off]        five samples from each of three servers, the best agreeing one wins [on]
 
-moonwater link                         on or off, this machine's key, peers, what is open
-moonwater link on|off                  listen on udp 22348, kept across boots [off]
-moonwater link key                     this machine's public key
-moonwater link pair NAME KEY [HOST[:PORT]]
-moonwater link join NAMESPACE [SECRET] [allow GRANT...]
-moonwater link leave NAMESPACE [forget]
-moonwater link forget NAME
-moonwater link allow|deny NAME GRANT...  run shell files log screen channels verbs
-moonwater link shell NAME              a terminal on NAME
-moonwater link run NAME COMMAND...     one command on NAME, with its output and status here
+moonwater link                         who this machine is linked with and what each may do
+moonwater link pair [NAME]             make a code, like space-wizard abc-def, and wait for a machine to use it
+moonwater link NAME CODE               link to the machine called NAME, which is waiting on that code
+moonwater link NAME [COMMAND...]       a terminal on NAME, or one command with its output and status here
 moonwater link push NAME FILE PATH     a file to NAME, whole or not at all
 moonwater link pull NAME PATH FILE     a file from NAME
 moonwater link log NAME                follow NAME's kernel log
-moonwater link serve                   the listener in the foreground
+moonwater link add NAME KEY [HOST[:PORT]]   link by key, with no code
+moonwater link remove NAME
+moonwater link allow|deny NAME GRANT...  shell run log files (any file but the link's own)
+moonwater link group [NAME [SECRET] [allow GRANT...]]   machines on one network that link themselves
+moonwater link group leave NAME [forget]
+moonwater link on|off                  listen on udp 22348, kept across boots [off]
 ```
 
 Commands given to `moonwater` run as root through the shell, as if typed.
 `bind init` runs in the background and keeps each command's output in
 `/run/moonwater/init`; `bind exit` allows 10 seconds a command and 30 in all.
 
+**Live and installed.** A machine started from the stick is a live session:
+Moonwater runs from memory and nothing is kept after power off. `moonwater
+setup install DISK` erases DISK and writes this Moonwater on it with a data
+partition for `/bowls`, `/root` and `/home`, and a session started from that
+disk keeps them there; a disk that says it is removable, a USB stick, is
+installed only with the word `removable`. When a stick finds an install of
+another build, `setup use` runs this build on the disk's data, `setup update`
+writes this build onto the disk first, and `setup live` leaves the disk alone.
+`moonwater setup` says which of these a session is.
+
 **Settings.** Binds, init and exit live in the boot image: set them on a live
-stick and `install` carries them to the disk, while `update` keeps the disk's
-own. Wifi, wired, bluetooth, internet preference, power and charge settings,
+stick and `setup install` carries them to the disk, while `setup update` keeps
+the disk's own. Wifi, wired, bluetooth, internet preference, power and charge settings,
 timezone, NTP, keyboard, name and link settings live in `/root` on the data
-partition, so `update` and `wipe` keep them. A machine gets its name the first
-time it boots, from a live stick too, and `install` carries it to the disk.
+partition, so `setup update` and `wipe` keep them. A machine gets its name the first
+time it boots, from a live stick too, and `setup install` carries it to the disk.
 
 **Events.** Besides the power button and Canvas, `bind` covers `reset`, `mute`,
 `micmute`, `volume_up`/`down`, `brightness_up`/`down`, `lid_close`/`open`,
@@ -126,22 +137,37 @@ background: events wait until `moonwater_init` returns.
 
 `moonwater link` is ssh by key over waterlink (`src/waterlink/`): UDP datagrams
 sealed with AES-128-GCM after a Noise IK handshake, with no users and no
-passwords. Pair both ways, as with WireGuard: `link key` prints a machine's key
-and `link pair` gives it to the other. A paired machine can do nothing until
-allowed, e.g. `moonwater link allow laptop shell run`.
+passwords. Every machine has a name (`moonwater name`), and two are linked in
+a minute: `moonwater link pair` on one prints its name and a six-symbol code,
+`moonwater link space-wizard abc-def` on the other uses them, and from then on
+`moonwater link space-wizard` is a terminal there and
+`moonwater link space-wizard uname -a` one command, run as root on a machine
+that allowed it. A code works once, for five minutes, from a machine on the
+same network (found over mDNS), and the two machines then may use each other's
+terminal, commands, files and log. `link pair space-wizard` lets in only that
+name. A code is thirty bits stretched by 600,000 rounds of PBKDF2, so it holds
+for the minutes it lives and no longer.
 
-`link shell` sends each keystroke in its own datagram at once; `link run`
+Without a code, link by key, both ways, as WireGuard does: `link key` prints a
+machine's key and `link add NAME KEY HOST` gives it to the other. A machine
+added so can do nothing until allowed, e.g. `moonwater link allow laptop shell
+run`; `moonwater link` shows each machine's grants. `files` is push and pull of
+any file root has, so it is as good as `run` (a file pushed over a boot script
+is a command), except the link's own key, machines, groups and the machine
+script, which no peer reads or writes.
+
+`link NAME` sends each keystroke in its own datagram at once; with a command it
 passes stdin through and exits with the far command's status (255 if the link
 failed). Both ends run this shell binary, on Moonwater or Linux. A direct
 address is needed; there is no NAT traversal.
 
 For machines nobody stands in front of, join a group instead:
-`moonwater link join office` makes a 160-bit secret and prints the line to run
+`moonwater link group office` makes a 160-bit secret and prints the line to run
 on the others. Members on the same local network find each other over mDNS
-(`_waterlink._udp`) and pair themselves, under the grants their join line gave.
-Machines announce only a port, under random labels; only the secret's
+(`_waterlink._udp`) and link themselves, under the grants their group line
+gave. Machines announce only a port, under random labels; only the secret's
 600,000-round PBKDF2 result is stored. Join on the live stick before
-`install` and the machine is in the group from its first boot.
+`setup install` and the machine is in the group from its first boot.
 
 ## The machine script
 
@@ -206,7 +232,7 @@ gives package managers a complete namespace with the host's `/proc/sys` and
 global path. A bowl is not a security sandbox: its programs run as root.
 
 `bowl setup` checks for room before downloading. On a live stick bowls live in
-memory; `moonwater install` puts them on a data partition.
+memory; `moonwater setup install` puts them on a data partition.
 
 ### Profiles
 

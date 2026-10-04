@@ -25141,13 +25141,18 @@ static char *strndup_user(const char *from, long limit) {
     if (++allocations == fail_allocation) return (char *)(long)-ENOMEM;
     return strdup(from);
 }
-static int current, spawn_pid = 4242;
+/* The task the kernel calls current: which thread group it is in and whether
+   it is on its way out. Nothing but task_tgid and the flags is read. */
+static struct { int tgid; unsigned flags; } task_current;
+#define current (&task_current)
+#define PF_EXITING 0x4u
+static int spawn_pid = 4242;
 static int spawn_entered;
 /* The work the launch was handed. Interpretation policy is decided in the
    request and only shows up here, on the task that is about to exec. */
 static void *spawn_handed;
-#define task_tgid(t) ((void *)(long)(t))
-#define current_cred() ((const void *)&current)
+#define task_tgid(t) ((void *)(long)(t)->tgid)
+#define current_cred() ((const void *)&task_current)
 #define get_pid(p) (p)
 #define put_pid(p) ((void)(p))
 #define get_cred(c) (c)
@@ -25355,7 +25360,8 @@ static void state_strscpy(char *to, const char *from, unsigned long size) {
     if (size) to[at]=0;
 }
 #define strscpy(to,from,size) state_strscpy((to),(from),(size))
-#define wait_event_interruptible_timeout(wq,cond,to) ((void)(wq),(cond)?1:0)
+static unsigned long wait_timeout;
+#define wait_event_interruptible_timeout(wq,cond,to) ((void)(wq),wait_timeout=(to),(cond)?1:0)
 #define KEY_LEFTCTRL 29
 #define KEY_RIGHTCTRL 97
 #define KEY_LEFTALT 56
@@ -25438,8 +25444,17 @@ static void canvas_thread_wake(void) { wakes++; }
 static void atomic_fetch_add(int value,atomic_t *at) { *at+=value; }
 static void atomic_fetch_sub(int value,atomic_t *at) { *at-=value; }
 #define smp_wmb() ((void)0)
+/* Somebody else's turn at the moment a lock is let go: the hook runs once,
+   with the lock that was, and is how a check puts a second caller between two
+   statements of the first. */
+static void (*unlock_hook)(const void *lock);
 #define spin_lock_irqsave(lock,flags) do { (flags)=0;mutex_lock(lock); } while(0)
-#define spin_unlock_irqrestore(lock,flags) do { (void)(flags);mutex_unlock(lock); } while(0)
+#define spin_unlock_irqrestore(lock,flags) do { \
+        void (*hook_)(const void *)=unlock_hook; \
+        (void)(flags);mutex_unlock(lock); \
+        if (hook_) { unlock_hook=0;hook_(lock); } } while(0)
+#define spin_lock_irq(lock) mutex_lock(lock)
+#define spin_unlock_irq(lock) mutex_unlock(lock)
 struct pointer_handle;
 struct key_link { struct pointer_handle *owner; };
 struct pointer_handle {
@@ -25563,8 +25578,11 @@ static void desktop_set_awake(_Bool awake) { assert(desktop.lock);desktop.awake=
 #ifndef WRITE_ONCE
 #define WRITE_ONCE(x, val) do { (x) = (val); } while (0)
 #endif
+/* The last warning the module printed: what a command that failed is said to
+   have done is part of what the log is for. */
+static char last_warn[300];
 #ifndef pr_warn
-#define pr_warn(...) ((void)0)
+#define pr_warn(...) snprintf(last_warn,sizeof last_warn,__VA_ARGS__)
 #endif
 #ifndef pr_alert
 #define pr_alert(...) ((void)0)
@@ -25609,8 +25627,13 @@ static void orderly_reboot(void) { bind_reboots++; }
 static pid_t user_mode_thread(int (*fn)(void *), void *arg, unsigned long sig);
 static int kernel_wait(pid_t pid, int *stat);
 static void kernel_sigaction(int sig, void *act) { (void)sig;(void)act; }
+static char bind_env[8][160];
+static unsigned bind_env_count;
 static int kernel_execve(const char *path, const char *const *argv, const char *const *envp) {
-    (void)path;(void)argv;(void)envp; return 0;
+    (void)path;(void)argv;
+    for (bind_env_count=0;envp[bind_env_count] && bind_env_count<8;bind_env_count++)
+        snprintf(bind_env[bind_env_count],sizeof bind_env[0],"%s",envp[bind_env_count]);
+    return 0;
 }
 __attribute__((noreturn)) static void do_exit(long code) { (void)code; abort(); }
 #define CAP_SYS_ADMIN 21
@@ -26073,7 +26096,7 @@ static void check_bind(void) {
 
     queued=bind_queued; sleep->last=0; atomic_set(&sleep->bound,1);
     snprintf(sleep->command,sizeof(sleep->command),"true");
-    bind_watch_row(sleep, 1);
+    bind_watch_row(sleep);
     bind_send(EV_KEY,KEY_SLEEP,1);
     check(bind_queued==queued+1,"KEY_SLEEP queues sleep");
     bind_idle(sleep); sleep->last=0; jiffies+=5000;
@@ -26109,7 +26132,7 @@ static void check_bind(void) {
     check(bind_queued==queued,"an unbound volume key does not queue");
     atomic_set(&vol->bound,1);
     snprintf(vol->command,sizeof(vol->command),"true");
-    bind_watch_row(vol, 1);
+    bind_watch_row(vol);
     bind_send(EV_KEY,KEY_VOLUMEUP,1);
     check(bind_queued==queued+1,"a bound volume key queues");
 
@@ -26240,6 +26263,64 @@ static void check_bind(void) {
     check(bind_queued==queued,"nothing is queued once bindings have stopped");
     atomic_set(&bind_alive,1);
 }
+/*
+        What a bound line is given to run in, and what the log says when it
+        does not do well. The environment is the one an init entry gets, so a
+        bowl's launcher is found from every place a line can run; and a line
+        that exited, was killed or never ran says which, in the shell's
+        words, and not a wait status as though it were a number of its own.
+*/
+static void check_bind_report(void) {
+    struct bind_spawn spawn;
+    struct bind_row *mute=bind_row(SPARK_BIND_MUTE);
+    struct bind_row *power=bind_row(SPARK_BIND_POWEROFF);
+    static const char *want[]={"HOME=/root",("PATH=" SPARK_COMMAND_PATH),"TERM=dumb",
+                               "LANG=C.UTF-8","MOONWATER_EVENT=volume_up"};
+    char expected[64];
+    unsigned found=0;
+
+    memset(&spawn,0,sizeof spawn);
+    snprintf(spawn.command,sizeof spawn.command,"pactl set-sink-mute 0 toggle");
+    snprintf(spawn.event,sizeof spawn.event,"volume_up");
+    check(bind_spawn_enter(&spawn)==0 && bind_env_count==sizeof want/sizeof want[0],
+          "a bound line is run with the five variables it is given and no more");
+    for (unsigned at=0;at<sizeof want/sizeof want[0];at++)
+        for (unsigned seen=0;seen<bind_env_count;seen++)
+            found+=!strcmp(want[at],bind_env[seen]);
+    check(found==sizeof want/sizeof want[0],
+          "a bound line gets the PATH a terminal gives its shell, the home, TERM and LANG, and the event");
+
+    last_warn[0]=0;
+    bind_press(SPARK_BIND_MUTE,"false",42,1<<8);
+    check(strstr(last_warn,"mute: ") && strstr(last_warn," exited 1") != NULL,
+          "a line that exits 1 is said to have exited 1");
+    bind_idle(mute);
+    bind_press(SPARK_BIND_MUTE,"loop",42,9);
+    check(strstr(last_warn," was killed by signal 9") != NULL,
+          "a line that was killed is said to have been killed, and by what");
+    bind_idle(mute);
+    bind_press(SPARK_BIND_MUTE,"nothing",0,0);
+    snprintf(expected,sizeof expected," could not be run, error %d",EAGAIN);
+    check(strstr(last_warn,expected) != NULL,
+          "a line that could not be started says the error, not that it exited");
+    bind_idle(mute);
+    bind_press(SPARK_BIND_MUTE,"",42,0);
+    bind_idle(mute);
+    last_warn[0]=0;
+    bind_press(SPARK_BIND_POWEROFF,"poweroff",42,2<<8);
+    check(strstr(last_warn," exited 2, stopping the machine anyway") && bind_offs==1,
+          "a poweroff that fails is said to have, and the machine is stopped anyway");
+    bind_idle(power);
+    snprintf(power->command,sizeof power->command,"poweroff");
+    snprintf(mute->command,sizeof mute->command,"x");
+    bind_press(SPARK_BIND_MUTE,"echo 'a\033[2Jb",42,1<<8);
+    check(strstr(last_warn,"mute:") != NULL && !strchr(last_warn,'\033'),
+          "the line that is printed is the line, with what a terminal would act on kept out");
+    bind_idle(mute);
+    bind_press(SPARK_BIND_MUTE,"",42,0);
+    bind_idle(mute);
+}
+
 static void check_bind_edges(void) {
     struct bind_control request;
     struct bind_row *row;
@@ -26920,7 +27001,7 @@ static void check_machine_events(void) {
     check(bind_queued==queued+1 && !bind_machine.count,
           "a press after that is not queued for a process that is leaving: the image line runs");
 
-    bind_machine_detach(&machine);
+    bind_machine_detach(&machine,NULL);
     check(!atomic_read(&bind_machine_live) && !bind_machine.owner &&
           !bind_machine.ending,
           "and detaching gives the rows back");
@@ -26936,6 +27017,259 @@ static void check_machine_events(void) {
           machine_script_length==machine_script_builtin &&
           (machine_script_owned & (1u<<(SPARK_BIND_POWEROFF-1))),
           "and the module's own copy of that script owns the same rows");
+}
+
+/*
+        The machine process and the device it holds.
+
+        The attach is an open file, and the file is not the process: a fork
+        that does not exec copies the descriptor into a child, and the file
+        then lives as long as any child does. So who holds the machine is the
+        file and the thread group that attached it, and letting go happens
+        when that thread group is on its way out -- not when the file is
+        released, which a background job in the script can put off for as
+        long as it runs.
+*/
+static struct machine_control machine_answer;
+static long machine_op(struct file *file,unsigned op,unsigned wait) {
+    memset(&machine_answer,0,sizeof machine_answer);
+    machine_answer.op=op; machine_answer.reserved[0]=wait;
+    return report_machine(file,&machine_answer);
+}
+static struct file machine_second;
+/* A second machine process that opens the device at the instant the first
+   one's detach has let go of the queue, and attaches. */
+static void machine_takes_over(const void *lock) {
+    if (lock!=&bind_machine_lock) { unlock_hook=machine_takes_over;return; }
+    task_current.tgid=200;
+    machine_op(&machine_second,MOONWATER_ATTACH,0);
+}
+static void check_machine_owner(void) {
+    struct file first;
+    struct machine_control raw;
+    struct bind_row *volume=bind_row(SPARK_BIND_VOLUME_UP);
+    unsigned queued;
+
+    memset(&first,0,sizeof first); memset(&machine_second,0,sizeof machine_second);
+    power_admin=1; power_capable=1; task_current.tgid=100; task_current.flags=0;
+    check(!bind_machine.owner && !atomic_read(&bind_machine_live),
+          "nobody holds the machine to begin with");
+
+    check(!machine_op(&first,MOONWATER_ATTACH,0) && bind_machine.owner==&first &&
+          bind_machine.process==task_tgid(current) && (machine_answer.flags & MOONWATER_ATTACHED),
+          "a machine process attaches, and the attach is that thread group's");
+    check(machine_op(&machine_second,MOONWATER_ATTACH,0)==-EBUSY && bind_machine.owner==&first,
+          "a second open file is refused while the first holds it");
+    check(machine_op(&machine_second,MOONWATER_WAIT,5)==-EPIPE,
+          "and only the file that holds it reads its queue");
+    check(!machine_op(&machine_second,MOONWATER_STATUS,0) &&
+          (machine_answer.flags & MOONWATER_ATTACHED) && !machine_answer.event,
+          "anybody may ask whether it is held");
+    check(!machine_op(&machine_second,MOONWATER_DETACH,0) && bind_machine.owner==&first &&
+          atomic_read(&bind_machine_live),
+          "and a detach by a file that does not hold it lets go of nothing");
+
+    /*  What the process dying has to do while a child that forked with the
+        descriptor lives on. None of these is the machine process leaving. */
+    task_current.tgid=101; task_current.flags=PF_EXITING;
+    bind_machine_flush(&first);
+    check(bind_machine.owner==&first && atomic_read(&bind_machine_live),
+          "a child that was handed the descriptor and exits does not end the attach");
+    task_current.tgid=100; task_current.flags=0;
+    bind_machine_flush(&first);
+    check(bind_machine.owner==&first && atomic_read(&bind_machine_live),
+          "the machine process closing a copy of the descriptor does not end it either");
+    task_current.flags=PF_EXITING;
+    bind_machine_flush(&machine_second);
+    check(bind_machine.owner==&first,
+          "and the exit of a process that holds some other open file changes nothing");
+
+    snprintf(volume->command,sizeof volume->command,"true");
+    atomic_set(&volume->bound,1);
+    bind_machine.count=0;
+    bind_idle(volume);
+    bind_fire(SPARK_BIND_VOLUME_UP);
+    check(bind_machine.count==1,"a press is queued for the attached process");
+    bind_idle(volume);
+    queued=bind_queued;
+    bind_machine_flush(&first);
+    check(!bind_machine.owner && !bind_machine.process && !bind_machine.ending &&
+          !bind_machine.count && !atomic_read(&bind_machine_live),
+          "the machine process exiting lets go of the machine while a child still holds the file");
+    check(bind_queued==queued+1,
+          "and what it had not read goes to the image line");
+    task_current.tgid=300; task_current.flags=0;
+    check(!machine_op(&machine_second,MOONWATER_ATTACH,0) && bind_machine.owner==&machine_second,
+          "so the next machine process attaches at once and is not told it is busy");
+    check(machine_op(&first,MOONWATER_WAIT,5)==-EPIPE,
+          "and the file that was left holding the old descriptor reads nothing from it");
+    machine_op(&machine_second,MOONWATER_DETACH,0);
+    for (unsigned event=SPARK_BIND_VOLUME_UP;event<=SPARK_BIND_BRIGHTNESS_DOWN;event++) {
+        atomic_set(&bind_row(event)->bound,0); bind_row(event)->command[0]=0;
+    }
+
+    /*  The rows nobody has a line for are heard while a process is attached,
+        because its script may name any of them. A detach that lands after
+        another attach has to read that attach's state, not its own. */
+    task_current.tgid=100;
+    machine_op(&first,MOONWATER_ATTACH,0);
+    check(bind_watched(KEY_VOLUMEUP) && bind_watched(KEY_MUTE) &&
+          bind_watched(KEY_BRIGHTNESSUP),
+          "an attached process hears the keys of rows with no line");
+    unlock_hook=machine_takes_over;
+    machine_op(&first,MOONWATER_DETACH,0);
+    check(bind_machine.owner==&machine_second && atomic_read(&bind_machine_live) &&
+          bind_watched(KEY_VOLUMEUP) && bind_watched(KEY_MUTE) &&
+          bind_watched(KEY_BRIGHTNESSUP) && bind_watched(KEY_BRIGHTNESSDOWN),
+          "a detach that a second attach lands in the middle of leaves the new process its keys");
+    task_current.tgid=200; task_current.flags=PF_EXITING;
+    bind_machine_flush(&machine_second);
+    task_current.tgid=100; task_current.flags=0;
+    check(!bind_machine.owner && !bind_watched(KEY_VOLUMEUP) && !bind_watched(KEY_MUTE),
+          "and with nobody attached the unbound rows are deaf again");
+
+    /*  Who may do what, and what is not a request at all. */
+    power_admin=0;
+    check(machine_op(&first,MOONWATER_ATTACH,0)==-EPERM &&
+          machine_op(&first,MOONWATER_WAIT,5)==-EPERM &&
+          machine_op(&first,MOONWATER_END,0)==-EPERM && !bind_machine.owner,
+          "attach, wait and end need CAP_SYS_ADMIN");
+    check(!machine_op(&first,MOONWATER_STATUS,0) && !machine_op(&first,MOONWATER_DETACH,0),
+          "and status and detach do not");
+    power_admin=1;
+    check(machine_op(&first,MOONWATER_END+1,0)==-EINVAL &&
+          machine_op(&first,0xffffffffu,0)==-EINVAL,
+          "an op that is not one is refused");
+    for (unsigned op=MOONWATER_ATTACH;op<=MOONWATER_END;op++) {
+        memset(&raw,0,sizeof raw); raw.op=op; raw.reserved[1]=1;
+        check(report_machine(&first,&raw)==-EINVAL,"a reserved word that is set is refused (1)");
+        memset(&raw,0,sizeof raw); raw.op=op; raw.reserved[2]=1;
+        check(report_machine(&first,&raw)==-EINVAL,"a reserved word that is set is refused (2)");
+        check(machine_op(&first,op,op==MOONWATER_WAIT?0:7)==(op==MOONWATER_WAIT?-EPIPE:-EINVAL) ||
+              op==MOONWATER_WAIT,
+              "only a wait takes a timeout; any other op that names one is refused");
+    }
+    check(!bind_machine.owner,"none of the refusals attached anything");
+
+    /*  A wait: the timeout is the caller's up to a minute, and a queue with
+        nothing in it times out rather than blocking for good. */
+    task_current.tgid=100;
+    machine_op(&first,MOONWATER_ATTACH,0);
+    check(machine_op(&first,MOONWATER_WAIT,50)==-ETIMEDOUT && wait_timeout==50,
+          "a wait with nothing to read times out after what was asked");
+    check(machine_op(&first,MOONWATER_WAIT,0xffffffffu)==-ETIMEDOUT && wait_timeout==60000,
+          "and no longer than a minute however much was asked");
+    check(machine_op(&first,MOONWATER_WAIT,0)==-EINTR,
+          "a wait with no timeout is the one a signal ends");
+
+    /*  A pair is one state, the last said: the queue never holds a tablet
+        turned on and then off for a process that was busy while both. */
+    bind_machine.count=0;
+    bind_fire(SPARK_BIND_TABLET_ON);
+    bind_fire(SPARK_BIND_TABLET_OFF);
+    check(bind_machine.count==1 && bind_machine.event[0]==SPARK_BIND_TABLET_OFF,
+          "an on and an off of the same pair leave the later one");
+    bind_fire(SPARK_BIND_HEADPHONE_ON);
+    bind_fire(SPARK_BIND_TABLET_ON);
+    check(bind_machine.count==2 && bind_machine.event[0]==SPARK_BIND_TABLET_ON &&
+          bind_machine.event[1]==SPARK_BIND_HEADPHONE_ON,
+          "pairs do not swallow each other, and the pair keeps its first place");
+    check(!machine_op(&first,MOONWATER_WAIT,5) && machine_answer.event==SPARK_BIND_TABLET_ON &&
+          machine_answer.extra==1 && !strcmp(machine_answer.name,"tablet on") &&
+          machine_answer.queued==1,
+          "a wait answers the event, which side of its pair, its name and what is left");
+    machine_op(&first,MOONWATER_WAIT,5);
+
+    /*  A full queue gives up its oldest event that may be given up, never a
+        stop; and the three switches are heard by value, both ways. */
+    for (unsigned at=0;at<BIND_MACHINE_QUEUE;at++) bind_machine.event[at]=SPARK_BIND_MUTE;
+    bind_machine.count=BIND_MACHINE_QUEUE;
+    bind_machine.event[0]=SPARK_BIND_RESET;
+    bind_fire(SPARK_BIND_VOLUME_UP);
+    check(bind_machine.count==BIND_MACHINE_QUEUE && bind_machine.event[0]==SPARK_BIND_RESET &&
+          bind_machine.event[BIND_MACHINE_QUEUE-1]==SPARK_BIND_VOLUME_UP,
+          "a full queue drops the oldest event that is not a stop, and takes the new one");
+    bind_machine.count=0;
+    {
+        static const struct { unsigned code,on,off; } switches[]={
+            {SW_TABLET_MODE,SPARK_BIND_TABLET_ON,SPARK_BIND_TABLET_OFF},
+            {SW_HEADPHONE_INSERT,SPARK_BIND_HEADPHONE_ON,SPARK_BIND_HEADPHONE_OFF},
+            {SW_DOCK,SPARK_BIND_DOCK_ON,SPARK_BIND_DOCK_OFF},
+        };
+        for (unsigned at=0;at<sizeof switches/sizeof switches[0];at++) {
+            bind_row(switches[at].on)->last=bind_row(switches[at].off)->last=0;
+            bind_send(EV_SW,switches[at].code,1);
+            check(bind_machine.count==1 && bind_machine.event[0]==switches[at].on,
+                  "a switch that closes is the on event of its pair");
+            machine_op(&first,MOONWATER_WAIT,5);
+            bind_row(switches[at].off)->last=0; jiffies+=5000;
+            bind_send(EV_SW,switches[at].code,0);
+            check(bind_machine.count==1 && bind_machine.event[0]==switches[at].off,
+                  "and one that opens is the off event");
+            machine_op(&first,MOONWATER_WAIT,5);
+            bind_send(EV_SW,switches[at].code,2);
+            check(!bind_machine.count,"a switch value that is neither is not an event");
+        }
+    }
+
+    /*  The end: a wait after it answers it, once, and the rest of the queue
+        is never read. */
+    bind_machine.count=0;
+    check(!machine_op(&first,MOONWATER_END,0) && bind_machine.ending,
+          "the machine process is told to end");
+    check(!machine_op(&first,MOONWATER_WAIT,5) && !machine_answer.event &&
+          !strcmp(machine_answer.name,"end"),
+          "and its next wait is answered with the end");
+    machine_op(&first,MOONWATER_DETACH,0);
+    check(!bind_machine.owner && !bind_machine.ending,
+          "and the detach that follows clears the end");
+    check(machine_op(&first,MOONWATER_END,0)==-EPIPE,
+          "telling a machine nobody holds to end is a broken pipe");
+
+    /*  The script: how big it may be, and what the request may carry. */
+    {
+        static char big[MOONWATER_SCRIPT_BYTES+1];
+        struct machine_script request;
+
+        memset(big,'#',sizeof big);
+        memset(&request,0,sizeof request);
+        request.op=MOONWATER_SCRIPT_SET; request.length=MOONWATER_SCRIPT_BYTES;
+        request.address=(unsigned long)big;
+        check(!report_machine_script(&request) && machine_script_length==MOONWATER_SCRIPT_BYTES,
+              "a script of exactly 64 KiB is taken");
+        request.length=MOONWATER_SCRIPT_BYTES+1;
+        check(report_machine_script(&request)==-EINVAL &&
+              machine_script_length==MOONWATER_SCRIPT_BYTES,
+              "one byte more is refused and the live script stays");
+        memset(&request,0,sizeof request);
+        request.op=MOONWATER_SCRIPT_SET; request.length=16;
+        check(report_machine_script(&request)==-EINVAL,
+              "bytes with no address are refused");
+        memset(&request,0,sizeof request);
+        request.op=MOONWATER_SCRIPT_SET; request.flags=1;
+        check(report_machine_script(&request)==-EINVAL,
+              "a flag nobody defined is refused");
+        memset(&request,0,sizeof request);
+        request.op=MOONWATER_SCRIPT_SET+1;
+        check(report_machine_script(&request)==-EINVAL,"an op that is not one is refused");
+        power_admin=0;
+        memset(&request,0,sizeof request);
+        request.op=MOONWATER_SCRIPT_SET;
+        check(report_machine_script(&request)==-EPERM &&
+              machine_script_length==MOONWATER_SCRIPT_BYTES,
+              "a set needs CAP_SYS_ADMIN and changes nothing without it");
+        power_admin=1;
+        memset(&request,0,sizeof request);
+        request.op=MOONWATER_SCRIPT_GET;
+        check(!report_machine_script(&request) && !request.overlay.pad && !request.overlay.spare &&
+              !request.overlay.hooks,
+              "the overlay answers with its padding clear");
+        memset(&request,0,sizeof request);
+        request.op=MOONWATER_SCRIPT_SET;
+        check(!report_machine_script(&request) && machine_script_length==machine_script_builtin,
+              "and an empty set puts the built-in script back");
+    }
+    task_current.tgid=0; task_current.flags=0;
 }
 
 static void check_settings_sum(void) {
@@ -27653,10 +27987,12 @@ int main(void) {
     check_console_keyboard();
     check_bind();
     check_bind_edges();
+    check_bind_report();
     check_canvas_control();
     check_input_reports();
     check_machine_script();
     check_machine_events();
+    check_machine_owner();
     check_settings_sum();
     check_input_suspension();
     check(!copies_under_lock,
@@ -34992,6 +35328,17 @@ def harness_image_nodes(argv):
               'the image makes %s, where bowl expose writes (%s)'
               % (wanted, ' '.join(made[-3:])))
 
+    #   The kernel cannot include bowl.c, and the line a bound event runs is
+    #   run by the kernel, so the PATH it gets is spelled out in spark.c:
+    #   the one a terminal gives its shell, or a bowl's launcher is found
+    #   from `bind init` and not from `bind volume_up`.
+    check(define(bowl, 'BOWL_DEFAULT_PATH') == '"/bin:/usr/bin:" BOWL_EXPOSE_DIRECTORY ":/"',
+          'bowl says what its default PATH is (%s)' % define(bowl, 'BOWL_DEFAULT_PATH'))
+    if root:
+        check(define(spark, 'SPARK_COMMAND_PATH') == '"/bin:/usr/bin:%s/bin:/"' % root.strip('"'),
+              'a bound event runs with bowl\'s default PATH (%s)'
+              % define(spark, 'SPARK_COMMAND_PATH'))
+
     #   The compositor's first program, which is the one crossing here with
     #   no compiler behind it at all. The kernel execs a path; the path is a
     #   link the build makes for every applet in the SYSTEM category, and it
@@ -41087,9 +41434,20 @@ def harness_moonwater_cli(argv):
         (sandbox / "bowls/one/etc/localtime").symlink_to("/usr/share/zoneinfo/UTC")
         shutil.copy(args.shell, sandbox / "tmp/moonwater")
 
+        #       A /dev of its own: the machine's null, zero, full, random, urandom and
+        #       tty, and an rfkill that is a plain file. Binding the whole of /dev
+        #       let airplane, wifi and bluetooth write the real /dev/rfkill, which a
+        #       seated user may; here the last event a verb wrote is a file to read.
+        nodes = [name for name in ("null", "zero", "full", "random", "urandom", "tty")
+                 if Path("/dev", name).exists()]
+        private_dev = (f"mount -t tmpfs -o mode=755 tmpfs {sandbox}/dev && " +
+                       "".join(f": > {sandbox}/dev/{name} && mount --bind /dev/{name} {sandbox}/dev/{name} && "
+                               for name in nodes) +
+                       f": > {sandbox}/dev/rfkill && ln -s /proc/self/fd {sandbox}/dev/fd && ")
+
         def session(script):
             """Run a script in the sandbox; its lines, and whether it finished."""
-            wrapper = (f"mount --rbind /usr {sandbox}/usr && mount --rbind /dev {sandbox}/dev && "
+            wrapper = (f"mount --rbind /usr {sandbox}/usr && {private_dev}"
                        f"mount --rbind /proc {sandbox}/proc && "
                        f"exec chroot {sandbox} /usr/bin/sh -c 'cd / && . /tmp/script'")
             (sandbox / "tmp/script").write_text(script)
@@ -41154,13 +41512,22 @@ def harness_moonwater_cli(argv):
                 "bios reboot extra", "bluetooth", "bluetooth off",
                 "bluetooth on", "priority internet", "priority internet wired",
                 "priority internet wifi", "priority internet cable", "wipe extra",
-                "install", "use", "update", "live extra", "boot", "ask", "machine extra",
-                "link", "link help", "link key", "link bogus", "link pair", "link pair x",
-                "link pair x y z w", "link forget nobody", "link allow nobody run",
-                "link deny", "link run", "link run nobody", "link shell", "link shell nobody",
-                "link serve extra", "link join", "link join .bad",
-                "link join ok allow", "link join ok allow nonsense", "link leave nobody",
-                "link leave nobody forget", "link leave a b c", "link off"]
+                "install", "use", "update", "live", "setup", "setup install", "setup install a b c",
+                "setup install a removable x", "setup install ../x removable", "setup use a b c",
+                "setup update a b c", "setup live extra", "setup bogus", "setup removable",
+                "setup use nobody", "setup update nobody", "boot extra", "ask extra",
+                "machine extra",
+                #       Not "link pair" or "link NAME CODE": those wait five minutes
+                #       for the other machine, and the link harness has them.
+                "link", "link help", "link key", "link bogus", "link pair x y z",
+                "link add", "link add x", "link add .bad AAAA", "link add x AAAA", "link remove",
+                "link remove nobody", "link allow nobody run", "link deny", "link run",
+                "link run nobody", "link shell", "link shell nobody", "link serve extra",
+                "link group .bad", "link group ok allow", "link group ok allow nonsense",
+                "link group leave", "link group leave nobody", "link group leave nobody forget",
+                "link group leave a b c", "link nobody", "link nobody abc", "link nobody ab-cd",
+                "link nobody not-a-code", "link nobody whoami", "link nobody reboot",
+                "link nobody abcdef", "link log", "link push nobody", "link off"]
         # State the mode rules act on: neither file, then a zone with no mode.
         script = ("rm -f /root/timezone /root/timezone.mode\n" + say("timezone") +
                   "printf 'Europe/London\\n' > /root/timezone\n" + say("timezone") +
@@ -41174,14 +41541,12 @@ def harness_moonwater_cli(argv):
                  "UTC+14", "UTC-14", "<+0530>-5:30", "Europe/", "../../etc/passwd", "x" * 300,
                  "\x1b[31m", "tab\there", "sv", "SE", "\u00e5\u00e4\u00f6", "0", "18446744073709551616",
                  "power", "canvas on", "--", "-h", "status"]
-        #       No "airplane" either: on writes to /dev/rfkill, which the sandbox
-        #       shares with the machine, and would block its radios.
         #       Neither "reboot" nor "bios" carries a reboot into these words: bios
         #       reboot sets a bit in the firmware, and a run as real root would
         #       leave it set on the machine that ran the lane.
         verbs = ["", "status", "timezone", "time", "ntp", "keyboard", "name", "canvas", "bind",
                  "wifi", "wired", "bluetooth", "priority", "brightness", "power", "cpu",
-                 "charge", "-h"]
+                 "charge", "airplane", "-h"]
         fuzzed = []
         for number in range(300):
             argv = [rng.choice(verbs)] + [rng.choice(words) for _ in range(rng.randint(0, 4))]
@@ -41204,6 +41569,17 @@ def harness_moonwater_cli(argv):
                      "neither zone file is auto", joined[:400])
         check("(manual)" in joined.split("@@ timezone", 3)[2].split("@@status")[0],
                      "a zone with no mode beside it is manual", joined[:400])
+
+        # A saved network on a machine with no wireless interface is not
+        # waited for: boot and `wifi on` come back at once, where they once
+        # held for eight seconds each.
+        lines, finished = session(
+            "rm -f /root/wifi\n" + say("wifi add timed-a passpass1") +
+            "s=$(date +%s)\n" + say("wifi on") + "echo \"@@seconds $(( $(date +%s) - s ))\"\n")
+        seconds = [int(line.split()[1]) for line in lines if line.startswith("@@seconds ")]
+        check(finished and seconds and seconds[0] <= 3,
+              "wifi on with a saved network and no wireless interface does not wait for one",
+              repr(seconds))
 
         # A saved network is forgotten, and only that one; wired keeps its
         # word across runs and says what it did to the links it found.
@@ -41365,6 +41741,7 @@ def harness_moonwater_cli(argv):
         sys_file("class/wakeup/wakeup0/event_count", "3\n")
         sys_file("bus/usb/devices/1-3/power/wakeup", "disabled\n")
         sys_file("bus/usb/devices/1-3:1.0/bInterfaceClass", "e0\n")
+        os.utime(fake / "power/pm_debug_messages", (1e9, 1e9))
         got, done = session("rm -f /root/tune\n" + say("sleep"))
         check(done and sys_read("power/state") == "mem", "sleep with wake sources still writes mem", sys_read("power/state"))
         check(sys_read("bus/serio/devices/serio0/power/wakeup") == "enabled", "sleep arms the PS/2 keyboard's wakeup")
@@ -41372,7 +41749,8 @@ def harness_moonwater_cli(argv):
         check(sys_read("bus/usb/devices/1-3/power/wakeup") == "disabled", "sleep leaves a USB radio's wakeup alone")
         check(sys_read("bus/usb/devices/1-4/power/wakeup") == "disabled", "sleep leaves a controller's wakeup alone")
         check("woken by:" in "\n".join(got), "sleep says what woke the machine", "\n".join(got)[-200:])
-        check(sys_read("power/pm_debug_messages") == "1", "sleep asks the kernel to log each device it suspends")
+        check(sys_read("power/pm_debug_messages") == "0" and (fake / "power/pm_debug_messages").stat().st_mtime > 1e9 + 1000,
+              "sleep asks the kernel to log each device it suspends, and puts the switch back as it was")
         check("mem_sleep [s2idle] deep" in "\n".join(got), "sleep says which kind of sleep it is", "\n".join(got)[-200:])
 
         got = tuned("rm -f /root/wifi.power /root/bluetooth.power\n" + say("airplane on") +
@@ -41382,11 +41760,347 @@ def harness_moonwater_cli(argv):
         check("@@ words\noff\noff" in joined, "airplane on turns the wifi and bluetooth words off", joined[-200:])
         check("@@ words2\non\non" in joined, "airplane off turns them back on", joined[-200:])
 
+        # What a verb tells the radios, read from the sandbox's rfkill, which
+        # is a plain file and so holds the last event written to it: eight
+        # bytes, the index, the type (1 wifi, 2 bluetooth, 0 every radio), the
+        # operation (3, every device of the type) and the soft block.
+        events = (("wifi on", "00 00 00 00 01 03 00 00"), ("wifi off", "00 00 00 00 01 03 01 00"),
+                  ("bluetooth on", "00 00 00 00 02 03 00 00"), ("bluetooth off", "00 00 00 00 02 03 01 00"),
+                  ("airplane on", "00 00 00 00 00 03 01 00"))
+        got = tuned("test -f /dev/rfkill && echo '@@ rfkill file'\n" + "".join(
+            f": > /dev/rfkill; timeout 20 /tmp/moonwater {verb} > /dev/null 2>&1; "
+            f"echo \"@@ event {verb}: $(od -An -tx1 /dev/rfkill | tr -s ' ' | sed 's/^ //')\"\n"
+            for verb, _ in events))
+        joined = "\n".join(got)
+        check("@@ rfkill file" in joined, "the sandbox's rfkill is a plain file, not the machine's", joined[:200])
+        for verb, wanted in events:
+            check(f"@@ event {verb}: {wanted}" in joined, f"{verb} writes its rfkill event",
+                  [line for line in got if line.startswith(f"@@ event {verb}")])
+
         got = tuned(say("bluetooth add kbd1") + say("bluetooth add mouse2") + say("bluetooth remove kbd1") +
                     "echo '@@ left'; cat /root/bluetooth; echo '@@end'\n" + say("bluetooth remove kbd1"))
         left = "\n".join(got).split("@@ left\n", 1)[1].split("@@end", 1)[0].split()
         check(left == ["mouse2"], "bluetooth remove takes one device out and leaves the other", repr(left))
         check(answers(got)["bluetooth remove kbd1"]["status"] == 1, "a forgotten device is refused a second time")
+
+        # What cannot be kept or applied is said, with the error the kernel
+        # gave, and answered with a failure: a /root that is read-only, one
+        # that is full, a sysfs file that refuses the write, an rfkill that
+        # does. The verbs printed success, or "Operation not permitted" in the
+        # place of every error, and a /run that says wifi over a /root that
+        # kept wired.
+        readonly = "mount --bind /root /root && mount -o remount,ro,bind /root\n"
+        got = tuned("rm -f /root/wifi /root/bluetooth /root/wifi.power /root/bluetooth.power /root/internet "
+                    "/run/moonwater/internet\n" + readonly +
+                    "".join(say(verb) for verb in (
+                        "wifi add ro-a passpass1", "bluetooth add ro-k", "wifi off", "bluetooth off", "airplane on",
+                        "wired off", "priority internet wifi", "charge limit 80", "cpu smt off", "power powersave")) +
+                    "echo \"@@ run $(cat /run/moonwater/internet 2>/dev/null)\"\n")
+        seen = answers(got)
+        for verb in ("wifi add ro-a passpass1", "bluetooth add ro-k", "wifi off", "bluetooth off", "airplane on",
+                     "wired off", "priority internet wifi", "charge limit 80", "cpu smt off", "power powersave"):
+            check(seen[verb]["status"] == 1 and any("Read-only file system" in line for line in seen[verb]["out"]),
+                  f"`{verb}` with /root read-only says so and fails", repr(seen[verb]))
+        check("@@ run " in got and "@@ run wifi" not in got,
+              "a preference that could not be kept is not put in /run either", got[-120:])
+
+        got = tuned("mount -t tmpfs -o size=16k tmpfs /root; dd if=/dev/zero of=/root/fill bs=4k count=4 2> /dev/null\n" +
+                    say("wifi add full-a passpass1") + say("bluetooth add full-k") + say("wifi off"))
+        seen = answers(got)
+        check(all(seen[verb]["status"] == 1 and any("No space left" in line for line in seen[verb]["out"])
+                  for verb in ("wifi add full-a passpass1", "bluetooth add full-k", "wifi off")),
+              "a full /root is said to be full", repr(seen))
+
+        got = tuned("mount --bind /dev/full /sys/class/power_supply/BAT0/charge_control_end_threshold\n" +
+                    say("charge limit 80"))
+        check(any("No space left" in line for line in answers(got)["charge limit 80"]["out"]),
+              "a sysfs write the kernel refuses is said with the kernel's error", repr(answers(got)))
+        got = tuned("mount --bind /dev/full /dev/rfkill\n" + say("bluetooth on") + say("wifi off"))
+        seen = answers(got)
+        check(all(seen[verb]["status"] == 1 and any("/dev/rfkill: No space left" in line for line in seen[verb]["out"])
+                  for verb in ("bluetooth on", "wifi off")),
+              "an rfkill that refuses the event is said, and the verb fails", repr(seen))
+        got = tuned("rm -f /dev/rfkill\n" + say("bluetooth off") + say("wifi off") + say("airplane on"))
+        seen = answers(got)
+        check(all(seen[verb]["status"] == 0 for verb in ("bluetooth off", "wifi off", "airplane on")),
+              "a machine with no rfkill has nothing to switch and nothing to say", repr(seen))
+
+        # A list that is more than the verbs read is not written back short:
+        # twenty networks and one forgotten left fifteen, sixty bluetooth
+        # names (past the room they are read into) and one forgotten left
+        # thirty-nine, and a /root/tune past its room lost whatever lay
+        # beyond. They are said to be too long, and left as they were.
+        bluetooth_name = "".join(
+            f"printf 'device-{n:02d}-{'p' * 80}\\n' >> /root/bluetooth\n" for n in range(60))
+        got = tuned("rm -f /root/wifi /root/bluetooth\n" +
+                    "".join(f"printf 'net{n:02d}\\npassword{n:02d}\\n' >> /root/wifi\n" for n in range(20)) +
+                    bluetooth_name + "cp /root/wifi /tmp/wifi.long; cp /root/bluetooth /tmp/bluetooth.long\n" +
+                    say("wifi remove net01") + say("wifi add net03 newpassword") +
+                    say("wifi add brand-new passpass1") + say(f"bluetooth remove device-01-{'p' * 80}") +
+                    say("bluetooth add another") +
+                    "cmp /root/wifi /tmp/wifi.long && echo '@@ wifi whole'\n"
+                    "cmp /root/bluetooth /tmp/bluetooth.long && echo '@@ bluetooth whole'\n")
+        seen = answers(got)
+        joined = "\n".join(got)
+        check(all(seen[verb]["status"] == 1 and any("too long to change here" in line for line in seen[verb]["out"])
+                  for verb in ("wifi remove net01", "wifi add net03 newpassword", "wifi add brand-new passpass1",
+                               f"bluetooth remove device-01-{'p' * 80}", "bluetooth add another")),
+              "a list longer than is read is refused by every verb that would rewrite it", repr(seen)[:400])
+        check("@@ wifi whole" in joined and "@@ bluetooth whole" in joined,
+              "and is left as it was", joined[-200:])
+        got = tuned("for n in $(seq 1 40); do echo \"fill.$n value-number-$n\" >> /root/tune; done\n"
+                    "cp /root/tune /tmp/tune.long\n" + say("power balanced") +
+                    "cmp /root/tune /tmp/tune.long && echo '@@ tune whole'\n")
+        seen = answers(got)
+        check(seen["power balanced"]["status"] == 1 and "@@ tune whole" in got and
+              any("File too large" in line for line in seen["power balanced"]["out"]),
+              "a /root/tune longer than is read is not written back short", repr(seen))
+
+        # Four verbs at once each keep a value in /root/tune: it is read,
+        # changed and written whole, and without the radio lock the last
+        # writer's key was all that was left of the four.
+        got = tuned("".join(
+            "rm -f /root/tune\n(/tmp/moonwater charge limit 80 & /tmp/moonwater cpu smt off & "
+            "/tmp/moonwater cpu boost off & /tmp/moonwater power powersave & wait) > /dev/null 2>&1\n"
+            f"echo \"@@ keys {n} $(sort /root/tune | tr '\\n' '|')\"\n" for n in range(12)))
+        want = "charge.limit 80|cpu.boost off|cpu.smt off|power powersave|"
+        kept = [line.split(" ", 3)[3] for line in got if line.startswith("@@ keys ")]
+        check(len(kept) == 12 and all(line == want for line in kept),
+              "four verbs at once keep all four values", repr(kept))
+
+        # What is stored is what the display can show: a name or password with
+        # a control byte, DEL, a C1 control, a byte that starts no character
+        # or half of one is refused, and a name in UTF-8 is kept as it is.
+        # DEL and C1 were stored, and a NUL from standard input ended the
+        # password it came in where it was saved, so "abcdefgh" was kept for
+        # a line of "abcdefgh\0ijkl".
+        hostile = (("DEL", "a\\177b"), ("C1", "a\\302\\233b"), ("latin1", "a\\377b"), ("tab", "a\\tb"),
+                   ("escape", "\\033[31mred"), ("cut", "a\\343\\201"), ("surrogate", "a\\355\\240\\200b"))
+        script = "rm -f /root/wifi /root/bluetooth\n"
+        for label, octal in hostile:
+            script += (f"echo \"@@ wifi {label} $(timeout 20 /tmp/moonwater wifi add \"$(printf '{octal}')\" passpass1 2>&1 | grep -c 'cannot be stored')\"\n"
+                       f"echo \"@@ pass {label} $(timeout 20 /tmp/moonwater wifi add okname \"$(printf 'password{octal}')\" 2>&1 | grep -c 'cannot be stored')\"\n"
+                       f"echo \"@@ bluetooth {label} $(timeout 20 /tmp/moonwater bluetooth add \"$(printf '{octal}')\" 2>&1 | grep -c 'cannot be stored')\"\n")
+        script += ("timeout 20 /tmp/moonwater wifi add \"$(printf 'caf\\303\\251')\" passpass1 > /dev/null 2>&1\n"
+                   "timeout 20 /tmp/moonwater bluetooth add \"$(printf 'na\\303\\257ve')\" > /dev/null 2>&1\n"
+                   "echo \"@@ nul $(printf 'abcdefgh\\0ijkl\\n' | timeout 20 /tmp/moonwater wifi add nul-pass - 2>&1 | grep -c 'nothing saved')\"\n"
+                   "echo \"@@ tabbed $(printf 'abcdefgh\\tijkl\\n' | timeout 20 /tmp/moonwater wifi add tab-pass - 2>&1 | grep -c 'nothing saved')\"\n"
+                   "echo '@@ saved'; od -An -c /root/wifi | tr -s ' ' ; echo '@@ devices'; cat /root/bluetooth; echo '@@end'\n")
+        got = tuned(script)
+        joined = "\n".join(got)
+        for label, _ in hostile:
+            for kind in ("wifi", "pass", "bluetooth"):
+                check(f"@@ {kind} {label} 1" in got, f"a {kind} with a {label} byte is refused as one that cannot be stored", joined[-300:])
+        check("@@ nul 1" in got and "@@ tabbed 1" in got, "a password from standard input with a NUL or a tab in it is refused",
+              joined[-300:])
+        saved = joined.split("@@ saved\n", 1)[1].split("@@ devices", 1)[0] if "@@ saved" in joined else ""
+        check(saved.split() == ["c", "a", "f", "303", "251", "\\n"] + list("passpass1") + ["\\n"],
+              "only the name in UTF-8 was kept, with its password", repr(saved))
+        check("na\u00efve" in got, "a bluetooth name in UTF-8 is kept as it is", joined[-200:])
+
+        # A list somebody wrote by hand may hold bytes the verbs would refuse;
+        # status shows every name as radio_display does, the escapes and the
+        # valid characters alike, instead of putting the raw bytes on the
+        # terminal. The model is the display's rule, over names from a grammar.
+        pieces = [b"a", b"Z", b" ", b"-", b"9", b"\\", "\u00e9".encode(), "\u65e5\u672c".encode(), "\U0001f642".encode(),
+                  b"\x7f", b"\xc2\x9b", b"\xff", b"\xe3\x81", b"\xed\xa0\x80", b"\xc0\x80", b"\xf4\x90\x80\x80", b"\x80"]
+        rng_names = random.Random(0xd15)
+        names = []
+        while len(names) < 24:
+            data = b"".join(rng_names.choice(pieces) for _ in range(rng_names.randrange(1, 7)))[:32]
+            if data and data.strip(b" ") == data and data not in names:
+                names.append(data)
+
+        def shown(data):
+            text, at = "", 0
+            while at < len(data):
+                for width in (4, 3, 2, 1):
+                    try:
+                        char = data[at:at + width].decode("utf-8")
+                    except UnicodeDecodeError:
+                        continue
+                    if len(char) == 1 and (width == 1 and 0x20 <= ord(char) < 0x7f or width > 1 and ord(char) >= 0xa0):
+                        text += char
+                        at += width
+                        break
+                else:
+                    text += "\\x%02x" % data[at]
+                    at += 1
+            return text
+
+        octal = lambda data: "".join("\\%03o" % byte for byte in data)
+        got = tuned("printf '" + "".join(octal(name) + "\\npasspass1\\n" for name in names[:16]) + "' > /root/wifi\n" +
+                    "printf '" + "".join(octal(name) + "\\n" for name in names) + "' > /root/bluetooth\n" +
+                    "rm -f /root/wifi.power /root/bluetooth.power\n" + say("wifi") + say("bluetooth"))
+        seen = answers(got)
+        for verb, listed in (("wifi", names[:16]), ("bluetooth", names)):
+            rows = [line[len("[Moonwater]   "):] for line in seen[verb]["out"] if line.startswith("[Moonwater]   ")]
+            rows = [row for row in rows if not row.startswith(("* joined", "wifi:", "no networks"))]
+            want = [shown(name) for name in listed]
+            check(rows[:len(want)] == want, f"{verb} shows each saved name as the display spells it",
+                  [(a, b) for a, b in zip(rows, want) if a != b][:3])
+
+        # The machine's own battery and panel are the ones the verbs go to. A
+        # mouse or a keyboard lists its battery under the same type with the
+        # scope Device, and one of them listed first was "the battery": its
+        # charge was shown and no limit could be set. A panel's own backlight
+        # is firmware's, then the platform's, then a raw one the driver also
+        # offers. Names are added until the one that should lose is listed
+        # first, whatever order this file system lists a directory in.
+        def listed_first(directory, loser, winner, make):
+            for count in range(1, 200):
+                make(count - 1)
+                order = os.listdir(directory)
+                if min(order.index(loser(n)) for n in range(count)) < order.index(winner):
+                    return
+
+        sys_reset()
+
+        def peripheral(n):
+            for leaf, text in (("type", "Battery"), ("scope", "Device"), ("capacity", "55"),
+                               ("status", "Discharging")):
+                sys_file(f"class/power_supply/hidpp_battery_{n}/{leaf}", text + "\n")
+        listed_first(fake / "class/power_supply", lambda n: f"hidpp_battery_{n}", "BAT0", peripheral)
+        got, done = session("rm -f /root/tune\n" + say("charge") + say("charge limit 80"))
+        seen = answers(got)
+        check(done and any("battery 73%" in line and "stops at 100%" in line for line in seen["charge"]["out"]),
+              "charge is the machine's battery and not a peripheral's", repr(seen["charge"]))
+        check(seen["charge limit 80"]["status"] == 0 and
+              sys_read("class/power_supply/BAT0/charge_control_end_threshold") == "80" and
+              not any(path.name == "charge_control_end_threshold" for path in (fake / "class/power_supply").glob("hidpp*/*")),
+              "and its limit is the one that is set", repr(seen["charge limit 80"]))
+
+        for kind, others in (("firmware", "raw"), ("platform", "raw")):
+            sys_reset()
+            shutil.rmtree(fake / "class/backlight")
+            for leaf, text in (("type", kind), ("brightness", "50"), ("max_brightness", "200")):
+                sys_file(f"class/backlight/panel0/{leaf}", text + "\n")
+
+            def raw(n):
+                for leaf, text in (("type", others), ("brightness", "50"), ("max_brightness", "100")):
+                    sys_file(f"class/backlight/{others}_{n}/{leaf}", text + "\n")
+            listed_first(fake / "class/backlight", lambda n: f"{others}_{n}", "panel0", raw)
+            got, done = session("rm -f /root/tune\n" + say("brightness 75"))
+            raws = [sys_read(f"class/backlight/{path.name}/brightness")
+                    for path in (fake / "class/backlight").iterdir() if path.name != "panel0"]
+            check(done and sys_read("class/backlight/panel0/brightness") == "150" and set(raws) == {"50"},
+                  f"brightness goes to the {kind} backlight before a raw one", (answers(got), raws))
+
+        # A profile counts as applied when a write went through: a governor
+        # that can be read, with no schedutil in its list and no platform
+        # profile, was "balanced", kept for the next boot, and said so.
+        sys_reset()
+        (fake / "firmware/acpi/platform_profile").unlink()
+        (fake / "firmware/acpi/platform_profile_choices").unlink()
+        (fake / "devices/system/cpu/cpu0/cpufreq/energy_performance_available_preferences").unlink()
+        sys_file("devices/system/cpu/cpu0/cpufreq/scaling_available_governors", "performance powersave\n")
+        got, done = session("rm -f /root/tune\n" + say("power balanced") + "cat /root/tune 2>/dev/null; echo '@@ tune'\n" +
+                            say("power powersave") + "echo '@@ kept'; cat /root/tune; echo '@@end'\n")
+        seen = answers(got)
+        check(done and seen["power balanced"]["status"] == 1 and
+              any("no power profile" in line for line in seen["power balanced"]["out"]) and
+              "power balanced" not in got,
+              "a profile nothing could apply is refused and not kept", repr(seen["power balanced"]))
+        check(seen["power powersave"]["status"] == 0 and "power powersave" in got and
+              sys_read("devices/system/cpu/cpu0/cpufreq/scaling_governor") == "powersave",
+              "a profile the machine has is applied and kept", repr(seen["power powersave"]))
+
+        # The numbers the verbs take, at their edges.
+        edges = {"brightness 100000": 0, "brightness 100001": 2, "brightness +0": 0, "brightness -0": 0,
+                 "brightness 0050": 0, "brightness 0000050": 0, "brightness 00000000000000000050": 2,
+                 "brightness 50%": 0, "brightness %": 2, "brightness 5%%": 2, "brightness +": 2,
+                 "charge limit 0080": 0, "charge limit 00080": 1, "charge limit 00000000000000000080": 1,
+                 "charge limit 100": 0, "charge limit 19": 1, "charge limit 101": 1, "charge limit 80x": 1,
+                 "cpu online 99999": 1, "cpu online 100000": 1, "cpu online 0": 1, "cpu online 1x": 1,
+                 "cpu offline 2": 0}
+        got = tuned("".join(say(verb) for verb in edges))
+        seen = answers(got)
+        for verb, status in edges.items():
+            check(seen[verb]["status"] == status, f"{verb} is {'refused' if status else 'taken'}", repr(seen[verb])[:200])
+        got = tuned(say("brightness 0000050") + "echo \"@@ now $(cat /sys/class/backlight/fake0/brightness)\"\n" +
+                    say("charge limit 0080") + "echo \"@@ limit $(cat /sys/class/power_supply/BAT0/charge_control_end_threshold)\"\n" +
+                    say("cpu online 100000") + say("cpu online 0") + say("cpu online 99999"))
+        seen = answers(got)
+        check("@@ now 100" in got and "@@ limit 80" in got, "leading zeros are the number they spell", got[-300:])
+        check(any("at most five digits" in line for line in seen["cpu online 100000"]["out"]) and
+              any("cpu 0 stays" in line for line in seen["cpu online 0"]["out"]) and
+              any("cannot be switched" in line for line in seen["cpu online 99999"]["out"]),
+              "a cpu that is too long a number, cpu 0 and a cpu that is not there are each said so",
+              repr(seen))
+
+        # What a sleep reports and puts back is by name. The wakeup sources and
+        # the backlights were paired with what they were before by their place
+        # in the directory, so a source that went while the machine slept
+        # moved every one after it a place, and each was reported as having
+        # woken the machine; a panel that went had its level written onto the
+        # next. A hundred sources are counted (sixty-four were), one goes,
+        # one counts an event, and one of two panels goes. The sandbox's
+        # power/state is a FIFO read once as the list of what it offers, and
+        # the change is made before a reader lets the write of "mem" through.
+        sys_reset()
+        shutil.rmtree(fake / "class/backlight")
+        for name, level in (("panel_a", 30), ("panel_b", 60)):
+            sys_file(f"class/backlight/{name}/brightness", f"{level}\n")
+            sys_file(f"class/backlight/{name}/max_brightness", "100\n")
+        got, done = session(
+            "rm -f /root/tune /sys/power/state; mkfifo /sys/power/state\n"
+            "for i in $(seq 100 199); do d=/sys/class/wakeup/wk$i; mkdir -p $d; "
+            "echo label-wk$i > $d/name; echo $((i * 3)) > $d/event_count; done\n"
+            "( echo 'freeze mem disk' > /sys/power/state ) &\n"
+            "( sleep 3; first=$(ls -U /sys/class/wakeup | head -1); last=$(ls -U /sys/class/wakeup | tail -1)\n"
+            "  rm -r /sys/class/wakeup/$first; echo 7 > /sys/class/wakeup/$last/event_count\n"
+            "  echo \"$first $last\" > /tmp/moved; light=$(ls -U /sys/class/backlight | head -1)\n"
+            "  rm -r /sys/class/backlight/$light; echo $light > /tmp/light; cat /sys/power/state > /dev/null ) &\n"
+            "timeout 30 /tmp/moonwater sleep 2>&1 | grep 'woken by'; wait\n"
+            "echo \"@@ moved $(cat /tmp/moved)\"; echo \"@@ light $(cat /tmp/light)\"\n")
+        joined = "\n".join(got)
+        moved = [line.split()[2:] for line in got if line.startswith("@@ moved ")]
+        light = [line.split()[2] for line in got if line.startswith("@@ light ")]
+        woken = [line for line in got if "woken by" in line]
+        check(done and moved and woken and woken[0].endswith("woken by: label-" + moved[0][1]),
+              "only the source that counted an event woke the machine", (woken, moved))
+        survivor = "panel_b" if light and light[0] == "panel_a" else "panel_a"
+        check(light and sys_read(f"class/backlight/{survivor}/brightness") ==
+              ("60" if survivor == "panel_b" else "30"),
+              "a panel keeps its own level when another went while the machine slept", (light, joined[-200:]))
+
+        # A switch the sleep found on is not touched, one it found off is put
+        # back, and airplane mode is remembered: bluetooth off before it was
+        # still off after it, where `airplane off` switched both on; and the
+        # block of every radio, the modem with it, is put back with the rest
+        # of what is kept (after a sleep here, as at boot).
+        sys_reset()
+        sys_file("power/pm_debug_messages", "1\n")
+        sys_file("power/pm_print_times", "0\n")
+        for leaf in ("pm_debug_messages", "pm_print_times"):
+            os.utime(fake / "power" / leaf, (1e9, 1e9))
+        got, done = session("rm -f /root/tune\n" + say("sleep"))
+        check(done and sys_read("power/pm_debug_messages") == "1" and
+              (fake / "power/pm_debug_messages").stat().st_mtime == 1e9 and
+              sys_read("power/pm_print_times") == "0" and
+              (fake / "power/pm_print_times").stat().st_mtime > 1e9 + 1000,
+              "a sleep leaves alone a switch that was on and puts back one that was off", repr(got[-6:]))
+
+        got = tuned("rm -f /root/wifi.power /root/bluetooth.power\n" + say("bluetooth off") + say("airplane on") +
+                    "echo '@@ kept'; cat /root/tune; echo '@@end'\n" + say("airplane") + say("airplane on") +
+                    "echo '@@ again'; cat /root/tune; echo '@@end'\n" +
+                    ": > /dev/rfkill\n" + say("sleep") +
+                    "echo \"@@ after-sleep $(od -An -tx1 /dev/rfkill | tr -s ' ' | sed 's/^ //')\"\n" +
+                    say("airplane off") + "echo '@@ words'; cat /root/wifi.power /root/bluetooth.power; echo '@@end'\n"
+                    "echo '@@ left'; cat /root/tune 2>/dev/null; echo '@@end'\n" + say("airplane"))
+        seen = answers(got)
+
+        def between(got, mark):
+            text = "\n".join(got)
+            return text.split(f"@@ {mark}\n", 1)[1].split("@@end", 1)[0].split() if f"@@ {mark}\n" in text else None
+        check(between(got, "kept") == ["airplane", "wifi"] and between(got, "again") == ["airplane", "wifi"],
+              "airplane on keeps the radios that were on, and a second airplane on keeps them", repr(between(got, "kept")))
+        check(any("airplane on" in line for line in seen["airplane"]["out"]), "and airplane says it is on")
+        check("@@ after-sleep 00 00 00 00 00 03 01 00" in got,
+              "the block of every radio is put back with what is kept", "\n".join(got)[-300:])
+        check(between(got, "words") == ["on", "off"] and between(got, "left") in ([], None) and
+              got[-3:] == ["@@ airplane", "[Moonwater] airplane off", "@@status 0"],
+              "airplane off turns back on only what was on, and forgets", repr((between(got, "words"), between(got, "left"), got[-3:])))
 
         # The saved lists survive a write cut short. RLIMIT_FSIZE 0 makes
         # every write fail and kills the writer with SIGXFSZ, the way a
@@ -41431,6 +42145,49 @@ def harness_moonwater_cli(argv):
               "radio commands refuse special state files without blocking", joined[-300:])
         check("stolen" not in joined and "passpass1" not in joined,
               "wifi does not read a planted final symlink", joined[-300:])
+
+        # The words the switches are kept in, the internet preference and
+        # /root/tune are state files too. A FIFO at any of them held the verb
+        # that reads it (and the machine at boot, which reads them all), and a
+        # link at the name was followed to whatever it named.
+        fifoed = (("wifi.power", "wifi"), ("wifi.power", "wifi off"), ("wired.power", "wired"),
+                  ("wired.power", "wired off"), ("bluetooth.power", "bluetooth"),
+                  ("bluetooth.power", "bluetooth on"), ("internet", "priority internet"),
+                  ("internet", "priority internet wifi"), ("tune", "power"), ("tune", "charge limit 80"),
+                  ("tune", "cpu boost off"))
+        got = tuned("".join(
+            f"rm -f /root/{name}; mkfifo /root/{name}\n"
+            f"timeout 3 /tmp/moonwater {verb} > /dev/null 2>&1; echo \"@@ fifo {name} {verb} $?\"\n"
+            f"rm -f /root/{name}\n" for name, verb in fifoed))
+        joined = "\n".join(got)
+        for name, verb in fifoed:
+            check(f"@@ fifo {name} {verb} 124" not in joined and f"@@ fifo {name} {verb} " in joined,
+                  f"a FIFO at /root/{name} does not hold `{verb}`", joined[-300:])
+        got = tuned("rm -f /run/moonwater/internet /root/wifi.power /root/bluetooth.power /root/internet\n"
+                    "printf 'off\\n' > /root/off-target; printf 'wifi\\n' > /root/wifi-word\n"
+                    "ln -s off-target /root/wifi.power; ln -s off-target /root/bluetooth.power\n"
+                    "ln -s wifi-word /root/internet\n" +
+                    say("wifi") + say("bluetooth") + say("priority internet"))
+        seen = answers(got)
+        check("wifi off" not in " ".join(seen["wifi"]["out"]) and
+              "bluetooth off" not in " ".join(seen["bluetooth"]["out"]) and
+              "prefers wired" in " ".join(seen["priority internet"]["out"]),
+              "a word that is a link is not followed", repr(seen))
+
+        # A word that is already what it is asked to be is not written again:
+        # two syncs, of the file and its directory, at every boot for nothing.
+        # A new file is a new inode, so the same inode is no write.
+        got = tuned("rm -f /root/bluetooth.power /root/wifi.power\n" + say("bluetooth on") + say("wifi on") +
+                    "bi=$(stat -c %i /root/bluetooth.power); wi=$(stat -c %i /root/wifi.power)\n" +
+                    say("bluetooth on") + say("wifi on") +
+                    "echo \"@@ same $([ $bi = $(stat -c %i /root/bluetooth.power) ] && echo b)"
+                    "$([ $wi = $(stat -c %i /root/wifi.power) ] && echo w)\"\n" +
+                    say("bluetooth off") + say("wifi off") +
+                    "echo \"@@ moved $([ $bi != $(stat -c %i /root/bluetooth.power) ] && echo b)"
+                    "$([ $wi != $(stat -c %i /root/wifi.power) ] && echo w) $(cat /root/bluetooth.power /root/wifi.power | tr '\\n' ' ')\"\n")
+        joined = "\n".join(got)
+        check("@@ same bw" in joined, "a word already there is not written again", joined[-300:])
+        check("@@ moved bw off off " in joined, "a word that changes is written", joined[-300:])
 
         # Bluetooth add and remove read the list, change it and write it
         # whole: with the radio lock held by another run they wait for it.
@@ -41488,68 +42245,108 @@ def harness_moonwater_cli(argv):
         # moonwater time sync against a server that answers what it is
         # told: a local one inside the namespace's own loopback, every field
         # an SNTP client has to judge walked -- the version, the mode, the
-        # stratum and a kiss-o-death's code, the leap alarm, a short packet,
-        # a transmit stamp of zero, an origin that does not echo ours. What
-        # RFC 4330 has a client take is taken (and then refused by a kernel
-        # that will not let a namespace set the clock), RATE is reported as
-        # asked too often, and everything else is no answer at all.
+        # stratum and a kiss-o-death's code, the leap indicator, a short or a
+        # long packet, a transmit stamp of zero, a reference stamp of zero or
+        # one that is not the server's to have, an origin that does not echo
+        # ours (one bit out, or the last request's), and a clock a few
+        # seconds, a day or a year from ours. What RFC 4330 has a client take
+        # is taken (and then refused by a kernel that will not let a namespace
+        # set the clock), RATE is reported as asked too often, DENY and RSTR
+        # as the server saying no, and everything else is no answer at all.
+        # A person who asks for the time takes a server's word for a year,
+        # where the machine itself never steps a clock that is set by more
+        # than a day.
         server = r"""
 import json, socket, struct, time
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.bind(("127.0.0.1", 123))
 s.settimeout(120)
+last = bytes(8)
 while True:
     try:
         data, peer = s.recvfrom(512)
     except socket.timeout:
         break
     spec = json.load(open("/tmp/ntp.spec"))
-    now = time.time()
+    now = time.time() + spec["offset"]
     def stamp(t):
         return struct.pack("!II", (int(t) + 2208988800) & 0xffffffff, int((t % 1) * 2**32))
     head = (spec["li"] << 6) | (spec["vn"] << 3) | spec["mode"]
     packet = struct.pack("!BBbb", head, spec["stratum"], 4, -20) + bytes(8) + spec["refid"].encode()
-    packet += stamp(now - 10) + (data[40:48] if spec["echo"] else bytes([1]) * 8)
+    packet += {"now": stamp(now - 10), "zero": bytes(8), "future": stamp(now + 5),
+               "old": stamp(1000)}[spec["reference"]]
+    packet += {True: data[40:48], False: bytes([1]) * 8, "flip": bytes([data[40] ^ 1]) + data[41:48],
+               "replay": last}[spec["echo"]]
+    last = data[40:48]
     # Received and sent in the same instant: a server that claims to have
     # held a request longer than the round trip gives a negative delay,
     # which a client is right to refuse.
     packet += stamp(now) + (stamp(now) if spec["transmit"] else bytes(8))
-    s.sendto(packet[:spec["length"]], peer)
+    s.sendto((packet + bytes(64))[:spec["length"]], peer)
 """
         (sandbox / "tmp/ntpd.py").write_text(server)
         answers_ntp = []
         script = ("ip link set lo up\npython3 /tmp/ntpd.py &\nntp_server=$!\nsleep 1\n"
                   "echo 127.0.0.1 > /root/ntp.server\necho off > /root/ntp.sampling\n")
         fields = {"vn": (0, 1, 3, 4, 5, 7), "mode": (3, 4, 5), "stratum": (0, 1, 15, 16),
-                  "li": (0, 1, 3), "refid": ("RATE", "DENY", "GPS\0"), "length": (47, 48, 60),
-                  "transmit": (True, False), "echo": (True, False)}
+                  "li": (0, 1, 2, 3), "refid": ("RATE", "DENY", "RSTR", "GPS\0"),
+                  "length": (47, 48, 60, 68), "transmit": (True, False),
+                  "echo": (True, False, "flip", "replay"),
+                  "reference": ("now", "zero", "future", "old"),
+                  "offset": (0.0002, 0.5, -0.5, 2.5, 90000, 400 * 86400, -400 * 86400,
+                             4000 * 86400)}
         base = {"vn": 4, "mode": 4, "stratum": 2, "li": 0, "refid": "GPS\0", "length": 48,
-                "transmit": True, "echo": True}
+                "transmit": True, "echo": True, "reference": "now", "offset": 0}
         specs = [dict(base, **{name: value}) for name, values in fields.items() for value in values]
+        #   A kiss-o-death is a stratum 0 with its code in the reference id.
+        specs += [dict(base, stratum=0, refid=code) for code in ("RATE", "DENY", "RSTR", "XXXX")]
         specs += [dict(base, **{name: rng.choice(values) for name, values in fields.items()})
                   for _ in range(40)]
         for number, spec in enumerate(specs):
             script += (f"printf '%s' {shlex.quote(json.dumps(spec))} > /tmp/ntp.spec\n"
                        f"echo '@@ ntp{number}'; timeout 20 /tmp/moonwater time sync 2>&1 | head -1\n")
-        script += "kill $ntp_server\n"
+        #   With nobody on the port the kernel says so at once, by ICMP, and the
+        #   query is over with it: it used to wait out its two seconds, and
+        #   the next sample's too.
+        script += ("kill $ntp_server\nwait $ntp_server 2>/dev/null\nt0=$(date +%s%N)\n"
+                   "echo '@@ closed'; timeout 20 /tmp/moonwater time sync 2>&1 | head -1\n"
+                   "t1=$(date +%s%N)\necho \"@@ms $(( (t1 - t0) / 1000000 ))\"\n")
         lines, finished = session(script)
         check(finished, "the time sync walk finished", "")
         said = {}
         current = None
+        closed_ms = 10**9
         for line in lines:
             if line.startswith("@@ ntp"):
                 current = int(line[6:])
+            elif line.startswith("@@ closed"):
+                current = "closed"
+            elif line.startswith("@@ms "):
+                current = None
+                closed_ms = int(line.split()[1])
             elif current is not None and current not in said:
                 said[current] = line
+        check("no server answered" in said.get("closed", "") and closed_ms < 1800,
+              "time sync against a port nobody listens on is over at once", f"{closed_ms} ms: {said.get('closed')}")
+        least = int(re.search(r"#define SNTP_WALL_LEAST (\d+)ll",
+                              (HARNESS_ROOT / "src/sh/host.c").read_text()).group(1))
+        most = int(re.search(r"#define SNTP_WALL_MOST (\d+)ll",
+                             (HARNESS_ROOT / "src/sh/host.c").read_text()).group(1))
         for number, spec in enumerate(specs):
-            valid = spec["length"] >= 48 and spec["mode"] == 4 and 1 <= spec["vn"] <= 4 and spec["echo"]
-            taken = valid and 1 <= spec["stratum"] <= 15 and spec["li"] != 3 and spec["transmit"]
+            valid = (spec["length"] >= 48 and spec["mode"] == 4 and 1 <= spec["vn"] <= 4
+                     and spec["echo"] is True)
+            #   The time it tells is inside the years the machine accepts.
+            inside = least <= time.time() + spec["offset"] <= most
+            taken = (valid and 1 <= spec["stratum"] <= 15 and spec["li"] != 3 and spec["transmit"]
+                     and spec["reference"] in ("now", "zero") and inside)
             rated = valid and spec["stratum"] == 0 and spec["refid"] == "RATE"
+            denied = valid and spec["stratum"] == 0 and spec["refid"] in ("DENY", "RSTR")
             answer = said.get(number, "")
             got = ("taken" if "answered, but" in answer else
                    "rated" if "asked too often" in answer else
+                   "denied" if "stay away" in answer else
                    "none" if "no server answered" in answer else answer)
-            want = "taken" if taken else "rated" if rated else "none"
+            want = "taken" if taken else "rated" if rated else "denied" if denied else "none"
             check(got == want, f"time sync against {spec} is {want}", got)
 
         # The machine's name: two lists of words with nothing wrong in them, a
@@ -41573,14 +42370,19 @@ while True:
         for roll in range(24):
             script += say("name random") + "echo \"@@saved $(cat /root/name) $(uname -n)\"\n"
         script += (say("name Space-Wizard") + "echo \"@@saved $(cat /root/name) $(uname -n)\"\n")
-        for given in ("a", "x" * 63, "0-9", "a--b"):
+        for given in ("a", "x" * 31, "0-9", "a--b"):
             script += say(f"name {given}") + "echo \"@@saved $(cat /root/name) $(uname -n)\"\n"
         script += "echo space-wizard > /root/name\n"
-        for bad in ("-x", "x-", "a_b", "a.b", "Random", "x" * 64, "../x", "a b", "", "\\xc3\\xa5"):
+        for bad in ("-x", "x-", "a_b", "a.b", "Random", "x" * 32, "../x", "a b", "", "\\xc3\\xa5",
+                    "log", "run", "Shell", "pair"):
             quoted = shlex.quote(bad)
             script += (f"echo '@@ bad {bad}'; timeout 20 /tmp/moonwater name {quoted} 2>&1; "
                        f"echo \"@@status $? $(cat /root/name)\"\n")
         script += "echo 'BAD NAME' > /root/name\n" + say("name") + "echo \"@@saved $(cat /root/name)\"\n"
+        #       A FIFO at the name is no name and cannot hold the command: it is
+        #       rolled over, and the file that replaces it reads.
+        script += ("rm -f /root/name; mkfifo /root/name\n" + say("name") +
+                   "echo \"@@saved $(timeout 5 cat /root/name)\"\n")
         lines, finished = session(script)
         check(finished, "the name walk finished", "")
         shape = re.compile(r"^([a-z]+)-([a-z]+)$")
@@ -41602,7 +42404,7 @@ while True:
                 elif current == "name Space-Wizard":
                     check(parts == ["space-wizard", "space-wizard"],
                           "a name is folded to lowercase, saved and applied", line)
-                elif current and current.startswith("name ") and current.split()[1] in ("a", "x" * 63, "0-9", "a--b"):
+                elif current and current.startswith("name ") and current.split()[1] in ("a", "x" * 31, "0-9", "a--b"):
                     check(parts == [current.split()[1]] * 2, f"{current} is taken as typed", line)
                 else:
                     check(False, f"an unexpected name answer after {current}", line)
@@ -41822,6 +42624,25 @@ while True:
               "with the bytes written out and the script's lines kept", repr(listed[:200]))
         check("\\x1b]0;title" in paged, "and status shows them the same way", repr(paged[:300]))
 
+        # A line that cannot be kept is refused before the kernel takes it:
+        # with the settings block full of init entries, a bind that needs
+        # room said refused after it had been set, and the command and the
+        # kernel disagreed about what the machine runs. Here there is no
+        # kernel to ask, so the room is the whole of the answer.
+        fill = "x" * 4000
+        lines, finished = session(
+            "rm -rf /run/moonwater\n" +
+            "for n in 1 2 3 4; do timeout 20 /tmp/moonwater bind init add \"" + fill + "\" > /dev/null 2>&1; done\n"
+            "timeout 20 /tmp/moonwater bind init add \"" + "y" * 250 + "\" > /dev/null 2>&1\n" +
+            say("bind mute " + "z" * 100) + say("bind mute z") +
+            "echo '@@ left'; timeout 20 /tmp/moonwater bind init | wc -l; echo '@@end'\n")
+        seen = answers(lines)
+        check(finished and seen.get("bind mute " + "z" * 100, {}).get("status") == 1 and
+              any("settings block is full" in line for line in seen.get("bind mute " + "z" * 100, {}).get("out", [])),
+              "a bound line the settings block has no room for is refused", repr(seen.get("bind mute " + "z" * 100)))
+        check(not any("settings block is full" in line for line in seen.get("bind mute z", {}).get("out", [])),
+              "and one that fits is not", repr(seen.get("bind mute z")))
+
         # A state file a verb writes, planted as a link to something else
         # before the verb runs: the verb may refuse or may replace the link,
         # and what the link pointed at is left as it was.
@@ -41865,26 +42686,61 @@ def harness_machine_reap(argv):
     pipe, and a job the machine script puts in the background still found
     no child to wait for. This compiles radio_reap as src/sh/host.c has it,
     starts one such job and one join, and holds the loop to leaving the job
-    to its owner while the join is reaped.
+    to its owner while the join is reaped. And radio_recover, the rest of the
+    pass: the saved network's join is the keeper's when wifi is wanted, and
+    bluetooth is not unblocked on every pass, which undid a `rfkill block
+    bluetooth` (or the radio key) within three seconds; it is unblocked when
+    it is asked to be on.
     """
     import subprocess
     import tempfile
     host = (HARNESS_ROOT / "src/sh/host.c").read_text()
     first = host.index("static bipolar radio_child;")
     body = host[first:host.index("static fn radio_wifi_keep(void)", first)]
+    recover = host[host.index("static fn radio_recover(void)\n{"):host.index("/* What a verb says it did")]
     source = r"""
 #include <signal.h>
 #include <stdio.h>
+#include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
 typedef unsigned long positive;
 typedef long bipolar;
+typedef unsigned char p8;
+typedef const unsigned char *string_address;
 #define fn void
 #define address_of &
+#define address_to *
 #define syscall(name) 0
 #define system_call_4(number, a, b, c, d) \
         ((long)wait4((pid_t)(a), (int *)(b), (int)(c), 0))
-""" + body + r"""
+#define HOST_NAME_ROOM 32
+#define HOST_VERDICT "verdict"
+#define NET_WIFI_POWER "wifi"
+#define NET_BLUETOOTH_POWER "bluetooth"
+#define RADIO_RFKILL_BLUETOOTH 2
+static int asked, kept, copied, unblocked;
+static long wifi_power, bluetooth_power;
+static bipolar host_read_text(string_address path, p8 *into, positive room)
+{
+        if (!asked)
+                return -1;
+        strcpy((char *)into, "ask disk");
+        return 8;
+}
+static int host_starts(string_address text, string_address prefix)
+{
+        return !strncmp((const char *)text, (const char *)prefix, strlen((const char *)prefix));
+}
+static void radio_internet_copy(void) { copied++; }
+static long radio_power(string_address path)
+{
+        return !strcmp((const char *)path, "bluetooth") ? bluetooth_power : wifi_power;
+}
+static int radio_wifi_wanted(long power) { return power != 0; }
+static void radio_wifi_keep(void) { kept++; }
+static bipolar radio_rfkill(int type, int block) { unblocked++; return 0; }
+""" + body + recover + r"""
 int main(void)
 {
         int status = 0, passed = 0;
@@ -41900,8 +42756,19 @@ int main(void)
         passed += waitpid(job, &status, 0) == job && WIFEXITED(status) &&
                   WEXITSTATUS(status) == 7;
         passed += radio_child == 0 && waitpid(join, &status, WNOHANG) < 0;
-        printf("machine reap %d/2\n", passed);
-        return passed != 2;
+        wifi_power = bluetooth_power = 1;
+        radio_recover();
+        passed += kept == 1 && copied == 1 && unblocked == 0;
+        kept = copied = unblocked = 0;
+        asked = 1;
+        radio_recover();
+        passed += !kept && !copied && !unblocked;
+        asked = 0;
+        wifi_power = 0;
+        radio_recover();
+        passed += !kept && copied == 1 && !unblocked;
+        printf("machine reap %d/5\n", passed);
+        return passed != 5;
 }
 """
     with tempfile.TemporaryDirectory(prefix="machine-reap-") as work:
@@ -41912,12 +42779,12 @@ int main(void)
                                capture_output=True, text=True)
         if built.returncode:
             print(built.stderr[-2000:])
-            write_tally("machine-reap", 0, 2)
+            write_tally("machine-reap", 0, 5)
             return 1
         ran = subprocess.run([str(Path(work) / "reap")], capture_output=True, text=True)
         print(ran.stdout, end="")
-        found = re.search(r"(\d)/2", ran.stdout)
-        write_tally("machine-reap", int(found.group(1)) if found else 0, 2)
+        found = re.search(r"(\d)/5", ran.stdout)
+        write_tally("machine-reap", int(found.group(1)) if found else 0, 5)
         return ran.returncode
 
 
@@ -50724,7 +51591,9 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                 if (flags & 1)
                         memcpy(reply + 24, request + 40, 8);
                 memset(heard + heard_count, 0, sizeof heard[0]);
-                if (sntp_reply_sample(reply, request, t1, t4, flags & 2,
+                if (sntp_reply_sample(reply, request, t1, t4,
+                                      flags & 2 ? SNTP_OFFSET_SYNCED_NS
+                                                : SNTP_OFFSET_MOST_NS,
                                       heard + heard_count) == SNTP_OK)
                 {
                         heard[heard_count].address = (p32)(heard_count + 1);
@@ -50753,8 +51622,6 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                 }
                 bipolar now = t4 < 0 ? 0 : t4;
                 bipolar target = 0;
-                bipolar sec = 0;
-                bipolar nsec = 0;
                 /* the kernel's state as locale_ntp_apply_offset reads it:
                    a pending slew within half a second, a frequency the
                    kernel holds to 500 ppm, and an elapsed boot time */
@@ -50765,9 +51632,8 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 
                 if (sntp_target_ok(now, offset, &target))
                 {
-                        sntp_split_offset(offset, &sec, &nsec);
                         locale_ntp_first = flags & 8;
-                        locale_ntp_discipline_words(offset, sec, nsec,
+                        locale_ntp_discipline_words(offset,
                                 locale_ntp_error_us(heard[chosen].distance_ns), words);
                         (void)locale_ntp_learned(offset - pending, elapsed, frequency);
                 }
@@ -50843,7 +51709,9 @@ def sntp_fuzz_source(host):
     """host.c's SNTP parse, selection and discipline arithmetic, lifted whole
     by the literal anchors below, behind SNTP_FUZZ_SHIM."""
     sec = src_slice
+    lib = (HARNESS_ROOT / "src/lib.util.c").read_text()
     parts = (
+        sec(lib, "static bipolar clock_floor_divide(", "/*\n        The calendar, closed form"),
         sec(host, "#define SNTP_PORT 123", "static inline INLINE bipolar sntp_now_ns(void)"),
         sec(host, "static inline INLINE PURE bipolar sntp_load_stamp",
             "/*\n        t4 is meant to be"),
@@ -50900,7 +51768,8 @@ int main(void)
                 era_put(reply + 40, server, 1000000);
                 verdict = sntp_reply_sample(
                     reply, request, sntp_timespec_ns((p64)client, 0),
-                    sntp_timespec_ns((p64)client, 2000000), tight, &sample);
+                    sntp_timespec_ns((p64)client, 2000000),
+                    tight ? SNTP_OFFSET_SYNCED_NS : SNTP_OFFSET_MOST_NS, &sample);
                 printf("%lld %lld %ld %ld %ld\n", client, server, (long)verdict,
                        verdict == SNTP_OK ? (long)sample.offset_ns : 0,
                        verdict == SNTP_OK ? (long)sample.delay_ns : 0);
@@ -57141,11 +58010,19 @@ int main(int argc, char **argv)
 
             def define(name, body, spelling):
                 at = sum(line.count("\n") + 1 for line in lines) + 1
-                head = {0: f"{name}() {{", 1: f"function {name} {{", 2: f"function {name}() {{",
-                        3: f"{name} () {{"}[spelling]
+                #   Bash takes any compound command as a function's body: a
+                #   group, a subshell, an if, a [[ ]] test. The last has no
+                #   lines to put a case in, so a body that has one is not
+                #   given it.
+                head, tail = {0: (f"{name}() {{", "}"), 1: (f"function {name} {{", "}"),
+                              2: (f"function {name}() {{", "}"), 3: (f"{name} () {{", "}"),
+                              4: (f"{name}() (", ")"), 5: (f"{name}() if :; then", "fi"),
+                              6: (f"{name}() [[ -n x ]]", None),
+                              7: (f"{name} () while :; do", "done")}[spelling]
                 lines.append(head)
-                lines.extend(body)
-                lines.append("}")
+                if tail is not None:
+                    lines.extend(body)
+                    lines.append(tail)
                 first.setdefault(name, at)
 
             noise = [
@@ -57161,9 +58038,18 @@ int main(int argc, char **argv)
                 lambda: lines.extend(["\tcat <<-END >/dev/null", "\tmoonwater_init() {", "\t}", "\tEND"]),
                 lambda: lines.append("n=$((1<<3)); m=$(( n << 2 ))"),
                 lambda: lines.append("q=a#b; helper2() { :; }"),
+                #   A delimiter longer than the scanner keeps is still the
+                #   delimiter: the body is text and the line that is all of
+                #   it ends it.
+                lambda: lines.extend(["cat <<" + "D" * 70 + " >/dev/null", "moonwater_end() {", "}",
+                                      "D" * 70]),
+                lambda: lines.extend(["cat <<'" + "E" * 64 + "' >/dev/null", "moonwater_init() {", "}",
+                                      "E" * 64]),
             ]
             names = ["moonwater_init", "moonwater_event", "moonwater_end", "helper", "moonwater_poweroff",
-                     "moonwater_volume_up", "moonwater_canvas", "moonwater_lid_close", "moonwater_", "moonwater_nosuch"]
+                     "moonwater_volume_up", "moonwater_canvas", "moonwater_lid_close", "moonwater_", "moonwater_nosuch",
+                     #   Names the scanner's word buffer cannot hold whole.
+                     "moonwater_" + "x" * 70, "moonwater_init" + "y" * 55, "m" * 63, "m" * 64]
             for _ in range(rng.randint(1, 7)):
                 if rng.random() < 0.4:
                     rng.choice(noise)()
@@ -57185,7 +58071,10 @@ int main(int argc, char **argv)
                         if "event" not in first:
                             arms.add(pattern)
                     body.append("        esac")
-                define(name, body, rng.randrange(4))
+                spelling = rng.randrange(8)
+                if spelling == 6 and len(body) > 1:
+                    spelling = rng.randrange(6)
+                define(name, body, spelling)
             text = "\n".join(lines) + "\n"
             return text, first, arms
 
@@ -57199,6 +58088,17 @@ int main(int argc, char **argv)
             path = work / f"r{number}.sh"
             blob = bytes(rng.choice(b"(){};|#\\\"'`\n abcmoonwater_initevent$*?[]-") for _ in range(rng.randint(0, 400)))
             path.write_bytes(blob)
+            cases.append((path, None, None, None))
+        #   And random runs of the words a compound command is made of, which
+        #   no byte soup reaches: bodies that never close, closers with no
+        #   opener, here-documents everywhere, patterns with their ) cut off.
+        pieces = ["if", "fi", "then", "else", "elif", "while", "until", "for", "select", "do", "done",
+                  "case", "in", "esac", ";;", "(", ")", "((", "))", "{", "}", "[[", "]]", "<<EOF", "<<-X",
+                  "<<'q", ";", "|", "&&", "\n", "\n", "moonwater_event()", "moonwater_init", "function",
+                  "mute)", "*)", "x", "$(", "'", '"', "\\\n", "#", "!"]
+        for number in range(300):
+            path = work / f"w{number}.sh"
+            path.write_text(" ".join(rng.choice(pieces) for _ in range(rng.randint(1, 120))))
             cases.append((path, None, None, None))
 
         scanned = subprocess.run([str(work / "scan"), *[str(c[0]) for c in cases]],
@@ -57230,6 +58130,250 @@ int main(int argc, char **argv)
                 checks(bool(fields[5 + index]) == want,
                        f"{path.name}: event {event!r} owned {bool(fields[5 + index])}, "
                        f"bash and the arms say {want}\n{text}")
+
+    #   What a static scan cannot know, said once so a change to it is seen.
+    #   A definition behind an if is armed -- the scanner reads the text, not
+    #   what runs -- and bash defines it only if the branch is taken.
+    with tempfile.TemporaryDirectory(prefix="machine-scan-pin-") as temporary:
+        work = Path(temporary)
+        (work / "scan.c").write_text(source)
+        subprocess.run([cc, "-O1", "-w", "-o", str(work / "scan"), str(work / "scan.c")], check=True)
+        pinned = work / "conditional.sh"
+        pinned.write_text("if false; then\n moonwater_reset() { :; }\nfi\n")
+        said = subprocess.run([str(work / "scan"), str(pinned)], capture_output=True, text=True).stdout.split()
+        defined = subprocess.run([bash, "-c", 'source "$1"; declare -F', "x", str(pinned)],
+                                 capture_output=True, text=True).stdout
+        checks(int(said[5 + events.index("reset")]) == 2 and "moonwater_reset" not in defined,
+               "a function defined behind an if is armed by the scan, and bash does not define it (known)")
+
+        #   Reading a script of nothing but shifts reads it once, not once for
+        #   each: twice the text takes about twice as long, not four times.
+        def timed(count):
+            path = work / f"flood{count}.sh"
+            path.write_text("x<<a\n" * count)
+            best = 1e9
+            for _ in range(3):
+                started = time.perf_counter()
+                subprocess.run([str(work / "scan"), str(path)], capture_output=True, timeout=300)
+                best = min(best, time.perf_counter() - started)
+            return best
+        small, large = timed(6500), timed(26000)
+        checks(large < 6 * max(small, 0.002),
+               f"a script of unclosed here-document starts is read in linear time ({small:.4f}s for 32 KiB, {large:.4f}s for 128 KiB)")
+
+    #   The machine process's other side, lifted out of the CLI half and run
+    #   against a device that is a few variables: the stop that asks it to
+    #   end. A caller who may not (END is root's) must not wait ten seconds
+    #   for a detach that is not coming, and a process that never let go is
+    #   not one that ran moonwater_end.
+    stop_source = r"""
+#include <stdio.h>
+#include <string.h>
+#include <stdbool.h>
+typedef unsigned long long p64;
+typedef long bipolar;
+typedef unsigned long positive;
+#define address_of &
+#define address_to *
+#define SPARK_DEVICE "/dev/spark"
+#define FILE_READ 0
+#define O_CLOEXEC 0
+#define AT_FDCWD (-100)
+#define HOST_CLOCK_BOOTTIME 7
+#define HOST_EXIT_EACH_NS ((p64)10000000000)
+#define HOST_EVENT_POLL_NS ((p64)20000000)
+#define SPARK_BIND_NAME_MAX 24
+#define memory_zero(at, n) memset(at, 0, n)
+""" + section(machine, "#define MOONWATER_ATTACH 0u", "#define MOONWATER_HOOK_INIT") + r"""
+static p64 now_ns;
+static bool host_machine_self, attached, may_end, leaves;
+static unsigned ended, polls, runs, opened;
+static bipolar system_open_at(int at, const char *path, int flags) { (void)at;(void)path;(void)flags;opened++;return 3; }
+static void system_close(bipolar h) { (void)h; }
+static p64 system_clock_ns(int c) { (void)c;return now_ns; }
+static void host_pause(p64 ns) { now_ns += ns; }
+static void host_machine_end_run(void) { runs++; }
+static bipolar system_control(bipolar d, unsigned op, void *p) {
+    struct machine_control *c = p; (void)d;(void)op;
+    if (c->op == MOONWATER_END) {
+        if (!may_end) return -1;
+        ended++;
+        return 0;
+    }
+    if (c->op == MOONWATER_STATUS) {
+        polls++;
+        c->flags = attached && !(ended && leaves && polls > 4) ? MOONWATER_ATTACHED : 0;
+        return 0;
+    }
+    return -1;
+}
+""" + section(machine, "static bipolar host_machine_ioctl(", "#define HOST_RADIO_WAIT_MS") + section(machine, "static bool host_machine_stop(void)", "static b32 host_machine_source(void)") + r"""
+static unsigned bad, total;
+static void check(int ok, const char *name) { total++; if (!ok) { bad++; printf("FAIL %s\n", name); } }
+static void world(bool a, bool m, bool l, bool s) {
+    now_ns = 0; polls = ended = runs = 0; attached = a; may_end = m; leaves = l; host_machine_self = s;
+}
+int main(void)
+{
+    bool got;
+    world(false, true, true, false);
+    got = host_machine_stop();
+    check(!got && !ended, "with no machine process attached there is nothing to end and it is not a stop it ran");
+    world(true, false, true, false);
+    got = host_machine_stop();
+    check(!got && !ended && now_ns < 1000000000ull, "a caller who may not end it is refused at once, not after ten seconds");
+    world(true, true, true, false);
+    got = host_machine_stop();
+    check(got && ended == 1 && now_ns < 1000000000ull, "a machine process that is told and leaves is a stop it ran");
+    world(true, true, false, false);
+    got = host_machine_stop();
+    check(!got && ended == 1 && now_ns >= HOST_EXIT_EACH_NS, "one that stays attached for ten seconds is not");
+    world(true, true, true, true);
+    got = host_machine_stop();
+    check(got && runs == 1 && !ended && !polls, "the machine process itself runs moonwater_end and waits for nobody");
+    printf("%u %u\n", total, bad);
+    return bad != 0;
+}
+"""
+    with tempfile.TemporaryDirectory(prefix="machine-stop-") as temporary:
+        work = Path(temporary)
+        (work / "stop.c").write_text(stop_source)
+        built = subprocess.run([cc, "-O1", "-g", "-fsanitize=address,undefined", "-w", "-o",
+                                str(work / "stop"), str(work / "stop.c")],
+                               capture_output=True, text=True)
+        if built.returncode:
+            print(built.stderr[-3000:])
+            return 1
+        ran = subprocess.run([str(work / "stop")], capture_output=True, text=True, timeout=60)
+        lines = ran.stdout.strip().split("\n")
+        for line in lines:
+            if line.startswith("FAIL"):
+                checks(False, "machine stop: " + line[5:])
+        total = int(lines[-1].split()[0]) if lines and lines[-1][:1].isdigit() else 0
+        for _ in range(total - sum(1 for line in lines if line.startswith("FAIL"))):
+            checks(True, "machine stop")
+        checks(total == 5 and ran.returncode == 0, "the stop checks ran: " + ran.stderr[-300:])
+
+    #   The CLI's side of the bind ioctl and of the settings block, lifted
+    #   and run: what is handed to the kernel for a command of every length
+    #   around its limit, what is made of an answer that is not terminated,
+    #   and an entry that claims more text than a buffer of the most an entry
+    #   may hold -- every caller copies it into one.
+    host = (root / "src/sh/host.c").read_text()
+    lift_source = r"""
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdbool.h>
+typedef unsigned char p8;
+typedef unsigned short p16;
+typedef unsigned int p32;
+typedef unsigned long long p64;
+typedef unsigned long positive;
+typedef long bipolar;
+typedef const char *string_address;
+#define address_of &
+#define address_to *
+#define end 0
+#define fn void
+#define memory_copy_apart memcpy
+#define memory_copy memcpy
+#define memory_zero(at, n) memset(at, 0, n)
+#define string_length strlen
+#define SPARK_EVENTS_UNUSED 0
+""" + section(spark, "#define SPARK_BIND_NAME_MAX", "#define SPARK_BIND_GET") + \
+        section(spark, "#define SPARK_BIND_POWEROFF", "static const unsigned char spark_bind_stop") + \
+        section(spark, "#define SPARK_BIND_COMMAND_MAX 256u", "#define SPARK_BIND_NAME_MAX") + \
+        section(spark, "struct bind_control {", "// _IOWR('s', 11, struct bind_control)") + \
+        section(spark, "#define SPARK_SETTINGS_MAGIC", "//      The sum a sealed slot carries") + r"""
+#define SPARK_IOCTL_BIND 0xc138730bu
+#define SPARK_BIND_GET 0u
+#define SPARK_BIND_SET 1u
+typedef struct spark_settings host_settings;
+""" + section(host, "typedef struct\n{\n        struct spark_settings_entry entry;",
+              "static const struct\n{\n        string_address verb;\n        p8 list;") + r"""
+static unsigned seen_op, seen_event, seen_length, seen_terminated;
+static char seen_command[SPARK_BIND_COMMAND_MAX];
+static int answer_loose, answer_fails;
+static bipolar system_control(bipolar device, unsigned long request, void *at) {
+    struct bind_control *c = at; (void)device;
+    seen_op = c->op; seen_event = c->event;
+    memcpy(seen_command, c->command, sizeof seen_command);
+    seen_terminated = memchr(c->command, 0, sizeof c->command) != NULL;
+    if (answer_loose) { memset(c->name, 'n', sizeof c->name); memset(c->command, 'c', sizeof c->command); }
+    return request == SPARK_IOCTL_BIND && !answer_fails ? 0 : -22;
+}
+""" + section(host, "static fn host_bind_fill(", "static bipolar host_bind_request(") + \
+        section(host, "/* The entry at at, stepping at past it", "/* An entry's words") + r"""
+static unsigned bad, total;
+static void check(int ok, const char *name) { total++; if (!ok) { bad++; printf("FAIL %s\n", name); } }
+int main(void)
+{
+    struct bind_control control;
+    char text[400];
+    static host_settings block;
+    host_setting entry;
+    positive at;
+    unsigned seen = 0;
+
+    for (unsigned length = 254; length <= 258; length++) {
+        memset(text, 'a', length); text[length] = 0;
+        memset(&control, 0xee, sizeof control);
+        answer_loose = answer_fails = 0;
+        check(host_bind_ioctl(3, SPARK_BIND_SET, 5, text, &control) == 0 && seen_op == SPARK_BIND_SET &&
+              seen_event == 5, "a set reaches the kernel as a set of that event");
+        check(!memcmp(seen_command, text, length < 256 ? length : 256) &&
+              (length < 256 ? seen_terminated : !seen_terminated),
+              length < 256 ? "a command that fits goes whole with its end" :
+                             "a command that is too long goes at the size, unended, so the kernel's refusal answers");
+    }
+    memset(&control, 0xee, sizeof control);
+    host_bind_ioctl(3, SPARK_BIND_GET, 7, NULL, &control);
+    check(seen_op == SPARK_BIND_GET && seen_event == 7 && seen_command[0] == 0 &&
+          !memchr(seen_command, 0xee, sizeof seen_command), "a get carries no command, and no stack");
+    answer_loose = 1;
+    check(host_bind_ioctl(3, SPARK_BIND_GET, 7, NULL, &control) == 0 &&
+          control.command[SPARK_BIND_COMMAND_MAX - 1] == 0 && control.name[SPARK_BIND_NAME_MAX - 1] == 0,
+          "an answer the kernel did not end is ended here");
+    answer_loose = 0; answer_fails = 1;
+    check(host_bind_ioctl(3, SPARK_BIND_GET, 7, NULL, &control) < 0, "a refusal is the caller's to see");
+
+    memset(&block, 0, sizeof block);
+    #define PUT(l_, k_, i_, n_) do { \
+        struct spark_settings_entry e = {0}; e.list = l_; e.kind = k_; e.id = i_; e.length = n_; \
+        memcpy(block.payload + block.length, &e, sizeof e); block.length += sizeof e; \
+        memset(block.payload + block.length, 'x', spark_settings_padded(n_)); \
+        block.length += spark_settings_padded(n_); } while (0)
+    PUT(1, 1, 1, 5); PUT(3, 1, 2, 4096); PUT(1, 1, 3, 0);
+    for (at = 0; host_settings_next(&block, &at, &entry); ) seen++;
+    check(seen == 3, "entries are walked by their padded size to the end of the block");
+    memset(&block, 0, sizeof block);
+    PUT(1, 1, 1, 7); PUT(1, 1, 2, 4097); PUT(1, 1, 3, 3);
+    seen = 0;
+    for (at = 0; host_settings_next(&block, &at, &entry); ) seen++;
+    check(seen == 1, "an entry that claims more than a buffer for one holds ends the list");
+    printf("%u %u\n", total, bad);
+    return bad != 0;
+}
+"""
+    with tempfile.TemporaryDirectory(prefix="machine-lift-") as temporary:
+        work = Path(temporary)
+        (work / "lift.c").write_text(lift_source)
+        built = subprocess.run([cc, "-O1", "-g", "-fsanitize=address,undefined", "-w", "-o",
+                                str(work / "lift"), str(work / "lift.c")],
+                               capture_output=True, text=True)
+        if built.returncode:
+            print(built.stderr[-3000:])
+            return 1
+        ran = subprocess.run([str(work / "lift")], capture_output=True, text=True, timeout=60)
+        lines = ran.stdout.strip().split("\n")
+        failed = [line for line in lines if line.startswith("FAIL")]
+        for line in failed:
+            checks(False, "bind and settings lift: " + line[5:])
+        total = int(lines[-1].split()[0]) if lines and lines[-1][:1].isdigit() else 0
+        for _ in range(total - len(failed)):
+            checks(True, "bind and settings lift")
+        checks(total == 15 and ran.returncode == 0, "the lifted checks ran: " + ran.stderr[-300:])
     return checks.verdict("machine scan", "machine-scan")
 
 
@@ -58077,25 +59221,33 @@ say(out.decode().strip() == keys["a"], "a key once made is the one printed after
 mode = os.stat(top + "/a/root/link.key").st_mode & 0o777
 say(mode == 0o600, "the key file is 0600 (%o)" % mode)
 
-on("a", "%s link pair b %s 10.77.0.2" % (moon, keys["b"]))
-on("c", "%s link pair b %s 10.77.0.2" % (moon, keys["b"]))
-on("a", "%s link pair bwrong %s 10.77.0.2" % (moon, keys["c"]))
-on("b", "%s link pair a %s" % (moon, keys["a"]))
+on("a", "%s link add b %s 10.77.0.2" % (moon, keys["b"]))
+on("c", "%s link add b %s 10.77.0.2" % (moon, keys["b"]))
+on("a", "%s link add bwrong %s 10.77.0.2" % (moon, keys["c"]))
+on("b", "%s link add a %s" % (moon, keys["a"]))
 status, out, err = on("b", moon + " link allow a run")
-say(status == 0 and b"a may verbs run" in out, "a grant is given by name")
-status, _, err = on("b", moon + " link pair 'bad name' " + keys["a"])
+say(status == 0 and b"a may run" in out, "a grant is given by name")
+status, _, err = on("b", moon + " link add 'bad name' " + keys["a"])
 say(status != 0, "a name with a space is refused")
-status, _, err = on("b", moon + " link pair x AAAA")
+status, _, err = on("b", moon + " link add x AAAA")
 say(status != 0, "a key that is not one is refused")
-status, _, err = on("b", moon + " link pair low " + "A" * 43 + "=")
+status, _, err = on("b", moon + " link add low " + "A" * 43 + "=")
 say(status != 0 and b"not a usable link key" in err,
     "sec: a low-order public key is refused before it is stored")
-status, _, err = on("b", "%s link pair me %s" % (moon, keys["b"]))
+status, _, err = on("b", "%s link add me %s" % (moon, keys["b"]))
 say(status != 0, "a machine will not pair its own key")
+on("b", "%s link add c %s" % (moon, keys["c"]))
+status, _, err = on("b", "%s link add a %s" % (moon, keys["c"]))
+say(status != 0 and b"already linked as c" in err,
+    "a key linked under one name is not added under another name's record (%r)" % (err[-120:],))
+on("b", moon + " link remove c")
 
 #       Descriptor 7 open in the server stands for anything a hand-started
 #       `link serve` inherited; no remote command may see it.
-server = subprocess.Popen(argv_on("b", moon + " link serve 7</etc/hostname"), stdin=subprocess.DEVNULL,
+#       Started in /run, which is not where a command or a relative path of
+#       a push is meant to be.
+server = subprocess.Popen(argv_on("b", "sh -c 'cd /run && exec " + moon + " link serve' 7</etc/hostname"),
+                          stdin=subprocess.DEVNULL,
                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
 time.sleep(0.5)
 
@@ -58201,6 +59353,54 @@ say(status == 0 and out.strip() == b"88895" and b"closed" not in err,
     "sec: output held for a slow reader is not dropped when the command ends "
     "(%r %r)" % (out.strip(), err[-80:]))
 
+#       The same reader with more behind it than the link holds. The command
+#       is done long before the last of its output has crossed, and what the
+#       pipe still has is the command's output and not something left behind
+#       it: all but 400 KB is read, then nothing for three seconds. That is
+#       more than the window's slots and the client's pipe hold, so the
+#       command runs on to its end, and less than they and its own pipe hold
+#       together, so it ends in the stall with the last of it still in there.
+with open(top + "/consume.py", "w") as f:
+    f.write("import hashlib, os, sys, time\n"
+            "first, wait = int(sys.argv[1]), float(sys.argv[2])\n"
+            "digest, total = hashlib.sha256(), 0\n"
+            "for stop in (first, None):\n"
+            "    while stop is None or total < stop:\n"
+            "        data = os.read(0, 65536 if stop is None else min(65536, stop - total))\n"
+            "        if not data:\n"
+            "            break\n"
+            "        total += len(data)\n"
+            "        digest.update(data)\n"
+            "    time.sleep(wait if stop else 0)\n"
+            "print(total, digest.hexdigest())\n")
+want = "".join("%d\n" % i for i in range(1, 400001)).encode()
+status, out, err = on("a", moon + " link run b 'seq 1 400000' | python3 %s/consume.py %d 3" %
+                      (top, len(want) - 400000), timeout=120)
+say(out.split() == [str(len(want)).encode(), hashlib.sha256(want).hexdigest().encode()],
+    "a stalled reader is handed all of the output, the last 400 KB of it after the command ended (%r)" %
+    (out[:90],))
+
+#       A client that ends while its command runs, here by TERM from timeout,
+#       says goodbye, and the listener hangs up on the command and waits for
+#       it: none is left a zombie of the listener.
+def zombies_of(pid):
+    found = 0
+    for entry in os.listdir("/proc"):
+        if entry.isdigit():
+            try:
+                fields = open("/proc/%s/stat" % entry).read().rsplit(")", 1)[1].split()
+            except (OSError, IndexError):
+                continue
+            found += fields[0] == "Z" and int(fields[1]) == pid
+    return found
+
+for _ in range(3):
+    on("a", "timeout 2 " + moon + " link run b 'sleep 100'", timeout=30)
+time.sleep(1.5)
+say(zombies_of(server.pid) == 0,
+    "sec: commands of sessions that ended are waited for, no zombie is left in the listener (%d)" %
+    zombies_of(server.pid))
+
 status, out, err = on("a", moon + " link run b 'for i in $(seq 1 25); do echo line $i; sleep 0.2; done'",
                       extra={"WATERLINK_REKEY_SECONDS": "1"}, timeout=60)
 keyed = [int(w) for w in err.split() if w.isdigit()]
@@ -58220,6 +59420,10 @@ status, out, err = on("a", moon + " link push b /root/blob /root/got", timeout=1
 got = open(top + "/b/root/got", "rb").read() if os.path.exists(top + "/b/root/got") else b""
 say(status == 0 and got == blob, "push carries 3 MB whole (%r, %d bytes)" % (status, len(got)))
 say(os.stat(top + "/b/root/got").st_mode & 0o777 == 0o640 if got else False, "and its mode")
+status, out, err = on("a", moon + " link push b /root/blob relative-push", timeout=120)
+say(status == 0 and os.path.exists(top + "/b/root/relative-push") and
+    not os.path.exists(top + "/b/run/relative-push"),
+    "a relative path in a push is /root's, as a command's is, and not where the listener was started")
 say(not os.path.exists(top + "/b/root/got.link-part"), "and leaves no part file")
 with open(top + "/b/root/guarded.link-part", "wb") as f:
     f.write(b"somebody else's staging file")
@@ -58244,6 +59448,29 @@ os.symlink(top + "/b/root/target", top + "/b/root/planted")
 status, out, err = on("a", moon + " link push b /root/blob /root/planted", timeout=120)
 say(open(top + "/b/root/target", "rb").read() == b"untouched",
     "a push onto a link replaces the link and never writes through it")
+#       files is every file root has bar the link's own. A peer holding it and
+#       nothing else cannot take the key, which is this machine to everyone,
+#       or write the list of machines, which would make it every grant.
+on("b", moon + " link deny a shell run log")
+peers_kept = open(top + "/b/root/link.peers", "rb").read()
+os.symlink("/root/link.key", top + "/b/root/own-link")
+with open(top + "/a/root/forged", "wb") as f:
+    f.write(bytes(96))
+status, out, err = on("a", moon + " link pull b /root/link.key /root/stolen", timeout=30)
+say(status == 255 and b"part of the link itself" in err and not os.path.exists(top + "/a/root/stolen"),
+    "sec: a peer with files only cannot pull the private key (%r %r)" % (status, err[-80:]))
+status, out, err = on("a", moon + " link pull b /root/own-link /root/stolen", timeout=30)
+say(status == 255 and b"part of the link itself" in err and not os.path.exists(top + "/a/root/stolen"),
+    "sec: nor through a link to it")
+status, out, err = on("a", moon + " link push b /root/forged /root/link.peers", timeout=30)
+say(status == 255 and b"part of the link itself" in err and
+    open(top + "/b/root/link.peers", "rb").read() == peers_kept,
+    "sec: nor write the list of machines (%r %r)" % (status, err[-80:]))
+status, out, err = on("a", moon + " link run b id", timeout=30)
+say(status == 255 and b"run is not granted to a" in err, "sec: and is still not allowed to run anything")
+os.unlink(top + "/b/root/own-link")
+on("b", moon + " link allow a shell run log")
+
 status, out, err = on("a", moon + " link pull b /root/nothing-here /root/nothing", timeout=30)
 say(status == 1 and b"No such file" in err and not os.path.exists(top + "/a/root/nothing"),
     "pulling what is not there fails, says why, and leaves nothing here")
@@ -58288,7 +59515,7 @@ say(status == 0 and out == b"restored\n",
 
 status, out, err = on("b", moon + " link")
 text = out.decode(errors="replace")
-say("a  " in text and "may verbs run shell" in text and "heard" in text,
+say("a  " in text and "may shell run" in text and "heard" in text,
     "status names the peer, its grants, and where it was heard")
 
 for dev, where in (("wb0", None), ("wb", netns)):
@@ -58297,6 +59524,24 @@ for dev, where in (("wb0", None), ("wb", netns)):
     subprocess.run((["nsenter", "--net=" + where] if where else []) + command, check=True)
 runs("lossy: ")
 shell("lossy: ")
+for dev, where in (("wb0", None), ("wb", netns)):
+    subprocess.run((["nsenter", "--net=" + where] if where else []) +
+                   ["tc", "qdisc", "del", "dev", dev, "root"], check=True)
+
+#       A path that is slow and loses nothing: a megabyte at four megabits is
+#       two seconds, and the command that sends it is done in a tenth of one.
+#       What is in its pipe when it ends is still to cross.
+big = os.urandom(1000000)
+with open(top + "/b/root/big", "wb") as f:
+    f.write(big)
+for dev, where in (("wb0", None), ("wb", netns)):
+    subprocess.run((["nsenter", "--net=" + where] if where else []) +
+                   ["tc", "qdisc", "add", "dev", dev, "root", "netem", "rate", "4mbit"], check=True)
+status, out, err = on("a", moon + " link pull b /root/big /root/bigslow", timeout=120)
+back = open(top + "/a/root/bigslow", "rb").read() if os.path.exists(top + "/a/root/bigslow") else b""
+say(status == 0 and back == big, "a pull over a slow path is whole (%r, %d of %d bytes)" % (status, len(back), len(big)))
+status, out, err = on("a", moon + " link run b 'cat /root/big'", timeout=120)
+say(status == 0 and out == big, "and so is a command's output (%r, %d of %d bytes)" % (status, len(out), len(big)))
 for dev, where in (("wb0", None), ("wb", netns)):
     subprocess.run((["nsenter", "--net=" + where] if where else []) +
                    ["tc", "qdisc", "del", "dev", dev, "root"], check=True)
@@ -58340,13 +59585,13 @@ listen.setblocking(False)
 
 for side in "ab":
     for name in ("a", "b", "bwrong"):
-        on(side, moon + " link forget " + name, timeout=30)
+        on(side, moon + " link remove " + name, timeout=30)
 secret = "lab-secret-for-the-lane-1"
-status, out, err = on("a", "%s link join lab %s allow run" % (moon, secret))
-say(status == 0 and b"in lab; members may run" in out and b"link on" in out,
+status, out, err = on("a", "%s link group lab %s allow run" % (moon, secret))
+say(status == 0 and b"in group lab; its members may run" in out and b"link on" in out,
     "join names the grants and switches the link on (%r)" % (err[-200:],))
-status, out, err = on("b", "%s link join lab %s allow run shell" % (moon, secret))
-status, out, err = on("c", "%s link join lab not-the-%s allow run" % (moon, secret))
+status, out, err = on("b", "%s link group lab %s allow run shell" % (moon, secret))
+status, out, err = on("c", "%s link group lab not-the-%s allow run" % (moon, secret))
 say(os.stat(top + "/a/root/link.groups").st_mode & 0o777 == 0o600,
     "the group file is root's alone")
 say(secret.encode() not in open(top + "/a/root/link.groups", "rb").read(),
@@ -58362,14 +59607,14 @@ old_record = bytearray(groups_file[:128])
 old_record[64:96] = hashlib.sha256(b"waterlink check lab " + secret.encode()).digest()
 open(top + "/a/root/link.groups", "wb").write(bytes(old_record))
 os.chmod(top + "/a/root/link.groups", 0o600)
-status, out, err = on("a", moon + " link join lab")
+status, out, err = on("a", moon + " link group lab")
 say(status == 0, "a group file with the old check still joins (%r)" % (err[-200:],))
 say(not any(open(top + "/a/root/link.groups", "rb").read()[64:96]),
     "and the file written after it has no check")
-status, out, err = on("a", moon + " link join fresh-lab allow run")
-say(status == 0 and b"link join fresh-lab " in out,
+status, out, err = on("a", moon + " link group fresh-lab allow run")
+say(status == 0 and b"link group fresh-lab " in out,
     "a made secret is told with the join command that takes it (%r)" % (out[-200:],))
-on("a", moon + " link leave fresh-lab")
+on("a", moon + " link group leave fresh-lab")
 
 names = {}
 began = time.time()
@@ -58378,7 +59623,7 @@ while time.time() - began < 25 and len(names) < 2:
     for side, other in (("a", "b"), ("b", "a")):
         status, out, err = on(side, moon + " link")
         for line in out.decode(errors="replace").splitlines():
-            if line.startswith("  box-" + other) and "paired in lab" in line:
+            if line.startswith("  box-" + other) and "in group lab" in line:
                 names[side] = line.split()[0]
 say(len(names) == 2, "a and b paired with each other by themselves (%r, %.1fs)" %
     (names, time.time() - began))
@@ -58389,15 +59634,165 @@ if len(names) == 2:
     say(status == 255 and b"shell is not granted" in err,
         "b may not open a shell on a, whose join line granted only run")
     status, out, err = on("b", moon + " link")
-    say(b"may run shell, paired in lab" in out,
+    say(b"may shell run, in group lab" in out,
         "b gives a what its own join line granted, and says how it was paired")
 
 status, out, err = on("c", moon + " link")
-say(b"paired in lab" not in out, "the machine with the wrong secret paired with nobody")
+say(b"in group lab" not in out, "the machine with the wrong secret paired with nobody")
 known = open(top + "/a/root/link.peers", "rb").read() + open(top + "/b/root/link.peers", "rb").read()
 status, key_c, err = on("c", moon + " link key")
 import base64
 say(base64.b64decode(key_c.strip()) not in known, "and neither member stored its key")
+
+#       A code. a waits and prints its name and six symbols, and c says them.
+#       The wait is cut to seconds where a test wants the code to run out,
+#       and WATERLINK_PAIR_SECONDS can only shorten it.
+import re
+code_alphabet = rb"[0-9a-hjkmnp-tv-z]"
+
+def waiting(side, args, seconds):
+    return subprocess.Popen(argv_on(side, moon + " link " + args), stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            env=dict(env, WATERLINK_PAIR_SECONDS=str(seconds)))
+
+def code_said(waiter, name):
+    said = b""
+    end = time.time() + 30
+    while time.time() < end:
+        ready, _, _ = select.select([waiter.stdout], [], [], 0.5)
+        if ready:
+            chunk = os.read(waiter.stdout.fileno(), 4096)
+            if not chunk:
+                break
+            said += chunk
+            found = re.search(name.encode() + rb" (" + code_alphabet + rb"{3}-" +
+                              code_alphabet + rb"{3})", said)
+            if found:
+                return found.group(1).decode(), said
+    return None, said
+
+def once_records(side):
+    data = open(top + "/" + side + "/root/link.groups", "rb").read() if os.path.exists(
+        top + "/" + side + "/root/link.groups") else b""
+    return [(data[at:at + 32].split(b"\0")[0], structure.unpack_from("<I", data, at + 100)[0])
+            for at in range(0, len(data) - 127, 128)
+            if structure.unpack_from("<I", data, at + 100)[0] & 1]
+
+for word in ("log", "leave", "pair", "run"):
+    status, _, err = on("c", moon + " link add " + word + " " + keys["a"])
+    say(status != 0 and b"is not a name" in err, "a machine cannot be called " + word)
+for word in ("abcdefg", "u0u0u0", "abc", "", "a-b-c-d-e-f-g", "whoami", "reboot", "abcdef"):
+    status, _, err = on("c", moon + " link box-a " + word, timeout=30)
+    say(status != 0 and b"no machine is called box-a" in err,
+        "link box-a %r is not a code, and a machine nobody linked is not a command" % word)
+status, _, err = on("c", moon + " link nobody-here ls", timeout=30)
+say(status != 0 and b"no machine is called nobody-here" in err,
+    "a command on a machine that is not known says so")
+
+#       A code that waits for one name only lets in that name.
+waiter = waiting("a", "pair box-nobody", 40)
+code, said = code_said(waiter, "box-a")
+say(code is not None, "pair [NAME] prints the machine's name and a code (%r)" % (said[-200:],))
+if code:
+    status, out, err = on("c", moon + " link box-a " + code, timeout=60,
+                          extra={"WATERLINK_PAIR_SECONDS": "6"})
+    say(status != 0 and b"nobody used the code" in err,
+        "c, which is not the name a waits for, is not let in (%r %r)" % (status, err[-120:]))
+    status, out, err = on("a", moon + " link")
+    say(b"box-c" not in out, "and a did not keep it, nor did c's try link c to a")
+    status, out, err = on("c", moon + " link")
+    say(b"box-a" not in out, "and c holds nothing of a either")
+    status, out, err = on("a", moon + " link")
+    say(b"a pairing code for box-a is waiting" in out, "a says a code is waiting")
+waiter.send_signal(signal.SIGINT)
+try:
+    out, err = waiter.communicate(timeout=30)
+except subprocess.TimeoutExpired:
+    waiter.kill()
+    out, err = waiter.communicate()
+say(waiter.returncode != 0 and b"stopped" in err,
+    "Ctrl+C stops the wait and says the code is no good (%r %r)" % (waiter.returncode, err[-120:]))
+say(once_records("a") == [], "and the code is gone from the file")
+
+#       A code nobody uses runs out.
+waiter = waiting("a", "pair", 3)
+out, err = waiter.communicate(timeout=30)
+say(waiter.returncode != 0 and b"nobody used the code" in err and once_records("a") == [],
+    "a code nobody used is refused at the end and taken back (%r)" % (err[-120:],))
+
+#       A code that nobody used does not leave the listener on.
+on("b", moon + " link off")
+waiter = waiting("b", "pair", 3)
+out, err = waiter.communicate(timeout=60)
+status, out, err = on("b", "cat /root/link")
+say(out.strip() == b"off", "a code nobody used leaves the switch as it was (%r)" % (out,))
+status, out, err = on("b", moon + " link")
+say(b"link off" in out, "and the listener stopped again")
+
+#       The code, a wrong code, a wrong name, then the code as someone would
+#       copy it off a screen.
+waiter = waiting("a", "pair", 90)
+code, said = code_said(waiter, "box-a")
+say(code is not None, "a prints a code (%r)" % (said[-200:],))
+if code:
+    wrong = ("1" if code[0] != "1" else "2") + code[1:]
+    short = {"WATERLINK_PAIR_SECONDS": "6"}
+    status, out, err = on("c", moon + " link box-a " + wrong, timeout=60, extra=short)
+    say(status != 0 and b"nobody used the code" in err, "a wrong code links nobody")
+    status, out, err = on("c", moon + " link box-ax " + code, timeout=60, extra=short)
+    say(status != 0 and b"nobody used the code" in err, "a wrong name links nobody")
+    status, out, err = on("a", moon + " link")
+    say(b"box-c" not in out, "and a has not linked c")
+    sloppy = code.upper().replace("0", "O").replace("1", "L")
+    status, out, err = on("c", moon + " link BOX-A " + sloppy, timeout=90)
+    say(status == 0 and b"linked with box-a" in out,
+        "the code is taken in capitals, with a look-alike letters and a name in capitals (%r %r)" %
+        (status, err[-160:]))
+    if status != 0:
+        for side in "ac":
+            _, shown, _ = on(side, moon + " link")
+            print("  debug %s status:\n%s" % (side, shown.decode(errors="replace")[:900]), flush=True)
+            print("  debug %s groups: %r" % (side, [(r[0], r[1]) for r in once_records(side)]), flush=True)
+        print("  debug sloppy=%r code=%r" % (sloppy, code), flush=True)
+    try:
+        out, err = waiter.communicate(timeout=60)
+    except subprocess.TimeoutExpired:
+        waiter.kill()
+        out, err = waiter.communicate()
+    say(waiter.returncode == 0 and b"linked with box-c" in out, "and a is told, with the name c has")
+    records = once_records("a")
+    say(len(records) == 1 and records[0][1] & 2, "the used code is closed in a's file (%r)" % (records,))
+    #       Used once: with both sides forgotten, the same code finds nobody.
+    on("a", moon + " link remove box-c")
+    on("c", moon + " link remove box-a")
+    status, out, err = on("c", moon + " link box-a " + code, timeout=60, extra=short)
+    say(status != 0 and b"nobody used the code" in err, "a code is good for one machine")
+
+#       And once more, to use what a code gives: a terminal and a command
+#       each way, and the grants it carries.
+waiter = waiting("a", "pair", 90)
+code, said = code_said(waiter, "box-a")
+if code:
+    status, out, err = on("c", moon + " link box-a " + code, timeout=90)
+    waiter.communicate(timeout=60)
+    say(status == 0, "a second code links the two again (%r)" % (err[-160:],))
+    status, out, err = on("c", moon + " link box-a echo coded-$((20+22))", timeout=60)
+    say(status == 0 and out == b"coded-42\n", "link NAME COMMAND runs it there (%r %r)" % (out, err[-100:]))
+    status, out, err = on("a", moon + " link box-c echo back-$((20+22))", timeout=60)
+    say(status == 0 and out == b"back-42\n", "and the other way")
+    status, out, err = on("c", moon + " link box-a", stdin=b"echo shell-$((20+22))\nexit\n", timeout=60)
+    say(b"shell-42" in out, "link NAME is a terminal there (%r %r)" % (out[-80:], err[-100:]))
+    status, out, err = on("a", moon + " link")
+    say(any(line.startswith("  box-c ") and "may shell run files log" in line and "in group" not in line
+            for line in out.decode(errors="replace").splitlines()),
+        "a shows what c may do, and that no group did it")
+
+#       A machine in too many groups has no room for a code.
+on("c", "sh -c 'for i in 1 2 3 4 5 6 7; do %s link group g$i secret-number-$i-a-long-one; done'" % moon,
+   timeout=120)
+status, out, err = on("c", moon + " link pair", timeout=30)
+say(status != 0 and b"8 groups already" in err, "no room for a code in a full groups file (%r)" % (err[-120:],))
+on("c", "sh -c 'for i in 1 2 3 4 5 6 7; do %s link group leave g$i; done'" % moon, timeout=60)
 
 heard = b""
 end = time.time() + 3
@@ -58638,10 +60033,10 @@ if len(names) == 2:
     status, out, err = on("a", "%s link run %s 'echo restored'" % (moon, names["a"]))
     say(status == 0 and out == b"restored\n", "and a runs on b again once it is put back (%r)" % (err[-80:],))
 
-status, out, err = on("a", moon + " link leave lab forget")
-say(status == 0 and b"forgot the 1 machines" in out, "leave with forget drops what the group paired")
+status, out, err = on("a", moon + " link group leave lab forget")
+say(status == 0 and b"removed the 1 machines" in out, "leave with forget drops what the group paired")
 status, out, err = on("a", moon + " link")
-say(b"paired in lab" not in out and b"in lab:" not in out, "and a is in no group")
+say(b"in group lab" not in out and b"group lab:" not in out, "and a is in no group")
 for side in "abc":
     on(side, moon + " link off")
 
@@ -58918,6 +60313,10 @@ def harness_guest_scenarios(argv):
                     networks.append(current)
             current = None
             want_ssid = True
+        # More than the sixteen rows read, or past the room they are read into:
+        # a list the verbs would write back short is not rewritten, and is said
+        # to be too long to change.
+        cut = len(networks) >= 16 and at < len(text) or len(data) >= 8191
         if not want_ssid and len(networks) < 16 and current is not None:
             networks.append(current)
         lines.append("printf %s > /root/wifi" % fmt(data))
@@ -58945,7 +60344,8 @@ def harness_guest_scenarios(argv):
         else:
             pw = q(password) if password else ""
         if len(networks) >= 16 and rng.random() < 0.5:
-            ssid_arg, pw, message = "brandnew", "", "too many saved networks"
+            ssid_arg, pw, message = ("brandnew", "",
+                                     "is too long to change here" if cut else "too many saved networks")
         lines.append("cp /root/wifi /tmp/sc.file 2>/dev/null || : > /tmp/sc.file")
         lines.append("moonwater wifi add %s %s > /tmp/sc.got 2>&1; scen_status %s 1 $?"
                      % (ssid_arg if ssid_arg.startswith(("'", '"')) else q(ssid_arg), pw,
@@ -62429,6 +63829,21 @@ static void crypto_hmac_sha256(const p8 *key, positive key_size, const void *mes
         crypto_sha256_write(&hash, message, size);
         crypto_sha256_close(&hash, out);
 }
+//      A prepared key, standing in: the key itself, which the stand-in MAC
+//      takes whole, so a message under it is the MAC under the key.
+#define DIGEST_SHA256 3
+typedef struct { p8 key[32]; } crypto_hmac_key;
+static void crypto_hmac_prepare(positive algorithm, positive size, const p8 *key,
+                                positive key_size, crypto_hmac_key *prepared)
+{
+        (void)algorithm; (void)size;
+        memcpy(prepared->key, key, key_size < 32 ? key_size : 32);
+}
+static void crypto_hmac_prepared(const crypto_hmac_key *prepared, const void *message,
+                                 positive size, p8 *out)
+{
+        crypto_hmac_sha256(prepared->key, 32, message, size, out);
+}
 static bool crypto_x25519(p8 *out, const p8 *secret, const p8 *point)
 {
         crypto_sha256 hash;
@@ -62557,6 +63972,10 @@ static struct waterlink_peer *link_peer_keyed(link_peers *peers, p8 *key)
         one.may = link_may;
         return &one;
 }
+
+/*      Whether a path is the link's own: what the machine's files say,
+        which this does not have. */
+static bool link_path_is_own(string_address path) { (void)path; return false; }
 
 static bool link_post(struct link_session *s, p8 key, p8 flags, p8 type,
                       p8 *data, positive length)
@@ -63408,14 +64827,52 @@ static WL_QUIET bool invariants(struct waterlink_link *link, const char *where)
                         printf("  FAIL %s: held free list broken\n", where);
                         return false;
                 }
+        /*      Each key's chain is in order, its stream frames within a window
+                of what was taken and the bits of held_mask, and held_last is
+                where it ends: what hold answers without a walk is what a walk
+                would find. */
         for (p32 key = 0; key < WATERLINK_KEYS; key++)
-                for (at = link->receiving[key].first; at != WATERLINK_NONE;
-                     at = link->held[at].next)
+        {
+                struct waterlink_receiving *live = link->receiving + key;
+                p64 mask = 0;
+                p32 last = WATERLINK_NONE;
+
+                for (at = live->first; at != WATERLINK_NONE; at = link->held[at].next)
+                {
+                        struct waterlink_frame *head;
+
                         if (at >= WATERLINK_HELD || ++seen > WATERLINK_HELD)
                         {
                                 printf("  FAIL %s: held key list broken\n", where);
                                 return false;
                         }
+                        head = &link->held[at].head;
+                        if (head->key != key ||
+                            (last != WATERLINK_NONE &&
+                             head->sequence <= link->held[last].head.sequence))
+                        {
+                                printf("  FAIL %s: held key %u out of order\n", where, key);
+                                return false;
+                        }
+                        if (head->flags & WATERLINK_FRAME_DURABLE)
+                        {
+                                if (head->sequence - live->delivered > WATERLINK_KEY_WINDOW)
+                                {
+                                        printf("  FAIL %s: key %u holds a stream frame %u past %u\n",
+                                               where, key, head->sequence, live->delivered);
+                                        return false;
+                                }
+                                mask |= 1ull << (head->sequence & 63);
+                        }
+                        last = at;
+                }
+                if (mask != link->held_mask[key] ||
+                    (last != WATERLINK_NONE && last != link->held_last[key]))
+                {
+                        printf("  FAIL %s: held key %u bits or end wrong\n", where, key);
+                        return false;
+                }
+        }
         if (seen != WATERLINK_HELD)
         {
                 printf("  FAIL %s: held pool accounts for %u of %u\n", where, seen, WATERLINK_HELD);
@@ -63993,6 +65450,10 @@ static p32 network_load_32(const p8 *at)
 {
         return (p32)at[0] << 24 | (p32)at[1] << 16 | (p32)at[2] << 8 | at[3];
 }
+static p64 network_load_64(const p8 *at)
+{
+        return (p64)network_load_32(at) << 32 | network_load_32(at + 4);
+}
 static void network_store_64(p8 *at, p64 v)
 {
         for (int i = 0; i < 8; i++)
@@ -64059,6 +65520,19 @@ static void crypto_hmac_sha256(const p8 *key, positive key_size, const void *mes
         crypto_sha256_write(&h, "\x36", 1);
         crypto_sha256_write(&h, message, size);
         crypto_sha256_close(&h, out);
+}
+//      A prepared key, standing in: the key, which the stand-in MAC takes whole.
+typedef struct { p8 key[32]; } crypto_hmac_key;
+static void crypto_hmac_prepare(positive algorithm, positive size, const p8 *key,
+                                positive key_size, crypto_hmac_key *prepared)
+{
+        (void)algorithm; (void)size;
+        memcpy(prepared->key, key, key_size < 32 ? key_size : 32);
+}
+static void crypto_hmac_prepared(const crypto_hmac_key *prepared, const void *message,
+                                 positive size, p8 *out)
+{
+        crypto_hmac_sha256(prepared->key, 32, message, size, out);
 }
 static void crypto_hkdf_extract(const p8 *salt, positive salt_size, const p8 *ikm,
                                 positive size, p8 *prk)
@@ -64162,6 +65636,7 @@ static bool crypto_aesgcm_open(crypto_aesgcm_key *key, const p8 *iv, const p8 *a
         off, and system calls answered from what the driver queued. */
 static p64 wl_clock = 1000000000ull;
 static p64 wl_wall = 1700000000000000000ull;
+static bool wl_clock_set; // the wall clock reads a time, which freshness is asked of
 static bool wl_entropy_down;
 static p64 wl_random_state = 1;
 static p64 system_clock_ns(int which) { return which ? wl_clock : wl_wall + wl_clock; }
@@ -64280,6 +65755,40 @@ static p16 link_port(void) { return LINK_PORT; }
     NEARBY_STUBS = r'''
 static bipolar link_peers_lock(void) { return 5; }
 static fn link_peers_unlock(bipolar handle) { (void)handle; }
+//      A pairing code's record is read, closed and saved in the driver's own
+//      copy of the groups; the file is the driver's, not a path.
+fn link_groups_load(link_groups address_to groups);
+static bipolar link_groups_save(link_groups address_to groups);
+static p32 hash_crc32(p32 crc, const p8 *data, positive length)
+{
+        while (length--)
+        {
+                crc ^= *data++;
+                for (int k = 0; k < 8; k++)
+                        crc = (crc >> 1) ^ (0xedb88320u & (p32)-(int)(crc & 1));
+        }
+        return crc;
+}
+static positive string_length_max(string_address text, positive room)
+{
+        positive length = 0;
+
+        while (length < room && text[length])
+                length++;
+        return length;
+}
+'''
+
+    NEARBY_GROUP_STUBS = r'''
+fn link_groups_load(link_groups address_to groups)
+{
+        memcpy(groups, &link_nearby.groups, sizeof *groups);
+}
+static bipolar link_groups_save(link_groups address_to groups)
+{
+        memcpy(&link_nearby.groups, groups, sizeof *groups);
+        return 0;
+}
 '''
 
     parts = [
@@ -64300,7 +65809,7 @@ static fn link_peers_unlock(bipolar handle) { (void)handle; }
             "// The grant a word names, or 0."),
         sec(svc, "// The grant a request byte needs", "static p64 link_now(void)"),
         sec(svc, "static p64 link_now(void)", "// All digits and nothing else"),
-        sec(svc, "static bool link_name_good(", "/* Everything waterlink keeps"),
+        sec(svc, "static const string_address link_words[]", "/* Everything waterlink keeps"),
         sec(svc, "typedef struct\n{\n        struct waterlink_peer peer[LINK_PEERS_MAX];",
             "static bipolar link_peers_read("),
         sec(svc, "static struct waterlink_peer address_to link_peer_named(",
@@ -64314,10 +65823,12 @@ static fn link_peers_unlock(bipolar handle) { (void)handle; }
         sec(svc, "typedef struct\n{\n        address_any base;", "static fn link_batch_flush(void)"),
         sec(svc, "// A sealed datagram of nothing", "static bool link_post("),
         SERVICE_STUBS,
-        sec(near, "#define LINK_GROUPS_PATH", "bool link_groups_load("),
+        sec(near, "#define LINK_PEERS_LOCK", "bool link_groups_load("),
         NEARBY_STUBS,
+        sec(near, "static p64 link_boot_seconds(void)", "/*\n        The peers file has two writers now"),
         sec(near, "static fn link_name_for(", "// The listener's side of it"),
         sec(near, "// The listener's side of it", "typedef struct\n{\n        p32 multiaddr;"),
+        NEARBY_GROUP_STUBS,
         sec(near, "typedef struct\n{\n        p32 multiaddr;",
             "/*\n        Every interface with an IPv4 address"),
         sec(near, "static bool link_nearby_send(", "// Goodbye, with TTL zero"),
@@ -64357,9 +65868,12 @@ WATERLINK_PRE_DRIVER = r'''
           - a handshake that completes agrees on its keys at both ends;
           - every name pairing saves is one link_name_good takes;
           - greetings an mDNS packet provoked number at most LINK_GREETED in
-            any LINK_GREET_AGAIN, and one-shot answers at most one in any
-            LINK_ANSWER_AGAIN: nothing a spoofed packet says makes this an
+            any LINK_GREET_AGAIN, at most one to a group from a packet that
+            names many, none to port zero, and one-shot answers at most one in
+            any LINK_ANSWER_AGAIN: nothing a spoofed packet says makes this an
             amplifier;
+          - where the clock reads a time, a greeting to a group that stays
+            and dated more than LINK_GREET_FRESH from it keeps nobody;
           - an initiation answered with a cookie reply spent no curve, and a
             cookie reply is WATERLINK_COOKIE_DATAGRAM bytes, a sixteenth of
             what provoked it.
@@ -64492,6 +66006,7 @@ static bipolar wl_system(positive n, positive a, positive b, positive c, positiv
 static int wl_phase; // 0 authenticated work, 1 mDNS heard
 static p64 wl_greeted_at[256];
 static positive wl_greeted_count;
+static positive wl_greeted_back; // first messages sent outside an mDNS packet's handling
 static p64 wl_answered_at[256];
 static positive wl_answered_count;
 static p8 wl_last_respond[WATERLINK_DATAGRAM];
@@ -64519,9 +66034,14 @@ static bipolar socket_send(b32 socket, const void *bytes, positive size, b32 fla
                     wl_answered_count < array_count(wl_answered_at))
                         wl_answered_at[wl_answered_count++] = wl_clock / 1000;
         }
+        if (socket == 3 && kind == WATERLINK_KIND_INITIATE && wl_phase == 1)
+                wl_check(((const socket_address_internet *)to)->port,
+                         "an announcement made a greeting for port zero");
         if (socket == 3 && kind == WATERLINK_KIND_INITIATE && wl_phase == 1 &&
             wl_greeted_count < array_count(wl_greeted_at))
                 wl_greeted_at[wl_greeted_count++] = wl_clock / 1000;
+        if (socket == 3 && kind == WATERLINK_KIND_INITIATE && wl_phase == 0)
+                wl_greeted_back++;
         if (socket == 3 && kind == WATERLINK_KIND_INITIATE && !link_self.server &&
             size == WATERLINK_DATAGRAM)
                 memcpy(wl_client_first, bytes, size);
@@ -64608,10 +66128,11 @@ static void wl_reset(bool server)
         memset(&wl_file, 0, sizeof wl_file);
         wl_file_unreadable = wl_entropy_down = false;
         wl_bad_names = 0;
-        wl_greeted_count = wl_answered_count = 0;
+        wl_greeted_count = wl_answered_count = wl_greeted_back = 0;
         wl_run_count = wl_run_next = wl_mdns_count = wl_mdns_next = 0;
         wl_have_respond = wl_have_cookie = false;
         wl_clock = 1000000000ull;
+        wl_wall = (wl_clock_set ? 1790000000ull : 1700000000ull) * 1000000000ull;
         wl_random_state = 1;
         for (int i = 0; i < 3; i++)
         {
@@ -64648,6 +66169,8 @@ static void wl_reset(bool server)
 }
 
 //      A first message from one of the three, stamped delta seconds on.
+static p8 wl_offered[WATERLINK_NAME_MAX];
+
 static void wl_initiation(p8 *datagram, int who, bool group, p32 delta,
                           p64 conversation, p32 index, struct waterlink_noise *noise)
 {
@@ -64655,12 +66178,14 @@ static void wl_initiation(p8 *datagram, int who, bool group, p32 delta,
         p8 ephemeral[32];
 
         memset(hello, 0, sizeof hello);
-        waterlink_stamp(hello, 1700000000ull + delta, 0);
+        waterlink_stamp(hello, wl_wall / 1000000000ull + delta - (wl_clock_set ? 32768 : 0), 0);
         if (group)
         {
                 positive n = take_bytes(hello + WATERLINK_STAMP_BYTES,
                                         take8() % (WATERLINK_NAME_MAX + 1));
                 (void)n;
+                memcpy(wl_offered, hello + WATERLINK_STAMP_BYTES, WATERLINK_NAME_MAX);
+                wl_offered[WATERLINK_NAME_MAX - 1] = 0;
         }
         else
         {
@@ -64737,13 +66262,67 @@ static void wl_step(bool server)
                 p32 index = take32();
                 p32 delta = take16();
                 bool spoil = take8() & 1;
+                //      The group is a code in some state: a single use code or
+                //      not, taken or not, run out or not, and for one name or
+                //      any, the name right or wrong.
+                p8 mode = group ? take8() : 0;
+                struct link_group_record *record = &link_nearby.groups.record[0];
+                positive peers_before = wl_file.count;
+                positive back_before = wl_greeted_back;
 
                 wl_initiation(datagram, who, group, delta, conversation, index, &noise);
+                if (group)
+                {
+                        p64 seconds = wl_clock / 1000000000ull;
+
+                        record->flags = (mode & 1 ? LINK_GROUP_ONCE : 0) |
+                                        (mode & 2 ? LINK_GROUP_DONE : 0);
+                        record->expires = mode & 4 ? seconds : seconds + 300;
+                        record->expect = !(mode & 8)    ? 0
+                                         : mode & 16 ? link_name_check((string_address)wl_offered,
+                                                                       WATERLINK_NAME_MAX)
+                                                     : 0x1badc0deu;
+                }
+                //      This place was greeted a moment ago, as an announcement of
+                //      it would have had this machine do.
+                if (group && (mode & 32))
+                {
+                        struct link_greeted *was =
+                                link_nearby.greeted + link_nearby.greeted_next;
+
+                        memcpy(was->address, address, 16);
+                        was->port = port;
+                        was->group = link_nearby.keys[0].mark;
+                        was->at = now ? now : 1;
+                        link_nearby.greeted_next = (link_nearby.greeted_next + 1) % LINK_GREETED;
+                }
                 if (spoil)
                         wl_spoil(datagram, group ? &wl_group.identity : &link_self.me, true);
                 wl_have_respond = false;
                 if (server)
                         link_datagram(datagram, WATERLINK_DATAGRAM, address, port, now);
+                if (server && group && wl_clock_set && !(mode & 1))
+                {
+                        //      A greeting to a group that stays, dated far from the
+                        //      clock the machine has, is a recording.
+                        p64 wall = system_clock_ns(0) / 1000000000ull;
+                        p64 sent = wl_wall / 1000000000ull + delta - 32768;
+
+                        if (sent + LINK_GREET_FRESH < wall || sent > wall + LINK_GREET_FRESH)
+                                wl_check(wl_file.count <= peers_before,
+                                         "a greeting dated far from the clock kept a member");
+                }
+                if (server && group && (mode & 1) &&
+                    ((mode & 2) || (mode & 4) || ((mode & 8) && !(mode & 16))))
+                        wl_check(wl_file.count <= peers_before,
+                                 "a code that is closed, run out or for another "
+                                 "name let a machine in");
+                //      A member that was let in is greeted back, whether or not
+                //      this place was greeted lately: it is waiting for it.
+                if (server && group && !spoil && !wl_entropy_down &&
+                    wl_file.count > peers_before)
+                        wl_check(wl_greeted_back > back_before,
+                                 "a member that was let in was not greeted back");
                 if (server && !group && !spoil && wl_have_respond && who < 2 &&
                     waterlink_gate_passes(&wl_id[who], wl_last_respond, WATERLINK_DATAGRAM))
                 {
@@ -64808,9 +66387,24 @@ static void wl_step(bool server)
                 p8 *raw = malloc(length ? length : 1);
 
                 length = take_bytes(raw, length);
-                wl_phase = 1;
-                link_nearby_heard(raw, length, wl_addresses[0], port, 0, now);
-                wl_phase = 0;
+                {
+                        struct link_group_record *record = &link_nearby.groups.record[0];
+                        positive greeted = wl_greeted_count;
+
+                        wl_phase = 1;
+                        link_nearby_heard(raw, length, wl_addresses[0], port, 0, now);
+                        wl_phase = 0;
+                        //      A machine announces one instance: a packet is at most a
+                        //      greeting to each group, however many it names.
+                        wl_check(wl_greeted_count - greeted <= link_nearby.groups.count,
+                                 "an announcement was more than one greeting to a group");
+                        //      A code that is used up, or waits for a named
+                        //      machine, only answers: it greets nobody.
+                        wl_check(!((record->flags & LINK_GROUP_ONCE) &&
+                                   ((record->flags & LINK_GROUP_DONE) || record->expect)) ||
+                                         wl_greeted_count == greeted,
+                                 "a code that only answers sent a greeting");
+                }
                 free(raw);
                 break;
         }
@@ -64861,9 +66455,16 @@ static void wl_step(bool server)
                         memcpy(run->address, wl_addresses[take8() % 3], 16);
                         run->port = take8() & 1 ? WATERLINK_MDNS_PORT : take16();
                 }
-                wl_phase = 1;
-                link_nearby_receive(now);
-                wl_phase = 0;
+                {
+                        positive greeted = wl_greeted_count;
+
+                        wl_phase = 1;
+                        link_nearby_receive(now);
+                        wl_phase = 0;
+                        wl_check(wl_greeted_count - greeted <=
+                                         packets * link_nearby.groups.count,
+                                 "an announcement was more than one greeting to a group");
+                }
                 for (positive r = 0; r < packets; r++)
                         free(bytes[r]);
                 wl_mdns_count = wl_mdns_next = 0;
@@ -65007,6 +66608,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         wl_in = data;
         wl_left = size;
         server = !(take8() & 1);
+        wl_clock_set = size && (data[0] & 2);
         wl_reset(server);
         if (!server && link_session_open(link_self.session))
         {
@@ -65068,6 +66670,13 @@ def waterlink_pre_seeds():
     socket_mdns = head(7) + b"\x00" + len(query).to_bytes(2, "big") + b"\x01" + query + \
         b"\x00\x01"
     many = [announce(range(1000 + 8 * k, 1008 + 8 * k)) for k in range(4)]
+
+    #   A group's greeting from the stranger, dated delta seconds from the
+    #   driver's clock (32768 is now) when the clock reads a time, to a group
+    #   that stays or a one-use code (mode 1).
+    def greet(delta, mode, index):
+        return head(2) + bytes([2, 0]) + index.to_bytes(4, "big") + \
+            delta.to_bytes(2, "big") + b"\x00" + bytes([mode, 6]) + b"office"
     return {
         "handshake_then_carried.bin": b"\x00" + initiation(0) + carried,
         "rekey_and_replay.bin": b"\x00" + initiation(0) + initiation(0, delta=6) +
@@ -65078,10 +66687,18 @@ def waterlink_pre_seeds():
         "announcements_many_ports.bin": b"\x00" + b"".join(op5(m) for m in many),
         "announcements_port_zero.bin": b"\x00" + b"".join(
             op5(announce([0] * 8, k)) for k in range(4)),
+        "announcements_zero_first.bin": b"\x00" + b"".join(
+            op5(announce([0, 0, 5000 + k, 5001 + k], k)) for k in range(4)),
         "one_shot_questions.bin": b"\x00" + b"".join(op5(query, 40000) for _ in range(4)),
         "coalesced_run.bin": b"\x00" + run,
         "mdns_socket.bin": b"\x00" + socket_mdns,
         "client_answer.bin": b"\x01" + head(8) + head(8) + b"\x00\x00\x00\x07\x00",
+        "greetings_dated.bin": b"\x02" + b"".join(
+            greet(32768 + shift, 0, 0x1000 + at) for at, shift in
+            enumerate((0, -5000, 5000, -3000, 3000, -4000, 60, -60))),
+        "greetings_dated_code.bin": b"\x02" + b"".join(
+            greet(32768 + shift, 1, 0x2000 + at) for at, shift in
+            enumerate((-30000, 30000, 0))),
         "raw.bin": b"\x00" + head(0) + (64).to_bytes(2, "big") + bytes(range(64)),
         "flood_then_cookie.bin": b"\x00" + head(9) + bytes([40, 0]) + b"".join(
             (i + 1).to_bytes(2, "big") + bytes([i & 3]) + (0x100 + i).to_bytes(4, "big")
@@ -65164,10 +66781,45 @@ def waterlink_fuzz_seeds():
                        for how in (0, 0x10, 3)) + b"".join(
         bytes([12, how, 7, 9]) for how in (1, 9, 0x11, 0x19)) + \
         post(1, 0, 20) + send_a + bytes([12, 2, 0, 3, 77])
+    #   What a peer that may do nothing can still send: bodies of frames with
+    #   no payload on keys the model does not follow, handed to B as the
+    #   script's own bytes -- some in the window past what was taken, some the
+    #   same again, some far ahead, then the one that was missing -- and a
+    #   register's reader that refuses while the same value is sent and
+    #   repeated, so what the hold-back keeps is walked and compared.
+    def number(value):
+        out = b""
+        while value >= 0x80:
+            out += bytes([value & 0x7f | 0x80])
+            value >>= 7
+        return out + bytes([value])
+
+    def flood(key, flags, sequences):
+        body = b""
+        for sequence in sequences:
+            frame = bytes([flags, key]) + number(sequence) + b"\x00"
+            if len(body) + len(frame) > 1165:
+                break
+            body += frame
+        body += bytes(-len(body) % 5)
+        return bytes([12, 0x12, len(body) // 5]) + body
+
+    window = list(range(2, 66))
+    held_ahead = (flood(40, 2, window) + flood(40, 2, range(200, 600)) +
+                  flood(40, 2, range(66, 400)) + flood(40, 2, [1]))
+    held_copies = (flood(41, 2, window) + flood(41, 2, window * 5) +
+                   flood(41, 2, window[::-1] * 5) + flood(41, 2, [1]) +
+                   flood(41, 2, range(66, 130)) + flood(41, 2, window * 5))
+    paused = toggle + b"".join(post(2, 1, i % 48) + send_a + arrive(0, 0, 3)
+                               for i in range(40)) + toggle + b"\x0b\x02" + \
+        send_a + arrive(0, 0) + send_b + arrive(1, 0)
     seeds = {"waterlink_empty.bin": b"", "waterlink_stream.bin": stream,
              "waterlink_lossy.bin": lossy, "waterlink_register.bin": register,
              "waterlink_keys_paused.bin": keys, "waterlink_ended.bin": ended,
-             "waterlink_replay.bin": replay, "waterlink_hostile.bin": hostile}
+             "waterlink_replay.bin": replay, "waterlink_hostile.bin": hostile,
+             "waterlink_held_ahead.bin": held_ahead,
+             "waterlink_held_copies.bin": held_copies,
+             "waterlink_register_paused.bin": paused}
     generator = random.Random(0x3a7e)
     for index in range(6):
         seeds["waterlink_mix_%d.bin" % index] = bytes(
@@ -65637,7 +67289,7 @@ def waterlink_script_scan(shim):
     script and namespace in a block of exactly its length, against a
     regular expression over a grammar of machine-script lines. It once
     compared the namespace's whole length with memory_compare wherever
-    "link join " was found, reading past a script that ended sooner.
+    "link group " was found, reading past a script that ended sooner.
     Returns 1 on a report or a disagreement, 0 otherwise, and 0 without
     a compiler that has ASan."""
     import random
@@ -65689,9 +67341,9 @@ int main(void)
     clang = shutil.which("clang") or shutil.which("cc")
     generator = random.Random(0x5c1e)
     names = ["home", "lab.1", "a", "net_9", "office-2", "x" * 31]
-    pieces = ["link join ", "link join  ", "link join", "allow", "allowed", "run",
-              " ", "  ", "\x01", ";", "#", "secret", "s3cr3t", "blink join ",
-              "moonwater link join "] + names
+    pieces = ["link group ", "link group  ", "link group", "allow", "allowed", "run",
+              " ", "  ", "\x01", ";", "#", "secret", "s3cr3t", "blink group ",
+              "moonwater link group "] + names
 
     def case():
         name = generator.choice(names)
@@ -65699,7 +67351,7 @@ int main(void)
             text = "".join(generator.choice(pieces) for _ in range(generator.randrange(12)))
         else:
             cut = generator.randrange(len(name) + 1)
-            text = generator.choice(["", "x\x01", "#\x01"]) + "link join " + (
+            text = generator.choice(["", "x\x01", "#\x01"]) + "link group " + (
                 name[:cut] if generator.randrange(2) else name +
                 generator.choice(["", " ", "  allow run", " s", " ;", " #", "\x01"]))
         return name, text
@@ -65719,7 +67371,7 @@ int main(void)
                              env=dict(os.environ, ASAN_OPTIONS="detect_leaks=0"))
     wrong = [pair for pair, got in zip(cases, ran.stdout)
              if (got == "1") != bool(re.search(
-                 "link join +" + re.escape(pair[0]) + " +(?! |allow)[^\x01;#]",
+                 "link group +" + re.escape(pair[0]) + " +(?! |allow)[^\x01;#]",
                  pair[1]))]
     if ran.returncode or len(ran.stdout) != len(cases) or wrong:
         report = [line for line in (ran.stderr or "").splitlines()

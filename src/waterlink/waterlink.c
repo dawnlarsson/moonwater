@@ -86,7 +86,8 @@
         so a stream frame arrives exactly once and in order however the
         network reorders, loses or repeats datagrams. The hold-back is a
         fixed pool; a frame that finds it full is dropped unacknowledged and
-        comes again.
+        comes again, and so is a stream frame further past what was taken than
+        a key's window, which a sender that keeps to it never makes.
 
         A key's sequence counts from one and never wraps: a key carries at
         most 2^32 - 2 frames. LAST ends a key for good, and the receiver
@@ -121,7 +122,7 @@
         network (discover.c finds them, nearby.c greets them). The rules:
 
         The secret is the grant. Whoever holds it gets, on every member, what
-        that member's join line granted, and the verbs when it granted
+        that member's join line granted, which is nothing when it granted
         nothing. Taking one machine out of a group is changing the secret on
         all the others, and forgetting the one that left; there is no list of
         members to strike a name from, only the secret.
@@ -271,19 +272,17 @@ struct waterlink_frame {
         refuse. The price of being right here is known and small: an urgent
         frame costs 2516 cycles where a bulk one costs 461. */
 
-/*      What a peer may do, granted one at a time and starting at none. VERBS
-        is the moonwater vocabulary the machine already answers to and is what
-        a freshly paired peer gets: it cannot execute, open a terminal or
-        write a file. Everything past it is a decision somebody made. */
-#define WATERLINK_MAY_VERBS 0x0001u
-#define WATERLINK_MAY_RUN 0x0002u      // one command, no terminal
-#define WATERLINK_MAY_SHELL 0x0004u    // a terminal
-#define WATERLINK_MAY_SCREEN 0x0008u   // watch the desktop
-#define WATERLINK_MAY_FILES 0x0010u    // push and pull
-#define WATERLINK_MAY_LOG 0x0020u      // follow the kernel log
-#define WATERLINK_MAY_CHANNELS 0x0040u // open channels of its own
+/*      What a peer may do, granted one at a time and starting at none: each
+        is a decision somebody made, by the name `moonwater link allow` takes,
+        and a request asks for the one it needs. The values are what the peers
+        file holds, which a bit nobody grants any more (1, 8, 64) may still
+        have set: nothing reads it. */
+#define WATERLINK_MAY_RUN 0x0002u   // one command, no terminal
+#define WATERLINK_MAY_SHELL 0x0004u // a terminal
+#define WATERLINK_MAY_FILES 0x0010u // push and pull
+#define WATERLINK_MAY_LOG 0x0020u   // follow the kernel log
 
-#define WATERLINK_MAY_DEFAULT WATERLINK_MAY_VERBS
+#define WATERLINK_MAY_DEFAULT 0u
 
 /*      AES-128-GCM, and not 256: it is the key size lib.c carries in assembly
         on all three machines, with a bitsliced floor that a kernel build
@@ -318,7 +317,7 @@ struct waterlink_peer {
                             // that paired it (discover.c)
         unsigned char address[16]; // last seen, v6 or v4 mapped
         unsigned short port;
-        unsigned short address_flags;
+        unsigned short reserved; // zero, so the record is whole words
         unsigned int seen; // group-paired: the member's last greeting stamp,
                            // older ones are replays; 0 for never
 };

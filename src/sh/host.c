@@ -29,8 +29,8 @@
         keyboard belongs to the terminal the compositor starts, so the verdict
         is written under /run/moonwater and that terminal asks before its
         shell does: use the disk's data with this build, update the disk to
-        this build first, or leave the disk alone. `moonwater use`, `update`
-        and `live` answer the same question from any shell.
+        this build first, or leave the disk alone. `moonwater setup use`,
+        `update` and `live` answer the same question from any shell.
 
         Dawn Larsson - Apache-2.0 license
         github.com/dawnlarsson/moonwater
@@ -147,8 +147,8 @@ static b32 host_settings_image(string_address path, host_settings address_to int
 static bipolar host_settings_stamp(string_address path, host_settings address_to settings);
 static bool host_settings_booted(host_settings address_to into);
 static bool host_settings_kept(host_settings address_to into);
-static fn host_settings_session(host_settings address_to settings);
-static fn host_settings_keep(host_settings address_to settings);
+static bool host_settings_session(host_settings address_to settings);
+static bool host_settings_keep(host_settings address_to settings);
 static bool host_settings_install(host_install address_to install,
                                   host_settings address_to into);
 static fn host_events_boot(host_settings address_to settings);
@@ -178,6 +178,8 @@ static fn radio_restore(void);
 static fn radio_recover(void);
 static b32 host_locale(string_address address_to arguments, positive count);
 static fn locale_restore(void);
+//      Set by the machine process alone, in moonwater.c: only it asks the time.
+static bool host_machine_self;
 static fn name_restore(void);
 static fn locale_recover(void);
 static unsigned int locale_wake_ms(unsigned int most);
@@ -280,6 +282,22 @@ static bipolar host_read_state(string_address path, p8 address_to into,
         system_close(handle);
         if (got >= 0)
                 into[got] = end;
+        return got;
+}
+
+/* A state word as host_read_state reads it, without its newline or the blanks
+   after it; negative, and empty, when the file is not there or not a plain one. */
+static bipolar host_read_word(string_address path, p8 address_to into, positive room)
+{
+        bipolar got = host_read_state(path, into, room);
+
+        if (got < 0)
+        {
+                into[0] = end;
+                return got;
+        }
+        while (got > 0 && (into[got - 1] == '\n' || into[got - 1] == ' '))
+                into[--got] = end;
         return got;
 }
 
@@ -1516,7 +1534,7 @@ static b32 host_boot(void)
         host_verdict_set("ask ", chosen->disk);
         host_say(log, host_label "%s has Moonwater installed from another build.\n"
                       host_label "A terminal will ask what to do with it, or "
-                      "moonwater use, update or live answers from a shell.\n",
+                      "moonwater setup use, update or live answers from a shell.\n",
                  chosen->disk);
         host_booted(known ? address_of settings : null);
         return 0;
@@ -1624,8 +1642,8 @@ fn host_terminal_opening(void)
         {
                 host_say(log, host_label "This is a live session: nothing is kept "
                                          "after power off.\n"
-                              host_label "moonwater install DISK puts Moonwater "
-                                         "on a disk.\n");
+                              host_label "moonwater setup install DISK puts "
+                                         "Moonwater on a disk.\n");
         }
 }
 
@@ -1733,8 +1751,8 @@ static b32 host_install_disk(string_address asked, bool removable)
 
         if (!removable && host_join(path, sizeof(path), sysfs, "/removable") &&
             host_read_text(path, text, sizeof(text)) > 0 && string_equals(text, "1"))
-                return host_refuse("%s is removable media; moonwater install "
-                                   "needs --removable\n", name);
+                return host_refuse("%s is removable media; moonwater setup "
+                                   "install DISK removable takes it\n", name);
 
         if (!host_running_build(running, sizeof(running)))
                 return host_refuse("%s cannot read its own build\n", "moonwater");
@@ -2018,11 +2036,9 @@ static bipolar host_spark_once(unsigned int command, void *request, unsigned int
         return failed;
 }
 
-static bipolar host_bind_ioctl(bipolar device, unsigned int op, unsigned int event,
-                               string_address command,
-                               struct bind_control address_to control)
+static fn host_bind_fill(unsigned int op, unsigned int event, string_address command,
+                         struct bind_control address_to control)
 {
-        bipolar failed;
         positive length;
 
         memory_zero(control, sizeof(address_to control));
@@ -2036,26 +2052,32 @@ static bipolar host_bind_ioctl(bipolar device, unsigned int op, unsigned int eve
                             length < SPARK_BIND_COMMAND_MAX ? length + 1
                                                             : SPARK_BIND_COMMAND_MAX);
         }
+}
 
-        failed = system_control(device, SPARK_IOCTL_BIND, control);
+//      What the kernel answers is ended here, whatever it left at the end.
+static bipolar host_bind_finish(bipolar failed, struct bind_control address_to control)
+{
         control->command[SPARK_BIND_COMMAND_MAX - 1] = end;
         control->name[SPARK_BIND_NAME_MAX - 1] = end;
         return failed < 0 ? failed : 0;
+}
+
+static bipolar host_bind_ioctl(bipolar device, unsigned int op, unsigned int event,
+                               string_address command,
+                               struct bind_control address_to control)
+{
+        host_bind_fill(op, event, command, control);
+        return host_bind_finish(system_control(device, SPARK_IOCTL_BIND, control),
+                                control);
 }
 
 static bipolar host_bind_request(unsigned int op, unsigned int event,
                                  string_address command,
                                  struct bind_control address_to control)
 {
-        bipolar device = system_open_at(AT_FDCWD, SPARK_DEVICE, FILE_READ | O_CLOEXEC);
-        bipolar failed;
-
-        if (device < 0)
-                return device;
-
-        failed = host_bind_ioctl(device, op, event, command, control);
-        system_close(device);
-        return failed;
+        host_bind_fill(op, event, command, control);
+        return host_bind_finish(host_spark_once(SPARK_IOCTL_BIND, control, FILE_READ),
+                                control);
 }
 
 // Settings ------------------------------------------------------
@@ -2080,7 +2102,7 @@ static bipolar host_bind_request(unsigned int op, unsigned int event,
 
         What cannot be written -- a read-only stick, an image found on no
         disk, one built without the section -- stays this session's, says
-        why, and still goes along with moonwater install.
+        why, and still goes along with moonwater setup install.
 */
 #define HOST_SETTINGS HOST_STATE "/settings"
 #define HOST_SETTINGS_NEXT HOST_STATE "/settings.next"
@@ -2158,6 +2180,11 @@ static bool host_settings_next(host_settings address_to settings,
         into->at = address_to at;
         memory_copy_apart(address_of into->entry, settings->payload + into->at,
                           SPARK_SETTINGS_ENTRY);
+        //      Every caller copies the text into a buffer of the most an
+        //      entry may hold, so an entry that says more is the end of the
+        //      list, whoever checked the block before it got here.
+        if (into->entry.length > SPARK_SETTINGS_TEXT_MOST)
+                return false;
         into->text = settings->payload + into->at + SPARK_SETTINGS_ENTRY;
         address_to at += SPARK_SETTINGS_ENTRY +
                          spark_settings_padded(into->entry.length);
@@ -2269,13 +2296,14 @@ static bool host_settings_find(host_settings address_to settings, p8 list,
         p8 text[SPARK_SETTINGS_TEXT_MOST + 1];
         positive id = 0;
         positive at = 0;
-        bool by_id = *wanted != end;
+        string_address stop = wanted;
+        b32 range = 0;
+        bool by_id = byte_is_digit(*wanted);
 
-        for (string_address digit = wanted; *digit && by_id; digit++)
-        {
-                by_id = byte_is_digit(*digit) && id <= 0xffff;
-                id = id * 10 + (positive)(*digit - '0');
-        }
+        if (by_id)
+                id = string_to_number_unsigned_checked(wanted, address_of stop, 10,
+                                                       address_of range);
+        by_id = by_id && !*stop && !range && id <= 0xffff;
 
         while (host_settings_next(settings, address_of at, into))
         {
@@ -2445,27 +2473,38 @@ static bool host_settings_booted(host_settings address_to into)
                spark_settings_check(into) >= 0;
 }
 
-/* This session's copy, root's alone because a command can carry a secret, and the kernel's. */
-static fn host_settings_keep(host_settings address_to settings)
+/*
+        This session's copy, root's alone because a command can carry a secret,
+        and the kernel's. True once both are as the caller has them: a kernel
+        with no /dev/spark has no copy to be out of step, and is the only
+        refusal that is not one. A copy that could not be written is not left
+        beside the old one.
+*/
+static bool host_settings_keep(host_settings address_to settings)
 {
         struct spark_settings_request request = {(unsigned long)settings, 0};
         bipolar handle;
+        bipolar set;
+        bool written = false;
 
         host_settings_seal(settings);
         host_state_ready();
-        (void)host_spark_once(SPARK_IOCTL_SETTINGS_SET, address_of request,
+        set = host_spark_once(SPARK_IOCTL_SETTINGS_SET, address_of request,
                               FILE_READ_WRITE);
 
         handle = host_open_state(AT_FDCWD, HOST_SETTINGS_NEXT, 0600);
-        if (handle < 0)
-                return;
+        if (handle >= 0)
+        {
+                written = !storage_format_write(handle, (p8 address_to)settings,
+                                                SPARK_SETTINGS_SLOT, 0) &&
+                          system_rename_at(AT_FDCWD, HOST_SETTINGS_NEXT, AT_FDCWD,
+                                           HOST_SETTINGS, 0) >= 0;
+                system_close(handle);
+                if (!written)
+                        system_remove_at(AT_FDCWD, HOST_SETTINGS_NEXT, 0);
+        }
 
-        if (!storage_format_write(handle, (p8 address_to)settings,
-                                  SPARK_SETTINGS_SLOT, 0))
-                system_rename_at(AT_FDCWD, HOST_SETTINGS_NEXT, AT_FDCWD,
-                                 HOST_SETTINGS, 0);
-
-        system_close(handle);
+        return written && (set >= 0 || set == -ENOENT || set == -ENODEV);
 }
 
 typedef struct
@@ -2541,36 +2580,46 @@ static fn host_settings_untrusted(host_settings address_to settings)
         host_settings_seal(settings);
 }
 
-/* This session's settings: its own copy, else the one image of this build a disk here has, else the defaults. */
-static fn host_settings_session(host_settings address_to settings)
+/*
+        This session's settings: its own copy, else the one image of this
+        build a disk here has, else the defaults. False when what came back
+        is not known to be anything: the copies are root's, so for anybody
+        else the defaults are an empty block and not a fact about this
+        machine.
+*/
+static bool host_settings_session(host_settings address_to settings)
 {
         host_settings_search search;
         p8 running[HOST_BUILD_ROOM];
 
         if (host_settings_kept(settings) || host_settings_booted(settings))
-                return;
+                return true;
 
         host_settings_empty(settings);
+
+        if (!bowl_is_root())
+                return false;
 
         /*  Tighter than safe hears nothing from a disk at all: the switches
             are only a nuisance, but a machine that wants no word from media
             somebody pushed in gets none. */
         if (MOONWATER_STRICT >= STRICT_TIGHT)
-                return;
+                return true;
 
         memory_zero(address_of search, sizeof(search));
 
         if (!host_running_build(running, sizeof(running)))
-                return;
+                return true;
 
         search.build = running;
         storage_each_device(host_settings_visit, address_of search);
 
         if (search.count != 1)
-                return;
+                return true;
 
         memory_copy_apart(settings, address_of search.found, SPARK_SETTINGS_SLOT);
         host_settings_untrusted(settings);
+        return true;
 }
 
 typedef struct
@@ -2755,8 +2804,13 @@ static string_address host_settings_write(string_address name,
         return null;
 }
 
-/* Writes this session's settings to its image where it can, ending the line with where they went. */
-static fn host_settings_save(host_settings address_to settings)
+/*
+        Writes this session's settings to its image where it can, ending the
+        line with where they went. False when the session could not keep its
+        own copy, which the line then says: the change is in the image or
+        nowhere, and the next command would read the old one.
+*/
+static bool host_settings_save(host_settings address_to settings)
 {
         host_settings_search search;
         p8 running[HOST_BUILD_ROOM];
@@ -2787,18 +2841,15 @@ static fn host_settings_save(host_settings address_to settings)
                                    "this session started from\n");
 
         log_flush();
-        host_settings_keep(settings);
+        if (host_settings_keep(settings))
+                return true;
+
+        host_say(log_error, host_label "this session could not keep its copy of "
+                                       "the settings; the next command reads the "
+                                       "ones from before\n");
+        return false;
 }
 
-/*
-        One list said twice.
-
-        `moonwater init` writes it as log lines of its own, and `moonwater
-        status` sets the same three answers -- the hook that took the list
-        away, the entries, or the sentence for an empty one -- under a
-        heading on the session page. Only the frame around them differs,
-        and a page is one block of output, so it does not flush per list.
-*/
 /*
         A saved command as it is shown: a script keeps its lines and tabs, and
         every other control byte, and bytes that are not valid text, are
@@ -2827,6 +2878,15 @@ static string_address host_plain(string_address text)
         return (string_address)shown;
 }
 
+/*
+        One list said twice.
+
+        `moonwater bind init` writes it as log lines of its own, and
+        `moonwater status` sets the same three answers -- the hook that took
+        the list away, the entries, or the sentence for an empty one -- under
+        a heading on the session page. Only the frame around them differs,
+        and a page is one block of output, so it does not flush per list.
+*/
 static fn host_settings_lines(host_settings address_to settings, positive which,
                               bool page)
 {
@@ -2882,10 +2942,37 @@ static b32 host_settings_refused(string_address verb, string_address why,
 }
 
 /*
+        Whether the words are a settings command at all: a list alone, a
+        switch alone or with on or off, add or remove with words. Said before
+        anything is read to answer them, so a mistyped line costs its usage
+        and not the search for a copy of the settings.
+*/
+static bool host_settings_shaped(string_address address_to arguments, positive count)
+{
+        if (string_table_find(arguments[1], host_lists, sizeof(host_lists[0]),
+                              array_count(host_lists)) == array_count(host_lists))
+                return false;
+
+        if (count == 2)
+                return true;
+
+        for (positive at = 0; at < array_count(host_switches); at++)
+                if (string_equals(arguments[1], host_switches[at].verb) &&
+                    string_equals(arguments[2], host_switches[at].word))
+                        return count == 3 ||
+                               (count == 4 && (string_equals(arguments[3], "on") ||
+                                               string_equals(arguments[3], "off")));
+
+        return count >= 4 && (string_equals(arguments[2], "add") ||
+                              string_equals(arguments[2], "remove"));
+}
+
+/*
         One settings command against a copy in memory, nothing read or written
-        but that copy: CHANGED once it printed what changed and wants the
-        line finished by saving, SHOWN once it printed what was asked, USAGE,
-        or REFUSED once it said why.
+        but that copy, once host_settings_shaped has said it is one: CHANGED
+        once it printed what changed and wants the line finished by saving,
+        SHOWN once it printed what was asked, USAGE for words that name
+        nothing to add or remove, or REFUSED once it said why.
 */
 static b32 host_settings_apply(host_settings address_to settings,
                                string_address address_to arguments, positive count)
@@ -2900,9 +2987,6 @@ static b32 host_settings_apply(host_settings address_to settings,
                                            array_count(host_lists));
         p16 id = 0;
         p8 list;
-
-        if (which == array_count(host_lists))
-                return HOST_SETTINGS_USAGE;
 
         list = host_lists[which].list;
 
@@ -2943,10 +3027,6 @@ static b32 host_settings_apply(host_settings address_to settings,
                         return HOST_SETTINGS_SHOWN;
                 }
 
-                if (count != 4 || (!string_equals(arguments[3], "on") &&
-                                   !string_equals(arguments[3], "off")))
-                        return HOST_SETTINGS_USAGE;
-
                 if (string_equals(arguments[3], "off"))
                         settings->flags |= flag;
                 else
@@ -2957,12 +3037,8 @@ static b32 host_settings_apply(host_settings address_to settings,
                 return HOST_SETTINGS_CHANGED;
         }
 
-        if (string_equals(arguments[2], "add") || string_equals(arguments[2], "remove"))
         {
                 bool adding = string_equals(arguments[2], "add");
-
-                if (count < 4)
-                        return HOST_SETTINGS_USAGE;
 
                 if (!host_settings_words(text, sizeof(text), arguments + 3, count - 3,
                                          address_of length))
@@ -2998,8 +3074,6 @@ static b32 host_settings_apply(host_settings address_to settings,
                               text);
                 return HOST_SETTINGS_CHANGED;
         }
-
-        return HOST_SETTINGS_USAGE;
 }
 
 /*
@@ -3056,6 +3130,9 @@ static b32 host_settings_command(string_address address_to arguments, positive c
 
         host_need_root("moonwater");
 
+        if (!host_settings_shaped(arguments, count))
+                return host_usage();
+
         host_state_ready();
         host_settings_session(address_of settings);
 
@@ -3065,7 +3142,8 @@ static b32 host_settings_command(string_address address_to arguments, positive c
         if (outcome != HOST_SETTINGS_CHANGED)
                 return outcome == HOST_SETTINGS_SHOWN ? 0 : 1;
 
-        host_settings_save(address_of settings);
+        if (!host_settings_save(address_of settings))
+                return 1;
 
         if (count > 3 && string_equals(arguments[2], "add") &&
             host_settings_words(text, sizeof(text), arguments + 3, count - 3,
@@ -3154,8 +3232,7 @@ static bool host_settings_install(host_install address_to install,
 static string_address address_to host_event_environment(void)
 {
         static string_address seed[] = {
-            "TERM=dumb", "HOME=/root", "PATH=" BOWL_DEFAULT_PATH, "LANG=C.UTF-8",
-            null};
+            SPARK_COMMAND_ENVIRONMENT(SPARK_ENVIRONMENT_ENTRY) null};
 
         bowl_session_prepare("/root", null);
         return bowl_environment(seed);
@@ -3177,10 +3254,10 @@ static fn host_event_shown(p8 address_to into, string_address text)
 static fn host_event_ending(p8 address_to into, positive room, positive status)
 {
         p8 number[24];
+        positive code = (positive)wait_status_code_base((p32)status, 256);
 
-        positive_into_string(number,
-                             status & 0x7f ? status & 0x7f : status >> 8 & 0xff);
-        string_copy_bounded(into, status & 0x7f ? "killed by signal " : "exited ", room);
+        positive_into_string(number, code >= 256 ? code & 0xff : code);
+        string_copy_bounded(into, code >= 256 ? "killed by signal " : "exited ", room);
         string_append_bounded(into, number, room);
 }
 
@@ -3203,35 +3280,49 @@ static fn host_kmsg(string_address address_to parts)
         system_close(handle);
 }
 
-/* /shell -c text in a session of its own, from /root, its output where asked or inherited. */
-static bipolar host_event_start(string_address text, bipolar output,
-                                string_address address_to environment)
+/*
+        /shell in a session of its own, from /root, with the environment init's
+        entries get. Its input is /dev/null and its output stays what the
+        caller has unless output is a descriptor to put there. Given a
+        terminal, all three are that terminal, opened here, after the session
+        is made, so that it is the shell's own and its controlling one.
+*/
+static bipolar host_shell_start(string_address address_to argv, positive count,
+                                string_address terminal, bipolar output)
 {
         bipolar child = system_fork();
+        bipolar handle;
 
         if (child)
                 return child;
 
+        system_call(syscall(setsid));
+        handle = system_open_at(AT_FDCWD, terminal ? terminal : (string_address) "/dev/null",
+                                FILE_READ_WRITE | O_CLOEXEC | O_NOFOLLOW);
+        if (terminal && handle < 3)
+                system_call_1(syscall(exit), 126);
+
+        if (handle > 0)
+                for (positive at = 0; at < (terminal ? 3 : 1); at++)
+                        system_call_3(syscall(dup3), (positive)handle, at, 0);
+        if (!terminal && output > 2)
         {
-                string_address argv[] = {HOST_EVENT_SHELL, "-c", text, null};
-                bipolar quiet = system_open_at(AT_FDCWD, "/dev/null",
-                                               FILE_READ_WRITE | O_CLOEXEC);
-
-                system_call(syscall(setsid));
-                if (quiet > 0)
-                        system_call_3(syscall(dup3), (positive)quiet, 0, 0);
-                if (output > 2)
-                {
-                        system_call_3(syscall(dup3), (positive)output, 1, 0);
-                        system_call_3(syscall(dup3), (positive)output, 2, 0);
-                }
-
-                system_call_1(syscall(chdir), (positive)(string_address)"/root");
-                (void)shell_exec_file(HOST_EVENT_SHELL, argv, 3, environment);
-                system_call_1(syscall(exit), 127);
+                system_call_3(syscall(dup3), (positive)output, 1, 0);
+                system_call_3(syscall(dup3), (positive)output, 2, 0);
         }
 
+        system_call_1(syscall(chdir), (positive)(string_address) "/root");
+        (void)shell_exec_file(HOST_EVENT_SHELL, argv, count, host_event_environment());
+        system_call_1(syscall(exit), 127);
         return -1;
+}
+
+/* /shell -c text, its output where asked or inherited. */
+static bipolar host_event_start(string_address text, bipolar output)
+{
+        string_address argv[] = {HOST_EVENT_SHELL, "-c", text, null};
+
+        return host_shell_start(argv, 3, null, output);
 }
 
 /*
@@ -3331,7 +3422,7 @@ static fn host_events_boot(host_settings address_to settings)
 
                 host_write_text(status_path, "running\n");
                 output = host_open_state(AT_FDCWD, path, 0600);
-                child = host_event_start(text, output, host_event_environment());
+                child = host_event_start(text, output);
                 if (output >= 0)
                         system_close(output);
 
@@ -3360,11 +3451,17 @@ fn host_exit_run(void)
         positive at = 0;
         p64 started = system_clock_ns(HOST_CLOCK_BOOTTIME);
 
-        bool machine = host_machine_stop();
+        bool machine;
 
-        if (!bowl_is_root() ||
-            (!host_settings_kept(address_of settings) &&
-             !host_settings_booted(address_of settings)))
+        //      Before the machine process is asked anything: END is root's, a
+        //      refusal left the stop polling ten seconds for a detach that
+        //      was never coming, and the list is root's too.
+        if (!bowl_is_root())
+                return;
+
+        machine = host_machine_stop();
+        if (!host_settings_kept(address_of settings) &&
+            !host_settings_booted(address_of settings))
                 return;
 
         if (machine && host_machine_hook_line(MOONWATER_HOOK_END))
@@ -3395,7 +3492,7 @@ fn host_exit_run(void)
 
                 //      The environment init's entries get, not the stopping
                 //      shell's: a bound poweroff has almost none.
-                child = host_event_start(text, -1, host_event_environment());
+                child = host_event_start(text, -1);
                 if (child < 0)
                         continue;
 
@@ -3489,8 +3586,7 @@ static bool host_console_is_screen(void)
 
         for (string_address at = (string_address)active; *at;)
         {
-                if (at[0] == 't' && at[1] == 't' && at[2] == 'y' &&
-                    at[3] >= '0' && at[3] <= '9')
+                if (host_starts(at, "tty") && byte_is_digit(at[3]))
                         return true;
 
                 at = string_first_of_or_end(at, ' ');
@@ -3503,88 +3599,29 @@ static bool host_console_is_screen(void)
 /* Whether a process that is not gone is on tty1: its controlling terminal is 4:1. */
 static bool host_tty1_held(void)
 {
-        bipolar handle = system_open_at(AT_FDCWD, "/proc", FILE_READ | O_DIRECTORY | O_CLOEXEC);
-        p8 records[2048];
-        positive have = 0;
-        positive at = 0;
-        bipolar error = 0;
-        struct linux_dirent64 address_to record;
+        static system_snapshot sample;
         bool held = false;
 
-        if (handle < 0)
+        if (!system_snapshot_take(address_of sample, SPARK_SNAPSHOT_PROCESS, false))
                 return false;
-        while (!held && (record = file_directory_next(handle, records, sizeof(records),
-                                                      address_of have, address_of at,
-                                                      address_of error)))
-        {
-                string_address name = (string_address)record->d_name;
-                p8 path[48];
-                p8 text[512];
-                bipolar got;
-                positive bracket = 0;
 
-                if (!byte_is_digit(name[0]) ||
-                    !host_join(path, sizeof(path), "/proc/", name) ||
-                    string_append_bounded(path, "/stat", sizeof(path)) >= sizeof(path))
-                        continue;
-                got = file_slurp_once_at(AT_FDCWD, path, text, sizeof(text) - 1);
-                if (got <= 0)
-                        continue;
-                text[got] = end;
+        for (positive at = 0; at < sample.header.process_count; at++)
+                held |= sample.processes[at].tty == (4 << 8 | 1) &&
+                        sample.processes[at].state != 'Z';
 
-                //      "pid (comm) S ppid pgrp session tty_nr": the name may hold
-                //      anything, so the fields are counted from its last bracket.
-                for (positive scan = 0; text[scan]; scan++)
-                        if (text[scan] == ')')
-                                bracket = scan;
-                if (!bracket || text[bracket + 1] != ' ' || text[bracket + 2] == 'Z')
-                        continue;
-                {
-                        string_address field = (string_address)text + bracket + 3;
-                        positive skipped = 0;
-
-                        while (skipped < 4 && *field)
-                                skipped += *field++ == ' ';
-                        held = skipped == 4 && field[0] == '1' && field[1] == '0' &&
-                               field[2] == '2' && field[3] == '5' && field[4] == ' ';
-                }
-        }
-        system_close((positive)handle);
         return held;
 }
 
 /* A shell on tty1, in a session of its own, for a console that has none. */
 static fn host_tty1_shell(void)
 {
-        bipolar child;
+        string_address argv[] = {HOST_EVENT_SHELL, null};
 
         //      One is enough: each canvas off over a console that is not a
         //      screen forked another, and none ended, so after a few round
         //      trips tty1 had as many shells splitting its keys.
-        if (host_tty1_held())
-                return;
-
-        child = system_fork();
-
-        if (child)
-                return;
-
-        {
-                string_address argv[] = {HOST_EVENT_SHELL, null};
-                bipolar tty;
-
-                system_call(syscall(setsid));
-                tty = system_open_at(AT_FDCWD, "/dev/tty1", FILE_READ_WRITE);
-                if (tty < 3)
-                        system_call_1(syscall(exit), 126);
-
-                for (positive at = 0; at < 3; at++)
-                        system_call_3(syscall(dup3), (positive)tty, at, 0);
-
-                system_call_1(syscall(chdir), (positive)(string_address)"/root");
-                (void)shell_exec_file(HOST_EVENT_SHELL, argv, 1, host_event_environment());
-                system_call_1(syscall(exit), 127);
-        }
+        if (!host_tty1_held())
+                host_shell_start(argv, 1, "/dev/tty1", -1);
 }
 
 /*
@@ -5643,34 +5680,47 @@ static fn radio_net_wake(void)
         system_close(handle);
 }
 
+/* The words a switch is set by: 1 for on, 0 for off, -1 for anything else. */
+static bipolar host_onoff(string_address word)
+{
+        return string_equals(word, "on") ? 1 : string_equals(word, "off") ? 0 : -1;
+}
+
 /* One word and its newline over a state file. The room is a timezone name's
    room, because the clock's words come through here too. */
 static bipolar radio_write_word(string_address path, string_address word)
 {
         p8 line[96];
+        p8 have[96];
 
         string_copy_bounded(line, word, sizeof(line));
         string_append_bounded(line, "\n", sizeof(line));
+        //      A word that is already there is not written again: two syncs,
+        //      of the file and of its directory, at every boot for nothing.
+        if (host_read_state(path, have, sizeof(have)) == (bipolar)string_length(line) &&
+            !string_compare(have, line))
+                return 0;
         return host_write_file(path, line, string_length(line), 0644, true);
 }
 
-static bool radio_word_is(string_address path, string_address word)
+/* What a switch's word says: 1 on, 0 off, -1 when it says neither or is not
+   there, which is the same as on to everything that asks. */
+static bipolar radio_power(string_address path)
 {
         p8 text[16];
 
-        if (host_read_text(path, text, sizeof(text)) < 0)
-                return false;
-        return string_equals(text, word);
+        return host_read_word(path, text, sizeof(text)) < 0 ? -1
+                                                              : host_onoff((string_address)text);
 }
 
-static bipolar radio_lock(bool wait)
+static bipolar host_lock(string_address path, bool wait)
 {
         bipolar handle;
         bipolar locked;
 
         host_state_ready();
         // Not through a link: the lock is made where it is named.
-        handle = system_open_at_mode(AT_FDCWD, RADIO_LOCK_PATH,
+        handle = system_open_at_mode(AT_FDCWD, path,
                                      FILE_READ_WRITE | FILE_CREATE |
                                          O_NOFOLLOW | O_CLOEXEC,
                                      0600);
@@ -5689,6 +5739,11 @@ static bipolar radio_lock(bool wait)
         return handle;
 }
 
+static bipolar radio_lock(bool wait)
+{
+        return host_lock(RADIO_LOCK_PATH, wait);
+}
+
 static fn radio_unlock(bipolar handle)
 {
         if (handle < 0)
@@ -5700,29 +5755,43 @@ static fn radio_unlock(bipolar handle)
 
 static bipolar radio_rfkill(p8 type, bool block)
 {
-        ul_rfkill_event event = {
-            .index = 0,
-            .type = type,
-            .operation = RADIO_RFKILL_CHANGE_ALL,
-            .soft = block,
-        };
         bipolar handle = system_open_at(AT_FDCWD, "/dev/rfkill",
                                         O_WRONLY | O_CLOEXEC | O_NONBLOCK);
+        bipolar sent;
 
+        //      No /dev/rfkill is a machine with nothing to switch, and that
+        //      is no failure to say.
         if (handle < 0)
-                return handle;
+                return handle == -ENOENT ? 0 : handle;
 
-        if (system_write_all((positive)handle, address_of event,
-                             sizeof(event)) != sizeof(event))
-        {
-                system_close(handle);
-                return -1;
-        }
-
+        sent = ul_rfkill_send(handle, 0, type, RADIO_RFKILL_CHANGE_ALL, block);
         system_close(handle);
-        return 0;
+        return sent;
 }
 
+/* Whether a radio's word and its rfkill write both went through; when not,
+   the first that did not is said (to somebody waiting to hear it) and
+   answered. */
+static b32 radio_failed(bool report, string_address path, bipolar kept, bipolar sent)
+{
+        if (kept >= 0 && sent >= 0)
+                return 0;
+        if (report)
+                host_fail(kept < 0 ? path : (string_address) "/dev/rfkill", kept < 0 ? kept : sent);
+        return 1;
+}
+
+/* A radio's switch: the word that outlasts a boot, and the block that is the
+   radio itself. */
+static b32 radio_switch(string_address path, p8 type, bool on, bool report)
+{
+        bipolar kept = radio_write_word(path, on ? "on" : "off");
+
+        return radio_failed(report, path, kept, radio_rfkill(type, !on));
+}
+
+/* Whether a line has no control byte: what a saved list may hold and still be
+   read, and the zone and server names of the clock. */
 static bool radio_text_plain(string_address text, positive length)
 {
         positive at;
@@ -5733,52 +5802,65 @@ static bool radio_text_plain(string_address text, positive length)
         return true;
 }
 
-static bool radio_line_has(p8 address_to text, positive got, string_address want)
+/* Whether a name is one radio_display shows as it is, character for character:
+   printable ASCII and whole UTF-8 characters from U+00A0 up, and no control
+   byte, DEL, C1 control or byte that starts no character. What the verbs
+   store is held to what is shown. */
+static bool radio_text_shown(string_address text)
 {
-        positive at = 0;
-        positive want_length = string_length(want);
+        positive length = string_length(text);
 
-        while (at < got)
+        for (positive at = 0; at < length;)
         {
-                positive start = at;
+                bool printable;
 
-                at += memory_span_without_byte(text + at, '\n', got - at);
-                if (at - start == want_length &&
-                    !memory_compare(text + start, want, want_length))
-                        return true;
-                if (at < got)
-                        at++;
+                at += file_terminal_step((const p8 address_to)text + at, length - at, true,
+                                         address_of printable);
+                if (!printable)
+                        return false;
         }
-
-        return false;
+        return true;
 }
 
-static positive radio_wifi_load(radio_network address_to into, positive room)
+/* The next line of text, its start and length (the newline is neither), with
+   the cursor past it; false once there is none. */
+static bool host_line_next(p8 address_to text, positive size, positive address_to at,
+                           positive address_to start, positive address_to length)
+{
+        if (*at >= size)
+                return false;
+        *start = *at;
+        *length = memory_span_without_byte(text + *at, '\n', size - *at);
+        *at += *length + (*at + *length < size);
+        return true;
+}
+
+/* The saved networks, up to room of them. cut, when asked for, says that
+   there was more than this read: a full buffer, or rows left over. */
+static positive radio_wifi_load(radio_network address_to into, positive room,
+                                bool address_to cut)
 {
         p8 text[8192];
         bipolar got = host_read_state(NET_WIFI_LIST, text, sizeof(text));
         positive count = 0;
         positive at = 0;
+        positive start;
+        positive length;
         bool want_ssid = true;
 
         memory_fill(into, 0, sizeof(radio_network) * room);
+        if (cut)
+                *cut = false;
         if (got <= 0)
                 return 0;
         /* text holds the saved passphrases in the clear, exactly as the
            radio_network array below does, so it is scrubbed the same way
            before this frame is left to whatever runs in it next. */
 
-        while (at < (positive)got && count < room)
+        while (count < room &&
+               host_line_next(text, (positive)got, address_of at, address_of start,
+                              address_of length))
         {
-                positive start = at;
-                positive length;
-
-                at += memory_span_without_byte(text + at, '\n',
-                                               (positive)got - at);
-                length = at - start;
-                if (at < (positive)got)
-                        at++;
-
                 if (want_ssid)
                 {
                         if (!length)
@@ -5819,6 +5901,8 @@ static positive radio_wifi_load(radio_network address_to into, positive room)
                 want_ssid = true;
         }
 
+        if (cut)
+                *cut = got >= (bipolar)sizeof(text) - 1 || (count == room && at < (positive)got);
         if (!want_ssid && count < room && into[count].ssid_length)
                 count++;
 
@@ -6261,7 +6345,7 @@ static bool radio_wifi_why(p8 address_to why, positive room)
         p8 rfkill = 0;
 
         why[0] = end;
-        if (radio_word_is(NET_WIFI_POWER, "off"))
+        if (radio_power(NET_WIFI_POWER) == 0)
         {
                 radio_line(why, room, (string_address) "switched off (moonwater wifi on)",
                            null, null, null, null);
@@ -7113,41 +7197,22 @@ static positive radio_display(p8 address_to into, positive room, p8 address_to n
 
         while (at < length && used + 5 < room)
         {
-                p8 byte = name[at];
-                positive span = byte >= 0xf0 && byte < 0xf5 ? 4
-                                : byte >= 0xe0              ? 3
-                                : byte >= 0xc2 && byte < 0xe0 ? 2
-                                                              : 1;
-                p32 point = 0;
-                bool good = byte >= 0x20 && byte < 0x7f;
+                bool printable;
+                positive step = file_terminal_step(name + at, length - at, true,
+                                                   address_of printable);
 
-                if (span > 1 && at + span <= length && byte >= 0xc2 && byte < 0xf5)
+                if (printable && used + step < room)
                 {
-                        point = byte & (0x7f >> span);
-                        good = true;
-                        for (positive next = 1; next < span; next++)
-                        {
-                                good &= (name[at + next] & 0xc0) == 0x80;
-                                point = (point << 6) | (name[at + next] & 0x3f);
-                        }
-                        good &= point >= 0xa0 && (point < 0xd800 || point > 0xdfff) &&
-                                point < 0x110000 &&
-                                point >= (span == 3 ? 0x800u : span == 4 ? 0x10000u : 0x80u);
-                }
-                else
-                        span = 1;
-
-                if (good && used + span < room)
-                {
-                        memory_copy(into + used, name + at, span);
-                        used += span;
-                        at += span;
+                        memory_copy(into + used, name + at, step);
+                        used += step;
                         columns++;
+                        at += step;
                         continue;
                 }
+                //      What is not shown is spelled a byte at a time.
                 into[used++] = '\\';
                 into[used++] = 'x';
-                used += memory_into_hex(into + used, address_of byte, 1);
+                used += memory_into_hex(into + used, name + at, 1);
                 columns += 4;
                 at++;
         }
@@ -7354,6 +7419,14 @@ static bipolar radio_password_read(p8 address_to into, positive room,
                         if (byte < 32)
                                 continue;
                 }
+                else if (byte < 32)
+                {
+                        //      Not what somebody typed: a NUL would end it
+                        //      where it is kept, and what lay before the NUL
+                        //      would be saved as the password.
+                        result = -1;
+                        break;
+                }
                 if (used + 1 < room)
                         into[used++] = byte;
         }
@@ -7403,7 +7476,12 @@ static bipolar radio_wifi_join(string_address ssid, string_address pass)
                                       secured ? pmk : null, address_of radio_joined);
                 if (failed != -19)
                         break;
-                if (system_clock_ns(HOST_CLOCK_BOOTTIME) - started >= 8000000000)
+                //      No wireless interface yet: waited for only where the
+                //      machine shows a card on its way. A machine with none
+                //      would hold every boot, and every `wifi on`, for the
+                //      whole wait, and the keeper joins when a card arrives.
+                if (!radio_has_interface() ||
+                    system_clock_ns(HOST_CLOCK_BOOTTIME) - started >= 8000000000)
                         break;
                 host_pause(200000000);
         }
@@ -7434,13 +7512,11 @@ static bipolar radio_wifi_leave(void)
 static b32 radio_wifi_bring(bool say)
 {
         radio_network networks[RADIO_WIFI_MOST];
-        positive count = radio_wifi_load(networks, RADIO_WIFI_MOST);
+        positive count = radio_wifi_load(networks, RADIO_WIFI_MOST, null);
         positive at;
         bipolar failed = 0;
         bool joined = false;
-
-        radio_write_word(NET_WIFI_POWER, "on");
-        radio_rfkill(RADIO_RFKILL_WLAN, false);
+        b32 switched = radio_switch(NET_WIFI_POWER, RADIO_RFKILL_WLAN, true, say);
 
         if (!say && nl80211_associated())
         {
@@ -7458,8 +7534,13 @@ static b32 radio_wifi_bring(bool say)
                 {
                         joined = true;
                         if (say)
-                                host_say(log, host_label "wifi joined %s\n",
-                                         (string_address)networks[at].ssid);
+                        {
+                                p8 shown[RADIO_SSID_MOST * 4 + 1];
+
+                                radio_display(shown, sizeof(shown), networks[at].ssid,
+                                              networks[at].ssid_length);
+                                host_say(log, host_label "wifi joined %s\n", (string_address)shown);
+                        }
                         break;
                 }
                 if (failed == -19)
@@ -7471,13 +7552,13 @@ static b32 radio_wifi_bring(bool say)
 
         if (!count)
         {
-                if (say)
+                if (say && !switched)
                         host_say(log, host_label "wifi on\n");
-                return 0;
+                return switched;
         }
 
         if (joined)
-                return 0;
+                return switched;
 
         if (say && failed == -19)
         {
@@ -7507,30 +7588,143 @@ static b32 radio_wifi_on(bool say)
         return result;
 }
 
-static b32 radio_wifi_off(bool say)
+/* Wifi off: the word kept, the link left, the radio blocked. report is for
+   somebody waiting to hear what did not go through. */
+static b32 radio_wifi_off(bool report)
 {
         bipolar lock = radio_lock(true);
+        bipolar kept;
+        b32 failed;
 
         if (lock < 0)
-                return say ? host_fail("wifi", lock) : 1;
-        radio_write_word(NET_WIFI_POWER, "off");
+                return report ? host_fail("wifi", lock) : 1;
+        kept = radio_write_word(NET_WIFI_POWER, "off");
         radio_wifi_leave();
-        radio_rfkill(RADIO_RFKILL_WLAN, true);
+        failed = radio_failed(report, NET_WIFI_POWER, kept,
+                              radio_rfkill(RADIO_RFKILL_WLAN, true));
         radio_net_wake();
         radio_unlock(lock);
-        if (say)
-                host_say(log, host_label "wifi off\n");
-        return 0;
+        return failed;
+}
+
+/* The network put on the saved list, or put there again with the password it
+   was last given. -E2BIG when the list is full, -EFBIG when it is more than
+   this reads and would be written back short. */
+static bipolar radio_wifi_store(string_address ssid, string_address pass)
+{
+        radio_network networks[RADIO_WIFI_MOST];
+        bool cut;
+        positive count = radio_wifi_load(networks, RADIO_WIFI_MOST, address_of cut);
+        positive at;
+        positive ssid_length = string_length(ssid);
+        positive pass_length = pass ? string_length(pass) : 0;
+        bipolar failed = 0;
+
+        for (at = 0; at < count; at++)
+                if (string_equals((string_address)networks[at].ssid, ssid))
+                        break;
+
+        if (cut)
+                failed = -EFBIG;
+        else if (at == count && count++ == RADIO_WIFI_MOST)
+                failed = -E2BIG;
+        else
+        {
+                memory_fill(networks[at].ssid, 0, sizeof(networks[at].ssid));
+                memory_copy(networks[at].ssid, ssid, ssid_length);
+                networks[at].ssid[ssid_length] = end;
+                networks[at].ssid_length = (p8)ssid_length;
+                memory_fill(networks[at].pass, 0, sizeof(networks[at].pass));
+                if (pass_length)
+                        memory_copy(networks[at].pass, pass, pass_length);
+                networks[at].pass[pass_length] = end;
+                networks[at].pass_length = (p8)pass_length;
+                failed = radio_wifi_save(networks, count);
+        }
+
+        crypto_forget(networks, sizeof(networks));
+        return failed;
+}
+
+/* Everything of `wifi add` that happens with the radio lock held. */
+static b32 radio_wifi_enter(string_address ssid, string_address pass)
+{
+        radio_air air;
+        radio_heard address_to heard = null;
+        positive pass_length = pass ? string_length(pass) : 0;
+        bipolar stored = radio_wifi_store(ssid, pass);
+        bipolar failed;
+        p8 why[RADIO_WHY_ROOM];
+
+        b32 switched;
+
+        if (stored == -E2BIG)
+                return host_refuse("too many saved networks%s\n", "");
+        if (stored == -EFBIG)
+                return host_refuse("%s is too long to change here\n", NET_WIFI_LIST);
+        if (stored < 0)
+                return host_fail(NET_WIFI_LIST, stored);
+
+        switched = radio_switch(NET_WIFI_POWER, RADIO_RFKILL_WLAN, true, true);
+
+        /*      What the air already says about it, from the last scan and
+                without asking for another: a network that asks for what the
+                join cannot give is saved and not tried, which would only
+                have waited out the association timeout to say less. */
+        if (radio_air_take(address_of air, RADIO_AIR_STALE | RADIO_AIR_JOINABLE) &&
+            ((heard = radio_air_find(address_of air, ssid)) ||
+             (radio_air_take(address_of air, RADIO_AIR_NOW | RADIO_AIR_JOINABLE) &&
+              (heard = radio_air_find(address_of air, ssid)))))
+        {
+                if (!radio_security_joinable(heard->security))
+                        return host_refuse("saved, but it asks for %s, which "
+                                           "moonwater cannot join yet\n",
+                                           radio_security_words[heard->security]);
+                if (heard->security != RADIO_OPEN && !pass_length)
+                        return host_refuse("saved with no password, but it "
+                                           "asks for one%s\n",
+                                           "");
+        }
+
+        /*      No radio at all is not one that is still arriving: the join's
+                eight seconds of asking are for a card whose interface is on
+                its way at boot. */
+        failed = radio_has_interface() ? radio_wifi_join(ssid, pass) : -19;
+        radio_last_set(ssid, failed);
+
+        radio_net_wake();
+        if (failed == -19)
+                return radio_wifi_why(why, sizeof(why))
+                           ? host_refuse("saved; wifi: %s\n", why)
+                           : host_refuse("saved, but there is no "
+                                         "wireless interface%s\n",
+                                         "");
+        if (failed == -113)
+                return host_refuse("saved, but it is not in range%s\n", "");
+        if (radio_join_said(failed))
+        {
+                if (failed == -110 &&
+                    radio_air_take(address_of air, RADIO_AIR_CACHED) &&
+                    air.count && !radio_air_find(address_of air, ssid))
+                        return host_refuse("saved, but it is not in range%s\n", "");
+                return host_refuse("saved, but the network %s\n",
+                                   radio_join_words(failed));
+        }
+        if (failed < 0)
+                return host_fail("wifi", failed);
+        if (pass && pass[0])
+                crypto_forget((address_any)pass, string_length(pass));
+
+        host_say(log, host_label "wifi joined %s\n", ssid);
+        return switched;
 }
 
 static b32 radio_wifi_add(string_address ssid, string_address pass)
 {
-        radio_network networks[RADIO_WIFI_MOST];
-        bipolar lock;
-        positive count;
-        positive at;
         positive ssid_length = string_length(ssid);
         positive pass_length = pass ? string_length(pass) : 0;
+        bipolar lock;
+        b32 result;
 
         if (!ssid_length || ssid_length > RADIO_SSID_MOST)
                 return host_refuse("that network name is empty or too long%s\n",
@@ -7542,8 +7736,7 @@ static b32 radio_wifi_add(string_address ssid, string_address pass)
                 return host_refuse("a WPA password is 8 to 63 characters, "
                                    "or a key of 64 hex digits%s\n",
                                    "");
-        if (!radio_text_plain(ssid, ssid_length) ||
-            (pass_length && !radio_text_plain(pass, pass_length)))
+        if (!radio_text_shown(ssid) || (pass_length && !radio_text_shown(pass)))
                 return host_refuse("that network name cannot be stored%s\n", "");
 
         /*      The radio lock from here, before the network is saved: the
@@ -7553,144 +7746,35 @@ static b32 radio_wifi_add(string_address ssid, string_address pass)
         lock = radio_lock(true);
         if (lock < 0)
                 return host_fail("wifi", lock);
-        count = radio_wifi_load(networks, RADIO_WIFI_MOST);
-
-        for (at = 0; at < count; at++)
-                if (string_equals((string_address)networks[at].ssid, ssid))
-                        break;
-
-        if (at == count)
-        {
-                if (count == RADIO_WIFI_MOST)
-                {
-                        crypto_forget(networks, sizeof(networks));
-                        radio_unlock(lock);
-                        return host_refuse("too many saved networks%s\n", "");
-                }
-                count++;
-        }
-
-        memory_fill(networks[at].ssid, 0, sizeof(networks[at].ssid));
-        memory_copy(networks[at].ssid, ssid, ssid_length);
-        networks[at].ssid[ssid_length] = end;
-        networks[at].ssid_length = (p8)ssid_length;
-        memory_fill(networks[at].pass, 0, sizeof(networks[at].pass));
-        if (pass_length)
-                memory_copy(networks[at].pass, pass, pass_length);
-        networks[at].pass[pass_length] = end;
-        networks[at].pass_length = (p8)pass_length;
-
-        if (radio_wifi_save(networks, count) < 0)
-        {
-                crypto_forget(networks, sizeof(networks));
-                radio_unlock(lock);
-                return host_fail("wifi", -1);
-        }
-
-        radio_write_word(NET_WIFI_POWER, "on");
-        radio_rfkill(RADIO_RFKILL_WLAN, false);
-        crypto_forget(networks, sizeof(networks));
-
-        /*      What the air already says about it, from the last scan and
-                without asking for another: a network that asks for what the
-                join cannot give is saved and not tried, which would only
-                have waited out the association timeout to say less. */
-        {
-                radio_air air;
-                radio_heard address_to heard;
-
-                if (radio_air_take(address_of air, RADIO_AIR_STALE | RADIO_AIR_JOINABLE) &&
-                    ((heard = radio_air_find(address_of air, ssid)) ||
-                     (radio_air_take(address_of air, RADIO_AIR_NOW | RADIO_AIR_JOINABLE) &&
-                      (heard = radio_air_find(address_of air, ssid)))))
-                {
-                        if (!radio_security_joinable(heard->security) ||
-                            (heard->security != RADIO_OPEN && !pass_length))
-                                radio_unlock(lock);
-                        if (!radio_security_joinable(heard->security))
-                                return host_refuse("saved, but it asks for %s, which "
-                                                   "moonwater cannot join yet\n",
-                                                   radio_security_words[heard->security]);
-                        if (heard->security != RADIO_OPEN && !pass_length)
-                                return host_refuse("saved with no password, but it "
-                                                   "asks for one%s\n",
-                                                   "");
-                }
-        }
-
-        {
-                bipolar failed;
-                p8 why[RADIO_WHY_ROOM];
-
-                /*      No radio at all is not one that is still arriving:
-                        the join's eight seconds of asking are for a card
-                        whose interface is on its way at boot. */
-                failed = radio_has_interface() ? radio_wifi_join(ssid, pass) : -19;
-                radio_unlock(lock);
-                radio_last_set(ssid, failed);
-
-                radio_net_wake();
-                if (failed == -19)
-                        return radio_wifi_why(why, sizeof(why))
-                                   ? host_refuse("saved; wifi: %s\n", why)
-                                   : host_refuse("saved, but there is no "
-                                                 "wireless interface%s\n",
-                                                 "");
-                if (failed == -113)
-                        return host_refuse("saved, but it is not in range%s\n", "");
-                if (radio_join_said(failed))
-                {
-                        radio_air air;
-
-                        if (failed == -110 &&
-                            radio_air_take(address_of air, RADIO_AIR_CACHED) &&
-                            air.count && !radio_air_find(address_of air, ssid))
-                                return host_refuse("saved, but it is not in range%s\n", "");
-                        return host_refuse("saved, but the network %s\n",
-                                           radio_join_words(failed));
-                }
-                if (failed < 0)
-                        return host_fail("wifi", failed);
-                if (pass && pass[0])
-                        crypto_forget((address_any)pass, string_length(pass));
-        }
-
-        host_say(log, host_label "wifi joined %s\n", ssid);
-        return 0;
+        result = radio_wifi_enter(ssid, pass);
+        radio_unlock(lock);
+        return result;
 }
 
-/*
-        Forget a saved network. The list is rewritten without it, and the
-        password with it. A network the machine is joined to when this runs
-        is left too: it was saved so the machine would rejoin it, and once it
-        is not saved nothing else would ever ask for the connection to end.
-*/
-static b32 radio_wifi_remove(string_address ssid)
+/* Everything of `wifi remove` that happens with the radio lock held. */
+static b32 radio_wifi_forget(string_address ssid)
 {
         radio_network networks[RADIO_WIFI_MOST];
-        bipolar lock;
-        positive count;
+        bool cut;
+        positive count = radio_wifi_load(networks, RADIO_WIFI_MOST, address_of cut);
         positive at;
         bool was_joined = false;
-        positive ssid_length = string_length(ssid);
-
-        if (!ssid_length || ssid_length > RADIO_SSID_MOST)
-                return host_refuse("that network name is empty or too long%s\n",
-                                   "");
-
-        lock = radio_lock(true);
-        if (lock < 0)
-                return host_fail("wifi", lock);
-        count = radio_wifi_load(networks, RADIO_WIFI_MOST);
+        bipolar failed;
 
         for (at = 0; at < count; at++)
                 if (string_equals((string_address)networks[at].ssid, ssid))
                         break;
 
+        //      A list longer than the rows read would be written back without
+        //      what was not read: twenty networks, one forgotten, and fifteen left.
+        if (cut)
+        {
+                crypto_forget(networks, sizeof(networks));
+                return host_refuse("%s is too long to change here\n", NET_WIFI_LIST);
+        }
         if (at == count)
         {
                 crypto_forget(networks, sizeof(networks));
-                radio_unlock(lock);
                 return host_refuse("no saved network is called %s\n", ssid);
         }
 
@@ -7711,13 +7795,10 @@ static b32 radio_wifi_remove(string_address ssid)
         count--;
         crypto_forget(address_of networks[count], sizeof(networks[count]));
 
-        if (radio_wifi_save(networks, count) < 0)
-        {
-                crypto_forget(networks, sizeof(networks));
-                radio_unlock(lock);
-                return host_fail("wifi", -1);
-        }
+        failed = radio_wifi_save(networks, count);
         crypto_forget(networks, sizeof(networks));
+        if (failed < 0)
+                return host_fail(NET_WIFI_LIST, failed);
 
         {
                 p8 last[RADIO_SSID_MOST + 1];
@@ -7730,12 +7811,35 @@ static b32 radio_wifi_remove(string_address ssid)
 
         if (was_joined)
                 (void)radio_wifi_leave();
-        radio_unlock(lock);
         radio_net_wake();
 
         host_say(log, host_label "wifi forgot %s%s\n", ssid,
                  was_joined ? " and left it" : "");
         return 0;
+}
+
+/*
+        Forget a saved network. The list is rewritten without it, and the
+        password with it. A network the machine is joined to when this runs
+        is left too: it was saved so the machine would rejoin it, and once it
+        is not saved nothing else would ever ask for the connection to end.
+*/
+static b32 radio_wifi_remove(string_address ssid)
+{
+        positive ssid_length = string_length(ssid);
+        bipolar lock;
+        b32 result;
+
+        if (!ssid_length || ssid_length > RADIO_SSID_MOST)
+                return host_refuse("that network name is empty or too long%s\n",
+                                   "");
+
+        lock = radio_lock(true);
+        if (lock < 0)
+                return host_fail("wifi", lock);
+        result = radio_wifi_forget(ssid);
+        radio_unlock(lock);
+        return result;
 }
 
 /*
@@ -7750,11 +7854,6 @@ static b32 radio_wifi_remove(string_address ssid)
         link with Ethernet framing that is neither loopback nor a wireless
         station is wired here.
 */
-static bool radio_wired_is_off(void)
-{
-        return radio_word_is(NET_WIRED_POWER, "off");
-}
-
 static b32 radio_wired_set(bool on)
 {
         netlink_wired wired;
@@ -7763,7 +7862,7 @@ static b32 radio_wired_set(bool on)
         bipolar written = radio_write_word(NET_WIRED_POWER, on ? "on" : "off");
 
         if (written < 0)
-                return host_fail("wired", written);
+                return host_fail(NET_WIRED_POWER, written);
 
         handle = netlink_open_groups(0);
         if (handle < 0)
@@ -7792,7 +7891,7 @@ static b32 radio_wired_status(void)
 
         if (handle >= 0)
                 socket_close((b32)handle);
-        string_format(log, host_label "wired %s\n", radio_wired_is_off() ? "off" : "on");
+        string_format(log, host_label "wired %s\n", net_wired_off() ? "off" : "on");
         if (failed >= 0)
                 for (positive at = 0; at < wired.count; at++)
                         string_format(log, host_label "  %s: %s, %s\n", wired.link[at].name,
@@ -7812,9 +7911,9 @@ static b32 radio_wired_status(void)
 static b32 radio_wifi_status(void)
 {
         radio_network networks[RADIO_WIFI_MOST];
-        positive count = radio_wifi_load(networks, RADIO_WIFI_MOST);
+        positive count = radio_wifi_load(networks, RADIO_WIFI_MOST, null);
         positive at;
-        bool off = radio_word_is(NET_WIFI_POWER, "off");
+        bool off = radio_power(NET_WIFI_POWER) == 0;
         bool joined = false;
         p8 why[RADIO_WHY_ROOM];
         p8 last[RADIO_SSID_MOST + 1];
@@ -7824,8 +7923,13 @@ static b32 radio_wifi_status(void)
         string_format(log, host_label "wifi %s\n",
                       off ? (string_address) "off" : (string_address) "on");
         for (at = 0; at < count; at++)
-                string_format(log, host_label "  %s\n",
-                              (string_address)networks[at].ssid);
+        {
+                p8 shown[RADIO_SSID_MOST * 4 + 1];
+
+                radio_display(shown, sizeof(shown), networks[at].ssid,
+                              networks[at].ssid_length);
+                string_format(log, host_label "  %s\n", (string_address)shown);
+        }
 
         if (radio_wifi_why(why, sizeof(why)) ||
             !radio_air_take(address_of air, RADIO_AIR_STALE))
@@ -7912,156 +8016,114 @@ static b32 radio_wifi_status(void)
         return 0;
 }
 
-/* The remembered word and the rfkill switch, set together. say is for the
-   person who asked; restoring the machine's own choice stays quiet. */
-static b32 radio_bluetooth_power(bool on, bool say)
+/* The remembered word and the rfkill switch, set together. report is for
+   the person who asked; restoring the machine's own choice stays quiet. */
+static b32 radio_bluetooth_power(bool on, bool report)
 {
-        string_address word = on ? (string_address)"on" : (string_address)"off";
-
-        radio_write_word(NET_BLUETOOTH_POWER, word);
-        radio_rfkill(RADIO_RFKILL_BLUETOOTH, !on);
-        if (say)
-                host_say(log, host_label "bluetooth %s\n", word);
-        return 0;
+        return radio_switch(NET_BLUETOOTH_POWER, RADIO_RFKILL_BLUETOOTH, on, report);
 }
 
-static b32 radio_bluetooth_add(string_address identity)
+/* Remember a device's name or forget it. Nothing here pairs or connects: the
+   list is the names a person keeps, shown by `moonwater bluetooth`, and a name
+   added turns the radio on for whatever does pair. It is read, changed and
+   written back whole under the lock the wifi verbs take, so two runs at once
+   cannot lose each other's names. */
+static b32 radio_bluetooth_edit(string_address identity, bool add)
 {
         p8 text[4096];
+        p8 kept[sizeof(text) + 1];
+        positive length = string_length(identity);
+        positive used = 0;
+        positive at = 0;
+        positive start;
+        positive size;
         bipolar got;
         bipolar lock;
-        p8 line[320];
-        positive used;
+        bipolar failed = 0;
+        bool found = false;
 
-        if (!identity[0] || string_length(identity) > 128)
+        if (!length || length > 128)
                 return host_refuse("that bluetooth name is empty or too long%s\n",
                                    "");
-        if (!radio_text_plain(identity, string_length(identity)))
+        if (add && !radio_text_shown(identity))
                 return host_refuse("that bluetooth name cannot be stored%s\n", "");
 
-        /*      The list is read, changed and written back whole, so two
-                runs at once lost one of the names: under the lock the wifi
-                verbs take, the second reads what the first wrote. */
         lock = radio_lock(true);
         if (lock < 0)
                 return host_fail("bluetooth", lock);
         got = host_read_state(NET_BLUETOOTH_LIST, text, sizeof(text));
         if (got < 0)
-        {
-                text[0] = end;
                 got = 0;
-        }
 
-        if (!(got > 0 && radio_line_has(text, (positive)got, identity)))
+        while (host_line_next(text, (positive)got, address_of at, address_of start,
+                              address_of size))
         {
-                string_copy_bounded(line, identity, sizeof(line));
-                string_append_bounded(line, "\n", sizeof(line));
-                used = (positive)got;
-                if (used + string_length(line) >= sizeof(text))
-                {
-                        radio_unlock(lock);
-                        return host_refuse("too many saved bluetooth devices%s\n",
-                                           "");
-                }
-                memory_copy(text + used, line, string_length(line));
-                used += string_length(line);
-                if (host_write_file(NET_BLUETOOTH_LIST, text, used, 0644,
-                                    true) < 0)
-                {
-                        radio_unlock(lock);
-                        return host_fail("bluetooth", -1);
-                }
-        }
-        radio_unlock(lock);
-
-        radio_bluetooth_power(true, false);
-        host_say(log, host_label "bluetooth remembered %s\n", identity);
-        return 0;
-}
-
-/* Forget a remembered device: its line goes and the others stay as they were. */
-static b32 radio_bluetooth_remove(string_address identity)
-{
-        p8 text[4096];
-        p8 kept[4096];
-        bipolar got;
-        bipolar lock;
-        positive at = 0;
-        positive used = 0;
-        bool found = false;
-        positive want_length = string_length(identity);
-
-        if (!want_length || want_length > 128)
-                return host_refuse("that bluetooth name is empty or too long%s\n", "");
-        lock = radio_lock(true);
-        if (lock < 0)
-                return host_fail("bluetooth", lock);
-        got = host_read_state(NET_BLUETOOTH_LIST, text, sizeof(text));
-        if (got <= 0 || !radio_line_has(text, (positive)got, identity))
-        {
-                radio_unlock(lock);
-                return host_refuse("no remembered bluetooth device is called %s\n", identity);
-        }
-
-        while (at < (positive)got)
-        {
-                positive start = at;
-                positive end_of_line;
-
-                at += memory_span_without_byte(text + at, '\n', (positive)got - at);
-                end_of_line = at;
-                if (at < (positive)got)
-                        at++;
-                if (end_of_line - start == want_length &&
-                    !memory_compare(text + start, identity, want_length))
+                if (size == length && !memory_compare(text + start, identity, length))
                 {
                         found = true;
-                        continue;
+                        if (!add)
+                                continue;
                 }
-                memory_copy(kept + used, text + start, at - start);
-                used += at - start;
+                memory_copy(kept + used, text + start, size);
+                kept[used += size] = '\n';
+                used++;
         }
 
-        if (!found || host_write_file(NET_BLUETOOTH_LIST, kept, used, 0644, true) < 0)
+        //      1: nothing by that name to forget, 2: no room for another,
+        //      4: more of a list than was read, which would be written back
+        //      short; or the list's own error when it would not be written.
+        if (got >= (bipolar)sizeof(text) - 1)
+                failed = 4;
+        else if (!add && !found)
+                failed = 1;
+        else if (add && !found && used + length + 1 >= sizeof(kept))
+                failed = 2;
+        else if (add != found)
         {
-                radio_unlock(lock);
-                return host_fail("bluetooth", -1);
+                if (add)
+                {
+                        memory_copy(kept + used, identity, length);
+                        kept[used += length] = '\n';
+                        used++;
+                }
+                failed = host_write_file(NET_BLUETOOTH_LIST, kept, used, 0644, true);
         }
         radio_unlock(lock);
-        host_say(log, host_label "bluetooth forgot %s\n", identity);
-        return 0;
+
+        if (failed == 1)
+                return host_refuse("no remembered bluetooth device is called %s\n", identity);
+        if (failed == 2)
+                return host_refuse("too many saved bluetooth devices%s\n", "");
+        if (failed == 4)
+                return host_refuse("%s is too long to change here\n", NET_BLUETOOTH_LIST);
+        if (failed)
+                return host_fail(NET_BLUETOOTH_LIST, failed);
+        //      A name remembered is for a radio that is on to find it.
+        failed = add ? radio_bluetooth_power(true, true) : 0;
+        host_say(log, host_label "bluetooth %s %s\n", add ? "remembered" : "forgot", identity);
+        return failed;
 }
 
 static b32 radio_bluetooth_status(void)
 {
         p8 text[4096];
         bipolar got = host_read_state(NET_BLUETOOTH_LIST, text, sizeof(text));
-        bool off = radio_word_is(NET_BLUETOOTH_POWER, "off");
+        bool off = radio_power(NET_BLUETOOTH_POWER) == 0;
         positive at = 0;
+        positive start;
+        positive length;
 
         string_format(log, host_label "bluetooth %s\n",
                       off ? (string_address) "off" : (string_address) "on");
-        if (got > 0)
-                while (at < (positive)got)
+        while (got > 0 && host_line_next(text, (positive)got, address_of at,
+                                         address_of start, address_of length))
+                if (length)
                 {
-                        positive start = at;
+                        p8 shown[128 * 4 + 1];
 
-                        at += memory_span_without_byte(text + at, '\n',
-                                                       (positive)got - at);
-                        if (at > start)
-                        {
-                                p8 name[129];
-                                positive length = at - start;
-
-                                if (length > 128)
-                                        length = 128;
-                                memory_copy(name, text + start, length);
-                                name[length] = end;
-                                string_format(log, host_label "  %s\n",
-                                              (string_address)name);
-                        }
-                        if (at < (positive)got)
-                                at++;
+                        radio_display(shown, sizeof(shown), text + start,
+                                      length > 128 ? 128 : length);
+                        string_format(log, host_label "  %s\n", (string_address)shown);
                 }
         log_flush();
         return 0;
@@ -8074,21 +8136,33 @@ static string_address radio_internet_word(void)
                    : (string_address) "wired";
 }
 
-static b32 radio_internet_set(string_address which)
+/* The preference this session goes by, the copy of /root's that /run holds. */
+static bipolar radio_internet_run(string_address which)
 {
         p8 line[8];
-
-        if (!string_equals(which, "wired") && !string_equals(which, "wifi"))
-                return host_usage();
 
         string_copy_bounded(line, which, sizeof(line));
         string_append_bounded(line, "\n", sizeof(line));
         host_state_ready();
-        if (host_write_text(NET_INTERNET_RUN, line) < 0)
-                return host_fail("internet", -1);
-        if (host_write_file(NET_INTERNET_ROOT, line, string_length(line),
-                            0644, true) < 0)
-                return host_fail("internet", -1);
+        return host_write_text(NET_INTERNET_RUN, line);
+}
+
+/* What is kept comes first: a /run that said wifi over a /root that kept
+   wired was put back by radio_internet_copy a pass later. */
+static b32 radio_internet_set(string_address which)
+{
+        bipolar failed;
+
+        if (!string_equals(which, "wired") && !string_equals(which, "wifi"))
+                return host_usage();
+
+        host_state_ready();
+        failed = radio_write_word(NET_INTERNET_ROOT, which);
+        if (failed < 0)
+                return host_fail(NET_INTERNET_ROOT, failed);
+        failed = radio_internet_run(which);
+        if (failed < 0)
+                return host_fail(NET_INTERNET_RUN, failed);
         radio_net_wake();
 
         host_say(log, host_label "internet prefers %s\n", which);
@@ -8106,31 +8180,25 @@ static fn radio_internet_copy(void)
 {
         p8 text[16];
         p8 have[16];
-        p8 line[8];
 
-        if (host_read_text(NET_INTERNET_ROOT, text, sizeof(text)) < 0)
+        if (host_read_word(NET_INTERNET_ROOT, text, sizeof(text)) < 0)
                 return;
-        if (host_read_text(NET_INTERNET_RUN, have, sizeof(have)) >= 0 &&
+        if (host_read_word(NET_INTERNET_RUN, have, sizeof(have)) >= 0 &&
             string_equals(have, text))
                 return;
 
-        string_copy_bounded(line, text, sizeof(line));
-        string_append_bounded(line, "\n", sizeof(line));
-        host_state_ready();
-        if (host_write_text(NET_INTERNET_RUN, line) >= 0)
+        if (radio_internet_run((string_address)text) >= 0)
                 radio_net_wake();
 }
 
-static bool radio_wifi_wanted(void)
+static bool radio_wifi_wanted(bipolar power)
 {
         radio_network networks[1];
         bool wanted;
 
-        if (radio_word_is(NET_WIFI_POWER, "off"))
-                return false;
-        if (radio_word_is(NET_WIFI_POWER, "on"))
-                return true;
-        wanted = radio_wifi_load(networks, 1) != 0;
+        if (power >= 0)
+                return power;
+        wanted = radio_wifi_load(networks, 1, null) != 0;
         crypto_forget(networks, sizeof(networks));
         return wanted;
 }
@@ -8191,17 +8259,18 @@ static fn radio_wifi_keep(void)
 
 static fn radio_restore(void)
 {
+        bipolar wifi = radio_power(NET_WIFI_POWER);
+        bipolar bluetooth = radio_power(NET_BLUETOOTH_POWER);
+
         radio_internet_copy();
 
-        if (radio_word_is(NET_WIFI_POWER, "off"))
+        if (wifi == 0)
                 radio_wifi_off(false);
-        else if (radio_wifi_wanted())
+        else if (radio_wifi_wanted(wifi))
                 radio_wifi_on(false);
 
-        if (radio_word_is(NET_BLUETOOTH_POWER, "off"))
-                radio_bluetooth_power(false, false);
-        else if (radio_word_is(NET_BLUETOOTH_POWER, "on"))
-                radio_bluetooth_power(true, false);
+        if (bluetooth >= 0)
+                radio_bluetooth_power(bluetooth, false);
 
         /*      The watcher took its first pass before /root was the kept
                 disk, so it knew none of what was set there: a wired-only
@@ -8223,17 +8292,23 @@ static fn radio_recover(void)
 
         radio_internet_copy();
 
-        if (radio_wifi_wanted())
+        if (radio_wifi_wanted(radio_power(NET_WIFI_POWER)))
                 radio_wifi_keep();
+}
 
-        if (radio_word_is(NET_BLUETOOTH_POWER, "on"))
-                radio_rfkill(RADIO_RFKILL_BLUETOOTH, false);
+/* What a verb says it did, when it did not fail. */
+static b32 radio_done(b32 failed, string_address what)
+{
+        if (!failed)
+                host_say(log, host_label "%s\n", what);
+        return failed;
 }
 
 static b32 host_radio(string_address address_to arguments, positive count)
 {
         string_address verb = arguments[1];
         string_address word = count > 2 ? arguments[2] : null;
+        bipolar power;
         bool mutate;
 
         if (string_equals(verb, "priority"))
@@ -8253,15 +8328,14 @@ static b32 host_radio(string_address address_to arguments, positive count)
         mutate = count > 2;
         if (mutate && !bowl_is_root())
                 return host_refuse("%s needs root\n", "moonwater");
+        power = count == 3 ? host_onoff(word) : -1;
 
         if (string_equals(verb, "wired"))
         {
                 if (count < 3)
                         return radio_wired_status();
-                if (count == 3 && string_equals(word, "on"))
-                        return radio_wired_set(true);
-                if (count == 3 && string_equals(word, "off"))
-                        return radio_wired_set(false);
+                if (power >= 0)
+                        return radio_wired_set(power);
                 return host_usage();
         }
 
@@ -8269,10 +8343,10 @@ static b32 host_radio(string_address address_to arguments, positive count)
         {
                 if (count < 3)
                         return radio_wifi_status();
-                if (string_equals(word, "on") && count == 3)
+                if (power > 0)
                         return radio_wifi_on(true);
-                if (string_equals(word, "off") && count == 3)
-                        return radio_wifi_off(true);
+                if (power == 0)
+                        return radio_done(radio_wifi_off(true), "wifi off");
                 if (string_equals(word, "add") && count >= 4 && count <= 5)
                 {
                         p8 pass[256];
@@ -8314,14 +8388,11 @@ static b32 host_radio(string_address address_to arguments, positive count)
 
         if (count < 3)
                 return radio_bluetooth_status();
-        if (string_equals(word, "on") && count == 3)
-                return radio_bluetooth_power(true, true);
-        if (string_equals(word, "off") && count == 3)
-                return radio_bluetooth_power(false, true);
-        if (string_equals(word, "add") && count == 4)
-                return radio_bluetooth_add(arguments[3]);
-        if (string_equals(word, "remove") && count == 4)
-                return radio_bluetooth_remove(arguments[3]);
+        if (power >= 0)
+                return radio_done(radio_bluetooth_power(power, true),
+                                  power ? "bluetooth on" : "bluetooth off");
+        if ((string_equals(word, "add") || string_equals(word, "remove")) && count == 4)
+                return radio_bluetooth_edit(arguments[3], string_equals(word, "add"));
         return host_usage();
 }
 
@@ -8336,8 +8407,9 @@ static b32 host_radio(string_address address_to arguments, positive count)
         line that says so.
 
         What should outlast a boot -- the profile, the CPU switches, the
-        charge limit -- is kept on /root/tune, one "key value" line each, and
-        put back by tune_restore when the machine starts. Brightness is not
+        charge limit, and what airplane mode switched off -- is kept on
+        /root/tune, one "key value" line each, and put back by tune_restore
+        when the machine starts. Brightness is not
         kept: the screen is the thing being looked at, and the last level is
         what the firmware brings it back at.
 */
@@ -8348,41 +8420,6 @@ static b32 host_radio(string_address address_to arguments, positive count)
 #define TUNE_SYS_PROFILE "/sys/firmware/acpi/platform_profile"
 #define TUNE_SYS_POWER "/sys/power"
 
-/* The nth entry of a directory that is not . or .., and whether there is one. */
-static bool tune_entry(string_address directory, positive want, p8 address_to name,
-                       positive room)
-{
-        bipolar handle = system_open_at(AT_FDCWD, directory,
-                                        FILE_READ | O_DIRECTORY | O_CLOEXEC);
-        p8 records[2048];
-        positive have = 0;
-        positive at = 0;
-        positive seen = 0;
-        bipolar error = 0;
-        struct linux_dirent64 address_to record;
-
-        if (handle < 0)
-                return false;
-        while ((record = file_directory_next(handle, records, sizeof(records),
-                                             address_of have, address_of at,
-                                             address_of error)))
-        {
-                string_address entry = (string_address)record->d_name;
-
-                if (file_is_dot(entry))
-                        continue;
-                if (seen++ == want)
-                {
-                        bool fits = string_copy_bounded(name, entry, room) < room;
-
-                        system_close((positive)handle);
-                        return fits;
-                }
-        }
-        system_close((positive)handle);
-        return false;
-}
-
 static bool tune_path(p8 address_to into, positive room, string_address first,
                       string_address second, string_address third)
 {
@@ -8391,18 +8428,60 @@ static bool tune_path(p8 address_to into, positive room, string_address first,
                string_append_bounded(into, third, room) < room;
 }
 
+/* Whether a file can be opened to be read, closing it. */
+static bool tune_exists(string_address path)
+{
+        bipolar handle = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC);
+
+        if (handle < 0)
+                return false;
+        system_close((positive)handle);
+        return true;
+}
+
+/* Whether a name in the cpu directory is a processor's: cpu and its number. */
+static bool tune_is_cpu(string_address name)
+{
+        return name[0] == 'c' && name[1] == 'p' && name[2] == 'u' && byte_is_digit(name[3]);
+}
+
+/* The best of a directory's entries, by the rank a visitor gives each, and the
+   first in the directory among equals. */
+typedef struct
+{
+        p8 name[64];
+        positive rank;
+} tune_choice;
+
+static fn tune_choose(tune_choice address_to choice, string_address name, positive rank)
+{
+        if (rank > choice->rank && string_length(name) < sizeof(choice->name))
+        {
+                choice->rank = rank;
+                string_copy(choice->name, name);
+        }
+}
+
+/* A kernel file's word is the one asked for. */
+static bool tune_says(string_address directory, string_address name, string_address leaf,
+                      string_address want)
+{
+        p8 text[16];
+
+        return radio_sys_read(directory, name, leaf, text, sizeof(text)) > 0 &&
+               string_equals((string_address)text, want);
+}
+
 /* One decimal number from a kernel file; false when it is not there or not one. */
 static bool tune_number(string_address path, positive address_to value)
 {
         p8 text[32];
-        positive digits = 0;
+        positive used;
 
         if (host_read_text(path, text, sizeof(text)) <= 0)
                 return false;
-        *value = 0;
-        while (byte_is_digit(text[digits]) && digits < 18)
-                *value = *value * 10 + (text[digits++] - '0');
-        return digits > 0 && !text[digits];
+        *value = string_digits_max(text, 18, address_of used);
+        return used && !text[used];
 }
 
 static bool tune_word(string_address path, p8 address_to into, positive room)
@@ -8416,16 +8495,13 @@ static bipolar tune_write(string_address path, string_address text)
         bipolar handle = system_open_at(AT_FDCWD, path,
                                         O_WRONLY | FILE_TRUNCATE | O_CLOEXEC | O_NOFOLLOW);
         positive length = string_length(text);
+        system_write_result wrote;
 
         if (handle < 0)
                 return handle;
-        if (system_write_all((positive)handle, (const address_any)text, length) != length)
-        {
-                system_close((positive)handle);
-                return -EIO;
-        }
+        wrote = system_write_all_checked((positive)handle, (const address_any)text, length);
         system_close((positive)handle);
-        return 0;
+        return wrote.bytes == length ? 0 : wrote.error ? wrote.error : -ERROR_INPUT_OUTPUT;
 }
 
 static bipolar tune_write_number(string_address path, positive value)
@@ -8436,15 +8512,12 @@ static bipolar tune_write_number(string_address path, positive value)
         return tune_write(path, (string_address)number);
 }
 
-/* Whether a word is in a file's blank-separated list. */
-static bool tune_lists(string_address path, string_address word)
+/* Whether a word is in a blank-separated list. */
+static bool tune_has(p8 address_to text, string_address word)
 {
-        p8 text[256];
         positive at = 0;
         positive length = string_length(word);
 
-        if (!tune_word(path, text, sizeof(text)))
-                return false;
         while (text[at])
         {
                 positive start = at;
@@ -8459,76 +8532,127 @@ static bool tune_lists(string_address path, string_address word)
         return false;
 }
 
+/* Whether a word is in a file's blank-separated list. */
+static bool tune_lists(string_address path, string_address word)
+{
+        p8 text[256];
+
+        return tune_word(path, text, sizeof(text)) && tune_has(text, word);
+}
+
+/* Whether a line of the kept settings is the one for a key: the key, a blank,
+   then the value. */
+static bool tune_line_is(p8 address_to line, positive length, string_address key)
+{
+        positive size = string_length(key);
+
+        return length > size && !memory_compare(line, key, size) && line[size] == ' ';
+}
+
+/* The kept settings, as far as the room goes: what the bytes are, or negative
+   when none are kept or the file is not a plain one. */
+static bipolar tune_load(p8 address_to text, positive room)
+{
+        return host_read_state(TUNE_KEPT, text, room);
+}
+
+/* The kept value for a key among settings already loaded, or false. */
+static bool tune_find(p8 address_to text, positive size, string_address key,
+                      p8 address_to into, positive room)
+{
+        positive at = 0;
+        positive start;
+        positive length;
+        positive value;
+
+        while (host_line_next(text, size, address_of at, address_of start,
+                              address_of length))
+                if (tune_line_is(text + start, length, key))
+                {
+                        value = length - string_length(key) - 1;
+                        if (value >= room)
+                                return false;
+                        memory_copy(into, text + start + length - value, value);
+                        into[value] = end;
+                        return true;
+                }
+        return false;
+}
+
 /* The kept value for a key, or false. */
 static bool tune_kept(string_address key, p8 address_to into, positive room)
 {
         p8 text[512];
-        bipolar got = file_slurp_once_at(AT_FDCWD, TUNE_KEPT, text, sizeof(text) - 1);
-        positive at = 0;
-        positive length = string_length(key);
+        bipolar got = tune_load(text, sizeof(text));
 
-        if (got <= 0)
-                return false;
-        text[got] = end;
-        while (at < (positive)got)
-        {
-                positive start = at;
-                positive stop = start + memory_span_without_byte(text + start, '\n',
-                                                                 (positive)got - start);
-
-                at = stop < (positive)got ? stop + 1 : stop;
-                if (stop - start > length && !memory_compare(text + start, key, length) &&
-                    text[start + length] == ' ')
-                {
-                        text[stop] = end;
-                        return string_copy_bounded(into, (string_address)text + start + length + 1,
-                                                   room) < room;
-                }
-        }
-        return false;
+        return got > 0 && tune_find(text, (positive)got, key, into, room);
 }
 
-/* Keep a value for a key: the other lines stay, and an empty value drops the key. */
-static bool tune_keep(string_address key, string_address value)
+/* The keeping itself: the other lines stay, and an empty value drops the key. */
+static bipolar tune_store(string_address key, string_address value)
 {
         p8 text[512];
         p8 out[640];
-        bipolar got = file_slurp_once_at(AT_FDCWD, TUNE_KEPT, text, sizeof(text) - 1);
+        bipolar got = tune_load(text, sizeof(text));
         positive at = 0;
         positive used = 0;
-        positive length = string_length(key);
+        positive start;
+        positive length;
+        positive size = string_length(key);
 
+        //      A file that filled the room is longer than this has read, and
+        //      would be written back without the rest of it.
+        if (got >= (bipolar)sizeof(text) - 1)
+                return -EFBIG;
         if (got < 0)
                 got = 0;
-        while (at < (positive)got)
+        while (host_line_next(text, (positive)got, address_of at, address_of start,
+                              address_of length))
         {
-                positive start = at;
-                positive stop = start + memory_span_without_byte(text + start, '\n',
-                                                                 (positive)got - start);
-
-                at = stop < (positive)got ? stop + 1 : stop;
-                if (stop - start > length && !memory_compare(text + start, key, length) &&
-                    text[start + length] == ' ')
+                if (tune_line_is(text + start, length, key))
                         continue;
-                if (used + (at - start) + 1 >= sizeof(out))
-                        return false;
-                memory_copy(out + used, text + start, stop - start);
-                used += stop - start;
+                if (used + length + 1 >= sizeof(out))
+                        return -EFBIG;
+                memory_copy(out + used, text + start, length);
+                used += length;
                 out[used++] = '\n';
         }
         if (value[0])
         {
-                if (used + length + string_length(value) + 2 >= sizeof(out))
-                        return false;
-                memory_copy(out + used, key, length);
-                used += length;
+                if (used + size + string_length(value) + 2 >= sizeof(out))
+                        return -EFBIG;
+                memory_copy(out + used, key, size);
+                used += size;
                 out[used++] = ' ';
                 memory_copy(out + used, value, string_length(value));
                 used += string_length(value);
                 out[used++] = '\n';
         }
         host_state_ready();
-        return host_write_file(TUNE_KEPT, out, used, 0644, true) >= 0;
+        return host_write_file(TUNE_KEPT, out, used, 0644, true);
+}
+
+/* Keep a value for a key: 0, or the error that kept it from being kept. Four
+   verbs at once each read the file and wrote it whole, and what was left was
+   the last one's key, so they take turns on the lock the radio verbs use. */
+static bipolar tune_keep(string_address key, string_address value)
+{
+        bipolar lock = radio_lock(true);
+        bipolar failed;
+
+        if (lock < 0)
+                return lock;
+        failed = tune_store(key, value);
+        radio_unlock(lock);
+        return failed;
+}
+
+/* tune_keep, with what it could not do said: 0, or 1 when it was. */
+static b32 tune_remember(string_address key, string_address value)
+{
+        bipolar failed = tune_keep(key, value);
+
+        return failed < 0 ? host_fail(TUNE_KEPT, failed) : 0;
 }
 
 /* A whole percent, "N", "N%", "+N" or "-N": the sign says relative. */
@@ -8536,7 +8660,8 @@ static bool tune_percent(string_address text, bool address_to relative, bool add
                          positive address_to value)
 {
         positive at = 0;
-        positive number = 0;
+        positive number;
+        positive used;
 
         *relative = *lower = false;
         if (text[at] == '+' || text[at] == '-')
@@ -8547,23 +8672,31 @@ static bool tune_percent(string_address text, bool address_to relative, bool add
         }
         if (!byte_is_digit(text[at]))
                 return false;
-        while (byte_is_digit(text[at]))
-        {
-                number = number * 10 + (text[at++] - '0');
-                if (number > 100000)
-                        return false;
-        }
+        //      Nineteen digits is as many as a word holds, and more is not a
+        //      percent whatever it starts with.
+        number = string_digits_max(text + at, 19, address_of used);
+        at += used;
+        if (number > 100000)
+                return false;
         if (text[at] == '%')
                 at++;
         *value = number;
         return !text[at];
 }
 
-/* moonwater airplane [on|off]: every radio, at once. */
+/* moonwater airplane [on|off]: every radio, at once, and back as they were.
+   What was on is kept in /root/tune as the key airplane, so that a radio that
+   was off before stays off after, and the block of every radio, the modem
+   included, outlasts a boot. With nothing kept both come back. */
 static b32 tune_airplane(string_address address_to arguments, positive count)
 {
-        bool wifi_off = radio_word_is(NET_WIFI_POWER, "off");
-        bool bluetooth_off = radio_word_is(NET_BLUETOOTH_POWER, "off");
+        bool wifi_off = radio_power(NET_WIFI_POWER) == 0;
+        bool bluetooth_off = radio_power(NET_BLUETOOTH_POWER) == 0;
+        p8 was[24];
+        bool kept;
+        bool on;
+        b32 failed;
+        bipolar sent;
 
         if (count == 2)
         {
@@ -8571,28 +8704,54 @@ static b32 tune_airplane(string_address address_to arguments, positive count)
                          wifi_off && bluetooth_off ? "on" : "off");
                 return 0;
         }
-        if (count != 3 || (!string_equals(arguments[2], "on") && !string_equals(arguments[2], "off")))
+        if (count != 3 || host_onoff(arguments[2]) < 0)
                 return host_usage();
         host_need_root("moonwater airplane");
+        on = host_onoff(arguments[2]) > 0;
+        kept = tune_kept("airplane", was, sizeof(was));
 
-        if (string_equals(arguments[2], "on"))
+        //      Type zero is every radio, the modem included.
+        if (on)
         {
-                (void)radio_wifi_off(false);
-                (void)radio_bluetooth_power(false, false);
-                //      Type zero is every radio, the modem included.
-                (void)radio_rfkill(0, true);
+                //      Already in airplane mode is nothing to remember.
+                failed = !wifi_off || !bluetooth_off
+                             ? tune_remember("airplane", wifi_off ? "bluetooth"
+                                                         : bluetooth_off ? "wifi" : "wifi bluetooth")
+                             : 0;
+                failed |= radio_wifi_off(true);
+                failed |= radio_bluetooth_power(false, true);
+                sent = radio_rfkill(0, true);
         }
         else
         {
-                (void)radio_rfkill(0, false);
-                (void)radio_wifi_on(false);
-                (void)radio_bluetooth_power(true, false);
+                sent = radio_rfkill(0, false);
+                failed = 0;
+                if (!kept || tune_has(was, "wifi"))
+                {
+                        failed |= radio_switch(NET_WIFI_POWER, RADIO_RFKILL_WLAN, true, true);
+                        (void)radio_wifi_on(false);
+                }
+                if (!kept || tune_has(was, "bluetooth"))
+                        failed |= radio_bluetooth_power(true, true);
+                if (kept)
+                        failed |= tune_remember("airplane", "");
         }
-        host_say(log, host_label "airplane %s\n", arguments[2]);
-        return 0;
+        failed |= sent < 0 ? host_fail("/dev/rfkill", sent) : 0;
+        return radio_done(failed, on ? "airplane on" : "airplane off");
 }
 
-/* moonwater brightness [N|N%|+N|-N]: the first backlight, in percent. */
+/* The panel's own backlight before a raw one the driver also offers, the way
+   systemd-backlight orders them: firmware's, then the platform's, then raw. */
+static bool tune_backlight_visit(string_address directory, string_address name,
+                                 address_any context)
+{
+        tune_choose((tune_choice address_to)context, name,
+                    tune_says(directory, name, "/type", "firmware") ? 3
+                    : tune_says(directory, name, "/type", "platform") ? 2 : 1);
+        return true;
+}
+
+/* moonwater brightness [N|N%|+N|-N]: the panel's backlight, in percent. */
 static b32 tune_brightness(string_address address_to arguments, positive count)
 {
         p8 name[64];
@@ -8606,7 +8765,11 @@ static b32 tune_brightness(string_address address_to arguments, positive count)
 
         if (count > 3)
                 return host_usage();
-        if (!tune_entry(TUNE_SYS_BACKLIGHT, 0, name, sizeof(name)) ||
+        tune_choice panel = {.rank = 0};
+
+        host_each_entry(TUNE_SYS_BACKLIGHT, tune_backlight_visit, address_of panel);
+        string_copy(name, panel.name);
+        if (!panel.rank ||
             !tune_path(maximum_path, sizeof(maximum_path), TUNE_SYS_BACKLIGHT "/", (string_address)name,
                        "/max_brightness") ||
             !tune_path(current_path, sizeof(current_path), TUNE_SYS_BACKLIGHT "/", (string_address)name,
@@ -8648,19 +8811,32 @@ static b32 tune_brightness(string_address address_to arguments, positive count)
         return 0;
 }
 
-/* The first battery, by name. */
+/* A battery of the machine's own, and best the one that can limit its charge.
+   A mouse or a keyboard reports its battery here too, with the scope Device,
+   and is not the one a charge limit is for. */
+static bool tune_battery_visit(string_address directory, string_address name, address_any context)
+{
+        p8 path[160];
+
+        if (tune_says(directory, name, "/type", "Battery") &&
+            !tune_says(directory, name, "/scope", "Device"))
+        {
+                bool limited = radio_sys_path(path, sizeof(path), directory, name,
+                                              "/charge_control_end_threshold") &&
+                               tune_exists(path);
+
+                tune_choose((tune_choice address_to)context, name, limited ? 2 : 1);
+        }
+        return true;
+}
+
 static bool tune_battery(p8 address_to name, positive room)
 {
-        for (positive at = 0; tune_entry(TUNE_SYS_BATTERY, at, name, room); at++)
-        {
-                p8 path[160];
-                p8 type[16];
+        tune_choice battery = {.rank = 0};
 
-                if (tune_path(path, sizeof(path), TUNE_SYS_BATTERY "/", (string_address)name, "/type") &&
-                    tune_word(path, type, sizeof(type)) && string_equals((string_address)type, "Battery"))
-                        return true;
-        }
-        return false;
+        host_each_entry(TUNE_SYS_BATTERY, tune_battery_visit, address_of battery);
+        return battery.rank && string_length(battery.name) < room &&
+               (string_copy(name, battery.name), true);
 }
 
 static bipolar tune_charge_apply(string_address percent_text)
@@ -8718,12 +8894,10 @@ static b32 tune_charge(string_address address_to arguments, positive count)
                 host_need_root("moonwater charge");
                 if (!string_equals(arguments[3], "off"))
                 {
-                        positive at = 0;
+                        positive used;
 
-                        number = 0;
-                        while (byte_is_digit(arguments[3][at]) && at < 4)
-                                number = number * 10 + (arguments[3][at++] - '0');
-                        if (arguments[3][at] || number < 20 || number > 100)
+                        number = string_digits_max(arguments[3], 4, address_of used);
+                        if (arguments[3][used] || number < 20 || number > 100)
                                 return host_refuse("a charge limit is 20 to 100 percent%s\n", "");
                 }
                 {
@@ -8738,7 +8912,8 @@ static b32 tune_charge(string_address address_to arguments, positive count)
                                                  ? host_refuse("this battery has no charge limit%s\n", "")
                                                  : host_fail("charge", failed);
                         //      A limit of a full charge is the default: nothing to bring back.
-                        (void)tune_keep("charge.limit", number == 100 ? (string_address)"" : (string_address)text);
+                        if (tune_remember("charge.limit", number == 100 ? (string_address)"" : (string_address)text))
+                                return 1;
                 }
                 host_say(log, host_label "charging stops at %p%%\n", number);
                 return 0;
@@ -8746,32 +8921,44 @@ static b32 tune_charge(string_address address_to arguments, positive count)
         return host_usage();
 }
 
-/* The governor and preference a profile means, where the machine has them. */
-static fn tune_profile_cpus(string_address governor, string_address preference)
+typedef struct
 {
-        p8 name[32];
+        string_address governor;
+        string_address preference;
+        positive written;
+} tune_profile;
 
-        for (positive at = 0; tune_entry(TUNE_SYS_CPU, at, name, sizeof(name)); at++)
-        {
-                p8 path[160];
-                p8 policy[160];
+static bool tune_profile_visit(string_address directory, string_address name, address_any context)
+{
+        tune_profile address_to profile = (tune_profile address_to)context;
+        p8 path[160];
+        p8 policy[160];
 
-                if (name[0] != 'c' || name[1] != 'p' || name[2] != 'u' || !byte_is_digit(name[3]))
-                        continue;
-                if (!tune_path(policy, sizeof(policy), TUNE_SYS_CPU "/", (string_address)name, "/cpufreq/"))
-                        continue;
-                if (governor && tune_path(path, sizeof(path), (string_address)policy,
-                                          "scaling_available_governors", "") &&
-                    tune_lists(path, governor) &&
-                    tune_path(path, sizeof(path), (string_address)policy, "scaling_governor", ""))
-                        (void)tune_write(path, governor);
-                if (preference && tune_path(path, sizeof(path), (string_address)policy,
-                                            "energy_performance_available_preferences", "") &&
-                    tune_lists(path, preference) &&
-                    tune_path(path, sizeof(path), (string_address)policy,
-                              "energy_performance_preference", ""))
-                        (void)tune_write(path, preference);
-        }
+        if (!tune_is_cpu(name) ||
+            !tune_path(policy, sizeof(policy), directory, "/", name) ||
+            string_append_bounded(policy, "/cpufreq/", sizeof(policy)) >= sizeof(policy))
+                return true;
+        if (profile->governor && tune_path(path, sizeof(path), (string_address)policy,
+                                           "scaling_available_governors", "") &&
+            tune_lists(path, profile->governor) &&
+            tune_path(path, sizeof(path), (string_address)policy, "scaling_governor", ""))
+                profile->written += tune_write(path, profile->governor) >= 0;
+        if (profile->preference && tune_path(path, sizeof(path), (string_address)policy,
+                                             "energy_performance_available_preferences", "") &&
+            tune_lists(path, profile->preference) &&
+            tune_path(path, sizeof(path), (string_address)policy,
+                      "energy_performance_preference", ""))
+                profile->written += tune_write(path, profile->preference) >= 0;
+        return true;
+}
+
+/* The governor and preference a profile means, on every processor that has them: how many writes went through. */
+static positive tune_profile_cpus(string_address governor, string_address preference)
+{
+        tune_profile profile = {governor, preference, 0};
+
+        host_each_entry(TUNE_SYS_CPU, tune_profile_visit, address_of profile);
+        return profile.written;
 }
 
 /* Apply one of performance, balanced and powersave; false when the machine has no way to. */
@@ -8793,18 +8980,12 @@ static bool tune_power_apply(string_address profile)
         if (tune_lists(TUNE_SYS_PROFILE "_choices", platform))
                 any = tune_write(TUNE_SYS_PROFILE, platform) >= 0;
 
-        tune_profile_cpus(performance ? (string_address)"performance"
-                          : balanced ? (string_address)"schedutil" : (string_address)"powersave",
-                          performance ? (string_address)"performance"
-                          : balanced ? (string_address)"balance_performance" : (string_address)"power");
-        {
-                p8 path[160];
-                p8 word[32];
-
-                //      A governor the machine has counts as a way to, too.
-                any |= tune_path(path, sizeof(path), TUNE_SYS_CPU, "/cpu0/cpufreq/scaling_governor", "") &&
-                       tune_word(path, word, sizeof(word));
-        }
+        //      A way to is a write that went through: a governor that can be read
+        //      and never set is no profile applied.
+        any |= tune_profile_cpus(performance ? (string_address)"performance"
+                                 : balanced ? (string_address)"schedutil" : (string_address)"powersave",
+                                 performance ? (string_address)"performance"
+                                 : balanced ? (string_address)"balance_performance" : (string_address)"power") > 0;
         return any;
 }
 
@@ -8844,35 +9025,37 @@ static b32 tune_power(string_address address_to arguments, positive count)
         host_need_root("moonwater power");
         if (!tune_power_apply(arguments[2]))
                 return host_refuse("this machine has no power profile to set%s\n", "");
-        (void)tune_keep("power", arguments[2]);
+        if (tune_remember("power", arguments[2]))
+                return 1;
         host_say(log, host_label "power %s\n", arguments[2]);
         return 0;
 }
 
-/* Whether a file can be opened to be read, closing it. */
-static bool tune_exists(string_address path)
+/* The boost switch the machine has, or -ENOENT when it has neither. */
+static bipolar tune_cpu_boost(bool on)
 {
-        bipolar handle = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC);
+        bipolar failed = tune_write(TUNE_SYS_CPU "/cpufreq/boost", on ? "1" : "0");
 
-        if (handle < 0)
-                return false;
-        system_close((positive)handle);
+        return failed == -ENOENT ? tune_write(TUNE_SYS_CPU "/intel_pstate/no_turbo", on ? "0" : "1")
+                                 : failed;
+}
+
+static bipolar tune_cpu_smt(bool on)
+{
+        return tune_write(TUNE_SYS_CPU "/smt/control", on ? "on" : "off");
+}
+
+/* A processor with no switch to read is online: cpu0 has none. */
+static bool tune_online_visit(string_address directory, string_address name, address_any context)
+{
+        p8 path[160];
+        p8 word[4];
+
+        if (tune_is_cpu(name))
+                *(positive address_to)context += !tune_path(path, sizeof(path), directory, "/", name) ||
+                                                 string_append_bounded(path, "/online", sizeof(path)) >= sizeof(path) ||
+                                                 !tune_word(path, word, sizeof(word)) || word[0] == '1';
         return true;
-}
-
-static bool tune_cpu_boost(bool on)
-{
-        if (tune_exists(TUNE_SYS_CPU "/cpufreq/boost"))
-                return tune_write(TUNE_SYS_CPU "/cpufreq/boost", on ? "1" : "0") >= 0;
-        if (tune_exists(TUNE_SYS_CPU "/intel_pstate/no_turbo"))
-                return tune_write(TUNE_SYS_CPU "/intel_pstate/no_turbo", on ? "0" : "1") >= 0;
-        return false;
-}
-
-static bool tune_cpu_smt(bool on)
-{
-        return tune_exists(TUNE_SYS_CPU "/smt/control") &&
-               tune_write(TUNE_SYS_CPU "/smt/control", on ? "on" : "off") >= 0;
 }
 
 /* moonwater cpu [boost|smt on|off] [online|offline N] */
@@ -8883,8 +9066,6 @@ static b32 tune_cpu(string_address address_to arguments, positive count)
                 p8 smt[24];
                 p8 boost[8];
                 positive online = 0;
-                positive at = 0;
-                p8 name[32];
 
                 boost[0] = smt[0] = end;
                 if (tune_exists(TUNE_SYS_CPU "/cpufreq/boost"))
@@ -8895,16 +9076,7 @@ static b32 tune_cpu(string_address address_to arguments, positive count)
                         boost[0] = boost[0] == '0' ? '1' : '0';
                 }
                 (void)tune_word(TUNE_SYS_CPU "/smt/control", smt, sizeof(smt));
-                while (tune_entry(TUNE_SYS_CPU, at++, name, sizeof(name)))
-                        if (name[0] == 'c' && name[1] == 'p' && name[2] == 'u' && byte_is_digit(name[3]))
-                        {
-                                p8 path[160];
-                                p8 word[4];
-
-                                online += !tune_path(path, sizeof(path), TUNE_SYS_CPU "/", (string_address)name,
-                                                     "/online") ||
-                                          !tune_word(path, word, sizeof(word)) || word[0] == '1';
-                        }
+                host_each_entry(TUNE_SYS_CPU, tune_online_visit, address_of online);
                 string_format(log, host_label "cpu: %p online", online);
                 if (boost[0])
                         string_format(log, "; boost %s", boost[0] == '1' ? "on" : "off");
@@ -8914,17 +9086,22 @@ static b32 tune_cpu(string_address address_to arguments, positive count)
                 return 0;
         }
         if (count == 4 && (string_equals(arguments[2], "boost") || string_equals(arguments[2], "smt")) &&
-            (string_equals(arguments[3], "on") || string_equals(arguments[3], "off")))
+            host_onoff(arguments[3]) >= 0)
         {
-                bool on = string_equals(arguments[3], "on");
+                bool on = host_onoff(arguments[3]);
                 bool boost = string_equals(arguments[2], "boost");
+                bipolar failed;
 
                 host_need_root("moonwater cpu");
-                if (!(boost ? tune_cpu_boost(on) : tune_cpu_smt(on)))
+                failed = boost ? tune_cpu_boost(on) : tune_cpu_smt(on);
+                if (failed == -ENOENT)
                         return host_refuse(boost ? "this machine has no boost switch%s\n"
                                                  : "this machine has no SMT switch%s\n", "");
+                if (failed < 0)
+                        return host_fail(boost ? "cpu boost" : "cpu smt", failed);
                 //      Both default to on: nothing to bring back then.
-                (void)tune_keep(boost ? "cpu.boost" : "cpu.smt", on ? "" : "off");
+                if (tune_remember(boost ? "cpu.boost" : "cpu.smt", on ? "" : "off"))
+                        return 1;
                 host_say(log, host_label "cpu %s %s\n", arguments[2], arguments[3]);
                 return 0;
         }
@@ -8932,19 +9109,26 @@ static b32 tune_cpu(string_address address_to arguments, positive count)
             byte_is_digit(arguments[3][0]))
         {
                 p8 path[160];
-                positive number = 0;
-                positive at = 0;
+                positive number;
+                positive used;
                 p8 text[8];
 
                 host_need_root("moonwater cpu");
-                while (byte_is_digit(arguments[3][at]) && at < 5)
-                        number = number * 10 + (arguments[3][at++] - '0');
-                if (arguments[3][at] || number == 0)
-                        return host_refuse("cpu 0 stays, and a cpu is a number%s\n", "");
+                number = string_digits_max(arguments[3], 5, address_of used);
+                if (arguments[3][used])
+                        return host_refuse("a cpu is a number of at most five digits%s\n", "");
+                if (!number)
+                        return host_refuse("cpu 0 stays%s\n", "");
+                bipolar failed;
+
                 positive_into_string(text, number);
-                if (!tune_path(path, sizeof(path), TUNE_SYS_CPU "/cpu", (string_address)text, "/online") ||
-                    tune_write(path, string_equals(arguments[2], "online") ? "1" : "0") < 0)
+                failed = tune_path(path, sizeof(path), TUNE_SYS_CPU "/cpu", (string_address)text, "/online")
+                             ? tune_write(path, string_equals(arguments[2], "online") ? "1" : "0")
+                             : -ENOENT;
+                if (failed == -ENOENT)
                         return host_refuse("that cpu cannot be switched%s\n", "");
+                if (failed < 0)
+                        return host_fail("cpu", failed);
                 host_say(log, host_label "cpu %s %p\n", arguments[2], number);
                 return 0;
         }
@@ -8983,81 +9167,103 @@ static bool tune_usb_keyboard(string_address bus, string_address name)
         return false;
 }
 
-static fn tune_wake_arm(string_address bus, bool usb)
+/* What is armed to wake the machine: a PS/2 port, or a USB device with a boot keyboard on it. */
+static bool tune_wake_visit(string_address directory, string_address name, address_any context)
 {
-        p8 name[64];
+        p8 path[192];
+        p8 word[16];
 
-        for (positive at = 0; tune_entry(bus, at, name, sizeof(name)); at++)
-        {
-                p8 path[192];
-                p8 word[16];
-
-                //      An interface's own name, 1-2:1.0, has no wakeup file.
-                if (usb && (string_first_of((string_address)name, ':') ||
-                            !tune_usb_keyboard(bus, (string_address)name)))
-                        continue;
-                if (!tune_path(path, sizeof(path), bus, "/", (string_address)name) ||
-                    string_append_bounded(path, "/power/wakeup", sizeof(path)) >= sizeof(path))
-                        continue;
-                if (tune_word(path, word, sizeof(word)) && string_equals((string_address)word, "disabled") &&
-                    tune_write(path, "enabled") >= 0)
-                        host_say(log, host_label "wakes on %s\n", (string_address)name);
-        }
+        //      An interface's own name, 1-2:1.0, has no wakeup file.
+        if (*(bool address_to)context && (string_first_of(name, ':') || !tune_usb_keyboard(directory, name)))
+                return true;
+        if (!tune_path(path, sizeof(path), directory, "/", name) ||
+            string_append_bounded(path, "/power/wakeup", sizeof(path)) >= sizeof(path))
+                return true;
+        if (tune_word(path, word, sizeof(word)) && string_equals((string_address)word, "disabled") &&
+            tune_write(path, "enabled") >= 0)
+                host_say(log, host_label "wakes on %s\n", name);
+        return true;
 }
 
-#define TUNE_WAKE_MOST 64
+static fn tune_wake_arm(string_address bus, bool usb)
+{
+        host_each_entry(bus, tune_wake_visit, address_of usb);
+}
+
+#define TUNE_WAKE_MOST 128
 #define TUNE_WAKE_CLASS "/sys/class/wakeup"
 
-/* The event count of every wakeup source, in directory order. */
-static positive tune_wake_counts(positive address_to counts)
+typedef struct
 {
         p8 name[48];
-        positive n = 0;
+        positive count;
+} tune_source;
 
-        for (positive at = 0; n < TUNE_WAKE_MOST && tune_entry(TUNE_WAKE_CLASS, at, name, sizeof(name)); at++)
-        {
-                p8 path[160];
-                positive value = 0;
+typedef struct
+{
+        tune_source source[TUNE_WAKE_MOST];
+        positive kept;
+        positive seen;
+} tune_sources;
 
-                if (tune_path(path, sizeof(path), TUNE_WAKE_CLASS "/", (string_address)name, "/event_count") &&
-                    tune_number(path, address_of value))
-                        counts[n] = value;
-                else
-                        counts[n] = 0;
-                n++;
-        }
-        return n;
+static bool tune_source_visit(string_address directory, string_address name, address_any context)
+{
+        tune_sources address_to sources = (tune_sources address_to)context;
+        tune_source address_to source = sources->source + sources->kept;
+        p8 path[160];
+
+        sources->seen++;
+        if (sources->kept == TUNE_WAKE_MOST || string_length(name) >= sizeof(source->name))
+                return true;
+        string_copy(source->name, name);
+        if (!radio_sys_path(path, sizeof(path), directory, name, "/event_count") ||
+            !tune_number(path, address_of source->count))
+                source->count = 0;
+        sources->kept++;
+        return true;
+}
+
+/* The event count of every wakeup source there is, by name. */
+static fn tune_wake_counts(tune_sources address_to sources)
+{
+        sources->kept = sources->seen = 0;
+        host_each_entry(TUNE_WAKE_CLASS, tune_source_visit, sources);
 }
 
 #define TUNE_LOG_LINES 60
 #define TUNE_LOG_WIDTH 160
 #define TUNE_LOG_ROOM (TUNE_LOG_LINES * TUNE_LOG_WIDTH + 512)
 
-/* The wakeup sources that fired since the counts were taken, said and put first in text for /root/sleep.log. */
-static fn tune_wake_report(positive address_to before, positive n, p8 address_to text)
+/* The wakeup sources that fired since the counts were taken, said and put first in text for /root/sleep.log. A source is the one of its name: one that came or went while the machine slept is not matched with whatever stood where it did in the directory. */
+static fn tune_wake_report(tune_sources address_to before, p8 address_to text)
 {
-        p8 name[48];
-        positive after[TUNE_WAKE_MOST];
-        positive seen = tune_wake_counts(after);
+        tune_sources after;
         bool any = false;
 
+        tune_wake_counts(address_of after);
         string_copy_bounded(text, "woken by:", TUNE_LOG_ROOM);
-        for (positive at = 0; at < n && at < seen && tune_entry(TUNE_WAKE_CLASS, at, name, sizeof(name)); at++)
+        for (positive at = 0; at < after.kept; at++)
         {
                 p8 path[160];
                 p8 label[48];
+                positive was = 0;
 
-                if (after[at] == before[at])
+                for (positive then = 0; then < before->kept; then++)
+                        if (string_equals(before->source[then].name, after.source[at].name))
+                                was = before->source[then].count;
+                if (after.source[at].count == was)
                         continue;
-                if (!tune_path(path, sizeof(path), TUNE_WAKE_CLASS "/", (string_address)name, "/name") ||
+                if (!radio_sys_path(path, sizeof(path), TUNE_WAKE_CLASS, after.source[at].name, "/name") ||
                     !tune_word(path, label, sizeof(label)))
-                        string_copy_bounded(label, name, sizeof(label));
+                        string_copy_bounded(label, after.source[at].name, sizeof(label));
                 string_append_bounded(text, " ", TUNE_LOG_ROOM);
                 string_append_bounded(text, (string_address)label, TUNE_LOG_ROOM);
                 any = true;
         }
         if (!any)
                 string_append_bounded(text, " nothing the kernel counted", TUNE_LOG_ROOM);
+        if (after.seen > after.kept || before->seen > before->kept)
+                string_append_bounded(text, " (some sources past the room were not counted)", TUNE_LOG_ROOM);
         host_say(log, host_label "%s\n", (string_address)text);
         string_append_bounded(text, "\n", TUNE_LOG_ROOM);
 }
@@ -9161,23 +9367,39 @@ static fn tune_sleep_stats(p8 address_to text)
 #define TUNE_BACKLIGHTS 4
 #define TUNE_NO_LEVEL ((positive)-1)
 
-/* Each backlight's level, in directory order, before the machine sleeps. */
-static positive tune_backlight_save(positive address_to levels)
+typedef struct
 {
         p8 name[64];
-        positive n = 0;
+        positive level;
+} tune_light;
 
-        for (positive at = 0; n < TUNE_BACKLIGHTS && tune_entry(TUNE_SYS_BACKLIGHT, at, name, sizeof(name)); at++)
-        {
-                p8 path[160];
-                positive level = TUNE_NO_LEVEL;
+typedef struct
+{
+        tune_light light[TUNE_BACKLIGHTS];
+        positive kept;
+} tune_lights;
 
-                if (!tune_path(path, sizeof(path), TUNE_SYS_BACKLIGHT "/", (string_address)name, "/brightness") ||
-                    !tune_number(path, address_of level))
-                        level = TUNE_NO_LEVEL;
-                levels[n++] = level;
-        }
-        return n;
+static bool tune_light_visit(string_address directory, string_address name, address_any context)
+{
+        tune_lights address_to lights = (tune_lights address_to)context;
+        tune_light address_to light = lights->light + lights->kept;
+        p8 path[160];
+
+        if (lights->kept == TUNE_BACKLIGHTS || string_length(name) >= sizeof(light->name))
+                return true;
+        string_copy(light->name, name);
+        if (!radio_sys_path(path, sizeof(path), directory, name, "/brightness") ||
+            !tune_number(path, address_of light->level))
+                light->level = TUNE_NO_LEVEL;
+        lights->kept++;
+        return true;
+}
+
+/* Each backlight's level, by name, before the machine sleeps. */
+static fn tune_backlight_save(tune_lights address_to lights)
+{
+        lights->kept = 0;
+        host_each_entry(TUNE_SYS_BACKLIGHT, tune_light_visit, lights);
 }
 
 /*
@@ -9186,48 +9408,71 @@ static positive tune_backlight_save(positive address_to levels)
         backlight off or at nought (bl_power still blanked, or a level the
         firmware picked) is a screen that is on and dark. The level is written
         back whatever the file says: it is what the class device last stored,
-        and after a wake the panel may not be doing it.
+        and after a wake the panel may not be doing it. Each by its name, so a
+        panel that came or went while the machine slept is not given another's.
 */
-static fn tune_backlight_restore(positive address_to levels, positive n)
+static fn tune_backlight_restore(tune_lights address_to lights)
 {
-        p8 name[64];
-
-        for (positive at = 0; at < n && tune_entry(TUNE_SYS_BACKLIGHT, at, name, sizeof(name)); at++)
+        for (positive at = 0; at < lights->kept; at++)
         {
+                string_address name = (string_address)lights->light[at].name;
                 p8 path[160];
                 positive blank = 0;
 
-                if (tune_path(path, sizeof(path), TUNE_SYS_BACKLIGHT "/", (string_address)name, "/bl_power") &&
+                if (radio_sys_path(path, sizeof(path), TUNE_SYS_BACKLIGHT, name, "/bl_power") &&
                     tune_number(path, address_of blank) && blank &&
                     tune_write(path, "0") >= 0)
-                        host_say(log, host_label "backlight %s was blanked, unblanked\n", (string_address)name);
-                if (levels[at] == TUNE_NO_LEVEL ||
-                    !tune_path(path, sizeof(path), TUNE_SYS_BACKLIGHT "/", (string_address)name, "/brightness"))
+                        host_say(log, host_label "backlight %s was blanked, unblanked\n", name);
+                if (lights->light[at].level == TUNE_NO_LEVEL ||
+                    !radio_sys_path(path, sizeof(path), TUNE_SYS_BACKLIGHT, name, "/brightness"))
                         continue;
                 //      Written even when the file already says so: it is the value
                 //      the class device last stored, not what the panel is doing.
-                if (tune_write_number(path, levels[at]) >= 0)
-                        host_say(log, host_label "backlight %s set to %p\n", (string_address)name, levels[at]);
+                if (tune_write_number(path, lights->light[at].level) >= 0)
+                        host_say(log, host_label "backlight %s set to %p\n", name, lights->light[at].level);
         }
+}
+
+/* A kernel switch turned on for the length of a sleep, and what it was. */
+typedef struct
+{
+        string_address path;
+        p8 was[8];
+        bool changed;
+} tune_flag;
+
+static fn tune_flag_on(tune_flag address_to flag, string_address path)
+{
+        flag->path = path;
+        flag->changed = tune_word(path, flag->was, sizeof(flag->was)) &&
+                        !string_equals((string_address)flag->was, "1") &&
+                        tune_write(path, "1") >= 0;
+}
+
+static fn tune_flag_back(tune_flag address_to flag)
+{
+        if (flag->changed)
+                (void)tune_write(flag->path, (string_address)flag->was);
 }
 
 /* moonwater sleep and moonwater hibernate: the kernel's own suspend and hibernate. */
 static b32 tune_suspend(string_address verb, string_address state)
 {
-        positive before[TUNE_WAKE_MOST];
-        positive levels[TUNE_BACKLIGHTS];
+        tune_sources sources;
+        tune_lights lights;
+        tune_flag messages;
+        tune_flag times;
         p8 text[TUNE_LOG_ROOM];
-        positive lights;
-        positive sources;
 
         if (!tune_lists(TUNE_SYS_POWER "/state", state))
                 return host_refuse(string_equals(state, "mem")
                                        ? "this kernel does not offer sleep%s\n"
                                        : "this kernel does not offer hibernate%s\n", "");
         host_need_root(string_equals(state, "mem") ? "moonwater sleep" : "moonwater hibernate");
-        //      So a sleep that never wakes leaves the device it stopped at in the log.
-        (void)tune_write(TUNE_SYS_POWER "/pm_debug_messages", "1");
-        (void)tune_write(TUNE_SYS_POWER "/pm_print_times", "1");
+        //      So a sleep that never wakes leaves the device it stopped at in the
+        //      log, and what they were is put back when it is over.
+        tune_flag_on(address_of messages, TUNE_SYS_POWER "/pm_debug_messages");
+        tune_flag_on(address_of times, TUNE_SYS_POWER "/pm_print_times");
         tune_wake_arm("/sys/bus/usb/devices", true);
         tune_wake_arm("/sys/bus/serio/devices", false);
         if (string_equals(state, "mem"))
@@ -9238,8 +9483,8 @@ static b32 tune_suspend(string_address verb, string_address state)
                 if (tune_word(TUNE_SYS_POWER "/mem_sleep", mode, sizeof(mode)))
                         host_say(log, host_label "sleeping, mem_sleep %s\n", (string_address)mode);
         }
-        sources = tune_wake_counts(before);
-        lights = tune_backlight_save(levels);
+        tune_wake_counts(address_of sources);
+        tune_backlight_save(address_of lights);
         system_call(syscall(sync));
         {
                 bipolar failed = tune_write(TUNE_SYS_POWER "/state", state);
@@ -9251,38 +9496,52 @@ static b32 tune_suspend(string_address verb, string_address state)
                         tune_sleep_stats(text);
                         tune_kernel_lines(text);
                         (void)host_write_text("/root/sleep.log", (string_address)text);
+                        tune_flag_back(address_of messages);
+                        tune_flag_back(address_of times);
                         return host_fail(verb, failed);
                 }
         }
         //      Reached again once the machine has woken.
-        tune_wake_report(before, sources, text);
+        tune_wake_report(address_of sources, text);
         host_say(log, host_label "awake again\n");
         //      What a sleep can leave behind: the panel's level, the link (the
         //      watcher is asked to look again, since a carrier that came back
         //      before it was listening is news it never heard), and the
         //      settings the machine put in place at boot.
-        tune_backlight_restore(levels, lights);
+        tune_backlight_restore(address_of lights);
         radio_net_wake();
         tune_restore();
         tune_sleep_stats(text);
         tune_kernel_lines(text);
         (void)host_write_text("/root/sleep.log", (string_address)text);
+        tune_flag_back(address_of messages);
+        tune_flag_back(address_of times);
         return 0;
 }
 
 /* What was kept, put back at boot. */
 static fn tune_restore(void)
 {
+        p8 text[512];
         p8 value[24];
+        bipolar got = tune_load(text, sizeof(text));
 
-        if (tune_kept("power", value, sizeof(value)))
+        if (got <= 0)
+                return;
+        if (tune_find(text, (positive)got, "power", value, sizeof(value)))
                 (void)tune_power_apply((string_address)value);
-        if (tune_kept("cpu.boost", value, sizeof(value)) && string_equals((string_address)value, "off"))
+        if (tune_find(text, (positive)got, "cpu.boost", value, sizeof(value)) &&
+            string_equals((string_address)value, "off"))
                 (void)tune_cpu_boost(false);
-        if (tune_kept("cpu.smt", value, sizeof(value)) && string_equals((string_address)value, "off"))
+        if (tune_find(text, (positive)got, "cpu.smt", value, sizeof(value)) &&
+            string_equals((string_address)value, "off"))
                 (void)tune_cpu_smt(false);
-        if (tune_kept("charge.limit", value, sizeof(value)))
+        if (tune_find(text, (positive)got, "charge.limit", value, sizeof(value)))
                 (void)tune_charge_apply((string_address)value);
+        //      Airplane mode is every radio off, and the modem has no word of its own.
+        if (tune_find(text, (positive)got, "airplane", value, sizeof(value)) &&
+            radio_power(NET_WIFI_POWER) == 0 && radio_power(NET_BLUETOOTH_POWER) == 0)
+                (void)radio_rfkill(0, true);
 }
 
 static b32 host_tune(string_address address_to arguments, positive count)
@@ -9321,9 +9580,8 @@ static b32 host_tune(string_address address_to arguments, positive count)
         The forked query is not asked after with kill. A pid that has
         exited but not been waited for is still a pid, so kill(pid, 0)
         answers zero for a zombie exactly as it does for a live child: the
-        poll would see its first query running for ever. Nor is it asked
-        with wait4 alone, since the machine loop reaps every child it has;
-        it says how it went on a pipe (locale_child).
+        poll would see its first query running for ever. It says how it
+        went on a pipe (locale_child), and is waited for once it has.
 
         NOTHING BELOW HAS BEEN SEEN TO SET A CLOCK
 
@@ -9451,12 +9709,18 @@ static b32 host_tune(string_address address_to arguments, positive count)
 #define SNTP_LI_VN_MODE 0x23
 #define SNTP_NANOSECONDS 1000000000ull
 #define SNTP_OK 0
-#define SNTP_NO_SERVER (-1)
-#define SNTP_NO_REPLY (-2)
-#define SNTP_MALFORMED (-3)
-#define SNTP_BAD_SERVER (-4)
-#define SNTP_RATE_LIMITED (-5)
-#define SNTP_UNCONFIRMED (-6)
+//      A query's answers are numbers of their own, far from the errors a
+//      system call gives: the clock's refusal to be set is one of those, and
+//      -EPERM was SNTP_NO_SERVER and -EIO was SNTP_RATE_LIMITED, so file_reason
+//      said "No such process" of an answer out of range.
+#define SNTP_ANSWER (-100000)
+#define SNTP_NO_SERVER (SNTP_ANSWER - 1)
+#define SNTP_NO_REPLY (SNTP_ANSWER - 2)
+#define SNTP_MALFORMED (SNTP_ANSWER - 3)
+#define SNTP_BAD_SERVER (SNTP_ANSWER - 4)
+#define SNTP_RATE_LIMITED (SNTP_ANSWER - 5)
+#define SNTP_UNCONFIRMED (SNTP_ANSWER - 6)
+#define SNTP_DENIED (SNTP_ANSWER - 7)
 #define SNTP_KISS_RATE 0x52415445u /* "RATE" */
 #define SNTP_KISS_DENY 0x44454e59u /* "DENY" */
 #define SNTP_KISS_RSTR 0x52535452u /* "RSTR" */
@@ -9469,6 +9733,9 @@ static b32 host_tune(string_address address_to arguments, positive count)
         ((bipolar)SNTP_WALL_LEAST * (bipolar)SNTP_NANOSECONDS)
 #define SNTP_WALL_MOST_NS \
         ((bipolar)SNTP_WALL_MOST * (bipolar)SNTP_NANOSECONDS)
+//      What a person who asks for the time by hand may be told to step by:
+//      anything the window holds.
+#define SNTP_OFFSET_ANY_NS (SNTP_WALL_MOST_NS - SNTP_WALL_LEAST_NS)
 #define SNTP_TIMESPEC_SECONDS_MOST 9223372035ull
 #define SNTP_ERA ((bipolar)4294967296)
 #define SNTP_SHORT_SECOND 0x10000u
@@ -9478,7 +9745,8 @@ static b32 host_tune(string_address address_to arguments, positive count)
 #define SNTP_ERRQUEUE 0x2000
 #define SNTP_DONTWAIT 0x40
 #define SNTP_MESSAGE_WORDS 7
-#define SNTP_CONTROL_WORDS 16
+#define SNTP_CONTROL_WORDS 24
+#define SNTP_MSG_CTRUNC 0x8
 #define SNTP_CONTROL_HEAD (sizeof(positive) + 8)
 #define SNTP_ERRQUEUE_MOST 4
 #define SNTP_SOL_IP 0
@@ -9607,21 +9875,6 @@ static inline INLINE CONST bipolar sntp_distance_ns(bipolar delay_ns,
                sntp_short_ns(root_dispersion);
 }
 
-static COLD fn sntp_split_offset(bipolar ns, bipolar address_to seconds,
-                            bipolar address_to nanoseconds)
-{
-        bipolar sec = ns / (bipolar)SNTP_NANOSECONDS;
-        bipolar nsec = ns % (bipolar)SNTP_NANOSECONDS;
-
-        if (nsec < 0)
-        {
-                sec -= 1;
-                nsec += (bipolar)SNTP_NANOSECONDS;
-        }
-        address_to seconds = sec;
-        address_to nanoseconds = nsec;
-}
-
 static inline INLINE fn sntp_offset_delay(bipolar t1, bipolar t2, bipolar t3,
                                           bipolar t4,
                                           bipolar address_to offset_ns,
@@ -9633,7 +9886,7 @@ static inline INLINE fn sntp_offset_delay(bipolar t1, bipolar t2, bipolar t3,
 
 static CONST COLD bool sntp_sample_sane(bipolar t1, bipolar t2, bipolar t3,
                                    bipolar t4, bipolar offset_ns,
-                                   bipolar delay_ns, bool tight)
+                                   bipolar delay_ns, bipolar most)
 {
         if (t1 < 0 || t4 < t1 || t3 < t2)
                 return false;
@@ -9641,9 +9894,12 @@ static CONST COLD bool sntp_sample_sane(bipolar t1, bipolar t2, bipolar t3,
                 return false;
         if (delay_ns < 0 || delay_ns > SNTP_DELAY_MOST_NS)
                 return false;
-        if (tight)
-                return sntp_within(offset_ns, SNTP_OFFSET_SYNCED_NS);
-        return !sntp_wall_ok(t1) || sntp_within(offset_ns, SNTP_OFFSET_MOST_NS);
+        //      A clock that tells the time already is moved by at most
+        //      what was asked; one that does not has nothing to be moved
+        //      from, and the window bounds what it can be told.
+        if (most <= SNTP_OFFSET_SYNCED_NS)
+                return sntp_within(offset_ns, most);
+        return !sntp_wall_ok(t1) || sntp_within(offset_ns, most);
 }
 
 static COLD bool sntp_target_ok(bipolar now, bipolar offset_ns,
@@ -9807,6 +10063,20 @@ static bool sntp_control_stamp(p8 address_to control, positive length,
 }
 
 /*
+        What of the control buffer is to be believed. The kernel says when
+        it had more to put in than there was room for, and the stamps and
+        the id are read in pairs, so a buffer it cut short is not read at
+        all: the exchange takes its stamps from the clock, as it does with
+        none. The buffer holds the three messages a send and a receive
+        can leave, 32, 64 and 48 bytes, with room to spare.
+*/
+static inline INLINE CONST positive sntp_control_held(positive flags,
+                                                      positive filled)
+{
+        return flags & SNTP_MSG_CTRUNC ? 0 : filled;
+}
+
+/*
         recvmsg into one buffer and the control words beside it, with the
         control length the kernel filled put in held.
 */
@@ -9828,7 +10098,7 @@ static HOT bipolar sntp_receive_message(b32 handle, p8 address_to into,
         message[5] = SNTP_CONTROL_WORDS * sizeof(positive);
         got = system_call_3(syscall(recvmsg), (positive)handle,
                             (positive)message, flags);
-        address_to held = got < 0 ? 0 : message[5];
+        address_to held = got < 0 ? 0 : sntp_control_held(message[6], message[5]);
         return got;
 }
 
@@ -9951,9 +10221,10 @@ static HOT bool sntp_transmit_stamp(b32 handle, p32 wanted,
 
         Stratum zero is a kiss-o-death and the four bytes at 12 say which.
         RATE is the server asking to be asked less often, which is a
-        different answer from DENY and RSTR: it is reported separately so
-        the policy above can wait instead of walking to the next server
-        and asking again immediately.
+        different answer from DENY and RSTR, which tell this machine to
+        stay away: each is reported separately so the policy above can wait
+        instead of walking to the next server and asking again immediately,
+        and wait longer for the one that says no.
 */
 static COLD bipolar sntp_reply_ok(p8 address_to reply, p8 address_to request)
 {
@@ -9964,9 +10235,14 @@ static COLD bipolar sntp_reply_ok(p8 address_to reply, p8 address_to request)
         if ((reply[0] & 0x7) != 4 || !((reply[0] >> 3) & 7) || ((reply[0] >> 3) & 7) > 4)
                 return SNTP_BAD_SERVER;
         if (!reply[1])
-                return network_load_32(reply + 12) == SNTP_KISS_RATE
-                           ? SNTP_RATE_LIMITED
+        {
+                p32 kiss = network_load_32(reply + 12);
+
+                return kiss == SNTP_KISS_RATE ? SNTP_RATE_LIMITED
+                       : kiss == SNTP_KISS_DENY || kiss == SNTP_KISS_RSTR
+                           ? SNTP_DENIED
                            : SNTP_BAD_SERVER;
+        }
         if ((reply[0] >> 6) == 3 || reply[1] >= 16)
                 return SNTP_BAD_SERVER;
         if (!sntp_short_ok(network_load_32(reply + 4)) ||
@@ -9982,13 +10258,12 @@ static COLD bipolar sntp_reply_ok(p8 address_to reply, p8 address_to request)
 */
 static COLD bipolar sntp_reply_sample(p8 address_to reply,
                                       p8 address_to request, bipolar t1,
-                                      bipolar t4, bool tight,
+                                      bipolar t4, bipolar most,
                                       sntp_sample address_to into)
 {
         bipolar verdict = sntp_reply_ok(reply, request);
         bipolar t2;
         bipolar t3;
-        bipolar reference;
         bipolar offset = 0;
         bipolar delay = 0;
 
@@ -10005,14 +10280,20 @@ static COLD bipolar sntp_reply_sample(p8 address_to reply,
                 moments and a server whose reference is one tick the wrong
                 side of transmit would otherwise be refused for ever: the
                 sample loop stops on BAD_SERVER, so that server is not asked
-                again.
+                again. A reference of all zeros is a server that does not
+                say: RFC 5905 reads it as never synchronised, and a server
+                that keeps no such clock sends it at stratum 1 all the same.
+                The echo of our own stamp is what says the reply is ours,
+                so it is no reason to refuse one, and only one that states a
+                time is held to the window.
         */
-        reference = sntp_load_stamp(reply + 16);
-        if_rare (!sntp_wall_ok(reference) ||
-                 reference > t3 + (bipolar)SNTP_NANOSECONDS)
+        if_rare ((network_load_32(reply + 16) | network_load_32(reply + 20)) &&
+                 (!sntp_wall_ok(sntp_load_stamp(reply + 16)) ||
+                  sntp_load_stamp(reply + 16) >
+                      t3 + (bipolar)SNTP_NANOSECONDS))
                 return SNTP_BAD_SERVER;
         sntp_offset_delay(t1, t2, t3, t4, address_of offset, address_of delay);
-        if_rare (!sntp_sample_sane(t1, t2, t3, t4, offset, delay, tight))
+        if_rare (!sntp_sample_sane(t1, t2, t3, t4, offset, delay, most))
                 return SNTP_MALFORMED;
         into->offset_ns = offset;
         into->delay_ns = delay;
@@ -10033,6 +10314,15 @@ static COLD fn sntp_test_message(p8 address_to at, positive size, b32 level,
         address_to(p64 address_to)(at + SNTP_CONTROL_DATA) = seconds;
         address_to(p64 address_to)(at + SNTP_CONTROL_DATA + sizeof(p64)) =
             nanoseconds;
+}
+
+//      A stamp, as the wire has it, for a time before 2036.
+static COLD fn sntp_test_stamp(p8 address_to at, bipolar ns)
+{
+        network_store_32(at, (p32)(ns / (bipolar)SNTP_NANOSECONDS + SNTP_UNIX));
+        network_store_32(at + 4,
+                         (p32)((p64)(ns % (bipolar)SNTP_NANOSECONDS) *
+                               4294967296ull / SNTP_NANOSECONDS));
 }
 
 static COLD bool sntp_math_ok(void)
@@ -10099,9 +10389,11 @@ static COLD bool sntp_math_ok(void)
             {0x3c, 2, 0, 0, 0, true, SNTP_BAD_SERVER},
             /* stratum 0 carries a kiss code in the reference id */
             {0x24, 0, 0, 0, SNTP_KISS_RATE, true, SNTP_RATE_LIMITED},
-            {0x24, 0, 0, 0, SNTP_KISS_DENY, true, SNTP_BAD_SERVER},
-            {0x24, 0, 0, 0, SNTP_KISS_RSTR, true, SNTP_BAD_SERVER},
+            {0x24, 0, 0, 0, SNTP_KISS_DENY, true, SNTP_DENIED},
+            {0x24, 0, 0, 0, SNTP_KISS_RSTR, true, SNTP_DENIED},
             {0x24, 0, 0, 0, 0, true, SNTP_BAD_SERVER},
+            /* and a kiss that is none of the three tells us nothing */
+            {0x24, 0, 0, 0, 0x58595a5au, true, SNTP_BAD_SERVER},
             /* RATE is still RATE when the alarm bit is set with it */
             {0xe4, 0, 0, 0, SNTP_KISS_RATE, true, SNTP_RATE_LIMITED},
             /* stratum 16 is unsynchronised, and the alarm says so too */
@@ -10139,12 +10431,6 @@ static COLD bool sntp_math_ok(void)
             {0, 0, (bipolar)2085978496 * (bipolar)SNTP_NANOSECONDS},
             {1, 0, (bipolar)2085978497 * (bipolar)SNTP_NANOSECONDS},
         };
-        static const bipolar split_case[][3] = {
-            {1500000000, 1, 500000000},
-            {-1500000000, -2, 500000000},
-            {-1, -1, 999999999},
-            {0, 0, 0},
-        };
         static const struct
         {
                 bipolar t1;
@@ -10153,27 +10439,45 @@ static COLD bool sntp_math_ok(void)
                 bipolar t4;
                 bipolar off;
                 bipolar del;
-                bool tight;
+                bipolar most;
                 bool want;
         } sane_case[] = {
             {SNTP_TEST_NOW, SNTP_TEST_NOW + 1000000000,
              SNTP_TEST_NOW + 1000000000, SNTP_TEST_NOW + 2000000000, 0,
-             2000000000, false, true},
+             2000000000, SNTP_OFFSET_MOST_NS, true},
             {SNTP_TEST_NOW, SNTP_TEST_NOW + 1000000000,
              SNTP_TEST_NOW + 1000000000, SNTP_TEST_NOW + 2000000000, 0,
-             2000000000, true, true},
+             2000000000, SNTP_OFFSET_SYNCED_NS, true},
             {SNTP_TEST_NOW, SNTP_TEST_NOW + 1000000000,
              SNTP_TEST_NOW + 1000000000, SNTP_TEST_NOW + 3000000001, 0,
-             3000000001, false, false},
+             3000000001, SNTP_OFFSET_MOST_NS, false},
             {SNTP_TEST_NOW, SNTP_TEST_NOW + 1000000000,
              SNTP_TEST_NOW + 1000000000, SNTP_TEST_NOW + 500000000, 0,
-             -500000000, false, false},
+             -500000000, SNTP_OFFSET_MOST_NS, false},
             {SNTP_TEST_NOW, SNTP_TEST_NOW + 3000000000,
              SNTP_TEST_NOW + 3000000000, SNTP_TEST_NOW + 50000000, 2975000000,
-             50000000, true, false},
+             50000000, SNTP_OFFSET_SYNCED_NS, false},
             {SNTP_TEST_NOW, SNTP_TEST_NOW + 2000000000,
              SNTP_TEST_NOW + 1000000000, SNTP_TEST_NOW + 50000000, 0, 50000000,
-             false, false},
+             SNTP_OFFSET_MOST_NS, false},
+            /* a clock that is 2.5 s out is stepped by an unsynchronised
+               clock and by a hand, and left to a synchronised one */
+            {SNTP_TEST_NOW, SNTP_TEST_NOW + 2500000000,
+             SNTP_TEST_NOW + 2500000000, SNTP_TEST_NOW + 2000000, 2499000000,
+             2000000, SNTP_OFFSET_SYNCED_NS, false},
+            {SNTP_TEST_NOW, SNTP_TEST_NOW + 2500000000,
+             SNTP_TEST_NOW + 2500000000, SNTP_TEST_NOW + 2000000, 2499000000,
+             2000000, SNTP_OFFSET_MOST_NS, true},
+            /* and one 25 h out only by a hand, which the window bounds */
+            {SNTP_TEST_NOW, SNTP_TEST_NOW + 90000000000000,
+             SNTP_TEST_NOW + 90000000000000, SNTP_TEST_NOW + 2000000,
+             89999999000000, 2000000, SNTP_OFFSET_MOST_NS, false},
+            {SNTP_TEST_NOW, SNTP_TEST_NOW + 90000000000000,
+             SNTP_TEST_NOW + 90000000000000, SNTP_TEST_NOW + 2000000,
+             89999999000000, 2000000, SNTP_OFFSET_SYNCED_NS, false},
+            {SNTP_TEST_NOW, SNTP_TEST_NOW + 90000000000000,
+             SNTP_TEST_NOW + 90000000000000, SNTP_TEST_NOW + 2000000,
+             89999999000000, 2000000, SNTP_OFFSET_ANY_NS, true},
         };
 
         for (at = 0; at < array_count(delay_case); at++)
@@ -10189,7 +10493,7 @@ static COLD bool sntp_math_ok(void)
                 if (sntp_sample_sane(sane_case[at].t1, sane_case[at].t2,
                                      sane_case[at].t3, sane_case[at].t4,
                                      sane_case[at].off, sane_case[at].del,
-                                     sane_case[at].tight) != sane_case[at].want)
+                                     sane_case[at].most) != sane_case[at].want)
                         return false;
 
         sntp_offset_delay(0, SNTP_TEST_NOW + 1000000000,
@@ -10197,10 +10501,10 @@ static COLD bool sntp_math_ok(void)
                           address_of offset, address_of delay);
         if (!sntp_sample_sane(0, SNTP_TEST_NOW + 1000000000,
                               SNTP_TEST_NOW + 1000000000, 100000000, offset,
-                              delay, false) ||
+                              delay, SNTP_OFFSET_MOST_NS) ||
             sntp_sample_sane(0, SNTP_TEST_NOW + 1000000000,
                              SNTP_TEST_NOW + 1000000000, 100000000, offset,
-                             delay, true) ||
+                             delay, SNTP_OFFSET_SYNCED_NS) ||
             !sntp_target_ok(0, offset, address_of target) ||
             target < SNTP_TEST_NOW || target > SNTP_TEST_NOW + 1000000000)
                 return false;
@@ -10211,7 +10515,8 @@ static COLD bool sntp_math_ok(void)
                           address_of delay);
         if (sntp_sample_sane(SNTP_TEST_NOW, SNTP_TEST_NOW + two_days,
                              SNTP_TEST_NOW + two_days,
-                             SNTP_TEST_NOW + 50000000, offset, delay, false))
+                             SNTP_TEST_NOW + 50000000, offset, delay,
+                             SNTP_OFFSET_MOST_NS))
                 return false;
 
         if (!sntp_short_ok(0) || !sntp_short_ok(SNTP_SHORT_SECOND) ||
@@ -10244,14 +10549,6 @@ static COLD bool sntp_math_ok(void)
                         return false;
         }
 
-        for (at = 0; at < array_count(split_case); at++)
-        {
-                sntp_split_offset(split_case[at][0], address_of offset,
-                                  address_of delay);
-                if (offset != split_case[at][1] || delay != split_case[at][2])
-                        return false;
-        }
-
         memory_fill(request, 0, sizeof(request));
         request[0] = SNTP_LI_VN_MODE;
         network_store_32(request + 40, 0xc0ffee00u);
@@ -10269,6 +10566,62 @@ static COLD bool sntp_math_ok(void)
                 if (sntp_reply_ok(reply, request) != reply_case[at].want)
                         return false;
         }
+
+        /*
+                The reference stamp: all zeros is a server that does not
+                say, and is the same server for all that; one that says is
+                held to the window and to what the server sent.
+        */
+        {
+                static const struct
+                {
+                        bipolar reference; /* unix seconds; -1 for all zeros */
+                        bipolar want;
+                } reference_case[] = {
+                    {-1, SNTP_OK},
+                    {SNTP_TEST_NOW / (bipolar)SNTP_NANOSECONDS - 10, SNTP_OK},
+                    {SNTP_TEST_NOW / (bipolar)SNTP_NANOSECONDS + 1, SNTP_OK},
+                    {SNTP_TEST_NOW / (bipolar)SNTP_NANOSECONDS + 5,
+                     SNTP_BAD_SERVER},
+                    {SNTP_WALL_LEAST - 1, SNTP_BAD_SERVER},
+                    {1, SNTP_BAD_SERVER},
+                };
+                sntp_sample taken;
+
+                for (at = 0; at < array_count(reference_case); at++)
+                {
+                        memory_fill(reply, 0, sizeof(reply));
+                        reply[0] = 0x24;
+                        reply[1] = 2;
+                        memory_copy(reply + 24, request + 40, 8);
+                        sntp_test_stamp(reply + 32, SNTP_TEST_NOW + 1000000);
+                        sntp_test_stamp(reply + 40, SNTP_TEST_NOW + 1000000);
+                        if (reference_case[at].reference >= 0)
+                                sntp_test_stamp(reply + 16,
+                                                reference_case[at].reference *
+                                                    (bipolar)SNTP_NANOSECONDS);
+                        memory_zero(address_of taken, sizeof(taken));
+                        if (sntp_reply_sample(reply, request, SNTP_TEST_NOW,
+                                              SNTP_TEST_NOW + 2000000,
+                                              SNTP_OFFSET_MOST_NS,
+                                              address_of taken) !=
+                            reference_case[at].want)
+                                return false;
+                }
+        }
+
+        /*
+                A control buffer the kernel says it filled short is read
+                for nothing, the error queue's own flag is not that, and
+                the buffer takes the arrival stamp, the departure stamp and
+                the error header with the address behind it at once.
+        */
+        if (sntp_control_held(0, 144) != 144 ||
+            sntp_control_held(SNTP_MSG_CTRUNC, 144) ||
+            sntp_control_held(SNTP_MSG_CTRUNC | SNTP_ERRQUEUE, 128) ||
+            sntp_control_held(SNTP_ERRQUEUE, 96) != 96 ||
+            SNTP_CONTROL_WORDS * sizeof(positive) < 32 + 64 + 48)
+                return false;
 
         for (at = 0; at < array_count(control_case); at++)
         {
@@ -10481,7 +10834,7 @@ static COLD bool sntp_math_ok(void)
 
 static HOT bipolar sntp_exchange(b32 handle,
                                  network_deadline address_to deadline,
-                                 bool tight, p32 address_to sequence,
+                                 bipolar most, p32 address_to sequence,
                                  sntp_sample address_to into)
 {
         p8 request[SNTP_PACKET];
@@ -10527,6 +10880,11 @@ static HOT bipolar sntp_exchange(b32 handle,
                          system_call_2(syscall(clock_gettime), CLOCK_REALTIME,
                                        (positive)got) < 0)
                         return SNTP_NO_REPLY;
+                if_rare (received == -ECONNREFUSED || received == -EHOSTUNREACH ||
+                         received == -ENETUNREACH)
+                        //      ICMP says nobody is there; waiting out the
+                        //      deadline would not make it so.
+                        return SNTP_NO_SERVER;
                 if_rare (received < 0)
                 {
                         /*
@@ -10554,7 +10912,7 @@ static HOT bipolar sntp_exchange(b32 handle,
                 }
                 verdict = sntp_reply_sample(reply, request, t1,
                                             sntp_timespec_ns(got[0], got[1]),
-                                            tight, into);
+                                            most, into);
                 if_rare (verdict == SNTP_NO_REPLY)
                 {
                         if (discarded++ == SNTP_DISCARD_MAX)
@@ -10565,7 +10923,7 @@ static HOT bipolar sntp_exchange(b32 handle,
         }
 }
 
-static COLD bipolar sntp_query_at(p32 server, bool filter, bool tight,
+static COLD bipolar sntp_query_at(p32 server, bool filter, bipolar most,
                                   sntp_sample address_to answer)
 {
         socket_address_internet where = {
@@ -10583,9 +10941,6 @@ static COLD bipolar sntp_query_at(p32 server, bool filter, bool tight,
         bipolar handle;
         bipolar best;
         bipolar failed = SNTP_NO_REPLY;
-
-        if (!sntp_math_ok())
-                return SNTP_MALFORMED;
 
         handle = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
         if (handle < 0)
@@ -10612,9 +10967,12 @@ static COLD bipolar sntp_query_at(p32 server, bool filter, bool tight,
                 if (!network_deadline_begin(address_of deadline, SNTP_SECONDS,
                                             0))
                         break;
-                failed = sntp_exchange((b32)handle, address_of deadline, tight,
+                failed = sntp_exchange((b32)handle, address_of deadline, most,
                                        address_of sequence, row + at);
-                if (failed == SNTP_BAD_SERVER || failed == SNTP_RATE_LIMITED)
+                //      A server that is not there, or has said no, is not
+                //      asked again for the rest of the samples.
+                if (failed == SNTP_NO_SERVER || failed == SNTP_BAD_SERVER ||
+                    failed == SNTP_RATE_LIMITED || failed == SNTP_DENIED)
                         break;
         }
         socket_close((b32)handle);
@@ -10627,7 +10985,7 @@ static COLD bipolar sntp_query_at(p32 server, bool filter, bool tight,
         return SNTP_OK;
 }
 
-static COLD bipolar sntp_query(string_address name, bool filter, bool tight,
+static COLD bipolar sntp_query(string_address name, bool filter, bipolar most,
                                sntp_sample address_to answer)
 {
         bipolar numeric;
@@ -10638,19 +10996,18 @@ static COLD bipolar sntp_query(string_address name, bool filter, bool tight,
                 return SNTP_NO_SERVER;
         numeric = string_to_host(name);
         if (numeric >= 0)
-                return sntp_query_at((p32)numeric, filter, tight, answer);
+                return sntp_query_at((p32)numeric, filter, most, answer);
 
         found = dns_resolve_any((string_address) "/etc/resolv.conf", name,
                                 address_of host, SNTP_SECONDS);
         if (found != DNS_OK)
                 return SNTP_NO_SERVER;
-        return sntp_query_at(host, filter, tight, answer);
+        return sntp_query_at(host, filter, most, answer);
 }
 
 #endif
 
 
-#define LOCALE_ZONE_PATH "/root/timezone"
 #define LOCALE_ZONE_MODE_PATH "/root/timezone.mode"
 #define LOCALE_ZONE_NETWORK_PATH HOST_STATE "/timezone.network"
 #define LOCALE_NTP_PATH "/root/ntp"
@@ -10659,15 +11016,17 @@ static COLD bipolar sntp_query(string_address name, bool filter, bool tight,
 #define LOCALE_KEYBOARD_PATH "/root/keyboard"
 #define LOCALE_NTP_DEFAULT_SERVER "pool.ntp.org"
 #define LOCALE_NTP_RETRY_LEAST 1
-#define LOCALE_NTP_RETRY_MOST 8
+#define LOCALE_NTP_RETRY_MOST 900
 #define LOCALE_NTP_AGAIN 1800
 #define LOCALE_NTP_AGAIN_FIRST 256
 #define LOCALE_NTP_LEARN_LEAST_NS ((bipolar)60 * 1000000000)
 #define LOCALE_NTP_FREQ_MOST ((bipolar)500 << 16)
 #define LOCALE_NTP_NOISE_NS ((bipolar)500000)
-#define LOCALE_WAIT_NOHANG 1
 #define LOCALE_NTP_RATE_AGAIN 300
 #define LOCALE_NTP_EXIT_RATE 2
+#define LOCALE_NTP_EXIT_LONG 3
+#define LOCALE_LOCK_PATH HOST_STATE "/locale.lock"
+#define LOCALE_NTP_LOCK_PATH HOST_STATE "/ntp.lock"
 #define LOCALE_NTP_STEP_NS ((bipolar)128 * 1000000)
 #define LOCALE_NTP_STEP_FIRST_NS ((bipolar)1000000)
 #define LOCALE_NTP_TIMECONST 6
@@ -10704,14 +11063,16 @@ static COLD bipolar sntp_query(string_address name, bool filter, bool tight,
         answer gets back.
 
         It used to come back as the child's exit status, collected by a
-        wait4 on its pid. But the machine loop runs radio_recover first, and
-        that reaps every child it has with wait4(-1): the status was gone
-        before this side asked, wait4 answered ECHILD, and the status read
-        as zero. So a kiss-o-death never slowed anything down. The answer is
-        now one byte on a pipe, which nothing else in the process reads; the
-        pid is still reaped here when radio_reap has not got there first,
-        and a child that dies without writing reads as end of file, which
-        is a failure like any other.
+        wait4 on its pid, while the machine loop reaped every child it had
+        with wait4(-1): the status was gone before this side asked, and a
+        kiss-o-death never slowed anything down. The answer is one byte on a
+        pipe, which nothing else in the process reads; a child that dies
+        without writing reads as end of file, which is a failure like any
+        other. The byte is the last thing the child does, so it is a zombie
+        a moment later, and it is waited for here, blocking: the wait that
+        did not block found it still running 2,994 times in 3,000 and never
+        came back, so a query that ended left its pid, and its pipe, for
+        the rest of the boot.
 */
 typedef struct
 {
@@ -10738,9 +11099,19 @@ static bipolar locale_child_fork(locale_child address_to child)
         }
         if (!pid)
         {
+                positive keep = (positive)ends[1];
+
                 system_close(ends[0]);
                 child->pid = 0;
                 child->answer = ends[1];
+                //      Nothing of the machine process stays open in it. Its
+                //      descriptor on /dev/spark holds the machine's
+                //      attachment until the last copy closes, and a machine
+                //      restarted during a query found it taken.
+                if (keep > 3)
+                        system_call_3(syscall(close_range), 3, keep - 1, 0);
+                system_call_3(syscall(close_range), keep < 3 ? 3 : keep + 1,
+                              ~(p32)0, 0);
                 return 0;
         }
         system_close(ends[1]);
@@ -10756,6 +11127,20 @@ static DEAD_END fn locale_child_end(locale_child address_to child, p8 code)
         __builtin_unreachable();
 }
 
+//      A query nobody wants any more, ended and waited for.
+static fn locale_child_stop(locale_child address_to child)
+{
+        positive status = 0;
+
+        if (child->pid <= 0)
+                return;
+        system_call_2(syscall(kill), (positive)child->pid, SIGKILL);
+        system_close(child->answer);
+        (void)system_wait4_retry(child->pid, address_of status, 0, null);
+        child->pid = 0;
+        child->answer = -1;
+}
+
 //      LOCALE_CHILD_IDLE with none running, LOCALE_CHILD_RUNNING while it
 //      runs, then the byte it ended with -- once.
 static bipolar locale_child_poll(locale_child address_to child)
@@ -10769,9 +11154,12 @@ static bipolar locale_child_poll(locale_child address_to child)
         got = system_read_once(child->answer, address_of code, 1);
         if (got == -EAGAIN || got == -EINTR)
                 return LOCALE_CHILD_RUNNING;
+        //      The byte or the end of file says it is done; any other
+        //      answer of read says nothing, and is not waited for.
+        if (got < 0)
+                system_call_2(syscall(kill), (positive)child->pid, SIGKILL);
         system_close(child->answer);
-        (void)system_wait4_retry(child->pid, address_of status,
-                                 LOCALE_WAIT_NOHANG, null);
+        (void)system_wait4_retry(child->pid, address_of status, 0, null);
         child->pid = 0;
         child->answer = -1;
         return got == 1 ? code : 1;
@@ -10780,17 +11168,18 @@ static bipolar locale_child_poll(locale_child address_to child)
 static p64 locale_ntp_next;
 static positive locale_ntp_retry = LOCALE_NTP_RETRY_LEAST;
 /*
-        When the query in flight was asked, when the last one that set the
-        clock was, and how long until the next: the forked query reads the
-        last, which the fork hands it, to tell how fast the clock ran.
+        When the last query that set the clock ended, and how long until the
+        next: the forked query reads the first, which the fork hands it, to
+        tell how fast the clock ran. It is the end of the query the machine
+        saw and not the start of the walk, which is up to a minute earlier
+        and would put that into the frequency it learns.
 */
-static p64 locale_ntp_asked;
 static p64 locale_ntp_synced;
 static positive locale_ntp_every = LOCALE_NTP_AGAIN_FIRST;
 static locale_child locale_ntp_child = {0, -1};
 
-static fn locale_ntp_keep(void);
-static bipolar locale_ntp_apply(void);
+static fn locale_ntp_keep(bool online);
+static bipolar locale_ntp_apply(bool by_hand);
 
 //      What the last answer moved the clock by, and who gave it, for the
 //      person who asked by hand. The scheduled queries run in a child and
@@ -10798,9 +11187,11 @@ static bipolar locale_ntp_apply(void);
 static bipolar locale_ntp_moved_ns;
 static p8 locale_ntp_answered[80];
 
+//      A word from /root, read as state is: a FIFO or a link planted at the
+//      name on the data partition is no word, and cannot stop the command.
 static fn locale_word(string_address path, p8 address_to into, positive room)
 {
-        bipolar got = host_read_text(path, into, room);
+        bipolar got = host_read_state(path, into, room);
         positive length;
 
         if (got < 0)
@@ -10895,9 +11286,11 @@ static bool locale_zone_resolve(string_address name, p8 address_to into,
         if (clock_zone_offset(name, into, room))
                 return true;
 
-        //      clock_tz_parse leaves the process's zone set to what it read,
-        //      so the one in force is put back whichever way it goes.
-        parsed = string_length(name) < room && clock_tz_parse(name);
+        //      Read whole: what the grammar leaves over is kept as typed in
+        //      the file every bowl copies. clock_tz_whole leaves the
+        //      process's zone set to what it read, so the one in force is put
+        //      back whichever way it goes.
+        parsed = string_length(name) < room && clock_tz_whole(name);
         tzset();
         if (!parsed)
                 return false;
@@ -11010,7 +11403,7 @@ static fn locale_zone_mode(p8 address_to into, positive room)
         locale_word(LOCALE_ZONE_MODE_PATH, into, room);
         if (into[0])
                 return;
-        locale_word(LOCALE_ZONE_PATH, zone, sizeof(zone));
+        locale_word(CLOCK_ZONE_PATH, zone, sizeof(zone));
         if (zone[0])
                 string_copy_bounded(into, "manual", room);
 }
@@ -11050,7 +11443,7 @@ static b32 locale_zone_status(void)
         p8 how[48];
         p8 when[48];
 
-        locale_word(LOCALE_ZONE_PATH, zone, sizeof(zone));
+        locale_word(CLOCK_ZONE_PATH, zone, sizeof(zone));
         locale_zone_title(zone, title, sizeof(title));
         locale_zone_how(how, sizeof(how));
         locale_zone_moment(when, sizeof(when));
@@ -11166,6 +11559,45 @@ static fn locale_zone_apply(void)
                 string_format(log, "  refused by  %s\n", kept);
 }
 
+/*
+        The zone and how it came to be, as one change. Under a lock, so that
+        the machine's own query -- which looks at the mode and writes the
+        zone it was told, and meant to leave a zone somebody typed alone --
+        cannot do both between a hand's two writes and leave Cloudflare's
+        zone with the word manual beside it; and in the order that leaves
+        the least when it is cut short: a zone somebody chose is marked
+        manual first, so that a crash after that leaves the old zone with
+        the word that keeps it, and one the network chose is written first,
+        so that nobody reads the new word beside the old zone. A write made
+        by the machine says -EBUSY of a zone that has gone manual since it
+        asked.
+*/
+static bipolar locale_zone_write(string_address zone, string_address mode,
+                                 bool by_hand)
+{
+        bipolar lock = host_lock(LOCALE_LOCK_PATH, true);
+        bipolar failed;
+
+        if (lock < 0)
+                return lock;
+        if (!by_hand && locale_zone_manual())
+                failed = -EBUSY;
+        else if (host_starts(mode, "manual"))
+        {
+                failed = radio_write_word(LOCALE_ZONE_MODE_PATH, mode);
+                if (failed >= 0)
+                        failed = radio_write_word(CLOCK_ZONE_PATH, zone);
+        }
+        else
+        {
+                failed = radio_write_word(CLOCK_ZONE_PATH, zone);
+                if (failed >= 0)
+                        failed = radio_write_word(LOCALE_ZONE_MODE_PATH, mode);
+        }
+        radio_unlock(lock);
+        return failed;
+}
+
 //      Setting prints what the clock now reads, so a wrong zone -- an offset
 //      with the sign the other way round, a country in the wrong half of a
 //      continent -- is visible at the moment it is set, not at the next
@@ -11178,14 +11610,15 @@ static b32 locale_zone_store(string_address zone, string_address mode)
         p8 title[128];
         p8 how[48];
         p8 old_shown[80];
+        bipolar failed;
 
-        locale_word(LOCALE_ZONE_PATH, was, sizeof(was));
+        locale_word(CLOCK_ZONE_PATH, was, sizeof(was));
         locale_zone_describe(was, old_shown, sizeof(old_shown));
         locale_zone_moment(before, sizeof(before));
 
-        if (radio_write_word(LOCALE_ZONE_PATH, zone) < 0 ||
-            radio_write_word(LOCALE_ZONE_MODE_PATH, mode) < 0)
-                return host_fail("timezone", -1);
+        failed = locale_zone_write(zone, mode, true);
+        if (failed < 0)
+                return host_fail("timezone", failed);
 
         locale_zone_moment(after, sizeof(after));
         locale_zone_title(zone, title, sizeof(title));
@@ -11263,9 +11696,13 @@ typedef struct
         and the gateway's hardware address when the neighbour table has it.
         Empty with no default route. Two networks that both hand out
         192.168.1.1 differ in the last part, which is why it is there.
+        Whether there is any route at all is the answer: a machine with an
+        address and no gateway is on a network, though nothing that lives
+        past it can be asked.
 */
-static fn locale_network(p8 address_to into, positive room)
+static bool locale_network(p8 address_to into, positive room)
 {
+        bool any = false;
         p8 table[4096];
         p8 gateway[16] = {0};
         p8 device[20] = {0};
@@ -11275,7 +11712,7 @@ static fn locale_network(p8 address_to into, positive room)
         into[0] = end;
         got = host_read_text("/proc/net/route", table, sizeof(table));
         if (got <= 0)
-                return;
+                return false;
         for (line = (string_address)table; line && line[0];)
         {
                 string_address next = string_first_of(line, '\n');
@@ -11297,6 +11734,7 @@ static fn locale_network(p8 address_to into, positive room)
                         if (length)
                                 words++;
                 }
+                any |= words >= 4 && !string_equals(word[0], "Iface");
                 //      Iface Destination Gateway Flags: a default route
                 //      through a gateway.
                 if (words >= 4 && string_equals(word[1], "00000000") &&
@@ -11310,7 +11748,7 @@ static fn locale_network(p8 address_to into, positive room)
                 line = next ? next + 1 : null;
         }
         if (!device[0])
-                return;
+                return any;
 
         string_copy_bounded(into, device, room);
         string_append_bounded(into, " ", room);
@@ -11321,15 +11759,10 @@ static fn locale_network(p8 address_to into, positive room)
         {
                 p32 raw = (p32)string_to_number_unsigned(gateway, null, 16);
                 p8 dotted[20];
-                positive at = 0;
+                positive at = 1;
 
-                dotted[at++] = '\n';
-                for (positive octet = 0; octet < 4; octet++)
-                {
-                        if (octet)
-                                dotted[at++] = '.';
-                        at += positive_into(dotted + at, (raw >> (8 * octet)) & 0xff);
-                }
+                dotted[0] = '\n';
+                at += host_into(dotted + at, bytes_reverse_32(raw));
                 dotted[at++] = ' ';
                 dotted[at] = end;
                 got = host_read_text("/proc/net/arp", table, sizeof(table));
@@ -11363,6 +11796,7 @@ static fn locale_network(p8 address_to into, positive room)
                         }
                 }
         }
+        return true;
 }
 
 /*
@@ -11601,15 +12035,14 @@ static bipolar locale_auto_take(locale_auto_answer address_to answer,
         p8 was[80];
         p8 mode[48];
 
-        locale_word(LOCALE_ZONE_PATH, was, sizeof(was));
+        locale_word(CLOCK_ZONE_PATH, was, sizeof(was));
         locale_word(LOCALE_ZONE_MODE_PATH, mode, sizeof(mode));
         if (loud)
                 return locale_zone_store(answer->zone, answer->mode) ? -1 : 0;
         if (string_equals(was, answer->zone) &&
             string_equals(mode, answer->mode))
                 return 0;
-        if (radio_write_word(LOCALE_ZONE_PATH, answer->zone) < 0 ||
-            radio_write_word(LOCALE_ZONE_MODE_PATH, answer->mode) < 0)
+        if (locale_zone_write(answer->zone, answer->mode, false) < 0)
                 return -1;
         tzset();
         (void)bowl_write_localtime_host();
@@ -11639,7 +12072,7 @@ static b32 locale_zone_auto(void)
         if (status)
         {
                 locale_auto_asked(null);
-                locale_word(LOCALE_ZONE_PATH, zone, sizeof(zone));
+                locale_word(CLOCK_ZONE_PATH, zone, sizeof(zone));
                 host_say(log_error, host_label "timezone auto: Cloudflare "
                                     "could not be asked (%s); keeping %s "
                                     "until the network answers\n",
@@ -11658,11 +12091,10 @@ static p64 locale_auto_next;
 static positive locale_auto_wait = LOCALE_AUTO_LEAST;
 static locale_child locale_auto_child = {0, -1};
 
-static fn locale_auto_keep(void)
+static fn locale_auto_keep(bool ntp_wanted, string_address network)
 {
         p64 now = system_clock_ns(HOST_CLOCK_BOOTTIME);
         bipolar ended = locale_child_poll(address_of locale_auto_child);
-        p8 network[LOCALE_NETWORK_ROOM];
         p8 asked[LOCALE_NETWORK_ROOM];
 
         if (ended == LOCALE_CHILD_RUNNING)
@@ -11683,10 +12115,9 @@ static fn locale_auto_keep(void)
                 return;
         //      A certificate is only as good as the clock that checks it:
         //      while NTP is on and has not set it, wait a minute for it.
-        if (locale_ntp_wanted() && !locale_clock_synced() &&
+        if (ntp_wanted && !locale_clock_synced() &&
             now < (p64)LOCALE_AUTO_CLOCK_WAIT * 1000000000ull)
                 return;
-        locale_network(network, sizeof(network));
         if (!network[0])
                 return;
         locale_word(LOCALE_ZONE_NETWORK_PATH, asked, sizeof(asked));
@@ -11704,7 +12135,6 @@ static fn locale_auto_keep(void)
         {
                 locale_auto_answer answer;
                 bool took = !locale_auto_ask(address_of answer) &&
-                            !locale_zone_manual() &&
                             !locale_auto_take(address_of answer, false);
 
                 if (took)
@@ -11740,11 +12170,16 @@ static b32 locale_time_sync(void)
 
         locale_ntp_moved_ns = 0;
         locale_ntp_answered[0] = end;
-        failed = locale_ntp_apply();
+        failed = locale_ntp_apply(true);
         if (failed < 0 && locale_ntp_answered[0])
                 string_format(log, host_label "time: %s answered, but the "
                                    "clock could not be set: %s\n",
-                              locale_ntp_answered, file_reason(failed));
+                              locale_ntp_answered,
+                              failed == SNTP_MALFORMED
+                                  ? (string_address) "the time it gave is "
+                                                     "outside the years this "
+                                                     "machine accepts"
+                                  : file_reason(failed));
         else if (failed == SNTP_UNCONFIRMED)
                 string_format(log, host_label "time: no second server agreed "
                                    "with a step past 2 s, so the clock was "
@@ -11753,6 +12188,8 @@ static b32 locale_time_sync(void)
                 string_format(log, host_label "time: no server answered%s\n",
                               failed == SNTP_RATE_LIMITED
                                   ? " -- asked too often, try in a minute"
+                              : failed == SNTP_DENIED
+                                  ? " -- a server told this machine to stay away"
                                   : "");
         else
         {
@@ -11931,10 +12368,14 @@ static CONST bipolar locale_ntp_learned(bipolar offset_ns, bipolar elapsed_ns,
         return learned;
 }
 
-static fn locale_ntp_discipline_words(bipolar offset_ns, bipolar seconds,
-                                      bipolar nanoseconds, positive error_us,
+static fn locale_ntp_discipline_words(bipolar offset_ns, positive error_us,
                                       positive address_to words)
 {
+        //      The time of a step is whole seconds and the nanoseconds left
+        //      after them, which are not negative: a second short is -1 and
+        //      999999999 and not 0 and -1.
+        bipolar seconds = clock_floor_divide(offset_ns, (bipolar)SNTP_NANOSECONDS);
+
         memory_zero(words, LOGGER_TIMEX_WORDS * sizeof(positive));
         words[LOGGER_TIMEX_STATUS] = STA_PLL | STA_FREQHOLD;
         words[LOGGER_TIMEX_MAXERROR] = error_us;
@@ -11945,7 +12386,8 @@ static fn locale_ntp_discipline_words(bipolar offset_ns, bipolar seconds,
                            ADJ_MAXERROR | ADJ_ESTERROR;
                 words[LOCALE_TIMEX_OFFSET] = 0;
                 words[LOGGER_TIMEX_TIME_SEC] = (positive)seconds;
-                words[LOGGER_TIMEX_TIME_NSEC] = (positive)nanoseconds;
+                words[LOGGER_TIMEX_TIME_NSEC] =
+                    (positive)(offset_ns - seconds * (bipolar)SNTP_NANOSECONDS);
                 return;
         }
         words[0] = ADJ_OFFSET | ADJ_TIMECONST | ADJ_NANO | ADJ_STATUS |
@@ -11968,28 +12410,33 @@ static COLD bool locale_discipline_ok(void)
         {
                 bipolar offset_ns;
                 bool step;
+                bipolar sec; /* what a step carries, floored */
+                bipolar nsec;
         } discipline_case[] = {
-            {0, false},
-            {1000000, false},
-            {-1000000, false},
-            {LOCALE_NTP_STEP_NS - 1, false},
-            {-(LOCALE_NTP_STEP_NS - 1), false},
-            {LOCALE_NTP_STEP_NS, true},
-            {-LOCALE_NTP_STEP_NS, true},
-            {(bipolar)86400 * 1000000000, true},
-            {-(bipolar)86400 * 1000000000, true},
+            {0, false, 0, 0},
+            {1000000, false, 0, 0},
+            {-1000000, false, 0, 0},
+            {LOCALE_NTP_STEP_NS - 1, false, 0, 0},
+            {-(LOCALE_NTP_STEP_NS - 1), false, 0, 0},
+            {LOCALE_NTP_STEP_NS, true, 0, LOCALE_NTP_STEP_NS},
+            {-LOCALE_NTP_STEP_NS, true, -1,
+             (bipolar)SNTP_NANOSECONDS - LOCALE_NTP_STEP_NS},
+            {1500000000, true, 1, 500000000},
+            {-1500000000, true, -2, 500000000},
+            {(bipolar)86400 * 1000000000, true, 86400, 0},
+            {-(bipolar)86400 * 1000000000, true, -86400, 0},
+            {(bipolar)3 * 86400 * 1000000000 + 1, true, 259200, 1},
+            {-((bipolar)3 * 86400 * 1000000000 + 1), true, -259201,
+             (bipolar)SNTP_NANOSECONDS - 1},
         };
 
         for (at = 0; at < array_count(discipline_case); at++)
         {
                 bipolar offset = discipline_case[at].offset_ns;
-                bipolar sec = 0;
-                bipolar nsec = 0;
 
-                sntp_split_offset(offset, address_of sec, address_of nsec);
                 /* a 20 ms round trip to a server at the root of its
                    tree is a 10 ms root distance */
-                locale_ntp_discipline_words(offset, sec, nsec,
+                locale_ntp_discipline_words(offset,
                                             locale_ntp_error_us(
                                                 sntp_distance_ns(20000000, 0, 0)),
                                             words);
@@ -12015,8 +12462,10 @@ static COLD bool locale_discipline_ok(void)
                         if (!(words[0] & ADJ_SETOFFSET) ||
                             words[0] & ADJ_TIMECONST ||
                             words[LOCALE_TIMEX_OFFSET] != 0 ||
-                            (bipolar)words[LOGGER_TIMEX_TIME_SEC] != sec ||
-                            (bipolar)words[LOGGER_TIMEX_TIME_NSEC] != nsec)
+                            (bipolar)words[LOGGER_TIMEX_TIME_SEC] !=
+                                discipline_case[at].sec ||
+                            (bipolar)words[LOGGER_TIMEX_TIME_NSEC] !=
+                                discipline_case[at].nsec)
                                 return false;
                 }
                 else
@@ -12085,8 +12534,6 @@ static bipolar locale_ntp_apply_offset(bipolar offset_ns, bipolar distance_ns)
 {
         bipolar now;
         bipolar target = 0;
-        bipolar sec = 0;
-        bipolar nsec = 0;
         positive words[LOGGER_TIMEX_WORDS];
         p64 stamp[2];
         bipolar failed;
@@ -12097,10 +12544,9 @@ static bipolar locale_ntp_apply_offset(bipolar offset_ns, bipolar distance_ns)
         if (!sntp_target_ok(now, offset_ns, address_of target))
                 return SNTP_MALFORMED;
 
-        sntp_split_offset(offset_ns, address_of sec, address_of nsec);
         locale_ntp_first = !locale_ntp_synced;
-        locale_ntp_discipline_words(offset_ns, sec, nsec,
-                                    locale_ntp_error_us(distance_ns), words);
+        locale_ntp_discipline_words(offset_ns, locale_ntp_error_us(distance_ns),
+                                    words);
         if (locale_ntp_synced)
         {
                 positive state[LOGGER_TIMEX_WORDS] = {0};
@@ -12133,9 +12579,9 @@ static bipolar locale_ntp_apply_offset(bipolar offset_ns, bipolar distance_ns)
                 return now;
         if (!sntp_target_ok(now, offset_ns, address_of target))
                 return SNTP_MALFORMED;
-        sntp_split_offset(target, address_of sec, address_of nsec);
-        stamp[0] = (p64)sec;
-        stamp[1] = (p64)nsec;
+        //      A time in the window is after 1970, so it needs no flooring.
+        stamp[0] = (p64)(target / (bipolar)SNTP_NANOSECONDS);
+        stamp[1] = (p64)(target % (bipolar)SNTP_NANOSECONDS);
         failed = system_call_2(syscall(clock_settime), CLOCK_REALTIME,
                                (positive)stamp);
         if (failed < 0)
@@ -12149,13 +12595,13 @@ static bipolar locale_ntp_apply_offset(bipolar offset_ns, bipolar distance_ns)
         return 0;
 }
 
-static bipolar locale_ntp_ask(string_address server, bool filter, bool tight,
+static bipolar locale_ntp_ask(string_address server, bool filter, bipolar most,
                               sntp_sample address_to answer)
 {
         if (!server || !server[0] ||
             !radio_text_plain(server, string_length(server)))
                 return SNTP_NO_SERVER;
-        return sntp_query(server, filter, tight, answer);
+        return sntp_query(server, filter, most, answer);
 }
 
 static bipolar locale_ntp_take(string_address server,
@@ -12182,16 +12628,31 @@ static bipolar locale_ntp_take(string_address server,
         /root/ntp.server is believed on its own, as before, and sampling off
         takes the first answer -- unless it would step the clock more than
         two seconds, when a second is asked for, since sntp_choose believes
-        no such step on one word.
+        no such step on one word. A clock nobody has set takes the first
+        answer there is, with sampling or not: it has no time to be moved
+        from, and waiting for the others is a minute on a machine whose
+        network is slow to come.
 */
-static bipolar locale_ntp_apply(void)
+static bipolar locale_ntp_walk(bool by_hand)
 {
         p8 server[80];
         bipolar failed = SNTP_NO_SERVER;
         positive at;
         bool filter = locale_ntp_sampling_wanted();
-        bool tight = locale_clock_synced();
+        bipolar now = sntp_now_ns();
+        //      A clock nobody has set has no time of its own to be moved
+        //      from, and the window bounds what it can be told.
+        bool unset = now >= 0 && !sntp_wall_ok(now);
+        //      How far an answer may move the clock: two seconds when it
+        //      tells the time, a day when it does not, and for a person who
+        //      asked, anything the window holds -- a clock that is a week
+        //      out is refused by every sample otherwise, with nothing to
+        //      bring it back.
+        bipolar most = by_hand ? SNTP_OFFSET_ANY_NS
+                       : locale_clock_synced() ? SNTP_OFFSET_SYNCED_NS
+                                               : SNTP_OFFSET_MOST_NS;
         bool rated = false;
+        bool denied = false;
         sntp_sample heard[SNTP_SERVERS];
         b32 heard_from[SNTP_SERVERS];
         positive heard_count = 0;
@@ -12200,14 +12661,15 @@ static bipolar locale_ntp_apply(void)
         locale_word(LOCALE_NTP_SERVER_PATH, server, sizeof(server));
         if (server[0])
         {
-                failed = locale_ntp_ask((string_address)server, filter, tight,
+                failed = locale_ntp_ask((string_address)server, filter, most,
                                         heard);
                 if (failed >= 0)
                         return locale_ntp_take((string_address)server, heard);
                 rated = failed == SNTP_RATE_LIMITED;
+                denied = failed == SNTP_DENIED;
         }
 
-        wanted = filter && !server[0] ? SNTP_SERVERS : 1;
+        wanted = filter && !server[0] && !unset ? SNTP_SERVERS : 1;
         for (at = 0; at < array_count(locale_ntp_fallback) &&
                      heard_count < wanted; at++)
         {
@@ -12216,7 +12678,7 @@ static bipolar locale_ntp_apply(void)
                                   (string_address)locale_ntp_fallback[at]))
                         continue;
                 failed = locale_ntp_ask((string_address)locale_ntp_fallback[at],
-                                        filter, tight, heard + heard_count);
+                                        filter, most, heard + heard_count);
                 if (failed >= 0)
                 {
                         bool again = false;
@@ -12234,8 +12696,10 @@ static bipolar locale_ntp_apply(void)
                 }
                 else if (failed == SNTP_RATE_LIMITED)
                         rated = true;
+                else if (failed == SNTP_DENIED)
+                        denied = true;
                 //      A far step is not taken on one server's word.
-                if (heard_count == 1 && wanted < 2 &&
+                if (heard_count == 1 && wanted < 2 && !unset &&
                     !sntp_within(heard[0].offset_ns, SNTP_OFFSET_SYNCED_NS))
                         wanted = 2;
         }
@@ -12243,12 +12707,8 @@ static bipolar locale_ntp_apply(void)
         if (heard_count)
         {
                 bipolar chosen = sntp_choose(heard, heard_count);
-                bipolar now = sntp_now_ns();
 
-                //      A clock nobody has set takes the one server there is:
-                //      it has no time of its own to be moved from, and the
-                //      window bounds what it can be told.
-                if (chosen < 0 && heard_count == 1 && now >= 0 && !sntp_wall_ok(now))
+                if (chosen < 0 && heard_count == 1 && unset)
                         chosen = 0;
                 if (chosen < 0)
                         return SNTP_UNCONFIRMED;
@@ -12256,7 +12716,33 @@ static bipolar locale_ntp_apply(void)
                     (string_address)locale_ntp_fallback[heard_from[chosen]],
                     heard + chosen);
         }
-        return rated ? SNTP_RATE_LIMITED : failed;
+        return denied ? SNTP_DENIED : rated ? SNTP_RATE_LIMITED : failed;
+}
+
+/*
+        One query at a time, whoever asks. The offset is measured against the
+        clock as it is and applied relative to it, so two that measured
+        before either applied would both move the clock by the same amount:
+        the machine's own query and `moonwater time sync` or `ntp on` typed
+        while it runs. The machine's gives way and is asked again, and a
+        hand waits its turn, and says so, since a walk is up to a minute.
+*/
+static bipolar locale_ntp_apply(bool by_hand)
+{
+        bipolar lock = host_lock(LOCALE_NTP_LOCK_PATH, false);
+        bipolar failed;
+
+        if (lock == -EAGAIN)
+        {
+                if (!by_hand)
+                        return SNTP_NO_REPLY;
+                host_say(log, host_label "time: another query is running; "
+                                         "waiting for it\n");
+                lock = host_lock(LOCALE_NTP_LOCK_PATH, true);
+        }
+        failed = locale_ntp_walk(by_hand);
+        radio_unlock(lock);
+        return failed;
 }
 
 static b32 locale_ntp_status(void)
@@ -12295,7 +12781,7 @@ static b32 locale_ntp_set(bool sampling, string_address word)
         if (!sampling && string_equals(word, "on"))
         {
                 locale_ntp_next = 0;
-                if (locale_ntp_apply() < 0)
+                if (locale_ntp_apply(true) < 0)
                         word = "on, waiting for a reply";
         }
         host_say(log, host_label "ntp %s%s\n", sampling ? "sampling " : "",
@@ -12380,34 +12866,6 @@ static b32 locale_keyboard_set(string_address name)
         return 0;
 }
 
-static fn locale_restore(void)
-{
-        p8 zone[80];
-        p8 keyboard[16];
-
-        locale_word(LOCALE_ZONE_PATH, zone, sizeof(zone));
-        if (zone[0])
-        {
-                tzset();
-                (void)locale_zone_kernel();
-                (void)bowl_write_localtime_host();
-                (void)bowl_write_localtime_all(null);
-        }
-
-        locale_word(LOCALE_KEYBOARD_PATH, keyboard, sizeof(keyboard));
-        if (keyboard[0])
-                locale_keyboard_live(keyboard);
-
-        locale_ntp_next = 0;
-        locale_ntp_retry = LOCALE_NTP_RETRY_LEAST;
-        locale_ntp_synced = 0;
-        locale_ntp_every = LOCALE_NTP_AGAIN_FIRST;
-        locale_auto_next = 0;
-        locale_auto_wait = LOCALE_AUTO_LEAST;
-        if (locale_ntp_wanted())
-                locale_ntp_keep();
-}
-
 /*
         What the schedule makes of a query that ended, or of a look between
         queries. A success is only a success if the kernel still says the
@@ -12432,7 +12890,7 @@ static fn locale_ntp_schedule(bipolar ended, bool synced, p64 now)
                 //      fast this clock runs, and half-hourly once it has
                 //      had the time to.
                 locale_ntp_retry = LOCALE_NTP_RETRY_LEAST;
-                locale_ntp_synced = locale_ntp_asked;
+                locale_ntp_synced = now;
                 locale_ntp_next = now + (p64)locale_ntp_every * 1000000000ull;
                 locale_ntp_every = locale_ntp_every * 2 < LOCALE_NTP_AGAIN
                                        ? locale_ntp_every * 2
@@ -12443,11 +12901,17 @@ static fn locale_ntp_schedule(bipolar ended, bool synced, p64 now)
                 locale_ntp_retry = LOCALE_NTP_RETRY_MOST;
                 locale_ntp_next = now + (p64)LOCALE_NTP_RATE_AGAIN * 1000000000ull;
         }
+        else if (ended == LOCALE_NTP_EXIT_LONG)
+                locale_ntp_next = now + (p64)LOCALE_NTP_AGAIN * 1000000000ull;
         else if (ended != LOCALE_CHILD_IDLE)
         {
+                //      Doubling from a second to a quarter of an hour: a
+                //      machine that cannot reach a server does not walk
+                //      seven names every eight seconds for ever.
                 locale_ntp_next = now + (p64)locale_ntp_retry * 1000000000ull;
-                if (locale_ntp_retry < LOCALE_NTP_RETRY_MOST)
-                        locale_ntp_retry *= 2;
+                locale_ntp_retry = locale_ntp_retry * 2 < LOCALE_NTP_RETRY_MOST
+                                       ? locale_ntp_retry * 2
+                                       : LOCALE_NTP_RETRY_MOST;
         }
         else if (locale_ntp_synced && !synced &&
                  locale_ntp_retry == LOCALE_NTP_RETRY_LEAST &&
@@ -12455,28 +12919,83 @@ static fn locale_ntp_schedule(bipolar ended, bool synced, p64 now)
                 locale_ntp_next = now + LOCALE_NTP_RETRY_LEAST * 1000000000ull;
 }
 
-static fn locale_ntp_keep(void)
+/*
+        Whether NTP was wanted at the machine's last turn, which the wake
+        below reads rather than the file again; and which network the turn
+        was on, so that a different one, or the first, is a new chance for
+        the queries that wait out a failure.
+*/
+static bool locale_ntp_on;
+static bool locale_online_held;
+static p8 locale_network_held[LOCALE_NETWORK_ROOM];
+
+static fn locale_ntp_keep(bool online)
 {
         p64 now = system_clock_ns(HOST_CLOCK_BOOTTIME);
-        bipolar ended = locale_child_poll(address_of locale_ntp_child);
+        bipolar ended;
 
+        //      `ntp off` ends a query in flight and waits for it: left to
+        //      run it would set the clock after it was told not to, and
+        //      nothing would reap it or close its pipe.
+        if (!locale_ntp_on)
+        {
+                locale_child_stop(address_of locale_ntp_child);
+                return;
+        }
+        ended = locale_child_poll(address_of locale_ntp_child);
         if (ended == LOCALE_CHILD_RUNNING)
                 return;
         locale_ntp_schedule(ended, locale_clock_synced(), now);
-        if (ended != LOCALE_CHILD_IDLE || (locale_ntp_next && now < locale_ntp_next))
+        if (ended != LOCALE_CHILD_IDLE || (locale_ntp_next && now < locale_ntp_next) ||
+            !online)
                 return;
 
-        locale_ntp_asked = now;
         if (!locale_child_fork(address_of locale_ntp_child))
         {
-                bipolar failed = locale_ntp_apply();
+                bipolar failed = locale_ntp_apply(false);
 
                 locale_child_end(address_of locale_ntp_child,
                                  failed >= 0 ? 0
                                  : failed == SNTP_RATE_LIMITED
                                      ? LOCALE_NTP_EXIT_RATE
+                                 : failed == SNTP_DENIED || failed > SNTP_ANSWER
+                                     ? LOCALE_NTP_EXIT_LONG
                                      : 1);
         }
+}
+
+static fn locale_restore(void)
+{
+        p8 zone[80];
+        p8 keyboard[16];
+
+        locale_word(CLOCK_ZONE_PATH, zone, sizeof(zone));
+        if (zone[0])
+        {
+                tzset();
+                (void)locale_zone_kernel();
+                (void)bowl_write_localtime_host();
+                (void)bowl_write_localtime_all(null);
+        }
+
+        locale_word(LOCALE_KEYBOARD_PATH, keyboard, sizeof(keyboard));
+        if (keyboard[0])
+                locale_keyboard_live(keyboard);
+
+        locale_ntp_next = 0;
+        locale_ntp_retry = LOCALE_NTP_RETRY_LEAST;
+        locale_ntp_synced = 0;
+        locale_ntp_every = LOCALE_NTP_AGAIN_FIRST;
+        locale_auto_next = 0;
+        locale_auto_wait = LOCALE_AUTO_LEAST;
+        //      Only the machine process asks the time. `moonwater boot` comes
+        //      through here too when a disk is taken, and the machine
+        //      process, released by the same verdict, asks as well: two
+        //      queries that each measured an offset before either applied it
+        //      stepped the clock twice.
+        locale_ntp_on = locale_ntp_wanted();
+        if (host_machine_self && locale_ntp_on)
+                locale_ntp_keep(true);
 }
 
 /*
@@ -12484,16 +13003,17 @@ static fn locale_ntp_keep(void)
         again, at most the loop's own wake. A query in flight is polled every
         quarter second and a retry is woken for when it falls due: the first
         ask of a boot can run before the lease (its DNS id waits on the same
-        entropy the DHCP transaction id does), and on the radio wake alone
-        that failed ask cost two three-second wakes before the retry went out.
-        Never 0, which the machine wait reads as not waiting at all; a retry
-        already past due (its fork failed) is looked at again in a quarter
-        second rather than in a spin. For ten seconds after a query that set
-        the clock it is a quarter second as well, so that the kernel dropping
-        that synchronisation at the boot's clocksource switch (see
+        entropy the DHCP transaction id does). Never 0, which the machine
+        wait reads as not waiting at all; a retry already past due (its fork
+        failed) is looked at again in a quarter second rather than in a
+        spin. For ten seconds after a query that set the clock it is a
+        quarter second as well, so that the kernel dropping that
+        synchronisation at the boot's clocksource switch (see
         locale_ntp_schedule) is seen at once and not at the next three-second
         wake: three instrumented boots lost it at 1.5 s and asked again only
-        at 5.6 s.
+        at 5.6 s. In the first minute of a boot with no clock set yet it is
+        a second, because the network that comes up then is the one the
+        clock waits for.
 */
 static unsigned int locale_wake_ms(unsigned int most)
 {
@@ -12502,9 +13022,13 @@ static unsigned int locale_wake_ms(unsigned int most)
 
         if (locale_ntp_child.pid > 0)
                 return most < 250 ? most : 250;
-        if (!locale_ntp_next || !locale_ntp_wanted())
+        if (!locale_ntp_on)
                 return most;
         now = system_clock_ns(HOST_CLOCK_BOOTTIME);
+        if (!locale_ntp_synced && now < 60000000000ull && most > 1000)
+                return 1000;
+        if (!locale_ntp_next)
+                return most;
         if (locale_ntp_synced && now - locale_ntp_synced < 10000000000ull)
                 return most < 250 ? most : 250;
         due = locale_ntp_next <= now ? 250
@@ -12517,10 +13041,28 @@ static unsigned int locale_wake_ms(unsigned int most)
 //      their file carries the rule rather than the offset.
 static fn locale_recover(void)
 {
+        p8 network[LOCALE_NETWORK_ROOM];
+        bool online = locale_network(network, sizeof(network));
+
         (void)locale_zone_kernel();
-        if (locale_ntp_wanted())
-                locale_ntp_keep();
-        locale_auto_keep();
+        locale_ntp_on = locale_ntp_wanted();
+        //      A network that is not the one of the last turn, or the first
+        //      after none, is not a reason to go on waiting out a failure
+        //      that was the last one's: both queries are asked at once.
+        if (online && (!locale_online_held ||
+                       (network[0] &&
+                        !locale_network_same(network, locale_network_held))))
+        {
+                locale_ntp_next = 0;
+                locale_ntp_retry = LOCALE_NTP_RETRY_LEAST;
+                locale_auto_next = 0;
+                locale_auto_wait = LOCALE_AUTO_LEAST;
+        }
+        locale_online_held = online;
+        string_copy_bounded(locale_network_held, network,
+                            sizeof(locale_network_held));
+        locale_ntp_keep(online);
+        locale_auto_keep(locale_ntp_on, network);
 }
 
 /*
@@ -12542,7 +13084,6 @@ static fn locale_recover(void)
 */
 #define NAME_PATH "/root/name"
 #define NAME_ROOM 80
-#define NAME_LONGEST 63
 #define NAME_WORDS 512
 #define NAME_LETTERS "abcdefghijklmnopqrstuvwxyz0123456789-"
 
@@ -12678,36 +13219,55 @@ static fn name_roll(p8 address_to into, positive room)
         string_append_bounded(into, noun, room);
 }
 
+static bool link_name_good(string_address name);
+
 /* Lowercase letters, digits and hyphens, a letter or digit at each end: one
-   label of a host name, and not the word that rolls a new one. */
+   label of a host name, and not the word that rolls a new one. It is also
+   what `moonwater link` can say, which is the shorter limit (under 32) and
+   leaves out the words that command takes in a name's place, so the name a
+   machine has is always one it can be linked by. */
 static bool name_valid(string_address name)
 {
         positive length = string_length(name);
 
-        return length && length <= NAME_LONGEST &&
-               string_span_of_set(name, NAME_LETTERS) == length &&
+        return length && string_span_of_set(name, NAME_LETTERS) == length &&
                name[0] != '-' && name[length - 1] != '-' &&
-               !string_equals(name, "random");
+               !string_equals(name, "random") && link_name_good(name);
 }
 
-static bool name_apply(string_address name)
+static bipolar name_apply(string_address name)
 {
         return system_call_2(syscall(sethostname), (positive)name,
-                             string_length(name)) >= 0;
+                             string_length(name));
 }
 
+//      A roll that could not be saved, kept so that the next ask in this
+//      process is the same name and not another roll.
+static p8 name_unsaved[NAME_ROOM];
+
 /* The saved name, rolled and saved first when there is none or it does not
-   read. Says whether it had to roll. */
-static fn name_ensure(p8 address_to into, positive room, bool address_to rolled)
+   read. Says whether it had to roll in `rolled`, and whether the name is
+   saved at the end: false when /root would not take it. */
+static bool name_ensure(p8 address_to into, positive room, bool address_to rolled)
 {
         locale_word(NAME_PATH, into, room);
         address_to rolled = !name_valid(into);
 
         if (!address_to rolled)
-                return;
+                return true;
 
-        name_roll(into, room);
-        (void)radio_write_word(NAME_PATH, into);
+        if (name_unsaved[0])
+                string_copy_bounded(into, (string_address)name_unsaved, room);
+        else
+                name_roll(into, room);
+        if (radio_write_word(NAME_PATH, into) >= 0)
+        {
+                name_unsaved[0] = 0;
+                return true;
+        }
+        string_copy_bounded((string_address)name_unsaved, (string_address)into,
+                            sizeof(name_unsaved));
+        return false;
 }
 
 static fn name_restore(void)
@@ -12715,7 +13275,7 @@ static fn name_restore(void)
         p8 name[NAME_ROOM];
         bool rolled;
 
-        name_ensure(name, sizeof(name), address_of rolled);
+        (void)name_ensure(name, sizeof(name), address_of rolled);
         (void)name_apply(name);
 
         if (rolled)
@@ -12736,17 +13296,20 @@ static b32 host_name(string_address address_to arguments, positive count)
                 file_machine machine;
 
                 //      /root is root's. Anyone else is told what the kernel
-                //      calls the machine, which is the name this applies.
-                if (bowl_is_root())
+                //      calls the machine, which is the name this applies; so
+                //      is root when /root will not keep a roll, because a
+                //      name that is not kept is not made up again at every
+                //      question.
+                if (bowl_is_root() &&
+                    name_ensure(name, sizeof(name), address_of rolled))
                 {
-                        name_ensure(name, sizeof(name), address_of rolled);
                         if (rolled)
                                 (void)name_apply(name);
                 }
                 else if (file_machine_read(address_of machine))
                         string_copy_bounded(name, machine.node, sizeof(name));
                 else
-                        return host_fail("name", -1);
+                        return host_fail("name", -EIO);
 
                 host_say(log, "%s\n", name);
                 return 0;
@@ -12764,16 +13327,27 @@ static b32 host_name(string_address address_to arguments, positive count)
 
                 if (!name_valid(name))
                         return host_refuse("%s is not a machine name: lowercase "
-                                           "letters, digits and hyphens, "
-                                           "at most 63, a letter or digit at "
-                                           "each end\n", arguments[2]);
+                                           "letters, digits and hyphens, a "
+                                           "letter or digit at each end, under "
+                                           "32 characters, and not random or "
+                                           "a word moonwater link takes\n",
+                                           arguments[2]);
         }
 
-        if (radio_write_word(NAME_PATH, name) < 0)
-                return host_fail("name", -1);
+        {
+                bipolar done = radio_write_word(NAME_PATH, name);
 
-        if (!name_apply(name))
-                return host_fail("name", -1);
+                if (done < 0)
+                        return host_fail(NAME_PATH, done);
+                done = name_apply(name);
+                if (done < 0)
+                {
+                        host_say(log_error, host_label "%s is saved, but the "
+                                            "kernel did not take it: %s\n",
+                                 name, file_reason(done));
+                        return 1;
+                }
+        }
 
         host_say(log, "%s\n", name);
         return 0;
@@ -12914,16 +13488,39 @@ static b32 host_wipe(void)
 static fn host_bind_say(string_address prefix, struct bind_control address_to control)
 {
         p16 line = host_machine_event_line(control->event);
+        string_address name = (string_address)control->name;
+        bool said = false;
 
         if (line)
-                string_format(log, "%s%s: %s:%p\n", prefix,
-                              (string_address)control->name, host_machine_where(),
+                string_format(log, "%s%s: %s:%p", prefix, name, host_machine_where(),
                               (positive)line);
-        else if (!control->command[0])
-                string_format(log, "%s%s\n", prefix, (string_address)control->name);
-        else
-                string_format(log, "%s%s: %s\n", prefix, (string_address)control->name,
+        else if (control->command[0])
+                string_format(log, "%s%s: %s", prefix, name,
                               host_plain((string_address)control->command));
+        else if (control->flags & SPARK_BIND_DEFAULT)
+                string_format(log, "%s%s", prefix, name);
+        else
+                //      The kernel keeps a line somebody set from anyone but
+                //      root, and clears the DEFAULT flag so that this can say so.
+                string_format(log, "%s%s: set, and root's to read", prefix, name);
+
+        if (control->runs)
+        {
+                string_format(log, "  (ran %p time%s", (positive)control->runs,
+                              control->runs == 1 ? "" : "s");
+                said = true;
+        }
+        if (control->flags & SPARK_BIND_RUNNING)
+        {
+                string_format(log, said ? ", running now" : "  (running now");
+                said = true;
+        }
+        if (control->flags & SPARK_BIND_PENDING)
+        {
+                string_format(log, said ? ", queued" : "  (queued");
+                said = true;
+        }
+        string_format(log, said ? ")\n" : "\n");
 }
 
 static fn host_bind_forget(host_settings address_to settings, p16 event)
@@ -12951,6 +13548,30 @@ static fn host_bind_forget(host_settings address_to settings, p16 event)
         }
 }
 
+/*
+        Whether the line to be set will fit in the block that keeps it, asked
+        before the kernel is: a block full of init and exit entries refused
+        the line after the kernel had taken it, and the command said refused
+        about a line that was live. An empty line puts the default back and
+        needs no room. Null when it fits or when there is no copy to ask --
+        the kernel's own refusal comes first for anyone it refuses.
+*/
+static string_address host_bind_fits(host_settings address_to settings,
+                                     unsigned int event, string_address command)
+{
+        p16 id = (p16)event;
+
+        if (!host_settings_session(settings))
+                return null;
+
+        host_bind_forget(settings, id);
+        if (!*command)
+                return null;
+
+        return host_settings_add(settings, SPARK_SETTINGS_BIND, SPARK_SETTINGS_COMMAND,
+                                 command, string_length(command), address_of id);
+}
+
 static b32 host_bind_keep(unsigned int event, struct bind_control address_to control)
 {
         host_settings settings;
@@ -12970,8 +13591,7 @@ static b32 host_bind_keep(unsigned int event, struct bind_control address_to con
                 if (failed)
                         return host_settings_refused("bind", failed, address_of settings);
         }
-        host_settings_save(address_of settings);
-        return 0;
+        return host_settings_save(address_of settings) ? 0 : 1;
 }
 
 static fn host_bind_apply(host_settings address_to settings)
@@ -13077,7 +13697,9 @@ static unsigned int host_bind_named(string_address first, string_address second)
 static b32 host_bind_tell(unsigned int event, string_address command)
 {
         struct bind_control control;
+        host_settings settings;
         p16 line = host_machine_event_line(event);
+        string_address full;
         bipolar failed;
 
         if (line)
@@ -13086,6 +13708,13 @@ static b32 host_bind_tell(unsigned int event, string_address command)
                                          ? (string_address)spark_bind_event_name[event - 1]
                                          : (string_address) "that event",
                                      line);
+                return 1;
+        }
+
+        full = host_bind_fits(address_of settings, event, command);
+        if (full)
+        {
+                host_settings_refused("bind", full, address_of settings);
                 return 1;
         }
 
@@ -13205,10 +13834,7 @@ static fn host_usage_write(writer out)
 {
         host_say(out,
                  HOST_ROW("status", "                      ", "this picture")
-                 HOST_ROW("install DISK [--removable]", "  ", "put Moonwater on a disk")
-                 HOST_ROW("use [DISK]", "                  ", "keep that disk this session")
-                 HOST_ROW("update [DISK]", "               ", "write this build onto a disk")
-                 HOST_ROW("live", "                        ", "leave the disks alone")
+                 HOST_ROW("setup", "                       ", "live or kept on a disk: install, update, use, live")
                  HOST_ROW("bind", "                        ", "what the machine's events run")
                  HOST_ROW("bind EVENT [COMMAND]", "        ", "one event; empty puts the default back")
                  HOST_ROW("bind init [add|remove ...]", "  ", "what runs at boot")
@@ -13239,7 +13865,7 @@ static fn host_usage_write(writer out)
                  "                              " TERM_DIM "request per network joined" TERM_RESET "\n"
                  HOST_ROW("ntp [on|off]", "                ", "set the clock from the network [on]")
                  HOST_ROW("ntp sampling [on|off]", "       ", "keep the lowest-delay sample of five [on]")
-                 HOST_ROW("link [on|off|help]", "          ", "shell and run on paired machines, by key")
+                 HOST_ROW("link [pair|NAME|help]", "       ", "link machines by a code, then a terminal or a command on any, by name")
                  HOST_ROW("keyboard [LAYOUT|list]", "      ", "Canvas keys: us uk de se no dk fi fr es it")
                  HOST_ROW("name [NEW|random]", "           ", "what this machine is called; rolled at first boot")
                  HOST_ROW("wipe", "                        ", "forget /home and /root, keep the machine")
@@ -13254,6 +13880,30 @@ static b32 host_usage(void)
 {
         host_title(log_error);
         host_usage_write(log_error);
+        return 2;
+}
+
+/*
+        What setup does. A session is live, with nothing kept after power off,
+        or it keeps /bowls, /root and /home on an install's data partition;
+        the verbs move between the two, or write this build onto a disk.
+*/
+static fn host_setup_usage_write(writer out)
+{
+        host_say(out,
+                 HOST_ROW("setup", "                       ", "where this session runs, and the installs found")
+                 HOST_ROW("setup install DISK [removable]", " ", "erase DISK and put Moonwater on it; removable")
+                 "                              " TERM_DIM "takes a disk that says it is removable" TERM_RESET "\n"
+                 HOST_ROW("setup update [DISK]", "         ", "write this build over an install, keeping its data")
+                 HOST_ROW("setup use [DISK]", "            ", "run this build with an install's /bowls /root /home")
+                 HOST_ROW("setup live", "                  ", "leave the disks alone this session")
+                 "\n");
+}
+
+static b32 host_setup_usage(void)
+{
+        host_title(log_error);
+        host_setup_usage_write(log_error);
         return 2;
 }
 
@@ -13295,21 +13945,17 @@ static fn host_status_wifi(void)
 }
 
 /*
-        This session as one page: the build, the disks, Canvas, the bound
-        events, init and exit, then the commands. Nothing is a log line;
-        the words that name each fact stay as they are.
+        Where this session runs and what is on the disks: the build, whether
+        the session is live, kept on a disk or waiting for an answer, every
+        install found and the stick this image is on. Setup and status both
+        open with it.
 */
-static b32 host_status(void)
+static fn host_setup_state(void)
 {
         p8 running[HOST_BUILD_ROOM];
         p8 verdict[HOST_NAME_ROOM + 16];
         host_census census;
         host_medium_search search;
-        host_settings settings;
-        struct canvas_control canvas;
-
-        host_state_ready();
-        host_title(log);
 
         if (host_running_build(running, sizeof(running)))
                 string_format(log, "  this is %s\n", running);
@@ -13322,10 +13968,11 @@ static b32 host_status(void)
                               verdict + 5, BOWL_ROOT_DIRECTORY);
         else if (host_starts(verdict, "ask "))
                 string_format(log, "  waiting: %s has another build; "
-                                   "moonwater use, update or live\n",
+                                   "moonwater setup use, update or live\n",
                               verdict + 4);
         else
-                string_format(log, "  live: nothing is kept after power off\n");
+                string_format(log, "  live session: nothing is kept after power "
+                                   "off; moonwater setup install DISK keeps it\n");
 
         host_census_take(address_of census);
         for (positive at = 0; at < census.count; at++)
@@ -13352,6 +13999,21 @@ static b32 host_status(void)
                 string_format(log, "  this image is on %s\n", search.name);
                 host_unmount(HOST_MEDIUM);
         }
+}
+
+/*
+        This session as one page: the build, the disks, Canvas, the bound
+        events, init and exit, then the commands. Nothing is a log line;
+        the words that name each fact stay as they are.
+*/
+static b32 host_status(void)
+{
+        host_settings settings;
+        struct canvas_control canvas;
+
+        host_state_ready();
+        host_title(log);
+        host_setup_state();
 
         string_format(log, "\n");
 
@@ -13365,7 +14027,7 @@ static b32 host_status(void)
                 p8 shown[128];
                 p8 how[48];
 
-                locale_word(LOCALE_ZONE_PATH, zone, sizeof(zone));
+                locale_word(CLOCK_ZONE_PATH, zone, sizeof(zone));
                 locale_word(LOCALE_KEYBOARD_PATH, keyboard, sizeof(keyboard));
                 locale_zone_title(zone, shown, sizeof(shown));
                 locale_zone_how(how, sizeof(how));
@@ -13462,6 +14124,57 @@ static b32 host_answer(bool update, string_address disk)
 
 #include "../waterlink/command.c"
 
+/*
+        `moonwater setup`: a live session, or one that keeps its data on a
+        disk, and the ways to change which. Arguments are judged before
+        root is asked for, so a wrong one is a usage page for anyone.
+*/
+static b32 host_setup(string_address address_to arguments, positive count)
+{
+        string_address verb = count > 2 ? arguments[2] : null;
+        bool update = verb && string_equals(verb, "update");
+
+        if (!verb)
+        {
+                host_state_ready();
+                host_title(log);
+                host_setup_state();
+                string_format(log, "\n");
+                host_setup_usage_write(log);
+                return 0;
+        }
+
+        if (string_equals(verb, "install"))
+        {
+                bool removable = count == 5 && string_equals(arguments[4], "removable");
+
+                if (count < 4 || count > 5 || (count == 5 && !removable))
+                        return host_setup_usage();
+                host_need_root("moonwater setup");
+                host_state_ready();
+                return host_install_disk(arguments[3], removable);
+        }
+
+        if (string_equals(verb, "live") && count == 3)
+        {
+                host_need_root("moonwater setup");
+                host_state_ready();
+                system_remove_at(AT_FDCWD, HOST_QUESTION, 0);
+                host_verdict_set("live", "");
+                host_say(log, host_label "the disks are left alone this session\n");
+                return 0;
+        }
+
+        if ((update || string_equals(verb, "use")) && count <= 4)
+        {
+                host_need_root("moonwater setup");
+                host_state_ready();
+                return host_answer(update, count == 4 ? arguments[3] : null);
+        }
+
+        return host_setup_usage();
+}
+
 static b32 host_main()
 {
         string_address address_to arguments = program_argument_list();
@@ -13480,6 +14193,9 @@ static b32 host_main()
 
         if (string_equals(verb, "status") && count <= 2)
                 return host_status();
+
+        if (string_equals(verb, "setup"))
+                return host_setup(arguments, count);
 
         // Before the root check: reading needs nothing, and the kernel
         // decides who may set a bound event. init and exit still need root.
@@ -13518,50 +14234,19 @@ static b32 host_main()
         if (string_equals(verb, "machine") && count == 2)
                 return host_machine_run();
 
-        if (!string_equals(verb, "install") && !string_equals(verb, "use") &&
-            !string_equals(verb, "update") && !string_equals(verb, "live") &&
-            !string_equals(verb, "boot") && !string_equals(verb, "ask"))
+        if (!string_equals(verb, "boot") && !string_equals(verb, "ask"))
                 return host_usage();
 
         host_need_root("moonwater");
 
         host_state_ready();
 
-        if (string_equals(verb, "install"))
-        {
-                string_address disk = null;
-                bool removable = false;
-
-                for (positive at = 2; at < count; at++)
-                {
-                        if (string_equals(arguments[at], "--removable"))
-                                removable = true;
-                        else if (!disk)
-                                disk = arguments[at];
-                        else
-                                return host_usage();
-                }
-
-                return disk ? host_install_disk(disk, removable) : host_usage();
-        }
-
-        if (count > 3 || (count > 2 && (string_equals(verb, "live") ||
-                                        string_equals(verb, "boot") ||
-                                        string_equals(verb, "ask"))))
+        if (count > 2)
                 return host_usage();
 
         if (string_equals(verb, "boot"))
                 return host_boot();
 
-        if (string_equals(verb, "live"))
-        {
-                system_remove_at(AT_FDCWD, HOST_QUESTION, 0);
-                host_verdict_set("live", "");
-                host_say(log, host_label "the disks are left alone this session\n");
-                return 0;
-        }
-
-        if (string_equals(verb, "ask"))
         {
                 p8 verdict[HOST_NAME_ROOM + 16];
 
@@ -13572,11 +14257,8 @@ static b32 host_main()
                         return host_refuse("there is nothing to ask%s\n", "");
 
                 host_question(verdict + 4);
-                return 0;
         }
-
-        return host_answer(string_equals(verb, "update"),
-                           count == 3 ? arguments[2] : null);
+        return 0;
 }
 
 #define MOONWATER_CLI

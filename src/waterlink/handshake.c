@@ -110,6 +110,7 @@ struct waterlink_identity {
         p8 public[WATERLINK_KEY_BYTES];
         p8 gate[32];   // mac1's key for datagrams sent to this identity
         p8 sealer[32]; // what seals the cookies this identity hands out
+        crypto_hmac_key gate_ready; // the gate, as every datagram is checked
 };
 
 struct waterlink_noise {
@@ -243,6 +244,8 @@ fn waterlink_identity_from(struct waterlink_identity address_to identity,
         crypto_x25519(identity->public, identity->secret, waterlink_base);
         waterlink_label_key((string_address) "mac1----", identity->public,
                             identity->gate);
+        crypto_hmac_prepare(DIGEST_SHA256, 32, identity->gate, 32,
+                            address_of identity->gate_ready);
         waterlink_label_key((string_address) "cookie--", identity->public,
                             identity->sealer);
 }
@@ -287,7 +290,7 @@ bool waterlink_gate_passes(struct waterlink_identity address_to me,
         struct waterlink_datagram head;
         positive body;
         positive padding;
-        p8 mac[16];
+        p8 mac[32];
 
         if (length != WATERLINK_DATAGRAM)
                 return false;
@@ -305,7 +308,8 @@ bool waterlink_gate_passes(struct waterlink_identity address_to me,
             length - padding)
                 return false;
 
-        waterlink_mac1(me->gate, datagram, 16 + body - 16, mac);
+        crypto_hmac_prepared(address_of me->gate_ready, datagram, 16 + body - 16,
+                             mac);
         return crypto_same(mac, datagram + 16 + body - 16, 16);
 }
 
@@ -778,17 +782,13 @@ bool waterlink_cookie_take(p8 address_to responder_public, p8 address_to mac1,
 }
 
 /*
-        When a session must be keyed again, and when it may no longer be
-        used at all -- waterlink.c's numbers. The initiator keys again at
-        REKEY; either side refuses a session past REJECT, so an initiator
-        that has gone quiet cannot keep one alive forever.
+        When a session may no longer be used at all -- waterlink.c's numbers:
+        either side refuses one past REJECT, so an initiator that has gone
+        quiet cannot keep one alive forever. The initiator keys again at
+        REKEY, a time and not a count: the count would take nine billion
+        datagrams a second to reach in that time, and the one past which a
+        session is refused is checked here all the same.
 */
-bool waterlink_rekey_due(p64 age, p64 sent)
-{
-        return age >= (p64)WATERLINK_REKEY_SECONDS * 1000000 ||
-               sent >= WATERLINK_REKEY_MESSAGES;
-}
-
 bool waterlink_session_spent(p64 age, p64 sent)
 {
         return age >= (p64)WATERLINK_REJECT_SECONDS * 1000000 ||

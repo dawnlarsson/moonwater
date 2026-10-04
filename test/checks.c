@@ -42998,16 +42998,16 @@ static fn check_live(void)
                         bool spoken = true;
 
                         for (positive at = 1; at < array_count(clock_zones); at++)
-                                if (clock_zone_order((string_address)clock_zones[at - 1].name,
-                                                     (string_address)clock_zones[at].name) >= 0)
+                                if (string_compare_folded((string_address)clock_zones[at - 1].name,
+                                                          (string_address)clock_zones[at].name) >= 0)
                                         sorted = false;
                         for (positive at = 1; at < array_count(clock_zone_links); at++)
-                                if (clock_zone_order((string_address)clock_zone_links[at - 1].name,
-                                                     (string_address)clock_zone_links[at].name) >= 0)
+                                if (string_compare_folded((string_address)clock_zone_links[at - 1].name,
+                                                          (string_address)clock_zone_links[at].name) >= 0)
                                         sorted = false;
                         for (positive at = 1; at < array_count(clock_zone_codes); at++)
-                                if (clock_zone_order((string_address)clock_zone_codes[at - 1].code,
-                                                     (string_address)clock_zone_codes[at].code) >= 0)
+                                if (string_compare_folded((string_address)clock_zone_codes[at - 1].code,
+                                                          (string_address)clock_zone_codes[at].code) >= 0)
                                         sorted = false;
                         for (positive at = 0; at < array_count(clock_zones); at++)
                         {
@@ -43166,6 +43166,105 @@ static fn check_live(void)
                                                 sizeof(zone)) &&
                                  !clock_zone_offset((string_address) "+5:3",
                                                     zone, sizeof(zone)));
+                }
+
+                //      A POSIX zone string, as tzset reads a TZ and as a zone
+                //      is kept for every bowl to read. Whole: what the parser
+                //      leaves unread is junk in a file every bowl copies, and
+                //      glibc's leniency (a summer name it cannot read leaves
+                //      the standard zone standing) is for a TZ and no more.
+                //      A number too long for a word is not read as the number
+                //      its low digits make.
+                {
+                        static const struct
+                        {
+                                char text[56];
+                                bool read;  //  tzset's parse takes it
+                                bool whole; //  and it is all of the text
+                        } strings[] = {
+                                {"CET-1", true, true},
+                                {"CET-1CEST", true, true},
+                                {"CET-1CEST,M3.5.0,M10.5.0/3", true, true},
+                                {"<+0530>-5:30", true, true},
+                                {"<-03>3", true, true},
+                                {"EST5EDT,M3.2.0,M11.1.0", true, true},
+                                {"CET-1CEST,J60/-167,J365/167", true, true},
+                                {"CET-1CEST,59,M10.5.0", true, true},
+                                {"CET-24", true, true},
+                                {"CET-24:00:00", true, true},
+                                {"CET-1CEST,M3.4.4/26,M10.5.0", true, true},
+                                //      junk after the standard offset
+                                {"CET-1 xyz", true, false},
+                                {"CET-1\x7f", true, false},
+                                {"CET-1\xff", true, false},
+                                {"CET-1\n", true, false},
+                                {"CET-1CE", true, false},
+                                {"CET-1CEST x", false, false},
+                                //      too long for a word, wrapping to a good one
+                                {"CET-1CEST,M18446744073709551619.1.0,M10.5.0", false, false},
+                                {"CET-1CEST,M3.18446744073709551621.0,M10.5.0", false, false},
+                                {"CET-1CEST,J18446744073709551617,M10.5.0", false, false},
+                                {"CET-1CEST,18446744073709551617,M10.5.0", false, false},
+                                {"CET-1CEST,M3.5.0,M99999999999999999999999.5.0", false, false},
+                                //      outside the grammar
+                                {"<>-1", false, false},
+                                {"<ab>-1", false, false},
+                                {"<+0530-5:30", false, false},
+                                {"CET", false, false},
+                                {"CET-25", false, false},
+                                {"CET-24:01", false, false},
+                                {"CET-24:00:01", false, false},
+                                {"CET-1CEST,M3.5.0", false, false},
+                                {"CET-1CEST,M13.1.0,M10.5.0", false, false},
+                                {"CET-1CEST,M0.1.0,M10.5.0", false, false},
+                                {"CET-1CEST,M3.0.0,M10.5.0", false, false},
+                                {"CET-1CEST,M3.6.0,M10.5.0", false, false},
+                                {"CET-1CEST,M3.5.7,M10.5.0", false, false},
+                                {"CET-1CEST,J0,M10.5.0", false, false},
+                                {"CET-1CEST,J366,M10.5.0", false, false},
+                                {"CET-1CEST,366,M10.5.0", false, false},
+                                {"CET-1CEST,J,M10.5.0", false, false},
+                                {"CET-1CEST,M3.5.0/-168,M10.5.0", false, false},
+                                {"CET-1CEST,M3.5.0/168,M10.5.0", false, false},
+                                {"CET-1CEST,M3.5.0,M10.5.0,", false, false},
+                                {"CET-1CEST,M3.5.0,M10.5.0x", false, false},
+                        };
+                        bool all = true;
+                        bool whole = true;
+
+                        for (positive at = 0; at < array_count(strings); at++)
+                        {
+                                if (clock_tz_parse((string_address)strings[at].text) !=
+                                    strings[at].read)
+                                {
+                                        all = false;
+                                        string_format(log, "  tzset read of %s\n",
+                                                      (string_address)strings[at].text);
+                                }
+                                if (clock_tz_whole((string_address)strings[at].text) !=
+                                    strings[at].whole)
+                                {
+                                        whole = false;
+                                        string_format(log, "  kept whole: %s\n",
+                                                      (string_address)strings[at].text);
+                                }
+                        }
+                        tzset();
+                        good((string_address) "a TZ is read as glibc reads it, and a number is not wrapped",
+                             all);
+                        good((string_address) "a zone to keep is the whole of its text and is in the grammar",
+                             whole);
+                        {
+                                static p8 tzif[512];
+
+                                good((string_address) "a zone with junk after it is no TZif footer for a bowl",
+                                     !clock_zone_tzif((string_address) "CET-1 xyz",
+                                                      tzif, sizeof(tzif)) &&
+                                         !clock_zone_tzif((string_address) "CET-1\x7f",
+                                                          tzif, sizeof(tzif)) &&
+                                         clock_zone_tzif((string_address) "CET-1",
+                                                         tzif, sizeof(tzif)));
+                        }
                 }
 
                 setenv((string_address) "TZ", (string_address) "UTC", 1);
@@ -68254,6 +68353,57 @@ static fn fill_procedural(void)
 }
 
 /*
+        What the hold-back says of itself: each key's chain in order, ending
+        where held_last says, its stream frames the bits of held_mask and none
+        of them further past what was taken than a window, and the pool's free
+        list and the chains the whole of it. The count it returns is how many
+        frames the link holds.
+*/
+static bool held_consistent(struct waterlink_link address_to link,
+                            positive address_to total)
+{
+        positive free = 0;
+        positive used = 0;
+
+        for (p32 at = link->held_free; at != WATERLINK_NONE;
+             at = link->held[at].next)
+                if (at >= WATERLINK_HELD || ++free > WATERLINK_HELD)
+                        return false;
+        for (p32 key = 0; key < WATERLINK_KEYS; key++)
+        {
+                struct waterlink_receiving address_to live = link->receiving + key;
+                p64 mask = 0;
+                p32 last = WATERLINK_NONE;
+
+                for (p32 at = live->first; at != WATERLINK_NONE;
+                     at = link->held[at].next)
+                {
+                        struct waterlink_frame address_to head =
+                                address_of link->held[at].head;
+
+                        if (at >= WATERLINK_HELD || ++used > WATERLINK_HELD ||
+                            head->key != key ||
+                            (last != WATERLINK_NONE &&
+                             head->sequence <= link->held[last].head.sequence))
+                                return false;
+                        if (head->flags & WATERLINK_FRAME_DURABLE)
+                        {
+                                if (head->sequence - live->delivered >
+                                    WATERLINK_KEY_WINDOW)
+                                        return false;
+                                mask |= 1ull << (head->sequence & 63);
+                        }
+                        last = at;
+                }
+                if (mask != link->held_mask[key] ||
+                    (last != WATERLINK_NONE && last != link->held_last[key]))
+                        return false;
+        }
+        address_to total = used;
+        return free + used == WATERLINK_HELD;
+}
+
+/*
         Applying against the C it replaced, on the links fill's changes make
         and bodies a judge could have passed: acknowledgements at and around
         each key's chain with every kind of mask, frames stale, next, ahead
@@ -68393,6 +68543,8 @@ static fn apply_procedural(void)
         p64 state = 0x13198a2e03707344ull;
         positive runs = 0, calls = 0, apart = 0, heard = 0, missed = 0;
         positive miscounted = 0;
+        positive inconsistent = 0;
+        positive total;
 
         memory_zero(apply_seen, sizeof apply_seen);
         for (positive run = 0; run < 240; run++)
@@ -68447,6 +68599,8 @@ static fn apply_procedural(void)
                                         sink, (address_any)2);
                         calls++;
                         miscounted += !band_counts_hold(address_of fill_two);
+                        inconsistent +=
+                                !held_consistent(address_of fill_two, address_of total);
                         apart += memory_compare(address_of fill_one.sending,
                                                 address_of fill_two.sending,
                                                 sizeof fill_one -
@@ -68496,6 +68650,9 @@ static fn apply_procedural(void)
         check("and the normal band's tally by key is the band after every "
               "apply",
               miscounted == 0);
+        check("and every key's held frames are in order, within a window of "
+              "what was taken, and the ones its chain's end and bits say",
+              inconsistent == 0);
 }
 
 static fn replay(void)
@@ -69315,6 +69472,178 @@ static fn reader_credit(void)
         check("and the rest follows, with the link left idle",
               one.delivered == 101 && waterlink_idle(address_of one) &&
                       one.retransmitted == 0);
+}
+
+/*      A body of frames with no payload on one key, as many as it holds: the
+        sequences first, first + 1, and so on round to first again after span
+        of them. Nothing a peer sends costs it less. */
+static positive flood_body(p8 address_to body, p8 key, p8 flags, p32 first,
+                           p32 span, positive most)
+{
+        positive used = 0;
+
+        memory_zero(body, WATERLINK_PAYLOAD);
+        for (positive frame = 0; frame < most; frame++)
+        {
+                p32 sequence = first + frame % span;
+
+                if (used + 3 + memory_vli_size(sequence) > WATERLINK_PAYLOAD)
+                        break;
+                body[used++] = flags;
+                body[used++] = key;
+                used += memory_vli_put(body + used, sequence);
+                body[used++] = 0;
+        }
+        return used;
+}
+
+/*
+        An authenticated peer that may do nothing still has its frames held:
+        the listener that serves it is one thread, so a datagram of frames
+        that are of no use to anyone must cost about what a datagram in order
+        does. Held are the stream frames ahead of what was taken -- none past
+        the window the sender would keep to -- and the registers newer than
+        any held; a copy is a bit and an older register is dropped on arrival.
+        The cost is read as a ratio to a body of the same size in order, the
+        least of many in the same process, so a loaded machine or an emulator
+        moves both alike: it was 7 to 17 times when the hold-back walked a
+        chain of up to 128 frames to find where a frame went, and a copy
+        walked it to the copy.
+*/
+static positive flood_ticks(positive shape)
+{
+        p8 body[WATERLINK_PAYLOAD];
+        p8 first[WATERLINK_PAYLOAD];
+        positive used;
+        positive least = ~0ull;
+
+        for (positive round = 0; round < 64; round++)
+        {
+                p64 start, took;
+
+                waterlink_link_reset(address_of one);
+                refusing = shape == 3;
+                switch (shape)
+                {
+                case 1: // sixty four held, behind the one that is missing
+                        (void)waterlink_deliver(
+                                address_of one, first,
+                                flood_body(first, 5, WATERLINK_FRAME_DURABLE, 2, 64, 64),
+                                1000, hear, null);
+                        used = flood_body(body, 5, WATERLINK_FRAME_DURABLE, 2, 64, 1000);
+                        break;
+                case 2: // far ahead of anything taken
+                        used = flood_body(body, 5, WATERLINK_FRAME_DURABLE, 200, ~0u - 400, 1000);
+                        break;
+                case 3: // a register's reader that will not take it, then newer values
+                        (void)waterlink_deliver(
+                                address_of one, first,
+                                flood_body(first, 6, WATERLINK_FRAME_REPLACEABLE, 1, 1, 1),
+                                1000, hear_or_refuse, null);
+                        used = flood_body(body, 6, WATERLINK_FRAME_REPLACEABLE, 1000, ~0u - 2000, 1000);
+                        break;
+                default: // in order, every frame taken
+                        used = flood_body(body, 5, WATERLINK_FRAME_DURABLE, 1, ~0u - 2, 1000);
+                }
+                start = get_cpu_time();
+                (void)waterlink_deliver(address_of one, body, used, 1001 + round,
+                                        hear_or_refuse, null);
+                took = get_cpu_time() - start;
+                if (took < least)
+                        least = took;
+        }
+        refusing = false;
+        return least;
+}
+
+//      One frame of that, delivered to the link under test.
+static bool flood_one(p8 key, p8 flags, p32 sequence, positive copies)
+{
+        p8 body[WATERLINK_PAYLOAD];
+
+        return waterlink_deliver(address_of one, body,
+                                 flood_body(body, key, flags, sequence, 1,
+                                            copies),
+                                 1000, hear_or_refuse, null);
+}
+
+static fn held_floods(void)
+{
+        positive total;
+        positive in_order = flood_ticks(0);
+        positive copies = flood_ticks(1);
+        positive ahead = flood_ticks(2);
+        positive registers = flood_ticks(3);
+
+        string_format(log, "  held floods, ticks a body: in order %p, copies %p, "
+                           "ahead %p, registers %p\n",
+                      in_order, copies, ahead, registers);
+        check("sec: a body of copies of what a key holds costs about what one "
+              "in order does",
+              copies < 3 * in_order);
+        check("sec: a body of stream frames far ahead of what was taken costs "
+              "about what one in order does",
+              ahead < 3 * in_order);
+        check("sec: a body of registers newer than what is held costs about "
+              "what one in order does",
+              registers < 3 * in_order);
+
+        waterlink_link_reset(address_of one);
+        heard = 0;
+        check("a stream frame a window past what was taken is held",
+              flood_one(5, WATERLINK_FRAME_DURABLE, WATERLINK_KEY_WINDOW, 1) &&
+                      held_consistent(address_of one, address_of total) &&
+                      total == 1 && one.kept == 1 && heard == 0);
+        check("sec: one past that is dropped, and counted with what the pool "
+              "could not take",
+              flood_one(5, WATERLINK_FRAME_DURABLE, WATERLINK_KEY_WINDOW + 1, 1) &&
+                      held_consistent(address_of one, address_of total) &&
+                      total == 1 && one.kept == 1 && one.spilled == 1);
+        check("sec: copies of a frame held take nothing more of the pool",
+              flood_one(5, WATERLINK_FRAME_DURABLE, WATERLINK_KEY_WINDOW, 3) &&
+                      held_consistent(address_of one, address_of total) &&
+                      total == 1 && one.kept == 1 && one.spilled == 1);
+        {
+                p8 body[WATERLINK_PAYLOAD];
+
+                check("and the frames before it, arriving, are handed on in "
+                      "order with it, and the pool is empty",
+                      waterlink_deliver(address_of one, body,
+                                        flood_body(body, 5,
+                                                   WATERLINK_FRAME_DURABLE, 1,
+                                                   0x7fffffffu,
+                                                   WATERLINK_KEY_WINDOW - 1),
+                                        1000, hear, null) &&
+                              held_consistent(address_of one,
+                                              address_of total) &&
+                              total == 0 && heard == WATERLINK_KEY_WINDOW &&
+                              heard_sequence[WATERLINK_KEY_WINDOW - 1] ==
+                                      WATERLINK_KEY_WINDOW);
+        }
+        check("sec: a window past what was taken is held again once more is "
+              "taken, though its low bits are those of a frame that left",
+              flood_one(5, WATERLINK_FRAME_DURABLE, 2 * WATERLINK_KEY_WINDOW, 1) &&
+                      held_consistent(address_of one, address_of total) &&
+                      total == 1 && one.held_mask[5] == 1);
+
+        //      A register the reader would not take, and newer ones: only the
+        //      newest is ever handed on, so an older one is not kept.
+        waterlink_link_reset(address_of one);
+        heard = 0;
+        refusing = true;
+        (void)flood_one(6, WATERLINK_FRAME_REPLACEABLE, 5, 1);
+        (void)flood_one(6, WATERLINK_FRAME_REPLACEABLE, 9, 1);
+        (void)flood_one(6, WATERLINK_FRAME_REPLACEABLE, 7, 1);
+        check("sec: a register older than one held is not kept",
+              held_consistent(address_of one, address_of total) &&
+                      total == 2 && one.stale == 1 && heard == 0);
+        refusing = false;
+        waterlink_resume(address_of one, 6, hear_or_refuse, null);
+        check("and the newest is the only one handed on once the reader "
+              "comes back",
+              heard == 1 && heard_sequence[0] == 9 &&
+                      held_consistent(address_of one, address_of total) &&
+                      total == 0);
 }
 
 /*      Two ends, and the one acknowledgement that would free what the far
@@ -70599,13 +70928,13 @@ static fn handshake(void)
               waterlink_admit(address_of admission, unproven, source, 7,
                               3000000) == 1);
 
-        check("a session is keyed again at two minutes",
-              !waterlink_rekey_due(119999999, 5) &&
-                      waterlink_rekey_due(120000000, 5) &&
-                      waterlink_rekey_due(1, WATERLINK_REKEY_MESSAGES));
-        check("and refused at three",
+        check("a session is refused at three minutes, or past its counter by "
+              "more than a rekey's room",
               !waterlink_session_spent(179999999, 5) &&
-                      waterlink_session_spent(180000000, 5));
+                      waterlink_session_spent(180000000, 5) &&
+                      !waterlink_session_spent(1, WATERLINK_REKEY_MESSAGES) &&
+                      waterlink_session_spent(1, WATERLINK_REKEY_MESSAGES +
+                                                         (1ull << 20)));
 }
 
 /*
@@ -71260,6 +71589,7 @@ b32 main(void)
         superseded_in_flight();
         full_frame_beside_owed_ack();
         reader_credit();
+        held_floods();
         held_answer_lost();
         held_after_losses();
         register_behind_its_newest();
@@ -71754,6 +72084,256 @@ static fn publication(void)
                         system_close(planted);
         }
         (void)system_remove_at(AT_FDCWD, (string_address)kept, 0);
+}
+
+/*
+        A command for a session to hang up on: one that hears the hangup and
+        ends with it, or one that ignores it and ends on its own a moment
+        later. Answers its pidfd, which the session closes with.
+*/
+static bipolar wls_command(struct link_session address_to s, bool deaf)
+{
+        bipolar child = system_fork();
+
+        if (!child)
+        {
+                timespec pause = {deaf ? 0 : 30, deaf ? 300000000 : 0};
+                p64 ignore[4] = {1, 0, 0, 0};
+
+                if (deaf)
+                        (void)system_call_4(syscall(rt_sigaction), 1,
+                                            (positive)ignore, 0, 8);
+                (void)system_call_2(syscall(nanosleep),
+                                    (positive)address_of pause, 0);
+                exit(0);
+        }
+        if (child < 0 || !link_session_open(s))
+                return -1;
+        s->kind = LINK_KIND_RUN;
+        s->pid = child;
+        s->pidfd = system_call_2(syscall(pidfd_open), (positive)child, 0);
+        return child;
+}
+
+//      Whether a process is still in the table, a zombie or not.
+static bool wls_present(bipolar pid)
+{
+        return system_call_2(syscall(kill), (positive)pid, 0) == 0;
+}
+
+//      Until nothing waits to be waited for, or a few seconds.
+static fn wls_reaped(void)
+{
+        timespec pause = {0, 20000000};
+
+        for (positive tick = 0; tick < 250 && link_reaping_count; tick++)
+        {
+                link_reap();
+                (void)system_call_2(syscall(nanosleep),
+                                    (positive)address_of pause, 0);
+        }
+}
+
+/*
+        A session that ends hangs up on its command, and the command is
+        waited for however it ends: not left a zombie in the listener's table
+        of processes, as every one was.
+*/
+static fn reaped_commands(void)
+{
+        struct link_session address_to s = link_self.session;
+        bipolar child;
+        bipolar deaf;
+        bipolar group;
+        bipolar many[LINK_REAPING + 4];
+        positive before = link_reaping_count;
+        bool all = true;
+
+        child = wls_command(s, false);
+        link_session_close(s);
+        wls_reaped();
+        check("sec: a command hung up on at the close of its session is "
+              "waited for, and gone",
+              child > 0 && link_reaping_count == before && !wls_present(child));
+
+        deaf = wls_command(s, true);
+        link_session_close(s);
+        check("sec: one that ignores the hangup is kept to be waited for",
+              deaf > 0 && link_reaping_count == before + 1 &&
+                      wls_present(deaf));
+        wls_reaped();
+        check("sec: and is waited for when it ends",
+              link_reaping_count == before && !wls_present(deaf));
+
+        //      A session the listener gave up on: nothing heard in 45
+        //      seconds, as when its client was killed and said nothing.
+        link_self.server = true;
+        child = wls_command(s, false);
+        s->heard = link_now() - LINK_DEAD - 1;
+        (void)link_sessions_turn(link_now());
+        link_self.server = false;
+        wls_reaped();
+        check("sec: so is the command of a session that went silent",
+              child > 0 && !s->used && link_reaping_count == before &&
+                      !wls_present(child));
+
+        //      A command already waited for is not signalled again by the
+        //      number it had: it may be somebody else's by now.
+        group = system_fork();
+        if (!group)
+        {
+                timespec pause = {30, 0};
+
+                (void)system_call(syscall(setsid));
+                (void)system_call_2(syscall(nanosleep),
+                                    (positive)address_of pause, 0);
+                exit(0);
+        }
+        if (link_session_open(s))
+        {
+                s->kind = LINK_KIND_RUN;
+                s->pid = group;
+                s->exited = true;
+                link_session_close(s);
+        }
+        check("sec: and the group of one that has exited is not hung up on",
+              group > 0 && wls_present(group));
+        (void)system_call_2(syscall(kill), (positive)group, 9);
+        (void)system_wait4_retry((b32)group, null, 0, null);
+
+        //      More hung up on than there are places to wait in: the table
+        //      does not grow past its end, and every command is still hung
+        //      up on.
+        for (positive at = 0; at < array_count(many); at++)
+        {
+                many[at] = wls_command(s, true);
+                all &= many[at] > 0;
+                link_session_close(s);
+        }
+        check("sec: the commands waiting to be waited for are bounded",
+              all && link_reaping_count == LINK_REAPING);
+        wls_reaped();
+        check("sec: and those that stayed in it are all waited for",
+              link_reaping_count == 0);
+        for (positive at = 0; at < array_count(many); at++)
+                if (many[at] > 0)
+                        (void)system_wait4_retry((b32)many[at], null, 0, null);
+}
+
+/*
+        A request for a file, as a peer holding `files` and nothing else would
+        send it: the answer is whether the machine took it up.
+*/
+static bool wls_file_asked(struct link_session address_to s, p8 ask,
+                           string_address path)
+{
+        p8 request[LINK_REQUEST_MAX + 8];
+        p8 key[32];
+        positive length = string_length(path);
+        positive at = 1;
+
+        wls_seeded(key, 32, 9);
+        if (!link_session_open(s))
+                return false;
+        memory_copy(s->peer, key, 32);
+        string_copy((string_address)s->name, "client");
+        request[0] = ask;
+        if (ask == LINK_ASK_PUSH)
+        {
+                memory_zero(request + 1, 4);
+                at += 4;
+        }
+        memory_copy(request + at, path, length);
+        link_request(s, request, at + length);
+        return !s->exit_sent && s->kind != LINK_KIND_NONE;
+}
+
+/*
+        The link's own state is not a file a grant for files reaches, however
+        it is named; any other file is.
+*/
+static fn own_files(void)
+{
+        static const string_address own[] = {
+            LINK_KEY_PATH, LINK_PEERS_PATH, LINK_GROUPS_PATH, LINK_STAMPS_PATH,
+            HOST_MACHINE_SCRIPT};
+        struct link_session address_to s = link_self.session;
+        file_facts before[array_count(own)];
+        bool named = true, linked = true, doubled = true, spelled = true;
+        bool kept = true, pushed = false, pulled = false;
+        bool made[array_count(own)];
+        p8 round[64];
+        p8 key[32];
+
+        wls_seeded(key, 32, 9);
+        wls_peers_with(key, WATERLINK_MAY_FILES);
+        for (positive at = 0; at < array_count(own); at++)
+        {
+                made[at] = !file_look_at(own[at], address_of before[at]);
+                if (made[at])
+                        (void)wls_write(own[at], "x", 1, 0600);
+                (void)file_look_at(own[at], address_of before[at]);
+        }
+        for (positive at = 0; at < array_count(own); at++)
+        {
+                file_facts after;
+
+                (void)system_remove_at(AT_FDCWD, "/root/own-link", 0);
+                (void)system_remove_at(AT_FDCWD, "/root/own-hard", 0);
+                (void)system_symbolic_link_at(own[at], AT_FDCWD,
+                                              "/root/own-link");
+                (void)system_call_5(syscall(linkat), (positive)(bipolar)AT_FDCWD,
+                                    (positive)own[at],
+                                    (positive)(bipolar)AT_FDCWD,
+                                    (positive) "/root/own-hard", 0);
+                string_copy((string_address)round, "/root/../root/");
+                string_append_bounded((string_address)round, own[at] + 6,
+                                      sizeof round);
+                named &= link_path_is_own(own[at]);
+                linked &= link_path_is_own("/root/own-link");
+                doubled &= link_path_is_own("/root/own-hard");
+                spelled &= link_path_is_own((string_address)round);
+                //      Neither verb takes it up, and nothing is staged.
+                pushed |= wls_file_asked(s, LINK_ASK_PUSH, own[at]) ||
+                          s->writes[0].fd >= 0;
+                link_session_close(s);
+                pulled |= wls_file_asked(s, LINK_ASK_PULL, own[at]) ||
+                          s->pid > 0;
+                link_session_close(s);
+                pulled |= wls_file_asked(s, LINK_ASK_PULL, "/root/own-link") ||
+                          s->pid > 0;
+                link_session_close(s);
+                kept &= file_look_at(own[at], address_of after) &&
+                        file_same_identity(address_of before[at],
+                                           address_of after) &&
+                        before[at].size == after.size &&
+                        before[at].modified.seconds == after.modified.seconds &&
+                        before[at].modified.nanoseconds ==
+                                after.modified.nanoseconds;
+        }
+        check("sec: the key, the machines, the groups, the stamps and the "
+              "machine script are the link's own files",
+              named);
+        check("sec: and so is a link to one, and a second name for it, and "
+              "a path spelled round it",
+              linked && doubled && spelled);
+        check("sec: a push or a pull of any of them is refused, nothing is "
+              "staged or started, and the file is as it was",
+              !pushed && !pulled && kept);
+        check("a path that is not there, or any other file, is not",
+              !link_path_is_own("/root/no-such-file") &&
+                      wls_write("/root/ordinary", "y", 1, 0600) &&
+                      !link_path_is_own("/root/ordinary"));
+        check("and a push of another file is taken up",
+              wls_file_asked(s, LINK_ASK_PUSH, "/root/ordinary") &&
+                      s->writes[0].fd >= 0);
+        link_session_close(s);
+        (void)system_remove_at(AT_FDCWD, "/root/own-link", 0);
+        (void)system_remove_at(AT_FDCWD, "/root/own-hard", 0);
+        (void)system_remove_at(AT_FDCWD, "/root/ordinary", 0);
+        for (positive at = 0; at < array_count(own); at++)
+                if (made[at])
+                        (void)system_remove_at(AT_FDCWD, own[at], 0);
 }
 
 /*
@@ -72912,7 +73492,8 @@ static fn greetings(bipolar listener, p16 port)
                       link_self.stamps == stamps);
         }
 
-        wls_peers_with(wls_client.public, WATERLINK_MAY_VERBS);
+        wls_peers_with(wls_client.public, WATERLINK_MAY_LOG);
+        link_nearby.groups.record[0].may = WATERLINK_MAY_RUN | WATERLINK_MAY_SHELL;
         wls_greeting(address_of wls_client, address_of wls_office, "machine-a",
                      15, greeting);
         link_server_initiation(greeting, WATERLINK_DATAGRAM, wls_loopback,
@@ -72920,7 +73501,7 @@ static fn greetings(bipolar listener, p16 port)
         link_peers_load(address_of peers);
         check("sec: a record paired by hand is never replaced, moved or widened",
               peers.count == 1 && peers.peer[0].group == 0 &&
-                      peers.peer[0].may == WATERLINK_MAY_VERBS &&
+                      peers.peer[0].may == WATERLINK_MAY_LOG &&
                       string_equals(peers.peer[0].name, "client") &&
                       peers.peer[0].port != port + 2);
 
@@ -72991,8 +73572,8 @@ static fn mdns_amplification(void)
                 waterlink_group_keys_from(address_of second, derived, "second");
                 link_nearby.groups.count = 2;
                 link_nearby.keys[1] = second;
-                link_pair_begin(0, wls_loopback, 9, 1000000);
-                link_pair_begin(1, wls_loopback, 9, 1000001);
+                link_pair_begin(0, wls_loopback, 9, 1000000, false);
+                link_pair_begin(1, wls_loopback, 9, 1000001, false);
                 check("sec: one place is greeted immediately for each group, "
                       "not throttled as if groups shared an identity",
                       entropy_draws - before == 2 &&
@@ -73051,10 +73632,9 @@ static fn mdns_amplification(void)
                           LINK_GREETED - LINK_GREET_SOURCE);
         }
 
-        //      Port zero is SRV's unusable destination and is rejected by
-        //      discovery before the curve or the greeting budget. A forged
-        //      nonzero port may still be unreachable, so the global budget
-        //      remains necessary for those announcements.
+        //      A place that refuses the greeting (port zero, from any
+        //      address) is nowhere to greet: no curve work is spent on it and
+        //      none of the budget is taken.
         wls_group();
         greeted = entropy_draws;
         for (positive at = 0; at < LINK_GREETED + 8; at++)
@@ -73070,8 +73650,9 @@ static fn mdns_amplification(void)
                 link_nearby_heard(packet, length, place, WATERLINK_MDNS_PORT,
                                   0, 5000000 + at);
         }
-        check("sec: port-zero SRV announcements spend no curve or greeting budget",
-              entropy_draws == greeted);
+        check("sec: announcements naming a place that refuses a greeting "
+              "spend none of the budget",
+              entropy_draws == greeted && link_nearby.greeted_next == 0);
 
         link_nearby.socket = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC |
                                                          SOCK_NONBLOCK, 0);
@@ -73228,6 +73809,643 @@ static fn mdns_hop_limit(void)
         system_close(asker);
         socket_close((b32)link_nearby.socket);
         link_nearby.socket = -1;
+}
+
+/*
+        An announcement as a stranger could make one: the instances it names,
+        each with the port it says, whatever they are. A machine's own
+        names one.
+*/
+static positive wls_mdns_naming(p8 address_to packet, const p16 address_to ports,
+                                positive count)
+{
+        positive at = 12;
+
+        memory_zero(packet, 12);
+        packet[2] = 0x84;
+        packet[7] = (p8)count;
+        for (positive one = 0; one < count; one++)
+        {
+                packet[at++] = 5;
+                memory_copy(packet + at, "wl-x", 4);
+                packet[at + 4] = (p8)('a' + one);
+                at += 5;
+                memory_copy(packet + at, waterlink_service_name,
+                            WATERLINK_SERVICE_BYTES);
+                at += WATERLINK_SERVICE_BYTES;
+                memory_copy(packet + at,
+                            "\x00\x21\x80\x01\x00\x00\x11\x94\x00\x09\x00\x00\x00\x00",
+                            14);
+                at += 14;
+                network_store_16(packet + at, ports[one]);
+                memory_copy(packet + at + 2, "\x01h", 3);
+                at += 5;
+        }
+        return at;
+}
+
+/*
+        What one announcement is worth to whoever sent it. A machine says one
+        instance, so a packet that names eight is eight handshakes of 1200
+        bytes to the address it came from, which a spoofed one made somebody
+        else's: the first instance it names that has a port is greeted, and
+        the rest are not. A port of zero is nowhere to greet and costs no
+        curve work and no place in the ring that budgets them.
+*/
+static fn mdns_names_one(void)
+{
+        static const p16 many[] = {41000, 41001, 41002, 41003,
+                                   41004, 41005, 41006, 41007};
+        static const p16 zeros[] = {0, 0, 0, 0, 0, 0, 0, 0};
+        static const p16 mixed[] = {0, 0, 41100, 41101};
+        p8 packet[WATERLINK_MDNS_MAX];
+        positive length;
+        positive before;
+
+        wls_group();
+        before = entropy_draws;
+        length = wls_mdns_naming(packet, many, 8);
+        link_nearby_heard(packet, length, wls_loopback, WATERLINK_MDNS_PORT, 0,
+                          6000000);
+        check("sec: an announcement naming eight instances is one greeting, "
+              "to the first",
+              entropy_draws - before == 1 &&
+                      link_greeted_lately(wls_office.mark, wls_loopback, 41000,
+                                          6000001) &&
+                      !link_greeted_lately(wls_office.mark, wls_loopback, 41001,
+                                           6000001));
+
+        wls_group();
+        before = entropy_draws;
+        length = wls_mdns_naming(packet, zeros, 8);
+        link_nearby_heard(packet, length, wls_loopback, WATERLINK_MDNS_PORT, 0,
+                          6100000);
+        check("sec: eight instances at port zero are greeted not at all, and "
+              "take nothing of the ring",
+              entropy_draws == before && link_nearby.greeted_next == 0);
+
+        wls_group();
+        before = entropy_draws;
+        length = wls_mdns_naming(packet, mixed, 4);
+        link_nearby_heard(packet, length, wls_loopback, WATERLINK_MDNS_PORT, 0,
+                          6200000);
+        check("sec: the first instance with a port is the one greeted, past "
+              "those without",
+              entropy_draws - before == 1 &&
+                      link_greeted_lately(wls_office.mark, wls_loopback, 41100,
+                                          6200001) &&
+                      !link_greeted_lately(wls_office.mark, wls_loopback, 41101,
+                                           6200001));
+}
+
+//      A group the greeted machine has, in memory and as the file: one that
+//      stays (flags and expect zero) or a one-use code.
+static fn wls_group_file(p32 flags, p64 expires, p32 expect)
+{
+        wls_group();
+        link_nearby.groups.record[0].flags = flags;
+        link_nearby.groups.record[0].expires = expires;
+        link_nearby.groups.record[0].expect = expect;
+        (void)wls_write(LINK_GROUPS_PATH,
+                        address_of link_nearby.groups.record[0],
+                        sizeof(struct link_group_record), 0600);
+}
+
+//      A greeting that arrives, from this machine's loopback: the peers file
+//      as it leaves it is the answer.
+static fn wls_greeted(struct waterlink_identity address_to from,
+                      string_address name, p64 ahead, p16 port, p64 now)
+{
+        p8 greeting[WATERLINK_DATAGRAM];
+
+        memory_zero(address_of link_self.admission, sizeof link_self.admission);
+        wls_greeting(from, address_of wls_office, name, ahead, greeting);
+        link_server_initiation(greeting, WATERLINK_DATAGRAM, wls_loopback, port,
+                               now);
+}
+
+/*
+        A greeting is its sender's clock when it was sent, and one that is
+        not about now is a recording: from a member that was forgotten and
+        whose marker was dropped since, it brought that member back at the
+        address of whoever played it, with the group's grants. Where this
+        machine's clock reads a time, a greeting to a group that stays must
+        be dated within an hour of it, either way; a code is single use and
+        ends on its own.
+*/
+static fn greeting_freshness(bipolar listener, p16 port)
+{
+        static const struct
+        {
+                long ahead;
+                bool kept;
+        } dated[] = {
+            {0, true},         {-60, true},        {-3500, true},
+            {3500, true},      {-3700, false},     {3700, false},
+            {-7200, false},    {7200, false},      {-86400 * 30, false},
+            {86400 * 365, false}, {-1700000000, false},
+        };
+        p64 wall = system_clock_ns(0) / 1000000000ull;
+        p8 back[WATERLINK_DATAGRAM + 16];
+        positive kept = 0, refused = 0, mistaken = 0, answered = 0;
+
+        if (wall < LINK_CLOCK_FLOOR)
+                return;
+        link_self.me = wls_b;
+        for (positive at = 0; at < array_count(dated); at++)
+        {
+                wls_group_file(0, 0, 0);
+                (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
+                link_self.stamps = 0;
+                wls_drain(listener);
+                wls_greeted(address_of wls_client, "machine-a",
+                            (p64)(bipolar)dated[at].ahead, port, 7000000 + at);
+                kept += dated[at].kept;
+                refused += !dated[at].kept;
+                mistaken += (wls_peers_count() == 1) != dated[at].kept;
+                answered += dated[at].kept &&
+                            wls_heard(listener, back) == WATERLINK_DATAGRAM;
+        }
+        check("sec: a greeting to a group that stays is kept when it is dated "
+              "within an hour of this machine's clock, and not otherwise",
+              mistaken == 0 && kept == 4 && refused == 7);
+        check("and one that is kept is greeted back", answered == kept);
+
+        //      The member that was forgotten: its marker is gone, a recording
+        //      of its greeting from two hours ago is played, and it is not
+        //      back; it greets now and is.
+        wls_group_file(0, 0, 0);
+        (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
+        link_self.stamps = 0;
+        wls_greeted(address_of wls_client, "machine-a", (p64)(bipolar)-7200,
+                    port, 7100000);
+        check("sec: a recorded greeting of a forgotten member, its marker "
+              "dropped, does not bring it back",
+              wls_peers_count() == 0 && link_self.stamps == 0);
+        wls_greeted(address_of wls_client, "machine-a", 5, port, 7200000);
+        check("while the member's own greeting does", wls_peers_count() == 1);
+
+        //      A code ends by itself and its own greeting may come from a
+        //      machine that has not been told the time.
+        wls_group_file(LINK_GROUP_ONCE, link_boot_seconds() + 300, 0);
+        (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
+        link_self.stamps = 0;
+        wls_greeted(address_of wls_client, "machine-a", (p64)(bipolar)-1700000000,
+                    port, 7300000);
+        check("sec: a greeting to a code is not held to the clock: the "
+              "machine pairing may have none",
+              wls_peers_count() == 1);
+        (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
+        (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
+}
+
+/*      A socket for the listener's mDNS that sends nothing: nothing in this
+        test may reach the link it runs on. A send on it is refused (the
+        write side is shut), and what joins a group on it is only the
+        kernel's own book. */
+static bipolar wls_quiet_socket(void)
+{
+        bipolar handle = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC |
+                                                     SOCK_NONBLOCK, 0);
+
+        if (handle >= 0)
+                (void)system_call_2(syscall(shutdown), (positive)handle, 1);
+        return handle;
+}
+
+/*
+        A code, and what keeps a member: it lets one machine in and is closed
+        to every other at once; it lets in no machine after its minutes, nor
+        one that is not the name it waits for; the member that came in is
+        still followed while it is closed, so a greeting back that was lost
+        can be answered; and what ran out is gone from the file whether or not
+        anything else changed it.
+*/
+static fn pairing_codes(bipolar listener, p16 port)
+{
+        link_groups groups;
+        p64 boot = link_boot_seconds();
+        p8 back[WATERLINK_DATAGRAM + 16];
+
+        link_self.me = wls_b;
+        wls_group_file(LINK_GROUP_ONCE, boot + 300, 0);
+        (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
+        link_self.stamps = 0;
+        wls_drain(listener);
+        wls_greeted(address_of wls_client, "machine-a", 20, port, 8000000);
+        link_groups_load(address_of groups);
+        check("a code lets the first machine in, and greets it back",
+              wls_peers_count() == 1 &&
+                      wls_heard(listener, back) == WATERLINK_DATAGRAM);
+        check("and is closed at once, in memory and in the file, for half a "
+              "minute more",
+              (link_nearby.groups.record[0].flags & LINK_GROUP_DONE) &&
+                      link_nearby.groups.record[0].expires <=
+                              link_boot_seconds() + LINK_PAIR_GRACE &&
+                      groups.count == 1 &&
+                      (groups.record[0].flags & LINK_GROUP_DONE) &&
+                      (groups.record[0].flags & LINK_GROUP_ONCE) &&
+                      groups.record[0].expires > boot &&
+                      groups.record[0].expires <=
+                              link_boot_seconds() + LINK_PAIR_GRACE);
+        wls_greeted(address_of wls_server, "machine-b", 21, port, 8100000);
+        check("sec: a second machine is not let in by a code that took one",
+              wls_peers_count() == 1);
+        wls_greeted(address_of wls_client, "machine-a", 22, port + 1, 8200000);
+        {
+                link_peers peers;
+
+                link_peers_load(address_of peers);
+                check("sec: the machine that came in is still followed, and "
+                      "is not greeted again as if it were new",
+                      peers.count == 1 && peers.peer[0].port == port + 1 &&
+                              wls_heard(listener, back) <= 0);
+        }
+
+        wls_group_file(LINK_GROUP_ONCE, boot, 0);
+        (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
+        link_self.stamps = 0;
+        wls_greeted(address_of wls_client, "machine-a", 23, port, 8300000);
+        check("sec: a code past its minutes lets nobody in", wls_peers_count() == 0);
+
+        wls_group_file(LINK_GROUP_ONCE, boot + 300,
+                       link_name_check("machine-a", WATERLINK_NAME_MAX));
+        link_self.stamps = 0;
+        wls_greeted(address_of wls_client, "machine-b", 24, port, 8400000);
+        check("sec: a code for one name lets in no other", wls_peers_count() == 0);
+        wls_greeted(address_of wls_client, "machine-a", 25, port, 8500000);
+        check("while the name it waits for is let in", wls_peers_count() == 1);
+
+        //      Runs out in the file as well, as the listener's turn finds it.
+        wls_group_file(LINK_GROUP_ONCE, boot, 0);
+        link_nearby.socket = wls_quiet_socket();
+        link_nearby_reload(20000000);
+        link_groups_load(address_of groups);
+        check("what ran out is dropped from the file, and the listener has "
+              "no group left",
+              groups.count == 0 && link_nearby.groups.count == 0 &&
+                      link_nearby.socket < 0);
+        wls_group_file(LINK_GROUP_ONCE, boot + 300, 0);
+        link_nearby.socket = wls_quiet_socket();
+        link_nearby_reload(30000000);
+        link_groups_load(address_of groups);
+        check("and what has not, is kept", groups.count == 1 &&
+                                               link_nearby.groups.count == 1);
+        link_nearby_close();
+        (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
+        (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
+}
+
+/*
+        The listener reads its groups again when the file has changed, at
+        most twice a second. A save is a rename, so the inode says which file
+        it is, and an inode that is freed and given to the next save, with the
+        same records the same size, would say nothing changed: what was
+        changed and written, to the nanosecond, says more. A file that is not
+        there is no groups, and takes the socket with it.
+*/
+static fn nearby_reload(void)
+{
+        struct link_group_record record;
+        struct waterlink_group_keys keys;
+        struct
+        {
+                p64 seconds;
+                p64 nanoseconds;
+        } times[2] = {{0, UTIME_OMIT}, {1000000000, 5}};
+        bipolar handle;
+        positive got;
+
+        memory_zero(address_of record, sizeof record);
+        string_copy(record.namespace, "office");
+        memory_fill(record.key, 0x5a, sizeof record.key);
+        record.may = WATERLINK_MAY_RUN;
+        waterlink_group_keys_from(address_of keys, record.key, "office");
+
+        memory_zero(address_of link_nearby, sizeof link_nearby);
+        (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
+        link_nearby.socket = wls_quiet_socket();
+        link_nearby_reload(10000000);
+        check("no file is no group, and nothing is opened or closed",
+              link_nearby.groups.count == 0 && link_nearby.socket >= 0 &&
+                      !link_nearby.labels_ready);
+
+        (void)wls_write(LINK_GROUPS_PATH, address_of record, sizeof record, 0600);
+        link_nearby_reload(10600000);
+        check("a file that is there is read: the group, its keys derived and "
+              "its labels drawn",
+              link_nearby.groups.count == 1 &&
+                      link_nearby.groups.record[0].may == WATERLINK_MAY_RUN &&
+                      link_nearby.keys[0].mark == keys.mark &&
+                      !memory_compare(link_nearby.keys[0].psk, keys.psk, 32) &&
+                      link_nearby.labels_ready && link_nearby.socket >= 0 &&
+                      link_nearby.next_announce == 10600000);
+
+        link_nearby.groups.record[0].may = 77;
+        link_nearby_reload(11200000);
+        check("sec: a file that has not changed is not read again",
+              link_nearby.groups.record[0].may == 77);
+
+        //      The same file, the same size, the same inode: a record's
+        //      grant changed in place, written at another time.
+        record.may = WATERLINK_MAY_FILES;
+        handle = system_open_at(AT_FDCWD, LINK_GROUPS_PATH, FILE_READ_WRITE);
+        got = handle >= 0 ? system_write_all((positive)handle, address_of record,
+                                             sizeof record)
+                          : 0;
+        if (handle >= 0)
+                system_close(handle);
+        (void)system_call_4(syscall(utimensat), (positive)(bipolar)AT_FDCWD,
+                            (positive)LINK_GROUPS_PATH,
+                            (positive)address_of times, 0);
+        link_nearby_reload(11500000);
+        check("sec: it is looked at twice a second at most",
+              got == sizeof record && link_nearby.groups.record[0].may == 77);
+        link_nearby_reload(12000000);
+        check("sec: and a file changed in place, with the inode and size it "
+              "had, is read again",
+              link_nearby.groups.record[0].may == WATERLINK_MAY_FILES);
+
+        //      A clock that was stepped back is not a reason to look at every
+        //      turn: a turn dated before the last look is the same turn.
+        record.may = WATERLINK_MAY_LOG;
+        times[1].nanoseconds = 7;
+        handle = system_open_at(AT_FDCWD, LINK_GROUPS_PATH, FILE_READ_WRITE);
+        if (handle >= 0)
+        {
+                (void)system_write_all((positive)handle, address_of record,
+                                       sizeof record);
+                system_close(handle);
+        }
+        (void)system_call_4(syscall(utimensat), (positive)(bipolar)AT_FDCWD,
+                            (positive)LINK_GROUPS_PATH,
+                            (positive)address_of times, 0);
+        link_nearby_reload(5000000);
+        check("sec: a turn dated before the last look neither looks nor "
+              "wraps into an age of years",
+              link_nearby.groups.record[0].may == WATERLINK_MAY_FILES);
+        link_nearby_reload(13000000);
+        check("and the next that is due looks",
+              link_nearby.groups.record[0].may == WATERLINK_MAY_LOG);
+
+        (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
+        link_nearby_reload(14000000);
+        check("a file that is gone is no group, and closes the socket",
+              link_nearby.groups.count == 0 && link_nearby.socket < 0);
+
+        (void)wls_write(LINK_GROUPS_PATH, address_of record, sizeof record, 0644);
+        link_nearby.socket = wls_quiet_socket();
+        link_nearby_reload(15000000);
+        check("sec: a file others can read is no group",
+              link_nearby.groups.count == 0 && link_nearby.socket < 0);
+        (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
+}
+
+/*
+        An address that comes to an interface after the listener started is
+        the ordinary case on a machine that boots straight into its lease:
+        the memberships are asked for again every five seconds, and a table
+        that changed starts the quick announcements over. The messages are the
+        kernel's, made here by hand, so a hostile or short one is as likely
+        as a good one.
+*/
+static fn nearby_address(void)
+{
+        p8 message[64];
+        netlink_header address_to header = (netlink_header address_to)message;
+        netlink_address address_to body = (netlink_address address_to)(message + 16);
+        bool refused_all = true;
+
+        wls_group();
+        link_nearby.socket = wls_quiet_socket();
+        memory_zero(message, sizeof message);
+        header->length = 16 + 8 + 8;
+        header->type = RTM_NEWADDR;
+        body->family = AF_INET;
+        body->index = 1;
+        memory_copy(message + 24, "\x08\x00\x02\x00\x7f\x00\x00\x01", 8);
+
+        check("an address of an interface is joined and kept, with its address",
+              link_nearby_address(header, null) &&
+                      link_nearby.interfaces == 1 &&
+                      link_nearby.interface[0] == 1 &&
+                      link_nearby.interface_address[0] == 0x7f000001);
+        (void)link_nearby_address(header, null);
+        check("sec: the same interface again is kept once",
+              link_nearby.interfaces == 1);
+
+        //      The refresh starts from nothing, and the group is joined on the
+        //      socket already: the kernel says so, and it is as good as new.
+        link_nearby.interfaces = 0;
+        (void)link_nearby_address(header, null);
+        check("an interface joined already is joined",
+              link_nearby.interfaces == 1);
+
+        link_nearby.interfaces = 0;
+        body->family = AF_INET6;
+        (void)link_nearby_address(header, null);
+        refused_all &= link_nearby.interfaces == 0;
+        body->family = AF_INET;
+        header->type = RTM_NEWADDR + 1;
+        (void)link_nearby_address(header, null);
+        refused_all &= link_nearby.interfaces == 0;
+        header->type = RTM_NEWADDR;
+        header->length = 16 + 8;
+        (void)link_nearby_address(header, null);
+        refused_all &= link_nearby.interfaces == 0;
+        header->length = 16 + 8 + 8;
+        message[26] = 3; // an attribute that is not the local address
+        (void)link_nearby_address(header, null);
+        refused_all &= link_nearby.interfaces == 0;
+        message[26] = 2;
+        message[24] = 4; // an address of two bytes
+        (void)link_nearby_address(header, null);
+        refused_all &= link_nearby.interfaces == 0;
+        message[24] = 8;
+        body->index = 0x7ffffff0; // an interface nobody has
+        (void)link_nearby_address(header, null);
+        refused_all &= link_nearby.interfaces == 0;
+        check("sec: another family, another message, a short one, another "
+              "attribute, a short address and an interface that is not there "
+              "are none of them kept",
+              refused_all);
+
+        body->index = 1;
+        link_nearby.interfaces = LINK_INTERFACES;
+        (void)link_nearby_address(header, null);
+        check("sec: a table that is full takes no more",
+              link_nearby.interfaces == LINK_INTERFACES);
+        link_nearby_close();
+}
+
+/*
+        The listener's turn: the groups first, then what is due -- three
+        announcements and questions a second apart, as RFC 6762 asks of a
+        responder, then every minute and every half a minute -- and when it
+        wants to be asked again. Nothing is sent: the interfaces it has are
+        none, or the quiet socket's, which refuses.
+*/
+static fn nearby_tick(void)
+{
+        struct link_group_record record;
+        p64 wake;
+
+        memory_zero(address_of record, sizeof record);
+        string_copy(record.namespace, "office");
+        memory_fill(record.key, 0x5a, sizeof record.key);
+
+        memory_zero(address_of link_nearby, sizeof link_nearby);
+        (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
+        link_nearby.socket = wls_quiet_socket();
+        wake = link_nearby_tick(20000000);
+        check("with no group there is nothing to send, and a second to wait",
+              wake == 21000000 && link_nearby.announced == 0);
+
+        (void)wls_write(LINK_GROUPS_PATH, address_of record, sizeof record, 0600);
+        link_nearby.interfaces_looked = 20000000; // not due
+        wake = link_nearby_tick(20600000);
+        check("a group is announced and asked about, once, and the next is a "
+              "second on",
+              link_nearby.groups.count == 1 && link_nearby.labels_ready &&
+                      link_nearby.announced == 1 && link_nearby.asked == 1 &&
+                      wake == 21600000);
+        wake = link_nearby_tick(21000000);
+        check("sec: asked again before it is due, it sends nothing",
+              link_nearby.announced == 1 && link_nearby.asked == 1 &&
+                      wake == 21600000);
+        (void)link_nearby_tick(21600000);
+        wake = link_nearby_tick(22600000);
+        check("the third is the last quick one; then a minute for announcing "
+              "and half of one for asking",
+              link_nearby.announced == 3 && link_nearby.asked == 3 &&
+                      link_nearby.next_announce == 22600000 + LINK_ANNOUNCE_EVERY &&
+                      link_nearby.next_ask == 22600000 + LINK_ASK_EVERY &&
+                      wake == 23600000);
+
+        //      The memberships are asked for again every five seconds, and a
+        //      table that is not the one it was starts the quick announcements
+        //      over: here the table it had names an interface nobody has.
+        link_nearby.interfaces = 1;
+        link_nearby.interface[0] = 0x7ffffff0;
+        link_nearby.interface_address[0] = 0x0a000001;
+        link_nearby.interfaces_looked = 22600000;
+        (void)link_nearby_tick(23700000);
+        check("sec: the table is asked for again every five seconds, and not "
+              "sooner",
+              link_nearby.interface[0] == 0x7ffffff0 &&
+                      link_nearby.announced == 3);
+        (void)link_nearby_tick(27700000);
+        check("and when it is not the table it was, the announcements start "
+              "again",
+              (link_nearby.interfaces != 1 ||
+               link_nearby.interface[0] != 0x7ffffff0) &&
+                      link_nearby.announced == 1 && link_nearby.asked == 1);
+
+        link_nearby_close();
+        (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
+}
+
+/*
+        A groups file is read as root's own, private, whole records. The old
+        check in each -- a hash of the secret, a guessing oracle at full speed
+        -- is taken out of the file as well as out of memory, and only from a
+        file that is what it was read as; the records it read are all it
+        changes.
+*/
+static fn groups_scrub_edges(void)
+{
+        struct link_group_record three[3];
+        struct link_group_record back[3];
+        link_groups groups;
+        bipolar handle;
+        positive got;
+        bool kept = true;
+
+        memory_zero(three, sizeof three);
+        for (positive at = 0; at < 3; at++)
+        {
+                string_copy(three[at].namespace, at == 1 ? "bad name" : "office");
+                memory_fill(three[at].key, 0x40 + at, sizeof three[at].key);
+                memory_fill(three[at].check, 0xa5, sizeof three[at].check);
+                three[at].may = 2 + 2 * (p32)at;
+        }
+
+        //      A record with a name that cannot be one is dropped, and its
+        //      old check is still taken out of the file.
+        (void)wls_write(LINK_GROUPS_PATH, three, sizeof three, 0600);
+        link_groups_load(address_of groups);
+        handle = system_open_at(AT_FDCWD, LINK_GROUPS_PATH, FILE_READ);
+        got = handle >= 0 ? (positive)system_read_retry((positive)handle, back,
+                                                        sizeof back)
+                          : 0;
+        if (handle >= 0)
+                system_close(handle);
+        for (positive at = 0; at < 3; at++)
+                kept &= memory_span_byte(back[at].check, 0,
+                                         sizeof back[at].check) ==
+                        sizeof back[at].check;
+        check("sec: a record with a name that is not one is dropped, the last "
+              "in its place, and every record's old check leaves the file",
+              groups.count == 2 && got == sizeof back && kept &&
+                      string_equals(groups.record[0].namespace, "office") &&
+                      string_equals(groups.record[1].namespace, "office") &&
+                      groups.record[1].may == 6 &&
+                      !memory_compare(groups.record[1].key, three[2].key, 32));
+
+        //      Not a file to write: others can read it, or it is not whole,
+        //      or it is a link to one.
+        (void)wls_write(LINK_GROUPS_PATH, three, sizeof three, 0644);
+        link_groups_scrub(3);
+        handle = system_open_at(AT_FDCWD, LINK_GROUPS_PATH, FILE_READ);
+        got = handle >= 0 ? (positive)system_read_retry((positive)handle, back,
+                                                        sizeof back)
+                          : 0;
+        if (handle >= 0)
+                system_close(handle);
+        check("sec: a file others can read is not written to",
+              got == sizeof back && back[0].check[0] == 0xa5);
+
+        (void)wls_write(LINK_GROUPS_PATH, three, sizeof three - 40, 0600);
+        link_groups_scrub(3);
+        handle = system_open_at(AT_FDCWD, LINK_GROUPS_PATH, FILE_READ);
+        got = handle >= 0 ? (positive)system_read_retry((positive)handle, back,
+                                                        sizeof three - 40)
+                          : 0;
+        if (handle >= 0)
+                system_close(handle);
+        check("sec: nor one that is not whole records",
+              got == sizeof three - 40 && back[0].check[0] == 0xa5);
+
+        (void)wls_write("/root/groups.elsewhere", three, sizeof three, 0600);
+        (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
+        (void)system_symbolic_link_at("/root/groups.elsewhere", AT_FDCWD,
+                                      LINK_GROUPS_PATH);
+        link_groups_scrub(3);
+        handle = system_open_at(AT_FDCWD, "/root/groups.elsewhere", FILE_READ);
+        got = handle >= 0 ? (positive)system_read_retry((positive)handle, back,
+                                                        sizeof back)
+                          : 0;
+        if (handle >= 0)
+                system_close(handle);
+        check("sec: nor one that is a link to another file",
+              got == sizeof back && back[2].check[0] == 0xa5);
+        (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
+        (void)system_remove_at(AT_FDCWD, "/root/groups.elsewhere", 0);
+
+        //      As many records as were read, and no more.
+        (void)wls_write(LINK_GROUPS_PATH, three, sizeof three, 0600);
+        link_groups_scrub(2);
+        handle = system_open_at(AT_FDCWD, LINK_GROUPS_PATH, FILE_READ);
+        got = handle >= 0 ? (positive)system_read_retry((positive)handle, back,
+                                                        sizeof back)
+                          : 0;
+        if (handle >= 0)
+                system_close(handle);
+        check("sec: the records the caller read are all it changes",
+              got == sizeof back && back[0].check[0] == 0 &&
+                      back[1].check[31] == 0 && back[2].check[0] == 0xa5 &&
+                      back[2].may == 6);
+        (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
 }
 
 //      Discovery labels are published only when every one was drawn.
@@ -73758,7 +74976,7 @@ static fn indexes_and_commands(void)
                 link_key_text(zero, text);
                 (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
                 check("sec: a low-order key is not paired",
-                      link_pair_locked("low", (string_address)text, null) != 0 &&
+                      link_add_locked("low", (string_address)text, null) != 0 &&
                               wls_peers_count() == 0);
         }
 
@@ -73768,7 +74986,7 @@ static fn indexes_and_commands(void)
                 (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
                 entropy_down = true;
                 check("sec: with no entropy no group secret is made up",
-                      link_join(words, 1) != 0 &&
+                      link_group_join(words, 1) != 0 &&
                               system_open_at(AT_FDCWD, LINK_GROUPS_PATH,
                                              FILE_READ) < 0);
                 entropy_down = false;
@@ -74129,6 +75347,8 @@ b32 main(void)
         authorization_files();
         staging();
         publication();
+        own_files();
+        reaped_commands();
         responder(listener, port);
         cookies(listener, port);
         stamps_outlive(listener, port);
@@ -74143,9 +75363,16 @@ b32 main(void)
         quiet_streams();
         control_records_are_canonical();
         greetings(listener, port);
+        greeting_freshness(listener, port);
         mdns_amplification();
         mdns_interface_selection();
+        mdns_names_one();
         mdns_hop_limit();
+        pairing_codes(listener, port);
+        nearby_reload();
+        nearby_address();
+        nearby_tick();
+        groups_scrub_edges();
         labels();
         wpa_key();
         wifi_source_checks();
@@ -83287,6 +84514,11 @@ static b32 settings_run(string_address first, string_address second,
         while (arguments[count])
                 count++;
 
+        //      The command asks the shape first, so that what is not one is
+        //      usage before anything is read.
+        if (!host_settings_shaped(arguments, count))
+                return HOST_SETTINGS_USAGE;
+
         //      A change leaves its line for saving to finish, and nothing is
         //      saved here: end it, or the verdict lands on the same line.
         outcome = host_settings_apply(address_of settings_slot, arguments, count);
@@ -83616,6 +84848,23 @@ static fn machine_hooks(void)
         machine_scan("moonwater_event() {\n  :\n}\n", address_of script);
         check("NAME() { is a hook", script.hooks == MOONWATER_HOOK_EVENT);
         check("and the line is the name", script.event_line == 1);
+
+        machine_scan("moonwater_init() ( : )\nmoonwater_end() [[ -n x ]]\n"
+                     "moonwater_event() if :; then\n  case $1 in\n  mute) : ;;\n  esac\nfi\n"
+                     "moonwater_poweroff() { :; }\n",
+                     address_of script);
+        check("a subshell, a test and an if are function bodies too",
+              script.hooks == (MOONWATER_HOOK_INIT | MOONWATER_HOOK_EVENT |
+                               MOONWATER_HOOK_END) &&
+                  script.init_line == 1 && script.end_line == 2 &&
+                  script.event_line == 3);
+        check("a case inside an if body gives its arms, and the end is found",
+              moonwater_bind_line(address_of script, SPARK_BIND_MUTE) == 5 &&
+                  moonwater_bind_line(address_of script, SPARK_BIND_POWEROFF) == 8);
+        machine_scan("moonwater_event() ( echo fi; echo ')' )\nmoonwater_end() { :; }\n",
+                     address_of script);
+        check("a word that closes a compound where one cannot begin closes nothing",
+              script.hooks == (MOONWATER_HOOK_EVENT | MOONWATER_HOOK_END));
 
         machine_scan("function moonwater_init {\n  :\n}\n"
                      "function moonwater_event {\n  :\n}\n"
@@ -83989,7 +85238,6 @@ static fn machine_ntp_schedule(void)
         p64 second = 1000000000ull;
         p64 now = 1000 * second;
         p64 next = locale_ntp_next;
-        p64 asked = locale_ntp_asked;
         p64 synced = locale_ntp_synced;
         positive retry = locale_ntp_retry;
         positive every = locale_ntp_every;
@@ -83998,15 +85246,13 @@ static fn machine_ntp_schedule(void)
         locale_ntp_synced = 0;
         locale_ntp_retry = LOCALE_NTP_RETRY_LEAST;
         locale_ntp_every = LOCALE_NTP_AGAIN_FIRST;
-        locale_ntp_asked = now - second;
         locale_ntp_schedule(0, false, now);
         check("an answer the kernel has already forgotten is asked again in a second",
               locale_ntp_next == now + second && !locale_ntp_synced);
-        locale_ntp_asked = now + second;
         locale_ntp_schedule(0, true, now + 2 * second);
         check("an answer the kernel keeps waits for the first poll",
               locale_ntp_next == now + 2 * second + LOCALE_NTP_AGAIN_FIRST * second &&
-                  locale_ntp_synced == now + second);
+                  locale_ntp_synced == now + 2 * second);
         locale_ntp_schedule(LOCALE_CHILD_IDLE, true, now + 3 * second);
         check("a clock still synchronised keeps that poll",
               locale_ntp_next == now + 2 * second + LOCALE_NTP_AGAIN_FIRST * second);
@@ -84018,8 +85264,40 @@ static fn machine_ntp_schedule(void)
         check("but never over a RATE answer's wait",
               locale_ntp_next == now + 5 * second + LOCALE_NTP_RATE_AGAIN * second);
 
+        //      What a machine that gets no answer asks for in an hour, in
+        //      its fourth, by what the failure was: unreachable doubles to a
+        //      quarter of an hour, a clock the kernel will not set or a
+        //      server that said DENY is half an hour, RATE is five minutes.
+        //      It was every eight seconds for ever.
+        {
+                static const bipolar ended[3] = {1, LOCALE_NTP_EXIT_LONG,
+                                                 LOCALE_NTP_EXIT_RATE};
+                positive hour[3];
+
+                for (positive at = 0; at < 3; at++)
+                {
+                        p64 when = now;
+
+                        hour[at] = 0;
+                        locale_ntp_next = 0;
+                        locale_ntp_retry = LOCALE_NTP_RETRY_LEAST;
+                        while (when < now + 4 * 3600 * second)
+                        {
+                                locale_ntp_schedule(ended[at], false, when);
+                                when = locale_ntp_next;
+                                hour[at] += when >= now + 3 * 3600 * second &&
+                                            when < now + 4 * 3600 * second;
+                        }
+                }
+                check("a machine with no answer asks at most five times an hour",
+                      hour[0] && hour[0] <= 5);
+                check("one refused or denied asks at most twice an hour",
+                      hour[1] && hour[1] <= 2);
+                check("and one rate limited at most a dozen times",
+                      hour[2] && hour[2] <= 13);
+        }
+
         locale_ntp_next = next;
-        locale_ntp_asked = asked;
         locale_ntp_synced = synced;
         locale_ntp_retry = retry;
         locale_ntp_every = every;
@@ -84063,6 +85341,82 @@ static fn sntp_datagram_framing(void)
         socket_close(pair[1]);
 }
 
+/*
+        The query the machine forks and what becomes of it: every answer
+        byte read once and the child waited for, so that none is left a
+        zombie (the wait did not block, and found the child still running
+        in nearly every case); nothing of the parent open in it, because its
+        descriptor on /dev/spark kept the machine attached; and `ntp off`
+        ending one in flight.
+*/
+static fn machine_ntp_child(void)
+{
+        positive status = 0;
+        positive left = 0;
+        positive wrong = 0;
+        bipolar held = system_open_at(AT_FDCWD, "/dev/null", O_RDONLY);
+        locale_child child = {0, -1};
+
+        for (positive at = 0; at < 300; at++)
+        {
+                bipolar ended;
+
+                if (!locale_child_fork(address_of child))
+                {
+                        //      The third of these ends without its byte.
+                        if (at % 3 == 2)
+                                system_call_1(syscall(exit), 0);
+                        locale_child_end(address_of child, (p8)(at % 3));
+                }
+                while ((ended = locale_child_poll(address_of child)) ==
+                       LOCALE_CHILD_RUNNING)
+                        ;
+                wrong += ended != (at % 3 == 2 ? 1 : (bipolar)(at % 3));
+                left += system_call_4(syscall(wait4), (positive)-1,
+                                      (positive)address_of status, 1, 0) !=
+                        -ECHILD;
+        }
+        check("every query that ended is waited for, so none is left to be a zombie",
+              !left);
+        check("and says what it ended with, or 1 when it died without saying",
+              !wrong);
+
+        if (held >= 0)
+        {
+                bipolar ended;
+
+                if (!locale_child_fork(address_of child))
+                        locale_child_end(address_of child,
+                                         system_call_3(syscall(fcntl),
+                                                       (positive)held, 1, 0) < 0
+                                             ? 0
+                                             : 5);
+                while ((ended = locale_child_poll(address_of child)) ==
+                       LOCALE_CHILD_RUNNING)
+                        ;
+                check("a query is forked with nothing of the machine open in it",
+                      ended == 0);
+                system_close(held);
+        }
+
+        //      A query in flight when NTP is turned off.
+        locale_ntp_on = false;
+        if (!locale_child_fork(address_of locale_ntp_child))
+        {
+                for (;;)
+                        system_call_1(syscall(getppid), 0);
+        }
+        check("`ntp off` with a query in flight ends it and waits for it",
+              locale_ntp_child.pid > 0);
+        locale_ntp_keep(true);
+        check("so no pid is kept, no pipe, and no child is left",
+              locale_ntp_child.pid == 0 && locale_ntp_child.answer < 0 &&
+                  system_call_4(syscall(wait4), (positive)-1,
+                                (positive)address_of status, 1, 0) == -ECHILD);
+        check("and the machine sleeps its whole wake again",
+              locale_wake_ms(3000) == 3000);
+}
+
 static fn machine_sntp(void)
 {
         check("RFC 5905 offset, min-delay pick and poison guards hold",
@@ -84071,6 +85425,7 @@ static fn machine_sntp(void)
               locale_discipline_ok());
         sntp_datagram_framing();
         machine_ntp_schedule();
+        machine_ntp_child();
 
         /* Case 0 refuses blocking getrandom: the stamp fails untouched and
            the exchange returns before any send. Case 1 refuses only
@@ -87368,6 +88723,7 @@ b32 main(void)
 #include "../src/net/net.c"
 #include "../src/waterlink/link.c"
 #include "../src/waterlink/seal.c"
+#include "../src/waterlink/handshake.c"
 
 #define STEPS 9
 static struct waterlink_link sender, receiver;
@@ -87489,6 +88845,49 @@ static fn shape(string_address name, positive length, p16 flags)
         string_format(log, "    all  %p\n", (positive)total);
 }
 
+/*
+        The first thing an initiation meets is its gate, asked once for each
+        key the machine holds -- its own, and a group's for each group -- and
+        for a stranger's datagram that none of them accepts it is all the
+        datagram costs: ticks a datagram for the machine's own key and eight
+        groups.
+*/
+static fn gate_shape(void)
+{
+        static struct waterlink_identity keys[9];
+        static p8 gate_datagram[WATERLINK_DATAGRAM];
+        struct waterlink_datagram head = {WATERLINK_KIND_INITIATE, 0, 0};
+        p64 best = ~0ull;
+        positive refused = 0;
+
+        for (positive at = 0; at < 9; at++)
+        {
+                p8 secret[32];
+
+                for (positive byte = 0; byte < 32; byte++)
+                        secret[byte] = (p8)(at * 31 + byte * 7 + 1);
+                waterlink_identity_from(keys + at, secret);
+        }
+        memory_copy(gate_datagram, address_of head, 16);
+        for (positive round = 0; round < 7; round++)
+        {
+                p64 start = get_cpu_time();
+                p64 took;
+
+                for (positive each = 0; each < 20000; each++)
+                        for (positive at = 0; at < 9; at++)
+                                refused += !waterlink_gate_passes(
+                                        keys + at, gate_datagram,
+                                        WATERLINK_DATAGRAM);
+                took = (get_cpu_time() - start) / 20000;
+                if (took < best)
+                        best = took;
+        }
+        string_format(log, "  gate, nine keys and none accepts, ticks a datagram:"
+                           " %p (%p refused)\n",
+                      (positive)best, refused);
+}
+
 b32 main(void)
 {
         string_address address_to words = program_argument_list();
@@ -87512,6 +88911,7 @@ b32 main(void)
                 return 0;
         }
 
+        gate_shape();
         shape("bulk", WATERLINK_FRAME_MAX, WATERLINK_FRAME_DURABLE);
         shape("keystroke", 1, WATERLINK_FRAME_DURABLE | WATERLINK_FRAME_URGENT);
         log_flush();

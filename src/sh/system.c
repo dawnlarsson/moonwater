@@ -284,9 +284,7 @@ static DEAD_END b32 system_init()
 
                         if (reaped == machine)
                         {
-                                positive code = status & 0x7f
-                                                    ? 0xff
-                                                    : (status >> 8) & 0xff;
+                                positive code = (positive)wait_status_code(status);
 
                                 if (code == 0 || code == 1)
                                 {

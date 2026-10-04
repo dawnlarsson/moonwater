@@ -1,28 +1,40 @@
 /*
         `moonwater link`: the verbs.
 
-                link                    what is on, this machine's key, the
-                                        peers, what is open
-                link on | off           the listener, kept across boots
-                link key                this machine's public key
-                link pair NAME KEY [HOST[:PORT]]
-                link forget NAME
-                link allow NAME GRANT...
-                link deny NAME GRANT...
-                link shell NAME         a terminal on NAME
-                link run NAME COMMAND...
+                link                    who this machine is linked with and
+                                        what each may do
+                link pair [NAME]        a code, and wait for a machine to use it
+                link NAME CODE          link to the machine called NAME
+                link NAME [COMMAND...]  a terminal on NAME, or one command
                 link push NAME FILE PATH   a file there, whole or not at all
                 link pull NAME PATH FILE   and back
                 link log NAME           follow the far kernel log
-                link serve              the listener, in the foreground
+                link add NAME KEY [HOST[:PORT]]   link by key, with no code
+                link remove NAME
+                link allow NAME GRANT...
+                link deny NAME GRANT...
+                link group ...          machines on one network that link
+                                        themselves
+                link on | off           the listener, kept across boots
 
-        Pairing is by key and both ways, as WireGuard's is: each machine is
+        `key` and `serve` are not in the page: the key is in the status, and
+        `serve` is how the listener starts itself.
+
+        Linking is by key and both ways, as WireGuard's is: each machine is
         told the other's key, and a machine answers only a key it was told.
-        A new peer may do nothing but the moonwater verbs; everything past
-        that is a grant somebody gave it by name.
+        A new machine may do nothing until it is allowed something by name:
+        a code gives the two that used it a terminal, a command, files and
+        the log, in both directions.
 
-        The switch, the key and the peers live in /root, beside the wireless
-        networks, so install carries them to the disk and wipe keeps them.
+        The grants: shell is a terminal, run is one command, log follows the
+        kernel log, and files is push and pull of any file root has, which
+        is as good as run -- a file pushed over a script that runs at boot is
+        a command -- bar the link's own: its key, machines, groups, stamps
+        and the machine script are never read or written through it.
+
+        The switch, the key and the machines live in /root, beside the
+        wireless networks, so install carries them to the disk and wipe keeps
+        them.
 
         Dawn Larsson - Apache-2.0 license
         github.com/dawnlarsson/moonwater
@@ -37,33 +49,30 @@ static fn link_usage_write(writer out)
 {
         string_format(out,
                       TERM_BOLD "  link" TERM_RESET
-                      "                        " TERM_DIM "on or off, this machine's key, peers, sessions" TERM_RESET "\n"
-                      TERM_BOLD "  link on|off" TERM_RESET
-                      "                 " TERM_DIM "the listener, udp 22348, kept across boots" TERM_RESET "\n"
-                      TERM_BOLD "  link key" TERM_RESET
-                      "                    " TERM_DIM "this machine's public key, made on first use" TERM_RESET "\n"
-                      TERM_BOLD "  link pair NAME KEY [HOST[:PORT]]" TERM_RESET "\n"
-                      "                              " TERM_DIM "know a machine by its key" TERM_RESET "\n"
-                      TERM_BOLD "  link join NAMESPACE [SECRET] [allow GRANT...]" TERM_RESET "\n"
-                      "                              " TERM_DIM "pair with every machine on this network in it" TERM_RESET "\n"
-                      TERM_BOLD "  link leave NAMESPACE [forget]" TERM_RESET "\n"
-                      "                              " TERM_DIM "stop, and maybe forget the machines it paired" TERM_RESET "\n"
-                      TERM_BOLD "  link forget NAME" TERM_RESET
-                      "            " TERM_DIM "stop knowing it" TERM_RESET "\n"
-                      TERM_BOLD "  link allow|deny NAME GRANT..." TERM_RESET "\n"
-                      "                              " TERM_DIM "run shell files log screen channels verbs" TERM_RESET "\n"
-                      TERM_BOLD "  link shell NAME" TERM_RESET
-                      "             " TERM_DIM "a terminal on NAME" TERM_RESET "\n"
-                      TERM_BOLD "  link run NAME COMMAND..." TERM_RESET
-                      "    " TERM_DIM "one command on NAME, its output and status here" TERM_RESET "\n"
+                      "                        " TERM_DIM "who this machine is linked with, and what each may do" TERM_RESET "\n"
+                      TERM_BOLD "  link pair [NAME]" TERM_RESET
+                      "            " TERM_DIM "a code, and wait for the other machine to use it" TERM_RESET "\n"
+                      TERM_BOLD "  link NAME CODE" TERM_RESET
+                      "              " TERM_DIM "link to the machine called NAME, which is waiting" TERM_RESET "\n"
+                      TERM_BOLD "  link NAME [COMMAND...]" TERM_RESET
+                      "      " TERM_DIM "a terminal on NAME, or one command with its status" TERM_RESET "\n"
                       TERM_BOLD "  link push NAME FILE PATH" TERM_RESET
                       "    " TERM_DIM "a file here to PATH there" TERM_RESET "\n"
                       TERM_BOLD "  link pull NAME PATH FILE" TERM_RESET
                       "    " TERM_DIM "PATH there to a file here" TERM_RESET "\n"
                       TERM_BOLD "  link log NAME" TERM_RESET
                       "               " TERM_DIM "follow NAME's kernel log" TERM_RESET "\n"
-                      TERM_BOLD "  link serve" TERM_RESET
-                      "                  " TERM_DIM "the listener in the foreground" TERM_RESET "\n");
+                      TERM_BOLD "  link add NAME KEY [HOST[:PORT]]" TERM_RESET "\n"
+                      "                              " TERM_DIM "link by key, with no code" TERM_RESET "\n"
+                      TERM_BOLD "  link remove NAME" TERM_RESET
+                      "            " TERM_DIM "stop knowing it" TERM_RESET "\n"
+                      TERM_BOLD "  link allow|deny NAME GRANT..." TERM_RESET "\n"
+                      "                              " TERM_DIM "shell run log files (any file but the link's own)" TERM_RESET "\n"
+                      TERM_BOLD "  link group [NAME [SECRET] [allow GRANT...]]" TERM_RESET "\n"
+                      "                              " TERM_DIM "machines on one network that link themselves" TERM_RESET "\n"
+                      TERM_BOLD "  link group leave NAME [forget]" TERM_RESET "\n"
+                      TERM_BOLD "  link on|off" TERM_RESET
+                      "                 " TERM_DIM "the listener, udp 22348, kept across boots" TERM_RESET "\n");
         log_flush();
 }
 
@@ -110,7 +119,7 @@ static fn link_ago(p64 then, p8 address_to text)
 */
 /*
         Whether the machine script joins a namespace with a secret on the
-        line: "link join NAME" followed by a word that is not "allow".
+        line: "link group NAME" followed by a word that is not "allow".
 */
 static bool link_script_names_secret(string_address script,
                                      string_address namespace)
@@ -121,9 +130,9 @@ static bool link_script_names_secret(string_address script,
         {
                 string_address word;
 
-                if (!host_starts(at, "link join "))
+                if (!host_starts(at, "link group "))
                         continue;
-                word = at + 10;
+                word = at + 11;
                 word += string_span_of_set(word, " ");
                 if (!host_starts(word, namespace) || word[length] != ' ')
                         continue;
@@ -173,12 +182,16 @@ static b32 link_status(void)
 
         if (link_identity(address_of me, false) >= 0)
         {
+                p8 own[WATERLINK_NAME_MAX];
+
                 link_key_text(me.public, key);
-                string_format(log, "  this machine  %s\n", (string_address)key);
+                link_machine_name(own);
+                string_format(log, "  this machine  %s  %s\n",
+                              (string_address)own, (string_address)key);
                 crypto_forget(address_of me, sizeof me);
         }
         else
-                string_format(log, "  this machine  no key yet: moonwater link key\n");
+                string_format(log, "  this machine  no key yet: moonwater link on\n");
 
         //      The groups: which, what members get, and whether the secret
         //      sits in the machine script, where /dev/spark shows it to any
@@ -187,7 +200,7 @@ static b32 link_status(void)
         {
                 p8 script[16384];
                 bipolar script_length = file_slurp_once_at(
-                        AT_FDCWD, "/root/main.moonwater.sh", script,
+                        AT_FDCWD, HOST_MACHINE_SCRIPT, script,
                         sizeof script - 1);
 
                 script[script_length > 0 ? script_length : 0] = 0;
@@ -196,7 +209,25 @@ static b32 link_status(void)
                 {
                         struct waterlink_group_keys keys;
                         p8 grants[96];
-                        bool shown = link_script_names_secret(
+                        bool shown;
+
+                        if (groups.record[g].flags & LINK_GROUP_ONCE)
+                        {
+                                p64 now = link_boot_seconds();
+                                p64 left = groups.record[g].expires > now
+                                                   ? groups.record[g].expires - now
+                                                   : 0;
+
+                                //      A code is not a group: what it linked
+                                //      is not said to be in one.
+                                if (!(groups.record[g].flags & LINK_GROUP_DONE))
+                                        string_format(log, "  a pairing code for %s is waiting, "
+                                                           "%p seconds left\n",
+                                                      (string_address)groups.record[g].namespace,
+                                                      (positive)left);
+                                continue;
+                        }
+                        shown = link_script_names_secret(
                                 (string_address)script,
                                 groups.record[g].namespace);
 
@@ -207,8 +238,8 @@ static b32 link_status(void)
                         crypto_forget(address_of keys, sizeof keys);
                         link_grants_text(groups.record[g].may, grants,
                                          sizeof grants);
-                        string_format(log, "  in %s: members on this network "
-                                           "pair by themselves, and may %s\n",
+                        string_format(log, "  group %s: machines on this network "
+                                           "link themselves, and may %s\n",
                                       (string_address)groups.record[g].namespace,
                                       (string_address)grants);
                         if (shown)
@@ -216,7 +247,7 @@ static b32 link_status(void)
                                               "    the machine script holds "
                                               "its secret, which any user can "
                                               "read through /dev/spark: run "
-                                              "moonwater link join %s SECRET "
+                                              "moonwater link group %s SECRET "
                                               "once and keep only the name "
                                               "there\n",
                                               (string_address)groups.record[g].namespace);
@@ -225,7 +256,8 @@ static b32 link_status(void)
 
         link_peers_load(address_of peers);
         if (!peers.count)
-                string_format(log, "  no peers: moonwater link pair NAME KEY HOST\n");
+                string_format(log, "  nobody linked yet: moonwater link pair here, "
+                                   "and moonwater link NAME CODE there\n");
 
         for (positive at = 0; at < peers.count; at++)
         {
@@ -241,23 +273,19 @@ static b32 link_status(void)
                 link_grants_text(peer->may, grants, sizeof grants);
 
                 {
-                        string_address how = "paired by hand";
+                        string_address how = "";
                         p8 in_group[48];
 
-                        if (peer->group)
-                        {
-                                how = "paired by a group this machine left";
-                                for (positive g = 0; g < groups.count; g++)
-                                        if (marks[g] == peer->group)
-                                        {
-                                                string_copy((string_address)in_group,
-                                                            "paired in ");
-                                                string_copy((string_address)in_group + 10,
-                                                            groups.record[g].namespace);
-                                                how = (string_address)in_group;
-                                        }
-                        }
-                        string_format(log, "  %s  %s...  may %s, %s\n",
+                        for (positive g = 0; peer->group && g < groups.count; g++)
+                                if (marks[g] == peer->group)
+                                {
+                                        string_copy((string_address)in_group,
+                                                    ", in group ");
+                                        string_copy((string_address)in_group + 11,
+                                                    groups.record[g].namespace);
+                                        how = (string_address)in_group;
+                                }
+                        string_format(log, "  %s  %s...  may %s%s\n",
                                       (string_address)peer->name,
                                       (string_address)short_key,
                                       (string_address)grants, how);
@@ -341,17 +369,19 @@ static b32 link_key_verb(void)
         return 0;
 }
 
-static b32 link_pair_locked(string_address name, string_address text,
-                            string_address place)
+static b32 link_add_locked(string_address name, string_address text,
+                          string_address place)
 {
         link_peers peers;
         struct waterlink_peer peer;
         struct waterlink_peer address_to found;
+        struct waterlink_peer address_to keyed;
         struct waterlink_identity me;
 
         if (!link_name_good(name))
-                return host_refuse("%s is not a peer name: letters, digits, "
-                                   ". - _, up to 31\n",
+                return host_refuse("%s is not a name: letters, digits, "
+                                   ". - _, up to 31, and not one of the words "
+                                   "link uses\n",
                                    name);
 
         memory_zero(address_of peer, sizeof peer);
@@ -386,22 +416,39 @@ static b32 link_pair_locked(string_address name, string_address text,
         if (!link_peers_for_change(address_of peers))
                 return host_refuse("%s could not be read\n", LINK_PEERS_PATH);
         found = link_peer_named(address_of peers, name);
+        keyed = link_peer_keyed(address_of peers, peer.key);
+        //      The name is one machine's and the key another's: replacing the
+        //      first would leave the key twice, and the listener goes by the
+        //      first it finds.
+        if (found && keyed && found != keyed)
+                return host_refuse("that key is already linked as %s: moonwater "
+                                   "link remove it first\n",
+                                   (string_address)keyed->name);
         if (!found)
-                found = link_peer_keyed(address_of peers, peer.key);
+                found = keyed;
 
         if (found)
         {
-                //      Paired again: the grants stay with the key they were
-                //      given to, and nowhere else.
+                //      Added again: the grants stay with the key they were
+                //      given to, and nowhere else, and so does the address
+                //      when none is given.
                 if (crypto_same(found->key, peer.key, 32))
+                {
                         peer.may = found->may;
+                        if (!place)
+                        {
+                                memory_copy(peer.address, found->address,
+                                            sizeof peer.address);
+                                peer.port = found->port;
+                        }
+                }
                 *found = peer;
         }
         else
         {
                 if (peers.count >= LINK_PEERS_MAX)
-                        return host_refuse("this machine knows %s peers "
-                                           "already\n",
+                        return host_refuse("this machine is linked with %s "
+                                           "machines already\n",
                                            "64");
                 peers.peer[peers.count++] = peer;
         }
@@ -409,14 +456,14 @@ static b32 link_pair_locked(string_address name, string_address text,
         if (link_peers_save(address_of peers) < 0)
                 return host_refuse("%s could not be written\n", LINK_PEERS_PATH);
 
-        string_format(log, host_label "paired %s; it may use the moonwater "
-                                      "verbs, and more once allowed\n",
-                      name);
+        string_format(log, host_label "added %s; it may do nothing yet: "
+                                      "moonwater link allow %s run\n",
+                      name, name);
         log_flush();
         return 0;
 }
 
-static b32 link_forget_locked(string_address name)
+static b32 link_remove_locked(string_address name)
 {
         link_peers peers;
         struct waterlink_peer address_to found;
@@ -424,13 +471,13 @@ static b32 link_forget_locked(string_address name)
         link_peers_load(address_of peers);
         found = link_peer_named(address_of peers, name);
         if (!found)
-                return host_refuse("no peer is called %s\n", name);
+                return host_refuse("no machine is called %s\n", name);
 
         *found = peers.peer[--peers.count];
         if (link_peers_save(address_of peers) < 0)
                 return host_refuse("%s could not be written\n", LINK_PEERS_PATH);
 
-        string_format(log, host_label "forgot %s\n", name);
+        string_format(log, host_label "removed %s\n", name);
         log_flush();
         return 0;
 }
@@ -445,15 +492,15 @@ static b32 link_grant_locked(string_address name, bool allow,
         link_peers_load(address_of peers);
         found = link_peer_named(address_of peers, name);
         if (!found)
-                return host_refuse("no peer is called %s\n", name);
+                return host_refuse("no machine is called %s\n", name);
 
         for (positive at = 0; at < count; at++)
         {
                 p32 bit = link_grant_bit(words[at]);
 
                 if (!bit)
-                        return host_refuse("%s is not a grant: run shell files "
-                                           "log screen channels verbs\n",
+                        return host_refuse("%s is not a grant: shell run files "
+                                           "log\n",
                                            words[at]);
                 if (allow)
                         found->may |= bit;
@@ -520,7 +567,7 @@ static bool link_wait_owner(bool present)
         return false;
 }
 
-static b32 link_switch(bool on)
+static b32 link_switch(bool on, bool say)
 {
         struct waterlink_identity me;
         p8 key[48];
@@ -534,8 +581,11 @@ static b32 link_switch(bool on)
                 (void)link_lock_signal(15);
                 if (!link_wait_owner(false))
                         return host_refuse("the listener did not stop%s\n", "");
-                string_format(log, host_label "link off; sessions closed\n");
-                log_flush();
+                if (say)
+                {
+                        string_format(log, host_label "link off; sessions closed\n");
+                        log_flush();
+                }
                 return 0;
         }
 
@@ -551,9 +601,12 @@ static b32 link_switch(bool on)
 
         link_key_text(me.public, key);
         crypto_forget(address_of me, sizeof me);
-        string_format(log, host_label "link on, udp %p; this machine is %s\n",
-                      (positive)link_port(), (string_address)key);
-        log_flush();
+        if (say)
+        {
+                string_format(log, host_label "link on, udp %p; this machine is %s\n",
+                              (positive)link_port(), (string_address)key);
+                log_flush();
+        }
         return 0;
 }
 
@@ -575,19 +628,19 @@ static p32 link_grants_of(string_address address_to words, positive count,
 }
 
 /*
-        join NAMESPACE [SECRET] [allow GRANT...]
+        group NAMESPACE [SECRET] [allow GRANT...]
 
         With a secret, this machine is in the group from now on and across
         boots, install and wipe; the secret itself is never kept, only what
         PBKDF2 makes of it. Without one, the group already joined is joined
         again, or a new group gets a secret of 160 random bits, printed once
         for the other machines.
-        Members get the grants named here, and the verbs when none are. The
+        Members get the grants named here, and none when none are. The
         link is switched on.
 */
 static const char link_base32[] = "abcdefghijklmnopqrstuvwxyz234567";
 
-static b32 link_join(string_address address_to words, positive count)
+static b32 link_group_join(string_address address_to words, positive count)
 {
         string_address namespace = words[0];
         string_address secret = null;
@@ -600,11 +653,13 @@ static b32 link_join(string_address address_to words, positive count)
         p32 may = 0;
         positive at = 1;
         p8 grants[96];
+        bipolar lock;
 
         if (!link_name_good(namespace) ||
             string_length(namespace) >= WATERLINK_NAMESPACE_MAX)
-                return host_refuse("%s is not a namespace: letters, digits, "
-                                   ". - _, up to 31\n",
+                return host_refuse("%s is not a group name: letters, digits, "
+                                   ". - _, up to 31, and not one of the words "
+                                   "link uses\n",
                                    namespace);
         if (at < count && !string_equals(words[at], "allow"))
                 secret = words[at++];
@@ -615,15 +670,17 @@ static b32 link_join(string_address address_to words, positive count)
                 may = link_grants_of(words + at + 1, count - at - 1,
                                      address_of good);
                 if (!good)
-                        return host_refuse("a grant is one of run shell files "
-                                           "log screen channels verbs%s\n",
+                        return host_refuse("a grant is one of shell run files "
+                                           "log%s\n",
                                            "");
                 granted = true;
         }
 
+        lock = link_peers_lock();
         link_groups_load(address_of groups);
         for (positive look = 0; look < groups.count; look++)
-                if (string_equals(groups.record[look].namespace, namespace))
+                if (string_equals(groups.record[look].namespace, namespace) &&
+                    !(groups.record[look].flags & LINK_GROUP_ONCE))
                         record = groups.record + look;
 
         if (!secret && !record)
@@ -632,6 +689,7 @@ static b32 link_join(string_address address_to words, positive count)
 
                 if (system_random_fill(random, sizeof random, 0) < 0)
                 {
+                        link_peers_unlock(lock);
                         crypto_forget(random, sizeof random);
                         crypto_forget(address_of groups, sizeof groups);
                         return host_fail("randomness", -EIO);
@@ -648,6 +706,7 @@ static b32 link_join(string_address address_to words, positive count)
         {
                 if (groups.count >= LINK_GROUPS_MAX)
                 {
+                        link_peers_unlock(lock);
                         crypto_forget(made, sizeof made);
                         crypto_forget(address_of groups, sizeof groups);
                         return host_refuse("this machine is in %s groups "
@@ -680,18 +739,20 @@ static b32 link_join(string_address address_to words, positive count)
 
         if (link_groups_save(address_of groups) < 0)
         {
+                link_peers_unlock(lock);
                 crypto_forget(made, sizeof made);
                 crypto_forget(address_of groups, sizeof groups);
                 return host_refuse("%s could not be written\n", LINK_GROUPS_PATH);
         }
+        link_peers_unlock(lock);
 
         link_grants_text(record->may, grants, sizeof grants);
-        string_format(log, host_label "in %s; members may %s here\n", namespace,
-                      (string_address)grants);
+        string_format(log, host_label "in group %s; its members may %s here\n",
+                      namespace, (string_address)grants);
         if (generated)
                 string_format(log,
                               host_label "the secret is %s -- on each other "
-                                         "machine: moonwater link join %s %s\n",
+                                         "machine: moonwater link group %s %s\n",
                               (string_address)made, namespace,
                               (string_address)made);
         else if (secret && string_length(secret) < 20)
@@ -702,20 +763,22 @@ static b32 link_join(string_address address_to words, positive count)
         log_flush();
         crypto_forget(made, sizeof made);
         crypto_forget(address_of groups, sizeof groups);
-        return link_switch(true);
+        return link_switch(true, true);
 }
 
-// leave NAMESPACE [forget]: stop announcing it, and maybe its peers too.
-static b32 link_leave(string_address namespace, bool forget)
+// group leave NAMESPACE [forget]: stop announcing it, and maybe its machines too.
+static b32 link_group_leave(string_address namespace, bool forget)
 {
         link_groups groups;
         struct waterlink_group_keys keys;
         bool found = false;
         bool saved;
+        bipolar lock = link_peers_lock();
 
         link_groups_load(address_of groups);
         for (positive at = 0; at < groups.count; at++)
-                if (string_equals(groups.record[at].namespace, namespace))
+                if (string_equals(groups.record[at].namespace, namespace) &&
+                    !(groups.record[at].flags & LINK_GROUP_ONCE))
                 {
                         waterlink_group_keys_from(address_of keys,
                                                   groups.record[at].key,
@@ -725,9 +788,10 @@ static b32 link_leave(string_address namespace, bool forget)
                         break;
                 }
         saved = found && link_groups_save(address_of groups) >= 0;
+        link_peers_unlock(lock);
         crypto_forget(address_of groups, sizeof groups);
         if (!found)
-                return host_refuse("this machine is not in %s\n", namespace);
+                return host_refuse("this machine is not in group %s\n", namespace);
         if (!saved)
         {
                 crypto_forget(address_of keys, sizeof keys);
@@ -737,7 +801,7 @@ static b32 link_leave(string_address namespace, bool forget)
         if (forget)
         {
                 link_peers peers;
-                bipolar lock = link_peers_lock();
+                bipolar held = link_peers_lock();
                 positive dropped = 0;
                 bool read = link_peers_for_change(address_of peers);
 
@@ -749,73 +813,439 @@ static b32 link_leave(string_address namespace, bool forget)
                         }
                 if (read)
                         (void)link_peers_save(address_of peers);
-                link_peers_unlock(lock);
+                link_peers_unlock(held);
                 if (read)
-                        string_format(log, host_label "left %s and forgot the "
-                                                      "%p machines it paired\n",
+                        string_format(log, host_label "left group %s and removed the "
+                                                      "%p machines it linked\n",
                                       namespace, dropped);
                 else
-                        string_format(log, host_label "left %s; %s could not "
+                        string_format(log, host_label "left group %s; %s could not "
                                                       "be read, so the "
-                                                      "machines it paired are "
+                                                      "machines it linked are "
                                                       "kept\n",
                                       namespace, LINK_PEERS_PATH);
         }
         else
-                string_format(log, host_label "left %s; the machines it paired "
-                                              "are still known\n",
+                string_format(log, host_label "left group %s; the machines it "
+                                              "linked are still known\n",
                               namespace);
         log_flush();
         crypto_forget(address_of keys, sizeof keys);
         return 0;
 }
 
+/*
+        A code, and the machines that use it.
+
+        pair [NAME] makes six symbols, thirty bits, and waits; NAME CODE is
+        said on the other machine. Both sides are the same group of one: the
+        namespace is the name of the machine that is waiting, the secret is
+        the code, and the key is what PBKDF2 makes of the two, the same slow
+        derivation any group has, so a code can be guessed no faster than a
+        group's secret can and has five minutes to be. A name typed wrong
+        derives another key and finds nobody. The group lets in one machine
+        and is gone (nearby.c), and the two know each other by the names they
+        are called, which is what `link NAME` takes after.
+
+        Crockford's alphabet: no u, and o, i and l read as 0 and 1, so a code
+        read off one screen and typed on another survives a misread letter.
+*/
+static const char link_code_alphabet[] = "0123456789abcdefghjkmnpqrstvwxyz";
+#define LINK_CODE_LENGTH 6
+#define LINK_PAIR_MAY (WATERLINK_MAY_SHELL | WATERLINK_MAY_RUN | \
+                       WATERLINK_MAY_FILES | WATERLINK_MAY_LOG)
+
+static bool link_code_make(p8 address_to code)
+{
+        p32 bits;
+
+        if (system_random_fill(address_of bits, sizeof(bits), 0) < 0)
+                return false;
+        for (positive at = 0; at < LINK_CODE_LENGTH; at++)
+                code[at] = (p8)link_code_alphabet[(bits >> (5 * at)) & 31];
+        code[LINK_CODE_LENGTH] = 0;
+        crypto_forget(address_of bits, sizeof(bits));
+        return true;
+}
+
+/*      A code as typed: capitals folded, hyphens and spaces left out, the
+        look-alikes read as what they stand for. False unless it comes to
+        exactly six symbols of the alphabet, which is also how a word after a
+        machine's name is told from a command. */
+static bool link_code_clean(string_address text, p8 address_to code)
+{
+        positive used = 0;
+
+        for (positive at = 0; text[at]; at++)
+        {
+                p8 c = byte_to_lower((p8)text[at]);
+
+                if (c == '-' || c == ' ')
+                        continue;
+                if (c == 'o')
+                        c = '0';
+                else if (c == 'i' || c == 'l')
+                        c = '1';
+                if (used == LINK_CODE_LENGTH || !string_first_of(link_code_alphabet, c))
+                        return false;
+                code[used++] = c;
+        }
+        code[used] = 0;
+        return used == LINK_CODE_LENGTH;
+}
+
+//      A machine's name as the other one prints it: lowercase.
+static fn link_fold_name(string_address name, p8 address_to into)
+{
+        positive at = 0;
+
+        for (; name[at] && at < WATERLINK_NAME_MAX - 1; at++)
+                into[at] = byte_to_lower((p8)name[at]);
+        into[at] = 0;
+}
+
+//      abc-def, as it is said aloud and typed.
+static fn link_code_text(p8 address_to code, p8 address_to text)
+{
+        memory_copy(text, code, 3);
+        text[3] = '-';
+        memory_copy(text + 4, code + 3, 3);
+        text[7] = 0;
+}
+
+/*      Five minutes, or less when the environment says so, which is how a
+        test sees a code run out. A longer wait is never taken. */
+static p64 link_pair_seconds(void)
+{
+        bipolar seconds = link_decimal(
+            file_environment((string_address) "WATERLINK_PAIR_SECONDS"));
+
+        return seconds > 0 && seconds < LINK_PAIR_SECONDS ? (p64)seconds
+                                                          : LINK_PAIR_SECONDS;
+}
+
+/*      This machine's side of a code in the groups file, under the lock the
+        listener takes for it: a code for this namespace made before is
+        replaced, and so is anything that has run out. Answers the mark the
+        machines it links will carry. */
+static bipolar link_pair_open(string_address namespace, p8 address_to code,
+                              string_address expect, p32 address_to mark)
+{
+        link_groups groups;
+        struct link_group_record address_to record;
+        struct waterlink_group_keys keys;
+        p8 key[32];
+        p64 now = link_boot_seconds();
+        bipolar lock;
+        bipolar answer = -ENOSPC;
+
+        //      The slow part, before the lock is taken.
+        waterlink_group_derive(namespace, code, LINK_CODE_LENGTH,
+                               WATERLINK_GROUP_ROUNDS, key);
+
+        lock = link_peers_lock();
+        link_groups_load(address_of groups);
+        for (positive at = 0; at < groups.count; at++)
+                if (link_group_spent(groups.record + at, now) ||
+                    ((groups.record[at].flags & LINK_GROUP_ONCE) &&
+                     string_equals(groups.record[at].namespace, namespace)))
+                        groups.record[at--] = groups.record[--groups.count];
+
+        if (groups.count < LINK_GROUPS_MAX)
+        {
+                record = groups.record + groups.count++;
+                memory_zero(record, sizeof(address_to record));
+                string_copy(record->namespace, namespace);
+                memory_copy(record->key, key, 32);
+                record->may = LINK_PAIR_MAY;
+                record->flags = LINK_GROUP_ONCE;
+                record->expires = now + link_pair_seconds();
+                record->expect = expect ? link_name_check(expect, WATERLINK_NAME_MAX)
+                                        : 0;
+                answer = link_groups_save(address_of groups) < 0 ? -EIO : 0;
+                waterlink_group_keys_from(address_of keys, key, namespace);
+                address_to mark = keys.mark;
+                crypto_forget(address_of keys, sizeof keys);
+        }
+        link_peers_unlock(lock);
+        crypto_forget(key, sizeof key);
+        crypto_forget(address_of groups, sizeof groups);
+        return answer;
+}
+
+//      The code taken back, when nobody used it.
+static fn link_pair_close(p32 mark)
+{
+        link_groups groups;
+        struct waterlink_group_keys keys;
+        bipolar lock = link_peers_lock();
+
+        link_groups_load(address_of groups);
+        for (positive at = 0; at < groups.count; at++)
+        {
+                waterlink_group_keys_from(address_of keys, groups.record[at].key,
+                                          groups.record[at].namespace);
+                if ((groups.record[at].flags & LINK_GROUP_ONCE) && keys.mark == mark)
+                        groups.record[at--] = groups.record[--groups.count];
+                crypto_forget(address_of keys, sizeof keys);
+        }
+        (void)link_groups_save(address_of groups);
+        link_peers_unlock(lock);
+        crypto_forget(address_of groups, sizeof groups);
+}
+
+/*      The listener as it was before a code turned it on: whether it ran,
+        and what the switch said, if anything. A code nobody used leaves it so,
+        and not on for good. */
+typedef struct
+{
+        bool running;
+        p8 word[16];
+} link_before;
+
+static fn link_before_take(link_before address_to before)
+{
+        before->word[0] = 0;
+        (void)host_read_text(LINK_SWITCH_PATH, before->word, sizeof before->word);
+        before->running = link_lock_owner() > 0;
+}
+
+static fn link_before_restore(link_before address_to before)
+{
+        if (!before->running)
+                (void)link_switch(false, false);
+        if (before->word[0])
+                (void)radio_write_word(LINK_SWITCH_PATH, (string_address)before->word);
+        else
+                (void)system_remove_at(AT_FDCWD, LINK_SWITCH_PATH, 0);
+}
+
+//      Whether the listener has closed this namespace's code on a machine.
+static bool link_pair_closed(string_address namespace)
+{
+        link_groups groups;
+        bool closed = false;
+
+        link_groups_load(address_of groups);
+        for (positive at = 0; at < groups.count; at++)
+                if ((groups.record[at].flags & LINK_GROUP_ONCE) &&
+                    string_equals(groups.record[at].namespace, namespace))
+                        closed = (groups.record[at].flags & LINK_GROUP_DONE) != 0;
+        crypto_forget(address_of groups, sizeof groups);
+        return closed;
+}
+
+/*      Until a machine carrying the mark is among the ones this machine
+        knows, the code has run out, or somebody stops it. The listener does
+        the pairing and writes the file this reads, a few times a second.
+        The listener closes the code after it has written the machine, so the
+        code is read first and the machines after: a closed code with no
+        machine behind it is one used by a machine that was already linked,
+        which keeps what it had. */
+static b32 link_pair_wait(p32 mark, string_address namespace,
+                          link_before address_to before)
+{
+        p64 until = link_boot_seconds() + link_pair_seconds() + 2;
+        bipolar signals = link_signals_open();
+        b32 stopped = 0;
+        bool closed = false;
+
+        for (;;)
+        {
+                link_peers peers;
+                timespec limit = {0, 250000000};
+
+                closed = link_pair_closed(namespace);
+                link_peers_load(address_of peers);
+                for (positive at = 0; at < peers.count; at++)
+                        if (peers.peer[at].group == mark)
+                        {
+                                string_format(log, host_label "linked with %s: it and "
+                                                              "this machine may each "
+                                                              "use a terminal, "
+                                                              "commands, files and "
+                                                              "the log of the other\n",
+                                              (string_address)peers.peer[at].name);
+                                log_flush();
+                                return 0;
+                        }
+                if (closed || link_boot_seconds() >= until)
+                        break;
+                if (signals < 0)
+                        host_pause(250000000);
+                else
+                {
+                        (void)descriptor_wait_readable(signals, address_of limit, null);
+                        link_signals_take(signals, address_of stopped);
+                        if (stopped)
+                                break;
+                }
+        }
+
+        link_before_restore(before);
+        if (closed)
+                return host_refuse("the machine that used the code was already "
+                                   "linked, and keeps what it may do%s: "
+                                   "moonwater link shows it\n",
+                                   "");
+        link_pair_close(mark);
+        if (stopped)
+                return host_refuse("stopped, and the code no longer works%s\n", "");
+        return host_refuse("nobody used the code%s: both machines have to be on "
+                           "one network, and a code lasts five minutes\n",
+                           "");
+}
+
+//      The code in the groups file and the listener on, or why not.
+static b32 link_pair_start(string_address namespace, p8 address_to code,
+                           string_address expect, p32 address_to mark,
+                           link_before address_to before)
+{
+        bipolar opened = link_pair_open(namespace, code, expect, mark);
+
+        if (opened == -ENOSPC)
+                return host_refuse("this machine is in %s groups already\n", "8");
+        if (opened < 0)
+                return host_refuse("%s could not be written\n", LINK_GROUPS_PATH);
+        link_before_take(before);
+        if (!link_switch(true, false))
+                return 0;
+        link_pair_close(address_to mark);
+        link_before_restore(before);
+        return 1;
+}
+
+static b32 link_pair_here(string_address expect)
+{
+        p8 name[WATERLINK_NAME_MAX];
+        p8 code[LINK_CODE_LENGTH + 1];
+        p8 said[8];
+        p32 mark;
+        b32 refused;
+        p8 only[WATERLINK_NAME_MAX];
+        link_before before;
+
+        //      Names are lowercase on both machines.
+        if (expect)
+        {
+                link_fold_name(expect, only);
+                expect = (string_address)only;
+        }
+        if (expect && !link_name_good(expect))
+                return host_refuse("%s is not a machine name\n", expect);
+
+        //      What peers will call this machine, which is what the other
+        //      one types; a machine called by one of link's own words is
+        //      told how to be called something else.
+        link_machine_name(name);
+        if (!link_name_good((string_address)name))
+                return host_refuse("%s is not a name to link by: moonwater name "
+                                   "NEW gives one that is\n",
+                                   (string_address)name);
+        if (!link_code_make(code))
+                return host_fail("randomness", -EIO);
+
+        refused = link_pair_start((string_address)name, code, expect,
+                                  address_of mark, address_of before);
+        if (refused)
+                return refused;
+
+        link_code_text(code, said);
+        string_format(log, host_label "%s %s: on the other machine, moonwater "
+                                      "link %s %s\n"
+                           host_label "waiting five minutes for it\n",
+                      (string_address)name, (string_address)said,
+                      (string_address)name, (string_address)said);
+        log_flush();
+        crypto_forget(code, sizeof code);
+        return link_pair_wait(mark, (string_address)name, address_of before);
+}
+
+static b32 link_pair_there(string_address typed_name, string_address typed)
+{
+        p8 code[LINK_CODE_LENGTH + 1];
+        p8 name[WATERLINK_NAME_MAX];
+        p8 own[WATERLINK_NAME_MAX];
+        p32 mark;
+        b32 refused;
+        link_before before;
+
+        link_fold_name(typed_name, name);
+        link_machine_name(own);
+        if (string_equals((string_address)own, (string_address)name))
+                return host_refuse("%s is this machine's own name\n",
+                                   (string_address)name);
+
+        if (!link_code_clean(typed, code))
+                return host_refuse("%s is not a code: six letters and digits, as "
+                                   "moonwater link pair prints them\n",
+                                   typed);
+        refused = link_pair_start((string_address)name, code, null,
+                                  address_of mark, address_of before);
+        crypto_forget(code, sizeof code);
+        if (refused)
+                return refused;
+
+        string_format(log, host_label "looking for %s on this network\n",
+                      (string_address)name);
+        log_flush();
+        return link_pair_wait(mark, (string_address)name, address_of before);
+}
+
+// Whether a name is a machine this one is linked with.
+static bool link_known(string_address name)
+{
+        link_peers peers;
+
+        link_peers_load(address_of peers);
+        return link_peer_named(address_of peers, name) != null;
+}
+
 static b32 link_main(string_address address_to arguments, positive count)
 {
         string_address verb = count > 2 ? arguments[2] : null;
+        positive kind;
 
-        if (!verb)
-                return link_status();
-
-        if (string_equals(verb, "-h") || string_equals(verb, "--help") ||
-            string_equals(verb, "help"))
+        if (verb && (string_equals(verb, "-h") || string_equals(verb, "--help") ||
+                     string_equals(verb, "help")))
         {
                 link_usage_write(log);
                 return 0;
         }
 
+        //      The key, the machines and the groups are root's files: for
+        //      anyone else the page would say "nobody linked" of a machine
+        //      that has a dozen.
         if (!bowl_is_root())
                 return host_refuse("%s needs root\n", "moonwater link");
 
+        if (!verb)
+                return link_status();
+
         if ((string_equals(verb, "on") || string_equals(verb, "off")) &&
             count == 3)
-                return link_switch(string_equals(verb, "on"));
+                return link_switch(string_equals(verb, "on"), true);
         if (string_equals(verb, "key") && count == 3)
                 return link_key_verb();
         if (string_equals(verb, "serve") && count == 3)
                 return link_serve();
-        if (string_equals(verb, "join") && count >= 4)
-                return link_join(arguments + 3, count - 3);
-        if (string_equals(verb, "leave") && (count == 4 ||
-                                             (count == 5 &&
-                                              string_equals(arguments[4],
-                                                            "forget"))))
-                return link_leave(arguments[3], count == 5);
+        if (string_equals(verb, "pair") && (count == 3 || count == 4))
+                return link_pair_here(count == 4 ? arguments[3] : null);
+
         //      The peers file has a second writer, the listener pairing
         //      members: each change made here happens under the same lock.
-        if ((string_equals(verb, "pair") && (count == 5 || count == 6)) ||
-            (string_equals(verb, "forget") && count == 4) ||
+        if ((string_equals(verb, "add") && (count == 5 || count == 6)) ||
+            (string_equals(verb, "remove") && count == 4) ||
             ((string_equals(verb, "allow") || string_equals(verb, "deny")) &&
              count >= 5))
         {
                 bipolar lock = link_peers_lock();
                 b32 answer =
-                        string_equals(verb, "pair")
-                                ? link_pair_locked(arguments[3], arguments[4],
-                                                   count == 6 ? arguments[5]
-                                                              : null)
-                        : string_equals(verb, "forget")
-                                ? link_forget_locked(arguments[3])
+                        string_equals(verb, "add")
+                                ? link_add_locked(arguments[3], arguments[4],
+                                                  count == 6 ? arguments[5] : null)
+                        : string_equals(verb, "remove")
+                                ? link_remove_locked(arguments[3])
                                 : link_grant_locked(arguments[3],
                                                     string_equals(verb, "allow"),
                                                     arguments + 4, count - 4);
@@ -823,19 +1253,70 @@ static b32 link_main(string_address address_to arguments, positive count)
                 link_peers_unlock(lock);
                 return answer;
         }
-        //      shell, run, push, pull and log: a peer and what the kind takes.
+
+        if (string_equals(verb, "group"))
+        {
+                if (count == 3)
+                        return link_status();
+                if (string_equals(arguments[3], "leave") &&
+                    (count == 5 ||
+                     (count == 6 && string_equals(arguments[5], "forget"))))
+                        return link_group_leave(arguments[4], count == 6);
+                if (count >= 4)
+                        return link_group_join(arguments + 3, count - 3);
+        }
+
+        //      push, pull, log, shell and run: a machine and what the kind
+        //      takes.
         {
                 static const positive least[] = {0, 4, 5, 6, 6, 4};
                 static const positive most[] = {0, 4, ~(positive)0, 6, 6, 4};
-                positive kind = string_table_find(verb, link_kind_names,
-                                                  sizeof link_kind_names[0],
-                                                  array_count(link_kind_names));
 
-                if (kind && kind < array_count(link_kind_names) &&
-                    count >= least[kind] && count <= most[kind])
-                        return link_client_run(arguments[3], (p8)kind,
-                                               arguments + 4, count - 4);
+                kind = string_table_find(verb, link_kind_names,
+                                         sizeof link_kind_names[0],
+                                         array_count(link_kind_names));
+                if (kind && kind < array_count(link_kind_names))
+                        return count >= least[kind] && count <= most[kind]
+                                       ? link_client_run(arguments[3], (p8)kind,
+                                                         arguments + 4, count - 4)
+                                       : link_usage();
         }
+
+        //      A word that is none of those is a machine: its terminal, one
+        //      command on it, or, if it is not known and the word after it
+        //      is a code, the pairing that makes it known. A name that is
+        //      neither is told how to become one.
+        {
+                p8 folded[WATERLINK_NAME_MAX];
+
+                link_fold_name(verb, folded);
+                if (!link_known(verb) && link_known((string_address)folded))
+                        verb = (string_address)folded;
+        }
+        if (link_known(verb))
+                return link_client_run(verb,
+                                       count == 3 ? LINK_KIND_SHELL : LINK_KIND_RUN,
+                                       arguments + 3, count - 3);
+        //      The code as it is printed, abc-def: a word of six letters is
+        //      as likely to be a command (whoami, reboot) as a code, and a
+        //      misspelt machine would otherwise start a five minute wait.
+        if (count == 4)
+        {
+                p8 code[LINK_CODE_LENGTH + 1];
+
+                if (string_length(arguments[3]) == LINK_CODE_LENGTH + 1 &&
+                    arguments[3][3] == '-' &&
+                    link_code_clean(arguments[3], code))
+                        return link_name_good(verb)
+                                       ? link_pair_there(verb, arguments[3])
+                                       : host_refuse("%s is not a machine "
+                                                     "name\n",
+                                                     verb);
+        }
+        if (link_name_good(verb))
+                return host_refuse("no machine is called %s: moonwater link pair "
+                                   "on it, then moonwater link NAME CODE here\n",
+                                   verb);
         return link_usage();
 }
 

@@ -281,6 +281,22 @@ says()
         fi
 }
 
+#       The same, for a line the program wrote and the kernel's own lines
+#       cut in two: the serial console moves a write 64 bytes at a time and
+#       a printk goes out between the pieces (`...installed from another[
+#       0.927214] ip: using eth0` and then ` build.`), at a moment that
+#       depends on how fast the guest boots. The kernel's lines are taken
+#       out first, which is the one thing that makes the program's line one
+#       again.
+says_whole()
+{
+        if perl -0pe 's/\[ *[0-9]+\.[0-9]+\][^\n]*\n//g' "$work/$1" | grep -q -F -- "$3"; then
+                won
+        else
+                lost "$2" "no $3 in $1, whole"
+        fi
+}
+
 never()
 {
         if grep -q -F -- "$3" "$work/$1"; then
@@ -13186,6 +13202,75 @@ asked("a command longer than a bound event holds is refused",
 asked("a moonwater_mute function owns mute",
       "printf '%s\\n' 'function moonwater_mute {' '  :' '}' > /root/main.moonwater.sh; chmod 600 /root/main.moonwater.sh; moonwater bind mute | grep -c 'mute: /root/main.moonwater.sh:1' | sed 's/^/nf-/' | rev",
       b"1-fn")
+#       The file the machine script is read from is held to a policy, and a
+#       file that fails it is said to have been refused, by name, wherever the
+#       script's lines are shown: the kernel keeps what it had, and that is
+#       what `moonwater bind` is describing.
+def refused(name, make, marker, want):
+    asked(name,
+          "rm -f /root/main.moonwater.sh; " + make +
+          "; timeout 10 moonwater bind mute 2>&1 | grep -c 'refused' | sed 's/^/" + marker + "-/' | rev",
+          want)
+
+script_text = "printf '%s\\n' 'function moonwater_mute {' '  :' '}' > /root/main.moonwater.sh"
+refused("a script that others may write is refused, and the status says so",
+        script_text + "; chmod 666 /root/main.moonwater.sh", "wo", b"1-ow")
+refused("a script only the group may write is refused too",
+        script_text + "; chmod 664 /root/main.moonwater.sh", "pg", b"1-gp")
+refused("a link in its place is refused",
+        "echo ':' > /tmp/linked; chmod 600 /tmp/linked; ln -s /tmp/linked /root/main.moonwater.sh", "ln", b"1-nl")
+refused("a fifo in its place is refused and does not hang the command",
+        "mkfifo -m 600 /root/main.moonwater.sh", "fi", b"1-if")
+refused("a script over 64 KiB is refused",
+        "head -c 65537 /dev/zero | tr '\\0' '#' > /root/main.moonwater.sh; chmod 600 /root/main.moonwater.sh", "bg", b"1-gb")
+refused("a script of exactly 64 KiB is taken",
+        "head -c 65536 /dev/zero | tr '\\0' '#' > /root/main.moonwater.sh; chmod 600 /root/main.moonwater.sh", "ok", b"0-ko")
+refused("and an empty one",
+        ": > /root/main.moonwater.sh; chmod 600 /root/main.moonwater.sh", "em", b"0-me")
+#       A second machine process is refused, and says why; and nobody but
+#       root is one.
+asked("a second machine process is refused with 2",
+      "timeout 20 moonwater machine >/dev/null 2>&1; printf 'second-%s\\n' $? | rev",
+      b"2-dnoces")
+asked("and so is one that is not root, with 1",
+      "setpriv --reuid=65534 --regid=65534 --clear-groups moonwater machine >/dev/null 2>&1; printf 'plain-%s\\n' $? | rev",
+      b"1-nialp")
+#       Stopping the machine as somebody who may not takes no time at all: the
+#       exit list is root's, and asking a machine process to end is too.
+asked("poweroff by an ordinary user fails at once",
+      "s=$(date +%s%N); setpriv --reuid=65534 --regid=65534 --clear-groups /shell -c poweroff >/dev/null 2>&1; e=$(date +%s%N); "
+      "[ $(( (e - s) / 1000000 )) -lt 1500 ] && echo quick-poweroff | rev",
+      b"fforewop-kciuq")
+#       The machine process killed while a job of its script that is not an
+#       exec -- a subshell loop, which keeps a copy of its descriptor -- is
+#       alive: the next one attaches. A counter file says how many times
+#       moonwater_init ran. The loop has the machine process's command line
+#       too, so the one killed is the one init started: the child of 1.
+asked("a machine process killed with a background job alive is replaced by one that attaches",
+      "mp() { for f in /proc/[0-9]*/cmdline; do case $(tr '\\0' ' ' < $f) in '/shell -c moonwater machine'*) p=${f#/proc/}; p=${p%/cmdline}; set -- $(cat /proc/$p/stat); [ \"$4\" = 1 ] && echo $p;; esac; done; }; "
+      "rm -f /root/inits /root/bgpids; "
+      "printf '%s\\n' 'function moonwater_init {' '  n=$(cat /root/inits 2>/dev/null || echo 0)' '  echo $((n + 1)) > /root/inits' "
+      "'  ( while :; do sleep 1; done ) &' '  echo $! >> /root/bgpids' '}' > /root/main.moonwater.sh; chmod 600 /root/main.moonwater.sh; "
+      "kill -9 $(mp); for i in $(seq 60); do [ \"$(cat /root/inits 2>/dev/null)\" = 1 ] && break; sleep 0.5; done; "
+      "kill -9 $(mp); for i in $(seq 60); do [ \"$(cat /root/inits 2>/dev/null)\" = 2 ] && break; sleep 0.5; done; "
+      "printf 'reattach-%s\\n' \"$(cat /root/inits)\" | rev; kill $(cat /root/bgpids) 2>/dev/null",
+      b"2-hcattaer", 90)
+#       A key held down is a flood of presses of a row with no debounce: each
+#       is queued or folded into the one waiting, and the machine goes on.
+if button:
+    asked("a volume key is bound to a command",
+          "rm -f /root/main.moonwater.sh /root/vol; moonwater bind volume_up 'echo VOL >> /root/vol' > /dev/null; printf 'bound-%s\\n' ok | rev",
+          b"ko-dnuob")
+    if ready:
+        for _ in range(100):
+            qcmd({"execute": "send-key", "arguments": {"keys": [{"type": "qcode", "data": "volumeup"}]}})
+        pump(3)
+    asked("a hundred volume key presses ran the command and left the machine answering",
+          "[ \"$(wc -l < /root/vol)\" -ge 1 ] && echo flood-answers | rev",
+          b"srewsna-doolf")
+    asked("and the key's command is put back",
+          "moonwater bind volume_up '' > /dev/null; printf 'unbound-%s\\n' ok | rev",
+          b"ko-dnuobnu")
 asked("the power button takes a command",
       "printf '%s\\n' 'function moonwater_event {' '  :' '}' > /root/main.moonwater.sh; chmod 600 /root/main.moonwater.sh; moonwater bind mute >/dev/null; moonwater bind poweroff 'echo NOTTUB | rev > /dev/" + tty + "' | grep -c NOTTUB | sed 's/^/tes-/' | rev",
       b"1-set")
@@ -13549,7 +13634,7 @@ cat > "$work/live.commands" <<'COMMANDS'
 this line is eaten by the console
 printf 'verdict-%s\n' "$(rev < /run/moonwater/verdict)"
 moonwater status > /tmp/status 2>&1
-printf 'status-live-%s\n' $(( $(grep -c 'live: nothing is kept' /tmp/status) * 7 ))
+printf 'status-live-%s\n' $(( $(grep -c 'live session: nothing is kept' /tmp/status) * 7 ))
 printf 'status-none-%s\n' $(( $(grep -c 'not installed on any disk' /tmp/status) * 7 ))
 printf 'status-stick-%s\n' $(( $(grep -c 'this image is on sda1' /tmp/status) * 7 ))
 mkdir -p /bowls/probe
@@ -13561,20 +13646,20 @@ moonwater bind init add "echo boot >> /root/boots" > /dev/null 2>&1
 moonwater bind exit add "echo stop >> /root/stops" > /dev/null 2>&1
 printf 'listed-%s\n' $(( $(moonwater bind init | grep -c -e '^1  echo carried' -e '^2  echo boot') * 7 ))
 moonwater link key > /tmp/linkkey 2>&1
-moonwater link pair host LINK_HOST_KEY > /dev/null 2>&1
+moonwater link add host LINK_HOST_KEY > /dev/null 2>&1
 moonwater link allow host run log > /dev/null 2>&1
 moonwater link on > /tmp/linkon 2>&1
 printf 'link-on-%s\n' $(( $(grep -c 'link on,' /tmp/linkon) * 7 ))
-moonwater link join lab LINK_LAN_SECRET allow run > /tmp/linkjoin 2>&1
-printf 'link-joined-%s\n' $(( $(grep -c 'in lab; members may run' /tmp/linkjoin) * 7 ))
+moonwater link group lab LINK_LAN_SECRET allow run > /tmp/linkjoin 2>&1
+printf 'link-joined-%s\n' $(( $(grep -c 'in group lab; its members may run' /tmp/linkjoin) * 7 ))
 printf 'link-key-%s\n' "$(cat /tmp/linkkey)"
 moonwater name > /root/livename
 printf 'name-live-%s\n' $(( $(grep -c -E '^[a-z]+-[a-z]+$' /root/livename) * 7 ))
-printf 'no\n' | moonwater install nvme0n1 > /tmp/refused 2>&1
+printf 'no\n' | moonwater setup install nvme0n1 > /tmp/refused 2>&1
 printf 'unconfirmed-%s\n' $(( $? + 40 ))
-printf 'sda\n' | moonwater install sda > /tmp/removable 2>&1
+printf 'sda\n' | moonwater setup install sda > /tmp/removable 2>&1
 printf 'removable-%s\n' $(( $? + 40 ))
-printf 'nvme0n1\n' | moonwater install nvme0n1 > /tmp/install 2>&1
+printf 'nvme0n1\n' | moonwater setup install nvme0n1 > /tmp/install 2>&1
 printf 'installed-%s\n' $(( $? + 40 ))
 cat /tmp/install
 printf 'verdict-%s\n' "$(rev < /run/moonwater/verdict)"
@@ -13624,7 +13709,7 @@ i=0; until [ -e /root/link-asked ] || [ $i -ge 45 ]; do sleep 1; i=$((i + 1)); d
 printf 'link-asked-%s\n' "$(rev < /root/link-asked)"
 i=0; until [ -e /root/lan-asked ] || [ $i -ge 120 ]; do sleep 1; i=$((i + 1)); done
 printf 'lan-asked-%s\n' "$(rev < /root/lan-asked)"
-printf 'lan-group-%s\n' $(( $(moonwater link | grep -c 'paired in lab') * 7 ))
+printf 'lan-group-%s\n' $(( $(moonwater link | grep -c 'in group lab') * 7 ))
 printf 'kept-%s\n' "$(rev < /bowls/probe/file)"
 printf 'root-%s\n' "$(rev < /root/probe)"
 printf 'name-kept-%s\n' $(( $(test "$(moonwater name)" = "$(cat /root/livename)" && test "$(uname -n)" = "$(cat /root/livename)" && echo 1 || echo 0) * 7 ))
@@ -13660,7 +13745,7 @@ link_asker=""
 if [ -n "$link_host" ]; then
         link_guest_key=$(grep -o 'link-key-[A-Za-z0-9+/]\{43\}=' "$work/live" |
                 head -1 | sed 's/^link-key-//')
-        link_on_host "$link_host/bin/moonwater link pair guest $link_guest_key 127.0.0.1:$link_port" \
+        link_on_host "$link_host/bin/moonwater link add guest $link_guest_key 127.0.0.1:$link_port" \
                 > /dev/null 2>&1
         (
                 tries=0
@@ -13695,9 +13780,9 @@ until [ -e /run/moonwater/verdict ]; do sleep 1; done
 for i in /sys/class/net/*; do [ "\$(cat \$i/address)" = 52:54:00:66:00:02 ] && lan=\${i##*/}; done
 ip link set \$lan up
 ip addr add 10.66.0.2/24 dev \$lan
-moonwater link join lab $link_lan_secret allow run > /tmp/join 2>&1
-i=0; until moonwater link | grep -q 'paired in lab' || [ \$i -ge 90 ]; do sleep 1; i=\$((i + 1)); done
-name=\$(moonwater link | sed -n 's/^  \([^ ]*\) .*paired in lab.*/\1/p' | head -1)
+moonwater link group lab $link_lan_secret allow run > /tmp/join 2>&1
+i=0; until moonwater link | grep -q 'in group lab' || [ \$i -ge 90 ]; do sleep 1; i=\$((i + 1)); done
+name=\$(moonwater link | sed -n 's/^  \([^ ]*\) .*in group lab.*/\1/p' | head -1)
 moonwater link run "\$name" 'echo asked > /root/lan-asked; echo from-the-headless-box' < /dev/null > /tmp/lanrun 2>&1
 printf 'lan-run-%s\\n' "\$(rev < /tmp/lanrun)"
 poweroff
@@ -13750,7 +13835,7 @@ says disk 'the link switch came through the install and the reboot' 'link-kept-7
 says live 'join takes the group and its grant' 'link-joined-7'
 says neighbour 'a machine on the LAN paired with the headless box and ran a command there' 'lan-run-xob-sseldaeh-eht-morf'
 says disk 'the headless box was asked, having been told nothing on site but its address' 'lan-asked-deksa'
-says disk 'and knows its neighbour as paired in lab' 'lan-group-7'
+says disk 'and knows its neighbour as in group lab' 'lan-group-7'
 if [ -n "$link_host" ]; then
         says disk 'a paired machine ran a command there' 'link-asked-deksa'
         if [ "$(cat "$work/link-run" 2> /dev/null)" = from-the-disk ]; then
@@ -13787,7 +13872,7 @@ this line is eaten by the console
 printf 'two-verdict-%s\n' "$(cut -c1-4 /run/moonwater/verdict | rev)"
 moonwater status > /tmp/status 2>&1
 printf 'two-listed-%s\n' $(( $(grep -c -e 'installed on nvme0n1' -e 'installed on nvme1n1' /tmp/status) * 3 ))
-moonwater use nvme9n1 > /tmp/use9 2>&1
+moonwater setup use nvme9n1 > /tmp/use9 2>&1
 printf 'two-refused-%s\n' $(( $? + 40 ))
 printf 'two-said-%s\n' $(( $(grep -c 'nvme9n1 has no Moonwater install' /tmp/use9) * 7 ))
 poweroff
@@ -13827,7 +13912,7 @@ COMMANDS
 # shellcheck disable=SC2086
 install_boot update $stick
 says update 'another build is asked about' 'verdict-1n0emvn ksa'
-says update 'boot told the console'      'has Moonwater installed from another build'
+says_whole update 'boot told the console' 'has Moonwater installed from another build'
 says update 'nothing mounted before'     'unmounted-evil'
 says update 'the answer was taken'       'answered-50'
 says update 'answering keeps the disk'   'verdict-1n0emvn ksid'
@@ -13922,12 +14007,12 @@ printf '3\n' | moonwater ask > /tmp/ask 2>&1
 printf 'left-%s\n' "$(rev < /run/moonwater/verdict)"
 moonwater ask > /dev/null 2>&1
 printf 'asked-once-%s\n' $(( $? + 60 ))
-moonwater use > /tmp/use 2>&1
+moonwater setup use > /tmp/use 2>&1
 printf 'used-%s\n' $(( $? + 70 ))
 printf 'used-root-%s\n' "$(rev < /root/second)"
 moonwater status > /tmp/status 2>&1
 printf 'status-kept-other-%s\n' $(( $(grep -c 'installed on nvme0n1, another build' /tmp/status) * 3 ))
-moonwater update > /tmp/update 2>&1
+moonwater setup update > /tmp/update 2>&1
 printf 'updated-beneath-%s\n' $(( $? + 80 ))
 moonwater status > /tmp/status 2>&1
 printf 'status-current-%s\n' $(( $(grep -c 'installed on nvme0n1, this build' /tmp/status) * 3 ))
@@ -16323,7 +16408,7 @@ bench_about()
         unicode-width) bench_section=BENCH_unicode_width
                  bench_line="display widths, variant by variant: term.c's and wc's C against unicode_width" ;;
         link)    bench_section=BENCH_link
-                 bench_line="waterlink's transform a frame at a time: post, fill, seal, open, replay, deliver, acknowledge" ;;
+                 bench_line="waterlink's transform a frame at a time: post, fill, seal, open, replay, deliver, acknowledge, and a stranger's datagram at the gate" ;;
         compression) bench_line="byte-checked gzip/xz/zstd speed and ratio on identical corpora" ;;
         *)       bench_line= ;;
         esac

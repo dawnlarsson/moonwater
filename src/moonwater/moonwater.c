@@ -201,12 +201,15 @@ struct script_read {
         unsigned short line;
         unsigned char heredoc_tabs;     // <<- strips leading tabs
         unsigned char heredoc_length;   // a body waits for the next newline
-        char heredoc[SCRIPT_WORD];      // the line that ends it
+        unsigned long heredoc_total;    // its ending line's length, all of it
+        unsigned long rescan;           // what may still be read again for one
+        char heredoc[SCRIPT_WORD];      // the start of the line that ends it
 };
 
 struct script_token {
         unsigned char kind;
         unsigned char punct;
+        unsigned char fresh; // a newline came before it
         unsigned short line;
         char word[SCRIPT_WORD];
 };
@@ -247,6 +250,7 @@ static void script_heredoc_start(struct script_read *scan)
 {
         unsigned char quote = 0;
         unsigned int used = 0;
+        unsigned long total = 0;
 
         scan->at += 2;
         scan->heredoc_tabs = scan->at < scan->length && scan->text[scan->at] == '-';
@@ -273,22 +277,32 @@ static void script_heredoc_start(struct script_read *scan)
                                 value == '|' || value == '&' || value == '>' ||
                                 value == '<' || value == ')')))
                         break;
-                if (value != '\\' && used + 1 < SCRIPT_WORD)
-                        scan->heredoc[used++] = (char)value;
+                if (value != '\\') {
+                        total++;
+                        if (used + 1 < SCRIPT_WORD)
+                                scan->heredoc[used++] = (char)value;
+                }
                 scan->at++;
         }
         scan->heredoc[used] = 0;
         scan->heredoc_length = (unsigned char)used;
+        scan->heredoc_total = total;
 }
 
 static void script_skip_heredoc(struct script_read *scan)
 {
         //      A << that no line ever closes is not taken as a here-document
         //      -- a shift in $(( )) reads the same -- and nothing is skipped.
+        //      Finding that out reads to the end of the text, and a script of
+        //      nothing but shifts would do it from every one of them, under
+        //      the script lock: so what may be read again for them is
+        //      bounded, and past it a << is a shift.
         unsigned long at = scan->at;
+        unsigned long open = scan->at;
         unsigned short lines = 0;
+        unsigned long length = scan->heredoc_length;
 
-        while (at < scan->length) {
+        while (scan->rescan && at < scan->length) {
                 unsigned long start = ++at, stop = start, from;
 
                 lines++;
@@ -299,21 +313,24 @@ static void script_skip_heredoc(struct script_read *scan)
                         while (from < stop && scan->text[from] == '\t')
                                 from++;
                 at = stop;
-                if (stop - from == scan->heredoc_length) {
+                if (stop - from == scan->heredoc_total) {
                         unsigned long k = 0;
 
-                        while (k < scan->heredoc_length &&
+                        while (k < length &&
                                scan->text[from + k] == (unsigned char)scan->heredoc[k])
                                 k++;
-                        if (k == scan->heredoc_length) {
+                        if (k == length) {
                                 scan->at = at;
                                 scan->line += lines;
                                 break;
                         }
                 }
         }
-        if (scan->at != at) {
+        if (scan->at == open) {
                 //      Unclosed: the newline is an ordinary one.
+                unsigned long spent = at > open ? at - open : 0;
+
+                scan->rescan -= spent < scan->rescan ? spent : scan->rescan;
                 scan->at++;
                 scan->line++;
         }
@@ -322,7 +339,7 @@ static void script_skip_heredoc(struct script_read *scan)
 
 static void script_next(struct script_read *scan, struct script_token *token)
 {
-        unsigned char value, quote, kind;
+        unsigned char value, quote, kind, fresh = 0;
         unsigned int used = 0;
         unsigned char *b = (unsigned char *)token;
         unsigned long n = sizeof(*token);
@@ -334,9 +351,11 @@ static void script_next(struct script_read *scan, struct script_token *token)
                 kind = script_kind[value];
                 if (kind == SK_NL && scan->heredoc_length) {
                         script_skip_heredoc(scan);
+                        fresh = 1;
                         continue;
                 }
                 if (kind == SK_NL || kind == SK_SPACE) {
+                        fresh |= kind == SK_NL;
                         scan->line += kind == SK_NL;
                         scan->at++;
                         continue;
@@ -356,6 +375,7 @@ static void script_next(struct script_read *scan, struct script_token *token)
                 break;
         }
         token->line = scan->line;
+        token->fresh = fresh;
         if (scan->at >= scan->length) {
                 token->kind = SCRIPT_TOK_END;
                 return;
@@ -462,6 +482,8 @@ static void script_arm(struct moonwater_overlay *into, const char *pattern,
 {
         unsigned int event, i;
 
+        if (!into)
+                return;
         if (script_eq(pattern, "*")) {
                 if (!into->star_line)
                         into->star_line = line;
@@ -572,6 +594,67 @@ static void script_block(struct script_read *scan, struct moonwater_overlay *int
         }
 }
 
+/*
+        A function's body is any compound command, and bash defines the
+        function whichever one it is: a group, a subshell (or an arithmetic
+        one, which is two), a [[ ]] test, an if, a loop or a case. Only the
+        end of it has to be found, so that what follows is read as what
+        follows. A group and a subshell are counted by their punctuation, the
+        keyword ones by the keywords that open and close them, and those only
+        where a command can begin -- `echo fi` closes nothing. A case inside
+        either is read as a case, so that its patterns' ) are not taken for
+        the end, and the arms of the event hook's are the rows it owns.
+*/
+static int script_command_start(const struct script_token *token)
+{
+        static const char *const before[] = {
+                "if", "while", "until", "then", "do", "else", "elif", "!", "time", 0 };
+        unsigned int i;
+
+        if (token->kind == SCRIPT_TOK_DSEMI)
+                return 1;
+        if (token->kind == SCRIPT_TOK_PUNCT)
+                return token->punct == ';' || token->punct == '|' ||
+                       token->punct == '(' || token->punct == ')' ||
+                       token->punct == '{' || token->punct == '}' ||
+                       token->punct == '&';
+        for (i = 0; before[i]; i++)
+                if (script_word_is(token, before[i]))
+                        return 1;
+        return 0;
+}
+
+static void script_compound(struct script_read *scan, struct moonwater_overlay *into,
+                            int parens)
+{
+        struct script_token token;
+        unsigned short depth = 1;
+        int command = 1;
+
+        while (depth) {
+                script_next(scan, &token);
+                if (token.kind == SCRIPT_TOK_END)
+                        return;
+                if (token.fresh)
+                        command = 1;
+                if (parens && script_punct_is(&token, '('))
+                        depth++;
+                else if (parens && script_punct_is(&token, ')'))
+                        depth--;
+                else if (command && script_word_is(&token, "case"))
+                        script_parse_case(scan, into);
+                else if (command && !parens &&
+                         (script_word_is(&token, "if") || script_word_is(&token, "while") ||
+                          script_word_is(&token, "until") || script_word_is(&token, "for") ||
+                          script_word_is(&token, "select")))
+                        depth++;
+                else if (command && !parens &&
+                         (script_word_is(&token, "fi") || script_word_is(&token, "done")))
+                        depth--;
+                command = script_command_start(&token);
+        }
+}
+
 static int script_take_function(struct script_read *scan, const char *name,
                                 unsigned short line, struct moonwater_overlay *into)
 {
@@ -583,12 +666,16 @@ static int script_take_function(struct script_read *scan, const char *name,
         token = script_peek(scan);
         if (script_punct_is(&token, '(')) {
                 script_next(scan, &token);
-                token = script_peek(scan);
-                if (script_punct_is(&token, ')'))
-                        script_next(scan, &token);
+                script_next(scan, &token);
+                if (!script_punct_is(&token, ')'))
+                        return 0;
                 token = script_peek(scan);
         }
-        if (!script_punct_is(&token, '{'))
+        if (!script_punct_is(&token, '{') && !script_punct_is(&token, '(') &&
+            !script_word_is(&token, "[[") && !script_word_is(&token, "if") &&
+            !script_word_is(&token, "while") && !script_word_is(&token, "until") &&
+            !script_word_is(&token, "for") && !script_word_is(&token, "select") &&
+            !script_word_is(&token, "case"))
                 return 0;
 
         script_next(scan, &token);
@@ -611,7 +698,20 @@ static int script_take_function(struct script_read *scan, const char *name,
             name[6] == 't' && name[7] == 'e' && name[8] == 'r' &&
             name[9] == '_' && name[10])
                 script_arm(into, name + 10, line);
-        script_block(scan, hook == MOONWATER_HOOK_EVENT ? into : 0, 1);
+
+        if (script_punct_is(&token, '{'))
+                script_block(scan, hook == MOONWATER_HOOK_EVENT ? into : 0, 1);
+        else if (script_word_is(&token, "[[")) {
+                while (token.kind != SCRIPT_TOK_END && !script_punct_is(&token, ']'))
+                        script_next(scan, &token);
+                token = script_peek(scan);
+                if (script_punct_is(&token, ']'))
+                        script_next(scan, &token);
+        } else if (script_word_is(&token, "case"))
+                script_parse_case(scan, hook == MOONWATER_HOOK_EVENT ? into : 0);
+        else
+                script_compound(scan, hook == MOONWATER_HOOK_EVENT ? into : 0,
+                                script_punct_is(&token, '('));
         return 1;
 }
 
@@ -631,6 +731,8 @@ static void moonwater_scan(const char *text, unsigned long length,
         scan.line = 1;
         scan.heredoc_tabs = 0;
         scan.heredoc_length = 0;
+        scan.heredoc_total = 0;
+        scan.rescan = 8 * length;
 
         while (scan.at < scan.length) {
                 script_next(&scan, &token);
@@ -737,6 +839,7 @@ static struct {
         unsigned int event[BIND_MACHINE_QUEUE];
         unsigned int count;
         struct file *owner;
+        struct pid *process; // the thread group that attached it
         wait_queue_head_t wait;
         _Bool ending;
 } bind_machine;
@@ -863,9 +966,21 @@ static void bind_watch_code(unsigned int code, unsigned int event, _Bool on)
         WRITE_ONCE(bind_code_event[code], on ? (u8)event : 0);
 }
 
-static void bind_watch_row(struct bind_row *row, _Bool on)
+/*
+        A row somebody hears: one that has a line, or every row while a machine
+        process is attached, because the process's script may name any of them.
+        Read where the watch is written, under bind_lock, so a detach that
+        lands after another attach reads that attach's state and not its own.
+*/
+static _Bool bind_row_bound(struct bind_row *row)
+{
+        return row && (atomic_read(&bind_machine_live) || atomic_read(&row->bound));
+}
+
+static void bind_watch_row(struct bind_row *row)
 {
         unsigned int i, event = row->event;
+        _Bool on = bind_row_bound(row);
 
         for (i = 0; i < BIND_CODES_PER; i++)
                 bind_watch_code(bind_spec[event - 1].code[i], event, on);
@@ -877,8 +992,8 @@ static int bind_spawn_enter(void *data)
         char command[SPARK_BIND_COMMAND_MAX];
         char event_env[sizeof("MOONWATER_EVENT=") + SPARK_BIND_NAME_MAX];
         char *argv[] = { SPARK_TOOL_PROGRAM, "-c", command, NULL };
-        char *envp[] = { "HOME=/root", "PATH=/bin:/sbin:/usr/bin:/usr/sbin",
-                         "TERM=linux", event_env, NULL };
+        char *envp[] = { SPARK_COMMAND_ENVIRONMENT(SPARK_ENVIRONMENT_ENTRY)
+                         event_env, NULL };
         int ret;
 
         strscpy(command, spawn->command, sizeof(command));
@@ -890,13 +1005,34 @@ static int bind_spawn_enter(void *data)
         return 0;
 }
 
+/*
+        How a command that did not answer 0 ended, said as the shell says it.
+        ret is a wait status, or an error number when the command never got
+        to run or be waited for; the number is the exit code, the signal or
+        the error, whichever the words are about.
+*/
+static const char *bind_ending(int ret, int *number)
+{
+        if (ret < 0) {
+                *number = -ret;
+                return "could not be run, error";
+        }
+        if (ret & 0x7f) {
+                *number = ret & 0x7f;
+                return "was killed by signal";
+        }
+        *number = (ret >> 8) & 0xff;
+        return "exited";
+}
+
 static void bind_run(struct bind_row *row)
 {
         struct bind_spawn spawn;
         const char *name = spark_bind_event_name[row->event - 1];
+        const char *how;
         _Bool poweroff, reboot;
         pid_t pid;
-        int ret = 0, stat = 0;
+        int ret = 0, stat = 0, number, shown;
         unsigned long flags;
 
         spin_lock_irqsave(&bind_lock, flags);
@@ -912,7 +1048,9 @@ static void bind_run(struct bind_row *row)
 
         poweroff = !strcmp(spawn.command, "poweroff");
         reboot = !strcmp(spawn.command, "reboot");
-        pr_info("[moonwater] %s: %s\n", name, spawn.command);
+        //      %*pE: the line is somebody's text, and a log is not a terminal.
+        shown = (int)strlen(spawn.command);
+        pr_info("[moonwater] %s: %*pE\n", name, shown, spawn.command);
 
         kernel_sigaction(SIGCHLD, SIG_DFL);
         pid = user_mode_thread(bind_spawn_enter, &spawn, SIGCHLD);
@@ -926,14 +1064,15 @@ static void bind_run(struct bind_row *row)
 
         if (!ret)
                 goto done;
+        how = bind_ending(ret, &number);
         if (!poweroff && !reboot) {
-                pr_warn("[moonwater] %s: %s did not start (%d)\n",
-                        name, spawn.command, ret);
+                pr_warn("[moonwater] %s: %*pE %s %d\n", name, shown, spawn.command,
+                        how, number);
                 goto done;
         }
 
-        pr_warn("[moonwater] %s: %s answered %d, stopping the machine anyway\n",
-                name, spawn.command, ret);
+        pr_warn("[moonwater] %s: %*pE %s %d, stopping the machine anyway\n",
+                name, shown, spawn.command, how, number);
         if (reboot)
                 orderly_reboot();
         else
@@ -971,15 +1110,14 @@ static void bind_machine_shift(unsigned int at)
                         n * sizeof(bind_machine.event[0]));
 }
 
-static void bind_machine_watch_all(_Bool on)
+static void bind_machine_watch_all(void)
 {
         unsigned at;
         unsigned long flags;
 
         spin_lock_irqsave(&bind_lock, flags);
         for (at = 0; at < SPARK_BIND_EVENTS; at++)
-                bind_watch_row(bind_table + at,
-                               on || atomic_read(&bind_table[at].bound));
+                bind_watch_row(bind_table + at);
         spin_unlock_irqrestore(&bind_lock, flags);
 }
 
@@ -1096,11 +1234,6 @@ static void bind_queue(struct bind_row *row)
                 atomic_fetch_add(1, &row->runs);
 }
 
-static _Bool bind_row_bound(struct bind_row *row)
-{
-        return row && (atomic_read(&bind_machine_live) || atomic_read(&row->bound));
-}
-
 static void bind_fire(unsigned int event)
 {
         struct bind_row *row = bind_row(event);
@@ -1112,29 +1245,52 @@ static void bind_fire(unsigned int event)
                 bind_queue(row);
 }
 
-static void bind_machine_detach(struct file *file)
+/*
+        Nobody holds the machine: no owner, nothing queued, no ending in
+        progress. With bind_machine_lock held; the process it returns is the
+        caller's to put once the lock is let go.
+*/
+static struct pid *bind_machine_reset(void)
+{
+        struct pid *process = bind_machine.process;
+
+        bind_machine.owner = NULL;
+        bind_machine.process = NULL;
+        bind_machine.ending = false;
+        bind_machine.count = 0;
+        atomic_set(&bind_machine_live, 0);
+        return process;
+}
+
+/*
+        Let go of the machine, if file holds it -- and, when process is named,
+        only if that thread group is the one that attached, which is how a
+        flush from a process that is not the machine process's own is told
+        apart from the real thing.
+*/
+static void bind_machine_detach(struct file *file, struct pid *process)
 {
         unsigned long flags;
         unsigned int drain[BIND_MACHINE_QUEUE], n = 0, i;
+        struct pid *gone = NULL;
         _Bool was_owner = false;
 
         spin_lock_irqsave(&bind_machine_lock, flags);
-        if (bind_machine.owner == file) {
+        if (bind_machine.owner == file &&
+            (!process || bind_machine.process == process)) {
                 was_owner = true;
                 if (!bind_machine.ending)
                         for (i = 0; i < bind_machine.count; i++)
                                 drain[n++] = bind_machine.event[i];
-                bind_machine.owner = NULL;
-                bind_machine.ending = false;
-                bind_machine.count = 0;
-                atomic_set(&bind_machine_live, 0);
+                gone = bind_machine_reset();
         }
         spin_unlock_irqrestore(&bind_machine_lock, flags);
 
         if (!was_owner)
                 return;
 
-        bind_machine_watch_all(false);
+        put_pid(gone);
+        bind_machine_watch_all();
         wake_up(&bind_machine.wait);
         for (i = 0; i < n; i++) {
                 struct bind_row *row = bind_row(drain[i]);
@@ -1142,6 +1298,31 @@ static void bind_machine_detach(struct file *file)
                 if (row)
                         bind_queue(row);
         }
+}
+
+/*
+        Called when a descriptor of the device is closed, by whoever closes it:
+        every spawn device a shell opens comes through here, so the common
+        answer costs one load.
+
+        The machine process's attach is its open file, and an open file is let
+        go of only when the last reference to it is. A process that forks and
+        does not exec -- a background function in the script, a subshell, the
+        wifi and time children -- hands each child a copy of the descriptor,
+        so killing the machine process left the file open for as long as any
+        of them lived. The owner stayed set, the next machine process was
+        answered EBUSY, and the rows it had claimed went to a queue nobody
+        read. The machine process dying is what ends its attach, and it ends
+        it here, as its descriptors are closed on the way out: not a close by
+        anyone else, and not a close by the machine process itself of a copy
+        it made, which is its own business and does not end anything.
+*/
+static void bind_machine_flush(struct file *file)
+{
+        if (likely(READ_ONCE(bind_machine.owner) != file) ||
+            !(current->flags & PF_EXITING))
+                return;
+        bind_machine_detach(file, task_tgid(current));
 }
 
 static void bind_machine_fill(struct machine_control *request, unsigned int event)
@@ -1277,26 +1458,34 @@ static long report_machine(struct file *file, struct machine_control __user *out
                 return -EPERM;
 
         switch (request.op) {
-        case MOONWATER_ATTACH:
+        case MOONWATER_ATTACH: {
+                struct pid *process = get_pid(task_tgid(current));
+                struct pid *before;
+
                 spin_lock_irqsave(&bind_machine_lock, flags);
                 if (bind_machine.owner && bind_machine.owner != file) {
                         spin_unlock_irqrestore(&bind_machine_lock, flags);
+                        put_pid(process);
                         return -EBUSY;
                 }
+                before = bind_machine.process;
+                bind_machine.process = process;
                 bind_machine.owner = file;
                 bind_machine.ending = false;
                 request.queued = bind_machine.count;
                 atomic_set(&bind_machine_live, 1);
                 spin_unlock_irqrestore(&bind_machine_lock, flags);
-                bind_machine_watch_all(true);
+                put_pid(before);
+                bind_machine_watch_all();
 #ifdef CONFIG_MOONWATER_CANVAS
                 if (!atomic_read(&bind_canvas_told) && canvas_is_on())
                         bind_fire(SPARK_BIND_CANVAS_ON);
 #endif
                 request.flags = MOONWATER_ATTACHED;
                 break;
+        }
         case MOONWATER_DETACH:
-                bind_machine_detach(file);
+                bind_machine_detach(file, NULL);
                 request.flags = 0;
                 request.queued = 0;
                 break;
@@ -1673,10 +1862,9 @@ static void bind_start(void)
         INIT_WORK(&bind_canvas_work, bind_canvas_run);
         init_waitqueue_head(&bind_machine.wait);
         machine_script_reset();
-        bind_machine.owner = NULL;
-        bind_machine.ending = false;
-        bind_machine.count = 0;
-        atomic_set(&bind_machine_live, 0);
+        spin_lock_irq(&bind_machine_lock);
+        bind_machine_reset();
+        spin_unlock_irq(&bind_machine_lock);
         atomic_set(&bind_ctrl, 0);
         atomic_set(&bind_alt, 0);
         bind_held_n = 0;
@@ -1697,7 +1885,7 @@ static void bind_start(void)
                 atomic_set(&row->busy, 0);
                 row->last = 0;
                 INIT_WORK(&row->work, bind_work);
-                bind_watch_row(row, row->def[0] != 0);
+                bind_watch_row(row);
         }
         atomic_set(&bind_alive, 1);
         if (input_register_handler(&bind_handler))
@@ -1714,15 +1902,14 @@ static void bind_start(void)
 
 static void bind_stop(void)
 {
+        struct pid *gone;
         unsigned at;
 
         atomic_set(&bind_alive, 0);
         spin_lock_irq(&bind_machine_lock);
-        bind_machine.owner = NULL;
-        bind_machine.ending = false;
-        bind_machine.count = 0;
-        atomic_set(&bind_machine_live, 0);
+        gone = bind_machine_reset();
         spin_unlock_irq(&bind_machine_lock);
+        put_pid(gone);
         wake_up_all(&bind_machine.wait);
 
 #ifdef CONFIG_VT
@@ -1820,8 +2007,7 @@ static long report_bind(struct bind_control __user *out)
                         request.command[0] ? request.command : row->def,
                         sizeof(row->command));
                 atomic_set(&row->bound, row->command[0] != 0);
-                bind_watch_row(row, row->command[0] != 0 ||
-                                            atomic_read(&bind_machine_live));
+                bind_watch_row(row);
                 spin_unlock_irqrestore(&bind_lock, flags);
         }
 
@@ -1876,16 +2062,11 @@ static struct moonwater_overlay host_machine_sourced_overlay;
 static bool host_machine_self;
 //      moonwater_end has run; it runs once however the machine stops.
 static bool host_machine_ended;
+//      The file the script is read from was there and was refused: its mode,
+//      its owner, a link, or too many bytes. The kernel then keeps what it had.
+static bool host_machine_rejected;
 
-static const struct {
-        string_address name;
-        string_address value;
-} host_machine_env[] = {
-        { "HOME", "/root" },
-        { "TERM", "dumb" },
-        { "PATH", BOWL_DEFAULT_PATH },
-        { "LANG", "C.UTF-8" },
-};
+#define HOST_MACHINE_ASSIGN(name, value) env_assign(name, value);
 
 static bool host_machine_file_allowed(p16 mode, p32 owner)
 {
@@ -1893,15 +2074,13 @@ static bool host_machine_file_allowed(p16 mode, p32 owner)
                (mode & 0022) == 0;
 }
 
-static p8 host_machine_read_file(string_address path, p8 address_to text,
-                                 positive room, positive address_to used)
+static p8 host_machine_read_file(string_address path, byte_store address_to text)
 {
         file_facts facts;
         file_facts opened;
         bipolar handle;
         bipolar got;
 
-        address_to used = 0;
         if (!file_look(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW, address_of facts))
                 return HOST_MACHINE_ABSENT;
         if ((facts.mode & MODE_FORMAT) == MODE_LINK ||
@@ -1917,27 +2096,11 @@ static p8 host_machine_read_file(string_address path, p8 address_to text,
                 return HOST_MACHINE_REFUSED;
         }
 
-        for (;;) {
-                if (address_to used == room) {
-                        p8 extra;
-
-                        got = system_read_retry((positive)handle,
-                                                address_of extra, 1);
-                        system_close(handle);
-                        return (got < 0 || got) ? HOST_MACHINE_REFUSED : HOST_MACHINE_OK;
-                }
-                got = system_read_retry((positive)handle, text + address_to used,
-                                        room - address_to used);
-                if (got < 0) {
-                        system_close(handle);
-                        return HOST_MACHINE_REFUSED;
-                }
-                if (!got)
-                        break;
-                address_to used += (positive)got;
-        }
+        //      More than the kernel takes is refused rather than cut, and the
+        //      one probe past it is what tells a script that is exactly full.
+        got = file_store_read_limit((positive)handle, text, MOONWATER_SCRIPT_BYTES);
         system_close(handle);
-        return HOST_MACHINE_OK;
+        return got < 0 ? HOST_MACHINE_REFUSED : HOST_MACHINE_OK;
 }
 
 static bipolar host_machine_ioctl(bipolar device, unsigned int op,
@@ -1968,29 +2131,31 @@ static bipolar host_machine_script(unsigned int op)
 
 static fn host_machine_publish(void)
 {
-        positive used = 0;
+        byte_store text = {0};
         p8 loaded;
 
         if (!bowl_is_root())
                 return;
 
-        loaded = host_machine_read_file(HOST_MACHINE_SCRIPT, host_machine_text,
-                                        MOONWATER_SCRIPT_BYTES, address_of used);
-        if (loaded == HOST_MACHINE_REFUSED) {
+        loaded = host_machine_read_file(HOST_MACHINE_SCRIPT, address_of text);
+        host_machine_rejected = loaded == HOST_MACHINE_REFUSED;
+        if (host_machine_rejected) {
                 string_address line[] = { "machine script refused: ",
                                           HOST_MACHINE_SCRIPT, null };
 
+                byte_store_release(address_of text);
                 host_kmsg(line);
                 return;
         }
 
         memory_zero(address_of host_machine, sizeof(host_machine));
         if (loaded == HOST_MACHINE_OK) {
-                host_machine.length = (unsigned int)used;
-                host_machine.address = (unsigned long)host_machine_text;
+                host_machine.length = (unsigned int)text.used;
+                host_machine.address = (unsigned long)text.bytes;
         }
         if (host_machine_script(MOONWATER_SCRIPT_SET) >= 0)
                 host_machine_fresh = 1;
+        byte_store_release(address_of text);
 }
 
 static fn host_machine_ask(void)
@@ -2009,6 +2174,12 @@ static fn host_machine_ask(void)
 static string_address host_machine_where(void)
 {
         host_machine_ask();
+        if (host_machine_rejected)
+                return host_machine.origin == MOONWATER_ORIGIN_DISK
+                           ? "the script from before " HOST_MACHINE_SCRIPT
+                             " was refused"
+                           : HOST_MACHINE_BUILTIN " (" HOST_MACHINE_SCRIPT
+                             " is refused)";
         return host_machine.origin == MOONWATER_ORIGIN_DISK
                    ? HOST_MACHINE_SCRIPT
                    : HOST_MACHINE_BUILTIN;
@@ -2070,13 +2241,9 @@ static b32 host_machine_call(positive slot, string_address name,
 
 static fn host_machine_bind_fn(p8 address_to into, positive room, string_address rest)
 {
-        positive i;
-
         string_copy_bounded(into, "moonwater_", room);
         string_append_bounded(into, rest, room);
-        for (i = 0; into[i]; i++)
-                if (into[i] == ' ')
-                        into[i] = '_';
+        string_replace_all(into, ' ', '_');
 }
 
 static bool host_machine_try(string_address rest, string_address first,
@@ -2134,12 +2301,15 @@ static fn host_machine_lock_fns(bool lock)
         the byte count, every line number and the same set of functions, and
         that leaves a stale body rather than an event nobody runs.
 */
-static bool host_machine_changed(void)
+static bool host_machine_changed(bipolar device)
 {
         struct machine_script held = host_machine;
 
+        //      On the descriptor this process already holds: the device was
+        //      opened and closed again for every event.
         memory_zero(address_of host_machine, sizeof(host_machine));
-        if (host_machine_script(MOONWATER_SCRIPT_GET) < 0) {
+        host_machine.op = MOONWATER_SCRIPT_GET;
+        if (system_control(device, MOONWATER_IOCTL_SCRIPT, address_of host_machine) < 0) {
                 host_machine = held;
                 return false;
         }
@@ -2244,7 +2414,13 @@ static fn host_machine_end_run(void)
 }
 
 /*
-        Waiting for the machine process to let go, unless we are it.
+        Telling the machine process the machine is stopping, and waiting for
+        it to let go -- unless we are it. True once moonwater_end has had its
+        turn: the process was told, and was seen to leave. False when there
+        was no process to tell, when it would not be told (the caller is not
+        root: END is CAP_SYS_ADMIN's), and when it was still attached after
+        ten seconds, which is a machine process that never ran moonwater_end,
+        so the stop must not behave as though it had.
 
         host_machine_self is set the moment this process owns the attach, not
         when it is told to stop: its own moonwater_poweroff calls poweroff,
@@ -2258,6 +2434,7 @@ static bool host_machine_stop(void)
         struct machine_control control;
         bipolar device;
         p64 started;
+        bool left = false;
 
         if (host_machine_self) {
                 host_machine_end_run();
@@ -2266,21 +2443,21 @@ static bool host_machine_stop(void)
         device = system_open_at(AT_FDCWD, SPARK_DEVICE, FILE_READ | O_CLOEXEC);
         if (device < 0)
                 return false;
-        if (host_machine_ioctl(device, MOONWATER_STATUS, address_of control) < 0 ||
-            !(control.flags & MOONWATER_ATTACHED)) {
-                system_close(device);
-                return false;
-        }
-        (void)host_machine_ioctl(device, MOONWATER_END, address_of control);
-        started = system_clock_ns(HOST_CLOCK_BOOTTIME);
-        while (system_clock_ns(HOST_CLOCK_BOOTTIME) - started < HOST_EXIT_EACH_NS) {
-                if (host_machine_ioctl(device, MOONWATER_STATUS, address_of control) < 0 ||
-                    !(control.flags & MOONWATER_ATTACHED))
-                        break;
-                host_pause(HOST_EVENT_POLL_NS);
+        if (host_machine_ioctl(device, MOONWATER_STATUS, address_of control) >= 0 &&
+            (control.flags & MOONWATER_ATTACHED) &&
+            host_machine_ioctl(device, MOONWATER_END, address_of control) >= 0) {
+                started = system_clock_ns(HOST_CLOCK_BOOTTIME);
+                while (!left &&
+                       system_clock_ns(HOST_CLOCK_BOOTTIME) - started < HOST_EXIT_EACH_NS) {
+                        left = host_machine_ioctl(device, MOONWATER_STATUS,
+                                                  address_of control) < 0 ||
+                               !(control.flags & MOONWATER_ATTACHED);
+                        if (!left)
+                                host_pause(HOST_EVENT_POLL_NS);
+                }
         }
         system_close(device);
-        return true;
+        return left;
 }
 
 static b32 host_machine_source(void)
@@ -2288,7 +2465,6 @@ static b32 host_machine_source(void)
         string_address argv[3];
         string_address address_to saved_argv;
         positive saved_argc;
-        bipolar handle;
         bipolar failed;
 
         memory_zero(address_of host_machine, sizeof(host_machine));
@@ -2300,12 +2476,8 @@ static b32 host_machine_source(void)
         host_machine_fresh = 1;
 
         host_state_ready();
-        handle = host_open_state(AT_FDCWD, HOST_MACHINE_RUNTIME, 0600);
-        if (handle < 0)
-                return handle;
-        failed = storage_format_write(handle, host_machine_text, host_machine.length,
-                                      0);
-        system_close(handle);
+        failed = host_write_file(HOST_MACHINE_RUNTIME, host_machine_text,
+                                 host_machine.length, 0600, false);
         if (failed < 0)
                 return failed;
 
@@ -2428,7 +2600,6 @@ static b32 host_machine_run(void)
         bipolar failed;
         p8 dirty[8];
         positive slot[MOONWATER_HOOKS];
-        unsigned int i;
         bool marked = false;
         b32 answer = HOST_MACHINE_ENDED;
 
@@ -2438,8 +2609,7 @@ static b32 host_machine_run(void)
         host_state_ready();
         system_call_1(syscall(chdir), (positive)(string_address) "/root");
         bowl_session_prepare("/root", null);
-        for (i = 0; i < sizeof(host_machine_env) / sizeof(host_machine_env[0]); i++)
-                env_assign(host_machine_env[i].name, host_machine_env[i].value);
+        SPARK_COMMAND_ENVIRONMENT(HOST_MACHINE_ASSIGN)
 
         device = system_open_at(AT_FDCWD, SPARK_DEVICE, FILE_READ | O_CLOEXEC);
         if (device < 0) {
@@ -2510,7 +2680,7 @@ static b32 host_machine_run(void)
                 //      Before the event is named, because naming it is how
                 //      the new overlay decides whether the script owns it,
                 //      and the functions have to be the new ones by then.
-                if (host_machine_changed())
+                if (host_machine_changed(device))
                         host_machine_reload(slot);
                 pair = moonwater_paired(control.event);
                 if (pair) {
