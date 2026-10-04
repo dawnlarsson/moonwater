@@ -13642,7 +13642,7 @@ install_boot()
         mkfifo "$work/serial.in" || exit 1
         coverage_guest "$image" "$work/coverage-$name"
         # shellcheck disable=SC2086
-        timeout $((240 * install_slow)) "$install_emulator" -m 2G -smp 2 $install_board $install_machine \
+        timeout $((240 * install_slow)) "$install_emulator" -m "${install_memory:-2G}" -smp 2 $install_board $install_machine \
                 -kernel "$image" -no-reboot -display none -serial stdio $coverage_serial \
                 -append "console=$install_console drm_client_lib.active=" \
                 -device qemu-xhci,id=xhci \
@@ -13965,6 +13965,114 @@ COMMANDS
         says two 'and said to have none'         'two-said-7'
         rm -f "$work/disk2.img"
 fi
+
+#
+#       What an install does when the machine is not the one it was written
+#       for: six commands at once, a disk that cannot hold partitions, data
+#       that does not fit, a copy that stops, a session that already keeps a
+#       disk, a data partition whose directories are links. Each of them used
+#       to end with the disk erased and a machine that boots from what is
+#       left. Its own disks: the first, blank, is where an install is let
+#       through; the 2 GiB one, the smallest an install takes, is where it
+#       must not; and a zoned one, which has no partitions to hold.
+#
+cat > "$work/hostile.commands" <<'COMMANDS'
+this line is eaten by the console
+for n in 1 2 3 4 5 6; do moonwater bind init add "echo lock$n" > /dev/null 2>&1 & done
+wait
+printf 'lock-%s\n' $(( $(moonwater bind init | grep -c 'echo lock') * 7 ))
+moonwater bind init add "/bin/cp /root/a /root/b" > /tmp/note 2>&1
+printf 'note-%s\n' $(( $(grep -c 'is read when the entry runs' /tmp/note) + 30 ))
+for d in /sys/class/block/nvme*n*; do [ "$(cat $d/queue/zoned 2> /dev/null)" = host-managed ] && z=${d##*/}; done
+printf "$z\n" | moonwater setup install $z > /tmp/zoned 2>&1
+printf 'zoned-refused-%s\n' $(( $? + 40 ))
+printf 'zoned-said-%s\n' $(( $(grep -c 'cannot hold partitions' /tmp/zoned) * 7 ))
+printf 'zoned-clean-%s\n' $(( $(dd if=/dev/$z bs=1024 count=1 2> /dev/null | tr -d '\000' | wc -c) + 30 ))
+dd if=/dev/zero of=/root/big bs=1M count=1700 2> /dev/null
+printf 'big-%s\n' $(( $(wc -c < /root/big) / 1048576 ))
+printf 'nvme1n1\n' | moonwater setup install nvme1n1 > /tmp/small 2>&1
+printf 'small-refused-%s\n' $(( $? + 40 ))
+printf 'small-said-%s\n' $(( $(grep -c 'nvme1n1 would hold' /tmp/small) * 7 ))
+printf 'small-parts-%s\n' $(( $(ls /sys/class/block | grep -c '^nvme1n1p') + 30 ))
+rm -f /root/big
+printf 'nvme0n1\n' | moonwater setup install nvme0n1 > /tmp/first 2>&1
+printf 'first-%s\n' $(( $? + 40 ))
+printf 'nvme1n1\n' | moonwater setup install nvme1n1 > /tmp/second 2>&1
+printf 'keeps-refused-%s\n' $(( $? + 40 ))
+printf 'keeps-said-%s\n' $(( $(grep -c 'already keeps nvme0n1' /tmp/second) * 7 ))
+printf 'keeps-parts-%s\n' $(( $(ls /sys/class/block | grep -c '^nvme1n1p') + 30 ))
+cd /
+while umount /home 2> /dev/null; do :; done
+while umount /root 2> /dev/null; do :; done
+while umount /bowls 2> /dev/null; do :; done
+while umount /run/moonwater/data 2> /dev/null; do :; done
+mkdir -p /mnt
+mount -t ext4 /dev/nvme0n1p2 /mnt
+rm -rf /mnt/home
+ln -s /etc /mnt/home
+umount /mnt
+moonwater setup live > /dev/null 2>&1
+moonwater setup use nvme0n1 > /tmp/plant 2>&1
+printf 'plant-refused-%s\n' $(( $? + 40 ))
+printf 'plant-home-%s\n' $(( $(grep -c ' /home ' /proc/self/mounts) + 30 ))
+mount -t vfat /dev/nvme0n1p1 /mnt
+f=/mnt/EFI/BOOT/BOOTX64.EFI
+pe=$(od -An -tu4 -j60 -N4 $f | tr -d ' ')
+sections=$(od -An -tu2 -j$((pe + 6)) -N2 $f | tr -d ' ')
+table=$((pe + 24 + $(od -An -tu2 -j$((pe + 20)) -N2 $f | tr -d ' ')))
+i=0
+while [ $i -lt $sections ]; do [ "$(dd if=$f bs=1 skip=$((table + 40 * i)) count=6 2> /dev/null)" = .mwset ] && raw=$(od -An -tu4 -j$((table + 40 * i + 20)) -N4 $f | tr -d ' '); i=$((i + 1)); done
+printf '\377\377\377\377' | dd of=$f bs=1 seek=$((raw + 44)) conv=notrunc 2> /dev/null
+printf '\377\377\377\377' | dd of=$f bs=1 seek=$((raw + 16384 + 44)) conv=notrunc 2> /dev/null
+dd if=/dev/zero of=/mnt/fill bs=1M 2> /dev/null
+umount /mnt
+moonwater setup update nvme0n1 > /tmp/upd 2>&1
+printf 'damaged-%s\n' $(( $(grep -c 'settings slots on nvme0n1 are damaged' /tmp/upd) * 7 ))
+mount -t vfat /dev/nvme0n1p1 /mnt
+printf 'leftover-%s\n' $(( $(ls /mnt/EFI/BOOT /mnt/EFI/moonwater | grep -c -i '\.new$') + 30 ))
+rm -f /mnt/fill
+umount /mnt
+rm -f /bin/cp
+moonwater setup live > /dev/null 2>&1
+printf 'nvme1n1\n' | moonwater setup install nvme1n1 > /tmp/gone 2>&1
+printf 'gone-refused-%s\n' $(( $? + 40 ))
+printf 'gone-said-%s\n' $(( $(grep -c 'is left without a partition table' /tmp/gone) * 7 ))
+printf 'gone-parts-%s\n' $(( $(ls /sys/class/block | grep -c '^nvme1n1p') + 30 ))
+poweroff
+COMMANDS
+
+mv "$work/disk.img" "$work/disk.keep" && truncate -s 4G "$work/disk.img" &&
+        truncate -s 2G "$work/small.img" && truncate -s 3G "$work/zoned.img" || exit 1
+install_memory=6G
+# shellcheck disable=SC2086
+install_boot hostile $stick -drive if=none,id=small,format=raw,file="$work/small.img" \
+        -device nvme,serial=moonwater3,drive=small \
+        -drive if=none,id=zoned,format=raw,file="$work/zoned.img" \
+        -device nvme,id=zoned-controller,serial=moonwater4 \
+        -device nvme-ns,drive=zoned,bus=zoned-controller,zoned=true
+install_memory=""
+rm -f "$work/disk.img" "$work/small.img" "$work/zoned.img"
+mv "$work/disk.keep" "$work/disk.img"
+says hostile 'six binds at once keep all six'     'lock-42'
+says hostile 'a program of the image needs no warning' 'note-30'
+says hostile 'a disk with no partitions is refused' 'zoned-refused-41'
+says hostile 'and said so'                         'zoned-said-7'
+says hostile 'and nothing was written to it'       'zoned-clean-30'
+says hostile 'the data to keep is more than a GiB' 'big-1700'
+says hostile 'data that does not fit is refused'   'small-refused-41'
+says hostile 'and the refusal says how much'       'small-said-7'
+says hostile 'and the disk is left as it was'      'small-parts-30'
+says hostile 'a disk that fits is installed'       'first-40'
+says hostile 'a session that keeps a disk refuses a second' 'keeps-refused-41'
+says hostile 'and says which'                      'keeps-said-7'
+says hostile 'before the second is erased'         'keeps-parts-30'
+says hostile 'a data directory that is a link is not bound' 'plant-refused-41'
+says hostile 'and /home is not /etc'               'plant-home-30'
+says hostile 'an update says when it starts the settings over' 'damaged-7'
+says hostile 'and one that stops leaves nothing beside the images' 'leftover-30'
+says hostile 'a copy that cannot start is refused' 'gone-refused-41'
+says hostile 'and the disk says it has no install' 'gone-said-7'
+says hostile 'and has no partitions to be one'     'gone-parts-30'
 
 cat > "$work/update.commands" <<'COMMANDS'
 this line is eaten by the console

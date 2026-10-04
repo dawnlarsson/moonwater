@@ -5627,6 +5627,24 @@ static p64 storage_ext4_used(storage_ext4_plan address_to plan, p64 group)
                (group == plan->journal_group ? plan->journal_blocks : 0);
 }
 
+//      What a filesystem of this plan has left once it is made: blocks and
+//      inodes a tree copied into it can use.
+static p64 storage_ext4_free_blocks(storage_ext4_plan address_to plan)
+{
+        p64 free_blocks = 0;
+
+        for (p64 group = 0; group < plan->groups; group++)
+                free_blocks += storage_ext4_group_blocks(plan, group) -
+                               storage_ext4_used(plan, group);
+
+        return free_blocks;
+}
+
+static p64 storage_ext4_free_inodes(storage_ext4_plan address_to plan)
+{
+        return (p64)plan->groups * plan->inodes_per_group - STORAGE_EXT4_FIRST_INODE;
+}
+
 static fn storage_bits_set(p8 address_to bitmap, p64 from, p64 to)
 {
         while (from < to && from % 8)
@@ -5788,11 +5806,13 @@ static bipolar storage_format_ext4(bipolar handle, p64 offset, p64 bytes,
         p8 address_to descriptors;
         p8 address_to block;
         p32 seed;
-        p64 free_blocks = 0;
+        p64 free_blocks;
         bipolar failed = 0;
 
         if (!storage_ext4_layout(address_of plan, bytes))
                 return -ERROR_INVALID;
+
+        free_blocks = storage_ext4_free_blocks(address_of plan);
 
         seed = hash_crc32c(~(p32)0, identity->uuid, 16);
         descriptor_bytes = (positive)plan.descriptor_blocks * STORAGE_EXT4_BLOCK;
@@ -5841,7 +5861,6 @@ static bipolar storage_format_ext4(bipolar handle, p64 offset, p64 bytes,
                 storage_put16(descriptor + 0x18,
                               hash_crc32c(seed, block, STORAGE_EXT4_BLOCK));
                 storage_put16(descriptor + 0x1c, free_inodes);
-                free_blocks += group_blocks - used;
 
                 failed = storage_format_write(handle, block, STORAGE_EXT4_BLOCK,
                                               offset + bitmap * STORAGE_EXT4_BLOCK);

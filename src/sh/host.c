@@ -87,6 +87,14 @@
 #define HOST_SMALLEST ((p64)2 << 30)
 #define HOST_READ_ONLY (MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC)
 #define HOST_WRITABLE (MS_NOSUID | MS_NODEV | MS_NOEXEC)
+/* The data partition runs programs, and a bowl's sudo and su need their set-user
+   bits, so it is mounted without device files only. */
+#define HOST_DATA_MOUNT MS_NODEV
+#define HOST_LOCK HOST_STATE "/lock"
+#define HOST_LOCK_WAIT_NS ((p64)30000000000)
+#define HOST_LOCK_POLL_NS ((p64)10000000)
+/* How deep the install measures what it will copy before it refuses to guess. */
+#define HOST_MEASURE_DEPTH 128
 
 /*
         How long boot looks for disks. NVMe namespaces and USB disks arrive
@@ -108,6 +116,8 @@
 #define HOST_CLOCK_REALTIME 0
 #define HOST_CLOCK_BOOTTIME 7
 #define HOST_BLKRRPART 0x125f
+#define HOST_BLKFLSBUF 0x1261
+#define HOST_FADVISE_DONTNEED 4
 #define HOST_BLKSSZGET 0x1268
 #define HOST_BLKGETSIZE64 0x80081272u
 
@@ -145,6 +155,9 @@ typedef struct spark_settings host_settings;
 static fn host_settings_empty(host_settings address_to settings);
 static b32 host_settings_image(string_address path, host_settings address_to into);
 static bipolar host_settings_stamp(string_address path, host_settings address_to settings);
+static p64 host_settings_section(bipolar handle);
+static bool host_settings_slots(bipolar handle, host_settings address_to slots,
+                                p64 address_to offset);
 static bool host_settings_booted(host_settings address_to into);
 static bool host_settings_kept(host_settings address_to into);
 static bool host_settings_session(host_settings address_to settings);
@@ -501,7 +514,117 @@ static fn host_verdict_set(string_address kind, string_address disk)
                                  HOST_VERDICT, 0);
 }
 
+#define RADIO_LOCK_EX 2
+#define RADIO_LOCK_NB 4
+#define RADIO_LOCK_UN 8
+
+static bipolar host_lock(string_address path, bool wait)
+{
+        bipolar handle;
+        bipolar locked;
+
+        host_state_ready();
+        // Not through a link: the lock is made where it is named.
+        handle = system_open_at_mode(AT_FDCWD, path,
+                                     FILE_READ_WRITE | FILE_CREATE |
+                                         O_NOFOLLOW | O_CLOEXEC,
+                                     0600);
+        if (handle < 0)
+                return handle;
+
+        locked = system_call_2(syscall(flock), (positive)handle,
+                               wait ? RADIO_LOCK_EX
+                                    : (RADIO_LOCK_EX | RADIO_LOCK_NB));
+        if (locked < 0)
+        {
+                system_close(handle);
+                return locked;
+        }
+
+        return handle;
+}
+
+/*
+        One command at a time changes what a machine keeps.
+
+        Settings are read, changed and written back whole, so two commands at
+        once -- six `moonwater bind init add` in a loop -- each read the same
+        copy and the last write kept one entry of the six. The lock covers a
+        command from its read to its save, and an install, an update or a take
+        from its first look to its last write. The process that holds it takes
+        it again without waiting on itself, and lets go of it before it
+        forks anything that does not exec: a child would carry it on past its
+        parent. A command that cannot have it in time says so and does
+        nothing. A lock that cannot be made at all (no /run, not root) has
+        nobody to exclude, and is no reason to stop.
+*/
+static bipolar host_held = -1;
+static positive host_held_count;
+
+static bool host_acquire(void)
+{
+        p64 waited = 0;
+
+        if (host_held_count)
+        {
+                host_held_count++;
+                return true;
+        }
+
+        for (;;)
+        {
+                bipolar handle = host_lock(HOST_LOCK, false);
+
+                if (handle >= 0 || handle != -EAGAIN)
+                {
+                        host_held = handle;
+                        host_held_count = 1;
+                        return true;
+                }
+
+                if (waited >= HOST_LOCK_WAIT_NS)
+                {
+                        host_say(log_error, host_label "another moonwater command is changing "
+                                                       "this machine's settings or disks; "
+                                                       "try again in a moment\n");
+                        return false;
+                }
+
+                host_pause(HOST_LOCK_POLL_NS);
+                waited += HOST_LOCK_POLL_NS;
+        }
+}
+
+static fn host_release(void)
+{
+        if (!host_held_count || --host_held_count)
+                return;
+
+        if (host_held >= 0)
+        {
+                system_call_2(syscall(flock), (positive)host_held, RADIO_LOCK_UN);
+                system_close(host_held);
+        }
+        host_held = -1;
+}
+
+static fn host_release_all(void)
+{
+        while (host_held_count)
+                host_release();
+}
+
 // Disks ---------------------------------------------------------
+
+/* The disk whose data this session already keeps, when it keeps one. */
+static bool host_session_disk(p8 address_to into, positive room)
+{
+        p8 verdict[HOST_NAME_ROOM + 16];
+
+        return host_read_text(HOST_VERDICT, verdict, sizeof(verdict)) >= 0 &&
+               host_starts(verdict, "disk ") && string_length(verdict + 5) < room &&
+               (string_copy(into, verdict + 5), true);
+}
 
 static bool host_name_valid(string_address name)
 {
@@ -1030,9 +1153,9 @@ static bool host_install_refresh(host_install address_to install)
         return true;
 }
 
-static fn host_unmount(string_address target)
+static bool host_unmount(string_address target)
 {
-        system_call_2(syscall(umount2), (positive)target, 0);
+        return system_call_2(syscall(umount2), (positive)target, 0) >= 0;
 }
 
 static fn host_install_read(host_install address_to install)
@@ -1154,14 +1277,141 @@ static b32 host_copy_file(string_address from, string_address to)
 }
 
 /*
-        The running image onto a mounted system partition, which is the whole
-        of an update. The image there before is kept as previous.efi, for the
-        firmware's shell or a stick to start when a build turns out bad; the
-        new one is written beside the old and renamed over it, so a machine
-        that loses power part way still has an image that starts.
+        Two files alike byte for byte but for a window of the first, which is
+        where an image is stamped with the settings it is to keep.
 */
-static b32 host_place_image(string_address system, string_address running,
-                            host_settings address_to carry)
+static bool host_files_alike(string_address left, string_address right, p64 hole,
+                             p64 hole_end)
+{
+        p8 one[16384];
+        p8 two[16384];
+        file_facts first_facts;
+        file_facts second_facts;
+        bipolar first = system_open_at(AT_FDCWD, left, FILE_READ | O_CLOEXEC);
+        bipolar second = system_open_at(AT_FDCWD, right, FILE_READ | O_CLOEXEC);
+        bool alike = first >= 0 && second >= 0 &&
+                     file_look_code(AT_FDCWD, left, 0, address_of first_facts) >= 0 &&
+                     file_look_code(AT_FDCWD, right, 0, address_of second_facts) >= 0 &&
+                     first_facts.size == second_facts.size;
+        p64 offset = 0;
+
+        //      A read that comes up short before the size is an unreadable
+        //      file, which is not one that matches.
+        while (alike && offset < first_facts.size)
+        {
+                positive want = first_facts.size - offset < sizeof(one)
+                                    ? (positive)(first_facts.size - offset)
+                                    : sizeof(one);
+
+                if (storage_read(first, one, want, offset) != want ||
+                    storage_read(second, two, want, offset) != want)
+                        alike = false;
+
+                for (positive at = 0; alike && at < want; at++)
+                        if ((offset + at < hole || offset + at >= hole_end) &&
+                            one[at] != two[at])
+                                alike = false;
+
+                offset += want;
+        }
+
+        if (first >= 0)
+                system_close(first);
+        if (second >= 0)
+                system_close(second);
+
+        return alike;
+}
+
+/* Whether path is the image at source with the slots it is to be stamped with. */
+static bool host_image_is(string_address path, string_address source,
+                          host_settings address_to carry)
+{
+        host_settings slots[2];
+        bipolar handle = system_open_at(AT_FDCWD, source, FILE_READ | O_CLOEXEC);
+        p64 offset = 0;
+        bool alike;
+
+        if (handle >= 0)
+        {
+                offset = carry ? host_settings_section(handle) : 0;
+                system_close(handle);
+        }
+
+        alike = host_files_alike(source, path, offset,
+                                 offset ? offset + 2 * SPARK_SETTINGS_SLOT : 0);
+        if (!alike || !offset)
+                return alike;
+
+        handle = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC);
+        if (handle < 0)
+                return false;
+
+        alike = host_settings_slots(handle, slots, address_of offset) &&
+                !memory_compare(slots, carry, SPARK_SETTINGS_SLOT) &&
+                !memory_compare(slots + 1, carry, SPARK_SETTINGS_SLOT);
+        system_close(handle);
+        return alike;
+}
+
+/* What a place that did not finish leaves is not left: the copies it was
+   making beside the images. */
+static fn host_image_discard(string_address system)
+{
+        p8 path[HOST_PATH_ROOM];
+
+        if (host_join(path, sizeof(path), system, HOST_IMAGE_NEXT))
+                system_remove_at(AT_FDCWD, path, 0);
+        if (host_join(path, sizeof(path), system, HOST_KEPT_IMAGE_NEXT))
+                system_remove_at(AT_FDCWD, path, 0);
+}
+
+/*
+        The image the partition keeps, as the disk has it: the partition is
+        let go of, its buffers dropped, and it is mounted again with the file's
+        pages dropped, so what is compared is what a firmware would read and
+        not memory. The partition is left unmounted.
+*/
+static bool host_image_on_disk(string_address name, string_address system,
+                               string_address source, host_settings address_to carry)
+{
+        p8 device[HOST_NAME_ROOM + 8];
+        p8 path[HOST_PATH_ROOM];
+        bipolar handle;
+        bool alike = false;
+
+        if (!host_unmount(system) || !host_join(device, sizeof(device), "/dev/", name))
+                return false;
+
+        handle = system_open_at(AT_FDCWD, device, FILE_READ | O_CLOEXEC);
+        if (handle >= 0)
+        {
+                system_control(handle, HOST_BLKFLSBUF, 0);
+                system_close(handle);
+        }
+
+        if (host_mount(name, system, "vfat", HOST_READ_ONLY) < 0)
+                return false;
+
+        if (host_join(path, sizeof(path), system, HOST_IMAGE))
+        {
+                handle = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC);
+                if (handle >= 0)
+                {
+                        system_call_4(syscall(fadvise64), (positive)handle, 0, 0,
+                                      HOST_FADVISE_DONTNEED);
+                        system_close(handle);
+                }
+
+                alike = host_image_is(path, source, carry);
+        }
+
+        host_unmount(system);
+        return alike;
+}
+
+static b32 host_place_written(string_address system, string_address running,
+                              host_settings address_to carry, bool address_to carried)
 {
         p8 image[HOST_PATH_ROOM];
         p8 next[HOST_PATH_ROOM];
@@ -1187,6 +1437,9 @@ static b32 host_place_image(string_address system, string_address running,
                 if (host_copy_file(image, next))
                         return 1;
 
+                if (!host_files_alike(image, next, 0, 0))
+                        return host_refuse("%s could not be kept whole\n", image);
+
                 failed = system_rename_at(AT_FDCWD, next, AT_FDCWD, kept, 0);
                 if (failed < 0)
                         return host_fail(kept, failed);
@@ -1201,6 +1454,15 @@ static b32 host_place_image(string_address system, string_address running,
         failed = carry ? host_settings_stamp(next, carry) : 0;
         if (failed < 0)
                 return host_fail(next, failed);
+
+        *carried = carry && !failed;
+        if (carry && failed)
+                carry = null;
+
+        //      And the file that is renamed is the one that was copied, in every
+        //      byte but the slots, and the slots are the ones stamped.
+        if (!host_image_is(next, source, carry))
+                return host_refuse("%s is not the image it was copied from\n", next);
 
         failed = system_rename_at(AT_FDCWD, next, AT_FDCWD, image, 0);
         if (failed < 0)
@@ -1220,6 +1482,37 @@ static b32 host_place_image(string_address system, string_address running,
                         system_close(directory);
                 }
         }
+
+        return 0;
+}
+
+/*
+        The running image onto a mounted system partition, which is the whole
+        of an update. The image there before is kept as previous.efi, for the
+        firmware's shell or a stick to start when a build turns out bad; the
+        new one is written beside the old and renamed over it, so a machine
+        that loses power part way still has an image that starts. Nothing is
+        renamed that is not what was copied, nothing it was copying is left
+        behind when it stops, and what it did is read back from the disk
+        itself, the partition unmounted. The partition is left unmounted.
+*/
+static b32 host_place_image(string_address name, string_address system,
+                            string_address running, host_settings address_to carry,
+                            bool address_to carried)
+{
+        p8 source[HOST_PATH_ROOM];
+
+        *carried = false;
+        if (host_place_written(system, running, carry, carried))
+        {
+                host_image_discard(system);
+                return 1;
+        }
+
+        if (!host_join(source, sizeof(source), HOST_MEDIUM, HOST_IMAGE) ||
+            !host_image_on_disk(name, system, source, *carried ? carry : null))
+                return host_refuse("%s did not read back from the disk as the image "
+                                   "that was written\n", name);
 
         return 0;
 }
@@ -1248,7 +1541,7 @@ static b32 host_attach(host_install address_to install)
         if (!host_install_refresh(install))
                 return host_refuse("%s is no longer here\n", install->disk);
 
-        failed = host_mount(install->data, HOST_DATA, "ext4", 0);
+        failed = host_mount(install->data, HOST_DATA, "ext4", HOST_DATA_MOUNT);
 
         if (failed < 0)
                 return host_fail(install->data, failed);
@@ -1256,18 +1549,42 @@ static b32 host_attach(host_install address_to install)
         for (at = 0; at < array_count(host_kept); at++)
         {
                 p8 on_disk[HOST_PATH_ROOM];
+                p8 through[HOST_PATH_ROOM];
+                p8 number[24];
+                bipolar pinned;
 
                 host_join(on_disk, sizeof(on_disk), HOST_DATA, host_kept[at].path);
                 failed = system_make_directory_at(AT_FDCWD, on_disk, host_kept[at].mode);
                 if (failed < 0 && failed != -EEXIST)
                         break;
 
+                /*      What the data partition calls this directory is its
+                        say, and a link there (home -> /etc) would have this
+                        bind the live /etc over /home. The name is opened as
+                        a directory and never through a link, and that very
+                        directory is what is bound, whatever the name becomes
+                        after. */
+                pinned = system_open_at(AT_FDCWD, on_disk,
+                                        O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+                if (pinned < 0)
+                {
+                        failed = pinned == -ELOOP ? -ENOTDIR : pinned;
+                        break;
+                }
+
                 failed = system_make_directory_at(AT_FDCWD, host_kept[at].path,
                                                   host_kept[at].mode);
                 if (failed < 0 && failed != -EEXIST)
+                {
+                        system_close(pinned);
                         break;
+                }
 
-                failed = system_mount(on_disk, host_kept[at].path, 0, MS_BIND, 0);
+                positive_into_string(number, (positive)pinned);
+                failed = host_join(through, sizeof(through), "/proc/self/fd/", number)
+                             ? system_mount(through, host_kept[at].path, 0, MS_BIND, 0)
+                             : -ERROR_INVALID;
+                system_close(pinned);
                 if (failed < 0)
                         break;
         }
@@ -1303,7 +1620,7 @@ static fn host_medium_fresh(p8 address_to medium, positive size)
                 system_random_fill(medium, size, 0);
 }
 
-static b32 host_update(host_install address_to install)
+static b32 host_update_locked(host_install address_to install)
 {
         p8 running[HOST_BUILD_ROOM];
         host_medium_search search;
@@ -1320,6 +1637,14 @@ static b32 host_update(host_install address_to install)
                 return host_refuse("this session's image is on no disk but %s, "
                                    "so there is nothing to update from\n",
                                    install->disk);
+
+        //      The search can wait seconds for a stick, in which time a
+        //      disk comes and goes and its name goes to another.
+        if (!host_install_refresh(install))
+        {
+                host_unmount(HOST_MEDIUM);
+                return host_refuse("%s is no longer here\n", install->disk);
+        }
 
         mounted = host_mount(install->system, HOST_SYSTEM, "vfat", HOST_WRITABLE);
         if (mounted < 0)
@@ -1338,17 +1663,46 @@ static b32 host_update(host_install address_to install)
                 host_settings disk;
                 host_settings session;
                 p8 path[HOST_PATH_ROOM];
+                bool carried;
+                b32 read = -1;
 
                 host_settings_empty(address_of disk);
+                failed = 0;
                 if (host_join(path, sizeof(path), HOST_SYSTEM, HOST_IMAGE))
-                        host_settings_image(path, address_of disk);
+                {
+                        bipolar opened = system_open_at(AT_FDCWD, path,
+                                                        FILE_READ | O_CLOEXEC);
+
+                        //      An image that is there and cannot be read says
+                        //      nothing of the settings in it, and is not
+                        //      replaced on a guess that it has none.
+                        if (opened >= 0)
+                        {
+                                system_close(opened);
+                                read = host_settings_image(path, address_of disk);
+                        }
+                        else if (opened != -ERROR_NO_ENTRY)
+                                failed = host_refuse("%s cannot be read, so its settings "
+                                                     "cannot be kept\n", install->system);
+                }
+
+                if (read == 0)
+                        host_say(log, host_label "both settings slots on %s are damaged: "
+                                                 "it starts from the defaults\n",
+                                 install->disk);
 
                 disk.generation++;
                 host_medium_fresh(disk.medium, sizeof(disk.medium));
 
-                failed = host_place_image(HOST_SYSTEM, running, address_of disk);
-
                 if (!failed)
+                        failed = host_place_image(install->system, HOST_SYSTEM, running,
+                                                  address_of disk, address_of carried);
+
+                if (!failed && !carried)
+                        host_say(log, host_label "this build's image has no place for "
+                                                 "settings, so %s starts with the "
+                                                 "defaults\n", install->disk);
+                else if (!failed)
                 {
                         //      A session started from this disk is still its copy.
                         if (host_settings_kept(address_of session) &&
@@ -1366,6 +1720,18 @@ static b32 host_update(host_install address_to install)
 
         host_unmount(HOST_SYSTEM);
         host_unmount(HOST_MEDIUM);
+        return failed;
+}
+
+static b32 host_update(host_install address_to install)
+{
+        b32 failed;
+
+        if (!host_acquire())
+                return 1;
+
+        failed = host_update_locked(install);
+        host_release();
         return failed;
 }
 
@@ -1401,20 +1767,38 @@ static b32 host_run(string_address address_to argv)
         return 0;
 }
 
-/* Use an install's data, updating it first when asked, and say so. */
+/*
+        Use an install's data, updating it first when asked, and say so.
+
+        A session keeps one disk's data: a second set of binds over the first
+        hides it and is no better kept. The restores that follow start
+        programs that outlive this one, so the lock is let go of before them.
+*/
 static b32 host_take(host_install address_to install, bool update)
 {
+        p8 kept[HOST_NAME_ROOM];
+
+        if (!host_acquire())
+                return 1;
+
         system_remove_at(AT_FDCWD, HOST_QUESTION, 0);
 
-        if (update && host_update(install))
-                return 1;
+        if (host_session_disk(kept, sizeof(kept)))
+        {
+                host_release();
+                return host_refuse("this session already keeps %s\n", kept);
+        }
 
-        if (host_attach(install))
+        if ((update && host_update(install)) || host_attach(install))
+        {
+                host_release();
                 return 1;
+        }
 
         host_verdict_set("disk ", install->disk);
         host_say(log, host_label "%s, /root and /home are kept on %s\n",
                  BOWL_ROOT_DIRECTORY, install->disk);
+        host_release_all();
         radio_restore();
         name_restore();
         locale_restore();
@@ -1434,6 +1818,8 @@ static b32 host_take(host_install address_to install, bool update)
 */
 static fn host_booted(host_settings address_to settings)
 {
+        //      What follows starts commands that outlive this one.
+        host_release_all();
         name_restore();
         host_events_boot(settings);
 }
@@ -1447,6 +1833,7 @@ static b32 host_boot(void)
         bool known;
 
         host_state_ready();
+        host_acquire();
         host_running_build(running, sizeof(running));
 
         /*      The settings the image booted with. A kernel started without
@@ -1712,6 +2099,188 @@ static bool host_partitions_wait(host_install address_to install,
         return false;
 }
 
+/* The kernel's rescan of a disk's partitions, which waits while anything else
+   still holds the disk. */
+static bipolar host_rescan(bipolar handle)
+{
+        bipolar failed = 0;
+
+        for (positive tries = 0; tries < 20; tries++)
+        {
+                failed = system_control(handle, HOST_BLKRRPART, 0);
+                if (failed != -ERROR_BUSY)
+                        break;
+
+                host_pause(HOST_POLL_NS);
+        }
+
+        return failed;
+}
+
+typedef struct
+{
+        p64 blocks;
+        p64 inodes;
+        bool deep;
+} host_size;
+
+/*
+        What copying a tree will take of an ext4: its blocks and its inodes,
+        stopping at the filesystem it starts on, as a bowl's /proc is not data.
+        A file costs the blocks it has been given, rounded up to the ext4's
+        and shared out among its links, a directory at least one -- a tmpfs
+        gives it none -- and a link a block once it is too long to live in
+        its inode.
+*/
+static fn host_measure(bipolar directory, string_address name, positive depth,
+                       p64 device, host_size address_to size)
+{
+        file_facts facts;
+        file_walk walk;
+        struct linux_dirent64 address_to entry;
+        positive format;
+        p64 blocks;
+
+        if (file_look_code(directory, name, AT_SYMLINK_NOFOLLOW, address_of facts) < 0)
+                return;
+
+        if (!depth)
+                device = file_device_key(facts.device_major, facts.device_minor);
+        else if (file_device_key(facts.device_major, facts.device_minor) != device)
+                return;
+
+        format = facts.mode & MODE_FORMAT;
+        blocks = (facts.blocks * 512 + STORAGE_EXT4_BLOCK - 1) / STORAGE_EXT4_BLOCK;
+        size->inodes++;
+
+        if (format == MODE_LINK)
+                size->blocks += facts.size >= 60;
+        else if (format != MODE_DIRECTORY)
+                size->blocks += facts.hard_links > 1
+                                    ? (blocks + facts.hard_links - 1) / facts.hard_links
+                                    : blocks;
+        else
+        {
+                size->blocks += blocks ? blocks : 1;
+
+                if (depth >= HOST_MEASURE_DEPTH)
+                        size->deep = true;
+                else if (file_walk_open_found(address_of walk, directory, name))
+                {
+                        while ((entry = file_walk_next(address_of walk)))
+                                if (!file_is_dot(entry->d_name))
+                                        host_measure(walk.handle, entry->d_name, depth + 1,
+                                                     device, size);
+
+                        file_walk_close(address_of walk);
+                }
+        }
+}
+
+/*
+        Whether what the install copies fits the data partition it is about to
+        make, said before anything is asked or written. A disk that is too
+        small used to be erased, made bootable and given a data partition
+        that took what fitted of a copy that stopped, which the next boot
+        attached as the machine's own. A thirty-second part of both is held
+        back for the blocks an ext4 spends on the way, in extents and
+        directories.
+*/
+static bool host_data_fits(p64 bytes, string_address name)
+{
+        storage_ext4_plan plan;
+        host_size size;
+
+        memory_zero(address_of size, sizeof(size));
+        for (positive at = 0; at < array_count(host_kept); at++)
+                host_measure(AT_FDCWD, host_kept[at].path, 0, 0, address_of size);
+
+        if (size.deep)
+        {
+                host_say(log_error, host_label "%s, /root and /home go deeper than %p "
+                                               "levels, more than an install adds up; "
+                                               "nothing written\n",
+                         BOWL_ROOT_DIRECTORY, (positive)HOST_MEASURE_DEPTH);
+                return false;
+        }
+
+        if (!storage_ext4_layout(address_of plan, bytes))
+                return true;
+
+        if (size.blocks + size.blocks / 32 + 64 > storage_ext4_free_blocks(address_of plan) ||
+            size.inodes + size.inodes / 32 + 16 > storage_ext4_free_inodes(address_of plan))
+        {
+                host_say(log_error, host_label "%s, /root and /home hold %p MiB in %p files, "
+                                               "and the data partition on %s would hold %p "
+                                               "MiB in %p files; nothing written\n",
+                         BOWL_ROOT_DIRECTORY,
+                         size.blocks * STORAGE_EXT4_BLOCK >> 20, size.inodes, name,
+                         storage_ext4_free_blocks(address_of plan) * STORAGE_EXT4_BLOCK >> 20,
+                         storage_ext4_free_inodes(address_of plan));
+                return false;
+        }
+
+        return true;
+}
+
+/*
+        An install that did not finish is not left looking like one. Both of
+        Moonwater's partitions on a disk make it an install to the next boot,
+        which attaches whatever data reached it as the machine's own, so the
+        table goes, at both ends of the disk since the kernel falls back to the
+        backup.
+*/
+static bool host_install_clear(bipolar handle)
+{
+        p64 bytes = 0;
+        bipolar failed = system_control(handle, HOST_BLKGETSIZE64, address_of bytes);
+
+        if (failed >= 0 && bytes >= 2 * HOST_ALIGN_BYTES)
+        {
+                failed = storage_format_zero(handle, 0, HOST_ALIGN_BYTES);
+                if (!failed)
+                        failed = storage_format_zero(handle, bytes - HOST_ALIGN_BYTES,
+                                                     HOST_ALIGN_BYTES);
+                if (!failed)
+                        failed = system_call_1(syscall(fsync), (positive)handle);
+        }
+        else
+                failed = failed < 0 ? failed : -ERROR_INVALID;
+
+        host_rescan(handle);
+        return failed >= 0;
+}
+
+/* The same, once the partitions are mounted and the disk has been let go of. */
+static fn host_install_abandon(host_install address_to target)
+{
+        p8 device[HOST_NAME_ROOM + 8];
+        bipolar handle = -ERROR_INVALID;
+        bool cleared = false;
+
+        host_unmount(HOST_DATA);
+        host_unmount(HOST_SYSTEM);
+        host_unmount(HOST_MEDIUM);
+
+        if (host_install_refresh(target) &&
+            host_join(device, sizeof(device), "/dev/", target->disk))
+                handle = system_open_at(AT_FDCWD, device,
+                                        FILE_READ_WRITE | FILE_EXCLUSIVE | O_CLOEXEC);
+
+        if (handle >= 0)
+        {
+                cleared = host_install_clear(handle);
+                system_close(handle);
+        }
+
+        host_say(log_error, cleared ? host_label "%s is left without a partition table: "
+                                                 "the install did not finish\n"
+                                    : host_label "%s could not be cleared: the install did "
+                                                 "not finish, and its data partition is "
+                                                 "not to be trusted\n",
+                 target->disk);
+}
+
 /*
         Refusals first, then one question, then the writes.
 
@@ -1721,7 +2290,7 @@ static bool host_partitions_wait(host_install address_to install,
         itself: the exclusive open fails. Removable media is refused unless
         asked for, because the stick being installed from is removable too.
 */
-static b32 host_install_disk(string_address asked, bool removable)
+static b32 host_install_locked(string_address asked, bool removable)
 {
         string_address name = host_starts(asked, "/dev/") ? asked + 5 : asked;
         p8 sysfs[HOST_PATH_ROOM];
@@ -1731,6 +2300,7 @@ static b32 host_install_disk(string_address asked, bool removable)
         p8 running[HOST_BUILD_ROOM];
         p8 answer[HOST_NAME_ROOM];
         p8 random[80];
+        p8 kept[HOST_NAME_ROOM];
         host_medium_search search;
         host_install target;
         storage_format_identity identity;
@@ -1762,6 +2332,12 @@ static b32 host_install_disk(string_address asked, bool removable)
                 return host_refuse("%s is removable media; moonwater setup "
                                    "install DISK removable takes it\n", name);
 
+        /*      Keeping a second disk's data over the first's is what host_take
+                refuses, and it is asked now and not after the erase. */
+        if (host_session_disk(kept, sizeof(kept)))
+                return host_refuse("this session already keeps %s; installing on "
+                                   "another disk starts from a live session\n", kept);
+
         if (!host_running_build(running, sizeof(running)))
                 return host_refuse("%s cannot read its own build\n", "moonwater");
 
@@ -1769,6 +2345,7 @@ static b32 host_install_disk(string_address asked, bool removable)
                 install takes this session's settings, which is how what was
                 set on a live stick is still set on the disk it installed. */
         host_settings carry;
+        bool carried;
 
         host_settings_session(address_of carry);
         carry.generation++;
@@ -1824,6 +2401,42 @@ static b32 host_install_disk(string_address asked, bool removable)
                                                 "install needs\n", name);
         }
 
+        /*      The partition table is read back from the kernel once it is
+                written, which a disk that cannot hold partitions (a loop device
+                without them, a device-mapper or RAID one) never does: found
+                out now, on the open disk, and not after the erase. */
+        failed = host_rescan(handle);
+        if (failed < 0)
+        {
+                system_close(handle);
+                host_unmount(HOST_MEDIUM);
+                return failed == -ERROR_BUSY
+                           ? host_refuse("%s is in use: something on it is mounted\n", name)
+                       : failed == -EINVAL || failed == -ENOTTY
+                           ? host_refuse("%s cannot hold partitions\n", name)
+                           : host_fail(device, failed);
+        }
+
+        //      A 512 MiB system partition at 1 MiB, then the rest, to 16 TiB.
+        memory_zero(parts, sizeof(parts));
+        sectors = bytes / (p64)sector;
+        align = HOST_ALIGN_BYTES / (p64)sector;
+        parts[0].first = align;
+        parts[0].last = align + HOST_SYSTEM_BYTES / (p64)sector - 1;
+        parts[1].first = parts[0].last + 1;
+        parts[1].last = (last + 1) / align * align - 1;
+        if (parts[1].last - parts[1].first + 1 >
+            STORAGE_EXT4_MOST * STORAGE_EXT4_BLOCK / (p64)sector)
+                parts[1].last = parts[1].first +
+                                STORAGE_EXT4_MOST * STORAGE_EXT4_BLOCK / (p64)sector - 1;
+
+        if (!host_data_fits((parts[1].last - parts[1].first + 1) * (p64)sector, name))
+        {
+                system_close(handle);
+                host_unmount(HOST_MEDIUM);
+                return 1;
+        }
+
         if (!host_join(path, sizeof(path), sysfs, "/device/model") ||
             host_read_text(path, text, sizeof(text)) <= 0)
                 string_copy(text, "a disk");
@@ -1844,7 +2457,6 @@ static b32 host_install_disk(string_address asked, bool removable)
 
         failed = system_random_fill(random, sizeof(random), 0);
 
-        memory_zero(parts, sizeof(parts));
         memory_copy(identity.uuid, random, 16);
         memory_copy(identity.hash_seed, random + 16, 16);
         tools_uuid_version(identity.uuid, 6, 4);
@@ -1857,21 +2469,10 @@ static b32 host_install_disk(string_address asked, bool removable)
         identity.time = (p32)(system_clock_ns(HOST_CLOCK_REALTIME) / 1000000000);
         identity.label = "moonwater";
 
-        //      A 512 MiB system partition at 1 MiB, then the rest, to 16 TiB.
-        sectors = bytes / (p64)sector;
-        align = HOST_ALIGN_BYTES / (p64)sector;
         memory_copy(parts[0].type, storage_gpt_system_type, 16);
         memory_copy(parts[1].type, storage_gpt_linux_type, 16);
         parts[0].name = HOST_SYSTEM_NAME;
         parts[1].name = HOST_DATA_NAME;
-        parts[0].first = align;
-        parts[0].last = align + HOST_SYSTEM_BYTES / (p64)sector - 1;
-        parts[1].first = parts[0].last + 1;
-        parts[1].last = (last + 1) / align * align - 1;
-        if (parts[1].last - parts[1].first + 1 >
-            STORAGE_EXT4_MOST * STORAGE_EXT4_BLOCK / (p64)sector)
-                parts[1].last = parts[1].first +
-                                STORAGE_EXT4_MOST * STORAGE_EXT4_BLOCK / (p64)sector - 1;
 
         if (!failed)
         {
@@ -1901,14 +2502,11 @@ static b32 host_install_disk(string_address asked, bool removable)
         if (!failed)
                 failed = system_call_1(syscall(fsync), (positive)handle);
 
-        for (positive tries = 0; !failed && tries < 20; tries++)
-        {
-                failed = system_control(handle, HOST_BLKRRPART, 0);
-                if (failed != -ERROR_BUSY)
-                        break;
-
-                host_pause(HOST_POLL_NS);
-        }
+        //      Written part way, the disk is not left holding half of an install.
+        if (failed)
+                host_install_clear(handle);
+        else
+                failed = host_rescan(handle);
 
         system_close(handle);
 
@@ -1926,23 +2524,38 @@ static b32 host_install_disk(string_address asked, bool removable)
         failed = host_mount(target.system, HOST_SYSTEM, "vfat", HOST_WRITABLE);
         if (failed < 0)
         {
-                host_unmount(HOST_MEDIUM);
-                return host_fail(target.system, failed);
+                b32 said = host_fail(target.system, failed);
+
+                host_install_abandon(address_of target);
+                return said;
         }
 
         host_say(log, host_label "writing this build to %s, from %s, with this "
                                  "session's settings\n",
                  target.system, search.name);
 
-        failed = host_place_image(HOST_SYSTEM, running, address_of carry);
+        failed = host_place_image(target.system, HOST_SYSTEM, running, address_of carry,
+                                  address_of carried);
         host_unmount(HOST_SYSTEM);
         host_unmount(HOST_MEDIUM);
         if (failed)
+        {
+                host_install_abandon(address_of target);
                 return 1;
+        }
 
-        failed = host_mount(target.data, HOST_DATA, "ext4", 0);
+        if (!carried)
+                host_say(log, host_label "this build's image has no place for settings, "
+                                         "so %s starts with the defaults\n", name);
+
+        failed = host_mount(target.data, HOST_DATA, "ext4", HOST_DATA_MOUNT);
         if (failed < 0)
-                return host_fail(target.data, failed);
+        {
+                b32 said = host_fail(target.data, failed);
+
+                host_install_abandon(address_of target);
+                return said;
+        }
 
         /*
                 What this session already has goes along, bowls and all. Each
@@ -1962,7 +2575,7 @@ static b32 host_install_disk(string_address asked, bool removable)
 
                 if (host_run(argv))
                 {
-                        host_unmount(HOST_DATA);
+                        host_install_abandon(address_of target);
                         return 1;
                 }
         }
@@ -2019,6 +2632,18 @@ fn host_quiesce(void)
         }
 
         storage_mount_table_release(address_of table);
+}
+
+static b32 host_install_disk(string_address asked, bool removable)
+{
+        b32 failed;
+
+        if (!host_acquire())
+                return 1;
+
+        failed = host_install_locked(asked, removable);
+        host_release();
+        return failed;
 }
 
 // Bindings ------------------------------------------------------
@@ -2119,8 +2744,6 @@ static bipolar host_bind_request(unsigned int op, unsigned int event,
 #define HOST_SETTINGS_BLOCKS (SPARK_SETTINGS_SLOT / 512)
 #define HOST_FIBMAP 1
 #define HOST_FIGETBSZ 2
-#define HOST_BLKFLSBUF 0x1261
-#define HOST_FADVISE_DONTNEED 4
 
 #define HOST_SETTINGS_CHANGED 0
 #define HOST_SETTINGS_SHOWN 1
@@ -2521,6 +3144,7 @@ typedef struct
         string_address build;
         host_settings address_to session;
         p8 name[HOST_NAME_ROOM];
+        p8 partuuid[STORAGE_PARTUUID_ROOM];
         p8 other[HOST_NAME_ROOM];
         positive count;
         host_settings found;
@@ -2552,6 +3176,9 @@ static bool host_settings_visit(storage_identity address_to identity,
                 if (!search->count)
                 {
                         string_copy(search->name, name);
+                        string_copy(search->partuuid, identity->partuuid_length
+                                                          ? (string_address)identity->partuuid
+                                                          : (string_address) "");
                         memory_copy_apart(address_of search->found, address_of newest,
                                           SPARK_SETTINGS_SLOT);
                 }
@@ -2695,7 +3322,7 @@ static string_address host_settings_map(string_address name,
         once written and read back, else how it went wrong, said after the
         partition's name.
 */
-static string_address host_settings_write(string_address name,
+static string_address host_settings_write(string_address name, string_address partuuid,
                                           host_settings address_to settings)
 {
         host_settings_place place;
@@ -2717,6 +3344,16 @@ static string_address host_settings_write(string_address name,
 
         if (host_read_text(path, text, sizeof(text)) > 0 && string_equals(text, "1"))
                 return "is read-only";
+
+        //      The name was found some time ago, and a disk comes and goes.
+        if (partuuid[0])
+        {
+                p8 current[HOST_NAME_ROOM];
+
+                if (!host_partition_uuid_resolve(partuuid, current) ||
+                    !string_equals(current, name))
+                        return "is no longer the partition it was found as";
+        }
 
         if (storage_mount_table_load(address_of table, null))
         {
@@ -2835,7 +3472,7 @@ static bool host_settings_save(host_settings address_to settings)
         }
 
         if (search.count == 1)
-                failed = host_settings_write(search.name, settings);
+                failed = host_settings_write(search.name, search.partuuid, settings);
 
         if (search.count == 1 && !failed)
                 string_format(log, "saved in the image on %s\n", search.name);
@@ -3010,9 +3647,7 @@ static b32 host_settings_apply(host_settings address_to settings,
 
                 if (overlay)
                 {
-                        if (count >= 3 && string_equals(arguments[2], "mount"))
-                                ;
-                        else
+                        if (!string_equals(arguments[2], "mount"))
                         {
                                 host_machine_refused(verb, overlay);
                                 return HOST_SETTINGS_REFUSED;
@@ -3085,10 +3720,14 @@ static b32 host_settings_apply(host_settings address_to settings,
         }
 }
 
+/* Where the image's own programs are: they are the image, and every boot has them. */
+static const string_address host_image_programs[] = {
+    "/bin/", "/sbin/", "/usr/bin/", "/usr/sbin/", "/lib/", "/usr/lib/", "/lib64/"};
+
 /*
         A command naming a file the machine will not have when the entry runs:
         a live session's files, and /root, /home and the bowls once boot stops
-        mounting them, are gone at power off.
+        mounting them, are gone at power off. The image's own programs are not.
 */
 static fn host_settings_note(host_settings address_to settings,
                              string_address verb, string_address text)
@@ -3100,6 +3739,10 @@ static fn host_settings_note(host_settings address_to settings,
 
         if (text[0] != '/')
                 return;
+
+        for (positive at = 0; at < array_count(host_image_programs); at++)
+                if (host_starts(text, host_image_programs[at]))
+                        return;
 
         while (text[length] && text[length] != ' ' && length + 1 < sizeof(path))
         {
@@ -3130,17 +3773,12 @@ static fn host_settings_note(host_settings address_to settings,
                  path, verb, path);
 }
 
-static b32 host_settings_command(string_address address_to arguments, positive count)
+static b32 host_settings_locked(string_address address_to arguments, positive count)
 {
         host_settings settings;
         p8 text[SPARK_SETTINGS_TEXT_MOST + 1];
         positive length = 0;
         b32 outcome;
-
-        host_need_root("moonwater");
-
-        if (!host_settings_shaped(arguments, count))
-                return host_usage();
 
         host_state_ready();
         host_settings_session(address_of settings);
@@ -3162,7 +3800,33 @@ static b32 host_settings_command(string_address address_to arguments, positive c
         return 0;
 }
 
-/* Both slots of an image not yet in place, as these settings. */
+static b32 host_settings_command(string_address address_to arguments, positive count)
+{
+        b32 outcome;
+
+        host_need_root("moonwater");
+
+        if (!host_settings_shaped(arguments, count))
+                return host_usage();
+
+        //      Showing a list or a switch changes nothing and waits for nobody.
+        if (count < 4)
+                return host_settings_locked(arguments, count);
+
+        if (!host_acquire())
+                return 1;
+
+        outcome = host_settings_locked(arguments, count);
+        host_release();
+        return outcome;
+}
+
+/*
+        Both slots of an image not yet in place, as these settings: 0 once they
+        are, 1 for an image with no section to put them in -- one built before
+        there were settings, which starts with the defaults and has said so --
+        and negative when the image could not be written.
+*/
 static bipolar host_settings_stamp(string_address path, host_settings address_to settings)
 {
         bipolar handle = system_open_at(AT_FDCWD, path, FILE_READ_WRITE | O_CLOEXEC);
@@ -3173,7 +3837,9 @@ static bipolar host_settings_stamp(string_address path, host_settings address_to
                 return handle;
 
         offset = host_settings_section(handle);
-        if (offset)
+        if (!offset)
+                failed = 1;
+        else
         {
                 host_settings_seal(settings);
                 failed = storage_format_write(handle, (p8 address_to)settings,
@@ -3187,7 +3853,7 @@ static bipolar host_settings_stamp(string_address path, host_settings address_to
         }
 
         system_close(handle);
-        return failed < 0 ? failed : 0;
+        return failed;
 }
 
 /* The settings an install's own image starts with. */
@@ -5639,9 +6305,6 @@ static bipolar nl80211_disconnect(nl80211 address_to session, p32 index)
 #define RADIO_RFKILL_BLUETOOTH 2
 #define RADIO_RFKILL_CHANGE_ALL 3
 #define RADIO_LOCK_PATH NET_STATE_DIR "/radio.lock"
-#define RADIO_LOCK_EX 2
-#define RADIO_LOCK_NB 4
-#define RADIO_LOCK_UN 8
 
 typedef struct
 {
@@ -5708,32 +6371,6 @@ static bipolar radio_power(string_address path)
 
         return host_read_word(path, text, sizeof(text)) < 0 ? -1
                                                               : host_onoff((string_address)text);
-}
-
-static bipolar host_lock(string_address path, bool wait)
-{
-        bipolar handle;
-        bipolar locked;
-
-        host_state_ready();
-        // Not through a link: the lock is made where it is named.
-        handle = system_open_at_mode(AT_FDCWD, path,
-                                     FILE_READ_WRITE | FILE_CREATE |
-                                         O_NOFOLLOW | O_CLOEXEC,
-                                     0600);
-        if (handle < 0)
-                return handle;
-
-        locked = system_call_2(syscall(flock), (positive)handle,
-                               wait ? RADIO_LOCK_EX
-                                    : (RADIO_LOCK_EX | RADIO_LOCK_NB));
-        if (locked < 0)
-        {
-                system_close(handle);
-                return locked;
-        }
-
-        return handle;
 }
 
 static bipolar radio_lock(bool wait)
@@ -13694,7 +14331,7 @@ static unsigned int host_bind_named(string_address first, string_address second)
         return 0;
 }
 
-static b32 host_bind_tell(unsigned int event, string_address command)
+static b32 host_bind_told(unsigned int event, string_address command)
 {
         struct bind_control control;
         host_settings settings;
@@ -13738,6 +14375,23 @@ static b32 host_bind_tell(unsigned int event, string_address command)
         host_bind_say(host_label, address_of control);
         log_flush();
         return 0;
+}
+
+/* Setting an event reads the kept settings and writes them back, one command at
+   a time like the lists; anybody else is refused by the kernel before any of it. */
+static b32 host_bind_tell(unsigned int event, string_address command)
+{
+        b32 outcome;
+
+        if (!bowl_is_root())
+                return host_bind_told(event, command);
+
+        if (!host_acquire())
+                return 1;
+
+        outcome = host_bind_told(event, command);
+        host_release();
+        return outcome;
 }
 
 /* moonwater bind [init|exit|EVENT ...] */
