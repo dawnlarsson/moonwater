@@ -4978,6 +4978,29 @@ static b32 build_local(string_address address_to profiles, positive count,
 
                 if (build_tool_words((string_address address_to)words))
                         return build_die("filesystem setup");
+
+                /*
+                        Root's, whoever made them first. mkdir -p keeps a
+                        directory that is already there, and the initramfs
+                        carries each one's owner into the guest as it is: a
+                        tree whose fs/ the building user made (a copy, an
+                        rsync, a mkdir before sudo) booted with /etc, /root
+                        and /tmp owned by that uid. The shell will not
+                        replace a name in a directory another principal owns
+                        (file_name_stable), so every write of an existing
+                        /etc/resolv.conf after the first failed EACCES and
+                        ip took its lease back. A build that is not root
+                        cannot give them away, and makes no device nodes
+                        either; it is left as it was.
+                */
+                if (build_root())
+                {
+                        words[0] = "chown";
+                        words[1] = "0:0";
+
+                        if (build_tool_words((string_address address_to)words))
+                                return build_die("filesystem ownership");
+                }
         }
 
         {

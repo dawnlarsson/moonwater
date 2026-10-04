@@ -2770,7 +2770,15 @@ lane_link()
 lane_netem()
 {
         need_shell || return 1
-        python3 test/differential.py --harness net_netem --shell "$shell_binary"
+        netem_status=0
+        python3 test/differential.py --harness net_netem --shell "$shell_binary" ||
+                netem_status=$?
+        #       The lease epoch walk against sh/net.c with one step taken out:
+        #       the first mutant here, every one with MOONWATER_EPOCH_MUTANTS=all.
+        python3 test/differential.py --harness net_epoch_mutants || {
+                [ $? = 2 ] || netem_status=1
+        }
+        return "$netem_status"
 }
 #       qemu's default riscv64 cpu is its richest one, with V at a vector
 #       length of 128 bits, so the lane above runs the vector bodies at that

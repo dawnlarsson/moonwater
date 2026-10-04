@@ -1098,11 +1098,15 @@ static bipolar netlink_address_change(b32 handle, p16 type, p16 flags,
         The gateway has to be reachable already, which for a default route
         means the address added above has to cover it. The kernel says ENETUNREACH
         when it does not, which reads as a network problem and is really an
-        ordering one.
+        ordering one -- except for a gateway said to be on the link
+        (NETLINK_ROUTE_ONLINK), which the kernel takes without an address
+        that covers it: a /32 lease and its router.
 */
+#define NETLINK_ROUTE_ONLINK 4 // RTNH_F_ONLINK
+
 static bipolar netlink_route_change(b32 handle, p16 type, p16 flags,
                                     p32 destination, p8 bits, p32 gateway,
-                                    p32 index)
+                                    p32 index, p32 route_flags)
 {
         netlink_buffer request = {0};
         netlink_route address_to body;
@@ -1121,6 +1125,7 @@ static bipolar netlink_route_change(b32 handle, p16 type, p16 flags,
         body->protocol = RTPROT_BOOT;
         body->scope = gateway ? RT_SCOPE_UNIVERSE : RT_SCOPE_LINK;
         body->kind = RTN_UNICAST;
+        body->flags = route_flags;
 
         if (bits)
                 netlink_attribute_add(address_of request, RTA_DST,
@@ -1144,17 +1149,17 @@ static bipolar netlink_route_change(b32 handle, p16 type, p16 flags,
 //      EEXIST.
 #define netlink_route_add(handle, destination, bits, gateway, index) netlink_route_change( \
         handle, RTM_NEWROUTE, NLM_REQUEST | NLM_ACK | NLM_CREATE | NLM_REPLACE,            \
-        destination, bits, gateway, index)
+        destination, bits, gateway, index, 0)
 
 /* An existing route is state, not spare capacity.  Initial DHCP acquisition
    uses EXCLUSIVE so a pre-existing default route is reported as a conflict
    and remains byte-for-byte kernel state owned by whoever installed it. */
 #define netlink_route_acquire(handle, destination, bits, gateway, index) netlink_route_change( \
         handle, RTM_NEWROUTE, NLM_REQUEST | NLM_ACK | NLM_CREATE | NLM_EXCLUSIVE,              \
-        destination, bits, gateway, index)
+        destination, bits, gateway, index, 0)
 
 #define netlink_route_delete(handle, destination, bits, gateway, index) netlink_route_change( \
-        handle, RTM_DELROUTE, NLM_REQUEST | NLM_ACK, destination, bits, gateway, index)
+        handle, RTM_DELROUTE, NLM_REQUEST | NLM_ACK, destination, bits, gateway, index, 0)
 
 /*
         Everything of one kind, walked.
@@ -10896,6 +10901,7 @@ static bipolar http_fetch_to(string_address start, bipolar dest, bool check_cert
 #define DHCP_DISCOVER 1
 #define DHCP_OFFER 2
 #define DHCP_REQUEST 3
+#define DHCP_DECLINE 4
 #define DHCP_ACK 5
 #define DHCP_NAK 6
 
@@ -11070,12 +11076,16 @@ static COLD positive dhcp_build(p8 address_to into, positive room, p8 kind,
         //      What we would like to be told, which a server may ignore, and
         //      the end. Short packets are dropped by some servers and by some
         //      switches, so the 261 bytes at most written here are padded to
-        //      the length everything accepts.
+        //      the length everything accepts. A DECLINE asks for nothing: RFC
+        //      2131's table 5 says it MUST NOT carry a parameter list.
         static const p8 ask[] = {DHCP_OPTION_ASK, 3, DHCP_OPTION_MASK,
                                  DHCP_OPTION_ROUTER, DHCP_OPTION_DNS,
                                  DHCP_OPTION_END};
 
-        memory_copy(into + at, ask, sizeof ask);
+        if (kind == DHCP_DECLINE)
+                into[at] = DHCP_OPTION_END;
+        else
+                memory_copy(into + at, ask, sizeof ask);
         return 300;
 }
 
@@ -11335,6 +11345,33 @@ static COLD bool dhcp_lease_acknowledge(dhcp_lease address_to lease,
         return dhcp_lease_timers(lease);
 }
 
+/* An ACK that completes a REQUEST, taken into the lease it answers. The same
+   server's ACK may leave out what it said before (RFC 2131 4.3.1 lets a
+   renewal answer carry only what changed), and that is kept. Another
+   server's -- which only REBINDING accepts -- starts a lease of its own: the
+   mask, router, resolver and lifetime the old server gave are not this
+   one's, and an ACK that leaves them out has none of them, as a client that
+   reads each lease whole (systemd-networkd, dhclient) has none. An ACK that
+   is no lease leaves the lease as it was, for the next answer to be judged
+   against. */
+static COLD bool dhcp_lease_take(dhcp_lease address_to lease,
+                                 const dhcp_lease address_to answer)
+{
+        dhcp_lease next = *lease;
+
+        if (answer->server != next.server)
+        {
+                next.mask = 0;
+                next.router = 0;
+                next.nameserver = 0;
+                next.seconds = 0;
+        }
+        if (!dhcp_lease_acknowledge(address_of next, answer))
+                return false;
+        *lease = next;
+        return true;
+}
+
 /* OFFER, ACK and NAK all carry a mandatory server identifier; xid and chaddr
    identify the client, not the server.  Completing a selected OFFER and
    RENEWING are bound to that server, and an ACK must name the offered or held
@@ -11566,7 +11603,7 @@ static COLD bipolar dhcp_complete(bipolar handle, p8 address_to packet,
                 if (dhcp_reacquisition_answer_matches(kind, address_of answer,
                                                       lease, rebinding) &&
                     (kind == DHCP_NAK ||
-                     dhcp_lease_acknowledge(lease, address_of answer)))
+                     dhcp_lease_take(lease, address_of answer)))
                         return kind == DHCP_ACK ? DHCP_OK : DHCP_REFUSED;
                 else if (discarded++ == DHCP_DISCARD_MAX)
                         break;
@@ -11613,6 +11650,7 @@ static bipolar dhcp_ask(string_address device, p8 address_to hardware,
                         dhcp_lease address_to lease)
 {
         p8 packet[1024];
+        p8 spread[8];
         p32 transaction;
         bipolar handle;
         bipolar status;
@@ -11623,6 +11661,11 @@ static bipolar dhcp_ask(string_address device, p8 address_to hardware,
         memory_fill(lease, 0, sizeof(dhcp_lease));
         if (!dhcp_transaction_early(address_of transaction))
                 return DHCP_NO_RANDOM;
+        //      The backoff's spread, drawn now: the confined child may not
+        //      ask for randomness later. The pool answered for the
+        //      transaction, so it is ready; a refusal leaves no spread.
+        if (system_random_fill(spread, sizeof spread, 1))
+                memory_fill(spread, 128, sizeof spread);
         handle = dhcp_open(device, HOST_ANY, true);
 
         if (handle < 0)
@@ -11662,6 +11705,13 @@ static bipolar dhcp_ask(string_address device, p8 address_to hardware,
                         only the second) and took the lease 250 ms late.
                 */
                 wait = !attempt ? 50 : attempt < 12 ? 250 : (attempt - 11) * 2000;
+                //      The backoff, once a server has had three seconds
+                //      to answer, moves by up to a second either way (RFC
+                //      2131 4.1), so that machines that lost their server
+                //      together -- a power cut, a switch restarting -- do
+                //      not keep asking it in step.
+                if (attempt >= 12)
+                        wait = wait - 1000 + spread[attempt - 12] * 2000 / 255;
                 length = dhcp_build(packet, sizeof packet, DHCP_DISCOVER,
                                     transaction, hardware, 0, 0, 0, true);
 
@@ -11804,6 +11854,51 @@ static bipolar dhcp_reacquire(string_address device, p8 address_to hardware,
 done:
         socket_close((b32)handle);
         return status;
+}
+
+/*
+        Giving back an address somebody else answers for.
+
+        The watcher ARP-probes an acknowledged address before it installs it,
+        and a station that answers means the server handed out an address in
+        use: a stale lease, a machine configured by hand, or a host that says
+        so to keep this one off the network. RFC 2131 4.4.1 has the client
+        broadcast a DHCPDECLINE naming the address (option 50) and the server
+        that gave it (option 54), under a transaction id of its own, and wait
+        ten seconds before it asks again; the server marks the address in use
+        and offers another. Without it the server offered the same address on
+        every DISCOVER until its lease ran out, and the link had none.
+
+        Nothing answers a DECLINE, so this is one send, from the same confined
+        child as the other exchanges: its filter already allows sendto.
+*/
+static bipolar dhcp_decline(string_address device, p8 address_to hardware,
+                            const dhcp_lease address_to lease)
+{
+        p8 packet[300];
+        p32 transaction;
+        bipolar handle;
+        bipolar sent;
+        positive length;
+
+        if (!lease->address || !lease->server)
+                return DHCP_NO_OFFER;
+        if (!dhcp_transaction_early(address_of transaction))
+                return DHCP_NO_RANDOM;
+        handle = dhcp_open(device, HOST_ANY, true);
+        if (handle < 0)
+                return DHCP_NO_SOCKET;
+
+        socket_address_internet where = {
+            .family = AF_INET, .port = network_order_16(DHCP_SERVER_PORT),
+            .host = network_order_32(HOST_BROADCAST)};
+
+        length = dhcp_build(packet, sizeof packet, DHCP_DECLINE, transaction,
+                            hardware, lease->address, lease->server, 0, false);
+        sent = socket_send((b32)handle, packet, length, 0, address_of where,
+                           sizeof where);
+        socket_close((b32)handle);
+        return sent == (bipolar)length ? DHCP_OK : DHCP_NO_SOCKET;
 }
 
 #endif // STANDARD_MODERN_C_NET_DHCP

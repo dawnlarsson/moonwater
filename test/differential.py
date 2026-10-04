@@ -35397,6 +35397,17 @@ def harness_image_nodes(argv):
               '%s spells a bowl root out for itself instead of asking bowl'
               % path.relative_to(ROOT))
 
+    # The initramfs carries each directory's owner into the guest, and mkdir
+    # -p keeps one the building user made: a /etc owned by uid 1000 made the
+    # shell refuse to replace /etc/resolv.conf (file_name_stable), and ip took
+    # every lease after the first back. The setup that makes the image
+    # directories gives them to root after it, when the build is root.
+    setup = build[build.index('build_setting_get("image_directories")'):
+                  build.index('build_setting_get("image_nodes")')]
+    check('"mkdir"' in setup and '"chown"' in setup and '"0:0"' in setup and
+          'build_root()' in setup and setup.index('"mkdir"') < setup.index('"chown"'),
+          'image directories are given to root after mkdir -p, so the guest\'s /etc is root\'s')
+
     return check.verdict('image nodes', 'image_nodes')
 
 
@@ -40777,7 +40788,7 @@ def harness_dhcp_fuzz(argv):
     shim, head, walk = dhcp_lift()
     shell = (HARNESS_ROOT / "src/sh/net.c").read_text()
     clock = src_slice(shell, "/*\n        What this machine is holding, and since when.",
-                         "static COLD fn net_rollback_record(")
+                         "/* A lease's default route.")
     source = shim + r"""
 #define IFNAME_SIZE 16
 #define ERROR_NO_ENTRY 2
@@ -40785,6 +40796,10 @@ def harness_dhcp_fuzz(argv):
 #define ERROR_NO_DEVICE 19
 #define NETWORK_NANOSECONDS 1000000000
 static positive clock_monotonic_nanoseconds(void) { return 0; }
+/* net_seconds reads CLOCK_BOOTTIME; here, as the monotonic clock above, it
+   is a clock that will not answer. */
+typedef struct { long tv_sec; long tv_nsec; } timespec;
+#define clock_gettime(which, at) ((void)(which), (void)(at), -1)
 """ + head + walk + clock + r"""
 static const p8 fuzz_hardware[6] = {2, 0, 0, 0, 0, 1};
 
@@ -57355,8 +57370,10 @@ def harness_security_hygiene(argv):
         ("radio_rsn_security", ("element",)),
         ("radio_bss_read", ("elements",)),
         ("bowl_signature_read", ("bytes",)),
+        ("net_arp_claims", ("packet",)),
     )
     wire_source = (net + (HARNESS_ROOT / "src/sh/host.c").read_text() +
+                   (HARNESS_ROOT / "src/sh/net.c").read_text() +
                    (HARNESS_ROOT / "src/waterlink/discover.c").read_text() +
                    (HARNESS_ROOT / "src/bowl.c").read_text())
     try:
@@ -57367,7 +57384,7 @@ def harness_security_hygiene(argv):
         found = re.search(r"^[a-z][^\n(;]*\b%s\([^;{]*?\)\s*\n\{.*?^\}$" % name,
                           wire_source, re.M | re.S)
         checks(found is not None,
-               "reader-only: cannot find %s in net.c, host.c, discover.c or bowl.c" % name)
+               "reader-only: cannot find %s in net.c, host.c, sh/net.c, discover.c or bowl.c" % name)
         if not found:
             continue
         body = re.sub(r"//[^\n]*", "", re.sub(r"/\*.*?\*/", "", found.group(0), flags=re.S))
@@ -58780,6 +58797,11 @@ def harness_waterlink_noise(argv):
 NET_NETEM_DHCP_SERVER = r"""import socket, struct, sys, time, threading
 mode = sys.argv[1]
 OFFER_IP = "10.88.0.50"; BAD_IP = "10.88.0.66"; SERVER = "10.88.0.2"
+#   The pool: an address a client DECLINEs (RFC 2131 4.4.1) is marked in use
+#   and the next one offered, as a server does.
+POOL = ["10.88.0.50", "10.88.0.51", "10.88.0.52"]; declined = set()
+def current():
+    return next((a for a in POOL if a not in declined), BAD_IP)
 def parse(data):
     xid = data[4:8]; chaddr = data[28:34]
     opts = {}
@@ -58813,13 +58835,23 @@ while True:
     if len(data) < 241 or data[0] != 1: continue
     xid, chaddr, opts = parse(data)
     t = opts.get(53, b"\0")[0]
+    if t == 4:
+        asked = opts.get(50, b""); named = opts.get(54, b"")
+        log.write("%.3f rx type 4 xid %s req %s sid %s ciaddr %s flags %d ask %s\n" % (
+            time.time(), xid.hex(), socket.inet_ntoa(asked) if len(asked) == 4 else "-",
+            socket.inet_ntoa(named) if len(named) == 4 else "-", socket.inet_ntoa(data[12:16]),
+            struct.unpack("!H", data[10:12])[0], "yes" if 55 in opts else "-"))
+        if len(asked) == 4 and named == socket.inet_aton(SERVER):
+            declined.add(socket.inet_ntoa(asked))
+        continue
     log.write("%.3f rx type %d xid %s\n" % (time.time(), t, xid.hex()))
+    if mode == "mute-watch": continue
     if t == 1:
         seen_discover += 1
         if mode == "drop3" and seen_discover <= 3: continue
         msgs = []
         if mode == "stale":  msgs.append(reply(bytes(a ^ 0xff for a in xid), chaddr, 2, BAD_IP))
-        msgs.append(reply(xid, chaddr, 2, OFFER_IP))
+        msgs.append(reply(xid, chaddr, 2, current()))
         d = 1.5 if mode == "late" else 0.0
         for m in msgs:
             for _ in range(3 if mode == "dup" else 1): send(m, d)
@@ -58828,7 +58860,7 @@ while True:
             naked = True; send(reply(xid, chaddr, 6, "0.0.0.0")); continue
         msgs = []
         if mode == "stale": msgs.append(reply(bytes(a ^ 0xff for a in xid), chaddr, 5, BAD_IP))
-        msgs.append(reply(xid, chaddr, 5, OFFER_IP))
+        msgs.append(reply(xid, chaddr, 5, current()))
         for m in msgs:
             for _ in range(3 if mode == "dup" else 1): send(m, 1.5 if mode == "late" else 0)
         if mode == "dup":
@@ -58932,10 +58964,85 @@ try:
                            " rp_filter " + os.environ["NETEM_RP_FILTER"]
                            if os.environ.get("NETEM_RP_FILTER", "0") != "0" else "")
     if kind == "dhcp":
+        want = "10.88.0.51" if mode.startswith("conflict") else "10.88.0.50"
+        if mode.startswith("conflict"):
+            #   A station already on the offered address: the far namespace's
+            #   kernel answers the client's ARP probes for it.
+            there("ip", "addr", "add", "10.88.0.50/24", "dev", "cb")
         server("dhcpsrv.py", mode, top + "/dhcp.log")
         began = time.time()
-        client = run(top + "/ip", "auto", env=env, timeout=150)
-        if mode == "nak":
+
+        def dhcp_log():
+            return open(top + "/dhcp.log").read() if os.path.exists(top + "/dhcp.log") else ""
+
+        def decline_checks():
+            lines = dhcp_log().splitlines()
+            declines = [line for line in lines if " rx type 4 " in line]
+            say(len(declines) == 1, "%s: one DHCPDECLINE reached the server (%d)" % (label, len(declines)))
+            if not declines:
+                return None
+            say(declines[0].split(" xid ")[1].split()[1:] ==
+                ["req", "10.88.0.50", "sid", "10.88.0.2", "ciaddr", "0.0.0.0", "flags", "0", "ask", "-"],
+                "%s: the DECLINE names the address and the server, no ciaddr, no parameter list (%s)" % (
+                    label, declines[0]))
+            requests = [line.split(" xid ")[1].split()[0] for line in lines[:lines.index(declines[0])]
+                        if " rx type 3 " in line]
+            say(requests and declines[0].split(" xid ")[1].split()[0] not in requests,
+                "%s: the DECLINE has a transaction id of its own" % label)
+            return float(declines[0].split()[0])
+
+        if mode == "conflict":
+            first = run(top + "/ip", "auto", env=env, timeout=150)
+            said_first = first.stdout + first.stderr
+            say(first.returncode != 0 and address() is None and "already in use; declined" in said_first,
+                "%s: an address another station answers for is declined, not installed (%d, %s, %s)" % (
+                    label, first.returncode, address(), said_first.strip().replace("\n", " | ")[-160:]))
+            decline_checks()
+            client = run(top + "/ip", "auto", env=env, timeout=150)
+        elif mode == "conflict-watch":
+            sink = open(top + "/watch.out", "w")
+            watcher = subprocess.Popen([top + "/ip", "watch"], env=env, stdin=subprocess.DEVNULL,
+                                       stdout=sink, stderr=sink)
+            procs.append(watcher)
+            while time.time() - began < 60 and address() != want:
+                time.sleep(0.2)
+            declined_at = decline_checks()
+            after = [float(line.split()[0]) for line in dhcp_log().splitlines()
+                     if " rx type 1 " in line and declined_at is not None and
+                     float(line.split()[0]) > declined_at]
+            say(bool(after) and after[0] - declined_at >= 10.0,
+                "%s: the watcher waits ten seconds after a DECLINE before it asks again (%s)" % (
+                    label, "%.2f s" % (after[0] - declined_at) if after else "no DISCOVER after it"))
+            watcher.kill()
+            watcher.wait()
+            sink.close()
+            client = subprocess.CompletedProcess([], 0 if address() == want else 1,
+                                                 open(top + "/watch.out").read(), "")
+        elif mode == "mute-watch":
+            #   Nobody answers: the backoff after the first three seconds of
+            #   a pass (2 s, then 4 s) moves by up to a second either way
+            #   (RFC 2131 4.1), where it used to be the same to the
+            #   millisecond on every machine that lost the server together.
+            sink = open(top + "/watch.out", "w")
+            watcher = subprocess.Popen([top + "/ip", "watch"], env=env, stdin=subprocess.DEVNULL,
+                                       stdout=sink, stderr=sink)
+            procs.append(watcher)
+            time.sleep(27)
+            watcher.kill()
+            watcher.wait()
+            sink.close()
+            times = [float(line.split()[0]) for line in dhcp_log().splitlines() if " rx type 1 " in line]
+            gaps = [b - a for a, b in zip(times, times[1:]) if 1.5 < b - a < 5.5]
+            say(len(gaps) >= 3 and any(min(abs(g - 2), abs(g - 4)) > 0.05 for g in gaps),
+                "%s: the DISCOVER backoff is spread, not in step (%s)" % (
+                    label, " ".join("%.3f" % g for g in gaps)))
+            say(len(times) >= 12, "%s: the watcher kept asking a silent link (%d DISCOVERs in 27 s)" % (
+                label, len(times)))
+        else:
+            client = run(top + "/ip", "auto", env=env, timeout=150)
+        if mode == "mute-watch":
+            pass
+        elif mode == "nak":
             #   The one-shot ip auto reports a refused REQUEST and leaves
             #   nothing configured; the watcher asks again, which is a second
             #   run here, and the server answers that one.
@@ -58944,11 +59051,13 @@ try:
                     label, client.returncode, address()))
             client = run(top + "/ip", "auto", env=env, timeout=150)
         took = time.time() - began
+        if mode == "mute-watch":
+            raise SystemExit(0)
         route = open("/proc/net/route").read().splitlines()[1:]
         default = [line.split() for line in route if line.split()[1] == "00000000"]
         say(client.returncode == 0, "%s: ip auto took a lease (status %d, %.1f s: %s)" % (
             label, client.returncode, took, (client.stdout + client.stderr).strip().replace("\n", " | ")[-160:]))
-        say(address() == "10.88.0.50", "%s: the address is the real server's, not a forged one (%s)" % (label, address()))
+        say(address() == want, "%s: the address is the real server's, not a forged one (%s)" % (label, address()))
         say(bool(default) and default[0][2] == "0200580A", "%s: the default route is via the server" % label)
         say("nameserver 10.88.0.2" in open("/etc/resolv.conf").read() if os.path.exists("/etc/resolv.conf") else False,
             "%s: the resolver is the server's" % label)
@@ -58984,6 +59093,92 @@ finally:
 """
 
 
+#   Each one removes one step that keeps a lease's epoch whole, in
+#   src/sh/net.c, as (what it breaks, the text, what it becomes).
+NET_EPOCH_MUTANTS = (
+    ("a new route leaves the old one in place",
+     "        if (route_changed && net_owns_route(previous))\n        {\n                status = netlink_route_delete(",
+     "        if (false && route_changed && net_owns_route(previous))\n        {\n                status = netlink_route_delete("),
+    ("a new address leaves the old one in place",
+     "        if (address_changed && net_owns_address(previous))\n        {\n                status = netlink_address_delete(",
+     "        if (false && address_changed && net_owns_address(previous))\n        {\n                status = netlink_address_delete("),
+    ("a rollback does not put the old route back",
+     "                        bipolar status = net_lease_route(\n                            handle, address_of previous->lease,\n                            previous->index, false);",
+     "                        bipolar status = 0;"),
+    ("a rollback keeps the new address",
+     "        if (address_changed)\n                net_rollback_record(\n                    netlink_address_delete(handle, index, lease->address,",
+     "        if (false)\n                net_rollback_record(\n                    netlink_address_delete(handle, index, lease->address,"),
+    ("a release keeps the lease's resolver",
+     "                bipolar status = net_write_resolv(0);",
+     "                bipolar status = 0;"),
+    ("a release keeps the lease's route",
+     "        if (net_owns_route(held))\n                net_rollback_record(",
+     "        if (false)\n                net_rollback_record("),
+)
+
+
+def harness_net_epoch_mutants(argv):
+    """The lease epoch walk of storage_io (storage_test_lease_epochs) against
+    src/sh/net.c with one epoch step taken out at a time: each mutant must
+    break one of its two rows, or the walk would not have noticed that step
+    going. Built alone (-DSTORAGE_EPOCH_ONLY), natively, about a minute and a
+    half a mutant, so the lane asks the first; MOONWATER_EPOCH_MUTANTS=all asks
+    every one. NOT RUN (exit 2) off Linux, or where the walk's namespaces are
+    refused.
+
+        python3 test/differential.py --harness net_epoch_mutants [--all]
+    """
+    import shutil
+    import subprocess
+    import tempfile
+    parser = argparse.ArgumentParser(prog="differential.py --harness net_epoch_mutants")
+    parser.add_argument("--all", action="store_true")
+    parser.add_argument("--cc", default=os.environ.get("CC", "gcc"))
+    args = parser.parse_args(argv)
+    if platform.system() != "Linux" or platform.machine() not in ("x86_64", "AMD64"):
+        print("net epoch mutants: NOT RUN -- the walk runs natively on x86_64 Linux")
+        return 2
+    every = args.all or os.environ.get("MOONWATER_EPOCH_MUTANTS") == "all"
+    chosen = NET_EPOCH_MUTANTS if every else NET_EPOCH_MUTANTS[:1]
+    checks = Checks()
+    original = (HARNESS_ROOT / "src/sh/net.c").read_text()
+    with tempfile.TemporaryDirectory(prefix="net-epoch-") as temporary:
+        top = Path(temporary)
+        shutil.copytree(HARNESS_ROOT / "src", top / "src")
+        (top / "test").mkdir()
+        shutil.copy(HARNESS_ROOT / "test/checks.c", top / "test/checks.c")
+        for what, before, after in chosen:
+            checks(original.count(before) == 1,
+                   "mutant '%s': its text is in src/sh/net.c once" % what)
+            if original.count(before) != 1:
+                continue
+            (top / "src/sh/net.c").write_text(original.replace(before, after))
+            binary = top / "epoch"
+            built = subprocess.run(
+                [args.cc, "-O2", "-static", "-nostdlib", "-nostartfiles",
+                 "-fno-stack-protector", "-fno-builtin", "-march=x86-64", "-w",
+                 "-T", str(top / "src/build/spark.ld"), "-Wl,-e,_start",
+                 "-Wl,--build-id=none", "-Wl,--no-warn-rwx-segments",
+                 "-DCHECK_storage_io", "-DSTORAGE_EPOCH_ONLY", "-fwhole-program",
+                 "-o", str(binary), str(top / "test/checks.c")],
+                capture_output=True, text=True)
+            checks(built.returncode == 0, "mutant '%s' builds: %s" % (what, built.stderr[-400:]))
+            if built.returncode:
+                continue
+            ran = subprocess.run([str(binary)], capture_output=True, text=True,
+                                 cwd=temporary, timeout=600)
+            said = ran.stdout + ran.stderr
+            if "NOT RUN" in said:
+                print("net epoch mutants: NOT RUN -- " + said.strip().splitlines()[-1][:160])
+                return 2
+            verdict = re.search(r"^(\d+) checks, (\d+) failures$", said, re.M)
+            checks(verdict is not None and int(verdict.group(2)) > 0,
+                   "mutant '%s' is caught by the lease epoch walk: %s" % (
+                       what, " | ".join(line.strip() for line in said.splitlines()
+                                        if "epoch:" in line or "FAIL" in line)[:300] or said[-200:]))
+    return checks.verdict("net epoch mutants", "net-epoch-mutants")
+
+
 def harness_net_netem(argv):
     """The DHCP client and the SNTP client, as built, against a server that
     schedules its answers adversarially, over a veth pair in namespaces with
@@ -58997,7 +59192,13 @@ def harness_net_netem(argv):
     times over, with a forged reply (wrong transaction id, another address)
     before each real one, 1.5 s late, not at all for the first three
     DISCOVERs, or with a NAK for the first REQUEST, it has to end with the
-    real server's address, route and resolver and never a forged one.
+    real server's address, route and resolver and never a forged one. On a
+    clean wire, a station that already answers ARP for the offered address:
+    `ip auto` declines it (one DHCPDECLINE naming the address and the server,
+    no ciaddr, no parameter list, a transaction id of its own) and the next
+    `ip auto` takes the address the server offers instead, and `ip watch`
+    does the same by itself, waiting at least ten seconds before it asks
+    again.
     `moonwater time sync` is the SNTP client, with `/root/ntp.server` naming
     the far end: it has to take a clean, tripled, late or once-dropped answer,
     take the right one of a forged reply (wrong origin, three hours off) and
@@ -59046,6 +59247,10 @@ def harness_net_netem(argv):
         (top / "inner.py").write_text(NET_NETEM_INNER)
         scenes = [("dhcp", mode, netem, "0") for netem in ("", "netem")
                   for mode in ("clean", "dup", "stale", "late", "drop3", "nak")]
+        #   The ARP probe is three frames; netem's 25% loss on each leg would
+        #   miss the defender one run in twelve, so the conflict scenes are
+        #   asked on a clean wire.
+        scenes += [("dhcp", mode, "", "0") for mode in ("conflict", "conflict-watch", "mute-watch")]
         scenes += [("sntp", mode, netem, "0") for netem in ("", "netem")
                    for mode in ("clean", "dup", "spoof", "late", "drop2", "skewed", "kod")]
         checks = Checks()
@@ -69098,6 +69303,7 @@ HARNESS_CHECKS = {
     "http_response_framing": harness_http_response_framing,
     "http_fuzz": harness_http_fuzz,
     "net_netem": harness_net_netem,
+    "net_epoch_mutants": harness_net_epoch_mutants,
     "sntp_era": harness_sntp_era,
     "http_urls": harness_http_urls,
     "tls_der_fuzz": harness_tls_der_fuzz,

@@ -65356,6 +65356,32 @@ static fn leasing(void)
               packet[249] == DHCP_OPTION_SERVER && packet[250] == 4 &&
               network_load_32(packet + 251) == 0x0a000202);
 
+        //      A DECLINE (RFC 2131 table 5) names the address and the server
+        //      the same way, has no ciaddr and asks for no broadcast reply,
+        //      since none comes, and carries no parameter list: END follows
+        //      the server at once and the rest is padding.
+        memory_fill(packet, 0xa5, sizeof packet);
+        length = dhcp_build(packet, sizeof packet, DHCP_DECLINE, 0x01020304,
+                            hardware, 0x0a00020f, 0x0a000202, 0, false);
+        {
+                bool padded = true;
+
+                for (positive at = 256; at < 300; at++)
+                        padded &= packet[at] == 0;
+                check("a decline names the address, the server and nothing else",
+                      length == 300 && packet[0] == 1 &&
+                          network_load_32(packet + 4) == 0x01020304 &&
+                          !network_load_16(packet + 10) &&
+                          !network_load_32(packet + 12) &&
+                          !memory_compare(packet + 28, hardware, 6) &&
+                          packet[242] == DHCP_DECLINE &&
+                          packet[243] == DHCP_OPTION_REQUESTED &&
+                          network_load_32(packet + 245) == 0x0a00020f &&
+                          packet[249] == DHCP_OPTION_SERVER &&
+                          network_load_32(packet + 251) == 0x0a000202 &&
+                          packet[255] == DHCP_OPTION_END && padded);
+        }
+
         /*
                 An offer, in the shape qemu's own server sends one: the
                 address in yiaddr and the mask, router, server and lease in
@@ -65808,6 +65834,38 @@ static fn leasing(void)
                                              address_of answer) &&
                           held.seconds == 60 && held.renewal == 30 &&
                           held.rebinding == 52);
+        }
+        {
+                /* REBINDING's ACK from another server: what the first one
+                   said about the mask, router, resolver and lifetime is
+                   not carried into the second one's lease, and an ACK with
+                   no lifetime of its own is not a lease. The same server
+                   leaving its resolver out keeps it. */
+                dhcp_lease held = {.address = 0x0a00020f, .mask = 0xffffff00,
+                                   .router = 0x0a000201, .nameserver = 0x0a000201,
+                                   .server = 0x0a000202, .seconds = 3600};
+                dhcp_lease mine = held;
+                dhcp_lease other = {.address = 0x0a00020f,
+                                    .server = 0x0a000263, .seconds = 600};
+                dhcp_lease same = {.address = 0x0a00020f,
+                                   .router = 0x0a000203,
+                                   .server = 0x0a000202, .seconds = 600};
+                dhcp_lease bare = {.address = 0x0a00020f, .server = 0x0a000263};
+
+                check("another server's ACK starts a lease without the first one's mask, router or resolver",
+                      dhcp_lease_take(address_of held, address_of other) &&
+                          held.server == 0x0a000263 && !held.mask &&
+                          !held.router && !held.nameserver &&
+                          held.seconds == 600 && held.address == 0x0a00020f);
+                check("the same server's ACK keeps what it left out",
+                      dhcp_lease_take(address_of mine, address_of same) &&
+                          mine.mask == 0xffffff00 && mine.router == 0x0a000203 &&
+                          mine.nameserver == 0x0a000201 && mine.seconds == 600);
+                held = mine;
+                check("another server's ACK without a lifetime is not a lease, and changes nothing",
+                      !dhcp_lease_take(address_of held, address_of bare) &&
+                          !memory_compare(address_of held, address_of mine,
+                                          sizeof held));
         }
         for (positive bits = 0; bits < 256; bits++)
         {
@@ -82785,6 +82843,38 @@ static bool storage_test_write_text(string_address path, const void address_to t
         return written;
 }
 
+/* A namespace row's child that could not have its namespaces says why: 2
+   when the kernel will not give them, STORAGE_TEST_THREADED when unshare
+   answered EINVAL for a new user namespace, which the kernel gives only to a
+   process of one thread. qemu-user runs every program beside threads of its
+   own (and starts them again in a forked child), so the arm64 and riscv64
+   runs cannot ask these rows; the native run on the box does. */
+#define STORAGE_TEST_THREADED 7
+
+static bool storage_test_not_run(b32 status, string_address what,
+                                 string_address otherwise)
+{
+        if (status != 2 && status != STORAGE_TEST_THREADED)
+                return false;
+        string_format(log, "storage_io: %s NOT RUN -- %s\n", what,
+                      status == 2 ? otherwise
+                                  : (string_address) "a multithreaded runner "
+                                                     "(qemu-user) gets no new "
+                                                     "user namespace");
+        log_flush();
+        return true;
+}
+
+static positive storage_test_boottime(void)
+{
+        timespec stamp = {0, 0};
+
+        return clock_gettime(NET_CLOCK_BOOTTIME, address_of stamp) < 0
+                   ? 0
+                   : (positive)stamp.tv_sec * NETWORK_NANOSECONDS +
+                         (positive)stamp.tv_nsec;
+}
+
 /* The lease clock's first second.  A boot takes its lease there, and zero is
    what net_seconds says for a clock that failed -- which expires every lease
    at once.  A time namespace whose monotonic clock starts about now puts a
@@ -82796,19 +82886,22 @@ static fn storage_test_lease_clock_origin(void)
 
         if (child == 0)
         {
-                p8 offsets[48] = "monotonic -";
-                positive at = 11;
-                positive now = clock_monotonic_nanoseconds();
+                p8 offsets[48] = "boottime -";
+                positive at = 10;
+                positive now = storage_test_boottime();
                 timespec pause = {0, 250000000};
                 b32 inner = 0;
 
                 if (now % NETWORK_NANOSECONDS > 700000000)
                 {
                         system_call_2(syscall(nanosleep), (positive)address_of pause, 0);
-                        now = clock_monotonic_nanoseconds();
+                        now = storage_test_boottime();
                 }
-                if (system_call_1(syscall(unshare), CLONE_NEWUSER | CLONE_NEWTIME) < 0)
-                        system_call_1(syscall(exit_group), 2);
+                bipolar unshared = system_call_1(syscall(unshare),
+                                                 CLONE_NEWUSER | CLONE_NEWTIME);
+                if (unshared < 0)
+                        system_call_1(syscall(exit_group),
+                                      unshared == -EINVAL ? STORAGE_TEST_THREADED : 2);
                 at += positive_into(offsets + at, now / NETWORK_NANOSECONDS);
                 memory_copy(offsets + at, " 0\n", 3);
                 at += 3;
@@ -82824,11 +82917,101 @@ static fn storage_test_lease_clock_origin(void)
         if (child > 0)
                 system_call_4(syscall(wait4), (positive)child,
                               (positive)address_of status, 0, 0);
-        if (child > 0 && (status & 0x7f) == 0 && ((status >> 8) & 0xff) == 2)
-                log_direct(str("storage_io: lease clock origin NOT RUN -- no time namespace\n"));
-        else
+        if (!(child > 0 && (status & 0x7f) == 0 &&
+              storage_test_not_run((status >> 8) & 0xff, "lease clock origin",
+                                   "no time namespace")))
                 check("a lease taken in the clock's first second is not a failed clock",
                       child > 0 && status == 0);
+}
+
+/* A lease held across a suspend. A time namespace moves the clocks a child
+   reads: boottime two hours on is a machine that slept two hours (the
+   monotonic clock does not count a suspend, CLOCK_BOOTTIME does), and its
+   hour's lease has run out; boottime a hundred seconds on is a lease with
+   1,700 seconds to its renewal; and the monotonic clock two hours on with
+   boottime where it was is not a suspend at all. Exit bits over 16, so 2
+   and the threaded runner's 7 stay NOT RUN. */
+static fn storage_test_lease_asleep(void)
+{
+        static const struct
+        {
+                string_address offsets;
+                bool expired;
+                positive due;
+        } cases[] = {{"boottime 7200 0\n", true, 1},
+                     {"boottime 100 0\n", false, 1700},
+                     {"monotonic 7200 0\n", false, 1800}};
+        b32 wrong = 16;
+        b32 status = 0;
+
+        for (positive at = 0; at < array_count(cases); at++)
+        {
+                bipolar child = system_fork();
+
+                if (child == 0)
+                {
+                        net_holding held = {.index = 1};
+                        b32 inner = 0;
+
+                        held.lease.seconds = 3600;
+                        held.lease.renewal = 1800;
+                        held.lease.rebinding = 3150;
+                        held.retry = 1800;
+                        held.taken = net_seconds();
+                        bipolar unshared = system_call_1(
+                            syscall(unshare), CLONE_NEWUSER | CLONE_NEWTIME);
+                        if (unshared < 0)
+                                system_call_1(syscall(exit_group),
+                                              unshared == -EINVAL
+                                                  ? STORAGE_TEST_THREADED
+                                                  : 2);
+                        if (!storage_test_write_text(
+                                "/proc/self/timens_offsets", cases[at].offsets,
+                                string_length(cases[at].offsets)))
+                                system_call_1(syscall(exit_group), 2);
+                        bipolar grandchild = system_fork();
+                        if (grandchild == 0)
+                        {
+                                positive now = net_seconds();
+                                positive due = net_lease_due_in(address_of held,
+                                                                now);
+
+                                //      A second of slack for the clock
+                                //      moving between the two readings.
+                                system_call_1(
+                                    syscall(exit_group),
+                                    net_lease_expired_at(address_of held, now) ==
+                                                cases[at].expired &&
+                                            due <= cases[at].due &&
+                                            due + 1 >= cases[at].due
+                                        ? 0
+                                        : 1);
+                        }
+                        system_call_4(syscall(wait4), (positive)grandchild,
+                                      (positive)address_of inner, 0, 0);
+                        system_call_1(syscall(exit_group), (inner >> 8) & 0xff);
+                }
+                if (child > 0)
+                        system_call_4(syscall(wait4), (positive)child,
+                                      (positive)address_of status, 0, 0);
+                status = child > 0 && !(status & 0x7f) ? (status >> 8) & 0xff : 1;
+                if (status == 2 || status == STORAGE_TEST_THREADED)
+                        break;
+                if (status)
+                        wrong |= 1 << at;
+        }
+        if (!storage_test_not_run(status == 2 || status == STORAGE_TEST_THREADED
+                                      ? status
+                                      : wrong,
+                                  "lease across a suspend", "no time namespace"))
+        {
+                check("a lease runs out while the machine sleeps",
+                      !(wrong & 1));
+                check("time asleep short of the renewal moves it nearer, no more",
+                      !(wrong & 2));
+                check("a monotonic clock that jumps is not time asleep",
+                      !(wrong & 4));
+        }
 }
 
 static fn storage_test_arp_claims(void)
@@ -82864,6 +83047,33 @@ static fn storage_test_arp_claims(void)
               !net_arp_claims(packet, sizeof packet, mine, offered));
         check("a truncated ARP claim is refused",
               !net_arp_claims(packet, NET_ARP_PACKET - 1, mine, offered));
+
+        //      Every field that says what the packet is, wrong one at a
+        //      time, is not a claim; the frame's padding is not a field.
+        {
+                p8 padded[46] = {0};
+                static const struct { p8 at, value; } wrong[] = {
+                    {1, 6}, {3, 0x06}, {4, 8}, {5, 16}, {7, 3}, {7, 0}};
+
+                memory_copy(padded, packet, NET_ARP_PACKET);
+                network_store_32(padded + 14, offered);
+                check("an ARP claim padded to the frame minimum is a claim",
+                      net_arp_claims(padded, sizeof padded, mine, offered));
+                for (positive at = 0; at < array_count(wrong); at++)
+                {
+                        p8 copy[46];
+
+                        memory_copy(copy, padded, sizeof copy);
+                        copy[wrong[at].at] = wrong[at].value;
+                        check("an ARP packet of another medium, protocol, length or operation is no claim",
+                              !net_arp_claims(copy, sizeof copy, mine, offered));
+                }
+                bool refused = true;
+
+                for (positive length = 0; length < NET_ARP_PACKET; length++)
+                        refused &= !net_arp_claims(padded, length, mine, offered);
+                check("an ARP claim cut at any byte is refused", refused);
+        }
 }
 
 /* A renewal with nothing to renew answers DHCP_NO_OFFER from inside the
@@ -82878,7 +83088,7 @@ static fn storage_test_dhcp_apart(void)
         if (before >= 0)
                 system_close(before);
         bipolar status = net_dhcp_apart("moonwater-no-interface", hardware,
-                                        address_of lease, true, false, 1);
+                                        address_of lease, NET_DHCP_RENEW, 1);
         bipolar after = system_open_at(AT_FDCWD, "/", FILE_READ | O_CLOEXEC);
 
         if (after >= 0)
@@ -82887,6 +83097,57 @@ static fn storage_test_dhcp_apart(void)
               status == DHCP_NO_OFFER && before >= 0 && after == before &&
                   system_call_4(syscall(wait4), (positive)-1, 0, 1, 0) ==
                       -ECHILD);
+
+        //      A DECLINE goes through the same child: nothing to send from
+        //      on a link that is not there, and nothing to name without a
+        //      server, and neither leaves a child or a descriptor.
+        lease.address = 0x0a090909;
+        lease.server = 0x0a090901;
+        status = net_dhcp_apart("moonwater-no-interface", hardware,
+                                address_of lease, NET_DHCP_DECLINE, 0);
+        lease.server = 0;
+        bipolar unnamed = net_dhcp_apart("lo", hardware, address_of lease,
+                                         NET_DHCP_DECLINE, 0);
+        after = system_open_at(AT_FDCWD, "/", FILE_READ | O_CLOEXEC);
+        if (after >= 0)
+                system_close(after);
+        check("a DECLINE apart without a link or a server sends nothing and leaves nothing",
+              status == DHCP_NO_SOCKET && unnamed == DHCP_NO_SOCKET &&
+                  after == before &&
+                  system_call_4(syscall(wait4), (positive)-1, 0, 1, 0) ==
+                      -ECHILD);
+}
+
+/* The wait after a DECLINE is the declined link's, at least ten seconds, and
+   the slots it is kept in never lose a link that is still waiting to one
+   that is not. */
+static fn storage_test_decline_hold(void)
+{
+        memory_zero(net_declined, sizeof net_declined);
+        check("no link waits before anything was declined",
+              !net_decline_waiting(3) && !net_decline_left(0));
+        net_decline_hold(3);
+        positive left = net_decline_left(3);
+        check("a declined link waits ten seconds before it asks again",
+              net_decline_waiting(3) && left > 9900 &&
+                  left <= NET_DECLINE_HOLDOFF_SECONDS * 1000 + 1);
+        check("and only that link waits", !net_decline_waiting(4) &&
+                                              !net_decline_waiting(0));
+        net_decline_hold(3);
+        positive held = 0;
+        for (positive at = 0; at < NET_DECLINE_LINKS; at++)
+                held += net_declined[at].index == 3;
+        check("declining the same link again keeps one wait for it", held == 1);
+        for (p32 index = 10; index < 10 + NET_DECLINE_LINKS + 2; index++)
+                net_decline_hold(index);
+        check("more declined links than slots keep the latest ones waiting",
+              net_decline_waiting(10 + NET_DECLINE_LINKS + 1) &&
+                  net_decline_waiting(10 + NET_DECLINE_LINKS));
+        net_declined[0].until.began -= 11 * NETWORK_NANOSECONDS;
+        p32 expired = net_declined[0].index;
+        check("a wait that has run out is over and frees its slot",
+              !net_decline_waiting(expired) && !net_declined[0].index);
+        memory_zero(net_declined, sizeof net_declined);
 }
 
 /* A user, network and mount namespace of the caller's own, which must be
@@ -82904,9 +83165,12 @@ static bipolar storage_test_net_namespace(void)
         positive group = 2 + positive_into(
             groups + 2, (positive)system_call_1(syscall(getgid), 0));
 
-        if (system_call_1(syscall(unshare), CLONE_NEWUSER | CLONE_NEWNET |
-                                                CLONE_NEWNS) < 0)
-                system_call_1(syscall(exit_group), 2);
+        bipolar unshared = system_call_1(syscall(unshare), CLONE_NEWUSER |
+                                                               CLONE_NEWNET |
+                                                               CLONE_NEWNS);
+        if (unshared < 0)
+                system_call_1(syscall(exit_group),
+                              unshared == -EINVAL ? STORAGE_TEST_THREADED : 2);
         memory_copy(map + at, " 1\n", 4);
         memory_copy(groups + group, " 1\n", 4);
         if (!storage_test_write_text("/proc/self/uid_map", map, at + 3) ||
@@ -82963,9 +83227,8 @@ static fn storage_test_lease_over_existing(void)
                                   ? 0 : 3);
         }
         b32 status = storage_test_child_status(child);
-        if (status == 2)
-                log_direct(str("storage_io: lease over an existing address NOT RUN -- no namespaces\n"));
-        else
+        if (!storage_test_not_run(status, "lease over an existing address",
+                                 "no namespaces"))
                 check("a lease over an address already there is taken, held unowned and left",
                       status == 0);
 }
@@ -83061,9 +83324,8 @@ static fn storage_test_lease_inherited(void)
                 system_call_1(syscall(exit_group), 0);
         }
         b32 status = storage_test_child_status(child);
-        if (status == 2)
-                log_direct(str("storage_io: inherited lease NOT RUN -- no namespaces\n"));
-        else
+        if (!storage_test_not_run(status, "inherited lease",
+                                 "no namespaces"))
         {
                 check("a leased address carries the lease's lifetime",
                       status != 4 && status != 1);
@@ -83149,6 +83411,491 @@ static fn storage_test_link_news(b32 events, net_holding address_to held,
         netlink_forget(address_of message);
 }
 
+typedef struct
+{
+        p32 gateway;
+        bool found;
+        p32 flags;
+} storage_test_route_facts;
+
+static bool storage_test_route_seen(netlink_header address_to header,
+                                    address_any context)
+{
+        storage_test_route_facts address_to facts = context;
+        netlink_route address_to route =
+            netlink_message_body(header, sizeof(netlink_route));
+        positive size = 0;
+        p8 address_to gateway = netlink_find(header, sizeof(netlink_route),
+                                             RTA_GATEWAY, address_of size);
+
+        if (route && !route->destination_bits && gateway && size == 4 &&
+            memory_load_unaligned(p32, gateway) ==
+                network_order_32(facts->gateway))
+        {
+                facts->found = true;
+                facts->flags = route->flags;
+        }
+        return true;
+}
+
+/* A /32 lease and its router off the prefix, as clouds hand them out, which
+   dhcp_lease_usable takes: the default route goes in, through a router the
+   kernel is told is on the link, and goes with the release; a /24 lease's
+   router is on its prefix and is asked of the kernel as before. Exit bits
+   over 16, so 2 and the threaded runner's 7 stay NOT RUN. */
+static fn storage_test_lease_off_prefix(void)
+{
+        bipolar child = system_fork();
+
+        if (child == 0)
+        {
+                p8 hardware[6] = {2, 0, 0, 0, 0, 1};
+                bipolar handle = storage_test_net_namespace();
+                netlink_search link = {.wanted = (string_address) "wd3"};
+                dhcp_lease host = {.address = 0x0a090d0d, .mask = 0xffffffff,
+                                   .router = 0x0a090d01, .server = 0x0a090d01,
+                                   .seconds = 60, .renewal = 30,
+                                   .rebinding = 52};
+                dhcp_lease wide = {.address = 0x0a090e0e, .mask = 0xffffff00,
+                                   .router = 0x0a090e01, .server = 0x0a090e01,
+                                   .seconds = 60, .renewal = 30,
+                                   .rebinding = 52};
+                storage_test_route_facts facts = {.gateway = host.router};
+                net_holding held = {0};
+                b32 wrong = 16;
+
+                if (storage_test_dummy((b32)handle, "wd3") < 0 ||
+                    netlink_link_find((b32)handle, address_of link) < 0 ||
+                    netlink_link_up((b32)handle, link.index) < 0)
+                        system_call_1(syscall(exit_group), 2);
+                if (!dhcp_lease_usable(address_of host) ||
+                    net_apply_lease((b32)handle, link.index, "wd3", hardware,
+                                    address_of host, address_of held, false) != 0 ||
+                    !held.route_owned ||
+                    netlink_dump((b32)handle, RTM_GETROUTE, sizeof(netlink_route),
+                                 AF_INET, storage_test_route_seen,
+                                 address_of facts) < 0 ||
+                    !facts.found || !(facts.flags & NETLINK_ROUTE_ONLINK))
+                        wrong |= 1;
+                facts.found = false;
+                if (net_holding_release((b32)handle, address_of held) != 0 ||
+                    netlink_dump((b32)handle, RTM_GETROUTE, sizeof(netlink_route),
+                                 AF_INET, storage_test_route_seen,
+                                 address_of facts) < 0 ||
+                    facts.found)
+                        wrong |= 2;
+                facts.gateway = wide.router;
+                if (net_apply_lease((b32)handle, link.index, "wd3", hardware,
+                                    address_of wide, address_of held, false) != 0 ||
+                    netlink_dump((b32)handle, RTM_GETROUTE, sizeof(netlink_route),
+                                 AF_INET, storage_test_route_seen,
+                                 address_of facts) < 0 ||
+                    !facts.found || (facts.flags & NETLINK_ROUTE_ONLINK))
+                        wrong |= 4;
+                system_call_1(syscall(exit_group), wrong);
+        }
+        b32 status = storage_test_child_status(child);
+        if (!storage_test_not_run(status, "lease off its prefix",
+                                  "no namespaces or dummy links"))
+        {
+                check("a /32 lease installs its default route through a router on the link",
+                      status >= 16 && !(status & 1));
+                check("and the release takes that route away",
+                      status >= 16 && !(status & 2));
+                check("a router on the lease's prefix is asked of the kernel as before",
+                      status >= 16 && !(status & 4));
+        }
+}
+
+/*
+        Lease epochs against the kernel.
+
+        Every sequence of events from an alphabet, two deep (three with
+        -DSTORAGE_EPOCH_DEPTH=3), each in a namespace of its own on a dummy
+        link: a lease applied as the watcher applies one (a first lease, a
+        renewal that moves the router, the resolver, the address, the prefix
+        to a /32 with its router off it, a lease with no router, another
+        server's lease) beside an address put on the link by hand, each of
+        those again with the resolver file refusing
+        to be written (/etc read-only for the one apply), and the release.
+        After every event the kernel's addresses and default routes on the
+        link and /etc/resolv.conf are read back and held to what the lease
+        the watcher now holds says, and nothing else: an applied lease is
+        all of the new lease's address, route and resolver, a refused one
+        leaves every one of them as they were before it (no old route with a
+        new resolver, no new address beside the old route), and a release
+        leaves no lease's address or route and the fallback resolver. The
+        first sequence that breaks one is printed, with the event, which part
+        and the state.
+*/
+#ifndef STORAGE_EPOCH_DEPTH
+#define STORAGE_EPOCH_DEPTH 2
+#endif
+#define STORAGE_EPOCH_LEASES 7
+#define STORAGE_EPOCH_EVENTS (2 * STORAGE_EPOCH_LEASES + 1)
+#define STORAGE_EPOCH_ROOM 8
+//      An address somebody put on the link by hand, which no lease owns and
+//      every event must leave; it also keeps the link holding an address
+//      when a lease's goes, so the kernel does not sweep a route the
+//      watcher forgot.
+#define STORAGE_EPOCH_OPERATOR 0x0a091e1e
+
+typedef struct
+{
+        p32 index;
+        positive addresses;
+        p32 address[STORAGE_EPOCH_ROOM];
+        p8 prefix[STORAGE_EPOCH_ROOM];
+        positive routes;
+        p32 router[STORAGE_EPOCH_ROOM];
+        p32 resolver;
+} storage_epoch_state;
+
+static bool storage_epoch_address(netlink_header address_to header,
+                                  address_any context)
+{
+        storage_epoch_state address_to state = context;
+        netlink_address address_to body =
+            netlink_message_body(header, sizeof(netlink_address));
+        positive size = 0;
+        p8 address_to named = netlink_find(header, sizeof(netlink_address),
+                                           IFA_LOCAL, address_of size);
+
+        if (body && named && size == 4 && body->index == state->index &&
+            state->addresses < STORAGE_EPOCH_ROOM)
+        {
+                state->address[state->addresses] =
+                    network_order_32(memory_load_unaligned(p32, named));
+                state->prefix[state->addresses++] = body->prefix;
+        }
+        return true;
+}
+
+static bool storage_epoch_route(netlink_header address_to header,
+                                address_any context)
+{
+        storage_epoch_state address_to state = context;
+        netlink_route address_to body =
+            netlink_message_body(header, sizeof(netlink_route));
+        positive size = 0;
+        p8 address_to gateway = netlink_find(header, sizeof(netlink_route),
+                                             RTA_GATEWAY, address_of size);
+        positive out_size = 0;
+        p8 address_to out = netlink_find(header, sizeof(netlink_route), RTA_OIF,
+                                         address_of out_size);
+
+        if (body && !body->destination_bits && body->table == RT_TABLE_MAIN &&
+            gateway && size == 4 && out && out_size == 4 &&
+            memory_load_unaligned(p32, out) == state->index &&
+            state->routes < STORAGE_EPOCH_ROOM)
+                state->router[state->routes++] =
+                    network_order_32(memory_load_unaligned(p32, gateway));
+        return true;
+}
+
+static bool storage_epoch_read(b32 handle, p32 index,
+                               storage_epoch_state address_to state)
+{
+        p8 text[128];
+        bipolar got;
+
+        memory_zero(state, sizeof *state);
+        state->index = index;
+        if (netlink_dump(handle, RTM_GETADDR, sizeof(netlink_address), AF_INET,
+                         storage_epoch_address, state) < 0 ||
+            netlink_dump(handle, RTM_GETROUTE, sizeof(netlink_route), AF_INET,
+                         storage_epoch_route, state) < 0)
+                return false;
+        got = file_slurp_once_at(AT_FDCWD, "/etc/resolv.conf", text,
+                                 sizeof text - 1);
+        if (got >= 11 && !memory_compare(text, "nameserver ", 11))
+        {
+                positive at = 11;
+                positive stop = at;
+                bipolar host;
+
+                text[got] = 0;
+                while (stop < (positive)got && text[stop] != '\n')
+                        stop++;
+                text[stop] = 0;
+                host = string_to_host((string_address)(text + at));
+                state->resolver = host >= 0 ? (p32)host : 1;
+        }
+        return true;
+}
+
+static bool storage_epoch_same(const storage_epoch_state address_to a,
+                               const storage_epoch_state address_to b)
+{
+        if (a->addresses != b->addresses || a->routes != b->routes ||
+            a->resolver != b->resolver)
+                return false;
+        for (positive at = 0; at < a->addresses; at++)
+        {
+                bool found = false;
+
+                for (positive other = 0; other < b->addresses; other++)
+                        found |= a->address[at] == b->address[other] &&
+                                 a->prefix[at] == b->prefix[other];
+                if (!found)
+                        return false;
+        }
+        for (positive at = 0; at < a->routes; at++)
+        {
+                bool found = false;
+
+                for (positive other = 0; other < b->routes; other++)
+                        found |= a->router[at] == b->router[other];
+                if (!found)
+                        return false;
+        }
+        return true;
+}
+
+//      What the kernel should hold for what the watcher holds.
+static fn storage_epoch_expected(const net_holding address_to held, p32 index,
+                                 p32 resolver_before,
+                                 storage_epoch_state address_to want)
+{
+        memory_zero(want, sizeof *want);
+        want->index = index;
+        want->address[want->addresses] = STORAGE_EPOCH_OPERATOR;
+        want->prefix[want->addresses++] = 24;
+        if (held->index)
+        {
+                want->address[want->addresses] = held->lease.address;
+                want->prefix[want->addresses++] = dhcp_prefix_of(held->lease.mask);
+                if (held->lease.router)
+                        want->router[want->routes++] = held->lease.router;
+                want->resolver = held->lease.nameserver ? held->lease.nameserver
+                                                        : DNS_FALLBACK;
+        }
+        else
+                want->resolver = resolver_before ? DNS_FALLBACK : 0;
+}
+
+static fn storage_epoch_say(const p8 address_to events, positive depth,
+                            positive step, string_address what,
+                            const storage_epoch_state address_to have)
+{
+        string_format(log, "  epoch: events");
+        for (positive at = 0; at < depth; at++)
+                string_format(log, " %p", (positive)events[at]);
+        string_format(log, ", after event %p: %s; have %p addresses, %p routes, resolver %p\n",
+                      step, what, have->addresses, have->routes,
+                      (positive)have->resolver);
+        log_flush();
+}
+
+static b32 storage_epoch_walk(const p8 address_to events, positive depth)
+{
+        static const dhcp_lease leases[STORAGE_EPOCH_LEASES] = {
+            //      the first lease
+            {0x0a09140a, 0xffffff00, 0x0a091401, 0x0a091401, 0x0a091401, 600, 300, 525},
+            //      the router moved
+            {0x0a09140a, 0xffffff00, 0x0a091402, 0x0a091401, 0x0a091401, 600, 300, 525},
+            //      the resolver moved
+            {0x0a09140a, 0xffffff00, 0x0a091401, 0x0a091403, 0x0a091401, 600, 300, 525},
+            //      another address
+            {0x0a09140b, 0xffffff00, 0x0a091401, 0x0a091401, 0x0a091401, 600, 300, 525},
+            //      a /32 with its router off it
+            {0x0a09140a, 0xffffffff, 0x0a091401, 0x0a091401, 0x0a091401, 600, 300, 525},
+            //      no router at all
+            {0x0a09140a, 0xffffff00, 0, 0x0a091401, 0x0a091401, 600, 300, 525},
+            //      another server's lease on another network
+            {0x0a09150c, 0xffffff00, 0x0a091501, 0x0a091505, 0x0a091501, 600, 300, 525}};
+        p8 hardware[6] = {2, 0, 0, 0, 0, 1};
+        bipolar handle = storage_test_net_namespace();
+        netlink_search link = {.wanted = (string_address) "wd4"};
+        net_holding held = {0};
+
+        if (storage_test_dummy((b32)handle, "wd4") < 0 ||
+            netlink_link_find((b32)handle, address_of link) < 0 ||
+            netlink_link_up((b32)handle, link.index) < 0 ||
+            netlink_address_add((b32)handle, link.index, STORAGE_EPOCH_OPERATOR,
+                                24) < 0)
+                return 2;
+        for (positive step = 0; step < depth; step++)
+        {
+                p8 event = events[step];
+                storage_epoch_state before;
+                storage_epoch_state after;
+                storage_epoch_state want;
+                net_holding was = held;
+                b32 refused = 0;
+
+                if (!storage_epoch_read((b32)handle, link.index, address_of before))
+                        return 2;
+                if (event == 2 * STORAGE_EPOCH_LEASES)
+                        refused = net_holding_release((b32)handle, address_of held) ? 1 : 0;
+                else
+                {
+                        bool fault = event >= STORAGE_EPOCH_LEASES;
+                        dhcp_lease lease = leases[event % STORAGE_EPOCH_LEASES];
+
+                        if (fault &&
+                            system_call_5(syscall(mount), 0, (positive) "/etc", 0,
+                                          MS_REMOUNT | MS_RDONLY, 0) < 0)
+                                return 2;
+                        refused = net_apply_lease((b32)handle, link.index, "wd4",
+                                                  hardware, address_of lease,
+                                                  address_of held, false);
+                        if (fault &&
+                            system_call_5(syscall(mount), 0, (positive) "/etc", 0,
+                                          MS_REMOUNT, 0) < 0)
+                                return 2;
+                        if (fault != (refused != 0))
+                        {
+                                storage_epoch_say(events, depth, step,
+                                                  fault ? "a refused resolver did not fail the lease"
+                                                         : "a lease failed to apply",
+                                                  address_of before);
+                                return 16 | 1;
+                        }
+                }
+                if (!storage_epoch_read((b32)handle, link.index, address_of after))
+                        return 2;
+                if (refused)
+                {
+                        if (held.lost ||
+                            memory_compare(address_of held, address_of was,
+                                           sizeof held))
+                        {
+                                storage_epoch_say(events, depth, step,
+                                                  "a refused lease changed what is held",
+                                                  address_of after);
+                                return 16 | 2;
+                        }
+                        if (!storage_epoch_same(address_of after, address_of before))
+                        {
+                                storage_epoch_say(events, depth, step,
+                                                  "a refused lease left the kernel or the resolver changed",
+                                                  address_of after);
+                                return 16 | 4;
+                        }
+                        continue;
+                }
+                storage_epoch_expected(address_of held, link.index,
+                                       before.resolver, address_of want);
+                if (!storage_epoch_same(address_of after, address_of want))
+                {
+                        storage_epoch_say(events, depth, step,
+                                          held.index ? "the kernel and resolver are not the held lease's"
+                                                     : "a release left a lease behind",
+                                          address_of after);
+                        return 16 | 8;
+                }
+        }
+        return 16;
+}
+
+static fn storage_test_lease_epochs(void)
+{
+        p8 events[STORAGE_EPOCH_DEPTH];
+        positive total = 1;
+        positive walked = 0;
+        b32 failed = 0;
+        b32 status = 0;
+
+        for (positive at = 0; at < STORAGE_EPOCH_DEPTH; at++)
+                total *= STORAGE_EPOCH_EVENTS;
+        for (positive sequence = 0; sequence < total; sequence++)
+        {
+                positive rest = sequence;
+                bipolar child;
+
+                for (positive at = 0; at < STORAGE_EPOCH_DEPTH; at++)
+                {
+                        events[at] = (p8)(rest % STORAGE_EPOCH_EVENTS);
+                        rest /= STORAGE_EPOCH_EVENTS;
+                }
+                child = system_fork();
+                if (child == 0)
+                        system_call_1(syscall(exit_group),
+                                      storage_epoch_walk(events,
+                                                         STORAGE_EPOCH_DEPTH));
+                status = storage_test_child_status(child);
+                if (status == 2 || status == STORAGE_TEST_THREADED)
+                        break;
+                walked++;
+                if (status != 16)
+                        failed |= status < 16 ? 16 | 15 : status;
+        }
+        if (!storage_test_not_run(status == 2 || status == STORAGE_TEST_THREADED
+                                      ? status
+                                      : 0,
+                                  "lease epochs", "no namespaces or dummy links"))
+        {
+                check("every lease sequence that applies leaves the kernel and the resolver the held lease's alone",
+                      walked == total && !(failed & 8) && !(failed & 1));
+                check("every refused lease leaves what is held, the kernel and the resolver as they were",
+                      walked == total && !(failed & 6));
+        }
+}
+
+/* The probe before a new lease, on a link nobody answers on: quiet after
+   its three windows; cut at once by a byte on the wake pipe or by link news,
+   as an exchange is (a cable pulled while it listens is not a quiet link);
+   and never performed on a link that is not there. The child says which by
+   bits over 16, so 2 and the threaded runner's 7 stay NOT RUN. */
+static fn storage_test_arp_probe(void)
+{
+        bipolar child = system_fork();
+
+        if (child == 0)
+        {
+                bipolar handle = storage_test_net_namespace();
+                netlink_search link = {.wanted = (string_address) "wd2"};
+                p8 hardware[6] = {2, 0, 0, 0, 0, 1};
+                b32 ends[2];
+                bipolar events;
+                bipolar quiet, woken, news, missing;
+                positive began, quiet_took, woken_took;
+                b32 wrong = 16;
+
+                if (storage_test_dummy((b32)handle, "wd2") < 0 ||
+                    netlink_link_find((b32)handle, address_of link) < 0 ||
+                    netlink_link_up((b32)handle, link.index) < 0 ||
+                    system_call_2(syscall(pipe2), (positive)ends, O_CLOEXEC) < 0 ||
+                    (events = netlink_open_groups(RTNLGRP_LINK_MASK)) < 0)
+                        system_call_1(syscall(exit_group), 2);
+                began = clock_monotonic_nanoseconds();
+                quiet = net_arp_conflict(link.index, hardware, 0x0a090c0c);
+                quiet_took = clock_monotonic_nanoseconds() - began;
+                system_write_all((positive)ends[1], "x", 1);
+                net_wake_watch = ends[0];
+                began = clock_monotonic_nanoseconds();
+                woken = net_arp_conflict(link.index, hardware, 0x0a090c0c);
+                woken_took = clock_monotonic_nanoseconds() - began;
+                net_wake_watch = -1;
+                net_events_watch = events;
+                net_news_holdoff_until = 0;
+                storage_test_link_set((b32)handle, link.index, IFLA_MTU, 1400);
+                news = net_arp_conflict(link.index, hardware, 0x0a090c0c);
+                net_events_watch = -1;
+                missing = net_arp_conflict(link.index + 1000, hardware,
+                                           0x0a090c0c);
+                if (quiet != 0 || quiet_took < 590000000)
+                        wrong |= 1;
+                if (woken != -2 || woken_took > 100000000 || news != -2)
+                        wrong |= 2;
+                if (missing != -1)
+                        wrong |= 4;
+                system_call_1(syscall(exit_group), wrong);
+        }
+        b32 status = storage_test_child_status(child);
+        if (!storage_test_not_run(status, "ARP probe",
+                                  "no namespaces or dummy links"))
+        {
+                check("a probe nobody answers listens its three windows and finds the address free",
+                      status >= 16 && !(status & 1));
+                check("the wake pipe and link news cut a probe at once",
+                      status >= 16 && !(status & 2));
+                check("a probe on a link that is not there is not performed",
+                      status >= 16 && !(status & 4));
+        }
+}
+
 /* A cable pulled and put back while the watcher was busy: both events are
    read after the carrier is back, and only the kernel's count of carrier
    losses says the link went away -- perhaps into another network. Other
@@ -83193,9 +83940,8 @@ static fn storage_test_carrier_bounce(void)
                 system_call_1(syscall(exit_group), held.lost ? 0 : 5);
         }
         b32 status = storage_test_child_status(child);
-        if (status == 2)
-                log_direct(str("storage_io: carrier bounce NOT RUN -- no namespaces or dummy links\n"));
-        else
+        if (!storage_test_not_run(status, "carrier bounce",
+                                 "no namespaces or dummy links"))
         {
                 check("other news about the held link keeps the lease",
                       status != 4 && status != 1);
@@ -83255,9 +84001,8 @@ static fn storage_test_link_news_overrun(void)
                 system_call_1(syscall(exit_group), net_states.used ? 5 : 0);
         }
         b32 status = storage_test_child_status(child);
-        if (status == 2)
-                log_direct(str("storage_io: link news overrun NOT RUN -- no namespaces or dummy links\n"));
-        else
+        if (!storage_test_not_run(status, "link news overrun",
+                                 "no namespaces or dummy links"))
                 check("dropped link news resyncs the watcher instead of ending it",
                       status == 0);
 }
@@ -83911,6 +84656,11 @@ static fn storage_test_net_files(void)
 
 b32 main(void)
 {
+#ifdef STORAGE_EPOCH_ONLY
+        //      net_epoch_mutants builds this alone, once for each mutant.
+        storage_test_lease_epochs();
+        return test_report(null);
+#endif
         storage_test_read(1, 32);
         storage_test_read(2, 7);
         storage_test_read(3, 0);
@@ -83928,10 +84678,15 @@ b32 main(void)
         storage_test_script_rollback();
         storage_test_link_state();
         storage_test_lease_clock_origin();
+        storage_test_lease_asleep();
         storage_test_dhcp_apart();
+        storage_test_decline_hold();
         storage_test_arp_claims();
         storage_test_lease_over_existing();
         storage_test_lease_inherited();
+        storage_test_arp_probe();
+        storage_test_lease_off_prefix();
+        storage_test_lease_epochs();
         storage_test_carrier_bounce();
         storage_test_link_news_overrun();
         storage_test_netlink_output();
