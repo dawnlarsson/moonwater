@@ -1202,8 +1202,26 @@ static positive tar_header_word(p8 address_to into, p8 address_to field,
                 length = positive_into(into, (positive)number);
 #if MOONWATER_STRICT >= STRICT_SAFE
         else
+        {
+                /*      Text past ASCII stays as it is when it is UTF-8 and
+                        no C1 control: \xc2\x9b is CSI to a UTF-8 terminal,
+                        as \e[ is, and a byte that is not UTF-8 is nothing
+                        to show raw. Either spells every byte past ASCII. */
+                memory_utf8_state state = {0};
+                p8 unsafe = HEX_CONTROL | HEX_TAB;
+
+                for (positive at = 0; at < length; at++)
+                {
+                        b32 fed = memory_utf8_feed(address_of state, field[at]);
+
+                        if (fed < 0 || (fed > 0 && state.value >= 0x80 &&
+                                        state.value < 0xa0) ||
+                            (at + 1 == length && state.left))
+                                unsafe |= HEX_HIGH;
+                }
                 length = memory_into_escaped(into, field, length, 4 * width,
-                                             HEX_CONTROL | HEX_TAB).y;
+                                             unsafe).y;
+        }
 #else
         else
                 memory_copy(into, field, length);
@@ -4225,9 +4243,19 @@ static fn tar_diff_prefix_once(string_address prefix, positive length,
 
         memory_copy(shown, prefix, take);
         shown[take] = end;
+        /*      The prefix is the archive's, up to its last "..": GNU writes it
+                as it is, so `a\e]0;title\a/../x` set the terminal's title.
+                Spelled here as a member name is, and raw for a build that
+                diffs against GNU. */
+#if MOONWATER_STRICT >= STRICT_SAFE
+        string_format(log_error, link ? "tar: Removing leading `%w' from hard link targets\n"
+                                      : "tar: Removing leading `%w' from member names\n",
+                      tar_quoted, (string_address)shown);
+#else
         string_format(log_error, link ? "tar: Removing leading `%s' from hard link targets\n"
                                       : "tar: Removing leading `%s' from member names\n",
                       (string_address)shown);
+#endif
 }
 
 /* GNU's safer_name_suffix, then its trailing slash and component strip. */

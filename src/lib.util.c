@@ -2395,6 +2395,38 @@ static HOT bipolar file_slurp_once_at(bipolar directory, string_address path,
                 into[got] = end;
         return got;
 }
+
+/* A state file a program keeps for itself: read only when it is a regular
+   file, so a FIFO at the name answers at once instead of waiting forever for
+   a writer, and a directory or a device is refused (-EINVAL). flags adds
+   O_NOFOLLOW for a name that must not be a link. */
+static bipolar file_slurp_regular_at(bipolar directory, string_address path,
+                                     p8 address_to into, positive capacity,
+                                     positive flags)
+{
+        system_path_identity facts;
+        bipolar handle;
+        bipolar got;
+
+        if (!capacity)
+                return -1;
+        into[0] = end;
+        handle = system_open_at(directory, path,
+                                FILE_READ | O_NONBLOCK | O_CLOEXEC | flags);
+        if (handle < 0)
+                return handle;
+        got = system_path_identity_at(handle, (string_address) "",
+                                      SYSTEM_PATH_AT_EMPTY_PATH,
+                                      SYSTEM_PATH_STATX_TYPE, address_of facts);
+        if (got >= 0 && (facts.mode & 0170000) != 0100000)
+                got = -22;
+        if (got >= 0)
+                got = system_read_retry((positive)handle, into, capacity - 1);
+        system_close(handle);
+        if (got >= 0)
+                into[got] = end;
+        return got;
+}
 #endif // KERNEL_MODE
 
 /* Bounded parsers keep their overflow bit instead of silently truncating.
@@ -21908,9 +21940,11 @@ static fn clock_tz_load_file(void)
         bipolar got;
         positive used = 0;
 
+        //      Nonblocking: a FIFO at the name would hold every program
+        //      that asks the time of day until somebody wrote to it.
         handle = system_call_4(syscall(openat), AT_FDCWD,
                                (positive)(string_address)CLOCK_ZONE_PATH,
-                               O_RDONLY | O_CLOEXEC, 0);
+                               O_RDONLY | O_NONBLOCK | O_CLOEXEC, 0);
         if (handle < 0)
         {
                 clock_tz_load_localtime();

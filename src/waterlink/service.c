@@ -254,7 +254,8 @@ static bool link_name_good(string_address name)
 /* Everything waterlink keeps is records only root may read: the key, the
    peers, the groups and the listener's state. Refuse a partial, oversized,
    linked, non-root-owned or publicly accessible file rather than
-   interpreting the valid-looking prefix of a replaced one. */
+   interpreting the valid-looking prefix of a replaced one, and open it
+   nonblocking so a FIFO there is refused rather than waited on. */
 static bipolar link_read_private_records(string_address path,
                                          p8 address_to into, positive room,
                                          positive record,
@@ -262,7 +263,8 @@ static bipolar link_read_private_records(string_address path,
 {
         file_facts facts;
         bipolar handle = system_open_at(AT_FDCWD, path,
-                                        FILE_READ | O_NOFOLLOW | O_CLOEXEC);
+                                        FILE_READ | O_NONBLOCK | O_NOFOLLOW |
+                                            O_CLOEXEC);
         bipolar read;
 
         address_to got = 0;
@@ -287,14 +289,17 @@ static bipolar link_read_private_records(string_address path,
         return 0;
 }
 
-// Written beside its name and renamed over it: whole or not at all.
+/* Written beside its name and renamed over it: whole or not at all. Synced,
+   that is host_write_file's own staging, which syncs /root after its rename:
+   the second rename from next, unsynced, let a power cut bring back the peers
+   or the groups from before, a forgotten peer or a left group included. */
 static bipolar link_file_replace(string_address next, string_address path,
                                  address_any bytes, positive length, bool sync)
 {
-        bipolar failed = host_write_file(next, (p8 address_to)bytes, length,
-                                         0600, sync);
+        bipolar failed = host_write_file(sync ? path : next, (p8 address_to)bytes,
+                                         length, 0600, sync);
 
-        if (failed < 0)
+        if (failed < 0 || sync)
                 return failed;
         return system_rename_at(AT_FDCWD, next, AT_FDCWD, path, 0);
 }

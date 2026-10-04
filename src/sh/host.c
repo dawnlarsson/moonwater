@@ -238,13 +238,10 @@ static fn host_pause(p64 nanoseconds)
 static bipolar host_read_text(string_address path, p8 address_to into,
                               positive room)
 {
-        bipolar got = file_slurp_once_at(AT_FDCWD, path, into, room);
+        bipolar got = file_slurp_regular_at(AT_FDCWD, path, into, room, 0);
 
         if (got < 0)
-        {
-                into[0] = end;
                 return got;
-        }
 
         while (got > 0 && (into[got - 1] == '\n' || into[got - 1] == ' '))
                 got--;
@@ -260,29 +257,7 @@ static bipolar host_read_text(string_address path, p8 address_to into,
 static bipolar host_read_state(string_address path, p8 address_to into,
                                positive capacity)
 {
-        struct stat facts;
-        bipolar handle;
-        bipolar got;
-
-        if (!capacity)
-                return -1;
-        handle = system_open_at(AT_FDCWD, path,
-                                FILE_READ | O_NONBLOCK | O_NOFOLLOW |
-                                    O_CLOEXEC);
-        if (handle < 0)
-                return handle;
-        if (system_file_status(handle, address_of facts) < 0 ||
-            !S_ISREG(facts.st_mode))
-        {
-                system_close(handle);
-                into[0] = end;
-                return -22;
-        }
-        got = system_read_retry((positive)handle, into, capacity - 1);
-        system_close(handle);
-        if (got >= 0)
-                into[got] = end;
-        return got;
+        return file_slurp_regular_at(AT_FDCWD, path, into, capacity, O_NOFOLLOW);
 }
 
 /* A state word as host_read_state reads it, without its newline or the blanks
@@ -313,13 +288,25 @@ static bipolar host_read_word(string_address path, p8 address_to into, positive 
 static bipolar host_open_state(bipolar directory, string_address path,
                                positive mode)
 {
-        bipolar handle = system_open_output_at(directory, path, true, mode);
+        //      Nonblocking, and a file or nothing: a FIFO at the name held the
+        //      writer until a reader came, and a device took the mode.
+        bipolar handle = system_open_at_mode(directory, path,
+                                             FILE_WRITE | O_CLOEXEC | O_NOFOLLOW |
+                                                 O_NONBLOCK,
+                                             mode);
+        system_path_identity facts;
         bipolar moded;
 
         if (handle < 0)
                 return handle;
 
-        moded = system_call_2(syscall(fchmod), (positive)handle, mode);
+        moded = system_path_identity_at(handle, (string_address) "",
+                                        SYSTEM_PATH_AT_EMPTY_PATH,
+                                        SYSTEM_PATH_STATX_TYPE, address_of facts);
+        if (moded >= 0)
+                moded = (facts.mode & 0170000) == 0100000
+                            ? system_call_2(syscall(fchmod), (positive)handle, mode)
+                            : -22;
         if (moded < 0)
         {
                 system_close(handle);
@@ -2448,7 +2435,8 @@ static b32 host_settings_image(string_address path, host_settings address_to int
 
 static bool host_settings_kept(host_settings address_to into)
 {
-        bipolar handle = system_open_at(AT_FDCWD, HOST_SETTINGS, FILE_READ | O_CLOEXEC);
+        bipolar handle = system_open_at(AT_FDCWD, HOST_SETTINGS,
+                                        FILE_READ | O_NONBLOCK | O_CLOEXEC);
         bipolar got;
 
         if (handle < 0)
@@ -3212,8 +3200,12 @@ static bool host_settings_install(host_install address_to install,
         its question when it asked one, so a command reads the /root and the
         bowls it will be using. Each entry's output goes to
         /run/moonwater/init/ID.log and how it ended to ID.status, the kernel
-        log -- the kernel log window -- says when each starts and ends, and
-        neither the prompt nor the desktop waits for any of it.
+        log -- the kernel log window -- says when each starts and ends, by
+        its number and never its text, and neither the prompt nor the
+        desktop waits for any of it. The text is root's alone, because a
+        command can carry a secret (`link join NS SECRET`), and anybody can
+        read the kernel log on this image: its first eighty characters went
+        there with every boot.
 
         exit runs when the machine stops, before anything is remounted
         read-only, with its output on the terminal that stopped it. Each
@@ -3227,7 +3219,6 @@ static bool host_settings_install(host_install address_to install,
 #define HOST_EXIT_EACH_NS ((p64)10000000000)
 #define HOST_EXIT_ALL_NS ((p64)30000000000)
 #define HOST_EVENT_POLL_NS ((p64)20000000)
-#define HOST_EVENT_SHOWN 80
 
 static string_address address_to host_event_environment(void)
 {
@@ -3236,19 +3227,6 @@ static string_address address_to host_event_environment(void)
 
         bowl_session_prepare("/root", null);
         return bowl_environment(seed);
-}
-
-/* A command as one short line: control bytes as spaces, and cut with ... past eighty. */
-static fn host_event_shown(p8 address_to into, string_address text)
-{
-        positive at = 0;
-
-        for (; text[at] && at < HOST_EVENT_SHOWN; at++)
-                into[at] = (p8)text[at] < ' ' || text[at] == 0x7f ? ' ' : (p8)text[at];
-
-        into[at] = end;
-        if (text[at])
-                string_append_bounded(into, "...", HOST_EVENT_SHOWN + 4);
 }
 
 static fn host_event_ending(p8 address_to into, positive room, positive status)
@@ -3392,7 +3370,6 @@ static fn host_events_boot(host_settings address_to settings)
         while (host_settings_next(settings, address_of at, address_of setting))
         {
                 p8 text[SPARK_SETTINGS_TEXT_MOST + 1];
-                p8 shown[HOST_EVENT_SHOWN + 4];
                 p8 id[8];
                 p8 path[HOST_PATH_ROOM];
                 p8 status_path[HOST_PATH_ROOM];
@@ -3406,7 +3383,6 @@ static fn host_events_boot(host_settings address_to settings)
                         continue;
 
                 host_settings_text(text, address_of setting);
-                host_event_shown(shown, text);
                 positive_into_string(id, setting.entry.id);
 
                 if (!host_join(path, sizeof(path), HOST_EVENTS_INIT "/", id) ||
@@ -3415,7 +3391,7 @@ static fn host_events_boot(host_settings address_to settings)
                         continue;
 
                 {
-                        string_address line[] = {"init ", id, " started: ", shown, null};
+                        string_address line[] = {"init ", id, " started", null};
 
                         host_kmsg(line);
                 }
@@ -7894,7 +7870,8 @@ static b32 radio_wired_status(void)
         string_format(log, host_label "wired %s\n", net_wired_off() ? "off" : "on");
         if (failed >= 0)
                 for (positive at = 0; at < wired.count; at++)
-                        string_format(log, host_label "  %s: %s, %s\n", wired.link[at].name,
+                        string_format(log, host_label "  %w: %s, %s\n",
+                                      writer_terminal_name, wired.link[at].name,
                                       (wired.link[at].flags & IFF_UP) ? "up" : "down",
                                       (wired.link[at].flags & IFF_RUNNING) ? "carrier"
                                                                            : "no carrier");
@@ -13311,7 +13288,9 @@ static b32 host_name(string_address address_to arguments, positive count)
                 else
                         return host_fail("name", -EIO);
 
-                host_say(log, "%s\n", name);
+                //      What the kernel says can be whatever the root of a
+                //      UTS namespace set, escape and bell included.
+                host_say(log, "%w\n", writer_terminal_name, name);
                 return 0;
         }
 

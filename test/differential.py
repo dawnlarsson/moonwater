@@ -38907,6 +38907,18 @@ static bipolar system_open_output_at(bipolar d, string_address p, int replace, p
 static bipolar system_make_directory_at(bipolar d, string_address p, positive m) {
         return answer(mkdirat((int)d, p, (mode_t)m));
 }
+typedef struct { unsigned short mode; } system_path_identity;
+#define address_of &
+#define SYSTEM_PATH_AT_EMPTY_PATH AT_EMPTY_PATH
+#define SYSTEM_PATH_STATX_TYPE 1
+static bipolar system_path_identity_at(bipolar d, string_address p, positive f, positive r,
+                                       system_path_identity *into) {
+        struct stat seen;
+        (void)r;
+        if (fstatat((int)d, p, &seen, (int)f) < 0) return -errno;
+        into->mode = (unsigned short)seen.st_mode;
+        return 0;
+}
 static bipolar system_remove_at(bipolar d, string_address p, positive f) {
         return answer(unlinkat((int)d, p, (int)f));
 }
@@ -42679,6 +42691,90 @@ while True:
             check(f"@@planted {state} SAFE" in lines,
                   f"moonwater {command} does not write through a link at /root/{state}",
                   [line for line in lines if f"@@planted {state}" in line])
+
+        # Every state file under /root and /run/moonwater, replaced before a
+        # verb that writes it and one that reads it by every kind of thing a
+        # name can be: a link to a file, a link to nowhere, a FIFO with nobody
+        # on the other end, a directory, and a character device mounted over
+        # the name. A verb must answer within its five seconds, never write
+        # through to what a link names or into the directory, and leave the
+        # device a device.
+        states = [(f"/root/{name}", writer, reader) for name, writer, reader in (
+                  ("wifi", "wifi add plantnet passpass1", "wifi"),
+                  ("wifi.power", "wifi on", "wifi"),
+                  ("wired.power", "wired off", "wired"),
+                  ("bluetooth", "bluetooth add plantdev", "bluetooth"),
+                  ("bluetooth.power", "bluetooth off", "bluetooth"),
+                  ("internet", "priority internet wifi", "priority internet"),
+                  ("ntp", "ntp off", "ntp"),
+                  ("ntp.sampling", "ntp sampling off", "ntp"),
+                  ("keyboard", "keyboard de", "keyboard"),
+                  ("timezone", "timezone se", "timezone"),
+                  ("timezone.mode", "timezone se", "timezone"),
+                  ("name", "name random", "name"),
+                  ("tune", "charge limit 80", "charge"),
+                  ("link", "link off", "link"),
+                  ("link.key", "link key", "link"),
+                  ("link.peers", "link forget nobody", "link"),
+                  ("link.groups", "link join plantlab allow run", "link"))] + [
+                  ("/run/moonwater/settings.next", "bind init add true", "bind init"),
+                  ("/run/moonwater/settings", "bind init add true", "bind init")]
+        kinds = {"link": "ln -s /tmp/victim {p}",
+                 "dangling": "ln -s /tmp/nowhere/victim {p}",
+                 "fifo": "mkfifo {p}",
+                 "directory": "mkdir {p} && echo SAFE > {p}/inner",
+                 "device": ": > {p} && mount --bind /dev/null {p}"}
+        script = "mkdir -p /tmp/nowhere /run/moonwater\n"
+        for path, writer, reader in states:
+            for kind, plant in kinds.items():
+                for role, verb in (("writes", writer), ("reads", reader)):
+                    script += (f"umount {path} 2>/dev/null; rm -rf {path} /tmp/nowhere/victim; "
+                               f"echo SAFE > /tmp/victim; {plant.format(p=path)}\n"
+                               f"timeout 5 /tmp/moonwater {verb} > /dev/null 2>&1 < /dev/null; "
+                               f"echo \"@@object {path} {kind} {role} $? $(cat /tmp/victim) "
+                               f"$(cat {path}/inner 2>/dev/null || echo -) "
+                               f"$(test -e /tmp/nowhere/victim && echo made || echo -) "
+                               f"$(test -c {path} && echo char || echo -)\"\n"
+                               f"umount {path} 2>/dev/null; rm -rf {path}\n")
+        sys_reset()
+        lines, finished = session(script)
+        check(finished, "the planted objects run finished", "")
+        for path, writer, reader in states:
+            for kind in kinds:
+                for role, verb in (("writes", writer), ("reads", reader)):
+                    row = [line.split() for line in lines
+                           if line.startswith(f"@@object {path} {kind} {role} ")]
+                    status, victim, inner, made, device = (row[0][4:9] if row and len(row[0]) >= 9
+                                                           else ("-",) * 5)
+                    check(row and status != "124" and victim == "SAFE" and made == "-" and
+                          (kind != "directory" or inner == "SAFE") and
+                          (kind != "device" or device == "char"),
+                          f"moonwater {verb} with a {kind} at {path}",
+                          row[0] if row else "no answer")
+
+        # A secret on the command line is in /proc/PID/cmdline, which every
+        # user reads, for as long as the command lives. Each verb that takes
+        # one writes into a pipe already full, so it stops at its first word
+        # of output, after the secret has been used, and its cmdline is read
+        # there: the secret must be gone from it.
+        carried = [("link join lab S3cretOnTheLine77", "S3cretOnTheLine77"),
+                   ("link join lab2 S3cretOnTheLine78 allow run", "S3cretOnTheLine78"),
+                   ("wifi add argvnet S3cretOnTheLine79", "S3cretOnTheLine79")]
+        script = "rm -f /tmp/full; mkfifo /tmp/full\n"
+        for command, secret in carried:
+            script += ("exec 3<>/tmp/full; head -c 65536 /dev/zero >&3\n"
+                       f"/tmp/moonwater {command} >&3 2>&3 & pid=$!\n"
+                       "sleep 0.5; tr '\\000' ' ' < /proc/$pid/cmdline > /tmp/line\n"
+                       "kill $pid; exec 3>&-; wait $pid\n"
+                       f"echo \"@@argv {secret} $(grep -c {secret} /tmp/line)"
+                       " $(grep -c moonwater /tmp/line)\"\n")
+        lines, finished = session(script)
+        for command, secret in carried:
+            row = [line.split() for line in lines if line.startswith("@@argv " + secret)]
+            seen, alive = (int(row[0][2]), int(row[0][3])) if row else (-1, 0)
+            check(finished and seen == 0 and alive == 1,
+                  f"moonwater {command.replace(secret, 'SECRET')} keeps the secret out of "
+                  "its command line", f"secret in it {seen}, command line read {alive}")
 
         # Canvas with no kernel desktop to ask: off and on say why and say
         # nothing about windows closing.
@@ -57251,7 +57347,8 @@ def harness_security_hygiene(argv):
                 "dhcp_fuzz", "sntp_fuzz", "dns_fuzz", "netlink_fuzz", "tls_peer",
                 "http_fuzz", "http_urls", "wifi_eapol_fuzz", "wifi_scan_fuzz",
                 "bowl_sig_fuzz", "wget_mutation", "wget_hostile", "sntp_era", "net_netem",
-                "net_dependency_closure", "net_math_proof", "net_clock_fault")
+                "net_dependency_closure", "net_math_proof", "net_clock_fault",
+                "protected_links", "hostile_strings", "state_cuts")
     for name in security + ("tls_verify_fuzz",):
         checks(name in HARNESS_CHECKS, "differential.py: %s is not registered" % name)
     table = re.search(r"^HARNESS_CHECKS = \{$(.*?)^\}$", source, re.M | re.S)
@@ -57372,6 +57469,26 @@ def harness_security_hygiene(argv):
         ("bowl_signature_read", ("bytes",)),
         ("net_arp_claims", ("packet",)),
     )
+    #   The kernel log is anybody's to read on this image (DMESG_RESTRICT is
+    #   off) and the ring-0 terminal draws it, so every part of a host_kmsg
+    #   line that is not a literal is named here: a saved init command went
+    #   there whole, secrets and all, where its settings are root's alone. A
+    #   new part is a review before it is a leak.
+    kmsg_parts = {"id", "ending", "path", "answer->zone", "answer->mode",
+                  "HOST_MACHINE_SCRIPT", "name"}
+    for file in ("src/sh/host.c", "src/moonwater/moonwater.c"):
+        text = (HARNESS_ROOT / file).read_text()
+        lines = re.findall(r"string_address line\[\] = \{(.*?)\};\s*host_kmsg\(line\);",
+                           text, re.S)
+        calls = len(re.findall(r"\bhost_kmsg\(", text)) - len(
+            re.findall(r"^static fn host_kmsg\(", text, re.M))
+        checks(len(lines) == calls,
+               "%s: a host_kmsg call whose parts this cannot read" % file)
+        for parts in lines:
+            names = {part.strip() for part in
+                     re.sub(r'"(?:[^"\\]|\\.)*"', "", parts).split(",")} - {"", "null"}
+            checks(names <= kmsg_parts, "%s: a kernel log line carries %s"
+                   % (file, ", ".join(sorted(names - kmsg_parts))))
     wire_source = (net + (HARNESS_ROOT / "src/sh/host.c").read_text() +
                    (HARNESS_ROOT / "src/sh/net.c").read_text() +
                    (HARNESS_ROOT / "src/waterlink/discover.c").read_text() +
@@ -57406,6 +57523,923 @@ def harness_security_hygiene(argv):
 
     print("security hygiene %d/%d" % (checks.checks - checks.failures, checks.checks))
     return 1 if checks.failures else 0
+
+
+#       Where bytes somebody else chose enter a program, and every function
+#       that reads them there: each caller is a row hostile_strings drives,
+#       or the reason it needs none. A new caller of a source fails the gate
+#       until it is given one or the other.
+HOSTILE_SOURCES = {
+    "netlink_link_name": {
+        "netlink_link_seen": "row ifname (ip link, ip addr)",
+        "netlink_wired_seen": "row ifname (moonwater wired)",
+        "net_link_line": "row ifname (ip link)",
+        "net_name_seen": "row ifname (ip route)",
+    },
+    "radio_bss_read": {
+        "radio_air_seen": "SSIDs are shown through radio_display only (wifi_scan_fuzz, wifi_air)",
+        "radio_pick_seen": "picks a network; prints nothing",
+    },
+    "dns_copy_name": {
+        "dns_answer_address": "compares names; only addresses are printed",
+        "dns_skip_name": "skips a name",
+        "waterlink_dns_name": "names pass link_name_good before use",
+    },
+    "http_header": {
+        "http_response_framing_from": "row http (Location, reason, headers through wget and fetch)",
+        "locale_auto_from_headers": "words pass locale_auto_word and must name a zone in the table",
+    },
+    "waterlink_mdns_read": {
+        "link_nearby_heard": "names pass link_name_for (link_name_good)",
+    },
+    "file_machine_read": {
+        "build_arch_here": "build tool, the machine field only",
+        "build_local": "build tool, the machine field only",
+        "file_hostname": "hostname prints the node name raw, as GNU's does",
+        "file_ls_as": "ls's own use, the release",
+        "file_uname": "uname prints the fields raw, as GNU's does",
+        "host_name": "row nodename (moonwater name, not root)",
+        "host_running_build": "the release field only",
+        "tools_monitor": "monitor's header; the node name is set by root only",
+        "tools_hostid_value": "hostid hashes it",
+        "tools_hostname": "hostname prints it raw, as GNU's does",
+        "ul_lscpu_take": "lscpu, the machine field only",
+    },
+}
+
+#       What a terminal acts on, found in output: C0 but newline and tab, DEL,
+#       C1 once decoded, bytes that are not UTF-8, and a line a payload
+#       started (FORGED). The program's own bold, dim and reset are not.
+HOSTILE_PIECES = (b"\x1b]0;PWNED\x07", b"\x1b[31;5m", b"\x1bP$qm\x1b\\", b"\x1b_apc\x1b\\",
+                  b"\x1b[6n", b"\x9b6n", b"\xc2\x9b31m", b"\x7f", b"\r", b"\x08", b"\x07",
+                  b"\x0bv", b"\nFORGED: ok", "‮bidi".encode(), b"\xff\xfe", b"\x1bc")
+
+
+def hostile_payloads(seed, count, room, banned=b""):
+    import random
+    generator = random.Random(seed)
+    found = []
+    while len(found) < count:
+        pieces = [generator.choice(HOSTILE_PIECES)
+                  for _ in range(generator.randint(1, 3))]
+        text = b"a" + b"".join(pieces) + b"z"
+        text = bytes(byte for byte in text if byte not in banned)
+        if len(text) <= room and text not in found and len(text) > 2:
+            found.append(text)
+    return found
+
+
+def hostile_scan(data):
+    """What in data a terminal would act on, as a short list of reasons."""
+    own = re.sub(rb"\x1b\[[012]?m", b"", data)
+    found = []
+    for at, byte in enumerate(own):
+        if (byte < 0x20 and byte not in (0x0a, 0x09)) or byte == 0x7f:
+            found.append("byte 0x%02x at %d" % (byte, at))
+            break
+    try:
+        text = own.decode("utf-8")
+        for character in text:
+            if 0x80 <= ord(character) <= 0x9f:
+                found.append("C1 U+%04X" % ord(character))
+                break
+    except UnicodeDecodeError as error:
+        found.append("not UTF-8 at %d" % error.start)
+    if re.search(rb"(^|\n)FORGED", own):
+        found.append("a forged line")
+    return found
+
+
+def harness_hostile_strings(argv):
+    """Bytes somebody else chose, through every source that carries them to a
+    terminal, and nothing a terminal acts on comes out.
+
+    The sources are names: an interface's (IFLA_IFNAME, which the kernel
+    takes with escape and bell in it from anybody with CAP_NET_ADMIN in a
+    namespace), the node name, an archive's member, link, owner and
+    extended attribute names, and an HTTP server's status line, Location
+    and headers. Each gets payloads from a grammar of escape, CSI, OSC, DCS
+    (DECRQSS, which makes a terminal answer), APC, C1 both raw and in UTF-8,
+    DEL, carriage return, backspace, bell, a newline that starts a forged
+    line, a BiDi override and bytes that are not UTF-8, cut to what the
+    source can hold; every command that shows it is run and its standard
+    output and error scanned (hostile_scan). The table HOSTILE_SOURCES names
+    every function that reads such a source and the row that drives it or
+    why none is needed; a new caller fails here first. BiDi controls are
+    counted, not refused: GNU's tools print them in a UTF-8 locale.
+
+        python3 test/differential.py --harness hostile_strings --shell PATH
+    """
+    import io
+    import shutil
+    import socket
+    import tarfile
+    import tempfile
+    import threading
+    parser = argparse.ArgumentParser(prog="differential.py --harness hostile_strings")
+    parser.add_argument("--shell", required=True)
+    parser.add_argument("--inside", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--farm", help=argparse.SUPPRESS)
+    args = parser.parse_args(argv)
+    checks = Checks()
+    seed = int(os.environ.get("MOONWATER_HOSTILE_SEED", "2026"))
+    many = int(os.environ.get("MOONWATER_HOSTILE_COUNT", "6"))
+
+    bidi = []
+
+    def shown(row, command, ran):
+        data = ran.stdout + ran.stderr
+        bad = hostile_scan(data)
+        checks(not bad and ran.returncode is not None,
+               "%s: %s shows %s: %r" % (row, command, ", ".join(bad), data[:160]))
+        if re.search("[\u202a-\u202e\u2066-\u2069]", data.decode("utf-8", "replace")):
+            bidi.append("%s: %s" % (row, command))
+
+    if args.inside:
+        #   In a user and network namespace: interfaces named by the grammar,
+        #   made with the host's iproute2, shown by ours.
+        farm = Path(args.farm)
+        system_ip = shutil.which("ip", path="/usr/sbin:/usr/bin:/sbin:/bin")
+        names = hostile_payloads(seed, many, 15, banned=b"/: \t\n\r\x0b\x0c\x00")
+        made = []
+        for number, name in enumerate(names):
+            if subprocess.run([system_ip, "link", "add", name, "type", "dummy"],
+                              capture_output=True).returncode == 0:
+                subprocess.run([system_ip, "link", "set", name, "up"], capture_output=True)
+                subprocess.run([system_ip, "addr", "add", "10.77.%d.1/24" % number, "dev", name],
+                               capture_output=True)
+                made.append(name)
+        checks(len(made) == len(names), "ifname: the kernel took %d of %d names"
+               % (len(made), len(names)))
+        for words in (["ip", "link"], ["ip", "addr"], ["ip", "route"], ["moonwater", "wired"]):
+            ran = subprocess.run([str(farm / words[0])] + words[1:], capture_output=True,
+                                 timeout=20, env={"PATH": "/usr/bin:/bin"})
+            shown("ifname", " ".join(words), ran)
+            checks(ran.returncode == 0 and b"10.77.0" in ran.stdout if words[1] == "route"
+                   else ran.returncode == 0, "ifname: %s answered (%d)"
+                   % (" ".join(words), ran.returncode))
+        return checks.verdict("hostile strings (namespace)", "hostile-strings-inside")
+
+    #   The gate: every caller of a source has a row or a reason.
+    sources = {}
+    for path in sorted(list((HARNESS_ROOT / "src").rglob("*.c")) +
+                       list((HARNESS_ROOT / "src").rglob("*.inc"))):
+        current = None
+        for line in path.read_text(errors="replace").splitlines():
+            head = re.match(r"^(?:static|fn|b32|bool|bipolar|positive|p\d+|void|int|"
+                            r"string_address)\b[^;=]*?\b(\w+)\(", line)
+            if head:
+                current = head.group(1)
+            for name in HOSTILE_SOURCES:
+                if re.search(r"\b%s\(" % name, line) and current != name:
+                    sources.setdefault(name, set()).add(current)
+    for name, rows in HOSTILE_SOURCES.items():
+        found = sources.get(name, set())
+        checks(found, "gate: %s has no caller any more" % name)
+        for caller in sorted(found - set(rows)):
+            checks(False, "gate: %s reads %s and has no row or reason in HOSTILE_SOURCES"
+                   % (caller, name))
+
+    farm_dir = tempfile.mkdtemp(prefix="hostile-strings.")
+    try:
+        farm = Path(farm_dir)
+        for tool in ("ip", "moonwater", "tar", "wget", "fetch"):
+            (farm / tool).symlink_to(Path(args.shell).resolve())
+        work = farm / "work"
+        work.mkdir()
+        quiet = {"PATH": "/usr/bin:/bin", "LC_ALL": "C.UTF-8", "HOME": str(work)}
+
+        #   The node name, as somebody who is not root asks for it: a user
+        #   namespace of one's own uid and a UTS namespace whose name is set
+        #   before the exec that drops the capability.
+        for name in hostile_payloads(seed + 1, many, 64, banned=b"\x00"):
+            def named(name=name):
+                user, group = os.getuid(), os.getgid()
+                os.unshare(os.CLONE_NEWUSER | os.CLONE_NEWUTS)
+                Path("/proc/self/setgroups").write_text("deny")
+                Path("/proc/self/uid_map").write_text("%d %d 1" % (user, user))
+                Path("/proc/self/gid_map").write_text("%d %d 1" % (group, group))
+                socket.sethostname(name)
+            try:
+                ran = subprocess.run([str(farm / "moonwater"), "name"], capture_output=True,
+                                     timeout=20, env=quiet, preexec_fn=named)
+            except (subprocess.SubprocessError, OSError) as error:
+                print("hostile strings: nodename NOT RUN -- %s" % error)
+                break
+            shown("nodename", "moonwater name", ran)
+
+        #   Archives: member, link, owner and attribute names, listed,
+        #   extracted, compared.
+        for number, name in enumerate(hostile_payloads(seed + 2, many, 200, banned=b"\x00")):
+            text = name.decode("utf-8", "surrogateescape")
+            archive = work / ("a%d.tar" % number)
+            stream = io.BytesIO()
+            with tarfile.open(fileobj=stream, mode="w", format=tarfile.PAX_FORMAT,
+                              encoding="utf-8", errors="surrogateescape") as tar:
+                for member_name in (text, text + "/../escape", "plain"):
+                    info = tarfile.TarInfo(member_name)
+                    info.size = 2
+                    info.uname = info.gname = text[:31]
+                    info.pax_headers = {"SCHILY.xattr.user." + name.decode("utf-8", "ignore") +
+                                        "x" * 250: "v"}
+                    tar.addfile(info, io.BytesIO(b"hi"))
+                link = tarfile.TarInfo("link")
+                link.type = tarfile.SYMTYPE
+                link.linkname = text
+                tar.addfile(link)
+            archive.write_bytes(stream.getvalue())
+            for words in (["-tf"], ["-tvf"], ["-xf"], ["-xvf"], ["--xattrs", "-xf"],
+                          ["-df"]):
+                target = work / ("x%d" % number)
+                target.mkdir(exist_ok=True)
+                ran = subprocess.run([str(farm / "tar")] + words + [str(archive)], cwd=target,
+                                     capture_output=True, timeout=20, env=quiet)
+                shown("tar", "tar " + " ".join(words), ran)
+
+        #   HTTP: a status line, a Location and headers chosen by the server,
+        #   through wget and fetch, followed or refused.
+        class Server(threading.Thread):
+            def __init__(self, answers):
+                super().__init__(daemon=True)
+                self.answers = answers
+                self.listener = socket.socket()
+                self.listener.bind(("127.0.0.1", 0))
+                self.listener.listen(16)
+                self.port = self.listener.getsockname()[1]
+                self.start()
+
+            def run(self):
+                while True:
+                    try:
+                        peer, _ = self.listener.accept()
+                    except OSError:
+                        return
+                    with peer:
+                        peer.settimeout(5)
+                        head = b""
+                        try:
+                            while b"\r\n\r\n" not in head:
+                                more = peer.recv(4096)
+                                if not more:
+                                    break
+                                head += more
+                            path = head.split(b" ")[1] if head.count(b" ") > 1 else b"/"
+                            peer.sendall(self.answers(path, self.port))
+                        except OSError:
+                            pass
+
+        def http_answers(payload):
+            def answer(path, port):
+                if path.startswith(b"/loop"):
+                    return (b"HTTP/1.1 302 Found\r\nLocation: /loop" + payload +
+                            b"\r\nContent-Length: 0\r\n\r\n")
+                if path.startswith(b"/far"):
+                    return (b"HTTP/1.1 301 " + payload + b"\r\nLocation: http://" + payload +
+                            b".invalid/x\r\nContent-Length: 0\r\n\r\n")
+                if path.startswith(b"/down"):
+                    return (b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:%d/" % port +
+                            payload + b"\r\nContent-Length: 0\r\n\r\n")
+                return (b"HTTP/1.1 404 " + payload + b"\r\nServer: " + payload +
+                        b"\r\nContent-Disposition: attachment; filename=\"" + payload +
+                        b"\"\r\nContent-Length: 2\r\n\r\nno")
+            return answer
+
+        for payload in hostile_payloads(seed + 3, many, 120, banned=b"\x00\r\n"):
+            server = Server(http_answers(payload))
+            for tool, path, words in (("wget", b"/loop", []), ("wget", b"/far", []),
+                                      ("wget", b"/down", ["-O", "out"]),
+                                      ("wget", b"/gone", []), ("fetch", b"/down", []),
+                                      ("fetch", b"/gone", [])):
+                url = "http://127.0.0.1:%d%s" % (server.port, path.decode())
+                ran = subprocess.run([str(farm / tool)] + words + [url], cwd=work,
+                                     capture_output=True, timeout=60, env=quiet)
+                shown("http", "%s %s" % (tool, path.decode()), ran)
+            server.listener.close()
+        made = [entry.name for entry in work.iterdir()]
+        checks(not any(hostile_scan(name.encode("utf-8", "surrogateescape")) for name in made),
+               "http: a saved file's name carries what a terminal acts on: %r" % made[:6])
+
+        #   Interfaces, in a namespace of their own.
+        if shutil.which("unshare") and shutil.which("ip", path="/usr/sbin:/usr/bin:/sbin:/bin"):
+            inner = subprocess.run(
+                ["unshare", "-Urn", sys.executable, str(Path(__file__).resolve()),
+                 "--harness", "hostile_strings", "--inside", "--farm", str(farm),
+                 "--shell", args.shell], capture_output=True, text=True, timeout=300,
+                env=dict(os.environ, MOONWATER_HOSTILE_SEED=str(seed + 4)))
+            tally = re.search(r"^hostile strings \(namespace\) (\d+)/(\d+)$", inner.stdout, re.M)
+            for line in inner.stdout.splitlines():
+                if line.startswith("  FAIL"):
+                    print(line)
+            checks(inner.returncode in (0, 1) and tally,
+                   "ifname: the namespace run did not finish (%s)" % inner.stderr[-200:])
+            if tally:
+                checks.checks += int(tally.group(2))
+                checks.failures += int(tally.group(2)) - int(tally.group(1))
+        else:
+            print("hostile strings: ifname NOT RUN -- no unshare or ip")
+    finally:
+        shutil.rmtree(farm_dir, ignore_errors=True)
+    print("hostile strings: a BiDi control shown as it is by %d commands (GNU's tools "
+          "show them too in a UTF-8 locale)%s" % (len(bidi), ": " + ", ".join(sorted(set(bidi)))[:300]
+                                                  if bidi else ""))
+    return checks.verdict("hostile strings", "hostile-strings")
+
+
+class SyscallTracer:
+    """One program under ptrace on x86_64, its children followed, every
+    system call that touches a state directory seen at its exit, and at the
+    k-th of them one thing done to it: the program killed, the call made to
+    fail with an errno, or a write cut short."""
+
+    PATHS = (b"/root", b"/run/moonwater")
+    WRITES = {1, 18, 20, 77}            # write, pwrite64, writev, ftruncate
+    SYNCS = {74, 75}                    # fsync, fdatasync
+    RENAMES = {82: (0, 1), 264: (1, 3), 316: (1, 3), 265: (1, 3)}  # rename(at)(2), linkat
+    REMOVES = {87: 0, 263: 1}           # unlink, unlinkat
+    OPENS = {2: (0, 1), 257: (1, 2)}    # open, openat: path argument, flags argument
+
+    def __init__(self):
+        import ctypes
+        self.ctypes = ctypes
+        self.libc = ctypes.CDLL(None, use_errno=True)
+        self.libc.ptrace.argtypes = [ctypes.c_long, ctypes.c_long, ctypes.c_void_p,
+                                     ctypes.c_void_p]
+        self.libc.ptrace.restype = ctypes.c_long
+
+    def ptrace(self, request, pid, address=0, data=0):
+        return self.libc.ptrace(request, pid, self.ctypes.c_void_p(address),
+                                self.ctypes.c_void_p(data))
+
+    def registers(self, pid):
+        block = (self.ctypes.c_ulong * 27)()
+        self.ptrace(12, pid, 0, self.ctypes.addressof(block))
+        return block
+
+    def text(self, pid, address):
+        try:
+            with open("/proc/%d/mem" % pid, "rb") as memory:
+                memory.seek(address)
+                return memory.read(4096).split(b"\0", 1)[0]
+        except (OSError, ValueError, OverflowError):
+            return b""
+
+    def where(self, pid, directory, name):
+        if name.startswith(b"/"):
+            return name
+        try:
+            base = (os.readlink("/proc/%d/cwd" % pid) if directory in (-100, 2 ** 64 - 100)
+                    else os.readlink("/proc/%d/fd/%d" % (pid, directory)))
+        except OSError:
+            return name
+        return base.encode() + b"/" + name
+
+    def descriptor(self, pid, number):
+        try:
+            return os.readlink("/proc/%d/fd/%d" % (pid, number)).encode()
+        except OSError:
+            return b""
+
+    def state(self, path):
+        return any(path == top or path.startswith(top + b"/") for top in self.PATHS)
+
+    def classify(self, pid, regs):
+        """What a call is about to do, as (kind, paths), or None."""
+        number, a = regs[15], (regs[14], regs[13], regs[12], regs[7])
+        if number in self.OPENS:
+            path_at, flags_at = self.OPENS[number]
+            directory = a[0] if number == 257 else -100
+            path = self.where(pid, self.ctypes.c_long(directory).value,
+                              self.text(pid, a[path_at]))
+            if self.state(path) and a[flags_at] & 0o1103:   # O_WRONLY|O_RDWR|O_CREAT|O_TRUNC
+                return ("open", (path,))
+        elif number in self.WRITES or number in self.SYNCS:
+            path = self.descriptor(pid, a[0])
+            if self.state(path):
+                return ("sync" if number in self.SYNCS else "write", (path,))
+        elif number in self.RENAMES:
+            old, new = self.RENAMES[number]
+            directories = (-100, -100) if number == 82 else (a[0], a[2])
+            paths = (self.where(pid, self.ctypes.c_long(directories[0]).value, self.text(pid, a[old])),
+                     self.where(pid, self.ctypes.c_long(directories[1]).value, self.text(pid, a[new])))
+            if any(self.state(path) for path in paths):
+                return ("link" if number == 265 else "rename", paths)
+        elif number in self.REMOVES:
+            at = self.REMOVES[number]
+            path = self.where(pid, self.ctypes.c_long(a[0] if at else -100).value,
+                              self.text(pid, a[at]))
+            if self.state(path):
+                return ("remove", (path,))
+        return None
+
+    def run(self, argv, cut=None, action=None, environment=None, limit=30.0):
+        """The program run to its end, or cut at its cut-th state call.
+        Answers (status, calls), calls being (pid, kind, paths, result)."""
+        import signal as signals
+        import time as clock
+        devnull = os.open("/dev/null", os.O_RDWR)
+        child = os.fork()
+        if not child:
+            try:
+                for number in (0, 1, 2):
+                    os.dup2(devnull, number)
+                self.ptrace(0, 0)
+                os.execve(argv[0], argv, environment or {"PATH": "/usr/bin:/bin"})
+            finally:
+                os._exit(127)
+        os.close(devnull)
+        os.waitpid(child, 0)
+        self.ptrace(0x4200, child, 0, 0x1 | 0x2 | 0x4 | 0x8 | 0x100000)
+        self.ptrace(24, child, 0, 0)
+        live = {child}
+        inside = {}
+        calls = []
+        status = None
+        started = clock.monotonic()
+        while live:
+            if clock.monotonic() - started > limit:
+                for pid in live:
+                    os.kill(pid, signals.SIGKILL)
+                limit = 1e9
+            try:
+                pid, wait = os.waitpid(-1, 0x40000000)   # __WALL
+            except ChildProcessError:
+                break
+            if os.WIFEXITED(wait) or os.WIFSIGNALED(wait):
+                live.discard(pid)
+                if pid == child:
+                    status = os.waitstatus_to_exitcode(wait)
+                    for other in live:
+                        os.kill(other, signals.SIGKILL)
+                continue
+            if not os.WIFSTOPPED(wait):
+                continue
+            stop = os.WSTOPSIG(wait)
+            event = wait >> 16
+            deliver = 0
+            live.add(pid)
+            if event in (1, 2, 3):
+                message = self.ctypes.c_ulong()
+                self.ptrace(0x4201, pid, 0, self.ctypes.addressof(message))
+                live.add(message.value)
+            elif stop == (signals.SIGTRAP | 0x80):
+                regs = self.registers(pid)
+                if pid not in inside:
+                    seen = self.classify(pid, regs)
+                    inside[pid] = seen
+                    if seen and cut is not None and len(calls) == cut - 1 and action:
+                        if action[0] == "fail":
+                            self.ptrace(6, pid, 120, 2 ** 64 - 1)   # orig_rax -1: not made
+                        elif action[0] == "short" and seen[0] == "write" and \
+                                regs[15] in (1, 18) and regs[12] > 1:
+                            self.ptrace(6, pid, 96, regs[12] // 2)  # rdx: half the count
+                else:
+                    seen = inside.pop(pid)
+                    if seen:
+                        result = self.ctypes.c_long(regs[10]).value
+                        calls.append((pid, seen[0], seen[1], result))
+                        if cut is not None and len(calls) == cut and action:
+                            if action[0] == "kill":
+                                for other in list(live):
+                                    os.kill(other, signals.SIGKILL)
+                            elif action[0] == "fail":
+                                self.ptrace(6, pid, 80, 2 ** 64 - action[1])
+                            elif action[0] == "signal":
+                                os.kill(pid, action[1])
+            elif stop != signals.SIGSTOP or pid == child:
+                deliver = stop if stop not in (signals.SIGTRAP, signals.SIGSTOP) else 0
+            self.ptrace(24, pid, 0, deliver)
+        return status, calls
+
+
+def harness_state_cuts(argv):
+    """Every write of saved state cut at every system call it makes.
+
+    The moonwater command keeps the wifi list (passwords and all), the
+    bluetooth list, the zone, the keyboard, ntp, the internet preference and
+    waterlink's groups and peers under /root. In a sandbox like moonwater_cli's,
+    each verb that changes one of them runs under ptrace (SyscallTracer) from
+    a state made by the verbs before it; every call that opens for writing,
+    writes, syncs, renames, links or removes under /root or /run/moonwater is
+    a place to cut, and at each one the verb is killed (with its children), or
+    the call fails with ENOSPC (EIO for a sync), or a write comes back short.
+    After any cut every file is what it was or what the verb makes it, a
+    leftover is no wider than 0600 when the file holds a secret, a second run
+    of the verb arrives at what an uncut run does and leaves no leftover, and
+    a cut that failed a call does not end in status 0 with the state
+    unchanged. And a synced replacement is durable: after the last rename
+    onto a /root name, the directory /root is synced before the verb ends.
+
+        python3 test/differential.py --harness state_cuts --shell PATH
+        MOONWATER_CUTS_ALL=1 ... every cut of every action (default: every
+        kill, and the failures and short writes at a stride)
+
+    x86_64 Linux only (registers are read as x86_64's); NOT RUN elsewhere.
+    """
+    import platform
+    parser = argparse.ArgumentParser(prog="differential.py --harness state_cuts")
+    parser.add_argument("--shell", required=True)
+    parser.add_argument("--inside", action="store_true", help=argparse.SUPPRESS)
+    args = parser.parse_args(argv)
+    if platform.system() != "Linux" or platform.machine() != "x86_64":
+        print("state cuts: NOT RUN -- ptrace registers are read as x86_64's")
+        return 2
+
+    if not args.inside:
+        import tempfile
+        probe = subprocess.run(["unshare", "-Urmnu", "--fork", "true"], capture_output=True)
+        if probe.returncode:
+            print("state cuts: NOT RUN -- no unprivileged user namespaces here")
+            return 2
+        with tempfile.TemporaryDirectory(prefix="state-cuts-") as temporary:
+            sandbox = Path(temporary) / "root"
+            for name in ("usr", "dev", "proc", "root", "run/moonwater", "etc", "home", "tmp"):
+                (sandbox / name).mkdir(parents=True, exist_ok=True)
+            for name, target in (("bin", "usr/bin"), ("lib", "usr/lib"), ("lib64", "usr/lib"),
+                                 ("sbin", "usr/bin")):
+                (sandbox / name).symlink_to(target)
+            for name in ("passwd", "group"):
+                if Path("/etc", name).exists():
+                    shutil.copy(Path("/etc", name), sandbox / "etc" / name)
+            shutil.copy(args.shell, sandbox / "tmp/moonwater")
+            shutil.copy(Path(__file__).resolve(), sandbox / "tmp/differential.py")
+            wrapper = (f"mount --rbind /usr {sandbox}/usr && mount --rbind /dev {sandbox}/dev && "
+                       f"mount --rbind /proc {sandbox}/proc && "
+                       f"exec chroot {sandbox} /usr/bin/python3 /tmp/differential.py "
+                       f"--harness state_cuts --inside --shell /tmp/moonwater")
+            environment = {"PATH": "/usr/bin:/bin", "LC_ALL": "C",
+                           "MOONWATER_CUTS_ALL": os.environ.get("MOONWATER_CUTS_ALL", "")}
+            try:
+                ran = subprocess.run(["unshare", "-Urmnpu", "--fork", "--mount-proc", "sh", "-c",
+                                      wrapper], capture_output=True, text=True, timeout=1500,
+                                     env=environment)
+            except subprocess.TimeoutExpired:
+                print("state cuts: FAIL -- ran past 1500 s")
+                write_tally("state-cuts", 0, 1)
+                return 1
+            print(ran.stdout, end="")
+            tally = re.search(r"^state cuts (\d+)/(\d+)$", ran.stdout, re.M)
+            if not tally:
+                print("state cuts: FAIL -- the sandbox run did not finish\n" + ran.stderr[-1500:])
+                write_tally("state-cuts", 0, 1)
+                return 1
+            write_tally("state-cuts", int(tally.group(1)), int(tally.group(2)))
+            return 0 if tally.group(1) == tally.group(2) else 1
+
+    tracer = SyscallTracer()
+    checks = Checks()
+    everything = bool(os.environ.get("MOONWATER_CUTS_ALL"))
+    moonwater = args.shell
+    key = "bZOZjGi3+wRTI3dKplm7TSptcD6cjFeYxvDqPYCDSnI="
+    other_key = "kL8Wk4yX3lq2pCq2HfV1m4mJm7m6Zl0Q4Q2c0jV3m2c="
+    #   (name, verbs that make the state before, the verb cut, a secret it keeps)
+    scenes = [
+        ("wifi add", ["wifi add oldnet oldpass11"], "wifi add plantnet passpass1", b"passpass1"),
+        ("wifi remove", ["wifi add oldnet oldpass11", "wifi add second pass2222"],
+         "wifi remove oldnet", b"pass2222"),
+        ("bluetooth add", ["bluetooth add dev1"], "bluetooth add dev2", None),
+        ("timezone", ["timezone de"], "timezone se", None),
+        ("keyboard", ["keyboard us"], "keyboard de", None),
+        ("ntp", ["ntp on"], "ntp off", None),
+        ("internet", ["priority internet wired"], "priority internet wifi", None),
+        ("link join", ["link join lab S3cretOne11 allow run"],
+         "link join lab2 S3cretTwo22 allow run", None),
+        ("link leave", ["link join lab S3cretOne11 allow run",
+                        "link join lab2 S3cretTwo22 allow run"], "link leave lab", None),
+        ("link pair", ["link pair peera " + key], "link pair peerb " + other_key, None),
+        ("link forget", ["link pair peera " + key], "link forget peera", None),
+    ]
+
+    def clear():
+        for top in (Path("/root"), Path("/run/moonwater")):
+            for entry in list(top.iterdir()):
+                if entry.is_dir() and not entry.is_symlink():
+                    shutil.rmtree(entry, ignore_errors=True)
+                else:
+                    entry.unlink(missing_ok=True)
+
+    def snapshot():
+        seen = {}
+        for entry in sorted(Path("/root").rglob("*")):
+            if entry.is_file() and not entry.is_symlink():
+                info = entry.stat()
+                seen[str(entry)] = (entry.read_bytes(), info.st_mode & 0o7777)
+        return seen
+
+    def restore(state):
+        clear()
+        for name, (data, mode) in state.items():
+            Path(name).parent.mkdir(parents=True, exist_ok=True)
+            Path(name).write_bytes(data)
+            os.chmod(name, mode)
+
+    def quiet(verb):
+        return subprocess.run([moonwater] + verb.split(), capture_output=True, timeout=60,
+                              env={"PATH": "/usr/bin:/bin"}).returncode
+
+    def temporary(name):
+        return bool(re.search(r"\.(new|next|next\.new)$|/\.link\.key\.", name))
+
+    def settle():
+        #   A listener or keeper a verb started outlives it; the next run
+        #   must not find it, nor its writes. This is the first process of
+        #   a pid namespace of its own, so every other one in it is ours.
+        import signal as signals
+        for entry in Path("/proc").iterdir():
+            if entry.name.isdigit() and int(entry.name) != os.getpid():
+                try:
+                    os.kill(int(entry.name), signals.SIGKILL)
+                except OSError:
+                    pass
+        while True:
+            try:
+                if os.waitpid(-1, os.WNOHANG) == (0, 0):
+                    break
+            except ChildProcessError:
+                break
+
+    cut_total = 0
+    for name, before, verb, secret in scenes:
+        settle()
+        clear()
+        for step in before:
+            quiet(step)
+        settle()
+        old = snapshot()
+        restore(old)
+        argv_cut = [moonwater] + verb.split()
+        status, calls = tracer.run(argv_cut)
+        settle()
+        new = snapshot()
+        if status is None or new == old:
+            restore(old)
+            said = subprocess.run([moonwater] + verb.split(), capture_output=True, timeout=60,
+                                  env={"PATH": "/usr/bin:/bin"})
+            settle()
+            checks(False, "%s: an uncut run changes the state (traced %s, untraced %s: %r)"
+                   % (name, status, said.returncode, (said.stdout + said.stderr)[-200:]))
+            continue
+        #   Durability: a rename onto a kept /root name, then /root synced.
+        finals = [at for at, call in enumerate(calls)
+                  if call[1] == "rename" and call[3] == 0 and
+                  call[2][1].decode() in new and not temporary(call[2][1].decode()) and
+                  new.get(call[2][1].decode()) != old.get(call[2][1].decode()) and
+                  not call[2][1].endswith(b"/link.stamps")]
+        if finals:
+            synced = any(call[1] == "sync" and call[2][0] == b"/root" and call[3] == 0
+                         for call in calls[finals[-1] + 1:])
+            checks(synced, "%s: %s is renamed into /root and /root is never synced after"
+                   % (name, calls[finals[-1]][2][1].decode()))
+        count = len(calls)
+        stride = 1 if everything else max(1, count // 6)
+        plan = [(cut, ("kill",)) for cut in range(1, count + 1)]
+        for cut in range(1, count + 1, stride):
+            kind = calls[cut - 1][1]
+            plan.append((cut, ("fail", 5 if kind == "sync" else 28)))
+            if kind == "write":
+                plan.append((cut, ("short",)))
+        for cut, action in plan:
+            restore(old)
+            cut_status, _ = tracer.run(argv_cut, cut, action)
+            settle()
+            after = snapshot()
+            cut_total += 1
+            where = "%s: %s at call %d of %d (%s %s)" % (
+                name, action[0], cut, count, calls[cut - 1][1],
+                b" ".join(calls[cut - 1][2]).decode(errors="replace"))
+            half = [path for path in set(old) | set(new) | set(after)
+                    if not temporary(path) and after.get(path) not in (old.get(path), new.get(path))]
+            checks(not half, "%s leaves %s neither as it was nor as it is to be" % (
+                where, ", ".join(sorted(half))))
+            wide = [path for path in after if temporary(path) and secret and
+                    secret in after[path][0] and after[path][1] & 0o077]
+            checks(not wide, "%s leaves %s holding the secret readable by others" % (
+                where, ", ".join(wide)))
+            if action[0] in ("fail", "short"):
+                lost = [path for path in new if not temporary(path) and
+                        after.get(path) != new.get(path)]
+                checks(not (cut_status == 0 and lost),
+                       "%s ends 0 with %s not written" % (where, ", ".join(sorted(lost))))
+            quiet(verb)
+            settle()
+            again = snapshot()
+            checks({path: value for path, value in again.items() if not temporary(path)} ==
+                   {path: value for path, value in new.items() if not temporary(path)} and
+                   not [path for path in again if temporary(path)],
+                   "%s: a second run does not arrive at the uncut state (%s)" % (
+                       where, ", ".join(sorted(set(again) ^ set(new)))[:200]))
+    print("state cuts: %d scenes, %d cut runs" % (len(scenes), cut_total))
+    return checks.verdict("state cuts", "state-cuts-inside")
+
+
+def harness_protected_links(argv):
+    """A write through a planted link meets fs.protected_symlinks, as the
+    kernel's own open would.
+
+    The staged writers (wget -O, tar -cf, split, csplit, shuf -o) walk a chain of links in
+    userspace so that the reference's write-through survives their atomic
+    publication, and that walk never asked the question the kernel asks:
+    root's `wget -O /tmp/x` went through the link another user left at
+    /tmp/x and replaced what it named. In a user namespace with a second
+    uid, every link placement (sticky and world-writable, world-writable,
+    sticky and owned by the link's owner, an ordinary directory) times every
+    link owner (the writer, another user) times every target (a file, a name
+    that is not there, a second link another user owns in a sticky
+    directory) is written through by every tool, as root. A placement the
+    rule refuses must refuse with the victim and the link untouched and the
+    missing name never made; every other one is written through, as GNU's
+    open does. When the host's fs.protected_symlinks is on, the kernel's
+    own O_PATH open of each link is a second oracle for the rule.
+
+        python3 test/differential.py --harness protected_links --binary ours=PATH
+
+    Returns 2 (NOT RUN) without newuidmap, a subordinate id range or unshare.
+    """
+    import argparse
+    import shutil
+    import tempfile
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    parser = argparse.ArgumentParser(prog="protected_links")
+    parser.add_argument("--binary", required=True, metavar="LABEL=PATH")
+    parser.add_argument("--inside", action="store_true", help=argparse.SUPPRESS)
+    opts = parser.parse_args(argv)
+    label, _, binary = opts.binary.partition("=")
+    binary = str(Path(binary).resolve())
+    other = 1000
+
+    if not opts.inside:
+        user = os.getuid()
+        pwd_name = None
+        try:
+            import pwd
+            pwd_name = pwd.getpwuid(user).pw_name
+        except (ImportError, KeyError):
+            pass
+        ranges = {}
+        for kind in ("uid", "gid"):
+            try:
+                for line in Path("/etc/sub" + kind).read_text().splitlines():
+                    owner, _, rest = line.partition(":")
+                    if owner in (pwd_name, str(user)) and rest.count(":") == 1:
+                        ranges[kind] = rest.split(":")
+                        break
+            except OSError:
+                pass
+        if (len(ranges) != 2 or not shutil.which("newuidmap") or
+                not shutil.which("unshare") or not shutil.which("ip")):
+            print("protected links: NOT RUN -- no newuidmap, subordinate ids, unshare or ip")
+            return 2
+        command = ["unshare", "-U",
+                   "--map-users", "0:%d:1" % user,
+                   "--map-users", "1:%s:%s" % tuple(ranges["uid"]),
+                   "--map-groups", "0:%d:1" % os.getgid(),
+                   "--map-groups", "1:%s:%s" % tuple(ranges["gid"]),
+                   "-n", "-m", "-p", "-f", "--mount-proc",
+                   sys.executable, str(Path(__file__).resolve()),
+                   "--harness", "protected_links", "--inside",
+                   "--binary", label + "=" + binary]
+        try:
+            return subprocess.run(command, timeout=120).returncode
+        except subprocess.TimeoutExpired:
+            print("protected links: FAIL -- the scene ran past 120 s")
+            return 1
+
+    checks = Checks()
+    subprocess.run(["ip", "link", "set", "lo", "up"], check=True)
+    body = b"downloaded\n"
+
+    class Serve(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Serve)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = "http://127.0.0.1:%d/f" % server.server_address[1]
+
+    scratch = Path(tempfile.mkdtemp(prefix="protected-links."))
+    subprocess.run(["mount", "-t", "tmpfs", "-o", "mode=0755", "none", str(scratch)],
+                   check=True)
+    farm = scratch / "farm"
+    farm.mkdir()
+    for tool in ("wget", "tar", "split", "csplit", "shuf"):
+        (farm / tool).symlink_to(binary)
+
+    def as_other(work, pointed, leaf):
+        return subprocess.run(["ln", "-s", pointed, leaf], cwd=work, user=other,
+                              group=other, extra_groups=[]).returncode == 0
+
+    try:
+        protected = Path("/proc/sys/fs/protected_symlinks").read_text().strip() == "1"
+    except OSError:
+        protected = False
+
+    #   (placement, its mode, its owner)
+    placements = (("sticky-shared", 0o1777, 0), ("shared", 0o777, 0),
+                  ("sticky-theirs", 0o1777, other), ("plain", 0o755, 0))
+    owners = (("mine", 0), ("theirs", other))
+    targets = ("file", "missing", "chain", "chain-mine")
+    tools = ("wget", "tar", "split", "csplit", "shuf")
+    number = 0
+    for (place, mode, place_owner) in placements:
+        for (owner_name, owner) in owners:
+            if place == "plain" and owner:
+                continue  # nobody else can make a link in a 0755 root directory
+            for target in targets:
+                for tool in tools:
+                    number += 1
+                    scene = scratch / ("s%d" % number)
+                    holder = scene / "holder"
+                    safe = scene / "safe"
+                    shared = scene / "shared"
+                    for directory in (holder, safe, shared):
+                        directory.mkdir(parents=True)
+                    os.chmod(scene, 0o755)
+                    os.chmod(safe, 0o755)
+                    os.chmod(shared, 0o1777)
+                    os.chmod(holder, mode)
+                    os.chown(holder, place_owner, place_owner)
+                    victim = safe / "victim"
+                    victim.write_bytes(b"precious\n")
+                    leaf = "out" + {"split": "aa", "csplit": "00"}.get(tool, "")
+                    pointed = {"file": str(victim), "missing": str(safe / "new")}.get(
+                        target, str(shared / "hop"))
+                    if target == "chain":
+                        made = as_other(shared, str(victim), "hop")
+                        checks(made, "%s: cannot plant the second hop" % scene.name)
+                    elif target == "chain-mine":
+                        os.symlink(str(victim), shared / "hop")
+                    if owner:
+                        made = as_other(holder, pointed, leaf)
+                    else:
+                        os.symlink(pointed, holder / leaf)
+                        made = True
+                    checks(made, "%s: cannot plant the link" % scene.name)
+                    link = holder / leaf
+
+                    #   The rule, hop by hop, as may_follow_link applies it.
+                    def refused_at(link_owner, directory_mode, directory_owner):
+                        return ((directory_mode & 0o1002) == 0o1002 and
+                                link_owner != 0 and link_owner != directory_owner)
+                    refuse = refused_at(owner, mode, place_owner)
+                    if target == "chain" and not refuse:
+                        refuse = refused_at(other, 0o1777, 0)
+                    if protected:
+                        try:
+                            os.close(os.open(link, os.O_PATH))
+                            kernel = False
+                        except PermissionError:
+                            kernel = True
+                        except FileNotFoundError:
+                            kernel = False
+                        checks(kernel == refuse, "%s/%s/%s: the kernel %s, the rule %s" % (
+                            place, owner_name, target, "refuses" if kernel else "follows",
+                            "refuses" if refuse else "follows"))
+
+                    source = scene / "input"
+                    source.write_bytes(b"x\ny\n")
+                    if tool == "wget":
+                        argv_tool = [str(farm / "wget"), "-q", "-O", str(link), url]
+                    elif tool == "tar":
+                        argv_tool = [str(farm / "tar"), "-cf", str(link), "input"]
+                    elif tool == "split":
+                        argv_tool = [str(farm / "split"), "-b", "2", "input",
+                                     str(holder / "out")]
+                    elif tool == "csplit":
+                        argv_tool = [str(farm / "csplit"), "-s", "-f", str(holder / "out"),
+                                     "input", "2"]
+                    else:
+                        argv_tool = [str(farm / "shuf"), "-o", str(link), "input"]
+                    try:
+                        ran = subprocess.run(argv_tool, cwd=scene, capture_output=True,
+                                             timeout=20)
+                        status = ran.returncode
+                    except subprocess.TimeoutExpired:
+                        status = None
+                    row = "%s %s link in %s to a %s" % (tool, owner_name, place, target)
+                    kept = victim.read_bytes() == b"precious\n"
+                    still = link.is_symlink() and os.readlink(link) == pointed
+                    made_new = (safe / "new").exists()
+                    if refuse:
+                        checks(status not in (0, None) and kept and still and not made_new,
+                               "%s: wrote through a link the kernel refuses "
+                               "(status %s, victim kept %s, link kept %s, new name %s)"
+                               % (row, status, kept, still, made_new))
+                    else:
+                        wrote = (not kept) if target != "missing" else made_new
+                        checks(status == 0 and wrote,
+                               "%s: refused a link the kernel follows (status %s, %s)"
+                               % (row, status, ran.stderr[-200:] if status is not None else "timeout"))
+    server.shutdown()
+    subprocess.run(["umount", "-l", str(scratch)])
+    shutil.rmtree(scratch, ignore_errors=True)
+    return checks.verdict("protected links", "protected_links")
 
 
 def pathname_race_budget(default_rounds=80, default_seconds=2.0):
@@ -69331,6 +70365,9 @@ HARNESS_CHECKS = {
     "net_dependency_closure": harness_net_dependency_closure,
     "security_hygiene": harness_security_hygiene,
     "pathname_race": harness_pathname_race,
+    "protected_links": harness_protected_links,
+    "hostile_strings": harness_hostile_strings,
+    "state_cuts": harness_state_cuts,
     "machine_scan": harness_machine_scan,
     "waterlink_noise": harness_waterlink_noise,
     "waterlink_mdns": harness_waterlink_mdns,
