@@ -7854,6 +7854,74 @@ static fn file_staged_name_abort(file_staged_name address_to stage)
         (void)file_staged_name_finish(stage, false, 0);
 }
 
+/* A written stage made the file. With `sync` the bytes are on disk before the
+   name shows them, and the directory is synced after, so the result survives
+   the power going straight after (a downloaded image, a resolver file); without
+   it a file that only says what this session is doing is published as fast as
+   the rename. */
+static COLD bipolar file_staged_name_publish(
+    file_staged_name address_to stage, bool sync)
+{
+        bipolar directory = sync ? system_open_at(
+            stage->directory, (string_address)".",
+            FILE_READ | O_DIRECTORY | O_CLOEXEC) : -1;
+        if (sync && directory < 0)
+        {
+                file_staged_name_abort(stage);
+                return directory;
+        }
+
+        /* A device or FIFO written in place has no data of its own to
+           sync, and fsync on one answers EINVAL. */
+        bipolar prepared = file_staged_name_prepare(stage);
+        bipolar synced = prepared < 0 || stage->direct || !sync ? prepared
+            : system_call_1(syscall(fsync), (positive)stage->handle);
+
+        if (synced < 0)
+        {
+                file_staged_name_abort(stage);
+                if (sync)
+                        system_close(directory);
+                return synced;
+        }
+
+        bipolar published = file_staged_name_finish(stage, true, 0);
+        if (published < 0 || !sync)
+        {
+                if (sync)
+                        system_close(directory);
+                return published < 0 ? published : 0;
+        }
+
+        /* The rename above committed the caller-visible result.  Sync and
+           close still strengthen crash durability, but neither can turn that
+           published name back into a pre-publication failure for callers that
+           would otherwise roll back unrelated state. */
+        (void)system_call_1(syscall(fsync), (positive)directory);
+        (void)system_close(directory);
+        return 0;
+}
+
+/* A whole file, written beside its name and renamed over it: the old bytes
+   or the new, never half of each, and a crash or a signal part way leaves
+   the file as it was. */
+static COLD bipolar file_publish_bytes(string_address path, address_any bytes,
+                                       positive length, positive mode,
+                                       bool sync)
+{
+        file_staged_name stage;
+        bipolar handle = file_staged_name_open(address_of stage, path, mode, 0);
+
+        if (handle < 0)
+                return handle;
+        if (system_write_all((positive)handle, bytes, length) != length)
+        {
+                file_staged_name_abort(address_of stage);
+                return -ERROR_INPUT_OUTPUT;
+        }
+        return file_staged_name_publish(address_of stage, sync);
+}
+
 static bipolar file_directory_empty_same(bipolar directory,
                                          string_address name,
                                          file_facts address_to expected,

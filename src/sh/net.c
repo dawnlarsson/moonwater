@@ -676,50 +676,6 @@ static const argument_option wget_options[] = {
     {null},
 };
 
-/* Network files use the same descriptor-bound output transaction as the file
-   tools. They add a data sync before publication because a downloaded image
-   and resolv.conf must survive the power loss that may immediately follow
-   boot-time networking. */
-static COLD bipolar net_staged_name_publish(file_staged_name address_to stage)
-{
-        bipolar directory = system_open_at(
-            stage->directory, (string_address)".",
-            FILE_READ | O_DIRECTORY | O_CLOEXEC);
-        if (directory < 0)
-        {
-                file_staged_name_abort(stage);
-                return directory;
-        }
-
-        /* A device or FIFO written in place has no data of its own to
-           sync, and fsync on one answers EINVAL. */
-        bipolar prepared = file_staged_name_prepare(stage);
-        bipolar synced = prepared < 0 || stage->direct ? prepared : system_call_1(
-            syscall(fsync), (positive)stage->handle);
-
-        if (synced < 0)
-        {
-                file_staged_name_abort(stage);
-                system_close(directory);
-                return synced;
-        }
-
-        bipolar published = file_staged_name_finish(stage, true, 0);
-        if (published < 0)
-        {
-                system_close(directory);
-                return published;
-        }
-
-        /* The rename above committed the caller-visible result.  Sync and
-           close still strengthen crash durability, but neither can turn that
-           published name back into a pre-publication failure for callers that
-           would otherwise roll back unrelated network state. */
-        (void)system_call_1(syscall(fsync), (positive)directory);
-        (void)system_close(directory);
-        return 0;
-}
-
 /* wget's exit statuses are GNU wget's: 1 anything else, 2 a command line
    it cannot parse, 3 a file it cannot write, 4 the network, 6 a server
    refusing credentials, 8 a server answering with an error. */
@@ -985,7 +941,10 @@ static b32 net_wget(void)
 
         if (own_file)
         {
-                bipolar published = net_staged_name_publish(address_of staged);
+                //      A downloaded image has to survive the power that may
+                //      go straight after it.
+                bipolar published = file_staged_name_publish(address_of staged,
+                                                            true);
 
                 if (published < 0)
                         return string_report(log_error, WGET_FILE,
@@ -1031,8 +990,6 @@ static COLD bipolar net_write_resolv_to(string_address path, p32 nameserver)
             nameserver && nameserver != DNS_FALLBACK ? DNS_FALLBACK : 0};
         p8 line[64];
         positive used = 0;
-        file_staged_name staged;
-        bipolar handle;
 
         for (positive at = 0; at < 2 && servers[at]; at++)
         {
@@ -1041,19 +998,8 @@ static COLD bipolar net_write_resolv_to(string_address path, p32 nameserver)
                 line[used++] = '\n';
         }
 
-        handle = file_staged_name_open(
-            address_of staged, path, 0644 & ~file_umask(), 0);
-
-        if (handle < 0)
-                return handle;
-
-        if (system_write_all((positive)handle, line, used) != used)
-        {
-                file_staged_name_abort(address_of staged);
-                return -ERROR_INPUT_OUTPUT;
-        }
-
-        return net_staged_name_publish(address_of staged);
+        //      The file a lease writes survives the power going with it.
+        return file_publish_bytes(path, line, used, 0644 & ~file_umask(), true);
 }
 
 static COLD bipolar net_write_resolv(p32 nameserver)

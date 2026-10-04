@@ -85102,7 +85102,7 @@ static fn storage_test_net_files(void)
                   system_write_all((positive)handle, "new", 3) == 3);
         check("network publication atomically replaces the destination",
               handle >= 0 &&
-                  net_staged_name_publish(address_of staged) == 0);
+                  file_staged_name_publish(address_of staged, true) == 0);
         got = storage_test_file_read(target, bytes, sizeof bytes);
         check("network publication exposes only completed bytes",
               got == 3 && !memory_compare(bytes, "new", 3));
@@ -85116,7 +85116,7 @@ static fn storage_test_net_files(void)
                 storage_test_net_syncs = 0;
                 storage_test_net_sync_failure = 1;
                 check("pre-publication sync failure is reported",
-                      net_staged_name_publish(address_of staged) ==
+                      file_staged_name_publish(address_of staged, true) ==
                           -ERROR_INPUT_OUTPUT);
                 storage_test_net_sync_failure = 0;
         }
@@ -85133,7 +85133,7 @@ static fn storage_test_net_files(void)
                 storage_test_net_syncs = 0;
                 storage_test_net_sync_failure = 2;
                 check("post-publication sync failure remains committed",
-                      net_staged_name_publish(address_of staged) == 0 &&
+                      file_staged_name_publish(address_of staged, true) == 0 &&
                           storage_test_net_syncs == 2);
                 storage_test_net_sync_failure = 0;
         }
@@ -85149,7 +85149,7 @@ static fn storage_test_net_files(void)
                 system_write_all((positive)handle, "close", 5);
                 storage_test_net_close_failure = staged.directory;
                 check("post-publication directory close remains committed",
-                      net_staged_name_publish(address_of staged) == 0 &&
+                      file_staged_name_publish(address_of staged, true) == 0 &&
                           storage_test_net_close_failure == -1);
                 storage_test_net_close_failure = -1;
         }
@@ -85202,7 +85202,7 @@ static fn storage_test_net_files(void)
                         system_close(attacker);
                 }
                 check("a swapped staging name cannot be published",
-                      net_staged_name_publish(address_of staged) ==
+                      file_staged_name_publish(address_of staged, true) ==
                           -ERROR_AGAIN);
         }
         got = storage_test_file_read(target, bytes, sizeof bytes);
@@ -85246,6 +85246,22 @@ static fn storage_test_net_files(void)
                           storage_test_file_read(target, bytes, sizeof bytes) ==
                               sizeof(alone) - 1 &&
                           !memory_compare(bytes, alone, sizeof(alone) - 1));
+                //      The count is kept only while a failure is planned;
+                //      one that is never reached counts.
+                storage_test_net_sync_failure = 99;
+                storage_test_net_syncs = 0;
+                check("a file published without the syncs is the same bytes and asks for none",
+                      file_publish_bytes(target, "plain\n", 6, 0644, false) == 0 &&
+                          storage_test_net_syncs == 0 &&
+                          storage_test_file_read(target, bytes, sizeof bytes) == 6 &&
+                          !memory_compare(bytes, "plain\n", 6));
+                storage_test_net_syncs = 0;
+                check("and with them asks for the bytes' and the directory's",
+                      file_publish_bytes(target, "synced", 6, 0644, true) == 0 &&
+                          storage_test_net_syncs == 2 &&
+                          storage_test_file_read(target, bytes, sizeof bytes) == 6 &&
+                          !memory_compare(bytes, "synced", 6));
+                storage_test_net_sync_failure = 0;
                 check("only an answer about the name ends the walk over resolvers",
                       dns_answer_is_final(DNS_OK) &&
                           dns_answer_is_final(DNS_NO_SUCH_NAME) &&
