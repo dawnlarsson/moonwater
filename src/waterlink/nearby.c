@@ -605,7 +605,7 @@ static fn link_nearby_reload(p64 now)
                    removed durably; the next look retries the migration. */
                 crypto_forget(address_of link_nearby.groups,
                               sizeof link_nearby.groups);
-                link_nearby.groups_changed = 0;
+                memory_zero(link_nearby.groups_mark, sizeof mark);
         }
         for (positive at = 0; at < link_nearby.groups.count; at++)
                 waterlink_group_keys_from(link_nearby.keys + at,
