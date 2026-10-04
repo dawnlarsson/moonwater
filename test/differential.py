@@ -42715,8 +42715,8 @@ while True:
                   ("tune", "charge limit 80", "charge"),
                   ("link", "link off", "link"),
                   ("link.key", "link key", "link"),
-                  ("link.peers", "link forget nobody", "link"),
-                  ("link.groups", "link join plantlab allow run", "link"))] + [
+                  ("link.peers", "link remove nobody", "link"),
+                  ("link.groups", "link group plantlab allow run", "link"))] + [
                   ("/run/moonwater/settings.next", "bind init add true", "bind init"),
                   ("/run/moonwater/settings", "bind init add true", "bind init")]
         kinds = {"link": "ln -s /tmp/victim {p}",
@@ -42757,8 +42757,8 @@ while True:
         # one writes into a pipe already full, so it stops at its first word
         # of output, after the secret has been used, and its cmdline is read
         # there: the secret must be gone from it.
-        carried = [("link join lab S3cretOnTheLine77", "S3cretOnTheLine77"),
-                   ("link join lab2 S3cretOnTheLine78 allow run", "S3cretOnTheLine78"),
+        carried = [("link group lab S3cretOnTheLine77", "S3cretOnTheLine77"),
+                   ("link group lab2 S3cretOnTheLine78 allow run", "S3cretOnTheLine78"),
                    ("wifi add argvnet S3cretOnTheLine79", "S3cretOnTheLine79")]
         script = "rm -f /tmp/full; mkfifo /tmp/full\n"
         for command, secret in carried:
@@ -58101,12 +58101,12 @@ def harness_state_cuts(argv):
         ("keyboard", ["keyboard us"], "keyboard de", None),
         ("ntp", ["ntp on"], "ntp off", None),
         ("internet", ["priority internet wired"], "priority internet wifi", None),
-        ("link join", ["link join lab S3cretOne11 allow run"],
-         "link join lab2 S3cretTwo22 allow run", None),
-        ("link leave", ["link join lab S3cretOne11 allow run",
-                        "link join lab2 S3cretTwo22 allow run"], "link leave lab", None),
-        ("link pair", ["link pair peera " + key], "link pair peerb " + other_key, None),
-        ("link forget", ["link pair peera " + key], "link forget peera", None),
+        ("link join", ["link group lab S3cretOne11 allow run"],
+         "link group lab2 S3cretTwo22 allow run", None),
+        ("link leave", ["link group lab S3cretOne11 allow run",
+                        "link group lab2 S3cretTwo22 allow run"], "link group leave lab", None),
+        ("link pair", ["link add peera " + key], "link add peerb " + other_key, None),
+        ("link forget", ["link add peera " + key], "link remove peera", None),
     ]
 
     def clear():

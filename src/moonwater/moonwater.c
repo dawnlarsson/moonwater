@@ -2144,8 +2144,8 @@ static fn host_machine_publish(void)
                 string_address line[] = { "machine script refused: ",
                                           HOST_MACHINE_SCRIPT, null };
 
-                byte_store_release(address_of text);
                 host_kmsg(line);
+                byte_store_release(address_of text);
                 return;
         }
 
