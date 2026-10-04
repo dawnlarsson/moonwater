@@ -9695,11 +9695,11 @@ static b32 host_tune(string_address address_to arguments, positive count)
 
 #define SNTP_PORT 123
 #define SNTP_PACKET 48
-/* One byte beyond the only wire shape this client understands lets recvmsg
-   tell an exact 48-byte reply from a longer datagram.  Receiving into exactly
-   SNTP_PACKET bytes silently truncates UDP: the return value is then 48 for
-   both shapes, and attacker-chosen trailing data is accepted without ever
-   being parsed. */
+/* One byte beyond the 48-byte message lets recvmsg tell an exact reply from a
+   longer datagram.  The default reads the first 48 bytes of a longer one, as
+   ntpd and chrony do (extension fields, a MAC); the tight tier takes only the
+   exact shape, because bytes after the message are otherwise accepted without
+   being parsed.  A buffer of exactly SNTP_PACKET would make both read 48. */
 #define SNTP_REPLY_ROOM (SNTP_PACKET + 1)
 #define SNTP_SECONDS 2
 #define SNTP_SAMPLES 5
@@ -10904,7 +10904,7 @@ static HOT bipolar sntp_exchange(b32 handle,
                                 return SNTP_NO_REPLY;
                         continue;
                 }
-                if_rare (received != SNTP_PACKET)
+                if_rare (received < SNTP_PACKET || (tight && received != SNTP_PACKET))
                 {
                         if (discarded++ == SNTP_DISCARD_MAX)
                                 return SNTP_NO_REPLY;

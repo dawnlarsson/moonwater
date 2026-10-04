@@ -59853,8 +59853,8 @@ say(corners[5353, 255, 120] > 0 and
 #       What c may do on b is ops's grant and nothing of lab's, a's record
 #       stays lab's, and leaving ops with forget drops c and not a.
 ops_secret = "ops-secret-for-the-lane-2"
-on("b", "%s link join ops %s allow log" % (moon, ops_secret))
-on("c", "%s link join ops %s allow run" % (moon, ops_secret))
+on("b", "%s link group ops %s allow log" % (moon, ops_secret))
+on("c", "%s link group ops %s allow run" % (moon, ops_secret))
 c_on_b = None
 began = time.time()
 while time.time() - began < 25 and not c_on_b:
@@ -59874,7 +59874,7 @@ say(a_line and "may run shell, paired in lab" in a_line[0],
 status, out, err = on("c", "%s link run b 'echo no'" % moon, timeout=30)
 say(status == 255 and b"run is not granted" in err,
     "sec: the ops member may not run on b, which granted ops only log (%r)" % (err[-80:],))
-status, left, err = on("b", moon + " link leave ops forget")
+status, left, err = on("b", moon + " link group leave ops forget")
 time.sleep(1.5)
 status, out, err = on("b", moon + " link")
 say(b"box-c" not in out and b"paired in lab" in out,
@@ -59882,7 +59882,7 @@ say(b"box-c" not in out and b"paired in lab" in out,
 if len(names) == 2:
     status, out, err = on("a", "%s link run %s 'echo still-lab'" % (moon, names["a"]))
     say(status == 0 and out == b"still-lab\n", "and lab's member still runs on b")
-on("c", moon + " link leave ops forget")
+on("c", moon + " link group leave ops forget")
 
 #       A handshake flood. Anyone who knows the listener's public key can make
 #       an initiation that passes mac1, and a listener that did the curve for
@@ -60026,11 +60026,15 @@ def revoked(revoke, restore, label):
                "the 2 s after the first 2, status %r)" % (label, before, after - settled, ended))
 revoked("%s link deny %s run" % (moon, names.get("b", "a")),
         ["%s link allow %s run" % (moon, names.get("b", "a"))], "denying run")
-revoked("%s link forget %s" % (moon, names.get("b", "a")),
-        ["%s link pair %s %s 10.77.0.1" % (moon, names.get("b", "a"), keys["a"]),
-         "%s link allow %s run shell" % (moon, names.get("b", "a"))], "forgetting the peer")
+revoked("%s link remove %s" % (moon, names.get("b", "a")),
+        ["%s link group leave lab" % moon,
+         "%s link group lab %s allow run shell" % (moon, secret)], "forgetting the peer")
 if len(names) == 2:
-    status, out, err = on("a", "%s link run %s 'echo restored'" % (moon, names["a"]))
+    began = time.time()
+    status, out, err = 1, b"", b""
+    while time.time() - began < 30 and out != b"restored\n":
+        time.sleep(1)
+        status, out, err = on("a", "%s link run %s 'echo restored'" % (moon, names["a"]))
     say(status == 0 and out == b"restored\n", "and a runs on b again once it is put back (%r)" % (err[-80:],))
 
 status, out, err = on("a", moon + " link group leave lab forget")

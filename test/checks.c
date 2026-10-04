@@ -73870,10 +73870,10 @@ static fn mdns_names_one(void)
         check("sec: an announcement naming eight instances is one greeting, "
               "to the first",
               entropy_draws - before == 1 &&
-                      link_greeted_lately(wls_office.mark, wls_loopback, 41000,
-                                          6000001) &&
-                      !link_greeted_lately(wls_office.mark, wls_loopback, 41001,
-                                           6000001));
+                      link_greeted_recent(wls_loopback, wls_office.mark, 41000,
+                                          true, 6000001) &&
+                      !link_greeted_recent(wls_loopback, wls_office.mark, 41001,
+                                           true, 6000001));
 
         wls_group();
         before = entropy_draws;

@@ -33,8 +33,9 @@ never a pass.
 - Every loop over hostile data makes progress under a byte, item, depth or
   absolute-time bound.
 - A datagram reply matches its family, peer, transaction and echoed request
-  fields before it changes state, and is exactly the size of the one shape the
-  client parses (a longer datagram is not truncated into acceptance).
+  fields before it changes state, and, at the tight tier, is exactly the size of
+  the one shape the client parses (the default reads the first 48 bytes of a
+  longer SNTP reply, as ntpd and chrony do).
 - Security transactions use the initialized kernel CSPRNG or do not happen.
 - Text is validated again at the sink that serializes or executes it.
 - Failure publishes no partial output, keeps no stale authenticated state,
@@ -85,7 +86,7 @@ ARM64 and RISC-V mandatory with UBSan trapping.
 | Netlink | sender, port, sequence, alignment, multipart, `NETLINK_DISCARD_MAX`; `netlink_fuzz` | nested attributes beyond the bounded fuzz |
 | DNS | exact question, ID, peer; per-query source port, 0x20, EDNS0 with fallbacks; own resolver first; `DNS_DISCARD_MAX`; `dns_fuzz`, `sh test/run net` | independent packet oracle |
 | DHCPv4 | xid, MAC, server and OFFER-peer binding; option overload, END and zero padding; lease sanity; ARP probes before install; watcher cut once per link news; `dhcp_fuzz`, `sh test/run netem net machine` | DHCP over a raw socket (`rp_filter`); no DHCPDECLINE after an ARP conflict, so the server keeps offering the same address until its lease ends |
-| SNTP | 64-bit nonce, peer, mode, stratum, timing, exactly 48 bytes; each sample its own wait; `sntp_fuzz`, `sntp_era` (2036, 2038, 2104), `sh test/run netem machine` | unauthenticated; NTS is a separate branch |
+| SNTP | 64-bit nonce, peer, mode, stratum, timing, exactly 48 bytes at the tight tier; each sample its own wait; `sntp_fuzz`, `sntp_era` (2036, 2038, 2104), `sh test/run netem machine` | unauthenticated; NTS is a separate branch |
 | HTTP, URL | `localhost` and `*.localhost` reach 127.0.0.1 without a resolver (RFC 6761; `wget_hostile` with a stub resolver, curl held to the same rows); host spellings named against GNU wget and curl; the scheme rule at both tiers (`http_urls`); sink-side validation of host, target, headers; userinfo, schemes, fragments refused; one framing reading; redirect and HTTPS-downgrade bounds; body deadline; per-hop host, address, SNI and Host identity; `http_response_framing` (with `http.client` and curl), `wget_mutation` and `wget_hostile` (GNU wget and curl as live oracles), `https_downgrade`, `http_fuzz` | CNAME, multi-address and interface-scope identity; `inet_aton` shorthands (`0x7f.1`, `127.1`) are names here and addresses to wget and curl (decision); SNTP, logger and Waterlink peers still ask DNS for localhost; the tight tier bounds each hop, not the redirect chain |
 | TLS, X.509 | transcript, Finished, AEAD, record sequence, state ordering; strict DER; CertificateEntry extensions refused; delivery schedules and FIN/RST cuts (`tls_peer --schedule`); SAN and name constraints, key usage, EKU, dates; chains against OpenSSL and Go `crypto/x509`; `tls_chains`, `tls_hostnames`, `tls_dates`, `public_suffixes`, `anchors`, `tls_peer`, `tls_der_fuzz`, `tls_hs_fuzz`, `tls_verify_fuzz`; `x509_corpus` by hand over 643 hosts | name constraints in more shapes |
 | Crypto | OpenSSL vectors and every `lib.c` architecture body: `crypto_vectors` (`--wycheproof DIR` by hand), `crypto_fuzz` | none known |
