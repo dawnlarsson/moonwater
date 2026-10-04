@@ -108,6 +108,8 @@
 #define HOST_POLL_NS ((p64)100000000)
 #define HOST_VERDICT_WAIT_NS ((p64)15000000000)
 #define HOST_LOOKING_NS ((p64)700000000)
+/* How long names just resolved are still taken to be the disks' own. */
+#define HOST_FRESH_NS ((p64)2000000000)
 /*      How often a terminal looks for boot's verdict. It is one failed open,
         and the first prompt waits on it. */
 #define HOST_VERDICT_POLL_NS ((p64)5000000)
@@ -141,12 +143,15 @@ typedef struct
         p8 data_partuuid[STORAGE_PARTUUID_ROOM];
         p8 build[HOST_BUILD_ROOM];
         bool readable;
+        //      When the names above were last resolved, on the boot clock.
+        p64 resolved;
 } host_install;
 
 typedef struct
 {
         host_install found[HOST_INSTALLS];
         positive count;
+        positive dropped;
 } host_census;
 
 // Settings, defined further down with the commands that change them.
@@ -422,10 +427,15 @@ static bipolar host_write_text(string_address path, string_address text)
                                0644, false);
 }
 
-/* One line from standard input, or negative at its end. */
+/* One line from standard input, or negative: -1 at its end, and HOST_LINE_LONG
+   for one that did not fit, which is no answer to anything -- its first
+   characters read as a name were once all that was looked at. */
+#define HOST_LINE_LONG (-2)
+
 static bipolar host_read_line(p8 address_to into, positive room)
 {
         positive used = 0;
+        bool cut = false;
 
         for (;;)
         {
@@ -444,13 +454,15 @@ static bipolar host_read_line(p8 address_to into, positive room)
                         break;
                 if (used + 1 < room)
                         into[used++] = byte;
+                else
+                        cut = true;
         }
 
         while (used && (into[used - 1] == '\r' || into[used - 1] == ' '))
                 used--;
 
         into[used] = end;
-        return (bipolar)used;
+        return cut ? HOST_LINE_LONG : (bipolar)used;
 }
 
 typedef bool (*host_entry_visitor)(string_address directory,
@@ -500,18 +512,24 @@ static fn host_state_ready(void)
         host_state_directory(HOST_STATE, 0755);
 }
 
+/* The verdict a terminal waits on; one that could not be written is said, since
+   nothing else will tell the terminal why it never came. */
 static fn host_verdict_set(string_address kind, string_address disk)
 {
         p8 line[HOST_NAME_ROOM + 16];
         p8 text[HOST_NAME_ROOM + 16];
+        bipolar failed;
 
         if (!host_join(line, sizeof(line), kind, disk) ||
             !host_join(text, sizeof(text), line, "\n"))
                 return;
 
-        if (!host_write_text(HOST_VERDICT_NEXT, text))
-                system_rename_at(AT_FDCWD, HOST_VERDICT_NEXT, AT_FDCWD,
-                                 HOST_VERDICT, 0);
+        failed = host_write_text(HOST_VERDICT_NEXT, text);
+        if (!failed)
+                failed = system_rename_at(AT_FDCWD, HOST_VERDICT_NEXT, AT_FDCWD,
+                                          HOST_VERDICT, 0);
+        if (failed < 0)
+                host_fail(HOST_VERDICT, failed);
 }
 
 #define RADIO_LOCK_EX 2
@@ -700,7 +718,10 @@ static bool host_census_visit(storage_identity address_to identity,
         if (!install)
         {
                 if (census->count == HOST_INSTALLS)
+                {
+                        census->dropped++;
                         return true;
+                }
 
                 install = census->found + census->count++;
                 memory_zero(install, sizeof(address_to install));
@@ -727,6 +748,18 @@ static fn host_census_take(host_census address_to census)
                         census->found[kept++] = census->found[at];
 
         census->count = kept;
+
+        for (positive at = 0; at < kept; at++)
+                census->found[at].resolved = system_clock_ns(HOST_CLOCK_BOOTTIME);
+}
+
+/* The census could not keep every disk Moonwater has partitions on. */
+static fn host_census_said(host_census address_to census)
+{
+        if (census->dropped)
+                host_say(log_error, host_label "more than %p disks have Moonwater partitions; "
+                                               "the rest are not looked at\n",
+                         (positive)HOST_INSTALLS);
 }
 
 static host_install address_to host_census_find(host_census address_to census,
@@ -1132,13 +1165,20 @@ static bool host_partition_uuid_resolve(string_address uuid,
 
 /* Both partitions must still exist and still belong to one physical disk.
    Refresh all display names together so the rest of an operation cannot mix
-   one old name with one newly resolved identity. */
+   one old name with one newly resolved identity. Names resolved a moment ago
+   are not resolved again: each look is a scan of every disk there is, and boot
+   made seven of them in a row, where the point of looking again is the
+   minutes a prompt can wait. */
 static bool host_install_refresh(host_install address_to install)
 {
         p8 system[HOST_NAME_ROOM];
         p8 data[HOST_NAME_ROOM];
         p8 system_disk[HOST_NAME_ROOM];
         p8 data_disk[HOST_NAME_ROOM];
+
+        if (install->resolved &&
+            system_clock_ns(HOST_CLOCK_BOOTTIME) - install->resolved < HOST_FRESH_NS)
+                return true;
 
         if (!host_partition_uuid_resolve(install->system_partuuid, system) ||
             !host_partition_uuid_resolve(install->data_partuuid, data) ||
@@ -1150,6 +1190,7 @@ static bool host_install_refresh(host_install address_to install)
         string_copy(install->disk, system_disk);
         string_copy(install->system, system);
         string_copy(install->data, data);
+        install->resolved = system_clock_ns(HOST_CLOCK_BOOTTIME);
         return true;
 }
 
@@ -1824,12 +1865,46 @@ static fn host_booted(host_settings address_to settings)
         host_events_boot(settings);
 }
 
+/*
+        The one install of this build that the session started from, if it
+        is one: the settings an image boots with carry the medium they were
+        written for, and the same number is in the image on the disk they came
+        from.
+*/
+static host_install address_to host_census_booted(host_census address_to census,
+                                                  string_address running,
+                                                  host_settings address_to booted)
+{
+        host_install address_to found = null;
+        positive count = 0;
+
+        if (host_medium_blank(booted->medium, sizeof(booted->medium)))
+                return null;
+
+        for (positive at = 0; at < census->count; at++)
+        {
+                host_install address_to install = census->found + at;
+                host_settings theirs;
+
+                if (!install->readable || !string_equals(install->build, running) ||
+                    !host_settings_install(install, address_of theirs) ||
+                    memory_compare(theirs.medium, booted->medium, sizeof(theirs.medium)))
+                        continue;
+
+                found = install;
+                count++;
+        }
+
+        return count == 1 ? found : null;
+}
+
 static b32 host_boot(void)
 {
         p8 running[HOST_BUILD_ROOM];
         host_census census;
         host_install address_to chosen = null;
         host_settings settings;
+        positive same = 0;
         bool known;
 
         host_state_ready();
@@ -1885,12 +1960,41 @@ static b32 host_boot(void)
                 return 0;
         }
 
+        host_census_said(address_of census);
+
         for (positive at = 0; at < census.count; at++)
         {
                 host_install_read(census.found + at);
-                if (!chosen && running[0] && census.found[at].readable &&
+                if (running[0] && census.found[at].readable &&
                     string_equals(census.found[at].build, running))
-                        chosen = census.found + at;
+                {
+                        if (!chosen)
+                                chosen = census.found + at;
+                        same++;
+                }
+        }
+
+        /*      Two disks with this very build are no reason to take the first
+                one the kernel listed: it is the disk this session started from,
+                which carries the settings it started with, or it is asked. */
+        if (same > 1)
+        {
+                chosen = known ? host_census_booted(address_of census, running,
+                                                    address_of settings)
+                               : null;
+                if (!chosen)
+                {
+                        chosen = census.found;
+                        host_write_text(HOST_QUESTION, "");
+                        host_verdict_set("ask ", chosen->disk);
+                        host_say(log, host_label "more than one disk has Moonwater from "
+                                      "this build, and %s is not known to be the one "
+                                      "this started from.\n"
+                                      host_label "moonwater setup use DISK names the one "
+                                      "to keep.\n", chosen->disk);
+                        host_booted(known ? address_of settings : null);
+                        return 0;
+                }
         }
 
         if (chosen)
@@ -1971,10 +2075,15 @@ static fn host_question(string_address disk)
 
         for (;;)
         {
+                bipolar got;
+
                 host_say(log, host_label "1, 2 or 3? [1] ");
 
-                if (host_read_line(answer, sizeof(answer)) < 0)
+                got = host_read_line(answer, sizeof(answer));
+                if (got == -1)
                         break;
+                if (got == HOST_LINE_LONG)
+                        continue;
 
                 if (!answer[0] || string_equals(answer, "1") ||
                     string_equals(answer, "2"))
@@ -2090,6 +2199,7 @@ static bool host_partitions_wait(host_install address_to install,
                 {
                         host_partuuid(install->system_partuuid, parts[0].unique);
                         host_partuuid(install->data_partuuid, parts[1].unique);
+                        install->resolved = system_clock_ns(HOST_CLOCK_BOOTTIME);
                         return true;
                 }
 
@@ -2580,7 +2690,10 @@ static b32 host_install_locked(string_address asked, bool removable)
                 }
         }
 
-        host_unmount(HOST_DATA);
+        if (!host_unmount(HOST_DATA))
+                return host_refuse("%s is installed, but its data partition could not be "
+                                   "let go of; start again from it\n", name);
+
         if (host_take(address_of target, false))
                 return 1;
 
@@ -14629,6 +14742,7 @@ static fn host_setup_state(void)
                                    "off; moonwater setup install DISK keeps it\n");
 
         host_census_take(address_of census);
+        host_census_said(address_of census);
         for (positive at = 0; at < census.count; at++)
         {
                 host_install address_to install = census.found + at;

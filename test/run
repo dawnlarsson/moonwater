@@ -13995,6 +13995,9 @@ printf 'small-refused-%s\n' $(( $? + 40 ))
 printf 'small-said-%s\n' $(( $(grep -c 'nvme1n1 would hold' /tmp/small) * 7 ))
 printf 'small-parts-%s\n' $(( $(ls /sys/class/block | grep -c '^nvme1n1p') + 30 ))
 rm -f /root/big
+printf 'nvme0n1%58sjunk\n' '' | moonwater setup install nvme0n1 > /tmp/long 2>&1
+printf 'long-refused-%s\n' $(( $? + 40 ))
+printf 'long-parts-%s\n' $(( $(ls /sys/class/block | grep -c '^nvme0n1p') + 30 ))
 printf 'nvme0n1\n' | moonwater setup install nvme0n1 > /tmp/first 2>&1
 printf 'first-%s\n' $(( $? + 40 ))
 printf 'nvme1n1\n' | moonwater setup install nvme1n1 > /tmp/second 2>&1
@@ -14062,6 +14065,8 @@ says hostile 'the data to keep is more than a GiB' 'big-1700'
 says hostile 'data that does not fit is refused'   'small-refused-41'
 says hostile 'and the refusal says how much'       'small-said-7'
 says hostile 'and the disk is left as it was'      'small-parts-30'
+says hostile 'a confirmation that runs past the line is not the name' 'long-refused-41'
+says hostile 'and nothing was erased for it'       'long-parts-30'
 says hostile 'a disk that fits is installed'       'first-40'
 says hostile 'a session that keeps a disk refuses a second' 'keeps-refused-41'
 says hostile 'and says which'                      'keeps-said-7'
@@ -14215,6 +14220,30 @@ says use 'use leaves the build alone'    'status-kept-other-3'
 says use 'update under kept data works'  'updated-beneath-80'
 says use 'and the disk has this build'   'status-current-3'
 disk_checks use
+
+#
+#       Two disks, both carrying this very build: a copy of the one under new
+#       GPT identifiers. Nothing says which the session started from, so
+#       neither is taken because the kernel listed it first.
+#
+if command -v sfdisk > /dev/null 2>&1; then
+        cp "$work/disk.img" "$work/disk2.img"
+        sfdisk --disk-id "$work/disk2.img" "$(cat /proc/sys/kernel/random/uuid)" > /dev/null 2>&1
+        sfdisk --part-uuid "$work/disk2.img" 1 "$(cat /proc/sys/kernel/random/uuid)" > /dev/null 2>&1
+        sfdisk --part-uuid "$work/disk2.img" 2 "$(cat /proc/sys/kernel/random/uuid)" > /dev/null 2>&1
+
+        cat > "$work/twins.commands" <<'COMMANDS'
+this line is eaten by the console
+printf 'twins-%s\n' "$(cut -c1-4 /run/moonwater/verdict | rev)"
+poweroff
+COMMANDS
+
+        # shellcheck disable=SC2086
+        install_boot twins -drive if=none,id=disk2,format=raw,file="$work/disk2.img" \
+                -device nvme,serial=moonwater2,drive=disk2
+        says twins 'two installs of this build are asked about' 'twins- ksa'
+        rm -f "$work/disk2.img"
+fi
 
 #       The firmware, finally: no -kernel, just the disk.
 #
