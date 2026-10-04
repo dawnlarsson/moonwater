@@ -10904,7 +10904,7 @@ static HOT bipolar sntp_exchange(b32 handle,
                                 return SNTP_NO_REPLY;
                         continue;
                 }
-                if_rare (received < SNTP_PACKET || (tight && received != SNTP_PACKET))
+                if_rare (received < SNTP_PACKET || (MOONWATER_STRICT >= STRICT_TIGHT && received != SNTP_PACKET))
                 {
                         if (discarded++ == SNTP_DISCARD_MAX)
                                 return SNTP_NO_REPLY;
