@@ -40441,7 +40441,7 @@ def harness_dhcp_fuzz(argv):
     shim, head, walk = dhcp_lift()
     shell = (HARNESS_ROOT / "src/sh/net.c").read_text()
     clock = src_slice(shell, "/*\n        What this machine is holding, and since when.",
-                         "static COLD fn net_rollback_record(")
+                         "/* A lease's default route.")
     source = shim + r"""
 #define IFNAME_SIZE 16
 #define ERROR_NO_ENTRY 2
