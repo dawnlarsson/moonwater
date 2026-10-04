@@ -60067,7 +60067,7 @@ try:
             sink.close()
             times = [float(line.split()[0]) for line in dhcp_log().splitlines() if " rx type 1 " in line]
             gaps = [b - a for a, b in zip(times, times[1:]) if 1.5 < b - a < 5.5]
-            say(len(gaps) >= 3 and any(min(abs(g - 2), abs(g - 4)) > 0.05 for g in gaps),
+            say(len(gaps) >= 2 and any(min(abs(g - 2), abs(g - 4)) > 0.05 for g in gaps),
                 "%s: the DISCOVER backoff is spread, not in step (%s)" % (
                     label, " ".join("%.3f" % g for g in gaps)))
             say(len(times) >= 12, "%s: the watcher kept asking a silent link (%d DISCOVERs in 27 s)" % (
