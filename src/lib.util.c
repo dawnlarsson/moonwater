@@ -4660,13 +4660,9 @@ static inline fn digest_close(digest_state address_to digest, p8 address_to out)
                 memory_fill(digest->block + used, 0, 128 - used);
                 digest->state.wide[10] = ~(p64)0;
                 blake2b_blocks(digest->state.wide, digest->block, 1, used);
-
-                for (positive i = 0; i < digest->size; i++)
-                        out[i] = (p8)(digest->state.wide[i / 8] >> (8 * (i % 8)));
+                memory_copy(out, digest->state.wide, digest->size);
                 return;
         }
-
-        p64 bits = digest->bytes << 3;
 
         digest->block[used++] = 0x80;
         if (used > size - (size == 128 ? 16 : 8))
@@ -4677,25 +4673,30 @@ static inline fn digest_close(digest_state address_to digest, p8 address_to out)
         }
         memory_fill(digest->block + used, 0, size - used);
 
-        for (positive i = 0; i < 8; i++)
-                if (digest->algorithm == DIGEST_MD5)
-                        digest->block[56 + i] = (p8)(bits >> (8 * i));
-                else
-                        digest->block[size - 1 - i] = (p8)(bits >> (8 * i));
+        // The length in bits ends the block: MD5 little endian in its last
+        // eight bytes, the others big endian, the 128-bit ones with the
+        // bits above the 64th (a byte count's top three) just before.
+        if (digest->algorithm == DIGEST_MD5)
+                memory_store_unaligned(p64, digest->block + 56, digest->bytes << 3);
+        else
+                network_store_64(digest->block + size - 8, digest->bytes << 3);
         if (size == 128)
-                digest->block[119] = (p8)(digest->bytes >> 61);
+                network_store_64(digest->block + 112, digest->bytes >> 61);
 
         digest_run(digest, digest->block, 1);
 
-        for (positive i = 0; i < digest->size; i++)
-        {
-                if (digest->algorithm == DIGEST_MD5)
-                        out[i] = (p8)(digest->state.narrow[i / 4] >> (8 * (i % 4)));
-                else if (digest->algorithm <= DIGEST_SHA256)
-                        out[i] = (p8)(digest->state.narrow[i / 4] >> (24 - 8 * (i % 4)));
-                else
-                        out[i] = (p8)(digest->state.wide[i / 8] >> (56 - 8 * (i % 8)));
-        }
+        // The digest is the state's first size bytes in the order the
+        // algorithm writes its words; every size here is whole words.
+        if (digest->algorithm == DIGEST_MD5)
+                for (positive at = 0; at < digest->size; at += 4)
+                        memory_store_unaligned(p32, out + at,
+                                               digest->state.narrow[at / 4]);
+        else if (digest->algorithm <= DIGEST_SHA256)
+                for (positive at = 0; at < digest->size; at += 4)
+                        network_store_32(out + at, digest->state.narrow[at / 4]);
+        else
+                for (positive at = 0; at < digest->size; at += 8)
+                        network_store_64(out + at, digest->state.wide[at / 8]);
 }
 #endif // !KERNEL_MODE
 
