@@ -18,6 +18,8 @@
    into the shell. */
 static bipolar dns_resolve_any(string_address path, string_address name,
                                p32 address_to found, positive seconds);
+static bipolar net_resolve_v4(string_address name, p32 address_to found,
+                              positive seconds);
 
 #if defined(LINUX) && !defined(KERNEL_MODE)
 #include "../net/wait.c"
@@ -576,19 +578,13 @@ static bipolar logger_connect_kind(logger_control address_to control,
         bipolar connected;
         if (control->server)
         {
-                bipolar host = string_to_host(control->server);
-                if (host < 0)
+                p32 found;
+                if (net_resolve_v4(control->server, address_of found, 3))
                 {
-                        p32 found;
-                        if (dns_resolve_any((string_address)"/etc/resolv.conf",
-                                            control->server, address_of found,
-                                            3))
-                        {
-                                socket_close((b32)handle);
-                                return -ERROR_NO_ENTRY;
-                        }
-                        host = (bipolar)found;
+                        socket_close((b32)handle);
+                        return -ERROR_NO_ENTRY;
                 }
+                bipolar host = (bipolar)found;
 
                 positive port = transport == LOGGER_TRANSPORT_STREAM ? 601 : 514;
                 if (control->port &&

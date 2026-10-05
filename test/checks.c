@@ -58354,7 +58354,7 @@ static fn tls_certificate_identity_rules(void)
                         bool parsed;
 
                         memory_copy(text, literals[i].text, length + 1);
-                        parsed = tls_ipv6_literal(text, length, address);
+                        parsed = net_ipv6_literal(text, length, address);
                         wrong += parsed != literals[i].parsed ||
                                  (parsed && memory_compare(address,
                                                            literals[i].address,

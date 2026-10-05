@@ -2228,6 +2228,23 @@ static COLD bipolar dns_resolve_any(string_address path, string_address name,
         return status;
 }
 
+/* An IPv4 name as every client of it asks: the dotted address it is, or what
+   the resolvers in /etc/resolv.conf say it is. DNS_OK, with the address in
+   found, or the resolver's own answer. */
+static COLD bipolar net_resolve_v4(string_address name, p32 address_to found,
+                                   positive seconds)
+{
+        bipolar numeric = string_to_host(name);
+
+        if (numeric >= 0)
+        {
+                address_to found = (p32)numeric;
+                return DNS_OK;
+        }
+        return dns_resolve_any((string_address) "/etc/resolv.conf", name, found,
+                               seconds);
+}
+
 #endif // STANDARD_MODERN_C_NET_DNS
 /* ---- http: http: a URL, and the bytes behind it ---- */
 
@@ -5936,7 +5953,7 @@ static COLD bool tls_host_match(string_address host, p8 address_to name,
    eight groups of one to four hex digits, one "::" standing for one or more
    zero groups, and a dotted IPv4 tail for the last two. text is writable
    and terminated at length; a zone ("%eth0") or anything else is refused. */
-static COLD bool tls_ipv6_literal(p8 address_to text, positive length,
+static COLD bool net_ipv6_literal(p8 address_to text, positive length,
                                   p8 address_to out)
 {
         p8 groups[16];
@@ -6034,7 +6051,7 @@ static COLD bool tls_general_name_match(string_address host, p8 tag,
                 return false;
         memory_copy(canonical, host, length);
         canonical[length] = end;
-        if (tls_ipv6_literal(canonical, length, address))
+        if (net_ipv6_literal(canonical, length, address))
                 return tag == 0x87 && name_length == 16 &&
                        !memory_compare(name, address, 16);
         quad = string_to_host((string_address)canonical);
@@ -10463,17 +10480,11 @@ static bipolar http_status_code(p8 address_to bytes, positive size, b32 address_
 
 static p32 http_lookup(string_address host)
 {
-        bipolar server = string_to_host(host);
         p32 ip = 0;
 
-        if (server >= 0)
-                return (p32)server;
-        if (http_host_loopback(host))
+        if (string_to_host(host) < 0 && http_host_loopback(host))
                 return HOST_LOOPBACK;
-        if (dns_resolve_any((string_address) "/etc/resolv.conf", host, address_of ip,
-                            3) != DNS_OK)
-                return 0;
-        return ip;
+        return net_resolve_v4(host, address_of ip, 3) == DNS_OK ? ip : 0;
 }
 
 /* Whether a fetch whose destination the peer chose may go to ip: not this
