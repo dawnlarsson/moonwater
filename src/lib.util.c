@@ -1392,6 +1392,28 @@ static COLD bipolar system_path_private_directory_open_at(
 
 #define SYSTEM_PATH_STAGE_LEAF ((string_address)"object")
 
+/*
+        What a stage is called says whose it is: ".moonwater-stage-" and the
+        pid of the process that made it, then a number of its own. A stage a
+        killed writer left is a private directory nobody will finish, and the
+        pid is how the next writer in that directory tells it from one that is
+        being written at this moment.
+*/
+#define SYSTEM_STAGE_PREFIX ".moonwater-stage-"
+#define SYSTEM_STAGE_MARKER_ROOM 48
+
+static positive system_stage_marker(p8 address_to into)
+{
+        positive length = sizeof(SYSTEM_STAGE_PREFIX) - 1;
+
+        memory_copy(into, SYSTEM_STAGE_PREFIX, length);
+        length += positive_into_string(
+            into + length, (positive)system_call(syscall(getpid)));
+        into[length++] = '-';
+        into[length] = end;
+        return length;
+}
+
 /* A public entry is first moved under an fd-held, validated 0700 directory.
    All later remove or publish operations recheck the caller's open handle
    against that protected entry.  parent and opened remain caller-owned and
@@ -1447,6 +1469,8 @@ static bipolar system_path_stage_begin_at(
     string_address name)
 {
         positive length = name ? string_length(name) : 0;
+        p8 marker[SYSTEM_STAGE_MARKER_ROOM];
+        positive marker_length;
 
         system_path_stage_reset(stage);
         if (!length || length >= sizeof(stage->original) ||
@@ -1465,10 +1489,10 @@ static bipolar system_path_stage_begin_at(
         memory_copy_end(stage->original, name, length);
         stage->parent = directory;
         stage->opened = -1;
+        marker_length = system_stage_marker(marker);
         stage->directory = system_path_private_directory_open_at(
-            directory, name, (string_address)".moonwater-stage-",
-            sizeof(".moonwater-stage-") - 1, stage->private_name,
-            sizeof(stage->private_name));
+            directory, name, (string_address)marker, marker_length,
+            stage->private_name, sizeof(stage->private_name));
         if (stage->directory < 0)
         {
                 bipolar failed = stage->directory;

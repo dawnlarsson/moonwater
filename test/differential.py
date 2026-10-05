@@ -38902,10 +38902,6 @@ static bipolar system_open_at(bipolar d, string_address p, positive f) {
 static bipolar system_open_at_mode(bipolar d, string_address p, positive f, positive m) {
         return answer(openat((int)d, p, (int)f, (mode_t)m));
 }
-static bipolar system_open_output_at(bipolar d, string_address p, int replace, positive m) {
-        return answer(openat((int)d, p, FILE_WRITE | O_CLOEXEC |
-                                            (replace ? O_NOFOLLOW : O_EXCL), (mode_t)m));
-}
 static bipolar system_make_directory_at(bipolar d, string_address p, positive m) {
         return answer(mkdirat((int)d, p, (mode_t)m));
 }
@@ -38929,38 +38925,25 @@ static bipolar storage_format_write(bipolar h, const void *b, positive n, positi
         return write((int)h, b, n) == (ssize_t)n ? 0 : -EIO;
 }
 static fn system_close(bipolar h) { close((int)h); }
-#define HOST_PATH_ROOM 256
-#define end '\0'
-static positive string_length(string_address s) { return (positive)strlen(s); }
-static positive string_copy_bounded(string_address d, string_address s, positive n) {
-        char *to = (char *)d;
-        positive at = 0;
-        if (!n) return 0;
-        while (at + 1 < n && s[at]) { to[at] = s[at]; at++; }
-        to[at] = 0;
-        return at;
-}
-static positive string_append_bounded(string_address d, string_address s, positive n) {
-        positive at = strlen(d);
-        return at + string_copy_bounded(d + at, s, n > at ? n - at : 0);
-}
-static bipolar system_rename_at(bipolar od, string_address o, bipolar nd, string_address n, positive f) {
-        (void)f;
-        return answer(renameat((int)od, o, (int)nd, n));
-}
-/* dirname: the head of a path, "." when it has no directory, "/" for the root's. */
-static positive path_head_copy(p8 *to, positive capacity, string_address path) {
-        positive length = strlen(path), cut, at = 0;
-        const char *head;
-        if (!capacity) return 0;
-        while (length > 1 && path[length - 1] == '/') length--;
-        for (cut = length; cut && path[cut - 1] != '/'; cut--) ;
-        while (cut > 1 && path[cut - 1] == '/') cut--;
-        head = cut ? path : ".";
-        if (!cut) cut = 1;
-        for (; at < cut && at + 1 < capacity; at++) to[at] = (p8)head[at];
-        to[at] = 0;
-        return at;
+/* What file_publish_with is to a state file: the bytes beside the name under a
+   name of their own, with the mode asked for, and renamed over it, which
+   replaces a link at the name and never writes through one. */
+#define FILE_STAGED_EXACT_MODE 8
+static bipolar file_publish_with(string_address path, const void *bytes, positive length,
+                                 positive mode, bool sync, positive behavior) {
+        char stage[4096];
+        int handle;
+        bipolar failed = 0;
+        snprintf(stage, sizeof stage, "%s.stage-%d", path, (int)getpid());
+        unlink(stage);
+        handle = open(stage, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+        if (handle < 0) return -errno;
+        if (fchmod(handle, (mode_t)mode) < 0 || write(handle, bytes, length) != (ssize_t)length ||
+            (sync && fsync(handle) < 0)) failed = -EIO;
+        close(handle);
+        if (!failed && rename(stage, path) < 0) failed = -errno;
+        if (failed) unlink(stage);
+        return failed;
 }
 '''
     driver = r'''
@@ -42307,8 +42290,9 @@ def harness_moonwater_cli(argv):
         # crash part way through would: a list written in place was truncated
         # first, so the saved networks (with their passwords) were gone; one
         # written beside itself and renamed is what it was. A leftover from a
-        # crash (the killed writer leaves its temporary file) is not in the way of the next write.
-        got = tuned("rm -f /root/wifi /root/wifi.new /root/bluetooth /root/bluetooth.new\n" +
+        # crash (the killed writer leaves its stage, named for it) is taken away by the next write, and
+        # it is the writer's that is gone and nobody else's.
+        got = tuned("rm -rf /root/wifi /root/.moonwater-stage-* /root/bluetooth\n" +
                     say("wifi add cut-a passpass1") + say("wifi add cut-b passpass2") +
                     say("bluetooth add cut-k") +
                     "cp /root/wifi /tmp/wifi.before; cp /root/bluetooth /tmp/bluetooth.before\n"
@@ -42317,14 +42301,19 @@ def harness_moonwater_cli(argv):
                     "( ulimit -f 0; /tmp/moonwater bluetooth add cut-m >/dev/null 2>&1 )\n"
                     "cmp /root/wifi /tmp/wifi.before && echo '@@ wifi intact'\n"
                     "cmp /root/bluetooth /tmp/bluetooth.before && echo '@@ bluetooth intact'\n"
-                    "echo partial > /root/wifi.new\n" + say("wifi add cut-d passpass4") +
-                    "echo '@@ after'; cat /root/wifi; ls /root | grep -c '^wifi[.]new$'; echo '@@end'\n")
+                    "ls -A /root | grep -c '^[.]moonwater-stage-' | sed 's/^/@@ left /'\n"
+                    "d=$(sh -c 'echo $$'); mkdir -m 700 /root/.moonwater-stage-$d-1; "
+                    "echo partial > /root/.moonwater-stage-$d-1/object\n"
+                    "mkdir -m 700 /root/.moonwater-stage-$$-2; echo mine > /root/.moonwater-stage-$$-2/object\n" +
+                    say("wifi add cut-d passpass4") +
+                    "echo '@@ after'; cat /root/wifi; ls -A /root | grep -c '^[.]moonwater-stage-'; echo '@@end'\n")
         joined = "\n".join(got)
         check("@@ wifi intact" in joined, "a wifi list write cut short leaves the saved list as it was", joined[-300:])
         check("@@ bluetooth intact" in joined, "a bluetooth list write cut short leaves the list as it was", joined[-300:])
         after = joined.split("@@ after\n", 1)[1].split("@@end", 1)[0].split() if "@@ after" in joined else []
-        check(after == ["cut-a", "passpass1", "cut-b", "passpass2", "cut-d", "passpass4", "0"],
-              "a leftover temporary file from a crash is replaced by the next write", repr(after))
+        check(after == ["cut-a", "passpass1", "cut-b", "passpass2", "cut-d", "passpass4", "1"] and
+              "@@ left 0" not in joined,
+              "what a crash leaves is taken away by the next write, and a live writer's stage is not", repr((after, joined[-200:])))
 
         # A root-owned state pathname is still an input boundary. A FIFO at
         # the wifi list used to block in open(2) forever; a final symlink was
@@ -58925,12 +58914,7 @@ def harness_state_cuts(argv):
                               env={"PATH": "/usr/bin:/bin"}).returncode
 
     def temporary(name):
-        return bool(re.search(r"\.(new|next|next\.new)$|/\.link\.key\.|/\.moonwater-stage-", name))
-
-    def stage(name):
-        #   What a staged writer a cut left, under a name of its own each time:
-        #   a second run makes another, and nothing here takes the first away.
-        return "/.moonwater-stage-" in name
+        return bool(re.search(r"/\.link\.key\.|/\.moonwater-stage-", name))
 
     def settle():
         #   A listener or keeper a verb started outlives it; the next run
@@ -59017,7 +59001,7 @@ def harness_state_cuts(argv):
             again = snapshot()
             checks({path: value for path, value in again.items() if not temporary(path)} ==
                    {path: value for path, value in new.items() if not temporary(path)} and
-                   not [path for path in again if temporary(path) and not stage(path)],
+                   not [path for path in again if temporary(path)],
                    "%s: a second run does not arrive at the uncut state (%s)" % (
                        where, ", ".join(sorted(set(again) ^ set(new)))[:200]))
     print("state cuts: %d scenes, %d cut runs" % (len(scenes), cut_total))

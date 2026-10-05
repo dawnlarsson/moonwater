@@ -1414,6 +1414,8 @@ typedef struct
 #define FILE_STAGED_STREAM_SPECIAL 1
 #define FILE_STAGED_REGULAR_ONLY 2
 #define FILE_STAGED_NO_REPLACE 4
+//      A regular file replaced is given the mode asked for and not its own.
+#define FILE_STAGED_EXACT_MODE 8
 
 static bipolar file_staged_name_open_at(
     file_staged_name address_to stage, bipolar base, string_address path,
@@ -7716,7 +7718,7 @@ static HOT bipolar file_staged_name_open_at(
                         reason = -ERROR_INVALID;
                 else if (behavior & FILE_STAGED_NO_REPLACE)
                         reason = -ERROR_EXISTS;
-                else if (kind == MODE_FILE)
+                else if (kind == MODE_FILE && !(behavior & FILE_STAGED_EXACT_MODE))
                         /* New bytes must not inherit execution authority.
                            This matches truncating a regular file, where the
                            kernel clears set-ID bits after content changes. */
@@ -7902,24 +7904,88 @@ static COLD bipolar file_staged_name_publish(
         return 0;
 }
 
+/*
+        A stage that a killed writer left: a private directory with the file it
+        was making, named for the process that made it. The next writer in the
+        directory takes away the ones whose process is gone, so what a kill
+        part way leaves does not stay, a password in it included, and a stage
+        whose writer is alive is never touched.
+*/
+static fn file_stage_sweep(string_address path)
+{
+        p8 head[FILE_PATH_MAX];
+        file_walk walk;
+        struct linux_dirent64 address_to entry;
+        positive self = (positive)system_call(syscall(getpid));
+
+        path_head_copy(head, sizeof(head), path);
+        if (!file_walk_open(address_of walk, AT_FDCWD, head))
+                return;
+        while ((entry = file_walk_next(address_of walk)))
+        {
+                string_address name = entry->d_name;
+                string_address digits = name + sizeof(SYSTEM_STAGE_PREFIX) - 1;
+                positive pid = 0;
+                bipolar handle;
+
+                if (!string_has_prefix(name, SYSTEM_STAGE_PREFIX) ||
+                    !string_digits_checked(address_of digits, 10, address_of pid) ||
+                    *digits != '-' || !pid || pid == self ||
+                    system_call_2(syscall(kill), pid, 0) != -ERROR_NO_PROCESS)
+                        continue;
+
+                handle = system_open_at(walk.handle, name,
+                                        FILE_READ | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+                if (handle < 0)
+                        continue;
+                if (system_path_private_directory_valid(handle, walk.handle, name) < 0)
+                {
+                        system_close(handle);
+                        continue;
+                }
+                (void)system_remove_at(handle, SYSTEM_PATH_STAGE_LEAF, 0);
+                system_path_private_directory_close(walk.handle, name, handle);
+        }
+        file_walk_close(address_of walk);
+}
+
 /* A whole file, written beside its name and renamed over it: the old bytes
    or the new, never half of each, and a crash or a signal part way leaves
-   the file as it was. */
+   the file as it was. A synced one first takes away what an earlier writer
+   of its directory left when it was killed. */
+static bipolar file_transfer_exact(positive operation, bipolar handle,
+                                   p8 address_to buffer, positive length,
+                                   p64 offset);
+
+static COLD bipolar file_publish_with(string_address path, address_any bytes,
+                                      positive length, positive mode, bool sync,
+                                      positive behavior)
+{
+        file_staged_name stage;
+        bipolar handle;
+        bipolar written;
+
+        if (sync)
+                file_stage_sweep(path);
+        handle = file_staged_name_open(address_of stage, path, mode, behavior);
+        if (handle < 0)
+                return handle;
+        //      The error is the disk's own: a full one is said to be full.
+        written = file_transfer_exact(syscall(pwrite64), handle, (p8 address_to)bytes,
+                                      length, 0);
+        if (written != (bipolar)length)
+        {
+                file_staged_name_abort(address_of stage);
+                return written < 0 ? written : -ERROR_INPUT_OUTPUT;
+        }
+        return file_staged_name_publish(address_of stage, sync);
+}
+
 static COLD bipolar file_publish_bytes(string_address path, address_any bytes,
                                        positive length, positive mode,
                                        bool sync)
 {
-        file_staged_name stage;
-        bipolar handle = file_staged_name_open(address_of stage, path, mode, 0);
-
-        if (handle < 0)
-                return handle;
-        if (system_write_all((positive)handle, bytes, length) != length)
-        {
-                file_staged_name_abort(address_of stage);
-                return -ERROR_INPUT_OUTPUT;
-        }
-        return file_staged_name_publish(address_of stage, sync);
+        return file_publish_with(path, bytes, length, mode, sync, 0);
 }
 
 static bipolar file_directory_empty_same(bipolar directory,

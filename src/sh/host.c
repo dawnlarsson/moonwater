@@ -484,69 +484,28 @@ static bipolar host_open_state(bipolar directory, string_address path,
 }
 
 /* Bytes over a state file, made if it is not there. A choice that has to
-   survive the power going is synced; a /run file that only says what this
+   survive the power going is synced: written beside itself under a name of
+   its own, and renamed over the old one, so a crash or a signal part way (the
+   saved wifi list, passwords and all, was truncated first and written second)
+   leaves the file as it was or as it is to be, and nothing half of each, and
+   two writers at once leave one whole. A /run file that only says what this
    session is doing does not need to be. */
 static bipolar host_write_file(string_address path, p8 address_to bytes,
                                positive length, positive mode, bool sync)
 {
-        p8 next[HOST_PATH_ROOM];
         bipolar handle;
         bipolar failed;
 
-        if (!sync)
-        {
-                handle = host_open_state(AT_FDCWD, path, mode);
-                if (handle < 0)
-                        return handle;
-                failed = storage_format_write(handle, bytes, length, 0);
-                system_close(handle);
-                return failed;
-        }
+        if (sync)
+                return file_publish_with(path, bytes, length, mode, true,
+                                         FILE_STAGED_EXACT_MODE);
 
-        /*      A file that has to survive is written beside itself, synced,
-                and renamed over the old one, and the directory is synced
-                after: the old bytes are opened for writing never, so a crash
-                or a signal part way (the saved wifi list, passwords and all,
-                was truncated first and written second) leaves the list as it
-                was or as it is to be, and nothing half of each. A leftover
-                from a crash is removed and the name made again exclusively,
-                which also never follows a planted link; the rename replaces
-                a link at the final name instead of writing through it. */
-        if (string_length(path) + 5 >= sizeof(next))
-                return -36;
-        string_copy_bounded(next, path, sizeof(next));
-        string_append_bounded(next, ".new", sizeof(next));
-        system_remove_at(AT_FDCWD, next, 0);
-        handle = system_open_output_at(AT_FDCWD, next, false, mode);
+        handle = host_open_state(AT_FDCWD, path, mode);
         if (handle < 0)
                 return handle;
-        failed = system_call_2(syscall(fchmod), (positive)handle, mode);
-        if (!failed)
-                failed = storage_format_write(handle, bytes, length, 0);
-        if (!failed)
-                failed = system_call_1(syscall(fsync), (positive)handle);
+        failed = storage_format_write(handle, bytes, length, 0);
         system_close(handle);
-        if (!failed)
-                failed = system_rename_at(AT_FDCWD, next, AT_FDCWD, path, 0);
-        if (failed)
-        {
-                system_remove_at(AT_FDCWD, next, 0);
-                return failed;
-        }
-
-        {
-                bipolar parent;
-
-                path_head_copy(next, sizeof(next), path);
-                parent = system_open_at(AT_FDCWD, next,
-                                        FILE_READ | O_DIRECTORY | O_CLOEXEC);
-                if (parent >= 0)
-                {
-                        system_call_1(syscall(fsync), (positive)parent);
-                        system_close(parent);
-                }
-        }
-        return 0;
+        return failed;
 }
 
 static bipolar host_write_text(string_address path, string_address text)

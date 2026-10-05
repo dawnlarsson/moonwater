@@ -86780,6 +86780,28 @@ static fn storage_test_wget_304(string_address target)
         }
 }
 
+//      A stage as a writer of that pid would have left it: its name, and in
+//      it, for a directory, the file it was making.
+static fn storage_test_stage(p8 address_to into, p8 address_to root, positive pid,
+                             string_address tail, bool directory)
+{
+        p8 object[FILE_PATH_MAX];
+        p8 address_to at = string_copy_end(into, root);
+
+        at = string_copy_end(at, (string_address) "/.moonwater-stage-");
+        if (pid)
+                at += positive_into_string(at, pid);
+        string_copy_end(at, tail);
+        if (!directory)
+        {
+                system_close(system_open_at_mode(AT_FDCWD, into, FILE_WRITE | O_CLOEXEC, 0600));
+                return;
+        }
+        system_make_directory_at(AT_FDCWD, into, 0700);
+        if (file_path_join(object, into, SYSTEM_PATH_STAGE_LEAF))
+                system_close(system_open_at_mode(AT_FDCWD, object, FILE_WRITE | O_CLOEXEC, 0600));
+}
+
 static fn storage_test_net_files(void)
 {
         p8 root[FILE_PATH_MAX] = {0};
@@ -87067,6 +87089,67 @@ static fn storage_test_net_files(void)
                           storage_test_file_read(target, bytes, sizeof bytes) == 6 &&
                           !memory_compare(bytes, "synced", 6));
                 storage_test_net_sync_failure = 0;
+                {
+                        p8 dead[FILE_PATH_MAX];
+                        p8 alive[FILE_PATH_MAX];
+                        p8 foreign[FILE_PATH_MAX];
+                        p8 plain[FILE_PATH_MAX];
+                        p8 object[FILE_PATH_MAX];
+                        positive gone = 0;
+                        bipolar child = system_fork();
+
+                        if (!child)
+                                system_call_1(syscall(exit_group), 0);
+                        system_wait4_retry(child, address_of gone, 0, null);
+
+                        storage_test_stage(dead, root, (positive)child, "-1", true);
+                        storage_test_stage(alive, root, (positive)system_call(syscall(getpid)),
+                                           "-2", true);
+                        storage_test_stage(foreign, root, 0, "x-3", true);
+                        storage_test_stage(plain, root, (positive)child, "-4", false);
+                        check("a stage left by a writer that is gone is a private directory with "
+                              "its file",
+                              file_path_join(object, dead, SYSTEM_PATH_STAGE_LEAF) &&
+                                  system_access_at(AT_FDCWD, object, 0) == 0);
+                        check("a file published without the syncs takes nothing away",
+                              file_publish_bytes(target, "plain\n", 6, 0644, false) == 0 &&
+                                  system_access_at(AT_FDCWD, dead, 0) == 0);
+                        check("one with them takes away the stage of a writer that is gone, and "
+                              "only that",
+                              file_publish_bytes(target, "swept", 5, 0644, true) == 0 &&
+                                  system_access_at(AT_FDCWD, dead, 0) < 0 &&
+                                  system_access_at(AT_FDCWD, alive, 0) == 0 &&
+                                  system_access_at(AT_FDCWD, foreign, 0) == 0 &&
+                                  system_access_at(AT_FDCWD, plain, 0) == 0 &&
+                                  storage_test_file_read(target, bytes, sizeof bytes) == 5 &&
+                                  !memory_compare(bytes, "swept", 5));
+                        file_facts published;
+                        bipolar held;
+
+                        check("a state file written over a readable one has the mode asked for",
+                              file_publish_with(target, "private", 7, 0600, true,
+                                                FILE_STAGED_EXACT_MODE) == 0 &&
+                                  file_look(AT_FDCWD, target, AT_SYMLINK_NOFOLLOW,
+                                            address_of published) &&
+                                  (published.mode & 07777) == 0600);
+                        held = system_open_at(AT_FDCWD, target, FILE_READ | O_CLOEXEC);
+                        check("where file_publish_bytes leaves it the mode it had",
+                              held >= 0 &&
+                                  system_call_2(syscall(fchmod), (positive)held, 0644) == 0 &&
+                                  file_publish_bytes(target, "again", 5, 0600, true) == 0 &&
+                                  file_look(AT_FDCWD, target, AT_SYMLINK_NOFOLLOW,
+                                            address_of published) &&
+                                  (published.mode & 07777) == 0644);
+                        if (held >= 0)
+                                system_close(held);
+                        file_path_join(object, alive, SYSTEM_PATH_STAGE_LEAF);
+                        system_remove_at(AT_FDCWD, object, 0);
+                        system_remove_at(AT_FDCWD, alive, AT_REMOVEDIR);
+                        file_path_join(object, foreign, SYSTEM_PATH_STAGE_LEAF);
+                        system_remove_at(AT_FDCWD, object, 0);
+                        system_remove_at(AT_FDCWD, foreign, AT_REMOVEDIR);
+                        system_remove_at(AT_FDCWD, plain, 0);
+                }
                 check("only an answer about the name ends the walk over resolvers",
                       dns_answer_is_final(DNS_OK) &&
                           dns_answer_is_final(DNS_NO_SUCH_NAME) &&
