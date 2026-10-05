@@ -2697,7 +2697,7 @@ static b32 host_machine_run(void)
         //      waiting for this and not for them.
         host_write_text(HOST_MACHINE_SOURCED, "1\n");
 
-        if (!host_starts((string_address)verdict, "ask "))
+        if (!string_has_prefix((string_address)verdict, "ask "))
                 radio_restore();
         locale_restore();
         tune_restore();

@@ -69380,10 +69380,11 @@ def waterlink_script_scan(shim):
     import subprocess
     import tempfile
     command = (HARNESS_ROOT / "src/waterlink/command.c").read_text()
-    host = (HARNESS_ROOT / "src/sh/host.c").read_text()
     scan = src_slice(command, "static bool link_script_names_secret(",
                         "static b32 link_status(void)")
-    starts = src_slice(host, "static bool host_starts(", "static fn host_pause(")
+    #   lib.util.c's, spelled as it is there: the length of the literal.
+    starts = ("#define string_has_prefix(text, literal) "
+              "(!string_compare_max((text), literal, sizeof(literal) - 1))\n")
     driver = shim + r"""
 static b32 string_compare_max(const void *one, const void *two, positive size)
 {

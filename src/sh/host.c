@@ -794,7 +794,7 @@ static bool host_session_disk(p8 address_to into, positive room)
         p8 verdict[HOST_NAME_ROOM + 16];
 
         return host_read_word(HOST_VERDICT, verdict, sizeof(verdict)) >= 0 &&
-               host_starts(verdict, "disk ") && string_length(verdict + 5) < room &&
+               string_has_prefix(verdict, "disk ") && string_length(verdict + 5) < room &&
                (string_copy(into, verdict + 5), true);
 }
 
@@ -1309,7 +1309,7 @@ static bool host_partition_uuid_resolve(string_address uuid,
         if (!uuid[0] ||
             !host_join(query, sizeof(query), "PARTUUID=", uuid) ||
             !storage_resolve_tag(query, path, sizeof(path)) ||
-            !host_starts(path, "/dev/") ||
+            !string_has_prefix(path, "/dev/") ||
             !host_name_valid(path + sizeof("/dev/") - 1))
                 return false;
 
@@ -2305,7 +2305,7 @@ fn host_terminal_opening(void)
                 host_pause(HOST_VERDICT_POLL_NS);
         }
 
-        if (host_starts(verdict, "ask ") &&
+        if (string_has_prefix(verdict, "ask ") &&
             system_rename_at(AT_FDCWD, HOST_QUESTION, AT_FDCWD, HOST_QUESTION_TAKEN,
                              0) >= 0)
                 host_question(verdict + 4);
@@ -2571,7 +2571,7 @@ static fn host_install_abandon(host_install address_to target)
 */
 static b32 host_install_locked(string_address asked, bool removable)
 {
-        string_address name = host_starts(asked, "/dev/") ? asked + 5 : asked;
+        string_address name = string_has_prefix(asked, "/dev/") ? asked + 5 : asked;
         p8 sysfs[HOST_PATH_ROOM];
         p8 path[HOST_PATH_ROOM];
         p8 text[128];
@@ -2898,7 +2898,7 @@ fn host_quiesce(void)
                 storage_mount address_to mount = table.entry + at;
                 bool seen = false;
 
-                if (!host_starts(mount->source, "/dev/"))
+                if (!string_has_prefix(mount->source, "/dev/"))
                         continue;
 
                 for (positive look = 0; look < done_count; look++)
@@ -4064,7 +4064,7 @@ static fn host_settings_note(host_settings address_to settings,
                 kept |= host_starts(path, host_kept[at].path) && path[prefix] == '/';
         }
 
-        if (kept && host_starts(verdict, "disk ") &&
+        if (kept && string_has_prefix(verdict, "disk ") &&
             !(settings->flags & SPARK_SETTINGS_MOUNT_OFF))
                 return;
 
@@ -4350,7 +4350,7 @@ static fn host_events_boot(host_settings address_to settings)
                 p8 verdict[HOST_NAME_ROOM + 16];
 
                 if (host_read_word(HOST_VERDICT, verdict, sizeof(verdict)) >= 0
-                        ? !host_starts(verdict, "ask ")
+                        ? !string_has_prefix(verdict, "ask ")
                         : system_clock_ns(HOST_CLOCK_BOOTTIME) >= HOST_VERDICT_WAIT_NS)
                         break;
 
@@ -4567,7 +4567,7 @@ static bool host_console_is_screen(void)
 
         for (string_address at = (string_address)active; *at;)
         {
-                if (host_starts(at, "tty") && byte_is_digit(at[3]))
+                if (string_has_prefix(at, "tty") && byte_is_digit(at[3]))
                         return true;
 
                 at = string_first_of_or_end(at, ' ');
@@ -9224,7 +9224,7 @@ static fn radio_recover(void)
 
         radio_reap();
         if (host_read_word(HOST_VERDICT, verdict, sizeof(verdict)) >= 0 &&
-            host_starts(verdict, "ask "))
+            string_has_prefix(verdict, "ask "))
                 return;
 
         radio_internet_copy();
@@ -12403,7 +12403,7 @@ static bool locale_zone_manual(void)
         p8 mode[48];
 
         locale_zone_mode(mode, sizeof(mode));
-        return host_starts(mode, "manual");
+        return string_has_prefix(mode, "manual");
 }
 
 static fn locale_zone_how(p8 address_to into, positive room)
@@ -12411,11 +12411,11 @@ static fn locale_zone_how(p8 address_to into, positive room)
         p8 mode[48];
 
         locale_zone_mode(mode, sizeof(mode));
-        if (host_starts(mode, "manual"))
+        if (string_has_prefix(mode, "manual"))
                 string_copy_bounded(into, "(manual)", room);
-        else if (host_starts(mode, "auto cloudflare"))
+        else if (string_has_prefix(mode, "auto cloudflare"))
                 string_copy_bounded(into, "(auto, from Cloudflare)", room);
-        else if (host_starts(mode, "auto country ") && mode[13])
+        else if (string_has_prefix(mode, "auto country ") && mode[13])
         {
                 string_copy_bounded(into, "(auto, from country ", room);
                 string_append_bounded(into, mode + 13, room);
@@ -12581,7 +12581,7 @@ static bipolar locale_zone_write(string_address zone, string_address mode,
                                  bool by_hand)
 {
         bipolar lock = host_lock(LOCALE_LOCK_PATH, true);
-        bool manual = host_starts(mode, "manual");
+        bool manual = string_has_prefix(mode, "manual");
         bipolar failed = 0;
 
         if (lock < 0)
@@ -15129,10 +15129,10 @@ static fn host_setup_state(void)
                 string_format(log, "  this build's version cannot be read\n");
 
         host_read_word(HOST_VERDICT, verdict, sizeof(verdict));
-        if (host_starts(verdict, "disk "))
+        if (string_has_prefix(verdict, "disk "))
                 string_format(log, "  kept on %s: %s /root /home\n",
                               verdict + 5, BOWL_ROOT_DIRECTORY);
-        else if (host_starts(verdict, "ask "))
+        else if (string_has_prefix(verdict, "ask "))
                 string_format(log, "  waiting: %s has another build; "
                                    "moonwater setup use, update or live\n",
                               verdict + 4);
@@ -15224,13 +15224,13 @@ static b32 host_answer(bool update, string_address disk)
         host_install address_to install = null;
 
         host_read_word(HOST_VERDICT, verdict, sizeof(verdict));
-        if (disk && host_starts(disk, "/dev/"))
+        if (disk && string_has_prefix(disk, "/dev/"))
                 disk += 5;
 
         /*      The data this session already keeps. An update touches only the
                 system partition, so it can go ahead underneath what is mounted;
                 keeping a second disk's data on top of the first cannot. */
-        if (host_starts(verdict, "disk "))
+        if (string_has_prefix(verdict, "disk "))
         {
                 if (disk && !string_equals(disk, verdict + 5))
                         return host_refuse("this session already keeps %s\n",
@@ -15253,7 +15253,7 @@ static b32 host_answer(bool update, string_address disk)
 
         if (disk)
                 install = host_census_find(address_of census, disk);
-        else if (host_starts(verdict, "ask "))
+        else if (string_has_prefix(verdict, "ask "))
                 install = host_census_find(address_of census, verdict + 4);
         else if (census.count == 1)
                 install = census.found;
@@ -15458,7 +15458,7 @@ static b32 host_ask_verb(string_address address_to arguments, positive count)
         host_state_ready();
 
         host_read_word(HOST_VERDICT, verdict, sizeof(verdict));
-        if (!host_starts(verdict, "ask ") ||
+        if (!string_has_prefix(verdict, "ask ") ||
             system_rename_at(AT_FDCWD, HOST_QUESTION, AT_FDCWD,
                              HOST_QUESTION_TAKEN, 0) < 0)
                 return host_refuse("there is nothing to ask\n");

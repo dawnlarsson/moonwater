@@ -93,7 +93,7 @@ static bool link_script_names_secret(string_address script,
         {
                 string_address word;
 
-                if (!host_starts(at, "link group "))
+                if (!string_has_prefix(at, "link group "))
                         continue;
                 word = at + 11;
                 word += string_span_of_set(word, " ");
@@ -102,7 +102,7 @@ static bool link_script_names_secret(string_address script,
                 word += length;
                 word += string_span_of_set(word, " ");
                 if (*word && *word != '\n' && *word != ';' && *word != '#' &&
-                    !host_starts(word, "allow"))
+                    !string_has_prefix(word, "allow"))
                         return true;
         }
         return false;
