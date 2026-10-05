@@ -12470,15 +12470,11 @@ static b32 locale_zone_set(string_address name)
         kept in /run/moonwater/timezone.network so a hand-run
         moonwater timezone auto and the machine do not ask twice.
 */
-#define LOCALE_AUTO_HOST "speed.cloudflare.com"
-#define LOCALE_AUTO_PATH "/__down?bytes=0"
-#define LOCALE_AUTO_TRACE_HOST "cloudflare.com"
-#define LOCALE_AUTO_TRACE_PATH "/cdn-cgi/trace"
-#define LOCALE_AUTO_SECONDS 10
+#define LOCALE_AUTO_URL "https://speed.cloudflare.com/__down?bytes=0"
+#define LOCALE_AUTO_TRACE_URL "https://cloudflare.com/cdn-cgi/trace"
 #define LOCALE_AUTO_LEAST 180
 #define LOCALE_AUTO_MOST 3600
 #define LOCALE_AUTO_CLOCK_WAIT 60
-#define LOCALE_AUTO_ROOM 4096
 #define LOCALE_NETWORK_ROOM 96
 #define LOCALE_ROUTE_GATEWAY 0x2
 
@@ -12624,57 +12620,6 @@ static bool locale_network_same(string_address now, string_address asked)
         return string_equals(now + a, asked + b);
 }
 
-static bipolar locale_auto_get(string_address host, string_address path,
-                               p8 address_to into, positive room,
-                               positive address_to used,
-                               positive address_to header)
-{
-        http_link link;
-        http_response response;
-        network_deadline deadline;
-        p32 ip = http_lookup(host);
-        bipolar status;
-
-        address_to used = 0;
-        address_to header = 0;
-        into[0] = end;
-        if (!ip)
-                return HTTP_NO_HOST;
-        status = http_link_open(address_of link, ip, HTTP_HTTPS_PORT, host,
-                                true, true);
-        if (status)
-                return status;
-        status = http_send_get(address_of link, host, HTTP_HTTPS_PORT, path,
-                               true, '1', (string_address) "Moonwater");
-        if (!status)
-                status = http_response_head(address_of link, into, room - 1,
-                                            used, header, address_of response,
-                                            LOCALE_AUTO_SECONDS, 0, false);
-        if (!status && !http_response_is_success(response.code))
-                status = HTTP_STATUS;
-        //      A small body, read to its length or the server's close.
-        if (!status &&
-            network_deadline_begin(address_of deadline, LOCALE_AUTO_SECONDS, 0))
-                while (address_to used + 1 < room &&
-                       (response.body_kind != HTTP_BODY_LENGTH ||
-                        address_to used - address_to header < response.body_length))
-                {
-                        positive got = 0;
-
-                        if (http_link_read_until(address_of link,
-                                                 into + address_to used,
-                                                 room - 1 - address_to used,
-                                                 address_of got,
-                                                 address_of deadline) ||
-                            !got)
-                                break;
-                        address_to used += got;
-                }
-        http_link_close(address_of link);
-        into[address_to used] = end;
-        return status;
-}
-
 //      A header's value or a trace line's, if it is a plain word that fits.
 static bool locale_auto_word(string_address value, positive length,
                              p8 address_to into, positive room)
@@ -12768,27 +12713,28 @@ static bool locale_auto_from_trace(p8 address_to body, positive length,
 //      found, or the reason none was.
 static bipolar locale_auto_ask(locale_auto_answer address_to answer)
 {
-        p8 reply[LOCALE_AUTO_ROOM];
-        positive used = 0;
-        positive header = 0;
+        http_buffer head = {0};
+        http_buffer body = {0};
         bipolar status;
+        bool found;
 
         memory_zero(answer, sizeof(address_to answer));
-        status = locale_auto_get((string_address)LOCALE_AUTO_HOST,
-                                 (string_address)LOCALE_AUTO_PATH, reply,
-                                 sizeof(reply), address_of used,
-                                 address_of header);
-        if (!status && locale_auto_from_headers(reply, header, answer))
+        status = http_run((string_address)LOCALE_AUTO_URL,
+                          address_of http_manners_zone, true, -1,
+                          address_of body, null, null, address_of head);
+        found = !status &&
+                locale_auto_from_headers(head.bytes, head.used, answer);
+        byte_store_release(address_of head);
+        byte_store_release(address_of body);
+        if (found)
                 return 0;
-        status = locale_auto_get((string_address)LOCALE_AUTO_TRACE_HOST,
-                                 (string_address)LOCALE_AUTO_TRACE_PATH, reply,
-                                 sizeof(reply), address_of used,
-                                 address_of header);
-        if (status)
-                return status;
-        return locale_auto_from_trace(reply + header, used - header, answer)
-                   ? 0
-                   : HTTP_MALFORMED;
+        status = http_run((string_address)LOCALE_AUTO_TRACE_URL,
+                          address_of http_manners_zone, true, -1,
+                          address_of body, null, null, null);
+        found = !status &&
+                locale_auto_from_trace(body.bytes, body.used, answer);
+        byte_store_release(address_of body);
+        return status ? status : found ? 0 : HTTP_MALFORMED;
 }
 
 static string_address locale_auto_reason(bipolar status)

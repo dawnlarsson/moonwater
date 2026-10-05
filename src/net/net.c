@@ -9688,24 +9688,6 @@ static bipolar http_link_read_until(
         return HTTP_OK;
 }
 
-/* A request built and put on the wire in one step, for a caller that
-   already holds an open link (locale_auto_get in src/sh/host.c). http_run
-   builds its request before it connects instead. */
-static bipolar http_send_get(http_link address_to link, string_address host,
-                             p16 port, string_address path, bool tls,
-                             p8 version_minor, string_address agent)
-{
-        p8 request[2048];
-        positive used = 0;
-        bipolar built = http_get_request(
-            request, sizeof request, host, port, path, tls, version_minor,
-            agent, address_of used);
-        bipolar status = built ? built : http_link_write(link, request, used);
-
-        crypto_forget(request, sizeof request);
-        return status;
-}
-
 static bipolar http_response_head(
     http_link address_to link, p8 address_to head, positive room,
     positive address_to used, positive address_to header,
@@ -10628,7 +10610,7 @@ static fn http_url_leaf(string_address path, p8 address_to into, positive room)
 }
 
 /*
-        The two clients, written as the five words they disagree about.
+        The clients, written as the words they disagree about.
 
         Everything under this -- the connection, the request, the head, the
         framing and the body -- is one machine, and what is left is manners.
@@ -10637,7 +10619,10 @@ static fn http_url_leaf(string_address path, p8 address_to into, positive room)
         framing, because a plaintext peer that meant to answer had no reason
         to hang up mid-sentence. wget is the streaming download: Wget over
         HTTP/1.1, TLS, ten hops and never a step back down to plain, and a
-        head that stops early is a peer that went away.
+        head that stops early is a peer that went away. The zone's question
+        (locale_auto_ask in src/sh/host.c) is a third: Moonwater over HTTP/1.1
+        and TLS, no redirect, a few seconds and a few kilobytes of anything a
+        peer has to say, which is a line or two of a header or a trace.
 */
 typedef struct
 {
@@ -10646,22 +10631,43 @@ typedef struct
         bool follow;
         bool allow_tls;
         bool head_cut_is_malformed;
+        positive head_seconds;
+        positive body_seconds;
+        positive body_most;
 } http_manners;
 
 static const http_manners http_manners_fetch = {
-    (string_address)"dawning", '0', false, false, true};
+    (string_address)"dawning", '0', false, false, true,
+    HTTP_HEAD_SECONDS, HTTP_BODY_SECONDS, HTTP_FETCH_MAX};
 static const http_manners http_manners_wget = {
-    (string_address)"Wget", '1', true, true, false};
+    (string_address)"Wget", '1', true, true, false,
+    HTTP_HEAD_SECONDS, HTTP_BODY_SECONDS, HTTP_FETCH_MAX};
+static const http_manners http_manners_zone = {
+    (string_address)"Moonwater", '1', false, true, false, 10, 10, 4096};
+
+/* The head of the response a fetch ended on, for the caller that reads a
+   header of it. */
+static bipolar http_head_keep(http_buffer address_to into,
+                              const p8 address_to head, positive length)
+{
+        if (!byte_store_reserve(into, length + 1, 4096))
+                return HTTP_NO_REPLY;
+        memory_copy(into->bytes, head, length);
+        into->used = length;
+        into->bytes[length] = end;
+        return HTTP_OK;
+}
 
 /* One URL fetched under one client's manners, into exactly one sink: a
    descriptor, or a buffer filled here and handed over only on success, so a
    refused response leaves whatever the caller already held. A memory body is
-   bounded by HTTP_FETCH_MAX both by what Content-Length claims and by what
-   actually arrives. */
+   bounded by the manners' most both by what Content-Length claims and by what
+   actually arrives. A head_out is given the head of the final response, with
+   no body behind it. */
 static bipolar http_run(string_address start, const http_manners address_to how,
                         bool check_cert, bipolar dest,
                         http_buffer address_to into, b32 address_to code,
-                        p8 address_to where)
+                        p8 address_to where, http_buffer address_to head_out)
 {
         p8 url[HTTP_URL_MAX];
         http_buffer whole = {0};
@@ -10740,9 +10746,11 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                         status = http_response_head(
                             address_of link, head, sizeof head, address_of used,
                             address_of header, address_of response,
-                            HTTP_HEAD_SECONDS, 0, how->head_cut_is_malformed);
+                            how->head_seconds, 0, how->head_cut_is_malformed);
                 if (!status && code)
                         address_to code = response.code;
+                if (!status && head_out)
+                        status = http_head_keep(head_out, head, header);
 
                 if (!status && how->follow &&
                     http_response_is_redirect(response.code))
@@ -10787,7 +10795,7 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                             .stash_used = used - header,
                             .scratch = head,
                             .store = reset || into ? address_of whole : null,
-                            .store_limit = reset ? 0 : HTTP_FETCH_MAX,
+                            .store_limit = reset ? 0 : how->body_most,
                         };
 
                         /* The idle timer catches a stopped peer; this absolute
@@ -10800,13 +10808,13 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                            attack. */
                         if ((into || MOONWATER_STRICT >= STRICT_TIGHT) &&
                             !network_deadline_begin(address_of body.deadline,
-                                                    HTTP_BODY_SECONDS, 0))
+                                                    how->body_seconds, 0))
                                 status = HTTP_NO_REPLY;
                         else
                                 status =
                                     into &&
                                          response.body_kind == HTTP_BODY_LENGTH &&
-                                         response.body_length > HTTP_FETCH_MAX
+                                         response.body_length > how->body_most
                                      ? HTTP_MALFORMED
                                      : http_copy_body(address_of body,
                                                       reset ? -1 : dest,
@@ -10841,7 +10849,7 @@ static bipolar http_get(string_address url, http_buffer address_to body,
                         b32 address_to code)
 {
         return http_run(url, address_of http_manners_fetch, false, -1, body,
-                        code, null);
+                        code, null, null);
 }
 
 //      wget: TLS, redirects, and the body written as it arrives; where, if
@@ -10850,7 +10858,7 @@ static bipolar http_fetch_to(string_address start, bipolar dest, bool check_cert
                              b32 address_to code, p8 address_to where)
 {
         return http_run(start, address_of http_manners_wget, check_cert, dest,
-                        null, code, where);
+                        null, code, where, null);
 }
 
 #endif // STANDARD_MODERN_C_NET_HTTP
