@@ -2734,6 +2734,39 @@ static fn host_install_abandon(host_install address_to target)
 }
 
 /*
+        Where an install puts its partitions on a disk of so many bytes with
+        sectors of so many: a 512 MiB system partition at 1 MiB, then the data
+        partition to the last whole MiB the GPT leaves usable, and no more than
+        an ext4 can address (16 TiB less a block). False for a disk under
+        2 GiB, one whose sectors the GPT has no layout for, or one too small
+        for both of its tables. Only the places are written into parts, which
+        are two in a row.
+*/
+static bool host_install_place(p64 bytes, b32 sector, storage_format_partition address_to parts)
+{
+        p64 first;
+        p64 last;
+        p64 align;
+        p64 most;
+
+        if (bytes < HOST_SMALLEST || sector < 512 ||
+            !storage_gpt_span(bytes / (p64)sector, (p32)sector, address_of first,
+                              address_of last))
+                return false;
+
+        align = HOST_ALIGN_BYTES / (p64)sector;
+        most = STORAGE_EXT4_MOST * STORAGE_EXT4_BLOCK / (p64)sector;
+        parts[0].first = align;
+        parts[0].last = align + HOST_SYSTEM_BYTES / (p64)sector - 1;
+        parts[1].first = parts[0].last + 1;
+        parts[1].last = (last + 1) / align * align - 1;
+        if (parts[1].last - parts[1].first + 1 > most)
+                parts[1].last = parts[1].first + most - 1;
+
+        return true;
+}
+
+/*
         Refusals first, then one question, then the writes.
 
         The boot image has to be on some other disk -- it is what gets
@@ -2759,10 +2792,6 @@ static b32 host_install_locked(string_address asked, bool removable)
         storage_format_partition parts[2];
         p64 bytes = 0;
         b32 sector = 0;
-        p64 sectors;
-        p64 first;
-        p64 last;
-        p64 align;
         bipolar handle;
         bipolar failed;
 
@@ -2848,9 +2877,10 @@ static b32 host_install_locked(string_address asked, bool removable)
                 failed = system_control(handle, HOST_BLKSSZGET,
                                         address_of sector);
 
-        if (failed < 0 || bytes < HOST_SMALLEST || sector < 512 ||
-            !storage_gpt_span(bytes / (p64)sector, (p32)sector, address_of first,
-                              address_of last))
+        //      Placed now, before the rescan and the prompt, so a disk that
+        //      cannot be given both partitions is turned away on the open handle.
+        memory_zero(parts, sizeof(parts));
+        if (failed < 0 || !host_install_place(bytes, sector, parts))
         {
                 system_close(handle);
                 host_unmount(HOST_MEDIUM);
@@ -2874,19 +2904,6 @@ static b32 host_install_locked(string_address asked, bool removable)
                            ? host_refuse("%s cannot hold partitions\n", name)
                            : host_fail(device, failed);
         }
-
-        //      A 512 MiB system partition at 1 MiB, then the rest, to 16 TiB.
-        memory_zero(parts, sizeof(parts));
-        sectors = bytes / (p64)sector;
-        align = HOST_ALIGN_BYTES / (p64)sector;
-        parts[0].first = align;
-        parts[0].last = align + HOST_SYSTEM_BYTES / (p64)sector - 1;
-        parts[1].first = parts[0].last + 1;
-        parts[1].last = (last + 1) / align * align - 1;
-        if (parts[1].last - parts[1].first + 1 >
-            STORAGE_EXT4_MOST * STORAGE_EXT4_BLOCK / (p64)sector)
-                parts[1].last = parts[1].first +
-                                STORAGE_EXT4_MOST * STORAGE_EXT4_BLOCK / (p64)sector - 1;
 
         if (!host_data_fits((parts[1].last - parts[1].first + 1) * (p64)sector, name))
         {
@@ -2942,7 +2959,8 @@ static b32 host_install_locked(string_address asked, bool removable)
                 failed = storage_format_zero(handle, bytes - HOST_ALIGN_BYTES,
                                              HOST_ALIGN_BYTES);
         if (!failed)
-                failed = storage_format_gpt(handle, sectors, (p32)sector, random + 32,
+                failed = storage_format_gpt(handle, bytes / (p64)sector, (p32)sector,
+                                            random + 32,
                                             parts, 2);
         if (!failed)
                 failed = storage_format_fat32(

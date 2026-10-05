@@ -87248,6 +87248,89 @@ static fn format_spans(void)
                   storage_gpt_span(69, 512, address_of first, address_of last));
 }
 
+/*
+        Where an install puts its two partitions, on both sector sizes and at
+        the edges of what it takes: 2 GiB to the byte, a sector either side,
+        what the GPT's tail leaves of a MiB, and the 16 TiB an ext4 can
+        address. Every row holds the same things: the system partition is
+        512 MiB at 1 MiB, the data partition follows it and both begin on a
+        MiB, and nothing goes past the GPT's last usable sector.
+*/
+static bool place_holds(p64 bytes, b32 sector, storage_format_partition address_to parts)
+{
+        p64 align = ((p64)1 << 20) / (p64)sector;
+        p64 first;
+        p64 last;
+
+        memory_zero(parts, 2 * sizeof(parts[0]));
+        return host_install_place(bytes, sector, parts) &&
+               storage_gpt_span(bytes / (p64)sector, (p32)sector, address_of first,
+                                address_of last) &&
+               parts[0].first == align &&
+               parts[0].last - parts[0].first + 1 == ((p64)512 << 20) / (p64)sector &&
+               parts[1].first == parts[0].last + 1 && parts[1].first % align == 0 &&
+               parts[1].last <= last;
+}
+
+static fn format_places(void)
+{
+        static const b32 sizes[] = {512, 4096};
+
+        for (positive at = 0; at < array_count(sizes); at++)
+        {
+                b32 sector = sizes[at];
+                p64 align = ((p64)1 << 20) / (p64)sector;
+                p64 two = (p64)2 << 30;
+                p64 whole = ((p64)1 << 20) + ((p64)512 << 20);
+                p64 data = 0;
+                storage_format_partition exact[2];
+                storage_format_partition other[2];
+
+                check("an install takes a disk of 2 GiB to the byte, ending on a MiB with "
+                      "less than two of the disk's own after it",
+                      place_holds(two, sector, exact) && (exact[1].last + 1) % align == 0 &&
+                          two / (p64)sector - 1 - exact[1].last < 2 * align);
+                check("and not one a sector short of it, nor an empty one",
+                      !host_install_place(two - sector, sector, other) &&
+                          !host_install_place(0, sector, other));
+                check("a sector, 8 KiB or half a sector over 2 GiB is the layout of 2 GiB",
+                      place_holds(two + sector, sector, other) &&
+                          !memory_compare(exact, other, sizeof(exact)) &&
+                          place_holds(two + 8192, sector, other) &&
+                          !memory_compare(exact, other, sizeof(exact)) &&
+                          place_holds(two + sector / 2, sector, other) &&
+                          !memory_compare(exact, other, sizeof(exact)));
+                check("once the GPT's tail is paid for the next MiB is data, and so is "
+                      "each whole MiB after",
+                      place_holds(two + 24576, sector, other) &&
+                          other[1].last - exact[1].last == align &&
+                          place_holds(two + ((p64)1 << 20), sector, other) &&
+                          other[1].last - exact[1].last == align);
+                check("the data partition is cut at what an ext4 addresses",
+                      place_holds(whole + ((p64)16 << 40) + ((p64)1 << 20), sector, other) &&
+                          (other[1].last - other[1].first + 1) * (p64)sector ==
+                              (p64)0xffffffff * 4096 &&
+                          place_holds(whole + ((p64)64 << 40), sector, other) &&
+                          (other[1].last - other[1].first + 1) * (p64)sector ==
+                              (p64)0xffffffff * 4096);
+                data = (p64)16 << 40;
+                check("and is the rest of the disk, to the MiB, just under it",
+                      place_holds(whole + data, sector, other) &&
+                          (other[1].last + 1) % align == 0 &&
+                          (other[1].last - other[1].first + 1) * (p64)sector ==
+                              data - ((p64)1 << 20));
+        }
+
+        {
+                storage_format_partition parts[2];
+
+                check("sectors the GPT has no layout for are refused at any size",
+                      !host_install_place((p64)4 << 30, 256, parts) &&
+                          !host_install_place((p64)4 << 30, 1000, parts) &&
+                          !host_install_place((p64)4 << 30, 8192, parts));
+        }
+}
+
 static bipolar format_image(string_address directory, string_address name,
                             p64 bytes, p8 stamp)
 {
@@ -87970,6 +88053,7 @@ b32 main(void)
         image_builds();
         format_sums();
         format_spans();
+        format_places();
         format_layouts();
 
         if (program_argument_count() > 1)
