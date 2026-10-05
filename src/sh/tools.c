@@ -7945,20 +7945,20 @@ static bool tools_uuid_parse(string_address text,
         if (string_length(text) != 36)
                 return false;
 
+        //      Five runs of hexadecimal digits, as bytes: 4, 2, 2, 2 and 6,
+        //      a dash before each but the first.
+        static const p8 runs[] = {4, 2, 2, 2, 6};
         positive from = 0;
-        for (positive at = 0; at < sizeof(uuid->bytes); at++)
-        {
-                if (at == 4 || at == 6 || at == 8 || at == 10)
-                {
-                        if (text[from++] != '-')
-                                return false;
-                }
+        positive at = 0;
 
-                positive high = digit_known(text[from++], 16);
-                positive low = digit_known(text[from++], 16);
-                if (high >= 16 || low >= 16)
+        for (positive run = 0; run < sizeof(runs); run++)
+        {
+                if (run && text[from++] != '-')
                         return false;
-                uuid->bytes[at] = (p8)((positive)high << 4 | (positive)low);
+                if (!memory_from_hex(uuid->bytes + at, text + from, runs[run]))
+                        return false;
+                from += runs[run] * 2;
+                at += runs[run];
         }
 
         return true;
@@ -8086,14 +8086,8 @@ static bool tools_uuidgen_hex_name(string_address text,
         if (!decoded)
                 return false;
 
-        for (positive at = 0; at < count; at += 2)
-        {
-                positive high = digit_known(text[at], 16);
-                positive low = digit_known(text[at + 1], 16);
-                if (high >= 16 || low >= 16)
-                        return false;
-                decoded[at / 2] = (p8)((positive)high << 4 | (positive)low);
-        }
+        if (!memory_from_hex(decoded, text, count / 2))
+                return false;
 
         address_to bytes = decoded;
         address_to length = count / 2;

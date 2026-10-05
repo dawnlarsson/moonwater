@@ -166,6 +166,30 @@ static inline INLINE positive digit_known(p8 character, positive base)
         return narrow <= (p32)base - 11 ? narrow + 10 : base;
 }
 
+/* The bytes hexadecimal text stands for, two digits to a byte in either case:
+   false at the first character that is no digit, with the bytes before it
+   written and the rest not. The text is read no further than the byte it
+   fails in, so one that ends in a terminator is no overread. */
+static inline bool memory_from_hex(address_any into, string_address text,
+                                   positive bytes)
+{
+        p8 address_to out = (p8 address_to)into;
+
+        for (positive at = 0; at < bytes; at++)
+        {
+                positive high = digit_known(string_get(text + at * 2), 16);
+                positive low;
+
+                if (high >= 16)
+                        return false;
+                low = digit_known(string_get(text + at * 2 + 1), 16);
+                if (low >= 16)
+                        return false;
+                out[at] = (p8)(high << 4 | low);
+        }
+        return true;
+}
+
 /* Checked base-2..36 digit runs: overflow or no digits leaves both outputs
    untouched; success advances the cursor and writes the unsigned value. */
 static inline bool string_digits_checked(string_address address_to text,

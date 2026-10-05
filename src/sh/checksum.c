@@ -193,16 +193,7 @@ static bool checksum_digest_read(string_address text, positive length,
                 return checksum_base64_read &&
                        checksum_base64_decode(text, length, bytes, expected);
 
-        for (positive i = 0; i < bytes; i++)
-        {
-                positive high = digit_known(text[i * 2], 16);
-                positive low = digit_known(text[i * 2 + 1], 16);
-
-                if (high >= 16 || low >= 16)
-                        return false;
-                expected[i] = (p8)((high << 4) | low);
-        }
-        return true;
+        return memory_from_hex(expected, text, bytes);
 }
 
 /*

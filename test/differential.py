@@ -54282,6 +54282,7 @@ b32 main(void)
         p8 secret[96], out[160], peer[97], peer_scalar[48], message[64], tag[16];
         p8 iv[12] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
         crypto_aesgcm_key key;
+        positive used = 0;
         p64 seed = 0x9e3779b97f4a7c15ull * (p64)(p8)which[0];
 
         for (positive i = 0; i < 96; i++)
@@ -54311,6 +54312,12 @@ b32 main(void)
         case 'e': crypto_aesgcm_prepare(&key, secret);
                   crypto_aesgcm_seal(&key, iv, message, 16, message + 16, 32, tag); break;
         case 'f': crypto_hmac_sha256(secret, 32, message, 64, out); break;
+        case 'j':
+                //      A key wrapped under a KEK, both secret: the unwrap
+                //      refuses it, and refuses every wrap the same way.
+                crypto_aes_key_unwrap(secret, secret + 16, 40, out, &used);
+                out[0] = (p8)used;
+                break;
         case 'g':
                 //      One bit apart, at a place the byte draws: an
                 //      early exit shows as a count that follows it.
@@ -54341,7 +54348,18 @@ CRYPTO_SECRET_PRIMITIVES = (
     ("c", "ECDH P-384 public"), ("d", "ECDH P-384 shared"),
     ("e", "AES-128-GCM key and seal"), ("f", "HMAC-SHA256 key"),
     ("g", "crypto_same"), ("i", "AES-128-GCM refusing a forged tag"),
-    ("h", "HKDF-Extract"))
+    ("h", "HKDF-Extract"), ("j", "AES key unwrap"))
+
+#       What a secret is not allowed to choose a load or a store by, held
+#       by the same six secrets: where in their pages the data addresses a
+#       run touches fall, in order, is the same for all of them (test/insn.c
+#       with trace=on). A count cannot see a table indexed by a secret, which
+#       loads from another line with the same instructions. The compare and
+#       the forged tag are left out: the byte that program bends is the
+#       secret's draw, and its address follows it by design.
+CRYPTO_SECRET_TRACED = (
+    ("e", "AES-128-GCM key and seal"), ("f", "HMAC-SHA256 key"),
+    ("h", "HKDF-Extract"), ("j", "AES key unwrap"))
 
 
 def crypto_x25519_instruction_counts():
@@ -54447,6 +54465,22 @@ def crypto_x25519_instruction_counts():
                     rows.append("%s %s" % (name, counts[0] if same else
                                            "FAIL -- they differ: " + ", ".join(counts)))
                 lines.append("secret instructions %s%s, six secrets each: %s" % (
+                    machine, " " + body if body else "", "; ".join(rows)))
+                rows = []
+                for primitive, name in CRYPTO_SECRET_TRACED:
+                    traces = []
+                    for which in "anqz19":
+                        ran = subprocess.run(
+                            [runner] + cpu + ["-plugin", str(plugin) + ",trace=on",
+                                              str(secret_binary), primitive, which],
+                            capture_output=True, text=True)
+                        traces.append(ran.stderr.strip().split("\n")[-1] if ran.returncode == 0
+                                      else "exit %d" % ran.returncode)
+                    same = len(set(traces)) == 1 and traces[0].count(" ") == 1
+                    failed = failed or not same
+                    rows.append("%s %s" % (name, traces[0].split()[1] if same else
+                                           "FAIL -- the addresses differ: " + ", ".join(traces)))
+                lines.append("secret addresses %s%s, six secrets each: %s" % (
                     machine, " " + body if body else "", "; ".join(rows)))
     return lines, failed
 
@@ -62881,8 +62915,6 @@ def harness_guest_scenarios(argv):
 #       stands on, below net.c's hosted crypto: the frame and key calls it
 #       makes, recorded, and the rules every key it installs is held to.
 WIFI_EAPOL_FUZZ_SHIM = r"""
-static inline p8 byte_is_hexadecimal(p8 b) { return isxdigit(b) != 0; }
-static inline p8 byte_to_lower(p8 b) { return (p8)tolower(b); }
 #define network_order_16(v) ((p16)((((v) & 0xff) << 8) | (((v) >> 8) & 0xff)))
 #define AF_PACKET 17
 #define ETH_P_PAE 0x888e
@@ -62906,8 +62938,6 @@ typedef struct
 #define NL80211_KEYTYPE_GROUP 0
 #define NL80211_KEYTYPE_PAIRWISE 1
 #define WIFI_EAPOL_HDR 99
-#define WIFI_GTK_WRAP 24
-#define WIFI_WRAP_MOST 408
 
 static const p8 *fz_at;
 static positive fz_left;
@@ -63063,7 +63093,7 @@ static bipolar nl80211_authorize(nl80211 *session, p32 index, p8 *mac)
 WIFI_EAPOL_FUZZ_DRIVER = r"""
 static void wifi_rekey_offload(wifi_link *link) { (void)link; }
 
-/* RFC 3394 key wrap, the access point's half of wifi_kw_unwrap. */
+/* RFC 3394 key wrap, the access point's half of crypto_aes_key_unwrap. */
 static void fz_wrap(const p8 *kek, const p8 *plain, positive n, p8 *out)
 {
         p8 round[176], block[16], a[8];
@@ -63127,7 +63157,7 @@ static positive fz_frame(p8 *f, p16 info, const p8 *nonce, const p8 *data, posit
         {
                 p8 hash[20];
 
-                wifi_hmac_sha1((p8 *)kck, 16, f, 99 + n, hash);
+                crypto_hmac(DIGEST_SHA1, 20, (p8 *)kck, 16, f, 99 + n, hash);
                 memcpy(f + 81, hash, 16);
         }
         return 99 + n;
@@ -63206,7 +63236,7 @@ static void fz_answer(p16 info, const p8 *kck)
                 abort();
         memcpy(copy, fz_sent, fz_sent_length);
         memset(copy + 81, 0, 16);
-        wifi_hmac_sha1((p8 *)kck, 16, copy, fz_sent_length, hash);
+        crypto_hmac(DIGEST_SHA1, 20, (p8 *)kck, 16, copy, fz_sent_length, hash);
         if (memcmp(hash, fz_sent + 81, 16))
                 abort();
 }
@@ -63276,7 +63306,7 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
         for (int ops = 0; fz_left && ops < 24; ops++)
         {
                 p8 op = fz_byte() % 11;
-                p8 frame[512], wrapped[WIFI_WRAP_MOST + 8];
+                p8 frame[512], wrapped[CRYPTO_WRAP_MOST + 8];
                 positive n;
                 bipolar step;
 
@@ -63353,7 +63383,7 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                                 {
                                         p8 hash[20];
 
-                                        wifi_hmac_sha1(fz_ptk, 16, frame, n, hash);
+                                        crypto_hmac(DIGEST_SHA1, 20, fz_ptk, 16, frame, n, hash);
                                         memcpy(frame + 81, hash, 16);
                                 }
                         }
@@ -63481,7 +63511,7 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                         bool unwraps = mode == 0;
                         bool clean = fz_clean && (group || !fz_pending_bent);
                         bool want = false, cut = false;
-                        p8 plain[WIFI_WRAP_MOST], kek[16], want_key[16], want_idx = 0;
+                        p8 plain[CRYPTO_WRAP_MOST], kek[16], want_key[16], want_idx = 0;
 
                         //      The key data, element by element: what the
                         //      station must take is the first GTK KDE whose
@@ -63698,7 +63728,7 @@ def wifi_eapol_fuzz_source(net, host, checks):
     if CRYPTO_FUZZ_DRIVER_C not in crypto:
         raise ValueError("crypto_fuzz_source no longer ends in its driver")
     crypto = crypto.replace(CRYPTO_FUZZ_DRIVER_C, "")
-    derive = src_slice(host, "static COLD fn wifi_hmac_sha1(",
+    derive = src_slice(host, "static COLD fn wifi_ptk(",
                                  "static COLD bool nl80211_ext_bit(")
     link = src_slice(host, "#define WIFI_KEY_PAIRWISE",
                                "/* The replay counter and keys for a driver")

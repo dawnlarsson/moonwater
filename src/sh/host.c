@@ -4966,8 +4966,6 @@ static b32 host_bios(string_address address_to arguments, positive count)
 #define NL80211_CONNECT_SECONDS 20
 #define WIFI_EAPOL_SECONDS 8
 #define WIFI_EAPOL_HDR 99
-#define WIFI_GTK_WRAP 24
-#define WIFI_WRAP_MOST 408
 
 typedef struct
 {
@@ -5248,44 +5246,27 @@ static COLD fn radio_links_unleased(netlink_search address_to search)
         nl80211_close(address_of session);
 }
 
-/* WPA's PBKDF2 and PRF are HMAC-SHA-1, which is net.c's HMAC under a
-   different digest and nothing else. */
-static COLD fn wifi_hmac_sha1(p8 address_to key, positive key_length,
-                         p8 address_to data, positive length, p8 address_to out)
+/* Whether a password is one WPA takes: eight to sixty-three characters, or
+   sixty-four hexadecimal digits, which are the key itself. */
+static COLD bool wifi_pass_fits(p8 address_to pass, positive length)
 {
-        crypto_mac mac;
-
-        crypto_hmac_open(address_of mac, DIGEST_SHA1, 20, key, key_length);
-        crypto_hmac_write(address_of mac, data, length);
-        crypto_hmac_close(address_of mac, out);
-}
-
-static COLD p8 wifi_nibble(p8 byte)
-{
-        if (byte_is_digit(byte))
-                return (p8)(byte - '0');
-        byte = byte_to_lower(byte);
-        return (p8)(byte - 'a' + 10);
+        if (length != 64)
+                return length >= 8 && length <= 63;
+        for (positive at = 0; at < length; at++)
+                if (digit_known(pass[at], 16) >= 16)
+                        return false;
+        return true;
 }
 
 static COLD bool wifi_psk(p8 address_to ssid, positive ssid_length,
                      p8 address_to pass, positive pass_length, p8 address_to pmk)
 {
-        positive i;
-
+        if (!wifi_pass_fits(pass, pass_length))
+                return false;
         if (pass_length == 64)
-        {
-                for (i = 0; i < 64; i++)
-                        if (!byte_is_hexadecimal(pass[i]))
-                                return false;
-                for (i = 0; i < 32; i++)
-                        pmk[i] = (p8)((wifi_nibble(pass[i * 2]) << 4) |
-                                      wifi_nibble(pass[i * 2 + 1]));
-                return true;
-        }
+                return memory_from_hex(pmk, (string_address)pass, 32);
 
-        if (pass_length < 8 || pass_length > 63 || !ssid_length ||
-            ssid_length > 32)
+        if (!ssid_length || ssid_length > 32)
                 return false;
 
         //      IEEE 802.11i: PBKDF2-HMAC-SHA1 of the passphrase, the SSID as
@@ -5293,132 +5274,6 @@ static COLD bool wifi_psk(p8 address_to ssid, positive ssid_length,
         crypto_pbkdf2(DIGEST_SHA1, 20, pass, pass_length, ssid, ssid_length,
                       4096, pmk, 32);
         return true;
-}
-
-/* One byte of InvMixColumns.  The matrix's four rows are the same four
-   coefficients rotated, so the row it is wanted for says where to start
-   reading them, and the multiply is net.c's constant-time one -- the
-   same GF(2^8) its S-box inversion runs in. */
-static COLD p8 wifi_unmix(p8 address_to column, positive row)
-{
-        static const p8 factor[4] = {0x0e, 0x0b, 0x0d, 0x09};
-        p8 mixed = 0;
-
-        for (positive at = 0; at < 4; at++)
-                mixed ^= crypto_aes_field_multiply(
-                    column[at], factor[(4 + at - row) & 3]);
-
-        return mixed;
-}
-
-/* The inverse S-box, built rather than written out: it is the forward box's
-   inverse permutation, and net.c already computes that box in the field
-   it lives in. Two hundred and fifty six hand-typed bytes are two hundred
-   and fifty six chances to mistype one, and built this way the two boxes
-   cannot disagree. The unwrap builds it once and lends it to every block. */
-static COLD fn wifi_inverse_box(p8 address_to inverse)
-{
-        for (positive at = 0; at < 256; at++)
-                inverse[crypto_aes_substitute((p8)at)] = (p8)at;
-}
-
-static COLD fn wifi_aes_decrypt(p8 address_to key, p8 address_to in,
-                           p8 address_to out, const p8 address_to inverse)
-{
-        p8 round[176];
-        p8 state[16];
-        p8 hold[16];
-        positive step;
-        positive row;
-        p8 temp;
-
-        crypto_aes128_expand(key, round);
-        memory_copy(state, in, 16);
-        for (step = 0; step < 16; step++)
-                state[step] ^= round[160 + step];
-
-        /*
-                The last round is every other round without InvMixColumns, so
-                the loop runs once more and leaves from the middle rather
-                than repeating its first three steps underneath itself.
-        */
-        for (step = 9;; step--)
-        {
-                //      InvShiftRows: row r of the state -- the bytes r, r+4,
-                //      r+8 and r+12 -- rotates right by r.
-                for (row = 1; row < 4; row++)
-                        for (positive turn = 0; turn < row; turn++)
-                        {
-                                temp = state[row + 12];
-                                state[row + 12] = state[row + 8];
-                                state[row + 8] = state[row + 4];
-                                state[row + 4] = state[row];
-                                state[row] = temp;
-                        }
-
-                for (row = 0; row < 16; row++)
-                        state[row] = inverse[state[row]];
-                for (row = 0; row < 16; row++)
-                        state[row] ^= round[step * 16 + row];
-                if (!step)
-                        break;
-
-                memory_copy(hold, state, 16);
-                for (row = 0; row < 4; row++)
-                        for (positive at = 0; at < 4; at++)
-                                state[row * 4 + at] =
-                                    wifi_unmix(hold + row * 4, at);
-        }
-
-        memory_copy(out, state, 16);
-        crypto_forget(round, sizeof(round));
-        crypto_forget(state, sizeof(state));
-        crypto_forget(hold, sizeof(hold));
-}
-
-static COLD bool wifi_kw_unwrap(p8 address_to kek, p8 address_to wrap, positive length,
-                           p8 address_to plain, positive address_to plain_length)
-{
-        p8 block[16];
-        p8 a[8];
-        p8 inverse[256];
-        p8 r[WIFI_WRAP_MOST - 8];
-        positive words;
-        positive round;
-        positive i;
-        p64 t;
-        bool unwrapped;
-
-        if (length < 24 || (length & 7) || length > WIFI_WRAP_MOST)
-                return false;
-        words = (length / 8) - 1;
-        wifi_inverse_box(inverse);
-        memory_copy(a, wrap, 8);
-        memory_copy(r, wrap + 8, words * 8);
-        for (round = 6; round > 0; round--)
-                for (i = words; i > 0; i--)
-                {
-                        t = (p64)words * (round - 1) + i;
-                        network_store_64(a, network_load_64(a) ^ t);
-                        memory_copy(block, a, 8);
-                        memory_copy(block + 8, r + (i - 1) * 8, 8);
-                        wifi_aes_decrypt(kek, block, block, inverse);
-                        memory_copy(a, block, 8);
-                        memory_copy(r + (i - 1) * 8, block + 8, 8);
-                }
-
-        //      The check value, and the unwrapped key data forgotten here
-        //      whether it held or not.
-        unwrapped = network_load_64(a) == 0xa6a6a6a6a6a6a6a6ull;
-        if (unwrapped)
-        {
-                memory_copy(plain, r, words * 8);
-                address_to plain_length = words * 8;
-        }
-        crypto_forget(block, sizeof(block));
-        crypto_forget(a, sizeof(a));
-        crypto_forget(r, sizeof(r));
-        return unwrapped;
 }
 
 static COLD fn wifi_ptk(p8 address_to pmk, p8 address_to ap, p8 address_to sta,
@@ -5466,7 +5321,7 @@ static COLD fn wifi_ptk(p8 address_to pmk, p8 address_to ap, p8 address_to sta,
         for (which = 0; used < 64; which++)
         {
                 input[99] = (p8)which;
-                wifi_hmac_sha1(pmk, 32, input, 100, hash);
+                crypto_hmac(DIGEST_SHA1, 20, pmk, 32, input, 100, hash);
                 memory_copy(ptk + used, hash, used + 20 > 64 ? 64 - used : 20);
                 used += 20;
         }
@@ -5697,7 +5552,7 @@ static COLD bool wifi_eapol_mic(p8 address_to kck, p8 address_to frame, positive
 
         memory_copy(carried, frame + 81, 16);
         memory_fill(frame + 81, 0, 16);
-        wifi_hmac_sha1(kck, 16, frame, length, hash);
+        crypto_hmac(DIGEST_SHA1, 20, kck, 16, frame, length, hash);
         same = crypto_same(carried, hash, 16);
         memory_copy(frame + 81, check ? carried : hash, 16);
         crypto_forget(hash, sizeof(hash));
@@ -5743,12 +5598,12 @@ static COLD bipolar wifi_eapol_reply(wifi_link address_to link, p8 address_to kc
 static COLD bipolar wifi_gtk_take(p8 address_to kek, p8 address_to data, positive length,
                                   p8 address_to gtk, p8 address_to idx)
 {
-        p8 plain[WIFI_WRAP_MOST];
+        p8 plain[CRYPTO_WRAP_MOST];
         positive size = 0;
         bipolar found = 0;
         byte_reader reader;
 
-        if (!wifi_kw_unwrap(kek, data, length, plain, address_of size))
+        if (!crypto_aes_key_unwrap(kek, data, length, plain, address_of size))
                 return -1;
         reader = byte_reader_open(plain, size);
         while (byte_reader_left(&reader))
@@ -8392,15 +8247,6 @@ static bipolar radio_password_read(p8 address_to into, positive room,
         return result < 0 ? result : (bipolar)used;
 }
 
-/* A 64-character password is the key itself, in hex. */
-static bool radio_hex_key(string_address pass)
-{
-        for (positive at = 0; pass[at]; at++)
-                if (!byte_is_hexadecimal(pass[at]))
-                        return false;
-        return true;
-}
-
 static bipolar radio_wifi_join(string_address ssid, string_address pass)
 {
         p8 pmk[32];
@@ -8675,8 +8521,7 @@ static b32 radio_wifi_add(string_address ssid, string_address pass)
                 return host_refuse("that network name is empty or too long\n");
         if (pass_length > RADIO_PASS_MOST)
                 return host_refuse("that password is too long\n");
-        if (pass_length && (pass_length < 8 ||
-                            (pass_length == 64 && !radio_hex_key(pass))))
+        if (pass_length && !wifi_pass_fits((p8 address_to)pass, pass_length))
                 return host_refuse("a WPA password is 8 to 63 characters, "
                                    "or a key of 64 hex digits\n");
         if (!radio_text_shown(ssid) || (pass_length && !radio_text_shown(pass)))

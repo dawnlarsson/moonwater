@@ -75691,6 +75691,160 @@ static fn wpa_key(void)
                       !memory_compare(pmk, this_is, 32));
 }
 
+//      AES-128's inverse and RFC 3394's unwrap, which hold the key data of
+//      every group key and every rekey. FIPS-197 C.1 is the cipher's own
+//      vector; RFC 3394 4.1 is the wrap's, 128 bits of key data under a
+//      128-bit KEK.
+static fn wifi_unwrap_checks(void)
+{
+        static const p8 kek[16] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+                                   0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f};
+        static const p8 plain[16] = {0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+                                     0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff};
+        static const p8 wrap[24] = {0x1f, 0xa6, 0x8b, 0x0a, 0x81, 0x12, 0xb4, 0x47,
+                                    0xae, 0xf3, 0x4b, 0xd8, 0xfb, 0x5a, 0x7b, 0x82,
+                                    0x9d, 0x3e, 0x86, 0x23, 0x71, 0xd2, 0xcf, 0xe5};
+        static const p8 cipher[16] = {0x69, 0xc4, 0xe0, 0xd8, 0x6a, 0x7b, 0x04, 0x30,
+                                      0xd8, 0xcd, 0xb7, 0x80, 0x70, 0xb4, 0xc5, 0x5a};
+        p8 round[176];
+        p8 out[16];
+        p8 got[CRYPTO_WRAP_MOST];
+        p8 bent[CRYPTO_WRAP_MOST + 8];
+        positive size = 99;
+        bool inverts = true;
+
+        for (positive value = 0; value < 256; value++)
+                inverts &= crypto_aes_unsubstitute(crypto_aes_substitute((p8)value)) ==
+                               (p8)value &&
+                           crypto_aes_substitute(crypto_aes_unsubstitute((p8)value)) ==
+                               (p8)value;
+        check("the inverse S-box undoes the S-box for every byte", inverts);
+        check("and is FIPS-197's: 0x63 gives 0x00, 0xed gives 0x53",
+              crypto_aes_unsubstitute(0x63) == 0x00 &&
+                  crypto_aes_unsubstitute(0xed) == 0x53);
+
+        crypto_aes128_expand((p8 address_to)kek, round);
+        crypto_aes128_decrypt(round, cipher, out);
+        check("AES-128 decrypts FIPS-197 C.1", !memory_compare(out, plain, 16));
+        memory_copy(out, cipher, 16);
+        crypto_aes128_decrypt(round, out, out);
+        check("in place too", !memory_compare(out, plain, 16));
+
+        check("RFC 3394 4.1 unwraps",
+              crypto_aes_key_unwrap((p8 address_to)kek, (p8 address_to)wrap, 24, got,
+                                    address_of size) &&
+                  size == 16 && !memory_compare(got, plain, 16));
+
+        memory_copy(bent, wrap, 24);
+        bent[23] ^= 1;
+        size = 99;
+        check("a wrap with one bit bent is refused and gives no length",
+              !crypto_aes_key_unwrap((p8 address_to)kek, bent, 24, got, address_of size) &&
+                  size == 99);
+        check("under another KEK as well",
+              !crypto_aes_key_unwrap((p8 address_to)plain, (p8 address_to)wrap, 24, got,
+                                     address_of size) &&
+                  size == 99);
+        memory_fill(bent, 0, sizeof(bent));
+        check("a wrap of two blocks, of 25 bytes and of one block past the most are refused",
+              !crypto_aes_key_unwrap((p8 address_to)kek, (p8 address_to)wrap, 16, got,
+                                     address_of size) &&
+                  !crypto_aes_key_unwrap((p8 address_to)kek, bent, 25, got,
+                                         address_of size) &&
+                  !crypto_aes_key_unwrap((p8 address_to)kek, bent, CRYPTO_WRAP_MOST + 8,
+                                         got, address_of size));
+}
+
+//      IEEE 802.11i's pairwise key expansion, PRF-512 over the PMK with the
+//      two addresses and the two nonces each in order, smaller first. The
+//      vector is one an independent PRF (Python's hmac) gave, with the
+//      addresses and the first nonce bytes past 0x7f: an order taken on
+//      signed bytes would put the station's address first, and a key the
+//      access point does not derive.
+static fn wifi_ptk_checks(void)
+{
+        static const p8 pmk[32] = {
+                0x0d, 0xc0, 0xd6, 0xeb, 0x90, 0x55, 0x5e, 0xd6, 0x41, 0x97, 0x56,
+                0xb9, 0xa1, 0x5e, 0xc3, 0xe3, 0x20, 0x9b, 0x63, 0xdf, 0x70, 0x7d,
+                0xd5, 0x08, 0xd1, 0x45, 0x81, 0xf8, 0x98, 0x27, 0x21, 0xaf};
+        static const p8 ap[6] = {0x80, 0xa1, 0xb2, 0xc3, 0xd4, 0xe5};
+        static const p8 sta[6] = {0x7f, 0x01, 0x02, 0x03, 0x04, 0x05};
+        static const p8 anonce[32] = {
+                0xc0, 0x0a, 0x11, 0x18, 0x1f, 0x26, 0x2d, 0x34, 0x3b, 0x42, 0x49,
+                0x50, 0x57, 0x5e, 0x65, 0x6c, 0x73, 0x7a, 0x81, 0x88, 0x8f, 0x96,
+                0x9d, 0xa4, 0xab, 0xb2, 0xb9, 0xc0, 0xc7, 0xce, 0xd5, 0xdc};
+        static const p8 snonce[32] = {
+                0x3e, 0x10, 0x1b, 0x26, 0x31, 0x3c, 0x47, 0x52, 0x5d, 0x68, 0x73,
+                0x7e, 0x89, 0x94, 0x9f, 0xaa, 0xb5, 0xc0, 0xcb, 0xd6, 0xe1, 0xec,
+                0xf7, 0x02, 0x0d, 0x18, 0x23, 0x2e, 0x39, 0x44, 0x4f, 0x5a};
+        static const p8 expect[64] = {
+                0x88, 0xe0, 0xed, 0x01, 0xaa, 0x50, 0x00, 0x38, 0x70, 0x23, 0xf0,
+                0xef, 0x4c, 0xa2, 0xe0, 0x58, 0x5d, 0xdd, 0x2c, 0x56, 0xc8, 0x6d,
+                0xa9, 0xda, 0x9a, 0x28, 0x6b, 0xc2, 0x79, 0x30, 0x2d, 0xbb, 0xfc,
+                0xda, 0xb7, 0x22, 0xe5, 0x99, 0x72, 0xb7, 0xae, 0x8e, 0xe9, 0xdc,
+                0xc5, 0x6d, 0x28, 0xcf, 0x21, 0x14, 0x18, 0x7e, 0xe1, 0xbc, 0x89,
+                0xa8, 0x03, 0x7d, 0x96, 0xba, 0xbf, 0x8c, 0x98, 0x6f};
+        p8 ptk[64];
+        p8 other[64];
+
+        wifi_ptk((p8 address_to)pmk, (p8 address_to)ap, (p8 address_to)sta,
+                 (p8 address_to)anonce, (p8 address_to)snonce, ptk);
+        check("the pairwise key of an access point and a station past 0x7f is 802.11i's",
+              !memory_compare(ptk, expect, 64));
+        wifi_ptk((p8 address_to)pmk, (p8 address_to)sta, (p8 address_to)ap,
+                 (p8 address_to)snonce, (p8 address_to)anonce, other);
+        check("and the same from either side of the handshake",
+              !memory_compare(other, expect, 64));
+}
+
+//      A password is eight to sixty-three characters or sixty-four digits of
+//      hex, the one rule for the verb that takes it and the key it makes.
+static fn wifi_password_checks(void)
+{
+        static const p8 key[32] = {0x00, 0xff, 0x10, 0xab, 0xcd, 0xef, 0x01, 0x23,
+                                   0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x12, 0x34,
+                                   0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x11, 0x22,
+                                   0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa};
+        p8 text[96];
+        p8 pmk[32];
+        p8 into[4];
+
+        memory_fill(text, 'p', sizeof(text));
+        check("a password of seven characters is not one, of eight to sixty-three it is",
+              !wifi_pass_fits(text, 7) && wifi_pass_fits(text, 8) && wifi_pass_fits(text, 63) &&
+                  !wifi_pass_fits(text, 0) && !wifi_pass_fits(text, 65) &&
+                  !wifi_pass_fits(text, 64));
+        memory_into_hex(text, (address_any)key, 32);
+        check("of sixty-four hex digits it is the key", wifi_pass_fits(text, 64));
+        for (positive at = 0; at < 64; at++)
+                text[at] = byte_to_upper(text[at]);
+        check("in either case", wifi_pass_fits(text, 64));
+        text[63] = 'g';
+        check("a digit that is none makes sixty-four characters no password",
+              !wifi_pass_fits(text, 64) &&
+                  !wifi_psk((p8 address_to) "net", 3, text, 64, pmk));
+        memory_into_hex(text, (address_any)key, 32);
+        check("a key of hex is the key itself, and the name is not asked of it",
+              wifi_psk((p8 address_to) "net", 3, text, 64, pmk) &&
+                  !memory_compare(pmk, key, 32) &&
+                  wifi_psk((p8 address_to) "", 0, text, 64, pmk));
+        check("a password of eight to sixty-three is asked of a name of one to thirty-two",
+              !wifi_psk((p8 address_to) "", 0, (p8 address_to) "password", 8, pmk) &&
+                  !wifi_psk((p8 address_to) "0123456789012345678901234567890123", 34,
+                            (p8 address_to) "password", 8, pmk));
+
+        memory_fill(into, 0x77, 4);
+        check("hex text is bytes, either case", memory_from_hex(into, "00fF10aB", 4) &&
+              into[0] == 0x00 && into[1] == 0xff && into[2] == 0x10 && into[3] == 0xab);
+        memory_fill(into, 0x77, 4);
+        check("text that is no hex stops at the byte it is in, the ones before it written",
+              !memory_from_hex(into, "00zz1122", 4) && into[0] == 0 && into[1] == 0x77);
+        memory_fill(into, 0x77, 4);
+        check("text that ends is read no further than its end",
+              !memory_from_hex(into, "ab\0cd", 2) && into[0] == 0xab && into[1] == 0x77 &&
+                  !memory_from_hex(into, "abc", 2));
+}
+
 //      A key's text and back, and text that is not quite a key.
 static fn key_text(void)
 {
@@ -76553,6 +76707,9 @@ b32 main(void)
         records_named();
         labels();
         wpa_key();
+        wifi_unwrap_checks();
+        wifi_ptk_checks();
+        wifi_password_checks();
         wifi_source_checks();
         wifi_air_capacity();
         key_text();

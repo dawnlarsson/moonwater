@@ -2422,15 +2422,23 @@ static inline INLINE fn crypto_hmac_close(crypto_mac address_to mac,
         crypto_forget(inner, sizeof inner);
 }
 
+/* One message under one key, whole: the digest's size bytes of it. */
+static fn crypto_hmac(positive algorithm, positive size, p8 address_to key,
+                      positive key_length, p8 address_to data, positive length,
+                      p8 address_to out)
+{
+        crypto_mac mac;
+
+        crypto_hmac_open(address_of mac, algorithm, size, key, key_length);
+        crypto_hmac_write(address_of mac, data, length);
+        crypto_hmac_close(address_of mac, out);
+}
+
 static fn crypto_hmac_sha256(p8 address_to key, positive key_length,
                              p8 address_to data, positive length,
                              p8 address_to out)
 {
-        crypto_mac mac;
-
-        crypto_hmac_open(address_of mac, DIGEST_SHA256, 32, key, key_length);
-        crypto_hmac_write(address_of mac, data, length);
-        crypto_hmac_close(address_of mac, out);
+        crypto_hmac(DIGEST_SHA256, 32, key, key_length, data, length, out);
 }
 
 /*
@@ -2616,7 +2624,9 @@ static p8 crypto_aes_field_multiply(p8 left, p8 right)
         return product;
 }
 
-static p8 crypto_aes_substitute(p8 value)
+/* x^254, which is the inverse of x and 0 for 0: the addition chain both
+   S-boxes run, the same operations for every input. */
+static p8 crypto_aes_field_inverse(p8 value)
 {
         p8 x2 = crypto_aes_field_multiply(value, value);
         p8 x3 = crypto_aes_field_multiply(x2, value);
@@ -2627,14 +2637,32 @@ static p8 crypto_aes_substitute(p8 value)
         p8 x60 = crypto_aes_field_multiply(x30, x30);
         p8 x120 = crypto_aes_field_multiply(x60, x60);
         p8 x240 = crypto_aes_field_multiply(x120, x120);
-        p8 inverse = crypto_aes_field_multiply(
+
+        return crypto_aes_field_multiply(
             crypto_aes_field_multiply(x240, x12), x2);
+}
+
+static p8 crypto_aes_substitute(p8 value)
+{
+        p8 inverse = crypto_aes_field_inverse(value);
 
         return (p8)(inverse ^
                     ((inverse << 1) | (inverse >> 7)) ^
                     ((inverse << 2) | (inverse >> 6)) ^
                     ((inverse << 3) | (inverse >> 5)) ^
                     ((inverse << 4) | (inverse >> 4)) ^ 0x63);
+}
+
+/* The inverse S-box: the affine transform undone, then the same inversion.
+   The state it runs on is a key being unwrapped, so no table indexed by it
+   either: the one a decrypt wants was built from the forward box and read
+   back by the secret itself. */
+static p8 crypto_aes_unsubstitute(p8 value)
+{
+        return crypto_aes_field_inverse(
+            (p8)(((value << 1) | (value >> 7)) ^
+                 ((value << 3) | (value >> 5)) ^
+                 ((value << 6) | (value >> 2)) ^ 0x05));
 }
 
 /* Two authenticators compared without telling the peer where they first
@@ -2695,6 +2723,124 @@ static fn crypto_aes128_expand(p8 address_to key, p8 address_to round)
                 round[i + 2] = round[i - 14] ^ t2;
                 round[i + 3] = round[i - 13] ^ t3;
         }
+}
+
+/* One byte of InvMixColumns of a column. The matrix's four rows are the same
+   four coefficients rotated, so the row it is wanted for says where to start
+   reading them, and the multiply is the constant-time one the S-box runs in. */
+static p8 crypto_aes_unmix(const p8 address_to column, positive row)
+{
+        static const p8 factor[4] = {0x0e, 0x0b, 0x0d, 0x09};
+        p8 mixed = 0;
+
+        for (positive at = 0; at < 4; at++)
+                mixed ^= crypto_aes_field_multiply(
+                    column[at], factor[(4 + at - row) & 3]);
+
+        return mixed;
+}
+
+/* One block back through the schedule crypto_aes128_expand made. */
+static fn crypto_aes128_decrypt(const p8 address_to round,
+                                const p8 address_to in, p8 address_to out)
+{
+        p8 state[16];
+        p8 hold[16];
+        positive step;
+        positive at;
+        positive row;
+        p8 temp;
+
+        memory_copy(state, in, 16);
+        for (at = 0; at < 16; at++)
+                state[at] ^= round[160 + at];
+
+        /* The last round is every other round without InvMixColumns, so the
+           loop runs once more and leaves from the middle rather than
+           repeating its first three steps underneath itself. */
+        for (step = 9;; step--)
+        {
+                //      InvShiftRows: row r of the state -- the bytes r, r+4,
+                //      r+8 and r+12 -- rotates right by r.
+                for (row = 1; row < 4; row++)
+                        for (positive turn = 0; turn < row; turn++)
+                        {
+                                temp = state[row + 12];
+                                state[row + 12] = state[row + 8];
+                                state[row + 8] = state[row + 4];
+                                state[row + 4] = state[row];
+                                state[row] = temp;
+                        }
+
+                for (at = 0; at < 16; at++)
+                        state[at] = crypto_aes_unsubstitute(state[at]) ^
+                                    round[step * 16 + at];
+                if (!step)
+                        break;
+
+                memory_copy(hold, state, 16);
+                for (positive column = 0; column < 4; column++)
+                        for (row = 0; row < 4; row++)
+                                state[column * 4 + row] =
+                                    crypto_aes_unmix(hold + column * 4, row);
+        }
+
+        memory_copy(out, state, 16);
+        crypto_forget(state, sizeof(state));
+        crypto_forget(hold, sizeof(hold));
+}
+
+/*
+        RFC 3394 key unwrap under a 16 byte key: the plaintext of a wrap of
+        length bytes (a multiple of eight, three blocks to CRYPTO_WRAP_MOST),
+        true with the check value in place. WPA's key data is wrapped this
+        way under the EAPOL-Key's KEK. The schedule is made once for all the
+        blocks, and what is unwrapped is forgotten here whether the check
+        held or not.
+*/
+#define CRYPTO_WRAP_MOST 408
+
+static bool crypto_aes_key_unwrap(p8 address_to kek, p8 address_to wrap,
+                                  positive length, p8 address_to plain,
+                                  positive address_to plain_length)
+{
+        p8 round[176];
+        p8 block[16];
+        p8 a[8];
+        p8 r[CRYPTO_WRAP_MOST - 8];
+        positive words;
+        bool unwrapped;
+
+        if (length < 24 || (length & 7) || length > CRYPTO_WRAP_MOST)
+                return false;
+        words = (length / 8) - 1;
+        crypto_aes128_expand(kek, round);
+        memory_copy(a, wrap, 8);
+        memory_copy(r, wrap + 8, words * 8);
+        for (positive turn = 6; turn > 0; turn--)
+                for (positive i = words; i > 0; i--)
+                {
+                        p64 t = (p64)words * (turn - 1) + i;
+
+                        network_store_64(a, network_load_64(a) ^ t);
+                        memory_copy(block, a, 8);
+                        memory_copy(block + 8, r + (i - 1) * 8, 8);
+                        crypto_aes128_decrypt(round, block, block);
+                        memory_copy(a, block, 8);
+                        memory_copy(r + (i - 1) * 8, block + 8, 8);
+                }
+
+        unwrapped = network_load_64(a) == 0xa6a6a6a6a6a6a6a6ull;
+        if (unwrapped)
+        {
+                memory_copy(plain, r, words * 8);
+                address_to plain_length = words * 8;
+        }
+        crypto_forget(round, sizeof(round));
+        crypto_forget(block, sizeof(block));
+        crypto_forget(a, sizeof(a));
+        crypto_forget(r, sizeof(r));
+        return unwrapped;
 }
 
 /*
