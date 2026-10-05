@@ -13674,7 +13674,7 @@ install_boot()
                 -kernel "$image" -no-reboot -display none -serial stdio $coverage_serial \
                 -append "console=$install_console drm_client_lib.active=" \
                 -device qemu-xhci,id=xhci \
-                -drive if=none,id=disk,format=raw,file="$work/disk.img" \
+                -drive if=none,id=disk,format=raw,file="${install_disk:-$work/disk.img}" \
                 -device nvme,serial=moonwater,drive=disk \
                 "$@" < "$work/serial.in" > "$work/$name" 2>&1 &
         booting=$!
@@ -13717,24 +13717,602 @@ disk_checks()
                 return
         fi
 
-        if sfdisk --verify "$work/disk.img" > "$work/sfdisk" 2>&1; then
+        if sfdisk --verify "${install_disk:-$work/disk.img}" > "$work/sfdisk" 2>&1; then
                 won
         else
                 lost "$1 disk" 'sfdisk --verify refused the table'
                 sed 's/^/    /' "$work/sfdisk" | head -8
         fi
 
-        offset=$(sfdisk -d "$work/disk.img" 2>/dev/null |
+        offset=$(sfdisk -d "${install_disk:-$work/disk.img}" 2>/dev/null |
                 awk -F '[=,]' '/name="moonwater-data"/ { print $2 * 512; exit }')
 
         if [ -n "$offset" ] &&
-                e2fsck -fn "$work/disk.img?offset=$offset" > "$work/fsck" 2>&1; then
+                e2fsck -fn "${install_disk:-$work/disk.img}?offset=$offset" > "$work/fsck" 2>&1; then
                 won
         else
                 lost "$1 disk" 'e2fsck -fn is not clean'
                 sed 's/^/    /' "$work/fsck" | head -12
         fi
 }
+
+#
+#       Power lost while an image is being written, and an image that cannot
+#       be written whole.
+#
+#       A guest on pipes is started beside the stick, asked to update (or
+#       install), and killed outright a few milliseconds after it says it is
+#       writing the build, with QEMU gone mid-write. What is left on the disk
+#       is read from here, with a FAT reader that is not Moonwater's: the
+#       loader is the image the disk had or the one it was given, never
+#       between, no cluster chain of a file that is kept runs out, and a
+#       staging file the cut left is the one thing allowed to be there. Then
+#       the same disk is asked again and must come out as this build, with
+#       nothing left beside it. A stick whose image has no settings section
+#       says so, and one that stops short of its own sections is refused with
+#       the disk as it was.
+#
+#       The grid of cut times is where the write is, which is a few hundred
+#       milliseconds on a disk that answers at once; rows say that some cut
+#       landed with the copy begun and the old loader still the loader, and
+#       some after the new one was in place, so a grid that missed the write
+#       does not pass for one that held.
+#
+cat > "$work/fatjudge.py" <<'PY'
+import hashlib, re, struct, sys
+
+def masked(data):
+    # An image with the bytes of its settings section, where an install or an
+    # update stamps what the disk keeps, set aside.
+    d = bytearray(data)
+    if d[:2] == b'MZ':
+        pe = struct.unpack_from('<I', d, 0x3c)[0]
+        if bytes(d[pe:pe + 4]) == b'PE\0\0':
+            table = pe + 24 + struct.unpack_from('<H', d, pe + 20)[0]
+            for i in range(struct.unpack_from('<H', d, pe + 6)[0]):
+                s = bytes(d[table + 40 * i:table + 40 * i + 40])
+                if s[:8].rstrip(b'\0') == b'.mwset':
+                    size, raw = struct.unpack_from('<II', s, 16)
+                    d[raw:raw + size] = b'\0' * len(d[raw:raw + size])
+    return hashlib.sha256(bytes(d)).hexdigest()
+
+class Disk:
+    def __init__(self, path):
+        self.f = open(path, 'rb')
+        head = self.read(512, 92)
+        entries, count, size = struct.unpack_from('<QII', head, 72)
+        self.start = None
+        for i in range(count):
+            e = self.read(entries * 512 + i * size, size)
+            if e[56:128].decode('utf-16-le', 'replace').rstrip('\0') == 'moonwater-boot':
+                self.start = struct.unpack_from('<Q', e, 32)[0] * 512
+        if self.start is None:
+            raise SystemExit('none')
+        boot = self.read(self.start, 512)
+        self.sector, per, reserved, fats = struct.unpack_from('<HBHB', boot, 11)
+        self.fat_sectors = struct.unpack_from('<I', boot, 36)[0]
+        self.root = struct.unpack_from('<I', boot, 44)[0]
+        self.cluster = self.sector * per
+        self.fat = self.start + reserved * self.sector
+        self.data = self.fat + fats * self.fat_sectors * self.sector
+        self.clusters = (self.fat_sectors * self.sector) // 4
+        self.table = self.read(self.fat, self.fat_sectors * self.sector)
+        self.errors = []
+        self.claimed = {}
+    def read(self, offset, size):
+        self.f.seek(offset)
+        return self.f.read(size)
+    def next(self, c):
+        return struct.unpack_from('<I', self.table, c * 4)[0] & 0x0fffffff
+    def chain(self, first, what, size=None):
+        out, c = [], first
+        if first == 0:
+            if size:
+                self.errors.append('%s has no clusters for %d bytes' % (what, size))
+            return out
+        while True:
+            if c < 2 or c >= self.clusters or c == 0x0ffffff7:
+                self.errors.append('%s runs to cluster %#x' % (what, c))
+                return out
+            if self.next(c) == 0:
+                self.errors.append('%s has a free cluster %d in its chain' % (what, c))
+                return out
+            if c in out:
+                self.errors.append('%s loops' % what)
+                return out
+            if self.claimed.get(c, what) != what:
+                self.errors.append('%s and %s share cluster %d' % (what, self.claimed[c], c))
+            self.claimed[c] = what
+            out.append(c)
+            c = self.next(c)
+            if c >= 0x0ffffff8:
+                break
+        if size is not None and len(out) * self.cluster < size:
+            self.errors.append('%s is %d bytes in %d clusters' % (what, size, len(out)))
+        return out
+    def entries(self, first, what):
+        found = []
+        for c in self.chain(first, what):
+            blob = self.read(self.data + (c - 2) * self.cluster, self.cluster)
+            for o in range(0, self.cluster, 32):
+                e = blob[o:o + 32]
+                if e[0] == 0:
+                    return found
+                if e[0] == 0xe5 or e[11] == 0x0f or e[11] & 0x08:
+                    continue
+                found.append((e[:11].decode('latin-1'), e[11],
+                              struct.unpack_from('<H', e, 20)[0] << 16 |
+                              struct.unpack_from('<H', e, 26)[0],
+                              struct.unpack_from('<I', e, 28)[0]))
+        return found
+    def content(self, first, size, what):
+        data = b''
+        for c in self.chain(first, what, size):
+            data += self.read(self.data + (c - 2) * self.cluster, self.cluster)
+        return data[:size]
+
+def survey(path):
+    d = Disk(path)
+    files = {}
+    d.dirs = {}
+    stack = [('', d.root)]
+    while stack:
+        where, first = stack.pop()
+        for name, attr, cl, size in d.entries(first, where or '/'):
+            if name.startswith('.'):
+                continue
+            full = where + '/' + name.rstrip()
+            if attr & 0x10:
+                d.dirs[full] = cl
+                stack.append((full, cl))
+            else:
+                files[full] = (size, cl)
+                d.chain(cl, full, size)
+    return d, files
+
+def find(d, files, tail):
+    found = [k for k in files if k.endswith('/' + tail)]
+    if not found:
+        return None
+    size, cl = files[found[0]]
+    return masked(d.content(cl, size, found[0]))
+
+def stale(path):
+    # What a cut leaves when the directory block reached the disk and the FAT
+    # did not: a staging file beside each image, of 14 MB, whose first cluster
+    # the FAT says is free.
+    d, files = survey(path)
+    w = open(path, 'r+b')
+    free = [c for c in range(2, d.clusters) if d.next(c) == 0][-2:]
+    for where, name, cluster in (('/EFI/BOOT', b'BOOTX64 NEW', free[0]),
+                                 ('/EFI/MOONWA~1', b'PREVIOUSNEW', free[1])):
+        for c in d.chain(d.dirs[where], where):
+            at = d.data + (c - 2) * d.cluster
+            blob = d.read(at, d.cluster)
+            slot = [o for o in range(0, d.cluster, 32) if blob[o] in (0, 0xe5)]
+            if slot:
+                entry = bytearray(32)
+                entry[:11] = name
+                entry[11] = 0x20
+                struct.pack_into('<H', entry, 20, cluster >> 16)
+                struct.pack_into('<H', entry, 26, cluster & 0xffff)
+                struct.pack_into('<I', entry, 28, 14 * 1024 * 1024)
+                w.seek(at + slot[0])
+                w.write(entry)
+                break
+    w.close()
+
+mode = sys.argv[1]
+if mode == 'stale':
+    stale(sys.argv[2])
+elif mode == 'sha':
+    print(masked(open(sys.argv[2], 'rb').read()))
+elif mode == 'diskimage':
+    d, files = survey(sys.argv[2])
+    print(find(d, files, sys.argv[3]))
+elif mode == 'judge':
+    # judge DISK LOADER OLD NEW: what is on the disk, as words.
+    path, loader, old, new = sys.argv[2:6]
+    try:
+        d, files = survey(path)
+    except BaseException as e:
+        # No Moonwater partition, or a FAT that was still being made: no
+        # loader, which is whole when there was none to lose.
+        print('no-partitions' if isinstance(e, SystemExit) else 'fat-unreadable %s' % e)
+        print('image-absent')
+        print('image-whole' if old == 'none' else 'image-not-whole')
+        sys.exit(0)
+    sha = find(d, files, loader)
+    state = 'absent' if sha is None else 'old' if sha == old else 'new' if sha == new else 'torn'
+    print('image-%s' % state)
+    print('image-whole' if state in ('old', 'new') or (state == 'absent' and old == 'none')
+          else 'image-not-whole')
+    left = sorted(k.replace(' ', '') for k in files if k.endswith('NEW'))
+    print('leftover-%s' % (','.join(left) if left else 'none'))
+    sha = find(d, files, 'PREVIOUSEFI')
+    print('previous-absent' if sha is None else
+          'previous-%s' % ('old' if sha == old else 'new' if sha == new else 'torn'))
+    # A staging file the cut left half made is the one thing allowed to be
+    # wrong: the next write removes it.
+    errors = [e for e in d.errors if not re.search(r'NEW\b', e)]
+    print('fat-ok' if not errors else 'fat-bad %s' % '; '.join(errors[:4]))
+PY
+cat > "$work/cutboot.py" <<'PY'
+import os, re, subprocess, sys, threading, time
+
+# cutboot.py LOG TRIGGER K_MS COMMANDS LIMIT -- QEMU...
+# A guest started with its console on pipes, given COMMANDS at its first
+# prompt, and killed outright K_MS after TRIGGER first shows on the console
+# (never, when K_MS is negative). Says what became of it, and the time of
+# every line the moonwater command said, from the trigger, in LOG.times.
+log, trigger, k, commands, limit = sys.argv[1:6]
+k, limit = int(k), float(limit)
+argv = sys.argv[sys.argv.index('--') + 1:]
+trigger = trigger.encode()
+p = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                     stderr=subprocess.STDOUT)
+out = open(log, 'wb')
+times = open(log + '.times', 'w')
+seen = bytearray()
+state = {'sent': False, 'fired': None}
+begun = time.monotonic()
+
+def reader():
+    taken = 0
+    while True:
+        chunk = os.read(p.stdout.fileno(), 65536)
+        if not chunk:
+            return
+        out.write(chunk)
+        out.flush()
+        seen.extend(chunk)
+        if not state['sent'] and b' $ ' in seen:
+            state['sent'] = True
+            p.stdin.write(open(commands, 'rb').read())
+            p.stdin.close()
+        #       The kernel's own lines cut the console's in two (see says_whole).
+        if state['fired'] is None and \
+                trigger in re.sub(rb'\[ *[0-9]+\.[0-9]+\][^\n]*\n', b'', bytes(seen)):
+            state['fired'] = time.monotonic()
+        while b'\n' in seen[taken:]:
+            end = seen.index(b'\n', taken)
+            line = bytes(seen[taken:end])
+            taken = end + 1
+            if state['fired'] is not None and b'[Moonwater]' in line:
+                times.write('%d %s\n' % ((time.monotonic() - state['fired']) * 1000,
+                                         line.decode('latin-1', 'replace').strip()))
+                times.flush()
+
+thread = threading.Thread(target=reader, daemon=True)
+thread.start()
+cut = False
+while p.poll() is None and time.monotonic() - begun < limit:
+    if k >= 0 and state['fired'] is not None:
+        time.sleep(k / 1000.0)
+        p.kill()
+        cut = True
+        break
+    time.sleep(0.002)
+if p.poll() is None:
+    p.kill()
+p.wait()
+thread.join(5)
+print('fired-%s' % ('yes' if state['fired'] else 'no'))
+print('killed-%s' % ('yes' if cut else 'no'))
+print('ms-%d' % ((time.monotonic() - state['fired']) * 1000 if state['fired'] else -1))
+PY
+
+if [ "$install_loader" = BOOTX64.EFI ] && [ -r /dev/kvm ] && [ -w /dev/kvm ] &&
+        command -v python3 > /dev/null 2>&1 && command -v sfdisk > /dev/null 2>&1; then
+        loader_sha=$(python3 "$work/fatjudge.py" sha "$image")
+
+        #       MOONWATER_CUT_SHOW=DIRECTORY keeps what each of them did there,
+        #       for finding the grid: the verdicts, when the guest spoke from
+        #       the trigger, and the console.
+        cut_show()
+        {
+                [ -n "${MOONWATER_CUT_SHOW:-}" ] || return 0
+                cp "$work/$1" "$work/$1.console" "$work/$1.console.times" \
+                        "$MOONWATER_CUT_SHOW/" 2> /dev/null || true
+                { echo "== $1"; cat "$work/$1" "$work/$1.console.times" 2> /dev/null; } >&2
+        }
+
+        #       A guest cut at k ms: install_cut NAME K DISK COMMANDS [QEMU ARGS].
+        #       What the disk holds afterwards is judged against old_sha and
+        #       the image, and said in the file NAME.
+        install_cut()
+        {
+                name=$1
+                k=$2
+                disk=$3
+                commands=$4
+                shift 4
+                {
+                        sed -n 1p "$commands"
+                        echo 'until [ -e /run/moonwater/verdict ]; do sleep 1; done'
+                        sed 1d "$commands"
+                } > "$work/$name.sent"
+                # shellcheck disable=SC2086
+                python3 "$work/cutboot.py" "$work/$name.console" "${cut_trigger:-writing this build}" "$k" \
+                        "$work/$name.sent" 240 -- \
+                        "$install_emulator" -m 2G -smp 2 $install_board $install_machine \
+                        -kernel "$image" -no-reboot -display none -serial stdio \
+                        -append "console=$install_console drm_client_lib.active=" \
+                        -device qemu-xhci,id=xhci \
+                        -drive if=none,id=disk,format=raw,file="$disk" \
+                        -device nvme,serial=moonwater,drive=disk "$@" \
+                        > "$work/$name" 2>&1
+                python3 "$work/fatjudge.py" judge "$disk" "$install_short" "$old_sha" \
+                        "$loader_sha" >> "$work/$name" 2>&1
+                cut_show "$name"
+        }
+
+        #       The disk of another build the cuts start from: this build
+        #       installed, then its loader made one byte another's.
+        cat > "$work/cutbase.commands" <<'COMMANDS'
+this line is eaten by the console
+printf 'nvme0n1\n' | moonwater setup install nvme0n1 > /tmp/install 2>&1
+printf 'based-%s\n' $(( $? + 40 ))
+mkdir -p /mnt
+mount -t vfat /dev/nvme0n1p1 /mnt
+at=$(od -An -tu2 -j526 -N2 /mnt/EFI/BOOT/BOOTX64.EFI)
+printf X | dd of=/mnt/EFI/BOOT/BOOTX64.EFI bs=1 seek=$((512 + at)) conv=notrunc 2>/dev/null
+umount /mnt
+poweroff
+COMMANDS
+        truncate -s 4G "$work/cutbase.img" || exit 1
+        install_disk=$work/cutbase.img
+        # shellcheck disable=SC2086
+        install_boot cutbase $stick
+        install_disk=""
+        says cutbase 'the disk the cuts start from is installed' 'based-40'
+        old_sha=$(python3 "$work/fatjudge.py" diskimage "$work/cutbase.img" "$install_short")
+        if [ -z "$old_sha" ] || [ "$old_sha" = "$loader_sha" ]; then
+                lost 'cut base' 'the disk the cuts start from does not hold another build'
+        fi
+
+        cat > "$work/cutupdate.commands" <<'COMMANDS'
+this line is eaten by the console
+moonwater setup update nvme0n1
+poweroff
+COMMANDS
+        cat > "$work/cutagain.commands" <<'COMMANDS'
+this line is eaten by the console
+moonwater setup update nvme0n1 > /tmp/again 2>&1
+printf 'again-%s\n' $(( $? + 40 ))
+cat /tmp/again
+poweroff
+COMMANDS
+
+        landed_begun=0
+        landed_after=0
+        for k in ${MOONWATER_CUT_MS:-0 10 20 30 40 50 60 70}; do
+                rm -f "$work/cut.img"
+                cp --sparse=always "$work/cutbase.img" "$work/cut.img" || exit 1
+                # shellcheck disable=SC2086
+                install_cut "cutu$k" "$k" "$work/cut.img" "$work/cutupdate.commands" $stick
+                says "cutu$k" "update cut at $k ms: the guest was writing" 'fired-yes'
+                says "cutu$k" "update cut at $k ms: the loader is old or new, never torn" 'image-whole'
+                never "cutu$k" "update cut at $k ms: the FAT's chains hold" 'fat-bad'
+                if grep -q 'image-old' "$work/cutu$k" && ! grep -q 'leftover-none' "$work/cutu$k"; then
+                        landed_begun=$((landed_begun + 1))
+                fi
+                ! grep -q 'image-new' "$work/cutu$k" || landed_after=$((landed_after + 1))
+
+                #       Asked again, the disk is updated whatever the cut left.
+                cp "$work/cutagain.commands" "$work/again$k.commands"
+                install_disk=$work/cut.img
+                # shellcheck disable=SC2086
+                install_boot "again$k" $stick
+                cut_show "again$k"
+                python3 "$work/fatjudge.py" judge "$work/cut.img" "$install_short" "$old_sha" \
+                        "$loader_sha" >> "$work/again$k" 2>&1
+                disk_checks "again$k"
+                install_disk=""
+                says "again$k" "update after a cut at $k ms succeeds" 'again-40'
+                says "again$k" "and the disk has this build's loader" 'image-new'
+                says "again$k" "and nothing is left beside the loaders" 'leftover-none'
+                says "again$k" "and the FAT's chains hold" 'fat-ok'
+        done
+        if [ "$landed_begun" -gt 0 ]; then
+                won
+        else
+                lost 'power cuts' 'no cut landed with the copy begun and the old loader in place'
+        fi
+        if [ "$landed_after" -gt 0 ]; then
+                won
+        else
+                lost 'power cuts' 'no cut landed after the new loader was in place'
+        fi
+
+        #       What a cut leaves is not always a file the FAT driver can be
+        #       trusted with: a staging file whose directory entry is on the
+        #       disk and whose chain is not (made here, deterministically,
+        #       beside both images). Opening or removing it turns the
+        #       partition read-only unless the mount goes on.
+        cp --sparse=always "$work/cutbase.img" "$work/cut.img" || exit 1
+        python3 "$work/fatjudge.py" stale "$work/cut.img"
+        cp "$work/cutagain.commands" "$work/stale.commands"
+        install_disk=$work/cut.img
+        # shellcheck disable=SC2086
+        install_boot stale $stick
+        cut_show stale
+        python3 "$work/fatjudge.py" judge "$work/cut.img" "$install_short" "$old_sha" \
+                "$loader_sha" >> "$work/stale" 2>&1
+        install_disk=""
+        says stale 'an update over staging files with no chains succeeds' 'again-40'
+        says stale 'and the disk has this build'"'"'s loader'        'image-new'
+        says stale 'and the staging files are gone'                'leftover-none'
+        says stale 'and the FAT'"'"'s chains hold'                   'fat-ok'
+        never stale 'and the partition did not turn read-only'     'Read-only file system'
+
+        #       A stick whose image stops before its own sections do: refused
+        #       by an update with the disk as it was, and by an install before
+        #       the disk is erased.
+        mkdir -p "$work/stick-short/EFI/BOOT" "$work/stick-plain/EFI/BOOT" || exit 1
+        python3 - "$image" "$work/stick-short/EFI/BOOT/$install_loader" \
+                "$work/stick-plain/EFI/BOOT/$install_loader" <<'PY'
+import sys
+d = bytearray(open(sys.argv[1], 'rb').read())
+open(sys.argv[2], 'wb').write(d[:len(d) * 3 // 4])
+# And this one with no settings section: its name in the table is not .mwset.
+d[d.index(b'.mwset\0\0', 0, 4096) + 5] = ord('x')
+open(sys.argv[3], 'wb').write(d)
+PY
+        cat > "$work/short.commands" <<'COMMANDS'
+this line is eaten by the console
+moonwater setup update nvme0n1 > /tmp/update 2>&1
+printf 'update-refused-%s\n' $(( $? + 40 ))
+cat /tmp/update
+printf 'nvme1n1\n' | moonwater setup install nvme1n1 > /tmp/install 2>&1
+printf 'install-refused-%s\n' $(( $? + 40 ))
+cat /tmp/install
+printf 'blank-%s\n' $(( $(ls /sys/class/block | grep -c '^nvme1n1p') + 30 ))
+poweroff
+COMMANDS
+        truncate -s 4G "$work/blank.img" || exit 1
+        install_disk=$work/cutbase.img
+        # shellcheck disable=SC2086
+        install_boot short -drive if=none,id=stick,format=raw,file=fat:ro:$work/stick-short,readonly=on \
+                -device usb-storage,bus=xhci.0,drive=stick,removable=on \
+                -drive if=none,id=blank,format=raw,file="$work/blank.img" \
+                -device nvme,serial=moonwater2,drive=blank
+        install_disk=""
+        python3 "$work/fatjudge.py" judge "$work/cutbase.img" "$install_short" "$old_sha" \
+                "$loader_sha" >> "$work/short" 2>&1
+        says short 'an update from an image cut short is refused'  'update-refused-41'
+        says short 'and says it is cut short'                      'is cut short'
+        says short 'and the disk keeps the loader it had'          'image-old'
+        says short 'and no previous loader was made of it'         'previous-absent'
+        says short 'an install from it is refused'                 'install-refused-41'
+        says short 'and the disk was not erased for it'            'blank-30'
+        rm -f "$work/blank.img" "$work/cutbase.img"
+
+        #       An install cut the same way, with 300 MB of /root to copy so
+        #       the write has a length: the loader is absent or whole, what
+        #       is on the disk is judged as before, and an install over what
+        #       the cut left is a whole install.
+        cat > "$work/cutinstall.commands" <<'COMMANDS'
+this line is eaten by the console
+dd if=/dev/urandom of=/root/big bs=1M count=300 2> /dev/null
+printf 'nvme0n1\n' | moonwater setup install nvme0n1
+poweroff
+COMMANDS
+        cat > "$work/cutredo.commands" <<'COMMANDS'
+this line is eaten by the console
+printf 'verdict-%s\n' "$(cut -c1-4 /run/moonwater/verdict | rev)"
+if [ "$(cut -c1-4 /run/moonwater/verdict)" != disk ]; then
+        printf 'nvme0n1\n' | moonwater setup install nvme0n1 > /tmp/install 2>&1
+        printf 'redone-%s\n' $(( $? + 40 ))
+fi
+poweroff
+COMMANDS
+
+        #       The data an install keeps, read by e2fsck and debugfs: the
+        #       ext4 is clean and /root/big is all of its 300 MB.
+        cut_data()
+        {
+                offset=$(sfdisk -d "$2" 2> /dev/null |
+                        awk -F '[=,]' '/name="moonwater-data"/ { print $2 * 512; exit }')
+                size=$(debugfs -R 'stat /root/big' "$2?offset=$offset" 2> /dev/null |
+                        sed -n 's/^.*Size: \([0-9]*\).*$/\1/p' | head -n 1)
+                if [ -n "$offset" ] && e2fsck -fn "$2?offset=$offset" > /dev/null 2>&1 &&
+                        [ "$size" = 314572800 ]; then
+                        echo data-whole >> "$work/$1"
+                else
+                        echo "data-partial-${size:-none}" >> "$work/$1"
+                fi
+        }
+
+        old_sha=none
+        landed_copy=0
+        landed_image=0
+        cut_trigger='partitioning and formatting'
+        for k in ${MOONWATER_CUT_INSTALL_MS:-0 30 70 120 170 185 200 215 230 260}; do
+                rm -f "$work/cut.img"
+                truncate -s 4G "$work/cut.img" || exit 1
+                # shellcheck disable=SC2086
+                install_cut "cuti$k" "$k" "$work/cut.img" "$work/cutinstall.commands" $stick
+                cut_data "cuti$k" "$work/cut.img"
+                says "cuti$k" "install cut at $k ms: the guest was installing" 'fired-yes'
+                says "cuti$k" "install cut at $k ms: no loader, or a whole one" 'image-whole'
+                never "cuti$k" "install cut at $k ms: the FAT's chains hold" 'fat-bad'
+                if grep -q 'image-new' "$work/cuti$k"; then
+                        says "cuti$k" "install cut at $k ms: a disk with its loader has all its data" 'data-whole'
+                        landed_image=$((landed_image + 1))
+                elif grep -q 'image-absent' "$work/cuti$k" && grep -q 'copying /root' "$work/cuti$k.console"; then
+                        landed_copy=$((landed_copy + 1))
+                fi
+                cp "$work/cutredo.commands" "$work/redo$k.commands"
+                install_disk=$work/cut.img
+                # shellcheck disable=SC2086
+                install_boot "redo$k" $stick
+                cut_show "redo$k"
+                python3 "$work/fatjudge.py" judge "$work/cut.img" "$install_short" none \
+                        "$loader_sha" >> "$work/redo$k" 2>&1
+                disk_checks "redo$k"
+                install_disk=""
+                if grep -q 'image-absent' "$work/cuti$k"; then
+                        says "redo$k" "a disk cut before its loader is not attached" 'redone-40'
+                fi
+                if grep -q 'image-absent' "$work/cuti$k" && ! grep -q 'no-partitions' "$work/cuti$k"; then
+                        says "redo$k" "and is asked about, not trusted" 'verdict- ksa'
+                fi
+                says "redo$k" "a disk after the cut at $k ms comes out of an install whole" 'image-new'
+                says "redo$k" "and nothing left beside the loader" 'leftover-none'
+                says "redo$k" "and the FAT's chains hold" 'fat-ok'
+        done
+        cut_trigger=""
+        if [ "$landed_copy" -gt 0 ]; then
+                won
+        else
+                lost 'power cuts' 'no install was cut with its data copying and no loader yet'
+        fi
+        if [ "$landed_image" -gt 0 ]; then
+                won
+        else
+                lost 'power cuts' 'no install was cut after its loader was in place'
+        fi
+        rm -f "$work/cut.img"
+
+        #       An image with no settings section, which an install and an
+        #       update must say starts the disk from the defaults and not
+        #       claim to carry the session's.
+        cat > "$work/plain.commands" <<'COMMANDS'
+this line is eaten by the console
+printf 'nvme0n1\n' | moonwater setup install nvme0n1 > /tmp/install 2>&1
+printf 'installed-%s\n' $(( $? + 40 ))
+cat /tmp/install
+printf 'claim-%s\n' $(( $(grep -c "this session's settings" /tmp/install) + 30 ))
+printf 'said-%s\n' $(( $(grep -c 'has no place for settings' /tmp/install) * 7 ))
+moonwater setup update > /tmp/update 2>&1
+printf 'updated-%s\n' $(( $? + 40 ))
+cat /tmp/update
+printf 'update-said-%s\n' $(( $(grep -c 'has no place for settings' /tmp/update) * 7 ))
+poweroff
+COMMANDS
+        truncate -s 4G "$work/cut.img" || exit 1
+        install_disk=$work/cut.img
+        # shellcheck disable=SC2086
+        install_boot plain -drive if=none,id=stick,format=raw,file=fat:ro:$work/stick-plain,readonly=on \
+                -device usb-storage,bus=xhci.0,drive=stick,removable=on
+        install_disk=""
+        plain_sha=$(python3 "$work/fatjudge.py" sha "$work/stick-plain/EFI/BOOT/$install_loader")
+        python3 "$work/fatjudge.py" judge "$work/cut.img" "$install_short" none "$plain_sha" \
+                >> "$work/plain" 2>&1
+        says plain 'an image with no settings section installs'  'installed-40'
+        says plain 'and does not say it carries the session'"'"'s settings' 'claim-30'
+        says plain 'and says the disk starts with the defaults'  'said-7'
+        says plain 'an update from it succeeds'                  'updated-40'
+        says plain 'and says so too'                             'update-said-7'
+        says plain 'and the disk has the image as it is'         'image-new'
+        rm -f "$work/cut.img"
+fi
+
+if [ "${MOONWATER_INSTALL_ONLY:-}" = cut ]; then
+        counted
+        exit
+fi
 
 cat > "$work/live.commands" <<'COMMANDS'
 this line is eaten by the console
@@ -14055,11 +14633,14 @@ i=0
 while [ $i -lt $sections ]; do [ "$(dd if=$f bs=1 skip=$((table + 40 * i)) count=6 2> /dev/null)" = .mwset ] && raw=$(od -An -tu4 -j$((table + 40 * i + 20)) -N4 $f | tr -d ' '); i=$((i + 1)); done
 printf '\377\377\377\377' | dd of=$f bs=1 seek=$((raw + 44)) conv=notrunc 2> /dev/null
 printf '\377\377\377\377' | dd of=$f bs=1 seek=$((raw + 16384 + 44)) conv=notrunc 2> /dev/null
+cp $f /tmp/before
 dd if=/dev/zero of=/mnt/fill bs=1M 2> /dev/null
 umount /mnt
 moonwater setup update nvme0n1 > /tmp/upd 2>&1
 printf 'damaged-%s\n' $(( $(grep -c 'settings slots on nvme0n1 are damaged' /tmp/upd) * 7 ))
 mount -t vfat /dev/nvme0n1p1 /mnt
+cmp $f /tmp/before > /dev/null 2>&1
+printf 'full-kept-%s\n' $(( $? + 30 ))
 printf 'leftover-%s\n' $(( $(ls /mnt/EFI/BOOT /mnt/EFI/moonwater | grep -c -i '\.new$') + 30 ))
 rm -f /mnt/fill
 umount /mnt
@@ -14103,6 +14684,7 @@ says hostile 'a data directory that is a link is not bound' 'plant-refused-41'
 says hostile 'and /home is not /etc'               'plant-home-30'
 says hostile 'an update says when it starts the settings over' 'damaged-7'
 says hostile 'and one that stops leaves nothing beside the images' 'leftover-30'
+says hostile 'a full partition keeps the loader it had'  'full-kept-30'
 says hostile 'a copy that cannot start is refused' 'gone-refused-41'
 says hostile 'and the disk says it has no install' 'gone-said-7'
 says hostile 'and has no partitions to be one'     'gone-parts-30'

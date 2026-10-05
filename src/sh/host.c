@@ -293,6 +293,7 @@ static fn host_settings_empty(host_settings address_to settings);
 static b32 host_settings_image(string_address path, host_settings address_to into);
 static bipolar host_settings_stamp(string_address path, host_settings address_to settings);
 static p64 host_settings_section(bipolar handle);
+static bool host_image_whole(string_address path);
 static bool host_settings_slots(bipolar handle, host_settings address_to slots,
                                 p64 address_to offset);
 static bool host_settings_booted(host_settings address_to into);
@@ -1424,7 +1425,15 @@ static bipolar host_mount(string_address name, string_address target,
         if (made < 0)
                 return made;
 
-        return system_mount(device, target, type, flags, 0);
+        /*      A FAT written to goes on when it finds a chain that is wrong, and
+                does not turn read-only. What a write stages beside the image and
+                power cut off part way is wrong in just that way (the directory
+                entry reached the disk and the table did not), and removing it is
+                the next write's first step, which an ro partition refuses. */
+        return system_mount(device, target, type, flags,
+                            !(flags & MS_RDONLY) && string_equals(type, "vfat")
+                                ? (string_address) "errors=continue"
+                                : null);
 }
 
 /* Resolve the identity again immediately before a later use. Device names are
@@ -1568,6 +1577,24 @@ static bool host_medium_find(host_medium_search address_to search,
 
                 host_pause(HOST_POLL_NS);
         }
+}
+
+/*
+        Whether the image on the medium found is all there, said when it is
+        not. Asked before a disk is erased or an image on it is kept as the
+        previous one: a copy that is cut short reads back as itself.
+*/
+static bool host_medium_whole(void)
+{
+        p8 source[HOST_PATH_ROOM];
+
+        if (host_join(source, sizeof(source), HOST_MEDIUM, HOST_IMAGE) &&
+            host_image_whole(source))
+                return true;
+
+        host_say(log_error, host_label "the image to write is cut short: it ends before "
+                                       "its own sections do, so nothing was written\n");
+        return false;
 }
 
 // Placing an image ----------------------------------------------
@@ -1755,6 +1782,10 @@ static b32 host_place_written(string_address system, string_address running,
             !host_join(source, sizeof(source), HOST_MEDIUM, HOST_IMAGE))
                 return host_refuse("%s: path too long\n", system);
 
+        //      What an earlier write that was cut off left beside the images is
+        //      not trusted to be a file, and is not opened: it is removed.
+        host_image_discard(system);
+
         if (system_access_at(AT_FDCWD, image, 0) >= 0 &&
             host_join(next, sizeof(next), system, HOST_KEPT_IMAGE_NEXT) &&
             host_join(kept, sizeof(kept), system, HOST_KEPT_IMAGE))
@@ -1816,10 +1847,13 @@ static b32 host_place_written(string_address system, string_address running,
         of an update. The image there before is kept as previous.efi, for the
         firmware's shell or a stick to start when a build turns out bad; the
         new one is written beside the old and renamed over it, so a machine
-        that loses power part way still has an image that starts. Nothing is
-        renamed that is not what was copied, nothing it was copying is left
-        behind when it stops, and what it did is read back from the disk
-        itself, the partition unmounted. The partition is left unmounted.
+        that loses power part way finds the image it had or this one, whole
+        (test/run's power cuts hold that on a disk killed at every few
+        milliseconds of the write). Nothing is renamed that is not what was
+        copied, nothing it was copying is left behind when it stops, what a cut
+        left is removed before the next write, and what it did is read back
+        from the disk itself, the partition unmounted. The partition is left
+        unmounted.
 */
 static b32 host_place_image(string_address name, string_address system,
                             string_address running, host_settings address_to carry,
@@ -1969,6 +2003,12 @@ static b32 host_update_locked(host_install address_to install)
         {
                 host_unmount(HOST_MEDIUM);
                 return host_refuse("%s is no longer here\n", install->disk);
+        }
+
+        if (!host_medium_whole())
+        {
+                host_unmount(HOST_MEDIUM);
+                return 1;
         }
 
         mounted = host_mount(install->system, HOST_SYSTEM, "vfat", HOST_WRITABLE);
@@ -2330,10 +2370,13 @@ static b32 host_boot(void)
         chosen = census.found;
         host_write_text(HOST_QUESTION, "");
         host_verdict_set("ask ", chosen->disk);
-        host_say(log, host_label "%s has Moonwater installed from another build.\n"
-                      host_label "A terminal will ask what to do with it, or "
-                      "moonwater setup use, update or live answers from a shell.\n",
+        host_say(log, chosen->readable
+                          ? host_label "%s has Moonwater installed from another build.\n"
+                          : host_label "%s has Moonwater's partitions and no image on "
+                                       "them: an install that did not finish.\n",
                  chosen->disk);
+        host_say(log, host_label "A terminal will ask what to do with it, or "
+                      "moonwater setup use, update or live answers from a shell.\n");
         host_booted(known ? address_of settings : null);
         return 0;
 }
@@ -2773,6 +2816,12 @@ static b32 host_install_locked(string_address asked, bool removable)
                                    "there is nothing to install on %s\n", name);
         }
 
+        if (!host_medium_whole())
+        {
+                host_unmount(HOST_MEDIUM);
+                return 1;
+        }
+
         host_join(device, sizeof(device), "/dev/", name);
 
         /*
@@ -2930,33 +2979,14 @@ static b32 host_install_locked(string_address asked, bool removable)
                                             name);
         }
 
-        failed = host_mount(target.system, HOST_SYSTEM, "vfat", HOST_WRITABLE);
-        if (failed < 0)
-        {
-                b32 said = host_fail(target.system, failed);
-
-                host_install_abandon(address_of target);
-                return said;
-        }
-
-        host_say(log, host_label "writing this build to %s, from %s, with this "
-                                 "session's settings\n",
-                 target.system, search.name);
-
-        failed = host_place_image(target.system, HOST_SYSTEM, running, address_of carry,
-                                  address_of carried);
-        host_unmount(HOST_SYSTEM);
-        host_unmount(HOST_MEDIUM);
-        if (failed)
-        {
-                host_install_abandon(address_of target);
-                return 1;
-        }
-
-        if (!carried)
-                host_say(log, host_label "this build's image has no place for settings, "
-                                         "so %s starts with the defaults\n", name);
-
+        /*
+                The data goes first and the image last. The image is what makes
+                a disk an install of this build, which boot attaches without
+                asking: with it placed before the copy, power lost during the
+                copy left a disk that boots as complete and keeps what part of
+                /root had arrived. A disk cut before the image has partitions
+                and none, and is asked about.
+        */
         failed = host_mount(target.data, HOST_DATA, "ext4", HOST_DATA_MOUNT);
         if (failed < 0)
         {
@@ -2990,8 +3020,40 @@ static b32 host_install_locked(string_address asked, bool removable)
         }
 
         if (!host_unmount(HOST_DATA))
-                return host_refuse("%s is installed, but its data partition could not be "
-                                   "let go of; start again from it\n", name);
+        {
+                b32 said = host_refuse("the data partition on %s could not be let go "
+                                       "of\n", name);
+
+                host_install_abandon(address_of target);
+                return said;
+        }
+
+        failed = host_mount(target.system, HOST_SYSTEM, "vfat", HOST_WRITABLE);
+        if (failed < 0)
+        {
+                b32 said = host_fail(target.system, failed);
+
+                host_install_abandon(address_of target);
+                return said;
+        }
+
+        host_say(log, host_label "writing this build to %s, from %s\n",
+                 target.system, search.name);
+
+        failed = host_place_image(target.system, HOST_SYSTEM, running, address_of carry,
+                                  address_of carried);
+        host_unmount(HOST_SYSTEM);
+        host_unmount(HOST_MEDIUM);
+        if (failed)
+        {
+                host_install_abandon(address_of target);
+                return 1;
+        }
+
+        host_say(log, carried ? host_label "%s starts with this session's settings\n"
+                              : host_label "this build's image has no place for "
+                                           "settings, so %s starts with the defaults\n",
+                 name);
 
         if (host_take(address_of target, false))
                 return 1;
@@ -3431,6 +3493,66 @@ static p64 host_settings_generation(host_settings address_to slots)
 }
 
 /*
+        The first page of a PE image read into head, and where its section
+        table is in it and how many sections it names: false for a file that
+        is not one, or one whose section table does not end inside the page.
+*/
+static bool host_pe_table(bipolar handle, p8 address_to head, positive address_to table,
+                          positive address_to count)
+{
+        positive pe;
+
+        if (file_transfer_exact(syscall(pread64), handle, head, HOST_SETTINGS_PAGE, 0) !=
+                (bipolar)HOST_SETTINGS_PAGE ||
+            head[0] != 'M' || head[1] != 'Z')
+                return false;
+
+        pe = storage_le32(head + 0x3c);
+        if (pe > HOST_SETTINGS_PAGE - 24 || memory_compare(head + pe, "PE\0\0", 4))
+                return false;
+
+        address_to count = storage_le16(head + pe + 6);
+        address_to table = pe + 24 + storage_le16(head + pe + 20);
+        return address_to table + address_to count * 40 <= HOST_SETTINGS_PAGE;
+}
+
+/*
+        Whether a file runs as far as its own section table says it does. An
+        image cut short, by a copy that stopped or a stick pulled, still names
+        its build in its first page, and everything past the cut is missing
+        from what would be copied and read back as itself.
+*/
+static bool host_image_whole(string_address path)
+{
+        p8 head[HOST_SETTINGS_PAGE];
+        file_facts facts;
+        bipolar handle = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC);
+        positive table;
+        positive count;
+        bool whole = false;
+
+        if (handle < 0)
+                return false;
+
+        if (host_pe_table(handle, head, address_of table, address_of count) && count &&
+            file_look_code(AT_FDCWD, path, 0, address_of facts) >= 0)
+        {
+                whole = true;
+                for (positive at = 0; at < count; at++)
+                {
+                        p8 address_to section = head + table + at * 40;
+
+                        if ((p64)storage_le32(section + 20) + storage_le32(section + 16) >
+                            facts.size)
+                                whole = false;
+                }
+        }
+
+        system_close(handle);
+        return whole;
+}
+
+/*
         Where an image keeps its settings: the file offset of its first slot,
         or 0 for an image without them. The section table says where, and both
         slots must carry the magic there before anything believes it.
@@ -3439,23 +3561,13 @@ static p64 host_settings_section(bipolar handle)
 {
         p8 head[HOST_SETTINGS_PAGE];
         p64 magic[2];
-        positive pe;
         positive table;
         positive count;
 
-        if (file_transfer_exact(syscall(pread64), handle, head, sizeof(head), 0) !=
-                (bipolar)sizeof(head) ||
-            head[0] != 'M' || head[1] != 'Z')
+        if (!host_pe_table(handle, head, address_of table, address_of count))
                 return 0;
 
-        pe = storage_le32(head + 0x3c);
-        if (pe > sizeof(head) - 24 || memory_compare(head + pe, "PE\0\0", 4))
-                return 0;
-
-        count = storage_le16(head + pe + 6);
-        table = pe + 24 + storage_le16(head + pe + 20);
-
-        for (positive at = 0; at < count && table + (at + 1) * 40 <= sizeof(head); at++)
+        for (positive at = 0; at < count; at++)
         {
                 p8 address_to section = head + table + at * 40;
                 p64 raw = storage_le32(section + 20);
