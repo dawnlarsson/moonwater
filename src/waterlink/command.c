@@ -551,7 +551,7 @@ static fn link_serve_start(bool detached)
                                         system_descriptor_install(null_handle,
                                                                   target);
                 }
-                (void)system_call_3(syscall(close_range), 3, ~0u, 0);
+                (void)descriptors_close_except(3, descriptors_none, descriptors_none);
                 (void)shell_exec_file((string_address) "/proc/self/exe", words,
                                       3, file_environment_all());
                 system_call_1(syscall(exit), 127);

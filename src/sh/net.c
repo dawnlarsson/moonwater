@@ -82,25 +82,6 @@ static b32 net_kmsg_handle = -1;
 static p8 net_kmsg_line[512];
 static positive net_kmsg_used;
 
-/*
-        Every record says what level it is, and says 6.
-
-        A write to /dev/kmsg with no level on the front is given the default
-        one, which this kernel sets to 7. The console prints what is BELOW its
-        own loglevel, also 7, so a message at 7 goes into the log and never
-        appears -- which is exactly what happened: the machine configured
-        itself perfectly and said nothing about it. 6 is KERN_INFO, which is
-        what this is.
-*/
-#define NET_KMSG_LEVEL "<6>"
-#define NET_KMSG_LEVEL_BYTES 3
-
-static COLD fn net_kmsg_begin(void)
-{
-        memory_copy(net_kmsg_line, NET_KMSG_LEVEL, NET_KMSG_LEVEL_BYTES);
-        net_kmsg_used = NET_KMSG_LEVEL_BYTES;
-}
-
 static COLD fn net_kmsg(address_any data, positive length)
 {
         p8 address_to bytes = (p8 address_to)data;
@@ -109,18 +90,15 @@ static COLD fn net_kmsg(address_any data, positive length)
         if (!length)
                 length = string_length(bytes);
 
-        if (net_kmsg_used < NET_KMSG_LEVEL_BYTES)
-                net_kmsg_begin();
-
         for (at = 0; at < length; at++)
         {
-                if (bytes[at] == '\n' || net_kmsg_used + 2 >= sizeof net_kmsg_line)
+                if (bytes[at] == '\n' || net_kmsg_used + 1 >= sizeof net_kmsg_line)
                 {
-                        if (net_kmsg_used > NET_KMSG_LEVEL_BYTES)
-                                system_write_all((positive)net_kmsg_handle,
-                                                 net_kmsg_line, net_kmsg_used);
+                        if (net_kmsg_used)
+                                kmsg_write(net_kmsg_handle, net_kmsg_line,
+                                           net_kmsg_used);
 
-                        net_kmsg_begin();
+                        net_kmsg_used = 0;
 
                         if (bytes[at] == '\n')
                                 continue;
@@ -2572,7 +2550,7 @@ static COLD b32 net_watch(void)
 
         if (net_kmsg_handle >= 0)
         {
-                net_kmsg_begin();
+                net_kmsg_used = 0;
                 net_out = net_kmsg;
         }
 

@@ -1856,6 +1856,72 @@ static inline INLINE bool system_signal_install(
 #define system_fork() system_call_2(syscall(clone), SIGCHLD, 0)
 #endif
 
+#if defined(LINUX) && !defined(KERNEL_MODE) && !defined(STANDARD_NO_PLATFORM)
+/* A forked child lets go of everything its parent had open: every descriptor
+   from the first number up, except the one or two it still needs (a pipe's
+   end, a socket) -- pass descriptors_none for a missing one. The two may
+   come in either order, be the same, or lie below the first number; the
+   ranges handed to the kernel are the ones between them, so none is empty
+   (close_range refuses those). A copy of a descriptor outlives the process that opened it for as
+   long as any child holds it, and a lock or an attach on the file is held
+   that long, so a child that does not exec is the one place this has to be
+   said. False when the kernel refused a range. */
+#define descriptors_none (~(p32)0)
+
+static COLD bool descriptors_close_except(p32 from, p32 first, p32 second)
+{
+        p32 keep[2] = {first, second};
+
+        if (keep[0] > keep[1])
+                keep[0] = second, keep[1] = first;
+        for (positive i = 0; i < 2 && keep[i] != descriptors_none; i++)
+        {
+                if (keep[i] < from)
+                        continue;
+                if (keep[i] > from &&
+                    system_call_3(syscall(close_range), from, keep[i] - 1, 0) < 0)
+                        return false;
+                from = keep[i] + 1;
+        }
+        return system_call_3(syscall(close_range), from, ~(p32)0, 0) >= 0;
+}
+
+/*
+        One record in the kernel log, which says what level it is, and says 6.
+
+        A write to /dev/kmsg with no level on the front is given the default
+        one, which this kernel sets to 7. The console prints what is BELOW its
+        own loglevel, also 7, so a message at 7 goes into the log and never
+        appears -- which is exactly what happened: the machine configured
+        itself perfectly and said nothing about it. 6 is KERN_INFO, which is
+        what this is.
+
+        The text is one record, and a record is one write: the kernel refuses
+        one over 1,024 bytes outright rather than cutting it, so the text is
+        cut here to what fits behind the level. A newline at its end is the
+        kernel's to strip, and one in the middle is the caller's to avoid.
+        handle is /dev/kmsg opened for writing; false when the record did not
+        go in whole.
+*/
+#define KMSG_LEVEL "<6>"
+#define KMSG_LEVEL_BYTES 3
+#define KMSG_RECORD_MOST 1024
+
+static COLD bool kmsg_write(bipolar handle, const address_any text,
+                            positive length)
+{
+        p8 record[KMSG_RECORD_MOST];
+
+        if (length > sizeof record - KMSG_LEVEL_BYTES)
+                length = sizeof record - KMSG_LEVEL_BYTES;
+        memory_copy(record, KMSG_LEVEL, KMSG_LEVEL_BYTES);
+        memory_copy(record + KMSG_LEVEL_BYTES, text, length);
+        return system_write_all((positive)handle, record,
+                                KMSG_LEVEL_BYTES + length) ==
+               KMSG_LEVEL_BYTES + length;
+}
+#endif
+
 /* The common moving byte store.  Naming the three words once also names the
    only correct reserve/release argument order; subsystems keep semantic
    typedefs without rebuilding either operation around them. */

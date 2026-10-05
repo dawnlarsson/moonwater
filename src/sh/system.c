@@ -340,10 +340,12 @@ static DEAD_END b32 system_init()
                 }
                 else
                 {
-                        string_format(log, status & 0x7f
+                        positive code = (positive)wait_status_code_base((p32)status, 256);
+
+                        string_format(log, code >= 256
                             ? init_label "%s killed by signal %p, restarting\n"
                             : init_label "%s exited (%p), restarting\n", init_program,
-                            status & 0x7f ? status & 0x7f : status >> 8 & 0xff);
+                            code >= 256 ? code & 0xff : code);
                         log_flush();
                 }
 

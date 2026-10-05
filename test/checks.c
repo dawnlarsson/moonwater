@@ -47974,6 +47974,121 @@ static fn test_exec(void)
              WEXITSTATUS(status), 13);
 }
 
+//      -- descriptors a child lets go of -----------------------------------------
+
+/*
+        descriptors_close_except in a child of its own, over sixteen
+        descriptors that are all open to begin with: the ones from `from` up
+        are closed except the two kept, whatever their order, and the ones
+        below `from` are not touched. The child answers with the number of
+        descriptors that are not what that says, and 100 when the call
+        itself said false.
+*/
+static fn test_close_except_case(string_address name, p32 from, p32 first,
+                                 p32 second)
+{
+        b32 status = 0;
+        b32 child;
+
+        log_flush();
+        child = fork();
+
+        if (child == 0)
+        {
+                positive wrong = 0;
+                bipolar null_device = system_open_at(AT_FDCWD, "/dev/null", FILE_READ);
+
+                for (positive at = 0; at < 16; at++)
+                        system_call_3(syscall(dup3), (positive)null_device, at, 0);
+                if (null_device >= 16)
+                        system_close(null_device);
+
+                if (!descriptors_close_except(from, first, second))
+                        _exit(100);
+
+                for (positive at = 0; at < 16; at++)
+                {
+                        bool open = system_call_3(syscall(fcntl), at, 1, 0) >= 0;
+                        bool wanted = at < from || at == first || at == second;
+
+                        wrong += open != wanted;
+                }
+                _exit((int)wrong);
+        }
+
+        waitpid(child, address_of status, 0);
+        same(name, WEXITSTATUS(status), 0);
+}
+
+static fn test_close_except(void)
+{
+        test_close_except_case("close_except: all from 3 up", 3, descriptors_none,
+                               descriptors_none);
+        test_close_except_case("close_except: one kept", 3, 5, descriptors_none);
+        test_close_except_case("close_except: one kept, in the second place", 3,
+                               descriptors_none, 5);
+        test_close_except_case("close_except: two kept", 3, 5, 9);
+        test_close_except_case("close_except: two kept, reversed", 3, 9, 5);
+        test_close_except_case("close_except: the same one twice", 3, 5, 5);
+        test_close_except_case("close_except: two adjacent", 3, 7, 8);
+        test_close_except_case("close_except: one at from, one beside it", 3, 3, 4);
+        test_close_except_case("close_except: the last of the sixteen kept", 3, 15,
+                               descriptors_none);
+        test_close_except_case("close_except: kept below from are not the range's", 3,
+                               1, 2);
+        test_close_except_case("close_except: one below from and one above it", 3, 2, 9);
+        test_close_except_case("close_except: one above from and one below it", 3, 9, 1);
+        test_close_except_case("close_except: from 0 closes standard input too", 0,
+                               4, 8);
+        test_close_except_case("close_except: one past every open one", 3, 100,
+                               descriptors_none);
+        test_close_except_case("close_except: the highest number there is", 3,
+                               0xfffffffe, descriptors_none);
+}
+
+//      -- the kernel log's record -------------------------------------------------
+
+/*
+        kmsg_write against a pipe in place of /dev/kmsg: the bytes that go
+        in are the level and the text in one write, and one that would not
+        fit behind the level is cut to what does -- the kernel refuses the
+        record whole past 1,024 bytes.
+*/
+static fn test_kmsg_write(void)
+{
+        b32 ends[2];
+        p8 text[1100];
+        p8 got[1100];
+        bipolar read_length;
+
+        same("kmsg: a pipe to stand for the log", system_pipe(ends, 0), 0);
+        memory_fill(text, 'x', sizeof text);
+
+        true_is("kmsg: a short record is written whole",
+                kmsg_write(ends[1], "hello", 5));
+        read_length = system_read_retry((positive)ends[0], got, sizeof got);
+        same("kmsg: it is the level and the text", read_length, 8);
+        same("kmsg: and in that order", memory_compare(got, "<6>hello", 8), 0);
+
+        true_is("kmsg: an empty record is the level alone",
+                kmsg_write(ends[1], "", 0));
+        same("kmsg: which is three bytes", system_read_retry((positive)ends[0], got, sizeof got), 3);
+
+        true_is("kmsg: the longest text that fits is written whole",
+                kmsg_write(ends[1], text, 1021));
+        same("kmsg: as 1,024 bytes", system_read_retry((positive)ends[0], got, sizeof got), 1024);
+
+        true_is("kmsg: more than fits is cut to it, not refused",
+                kmsg_write(ends[1], text, sizeof text));
+        read_length = system_read_retry((positive)ends[0], got, sizeof got);
+        same("kmsg: 1,024 bytes again", read_length, 1024);
+        same("kmsg: of the level and the text's first 1,021",
+             memory_compare(got, "<6>", 3) == 0 && got[1023] == 'x', 1);
+
+        system_close(ends[0]);
+        system_close(ends[1]);
+}
+
 //      -- temporary names ------------------------------------------------------
 
 static fn test_temporary(void)
@@ -48291,6 +48406,8 @@ b32 main(void)
         test_names();
         test_realpath();
         test_exec();
+        test_close_except();
+        test_kmsg_write();
         test_temporary();
         test_remove();
         test_getopt();

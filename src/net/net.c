@@ -11440,25 +11440,13 @@ static COLD bool dhcp_confine(b32 handle)
                 p16 count;
                 dhcp_filter_step address_to steps;
         } filter = {0, steps};
-        p32 keep[2] = {(p32)handle, (p32)dhcp_apart};
-        p32 from = 0;
         positive at = 0;
         bipolar status;
 
         if (dhcp_apart < 0)
                 return true;
-        if (keep[0] > keep[1])
-                keep[0] = keep[1], keep[1] = (p32)handle;
-        //      Below, between and above the two kept.
-        for (positive i = 0; i < 3; i++)
-        {
-                if ((i == 2 || keep[i] > from) &&
-                    system_call_3(syscall(close_range), from,
-                                  i < 2 ? keep[i] - 1 : ~0u, 0) < 0)
-                        return false;
-                if (i < 2)
-                        from = keep[i] + 1;
-        }
+        if (!descriptors_close_except(0, (p32)handle, (p32)dhcp_apart))
+                return false;
 
         if ((!system_call_1(syscall(getuid), 0) &&
              (system_call_2(syscall(setgroups), 0, 0) < 0 ||

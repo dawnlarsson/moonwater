@@ -4045,16 +4045,15 @@ static fn host_kmsg(string_address address_to parts)
         p8 line[320];
         bipolar handle;
 
-        string_copy_bounded(line, "<6>[moonwater] ", sizeof(line) - 1);
+        string_copy_bounded(line, "[moonwater] ", sizeof(line));
         for (; *parts; parts++)
-                string_append_bounded(line, *parts, sizeof(line) - 1);
-        string_append_bounded(line, "\n", sizeof(line));
+                string_append_bounded(line, *parts, sizeof(line));
 
         handle = system_open_at(AT_FDCWD, "/dev/kmsg", 01 | O_CLOEXEC);
         if (handle < 0)
                 return;
 
-        system_call_3(syscall(write), (positive)handle, (positive)line, string_length(line));
+        kmsg_write(handle, line, string_length(line));
         system_close(handle);
 }
 
@@ -5993,10 +5992,6 @@ static COLD fn radio_keeper_start(void)
 {
         wifi_link address_to link = address_of radio_joined;
         radio_file_lock lock = {.type = RADIO_FILE_WRITE_LOCK};
-        positive low = link->eapol < link->session.handle ? (positive)link->eapol
-                                                          : (positive)link->session.handle;
-        positive high = link->eapol < link->session.handle ? (positive)link->session.handle
-                                                           : (positive)link->eapol;
         positive status = 0;
         bipolar quiet;
         bipolar handle;
@@ -6022,11 +6017,7 @@ static COLD fn radio_keeper_start(void)
         for (positive at = 0; quiet >= 0 && at < 3; at++)
                 if ((positive)quiet != at)
                         system_call_3(syscall(dup3), (positive)quiet, at, 0);
-        if (low > 3)
-                system_call_3(syscall(close_range), 3, low - 1, 0);
-        if (high > low + 1)
-                system_call_3(syscall(close_range), low + 1, high - 1, 0);
-        system_call_3(syscall(close_range), high + 1, ~(p32)0, 0);
+        (void)descriptors_close_except(3, (p32)link->eapol, (p32)link->session.handle);
         //      The join's scan news is nothing to the keeper, which would
         //      wake for every scan anyone asked for.
         if (link->session.scan)
@@ -11852,14 +11843,11 @@ static bipolar locale_child_fork(locale_child address_to child)
                 system_close(ends[0]);
                 child->pid = 0;
                 child->answer = ends[1];
-                //      Nothing of the machine process stays open in it. Its
-                //      descriptor on /dev/spark holds the machine's
-                //      attachment until the last copy closes, and a machine
-                //      restarted during a query found it taken.
-                if (keep > 3)
-                        system_call_3(syscall(close_range), 3, keep - 1, 0);
-                system_call_3(syscall(close_range), keep < 3 ? 3 : keep + 1,
-                              ~(p32)0, 0);
+                //      Nothing of the machine process stays open in it: a copy
+                //      of a descriptor of its lives as long as the query does,
+                //      and the machine's attachment on /dev/spark once lived
+                //      with it.
+                (void)descriptors_close_except(3, (p32)keep, descriptors_none);
                 return 0;
         }
         system_close(ends[1]);
