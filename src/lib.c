@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        380 routines (360 public, 20 local), 373 of them on all three and 7 local to one.
+        381 routines (361 public, 20 local), 374 of them on all three and 7 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -163,6 +163,7 @@
           hash_crc32c                    public  yes     yes     yes
           hash_crc64                     public  yes     yes     yes
           hash_half_md4_wide             public  yes     yes     yes
+          hash_hmac_sha256_prepared      public  yes     yes     yes
           hash_xxh64                     public  yes     yes     yes
           hash_xxh64_add                 public  yes     yes     yes
           hash_xxh64_begin               public  yes     yes     yes
@@ -9846,6 +9847,186 @@ __asm__(
     ASM_FUNC(sha256_compress)
     "mov $1, %edx\n   jmp sha256_blocks\n"
     ASM_END(sha256_compress)
+
+    // HMAC-SHA-256 of a message under a key whose two pad blocks are already
+    // digested: inner and outer are the eight chaining words each of them
+    // left, data and length the message, out the 32 bytes of the answer. It
+    // answers whether it did it, which is whether the machine has the SHA
+    // extensions; where it did not the caller has the answer to make.
+    //
+    // The state stays in the two registers the rounds want it in from the
+    // first block to the last: the whole blocks of the message are read where
+    // they lie, the last block is built in sixteen-byte stores (the whole
+    // sixteens copied, the remainder read as the last sixteen bytes of the
+    // message and shifted down under a mask, so that no byte past the
+    // message is read, and the padding and the length put in with it), and
+    // the inner digest, which is the next message, never leaves a register.
+    // Every load a block meets is one store of the same size, because a
+    // load that spans several smaller stores waits for them to retire:
+    // two of those waits were a fifth of a check of a stranger's datagram.
+    // A message under sixteen bytes has no sixteen to read and is copied a
+    // byte at a time, which waits once.
+    ASM_FUNC(hash_hmac_sha256_prepared)
+#ifndef KERNEL_MODE
+    ".Lhmac256_x64_dispatch:\n"
+    "cmpb $0, cpu_has_sha(%rip)\n   jne .Lhmac256_x64_ni\n"
+    "cmpb $0, cpu_hash_probed(%rip)\n   jne .Lhmac256_x64_none\n"
+    "call cpu_hash_detect\n   jmp .Lhmac256_x64_dispatch\n"
+    ".Lhmac256_x64_ni:\n"
+    "sub $136, %rsp\n"
+    "movdqa .Lsha256_ni_mask_x64(%rip), %xmm8\n"
+    "movdqu (%rdi), %xmm7\n   movdqu 16(%rdi), %xmm2\n   pshufd $0xb1, %xmm7, %xmm7\n   pshufd $0x1b, %xmm2, %xmm2\n   movdqa %xmm7, %xmm1\n   palignr $8, %xmm2, %xmm1\n   pblendw $0xf0, %xmm7, %xmm2\n"
+    "mov %rcx, %r9\n   mov %rcx, %r10\n   shr $6, %r10\n   jz .Lhmac256_x64_tail\n"
+    ".balign 16\n"
+    ".Lhmac256_x64_full:\n"
+    "movdqu 0(%rdx), %xmm3\n   pshufb %xmm8, %xmm3\n   movdqu 16(%rdx), %xmm4\n   pshufb %xmm8, %xmm4\n"
+    "movdqu 32(%rdx), %xmm5\n   pshufb %xmm8, %xmm5\n   movdqu 48(%rdx), %xmm6\n   pshufb %xmm8, %xmm6\n"
+    "call .Lhmac256_x64_compress\n"
+    "add $64, %rdx\n   dec %r10\n   jnz .Lhmac256_x64_full\n"
+    ".Lhmac256_x64_tail:\n"
+    "and $63, %ecx\n"
+    "pxor %xmm0, %xmm0\n"
+    "movdqa %xmm0, 0(%rsp)\n   movdqa %xmm0, 16(%rsp)\n   movdqa %xmm0, 32(%rsp)\n   movdqa %xmm0, 48(%rsp)\n"
+    "movdqa %xmm0, 64(%rsp)\n   movdqa %xmm0, 80(%rsp)\n   movdqa %xmm0, 96(%rsp)\n   movdqa %xmm0, 112(%rsp)\n"
+    "lea 64(%r9), %rax\n   shl $3, %rax\n   bswap %rax\n   movq %rax, %xmm12\n   pslldq $8, %xmm12\n"
+    "cmp $16, %r9\n   jb .Lhmac256_x64_small\n"
+    "mov %ecx, %r10d\n   shr $4, %r10d\n   shl $4, %r10d\n"
+    "xor %r11d, %r11d\n"
+    ".Lhmac256_x64_granules:\n"
+    "cmp %r10d, %r11d\n   jae .Lhmac256_x64_partial\n"
+    "movdqu (%rdx,%r11), %xmm0\n   movdqa %xmm0, (%rsp,%r11)\n   add $16, %r11d\n"
+    "jmp .Lhmac256_x64_granules\n"
+    ".Lhmac256_x64_partial:\n"
+    "movdqu -16(%rdx,%rcx), %xmm11\n"
+    "lea .Lhmac256_x64_shift(%rip), %rax\n   mov %ecx, %edi\n   and $15, %edi\n   shl $4, %edi\n"
+    "pshufb (%rax,%rdi), %xmm11\n   por 256(%rax,%rdi), %xmm11\n"
+    "cmp $48, %ecx\n   jb .Lhmac256_x64_last\n   cmp $56, %ecx\n   jae .Lhmac256_x64_last\n"
+    "por %xmm12, %xmm11\n   movdqa %xmm11, 48(%rsp)\n   jmp .Lhmac256_x64_blocks\n"
+    ".Lhmac256_x64_last:\n"
+    "movdqa %xmm11, (%rsp,%r10)\n"
+    "cmp $56, %ecx\n   jae .Lhmac256_x64_two\n"
+    "movdqa %xmm12, 48(%rsp)\n   jmp .Lhmac256_x64_blocks\n"
+    ".Lhmac256_x64_two:\n"
+    "movdqa %xmm12, 112(%rsp)\n   jmp .Lhmac256_x64_blocks\n"
+    ".Lhmac256_x64_small:\n"
+    "xor %r11d, %r11d\n"
+    ".Lhmac256_x64_byte:\n"
+    "cmp %ecx, %r11d\n   jae .Lhmac256_x64_marker\n"
+    "movzbl (%rdx,%r11), %eax\n   movb %al, (%rsp,%r11)\n   inc %r11d\n   jmp .Lhmac256_x64_byte\n"
+    ".Lhmac256_x64_marker:\n"
+    "movb $0x80, (%rsp,%rcx)\n   movdqa %xmm12, 48(%rsp)\n"
+    ".Lhmac256_x64_blocks:\n"
+    "mov $1, %r10d\n   cmp $56, %ecx\n   jb .Lhmac256_x64_built\n   mov $2, %r10d\n"
+    ".Lhmac256_x64_built:\n"
+    "xor %r11d, %r11d\n"
+    ".balign 16\n"
+    ".Lhmac256_x64_tail_block:\n"
+    "movdqa 0(%rsp,%r11), %xmm3\n   pshufb %xmm8, %xmm3\n   movdqa 16(%rsp,%r11), %xmm4\n   pshufb %xmm8, %xmm4\n"
+    "movdqa 32(%rsp,%r11), %xmm5\n   pshufb %xmm8, %xmm5\n   movdqa 48(%rsp,%r11), %xmm6\n   pshufb %xmm8, %xmm6\n"
+    "call .Lhmac256_x64_compress\n"
+    "add $64, %r11d\n   dec %r10d\n   jnz .Lhmac256_x64_tail_block\n"
+    // The inner digest is the outer block's first 32 bytes, as words and so
+    // as it stands, with the padding and the length of 96 bytes after it.
+    "pshufd $0x1b, %xmm1, %xmm3\n   pshufd $0xb1, %xmm2, %xmm4\n"
+    "movdqa %xmm4, %xmm6\n   palignr $8, %xmm3, %xmm6\n   pblendw $0xf0, %xmm4, %xmm3\n"
+    "movdqa %xmm6, %xmm4\n"
+    "movdqa .Lhmac256_x64_pad(%rip), %xmm5\n   movdqa .Lhmac256_x64_bits(%rip), %xmm6\n"
+    "movdqu (%rsi), %xmm7\n   movdqu 16(%rsi), %xmm2\n   pshufd $0xb1, %xmm7, %xmm7\n   pshufd $0x1b, %xmm2, %xmm2\n   movdqa %xmm7, %xmm1\n   palignr $8, %xmm2, %xmm1\n   pblendw $0xf0, %xmm7, %xmm2\n"
+    "call .Lhmac256_x64_compress\n"
+    "pshufd $0x1b, %xmm1, %xmm3\n   pshufd $0xb1, %xmm2, %xmm4\n"
+    "movdqa %xmm4, %xmm6\n   palignr $8, %xmm3, %xmm6\n   pblendw $0xf0, %xmm4, %xmm3\n"
+    "pshufb %xmm8, %xmm3\n   pshufb %xmm8, %xmm6\n"
+    "movdqu %xmm3, (%r8)\n   movdqu %xmm6, 16(%r8)\n"
+    "pxor %xmm0, %xmm0\n"
+    "movdqa %xmm0, 0(%rsp)\n   movdqa %xmm0, 16(%rsp)\n   movdqa %xmm0, 32(%rsp)\n   movdqa %xmm0, 48(%rsp)\n"
+    "movdqa %xmm0, 64(%rsp)\n   movdqa %xmm0, 80(%rsp)\n   movdqa %xmm0, 96(%rsp)\n   movdqa %xmm0, 112(%rsp)\n"
+    "add $136, %rsp\n   mov $1, %eax\n"
+    ASM_RET
+    // One block, from the message words in xmm3-xmm6 and the state in xmm1
+    // and xmm2, which are sha256_blocks' rounds with the loads taken out.
+    ".balign 16\n"
+    ".Lhmac256_x64_compress:\n"
+    "lea .Lsha256_ni_k_x64(%rip), %rax\n"
+    "movdqa %xmm1, %xmm9\n   movdqa %xmm2, %xmm10\n"
+    "movdqa %xmm3, %xmm0\n   paddd 0(%rax), %xmm0\n   sha256rnds2 %xmm1, %xmm2\n"
+    "pshufd $0x0e, %xmm0, %xmm0\n   sha256rnds2 %xmm2, %xmm1\n"
+    "movdqa %xmm4, %xmm0\n   paddd 16(%rax), %xmm0\n   sha256rnds2 %xmm1, %xmm2\n"
+    "pshufd $0x0e, %xmm0, %xmm0\n   sha256rnds2 %xmm2, %xmm1\n"
+    "sha256msg1 %xmm4, %xmm3\n"
+    "movdqa %xmm5, %xmm0\n   paddd 32(%rax), %xmm0\n   sha256rnds2 %xmm1, %xmm2\n"
+    "pshufd $0x0e, %xmm0, %xmm0\n   sha256rnds2 %xmm2, %xmm1\n"
+    "sha256msg1 %xmm5, %xmm4\n"
+    "movdqa %xmm6, %xmm0\n   paddd 48(%rax), %xmm0\n   sha256rnds2 %xmm1, %xmm2\n"
+    "movdqa %xmm6, %xmm7\n   palignr $4, %xmm5, %xmm7\n   paddd %xmm7, %xmm3\n   sha256msg2 %xmm6, %xmm3\n"
+    "pshufd $0x0e, %xmm0, %xmm0\n   sha256rnds2 %xmm2, %xmm1\n"
+    "sha256msg1 %xmm6, %xmm5\n"
+    "movdqa %xmm3, %xmm0\n   paddd 64(%rax), %xmm0\n   sha256rnds2 %xmm1, %xmm2\n"
+    "movdqa %xmm3, %xmm7\n   palignr $4, %xmm6, %xmm7\n   paddd %xmm7, %xmm4\n   sha256msg2 %xmm3, %xmm4\n"
+    "pshufd $0x0e, %xmm0, %xmm0\n   sha256rnds2 %xmm2, %xmm1\n"
+    "sha256msg1 %xmm3, %xmm6\n"
+    "movdqa %xmm4, %xmm0\n   paddd 80(%rax), %xmm0\n   sha256rnds2 %xmm1, %xmm2\n"
+    "movdqa %xmm4, %xmm7\n   palignr $4, %xmm3, %xmm7\n   paddd %xmm7, %xmm5\n   sha256msg2 %xmm4, %xmm5\n"
+    "pshufd $0x0e, %xmm0, %xmm0\n   sha256rnds2 %xmm2, %xmm1\n"
+    "sha256msg1 %xmm4, %xmm3\n"
+    "movdqa %xmm5, %xmm0\n   paddd 96(%rax), %xmm0\n   sha256rnds2 %xmm1, %xmm2\n"
+    "movdqa %xmm5, %xmm7\n   palignr $4, %xmm4, %xmm7\n   paddd %xmm7, %xmm6\n   sha256msg2 %xmm5, %xmm6\n"
+    "pshufd $0x0e, %xmm0, %xmm0\n   sha256rnds2 %xmm2, %xmm1\n"
+    "sha256msg1 %xmm5, %xmm4\n"
+    "movdqa %xmm6, %xmm0\n   paddd 112(%rax), %xmm0\n   sha256rnds2 %xmm1, %xmm2\n"
+    "movdqa %xmm6, %xmm7\n   palignr $4, %xmm5, %xmm7\n   paddd %xmm7, %xmm3\n   sha256msg2 %xmm6, %xmm3\n"
+    "pshufd $0x0e, %xmm0, %xmm0\n   sha256rnds2 %xmm2, %xmm1\n"
+    "sha256msg1 %xmm6, %xmm5\n"
+    "movdqa %xmm3, %xmm0\n   paddd 128(%rax), %xmm0\n   sha256rnds2 %xmm1, %xmm2\n"
+    "movdqa %xmm3, %xmm7\n   palignr $4, %xmm6, %xmm7\n   paddd %xmm7, %xmm4\n   sha256msg2 %xmm3, %xmm4\n"
+    "pshufd $0x0e, %xmm0, %xmm0\n   sha256rnds2 %xmm2, %xmm1\n"
+    "sha256msg1 %xmm3, %xmm6\n"
+    "movdqa %xmm4, %xmm0\n   paddd 144(%rax), %xmm0\n   sha256rnds2 %xmm1, %xmm2\n"
+    "movdqa %xmm4, %xmm7\n   palignr $4, %xmm3, %xmm7\n   paddd %xmm7, %xmm5\n   sha256msg2 %xmm4, %xmm5\n"
+    "pshufd $0x0e, %xmm0, %xmm0\n   sha256rnds2 %xmm2, %xmm1\n"
+    "sha256msg1 %xmm4, %xmm3\n"
+    "movdqa %xmm5, %xmm0\n   paddd 160(%rax), %xmm0\n   sha256rnds2 %xmm1, %xmm2\n"
+    "movdqa %xmm5, %xmm7\n   palignr $4, %xmm4, %xmm7\n   paddd %xmm7, %xmm6\n   sha256msg2 %xmm5, %xmm6\n"
+    "pshufd $0x0e, %xmm0, %xmm0\n   sha256rnds2 %xmm2, %xmm1\n"
+    "sha256msg1 %xmm5, %xmm4\n"
+    "movdqa %xmm6, %xmm0\n   paddd 176(%rax), %xmm0\n   sha256rnds2 %xmm1, %xmm2\n"
+    "movdqa %xmm6, %xmm7\n   palignr $4, %xmm5, %xmm7\n   paddd %xmm7, %xmm3\n   sha256msg2 %xmm6, %xmm3\n"
+    "pshufd $0x0e, %xmm0, %xmm0\n   sha256rnds2 %xmm2, %xmm1\n"
+    "sha256msg1 %xmm6, %xmm5\n"
+    "movdqa %xmm3, %xmm0\n   paddd 192(%rax), %xmm0\n   sha256rnds2 %xmm1, %xmm2\n"
+    "movdqa %xmm3, %xmm7\n   palignr $4, %xmm6, %xmm7\n   paddd %xmm7, %xmm4\n   sha256msg2 %xmm3, %xmm4\n"
+    "pshufd $0x0e, %xmm0, %xmm0\n   sha256rnds2 %xmm2, %xmm1\n"
+    "sha256msg1 %xmm3, %xmm6\n"
+    "movdqa %xmm4, %xmm0\n   paddd 208(%rax), %xmm0\n   sha256rnds2 %xmm1, %xmm2\n"
+    "movdqa %xmm4, %xmm7\n   palignr $4, %xmm3, %xmm7\n   paddd %xmm7, %xmm5\n   sha256msg2 %xmm4, %xmm5\n"
+    "pshufd $0x0e, %xmm0, %xmm0\n   sha256rnds2 %xmm2, %xmm1\n"
+    "movdqa %xmm5, %xmm0\n   paddd 224(%rax), %xmm0\n   sha256rnds2 %xmm1, %xmm2\n"
+    "movdqa %xmm5, %xmm7\n   palignr $4, %xmm4, %xmm7\n   paddd %xmm7, %xmm6\n   sha256msg2 %xmm5, %xmm6\n"
+    "pshufd $0x0e, %xmm0, %xmm0\n   sha256rnds2 %xmm2, %xmm1\n"
+    "movdqa %xmm6, %xmm0\n   paddd 240(%rax), %xmm0\n   sha256rnds2 %xmm1, %xmm2\n"
+    "pshufd $0x0e, %xmm0, %xmm0\n   sha256rnds2 %xmm2, %xmm1\n"
+    "paddd %xmm9, %xmm1\n   paddd %xmm10, %xmm2\n"
+    "ret\n"
+    "\n   .pushsection .rodata\n   .balign 16\n"
+    // Row r shifts the last sixteen bytes of a message down by 16 - r, and
+    // so puts its last r bytes first with zeros after them; row r of the
+    // second table is the padding byte at offset r.
+    ".Lhmac256_x64_shift:\n"
+    ".irp r,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15\n"
+    ".irp i,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15\n"
+    ".if \\i < \\r\n   .byte \\i + 16 - \\r\n.else\n   .byte 0x80\n.endif\n"
+    ".endr\n.endr\n"
+    ".Lhmac256_x64_padding:\n"
+    ".irp r,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15\n"
+    ".irp i,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15\n"
+    ".if \\i == \\r\n   .byte 0x80\n.else\n   .byte 0\n.endif\n"
+    ".endr\n.endr\n"
+    ".Lhmac256_x64_pad:\n   .long 0x80000000, 0, 0, 0\n"
+    ".Lhmac256_x64_bits:\n   .long 0, 0, 0, 768\n"
+    ".popsection\n"
+#endif
+    ".Lhmac256_x64_none:\n   xor %eax, %eax\n"
+    ASM_RET
+    ASM_END(hash_hmac_sha256_prepared)
     ASM_FUNC(sha512_blocks)
     "test %rdx, %rdx\n   jz .Lsha512_x64_none\n"
 #ifndef KERNEL_MODE
@@ -24009,6 +24190,15 @@ __asm__(
     ASM_FUNC(sha256_compress)
     "mov x2, #1\n   b sha256_blocks\n"
     ASM_END(sha256_compress)
+    // hash_hmac_sha256_prepared: not here. What the x86_64 body removes is a
+    // wait for stores to retire that a block built in sixteen-byte stores
+    // already avoids, which the caller does in C; the SHA-2 instructions keep
+    // their state in the register they are fed from, so there is no
+    // conversion to save either.
+    ASM_FUNC(hash_hmac_sha256_prepared)
+    "mov w0, #0\n"
+    ASM_RET
+    ASM_END(hash_hmac_sha256_prepared)
     //
     // sha512_blocks -- a..h in x3-x10, the circular schedule in sixteen registers,
     // two temporaries and b^c carried for Maj. Every free register is a
@@ -36697,6 +36887,11 @@ __asm__(
     ASM_FUNC(sha256_compress)
     "li a2, 1\n   j sha256_blocks\n"
     ASM_END(sha256_compress)
+    // hash_hmac_sha256_prepared: not here, as on arm64.
+    ASM_FUNC(hash_hmac_sha256_prepared)
+    "li a0, 0\n"
+    ASM_RET
+    ASM_END(hash_hmac_sha256_prepared)
     // sha512_blocks: the sha256_blocks shape in doublewords. Each of the
     // three-rotation functions is two shift-xor chains, one gathering the
     // right halves and one the left, since the floor has no rori; a
@@ -51647,6 +51842,16 @@ READS(2) fn blake2b_blocks(p64 address_to state, const p8 address_to data, posit
                            positive tail);
 /* One SHA-256 compression: sha256_blocks over one 64-byte block. */
 fn sha256_compress(p32 address_to state, p8 address_to block);
+/* The HMAC-SHA-256 of length bytes under a key whose two pad blocks are
+   already digested -- inner and outer, the eight chaining words each left --
+   written to out, 32 bytes. True when it was made; false, with out untouched,
+   where this machine has no body for it (x86_64 with the SHA extensions has
+   one) and the caller makes it, as net.c's does. The message is read exactly
+   to its end. */
+bool hash_hmac_sha256_prepared(const p32 address_to inner,
+                               const p32 address_to outer,
+                               const p8 address_to data, positive length,
+                               p8 address_to out);
 /* GHASH, the GCM authenticator, over whole 16-byte blocks: for each block
    state = (state ^ block) * H in GF(2^128), state 16 bytes in GCM order.
    table is GHASH_KEY_SIZE bytes that ghash_key filled from the 16-byte H,

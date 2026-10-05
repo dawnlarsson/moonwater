@@ -2575,14 +2575,138 @@ static inline INLINE fn crypto_hmac_prepare(positive algorithm, positive size,
         crypto_forget(pad, sizeof pad);
 }
 
+/*
+        The same for SHA-256, which is every check of a stranger's datagram
+        and so the one HMAC anyone can make this machine do by the million.
+        Through the digest functions the last block of the message and the one
+        that holds the inner sum are built a byte or a word at a time and
+        handed to sha256_blocks, which reads a block in sixteen-byte loads, and
+        a load that spans several smaller stores waits for them to leave the
+        store buffer: two such waits in a check were a fifth of it. Here each
+        block is made of sixteen-byte stores -- the whole sixteens of the
+        message, what is left of it in two words, the padding and the length
+        in words -- so every load meets the one store that made it, and
+        nothing goes through a digest state.
+*/
+typedef p64 crypto_lane __attribute__((vector_size(16), may_alias));
+typedef p64 crypto_lane_loose
+    __attribute__((vector_size(16), may_alias, aligned(1)));
+
+static inline INLINE p32 crypto_swap32(p32 value)
+{
+        return value >> 24 | (value >> 8 & 0xff00) | (value << 8 & 0xff0000) |
+               value << 24;
+}
+
+//      The bytes of a word written big endian, as the word that holds them.
+static inline INLINE p64 crypto_bytes_of(p64 value)
+{
+        return (p64)crypto_swap32((p32)value) << 32 |
+               crypto_swap32((p32)(value >> 32));
+}
+
+//      Up to eight bytes as a little-endian word, and not one read past them.
+static inline INLINE p64 crypto_part(const p8 address_to bytes, positive length)
+{
+        if (length >= 4)
+                return (p64)memory_load_unaligned(p32, bytes) |
+                       (p64)memory_load_unaligned(p32, bytes + length - 4)
+                           << (8 * (length - 4));
+
+        return length ? (p64)bytes[0] | (p64)bytes[length >> 1] << (8 * (length >> 1)) |
+                            (p64)bytes[length - 1] << (8 * (length - 1))
+                      : 0;
+}
+
+//      Eight words of state as the thirty-two bytes of a digest, two lanes.
+static inline INLINE fn crypto_lanes_of_words(crypto_lane_loose address_to into,
+                                              const p32 address_to words)
+{
+        for (positive at = 0; at < 2; at++)
+                into[at] = (crypto_lane){
+                    (p64)crypto_swap32(words[4 * at]) |
+                        (p64)crypto_swap32(words[4 * at + 1]) << 32,
+                    (p64)crypto_swap32(words[4 * at + 2]) |
+                        (p64)crypto_swap32(words[4 * at + 3]) << 32};
+}
+
+static fn crypto_hmac_sha256_prepared(const crypto_hmac_key address_to prepared,
+                                      p8 address_to data, positive length,
+                                      p8 address_to out)
+{
+        crypto_lane state[2];
+        crypto_lane block[8];
+        p32 address_to words = (p32 address_to)state;
+        positive whole = length >> 6;
+        positive rest = length & 63;
+        positive full = rest >> 4;
+        positive left = rest & 15;
+        positive blocks = rest < 56 ? 1 : 2;
+        p8 address_to tail = data + (whole << 6);
+        p64 bits = crypto_bytes_of((prepared->inner.bytes + length) << 3);
+        p64 low;
+        p64 high;
+
+        state[0] = *(const crypto_lane_loose address_to)prepared->inner.state.narrow;
+        state[1] = *(const crypto_lane_loose address_to)(prepared->inner.state.narrow + 4);
+        if (whole)
+                sha256_blocks(words, data, whole);
+
+        for (positive at = 0; at < blocks * 4; at++)
+                block[at] = (crypto_lane){0, 0};
+        for (positive at = 0; at < full; at++)
+                block[at] = *(const crypto_lane_loose address_to)(tail + 16 * at);
+        if (left >= 8)
+        {
+                low = memory_load_unaligned(p64, tail + 16 * full);
+                high = crypto_part(tail + 16 * full + 8, left - 8) |
+                       (p64)0x80 << (8 * (left - 8));
+        }
+        else
+        {
+                low = crypto_part(tail + 16 * full, left) | (p64)0x80 << (8 * left);
+                high = 0;
+        }
+        block[full] = (crypto_lane){low, high};
+        if (blocks == 1 && full == 3)
+                block[3] = (crypto_lane){low, bits};
+        else
+                block[blocks * 4 - 1] = (crypto_lane){0, bits};
+        sha256_blocks(words, (p8 address_to)block, blocks);
+
+        crypto_lanes_of_words((crypto_lane_loose address_to)block, words);
+        block[2] = (crypto_lane){0x80, 0};
+        block[3] = (crypto_lane){
+            0, crypto_bytes_of((prepared->outer.bytes + 32) << 3)};
+        state[0] = *(const crypto_lane_loose address_to)prepared->outer.state.narrow;
+        state[1] = *(const crypto_lane_loose address_to)(prepared->outer.state.narrow + 4);
+        sha256_blocks(words, (p8 address_to)block, 1);
+        crypto_lanes_of_words((crypto_lane_loose address_to)out, words);
+
+        crypto_forget(state, sizeof state);
+        crypto_forget(block, sizeof block);
+}
+
 //      The HMAC of a message under a prepared key.
 static fn crypto_hmac_prepared(const crypto_hmac_key address_to prepared,
                                p8 address_to data, positive length,
                                p8 address_to out)
 {
-        digest_state work = prepared->inner;
+        digest_state work;
         p8 inner[64];
 
+        if (prepared->inner.algorithm == DIGEST_SHA256)
+        {
+                //      The assembly has the pad blocks' 64 bytes in it.
+                if (prepared->inner.bytes != 64 || prepared->outer.bytes != 64 ||
+                    !hash_hmac_sha256_prepared(prepared->inner.state.narrow,
+                                               prepared->outer.state.narrow,
+                                               data, length, out))
+                        crypto_hmac_sha256_prepared(prepared, data, length, out);
+                return;
+        }
+
+        work = prepared->inner;
         digest_write(address_of work, data, length);
         digest_close(address_of work, inner);
         work = prepared->outer;

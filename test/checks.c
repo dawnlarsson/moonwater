@@ -60912,6 +60912,52 @@ static fn crypto_floor(void)
               crypto_bytes_are(out, 32,
                                "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"));
 
+        /*      The HMAC of a prepared key -- the gate's check of a datagram --
+                against the one a key makes from its own bytes, which goes
+                through none of it: every message length to 400 at eight
+                alignments, six key lengths (one past the block, so one that is
+                digested first), through the assembly where the machine has it
+                and through the C that stands in for it where it has not. */
+        {
+                crypto_hmac_key prepared;
+                p8 key[100];
+                p8 data[408];
+                p8 want[32];
+                p8 got[32];
+                positive bad = 0;
+#if X64
+                p8 had_sha = cpu_has_sha;
+#endif
+
+                for (positive at = 0; at < sizeof key; at++)
+                        key[at] = (p8)(at * 13 + 5);
+                for (positive at = 0; at < sizeof data; at++)
+                        data[at] = (p8)(at * 37 + 11);
+                for (positive pass = 0; pass < 2; pass++)
+                {
+#if X64
+                        cpu_has_sha = pass ? 0 : had_sha;
+#endif
+                        for (positive key_length = 0; key_length <= 100; key_length += 20)
+                        {
+                                crypto_hmac_prepare(DIGEST_SHA256, 32, key, key_length,
+                                                    address_of prepared);
+                                for (positive length = 0; length <= 400; length++)
+                                {
+                                        p8 address_to at = data + (length & 7);
+
+                                        crypto_hmac_sha256(key, key_length, at, length, want);
+                                        crypto_hmac_prepared(address_of prepared, at, length, got);
+                                        bad += memory_compare(want, got, 32) != 0;
+                                }
+                        }
+                }
+#if X64
+                cpu_has_sha = had_sha;
+#endif
+                check("HMAC under a prepared key, in the assembly and in C, is the key's own", bad == 0);
+        }
+
         {
                 p8 key[16];
                 p8 iv[12];
@@ -90721,10 +90767,78 @@ static positive hash_check_streams(const p8 address_to pattern)
         return wrong;
 }
 
+/*
+        hash_hmac_sha256_prepared against the streaming digests it stands in
+        for, over three keys: every message length from 0 to 300, ending on
+        the guard page so that a read past the end is a fault and not a
+        wrong answer. Where the machine has no body for it the answer is no,
+        and the buffer it was handed is as it was; where it has one the 32
+        bytes are the HMAC.
+*/
+#if X64
+#define HASH_HMAC_MADE (cpu_has_sha != 0)
+#else
+#define HASH_HMAC_MADE false
+#endif
+
+static positive hash_check_hmac(p8 address_to limit, bool made)
+{
+        positive wrong = 0;
+
+        for (positive round = 0; round < 3; round++)
+        {
+                p8 key[64];
+                p8 pad[64];
+                digest_state inner;
+                digest_state outer;
+
+                for (positive at = 0; at < 64; at++)
+                        key[at] = hash_check_byte();
+                for (positive at = 0; at < 64; at++)
+                        pad[at] = key[at] ^ 0x36;
+                digest_open(address_of inner, DIGEST_SHA256, 32);
+                digest_write(address_of inner, pad, 64);
+                for (positive at = 0; at < 64; at++)
+                        pad[at] = key[at] ^ 0x5c;
+                digest_open(address_of outer, DIGEST_SHA256, 32);
+                digest_write(address_of outer, pad, 64);
+
+                for (positive length = 0; length <= 300; length++)
+                {
+                        p8 address_to data = limit - length;
+                        p8 middle[32];
+                        p8 want[32];
+                        p8 out[32];
+                        digest_state work = inner;
+
+                        digest_write(address_of work, data, length);
+                        digest_close(address_of work, middle);
+                        work = outer;
+                        digest_write(address_of work, middle, 32);
+                        digest_close(address_of work, want);
+
+                        memory_fill(out, 0xa5, sizeof out);
+                        bool got = hash_hmac_sha256_prepared(inner.state.narrow,
+                                                             outer.state.narrow,
+                                                             data, length, out);
+
+                        wrong += got != made;
+                        if (got)
+                                wrong += memory_compare(out, want, 32) != 0;
+                        else
+                                for (positive at = 0; at < 32; at++)
+                                        wrong += out[at] != 0xa5;
+                }
+        }
+
+        return wrong;
+}
+
 static fn hash_check_all(p8 address_to limit)
 {
         positive cores = 0;
         positive streams = 0;
+        positive hmacs = 0;
         positive bodies = 1;
 
 #ifndef KERNEL_MODE
@@ -90759,6 +90873,7 @@ static fn hash_check_all(p8 address_to limit)
                 bodies++;
                 cores += hash_check_cores(limit);
                 streams += hash_check_streams(limit - 8192);
+                hmacs += hash_check_hmac(limit, HASH_HMAC_MADE);
         }
         cpu_has_sha = sha;
         cpu_has_sha512 = sha512;
@@ -90769,8 +90884,11 @@ static fn hash_check_all(p8 address_to limit)
 #endif
         cores += hash_check_cores(limit);
         streams += hash_check_streams(limit - 8192);
+        hmacs += hash_check_hmac(limit, HASH_HMAC_MADE);
 
         check("hash cores ran under at least the floor's feature bytes", bodies >= 1);
+        check("an HMAC-SHA-256 under a prepared key is the streaming digests', or no, to the end of the message",
+              hmacs == 0);
         check("hash block cores agree with the textbook rounds", cores == 0);
         check("streaming digests give the known answers at every split", streams == 0);
 }
@@ -92772,6 +92890,66 @@ static fn shape(string_address name, positive length, p16 flags)
         datagram costs: ticks a datagram for the machine's own key and eight
         groups.
 */
+/*
+        The HMAC under a prepared key that every one of those checks is, alone,
+        for a message of the length an initiation's is (156 bytes): the
+        assembly where the machine has it, the C that stands in for it, and the
+        digest functions that both replaced.
+*/
+static fn hmac_shape(void)
+{
+        static struct waterlink_identity key;
+        static p8 data[256];
+        p8 secret[32];
+        p8 mac[32];
+        p64 best[3] = {~0ull, ~0ull, ~0ull};
+
+        for (positive at = 0; at < 32; at++)
+                secret[at] = (p8)(at * 31 + 1);
+        for (positive at = 0; at < sizeof data; at++)
+                data[at] = (p8)(at * 7);
+        waterlink_identity_from(address_of key, secret);
+        for (positive round = 0; round < 7; round++)
+                for (positive which = 0; which < 3; which++)
+                {
+                        p64 start = get_cpu_time();
+
+                        for (positive each = 0; each < 20000; each++)
+                        {
+                                if (which == 0)
+                                {
+                                        if (!hash_hmac_sha256_prepared(
+                                                key.gate_ready.inner.state.narrow,
+                                                key.gate_ready.outer.state.narrow,
+                                                data, 156, mac))
+                                                crypto_hmac_sha256_prepared(
+                                                    address_of key.gate_ready, data,
+                                                    156, mac);
+                                }
+                                else if (which == 1)
+                                        crypto_hmac_sha256_prepared(
+                                            address_of key.gate_ready, data, 156, mac);
+                                else
+                                {
+                                        digest_state work = key.gate_ready.inner;
+                                        p8 inner[64];
+
+                                        digest_write(address_of work, data, 156);
+                                        digest_close(address_of work, inner);
+                                        work = key.gate_ready.outer;
+                                        digest_write(address_of work, inner, 32);
+                                        digest_close(address_of work, mac);
+                                }
+                        }
+                        start = (get_cpu_time() - start) / 20000;
+                        if (start < best[which])
+                                best[which] = start;
+                }
+        string_format(log, "  hmac of 156 bytes under a prepared key, ticks: "
+                           "assembly or C %p, C %p, digest functions %p\n",
+                      (positive)best[0], (positive)best[1], (positive)best[2]);
+}
+
 static fn gate_shape(void)
 {
         static struct waterlink_identity keys[9];
@@ -92831,6 +93009,7 @@ b32 main(void)
                 return 0;
         }
 
+        hmac_shape();
         gate_shape();
         shape("bulk", WATERLINK_FRAME_MAX, WATERLINK_FRAME_DURABLE);
         shape("keystroke", 1, WATERLINK_FRAME_DURABLE | WATERLINK_FRAME_URGENT);

@@ -506,6 +506,12 @@ md5_blocks sha1_blocks sha256_blocks sha512_blocks sha512_blocks_avx2 blake2b_bl
       'detector runs on the first dispatching call; timed against the same '
       'rounds compiled from C in the BENCH_hardware_floor section, which test/run bench '
       'does not dispatch')
+cover('direct_benchmark', 'test/checks.c#BENCH_link', 'hash_hmac_sha256_prepared',
+      'the gate\'s HMAC alone and inside the gate row: the assembly (x86_64 '
+      'with the SHA extensions), the C that stands in for it elsewhere, and '
+      'the digest functions both replace; held to the key\'s own HMAC at '
+      'every length to 300 with a guard page at the end of the message in '
+      'CHECK_checksum_crc')
 cover('correctness_only', 'test/checks.c#BENCH_hardware_floor', 'sha256_compress',
       'one 64-byte compression; timed in the hardware-floor harness, not the '
       'test/run bench catalogue')

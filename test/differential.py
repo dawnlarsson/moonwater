@@ -55553,6 +55553,17 @@ def crypto_fuzz_source(net, checks, oracle, lifted=False):
     RuntimeError when a lib.c call survives."""
     crypto = src_slice(net, "typedef unsigned __int128 crypto_wide;",
                           "#endif\n#include \"wait.c\"")
+    #   The HMAC of a SHA-256 prepared key has a C twin over sha256_blocks and
+    #   lib.c's assembly behind it, which CHECK_net holds to the key's own HMAC
+    #   on all three machines; the hosted lift has the digest functions only,
+    #   so it takes the HMAC the way it was made before them.
+    begin = crypto.index("typedef p64 crypto_lane ")
+    end = crypto.index("//      The HMAC of a message under a prepared key.")
+    crypto = crypto[:begin] + crypto[end:]
+    crypto, cut = re.subn(r"if \(prepared->inner\.algorithm == DIGEST_SHA256\)\s*\{.*?return;\s*\}\s*",
+                          "", crypto, count=1, flags=re.S)
+    if cut != 1:
+        raise ValueError("the SHA-256 prepared-key path is gone from net.c's crypto section")
     for field_op in ("add", "subtract"):
         crypto = re.sub(
             r"if \(f == address_of crypto_p256_field\)\s*\{\s*p256_%s\(d, a, b\);\s*return;\s*\}\s*"
