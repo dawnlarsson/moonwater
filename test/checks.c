@@ -76533,7 +76533,12 @@ static fn wifi_last_checks(void)
                       radio_last_get(address_of last) && last.failed == -113 && !last.at &&
                           !last.count && !radio_join_wait(address_of last));
         }
+        radio_last_set("home", -113);
+        check("a join that failed a moment ago is waited out, and so is the restore of one",
+              radio_join_waiting() && radio_wifi_restored(1) && radio_wifi_restored(-1));
         radio_last_set("home", 0);
+        check("with no failure kept there is nothing to wait for and the restore joins",
+              !radio_join_waiting() && !radio_wifi_restored(1) && !radio_wifi_restored(-1));
 }
 
 //      The whole scans asked for here, by name: what a join may leave to the

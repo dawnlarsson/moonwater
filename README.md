@@ -53,7 +53,7 @@ moonwater wifi add SSID [PASSWORD|-]   remember a network and join it; asks for
                                        the password, - reads it from stdin
 moonwater wifi remove SSID             forget a saved network, and leave it
 moonwater bluetooth [on|off]           the radio and the remembered devices
-moonwater bluetooth add NAME           remember a bluetooth device
+moonwater bluetooth add NAME           keep a device's name; the radio goes on for what pairs
 moonwater bluetooth remove NAME        forget a bluetooth device
 moonwater priority [internet [wired|wifi]]  which link wins when both are up [wired]
 

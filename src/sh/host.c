@@ -322,11 +322,9 @@ fn shell_stop(writer write, positive command);
 #define REBOOT_RESTART 0x01234567
 #endif
 static b32 host_machine_run(void);
-static b32 host_radio(string_address address_to arguments, positive count);
 static fn tune_restore(void);
 static fn radio_restore(void);
 static fn radio_recover(void);
-static b32 host_locale(string_address address_to arguments, positive count);
 static fn locale_restore(void);
 //      Set by the machine process alone, in moonwater.c: only it asks the time.
 static bool host_machine_self;
@@ -8757,6 +8755,17 @@ static p64 radio_join_wait(const radio_last address_to last)
         return wait > 60000 ? 60000 : wait;
 }
 
+/* Whether the last join failed so lately that the next one is left to wait:
+   the pass and a restore both ask. */
+static bool radio_join_waiting(void)
+{
+        radio_last last;
+
+        return radio_last_get(address_of last) &&
+               system_clock_ns(HOST_CLOCK_BOOTTIME) / 1000000 <
+                   last.at + radio_join_wait(address_of last);
+}
+
 /*
         A password, without argv: ps shows every process's arguments to
         every user. At a terminal it is asked for with the echo off and the
@@ -9663,9 +9672,7 @@ static fn radio_wifi_keep(void)
                         return;
                 lost = true;
         }
-        else if (radio_last_get(address_of last) &&
-                 system_clock_ns(HOST_CLOCK_BOOTTIME) / 1000000 <
-                     last.at + radio_join_wait(address_of last))
+        else if (radio_join_waiting())
                 return;
 
         lock = radio_lock(false);
@@ -9693,6 +9700,18 @@ static fn radio_wifi_keep(void)
         system_call_1(syscall(exit), 0);
 }
 
+/* Whether the wifi is as a restore leaves it: a link a keeper holds, a join
+   that failed a moment ago (the machine's pass asks again when it is time),
+   or a radio left off and not linked. A boot restores twice, once when the
+   disk is taken and once when the machine process starts, and the second
+   finds it done, or finds it tried. */
+static bool radio_wifi_restored(bipolar wifi)
+{
+        if (wifi == 0)
+                return radio_rfkill_blocked() && !nl80211_associated();
+        return host_lock_owner(RADIO_KEEPER_PATH) || radio_join_waiting();
+}
+
 static fn radio_restore(void)
 {
         bipolar wifi = radio_power(NET_WIFI_POWER);
@@ -9700,10 +9719,13 @@ static fn radio_restore(void)
 
         radio_internet_copy();
 
-        if (wifi == 0)
-                radio_wifi_off(false);
-        else if (radio_wifi_wanted(wifi))
-                radio_wifi_on(false);
+        if (!radio_wifi_restored(wifi))
+        {
+                if (wifi == 0)
+                        radio_wifi_off(false);
+                else if (radio_wifi_wanted(wifi))
+                        radio_wifi_on(false);
+        }
 
         if (bluetooth >= 0)
                 radio_bluetooth_power(bluetooth, false);
@@ -9740,93 +9762,97 @@ static b32 radio_done(b32 failed, string_address what)
         return failed;
 }
 
-static b32 host_radio(string_address address_to arguments, positive count)
+//      What is asked is judged before who asks: a word that is no switch is a
+//      usage page for anyone, and root's refusal is for what would have been
+//      done. host_main's table gives each verb its own function, as every
+//      other verb has.
+static b32 host_priority(string_address address_to arguments, positive count)
 {
-        string_address verb = arguments[1];
         string_address word = count > 2 ? arguments[2] : null;
-        bipolar power;
 
-        if (string_equals(verb, "priority"))
-        {
-                if (count == 2)
-                        return radio_internet_status();
-                if (!string_equals(word, "internet"))
-                        return host_usage();
-                if (count == 3)
-                        return radio_internet_status();
-                if (count != 4 || (!string_equals(arguments[3], "wired") &&
-                                   !string_equals(arguments[3], "wifi")))
-                        return host_usage();
-                host_need_root();
-                return radio_internet_set(arguments[3]);
-        }
-
-        //      What is asked is judged before who asks: a word that is no
-        //      switch is a usage page for anyone, and root's refusal is for
-        //      what would have been done.
-        power = count == 3 ? host_onoff(word) : -1;
-
-        if (string_equals(verb, "wired"))
-        {
-                if (count < 3)
-                        return radio_wired_status();
-                if (power < 0)
-                        return host_usage();
-                host_need_root();
-                return radio_wired_set(power);
-        }
-
-        if (string_equals(verb, "wifi"))
-        {
-                if (count < 3)
-                        return radio_wifi_status();
-                if (power >= 0)
-                {
-                        host_need_root();
-                        return power ? radio_wifi_on(true)
-                                     : radio_done(radio_wifi_off(true), "wifi off");
-                }
-                if (string_equals(word, "add") && count >= 4 && count <= 5)
-                {
-                        p8 pass[256];
-                        positive length;
-                        b32 result;
-
-                        host_need_root();
-
-                        /*      No password: asked for at a terminal, open
-                                anywhere else, as it always was. "-": one
-                                line of standard input. Either keeps it out
-                                of argv, where ps shows it to everybody. */
-                        if (count == 4 ||
-                            string_equals(arguments[4], (string_address) "-"))
-                        {
-                                if (radio_password_read(pass, sizeof(pass), arguments[3],
-                                                        count == 4) < 0)
-                                {
-                                        crypto_forget(pass, sizeof(pass));
-                                        return host_refuse("nothing saved\n");
-                                }
-                        }
-                        else
-                        {
-                                length = string_length(arguments[4]);
-                                if (length >= sizeof(pass))
-                                        return host_refuse("that password is too long\n");
-                                memory_copy(pass, arguments[4], length + 1);
-                                crypto_forget(arguments[4], length);
-                        }
-                        result = radio_wifi_add(arguments[3], pass);
-                        crypto_forget(pass, sizeof(pass));
-                        return result;
-                }
-                if (string_equals(word, "remove") && count == 4)
-                {
-                        host_need_root();
-                        return radio_wifi_remove(arguments[3]);
-                }
+        if (count == 2)
+                return radio_internet_status();
+        if (!string_equals(word, "internet"))
                 return host_usage();
+        if (count == 3)
+                return radio_internet_status();
+        if (count != 4 || (!string_equals(arguments[3], "wired") &&
+                           !string_equals(arguments[3], "wifi")))
+                return host_usage();
+        host_need_root();
+        return radio_internet_set(arguments[3]);
+}
+
+static b32 host_wired(string_address address_to arguments, positive count)
+{
+        bipolar power = count == 3 ? host_onoff(arguments[2]) : -1;
+
+        if (count < 3)
+                return radio_wired_status();
+        if (power < 0)
+                return host_usage();
+        host_need_root();
+        return radio_wired_set(power);
+}
+
+static b32 host_wifi(string_address address_to arguments, positive count)
+{
+        string_address word = count > 2 ? arguments[2] : null;
+        bipolar power = count == 3 ? host_onoff(word) : -1;
+
+        if (count < 3)
+                return radio_wifi_status();
+        if (power >= 0)
+        {
+                host_need_root();
+                return power ? radio_wifi_on(true)
+                             : radio_done(radio_wifi_off(true), "wifi off");
         }
+        if (string_equals(word, "add") && count >= 4 && count <= 5)
+        {
+                p8 pass[256];
+                positive length;
+                b32 result;
+
+                host_need_root();
+
+                /*      No password: asked for at a terminal, open
+                        anywhere else, as it always was. "-": one
+                        line of standard input. Either keeps it out
+                        of argv, where ps shows it to everybody. */
+                if (count == 4 || string_equals(arguments[4], (string_address) "-"))
+                {
+                        if (radio_password_read(pass, sizeof(pass), arguments[3],
+                                                count == 4) < 0)
+                        {
+                                crypto_forget(pass, sizeof(pass));
+                                return host_refuse("nothing saved\n");
+                        }
+                }
+                else
+                {
+                        length = string_length(arguments[4]);
+                        if (length >= sizeof(pass))
+                                return host_refuse("that password is too long\n");
+                        memory_copy(pass, arguments[4], length + 1);
+                        crypto_forget(arguments[4], length);
+                }
+                result = radio_wifi_add(arguments[3], pass);
+                crypto_forget(pass, sizeof(pass));
+                return result;
+        }
+        if (string_equals(word, "remove") && count == 4)
+        {
+                host_need_root();
+                return radio_wifi_remove(arguments[3]);
+        }
+        return host_usage();
+}
+
+static b32 host_bluetooth(string_address address_to arguments, positive count)
+{
+        string_address word = count > 2 ? arguments[2] : null;
+        bipolar power = count == 3 ? host_onoff(word) : -1;
 
         if (count < 3)
                 return radio_bluetooth_status();
@@ -14931,65 +14957,70 @@ static b32 host_name(string_address address_to arguments, positive count)
         return 0;
 }
 
-static b32 host_locale(string_address address_to arguments, positive count)
+static b32 host_time(string_address address_to arguments, positive count)
 {
-        string_address verb = arguments[1];
+        locale_zone_own();
+        if (count == 2)
+                return locale_time_status();
+        if (count != 3 || !string_equals(arguments[2], "sync"))
+                return host_usage();
+        host_need_root();
+        return locale_time_sync();
+}
+
+static b32 host_timezone(string_address address_to arguments, positive count)
+{
         string_address word = count > 2 ? arguments[2] : null;
 
         locale_zone_own();
+        if (count == 2)
+                return locale_zone_status();
+        if (count != 3)
+                return host_usage();
+        if (string_equals(word, "list"))
+                return locale_zone_list();
+        host_need_root();
+        if (string_equals(word, "auto"))
+                return locale_zone_auto();
+        return locale_zone_set(word);
+}
 
-        if (string_equals(verb, "time"))
+static b32 host_ntp(string_address address_to arguments, positive count)
+{
+        string_address word = count > 2 ? arguments[2] : null;
+
+        locale_zone_own();
+        if (count == 2)
+                return locale_ntp_status();
+        if (string_equals(word, "server"))
         {
-                if (count == 2)
-                        return locale_time_status();
-                if (count != 3 || !string_equals(word, "sync"))
+                if (count == 3)
+                        return locale_ntp_server_status();
+                if (count != 4)
                         return host_usage();
                 host_need_root();
-                return locale_time_sync();
+                return locale_ntp_server_set(arguments[3]);
         }
-
-        if (string_equals(verb, "timezone"))
+        if (string_equals(word, "sampling"))
         {
-                if (count == 2)
-                        return locale_zone_status();
-                if (count != 3)
-                        return host_usage();
-                if (string_equals(word, "list"))
-                        return locale_zone_list();
-                host_need_root();
-                if (string_equals(word, "auto"))
-                        return locale_zone_auto();
-                return locale_zone_set(word);
-        }
-
-        if (string_equals(verb, "ntp"))
-        {
-                if (count == 2)
-                        return locale_ntp_status();
-                if (string_equals(word, "server"))
-                {
-                        if (count == 3)
-                                return locale_ntp_server_status();
-                        if (count != 4)
-                                return host_usage();
-                        host_need_root();
-                        return locale_ntp_server_set(arguments[3]);
-                }
-                if (string_equals(word, "sampling"))
-                {
-                        if (count == 3)
-                                return locale_ntp_sampling_status();
-                        if (count != 4 || host_onoff(arguments[3]) < 0)
-                                return host_usage();
-                        host_need_root();
-                        return locale_ntp_set(true, arguments[3]);
-                }
-                if (count != 3 || host_onoff(word) < 0)
+                if (count == 3)
+                        return locale_ntp_sampling_status();
+                if (count != 4 || host_onoff(arguments[3]) < 0)
                         return host_usage();
                 host_need_root();
-                return locale_ntp_set(false, word);
+                return locale_ntp_set(true, arguments[3]);
         }
+        if (count != 3 || host_onoff(word) < 0)
+                return host_usage();
+        host_need_root();
+        return locale_ntp_set(false, word);
+}
 
+static b32 host_keyboard(string_address address_to arguments, positive count)
+{
+        string_address word = count > 2 ? arguments[2] : null;
+
+        locale_zone_own();
         if (count == 2)
                 return locale_keyboard_status();
         if (count != 3)
@@ -15418,7 +15449,7 @@ static const host_row host_rows[] = {
     {null, "", "the password, - reads it from stdin", 'b'},
     {null, "wifi remove SSID", "forget a saved network, and leave it", 'b'},
     {null, "bluetooth [on|off]", "the radio and the remembered devices", 'b'},
-    {null, "bluetooth add NAME", "remember a bluetooth device", 'b'},
+    {null, "bluetooth add NAME", "keep a device's name; the radio goes on for what pairs", 'b'},
     {null, "bluetooth remove NAME", "forget a bluetooth device", 'b'},
     {null, "priority [internet [wired|wifi]]", "which link wins when both are up [wired]", 'b'},
     {null, "time [sync]", "the clock; sync sets it and the zone now", 'b'},
@@ -15976,14 +16007,14 @@ static b32 host_main()
             {"cpu", tune_cpu, false},
             {"sleep", tune_sleep_verb, false},
             {"hibernate", tune_hibernate_verb, false},
-            {"wifi", host_radio, false},
-            {"bluetooth", host_radio, false},
-            {"priority", host_radio, false},
-            {"wired", host_radio, false},
-            {"timezone", host_locale, false},
-            {"ntp", host_locale, false},
-            {"keyboard", host_locale, false},
-            {"time", host_locale, false},
+            {"wifi", host_wifi, false},
+            {"bluetooth", host_bluetooth, false},
+            {"priority", host_priority, false},
+            {"wired", host_wired, false},
+            {"timezone", host_timezone, false},
+            {"ntp", host_ntp, false},
+            {"keyboard", host_keyboard, false},
+            {"time", host_time, false},
             {"name", host_name, true},
             {"link", link_main, false},
             {"wipe", host_wipe_verb, true},

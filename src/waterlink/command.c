@@ -1197,10 +1197,58 @@ static bool link_known(string_address name)
         return link_peer_named(address_of peers, name) != null;
 }
 
+/*
+        How many words each verb that takes a fixed number is run with, the
+        two that name the program and the verb among them. A word of these
+        with the wrong number is a usage page for anyone: root's refusal is
+        for what would have been done, and a person who cannot do any of it
+        is still told how it is spelled.
+*/
+static const struct
+{
+        string_address word;
+        positive least;
+        positive most;
+} link_shapes[] = {
+    {"on", 3, 3},   {"off", 3, 3},   {"key", 3, 3},  {"serve", 3, 3},
+    {"pair", 3, 4}, {"add", 5, 6},   {"remove", 4, 4},
+    {"allow", 5, ~(positive)0},      {"deny", 5, ~(positive)0},
+    {"shell", 4, 4}, {"run", 5, ~(positive)0},
+    {"push", 6, 6}, {"pull", 6, 6}, {"log", 4, 4},
+};
+
+//      The code as it is printed, abc-def: a word of six letters is as likely
+//      to be a command (whoami, reboot) as a code, and a misspelt machine
+//      would otherwise start a five minute wait.
+static bool link_code_shaped(string_address word)
+{
+        p8 code[LINK_CODE_LENGTH + 1];
+
+        return string_length(word) == LINK_CODE_LENGTH + 1 && word[3] == '-' &&
+               link_code_clean(word, code);
+}
+
 static b32 link_main(string_address address_to arguments, positive count)
 {
         string_address verb = count > 2 ? arguments[2] : null;
         positive kind;
+        positive shape = verb ? string_table_find(verb, link_shapes,
+                                                  sizeof link_shapes[0],
+                                                  array_count(link_shapes))
+                              : array_count(link_shapes);
+
+        if (shape < array_count(link_shapes) &&
+            (count < link_shapes[shape].least || count > link_shapes[shape].most))
+                return host_usage();
+
+        //      A word that is no verb and no name a machine could have (help
+        //      and leave are words of the groups, not verbs) is a machine of
+        //      nobody's: what root would be told, anyone is.
+        if (verb && shape == array_count(link_shapes) &&
+            !string_equals(verb, "group") && !link_name_good(verb))
+                return count == 4 && link_code_shaped(arguments[3])
+                           ? host_refuse("%s is not a machine name\n", verb)
+                           : host_usage();
 
         //      The key, the machines and the groups are root's files: for
         //      anyone else the page would say "nobody linked" of a machine
@@ -1210,22 +1258,19 @@ static b32 link_main(string_address address_to arguments, positive count)
         if (!verb)
                 return link_status();
 
-        if ((string_equals(verb, "on") || string_equals(verb, "off")) &&
-            count == 3)
+        if (string_equals(verb, "on") || string_equals(verb, "off"))
                 return link_switch(string_equals(verb, "on"), true);
-        if (string_equals(verb, "key") && count == 3)
+        if (string_equals(verb, "key"))
                 return link_key_verb();
-        if (string_equals(verb, "serve") && count == 3)
+        if (string_equals(verb, "serve"))
                 return link_serve();
-        if (string_equals(verb, "pair") && (count == 3 || count == 4))
+        if (string_equals(verb, "pair"))
                 return link_pair_here(count == 4 ? arguments[3] : null);
 
         //      The peers file has a second writer, the listener pairing
         //      members: each change made here happens under the same lock.
-        if ((string_equals(verb, "add") && (count == 5 || count == 6)) ||
-            (string_equals(verb, "remove") && count == 4) ||
-            ((string_equals(verb, "allow") || string_equals(verb, "deny")) &&
-             count >= 5))
+        if (string_equals(verb, "add") || string_equals(verb, "remove") ||
+            string_equals(verb, "allow") || string_equals(verb, "deny"))
         {
                 struct waterlink_peer where;
                 bipolar lock;
@@ -1272,20 +1317,12 @@ static b32 link_main(string_address address_to arguments, positive count)
         }
 
         //      push, pull, log, shell and run: a machine and what the kind
-        //      takes.
-        {
-                static const positive least[] = {0, 4, 5, 6, 6, 4};
-                static const positive most[] = {0, 4, ~(positive)0, 6, 6, 4};
-
-                kind = string_table_find(verb, link_kind_names,
-                                         sizeof link_kind_names[0],
-                                         array_count(link_kind_names));
-                if (kind && kind < array_count(link_kind_names))
-                        return count >= least[kind] && count <= most[kind]
-                                       ? link_client_run(arguments[3], (p8)kind,
-                                                         arguments + 4, count - 4)
-                                       : host_usage();
-        }
+        //      takes, which the shapes above held it to.
+        kind = string_table_find(verb, link_kind_names, sizeof link_kind_names[0],
+                                 array_count(link_kind_names));
+        if (kind && kind < array_count(link_kind_names))
+                return link_client_run(arguments[3], (p8)kind, arguments + 4,
+                                       count - 4);
 
         //      A word that is none of those is a machine: its terminal, one
         //      command on it, or, if it is not known and the word after it
@@ -1302,27 +1339,11 @@ static b32 link_main(string_address address_to arguments, positive count)
                 return link_client_run(verb,
                                        count == 3 ? LINK_KIND_SHELL : LINK_KIND_RUN,
                                        arguments + 3, count - 3);
-        //      The code as it is printed, abc-def: a word of six letters is
-        //      as likely to be a command (whoami, reboot) as a code, and a
-        //      misspelt machine would otherwise start a five minute wait.
-        if (count == 4)
-        {
-                p8 code[LINK_CODE_LENGTH + 1];
-
-                if (string_length(arguments[3]) == LINK_CODE_LENGTH + 1 &&
-                    arguments[3][3] == '-' &&
-                    link_code_clean(arguments[3], code))
-                        return link_name_good(verb)
-                                       ? link_pair_there(verb, arguments[3])
-                                       : host_refuse("%s is not a machine "
-                                                     "name\n",
-                                                     verb);
-        }
-        if (link_name_good(verb))
-                return host_refuse("no machine is called %s: moonwater link pair "
-                                   "on it, then moonwater link NAME CODE here\n",
-                                   verb);
-        return host_usage();
+        if (count == 4 && link_code_shaped(arguments[3]))
+                return link_pair_there(verb, arguments[3]);
+        return host_refuse("no machine is called %s: moonwater link pair "
+                           "on it, then moonwater link NAME CODE here\n",
+                           verb);
 }
 
 /*
