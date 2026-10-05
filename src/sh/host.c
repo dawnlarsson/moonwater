@@ -254,9 +254,22 @@ static fn host_pause(p64 nanoseconds)
         sleep(address_of span);
 }
 
-/* A small kernel file (sysfs), without its trailing newline: the kernel's, not
-   a name anybody plants, and a test's sandbox stands a FIFO at one to hold a
-   sleep until its reader is ready, so it is read as it always was. */
+/* The bytes of a word a file held, its newline and the blanks after it taken off
+   and the end made: how many are left. */
+static bipolar host_word_end(p8 address_to into, bipolar got)
+{
+        while (got > 0 && (into[got - 1] == '\n' || into[got - 1] == '\r' ||
+                           into[got - 1] == ' '))
+                got--;
+
+        into[got] = end;
+        return got;
+}
+
+/* A small kernel file (sysfs, proc), without its trailing newline: the kernel's,
+   not a name anybody plants, and a test's sandbox stands a FIFO at one to hold a
+   sleep until its reader is ready, so it is read as it always was. Everything
+   this keeps for itself is read by host_read_word. */
 static bipolar host_read_kernel(string_address path, p8 address_to into,
                                 positive room)
 {
@@ -268,27 +281,7 @@ static bipolar host_read_kernel(string_address path, p8 address_to into,
                 return got;
         }
 
-        while (got > 0 && (into[got - 1] == '\n' || into[got - 1] == ' '))
-                got--;
-
-        into[got] = end;
-        return got;
-}
-
-/* A small state file, without its trailing newline; regular files only. */
-static bipolar host_read_text(string_address path, p8 address_to into,
-                              positive room)
-{
-        bipolar got = file_slurp_regular_at(AT_FDCWD, path, into, room, 0);
-
-        if (got < 0)
-                return got;
-
-        while (got > 0 && (into[got - 1] == '\n' || into[got - 1] == ' '))
-                got--;
-
-        into[got] = end;
-        return got;
+        return host_word_end(into, got);
 }
 
 /* Persistent state is a regular file owned by this program. Opening it
@@ -301,9 +294,10 @@ static bipolar host_read_state(string_address path, p8 address_to into,
         return file_slurp_regular_at(AT_FDCWD, path, into, capacity, O_NOFOLLOW);
 }
 
-/* A state word as host_read_state reads it, without its line end or the blanks
-   after it (a file edited with a CRLF is the word it says); negative, and empty,
-   when the file is not there or not a plain one. */
+/* A state word as host_read_state reads it, without its newline or the blanks
+   after it; negative, and empty, when the file is not there or not a plain one.
+   A FIFO or a link planted at the name on the data partition is no word, and
+   cannot stop the command. */
 static bipolar host_read_word(string_address path, p8 address_to into, positive room)
 {
         bipolar got = host_read_state(path, into, room);
@@ -313,10 +307,7 @@ static bipolar host_read_word(string_address path, p8 address_to into, positive 
                 into[0] = end;
                 return got;
         }
-        while (got > 0 && (into[got - 1] == '\n' || into[got - 1] == '\r' ||
-                           into[got - 1] == ' '))
-                into[--got] = end;
-        return got;
+        return host_word_end(into, got);
 }
 
 /*
@@ -643,7 +634,7 @@ static bool host_session_disk(p8 address_to into, positive room)
 {
         p8 verdict[HOST_NAME_ROOM + 16];
 
-        return host_read_text(HOST_VERDICT, verdict, sizeof(verdict)) >= 0 &&
+        return host_read_word(HOST_VERDICT, verdict, sizeof(verdict)) >= 0 &&
                host_starts(verdict, "disk ") && string_length(verdict + 5) < room &&
                (string_copy(into, verdict + 5), true);
 }
@@ -831,7 +822,7 @@ static bool host_nvme_visit(string_address directory, string_address name,
         }
 
         if (!host_join(path, sizeof(path), path, "/state") ||
-            host_read_text(path, state, sizeof(state)) < 0 ||
+            host_read_kernel(path, state, sizeof(state)) < 0 ||
             !string_equals(state, "live"))
         {
                 address_to (bool address_to)opaque = true;
@@ -896,7 +887,7 @@ static bool host_running_build(p8 address_to into, positive room)
         if (!file_machine_read(address_of machine))
                 return false;
 
-        got = host_read_text("/proc/version", banner, sizeof(banner));
+        got = host_read_kernel("/proc/version", banner, sizeof(banner));
         if (got <= 0)
                 return false;
 
@@ -2123,7 +2114,7 @@ fn host_terminal_opening(void)
         p8 verdict[HOST_NAME_ROOM + 16];
         bool said = false;
 
-        while (host_read_text(HOST_VERDICT, verdict, sizeof(verdict)) < 0)
+        while (host_read_word(HOST_VERDICT, verdict, sizeof(verdict)) < 0)
         {
                 p64 uptime = system_clock_ns(HOST_CLOCK_BOOTTIME);
 
@@ -2438,11 +2429,11 @@ static b32 host_install_locked(string_address asked, bool removable)
                 return host_refuse("%s is a partition; name the whole disk\n", name);
 
         if (host_join(path, sizeof(path), sysfs, "/ro") &&
-            host_read_text(path, text, sizeof(text)) > 0 && string_equals(text, "1"))
+            host_read_kernel(path, text, sizeof(text)) > 0 && string_equals(text, "1"))
                 return host_refuse("%s is read-only\n", name);
 
         if (!removable && host_join(path, sizeof(path), sysfs, "/removable") &&
-            host_read_text(path, text, sizeof(text)) > 0 && string_equals(text, "1"))
+            host_read_kernel(path, text, sizeof(text)) > 0 && string_equals(text, "1"))
                 return host_refuse("%s is removable media; moonwater setup "
                                    "install DISK removable takes it\n", name);
 
@@ -2552,7 +2543,7 @@ static b32 host_install_locked(string_address asked, bool removable)
         }
 
         if (!host_join(path, sizeof(path), sysfs, "/device/model") ||
-            host_read_text(path, text, sizeof(text)) <= 0)
+            host_read_kernel(path, text, sizeof(text)) <= 0)
                 string_copy(text, "a disk");
         host_plain_line(text);
 
@@ -3459,7 +3450,7 @@ static string_address host_settings_write(string_address name, string_address pa
             !host_join(path, sizeof(path), path, "/ro"))
                 return "has a name too long to write";
 
-        if (host_read_text(path, text, sizeof(text)) > 0 && string_equals(text, "1"))
+        if (host_read_kernel(path, text, sizeof(text)) > 0 && string_equals(text, "1"))
                 return "is read-only";
 
         //      The name was found some time ago, and a disk comes and goes.
@@ -3871,7 +3862,7 @@ static fn host_settings_note(host_settings address_to settings,
         if (system_access_at(AT_FDCWD, path, 0) < 0)
                 return;
 
-        host_read_text(HOST_VERDICT, verdict, sizeof(verdict));
+        host_read_word(HOST_VERDICT, verdict, sizeof(verdict));
 
         for (positive at = 0; at < array_count(host_kept); at++)
         {
@@ -4165,7 +4156,7 @@ static fn host_events_boot(host_settings address_to settings)
         {
                 p8 verdict[HOST_NAME_ROOM + 16];
 
-                if (host_read_text(HOST_VERDICT, verdict, sizeof(verdict)) >= 0
+                if (host_read_word(HOST_VERDICT, verdict, sizeof(verdict)) >= 0
                         ? !host_starts(verdict, "ask ")
                         : system_clock_ns(HOST_CLOCK_BOOTTIME) >= HOST_VERDICT_WAIT_NS)
                         break;
@@ -4369,7 +4360,7 @@ static bool host_console_is_screen(void)
 {
         p8 active[128];
 
-        if (host_read_text("/sys/class/tty/console/active", active, sizeof(active)) <= 0)
+        if (host_read_kernel("/sys/class/tty/console/active", active, sizeof(active)) <= 0)
                 return true;
 
         for (string_address at = (string_address)active; *at;)
@@ -6822,7 +6813,7 @@ static bipolar radio_sys_read(string_address directory, string_address name,
                 into[0] = end;
                 return -1;
         }
-        return host_read_text((string_address)path, into, room);
+        return host_read_kernel((string_address)path, into, room);
 }
 
 /* The name of the driver bound to a device, or empty. */
@@ -7050,9 +7041,9 @@ static bool radio_firmware_present(string_address name)
         string_address roots[5];
         positive count = 0;
 
-        host_read_text((string_address) "/sys/module/firmware_class/parameters/path",
+        host_read_kernel((string_address) "/sys/module/firmware_class/parameters/path",
                        custom, sizeof(custom));
-        host_read_text((string_address) "/proc/sys/kernel/osrelease", release,
+        host_read_kernel((string_address) "/proc/sys/kernel/osrelease", release,
                        sizeof(release));
         radio_line(updates, sizeof(updates), (string_address) "/lib/firmware/updates/",
                    release, null, null, null);
@@ -7519,7 +7510,7 @@ static p64 radio_scan_age(void)
         p64 now = system_clock_ns(HOST_CLOCK_BOOTTIME) / 1000000;
         p64 then;
 
-        if (host_read_text(RADIO_SCAN_PATH, text, sizeof(text)) <= 0)
+        if (host_read_word(RADIO_SCAN_PATH, text, sizeof(text)) <= 0)
                 return ~(p64)0;
         then = string_to_positive(text);
         return then <= now ? now - then : ~(p64)0;
@@ -8076,7 +8067,7 @@ static bool radio_last_get(p8 address_to ssid, positive room, bipolar address_to
         p8 text[RADIO_SSID_MOST + 32];
         positive at = 0;
 
-        if (host_read_text(RADIO_LAST_PATH, text, sizeof(text)) <= 0)
+        if (host_read_word(RADIO_LAST_PATH, text, sizeof(text)) <= 0)
                 return false;
         at = (positive)(string_first_of_or_end(text, '\n') - text);
         if (!text[at] || at > RADIO_SSID_MOST)
@@ -9038,7 +9029,7 @@ static fn radio_recover(void)
         p8 verdict[HOST_NAME_ROOM + 16];
 
         radio_reap();
-        if (host_read_text(HOST_VERDICT, verdict, sizeof(verdict)) >= 0 &&
+        if (host_read_word(HOST_VERDICT, verdict, sizeof(verdict)) >= 0 &&
             host_starts(verdict, "ask "))
                 return;
 
@@ -12503,7 +12494,7 @@ static bool locale_network(p8 address_to into, positive room)
         string_address line;
 
         into[0] = end;
-        got = host_read_text("/proc/net/route", table, sizeof(table));
+        got = host_read_kernel("/proc/net/route", table, sizeof(table));
         if (got <= 0)
                 return false;
         for (line = (string_address)table; line && line[0];)
@@ -12558,7 +12549,7 @@ static bool locale_network(p8 address_to into, positive room)
                 at += host_into(dotted + at, bytes_reverse_32(raw));
                 dotted[at++] = ' ';
                 dotted[at] = end;
-                got = host_read_text("/proc/net/arp", table, sizeof(table));
+                got = host_read_kernel("/proc/net/arp", table, sizeof(table));
                 if (got > 0)
                 {
                         //      IP address, HW type, Flags, HW address: the
@@ -14821,7 +14812,7 @@ static fn host_setup_state(void)
         else
                 string_format(log, "  this build's version cannot be read\n");
 
-        host_read_text(HOST_VERDICT, verdict, sizeof(verdict));
+        host_read_word(HOST_VERDICT, verdict, sizeof(verdict));
         if (host_starts(verdict, "disk "))
                 string_format(log, "  kept on %s: %s /root /home\n",
                               verdict + 5, BOWL_ROOT_DIRECTORY);
@@ -14912,7 +14903,7 @@ static b32 host_answer(bool update, string_address disk)
         host_census census;
         host_install address_to install = null;
 
-        host_read_text(HOST_VERDICT, verdict, sizeof(verdict));
+        host_read_word(HOST_VERDICT, verdict, sizeof(verdict));
         if (disk && host_starts(disk, "/dev/"))
                 disk += 5;
 
@@ -15176,7 +15167,7 @@ static b32 host_main()
         {
                 p8 verdict[HOST_NAME_ROOM + 16];
 
-                host_read_text(HOST_VERDICT, verdict, sizeof(verdict));
+                host_read_word(HOST_VERDICT, verdict, sizeof(verdict));
                 if (!host_starts(verdict, "ask ") ||
                     system_rename_at(AT_FDCWD, HOST_QUESTION, AT_FDCWD,
                                      HOST_QUESTION_TAKEN, 0) < 0)

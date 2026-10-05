@@ -483,7 +483,7 @@ static p16 link_port(void)
         p8 word[16];
         bipolar port;
 
-        host_read_text(LINK_PORT_PATH, word, sizeof word);
+        host_read_word(LINK_PORT_PATH, word, sizeof word);
         port = link_decimal((string_address)word);
         return port > 0 && port < 65536 ? (p16)port : LINK_PORT;
 }

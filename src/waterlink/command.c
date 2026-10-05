@@ -166,7 +166,7 @@ static b32 link_status(void)
         {
                 p8 word[16];
 
-                host_read_text(LINK_SWITCH_PATH, word, sizeof word);
+                host_read_word(LINK_SWITCH_PATH, word, sizeof word);
                 string_format(
                         log, host_label "link %s%s, udp %p\n",
                         owner > 0 ? "on" : "off",
@@ -1028,7 +1028,7 @@ typedef struct
 static fn link_before_take(link_before address_to before)
 {
         before->word[0] = 0;
-        (void)host_read_text(LINK_SWITCH_PATH, before->word, sizeof before->word);
+        (void)host_read_word(LINK_SWITCH_PATH, before->word, sizeof before->word);
         before->running = link_lock_owner() > 0;
 }
 
@@ -1361,7 +1361,7 @@ static fn link_keep(void)
 
         //      No switch at all is nobody's decision: a listener somebody ran
         //      by hand is left alone. Off is somebody's.
-        host_read_text(LINK_SWITCH_PATH, word, sizeof word);
+        host_read_word(LINK_SWITCH_PATH, word, sizeof word);
         if (!string_equals((string_address)word, "on"))
         {
                 if (string_equals((string_address)word, "off") &&

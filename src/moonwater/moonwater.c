@@ -2216,7 +2216,7 @@ static fn host_machine_wait_verdict(p8 address_to into, positive room)
 
         into[0] = end;
         for (;;) {
-                if (host_read_text(HOST_VERDICT, into, room) >= 0)
+                if (host_read_word(HOST_VERDICT, into, room) >= 0)
                         return;
                 if (system_clock_ns(HOST_CLOCK_BOOTTIME) - started >=
                     HOST_VERDICT_WAIT_NS)
@@ -2242,7 +2242,7 @@ static bool host_machine_sourced(p64 wait)
         p64 started = system_clock_ns(HOST_CLOCK_BOOTTIME);
         p8 said[8];
 
-        while (host_read_text(HOST_MACHINE_SOURCED, said, sizeof(said)) < 0) {
+        while (host_read_word(HOST_MACHINE_SOURCED, said, sizeof(said)) < 0) {
                 if (system_clock_ns(HOST_CLOCK_BOOTTIME) - started >= wait)
                         return false;
                 host_pause(HOST_EVENT_POLL_NS);
@@ -2705,7 +2705,7 @@ static b32 host_machine_run(void)
         host_machine_hold(slot, true);
 
         host_machine_hook(slot[0], 0, (string_address)verdict, null);
-        if (host_read_text(HOST_MACHINE_DIRTY, dirty, sizeof(dirty)) >= 0) {
+        if (host_read_word(HOST_MACHINE_DIRTY, dirty, sizeof(dirty)) >= 0) {
                 host_machine_dirty(false);
                 host_machine_emit(slot[1], 0, "recover", null);
         }

@@ -42699,6 +42699,18 @@ while True:
         check(finished and waited and waited[0] >= 2,
               "wipe waits for the radio lock a wifi add holds", repr(waited))
 
+        # What the command reads of its own is read as state is: a link at the
+        # verdict's name is no verdict. The status page took the planted
+        # file's "disk nvme9n1" for the disk this session keeps.
+        script = ("rm -rf /run/moonwater /tmp/planted; mkdir -p /run/moonwater\n"
+                  "echo 'disk nvme9n1' > /tmp/planted; ln -s /tmp/planted /run/moonwater/verdict\n" +
+                  say("status") + "rm -f /run/moonwater/verdict /tmp/planted\n")
+        lines, finished = session(script)
+        planted = answers(lines).get("status", {}).get("out", [])
+        check(finished and planted and not any("nvme9n1" in line for line in planted) and
+              any("live session" in line for line in planted),
+              "a link at the verdict's name is no verdict", repr(planted[:8]))
+
         # The switches and lists the command keeps in /root, drawn as runs of
         # verbs against a model of what each leaves: the words of wifi,
         # wired and bluetooth, the internet preference, ntp and its sampling,
@@ -43044,7 +43056,7 @@ typedef const unsigned char *string_address;
 #define RADIO_RFKILL_BLUETOOTH 2
 static int asked, kept, copied, unblocked;
 static long wifi_power, bluetooth_power;
-static bipolar host_read_text(string_address path, p8 *into, positive room)
+static bipolar host_read_word(string_address path, p8 *into, positive room)
 {
         if (!asked)
                 return -1;

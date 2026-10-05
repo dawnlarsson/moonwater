@@ -75377,7 +75377,7 @@ static b32 wls_output_full(positive kind)
         if (kind == 2)
                 return link_stream_take(s, s->writes, frame, 4) &&
                                        s->writes[0].fd == 1 &&
-                                       host_read_text("/root/wls-out", file,
+                                       host_read_word("/root/wls-out", file,
                                                       sizeof file) == 5 &&
                                        !memory_compare(file, "xyabc", 5)
                                ? 0
