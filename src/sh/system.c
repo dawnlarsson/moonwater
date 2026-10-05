@@ -128,6 +128,24 @@ static bipolar start_machine()
         return start_service((string_address)machine_program, machine_argv, 3);
 }
 
+/*
+        How long before the machine process is started again, by how many
+        times in a row it has not stayed. The first failure is tried at once,
+        as it was, and after that the shell's own steps, 250 ms doubling to
+        four seconds: a machine that failed because something it needs was
+        not there yet (the last process still leaving, a device node) is
+        given the moment that takes, and one that never will is given up on
+        after the same few tries.
+*/
+static positive machine_restart_wait(positive failures)
+{
+        positive wait = 0;
+
+        for (positive step = 1; step < failures && wait < RESTART_BACKOFF_MAX_NS; step++)
+                wait = wait ? wait * 2 : RESTART_BACKOFF_NS;
+        return wait < RESTART_BACKOFF_MAX_NS ? wait : RESTART_BACKOFF_MAX_NS;
+}
+
 static fn wait_for_settling(bipolar service)
 {
         positive started = clock_monotonic_nanoseconds();
@@ -285,6 +303,7 @@ static DEAD_END b32 system_init()
                         if (reaped == machine)
                         {
                                 positive code = (positive)wait_status_code(status);
+                                positive pause_ns;
 
                                 if (code == 0 || code == 1)
                                 {
@@ -321,6 +340,9 @@ static DEAD_END b32 system_init()
                                         continue;
                                 }
 
+                                pause_ns = machine_restart_wait(machine_failures);
+                                if (pause_ns)
+                                        host_pause(pause_ns);
                                 machine_started = clock_monotonic_nanoseconds();
                                 machine = start_machine();
                                 continue;

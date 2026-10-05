@@ -59326,10 +59326,13 @@ int main(int argc, char **argv)
     #   end. A caller who may not (END is root's) must not wait ten seconds
     #   for a detach that is not coming, and a process that never let go is
     #   not one that ran moonwater_end.
+    host = (root / "src/sh/host.c").read_text()
+    init_source = (root / "src/sh/system.c").read_text()
     stop_source = r"""
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
+typedef unsigned char p8;
 typedef unsigned long long p64;
 typedef long bipolar;
 typedef unsigned long positive;
@@ -59339,15 +59342,29 @@ typedef unsigned long positive;
 #define FILE_READ 0
 #define O_CLOEXEC 0
 #define AT_FDCWD (-100)
+#define EBUSY 16
 #define HOST_CLOCK_BOOTTIME 7
 #define HOST_EXIT_EACH_NS ((p64)10000000000)
 #define HOST_EVENT_POLL_NS ((p64)20000000)
+#define HOST_MACHINE_SOURCED "/run/moonwater/machine.sourced"
+#define MOONWATER_HOOK_INIT 1
 #define SPARK_BIND_NAME_MAX 24
 #define memory_zero(at, n) memset(at, 0, n)
-""" + section(machine, "#define MOONWATER_ATTACH 0u", "#define MOONWATER_HOOK_INIT") + r"""
+""" + section(host, "#define HOST_MACHINE_SOURCED_WAIT_NS", "static string_address address_to host_event_environment") + section(machine, "#define MOONWATER_ATTACH 0u", "#define MOONWATER_HOOK_INIT") + r"""
+""" + section(init_source, "#define RESTART_BACKOFF_NS", "#define RESTART_BACKOFF_AFTER") + section(init_source, "static positive machine_restart_wait(", "static fn wait_for_settling") + r"""
 static p64 now_ns;
 static bool host_machine_self, attached, may_end, leaves;
-static unsigned ended, polls, runs, opened;
+static unsigned ended, polls, runs, opened, attaches, busy_left;
+static bipolar attach_error;
+static p64 sourced_at;
+static unsigned hook_named, marker_reads;
+static bipolar host_read_text(const char *path, p8 *into, positive room) {
+    (void)path; (void)room; marker_reads++;
+    if (now_ns < sourced_at) return -2;
+    into[0] = '1'; into[1] = 0;
+    return 1;
+}
+static unsigned host_machine_hook_line(p8 hook) { (void)hook; return hook_named; }
 static bipolar system_open_at(int at, const char *path, int flags) { (void)at;(void)path;(void)flags;opened++;return 3; }
 static void system_close(bipolar h) { (void)h; }
 static p64 system_clock_ns(int c) { (void)c;return now_ns; }
@@ -59360,6 +59377,11 @@ static bipolar system_control(bipolar d, unsigned op, void *p) {
         ended++;
         return 0;
     }
+    if (c->op == MOONWATER_ATTACH) {
+        attaches++;
+        if (busy_left) { busy_left--; return -EBUSY; }
+        return attach_error;
+    }
     if (c->op == MOONWATER_STATUS) {
         polls++;
         c->flags = attached && !(ended && leaves && polls > 4) ? MOONWATER_ATTACHED : 0;
@@ -59367,7 +59389,7 @@ static bipolar system_control(bipolar d, unsigned op, void *p) {
     }
     return -1;
 }
-""" + section(machine, "static bipolar host_machine_ioctl(", "#define HOST_RADIO_WAIT_MS") + section(machine, "static bool host_machine_stop(void)", "static b32 host_machine_source(void)") + r"""
+""" + section(machine, "static bipolar host_machine_ioctl(", "#define HOST_RADIO_WAIT_MS") + section(machine, "static bool host_machine_stop(void)", "static b32 host_machine_source(void)") + section(machine, "static bool host_machine_sourced(p64 wait)", "static b32 host_machine_call(") + r"""
 static unsigned bad, total;
 static void check(int ok, const char *name) { total++; if (!ok) { bad++; printf("FAIL %s\n", name); } }
 static void world(bool a, bool m, bool l, bool s) {
@@ -59391,6 +59413,52 @@ int main(void)
     world(true, true, true, true);
     got = host_machine_stop();
     check(got && runs == 1 && !ended && !polls, "the machine process itself runs moonwater_end and waits for nobody");
+    /* The attach asked again while another process still has it. */
+    struct machine_control control;
+    world(false, true, true, false);
+    attaches = 0; busy_left = 3; attach_error = 0;
+    check(host_machine_attach(3, &control) == 0 && attaches == 4 && now_ns == 3 * HOST_EVENT_POLL_NS,
+          "an attach answered EBUSY three times is taken at the fourth, after three polls");
+    world(false, true, true, false);
+    attaches = 0; busy_left = 0; attach_error = 0;
+    check(host_machine_attach(3, &control) == 0 && attaches == 1 && now_ns == 0,
+          "one that is free is taken at once and waits for nobody");
+    world(false, true, true, false);
+    attaches = 0; busy_left = 1000000; attach_error = 0;
+    check(host_machine_attach(3, &control) == -EBUSY && now_ns >= HOST_MACHINE_ATTACH_NS &&
+          now_ns < HOST_MACHINE_ATTACH_NS + 2 * HOST_EVENT_POLL_NS,
+          "a second machine process is refused with EBUSY after the one second and no longer");
+    world(false, true, true, false);
+    attaches = 0; busy_left = 0; attach_error = -1;
+    check(host_machine_attach(3, &control) == -1 && attaches == 1 && now_ns == 0,
+          "an error that is not EBUSY is the answer at once");
+    /* init's pause before it starts the machine process again. */
+    check(machine_restart_wait(0) == 0 && machine_restart_wait(1) == 0,
+          "the first failure of the machine process is tried again at once");
+    check(machine_restart_wait(2) == 250000000 && machine_restart_wait(3) == 500000000 &&
+          machine_restart_wait(4) == 1000000000 && machine_restart_wait(5) == 2000000000,
+          "and then after the shell's own steps, 250 ms doubling");
+    check(machine_restart_wait(6) == 4000000000ull && machine_restart_wait(7) == 4000000000ull &&
+          machine_restart_wait((positive)-1) == 4000000000ull,
+          "to four seconds and no further, whatever the count");
+    /* The boot's question: has the machine process the script. */
+    world(false, true, true, false);
+    marker_reads = 0; sourced_at = 0; hook_named = 0;
+    check(host_init_list_runs() && now_ns == 0 && marker_reads == 0,
+          "a script that does not name moonwater_init leaves the list to run, and is not waited for");
+    world(false, true, true, false);
+    marker_reads = 0; sourced_at = 0; hook_named = 5;
+    check(!host_init_list_runs() && now_ns == 0 && marker_reads == 1,
+          "one that names it and whose machine process said so has the list's place");
+    world(false, true, true, false);
+    marker_reads = 0; sourced_at = 500000000ull; hook_named = 5;
+    check(!host_init_list_runs() && now_ns >= 500000000ull && now_ns < 500000000ull + 2 * HOST_EVENT_POLL_NS,
+          "and so does one that says so half a second late");
+    world(false, true, true, false);
+    marker_reads = 0; sourced_at = ~0ull; hook_named = 5;
+    check(host_init_list_runs() && now_ns >= HOST_MACHINE_SOURCED_WAIT_NS &&
+          now_ns < HOST_MACHINE_SOURCED_WAIT_NS + 2 * HOST_EVENT_POLL_NS,
+          "one whose machine process never does leaves the list to run, after the wait and no longer");
     printf("%u %u\n", total, bad);
     return bad != 0;
 }
@@ -59412,14 +59480,13 @@ int main(void)
         total = int(lines[-1].split()[0]) if lines and lines[-1][:1].isdigit() else 0
         for _ in range(total - sum(1 for line in lines if line.startswith("FAIL"))):
             checks(True, "machine stop")
-        checks(total == 5 and ran.returncode == 0, "the stop checks ran: " + ran.stderr[-300:])
+        checks(total == 16 and ran.returncode == 0, "the stop checks ran: " + ran.stderr[-300:])
 
     #   The CLI's side of the bind ioctl and of the settings block, lifted
     #   and run: what is handed to the kernel for a command of every length
     #   around its limit, what is made of an answer that is not terminated,
     #   and an entry that claims more text than a buffer of the most an entry
     #   may hold -- every caller copies it into one.
-    host = (root / "src/sh/host.c").read_text()
     lift_source = r"""
 #include <stdio.h>
 #include <stdlib.h>

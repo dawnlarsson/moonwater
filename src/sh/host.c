@@ -55,6 +55,7 @@
 #define HOST_MACHINE_BUILTIN "builtin"
 #define HOST_MACHINE_RUNTIME HOST_STATE "/machine.sh"
 #define HOST_MACHINE_DIRTY HOST_STATE "/machine.dirty"
+#define HOST_MACHINE_SOURCED HOST_STATE "/machine.sourced"
 
 #include "../moonwater/moonwater.c"
 
@@ -181,6 +182,7 @@ static p16 host_machine_event_line(unsigned int event);
 static string_address host_machine_where(void);
 static fn host_machine_refused(string_address name, p16 line);
 static bool host_machine_stop(void);
+static bool host_init_list_runs(void);
 
 //      builtin.c's, which stops the machine the way reboot does; it is
 //      included after this file. The number is the one it defines.
@@ -4019,6 +4021,9 @@ static bool host_settings_install(host_install address_to install,
 #define HOST_EXIT_EACH_NS ((p64)10000000000)
 #define HOST_EXIT_ALL_NS ((p64)30000000000)
 #define HOST_EVENT_POLL_NS ((p64)20000000)
+//      The machine process takes the verdict's poll and the script's sourcing
+//      to say it has the script; a boot that has not heard by then does not.
+#define HOST_MACHINE_SOURCED_WAIT_NS ((p64)5000000000)
 
 static string_address address_to host_event_environment(void)
 {
@@ -4146,7 +4151,7 @@ static fn host_events_boot(host_settings address_to settings)
         positive at = 0;
 
         if (!settings || !host_settings_count(settings, SPARK_SETTINGS_INIT) ||
-            host_machine_hook_line(MOONWATER_HOOK_INIT) || system_fork())
+            system_fork())
                 return;
 
         //      The runner, from here on: its own session, outliving boot.
@@ -4165,6 +4170,12 @@ static fn host_events_boot(host_settings address_to settings)
 
                 host_pause(HOST_POLL_NS * 2);
         }
+
+        //      After the verdict, which is when the machine process goes on to
+        //      its script: a script that names moonwater_init has the list's
+        //      place only if that process got that far.
+        if (!host_init_list_runs())
+                system_call_1(syscall(exit), 0);
 
         while (host_settings_next(settings, address_of at, address_of setting))
         {

@@ -2225,6 +2225,37 @@ static fn host_machine_wait_verdict(p8 address_to into, positive room)
         }
 }
 
+/*
+        Whether the machine process has taken the script up, which a boot has
+        to know before it leaves the settings' init list to moonwater_init.
+
+        The process says so when it has sourced the script and not before: a
+        process that never starts, or one that dies in the script's own
+        top-level lines (an exit in them, a failed restart that init gave up
+        on), never runs the hook, and a script naming the hook is then no
+        reason for nothing to run at boot. A script that does not name it is
+        never waited for. The wait is bounded, and a boot that has not heard
+        by the end of it runs the list.
+*/
+static bool host_machine_sourced(p64 wait)
+{
+        p64 started = system_clock_ns(HOST_CLOCK_BOOTTIME);
+        p8 said[8];
+
+        while (host_read_text(HOST_MACHINE_SOURCED, said, sizeof(said)) < 0) {
+                if (system_clock_ns(HOST_CLOCK_BOOTTIME) - started >= wait)
+                        return false;
+                host_pause(HOST_EVENT_POLL_NS);
+        }
+        return true;
+}
+
+static bool host_init_list_runs(void)
+{
+        return !host_machine_hook_line(MOONWATER_HOOK_INIT) ||
+               !host_machine_sourced(HOST_MACHINE_SOURCED_WAIT_NS);
+}
+
 static b32 host_machine_call(positive slot, string_address name,
                              string_address first, string_address second)
 {
@@ -2461,6 +2492,30 @@ static bool host_machine_stop(void)
         return left;
 }
 
+/*
+        The attach, asked again for a moment while another process has it.
+
+        The one that held it is most often the machine process this one
+        replaces, and it lets go as it exits: asked the instant before, this
+        process is answered EBUSY for the little that the other still has to
+        do, and each such answer counted toward init's giving the machine up
+        for the boot. A process that is told EBUSY for the whole second is
+        not racing one that is leaving, it is a second machine process, and
+        that is refused as it always was.
+*/
+#define HOST_MACHINE_ATTACH_NS ((p64)1000000000)
+
+static bipolar host_machine_attach(bipolar device, struct machine_control address_to control)
+{
+        p64 started = system_clock_ns(HOST_CLOCK_BOOTTIME);
+        bipolar failed;
+
+        while ((failed = host_machine_ioctl(device, MOONWATER_ATTACH, control)) == -EBUSY &&
+               system_clock_ns(HOST_CLOCK_BOOTTIME) - started < HOST_MACHINE_ATTACH_NS)
+                host_pause(HOST_EVENT_POLL_NS);
+        return failed;
+}
+
 static b32 host_machine_source(void)
 {
         string_address argv[3];
@@ -2575,11 +2630,11 @@ static fn host_machine_hook(positive slot, unsigned int which,
 
         So a failure has to say something else. host_fail answers 1, so a
         /dev/spark that is not there yet, an attach the last machine process
-        has not let go of, or one refused ioctl is otherwise a boot in which
-        moonwater_init never runs -- and host_events_boot skips the settings
-        init list whenever the overlay names that hook, whether or not
-        anything is left to run it, so on a machine whose script defines
-        moonwater_init nothing runs at boot at all.
+        has not let go of, or one refused ioctl is otherwise retired for the
+        rest of the boot, and the script's moonwater_init never runs. (The
+        settings' init list does not wait on that: host_events_boot runs it
+        unless the process said it had sourced the script, which is the one
+        thing that makes a script naming the hook the list's replacement.)
 
         The bound image lines are not part of that: bind_queue hands a press
         to the machine only while an attach is live, and the process that
@@ -2617,7 +2672,7 @@ static b32 host_machine_run(void)
                 host_fail(SPARK_DEVICE, device);
                 return HOST_MACHINE_FAILED;
         }
-        failed = host_machine_ioctl(device, MOONWATER_ATTACH, address_of control);
+        failed = host_machine_attach(device, address_of control);
         if (failed < 0) {
                 system_close(device);
                 host_fail("machine attach", failed);
@@ -2636,6 +2691,11 @@ static b32 host_machine_run(void)
                 host_fail("machine script", failed);
                 return HOST_MACHINE_FAILED;
         }
+
+        //      Said before the restores below, which can take a join's time:
+        //      a boot waiting to see whether this process has the script is
+        //      waiting for this and not for them.
+        host_write_text(HOST_MACHINE_SOURCED, "1\n");
 
         if (!host_starts((string_address)verdict, "ask "))
                 radio_restore();
