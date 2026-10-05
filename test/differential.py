@@ -42711,6 +42711,22 @@ while True:
               any("live session" in line for line in planted),
               "a link at the verdict's name is no verdict", repr(planted[:8]))
 
+        # What cannot be kept is said with the kernel's own error. The
+        # keyboard, ntp and timezone auto verbs said "Operation not
+        # permitted" for every reason, a read-only /root and a full one
+        # included, because the failure was spelled -1 and not the errno.
+        script = ("rm -f /root/ntp /root/ntp.sampling /root/keyboard /root/timezone.mode /root/name\n"
+                  "echo Europe/London > /root/timezone\n"
+                  "mount --bind /root /root && mount -o remount,ro,bind /root\n" +
+                  "".join(say(verb) for verb in ("keyboard de", "ntp off", "ntp sampling off",
+                                                 "timezone auto", "name keeper")))
+        lines, finished = session(script)
+        seen = answers(lines)
+        for verb in ("keyboard de", "ntp off", "ntp sampling off", "timezone auto", "name keeper"):
+            check(finished and seen[verb]["status"] == 1 and
+                  any("Read-only file system" in line for line in seen[verb]["out"]),
+                  f"`{verb}` with /root read-only says the kernel's reason and fails", repr(seen.get(verb)))
+
         # The switches and lists the command keeps in /root, drawn as runs of
         # verbs against a model of what each leaves: the words of wifi,
         # wired and bluetooth, the internet preference, ntp and its sampling,

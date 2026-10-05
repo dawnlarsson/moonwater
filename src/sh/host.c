@@ -6471,6 +6471,15 @@ static bipolar radio_write_word(string_address path, string_address word)
         return host_write_file(path, line, string_length(line), 0644, true);
 }
 
+/* A word kept for the next boot, or the reason it could not be, the kernel's and
+   not a guess, under the name of what was being kept: 1 once it is said. */
+static b32 host_save(string_address label, string_address path, string_address word)
+{
+        bipolar failed = radio_write_word(path, word);
+
+        return failed < 0 ? host_fail(label, failed) : 0;
+}
+
 /* What a switch's word says: 1 on, 0 off, -1 when it says neither or is not
    there, which is the same as on to everything that asks. */
 static bipolar radio_power(string_address path)
@@ -8601,10 +8610,9 @@ static b32 radio_wired_set(bool on)
         netlink_wired wired;
         bipolar handle;
         bipolar failed;
-        bipolar written = radio_write_word(NET_WIRED_POWER, on ? "on" : "off");
 
-        if (written < 0)
-                return host_fail(NET_WIRED_POWER, written);
+        if (host_save(NET_WIRED_POWER, NET_WIRED_POWER, on ? "on" : "off"))
+                return 1;
 
         handle = netlink_open_groups(0);
         if (handle < 0)
@@ -8900,9 +8908,8 @@ static b32 radio_internet_set(string_address which)
                 return host_usage();
 
         host_state_ready();
-        failed = radio_write_word(NET_INTERNET_ROOT, which);
-        if (failed < 0)
-                return host_fail(NET_INTERNET_ROOT, failed);
+        if (host_save(NET_INTERNET_ROOT, NET_INTERNET_ROOT, which))
+                return 1;
         failed = radio_internet_run(which);
         if (failed < 0)
                 return host_fail(NET_INTERNET_RUN, failed);
@@ -13540,15 +13547,10 @@ static b32 locale_ntp_sampling_status(void)
 //      at once.
 static b32 locale_ntp_set(bool sampling, string_address word)
 {
-        bipolar kept;
-
         if (!string_equals(word, "on") && !string_equals(word, "off"))
                 return host_usage();
-        kept = radio_write_word(sampling ? LOCALE_NTP_SAMPLING_PATH
-                                         : LOCALE_NTP_PATH,
-                                word);
-        if (kept < 0)
-                return host_fail("ntp", kept);
+        if (host_save("ntp", sampling ? LOCALE_NTP_SAMPLING_PATH : LOCALE_NTP_PATH, word))
+                return 1;
         if (!sampling && string_equals(word, "on"))
         {
                 locale_ntp_next = 0;
@@ -13714,7 +13716,6 @@ static b32 locale_keyboard_list(void)
 static b32 locale_keyboard_set(string_address name)
 {
         bipolar live;
-        bipolar kept;
 
         if (!locale_keyboard_ok(name))
                 return host_refuse("unknown keyboard layout %s -- "
@@ -13726,9 +13727,8 @@ static b32 locale_keyboard_set(string_address name)
         live = locale_keyboard_live(name);
         if (live == -EINVAL)
                 return host_refuse("Canvas has no keyboard layout %s\n", name);
-        kept = radio_write_word(LOCALE_KEYBOARD_PATH, name);
-        if (kept < 0)
-                return host_fail("keyboard", kept);
+        if (host_save("keyboard", LOCALE_KEYBOARD_PATH, name))
+                return 1;
         if (live < 0 && live != -ENOENT)
         {
                 host_say(log_error, host_label "keyboard %s is saved, but "
@@ -14220,12 +14220,13 @@ static b32 host_name(string_address address_to arguments, positive count)
                                            arguments[2]);
         }
 
+        //      Kept first, so a machine whose kernel will not take the name still
+        //      has it at the next boot, and says so when it does not.
+        if (host_save(NAME_PATH, NAME_PATH, name))
+                return 1;
         {
-                bipolar done = radio_write_word(NAME_PATH, name);
+                bipolar done = name_apply(name);
 
-                if (done < 0)
-                        return host_fail(NAME_PATH, done);
-                done = name_apply(name);
                 if (done < 0)
                 {
                         host_say(log_error, host_label "%s is saved, but the "
