@@ -14074,19 +14074,18 @@ static const p8 name_nouns[] =
     "dragonfly hummingbird kingfisher nightingale periwinkle sandpiper "
     "snowflake tangerine";
 
-/* The word at an index in a list of words one space apart. */
-static fn name_word(const p8 address_to list, positive index, p8 address_to into,
-                    positive room)
+/* The word at an index in a list of words one space apart, the empty word for
+   an index past the last. */
+static fn name_word(const p8 address_to list, positive size, positive index,
+                    p8 address_to into, positive room)
 {
-        positive length = 0;
+        string_address word = (string_address)list +
+                              memory_nth_of((address_any)list, ' ', size, index).x;
+        positive length = (positive)(string_first_of_or_end(word, ' ') - word);
 
-        for (; index; list++)
-                if (address_to list == ' ')
-                        index--;
-
-        while (address_to list && address_to list != ' ' && length + 1 < room)
-                into[length++] = address_to list++;
-
+        if (length >= room)
+                length = room - 1;
+        memory_copy_apart(into, word, length);
         into[length] = end;
 }
 
@@ -14097,9 +14096,11 @@ static fn name_roll(p8 address_to into, positive room)
 
         system_random_fill(address_of bits, sizeof(bits), 0);
 
-        name_word(name_adjectives, bits & (NAME_WORDS - 1), into, room);
+        name_word(name_adjectives, sizeof(name_adjectives) - 1, bits & (NAME_WORDS - 1),
+                  into, room);
         string_append_bounded(into, "-", room);
-        name_word(name_nouns, (bits >> 9) & (NAME_WORDS - 1), noun, sizeof(noun));
+        name_word(name_nouns, sizeof(name_nouns) - 1, (bits >> 9) & (NAME_WORDS - 1),
+                  noun, sizeof(noun));
         string_append_bounded(into, noun, room);
 }
 
@@ -14208,8 +14209,7 @@ static b32 host_name(string_address address_to arguments, positive count)
         else
         {
                 string_copy_bounded(name, arguments[2], sizeof(name));
-                for (positive at = 0; name[at]; at++)
-                        name[at] = byte_to_lower(name[at]);
+                memory_to_lower_ascii(name, string_length(name));
 
                 if (!name_valid(name))
                         return host_refuse("%s is not a machine name: lowercase "
