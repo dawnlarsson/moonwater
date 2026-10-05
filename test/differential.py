@@ -67153,13 +67153,17 @@ static positive string_length_max(string_address text, positive room)
 '''
 
     NEARBY_GROUP_STUBS = r'''
+/*      The groups file is the driver's own copy, apart from the listener's
+        groups in memory: a code closed or dropped in the one and not the
+        other is a difference the checks can see. */
+static link_groups wl_groups_file;
 fn link_groups_load(link_groups address_to groups)
 {
-        memcpy(groups, &link_nearby.groups, sizeof *groups);
+        memcpy(groups, &wl_groups_file, sizeof *groups);
 }
 static bipolar link_groups_save(link_groups address_to groups)
 {
-        memcpy(&link_nearby.groups, groups, sizeof *groups);
+        memcpy(&wl_groups_file, groups, sizeof *groups);
         return 0;
 }
 '''
@@ -67532,6 +67536,7 @@ static void wl_reset(bool server)
         memset(link_nearby.groups.record[0].key, 0x5a, 32);
         waterlink_group_keys_from(&wl_group, link_nearby.groups.record[0].key, "office");
         link_nearby.keys[0] = wl_group;
+        wl_groups_file = link_nearby.groups;
         strcpy((char *)link_nearby.name, "machine");
         for (int a = 0; a < 4; a++)
         {
@@ -67655,6 +67660,7 @@ static void wl_step(bool server)
                                          : mode & 16 ? link_name_check((string_address)wl_offered,
                                                                        WATERLINK_NAME_MAX)
                                                      : 0x1badc0deu;
+                        wl_groups_file = link_nearby.groups;
                 }
                 //      This place was greeted a moment ago, as an announcement of
                 //      it would have had this machine do.
@@ -67690,6 +67696,25 @@ static void wl_step(bool server)
                         wl_check(wl_file.count <= peers_before,
                                  "a code that is closed, run out or for another "
                                  "name let a machine in");
+                //      A one-use code that took its machine is closed at once and
+                //      kept its half minute; one that stays is not touched.
+                if (server && group && (mode & 1) && !(mode & 2) &&
+                    wl_file.count > peers_before)
+                {
+                        struct link_group_record *kept = &wl_groups_file.record[0];
+
+                        wl_check((record->flags & LINK_GROUP_DONE) &&
+                                         record->expires ==
+                                                 wl_clock / 1000000000ull + LINK_PAIR_GRACE,
+                                 "a code that took its machine was left open");
+                        wl_check((kept->flags & LINK_GROUP_DONE) &&
+                                         kept->expires == record->expires,
+                                 "a code that took its machine was left open in the file");
+                }
+                if (server && group && !(mode & 3))
+                        wl_check(!((record->flags | wl_groups_file.record[0].flags) &
+                                   LINK_GROUP_DONE),
+                                 "a code that stays was closed");
                 //      A member that was let in is greeted back, whether or not
                 //      this place was greeted lately: it is waiting for it.
                 if (server && group && !spoil && !wl_entropy_down &&
@@ -67751,8 +67776,41 @@ static void wl_step(bool server)
                 break;
         }
         case 4:
+        {
+                //      Time passes, and the listener's turn drops the one-use
+                //      codes that ran out and only those, as the file it keeps
+                //      would be left; the driver's groups are put back after.
+                link_groups before = link_nearby.groups;
+                positive spent = 0, kept = 0;
+
+                //      The file holds a group that stays beside the code, so a
+                //      turn that drops everything is not the one that drops
+                //      what ran out.
+                if (before.count == 1)
+                {
+                        before.record[1] = before.record[0];
+                        before.record[1].flags = 0;
+                        before.record[1].key[0] ^= 1;
+                        before.count = 2;
+                }
+                wl_groups_file = before;
                 wl_clock += (p64)take16() * (take8() & 1 ? 1000000ull : 1000ull);
+                for (positive at = 0; at < before.count; at++)
+                        spent += link_group_spent(before.record + at,
+                                                  wl_clock / 1000000000ull);
+                link_groups_expire();
+                for (positive at = 0; at < before.count; at++)
+                        for (positive now_at = 0; now_at < wl_groups_file.count; now_at++)
+                                kept += !memcmp(wl_groups_file.record + now_at,
+                                                before.record + at, sizeof before.record[0]) &&
+                                        !link_group_spent(before.record + at,
+                                                          wl_clock / 1000000000ull);
+                wl_check(wl_groups_file.count + spent == before.count &&
+                                 kept == wl_groups_file.count,
+                         "the listener's turn kept a code that ran out or dropped one that had not");
+                wl_groups_file = link_nearby.groups;
                 break;
+        }
         case 5:
         {
                 //      An mDNS packet, from anywhere on the link.
@@ -68015,13 +68073,18 @@ def waterlink_pre_seeds():
     service = (b"_waterlink", b"_udp", b"local")
 
     def announce(ports, ident=0):
+        #   DNS-SD: the service's PTR to each instance and the instance's SRV;
+        #   an SRV with no PTR is no advertisement, and the reader says so.
         body = b""
         for i, port in enumerate(ports):
-            body += name(b"wl-%02d" % i, *service) + b"\x00\x21\x80\x01" + \
+            instance = name(b"wl-%02d" % i, *service)
+            body += name(*service) + b"\x00\x0c\x00\x01\x00\x00\x11\x94" + \
+                len(instance).to_bytes(2, "big") + instance
+            body += instance + b"\x00\x21\x80\x01" + \
                 b"\x00\x00\x11\x94" + (6 + len(name(b"h"))).to_bytes(2, "big") + \
                 b"\x00\x00\x00\x00" + port.to_bytes(2, "big") + name(b"h")
         return ident.to_bytes(2, "big") + b"\x84\x00\x00\x00" + \
-            len(ports).to_bytes(2, "big") + b"\x00\x00\x00\x00" + body
+            (2 * len(ports)).to_bytes(2, "big") + b"\x00\x00\x00\x00" + body
 
     query = b"\x12\x34\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00" + \
         name(*service) + b"\x00\x0c\x00\x01"
@@ -68072,6 +68135,16 @@ def waterlink_pre_seeds():
         "greetings_dated_code.bin": b"\x02" + b"".join(
             greet(32768 + shift, 1, 0x2000 + at) for at, shift in
             enumerate((-30000, 30000, 0))),
+        #   A code that has taken its machine, or that waits for a named one,
+        #   and then an announcement: it greets nobody. A code that stays is
+        #   closed by nothing, and one that ran out goes with the clock.
+        "code_done_then_announced.bin": b"\x02" + greet(32768, 3, 0x3000) +
+        op5(announce(range(2000, 2008))),
+        "code_named_then_announced.bin": b"\x02" + greet(32768, 9, 0x3100) +
+        op5(announce(range(2100, 2108))),
+        "code_closes_and_runs_out.bin": b"\x02" + greet(32768, 1, 0x3200) +
+        head(4) + (40000).to_bytes(2, "big") + b"\x01" + greet(32768, 5, 0x3300) +
+        head(4) + (400).to_bytes(2, "big") + b"\x01",
         "raw.bin": b"\x00" + head(0) + (64).to_bytes(2, "big") + bytes(range(64)),
         "flood_then_cookie.bin": b"\x00" + head(9) + bytes([40, 0]) + b"".join(
             (i + 1).to_bytes(2, "big") + bytes([i & 3]) + (0x100 + i).to_bytes(4, "big")
