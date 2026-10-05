@@ -42745,6 +42745,17 @@ while True:
               "a second moonwater boot is refused and leaves the verdict as it was",
               repr((seen.get("boot"), seen.get("again"), verdicts)))
 
+        # The settings and lists are root's too: for anybody else the page said
+        # `init mount is on` and nothing at boot of a machine it could not
+        # read, as facts; it says nothing of them. (The zone, ntp and keyboard
+        # lines say what they cannot read already.)
+        lines, finished = session(say("status") + say("keyboard"), nobody=True)
+        seen = answers(lines)
+        page = "\n".join(seen.get("status", {}).get("out", []))
+        check(finished and page and "init mount is" not in page and "nothing runs" not in page and
+              "init:" not in page and "exit:" not in page,
+              "status does not make the settings up for a caller who cannot read them", page[:600])
+
         # The switches and lists the command keeps in /root, drawn as runs of
         # verbs against a model of what each leaves: the words of wifi,
         # wired and bluetooth, the internet preference, ntp and its sampling,

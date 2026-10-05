@@ -14893,11 +14893,15 @@ static b32 host_status(void)
 
         (void)host_bind_each("  ", false);
 
-        host_settings_session(address_of settings);
-        host_settings_lines(address_of settings, 0, true);
-        string_format(log, "  init mount is %s\n",
-                      settings.flags & SPARK_SETTINGS_MOUNT_OFF ? "off" : "on");
-        host_settings_lines(address_of settings, 1, true);
+        if (host_settings_session(address_of settings))
+        {
+                host_settings_lines(address_of settings, 0, true);
+                string_format(log, "  init mount is %s\n",
+                              settings.flags & SPARK_SETTINGS_MOUNT_OFF ? "off" : "on");
+                host_settings_lines(address_of settings, 1, true);
+        }
+        //      Else they are root's and not known to this caller: no line, where
+        //      there was "init mount is on" and nothing run at boot as facts.
 
         string_format(log, "\n");
         host_usage_write(log);
