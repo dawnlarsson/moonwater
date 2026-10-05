@@ -2005,8 +2005,7 @@ static bool build_asm_pass(string_address text, string_address target,
                                                       stop - at,
                                                       string_set_blanks);
 
-                        while (stop > at && byte_is_blank(walk.line[stop - 1]))
-                                stop--;
+                        stop -= memory_trailing(walk.line + at, stop - at, byte_is_blank);
 
                         count = build_words_of(walk.line + at, stop - at,
                                                (string_address address_to)words,
@@ -5802,9 +5801,8 @@ static b32 build_remote(string_address host, string_address remote,
                         return build_die(build_join("cannot reach ", host,
                                                     " over ssh", null));
                 length = string_length((string_address)build_file_two);
-                while (length && (build_file_two[length - 1] == '\n' ||
-                                  build_file_two[length - 1] == '\r'))
-                        build_file_two[--length] = end;
+                length -= memory_trailing(build_file_two, length, byte_is_line_end);
+                build_file_two[length] = end;
                 target = build_arch_name((string_address)build_file_two);
                 if (!target)
                         target = "x64";
@@ -5977,9 +5975,8 @@ static b32 build_remote(string_address host, string_address remote,
                 {
                         positive length = string_length((string_address)build_file_two);
 
-                        while (length && (build_file_two[length - 1] == '\n' ||
-                                          build_file_two[length - 1] == '\r'))
-                                build_file_two[--length] = end;
+                        length -= memory_trailing(build_file_two, length, byte_is_line_end);
+                        build_file_two[length] = end;
 
                         build_remote_image = build_join((string_address)build_file_two,
                                                         null);

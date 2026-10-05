@@ -11463,16 +11463,8 @@ static bool expand_brace_number(string_address text, positive length,
         address_to padded = at + 1 < length && text[at] == '0';
         limit = minus ? (positive)bipolar_max + 1 : (positive)bipolar_max;
 
-        for (; at < length; at++)
-        {
-                positive digit = text[at] - '0';
-
-                if (text[at] < '0' || text[at] > '9' ||
-                    magnitude > (limit - digit) / 10)
-                        return false;
-
-                magnitude = magnitude * 10 + digit;
-        }
+        if (!memory_digits_whole(text + at, length - at, limit, address_of magnitude))
+                return false;
 
         address_to value = bipolar_from_magnitude(magnitude, minus);
 

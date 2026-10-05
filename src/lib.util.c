@@ -243,6 +243,59 @@ static inline bool string_digits_checked_exact(string_address text,
         return true;
 }
 
+/* One more decimal digit on a number: false, with the number as it was, when
+   that would make more than limit. What every hand loop of
+   `n > (max - digit) / 10` was, over any limit, and what the readers below
+   run. */
+static inline bool positive_append_digit(positive address_to value,
+                                         positive digit, positive limit)
+{
+        positive made;
+
+        if (__builtin_mul_overflow(address_to value, 10, address_of made) ||
+            __builtin_add_overflow(made, digit, address_of made) || made > limit)
+                return false;
+
+        address_to value = made;
+        return true;
+}
+
+/* The decimal digits at the front of bytes[0, length) as the number they make,
+   no more than limit: how many there were, with the number in *value, or 0
+   when there are none or they make more (*value untouched). The reader over a
+   pointer and a length, where string_digits_checked wants a terminator and
+   string_decimal_saturated answers a number for "more". */
+static inline positive memory_digits_checked(const p8 address_to bytes,
+                                             positive length, positive limit,
+                                             positive address_to value)
+{
+        positive got = 0;
+        positive at = 0;
+
+        for (; at < length && digit_known(bytes[at], 10) < 10; at++)
+                if (!positive_append_digit(address_of got, bytes[at] - '0', limit))
+                        return 0;
+
+        if (at)
+                address_to value = got;
+        return at;
+}
+
+/* The same for a span that is nothing but digits, and not empty. */
+static inline bool memory_digits_whole(const p8 address_to bytes,
+                                       positive length, positive limit,
+                                       positive address_to value)
+{
+        positive got;
+
+        if (!length || memory_digits_checked(bytes, length, limit,
+                                             address_of got) != length)
+                return false;
+
+        address_to value = got;
+        return true;
+}
+
 /* The cold reader of a decimal option word: the digits at *text, every one of
    them, as the number they make, or LIMIT when they make more, with OVER (null
    when the caller does not ask) saying which. The cursor moves past the run
@@ -257,8 +310,7 @@ static inline positive string_decimal_saturated(string_address address_to text,
         bool past = false;
 
         for (positive digit; (digit = digit_known(string_get(at), 10)) < 10; at++)
-                if (past || __builtin_mul_overflow(got, 10, address_of got) ||
-                    __builtin_add_overflow(got, digit, address_of got) || got > limit)
+                if (past || !positive_append_digit(address_of got, digit, limit))
                 {
                         past = true;
                         got = limit;
@@ -494,6 +546,17 @@ static inline INLINE PURE positive path_trailing_slashes(const p8 address_to pat
         return length > 1 ? memory_span_byte_reverse((address_any)(path + 1),
                                                      '/', length - 1)
                           : 0;
+}
+
+/* Where what follows the last byte of block[0, size) begins: one past it, or
+   0 when there is none. The start of a path's last component after the
+   slash, of the last line after its newline, of a host after the @. */
+static inline INLINE PURE positive memory_after_last(const p8 address_to block,
+                                                     p8 byte, positive size)
+{
+        const p8 address_to last = memory_last_of((address_any)block, byte, size);
+
+        return last ? (positive)(last - block) + 1 : 0;
 }
 
 /* One Unicode scalar, with no terminator and no partial writes on failure.
@@ -1079,11 +1142,7 @@ static COLD bipolar system_open_parent_pinned(
                 return -22;
 
         positive length = string_length(path);
-        positive at = length;
-
-        while (at && path[at - 1] != '/')
-                at--;
-
+        positive at = memory_after_last(path, '/', length);
         positive name = length - at;
 
         if (!name || (name == 1 && path[at] == '.'))
@@ -1093,11 +1152,9 @@ static COLD bipolar system_open_parent_pinned(
 
         //      The directory part without the slashes that end it: the root
         //      for a name in it, the working directory for a name alone.
-        positive keep = at;
+        positive keep = at - path_trailing_slashes(path, at);
         p8 parent[4096];
 
-        while (keep > 1 && path[keep - 1] == '/')
-                keep--;
         if (keep >= sizeof(parent))
                 return -36;
         if (keep)
@@ -1619,10 +1676,8 @@ static bipolar system_path_remove_opened_at(
 {
         positive length = name ? string_length(name) : 0;
 
-        while (length > 1 && name[length - 1] == '/')
-                length--;
-        p8 address_to slash = memory_last_of(name, '/', length);
-        positive cut = slash ? (positive)(slash - name) + 1 : 0;
+        length -= path_trailing_slashes(name, length);
+        positive cut = memory_after_last(name, '/', length);
 
         if (cut && cut < length)
         {
@@ -7949,6 +8004,23 @@ static inline INLINE address_any copy_until_known(address_any destination,
 #define byte_to_lower(value)       KNOWN_SINGLE(byte_to_lower, known_to_lower, (value))
 #endif
 #define byte_is_punctuation(value) KNOWN_SINGLE(byte_is_punctuation, known_is_punctuation, (value))
+
+/* What ends a record a line reader read: the newline, and the carriage return
+   a Windows editor put before it. */
+#define byte_is_line_end(value)    ((value) == '\n' || (value) == '\r')
+
+/* How many bytes at the end of bytes[0, length) test accepts -- byte_is_blank,
+   byte_is_space, byte_is_line_end, any predicate of one byte -- which is what
+   a trim cuts: length -= memory_trailing(text, length, byte_is_space). One
+   fixed byte is memory_span_byte_reverse, whose assembly takes a block at a
+   step; this is the loop for a set, in the caller, as each hand loop was. The
+   front of a text is string_span_max over one of the string_set tables. */
+#define memory_trailing(bytes, length, test)                                  \
+        ({ const p8 address_to _trailing_bytes = (bytes);                    \
+           positive _trailing_all = (length), _trailing_kept = _trailing_all;  \
+           while (_trailing_kept && test(_trailing_bytes[_trailing_kept - 1])) \
+                   _trailing_kept--;                                          \
+           _trailing_all - _trailing_kept; })
 #if LIBRARY_INLINE_BITS
 #define bits_counted(value)        KNOWN_SINGLE(bits_counted, known_counted, (value))
 #define bits_trailing_zeros(value) KNOWN_SINGLE(bits_trailing_zeros, known_trailing_zeros, (value))
@@ -13390,8 +13462,8 @@ typedef struct
 */
 static fn numbers_trim(numbers_scan address_to number)
 {
-        while (number->count > 0 && number->digits[number->count - 1] == 0)
-                number->count--;
+        number->count -= (b32)memory_span_byte_reverse(number->digits, 0,
+                                                       (positive)number->count);
 
         if (number->count == 0)
                 number->point = 0;
@@ -19540,8 +19612,7 @@ static fn clock_format_core(clock_format_state address_to state,
                                 shown = wanted;
                                 if (state->width > 0 &&
                                     (state->pad == '-' || state->pad == '_'))
-                                        while (shown > 1 && fraction[shown - 1] == '0')
-                                                shown--;
+                                        shown -= memory_span_byte_reverse(fraction + 1, '0', shown - 1);
                                 clock_format_raw(state, fraction, shown);
                                 if (state->pad == '_')
                                         clock_format_run(state, ' ', wanted - shown);
@@ -22194,9 +22265,7 @@ static fn clock_tz_load_localtime(void)
             text[used - 1] != '\n')
                 return;
         text[--used] = 0;
-        line = used;
-        while (line && text[line - 1] != '\n')
-                line--;
+        line = memory_after_last(text, '\n', used);
         if (!line || line == used)
                 return;
         if (!clock_tz_parse(text + line))
@@ -22228,8 +22297,7 @@ static bipolar clock_zone_load(p8 address_to into, positive room)
         system_call_1(syscall(close), (positive)handle);
         if (got < 0)
                 return got;
-        while (got > 0 && (into[got - 1] == '\n' || into[got - 1] == '\r'))
-                got--;
+        got -= (bipolar)memory_trailing(into, (positive)got, byte_is_line_end);
         into[got] = 0;
         return got;
 }
@@ -29588,8 +29656,7 @@ static fn format_expand(decimal value, format_number address_to number,
         //      a read past the end already answers zero, and a cut run keeps
         //      its flag. Dropping them makes every later loop shorter and
         //      changes no answer.
-        while (number->count && number->digit[number->count - 1] == '0')
-                number->count--;
+        number->count -= memory_span_byte_reverse(number->digit, '0', number->count);
 }
 
 /*
@@ -29660,8 +29727,8 @@ static fn format_round(format_number address_to number, bipolar keep)
 
         if (!up)
         {
-                while (number->count && number->digit[number->count - 1] == '0')
-                        number->count--;
+                number->count -= memory_span_byte_reverse(number->digit, '0',
+                                                          number->count);
 
                 if (number->count == 0)
                         number->exponent = 1;
@@ -30621,8 +30688,7 @@ static fn format_hex_field(format_sink address_to sink, decimal value,
 
         if (spec->precision < 0)
         {
-                while (nibble_count && nibble[nibble_count - 1] == 0)
-                        nibble_count--;
+                nibble_count -= memory_span_byte_reverse(nibble, 0, nibble_count);
         }
         else if ((positive)spec->precision < nibble_count)
         {

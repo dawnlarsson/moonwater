@@ -5496,10 +5496,10 @@ static bool xz_cli_say(string_address one, string_address two, string_address th
 static bool xz_cli_number(string_address name, string_address value, p64 min, p64 max,
                           p64 address_to out)
 {
-        p64 result = 0;
+        p64 result;
+        bool past;
 
-        while (*value == ' ' || *value == '\t')
-                value++;
+        value += string_span(value, string_set_blanks);
         if (string_equals(value, "max"))
         {
                 address_to out = max;
@@ -5511,18 +5511,9 @@ static bool xz_cli_number(string_address name, string_address value, p64 min, p6
                               value);
                 return false;
         }
-        do
-        {
-                p64 add = (p64)(*value - '0');
-
-                if (result > ~(p64)0 / 10)
-                        goto range;
-                result *= 10;
-                if (~(p64)0 - add < result)
-                        goto range;
-                result += add;
-                value++;
-        } while (*value >= '0' && *value <= '9');
+        result = string_decimal_saturated(address_of value, ~(p64)0, address_of past);
+        if (past)
+                goto range;
         if (*value)
         {
                 p64 multiplier = 0;

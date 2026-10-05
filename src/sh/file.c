@@ -2340,8 +2340,7 @@ static bipolar file_identity_number(string_address text)
 {
         positive number;
 
-        while (byte_is_space(string_get(text)))
-                text++;
+        text += string_span(text, string_set_space);
         if (string_is(text, '+'))
                 text++;
         return string_digits_checked_exact(text, 10, address_of number) &&
@@ -10124,8 +10123,7 @@ static bool ls_block_size_read(string_address text, positive address_to unit,
         //      xstrtol_fatal names a bad suffix before an overflow.
         bool overflow = false;
 
-        while (byte_is_space(string_get(digits)))
-                digits++;
+        digits += string_span(digits, string_set_space);
         if (string_is(digits, '+'))
                 digits++;
         if (string_is(digits, '0') && (string_get(digits + 1) | 0x20) == 'x' &&
@@ -13587,8 +13585,7 @@ static bool file_number_c(string_address text, string_address address_to stop,
         address_to negative = false;
         address_to magnitude = 0;
         address_to overflow = false;
-        while (byte_is_space(string_get(at)))
-                at++;
+        at += string_span(at, string_set_space);
         if (string_is(at, '-') || string_is(at, '+'))
                 address_to negative = string_get(at++) == '-';
         if (string_is(at, '0') && (at[1] == 'x' || at[1] == 'X') &&
@@ -13618,8 +13615,7 @@ static bool file_number_c(string_address text, string_address address_to stop,
 
 static bool file_signed_decimal(string_address text, bipolar address_to value)
 {
-        while (byte_is_space(string_get(text)))
-                text++;
+        text += string_span(text, string_set_space);
 
         bool negative = string_is(text, '-');
 
@@ -19308,8 +19304,7 @@ static bool du_exclude_file(string_address path)
 
                 positive stop = at;
 
-                while (stop > start && byte_is_space(text[stop - 1]))
-                        stop--;
+                stop -= memory_trailing(text + start, stop - start, byte_is_space);
                 if (stop > start)
                 {
                         text[stop] = end;
@@ -28188,8 +28183,7 @@ static bool csplit_parse_line(string_address word,
         positive line;
 
         // xstrtoumax's reading: blanks before, then an optional +.
-        while (byte_is_space(string_get(word)))
-                word++;
+        word += string_span(word, string_set_space);
         if (string_is(word, '+'))
                 word++;
         if (!string_digits_checked_exact(word, 10, address_of line) ||
@@ -28431,8 +28425,7 @@ static b32 csplit_repeat_read(string_address word, bool address_to forever,
         positive used = 0;
         string_address at = word + 1;
 
-        while (byte_is_space(*at))
-                at++;
+        at += string_span(at, string_set_space);
         if (*at == '+')
                 at++;
         while (at < word + length - 1 && used + 1 < sizeof(digits))
@@ -31741,15 +31734,8 @@ static bool shred_remove(string_address path, file_facts address_to named,
         memory_copy_end(shred_new_name, path, length);
 
         //      The last component and its length without trailing slashes.
-        positive base_end = length;
-
-        while (base_end > 1 && shred_new_name[base_end - 1] == '/')
-                base_end--;
-
-        positive base = base_end;
-
-        while (base && shred_new_name[base - 1] != '/')
-                base--;
+        positive base_end = length - path_trailing_slashes(shred_new_name, length);
+        positive base = memory_after_last(shred_new_name, '/', base_end);
 
         p8 folder[FILE_PATH_MAX];
 
@@ -31757,11 +31743,8 @@ static bool shred_remove(string_address path, file_facts address_to named,
                 memory_copy_end(folder, ".", 1);
         else
         {
-                positive cut = base;
-
-                while (cut > 1 && shred_new_name[cut - 1] == '/')
-                        cut--;
-                memory_copy_end(folder, shred_new_name, cut);
+                memory_copy_end(folder, shred_new_name,
+                                base - path_trailing_slashes(shred_new_name, base));
         }
 
         if (how->removal == 's')
@@ -33469,8 +33452,7 @@ static bool dircolors_parse(string_address input, positive length, string_addres
                 line_number++;
                 at = stop < length ? stop + 1 : stop;
 
-                while (first < finish && byte_is_space(string_get(input + first)))
-                        first++;
+                first += string_span_max(input + first, finish - first, string_set_space);
                 if (first == finish || string_is(input + first, '#'))
                         continue;
 
@@ -33481,15 +33463,13 @@ static bool dircolors_parse(string_address input, positive length, string_addres
 
                 positive value = key_end;
 
-                while (value < finish && byte_is_space(string_get(input + value)))
-                        value++;
+                value += string_span_max(input + value, finish - value, string_set_space);
 
                 positive value_end = value;
 
                 while (value_end < finish && !string_is(input + value_end, '#'))
                         value_end++;
-                while (value_end > value && byte_is_space(string_get(input + value_end - 1)))
-                        value_end--;
+                value_end -= memory_trailing(input + value, value_end - value, byte_is_space);
 
                 string_address key = input + first;
                 positive key_length = key_end - first;
@@ -41877,13 +41857,12 @@ static bool file_duration_read(string_address text, bool units,
         }
         while (scale > 0)
         {
-                positive digit = dropped ? next : 0;
-                if (made > (positive_max - digit) / 10)
+                if (!positive_append_digit(address_of made, dropped ? next : 0,
+                                           positive_max))
                 {
                         file_duration_overflowed = true;
                         return false;
                 }
-                made = made * 10 + digit;
                 dropped = 0;
                 scale--;
         }
@@ -42375,12 +42354,10 @@ static bool seq_decimal_number(string_address text, seq_decimal address_to out)
                 if (text[i] == '.')
                         continue;
 
-                positive digit = (positive)(text[i] - '0');
-
-                if (coefficient > (limit - digit) / 10)
+                if (!positive_append_digit(address_of coefficient,
+                                           (positive)(text[i] - '0'), limit))
                         return false;
 
-                coefficient = coefficient * 10 + digit;
                 seen++;
         }
 
@@ -43318,8 +43295,7 @@ static fn seq_wide_digits(seq_wide value, positive significant, positive places)
                 seq_digit_exponent = count ? exponent : 1;
         }
 
-        while (seq_digit_count && seq_digit[seq_digit_count - 1] == '0')
-                seq_digit_count--;
+        seq_digit_count -= memory_span_byte_reverse(seq_digit, '0', seq_digit_count);
 }
 
 //      Keep the leading keep digits, half to even, as format_round does.
@@ -43353,8 +43329,8 @@ static fn seq_wide_round_digits(bipolar keep)
 
         if (!up)
         {
-                while (seq_digit_count && seq_digit[seq_digit_count - 1] == '0')
-                        seq_digit_count--;
+                seq_digit_count -= memory_span_byte_reverse(seq_digit, '0',
+                                                            seq_digit_count);
                 if (!seq_digit_count)
                         seq_digit_exponent = 1;
                 return;
@@ -43718,10 +43694,7 @@ static fn seq_wide_hex(seq_wide value, seq_format address_to format)
         }
 #endif
 
-        positive used = digits;
-
-        while (used && !nibble[used - 1])
-                used--;
+        positive used = digits - memory_span_byte_reverse(nibble, 0, digits);
 
         positive precision = format->precise ? format->precision : used;
 
@@ -46200,8 +46173,7 @@ static b32 file_hostname()
 
                 name += string_span(name, string_set_space);
                 length = string_length(name);
-                while (length && byte_is_space(name[length - 1]))
-                        length--;
+                length -= memory_trailing(name, length, byte_is_space);
 
                 if (!file_hostname_valid(name, length))
                         return string_report(log_error, 1,
@@ -46896,16 +46868,10 @@ static b32 file_mktemp()
                                              writer_terminal_quoted_name, suffix);
         }
 
-        p8 address_to last_x = memory_last_of(template, 'X', template_length);
-        positive run_end = last_x ? (positive)(last_x - template) + 1 : 0;
+        positive run_end = memory_after_last(template, 'X', template_length);
 
-        positive run_at = run_end;
-
-        while (run_at && template[run_at - 1] == 'X')
-        {
-                run_at--;
-                marks++;
-        }
+        marks = memory_span_byte_reverse(template, 'X', run_end);
+        positive run_at = run_end - marks;
 
         if (marks < MKTEMP_LEAST)
                 return string_report(log_error, 1, "mktemp: too few X's in template '%w'\n",

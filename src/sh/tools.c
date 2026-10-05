@@ -985,10 +985,8 @@ static bool logger_journald(logger_control address_to control,
         {
                 positive stop = at + memory_span_without_byte(entry + at, '\n',
                                                               length - at);
-                positive trimmed = stop;
-
-                while (trimmed > at && byte_is_space(entry[trimmed - 1]))
-                        trimmed--;
+                positive trimmed = stop - memory_trailing(entry + at, stop - at,
+                                                          byte_is_space);
                 if (trimmed == at)
                         break;
                 positive name = memory_span_without_byte(entry + at, '=',
@@ -1533,9 +1531,7 @@ static positive login_field(p8 address_to into, positive room,
         positive length = string_length_max(source, width);
 
         if (trim)
-                while (length && (source[length - 1] == ' ' ||
-                                  source[length - 1] == '\t'))
-                        length--;
+                length -= memory_trailing(source, length, byte_is_blank);
 
         if (length >= room)
                 length = room - 1;
@@ -3142,8 +3138,8 @@ static fn login_last_line(string_address user, string_address line,
                                     : "   gone - no logout");
 
         positive host_tail = string_length(host);
-        while (host_tail && byte_is_space(host[host_tail - 1]))
-                host_tail--;
+
+        host_tail -= memory_trailing(host, host_tail, byte_is_space);
         if (!login_last.no_host && login_last.host_last && host_tail)
         {
                 // The closing word sits in a twelve-wide column.
@@ -4916,8 +4912,7 @@ static bool numfmt_format_read(string_address text,
         //      reading where it began.
         positive number = at;
 
-        while (byte_is_space(text[number]))
-                number++;
+        number += string_span(text + number, string_set_space);
 
         bool negative = text[number] == '-';
 
@@ -4930,15 +4925,13 @@ static bool numfmt_format_read(string_address text,
 
                 while (byte_is_digit(text[number]))
                 {
-                        positive digit = (positive)(text[number++] - '0');
-
-                        if (width > (TEXT_LINE_MAX - digit) / 10)
+                        if (!positive_append_digit(address_of width,
+                                                   (positive)(text[number++] - '0'),
+                                                   TEXT_LINE_MAX))
                         {
                                 numfmt_format_kind = NUMFMT_FORMAT_BAD;
                                 return false;
                         }
-
-                        width = width * 10 + digit;
                 }
 
                 at = number;
@@ -7637,10 +7630,8 @@ static fn factor_line_end()
         if (text_out_used < FACTOR_PIPE_BUF)
                 return;
 
-        positive cut = FACTOR_PIPE_BUF;
+        positive cut = memory_after_last(text_out_buffer, '\n', FACTOR_PIPE_BUF);
 
-        while (cut && text_out_buffer[cut - 1] != '\n')
-                cut--;
         if (!cut)
                 cut = FACTOR_PIPE_BUF;
 
@@ -8756,8 +8747,7 @@ static bool dd_size(string_address text, positive address_to out)
 
                 /*      Each factor is read by strtoumax: blanks and a plus
                         sign may lead it, a minus may not. */
-                while (byte_is_space((p8)string_get(at)))
-                        at++;
+                at += string_span(at, string_set_space);
                 if (string_get(at) == '+')
                         at++;
 
@@ -8885,8 +8875,7 @@ static fn dd_zero_warnings(string_address text)
 
                 positive digit = at;
 
-                while (byte_is_space(text[digit]))
-                        digit++;
+                digit += string_span(text + digit, string_set_space);
                 if (text[digit] == '+')
                         digit++;
                 bool nought = byte_is_digit(text[digit]);
@@ -13095,8 +13084,8 @@ static fn diff_scan_open(diff_scan address_to scan, p8 address_to line,
         scan->stop = line + length;
 
         if (diff_trailing)
-                while (scan->stop > line && byte_is_space(scan->stop[-1]))
-                        scan->stop--;
+                scan->stop -= memory_trailing(line, (positive)(scan->stop - line),
+                                              byte_is_space);
 
         scan->column = 0;
         scan->tab_left = 0;
@@ -16087,21 +16076,13 @@ static bool tools_dmesg_span_number(p8 address_to address_to cursor,
                                     positive address_to value)
 {
         p8 address_to at = address_to cursor;
-        positive made = 0;
-        bool any = false;
+        positive made;
+        positive used = memory_digits_checked(at, (positive)(stop - at),
+                                              positive_max, address_of made);
 
-        while (at < stop && byte_is_digit(*at))
-        {
-                positive digit = *at++ - '0';
-
-                if (made > (positive_max - digit) / 10)
-                        return false;
-                made = made * 10 + digit;
-                any = true;
-        }
-        if (!any || at == stop || *at != delimiter)
+        if (!used || at + used == stop || at[used] != delimiter)
                 return false;
-        address_to cursor = at + 1;
+        address_to cursor = at + used + 1;
         address_to value = made;
         return true;
 }
@@ -16141,10 +16122,9 @@ static bool tools_dmesg_legacy_record(p8 address_to bytes, positive length,
                 bool any = false;
                 while (at < stop && byte_is_digit(*at))
                 {
-                        positive digit = *at++ - '0';
-                        if (seconds > (positive_max - digit) / 10)
+                        if (!positive_append_digit(address_of seconds, *at++ - '0',
+                                                   positive_max))
                                 return false;
-                        seconds = seconds * 10 + digit;
                         any = true;
                 }
 
@@ -16974,9 +16954,7 @@ static b32 ul_tasks(b32 pid, bool all, ul_task_action action,
 /* Trailing whitespace is noise on an operand and on a procfs line alike. */
 static positive ul_trimmed(p8 address_to text, positive length)
 {
-        while (length && byte_is_space(text[length - 1]))
-                length--;
-        return length;
+        return length - memory_trailing(text, length, byte_is_space);
 }
 
 /* One procfs scalar as a word: the kernel ends the record with a newline
@@ -19467,7 +19445,7 @@ static bool ul_wait_operand(string_address text, b32 address_to pid,
         string_address at = text;
         positive value;
 
-        while (byte_is_space(string_get(at))) at++;
+        at += string_span(at, string_set_space);
         if (string_is(at, '+')) at++;
         else if (string_is(at, '-')) return false;
         if (!string_digits_checked(address_of at, 10, address_of value) || !value ||
@@ -20767,7 +20745,7 @@ static bool ul_lsclock_offsets(p8 address_to monotonic,
                 {
                         address_to space = end;
                         string_address value = space + 1;
-                        while (byte_is_space(string_get(value))) value++;
+                        value += string_span(value, string_set_space);
                         string_address end_at = value;
                         if (string_is(end_at, '-') || string_is(end_at, '+')) end_at++;
                         while (byte_is_digit(string_get(end_at))) end_at++;
@@ -25998,8 +25976,9 @@ static fn ul_lscpu_info_read()
                                         ul_lscpu_cpuinfo + got)))
         {
                 positive finish = string_length(key);
-                while (finish && byte_is_space(key[finish - 1]))
-                        key[--finish] = end;
+
+                finish -= memory_trailing(key, finish, byte_is_space);
+                key[finish] = end;
                 if (!finish)
                         break;
 
@@ -26007,8 +25986,7 @@ static fn ul_lscpu_info_read()
                 if (!colon)
                         continue;
                 positive key_length = (positive)(colon - key);
-                while (key_length && byte_is_space(key[key_length - 1]))
-                        key_length--;
+                key_length -= memory_trailing(key, key_length, byte_is_space);
                 p8 address_to value = colon + 1;
                 value += string_span(value, string_set_space);
 

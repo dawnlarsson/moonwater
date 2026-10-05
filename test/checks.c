@@ -35758,10 +35758,117 @@ static fn vli_checks(void)
         }
 }
 
+/*
+        What the hand loops over a span became. A decimal number over a
+        pointer and a length says overflow where it used to wrap or be
+        refused by a test of `n > (max - digit) / 10` at every site; the
+        offset after the last of a byte and the run of a class at the end
+        of a text are what a path's last component, a record's line ending
+        and a trim of blanks each walked back for.
+*/
+static fn span_checks(void)
+{
+        static const p8 text[] = "18446744073709551615" "18446744073709551616"
+                                 "4294967295" "4294967296" "123abc" "0012";
+        positive value = 7;
+        positive got;
+
+        value = 0;
+        check("digit appended", positive_append_digit(address_of value, 5, 9) &&
+                                    value == 5);
+        check("digit past a small limit refused, value kept",
+              !positive_append_digit(address_of value, 6, 5) && value == 5);
+        value = 12;
+        check("digit makes the limit", positive_append_digit(address_of value, 3, 123) &&
+                                           value == 123);
+        value = 12;
+        check("digit makes one past the limit",
+              !positive_append_digit(address_of value, 4, 123) && value == 12);
+        value = positive_max / 10;
+        check("last digit of the largest number",
+              positive_append_digit(address_of value, 5, positive_max) &&
+                  value == positive_max);
+        value = positive_max / 10;
+        check("one past the largest number",
+              !positive_append_digit(address_of value, 6, positive_max) &&
+                  value == positive_max / 10);
+        value = positive_max / 10 + 1;
+        check("a number times ten past the word",
+              !positive_append_digit(address_of value, 0, positive_max) &&
+                  value == positive_max / 10 + 1);
+
+        value = 7;
+        check("digits at the front, count and number",
+              memory_digits_checked(text + 60, 6, positive_max, address_of value) == 3 &&
+                  value == 123);
+        value = 7;
+        check("no digits, number kept",
+              memory_digits_checked(text + 63, 3, positive_max, address_of value) == 0 &&
+                  value == 7);
+        check("nothing to read",
+              memory_digits_checked(text, 0, positive_max, address_of value) == 0 &&
+                  value == 7);
+        check("the largest word, exactly",
+              memory_digits_checked(text, 20, positive_max, address_of value) == 20 &&
+                  value == positive_max);
+        value = 7;
+        check("one past the largest word",
+              memory_digits_checked(text + 20, 20, positive_max, address_of value) == 0 &&
+                  value == 7);
+        check("a limit of 32 bits holds",
+              memory_digits_checked(text + 40, 10, 0xffffffffull, address_of value) == 10 &&
+                  value == 0xffffffffull);
+        value = 7;
+        check("a limit of 32 bits refuses one more",
+              memory_digits_checked(text + 50, 10, 0xffffffffull, address_of value) == 0 &&
+                  value == 7);
+        check("the length bounds the read, not the digits after it",
+              memory_digits_checked(text + 60, 2, positive_max, address_of value) == 2 &&
+                  value == 12);
+
+        value = 7;
+        check("a whole span of digits", memory_digits_whole(text + 66, 4, 99, address_of value) &&
+                                            value == 12);
+        value = 7;
+        check("a span with a letter in it, number kept",
+              !memory_digits_whole(text + 60, 6, positive_max, address_of value) &&
+                  value == 7);
+        check("an empty span is no number",
+              !memory_digits_whole(text, 0, positive_max, address_of value) && value == 7);
+        check("a span past the limit",
+              !memory_digits_whole(text + 66, 4, 11, address_of value) && value == 7);
+
+        check("after the last slash", memory_after_last((const p8 *)"a/b/c", '/', 5) == 4);
+        check("after the last slash of a cut text",
+              memory_after_last((const p8 *)"a/b/c", '/', 3) == 2);
+        check("after a final slash", memory_after_last((const p8 *)"a/", '/', 2) == 2);
+        check("after the only byte", memory_after_last((const p8 *)"/", '/', 1) == 1);
+        check("no such byte", memory_after_last((const p8 *)"abc", '/', 3) == 0);
+        check("no bytes", memory_after_last((const p8 *)"", '/', 0) == 0);
+
+        got = memory_trailing((const p8 *)"ab \t\n", 5, byte_is_space);
+        check("white space at the end", got == 3);
+        got = memory_trailing((const p8 *)"ab \t\n", 5, byte_is_blank);
+        check("blanks stop at a newline", got == 0);
+        got = memory_trailing((const p8 *)"ab \t", 4, byte_is_blank);
+        check("blanks at the end", got == 2);
+        got = memory_trailing((const p8 *)"ab\r\n", 4, byte_is_line_end);
+        check("a line ending of two bytes", got == 2);
+        got = memory_trailing((const p8 *)"ab\n\nc\r", 6, byte_is_line_end);
+        check("a line ending stops at a byte of the line", got == 1);
+        got = memory_trailing((const p8 *)"\v\f\r ", 4, byte_is_space);
+        check("every byte of the text is the run", got == 4);
+        got = memory_trailing((const p8 *)"a\xa0", 2, byte_is_space);
+        check("a byte past ASCII is not white space", got == 0);
+        got = memory_trailing((const p8 *)"", 0, byte_is_space);
+        check("no bytes, no run", got == 0);
+}
+
 b32 main(void)
 {
         p8 source[400], output[640], decoded[400];
         vli_checks();
+        span_checks();
         for (positive at = 0; at < sizeof(high_alphabet); at++)
                 high_alphabet[at] = (char)(192 + at);
 #if X64

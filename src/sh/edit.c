@@ -2078,8 +2078,7 @@ static PURE struct edit_place edit_word_left(struct edit_place place)
 
         text = edit_lines + place.line;
 
-        while (place.column && byte_is_blank(text->text[place.column - 1]))
-                place.column--;
+        place.column -= memory_trailing(text->text, place.column, byte_is_blank);
 
         if (place.column && edit_is_word(text->text[place.column - 1]))
         {

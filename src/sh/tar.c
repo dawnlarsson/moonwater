@@ -452,19 +452,7 @@ static tar_pax_state tar_pax_local;
 /* A plain decimal that fits a signed 64 bit size. */
 static bool tar_pax_wide(p8 address_to text, positive length, p64 address_to into)
 {
-        p64 number = 0;
-
-        if (!length)
-                return false;
-        for (positive at = 0; at < length; at++)
-        {
-                if (text[at] < '0' || text[at] > '9' ||
-                    number > ((p64)bipolar_max - (p64)(text[at] - '0')) / 10)
-                        return false;
-                number = number * 10 + (p64)(text[at] - '0');
-        }
-        address_to into = number;
-        return true;
+        return memory_digits_whole(text, length, (positive)bipolar_max, into);
 }
 
 /* What a pax header said of a sparse member: 1 the map is in its records
@@ -561,21 +549,7 @@ static fn tar_pax_clear(tar_pax_state address_to state)
 static bool tar_pax_number(p8 address_to text, positive length,
                            p64 address_to into)
 {
-        p64 number = 0;
-
-        if (!length)
-                return false;
-        for (positive at = 0; at < length; at++)
-        {
-                if (text[at] < '0' || text[at] > '9' ||
-                    number > 0xffffffffull / 10)
-                        return false;
-                number = number * 10 + (p64)(text[at] - '0');
-        }
-        if (number > 0xffffffffull)
-                return false;
-        address_to into = number;
-        return true;
+        return memory_digits_whole(text, length, 0xffffffffull, into);
 }
 
 /* Seconds since the epoch, perhaps negative, with a fraction whose first
@@ -590,14 +564,13 @@ static bool tar_pax_time(p8 address_to text, positive length,
         p32 fraction = 0;
         positive digits = 0;
 
-        if (at >= length || text[at] < '0' || text[at] > '9')
+        // Short of the largest by the one a negative fraction carries.
+        positive used = memory_digits_checked(text + at, length - at,
+                                              (positive)bipolar_max - 8, address_of whole);
+
+        if (!used)
                 return false;
-        while (at < length && text[at] >= '0' && text[at] <= '9')
-        {
-                if (whole >= 922337203685477580ull)
-                        return false;
-                whole = whole * 10 + (p64)(text[at++] - '0');
-        }
+        at += used;
         if (at < length && text[at] == '.')
                 for (at++; at < length && text[at] >= '0' && text[at] <= '9';
                      at++)
@@ -2054,12 +2027,9 @@ static bool tar_acl_binary(string_address text, positive length,
                                 end_of = walk;
                                 break;
                         }
-                positive first = 0;
+                positive first = string_span_max(line, end_of, string_set_blanks);
 
-                while (first < end_of && (line[first] == ' ' || line[first] == '\t'))
-                        first++;
-                while (end_of > first && (line[end_of - 1] == ' ' || line[end_of - 1] == '\t'))
-                        end_of--;
+                end_of -= memory_trailing(line + first, end_of - first, byte_is_blank);
                 at = stop + 1;
                 if (first == end_of)
                         continue;
@@ -3177,9 +3147,10 @@ static bool tar_pax_sparse_take(bipolar archive, p64 address_to size)
 
                                 if (byte >= '0' && byte <= '9')
                                 {
-                                        if (accumulated > ((p64)bipolar_max - (p64)(byte - '0')) / 10)
+                                        if (!positive_append_digit(address_of accumulated,
+                                                                   (positive)(byte - '0'),
+                                                                   (positive)bipolar_max))
                                                 return false;
-                                        accumulated = accumulated * 10 + (p64)(byte - '0');
                                         digits++;
                                         continue;
                                 }
@@ -5280,8 +5251,7 @@ static bool tar_x_time(string_address key, b64 seconds, p32 nanoseconds)
                 positive kept = 9;
 
                 positive_into_padded(fraction, nanoseconds, 9, '0');
-                while (kept && fraction[kept - 1] == '0')
-                        kept--;
+                kept -= memory_span_byte_reverse(fraction, '0', kept);
                 text[length++] = '.';
                 memory_copy(text + length, fraction, kept);
                 length += kept;
@@ -5423,10 +5393,8 @@ static fn tar_x_name(string_address name, string_address middle,
         positive used = 0;
         p8 full[TAR_PATH];
 
-        while (stop > 1 && name[stop - 1] == '/')
-                stop--;
-        for (start = stop; start > 0 && name[start - 1] != '/'; start--)
-                ;
+        stop -= path_trailing_slashes(name, stop);
+        start = memory_after_last(name, '/', stop);
         if (start == 0)
         {
                 memory_copy(full, ".", 1);
@@ -6102,15 +6070,13 @@ static bool tar_archived_current(string_address name, p64 time)
         bool found = false;
         positive length = string_length(name);
 
-        while (length > 1 && name[length - 1] == '/')
-                length--;
+        length -= path_trailing_slashes(name, length);
         for (positive at = 0; at < tar_archived_count; at++)
         {
                 string_address held = (string_address)tar_archived_names.bytes + tar_archived_offsets[at];
                 positive held_length = string_length(held);
 
-                while (held_length > 1 && held[held_length - 1] == '/')
-                        held_length--;
+                held_length -= path_trailing_slashes(held, held_length);
                 if (held_length == length && !memory_compare(held, name, length) &&
                     (!found || tar_archived_times[at] > latest))
                 {

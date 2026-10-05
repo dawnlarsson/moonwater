@@ -995,8 +995,7 @@ static bool checksum_line_parse(const checksum_algorithm address_to algorithm,
                 text_line_length--;
 
         // Blanks before the record, then the backslash of an escaped name.
-        while (at < text_line_length && (text_line[at] == ' ' || text_line[at] == '\t'))
-                at++;
+        at += string_span_max(text_line + at, text_line_length - at, string_set_blanks);
 
         bool escaped = at < text_line_length && text_line[at] == '\\';
 

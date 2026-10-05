@@ -4851,8 +4851,7 @@ fn history_remember(string_address line)
 
         length = string_length(line);
 
-        while (length && (line[length - 1] == '\n' || line[length - 1] == '\r'))
-                length--;
+        length -= memory_trailing(line, length, byte_is_line_end);
 
         if (string_span_max(line, length, string_set_blanks) == length)
                 return;
@@ -4882,9 +4881,7 @@ fn history_remember(string_address line)
                             "&", "!", ";;"};
                         p8 address_to made;
 
-                        while (end_at && (before[end_at - 1] == ' ' ||
-                                          before[end_at - 1] == '\t'))
-                                end_at--;
+                        end_at -= memory_trailing(before, end_at, byte_is_blank);
                         start_at = end_at;
                         while (start_at && before[start_at - 1] != ' ' &&
                                before[start_at - 1] != '\t')

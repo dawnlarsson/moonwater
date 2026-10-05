@@ -10768,13 +10768,7 @@ static positive tail_base(string_address name)
 
 static positive tail_directory_length(string_address name, positive base)
 {
-        positive floor = name[0] == '/';
-        positive length = base;
-
-        while (floor < length && name[length - 1] == '/')
-                length--;
-
-        return length;
+        return base - path_trailing_slashes(name, base);
 }
 
 /*
@@ -12192,7 +12186,8 @@ static bool text_tab_parse(string_address list)
                                 start = at;
                         }
 
-                        if (value > (positive_max - (positive)(c - '0')) / 10)
+                        if (!positive_append_digit(address_of value, (positive)(c - '0'),
+                                                   positive_max))
                         {
                                 positive length = 0;
                                 p8 number[64];
@@ -12209,7 +12204,6 @@ static bool text_tab_parse(string_address list)
                                 continue;
                         }
 
-                        value = value * 10 + (positive)(c - '0');
                         continue;
                 }
 
@@ -12292,12 +12286,10 @@ static bool text_tab_prescan(file_taking address_to taking, bool unexpand)
                                 if (!byte_is_digit(word[c]))
                                         return string_diagnostic(&text_diagnostic, 0, word, "invalid tab stops");
 
-                                positive digit = word[c] - '0';
-
-                                if (value > (positive_max - digit) / 10)
+                                if (!positive_append_digit(address_of value, (positive)(word[c] - '0'),
+                                                           positive_max))
                                         return string_diagnostic(&text_diagnostic, 0, null, "tab stop value is too large");
 
-                                value = value * 10 + digit;
                                 have_value = true;
                         }
 
@@ -17735,8 +17727,8 @@ static positive column_fields(p8 address_to bytes, positive length,
         {
                 if (!column_custom_separator)
                 {
-                        while (at < length && byte_is_blank(bytes[at]))
-                                at++;
+                        at += string_span_max(bytes + at, length - at,
+                                              string_set_blanks);
                         if (at == length)
                                 break;
                 }
@@ -17886,22 +17878,7 @@ static positive column_names_from_option(string_address names, bool fill,
 static bool column_span_unsigned(p8 address_to bytes, positive length,
                                  positive address_to answer)
 {
-        positive made = 0;
-
-        if (!length)
-                return false;
-
-        for (positive at = 0; at < length; at++)
-        {
-                if (!byte_is_digit(bytes[at]) ||
-                    made > (positive_max - (bytes[at] - '0')) / 10)
-                        return false;
-
-                made = made * 10 + bytes[at] - '0';
-        }
-
-        address_to answer = made;
-        return true;
+        return memory_digits_whole(bytes, length, positive_max, answer);
 }
 
 static bool column_name_equal(byte_span name, p8 address_to bytes,
@@ -18693,10 +18670,7 @@ static positive terminal_crt_length(p8 address_to line, positive room)
 {
         positive length = string_length_max(line, room);
 
-        while (length && byte_is_space(line[length - 1]))
-                length--;
-
-        return length;
+        return length - memory_trailing(line, length, byte_is_space);
 }
 
 static fn terminal_crt_clear()
@@ -22879,8 +22853,8 @@ static b32 text_cut()
                                         line += lead;
                                         line_length -= lead;
 
-                                        while (line_length && byte_is_blank(line[line_length - 1]))
-                                                line_length--;
+                                        line_length -= memory_trailing(line, line_length,
+                                                                       byte_is_blank);
                                 }
 
                                 if (whitespace && text_locale_utf8() &&
@@ -30778,8 +30752,7 @@ static positive sed_label_of(p8 address_to into, positive room)
                 sed_at++;
         }
 
-        while (have && byte_is_blank(into[have - 1]))
-                have--;
+        have -= memory_trailing(into, have, byte_is_blank);
 
         into[have] = '\0';
         return have;
