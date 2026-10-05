@@ -120,8 +120,13 @@ wired to the hardware and cannot be bound.
 **Wifi.** Bare `moonwater wifi` lists networks strongest first (`*` joined,
 `+` saved). When wifi cannot work it says why in one line -- no hardware, no
 driver, missing firmware, rfkill, switched off, or why the last join failed.
-Open and WPA2 (including WPA2/WPA3 mixed) networks can be joined; WPA3-only,
-802.1X and WEP networks are saved but not tried. A password on the command line
+Open and WPA2 (including WPA2/WPA3 mixed) networks can be joined, WPA2 with
+CCMP and plain PSK, no protected management frames required; WPA2 that asks
+for TKIP (`TKIP`), for PMF (`PMF`) or for FT or PSK-SHA256 key management
+(`FT/256`), WPA3-only, 802.1X and WEP networks are saved but not tried, and
+are listed under those names. The machine's own rejoin leaves a network that was
+not there, or refused the password, alone for three seconds, then twice as long
+each time to a minute, and scans for it at most every thirty seconds. A password on the command line
 shows in `ps`, so leave it off or pipe it with `-`. The image carries the
 firmware its wifi and bluetooth drivers load, fetched from linux-firmware at a
 pinned commit and checked against pinned SHA-256s; no blob is in this

@@ -63866,10 +63866,11 @@ def wifi_scan_fuzz_seeds():
         raw = struct.pack("<HH", 4 + len(body), kind) + body
         return raw + b"\0" * (-len(raw) % 4)
 
-    def rsn(*suites, pairwise=(b"\x00\x0f\xac\x04",), group=b"\x00\x0f\xac\x04"):
+    def rsn(*suites, pairwise=(b"\x00\x0f\xac\x04",), group=b"\x00\x0f\xac\x04", caps=None):
         return (b"\x01\x00" + group + struct.pack("<H", len(pairwise)) +
                 b"".join(pairwise) + struct.pack("<H", len(suites)) +
-                b"".join(b"\x00\x0f\xac" + bytes((suite,)) for suite in suites))
+                b"".join(b"\x00\x0f\xac" + bytes((suite,)) for suite in suites) +
+                (b"" if caps is None else struct.pack("<H", caps)))
 
     ssid = element(0, b"moonwater")
     wpa = element(221, b"\x00\x50\xf2\x01\x01\x00")
@@ -63878,6 +63879,22 @@ def wifi_scan_fuzz_seeds():
                          ("eap", (1,)), ("ft", (4, 9, 24, 25)), ("none", ())):
         seeds["rsn_%s.bin" % name] = b"\x03" + rsn(*suites)
         seeds["ies_%s.bin" % name] = b"\x01\x00\x00\x00" + ssid + element(48, rsn(*suites))
+    # What the join cannot answer though it asks for WPA2: TKIP as the group
+    # or the only pairwise cipher, protected management frames required,
+    # FT-PSK or PSK-SHA256 without plain PSK, and each with plain PSK beside.
+    tkip, ccmp = b"\x00\x0f\xac\x02", b"\x00\x0f\xac\x04"
+    seeds["rsn_tkip_group.bin"] = b"\x03" + rsn(2, group=tkip)
+    seeds["rsn_tkip_only.bin"] = b"\x03" + rsn(2, pairwise=(tkip,))
+    seeds["rsn_tkip_mixed.bin"] = b"\x03" + rsn(2, pairwise=(tkip, ccmp), caps=0)
+    seeds["rsn_pmf_required.bin"] = b"\x03" + rsn(2, caps=0x00c0)
+    seeds["rsn_pmf_capable.bin"] = b"\x03" + rsn(2, caps=0x0080)
+    seeds["rsn_ft_only.bin"] = b"\x03" + rsn(4, caps=0)
+    seeds["rsn_sha256_only.bin"] = b"\x03" + rsn(6, caps=0)
+    seeds["rsn_psk_ft.bin"] = b"\x03" + rsn(2, 4, caps=0)
+    seeds["rsn_transition_pmf.bin"] = b"\x03" + rsn(2, 8, caps=0x00c0)
+    seeds["rsn_transition_capable.bin"] = b"\x03" + rsn(2, 8, caps=0x0080)
+    seeds["rsn_caps_cut.bin"] = b"\x03" + rsn(2, caps=0x00c0)[:-1]
+    seeds["ies_pmf_required.bin"] = b"\x01\x00\x00\x00" + ssid + element(48, rsn(2, caps=0x00c0))
     seeds["ies_wpa.bin"] = b"\x01\x00\x10\x00" + ssid + wpa
     seeds["ies_wep.bin"] = b"\x01\x00\x10\x00" + ssid
     seeds["ies_beacon.bin"] = b"\x01\x01\x00\x00" + ssid + element(48, rsn(2))
@@ -63994,23 +64011,34 @@ static p8 rsn_model(const p8 *element, positive length)
 {
         positive at = 2 + 4;
         positive count;
-        bool psk = false, sae = false, eap = false, owe = false;
+        bool ccmp = false, psk = false, other = false, sae = false, eap = false, owe = false;
+        bool group_ccmp;
+        positive which;
+        unsigned capabilities = 0;
 
         if (length < at + 2)
                 return RADIO_WPA2;
-        count = element[at] | (element[at + 1] << 8);
-        at += 2 + 4 * count;
-        if (length < at + 2)
-                return RADIO_WPA2;
+        group_ccmp = element[2] == 0x00 && element[3] == 0x0f && element[4] == 0xac &&
+                     element[5] == 4;
         count = element[at] | (element[at + 1] << 8);
         at += 2;
-        for (positive which = 0; which < count && at + 4 <= length; which++, at += 4)
+        if (length < at + 4 * count + 2)
+                return RADIO_WPA2;
+        for (which = 0; which < count; which++, at += 4)
+                if (element[at] == 0x00 && element[at + 1] == 0x0f && element[at + 2] == 0xac &&
+                    element[at + 3] == 4)
+                        ccmp = true;
+        count = element[at] | (element[at + 1] << 8);
+        at += 2;
+        for (which = 0; which < count && at + 4 <= length; which++, at += 4)
         {
                 p8 suite = element[at + 3];
                 if (element[at] != 0x00 || element[at + 1] != 0x0f || element[at + 2] != 0xac)
                         continue;
-                if (suite == 2 || suite == 4 || suite == 6)
+                if (suite == 2)
                         psk = true;
+                else if (suite == 4 || suite == 6)
+                        other = true;
                 else if (suite == 8 || suite == 9 || suite == 24 || suite == 25)
                         sae = true;
                 else if (suite == 18)
@@ -64018,8 +64046,17 @@ static p8 rsn_model(const p8 *element, positive length)
                 else
                         eap = true;
         }
-        return psk && sae ? RADIO_WPA23 : sae ? RADIO_WPA3 : psk ? RADIO_WPA2
-               : owe ? RADIO_OWE : eap ? RADIO_EAP : RADIO_WPA2;
+        if (which == count && at + 2 <= length)
+                capabilities = element[at] | (element[at + 1] << 8);
+        if (!psk && !other)
+                return sae ? RADIO_WPA3 : owe ? RADIO_OWE : eap ? RADIO_EAP : RADIO_WPA2;
+        if (!psk)
+                return sae ? RADIO_WPA3 : RADIO_FT256;
+        if (!group_ccmp || !ccmp)
+                return RADIO_TKIP;
+        if (capabilities & 0x40)
+                return RADIO_PMF;
+        return sae ? RADIO_WPA23 : RADIO_WPA2;
 }
 
 /* What a beacon's elements say, counted the long way: the first name element
@@ -64094,8 +64131,8 @@ static void check_one(netlink_header *header)
         radio_air air;
 
         if (radio_bss_read(header, &one) &&
-            (one.ssid_length > RADIO_SSID_MOST || one.security > RADIO_EAP ||
-             one.beacon_security > RADIO_EAP))
+            (one.ssid_length > RADIO_SSID_MOST || one.security > RADIO_FT256 ||
+             one.beacon_security > RADIO_FT256))
         {
                 fprintf(stderr, "a scan row out of range\n");
                 abort();

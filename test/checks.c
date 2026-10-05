@@ -75845,6 +75845,138 @@ static fn wifi_password_checks(void)
                   !memory_from_hex(into, "abc", 2));
 }
 
+//      What an access point's RSN element asks of a station, and whether the
+//      join can answer it: key management 2, CCMP both ways, no demand for
+//      protected management frames. Anything else that asks for WPA2 is a
+//      class of its own, named for what it asks, and ranks behind a plain
+//      WPA2 twin of the same name however loud.
+static positive wifi_rsn_element(p8 address_to into, p32 group, const p32 address_to pairwise,
+                                 positive pairs, const p32 address_to keys, positive count,
+                                 b32 capabilities)
+{
+        positive at = 0;
+
+        into[at++] = 1;
+        into[at++] = 0;
+        network_store_32(into + at, group);
+        at += 4;
+        into[at++] = (p8)pairs;
+        into[at++] = 0;
+        for (positive one = 0; one < pairs; one++, at += 4)
+                network_store_32(into + at, pairwise[one]);
+        into[at++] = (p8)count;
+        into[at++] = 0;
+        for (positive one = 0; one < count; one++, at += 4)
+                network_store_32(into + at, keys[one]);
+        if (capabilities != (b32)-1)
+        {
+                into[at++] = (p8)capabilities;
+                into[at++] = (p8)(capabilities >> 8);
+        }
+        return at;
+}
+
+static fn wifi_rsn_checks(void)
+{
+        static const p32 ccmp[] = {0x000fac04};
+        static const p32 tkip[] = {0x000fac02};
+        static const p32 both[] = {0x000fac02, 0x000fac04};
+        static const p32 psk[] = {0x000fac02};
+        static const p32 ft[] = {0x000fac04};
+        static const p32 sha[] = {0x000fac06};
+        static const p32 psk_ft[] = {0x000fac02, 0x000fac04};
+        static const p32 psk_sha[] = {0x000fac06, 0x000fac02};
+        static const p32 sae[] = {0x000fac08};
+        static const p32 psk_sae[] = {0x000fac02, 0x000fac08};
+        static const p32 ft_sae[] = {0x000fac04, 0x000fac08};
+        static const p32 owe[] = {0x000fac12};
+        static const p32 eap[] = {0x000fac01};
+        p8 element[128];
+        positive size;
+
+#define RSN_CASE(name, group, pairwise, pairs, keys, count, capabilities, class)   \
+        size = wifi_rsn_element(element, group, pairwise, pairs, keys, count,       \
+                                capabilities);                                    \
+        check(name, radio_rsn_security(element, size) == (class))
+
+        RSN_CASE("WPA2 as an ordinary network has it", 0x000fac04, ccmp, 1, psk, 1, 0x000c, RADIO_WPA2);
+        RSN_CASE("WPA2 with no capabilities field", 0x000fac04, ccmp, 1, psk, 1, (b32)-1, RADIO_WPA2);
+        RSN_CASE("WPA2 that is capable of PMF", 0x000fac04, ccmp, 1, psk, 1, 0x0080, RADIO_WPA2);
+        RSN_CASE("WPA2 that requires PMF", 0x000fac04, ccmp, 1, psk, 1, 0x00c0, RADIO_PMF);
+        RSN_CASE("WPA2 that requires PMF and is not capable", 0x000fac04, ccmp, 1, psk, 1, 0x0040, RADIO_PMF);
+        RSN_CASE("WPA2 with a TKIP group", 0x000fac02, ccmp, 1, psk, 1, 0x000c, RADIO_TKIP);
+        RSN_CASE("WPA2 with TKIP alone pairwise", 0x000fac04, tkip, 1, psk, 1, 0x000c, RADIO_TKIP);
+        RSN_CASE("WPA2 with TKIP and CCMP pairwise and a CCMP group", 0x000fac04, both, 2, psk, 1, 0x000c, RADIO_WPA2);
+        RSN_CASE("FT-PSK alone", 0x000fac04, ccmp, 1, ft, 1, 0x000c, RADIO_FT256);
+        RSN_CASE("PSK-SHA256 alone", 0x000fac04, ccmp, 1, sha, 1, 0x000c, RADIO_FT256);
+        RSN_CASE("PSK and FT-PSK", 0x000fac04, ccmp, 1, psk_ft, 2, 0x000c, RADIO_WPA2);
+        RSN_CASE("PSK-SHA256 and PSK", 0x000fac04, ccmp, 1, psk_sha, 2, 0x000c, RADIO_WPA2);
+        RSN_CASE("PSK and SAE", 0x000fac04, ccmp, 1, psk_sae, 2, 0x0080, RADIO_WPA23);
+        RSN_CASE("PSK and SAE that requires PMF", 0x000fac04, ccmp, 1, psk_sae, 2, 0x00c0, RADIO_PMF);
+        RSN_CASE("PSK and SAE with a TKIP group", 0x000fac02, ccmp, 1, psk_sae, 2, 0x0080, RADIO_TKIP);
+        RSN_CASE("SAE alone", 0x000fac04, ccmp, 1, sae, 1, 0x00c0, RADIO_WPA3);
+        RSN_CASE("FT-PSK and SAE", 0x000fac04, ccmp, 1, ft_sae, 2, 0x00c0, RADIO_WPA3);
+        RSN_CASE("OWE", 0x000fac04, ccmp, 1, owe, 1, 0x000c, RADIO_OWE);
+        RSN_CASE("802.1X", 0x000fac04, ccmp, 1, eap, 1, 0x000c, RADIO_EAP);
+        RSN_CASE("no key management at all", 0x000fac04, ccmp, 1, psk, 0, 0x000c, RADIO_WPA2);
+#undef RSN_CASE
+
+        size = wifi_rsn_element(element, 0x000fac04, ccmp, 1, psk, 1, 0x00c0);
+        check("a capabilities field cut to one byte says nothing: WPA2",
+              radio_rsn_security(element, size - 1) == RADIO_WPA2);
+        check("an element cut inside its suites is WPA2, as one with none",
+              radio_rsn_security(element, 9) == RADIO_WPA2 &&
+                  radio_rsn_security(element, 3) == RADIO_WPA2);
+        check("what the join can answer is open, WPA2 and WPA2/3, and no class of "
+              "WPA2 that asks for more",
+              radio_security_joinable(RADIO_OPEN) && radio_security_joinable(RADIO_WPA2) &&
+                  radio_security_joinable(RADIO_WPA23) && !radio_security_joinable(RADIO_TKIP) &&
+                  !radio_security_joinable(RADIO_PMF) && !radio_security_joinable(RADIO_FT256) &&
+                  !radio_security_joinable(RADIO_WPA3) && !radio_security_joinable(RADIO_EAP));
+        //      The row of a name is its strongest access point, and says a
+        //      name can be joined when any by that name can: a louder twin
+        //      that asks for more must not make `wifi add` refuse the real
+        //      one, which the join would have picked ahead of it.
+        {
+                radio_air air;
+                radio_heard one;
+
+                memory_zero(address_of air, sizeof air);
+                memory_zero(address_of one, sizeof one);
+                memory_copy(one.ssid, "net", 3);
+                one.ssid_length = 3;
+                one.mbm = -3000;
+                one.security = RADIO_PMF;
+                one.beacon_security = RADIO_PMF;
+                radio_air_keep(address_of air, address_of one);
+                check("a name of one access point that asks for PMF is not joinable",
+                      air.count == 1 && !air.heard[0].joinable);
+                one.mbm = -7000;
+                one.security = RADIO_WPA2;
+                one.beacon_security = RADIO_WPA2;
+                one.joinable = true;
+                radio_air_keep(address_of air, address_of one);
+                check("a quieter twin of plain WPA2 makes it joinable, the row staying the louder",
+                      air.count == 1 && air.heard[0].joinable &&
+                          air.heard[0].security == RADIO_PMF && air.heard[0].mbm == -3000);
+                memory_zero(address_of air, sizeof air);
+                radio_air_keep(address_of air, address_of one);
+                one.mbm = -1000;
+                one.security = RADIO_TKIP;
+                one.beacon_security = RADIO_TKIP;
+                one.joinable = false;
+                radio_air_keep(address_of air, address_of one);
+                check("and a louder one that does not changes the row and not that",
+                      air.count == 1 && air.heard[0].joinable &&
+                          air.heard[0].security == RADIO_TKIP);
+        }
+        check("a saved network with a password is satisfied by WPA2 and WPA2/3 only",
+              radio_security_fits(true, RADIO_WPA2) && radio_security_fits(true, RADIO_WPA23) &&
+                  !radio_security_fits(true, RADIO_TKIP) && !radio_security_fits(true, RADIO_PMF) &&
+                  !radio_security_fits(true, RADIO_FT256) &&
+                  !radio_security_fits(false, RADIO_WPA2) && radio_security_fits(false, RADIO_OPEN));
+}
+
 //      A key's text and back, and text that is not quite a key.
 static fn key_text(void)
 {
@@ -76710,6 +76842,7 @@ b32 main(void)
         wifi_unwrap_checks();
         wifi_ptk_checks();
         wifi_password_checks();
+        wifi_rsn_checks();
         wifi_source_checks();
         wifi_air_capacity();
         key_text();

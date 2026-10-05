@@ -7262,13 +7262,23 @@ enum
         RADIO_WPA3,
         RADIO_OWE,
         RADIO_EAP,
+        RADIO_TKIP,
+        RADIO_PMF,
+        RADIO_FT256,
 };
 
 static const string_address radio_security_words[] = {
     (string_address) "open", (string_address) "WEP",    (string_address) "WPA",
     (string_address) "WPA2", (string_address) "WPA2/3", (string_address) "WPA3",
-    (string_address) "OWE",  (string_address) "802.1X",
+    (string_address) "OWE",  (string_address) "802.1X", (string_address) "TKIP",
+    (string_address) "PMF",  (string_address) "FT/256",
 };
+
+/* Whether moonwater can join what a network asks for. */
+static bool radio_security_joinable(p8 security)
+{
+        return security == RADIO_OPEN || security == RADIO_WPA2 || security == RADIO_WPA23;
+}
 
 typedef struct
 {
@@ -7278,6 +7288,11 @@ typedef struct
         //      What the access point's last beacon asked, where the kernel
         //      keeps one apart from the frame its other elements came from.
         p8 beacon_security;
+        //      Whether this access point, or another by the name, asks only
+        //      what the join can answer: a row is the strongest by its name,
+        //      and a louder twin that asks for more is no reason to say the
+        //      name cannot be joined.
+        bool joinable;
         bool joined;
         b32 mbm;
         p32 frequency;
@@ -7293,31 +7308,51 @@ typedef struct
         bool any;
 } radio_air;
 
-/* What an RSN element's key management suites ask of a station. */
+#define RADIO_RSN_CCMP 0x000fac04u
+#define RADIO_RSN_MFPR 0x0040u
+
+/* What an RSN element asks of a station. What the join can answer is one
+   thing: key management 00-0F-AC:2, CCMP as the group cipher and among the
+   pairwise ones, and no demand for protected management frames (its RSN
+   element carries capabilities of zero). A network that asks for WPA2 and
+   something besides is a class of its own, with the thing it asks for as
+   its name, because the kernel would refuse the join after its whole
+   timeout: TKIP or any other cipher but CCMP, PMF where the capabilities
+   require it, and FT or SHA-256 key management with no plain PSK. */
 static p8 radio_rsn_security(p8 address_to element, positive length)
 {
         byte_reader reader = byte_reader_open(element, length);
+        byte_reader pairwise;
         positive count;
-        bool psk = false, sae = false, eap = false, owe = false;
+        positive which;
+        p32 group;
+        p16 capabilities = 0;
+        bool ccmp = false, psk = false, other = false, sae = false, eap = false;
+        bool owe = false;
 
         //      The version and the group cipher, then the pairwise ciphers
         //      and the key management suites, each a count and that many
         //      four byte suites. What is cut short says WPA2.
-        (void)byte_reader_skip(&reader, 2 + 4);
+        (void)byte_reader_skip(&reader, 2);
+        group = byte_reader_u32(&reader);
         count = byte_reader_u16le(&reader);
-        (void)byte_reader_skip(&reader, 4 * count);
+        pairwise = byte_reader_window(&reader, 4 * count);
         count = byte_reader_u16le(&reader);
         if (!byte_reader_ok(&reader))
                 return RADIO_WPA2;
-        for (positive which = 0; which < count && byte_reader_left(&reader) >= 4; which++)
+        while (byte_reader_left(&pairwise) >= 4)
+                ccmp |= byte_reader_u32(&pairwise) == RADIO_RSN_CCMP;
+        for (which = 0; which < count && byte_reader_left(&reader) >= 4; which++)
         {
                 p32 oui = byte_reader_u24(&reader);
                 p8 suite = byte_reader_u8(&reader);
 
                 if (oui != 0x000fac)
                         continue;
-                if (suite == 2 || suite == 4 || suite == 6)
+                if (suite == 2)
                         psk = true;
+                else if (suite == 4 || suite == 6)
+                        other = true;
                 else if (suite == 8 || suite == 9 || suite == 24 || suite == 25)
                         sae = true;
                 else if (suite == 18)
@@ -7325,12 +7360,18 @@ static p8 radio_rsn_security(p8 address_to element, positive length)
                 else
                         eap = true;
         }
-        return psk && sae ? RADIO_WPA23
-               : sae      ? RADIO_WPA3
-               : psk      ? RADIO_WPA2
-               : owe      ? RADIO_OWE
-               : eap      ? RADIO_EAP
-                          : RADIO_WPA2;
+        if (which == count && byte_reader_left(&reader) >= 2)
+                capabilities = byte_reader_u16le(&reader);
+
+        if (!psk && !other)
+                return sae ? RADIO_WPA3 : owe ? RADIO_OWE : eap ? RADIO_EAP : RADIO_WPA2;
+        if (!psk)
+                return sae ? RADIO_WPA3 : RADIO_FT256;
+        if (group != RADIO_RSN_CCMP || !ccmp)
+                return RADIO_TKIP;
+        if (capabilities & RADIO_RSN_MFPR)
+                return RADIO_PMF;
+        return sae ? RADIO_WPA23 : RADIO_WPA2;
 }
 
 /* What the elements of one frame ask of a station: the first RSN element's
@@ -7456,6 +7497,8 @@ static bool radio_bss_read(netlink_header address_to header, radio_heard address
         one->beacon_security = beacon && beacon != elements
                                    ? radio_ies_security(beacon, beacon_size, capability)
                                    : one->security;
+        one->joinable = radio_security_joinable(one->security) ||
+                        radio_security_joinable(one->beacon_security);
         return true;
 }
 
@@ -7484,9 +7527,12 @@ static fn radio_air_keep(radio_air address_to air,
                    twin as the network carrying the live association.  An
                    associated BSS owns the row; otherwise the strongest BSS
                    owns the whole row, not three selected fields from it. */
+                bool joinable = have->joinable || one->joinable;
+
                 if ((one->joined && !have->joined) ||
                     (one->joined == have->joined && one->mbm > have->mbm))
                         *have = *one;
+                have->joinable = joinable;
                 return;
         }
         if (air->count < RADIO_AIR_MOST)
@@ -8063,12 +8109,6 @@ static fn radio_air_row(radio_heard address_to heard, positive width, bool saved
         string_format(log, host_label "%s\n", line);
 }
 
-/* Whether moonwater can join what a network asks for. */
-static bool radio_security_joinable(p8 security)
-{
-        return security == RADIO_OPEN || security == RADIO_WPA2 || security == RADIO_WPA23;
-}
-
 /* ---- wifi: what the last join said, and the password asked for ---- */
 
 /* The reason a join gave, as the words that follow the network's name. */
@@ -8469,7 +8509,7 @@ static b32 radio_wifi_enter(string_address ssid, string_address pass)
              (radio_air_take(address_of air, RADIO_AIR_NOW | RADIO_AIR_JOINABLE) &&
               (heard = radio_air_find(address_of air, ssid)))))
         {
-                if (!radio_security_joinable(heard->security))
+                if (!heard->joinable)
                         return host_refuse("saved, but it asks for %s, which "
                                            "moonwater cannot join yet\n",
                                            radio_security_words[heard->security]);
