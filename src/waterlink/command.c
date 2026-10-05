@@ -665,7 +665,12 @@ static b32 link_group_join(string_address address_to words, positive count)
                 crypto_forget(made, sizeof made);
                 return host_refuse("%s could not be locked\n", LINK_PEERS_LOCK);
         }
-        link_groups_load(address_of groups);
+        if (!link_groups_for_change(address_of groups))
+        {
+                link_peers_unlock(lock);
+                crypto_forget(made, sizeof made);
+                return host_refuse("%s could not be read\n", LINK_GROUPS_PATH);
+        }
         for (positive look = 0; look < groups.count; look++)
                 if (string_equals(groups.record[look].namespace, namespace) &&
                     !(groups.record[look].flags & LINK_GROUP_ONCE))
@@ -764,7 +769,11 @@ static b32 link_group_leave(string_address namespace, bool forget)
 
         if (lock < 0)
                 return host_refuse("%s could not be locked\n", LINK_PEERS_LOCK);
-        link_groups_load(address_of groups);
+        if (!link_groups_for_change(address_of groups))
+        {
+                link_peers_unlock(lock);
+                return host_refuse("%s could not be read\n", LINK_GROUPS_PATH);
+        }
         for (positive at = 0; at < groups.count; at++)
                 if (string_equals(groups.record[at].namespace, namespace) &&
                     !(groups.record[at].flags & LINK_GROUP_ONCE))
@@ -916,7 +925,9 @@ static p64 link_pair_seconds(void)
 /*      This machine's side of a code in the groups file, under the lock the
         listener takes for it: a code for this namespace made before is
         replaced, and so is anything that has run out. Answers the mark the
-        machines it links will carry. */
+        machines it links will carry, or why not: -ENOSPC when the file holds
+        its eight groups, -ENODATA when it is there and cannot be read,
+        which leaves it as it is. */
 static bipolar link_pair_open(string_address namespace, p8 address_to code,
                               string_address expect, p32 address_to mark)
 {
@@ -938,7 +949,12 @@ static bipolar link_pair_open(string_address namespace, p8 address_to code,
                 crypto_forget(key, sizeof key);
                 return lock;
         }
-        link_groups_load(address_of groups);
+        if (!link_groups_for_change(address_of groups))
+        {
+                link_peers_unlock(lock);
+                crypto_forget(key, sizeof key);
+                return -ENODATA;
+        }
         for (positive at = 0; at < groups.count; at++)
                 if (link_group_spent(groups.record + at, now) ||
                     ((groups.record[at].flags & LINK_GROUP_ONCE) &&
@@ -974,20 +990,25 @@ static fn link_pair_close(p32 mark)
         struct waterlink_group_keys keys;
         bipolar lock = link_peers_lock();
 
-        //      Without the lock the file is left as it is: the code runs out
-        //      by itself, and the listener drops it then.
+        //      Without the lock, or with a file that cannot be read, the file
+        //      is left as it is: the code runs out by itself, and the
+        //      listener drops it then.
         if (lock < 0)
                 return;
-        link_groups_load(address_of groups);
-        for (positive at = 0; at < groups.count; at++)
+        if (link_groups_for_change(address_of groups))
         {
-                waterlink_group_keys_from(address_of keys, groups.record[at].key,
-                                          groups.record[at].namespace);
-                if ((groups.record[at].flags & LINK_GROUP_ONCE) && keys.mark == mark)
-                        groups.record[at--] = groups.record[--groups.count];
-                crypto_forget(address_of keys, sizeof keys);
+                for (positive at = 0; at < groups.count; at++)
+                {
+                        waterlink_group_keys_from(address_of keys,
+                                                  groups.record[at].key,
+                                                  groups.record[at].namespace);
+                        if ((groups.record[at].flags & LINK_GROUP_ONCE) &&
+                            keys.mark == mark)
+                                groups.record[at--] = groups.record[--groups.count];
+                        crypto_forget(address_of keys, sizeof keys);
+                }
+                (void)link_groups_save(address_of groups);
         }
-        (void)link_groups_save(address_of groups);
         link_peers_unlock(lock);
         crypto_forget(address_of groups, sizeof groups);
 }
@@ -1101,6 +1122,8 @@ static b32 link_pair_start(string_address namespace, p8 address_to code,
 
         if (opened == -ENOSPC)
                 return host_refuse("this machine is in 8 groups already\n");
+        if (opened == -ENODATA)
+                return host_refuse("%s could not be read\n", LINK_GROUPS_PATH);
         if (opened < 0)
                 return host_refuse("%s could not be written\n", LINK_GROUPS_PATH);
         link_before_take(before);

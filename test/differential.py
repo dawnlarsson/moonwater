@@ -68406,7 +68406,7 @@ static bipolar link_peers_lock(void) { return 5; }
 static fn link_peers_unlock(bipolar handle) { (void)handle; }
 //      A pairing code's record is read, closed and saved in the driver's own
 //      copy of the groups; the file is the driver's, not a path.
-fn link_groups_load(link_groups address_to groups);
+static bool link_groups_for_change(link_groups address_to groups);
 static bipolar link_groups_save(link_groups address_to groups);
 static p32 hash_crc32(p32 crc, const p8 *data, positive length)
 {
@@ -68433,9 +68433,14 @@ static positive string_length_max(string_address text, positive room)
         groups in memory: a code closed or dropped in the one and not the
         other is a difference the checks can see. */
 static link_groups wl_groups_file;
-fn link_groups_load(link_groups address_to groups)
+static bool wl_groups_unreadable;
+static bool link_groups_for_change(link_groups address_to groups)
 {
+        memset(groups, 0, sizeof *groups);
+        if (wl_groups_unreadable)
+                return false;
         memcpy(groups, &wl_groups_file, sizeof *groups);
+        return true;
 }
 static bipolar link_groups_save(link_groups address_to groups)
 {
@@ -68779,7 +68784,7 @@ static void wl_reset(bool server)
         memset(&link_nearby, 0, sizeof link_nearby);
         memset(&link_client, 0, sizeof link_client);
         memset(&wl_file, 0, sizeof wl_file);
-        wl_file_unreadable = wl_entropy_down = false;
+        wl_file_unreadable = wl_entropy_down = wl_groups_unreadable = false;
         wl_bad_names = 0;
         wl_greeted_count = wl_answered_count = wl_greeted_back = 0;
         wl_run_count = wl_run_next = wl_mdns_count = wl_mdns_next = 0;
@@ -69084,6 +69089,21 @@ static void wl_step(bool server)
                 wl_check(wl_groups_file.count + spent == before.count &&
                                  kept == wl_groups_file.count,
                          "the listener's turn kept a code that ran out or dropped one that had not");
+                //      The same turn with a file that cannot be read is not a
+                //      turn over an empty list: the file is left as it is.
+                {
+                        link_groups memory = link_nearby.groups;
+
+                        wl_groups_file = before;
+                        wl_groups_unreadable = true;
+                        link_groups_expire();
+                        link_group_close(0);
+                        wl_groups_unreadable = false;
+                        wl_check(!memcmp(&wl_groups_file, &before, sizeof before),
+                                 "a turn with a groups file that could not be read "
+                                 "changed it");
+                        link_nearby.groups = memory;
+                }
                 wl_groups_file = link_nearby.groups;
                 break;
         }

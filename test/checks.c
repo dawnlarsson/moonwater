@@ -75487,6 +75487,298 @@ static fn groups_scrub_edges(void)
         (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
 }
 
+/*
+        A groups file that is there and cannot be read is not an empty list:
+        every change to the groups reads the file first, and a change that
+        saves over what it could not read forgets every group in it. The
+        file is cut short, readable by others, too large, a FIFO or a link,
+        and each way that groups are changed leaves it as it was: joining,
+        leaving, a code made and taken back, one closed after it took its
+        machine, and the listener's drop of codes that ran out.
+*/
+struct wls_groups_look
+{
+        p32 mode;
+        positive length;
+        p8 bytes[(LINK_GROUPS_MAX + 1) * sizeof(struct link_group_record)];
+};
+
+//      What is at the groups file, a link not followed: its kind and mode,
+//      and the bytes of a plain file.
+static fn wls_groups_look(struct wls_groups_look address_to look)
+{
+        file_facts facts;
+        bipolar handle;
+
+        memory_zero(look, sizeof(address_to look));
+        if (!file_look_link(LINK_GROUPS_PATH, address_of facts))
+                return;
+        look->mode = (p32)facts.mode;
+        look->length = (positive)facts.size;
+        if ((facts.mode & MODE_FORMAT) != MODE_FILE)
+                return;
+        handle = system_open_at(AT_FDCWD, LINK_GROUPS_PATH,
+                                FILE_READ | O_NOFOLLOW | O_CLOEXEC);
+        if (handle >= 0)
+        {
+                (void)system_read_retry((positive)handle, look->bytes,
+                                        sizeof look->bytes);
+                system_close(handle);
+        }
+}
+
+//      Three groups: two that stay and a code that has not run out.
+static fn wls_groups_three(struct link_group_record address_to three)
+{
+        static const string_address names[3] = {"office", "lab", "kiosk"};
+
+        memory_zero(three, 3 * sizeof(struct link_group_record));
+        for (positive at = 0; at < 3; at++)
+        {
+                string_copy(three[at].namespace, names[at]);
+                memory_fill(three[at].key, 0x41 + at, sizeof three[at].key);
+                three[at].may = 2 + 2 * (p32)at;
+        }
+        three[2].flags = LINK_GROUP_ONCE;
+        three[2].expires = link_boot_seconds() + 300;
+}
+
+enum { WLS_HOSTILE = 5 };
+
+//      The groups file as it is when something has gone wrong with it.
+static fn wls_groups_hostile(positive kind)
+{
+        struct link_group_record many[LINK_GROUPS_MAX + 1];
+
+        wls_groups_three(many);
+        memory_copy(many + 3, many, 3 * sizeof many[0]);
+        memory_zero(many + 6, 3 * sizeof many[0]);
+        (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
+        (void)system_remove_at(AT_FDCWD, "/root/groups.elsewhere", 0);
+        if (kind == 0)
+                (void)wls_write(LINK_GROUPS_PATH, many,
+                                3 * sizeof many[0] + 40, 0600);
+        else if (kind == 1)
+                (void)wls_write(LINK_GROUPS_PATH, many, 3 * sizeof many[0],
+                                0644);
+        else if (kind == 2)
+                (void)wls_write(LINK_GROUPS_PATH, many, sizeof many, 0600);
+        else if (kind == 3)
+                (void)system_call_4(syscall(mknodat), (positive)(bipolar)AT_FDCWD,
+                                    (positive)LINK_GROUPS_PATH, 0010600, 0);
+        else
+        {
+                (void)wls_write("/root/groups.elsewhere", many,
+                                3 * sizeof many[0], 0600);
+                (void)system_symbolic_link_at("/root/groups.elsewhere",
+                                              AT_FDCWD, LINK_GROUPS_PATH);
+        }
+}
+
+//      Each is true when the change was refused, or has no answer to give.
+static bool wls_change_join(void)
+{
+        //      The secret is wiped where it was typed: it must be writable.
+        p8 secret[] = "sesame-sesame";
+        string_address words[] = {"office", (string_address)secret};
+
+        return link_group_join(words, 2) != 0;
+}
+
+static bool wls_change_leave(void)
+{
+        return link_group_leave("lab", false) != 0;
+}
+
+static bool wls_change_open(void)
+{
+        p8 code[LINK_CODE_LENGTH] = {'a', 'b', 'c', 'd', 'e', 'f'};
+        p32 mark = 0;
+
+        return link_pair_open("gadget", code, null, address_of mark) < 0;
+}
+
+static bool wls_change_taken_back(void)
+{
+        link_pair_close(0x12345678);
+        return true;
+}
+
+static bool wls_change_closed(void)
+{
+        wls_group();
+        link_group_close(0);
+        return true;
+}
+
+static bool wls_change_expired(void)
+{
+        wls_group();
+        link_nearby.groups.record[0].flags = LINK_GROUP_ONCE;
+        link_nearby.groups.record[0].expires = 0;
+        link_groups_expire();
+        return true;
+}
+
+static fn groups_unreadable(void)
+{
+        static bool (*const changes[])(void) = {
+            wls_change_join,     wls_change_leave,  wls_change_open,
+            wls_change_taken_back, wls_change_closed, wls_change_expired,
+        };
+        bool held[array_count(changes)];
+        struct wls_groups_look before, after;
+        struct link_group_record three[3];
+        link_groups groups;
+        p8 want[2 * sizeof(struct link_group_record)];
+        p8 code[LINK_CODE_LENGTH] = {'a', 'b', 'c', 'd', 'e', 'f'};
+        p32 mark = 0;
+
+        //      A directory where the switch's word goes and one where the
+        //      key does: a join that went on would start a listener, and is
+        //      stopped there instead.
+        (void)system_make_directory_at(AT_FDCWD, LINK_SWITCH_PATH, 0700);
+        (void)system_make_directory_at(AT_FDCWD, LINK_KEY_PATH, 0700);
+        for (positive change = 0; change < array_count(changes); change++)
+        {
+                held[change] = true;
+                for (positive kind = 0; kind < WLS_HOSTILE; kind++)
+                {
+                        bool refused;
+
+                        wls_groups_hostile(kind);
+                        wls_groups_look(address_of before);
+                        refused = changes[change]();
+                        wls_groups_look(address_of after);
+                        held[change] &= refused &&
+                                        !memory_compare(address_of before,
+                                                        address_of after,
+                                                        sizeof before);
+                }
+        }
+        check("sec: a group joined to a groups file that is cut short, "
+              "readable by others, too large, a FIFO or a link is refused, "
+              "and the file is as it was",
+              held[0]);
+        check("sec: and one left", held[1]);
+        check("sec: and a pairing code made", held[2]);
+        check("sec: and a pairing code taken back", held[3]);
+        check("sec: and one closed after it took its machine", held[4]);
+        check("sec: and the codes that ran out dropped by the listener",
+              held[5]);
+
+        //      The same changes where the file reads, and where it was never
+        //      written, which is an empty list and no trouble.
+        wls_groups_three(three);
+        (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
+        (void)system_remove_at(AT_FDCWD, "/root/groups.elsewhere", 0);
+        check("a code made where no file was written is the one group",
+              link_pair_open("gadget", code, null, address_of mark) == 0 &&
+                      link_groups_load(address_of groups) && groups.count == 1 &&
+                      string_equals(groups.record[0].namespace, "gadget") &&
+                      (groups.record[0].flags & LINK_GROUP_ONCE));
+        (void)wls_write(LINK_GROUPS_PATH, three, sizeof three, 0600);
+        check("a group left is the one record gone",
+              link_group_leave("lab", false) == 0 &&
+                      link_groups_load(address_of groups) && groups.count == 2 &&
+                      string_equals(groups.record[0].namespace, "office") &&
+                      string_equals(groups.record[1].namespace, "kiosk"));
+        check("a code made where the file reads is the third",
+              link_pair_open("gadget", code, null, address_of mark) == 0 &&
+                      mark != 0 && link_groups_load(address_of groups) &&
+                      groups.count == 3 &&
+                      string_equals(groups.record[2].namespace, "gadget"));
+        link_pair_close(mark);
+        check("and taken back it is gone, and nothing else",
+              link_groups_load(address_of groups) && groups.count == 2 &&
+                      string_equals(groups.record[0].namespace, "office") &&
+                      string_equals(groups.record[1].namespace, "kiosk"));
+
+        //      A record whose flags are not any the code sets is read as the
+        //      record it is, and a change to another group keeps it whole.
+        wls_groups_three(three);
+        three[0].flags = 0xffffffffu;
+        three[0].expires = ~(p64)0;
+        (void)wls_write(LINK_GROUPS_PATH, three, sizeof three, 0600);
+        memory_copy(want, three, sizeof three[0]);
+        memory_copy(want + sizeof three[0], three + 2, sizeof three[2]);
+        check("sec: a record with flags that are none of the code's is read",
+              link_groups_load(address_of groups) && groups.count == 3 &&
+                      groups.record[0].flags == 0xffffffffu);
+        check("sec: and leaving another group keeps it byte for byte",
+              link_group_leave("lab", false) == 0);
+        wls_groups_look(address_of after);
+        check("sec: with the group after it in its place",
+              after.length == sizeof want &&
+                      !memory_compare(after.bytes, want, sizeof want));
+
+        (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
+        (void)system_remove_at(AT_FDCWD, LINK_SWITCH_PATH, AT_REMOVEDIR);
+        (void)system_remove_at(AT_FDCWD, LINK_KEY_PATH, AT_REMOVEDIR);
+}
+
+/*
+        A listener that has groups keeps them when a look at the file fails
+        for its own reasons -- here, no descriptor to open it with -- where
+        it took none and closed its socket for the rest of its life, since a
+        look is made once for each change of the file: the groups last read
+        stay, and the next look asks again, even when the file is gone by
+        then.
+*/
+static fn nearby_reload_failures(void)
+{
+        struct link_group_record record;
+        positive limits[2] = {0, 0};
+        positive tight[2];
+        bipolar probe;
+
+        memory_zero(address_of record, sizeof record);
+        string_copy(record.namespace, "office");
+        memory_fill(record.key, 0x5a, sizeof record.key);
+        record.may = WATERLINK_MAY_RUN;
+
+        memory_zero(address_of link_nearby, sizeof link_nearby);
+        (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
+        (void)wls_write(LINK_GROUPS_PATH, address_of record, sizeof record, 0600);
+        link_nearby.socket = wls_quiet_socket();
+        link_nearby_reload(10000000);
+
+        //      The lowest descriptor there is, and no soft limit above it.
+        probe = system_open_at(AT_FDCWD, "/dev/null", FILE_READ | O_CLOEXEC);
+        if (probe >= 0)
+                system_close(probe);
+        (void)system_call_4(syscall(prlimit64), 0, 7, 0, (positive)address_of limits);
+        tight[0] = probe >= 0 ? (positive)probe : limits[0];
+        tight[1] = limits[1];
+
+        record.may = WATERLINK_MAY_LOG;
+        (void)wls_write(LINK_GROUPS_PATH, address_of record, sizeof record, 0600);
+        (void)system_call_4(syscall(prlimit64), 0, 7, (positive)address_of tight, 0);
+        link_nearby_reload(11000000);
+        (void)system_call_4(syscall(prlimit64), 0, 7, (positive)address_of limits, 0);
+        check("sec: a groups file that could not be opened leaves the groups "
+              "last read, and the socket",
+              link_nearby.groups.count == 1 &&
+                      link_nearby.groups.record[0].may == WATERLINK_MAY_RUN &&
+                      link_nearby.socket >= 0);
+        link_nearby_reload(11600000);
+        check("and the next look reads it",
+              link_nearby.groups.count == 1 &&
+                      link_nearby.groups.record[0].may == WATERLINK_MAY_LOG);
+
+        record.may = WATERLINK_MAY_FILES;
+        (void)wls_write(LINK_GROUPS_PATH, address_of record, sizeof record, 0600);
+        (void)system_call_4(syscall(prlimit64), 0, 7, (positive)address_of tight, 0);
+        link_nearby_reload(12200000);
+        (void)system_call_4(syscall(prlimit64), 0, 7, (positive)address_of limits, 0);
+        (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
+        link_nearby_reload(12800000);
+        check("a file that is gone after a look that failed is no groups, "
+              "and closes the socket",
+              link_nearby.groups.count == 0 && link_nearby.socket < 0);
+        link_nearby_close();
+}
+
 //      The records of a file keep the names that could have been paired, and
 //      the last record takes the place of one that could not (the peers and
 //      the groups read their files through the same walk).
@@ -77601,6 +77893,8 @@ b32 main(void)
         nearby_address();
         nearby_tick();
         groups_scrub_edges();
+        groups_unreadable();
+        nearby_reload_failures();
         records_named();
         labels();
         wpa_key();

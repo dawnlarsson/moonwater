@@ -89,28 +89,63 @@ typedef struct
 
 static bool link_groups_scrub(positive records);
 
-/* False when an old file's fast verifier could not be removed durably.  The
-   groups stay loaded, because a command that goes on to save them rewrites the
-   file whole and that is the scrub; only the listener, which never saves,
-   refuses to act on them. */
+static bipolar link_groups_read(link_groups address_to groups,
+                                positive address_to old);
+
+/* A look at the groups: none when the file cannot be read, whatever the
+   reason. False when an old file's fast verifier could not be removed
+   durably. The groups stay loaded, because a command that goes on to save them
+   rewrites the file whole and that is the scrub; only the listener, which
+   keeps them in memory, refuses to act on them. */
 bool link_groups_load(link_groups address_to groups)
 {
+        positive old;
+
+        return link_groups_read(groups, address_of old) < 0 || !old ||
+               link_groups_scrub(old);
+}
+
+/* The groups, to change them: a file that is there and cannot be read is not
+   an empty list, and saving over it would forget every group in it. False
+   then, with the file as it was; only a file never written is empty. */
+static bool link_groups_for_change(link_groups address_to groups)
+{
+        positive old;
+        bipolar read = link_groups_read(groups, address_of old);
+
+        if (read >= 0 && old)
+                (void)link_groups_scrub(old);
+        return link_records_for_change(read);
+}
+
+/* The groups as the file says, with no groups and the reason when it cannot
+   be read: -ENOENT for a file never written, the refusal of a file that is not
+   root's own, private and whole, or what the read said. A record's old check
+   is zeroed in memory, and `old` is how many records the file holds when any
+   of them had one (the count the scrub is given, taken before a record whose
+   name is no name is dropped), or none. */
+static bipolar link_groups_read(link_groups address_to groups,
+                                positive address_to old)
+{
         positive got = 0;
-        bool old = false;
+        bipolar read;
 
         memory_zero(groups, sizeof(address_to groups));
-        if (link_read_private_records(LINK_GROUPS_PATH,
-                                      (p8 address_to)groups->record,
-                                      sizeof(groups->record),
-                                      sizeof(struct link_group_record),
-                                      address_of got) < 0)
-                return true;
+        address_to old = 0;
+        read = link_read_private_records(LINK_GROUPS_PATH,
+                                         (p8 address_to)groups->record,
+                                         sizeof(groups->record),
+                                         sizeof(struct link_group_record),
+                                         address_of got);
+        if (read < 0)
+                return read;
         groups->count = got / sizeof(struct link_group_record);
         for (positive at = 0; at < groups->count; at++)
         {
-                old |= memory_span_byte(groups->record[at].check, 0,
-                                        sizeof groups->record[at].check) !=
-                       sizeof groups->record[at].check;
+                if (memory_span_byte(groups->record[at].check, 0,
+                                     sizeof groups->record[at].check) !=
+                    sizeof groups->record[at].check)
+                        address_to old = groups->count;
                 memory_zero(groups->record[at].check, sizeof groups->record[at].check);
         }
         link_records_named((p8 address_to)groups->record,
@@ -118,7 +153,7 @@ bool link_groups_load(link_groups address_to groups)
                            sizeof(struct link_group_record),
                            __builtin_offsetof(struct link_group_record, namespace),
                            WATERLINK_NAMESPACE_MAX);
-        return !old || link_groups_scrub(got / sizeof(struct link_group_record));
+        return 0;
 }
 
 /*
@@ -333,22 +368,25 @@ static fn link_group_close(positive group)
         link_nearby.groups.record[group].flags |= LINK_GROUP_DONE;
         link_nearby.groups.record[group].expires = now + LINK_PAIR_GRACE;
 
-        //      Without the lock the file keeps the code a little longer: it is
-        //      spent by its time in memory and dropped from the file at the
-        //      next turn that has the lock.
+        //      Without the lock, or with a file that cannot be read (which is
+        //      no empty list to save over), the file keeps the code a little
+        //      longer: it is spent by its time in memory and dropped from the
+        //      file at the next turn that has both.
         lock = link_peers_lock();
         if (lock < 0)
                 return;
-        link_groups_load(address_of groups);
-        for (positive at = 0; at < groups.count; at++)
-                if ((groups.record[at].flags & LINK_GROUP_ONCE) &&
-                    crypto_same(groups.record[at].key,
-                                link_nearby.groups.record[group].key, 32))
-                {
-                        groups.record[at].flags |= LINK_GROUP_DONE;
-                        groups.record[at].expires = now + LINK_PAIR_GRACE;
-                }
-        (void)link_groups_save(address_of groups);
+        if (link_groups_for_change(address_of groups))
+        {
+                for (positive at = 0; at < groups.count; at++)
+                        if ((groups.record[at].flags & LINK_GROUP_ONCE) &&
+                            crypto_same(groups.record[at].key,
+                                        link_nearby.groups.record[group].key, 32))
+                        {
+                                groups.record[at].flags |= LINK_GROUP_DONE;
+                                groups.record[at].expires = now + LINK_PAIR_GRACE;
+                        }
+                (void)link_groups_save(address_of groups);
+        }
         link_peers_unlock(lock);
         crypto_forget(address_of groups, sizeof groups);
 }
@@ -370,11 +408,13 @@ static fn link_groups_expire(void)
         lock = link_peers_lock();
         if (lock < 0)
                 return;
-        link_groups_load(address_of groups);
-        for (positive at = 0; at < groups.count; at++)
-                if (link_group_spent(groups.record + at, now))
-                        groups.record[at--] = groups.record[--groups.count];
-        (void)link_groups_save(address_of groups);
+        if (link_groups_for_change(address_of groups))
+        {
+                for (positive at = 0; at < groups.count; at++)
+                        if (link_group_spent(groups.record + at, now))
+                                groups.record[at--] = groups.record[--groups.count];
+                (void)link_groups_save(address_of groups);
+        }
         link_peers_unlock(lock);
         crypto_forget(address_of groups, sizeof groups);
 }
@@ -568,13 +608,29 @@ static fn link_nearby_open(void)
 }
 
 /*
+        A read of the groups file that says nothing about what it holds: not
+        the file's absence, nor a file that is not what a groups file is (not
+        root's, private and whole, or a link), which are no groups, but a
+        read that failed for itself -- the disk, no descriptor, no memory.
+*/
+static bool link_groups_unknown(bipolar read)
+{
+        return read < 0 && read != -ENOENT && read != -EPERM && read != -ELOOP;
+}
+
+/*
         The groups as the file says now, when it has changed: keys derived
         (cheaply -- the slow derivation happened at join), labels drawn, the
-        socket opened for the first group and closed after the last.
+        socket opened for the first group and closed after the last. A read
+        that failed for itself leaves the groups last read as they are, and
+        the next look asks again.
 */
 static fn link_nearby_reload(p64 now)
 {
+        link_groups fresh;
         file_facts facts;
+        positive old = 0;
+        bipolar read;
         p64 mark[6] = {0};
 
         if (link_age(now, link_nearby.expiry_look) >= 2000000)
@@ -604,14 +660,24 @@ static fn link_nearby_reload(p64 now)
                 return;
         memory_copy(link_nearby.groups_mark, mark, sizeof mark);
 
-        if (!link_groups_load(address_of link_nearby.groups))
+        read = link_groups_read(address_of fresh, address_of old);
+        if (link_groups_unknown(read))
+        {
+                //      A mark no file has, so that the next look reads it
+                //      again even if the file is gone by then.
+                crypto_forget(address_of fresh, sizeof fresh);
+                memory_fill(link_nearby.groups_mark, 0xff, sizeof mark);
+                return;
+        }
+        if (old && !link_groups_scrub(old))
         {
                 /* Do not activate a secret whose fast verifier could not be
                    removed durably; the next look retries the migration. */
-                crypto_forget(address_of link_nearby.groups,
-                              sizeof link_nearby.groups);
+                crypto_forget(address_of fresh, sizeof fresh);
                 memory_zero(link_nearby.groups_mark, sizeof mark);
         }
+        link_nearby.groups = fresh;
+        crypto_forget(address_of fresh, sizeof fresh);
         for (positive at = 0; at < link_nearby.groups.count; at++)
                 waterlink_group_keys_from(link_nearby.keys + at,
                                           link_nearby.groups.record[at].key,
