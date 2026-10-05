@@ -29,8 +29,9 @@
         The grants: shell is a terminal, run is one command, log follows the
         kernel log, and files is push and pull of any file root has, which
         is as good as run -- a file pushed over a script that runs at boot is
-        a command -- bar the link's own: its key, machines, groups, stamps
-        and the machine script are never read or written through it.
+        a command -- bar the link's own: its key, machines, groups, stamps,
+        state, lock and the machine script are never read or written through
+        it.
 
         The switch, the key and the machines live in /root, beside the
         wireless networks, so install carries them to the disk and wipe keeps
@@ -333,8 +334,12 @@ static b32 link_key_verb(void)
         return 0;
 }
 
+/*      Under the peers lock. where is the address it is reached at, looked
+        up before the lock was taken -- a name is a wait of seconds on a
+        resolver, and every other writer of the file waits behind it -- or
+        null for none. */
 static b32 link_add_locked(string_address name, string_address text,
-                          string_address place)
+                          struct waterlink_peer address_to where)
 {
         link_peers peers;
         struct waterlink_peer peer;
@@ -373,9 +378,11 @@ static b32 link_add_locked(string_address name, string_address text,
         if (own)
                 return host_refuse("that is this machine's own key\n");
 
-        if (place && !link_parse_place(place, peer.address, address_of peer.port))
-                return host_refuse("%s is not an address this can reach\n",
-                                   place);
+        if (where)
+        {
+                memory_copy(peer.address, where->address, sizeof peer.address);
+                peer.port = where->port;
+        }
 
         string_copy(peer.name, name);
         peer.may = WATERLINK_MAY_DEFAULT;
@@ -402,7 +409,7 @@ static b32 link_add_locked(string_address name, string_address text,
                 if (crypto_same(found->key, peer.key, 32))
                 {
                         peer.may = found->may;
-                        if (!place)
+                        if (!where)
                         {
                                 memory_copy(peer.address, found->address,
                                             sizeof peer.address);
@@ -606,6 +613,7 @@ static p32 link_grants_of(string_address address_to words, positive count,
         link is switched on.
 */
 static const char link_base32[] = "abcdefghijklmnopqrstuvwxyz234567";
+#define LINK_SECRET_LEAST 8
 
 static b32 link_group_join(string_address address_to words, positive count)
 {
@@ -655,10 +663,23 @@ static b32 link_group_join(string_address address_to words, positive count)
                 crypto_forget(secret, length);
                 if (length >= sizeof made)
                         return host_refuse("that secret is too long\n");
+                //      A group with no secret, or one a person could guess in
+                //      a sitting, is a group anybody on the network is in.
+                if (length < LINK_SECRET_LEAST)
+                {
+                        crypto_forget(made, sizeof made);
+                        return host_refuse("a secret is at least 8 characters: "
+                                           "leave it out and one is made\n");
+                }
                 secret = (string_address)made;
         }
 
         lock = link_peers_lock();
+        if (lock < 0)
+        {
+                crypto_forget(made, sizeof made);
+                return host_refuse("%s could not be locked\n", LINK_PEERS_LOCK);
+        }
         link_groups_load(address_of groups);
         for (positive look = 0; look < groups.count; look++)
                 if (string_equals(groups.record[look].namespace, namespace) &&
@@ -756,6 +777,8 @@ static b32 link_group_leave(string_address namespace, bool forget)
         bool saved;
         bipolar lock = link_peers_lock();
 
+        if (lock < 0)
+                return host_refuse("%s could not be locked\n", LINK_PEERS_LOCK);
         link_groups_load(address_of groups);
         for (positive at = 0; at < groups.count; at++)
                 if (string_equals(groups.record[at].namespace, namespace) &&
@@ -784,7 +807,7 @@ static b32 link_group_leave(string_address namespace, bool forget)
                 link_peers peers;
                 bipolar held = link_peers_lock();
                 positive dropped = 0;
-                bool read = link_peers_for_change(address_of peers);
+                bool read = held >= 0 && link_peers_for_change(address_of peers);
 
                 for (positive at = 0; read && at < peers.count; at++)
                         if (peers.peer[at].group == keys.mark)
@@ -801,7 +824,7 @@ static b32 link_group_leave(string_address namespace, bool forget)
                                       namespace, dropped);
                 else
                         string_format(log, host_label "left group %s; %s could not "
-                                                      "be read, so the "
+                                                      "be locked or read, so the "
                                                       "machines it linked are "
                                                       "kept\n",
                                       namespace, LINK_PEERS_PATH);
@@ -925,6 +948,11 @@ static bipolar link_pair_open(string_address namespace, p8 address_to code,
                                WATERLINK_GROUP_ROUNDS, key);
 
         lock = link_peers_lock();
+        if (lock < 0)
+        {
+                crypto_forget(key, sizeof key);
+                return lock;
+        }
         link_groups_load(address_of groups);
         for (positive at = 0; at < groups.count; at++)
                 if (link_group_spent(groups.record + at, now) ||
@@ -961,6 +989,10 @@ static fn link_pair_close(p32 mark)
         struct waterlink_group_keys keys;
         bipolar lock = link_peers_lock();
 
+        //      Without the lock the file is left as it is: the code runs out
+        //      by itself, and the listener drops it then.
+        if (lock < 0)
+                return;
         link_groups_load(address_of groups);
         for (positive at = 0; at < groups.count; at++)
         {
@@ -1210,11 +1242,28 @@ static b32 link_main(string_address address_to arguments, positive count)
             ((string_equals(verb, "allow") || string_equals(verb, "deny")) &&
              count >= 5))
         {
-                bipolar lock = link_peers_lock();
-                b32 answer =
+                struct waterlink_peer where;
+                bipolar lock;
+                b32 answer;
+
+                //      An address is looked up before the lock, not under it.
+                memory_zero(address_of where, sizeof where);
+                if (string_equals(verb, "add") && count == 6 &&
+                    !link_parse_place(arguments[5], where.address,
+                                      address_of where.port))
+                        return host_refuse("%s is not an address this can "
+                                           "reach\n",
+                                           arguments[5]);
+
+                lock = link_peers_lock();
+                if (lock < 0)
+                        return host_refuse("%s could not be locked\n",
+                                           LINK_PEERS_LOCK);
+                answer =
                         string_equals(verb, "add")
                                 ? link_add_locked(arguments[3], arguments[4],
-                                                  count == 6 ? arguments[5] : null)
+                                                  count == 6 ? address_of where
+                                                             : null)
                         : string_equals(verb, "remove")
                                 ? link_remove_locked(arguments[3])
                                 : link_grant_locked(arguments[3],

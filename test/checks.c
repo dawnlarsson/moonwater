@@ -72617,11 +72617,13 @@ static bipolar wls_command(struct link_session address_to s, bool deaf)
         if (!child)
         {
                 timespec pause = {deaf ? 0 : 30, deaf ? 300000000 : 0};
-                p64 ignore[4] = {1, 0, 0, 0};
+                p64 ignore[4] = {deaf ? 1 : 0, 0, 0, 0};
 
-                if (deaf)
-                        (void)system_call_4(syscall(rt_sigaction), 1,
-                                            (positive)ignore, 0, 8);
+                //      The hangup is what one hears or one does not, and not
+                //      what the runner started this with: a run under nohup
+                //      hands every child a SIGHUP that is ignored.
+                (void)system_call_4(syscall(rt_sigaction), 1, (positive)ignore,
+                                    0, 8);
                 (void)system_call_2(syscall(nanosleep),
                                     (positive)address_of pause, 0);
                 exit(0);
@@ -72665,9 +72667,14 @@ static fn reaped_commands(void)
         bipolar deaf;
         bipolar group;
         bipolar many[LINK_REAPING + 4];
-        positive before = link_reaping_count;
+        positive before;
         bool all = true;
 
+        //      Whatever the checks before this closed on a command that was
+        //      still running -- a pull's cat -- is waited for first, so the
+        //      table starts empty and what it holds after is these.
+        wls_reaped();
+        before = link_reaping_count;
         child = wls_command(s, false);
         link_session_close(s);
         wls_reaped();
@@ -72743,8 +72750,8 @@ static fn reaped_commands(void)
         A request for a file, as a peer holding `files` and nothing else would
         send it: the answer is whether the machine took it up.
 */
-static bool wls_file_asked(struct link_session address_to s, p8 ask,
-                           string_address path)
+static bool wls_file_over(struct link_session address_to s, p8 ask,
+                          string_address path, bool over)
 {
         p8 request[LINK_REQUEST_MAX + 8];
         p8 key[32];
@@ -72756,6 +72763,8 @@ static bool wls_file_asked(struct link_session address_to s, p8 ask,
                 return false;
         memory_copy(s->peer, key, 32);
         string_copy((string_address)s->name, "client");
+        //      A session that has said it is over, by a refusal or an end.
+        s->exit_sent = over;
         request[0] = ask;
         if (ask == LINK_ASK_PUSH)
         {
@@ -72767,6 +72776,12 @@ static bool wls_file_asked(struct link_session address_to s, p8 ask,
         return !s->exit_sent && s->kind != LINK_KIND_NONE;
 }
 
+static bool wls_file_asked(struct link_session address_to s, p8 ask,
+                           string_address path)
+{
+        return wls_file_over(s, ask, path, false);
+}
+
 /*
         The link's own state is not a file a grant for files reaches, however
         it is named; any other file is.
@@ -72775,17 +72790,19 @@ static fn own_files(void)
 {
         static const string_address own[] = {
             LINK_KEY_PATH, LINK_PEERS_PATH, LINK_GROUPS_PATH, LINK_STAMPS_PATH,
-            HOST_MACHINE_SCRIPT};
+            LINK_STATE_PATH, LINK_LOCK_PATH, HOST_MACHINE_SCRIPT};
         struct link_session address_to s = link_self.session;
         file_facts before[array_count(own)];
         bool named = true, linked = true, doubled = true, spelled = true;
         bool kept = true, pushed = false, pulled = false;
         bool made[array_count(own)];
+        string_address hard;
         p8 round[64];
         p8 key[32];
 
         wls_seeded(key, 32, 9);
         wls_peers_with(key, WATERLINK_MAY_FILES);
+        host_state_ready();
         for (positive at = 0; at < array_count(own); at++)
         {
                 made[at] = !file_look_at(own[at], address_of before[at]);
@@ -72798,19 +72815,32 @@ static fn own_files(void)
                 file_facts after;
 
                 (void)system_remove_at(AT_FDCWD, "/root/own-link", 0);
+                hard = !string_compare_max(own[at], "/run/", 5)
+                               ? "/run/own-hard"
+                               : "/root/own-hard";
+                (void)system_remove_at(AT_FDCWD, hard, 0);
                 (void)system_remove_at(AT_FDCWD, "/root/own-hard", 0);
                 (void)system_symbolic_link_at(own[at], AT_FDCWD,
                                               "/root/own-link");
                 (void)system_call_5(syscall(linkat), (positive)(bipolar)AT_FDCWD,
                                     (positive)own[at],
                                     (positive)(bipolar)AT_FDCWD,
-                                    (positive) "/root/own-hard", 0);
-                string_copy((string_address)round, "/root/../root/");
-                string_append_bounded((string_address)round, own[at] + 6,
-                                      sizeof round);
+                                    (positive)hard, 0);
+                if (!string_compare_max(own[at], "/run/", 5))
+                {
+                        string_copy((string_address)round, "/run/../run/");
+                        string_append_bounded((string_address)round,
+                                              own[at] + 5, sizeof round);
+                }
+                else
+                {
+                        string_copy((string_address)round, "/root/../root/");
+                        string_append_bounded((string_address)round,
+                                              own[at] + 6, sizeof round);
+                }
                 named &= link_path_is_own(own[at]);
                 linked &= link_path_is_own("/root/own-link");
-                doubled &= link_path_is_own("/root/own-hard");
+                doubled &= link_path_is_own(hard);
                 spelled &= link_path_is_own((string_address)round);
                 //      Neither verb takes it up, and nothing is staged.
                 pushed |= wls_file_asked(s, LINK_ASK_PUSH, own[at]) ||
@@ -72849,10 +72879,392 @@ static fn own_files(void)
         link_session_close(s);
         (void)system_remove_at(AT_FDCWD, "/root/own-link", 0);
         (void)system_remove_at(AT_FDCWD, "/root/own-hard", 0);
+        (void)system_remove_at(AT_FDCWD, "/run/own-hard", 0);
         (void)system_remove_at(AT_FDCWD, "/root/ordinary", 0);
         for (positive at = 0; at < array_count(own); at++)
                 if (made[at])
                         (void)system_remove_at(AT_FDCWD, own[at], 0);
+}
+
+//      The answer a session posted, as the link holds it for sending: its
+//      length and what the first bytes are.
+static positive wls_answer(struct link_session address_to s, p8 address_to into)
+{
+        struct waterlink_sending address_to live =
+                s->link->sending + LINK_KEY_ANSWER;
+        struct waterlink_slot address_to slot;
+
+        if (live->first == WATERLINK_NONE)
+                return 0;
+        slot = s->link->slot + live->first;
+        memory_copy(into, slot->payload, slot->length < 8 ? slot->length : 8);
+        return slot->length;
+}
+
+/*
+        What the streams say when they fail. A read that cannot be done is
+        not the end of an input -- a directory pushed, a file that refuses --
+        and says why and ends nothing; a write that cannot be done is said to
+        the loop that stops on it, which is how a reader that went away
+        (`link run b yes | head -c 10`) stops what fills it; and a push that
+        failed leaves no staging file beside its target.
+*/
+static fn stream_failures(void)
+{
+        struct link_session address_to s = link_self.session;
+        p8 frame[2] = {LINK_DATA, 'x'};
+        p8 last[1] = {LINK_END};
+        p8 kept[LINK_REQUEST_MAX + 32];
+        p8 read[16];
+        file_facts gone;
+        bipolar handle;
+        positive room;
+        b32 pair[2];
+
+        check("a session opens for the streams", link_session_open(s));
+        room = waterlink_room(s->link);
+        handle = system_open_at(AT_FDCWD, "/root", FILE_READ | O_DIRECTORY | O_CLOEXEC);
+        link_stream_set(s->reads, handle, LINK_KEY_INPUT, WATERLINK_FRAME_DURABLE);
+        link_stream_read(s, s->reads);
+        check("sec: an input that cannot be read is not an input that ended: "
+              "it says why, and posts no end",
+              s->reads[0].done && s->reads[0].error == -EISDIR &&
+                      waterlink_room(s->link) == room);
+        link_session_close(s);
+
+        check("a session opens for an empty input", link_session_open(s));
+        room = waterlink_room(s->link);
+        handle = system_open_at(AT_FDCWD, "/dev/null", FILE_READ | O_CLOEXEC);
+        link_stream_set(s->reads, handle, LINK_KEY_INPUT, WATERLINK_FRAME_DURABLE);
+        link_stream_read(s, s->reads);
+        check("and an input at its end posts its end, and no error",
+              s->reads[0].done && !s->reads[0].error &&
+                      waterlink_room(s->link) == room - 1);
+        link_session_close(s);
+
+        check("a session opens for an output", link_session_open(s));
+        room = waterlink_room(s->link);
+        handle = system_open_at(AT_FDCWD, "/root", FILE_READ | O_DIRECTORY | O_CLOEXEC);
+        link_stream_set(s->reads, handle, LINK_KEY_OUTPUT, WATERLINK_FRAME_DURABLE);
+        link_stream_read(s, s->reads);
+        check("a machine's output that reads as an error is the end of it, as "
+              "a terminal's last holder closing it is, with nothing said",
+              s->reads[0].done && !s->reads[0].error &&
+                      waterlink_room(s->link) == room);
+        link_session_close(s);
+
+        //      A write to a pipe nobody reads: the error, with SIGPIPE
+        //      ignored as the loop's signalfd leaves it.
+        {
+                p64 ignore[4] = {1, 0, 0, 0};
+                p64 old[4] = {0, 0, 0, 0};
+
+                check("a session opens for a broken pipe", link_session_open(s));
+                check("a pipe opens", system_pipe(pair, O_CLOEXEC) >= 0);
+                system_close(pair[0]);
+                (void)system_call_4(syscall(rt_sigaction), 13, (positive)ignore,
+                                    (positive)old, 8);
+                link_stream_set(s->writes, pair[1], LINK_KEY_OUTPUT, 0);
+                check("a frame for a descriptor that is gone is taken",
+                      link_stream_take(s, s->writes, frame, 2));
+                (void)system_call_4(syscall(rt_sigaction), 13, (positive)old, 0,
+                                    8);
+                check("sec: and the stream says why it stopped, which is how "
+                      "the client knows the reader went away",
+                      s->failed && s->writes[0].error == -EPIPE);
+                link_session_close(s);
+        }
+
+        //      A push whose disk refuses: a descriptor that cannot be
+        //      written, on the staging file's inode.
+        (void)wls_write("/root/refused", "before", 6, 0644);
+        check("a push opens to be refused", wls_push(s, "/root/refused"));
+        string_copy((string_address)kept, (string_address)s->part);
+        handle = system_open_at(AT_FDCWD, (string_address)kept, FILE_READ | O_CLOEXEC);
+        system_close(s->writes[0].fd);
+        s->writes[0].fd = handle;
+        (void)link_stream_take(s, s->writes, frame, 2);
+        check("a write the disk refuses fails the push", s->failed &&
+                                                            s->writes[0].error < 0);
+        (void)link_stream_take(s, s->writes, last, 1);
+        {
+                bipolar target = system_open_at(AT_FDCWD, "/root/refused", FILE_READ);
+                bipolar got = system_read_once(target, read, sizeof read);
+
+                system_close(target);
+                check("sec: a push that failed leaves no staging file, and "
+                      "its target is as it was",
+                      s->exited && s->status == 1 && !s->part[0] &&
+                              !file_look_at((string_address)kept,
+                                            address_of gone) &&
+                              got == 6 && !memory_compare(read, "before", 6));
+        }
+        link_session_close(s);
+        (void)system_remove_at(AT_FDCWD, "/root/refused", 0);
+
+        //      A pushed file's disk is asked to begin on what has been
+        //      written every eight megabytes, so the fsync that ends the push
+        //      is not the one place the loop waits for all of it.
+        {
+                static p8 body[LINK_CHUNK + 1];
+                positive frames = (positive)((8ull << 20) / LINK_CHUNK);
+                bool early = true;
+
+                memory_fill(body, 'z', sizeof body);
+                body[0] = LINK_DATA;
+                check("a push opens to be flushed", wls_push(s, "/root/flushed"));
+                for (positive at = 0; at < frames / 2; at++)
+                        (void)link_stream_take(s, s->writes, body, sizeof body);
+                early = !s->writes[0].started;
+                for (positive at = frames / 2; at < frames + 1; at++)
+                        (void)link_stream_take(s, s->writes, body, sizeof body);
+                check("a transfer's file is flushed by the eight megabytes, "
+                      "and not before",
+                      early && s->writes[0].started >= (8ull << 20) &&
+                              !s->failed);
+                link_session_close(s);
+        }
+}
+
+/*
+        What the machine says of a request. A session that has answered, or
+        refused, takes no second request. A pulled file's mode goes with the
+        yes, to the bits its owner sets, and the client keeps that and no
+        more.
+*/
+static fn request_answers(void)
+{
+        struct link_session address_to s = link_self.session;
+        struct waterlink_frame head = {0};
+        p8 answer[5];
+        p8 got[8];
+        file_facts facts;
+        p32 mode = 0;
+        p8 key[32];
+
+        wls_seeded(key, 32, 9);
+        wls_peers_with(key, WATERLINK_MAY_FILES);
+        (void)wls_write("/root/ordinary", "y", 1, 0600);
+        check("sec: a request after the session said it is over is not taken",
+              !wls_file_over(s, LINK_ASK_PUSH, "/root/ordinary", true) &&
+                      s->kind == LINK_KIND_NONE && s->writes[0].fd < 0);
+        link_session_close(s);
+        check("and the same request in a session that has said nothing is",
+              wls_file_over(s, LINK_ASK_PUSH, "/root/ordinary", false) &&
+                      s->writes[0].fd >= 0);
+        link_session_close(s);
+
+        (void)wls_write("/root/private", "p", 1, 0640);
+        if (file_look_at("/root/private", address_of facts))
+                mode = facts.mode & 0777;
+        check("a pull of a file is taken up", wls_file_asked(s, LINK_ASK_PULL,
+                                                             "/root/private"));
+        memory_zero(answer, sizeof answer);
+        check("sec: and its yes carries the file's mode",
+              wls_answer(s, got) == 5 && got[0] == 'O' &&
+                      memory_load_unaligned(p32, got + 1) == mode && mode);
+        link_session_close(s);
+        check("a pull of a file that is not there is taken up as it always "
+              "was",
+              wls_file_asked(s, LINK_ASK_PULL, "/root/no-such-file"));
+        check("and its yes carries no mode: there is none",
+              wls_answer(s, got) == 1 && got[0] == 'O');
+        link_session_close(s);
+
+        //      The client's side of the yes.
+        head.key = LINK_KEY_ANSWER;
+        head.length = 5;
+        answer[0] = 'O';
+        answer[1] = 0xed; // 04755: the setuid bit is not taken
+        answer[2] = 0x09;
+        answer[3] = answer[4] = 0;
+        check("a client's session opens", link_session_open(s));
+        s->kind = LINK_KIND_PULL;
+        s->mode = 0644;
+        (void)link_hear(s, &head, answer);
+        check("sec: a pull's yes sets the mode of what is pulled, without "
+              "the bits that make a file run as somebody",
+              s->answered && s->mode == 0755);
+        link_session_close(s);
+        check("a client's session opens again", link_session_open(s));
+        s->kind = LINK_KIND_RUN;
+        s->mode = 0644;
+        (void)link_hear(s, &head, answer);
+        check("and a yes with a mode to a command that asked for none is "
+              "not an answer",
+              !s->answered && s->mode == 0644);
+        link_session_close(s);
+        (void)system_remove_at(AT_FDCWD, "/root/ordinary", 0);
+        (void)system_remove_at(AT_FDCWD, "/root/private", 0);
+}
+
+//      The words that name a machine, and the terminal a client names.
+static fn names_and_words(void)
+{
+        p8 into[48];
+
+        check("a name is letters, digits, dot, dash and underscore, starting "
+              "with a letter or digit",
+              link_name_good("box-1") && link_name_good("a.b_c") &&
+                      link_name_good("9lives") && !link_name_good("") &&
+                      !link_name_good("-a") && !link_name_good(".a") &&
+                      !link_name_good("_a") && !link_name_good("a b") &&
+                      !link_name_good("a\x01") && !link_name_good("a/b") &&
+                      !link_name_good("caf\xc3\xa9"));
+        check("and is not one of the words link takes in its place",
+              !link_name_good("run") && !link_name_good("on") &&
+                      link_name_good("running"));
+        check("a name of 31 is one and of 32 is not",
+              link_name_good("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") &&
+                      !link_name_good("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+        link_term_word((p8 address_to) "xterm-256color", 14, into);
+        check("a terminal type is its name", !string_compare((string_address)into,
+                                                              "xterm-256color"));
+        link_term_word((p8 address_to) "vt+x_y.z", 8, into);
+        check("with a plus, a dot and an underscore",
+              !string_compare((string_address)into, "vt+x_y.z"));
+        link_term_word((p8 address_to) "a b", 3, into);
+        check("sec: one with anything a terminfo name is not is xterm",
+              !string_compare((string_address)into, "xterm"));
+        link_term_word((p8 address_to) "ab\0cd", 5, into);
+        check("sec: and an end inside it is not an end of it",
+              !string_compare((string_address)into, "xterm"));
+        link_term_word((p8 address_to) "../x", 4, into);
+        check("sec: nor is a path", !string_compare((string_address)into, "xterm"));
+        link_term_word((p8 address_to) "", 0, into);
+        check("an empty one is xterm", !string_compare((string_address)into, "xterm"));
+}
+
+/*
+        The control messages a receive reports: the data of the one asked for,
+        among the bytes the kernel filled and not the room the buffer has.
+*/
+static fn control_messages(void)
+{
+        p8 control[64];
+        p64 size = 20;
+        b32 has[2] = {SOL_UDP, UDP_GRO};
+        b32 value = 1200;
+
+        memory_fill(control, 0, sizeof control);
+        memory_copy(control, address_of size, 8);
+        memory_copy(control + 8, has, 8);
+        memory_copy(control + 16, address_of value, 4);
+        check("a message that was filled whole gives its int",
+              link_control_int(control, 24, sizeof control, SOL_UDP,
+                               UDP_GRO) == 1200 &&
+                      link_control_int(control, 20, sizeof control, SOL_UDP,
+                                       UDP_GRO) == 1200);
+        check("sec: one that claims more than the kernel filled is not read, "
+              "though the buffer has room for it",
+              link_control_int(control, 16, sizeof control, SOL_UDP,
+                               UDP_GRO) == -1 &&
+                      link_control_int(control, 19, sizeof control, SOL_UDP,
+                                       UDP_GRO) == -1);
+        check("sec: nor is what the buffer holds past its room",
+              link_control_int(control, 24, 18, SOL_UDP, UDP_GRO) == -1);
+        check("and a level or a type that is not asked for is not read",
+              link_control_int(control, 24, sizeof control, SOL_UDP,
+                               UDP_SEGMENT) == -1 &&
+                      link_control_int(control, 24, sizeof control, IPPROTO_IP,
+                                       UDP_GRO) == -1);
+
+        //      After another message, padded to its eight.
+        memory_fill(control, 0, sizeof control);
+        size = 20;
+        has[0] = IPPROTO_IP;
+        has[1] = IP_TTL;
+        value = 255;
+        memory_copy(control, address_of size, 8);
+        memory_copy(control + 8, has, 8);
+        memory_copy(control + 16, address_of value, 4);
+        size = 20;
+        has[0] = SOL_UDP;
+        has[1] = UDP_GRO;
+        value = 1200;
+        memory_copy(control + 24, address_of size, 8);
+        memory_copy(control + 32, has, 8);
+        memory_copy(control + 40, address_of value, 4);
+        check("the one asked for is found after another, past its padding",
+              link_control_int(control, 48, sizeof control, SOL_UDP,
+                               UDP_GRO) == 1200 &&
+                      link_control_int(control, 48, sizeof control, IPPROTO_IP,
+                                       IP_TTL) == 255);
+        check("sec: and a second message the filled length cuts short is not",
+              link_control_int(control, 40, sizeof control, SOL_UDP,
+                               UDP_GRO) == -1);
+        size = 8; // smaller than its own header: nothing after it is a message
+        memory_copy(control, address_of size, 8);
+        check("sec: a message too small to be one ends the walk",
+              link_control_int(control, 48, sizeof control, SOL_UDP,
+                               UDP_GRO) == -1);
+}
+
+/*
+        State files are read nonblocking and taken only when they are plain
+        files, so a FIFO at the name is refused where it was waited on: each
+        is read in a child, which must come back, and refused.
+*/
+static fn private_records_never_wait(void)
+{
+        static const string_address names[] = {
+            LINK_KEY_PATH, LINK_PEERS_PATH, LINK_GROUPS_PATH, LINK_STAMPS_PATH,
+            LINK_STATE_PATH};
+        bool refused = true;
+        bool quick = true;
+
+        for (positive at = 0; at < array_count(names); at++)
+        {
+                bipolar child;
+                positive status = 0;
+                bool done = false;
+
+                (void)system_remove_at(AT_FDCWD, names[at], 0);
+                if (system_call_4(syscall(mknodat), (positive)(bipolar)AT_FDCWD,
+                                  (positive)names[at], 0010600, 0) < 0)
+                {
+                        refused = false;
+                        continue;
+                }
+                child = system_fork();
+                if (!child)
+                {
+                        p8 into[32];
+                        positive got = 0;
+
+                        exit(link_read_private_records(names[at], into,
+                                                       sizeof into, 32,
+                                                       address_of got) == -EPERM
+                                     ? 0
+                                     : 1);
+                }
+                for (positive tick = 0; child > 0 && tick < 100; tick++)
+                {
+                        timespec pause = {0, 20000000};
+
+                        if (system_wait4_retry(child, address_of status, 1,
+                                               null) == child)
+                        {
+                                done = true;
+                                refused &= wait_status_code(status) == 0;
+                                break;
+                        }
+                        (void)system_call_2(syscall(nanosleep),
+                                            (positive)address_of pause, 0);
+                }
+                if (!done && child > 0)
+                {
+                        (void)system_call_2(syscall(kill), (positive)child, 9);
+                        (void)system_wait4_retry(child, address_of status, 0,
+                                                 null);
+                }
+                quick &= done;
+                (void)system_remove_at(AT_FDCWD, names[at], 0);
+        }
+        check("sec: a FIFO at the key, the machines, the groups, the stamps "
+              "or the state is read as nothing, and not waited on",
+              quick);
+        check("and refused as not a private file", refused);
 }
 
 /*
@@ -72861,8 +73273,9 @@ static fn own_files(void)
 */
 static struct waterlink_identity wls_server, wls_client, wls_b;
 
-static fn wls_initiation(p8 address_to datagram, p64 conversation,
-                         p64 stamp_seconds, p32 index)
+static fn wls_initiation_as(struct waterlink_identity address_to who,
+                            p8 address_to datagram, p64 conversation,
+                            p64 stamp_seconds, p32 index)
 {
         struct waterlink_noise noise;
         p8 hello[WATERLINK_HELLO_BYTES];
@@ -72872,8 +73285,15 @@ static fn wls_initiation(p8 address_to datagram, p64 conversation,
         memory_copy(hello + WATERLINK_STAMP_BYTES, address_of conversation, 8);
         memory_copy(hello + WATERLINK_STAMP_BYTES + 8, address_of index, 4);
         wls_seeded(ephemeral, 32, (p8)conversation);
-        (void)waterlink_initiate(address_of noise, address_of wls_client,
-                                 wls_server.public, null, ephemeral, hello, datagram);
+        (void)waterlink_initiate(address_of noise, who, wls_server.public, null,
+                                 ephemeral, hello, datagram);
+}
+
+static fn wls_initiation(p8 address_to datagram, p64 conversation,
+                         p64 stamp_seconds, p32 index)
+{
+        wls_initiation_as(address_of wls_client, datagram, conversation,
+                          stamp_seconds, index);
 }
 
 static fn responder(bipolar listener, p16 port)
@@ -72953,6 +73373,74 @@ static fn responder(bipolar listener, p16 port)
         for (positive at = 0; at < LINK_SESSIONS; at++)
                 if (link_self.session[at].used)
                         link_session_close(link_self.session + at);
+}
+
+/*
+        The table of sessions has places for sixteen, and one peer may hold
+        eight of them: a peer that opens a session for every initiation it
+        can make fills what it may and no more, a second fills the rest, and
+        a third that is paired finds the table full -- nothing is opened past
+        its end.
+*/
+static fn session_caps(bipolar listener, p16 port)
+{
+        struct waterlink_identity third;
+        struct waterlink_identity address_to who[3] = {
+            address_of wls_client, address_of wls_b, address_of third};
+        struct waterlink_peer peers[3];
+        p8 datagram[WATERLINK_DATAGRAM];
+        positive kept[3] = {0, 0, 0};
+
+        wls_identity(address_of third, 84);
+        memory_zero(peers, sizeof peers);
+        for (positive at = 0; at < 3; at++)
+        {
+                memory_copy(peers[at].key, who[at]->public, 32);
+                peers[at].name[0] = (p8)('x' + at);
+                peers[at].may = WATERLINK_MAY_DEFAULT;
+        }
+        (void)wls_write(LINK_PEERS_PATH, peers, sizeof peers, 0600);
+        link_self.me = wls_server;
+        memory_zero(address_of link_self.admission, sizeof link_self.admission);
+        link_self.stamps = 0;
+        wls_drain(listener);
+
+        for (positive at = 0; at < 10; at++)
+        {
+                wls_initiation_as(who[0], datagram, 300 + at, 40000 + at,
+                                  0x30000 + (p32)at);
+                link_server_initiation(datagram, WATERLINK_DATAGRAM,
+                                       wls_loopback, port, 70000000 + at);
+        }
+        check("sec: one peer holds at most eight sessions, however many "
+              "initiations it makes",
+              wls_sessions_used() == LINK_SESSIONS_A_PEER);
+        for (positive at = 0; at < 10; at++)
+        {
+                wls_initiation_as(who[1], datagram, 400 + at, 41000 + at,
+                                  0x40000 + (p32)at);
+                link_server_initiation(datagram, WATERLINK_DATAGRAM,
+                                       wls_loopback, port, 70000100 + at);
+        }
+        check("sec: a second peer takes the rest", wls_sessions_used() ==
+                                                       LINK_SESSIONS);
+        wls_initiation_as(who[2], datagram, 500, 42000, 0x50000);
+        link_server_initiation(datagram, WATERLINK_DATAGRAM, wls_loopback, port,
+                               70000200);
+        for (positive at = 0; at < LINK_SESSIONS; at++)
+                for (positive look = 0; look < 3; look++)
+                        if (link_self.session[at].used &&
+                            crypto_same(link_self.session[at].peer,
+                                        who[look]->public, 32))
+                                kept[look]++;
+        check("sec: and a third, paired, finds the table full and holds "
+              "nothing",
+              wls_sessions_used() == LINK_SESSIONS && kept[0] == 8 &&
+                      kept[1] == 8 && !kept[2]);
+        for (positive at = 0; at < LINK_SESSIONS; at++)
+                if (link_self.session[at].used)
+                        link_session_close(link_self.session + at);
+        wls_drain(listener);
 }
 
 /*
@@ -75238,8 +75726,15 @@ static bool wls_place(string_address text, string_address address,
             port != want_port)
                 return false;
         if (string_first_of(address, ':'))
-                return link_parse_v6(address, string_length(address), expect) &&
+        {
+                p8 spelled[64];
+
+                string_copy_bounded(spelled, address, sizeof spelled);
+                return net_ipv6_literal(spelled,
+                                        string_length((string_address)spelled),
+                                        expect) &&
                        !memory_compare(into, expect, 16);
+        }
         link_address_v4(expect, (p32)string_to_host(address));
         return !memory_compare(into, expect, 16);
 }
@@ -75250,7 +75745,11 @@ static fn places(void)
         static const string_address refused[] = {
                 ":::", "1:2:3:4:5:6:7:8:9", "1::2::3", "1:2:3", "12345::", "1:",
                 ":1::", "g::", "1:2:3:4:5:6:7::8", "::1:", "[::1", "[::1]x",
-                "[::1]:0", "[::1]:65536", "1.2.3.4:", "[1.2.3.4]"};
+                "[::1]:0", "[::1]:65536", "1.2.3.4:", "[1.2.3.4]", "[[::1]]",
+                //      No machine: nobody, a group, everybody.
+                "0.0.0.0", "0.255.255.255", "224.0.0.1", "239.255.255.250",
+                "240.0.0.1", "255.255.255.255", "255.255.255.255:22348",
+                "::", "[::]:9", "ff02::1", "[ff02::1]", "[::ffff:224.0.0.1]"};
         bool whole = true, gapped = true, none = true;
         p8 address[16], back[16], text[64], spelled[64];
         p16 port;
@@ -75271,9 +75770,12 @@ static fn places(void)
                 if (link_address_mapped(address))
                         continue;
                 link_place_text(address, (p16)(seed + 1), text);
-                if (!link_parse_place((string_address)text, back,
-                                      address_of port) ||
-                    memory_compare(address, back, 16) || port != seed + 1)
+                //      The spreads include a first group of ffff, which is
+                //      a multicast group and no machine's place.
+                if (link_address_unicast(address) &&
+                    (!link_parse_place((string_address)text, back,
+                                       address_of port) ||
+                     memory_compare(address, back, 16) || port != seed + 1))
                         whole = false;
                 if (to == from)
                         continue;
@@ -75293,7 +75795,8 @@ static fn places(void)
                         used += positive_into_base(spelled + used, group[i], 16,
                                                    false);
                 }
-                if (!link_parse_v6((string_address)spelled, used, back) ||
+                spelled[used] = 0;
+                if (!net_ipv6_literal(spelled, used, back) ||
                     memory_compare(address, back, 16))
                         gapped = false;
         }
@@ -75320,11 +75823,15 @@ static fn places(void)
                       wls_place("::2:3:4:5:6:7:8", "0:2:3:4:5:6:7:8",
                                 LINK_PORT) &&
                       wls_place("1.2.3.4", "1.2.3.4", LINK_PORT) &&
+                      wls_place("127.0.0.1:9", "127.0.0.1", 9) &&
+                      wls_place("[::ffff:1.2.3.4]", "::ffff:1.2.3.4", LINK_PORT) &&
                       wls_place("10.0.0.1:77", "10.0.0.1", 77));
         for (positive at = 0; at < sizeof refused / sizeof refused[0]; at++)
                 if (link_parse_place(refused[at], back, address_of port))
                         none = false;
-        check("and the ones that are not an address are refused", none);
+        check("and the ones that are not an address, or that are none one "
+              "machine is at, are refused",
+              none);
 }
 
 /*
@@ -75620,6 +76127,61 @@ static fn indexes_and_commands(void)
                       string_equals((string_address)name, "box") &&
                           memory_span_byte(name + 4, 0, sizeof name - 4) ==
                               sizeof name - 4);
+
+                //      A name somebody else has: the key's own suffix, the
+                //      same every time, and longer when that is taken too.
+                string_copy(peers.peer[0].name, "box");
+                peers.count = 1;
+                link_name_for(address_of peers, offered, key, name);
+                check("sec: a name another machine has is not taken: the "
+                      "key's own suffix is added, and the name is one",
+                      !string_equals((string_address)name, "box") &&
+                          !memory_compare(name, "box-3", 5) &&
+                          link_name_good((string_address)name) &&
+                          memory_span_byte(name + string_length(
+                                                       (string_address)name) + 1,
+                                           0, sizeof name -
+                                                  string_length((string_address)
+                                                                        name) - 1) ==
+                              sizeof name - string_length((string_address)name) - 1);
+                {
+                        p8 again[WATERLINK_NAME_MAX];
+
+                        link_name_for(address_of peers, offered, key, again);
+                        check("and the same key gets the same name again",
+                              !memory_compare(name, again, sizeof name));
+                        string_copy(peers.peer[1].name, (string_address)name);
+                        peers.count = 2;
+                        link_name_for(address_of peers, offered, key, again);
+                        check("sec: one whose suffix is taken too is longer by "
+                              "a digit",
+                              string_length((string_address)again) ==
+                                      string_length((string_address)name) + 1 &&
+                                      link_name_good((string_address)again));
+                }
+
+                //      A name that is not one, or is a word link uses, is
+                //      the machine's; one at the longest keeps room for its
+                //      suffix.
+                memory_zero(offered, sizeof offered);
+                memory_copy(offered, "run", 4);
+                peers.count = 0;
+                link_name_for(address_of peers, offered, key, name);
+                check("sec: an offered name that is a word link takes in its "
+                      "place is called machine",
+                      string_equals((string_address)name, "machine"));
+                memory_fill(offered, 'n', WATERLINK_NAME_MAX - 1);
+                offered[WATERLINK_NAME_MAX - 1] = 0;
+                memory_copy(peers.peer[0].name, offered, WATERLINK_NAME_MAX);
+                peers.count = 1;
+                link_name_for(address_of peers, offered, key, name);
+                check("sec: an offered name at the longest is cut to leave "
+                      "room for its suffix, and still fits",
+                      string_length((string_address)name) <
+                              WATERLINK_NAME_MAX &&
+                              !string_equals((string_address)name,
+                                             (string_address)offered) &&
+                              link_name_good((string_address)name));
         }
 }
 
@@ -75957,8 +76519,14 @@ b32 main(void)
         staging();
         publication();
         own_files();
+        stream_failures();
+        request_answers();
+        names_and_words();
+        control_messages();
+        private_records_never_wait();
         reaped_commands();
         responder(listener, port);
+        session_caps(listener, port);
         cookies(listener, port);
         stamps_outlive(listener, port);
         client_cookie(listener, port);

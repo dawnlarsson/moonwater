@@ -56,15 +56,11 @@
 #define LINK_SWITCH_PATH "/root/link"
 #define LINK_KEY_PATH "/root/link.key"
 #define LINK_PEERS_PATH "/root/link.peers"
-#define LINK_PEERS_NEXT "/root/link.peers.next"
 #define LINK_GROUPS_PATH "/root/link.groups"
-#define LINK_GROUPS_NEXT "/root/link.groups.next"
 #define LINK_PORT_PATH "/root/link.port"
 #define LINK_LOCK_PATH HOST_STATE "/link.lock"
 #define LINK_STATE_PATH HOST_STATE "/link.state"
-#define LINK_STATE_NEXT HOST_STATE "/link.state.next"
 #define LINK_STAMPS_PATH "/root/link.stamps"
-#define LINK_STAMPS_NEXT "/root/link.stamps.next"
 
 #define LINK_PEERS_MAX 64
 #define LINK_SESSIONS 16
@@ -76,6 +72,22 @@
 #define LINK_GRACE 20000000ull       // old receive keys after a rekey
 #define LINK_ATTEMPT 1000000ull      // between initiations
 #define LINK_ATTEMPTS 6
+
+/*      The kernel's numbers for the socket options and control messages the
+        listener and the greeting ask for, by the names the uapi headers give
+        them; wire_constants holds each to the headers. */
+#define SO_REUSEPORT 15
+#define SOL_IPV6 41
+#define SOL_UDP 17
+#define IPV6_V6ONLY 26
+#define IP_TTL 2
+#define IP_PKTINFO 8
+#define IP_RECVTTL 12
+#define IP_MULTICAST_IF 32
+#define IP_MULTICAST_TTL 33
+#define IP_ADD_MEMBERSHIP 35
+#define UDP_SEGMENT 103
+#define UDP_GRO 104
 
 #define LINK_KEY_REQUEST 1
 #define LINK_KEY_ANSWER 2
@@ -230,24 +242,20 @@ static const string_address link_words[] = {
     "deny",  "group", "leave", "push", "pull", "log",  "shell", "run",  "help",
 };
 
+#define LINK_NAME_CHARACTERS                                                  \
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-_"
+
 static bool link_name_good(string_address name)
 {
         positive length = string_length(name);
 
-        if (!length || length >= WATERLINK_NAME_MAX)
+        if (!length || length >= WATERLINK_NAME_MAX ||
+            !byte_is_alnum((p8)name[0]) ||
+            string_span_of_set(name, LINK_NAME_CHARACTERS) != length)
                 return false;
         for (positive word = 0; word < array_count(link_words); word++)
                 if (string_equals(name, link_words[word]))
                         return false;
-
-        for (positive at = 0; at < length; at++)
-        {
-                p8 c = (p8)name[at];
-
-                if (!byte_is_alnum(c) &&
-                    (!at || (c != '.' && c != '-' && c != '_')))
-                        return false;
-        }
         return true;
 }
 
@@ -313,26 +321,23 @@ static bipolar link_read_private_records(string_address path,
 }
 
 /* Written beside its name and renamed over it: whole or not at all. Synced,
-   that is host_write_file's own staging, which syncs /root after its rename:
-   the second rename from next, unsynced, let a power cut bring back the peers
-   or the groups from before, a forgotten peer or a left group included. */
-static bipolar link_file_replace(string_address next, string_address path,
-                                 address_any bytes, positive length, bool sync)
+   the bytes are on disk before the name shows them and /root is synced after
+   the rename, so a power cut cannot bring back the peers or the groups from
+   before a forget, a pair or a leave; the state and the stamps, which only
+   say what this session is doing, are not. */
+static bipolar link_file_replace(string_address path, address_any bytes,
+                                 positive length, bool sync)
 {
-        bipolar failed = host_write_file(sync ? path : next, (p8 address_to)bytes,
-                                         length, 0600, sync);
-
-        if (failed < 0 || sync)
-                return failed;
-        return system_rename_at(AT_FDCWD, next, AT_FDCWD, path, 0);
+        return file_publish_bytes(path, bytes, length, 0600, sync);
 }
 
 /*
         The machine's own key, made on first use.
 
-        Made under a name nobody else could have chosen and linked into place,
-        so two first uses at once cannot leave half a key, and a name planted
-        at /root/link.key -- a link to somewhere, or a file somebody could read
+        Published under a name nobody else could have made and never over
+        one: two first uses at once cannot leave half a key, whoever got
+        there first wins and both read what won, and a name planted at
+        /root/link.key -- a link to somewhere, or a file somebody could read
         -- is refused rather than written through or trusted.
 */
 static bipolar link_secret(p8 address_to secret, bool make)
@@ -344,44 +349,17 @@ static bipolar link_secret(p8 address_to secret, bool make)
         if (read == -ENOENT && make)
         {
                 p8 fresh[32];
-                p8 name[64] = "/root/.link.key.";
-                p8 tail[8];
-                positive used = string_length((string_address)name);
                 bipolar made;
 
-                if (system_random_fill(fresh, 32, 0) < 0 ||
-                    system_random_fill(tail, 8, 0) < 0)
+                if (system_random_fill(fresh, 32, 0) < 0)
                 {
                         crypto_forget(fresh, sizeof fresh);
                         return -EIO;
                 }
-                memory_into_hex(name + used, tail, 8);
-                name[used + 16] = 0;
-
-                made = system_open_at_mode(AT_FDCWD, name,
-                                           FILE_WRITE | FILE_EXCLUSIVE |
-                                                   O_NOFOLLOW | O_CLOEXEC,
-                                           0600);
-                if (made >= 0 &&
-                    (system_write_all((positive)made, fresh, 32) != 32 ||
-                     system_call_1(syscall(fsync), (positive)made) < 0))
-                {
-                        system_close(made);
-                        system_remove_at(AT_FDCWD, name, 0);
-                        made = -EIO;
-                }
+                //      A name that is there already is a first use that got
+                //      here first, and is read.
+                made = file_publish_bytes(LINK_KEY_PATH, fresh, 32, 0600, true);
                 crypto_forget(fresh, sizeof fresh);
-                if (made < 0)
-                        return made;
-                system_close(made);
-
-                //      linkat does not replace: whoever got there first wins,
-                //      and both read what won.
-                made = system_call_5(syscall(linkat), (positive)(bipolar)AT_FDCWD,
-                                     (positive)name,
-                                     (positive)(bipolar)AT_FDCWD,
-                                     (positive)LINK_KEY_PATH, 0);
-                system_remove_at(AT_FDCWD, name, 0);
                 if (made < 0 && made != -ERROR_EXISTS)
                         return made;
 
@@ -455,7 +433,7 @@ static bool link_peers_for_change(link_peers address_to peers)
 
 static bipolar link_peers_save(link_peers address_to peers)
 {
-        return link_file_replace(LINK_PEERS_NEXT, LINK_PEERS_PATH, peers->peer,
+        return link_file_replace(LINK_PEERS_PATH, peers->peer,
                                  peers->count * sizeof(struct waterlink_peer),
                                  true);
 }
@@ -509,66 +487,28 @@ static bool link_address_mapped(p8 address_to address)
         return !memory_compare(address, prefix, 12);
 }
 
-static bool link_hex_group(string_address text, positive length,
-                           p16 address_to into)
+/*
+        An address one machine can be at: not 0.0.0.0 or ::, not a multicast
+        group (224/4, ff00::/8) and not the reserved block that holds the
+        limited broadcast (240/4). A peer recorded at one of them is a
+        datagram to nobody, or to everybody, for as long as the record lives.
+*/
+static bool link_address_unicast(p8 address_to address)
 {
-        positive used = 0;
-
-        address_to into = (p16)string_digits_hexadecimal_max(text, length,
-                                                             address_of used);
-        return length && length <= 4 && used == length;
-}
-
-// IPv6 text, with one :: at most and no embedded IPv4.
-static bool link_parse_v6(string_address text, positive length,
-                          p8 address_to into)
-{
-        p16 group[8];
-        positive count = 0;
-        positive gap = 9; // the group the :: stands before; 9 is none
-        positive at = 0;
-
-        if (length >= 2 && text[0] == ':' && text[1] == ':')
+        if (link_address_mapped(address))
         {
-                gap = 0;
-                at = 2;
-        }
-        while (at < length)
-        {
-                positive start = at;
+                p32 host = network_load_32(address + 12);
 
-                at += memory_span_without_byte(text + at, ':', length - at);
-                if (count == 8 ||
-                    !link_hex_group(text + start, at - start, group + count++))
-                        return false;
-                if (at < length)
-                {
-                        at++;
-                        if (at < length && text[at] == ':')
-                        {
-                                if (gap <= 8)
-                                        return false;
-                                gap = count;
-                                at++;
-                        }
-                        else if (at == length)
-                                return false;
-                }
+                return host >> 24 && host < 0xe0000000u;
         }
-        if (gap > 8 ? count != 8 : count > 7)
-                return false;
-
-        memory_zero(into, 16);
-        for (positive i = 0; i < count; i++)
-                network_store_16(into + 2 * (i < gap ? i : i + 8 - count),
-                                 group[i]);
-        return true;
+        return address[0] != 0xff && memory_span_byte(address, 0, 16) != 16;
 }
 
 /*
         HOST, HOST:PORT, [V6] or [V6]:PORT. A name is looked up once, now, over
         IPv4: an address is a cache of where a key last was, and the next
-        datagram from the peer corrects it.
+        datagram from the peer corrects it. What it comes to is one machine's
+        address, and not the address of none or of many.
 */
 static bool link_parse_place(string_address text, p8 address_to address,
                              p16 address_to port)
@@ -576,7 +516,6 @@ static bool link_parse_place(string_address text, p8 address_to address,
         p8 host[256];
         positive length = string_length(text);
         string_address colon = null;
-        bipolar numeric;
 
         address_to port = LINK_PORT;
 
@@ -590,33 +529,41 @@ static bool link_parse_place(string_address text, p8 address_to address,
                         colon = close + 1;
                 else if (close[1])
                         return false;
-                if (!link_parse_v6(text + 1, (positive)(close - text - 1),
-                                   address))
+                length = (positive)(close - text - 1);
+                //      One pair of brackets, which is the literal's own to
+                //      take off where there is no port.
+                if (length >= sizeof host || text[1] == '[')
+                        return false;
+                memory_copy(host, text + 1, length);
+                host[length] = 0;
+                if (!net_ipv6_literal(host, length, address))
                         return false;
         }
         else
         {
                 string_address first = string_first_of(text, ':');
+                bool bare = first && string_first_of(first + 1, ':');
 
-                if (first && string_first_of(first + 1, ':'))
-                        return link_parse_v6(text, length, address);
-                colon = first;
+                //      A name or an IPv4 address and a port, or an IPv6
+                //      address and none.
+                colon = bare ? null : first;
                 length = colon ? (positive)(colon - text) : length;
                 if (!length || length >= sizeof host)
                         return false;
                 memory_copy(host, text, length);
                 host[length] = 0;
 
-                numeric = string_to_host((string_address)host);
-                if (numeric >= 0)
-                        link_address_v4(address, (p32)numeric);
+                if (bare)
+                {
+                        if (!net_ipv6_literal(host, length, address))
+                                return false;
+                }
                 else
                 {
                         p32 found = 0;
 
-                        if (dns_resolve_any((string_address) "/etc/resolv.conf",
-                                            (string_address)host,
-                                            address_of found, 3) != DNS_OK)
+                        if (net_resolve_v4((string_address)host, address_of found,
+                                           3) != DNS_OK)
                                 return false;
                         link_address_v4(address, found);
                 }
@@ -630,7 +577,7 @@ static bool link_parse_place(string_address text, p8 address_to address,
                         return false;
                 address_to port = (p16)value;
         }
-        return true;
+        return link_address_unicast(address);
 }
 
 // Digits and colons only: what this writes can be printed to a terminal.
@@ -778,6 +725,9 @@ struct link_stream {
         bool done;
         bool quiet;  // it said "not now", and no wait has heard it since
         bool socket; // asked with MSG_DONTWAIT, since it is not opened again
+        bipolar error; // why a read or write failed, as a negative number; 0 while it did not
+        p64 written;   // bytes of a transfer's file written
+        p64 started;   // and how many of them the disk was asked to begin on
 };
 
 struct link_session {
@@ -786,7 +736,6 @@ struct link_session {
         p8 kind;
         p8 name[WATERLINK_NAME_MAX];
         p8 peer[32];
-        p32 may;
         p64 conversation;
         p8 address[16];
         p16 port;
@@ -815,6 +764,7 @@ struct link_session {
         bool answered;
         bool refused;
         p8 refusal[128];
+        p32 mode; // what a pulled file is made with: the far file's, when it said
         p8 part[LINK_REQUEST_MAX + 32]; // a transfer's staging file
         p8 whole[LINK_REQUEST_MAX + 1]; // and the name it becomes
 };
@@ -888,6 +838,7 @@ typedef struct
         positive batched;
         p8 batch_address[16];
         p16 batch_port;
+        p64 refused; // datagrams the socket would not take, for the stats line
 } link_service;
 
 static link_service link_self;
@@ -957,11 +908,13 @@ static bool link_part_owned(bipolar handle, p8 address_to path)
 
 /*
         Whether a path is one of the files the link is made of: its key, the
-        machines and groups it knows, the stamps it keeps and the script the
-        machine runs at boot. `files` is every file root has, bar these: the
-        key is this machine to every machine that knows it, and the rest say
+        machines and groups it knows, the stamps it keeps, what the listener
+        says of itself and the lock it holds, and the script the machine runs
+        at boot. `files` is every file root has, bar these: the key is this
+        machine to every machine that knows it, the machines and groups say
         who else may be anything here, which no peer is to be handed by a
-        grant for files. Looked at by inode, so a link, a second name or a
+        grant for files, and what the listener writes is its own to write,
+        or `moonwater link` would say what the listener did not. Looked at by inode, so a link, a second name or a
         path spelled round one is the same file; a path that is not there is
         not.
 */
@@ -969,7 +922,7 @@ static bool link_path_is_own(string_address path)
 {
         static const string_address own[] = {
             LINK_KEY_PATH, LINK_PEERS_PATH, LINK_GROUPS_PATH, LINK_STAMPS_PATH,
-            HOST_MACHINE_SCRIPT};
+            LINK_STATE_PATH, LINK_LOCK_PATH, HOST_MACHINE_SCRIPT};
         file_facts target;
 
         if (!file_look_at(path, address_of target))
@@ -1165,11 +1118,14 @@ static bipolar link_send_to(p8 address_to bytes, positive length,
 {
         socket_address_internet6 to;
         positive size = link_destination(address_of to, address, port);
+        bipolar sent;
 
         if (link_self.v4 && !link_address_mapped(address))
                 return -97; // EAFNOSUPPORT: no IPv6 here
-        return socket_send((b32)link_self.socket, bytes, length, MSG_NOSIGNAL,
+        sent = socket_send((b32)link_self.socket, bytes, length, MSG_NOSIGNAL,
                            address_of to, size);
+        link_self.refused += sent < 0;
+        return sent;
 }
 
 /*
@@ -1197,29 +1153,55 @@ typedef struct
 } link_message;
 
 /*
-        The int a control message carries, by its level and type, or -1:
-        each cmsghdr is a length, a level and a type, padded to eight bytes,
-        and nothing is read past what the kernel said it wrote.
+        The data of the first control message with this level and type, among
+        the length bytes the kernel filled -- not the room the buffer has,
+        which holds whatever an earlier call left. Each cmsghdr is a length
+        that counts itself, a level and a type, and is padded to eight bytes;
+        a message that claims more than was filled ends the walk. True with
+        data a reader on the message's bytes.
 */
+static bool link_control_find(p8 address_to control, positive length,
+                              positive room, b32 level, b32 type,
+                              byte_reader address_to data)
+{
+        byte_reader reader = byte_reader_open(control,
+                                              length < room ? length : room);
+
+        while (byte_reader_left(&reader) >= 16)
+        {
+                p64 size = byte_reader_u32le(&reader);
+                b32 has_level;
+                b32 has_type;
+
+                size |= (p64)byte_reader_u32le(&reader) << 32;
+                has_level = byte_reader_u32le(&reader);
+                has_type = byte_reader_u32le(&reader);
+                if (size < 16 || size - 16 > byte_reader_left(&reader))
+                        break;
+                *data = byte_reader_window(&reader, (positive)size - 16);
+                if (has_level == level && has_type == type)
+                        return true;
+                //      The padding, when the kernel kept it: the last message
+                //      may end where the filled length does.
+                (void)byte_reader_skip(
+                        &reader, (positive)(-size & 7) < byte_reader_left(&reader)
+                                         ? (positive)(-size & 7)
+                                         : byte_reader_left(&reader));
+        }
+        return false;
+}
+
+//      The int such a message carries, or -1.
 static b32 link_control_int(p8 address_to control, positive length,
                             positive room, b32 level, b32 type)
 {
-        b32 value = -1;
+        byte_reader data;
 
-        for (positive at = 0; at + 16 <= length && at + 16 <= room;)
-        {
-                p64 size;
-                b32 has[2];
-
-                memory_copy(address_of size, control + at, 8);
-                memory_copy(has, control + at + 8, 8);
-                if (size < 16 || size > room - at)
-                        break;
-                if (has[0] == level && has[1] == type && size >= 20)
-                        memory_copy(address_of value, control + at + 16, 4);
-                at += (size + 7) & ~7ull;
-        }
-        return value;
+        return link_control_find(control, length, room, level, type,
+                                 address_of data) &&
+                       byte_reader_left(&data) >= 4
+                       ? (b32)byte_reader_u32le(&data)
+                       : -1;
 }
 
 static fn link_batch_flush(void)
@@ -1243,8 +1225,8 @@ static fn link_batch_flush(void)
                                                  link_self.batch_port);
                 memory_zero(control, sizeof control);
                 control[0] = 18;                        // cmsg_len
-                ((b32 address_to)control)[2] = 17;      // SOL_UDP
-                ((b32 address_to)control)[3] = 103;     // UDP_SEGMENT
+                ((b32 address_to)control)[2] = SOL_UDP;
+                ((b32 address_to)control)[3] = UDP_SEGMENT;
                 ((p16 address_to)control)[8] = WATERLINK_DATAGRAM;
 
                 memory_zero(address_of message, sizeof message);
@@ -1258,9 +1240,13 @@ static fn link_batch_flush(void)
                 sent = system_call_3(syscall(sendmsg), (positive)link_self.socket,
                                      (positive)address_of message,
                                      MSG_NOSIGNAL);
-                if (sent >= 0 || sent == -EAGAIN)
+                if (sent >= 0)
                         return;
-                link_self.gso = false;
+                //      A full socket takes what has room for it, a datagram at
+                //      a time, where the run it could not take whole was lost
+                //      to the link whole; anything else turns segments off.
+                if (sent != -EAGAIN)
+                        link_self.gso = false;
         }
 
         for (positive at = 0; at < count; at++)
@@ -1338,6 +1324,16 @@ static fn link_session_say(struct link_session address_to s, p32 kind)
         s->spoke = link_now();
 }
 
+/*      A frame whose payload is made already, its type byte first: the link
+        copies it into its slot, and that is the only copy a read's bytes
+        make. */
+static bool link_post_framed(struct link_session address_to s, p8 key,
+                             p8 flags, p8 address_to payload, positive length)
+{
+        return waterlink_post(s->link, key, flags, payload, (p16)length,
+                              link_self.now);
+}
+
 static bool link_post(struct link_session address_to s, p8 key, p8 flags,
                       p8 type, p8 address_to data, positive length)
 {
@@ -1348,8 +1344,7 @@ static bool link_post(struct link_session address_to s, p8 key, p8 flags,
         payload[0] = type;
         if (length)
                 memory_copy(payload + 1, data, length);
-        return waterlink_post(s->link, key, flags, payload, (p16)(length + 1),
-                              link_self.now);
+        return link_post_framed(s, key, flags, payload, length + 1);
 }
 
 /*
@@ -1360,7 +1355,10 @@ static bool link_post(struct link_session address_to s, p8 key, p8 flags,
 #define LINK_READ_FRAMES 48
 #define LINK_CHUNK (WATERLINK_FRAME_MAX - 1)
 
-static p8 link_read_buffer[LINK_READ_FRAMES * LINK_CHUNK];
+/*      One byte more than the frames hold, in front: a chunk of a read is
+        posted from the byte before it, which is the type of its frame, and
+        that byte is the end of the chunk before it, posted already. */
+static p8 link_read_buffer[1 + LINK_READ_FRAMES * LINK_CHUNK];
 
 static positive link_room(struct link_session address_to s)
 {
@@ -1403,6 +1401,8 @@ static fn link_stream_set(struct link_stream address_to stream, bipolar fd,
         stream->quiet = false;
         stream->socket = false;
         stream->skip = 0;
+        stream->error = 0;
+        stream->written = stream->started = 0;
 }
 
 /*
@@ -1466,16 +1466,19 @@ static fn link_exited(struct link_session address_to s, b32 status, p64 now)
 
 static fn link_push_done(struct link_session address_to s, p64 now)
 {
-        //      The part file becomes the name only whole. Either way it is
-        //      no longer this session's to remove at close.
+        //      The part file becomes the name only whole, and is removed when
+        //      it cannot, here and not at the close: the descriptor that says
+        //      it is still this session's is closed by then, with the end of
+        //      the stream, and a part file nobody could prove was theirs was
+        //      left beside the target by every push that failed.
         if (!s->failed)
-        {
                 s->failed = system_call_1(syscall(fsync),
                                           (positive)s->writes[0].fd) < 0 ||
                             !link_part_publish(s->writes[0].fd, s->part,
                                                s->whole);
-                s->part[0] = 0;
-        }
+        if (s->failed)
+                link_part_discard(s->writes[0].fd, s->part);
+        s->part[0] = 0;
         link_exited(s, s->failed ? 1 : 0, now);
 }
 
@@ -1493,21 +1496,17 @@ static fn link_term_word(p8 address_to from, positive length,
 {
         bool good = length && length < 32;
 
-        for (positive at = 0; good && at < length; at++)
+        //      The bytes are a frame's, with no end of their own: copied
+        //      first, and an end inside them ends the span short.
+        if (good)
         {
-                p8 c = from[at];
-
-                good = byte_is_alnum(c) || c == '-' || c == '.' || c == '+' ||
-                       c == '_';
+                memory_copy(into, from, length);
+                into[length] = 0;
+                good = string_span_of_set((string_address)into,
+                                          LINK_NAME_CHARACTERS "+") == length;
         }
-
         if (!good)
-        {
                 string_copy((string_address)into, "xterm");
-                return;
-        }
-        memory_copy(into, from, length);
-        into[length] = 0;
 }
 
 static DEAD_END fn link_child_exec(string_address address_to words,
@@ -1723,7 +1722,9 @@ static fn link_refuse(struct link_session address_to s, string_address why)
         (void)link_post(s, LINK_KEY_ANSWER,
                         WATERLINK_FRAME_DURABLE | WATERLINK_FRAME_LAST, 'N',
                         (p8 address_to)why, string_length(why));
-        //      Ends once the far side has the answer.
+        //      Ends once the far side has the answer, and asks for nothing
+        //      more in the meantime: link_request takes no request of a
+        //      session that has said it is over.
         s->exit_sent = true;
         s->kind = LINK_KIND_NONE;
 }
@@ -1753,13 +1754,17 @@ static fn link_request(struct link_session address_to s, p8 address_to payload,
         p8 why[96];
         p8 text[LINK_REQUEST_MAX + 1];
         p32 mode = 0;
+        positive carried = 0;
+        file_facts far;
         positive skip;
         positive grant;
         string_address run[] = {"sh", "-c", (string_address)text, null};
         string_address pull[] = {"cat", "--", (string_address)text, null};
         string_address log[] = {"dmesg", "--follow", null};
 
-        if (s->kind != LINK_KIND_NONE || length < 1)
+        //      One request to a session: a second one, after an answer of
+        //      either kind, is nothing.
+        if (s->kind != LINK_KIND_NONE || s->exit_sent || length < 1)
                 return;
 
         //      Grants as they are now, not as they were at the handshake.
@@ -1767,7 +1772,6 @@ static fn link_request(struct link_session address_to s, p8 address_to payload,
         peer = link_peer_keyed(address_of peers, s->peer);
         if (peer)
                 may = peer->may;
-        s->may = may;
 
         grant = link_grant_asked(payload[0]);
         if (grant < array_count(link_grants) && !(may & link_grants[grant].bit))
@@ -1819,6 +1823,13 @@ static fn link_request(struct link_session address_to s, p8 address_to payload,
                 started = text[0] && link_start_command(s, run, 3);
                 break;
         case LINK_KIND_PULL:
+                //      The file's mode goes with the yes, so what is pulled
+                //      is as private here as it was there.
+                if (file_look_at((string_address)text, address_of far))
+                {
+                        mode = far.mode & 0777;
+                        carried = sizeof mode;
+                }
                 started = text[0] && link_start_command(s, pull, 3);
                 break;
         case LINK_KIND_LOG:
@@ -1843,7 +1854,7 @@ static fn link_request(struct link_session address_to s, p8 address_to payload,
 
         (void)link_post(s, LINK_KEY_ANSWER,
                         WATERLINK_FRAME_DURABLE | WATERLINK_FRAME_LAST, 'O',
-                        null, 0);
+                        (p8 address_to)address_of mode, carried);
         link_self.state_dirty = true;
 }
 
@@ -1903,10 +1914,10 @@ static fn link_stream_read(struct link_session address_to s,
                 positive want = link_room(s) * LINK_CHUNK;
                 bipolar got = stream->socket
                                       ? socket_receive((b32)stream->fd,
-                                                       link_read_buffer, want,
-                                                       MSG_DONTWAIT, 0, 0)
+                                                       link_read_buffer + 1,
+                                                       want, MSG_DONTWAIT, 0, 0)
                                       : system_read_once(stream->fd,
-                                                         link_read_buffer,
+                                                         link_read_buffer + 1,
                                                          want);
 
                 if (got == -EAGAIN || got == -4)
@@ -1917,8 +1928,18 @@ static fn link_stream_read(struct link_session address_to s,
                 if (got <= 0)
                 {
                         //      A terminal whose last holder closed it reads
-                        //      as EIO: that is its end.
+                        //      as EIO: that is its end at the machine. The
+                        //      client's standard input that cannot be read
+                        //      is not at its end, and is not said to be: a
+                        //      directory, a file that refuses, a pipe that
+                        //      broke would otherwise be an empty input that
+                        //      ended well.
                         stream->done = true;
+                        if (got < 0 && stream->key == LINK_KEY_INPUT)
+                        {
+                                stream->error = got;
+                                return;
+                        }
                         if (stream->key == LINK_KEY_INPUT)
                                 (void)link_post(s, LINK_KEY_INPUT,
                                                 WATERLINK_FRAME_DURABLE |
@@ -1926,16 +1947,52 @@ static fn link_stream_read(struct link_session address_to s,
                                                 LINK_END, null, 0);
                         return;
                 }
+                //      A read of more than a frame is a paste or a file and not
+                //      a key: its frames go in their turn, not each alone and
+                //      at once.
                 for (positive at = 0; at < (positive)got; at += LINK_CHUNK)
-                        (void)link_post(s, stream->key, stream->flags, LINK_DATA,
-                                        link_read_buffer + at,
-                                        (positive)got - at < LINK_CHUNK
-                                                ? (positive)got - at
-                                                : LINK_CHUNK);
+                {
+                        positive length = (positive)got - at < LINK_CHUNK
+                                                  ? (positive)got - at
+                                                  : LINK_CHUNK;
+
+                        link_read_buffer[at] = LINK_DATA;
+                        (void)link_post_framed(
+                                s, stream->key,
+                                (positive)got > LINK_CHUNK
+                                        ? (p8)(stream->flags &
+                                               ~WATERLINK_FRAME_URGENT)
+                                        : stream->flags,
+                                link_read_buffer + at, length + 1);
+                }
                 //      Less than was asked for is all there was: another
                 //      read now would only say "not now".
                 stream->quiet = (positive)got < want;
         }
+}
+
+/*
+        The loop is one thread, and the fsync that makes a pushed file whole
+        has to write all the file the disk was not yet asked to: a gigabyte
+        was a second in which no datagram was answered. So the disk is asked
+        to begin on what has been written every so many bytes of a transfer's
+        file, and what is left to wait for at the end is the last of them.
+*/
+#define LINK_FLUSH_EVERY (8ull << 20)
+#define SYNC_FILE_RANGE_WRITE 2
+
+static fn link_stream_flush(struct link_session address_to s,
+                            struct link_stream address_to stream, positive added)
+{
+        if (!s->part[0] || stream != s->writes || stream->socket)
+                return;
+        stream->written += added;
+        if (stream->written - stream->started < LINK_FLUSH_EVERY)
+                return;
+        (void)system_call_4(syscall(sync_file_range), (positive)stream->fd,
+                            stream->started, stream->written - stream->started,
+                            SYNC_FILE_RANGE_WRITE);
+        stream->started = stream->written;
 }
 
 /*
@@ -1985,12 +2042,17 @@ static bool link_stream_take(struct link_session address_to s,
                         {
                                 //      A disk that refuses: the rest is
                                 //      dropped and the push fails, rather
-                                //      than reading forever.
+                                //      than reading forever. At the client
+                                //      the loop says why and stops, which is
+                                //      how a reader that has gone away stops
+                                //      the command that fills it.
                                 s->failed = true;
+                                stream->error = wrote < 0 ? wrote : -EIO;
                                 break;
                         }
                         stream->skip += (positive)wrote;
                 }
+                link_stream_flush(s, stream, length - 1);
                 stream->skip = 0;
         }
         else if (payload[0] == LINK_EXIT)
@@ -2036,10 +2098,19 @@ static bool link_hear(address_any context, struct waterlink_frame address_to hea
         case LINK_KEY_ANSWER:
                 if (link_self.server)
                         break;
-                if ((payload[0] == 'O' && length != 1) ||
+                if ((payload[0] == 'O' && length != 1 &&
+                     !(length == 5 && s->kind == LINK_KIND_PULL)) ||
                     (payload[0] != 'O' && payload[0] != 'N'))
                         break;
                 s->answered = true;
+                //      The far file's mode, to the bits a file's own owner
+                //      sets: nothing a far machine says makes a file here
+                //      one that runs as somebody.
+                if (payload[0] == 'O' && length == 5)
+                {
+                        memory_copy(address_of s->mode, payload + 1, 4);
+                        s->mode &= 0777;
+                }
                 if (payload[0] == 'N')
                 {
                         positive keep = length - 1 < sizeof s->refusal - 1
@@ -2346,7 +2417,6 @@ static fn link_server_initiation(p8 address_to datagram, positive length,
                         goto forget;
                 memory_copy(s->peer, who, 32);
                 memory_copy(s->name, peer->name, WATERLINK_NAME_MAX);
-                s->may = peer->may;
                 s->conversation = conversation;
         }
 
@@ -2562,8 +2632,8 @@ static bipolar link_receive(link_run address_to run)
         {
                 b32 segment = link_control_int((p8 address_to)control[at],
                                                got[at].message.control_length,
-                                               sizeof control[at], 17,
-                                               104); // SOL_UDP, UDP_GRO
+                                               sizeof control[at], SOL_UDP,
+                                               UDP_GRO);
 
                 run[at].length = got[at].length;
                 run[at].size = segment > 0 && (positive)segment < run[at].length
@@ -2637,8 +2707,8 @@ static fn link_state_write(p64 now)
                 open->rtt = s->link->smoothed;
                 state->open_count++;
         }
-        (void)link_file_replace(LINK_STATE_NEXT, LINK_STATE_PATH, state,
-                                sizeof(address_to state), false);
+        (void)link_file_replace(LINK_STATE_PATH, state, sizeof(address_to state),
+                                false);
 }
 
 /*
@@ -2659,8 +2729,7 @@ static fn link_stamps_save(void)
         if (!link_self.stamps_dirty)
                 return;
         link_self.stamps_dirty = false;
-        (void)link_file_replace(LINK_STAMPS_NEXT, LINK_STAMPS_PATH,
-                                link_self.stamp,
+        (void)link_file_replace(LINK_STAMPS_PATH, link_self.stamp,
                                 link_self.stamps * sizeof(link_stamp_entry),
                                 false);
 }
@@ -2719,14 +2788,14 @@ static bipolar link_socket_open(p16 port, bool any)
         if (handle < 0)
                 return handle;
         if (!link_self.v4)
-                (void)socket_option_set((b32)handle, 41, 26, address_of zero,
-                                        sizeof zero); // IPV6_V6ONLY off
+                (void)socket_option_set((b32)handle, SOL_IPV6, IPV6_V6ONLY,
+                                        address_of zero, sizeof zero);
         (void)socket_option_set((b32)handle, SOL_SOCKET, SO_RCVBUF,
                                 address_of big, sizeof big);
         (void)socket_option_set((b32)handle, SOL_SOCKET, SO_SNDBUF,
                                 address_of big, sizeof big);
-        (void)socket_option_set((b32)handle, 17, 104, address_of one,
-                                sizeof one); // SOL_UDP, UDP_GRO: link_receive
+        (void)socket_option_set((b32)handle, SOL_UDP, UDP_GRO, address_of one,
+                                sizeof one); // link_receive reads what it makes
         if (any && socket_bind((b32)handle, address_of self,
                                link_destination(address_of self, anywhere,
                                                 port)) < 0)
@@ -2991,6 +3060,12 @@ static b32 link_serve(void)
         }
 
         link_nearby_stop();
+        if (file_environment((string_address) "WATERLINK_STATS"))
+        {
+                string_format(log_error, "link: unsent %p\n",
+                              (positive)link_self.refused);
+                log_flush();
+        }
 
         //      Off: every session is told, and every command hung up on.
         for (positive at = 0; at < LINK_SESSIONS; at++)
@@ -3258,6 +3333,7 @@ static b32 link_client_run(string_address name, p8 kind,
         memory_copy(s->address, peer->address, 16);
         s->port = peer->port;
         s->kind = kind;
+        s->mode = 0644;
         if (system_random_fill(address_of s->conversation, 8, 0) < 0)
         {
                 link_session_close(s);
@@ -3320,9 +3396,11 @@ static b32 link_client_run(string_address name, p8 kind,
                 {
                         if (kind == LINK_KIND_PULL)
                         {
+                                //      Private until it is whole and its
+                                //      mode is the far file's.
                                 bipolar part = link_part_open(
                                         words[1], string_length(words[1]),
-                                        s->part, sizeof s->part, 0644);
+                                        s->part, sizeof s->part, 0600);
 
                                 if (part < 0)
                                 {
@@ -3396,6 +3474,40 @@ static b32 link_client_run(string_address name, p8 kind,
                         log_flush();
                         break;
                 }
+                //      A stream that failed ends the session, and the command
+                //      behind it with the hangup: a reader that went away
+                //      (`link run b yes | head -c 10`) stops what fills it
+                //      as it would a command run here, and an input that
+                //      cannot be read is not an input that ended.
+                {
+                        struct link_stream address_to broken =
+                                s->reads[0].error < 0    ? s->reads
+                                : s->writes[0].error < 0 ? s->writes
+                                : s->writes[1].error < 0 ? s->writes + 1
+                                                         : null;
+
+                        if (broken)
+                        {
+                                string_address what = (string_address) "standard error";
+
+                                if (broken == s->reads)
+                                        what = kind == LINK_KIND_PUSH
+                                                       ? words[0]
+                                                       : (string_address) "standard input";
+                                else if (broken == s->writes)
+                                        what = kind == LINK_KIND_PULL
+                                                       ? words[1]
+                                                       : (string_address) "standard output";
+                                link_session_end(s, true);
+                                edit_terminal_restore();
+                                if (broken->error != -EPIPE)
+                                        (void)host_fail(what, broken->error);
+                                answer = broken == s->reads        ? LINK_FAILED
+                                         : broken->error == -EPIPE ? 128 + 13
+                                                                   : 1;
+                                break;
+                        }
+                }
                 if (s->writes[0].done &&
                     (kind == LINK_KIND_SHELL || kind == LINK_KIND_PUSH ||
                      s->writes[1].done))
@@ -3439,6 +3551,8 @@ static b32 link_client_run(string_address name, p8 kind,
         if (kind == LINK_KIND_PULL && s->part[0])
         {
                 if (!answer && !s->failed &&
+                    system_call_2(syscall(fchmod), (positive)s->writes[0].fd,
+                                  s->mode & ~file_umask()) >= 0 &&
                     system_call_1(syscall(fsync), (positive)s->writes[0].fd) >= 0 &&
                     link_part_publish(s->writes[0].fd, s->part, s->whole))
                         s->part[0] = 0;
@@ -3453,12 +3567,12 @@ static b32 link_client_run(string_address name, p8 kind,
                 string_format(log_error,
                               "link: sent %p again %p lost %p timeouts %p "
                               "delivered %p held %p spilled %p rtt %p us "
-                              "window %p\n",
+                              "window %p unsent %p\n",
                               (positive)l->sent, (positive)l->retransmitted,
                               (positive)l->lost, (positive)l->timeouts,
                               (positive)l->delivered, (positive)l->kept,
                               (positive)l->spilled, (positive)l->smoothed,
-                              (positive)l->window);
+                              (positive)l->window, (positive)link_self.refused);
                 log_flush();
         }
         if (rekey_after < (p64)WATERLINK_REKEY_SECONDS * 1000000)

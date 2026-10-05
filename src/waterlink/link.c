@@ -232,7 +232,7 @@ struct waterlink_link {
         into nearly 2^64 microseconds through unsigned subtraction. */
 static p64 link_age(p64 now, p64 then)
 {
-        return now > then ? now - then : 0;
+        return difference_or_zero(now, then);
 }
 
 fn waterlink_link_reset(struct waterlink_link address_to link)

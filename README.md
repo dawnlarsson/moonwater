@@ -80,7 +80,7 @@ moonwater link remove NAME             stop knowing it
 moonwater link allow|deny NAME GRANT...  shell run log files (any file but the link's own)
 moonwater link group [NAME [SECRET] [allow GRANT...]]  machines on one network that link themselves
 moonwater link group leave NAME [forget]  stop, and forget the group's key
-moonwater link on|off                  the listener, udp 22348, kept across boots [off]
+moonwater link on|off                  the listener, udp 22348 or /root/link.port, kept across boots [off]
 ```
 
 `moonwater` alone prints these, and `moonwater help VERB` one command's. A verb
@@ -166,17 +166,23 @@ machine's key and `link add NAME KEY HOST` gives it to the other. A machine
 added so can do nothing until allowed, e.g. `moonwater link allow laptop shell
 run`; `moonwater link` shows each machine's grants. `files` is push and pull of
 any file root has, so it is as good as `run` (a file pushed over a boot script
-is a command), except the link's own key, machines, groups and the machine
-script, which no peer reads or writes.
+is a command), except the link's own key, machines, groups, stamps, state, lock and the
+machine script, which no peer reads or writes. A pulled file has the far file's mode
+(under this machine's umask, and without setuid, setgid or sticky bits).
 
-`link NAME` sends each keystroke in its own datagram at once; with a command it
-passes stdin through and exits with the far command's status (255 if the link
-failed). Both ends run this shell binary, on Moonwater or Linux. A direct
-address is needed; there is no NAT traversal.
+`link NAME` sends each keystroke in its own datagram at once, and a paste in
+full frames; with a command it passes stdin through and exits with the far
+command's status (255 if the link failed or its stdin could not be read, 141 if
+whoever reads its output went away, which also hangs up on the command). Both ends run this shell binary, on Moonwater or Linux. A direct
+address is needed; there is no NAT traversal. The listener takes udp 22348
+unless `/root/link.port` holds another port (digits, 1 to 65535), read when it
+starts; `link add NAME KEY HOST:PORT` says where a machine that listens
+elsewhere is.
 
 For machines nobody stands in front of, join a group instead:
 `moonwater link group office` makes a 160-bit secret and prints the line to run
-on the others. Members on the same local network find each other over mDNS
+on the others; one of your own is eight characters or more, and under twenty is
+said to be guessable. Members on the same local network find each other over mDNS
 (`_waterlink._udp`) and link themselves, under the grants their group line
 gave. Machines announce only a port, under random labels; only the secret's
 600,000-round PBKDF2 result is stored. Join on the live stick before

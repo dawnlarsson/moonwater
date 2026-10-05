@@ -14967,7 +14967,7 @@ static const host_row host_rows[] = {
     {null, "link allow|deny NAME GRANT...", "shell run log files (any file but the link's own)", 'f'},
     {null, "link group [NAME [SECRET] [allow GRANT...]]", "machines on one network that link themselves", 'f'},
     {null, "link group leave NAME [forget]", "stop, and forget the group's key", 'f'},
-    {null, "link on|off", "the listener, udp 22348, kept across boots [off]", 'f'},
+    {null, "link on|off", "the listener, udp 22348 or /root/link.port, kept across boots [off]", 'f'},
 };
 
 /* The column the words of a row start in. A command that would not leave two

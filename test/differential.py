@@ -57924,7 +57924,8 @@ WIRE_ALIASES = {
 WIRE_FAMILIES = ("NLM_", "NLMSG_", "NLA_", "RTM_", "RTA_", "RT_", "RTN_", "RTPROT_",
                  "RTNLGRP_", "IFLA_", "IFA_", "IFF_", "NDA_", "NUD_", "NL80211_",
                  "CTRL_", "GENL_", "ETH_", "ARPHRD_", "AUDIT_ARCH_", "SECCOMP_",
-                 "IPPROTO_", "IP_", "SO_", "SOL_", "AF_", "MSG_", "TCP_", "PR_")
+                 "IPPROTO_", "IP_", "IPV6_", "SO_", "SOL_", "AF_", "MSG_", "TCP_", "UDP_",
+                 "PR_")
 
 WIRE_FILES = ("src/net/net.c", "src/net/wait.c", "src/sh/net.c", "src/sh/host.c",
               "src/waterlink/waterlink.c", "src/waterlink/discover.c",
@@ -57965,7 +57966,7 @@ def harness_wire_constants(argv):
     headers = ("sys/socket.h", "netinet/in.h", "netinet/tcp.h", "sys/prctl.h",
                "linux/netlink.h", "linux/rtnetlink.h", "linux/genetlink.h",
                "linux/nl80211.h", "linux/if.h", "linux/if_ether.h", "linux/if_arp.h",
-               "linux/audit.h", "linux/seccomp.h", "linux/filter.h")
+               "linux/audit.h", "linux/seccomp.h", "linux/filter.h", "linux/udp.h")
     head = "".join("#include <%s>\n" % h for h in headers) + "#include <stdio.h>\n"
 
     def program(names):
@@ -58884,7 +58885,12 @@ def harness_state_cuts(argv):
                               env={"PATH": "/usr/bin:/bin"}).returncode
 
     def temporary(name):
-        return bool(re.search(r"\.(new|next|next\.new)$|/\.link\.key\.", name))
+        return bool(re.search(r"\.(new|next|next\.new)$|/\.link\.key\.|/\.moonwater-stage-", name))
+
+    def stage(name):
+        #   What a staged writer a cut left, under a name of its own each time:
+        #   a second run makes another, and nothing here takes the first away.
+        return "/.moonwater-stage-" in name
 
     def settle():
         #   A listener or keeper a verb started outlives it; the next run
@@ -58971,7 +58977,7 @@ def harness_state_cuts(argv):
             again = snapshot()
             checks({path: value for path, value in again.items() if not temporary(path)} ==
                    {path: value for path, value in new.items() if not temporary(path)} and
-                   not [path for path in again if temporary(path)],
+                   not [path for path in again if temporary(path) and not stage(path)],
                    "%s: a second run does not arrive at the uncut state (%s)" % (
                        where, ", ".join(sorted(set(again) ^ set(new)))[:200]))
     print("state cuts: %d scenes, %d cut runs" % (len(scenes), cut_total))
@@ -61292,6 +61298,71 @@ say(status != 0 and b"already linked as c" in err,
     "a key linked under one name is not added under another name's record (%r)" % (err[-120:],))
 on("b", moon + " link remove c")
 
+#       An address is where one machine is: not none, not a group, not
+#       everybody. Each is refused before anything is written.
+peers_before = open(top + "/b/root/link.peers", "rb").read()
+for bad in ("0.0.0.0", "0.0.0.0:22348", "224.0.0.1", "255.255.255.255", "[::]", "[ff02::1]:5"):
+    status, _, err = on("b", "%s link add far %s %s" % (moon, keys["c"], bad))
+    say(status != 0 and b"not an address this can reach" in err and
+        open(top + "/b/root/link.peers", "rb").read() == peers_before,
+        "sec: a peer at %s is refused, and the list of machines is as it was (%r)" % (bad, err[-60:]))
+
+#       The peers lock is every writer of the file's, and a lock that cannot
+#       be had is said, not gone on without; and a name is looked up before
+#       it is taken, not while every other writer waits behind the resolver.
+if os.path.exists(top + "/c/run/moonwater/link.peers.lock"):
+    os.unlink(top + "/c/run/moonwater/link.peers.lock")
+os.makedirs(top + "/c/run/moonwater/link.peers.lock")
+status, _, err = on("c", moon + " link remove nobody")
+say(status != 0 and b"could not be locked" in err,
+    "sec: a lock that cannot be had is said and nothing is changed (%r)" % (err[-80:],))
+os.rmdir(top + "/c/run/moonwater/link.peers.lock")
+holder = open(top + "/c/run/moonwater/link.peers.lock", "a+")
+fcntl.lockf(holder, fcntl.LOCK_EX)
+began = time.time()
+status, _, err = on("c", "%s link add far %s no-such-host.invalid" % (moon, keys["a"]), timeout=25)
+fcntl.lockf(holder, fcntl.LOCK_UN)
+holder.close()
+say(status is not None and status != 0 and b"not an address this can reach" in err,
+    "sec: a name is looked up before the peers lock is asked for, not under it (%r after %.1fs)" %
+    (status, time.time() - began))
+
+#       State files are read nonblocking and taken only when plain: a FIFO
+#       at one is refused, where it was waited on, and a port that is not
+#       one is the default.
+os.rename(top + "/c/root/link.peers", top + "/c/root/link.peers.kept")
+os.mkfifo(top + "/c/root/link.groups")
+os.mkfifo(top + "/c/root/link.peers")
+status, out, err = on("c", moon + " link", timeout=20)
+say(status == 0 and b"nobody linked yet" in out,
+    "sec: a FIFO at the groups and the machines is read as nothing, and not waited on (%r)" % (status,))
+os.unlink(top + "/c/root/link.groups")
+os.unlink(top + "/c/root/link.peers")
+os.rename(top + "/c/root/link.peers.kept", top + "/c/root/link.peers")
+for text, want in ((b"22349\n", 22349), (b"99999", 22348), (b"abc", 22348), (b"-5", 22348),
+                   (b"0", 22348), (b"", 22348), (b"22349 22350", 22348)):
+    with open(top + "/c/root/link.port", "wb") as f:
+        f.write(text)
+    status, out, err = on("c", moon + " link", timeout=20)
+    listening = [w for w in out.decode(errors="replace").split("udp ")[1:2]]
+    say(status == 0 and listening and listening[0].split()[0] == str(want),
+        "the port in /root/link.port, %r, is %d (%r)" % (text, want, listening[:1]))
+os.unlink(top + "/c/root/link.port")
+os.mkfifo(top + "/c/root/link.port")
+status, out, err = on("c", moon + " link", timeout=20)
+say(status == 0 and b"udp 22348" in out, "a FIFO at /root/link.port is the default, and not waited on")
+os.unlink(top + "/c/root/link.port")
+
+#       The key, the machines and the groups are root's: for anybody else the
+#       page would say nobody is linked, of a machine that has a dozen.
+if subprocess.run(["unshare", "-U", "--map-user=1000", "true"], capture_output=True).returncode == 0:
+    status, out, err = on("c", "unshare -U --map-user=1000 " + moon + " link", timeout=20)
+    say(status != 0 and b"needs root" in err and out == b"",
+        "sec: link for somebody who is not root says so, and prints nothing of the machines (%r %r)" %
+        (status, err[-60:]))
+    status, out, err = on("c", "unshare -U --map-user=1000 " + moon + " link remove b", timeout=20)
+    say(status != 0 and b"needs root" in err, "and so does a change to them")
+
 #       Descriptor 7 open in the server stands for anything a hand-started
 #       `link serve` inherited; no remote command may see it.
 #       Started in /run, which is not where a command or a relative path of
@@ -61444,6 +61515,17 @@ def zombies_of(pid):
             found += fields[0] == "Z" and int(fields[1]) == pid
     return found
 
+def alive_children_of(pid):
+    found = 0
+    for entry in os.listdir("/proc"):
+        if entry.isdigit():
+            try:
+                fields = open("/proc/%s/stat" % entry).read().rsplit(")", 1)[1].split()
+            except (OSError, IndexError):
+                continue
+            found += fields[0] != "Z" and int(fields[1]) == pid
+    return found
+
 for _ in range(3):
     on("a", "timeout 2 " + moon + " link run b 'sleep 100'", timeout=30)
 time.sleep(1.5)
@@ -61512,6 +61594,9 @@ say(status == 255 and b"part of the link itself" in err and not os.path.exists(t
 status, out, err = on("a", moon + " link pull b /root/own-link /root/stolen", timeout=30)
 say(status == 255 and b"part of the link itself" in err and not os.path.exists(top + "/a/root/stolen"),
     "sec: nor through a link to it")
+status, out, err = on("a", moon + " link pull b /run/moonwater/link.state /root/stolen", timeout=30)
+say(status == 255 and b"part of the link itself" in err and not os.path.exists(top + "/a/root/stolen"),
+    "sec: nor what the listener says of itself (%r %r)" % (status, err[-80:]))
 status, out, err = on("a", moon + " link push b /root/forged /root/link.peers", timeout=30)
 say(status == 255 and b"part of the link itself" in err and
     open(top + "/b/root/link.peers", "rb").read() == peers_kept,
@@ -61541,6 +61626,59 @@ for length in (1024, 1025, 1028):
     else:
         say(status == 1 and b"too long a name" in err and not made,
             "a pull to a local name of %d bytes is refused, not copied past its buffer" % length)
+#       A pulled file is as private here as it was there: the far file's mode,
+#       to the bits its owner sets, under this machine's umask.
+for have, want in ((0o600, 0o600), (0o755, 0o755), (0o666, 0o644), (0o4755, 0o755)):
+    with open(top + "/b/root/modes", "wb") as f:
+        f.write(b"m")
+    os.chmod(top + "/b/root/modes", have)
+    status, out, err = on("a", "sh -c 'umask 022; exec %s link pull b /root/modes /root/modes-got'" % moon,
+                          timeout=30)
+    made = os.stat(top + "/a/root/modes-got").st_mode & 0o7777 if os.path.exists(top + "/a/root/modes-got") else None
+    say(status == 0 and made == want,
+        "sec: a pull of a %o file is %s here (%s, %r)" %
+        (have, "%o" % want, "%o" % made if made is not None else "missing", status))
+    if made is not None:
+        os.unlink(top + "/a/root/modes-got")
+
+#       An input that cannot be read is not an input that ended: the command
+#       is not handed an empty one, and a push does not leave an empty file.
+status, out, err = on("a", moon + " link run b cat < /root", timeout=30)
+say(status == 255 and b"standard input" in err and b"directory" in err.lower(),
+    "sec: a standard input that cannot be read fails and says so (%r %r)" % (status, err[-80:]))
+status, out, err = on("a", moon + " link push b /root/no-such-file /root/pushed-nothing", timeout=30)
+say(status == 1 and b"No such file" in err and not os.path.exists(top + "/b/root/pushed-nothing"),
+    "a push of a file that is not there fails and says why (%r %r)" % (status, err[-60:]))
+status, out, err = on("a", moon + " link push b /root /root/pushed-dir", timeout=30)
+time.sleep(1.5)
+say(status == 255 and b"directory" in err.lower() and
+    not [n for n in os.listdir(top + "/b/root") if n.startswith("pushed-dir")],
+    "sec: a push of a directory fails, and leaves nothing there, not even a staging file (%r %r)" %
+    (status, err[-80:]))
+
+#       The reader of a command's output went away: `link run b yes | head
+#       -c 10`. The client ends with the status of a broken pipe, and the
+#       command is hung up on, not left to fill a link nobody reads.
+client = subprocess.Popen(argv_on("a", moon + " link run b yes"), stdin=subprocess.DEVNULL,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+first = client.stdout.read(10)
+client.stdout.close()
+began = time.time()
+try:
+    client.wait(timeout=30)
+except subprocess.TimeoutExpired:
+    client.kill()
+    client.wait()
+took = time.time() - began
+client.stderr.close()
+say(first == b"y\n" * 5 and client.returncode == 141 and took < 15,
+    "sec: a reader that went away ends the client with 141 (%r after %.1fs, %r)" %
+    (client.returncode, took, first))
+time.sleep(2)
+say(alive_children_of(server.pid) == 0,
+    "sec: and the command it was running is gone from the far machine (%d left)" %
+    alive_children_of(server.pid))
+
 status, out, err = on("a", "timeout 5 " + moon + " link log b", timeout=30)
 say(out.startswith(b"[") or b"read kernel buffer failed" in err,
     "log follows the kernel log, or dmesg says it cannot be read")
@@ -61642,6 +61780,14 @@ say(status == 0 and b"in group lab; its members may run" in out and b"link on" i
     "join names the grants and switches the link on (%r)" % (err[-200:],))
 status, out, err = on("b", "%s link group lab %s allow run shell" % (moon, secret))
 status, out, err = on("c", "%s link group lab not-the-%s allow run" % (moon, secret))
+#       A group's secret is its key: none, or one a sitting could guess, is a
+#       group anybody on the network is in.
+groups_kept = open(top + "/c/root/link.groups", "rb").read()
+for weak in ("''", "x", "1234567"):
+    status, out, err = on("c", "%s link group weak %s" % (moon, weak))
+    say(status != 0 and b"at least 8 characters" in err and
+        open(top + "/c/root/link.groups", "rb").read() == groups_kept,
+        "sec: a group secret of %s is refused and no group is made (%r)" % (weak, err[-80:]))
 say(os.stat(top + "/a/root/link.groups").st_mode & 0o777 == 0o600,
     "the group file is root's alone")
 say(secret.encode() not in open(top + "/a/root/link.groups", "rb").read(),
@@ -65648,6 +65794,8 @@ typedef int8_t b8;
 ''' + WATERLINK_HOSTED_TYPES + r'''
 #define DEAD_END __attribute__((noreturn))
 #define array_count(a) (sizeof(a) / sizeof((a)[0]))
+#define difference_or_zero(a, b)                                             \
+        ({ __auto_type _a = (a); __auto_type _b = (b); _a > _b ? _a - _b : 0; })
 #define TIOCGWINSZ 0x5413u
 #define TIOCSWINSZ 0x5414u
 typedef struct { p16 rows, columns, x_pixels, y_pixels; } winsize;
@@ -65987,6 +66135,14 @@ static struct waterlink_peer *link_peer_keyed(link_peers *peers, p8 *key)
 /*      Whether a path is the link's own: what the machine's files say,
         which this does not have. */
 static bool link_path_is_own(string_address path) { (void)path; return false; }
+
+/*      What a pulled file's mode would be read from: nothing here is a file. */
+typedef struct { p32 mode; } file_facts;
+static bool file_look_at(string_address path, file_facts *out)
+{
+        (void)path; (void)out;
+        return false;
+}
 
 static bool link_post(struct link_session *s, p8 key, p8 flags, p8 type,
                       p8 *data, positive length)
@@ -67135,6 +67291,9 @@ int main(int argc, char **argv)
             sec(svc, "static const p8 link_kind_asks[] = {0, LINK_ASK_SHELL",
                 "typedef struct"),
             sec(svc, "static winsize link_size_unpack(", "// The streams"),
+            "static positive string_span_of_set(const void *text, const char *set)\n"
+            "{\n        return strspn(text, set);\n}\n",
+            sec(svc, "#define LINK_NAME_CHARACTERS", "static bool link_name_good("),
             sec(svc, "static fn link_term_word(", "static DEAD_END fn link_child_exec("),
             head, region, tail])
 
@@ -67381,6 +67540,9 @@ typedef unsigned long long p64;
 typedef int16_t b16;
 ''' + WATERLINK_HOSTED_TYPES + r'''
 #define array_count(a) (sizeof(a) / sizeof((a)[0]))
+#define difference_or_zero(a, b)                                             \
+        ({ __auto_type _a = (a); __auto_type _b = (b); _a > _b ? _a - _b : 0; })
+#define IPPROTO_IP 0
 #define EPERM 1
 #define ENOENT 2
 #define EIO 5
@@ -67448,6 +67610,10 @@ static positive memory_into_hex(void *into, const void *from, positive size)
         return 2 * size;
 }
 static positive string_length(const void *text) { return strlen(text); }
+static positive string_span_of_set(const void *text, const char *set)
+{
+        return strspn(text, set);
+}
 static void *string_copy(void *into, const void *from) { return strcpy(into, from); }
 static bool string_equals(const void *a, const void *b) { return !strcmp(a, b); }
 ''' + WATERLINK_HOSTED_HELPERS + r'''
@@ -67829,14 +67995,14 @@ static bipolar link_groups_save(link_groups address_to groups)
             "static bipolar link_peers_read("),
         sec(svc, "static struct waterlink_peer address_to link_peer_named(",
             "static p16 link_port(void)"),
-        sec(svc, "static fn link_address_v4(", "static bool link_hex_group("),
+        sec(svc, "static fn link_address_v4(", "/*\n        An address one machine can be at"),
         sec(svc, "static fn link_socket_address(", "// The lock ----"),
         sec(svc, "// Sessions ----", "static bool link_part_owned("),
         sec(svc, "static fn link_keys_install(", "// Sending ----"),
         sec(svc, "static positive link_destination(",
             "/*\n        A run of full datagrams to one place"),
         sec(svc, "typedef struct\n{\n        address_any base;", "static fn link_batch_flush(void)"),
-        sec(svc, "// A sealed datagram of nothing", "static bool link_post("),
+        sec(svc, "// A sealed datagram of nothing", "/*      A frame whose payload is made already"),
         SERVICE_STUBS,
         sec(near, "#define LINK_PEERS_LOCK", "bool link_groups_load("),
         NEARBY_STUBS,

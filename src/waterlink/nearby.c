@@ -168,8 +168,7 @@ static bool link_groups_scrub(positive records)
 
 static bipolar link_groups_save(link_groups address_to groups)
 {
-        return link_file_replace(LINK_GROUPS_NEXT, LINK_GROUPS_PATH,
-                                 groups->record,
+        return link_file_replace(LINK_GROUPS_PATH, groups->record,
                                  groups->count * sizeof(struct link_group_record),
                                  true);
 }
@@ -334,7 +333,12 @@ static fn link_group_close(positive group)
         link_nearby.groups.record[group].flags |= LINK_GROUP_DONE;
         link_nearby.groups.record[group].expires = now + LINK_PAIR_GRACE;
 
+        //      Without the lock the file keeps the code a little longer: it is
+        //      spent by its time in memory and dropped from the file at the
+        //      next turn that has the lock.
         lock = link_peers_lock();
+        if (lock < 0)
+                return;
         link_groups_load(address_of groups);
         for (positive at = 0; at < groups.count; at++)
                 if ((groups.record[at].flags & LINK_GROUP_ONCE) &&
@@ -364,6 +368,8 @@ static fn link_groups_expire(void)
                 return;
 
         lock = link_peers_lock();
+        if (lock < 0)
+                return;
         link_groups_load(address_of groups);
         for (positive at = 0; at < groups.count; at++)
                 if (link_group_spent(groups.record + at, now))
@@ -408,7 +414,9 @@ static bool link_pair_keep(positive group, p8 address_to key,
 
         address_to accepted = false;
 
-        if (!link_peers_for_change(address_of peers))
+        //      A member is kept only under the lock: without it the greeting
+        //      is as if it had not come, and the next one is asked again.
+        if (lock < 0 || !link_peers_for_change(address_of peers))
         {
                 link_peers_unlock(lock);
                 return false;
@@ -495,10 +503,10 @@ static bool link_nearby_address(netlink_header address_to header,
         //      One without multicast is passed over; joined already
         //      (EADDRINUSE) is joined.
         join.index = (b32)body->index;
-        joined = socket_option_set((b32)link_nearby.socket, 0,
-                                   35, // IP_ADD_MEMBERSHIP
-                                   address_of join, sizeof join);
-        if (joined < 0 && joined != -98)
+        joined = socket_option_set((b32)link_nearby.socket, IPPROTO_IP,
+                                   IP_ADD_MEMBERSHIP, address_of join,
+                                   sizeof join);
+        if (joined < 0 && joined != -EADDRINUSE)
                 return true;
         link_nearby.interface[link_nearby.interfaces] = (b32)body->index;
         link_nearby.interface_address[link_nearby.interfaces] =
@@ -541,14 +549,14 @@ static fn link_nearby_open(void)
                 return;
         (void)socket_option_set((b32)link_nearby.socket, SOL_SOCKET,
                                 SO_REUSEADDR, address_of one, sizeof one);
-        (void)socket_option_set((b32)link_nearby.socket, SOL_SOCKET, 15, // REUSEPORT
-                                address_of one, sizeof one);
-        (void)socket_option_set((b32)link_nearby.socket, 0, 33, // MULTICAST_TTL
-                                address_of ttl, sizeof ttl);
-        (void)socket_option_set((b32)link_nearby.socket, 0, 12, // RECVTTL
-                                address_of one, sizeof one);
-        (void)socket_option_set((b32)link_nearby.socket, 0, 8, // IP_PKTINFO
-                                address_of one, sizeof one);
+        (void)socket_option_set((b32)link_nearby.socket, SOL_SOCKET,
+                                SO_REUSEPORT, address_of one, sizeof one);
+        (void)socket_option_set((b32)link_nearby.socket, IPPROTO_IP,
+                                IP_MULTICAST_TTL, address_of ttl, sizeof ttl);
+        (void)socket_option_set((b32)link_nearby.socket, IPPROTO_IP,
+                                IP_RECVTTL, address_of one, sizeof one);
+        (void)socket_option_set((b32)link_nearby.socket, IPPROTO_IP,
+                                IP_PKTINFO, address_of one, sizeof one);
 
         if (socket_bind((b32)link_nearby.socket, address_of self,
                         sizeof self) < 0)
@@ -633,9 +641,8 @@ static bool link_nearby_send(p8 address_to packet, positive length,
         /* IP_MULTICAST_IF is part of the destination, not a best-effort hint.
            If it fails, send would retain the preceding interface selection
            and put this interface's announcement onto another link. */
-        if (socket_option_set((b32)link_nearby.socket, 0,
-                              32, // IP_MULTICAST_IF
-                              address_of out, sizeof out) < 0)
+        if (socket_option_set((b32)link_nearby.socket, IPPROTO_IP,
+                              IP_MULTICAST_IF, address_of out, sizeof out) < 0)
                 return false;
         return socket_send((b32)link_nearby.socket, packet, length,
                            MSG_NOSIGNAL, address_of to, sizeof to) ==
@@ -946,22 +953,15 @@ static fn link_nearby_heard(p8 address_to packet, positive length,
 static p32 link_nearby_local(p8 address_to control, positive length,
                              positive room)
 {
-        if (length > room)
-                length = room;
-        for (positive at = 0; at + 16 <= length;)
-        {
-                p64 size;
-                b32 has[2];
+        byte_reader data;
 
-                memory_copy(address_of size, control + at, 8);
-                memory_copy(has, control + at + 8, 8);
-                if (size < 16 || size > length - at)
-                        break;
-                if (!has[0] && has[1] == 8 && size >= 28) // IPPROTO_IP, IP_PKTINFO
-                        return network_load_32(control + at + 20);
-                at += (size + 7) & ~7ull;
-        }
-        return 0;
+        //      ifindex, spec_dst, then the header's destination: each four.
+        if (!link_control_find(control, length, room, IPPROTO_IP, IP_PKTINFO,
+                               address_of data) ||
+            byte_reader_left(&data) < 12)
+                return 0;
+        (void)byte_reader_skip(&data, 4);
+        return byte_reader_u32(&data);
 }
 
 /*
@@ -1058,8 +1058,8 @@ static fn link_nearby_receive(p64 now)
                         continue;
 
                 if (link_control_int((p8 address_to)control,
-                                     message.control_length, sizeof control, 0,
-                                     2) != 255) // IPPROTO_IP, IP_TTL
+                                     message.control_length, sizeof control,
+                                     IPPROTO_IP, IP_TTL) != 255)
                         continue;
 
                 link_address_v4(address, network_order_32(from.host));
