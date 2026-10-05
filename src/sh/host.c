@@ -42,7 +42,6 @@
 
 #define HOST_STATE "/run/moonwater"
 #define HOST_VERDICT HOST_STATE "/verdict"
-#define HOST_VERDICT_NEXT HOST_STATE "/verdict.next"
 #define HOST_QUESTION HOST_STATE "/question"
 #define HOST_QUESTION_TAKEN HOST_STATE "/question.taken"
 #define HOST_HINT HOST_STATE "/hint"
@@ -174,7 +173,6 @@ static fn host_events_boot(host_settings address_to settings);
 static fn host_bind_apply(host_settings address_to settings);
 static b32 host_bind(string_address address_to arguments, positive count);
 static b32 host_usage(void);
-static fn host_usage_write(writer out);
 static positive radio_display(p8 address_to into, positive room, p8 address_to name,
                               positive length);
 static p16 host_machine_hook_line(p8 hook);
@@ -192,7 +190,6 @@ fn shell_stop(writer write, positive command);
 #endif
 static b32 host_machine_run(void);
 static b32 host_radio(string_address address_to arguments, positive count);
-static b32 host_tune(string_address address_to arguments, positive count);
 static fn tune_restore(void);
 static fn radio_restore(void);
 static fn radio_recover(void);
@@ -213,12 +210,15 @@ static b32 host_wipe(void);
                 log_flush(); \
         } while (0)
 
+// The word the command was given, which its refusals and its usage name.
+static string_address host_verb;
+
 // The root check the commands that change the machine open with.
-#define host_need_root(what) \
+#define host_need_root() \
         do \
         { \
                 if (!bowl_is_root()) \
-                        return host_refuse("%s needs root\n", what); \
+                        return host_refuse("moonwater %s needs root\n", host_verb); \
         } while (0)
 
 // A refusal, in the voice of the rest: the label, the words and what they name.
@@ -246,6 +246,12 @@ static bool host_join(p8 address_to into, positive room, string_address left,
 static bool host_starts(string_address text, string_address prefix)
 {
         return !string_compare_max(text, prefix, string_length(prefix));
+}
+
+/* The words a switch is set by: 1 for on, 0 for off, -1 for anything else. */
+static bipolar host_onoff(string_address word)
+{
+        return string_equals(word, "on") ? 1 : string_equals(word, "off") ? 0 : -1;
 }
 
 static fn host_pause(p64 nanoseconds)
@@ -481,6 +487,17 @@ static fn host_each_entry(string_address path, host_entry_visitor visit,
         file_walk_close(address_of walk);
 }
 
+/* A directory made, or left as it is when it is there already: the failure is
+   the kernel's and a name that exists is none. With exact the mode is the one
+   asked for whatever the umask. */
+static bipolar host_make_directory(string_address path, positive mode, bool exact)
+{
+        bipolar made = exact ? system_make_directory_exact_at(AT_FDCWD, path, mode)
+                             : system_make_directory_at(AT_FDCWD, path, mode);
+
+        return made < 0 && made != -EEXIST ? made : 0;
+}
+
 /*      A directory this keeps state in, made if it is not there -- and made
         again if what is there is a link, which every write under it would
         otherwise have followed, since a mkdir that fails because the name
@@ -502,10 +519,21 @@ static fn host_state_directory(string_address path, positive mode)
                 system_make_directory_at(AT_FDCWD, path, mode);
 }
 
+/* The state directory is made, and looked at, once for a command: it asked four
+   system calls at each of 26 places, a verb that took the settings lock and
+   saved them three times over. The machine and the watchers that outlive one
+   ask again whenever they take a lock, which is when a directory removed under
+   them would matter, so only a command's own process holds the answer. */
+static bool host_state_made;
+static bool host_state_once;
+
 static fn host_state_ready(void)
 {
+        if (host_state_made)
+                return;
         system_make_directory_at(AT_FDCWD, "/run", 0755);
         host_state_directory(HOST_STATE, 0755);
+        host_state_made = host_state_once;
 }
 
 /* The verdict a terminal waits on; one that could not be written is said, since
@@ -520,10 +548,8 @@ static fn host_verdict_set(string_address kind, string_address disk)
             !host_join(text, sizeof(text), line, "\n"))
                 return;
 
-        failed = host_write_text(HOST_VERDICT_NEXT, text);
-        if (!failed)
-                failed = system_rename_at(AT_FDCWD, HOST_VERDICT_NEXT, AT_FDCWD,
-                                          HOST_VERDICT, 0);
+        failed = file_publish_bytes(HOST_VERDICT, text, string_length(text), 0644,
+                                    false);
         if (failed < 0)
                 host_fail(HOST_VERDICT, failed);
 }
@@ -1132,8 +1158,8 @@ static bipolar host_mount(string_address name, string_address target,
                 return -ERROR_INVALID;
 
         host_state_ready();
-        made = system_make_directory_at(AT_FDCWD, target, 0700);
-        if (made < 0 && made != -EEXIST)
+        made = host_make_directory(target, 0700, false);
+        if (made < 0)
                 return made;
 
         return system_mount(device, target, type, flags, 0);
@@ -1591,8 +1617,8 @@ static b32 host_attach(host_install address_to install)
                 bipolar pinned;
 
                 host_join(on_disk, sizeof(on_disk), HOST_DATA, host_kept[at].path);
-                failed = system_make_directory_at(AT_FDCWD, on_disk, host_kept[at].mode);
-                if (failed < 0 && failed != -EEXIST)
+                failed = host_make_directory(on_disk, host_kept[at].mode, false);
+                if (failed < 0)
                         break;
 
                 /*      What the data partition calls this directory is its
@@ -1609,9 +1635,9 @@ static b32 host_attach(host_install address_to install)
                         break;
                 }
 
-                failed = system_make_directory_at(AT_FDCWD, host_kept[at].path,
-                                                  host_kept[at].mode);
-                if (failed < 0 && failed != -EEXIST)
+                failed = host_make_directory(host_kept[at].path, host_kept[at].mode,
+                                             false);
+                if (failed < 0)
                 {
                         system_close(pinned);
                         break;
@@ -2862,7 +2888,6 @@ static bipolar host_bind_request(unsigned int op, unsigned int event,
         why, and still goes along with moonwater setup install.
 */
 #define HOST_SETTINGS HOST_STATE "/settings"
-#define HOST_SETTINGS_NEXT HOST_STATE "/settings.next"
 #define HOST_SETTINGS_SECTION ".mwset\0\0"
 #define HOST_SETTINGS_PAGE 4096
 #define HOST_SETTINGS_BLOCKS (SPARK_SETTINGS_SLOT / 512)
@@ -3073,20 +3098,51 @@ static bool host_settings_find(host_settings address_to settings, p8 list,
         return false;
 }
 
-/* Words given apart, joined by one space the way a shell would read them. */
-static bool host_settings_words(p8 address_to into, positive room,
-                                string_address address_to words, positive count,
-                                positive address_to length)
+//      Where host_words_write puts what it is handed, and whether it ran out.
+static p8 address_to host_words_into;
+static positive host_words_room;
+static bool host_words_full;
+
+static fn host_words_write(address_any data, positive length)
+{
+        positive used = string_length(host_words_into);
+
+        if (!length)
+                length = string_length(data);
+        if (used + length >= host_words_room)
+        {
+                host_words_full = true;
+                return;
+        }
+        memory_copy_apart(host_words_into + used, data, length);
+        host_words_into[used + length] = end;
+}
+
+/* Words given apart, joined by one space as a shell would have them: one
+   word is the command as it was typed, and several are quoted where they
+   need it, so `bind init add sh -c 'echo hi there'` keeps the quotes that
+   made `echo hi there` one word instead of running `sh -c echo hi there`. */
+static bool host_words_join(p8 address_to into, positive room,
+                            string_address address_to words, positive count,
+                            positive address_to length)
 {
         into[0] = end;
+        host_words_into = into;
+        host_words_room = room;
+        host_words_full = false;
 
-        for (positive at = 0; at < count; at++)
-                if ((at && string_append_bounded(into, " ", room) >= room) ||
-                    string_append_bounded(into, words[at], room) >= room)
-                        return false;
+        for (positive at = 0; at < count && !host_words_full; at++)
+        {
+                if (at)
+                        host_words_write(" ", 1);
+                if (count == 1)
+                        host_words_write((address_any)words[at], 0);
+                else
+                        writer_shell_name(host_words_write, words[at]);
+        }
 
         address_to length = string_length(into);
-        return true;
+        return !host_words_full;
 }
 
 /* Which slot a write goes over: a damaged one, else the older. */
@@ -3239,26 +3295,16 @@ static bool host_settings_booted(host_settings address_to into)
 static bool host_settings_keep(host_settings address_to settings)
 {
         struct spark_settings_request request = {(unsigned long)settings, 0};
-        bipolar handle;
         bipolar set;
-        bool written = false;
+        bool written;
 
         host_settings_seal(settings);
         host_state_ready();
         set = host_spark_once(SPARK_IOCTL_SETTINGS_SET, address_of request,
                               FILE_READ_WRITE);
 
-        handle = host_open_state(AT_FDCWD, HOST_SETTINGS_NEXT, 0600);
-        if (handle >= 0)
-        {
-                written = !storage_format_write(handle, (p8 address_to)settings,
-                                                SPARK_SETTINGS_SLOT, 0) &&
-                          system_rename_at(AT_FDCWD, HOST_SETTINGS_NEXT, AT_FDCWD,
-                                           HOST_SETTINGS, 0) >= 0;
-                system_close(handle);
-                if (!written)
-                        system_remove_at(AT_FDCWD, HOST_SETTINGS_NEXT, 0);
-        }
+        written = file_publish_bytes(HOST_SETTINGS, settings, SPARK_SETTINGS_SLOT, 0600,
+                                     false) >= 0;
 
         return written && (set >= 0 || set == -ENOENT || set == -ENODEV);
 }
@@ -3730,8 +3776,7 @@ static bool host_settings_shaped(string_address address_to arguments, positive c
                 if (string_equals(arguments[1], host_switches[at].verb) &&
                     string_equals(arguments[2], host_switches[at].word))
                         return count == 3 ||
-                               (count == 4 && (string_equals(arguments[3], "on") ||
-                                               string_equals(arguments[3], "off")));
+                               (count == 4 && host_onoff(arguments[3]) >= 0);
 
         return count >= 4 && (string_equals(arguments[2], "add") ||
                               string_equals(arguments[2], "remove"));
@@ -3795,7 +3840,7 @@ static b32 host_settings_apply(host_settings address_to settings,
                         return HOST_SETTINGS_SHOWN;
                 }
 
-                if (string_equals(arguments[3], "off"))
+                if (!host_onoff(arguments[3]))
                         settings->flags |= flag;
                 else
                         settings->flags &= ~flag;
@@ -3808,7 +3853,7 @@ static b32 host_settings_apply(host_settings address_to settings,
         {
                 bool adding = string_equals(arguments[2], "add");
 
-                if (!host_settings_words(text, sizeof(text), arguments + 3, count - 3,
+                if (!host_words_join(text, sizeof(text), arguments + 3, count - 3,
                                          address_of length))
                         return host_settings_refused(verb, "an entry is 4096 bytes at most",
                                                      settings);
@@ -3917,7 +3962,7 @@ static b32 host_settings_locked(string_address address_to arguments, positive co
                 return 1;
 
         if (count > 3 && string_equals(arguments[2], "add") &&
-            host_settings_words(text, sizeof(text), arguments + 3, count - 3,
+            host_words_join(text, sizeof(text), arguments + 3, count - 3,
                                 address_of length))
                 host_settings_note(address_of settings, arguments[1], text);
 
@@ -3928,7 +3973,7 @@ static b32 host_settings_command(string_address address_to arguments, positive c
 {
         b32 outcome;
 
-        host_need_root("moonwater");
+        host_need_root();
 
         if (!host_settings_shaped(arguments, count))
                 return host_usage();
@@ -4671,7 +4716,7 @@ static b32 host_bios(string_address address_to arguments, positive count)
                 return 0;
         }
 
-        host_need_root("moonwater bios reboot");
+        host_need_root();
         if (offered == -ENODEV)
                 return host_refuse("this machine did not start from UEFI firmware, so "
                                    "there is no setup to restart into\n");
@@ -6462,12 +6507,6 @@ static fn radio_net_wake(void)
 
         system_write_all((positive)handle, address_of one, 1);
         system_close(handle);
-}
-
-/* The words a switch is set by: 1 for on, 0 for off, -1 for anything else. */
-static bipolar host_onoff(string_address word)
-{
-        return string_equals(word, "on") ? 1 : string_equals(word, "off") ? 0 : -1;
 }
 
 /* One word and its newline over a state file. The room is a timezone name's
@@ -8914,9 +8953,6 @@ static b32 radio_internet_set(string_address which)
 {
         bipolar failed;
 
-        if (!string_equals(which, "wired") && !string_equals(which, "wifi"))
-                return host_usage();
-
         host_state_ready();
         if (host_save(NET_INTERNET_ROOT, NET_INTERNET_ROOT, which))
                 return 1;
@@ -9069,7 +9105,6 @@ static b32 host_radio(string_address address_to arguments, positive count)
         string_address verb = arguments[1];
         string_address word = count > 2 ? arguments[2] : null;
         bipolar power;
-        bool mutate;
 
         if (string_equals(verb, "priority"))
         {
@@ -9079,39 +9114,45 @@ static b32 host_radio(string_address address_to arguments, positive count)
                         return host_usage();
                 if (count == 3)
                         return radio_internet_status();
-                if (count != 4)
+                if (count != 4 || (!string_equals(arguments[3], "wired") &&
+                                   !string_equals(arguments[3], "wifi")))
                         return host_usage();
-                host_need_root("moonwater");
+                host_need_root();
                 return radio_internet_set(arguments[3]);
         }
 
-        mutate = count > 2;
-        if (mutate && !bowl_is_root())
-                return host_refuse("moonwater needs root\n");
+        //      What is asked is judged before who asks: a word that is no
+        //      switch is a usage page for anyone, and root's refusal is for
+        //      what would have been done.
         power = count == 3 ? host_onoff(word) : -1;
 
         if (string_equals(verb, "wired"))
         {
                 if (count < 3)
                         return radio_wired_status();
-                if (power >= 0)
-                        return radio_wired_set(power);
-                return host_usage();
+                if (power < 0)
+                        return host_usage();
+                host_need_root();
+                return radio_wired_set(power);
         }
 
         if (string_equals(verb, "wifi"))
         {
                 if (count < 3)
                         return radio_wifi_status();
-                if (power > 0)
-                        return radio_wifi_on(true);
-                if (power == 0)
-                        return radio_done(radio_wifi_off(true), "wifi off");
+                if (power >= 0)
+                {
+                        host_need_root();
+                        return power ? radio_wifi_on(true)
+                                     : radio_done(radio_wifi_off(true), "wifi off");
+                }
                 if (string_equals(word, "add") && count >= 4 && count <= 5)
                 {
                         p8 pass[256];
                         positive length;
                         b32 result;
+
+                        host_need_root();
 
                         /*      No password: asked for at a terminal, open
                                 anywhere else, as it always was. "-": one
@@ -9141,17 +9182,26 @@ static b32 host_radio(string_address address_to arguments, positive count)
                         return result;
                 }
                 if (string_equals(word, "remove") && count == 4)
+                {
+                        host_need_root();
                         return radio_wifi_remove(arguments[3]);
+                }
                 return host_usage();
         }
 
         if (count < 3)
                 return radio_bluetooth_status();
         if (power >= 0)
+        {
+                host_need_root();
                 return radio_done(radio_bluetooth_power(power, true),
                                   power ? "bluetooth on" : "bluetooth off");
+        }
         if ((string_equals(word, "add") || string_equals(word, "remove")) && count == 4)
+        {
+                host_need_root();
                 return radio_bluetooth_edit(arguments[3], string_equals(word, "add"));
+        }
         return host_usage();
 }
 
@@ -9465,7 +9515,7 @@ static b32 tune_airplane(string_address address_to arguments, positive count)
         }
         if (count != 3 || host_onoff(arguments[2]) < 0)
                 return host_usage();
-        host_need_root("moonwater airplane");
+        host_need_root();
         on = host_onoff(arguments[2]) > 0;
         kept = tune_kept("airplane", was, sizeof(was));
 
@@ -9518,12 +9568,16 @@ static b32 tune_brightness(string_address address_to arguments, positive count)
         p8 current_path[160];
         positive maximum = 0;
         positive current = 0;
-        positive percent;
-        bool relative;
-        bool lower;
+        positive percent = 0;
+        bool relative = false;
+        bool lower = false;
 
-        if (count > 3)
+        if (count > 3 || (count == 3 && !tune_percent(arguments[2], address_of relative,
+                                                      address_of lower, address_of percent)))
                 return host_usage();
+        if (count == 3)
+                host_need_root();
+
         tune_choice panel = {.rank = 0};
 
         host_each_entry(TUNE_SYS_BACKLIGHT, tune_backlight_visit, address_of panel);
@@ -9535,7 +9589,15 @@ static b32 tune_brightness(string_address address_to arguments, positive count)
                        "/brightness") ||
             !tune_number(maximum_path, address_of maximum) || !maximum ||
             !tune_number(current_path, address_of current))
+        {
+                //      Where it stands is an answer, and "nowhere" is one.
+                if (count == 2)
+                {
+                        host_say(log, host_label "this machine has no backlight\n");
+                        return 0;
+                }
                 return host_refuse("this machine has no backlight to set\n");
+        }
 
         if (count == 2)
         {
@@ -9543,10 +9605,6 @@ static b32 tune_brightness(string_address address_to arguments, positive count)
                          (current * 100 + maximum / 2) / maximum, current, maximum);
                 return 0;
         }
-        if (!tune_percent(arguments[2], address_of relative, address_of lower,
-                          address_of percent))
-                return host_usage();
-        host_need_root("moonwater brightness");
 
         {
                 positive now = (current * 100 + maximum / 2) / maximum;
@@ -9622,8 +9680,20 @@ static b32 tune_charge(string_address address_to arguments, positive count)
         p8 status[24];
         bool have_limit;
 
+        if (count != 2 && !(count == 4 && string_equals(arguments[2], "limit") &&
+                            (string_equals(arguments[3], "off") ||
+                             byte_is_digit(arguments[3][0]))))
+                return host_usage();
+
         if (!tune_battery(name, sizeof(name)))
+        {
+                if (count == 2)
+                {
+                        host_say(log, host_label "this machine has no battery\n");
+                        return 0;
+                }
                 return host_refuse("this machine has no battery\n");
+        }
 
         if (count == 2)
         {
@@ -9644,13 +9714,10 @@ static b32 tune_charge(string_address address_to arguments, positive count)
                 return 0;
         }
 
-        if (count == 4 && string_equals(arguments[2], "limit") &&
-            (string_equals(arguments[3], "off") || byte_is_digit(arguments[3][0])))
         {
                 positive number = 100;
                 bipolar failed;
 
-                host_need_root("moonwater charge");
                 if (!string_equals(arguments[3], "off"))
                 {
                         positive used;
@@ -9659,6 +9726,7 @@ static b32 tune_charge(string_address address_to arguments, positive count)
                         if (arguments[3][used] || number < 20 || number > 100)
                                 return host_refuse("a charge limit is 20 to 100 percent\n");
                 }
+                host_need_root();
                 {
                         p8 text[8];
 
@@ -9677,7 +9745,6 @@ static b32 tune_charge(string_address address_to arguments, positive count)
                 host_say(log, host_label "charging stops at %p%%\n", number);
                 return 0;
         }
-        return host_usage();
 }
 
 typedef struct
@@ -9764,7 +9831,10 @@ static b32 tune_power(string_address address_to arguments, positive count)
                 (void)tune_word(TUNE_SYS_CPU "/cpu0/cpufreq/energy_performance_preference", preference,
                                 sizeof(preference));
                 if (!profile[0] && !governor[0])
-                        return host_refuse("this machine has no power profile to set\n");
+                {
+                        host_say(log, host_label "this machine has no power profile\n");
+                        return 0;
+                }
                 kept[0] = end;
                 (void)tune_kept("power", kept, sizeof(kept));
                 string_format(log, host_label "power %s", kept[0] ? (string_address)kept : (string_address)"(not set here)");
@@ -9781,7 +9851,7 @@ static b32 tune_power(string_address address_to arguments, positive count)
                            !string_equals(arguments[2], "balanced") &&
                            !string_equals(arguments[2], "powersave")))
                 return host_usage();
-        host_need_root("moonwater power");
+        host_need_root();
         if (!tune_power_apply(arguments[2]))
                 return host_refuse("this machine has no power profile to set\n");
         if (tune_remember("power", arguments[2]))
@@ -9851,7 +9921,7 @@ static b32 tune_cpu(string_address address_to arguments, positive count)
                 bool boost = string_equals(arguments[2], "boost");
                 bipolar failed;
 
-                host_need_root("moonwater cpu");
+                host_need_root();
                 failed = boost ? tune_cpu_boost(on) : tune_cpu_smt(on);
                 if (failed == -ENOENT)
                         return host_refuse(boost ? "this machine has no boost switch\n"
@@ -9872,12 +9942,12 @@ static b32 tune_cpu(string_address address_to arguments, positive count)
                 positive used;
                 p8 text[8];
 
-                host_need_root("moonwater cpu");
                 number = string_digits_max(arguments[3], 5, address_of used);
                 if (arguments[3][used])
                         return host_refuse("a cpu is a number of at most five digits\n");
                 if (!number)
                         return host_refuse("cpu 0 stays\n");
+                host_need_root();
                 bipolar failed;
 
                 positive_into_string(text, number);
@@ -10227,7 +10297,7 @@ static b32 tune_suspend(string_address verb, string_address state)
                 return host_refuse(string_equals(state, "mem")
                                        ? "this kernel does not offer sleep\n"
                                        : "this kernel does not offer hibernate\n");
-        host_need_root(string_equals(state, "mem") ? "moonwater sleep" : "moonwater hibernate");
+        host_need_root();
         //      So a sleep that never wakes leaves the device it stopped at in the
         //      log, and what they were is put back when it is over.
         tune_flag_on(address_of messages, TUNE_SYS_POWER "/pm_debug_messages");
@@ -10303,25 +10373,15 @@ static fn tune_restore(void)
                 (void)radio_rfkill(0, true);
 }
 
-static b32 host_tune(string_address address_to arguments, positive count)
+/* sleep and hibernate take no words, and differ in what they ask the kernel for. */
+static b32 tune_sleep_verb(string_address address_to arguments, positive count)
 {
-        string_address verb = arguments[1];
+        return count == 2 ? tune_suspend(arguments[1], "mem") : host_usage();
+}
 
-        if (string_equals(verb, "airplane"))
-                return tune_airplane(arguments, count);
-        if (string_equals(verb, "brightness"))
-                return tune_brightness(arguments, count);
-        if (string_equals(verb, "charge"))
-                return tune_charge(arguments, count);
-        if (string_equals(verb, "power"))
-                return tune_power(arguments, count);
-        if (string_equals(verb, "cpu"))
-                return tune_cpu(arguments, count);
-        if (count != 2)
-                return host_usage();
-        if (string_equals(verb, "sleep"))
-                return tune_suspend(verb, "mem");
-        return tune_suspend(verb, "disk");
+static b32 tune_hibernate_verb(string_address address_to arguments, positive count)
+{
+        return count == 2 ? tune_suspend(arguments[1], "disk") : host_usage();
 }
 
 /* ---- locale: the timezone and the clock, and the SNTP that sets it. ---- */
@@ -13556,11 +13616,9 @@ static b32 locale_ntp_sampling_status(void)
 //      at once.
 static b32 locale_ntp_set(bool sampling, string_address word)
 {
-        if (!string_equals(word, "on") && !string_equals(word, "off"))
-                return host_usage();
         if (host_save("ntp", sampling ? LOCALE_NTP_SAMPLING_PATH : LOCALE_NTP_PATH, word))
                 return 1;
-        if (!sampling && string_equals(word, "on"))
+        if (!sampling && host_onoff(word) > 0)
         {
                 locale_ntp_next = 0;
                 if (locale_ntp_apply(true) < 0)
@@ -14135,6 +14193,13 @@ static bipolar name_apply(string_address name)
                              string_length(name));
 }
 
+/* The name /root keeps, when what it keeps is one. */
+static bool name_saved(p8 address_to into, positive room)
+{
+        host_read_word(NAME_PATH, into, room);
+        return name_valid(into);
+}
+
 //      A roll that could not be saved, kept so that the next ask in this
 //      process is the same name and not another roll.
 static p8 name_unsaved[NAME_ROOM];
@@ -14144,8 +14209,7 @@ static p8 name_unsaved[NAME_ROOM];
    saved at the end: false when /root would not take it. */
 static bool name_ensure(p8 address_to into, positive room, bool address_to rolled)
 {
-        host_read_word(NAME_PATH, into, room);
-        address_to rolled = !name_valid(into);
+        address_to rolled = !name_saved(into, room);
 
         if (!address_to rolled)
                 return true;
@@ -14211,7 +14275,7 @@ static b32 host_name(string_address address_to arguments, positive count)
                 return 0;
         }
 
-        host_need_root("moonwater name");
+        host_need_root();
 
         if (string_equals(arguments[2], "random"))
                 name_roll(name, sizeof(name));
@@ -14262,7 +14326,7 @@ static b32 host_locale(string_address address_to arguments, positive count)
                         return locale_time_status();
                 if (count != 3 || !string_equals(word, "sync"))
                         return host_usage();
-                host_need_root("moonwater");
+                host_need_root();
                 return locale_time_sync();
         }
 
@@ -14274,7 +14338,7 @@ static b32 host_locale(string_address address_to arguments, positive count)
                         return host_usage();
                 if (string_equals(word, "list"))
                         return locale_zone_list();
-                host_need_root("moonwater");
+                host_need_root();
                 if (string_equals(word, "auto"))
                         return locale_zone_auto();
                 return locale_zone_set(word);
@@ -14290,21 +14354,21 @@ static b32 host_locale(string_address address_to arguments, positive count)
                                 return locale_ntp_server_status();
                         if (count != 4)
                                 return host_usage();
-                        host_need_root("moonwater");
+                        host_need_root();
                         return locale_ntp_server_set(arguments[3]);
                 }
                 if (string_equals(word, "sampling"))
                 {
                         if (count == 3)
                                 return locale_ntp_sampling_status();
-                        if (count != 4)
+                        if (count != 4 || host_onoff(arguments[3]) < 0)
                                 return host_usage();
-                        host_need_root("moonwater");
+                        host_need_root();
                         return locale_ntp_set(true, arguments[3]);
                 }
-                if (count != 3)
+                if (count != 3 || host_onoff(word) < 0)
                         return host_usage();
-                host_need_root("moonwater");
+                host_need_root();
                 return locale_ntp_set(false, word);
         }
 
@@ -14314,7 +14378,7 @@ static b32 host_locale(string_address address_to arguments, positive count)
                 return host_usage();
         if (string_equals(word, "list"))
                 return locale_keyboard_list();
-        host_need_root("moonwater");
+        host_need_root();
         return locale_keyboard_set(word);
 }
 
@@ -14614,8 +14678,7 @@ static b32 host_bind(string_address address_to arguments, positive count)
         if (string_equals(arguments[2], "init") || string_equals(arguments[2], "exit"))
         {
                 arguments[1] = arguments[2];
-                memory_copy(arguments + 2, arguments + 3,
-                            (count - 3) * sizeof(*arguments));
+                array_close_gap(arguments, count, 2);
                 return host_settings_command(arguments, count - 1);
         }
 
@@ -14663,7 +14726,7 @@ static b32 host_bind(string_address address_to arguments, positive count)
                 return 0;
         }
 
-        if (!host_settings_words(text, sizeof(text), arguments + words, count - words,
+        if (!host_words_join(text, sizeof(text), arguments + words, count - words,
                                  address_of length))
                 return host_refuse("that command is longer than the 255 bytes a bound event holds\n");
 
@@ -14677,91 +14740,194 @@ static fn host_title(writer out)
         string_format(out, TERM_BOLD "Moonwater" TERM_RESET "\n\n");
 }
 
-/*      One line of the list: the command in bold, then padding that brings
-        the description to its column, then the description dimmed. */
-#define HOST_ROW(command, padding, description) \
-        TERM_BOLD "  " command TERM_RESET padding TERM_DIM description TERM_RESET "\n"
+/*
+        The pages, one row to a command as it is typed and what it does.
+
+        The whole page, a wrong argument's page and `help VERB` are drawn from
+        this one table, so the picture and the usage read as the same page,
+        and so does the README, which a lane holds to it row for row. A row
+        belongs to the verb its command starts with, or to every word of
+        verbs where one row serves two. A row with no command is the line
+        after the one above it. Most are on the main page and on their
+        verb's own, 'b'; a verb with more to say than a line (setup, bind,
+        link) has a row for the main page, 'm', and the rows of its own, 'f'.
+*/
+typedef struct
+{
+        string_address verbs;
+        string_address command;
+        string_address text;
+        p8 kind;
+} host_row;
+
+static const host_row host_rows[] = {
+    {null, "status", "this session as one page", 'b'},
+    {null, "help [VERB]", "these commands, or one command's", 'b'},
+    {null, "setup", "where it runs: install, update, use, live", 'm'},
+    {null, "setup", "where this session runs, and the installs found", 'f'},
+    {null, "setup install DISK [removable]", "erase DISK and put Moonwater on it", 'f'},
+    {null, "", "removable takes a disk that says it is", 'f'},
+    {null, "setup update [DISK]", "write this build over an install, keeping its data", 'f'},
+    {null, "setup use [DISK]", "run this build with an install's data", 'f'},
+    {null, "setup live", "leave the disks alone this session", 'f'},
+    {null, "wipe", "forget /home and /root, keep the machine", 'b'},
+    {null, "bind", "the machine's events, and what each runs", 'b'},
+    {null, "bind EVENT [COMMAND]", "one event; empty puts the default back", 'b'},
+    {null, "bind init [add|remove ...]", "what runs at boot", 'm'},
+    {null, "bind exit [add|remove ...]", "what runs when the machine stops", 'm'},
+    {null, "bind poweroff [COMMAND]", "the power button [poweroff]", 'f'},
+    {null, "bind canvas on|off [COMMAND]", "when the desktop starts or stops", 'f'},
+    {null, "bind init", "what runs at every boot, with ids", 'f'},
+    {null, "bind init add \"command\"", "run a command at boot, once disks settle", 'f'},
+    {null, "bind init remove ID|\"command\"", "stop running one at boot", 'f'},
+    {null, "bind init mount [on|off]", "mount kept disks at boot [on]", 'b'},
+    {null, "bind exit", "what runs at poweroff or reboot", 'f'},
+    {null, "bind exit add \"command\"", "run a command before the disks go read-only", 'f'},
+    {null, "bind exit remove ID|\"command\"", "stop running one at the stop", 'f'},
+    {null, "canvas [on|off]", "the desktop, and on which screens [on]", 'b'},
+    {null, "canvas log|terminal", "open the kernel log or a terminal", 'b'},
+    {null, "airplane [on|off]", "every radio at once", 'b'},
+    {null, "brightness [N%|+N|-N]", "the screen backlight", 'b'},
+    {null, "power [performance|balanced|powersave]", "profile and CPU governor, kept across boots", 'b'},
+    {null, "cpu [boost|smt on|off]", "turbo and SMT, kept across boots", 'b'},
+    {null, "cpu online|offline N", "hotplug one processor", 'b'},
+    {null, "charge [limit N|off]", "where the battery stops charging, 20 to 100", 'b'},
+    {"sleep hibernate", "sleep | hibernate", "suspend to RAM or to disk", 'b'},
+    {null, "bios [reboot]", "whether firmware setup is on offer; reboot goes", 'b'},
+    {null, "wired [on|off]", "the wired links; off keeps them down", 'b'},
+    {null, "wifi [on|off]", "the radio, saved networks and those in range", 'b'},
+    {null, "wifi add SSID [PASSWORD|-]", "remember a network and join it; asks for", 'b'},
+    {null, "", "the password, - reads it from stdin", 'b'},
+    {null, "wifi remove SSID", "forget a saved network, and leave it", 'b'},
+    {null, "bluetooth [on|off]", "the radio and the remembered devices", 'b'},
+    {null, "bluetooth add NAME", "remember a bluetooth device", 'b'},
+    {null, "bluetooth remove NAME", "forget a bluetooth device", 'b'},
+    {null, "priority [internet [wired|wifi]]", "which link wins when both are up [wired]", 'b'},
+    {null, "time [sync]", "the clock; sync sets it and the zone now", 'b'},
+    {null, "timezone [ZONE|list]", "IANA name, country, +1 or POSIX; manual", 'b'},
+    {null, "timezone auto", "from the network, one Cloudflare request", 'b'},
+    {null, "", "per network joined [auto]", 'b'},
+    {null, "ntp [on|off]", "set the clock from the network [on]", 'b'},
+    {null, "ntp server [NAME|auto]", "who is asked first: a name or address [auto]", 'b'},
+    {null, "ntp sampling [on|off]", "keep the lowest-delay sample of five [on]", 'b'},
+    {null, "keyboard [LAYOUT|list]", "us uk gb de se sv no nb dk fi fr es it [us]", 'b'},
+    {null, "name [NEW|random]", "what this machine is called, like space-wizard", 'b'},
+    {null, "link", "who this machine is linked with, and what each may do", 'f'},
+    {null, "link [pair|NAME]", "machines linked by name, with a code", 'm'},
+    {null, "link pair [NAME]", "a code, and wait for the other machine to use it", 'f'},
+    {null, "link NAME CODE", "link to the machine called NAME, which waits", 'f'},
+    {null, "link NAME [COMMAND...]", "a terminal on NAME, or one command with its status", 'f'},
+    {null, "link push NAME FILE PATH", "a file here to PATH there, whole or not at all", 'f'},
+    {null, "link pull NAME PATH FILE", "PATH there to a file here", 'f'},
+    {null, "link log NAME", "follow NAME's kernel log", 'f'},
+    {null, "link add NAME KEY [HOST[:PORT]]", "link by key, with no code", 'f'},
+    {null, "link remove NAME", "stop knowing it", 'f'},
+    {null, "link allow|deny NAME GRANT...", "shell run log files (any file but the link's own)", 'f'},
+    {null, "link group [NAME [SECRET] [allow GRANT...]]", "machines on one network that link themselves", 'f'},
+    {null, "link group leave NAME [forget]", "stop, and forget the group's key", 'f'},
+    {null, "link on|off", "the listener, udp 22348, kept across boots [off]", 'f'},
+};
+
+/* The column the words of a row start in. A command that would not leave two
+   blanks before it keeps them for the line below. */
+#define HOST_COLUMN 36
+
+static fn host_blank(writer out, positive count)
+{
+        static const p8 blanks[] = "                                        ";
+
+        string_format(out, "%s", (string_address)blanks + sizeof(blanks) - 1 - count);
+}
+
+static fn host_row_write(writer out, const host_row address_to row)
+{
+        positive length = string_length(row->command);
+
+        if (!length)
+                host_blank(out, HOST_COLUMN);
+        else
+        {
+                string_format(out, TERM_BOLD "  %s" TERM_RESET, row->command);
+                if (length + 4 > HOST_COLUMN)
+                {
+                        string_format(out, "\n");
+                        host_blank(out, HOST_COLUMN);
+                }
+                else
+                        host_blank(out, HOST_COLUMN - 2 - length);
+        }
+        string_format(out, TERM_DIM "%s" TERM_RESET "\n", row->text);
+}
+
+/* Whether a row is one of verb's: the words it lists, else its command's first. */
+static bool host_row_is(const host_row address_to row, string_address verb)
+{
+        string_address list = row->verbs ? row->verbs : row->command;
+        positive length = string_length(verb);
+
+        for (;;)
+        {
+                positive word = (positive)(string_first_of_or_end(list, ' ') - list);
+
+                if (word == length && !string_compare_max(list, verb, length))
+                        return true;
+                if (!list[word] || !row->verbs)
+                        return false;
+                list += word + 1;
+        }
+}
 
 /*
-        One list as it is typed, then what it does. Status, help and a
-        wrong argument share it, so the picture and the usage read as the
-        same page.
+        The main page when verb is null, else that verb's own: its full rows
+        where it has them, and what the main page shows of it where it has
+        not. How many rows were written, so that a word that is no verb is
+        told from one.
 */
-static fn host_usage_write(writer out)
+static positive host_rows_write(writer out, string_address verb)
 {
+        bool full = false;
+        bool live = false;
+        positive written = 0;
+
+        for (positive at = 0; verb && at < array_count(host_rows); at++)
+                full |= host_rows[at].kind == 'f' && host_rows[at].command[0] &&
+                        host_row_is(host_rows + at, verb);
+
+        for (positive at = 0; at < array_count(host_rows); at++)
+        {
+                const host_row address_to row = host_rows + at;
+
+                if (row->command[0])
+                        live = !verb || host_row_is(row, verb);
+                if (live && (verb && full ? row->kind != 'm' : row->kind != 'f'))
+                {
+                        host_row_write(out, row);
+                        written++;
+                }
+        }
+        return written;
+}
+
+static fn host_page_write(writer out)
+{
+        host_rows_write(out, null);
         host_say(out,
-                 HOST_ROW("status", "                      ", "this picture")
-                 HOST_ROW("setup", "                       ", "live or kept on a disk: install, update, use, live")
-                 HOST_ROW("bind", "                        ", "what the machine's events run")
-                 HOST_ROW("bind EVENT [COMMAND]", "        ", "one event; empty puts the default back")
-                 HOST_ROW("bind init [add|remove ...]", "  ", "what runs at boot")
-                 HOST_ROW("bind init mount [on|off]", "    ", "mount kept disks at boot")
-                 HOST_ROW("bind exit [add|remove ...]", "  ", "what runs when the machine stops")
-                 HOST_ROW("canvas [on|off]", "             ", "the desktop")
-                 HOST_ROW("canvas log|terminal", "         ", "open the kernel log or a terminal")
-                 HOST_ROW("airplane [on|off]", "           ", "every radio at once")
-                 HOST_ROW("brightness [N%%|+N|-N]", "       ", "the screen backlight")
-                 HOST_ROW("power [performance|balanced|powersave]", " ", "profile and CPU governor")
-                 HOST_ROW("cpu [boost|smt on|off] [online|offline N]", " ", "turbo, SMT and hotplug")
-                 HOST_ROW("charge [limit N|off]", "        ", "where the battery stops charging")
-                 TERM_BOLD "  sleep" TERM_RESET " | " TERM_BOLD "hibernate" TERM_RESET
-                 "           " TERM_DIM "suspend to RAM or to disk" TERM_RESET "\n"
-                 HOST_ROW("bios [reboot]", "               ", "restart into the firmware's setup screen")
-                 HOST_ROW("wired [on|off]", "              ", "the wired links: no lease is asked on one when off")
-                 HOST_ROW("wifi [on|off]", "               ", "the wireless radio")
-                 HOST_ROW("wifi add SSID [PASSWORD|-]", "  ", "remember a network and join it; asks for")
-                 "                              " TERM_DIM "the password, - reads it from stdin" TERM_RESET "\n"
-                 HOST_ROW("wifi remove SSID", "            ", "forget a saved network, and leave it")
-                 HOST_ROW("bluetooth [on|off]", "          ", "the bluetooth radio")
-                 HOST_ROW("bluetooth add NAME", "          ", "remember a bluetooth device")
-                 HOST_ROW("bluetooth remove NAME", "       ", "forget a bluetooth device")
-                 HOST_ROW("priority internet [wired|wifi]", " ", "which link when both are up [wired]")
-                 HOST_ROW("time [sync]", "                 ", "the clock; sync sets it and the zone now")
-                 HOST_ROW("timezone [ZONE|se|+1|list]", "  ", "the clock's zone; setting one makes it manual")
-                 HOST_ROW("timezone auto", "               ", "from the network [auto]: one Cloudflare")
-                 "                              " TERM_DIM "request per network joined" TERM_RESET "\n"
-                 HOST_ROW("ntp [on|off]", "                ", "set the clock from the network [on]")
-                 HOST_ROW("ntp server [NAME|auto]", "      ", "who is asked first: a name or address [auto]")
-                 HOST_ROW("ntp sampling [on|off]", "       ", "keep the lowest-delay sample of five [on]")
-                 HOST_ROW("link [pair|NAME|help]", "       ", "link machines by a code, then a terminal or a command on any, by name")
-                 HOST_ROW("keyboard [LAYOUT|list]", "      ", "Canvas keys: us uk de se no dk fi fr es it")
-                 HOST_ROW("name [NEW|random]", "           ", "what this machine is called; rolled at first boot")
-                 HOST_ROW("wipe", "                        ", "forget /home and /root, keep the machine")
                  "\n"
-                 TERM_DIM                       "  Settings stay in the image this session started from.\n"
+                 TERM_DIM "  Settings stay in the image this session started from.\n"
                  "  install takes this session's; update keeps the disk's.\n"
                  "  The machine script overwrites bind, init and exit.\n"
                  "  " HOST_MACHINE_SCRIPT " overlays the kernel builtin.\n" TERM_RESET);
 }
 
+/* A wrong argument's page: the verb's rows, or the whole of it for a word that is none. */
 static b32 host_usage(void)
 {
-        host_title(log_error);
-        host_usage_write(log_error);
-        return 2;
-}
-
-/*
-        What setup does. A session is live, with nothing kept after power off,
-        or it keeps /bowls, /root and /home on an install's data partition;
-        the verbs move between the two, or write this build onto a disk.
-*/
-static fn host_setup_usage_write(writer out)
-{
-        host_say(out,
-                 HOST_ROW("setup", "                       ", "where this session runs, and the installs found")
-                 HOST_ROW("setup install DISK [removable]", " ", "erase DISK and put Moonwater on it; removable")
-                 "                              " TERM_DIM "takes a disk that says it is removable" TERM_RESET "\n"
-                 HOST_ROW("setup update [DISK]", "         ", "write this build over an install, keeping its data")
-                 HOST_ROW("setup use [DISK]", "            ", "run this build with an install's /bowls /root /home")
-                 HOST_ROW("setup live", "                  ", "leave the disks alone this session")
-                 "\n");
-}
-
-static b32 host_setup_usage(void)
-{
-        host_title(log_error);
-        host_setup_usage_write(log_error);
+        if (!host_verb || !host_rows_write(log_error, host_verb))
+        {
+                host_title(log_error);
+                host_page_write(log_error);
+        }
+        log_flush();
         return 2;
 }
 
@@ -14904,7 +15070,7 @@ static b32 host_status(void)
         //      there was "init mount is on" and nothing run at boot as facts.
 
         string_format(log, "\n");
-        host_usage_write(log);
+        host_page_write(log);
         return 0;
 }
 
@@ -15006,22 +15172,15 @@ static string_address host_wipe_keep[] = {
     null,
 };
 
-//      An emptied directory that was not there is made, with the mode it is
-//      meant to have whatever the caller's umask says.
-static bipolar host_wipe_ensure(string_address path, positive mode)
-{
-        bipolar made = system_make_directory_exact_at(AT_FDCWD, path, mode);
-
-        return made < 0 && made != -ERROR_EXISTS ? made : 0;
-}
-
 static b32 host_wipe_path(string_address path, positive mode,
                           string_address address_to keep)
 {
         bipolar failed = bowl_reset_walk(path, BOWL_RESET_ONE_MOUNT, keep);
 
+        //      An emptied directory that was not there is made, with the mode
+        //      it is meant to have whatever the caller's umask says.
         if (!failed)
-                failed = host_wipe_ensure(path, mode);
+                failed = host_make_directory(path, mode, true);
         return failed < 0 ? host_fail(path, failed) : 0;
 }
 
@@ -15037,7 +15196,7 @@ static b32 host_wipe(void)
         bipolar lock;
         b32 failed;
 
-        host_need_root("moonwater wipe");
+        host_need_root();
 
         if (!host_acquire())
                 return 1;
@@ -15069,7 +15228,8 @@ static b32 host_setup(string_address address_to arguments, positive count)
                 host_title(log);
                 host_setup_state();
                 string_format(log, "\n");
-                host_setup_usage_write(log);
+                host_rows_write(log, "setup");
+                log_flush();
                 return 0;
         }
 
@@ -15078,15 +15238,15 @@ static b32 host_setup(string_address address_to arguments, positive count)
                 bool removable = count == 5 && string_equals(arguments[4], "removable");
 
                 if (count < 4 || count > 5 || (count == 5 && !removable))
-                        return host_setup_usage();
-                host_need_root("moonwater setup");
+                        return host_usage();
+                host_need_root();
                 host_state_ready();
                 return host_install_disk(arguments[3], removable);
         }
 
         if (string_equals(verb, "live") && count == 3)
         {
-                host_need_root("moonwater setup");
+                host_need_root();
                 host_state_ready();
                 system_remove_at(AT_FDCWD, HOST_QUESTION, 0);
                 host_verdict_set("live", "");
@@ -15096,98 +15256,157 @@ static b32 host_setup(string_address address_to arguments, positive count)
 
         if ((update || string_equals(verb, "use")) && count <= 4)
         {
-                host_need_root("moonwater setup");
+                host_need_root();
                 host_state_ready();
                 return host_answer(update, count == 4 ? arguments[3] : null);
         }
 
-        return host_setup_usage();
+        return host_usage();
 }
 
-static b32 host_main()
+/* moonwater help [VERB]: the main page, or one verb's. */
+static b32 host_help(string_address address_to arguments, positive count)
 {
-        string_address address_to arguments = program_argument_list();
-        positive count = (positive)program_argument_count();
-        string_address verb = count > 1 ? arguments[1] : null;
-
-        if (!verb || string_equals(verb, "-h") || string_equals(verb, "--help"))
-        {
-                if (count > 2)
-                        return host_usage();
-
-                host_title(log);
-                host_usage_write(log);
-                return 0;
-        }
-
-        if (string_equals(verb, "status") && count <= 2)
-                return host_status();
-
-        if (string_equals(verb, "setup"))
-                return host_setup(arguments, count);
-
-        // Before the root check: reading needs nothing, and the kernel
-        // decides who may set a bound event. init and exit still need root.
-        if (string_equals(verb, "bind"))
-                return host_bind(arguments, count);
-
-        if (string_equals(verb, "canvas"))
-                return host_canvas(arguments, count);
-
-        if (string_equals(verb, "bios"))
-                return host_bios(arguments, count);
-
-        if (string_equals(verb, "airplane") || string_equals(verb, "brightness") ||
-            string_equals(verb, "charge") || string_equals(verb, "power") ||
-            string_equals(verb, "cpu") || string_equals(verb, "sleep") ||
-            string_equals(verb, "hibernate"))
-                return host_tune(arguments, count);
-
-        if (string_equals(verb, "wifi") || string_equals(verb, "bluetooth") ||
-            string_equals(verb, "priority") || string_equals(verb, "wired"))
-                return host_radio(arguments, count);
-
-        if (string_equals(verb, "timezone") || string_equals(verb, "ntp") ||
-            string_equals(verb, "keyboard") || string_equals(verb, "time"))
-                return host_locale(arguments, count);
-
-        if (string_equals(verb, "name"))
-                return host_name(arguments, count);
-
-        if (string_equals(verb, "link"))
-                return link_main(arguments, count);
-
-        if (string_equals(verb, "wipe") && count == 2)
-                return host_wipe();
-
-        if (string_equals(verb, "machine") && count == 2)
-                return host_machine_run();
-
-        if (!string_equals(verb, "boot") && !string_equals(verb, "ask"))
+        if (count > 3)
                 return host_usage();
 
-        host_need_root("moonwater");
+        if (count == 3)
+        {
+                host_verb = arguments[2];
+                return host_rows_write(log, host_verb) ? (log_flush(), 0) : host_usage();
+        }
 
+        host_title(log);
+        host_page_write(log);
+        return 0;
+}
+
+static b32 host_status_verb(string_address address_to arguments, positive count)
+{
+        return count == 2 ? host_status() : host_usage();
+}
+
+static b32 host_wipe_verb(string_address address_to arguments, positive count)
+{
+        return count == 2 ? host_wipe() : host_usage();
+}
+
+static b32 host_machine_verb(string_address address_to arguments, positive count)
+{
+        return count == 2 ? host_machine_run() : host_usage();
+}
+
+/* boot and ask are init's and the terminal's, and take no words. */
+static b32 host_boot_verb(string_address address_to arguments, positive count)
+{
+        if (count > 2)
+                return host_usage();
+        host_need_root();
         host_state_ready();
+        return host_boot();
+}
+
+static b32 host_ask_verb(string_address address_to arguments, positive count)
+{
+        p8 verdict[HOST_NAME_ROOM + 16];
 
         if (count > 2)
                 return host_usage();
+        host_need_root();
+        host_state_ready();
 
-        if (string_equals(verb, "boot"))
-                return host_boot();
+        host_read_word(HOST_VERDICT, verdict, sizeof(verdict));
+        if (!host_starts(verdict, "ask ") ||
+            system_rename_at(AT_FDCWD, HOST_QUESTION, AT_FDCWD,
+                             HOST_QUESTION_TAKEN, 0) < 0)
+                return host_refuse("there is nothing to ask\n");
 
-        {
-                p8 verdict[HOST_NAME_ROOM + 16];
-
-                host_read_word(HOST_VERDICT, verdict, sizeof(verdict));
-                if (!host_starts(verdict, "ask ") ||
-                    system_rename_at(AT_FDCWD, HOST_QUESTION, AT_FDCWD,
-                                     HOST_QUESTION_TAKEN, 0) < 0)
-                        return host_refuse("there is nothing to ask\n");
-
-                host_question(verdict + 4);
-        }
+        host_question(verdict + 4);
         return 0;
+}
+
+/*
+        Every word the command answers to, and who answers. A verb that says
+        what it does and nothing else (quiet) has its output set aside from
+        its answer: standard output closed or full or a pipe whose reader has
+        gone is no reason for `moonwater name` to say it failed after the name
+        was kept, or for `status | head` to die of SIGPIPE; one that starts
+        processes of its own keeps the signal as it found it. The table is
+        host_main's own, where the lane that works out which applets can start
+        a program reads the handlers it names.
+*/
+
+static b32 host_main()
+{
+        static const struct
+        {
+                string_address verb;
+                b32 (*run)(string_address address_to arguments, positive count);
+                bool quiet;
+        } host_verbs[] = {
+            {"status", host_status_verb, true},
+            {"help", host_help, true},
+            {"setup", host_setup, false},
+            // Reading needs nothing, and the kernel decides who may set a bound
+            // event. init and exit still need root.
+            {"bind", host_bind, false},
+            {"canvas", host_canvas, false},
+            {"bios", host_bios, false},
+            {"airplane", tune_airplane, false},
+            {"brightness", tune_brightness, false},
+            {"charge", tune_charge, false},
+            {"power", tune_power, false},
+            {"cpu", tune_cpu, false},
+            {"sleep", tune_sleep_verb, false},
+            {"hibernate", tune_hibernate_verb, false},
+            {"wifi", host_radio, false},
+            {"bluetooth", host_radio, false},
+            {"priority", host_radio, false},
+            {"wired", host_radio, false},
+            {"timezone", host_locale, false},
+            {"ntp", host_locale, false},
+            {"keyboard", host_locale, false},
+            {"time", host_locale, false},
+            {"name", host_name, true},
+            {"link", link_main, false},
+            {"wipe", host_wipe_verb, true},
+            {"machine", host_machine_verb, false},
+            {"boot", host_boot_verb, false},
+            {"ask", host_ask_verb, false},
+        };
+
+        string_address address_to arguments = program_argument_list();
+        positive count = (positive)program_argument_count();
+        positive previous[4];
+        positive which;
+        bool ignored = false;
+        b32 answer;
+
+        host_verb = count > 1 ? arguments[1] : null;
+        if (!host_verb)
+        {
+                host_title(log);
+                host_page_write(log);
+                return 0;
+        }
+
+        which = string_table_find(host_verb, host_verbs, sizeof(host_verbs[0]),
+                                  array_count(host_verbs));
+        if (which == array_count(host_verbs))
+                return host_usage();
+
+        host_state_once = host_verbs[which].run != host_machine_verb;
+        if (host_verbs[which].quiet)
+                ignored = system_signal_install(13, 1, 0, 0, previous);
+        answer = host_verbs[which].run(arguments, count);
+        if (host_verbs[which].quiet)
+        {
+                log_flush();
+                log_failure_reset();
+        }
+        if (ignored)
+                system_signal_action(13, previous, null, 8);
+        return answer;
 }
 
 #define MOONWATER_CLI

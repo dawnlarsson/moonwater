@@ -490,11 +490,12 @@ static bool bowl_needs_isolated(string_address program)
                                  array_count(managers)) < array_count(managers);
 }
 
+/* A usage page is standard error and 2, as the moonwater command's and link's
+   are; a refusal is 1. */
 static b32 bowl_usage(void)
 {
-        log((address_any)bowl_usage_text, sizeof(bowl_usage_text) - 1);
-        log_flush();
-        return 1;
+        log_error((address_any)bowl_usage_text, sizeof(bowl_usage_text) - 1);
+        return 2;
 }
 
 /* Set while a pass does many things that may each fail and says so once: a

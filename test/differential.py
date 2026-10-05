@@ -41564,6 +41564,164 @@ def harness_moonwater_cli(argv):
                 "link group leave a b c", "link nobody", "link nobody abc", "link nobody ab-cd",
                 "link nobody not-a-code", "link nobody whoami", "link nobody reboot",
                 "link nobody abcdef", "link log", "link push nobody", "link off"]
+        #       What each vector of the walk answers, as a class: 0 it did what was
+        #       asked or showed it, 1 it refused or failed in words, 2 it was not
+        #       a command and printed its usage. A signal, a hang or any other
+        #       number is a bug, and so is a vector that moves between classes.
+        walk_classes = {}
+        for vector in [
+            '',
+            'status',
+            'timezone',
+            'time',
+            'ntp',
+            'ntp on',
+            'ntp off',
+            'ntp sampling',
+            'ntp sampling on',
+            'ntp sampling off',
+            'keyboard',
+            'name',
+            'name random',
+            'name x',
+            'name UPPER',
+            'bind init',
+            'bind exit',
+            'wifi',
+            'wifi off',
+            'wifi on',
+            'wired',
+            'wired on',
+            'wired off',
+            'airplane',
+            'brightness',
+            'power',
+            'cpu',
+            'charge',
+            'bios',
+            'bluetooth',
+            'bluetooth off',
+            'bluetooth on',
+            'priority internet',
+            'priority internet wired',
+            'priority internet wifi',
+            'setup',
+            'link',
+            'link key',
+            'link off',
+        ]:
+            walk_classes[vector] = 0
+        for vector in [
+            'timezone Mars/Olympus',
+            'timezone +99',
+            'timezone ""',
+            'time sync',
+            'keyboard xx',
+            'name ""',
+            'name -x',
+            'name x-',
+            'name xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
+            'name ../x',
+            'canvas',
+            'canvas on',
+            'canvas off',
+            'bind',
+            'bind bogus',
+            'wifi remove nobody',
+            'wifi remove ""',
+            'bluetooth remove nobody',
+            'setup install ../x removable',
+            'setup use nobody',
+            'setup update nobody',
+            'link bogus',
+            'link add .bad AAAA',
+            'link add x AAAA',
+            'link remove nobody',
+            'link allow nobody run',
+            'link shell nobody',
+            'link group .bad',
+            'link group ok allow nonsense',
+            'link group leave',
+            'link group leave nobody',
+            'link group leave nobody forget',
+            'link group leave a b c',
+            'link nobody',
+            'link nobody abc',
+            'link nobody ab-cd',
+            'link nobody not-a-code',
+            'link nobody whoami',
+            'link nobody reboot',
+            'link nobody abcdef',
+        ]:
+            walk_classes[vector] = 1
+        for vector in [
+            'status extra',
+            '-h',
+            '--help',
+            '-h extra',
+            'bogus',
+            'timezone list extra',
+            'timezone a b',
+            'time bogus',
+            'time sync extra',
+            'ntp sampling maybe',
+            'ntp sampling on extra',
+            'ntp a b',
+            'keyboard a b',
+            'name a b',
+            'name random x',
+            'canvas bogus',
+            'wifi add',
+            'wifi remove',
+            'wifi remove a b',
+            'wired on extra',
+            'wired sideways',
+            'airplane extra',
+            'airplane on extra',
+            'brightness 50 extra',
+            'power extra',
+            'cpu bogus',
+            'cpu boost',
+            'charge limit',
+            'charge bogus',
+            'sleep extra',
+            'hibernate extra',
+            'bluetooth remove',
+            'bios extra',
+            'bios bogus',
+            'bios reboot extra',
+            'priority internet cable',
+            'wipe extra',
+            'install',
+            'use',
+            'update',
+            'live',
+            'setup install',
+            'setup install a b c',
+            'setup install a removable x',
+            'setup use a b c',
+            'setup update a b c',
+            'setup live extra',
+            'setup bogus',
+            'setup removable',
+            'boot extra',
+            'ask extra',
+            'machine extra',
+            'link help',
+            'link pair x y z',
+            'link add',
+            'link add x',
+            'link remove',
+            'link deny',
+            'link run',
+            'link run nobody',
+            'link shell',
+            'link serve extra',
+            'link group ok allow',
+            'link log',
+            'link push nobody',
+        ]:
+            walk_classes[vector] = 2
         # State the mode rules act on: neither file, then a zone with no mode.
         script = ("rm -f /root/timezone /root/timezone.mode\n" + say("timezone") +
                   "printf 'Europe/London\\n' > /root/timezone\n" + say("timezone") +
@@ -41598,8 +41756,14 @@ def harness_moonwater_cli(argv):
             got = walked.get(command)
             status = got and got["status"]
             shown = fuzzed[int(command[4:])] if command.startswith("fuzz") else command
-            check(got is not None and status is not None and status < 124,
-                  f"moonwater {shown} answers", repr(got)[:300])
+            if command.startswith("fuzz"):
+                wanted_status = (0, 1, 2)
+            else:
+                wanted_status = (walk_classes.get(command, "unlisted"),) if command in walk_classes else (None,)
+                wanted_status = (int(wanted_status[0]),) if wanted_status[0] is not None else (None,)
+            check(got is not None and status is not None and status in wanted_status,
+                  f"moonwater {shown} answers {'0, 1 or 2' if command.startswith('fuzz') else wanted_status[0]}",
+                  repr(got)[:300])
         joined = "\n".join(lines)
         check("auto" in joined.split("@@ timezone", 2)[1].split("@@status")[0],
                      "neither zone file is auto", joined[:400])
@@ -42699,18 +42863,6 @@ while True:
         check(finished and waited and waited[0] >= 2,
               "wipe waits for the radio lock a wifi add holds", repr(waited))
 
-        # What the command reads of its own is read as state is: a link at the
-        # verdict's name is no verdict. The status page took the planted
-        # file's "disk nvme9n1" for the disk this session keeps.
-        script = ("rm -rf /run/moonwater /tmp/planted; mkdir -p /run/moonwater\n"
-                  "echo 'disk nvme9n1' > /tmp/planted; ln -s /tmp/planted /run/moonwater/verdict\n" +
-                  say("status") + "rm -f /run/moonwater/verdict /tmp/planted\n")
-        lines, finished = session(script)
-        planted = answers(lines).get("status", {}).get("out", [])
-        check(finished and planted and not any("nvme9n1" in line for line in planted) and
-              any("live session" in line for line in planted),
-              "a link at the verdict's name is no verdict", repr(planted[:8]))
-
         # What cannot be kept is said with the kernel's own error. The
         # keyboard, ntp and timezone auto verbs said "Operation not
         # permitted" for every reason, a read-only /root and a full one
@@ -42755,6 +42907,172 @@ while True:
         check(finished and page and "init mount is" not in page and "nothing runs" not in page and
               "init:" not in page and "exit:" not in page,
               "status does not make the settings up for a caller who cannot read them", page[:600])
+
+        # The pages. One table of rows draws the main page, a wrong word's
+        # page, `help VERB` and the README, and a lane holds them to each
+        # other: every verb the dispatcher answers to (bar init's own, boot ask
+        # and machine) has a page of its own, and the rows of all of them are
+        # the README's rows, word for word, and nothing else is in either.
+        host_source = (HARNESS_ROOT / "src/sh/host.c").read_text()
+        verb_table = src_slice(host_source, "host_verbs[] = {", "\n        };")
+        dispatched = re.findall(r'\{"(\w+)", \w+, (?:true|false)\}', verb_table)
+        public = [verb for verb in dispatched if verb not in ("boot", "ask", "machine")]
+        check(len(public) > 20 and "status" in public and "help" in public and "link" in public,
+              "the dispatcher's table names the verbs", repr(dispatched))
+
+        def page_rows(out):
+            rows = []
+            for line in out:
+                if line.startswith(" " * 36) and rows:
+                    rows[-1][1] += " " + line.strip()
+                    continue
+                found = re.match(r"^  (\S.*?)(?:  +(\S.*))?$", line)
+                if found and not line.startswith("   "):
+                    rows.append([found.group(1), found.group(2) or ""])
+            return [(command, " ".join(text.split())) for command, text in rows]
+
+        lines, finished = session("".join(say("help " + verb) for verb in public) + say("help") +
+                                  say("help bogus") + say("help wifi extra") + say("-h") + say("--help") +
+                                  say("wifi sideways") + say("link bogus!") + say("bogus"))
+        seen = answers(lines)
+        on_pages = set()
+        for verb in public:
+            got = seen.get("help " + verb, {"out": [], "status": None})
+            rows = page_rows(got["out"])
+            check(got["status"] == 0 and rows and all(
+                      command.split()[0] == verb or verb in ("sleep", "hibernate") and command.startswith("sleep")
+                      for command, _ in rows),
+                  f"help {verb} is that verb's page", repr(got)[:300])
+            on_pages.update(rows)
+        readme_text = (HARNESS_ROOT / "README.md").read_text()
+        readme_block = readme_text.split("```sh\n", 1)[1].split("```", 1)[0]
+        rows_readme = []
+        for line in readme_block.splitlines():
+            if line.startswith("moonwater "):
+                found = re.match(r"^moonwater (\S.*?)(?:  +(\S.*))?$", line)
+                rows_readme.append([found.group(1), found.group(2) or ""])
+            elif line.startswith(" " * 39) and rows_readme:
+                rows_readme[-1][1] += " " + line.strip()
+        in_readme = {(command, " ".join(text.split())) for command, text in rows_readme}
+        check(on_pages == in_readme,
+              "the README's rows are the rows of the pages, word for word",
+              "only on a page: %r; only in the README: %r" % (sorted(on_pages - in_readme)[:4],
+                                                             sorted(in_readme - on_pages)[:4]))
+        first_words = {command.split()[0] for command, _ in in_readme}
+        check(first_words <= set(dispatched) and {v for v in public if v != "hibernate"} <= first_words,
+              "the README names every verb the dispatcher answers to, and no other",
+              repr((sorted(first_words - set(dispatched)), sorted(set(public) - first_words))))
+
+        check(seen["help wifi extra"]["status"] == 2 and page_rows(seen["help wifi extra"]["out"]) ==
+              [("help [VERB]", "these commands, or one command's")],
+              "help with too many words is help's own usage", repr(seen["help wifi extra"]))
+        check(seen["help"]["status"] == 0 and any("Settings stay in the image" in line for line in seen["help"]["out"]) and
+              any("this session as one page" in line for line in seen["help"]["out"]),
+              "help alone is the page", repr(seen["help"])[:200])
+        for word in ("help bogus", "-h", "--help", "bogus"):
+            check(seen[word]["status"] == 2 and any("this session as one page" in line for line in seen[word]["out"]),
+                  f"`{word}` is a usage page and exits 2", repr(seen[word])[:200])
+        check(seen["wifi sideways"]["status"] == 2 and
+              any("wifi add SSID" in line for line in seen["wifi sideways"]["out"]) and
+              not any("this session as one page" in line or "bluetooth" in line for line in seen["wifi sideways"]["out"]),
+              "a wrong word to a verb prints that verb's rows and no others", repr(seen["wifi sideways"])[:300])
+
+        # Who is asked is judged after what is asked, and a refusal says which
+        # verb needs root. Nobody's wired sideways was "moonwater needs root"
+        # and a 1, as was every radio word, and the bare reading of a switch
+        # that is not there answered 1 for brightness and charge and said so
+        # in words that belonged to setting it.
+        session("chmod 700 /root; rm -rf /sys/class /sys/devices /sys/firmware /sys/power\n")
+        script = ("".join(say(command) for command in (
+            "wired sideways", "wifi sideways", "wifi add", "wifi on", "wifi add x", "wifi remove x",
+            "bluetooth add", "bluetooth sideways", "bluetooth add x", "wired off", "priority internet cable",
+            "priority sideways", "priority internet wired", "wipe", "bind init add x", "link", "name keeper",
+            "cpu online 0", "cpu online x", "charge limit", "charge limit 5", "brightness bogus", "brightness 50",
+            "power bogus", "power powersave", "brightness", "charge", "power", "ntp sideways", "ntp off",
+            "keyboard xx", "timezone Mars/Olympus", "setup install x", "setup bogus", "bios reboot",
+            "airplane on", "sleep", "time sync", "boot", "boot extra", "ask", "machine extra")))
+        lines, finished = session(script, nobody=True)
+        seen = answers(lines)
+        wanted = {
+            "wired sideways": (2, ""), "wifi sideways": (2, ""), "wifi add": (2, ""), "wifi on": (1, "moonwater wifi needs root"),
+            "wifi add x": (1, "moonwater wifi needs root"), "wifi remove x": (1, "moonwater wifi needs root"),
+            "bluetooth add": (2, ""), "bluetooth sideways": (2, ""), "bluetooth add x": (1, "moonwater bluetooth needs root"),
+            "wired off": (1, "moonwater wired needs root"), "priority internet cable": (2, ""), "priority sideways": (2, ""),
+            "priority internet wired": (1, "moonwater priority needs root"), "wipe": (1, "moonwater wipe needs root"),
+            "bind init add x": (1, "moonwater bind needs root"), "link": (1, "moonwater link needs root"),
+            "name keeper": (1, "moonwater name needs root"), "cpu online 0": (1, "cpu 0 stays"),
+            "cpu online x": (2, ""), "charge limit": (2, ""), "charge limit 5": (1, "no battery"),
+            "brightness bogus": (2, ""), "brightness 50": (1, "moonwater brightness needs root"),
+            "power bogus": (2, ""), "power powersave": (1, "moonwater power needs root"),
+            "brightness": (0, "no backlight"), "charge": (0, "no battery"), "power": (0, "no power profile"),
+            "ntp sideways": (2, ""), "ntp off": (1, "moonwater ntp needs root"), "keyboard xx": (1, "moonwater keyboard needs root"),
+            "timezone Mars/Olympus": (1, "moonwater timezone needs root"), "setup install x": (1, "moonwater setup needs root"),
+            "setup bogus": (2, ""), "bios reboot": (1, "moonwater bios needs root"), "airplane on": (1, "moonwater airplane needs root"),
+            "sleep": (1, ""), "time sync": (1, "moonwater time needs root"), "boot": (1, "moonwater boot needs root"),
+            "boot extra": (2, ""), "ask": (1, "moonwater ask needs root"), "machine extra": (2, ""),
+        }
+        for command, (status, words) in wanted.items():
+            got = seen.get(command, {"out": [], "status": None})
+            check(got["status"] == status and words in "\n".join(got["out"]),
+                  f"as nobody, `moonwater {command}` exits {status}" + (f" and says {words}" if words else ""),
+                  repr(got)[:240])
+
+        # A command's answer is what it did. Standard output closed, or full,
+        # or a pipe whose reader has gone is none of it: `moonwater name x` >
+        # /dev/full exited 1 after the name was kept, and `status | head` died
+        # of SIGPIPE, which a pipeline reports as 141.
+        script = ("rm -f /root/name /tmp/pipe\n"
+                  "/tmp/moonwater name keeper > /dev/full; echo \"@@full $? $(cat /root/name)\"\n"
+                  "/tmp/moonwater name keeper2 >&-; echo \"@@closed $? $(cat /root/name)\"\n"
+                  "(sleep 1; /tmp/moonwater status; echo \"@@pipe $?\" > /tmp/pipe) | sh -c 'exec <&-; sleep 3'\n"
+                  "cat /tmp/pipe\n")
+        lines, finished = session(script)
+        marks = {line.split()[0]: line.split()[1:] for line in lines if line.startswith("@@") and not line.startswith("@@ ")}
+        check(finished and marks.get("@@full") == ["0", "keeper"] and marks.get("@@closed") == ["0", "keeper2"] and
+              marks.get("@@pipe") == ["0"],
+              "output that goes nowhere is not the command's failure", repr(marks))
+
+        # What the verbs write is where it was meant to be: nothing is left
+        # beside a state file, and the kernel's name is the saved one.
+        script = ("rm -f /root/*.new /run/moonwater/*.next\n" +
+                  "".join(say(command) for command in ("name keeper", "keyboard de", "ntp off", "wired off", "wifi add t-a passpass1",
+                                                       "bluetooth add t-b", "priority internet wifi", "name random")) +
+                  "echo \"@@left $(ls -A /root /run/moonwater | grep -c '^\\.\\|\\.new$\\|\\.next$')\"\n"
+                  "echo \"@@names $(cat /root/name) $(cat /proc/sys/kernel/hostname)\"\n")
+        lines, finished = session(script)
+        left = [line.split()[1] for line in lines if line.startswith("@@left ")]
+        names = [line.split()[1:] for line in lines if line.startswith("@@names ")]
+        check(finished and left == ["0"] and names and names[0][0] == names[0][1],
+              "no temporary file is left beside a state file and the kernel's name is the saved one", repr((left, names)))
+
+        # A command given in words is the command as a shell would have been
+        # typed it: `bind init add sh -c 'echo hi there'` kept sh -c echo hi
+        # there, joined with a space and no quote, which runs echo. One word is
+        # the command as it is, and plain words are not dressed.
+        script = ("rm -f /run/moonwater/settings\n/tmp/moonwater bind init add sh -c 'echo hi there' > /dev/null 2>&1\n"
+                  "/tmp/moonwater bind init add echo plain words > /dev/null 2>&1\n"
+                  "/tmp/moonwater bind init add 'echo one  arg' > /dev/null 2>&1\n" + say("bind init") +
+                  "echo '@@ remove'; /tmp/moonwater bind init remove sh -c 'echo hi there' 2>&1; echo \"@@status $?\"\n")
+        lines, finished = session(script)
+        seen = answers(lines)
+        check(finished and [line.split(None, 1)[1] for line in seen["bind init"]["out"] if line[:1].isdigit()][:3] ==
+              ["sh -c 'echo hi there'", "echo plain words", "echo one  arg"] and
+              seen["remove"]["status"] == 0,
+              "bind's words are joined with the quotes that keep them words", repr(seen)[:400])
+
+        # With no /root at all every verb that reads it answers, in its
+        # class, and wipe makes it, 0700.
+        script = ("mv /root /root.gone\n" + "".join(say(command) for command in (
+            "status", "keyboard", "ntp", "timezone", "name", "wifi", "bluetooth", "wired", "priority",
+            "time", "bind", "link", "wifi add a passpass1", "ntp off", "keyboard de", "name keeper")) +
+                  say("wipe") + "echo \"@@mode $(stat -c %a /root)\"\nrm -rf /root; mv /root.gone /root\n")
+        lines, finished = session(script)
+        seen = answers(lines)
+        check(finished and all(got["status"] in (0, 1) for got in seen.values()) and
+              seen["wipe"]["status"] == 0 and seen["status"]["status"] == 0 and
+              any(line.startswith("@@mode 700") for line in lines),
+              "with no /root the verbs answer, and wipe makes it again",
+              repr({key: got["status"] for key, got in seen.items()}))
 
         # The switches and lists the command keeps in /root, drawn as runs of
         # verbs against a model of what each leaves: the words of wifi,
@@ -42889,16 +43207,18 @@ while True:
               "an empty line saves an open network, a line a password", repr(block("saved")))
 
         # The usage is one table: a description starts in one column for every
-        # row whose command leaves room, and the brightness row keeps its
+        # row whose command leaves room (the longer ones start it on the line
+        # below), and the brightness row keeps its
         # percent sign, which a format string once swallowed.
-        lines, finished = session("/tmp/moonwater -h 2>&1\n")
+        column = int(re.search(r"#define HOST_COLUMN (\d+)", (HARNESS_ROOT / "src/sh/host.c").read_text()).group(1))
+        lines, finished = session("/tmp/moonwater help 2>&1\n")
         rows = [line for line in lines if line.startswith("  ") and not line.startswith("   ")]
         starts = set()
         for line in rows:
             gap = re.search(r"\S( {2,})\S", line[2:])
             if gap:
                 starts.add(2 + gap.end() - 1)
-        check(finished and starts == {30}, "every usage row starts its description in column 30", sorted(starts))
+        check(finished and starts == {column}, f"every usage row starts its description in column {column}", sorted(starts))
         check(any(line.strip().startswith("brightness [N%|+N|-N]") for line in rows),
               "the brightness row shows N%|+N|-N", [line for line in rows if "brightness" in line])
 

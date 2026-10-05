@@ -14,69 +14,81 @@ the whole system is meant to stay under 15 MB.
 what the machine's events do.
 
 ```sh
-moonwater                              the commands
-moonwater status                       this session as one page: build, disks, Canvas, binds, settings
-moonwater setup                        live or kept on a disk, and the installs found
-moonwater setup install DISK [removable]  erase DISK and install Moonwater on it
-moonwater setup update [DISK]          write this build over an install, keeping its data and settings
-moonwater setup use [DISK]             run this build with an install's /bowls, /root and /home
+moonwater status                       this session as one page
+moonwater help [VERB]                  these commands, or one command's
+moonwater setup                        where this session runs, and the installs found
+moonwater setup install DISK [removable]  erase DISK and put Moonwater on it
+                                       removable takes a disk that says it is
+moonwater setup update [DISK]          write this build over an install, keeping its data
+moonwater setup use [DISK]             run this build with an install's data
 moonwater setup live                   leave the disks alone this session
-moonwater wipe                         forget /home and extra /root; keep the machine
+moonwater wipe                         forget /home and /root, keep the machine
 
 moonwater bind                         the machine's events, and what each runs
 moonwater bind EVENT [COMMAND]         one event; empty puts the default back
 moonwater bind poweroff [COMMAND]      the power button [poweroff]
-moonwater bind canvas on|off [COMMAND] when the desktop starts or stops
+moonwater bind canvas on|off [COMMAND]  when the desktop starts or stops
 moonwater bind init                    what runs at every boot, with ids
-moonwater bind init add "command"      run a command at boot, once the disks are settled
-moonwater bind init remove ID|"command"
-moonwater bind init mount on|off       mount the data partition over /bowls, /root and /home [on]
+moonwater bind init add "command"      run a command at boot, once disks settle
+moonwater bind init remove ID|"command"  stop running one at boot
+moonwater bind init mount [on|off]     mount kept disks at boot [on]
 moonwater bind exit                    what runs at poweroff or reboot
 moonwater bind exit add "command"      run a command before the disks go read-only
-moonwater bind exit remove ID|"command"
+moonwater bind exit remove ID|"command"  stop running one at the stop
 
 moonwater canvas [on|off]              the desktop, and on which screens [on]
-moonwater canvas log|terminal          open the kernel log window, or a terminal
-moonwater bios [reboot]                whether firmware setup is on offer; reboot restarts into it (UEFI)
+moonwater canvas log|terminal          open the kernel log or a terminal
 moonwater airplane [on|off]            every radio at once
 moonwater brightness [N%|+N|-N]        the screen backlight
-moonwater power [performance|balanced|powersave]  platform profile and CPU governor; kept across boots
-moonwater cpu [boost|smt on|off]       turbo and SMT, kept across boots; cpu online|offline N for hotplug
-moonwater charge [limit N|off]         where the battery stops charging (20 to 100); kept across boots
+moonwater power [performance|balanced|powersave]  profile and CPU governor, kept across boots
+moonwater cpu [boost|smt on|off]       turbo and SMT, kept across boots
+moonwater cpu online|offline N         hotplug one processor
+moonwater charge [limit N|off]         where the battery stops charging, 20 to 100
 moonwater sleep | hibernate            suspend to RAM or to disk
-moonwater keyboard [LAYOUT]            us uk de se no dk fi fr es it [us]
-moonwater name [NEW|random]            what this machine is called; one is rolled at first boot, like space-wizard
+moonwater bios [reboot]                whether firmware setup is on offer; reboot goes
 
-moonwater wired [on|off]                the wired links, and which have carrier; off keeps them down across a reboot
-moonwater wifi                         the radio, saved networks and networks in range, or why there are none
-moonwater wifi on|off                  unblock or block wifi
-moonwater wifi add SSID [PASSWORD|-]   remember and join a network; asks at a terminal, - reads stdin
-moonwater wifi remove SSID             forget a saved network; leaves it if it is the joined one
-moonwater bluetooth [on|off]           the bluetooth radio and remembered devices
+moonwater wired [on|off]               the wired links; off keeps them down
+moonwater wifi [on|off]                the radio, saved networks and those in range
+moonwater wifi add SSID [PASSWORD|-]   remember a network and join it; asks for
+                                       the password, - reads it from stdin
+moonwater wifi remove SSID             forget a saved network, and leave it
+moonwater bluetooth [on|off]           the radio and the remembered devices
 moonwater bluetooth add NAME           remember a bluetooth device
-moonwater bluetooth remove NAME        forget a remembered bluetooth device
-moonwater priority internet [wired|wifi]  which link wins when both are up [wired]
+moonwater bluetooth remove NAME        forget a bluetooth device
+moonwater priority [internet [wired|wifi]]  which link wins when both are up [wired]
 
-moonwater time [sync]                  local time, UTC and NTP state; sync asks now
-moonwater timezone [auto|ZONE|list]    IANA name, country code, +1 or POSIX TZ string [auto]
+moonwater time [sync]                  the clock; sync sets it and the zone now
+moonwater timezone [ZONE|list]         IANA name, country, +1 or POSIX; manual
+moonwater timezone auto                from the network, one Cloudflare request
+                                       per network joined [auto]
 moonwater ntp [on|off]                 set the clock from the network [on]
-moonwater ntp server [NAME|auto]       who is asked first, a name or an address; auto is the pool and the names beside it [auto]
-moonwater ntp sampling [on|off]        five samples from each of three servers, the best agreeing one wins [on]
+moonwater ntp server [NAME|auto]       who is asked first: a name or address [auto]
+moonwater ntp sampling [on|off]        keep the lowest-delay sample of five [on]
 
-moonwater link                         who this machine is linked with and what each may do
-moonwater link pair [NAME]             make a code, like space-wizard abc-def, and wait for a machine to use it
-moonwater link NAME CODE               link to the machine called NAME, which is waiting on that code
-moonwater link NAME [COMMAND...]       a terminal on NAME, or one command with its output and status here
-moonwater link push NAME FILE PATH     a file to NAME, whole or not at all
-moonwater link pull NAME PATH FILE     a file from NAME
+moonwater keyboard [LAYOUT|list]       us uk gb de se sv no nb dk fi fr es it [us]
+moonwater name [NEW|random]            what this machine is called, like space-wizard
+
+moonwater link                         who this machine is linked with, and what each may do
+moonwater link pair [NAME]             a code, and wait for the other machine to use it
+moonwater link NAME CODE               link to the machine called NAME, which waits
+moonwater link NAME [COMMAND...]       a terminal on NAME, or one command with its status
+moonwater link push NAME FILE PATH     a file here to PATH there, whole or not at all
+moonwater link pull NAME PATH FILE     PATH there to a file here
 moonwater link log NAME                follow NAME's kernel log
-moonwater link add NAME KEY [HOST[:PORT]]   link by key, with no code
-moonwater link remove NAME
+moonwater link add NAME KEY [HOST[:PORT]]  link by key, with no code
+moonwater link remove NAME             stop knowing it
 moonwater link allow|deny NAME GRANT...  shell run log files (any file but the link's own)
-moonwater link group [NAME [SECRET] [allow GRANT...]]   machines on one network that link themselves
-moonwater link group leave NAME [forget]
-moonwater link on|off                  listen on udp 22348, kept across boots [off]
+moonwater link group [NAME [SECRET] [allow GRANT...]]  machines on one network that link themselves
+moonwater link group leave NAME [forget]  stop, and forget the group's key
+moonwater link on|off                  the listener, udp 22348, kept across boots [off]
 ```
+
+`moonwater` alone prints these, and `moonwater help VERB` one command's. A verb
+with no word after it says where its switch stands, to anybody; with one it
+changes it and needs root, and a word it does not take is a usage page (exit 2)
+and not a refusal (exit 1). The keyboard layouts `gb`, `sv` and `nb` are `uk`,
+`se` and `no` by their country's other codes. `boot`, `ask` and `machine` are
+init's and the first terminal's, started by them and not typed by hand.
 
 Commands given to `moonwater` run as root through the shell, as if typed.
 `bind init` runs in the background and keeps each command's output in
@@ -120,9 +132,8 @@ until the kernel reports the clock synchronised. NTP sampling takes five
 samples a query and keeps the one with the fastest round trip, RFC 5905's clock
 filter, so a queueing spike never sets the clock; it also asks three servers
 and believes the one with the least root distance among those whose answers
-agree, so one wrong server cannot set it either. A server named with
-`moonwater ntp server` (it is kept in `/root/ntp.server`) is believed on its
-own. The timezone is auto until set
+agree, so one wrong server cannot set it either. A server named in
+`/root/ntp.server` is believed on its own. The timezone is auto until set
 by hand: on each new network the machine makes one HTTPS request to Cloudflare
 and takes the zone it reports, at most once every three minutes. There is no
 zoneinfo directory: each of tzdata's 420 zones maps to the POSIX rule in its

@@ -45,43 +45,6 @@
 
 #include "service.c"
 
-static fn link_usage_write(writer out)
-{
-        string_format(out,
-                      TERM_BOLD "  link" TERM_RESET
-                      "                        " TERM_DIM "who this machine is linked with, and what each may do" TERM_RESET "\n"
-                      TERM_BOLD "  link pair [NAME]" TERM_RESET
-                      "            " TERM_DIM "a code, and wait for the other machine to use it" TERM_RESET "\n"
-                      TERM_BOLD "  link NAME CODE" TERM_RESET
-                      "              " TERM_DIM "link to the machine called NAME, which is waiting" TERM_RESET "\n"
-                      TERM_BOLD "  link NAME [COMMAND...]" TERM_RESET
-                      "      " TERM_DIM "a terminal on NAME, or one command with its status" TERM_RESET "\n"
-                      TERM_BOLD "  link push NAME FILE PATH" TERM_RESET
-                      "    " TERM_DIM "a file here to PATH there" TERM_RESET "\n"
-                      TERM_BOLD "  link pull NAME PATH FILE" TERM_RESET
-                      "    " TERM_DIM "PATH there to a file here" TERM_RESET "\n"
-                      TERM_BOLD "  link log NAME" TERM_RESET
-                      "               " TERM_DIM "follow NAME's kernel log" TERM_RESET "\n"
-                      TERM_BOLD "  link add NAME KEY [HOST[:PORT]]" TERM_RESET "\n"
-                      "                              " TERM_DIM "link by key, with no code" TERM_RESET "\n"
-                      TERM_BOLD "  link remove NAME" TERM_RESET
-                      "            " TERM_DIM "stop knowing it" TERM_RESET "\n"
-                      TERM_BOLD "  link allow|deny NAME GRANT..." TERM_RESET "\n"
-                      "                              " TERM_DIM "shell run log files (any file but the link's own)" TERM_RESET "\n"
-                      TERM_BOLD "  link group [NAME [SECRET] [allow GRANT...]]" TERM_RESET "\n"
-                      "                              " TERM_DIM "machines on one network that link themselves" TERM_RESET "\n"
-                      TERM_BOLD "  link group leave NAME [forget]" TERM_RESET "\n"
-                      TERM_BOLD "  link on|off" TERM_RESET
-                      "                 " TERM_DIM "the listener, udp 22348, kept across boots" TERM_RESET "\n");
-        log_flush();
-}
-
-static b32 link_usage(void)
-{
-        link_usage_write(log_error);
-        return 2;
-}
-
 static fn link_grants_text(p32 may, p8 address_to text, positive room)
 {
         text[0] = 0;
@@ -346,7 +309,7 @@ static b32 link_status(void)
 
         crypto_forget(address_of groups, sizeof groups);
         string_format(log, "\n");
-        link_usage_write(log);
+        host_rows_write(log, "link");
         return 0;
 }
 
@@ -670,7 +633,7 @@ static b32 link_group_join(string_address address_to words, positive count)
         if (at < count)
         {
                 if (!string_equals(words[at], "allow") || at + 1 == count)
-                        return link_usage();
+                        return host_usage();
                 may = link_grants_of(words + at + 1, count - at - 1,
                                      address_of good);
                 if (!good)
@@ -1222,18 +1185,10 @@ static b32 link_main(string_address address_to arguments, positive count)
         string_address verb = count > 2 ? arguments[2] : null;
         positive kind;
 
-        if (verb && (string_equals(verb, "-h") || string_equals(verb, "--help") ||
-                     string_equals(verb, "help")))
-        {
-                link_usage_write(log);
-                return 0;
-        }
-
         //      The key, the machines and the groups are root's files: for
         //      anyone else the page would say "nobody linked" of a machine
         //      that has a dozen.
-        if (!bowl_is_root())
-                return host_refuse("moonwater link needs root\n");
+        host_need_root();
 
         if (!verb)
                 return link_status();
@@ -1295,7 +1250,7 @@ static b32 link_main(string_address address_to arguments, positive count)
                         return count >= least[kind] && count <= most[kind]
                                        ? link_client_run(arguments[3], (p8)kind,
                                                          arguments + 4, count - 4)
-                                       : link_usage();
+                                       : host_usage();
         }
 
         //      A word that is none of those is a machine: its terminal, one
@@ -1333,7 +1288,7 @@ static b32 link_main(string_address address_to arguments, positive count)
                 return host_refuse("no machine is called %s: moonwater link pair "
                                    "on it, then moonwater link NAME CODE here\n",
                                    verb);
-        return link_usage();
+        return host_usage();
 }
 
 /*
