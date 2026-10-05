@@ -1897,6 +1897,7 @@ static host_install address_to host_census_booted(host_census address_to census,
 static b32 host_boot(void)
 {
         p8 running[HOST_BUILD_ROOM];
+        p8 verdict[HOST_NAME_ROOM + 16];
         host_census census;
         host_install address_to chosen = null;
         host_settings settings;
@@ -1905,6 +1906,20 @@ static b32 host_boot(void)
 
         host_state_ready();
         host_acquire();
+
+        /*      Boot settles a session once, and what it wrote is what the
+                terminals and the machine script have been waiting for. Run
+                by hand it would settle again, and with every command bound
+                to init running a second time. A second boot that was started
+                while the first was settling waited for it on the lock above,
+                and finds the verdict here. */
+        if (host_read_word(HOST_VERDICT, verdict, sizeof(verdict)) >= 0)
+        {
+                host_release();
+                return host_refuse("boot is init's, and has settled this session; "
+                                   "moonwater setup shows what it found\n");
+        }
+
         host_running_build(running, sizeof(running));
 
         /*      The settings the image booted with. A kernel started without

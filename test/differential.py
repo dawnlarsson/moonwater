@@ -42727,6 +42727,24 @@ while True:
                   any("Read-only file system" in line for line in seen[verb]["out"]),
                   f"`{verb}` with /root read-only says the kernel's reason and fails", repr(seen.get(verb)))
 
+        # moonwater boot is init's: it settles a session once, and what it
+        # wrote is what the terminals and the machine script wait on. By hand
+        # a second one settled again and put every command bound to init back
+        # to work; now it is refused, and the verdict is the first one's file.
+        script = ("rm -rf /run/moonwater\n" + say("boot") +
+                  "echo \"@@verdict $(cat /run/moonwater/verdict) $(stat -c %i /run/moonwater/verdict)\"\n" +
+                  "echo '@@ again'; timeout 20 /tmp/moonwater boot 2>&1; echo \"@@status $?\"\n"
+                  "echo \"@@verdict $(cat /run/moonwater/verdict) $(stat -c %i /run/moonwater/verdict)\"\n")
+        lines, finished = session(script)
+        seen = answers(lines)
+        verdicts = [line.split(maxsplit=1)[1] for line in lines if line.startswith("@@verdict ")]
+        check(finished and seen.get("boot", {}).get("status") == 0 and len(verdicts) == 2 and
+              verdicts[0].startswith("live ") and verdicts[0] == verdicts[1] and
+              seen.get("again", {}).get("status") == 1 and
+              any("settled this session" in line for line in seen.get("again", {}).get("out", [])),
+              "a second moonwater boot is refused and leaves the verdict as it was",
+              repr((seen.get("boot"), seen.get("again"), verdicts)))
+
         # The switches and lists the command keeps in /root, drawn as runs of
         # verbs against a model of what each leaves: the words of wifi,
         # wired and bluetooth, the internet preference, ntp and its sampling,
