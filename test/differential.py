@@ -43484,6 +43484,8 @@ static int host_starts(string_address text, string_address prefix)
 {
         return !strncmp((const char *)text, (const char *)prefix, strlen((const char *)prefix));
 }
+#define string_has_prefix(text, literal) \
+        (!strncmp((const char *)(text), literal, sizeof(literal) - 1))
 static void radio_internet_copy(void) { copied++; }
 static long radio_power(string_address path)
 {
@@ -60002,7 +60004,7 @@ static unsigned ended, polls, runs, opened, attaches, busy_left;
 static bipolar attach_error;
 static p64 sourced_at;
 static unsigned hook_named, marker_reads;
-static bipolar host_read_text(const char *path, p8 *into, positive room) {
+static bipolar host_read_word(const char *path, p8 *into, positive room) {
     (void)path; (void)room; marker_reads++;
     if (now_ns < sourced_at) return -2;
     into[0] = '1'; into[1] = 0;
@@ -69546,11 +69548,15 @@ def waterlink_script_scan(shim):
     import subprocess
     import tempfile
     command = (HARNESS_ROOT / "src/waterlink/command.c").read_text()
+    host = (HARNESS_ROOT / "src/sh/host.c").read_text()
     scan = src_slice(command, "static bool link_script_names_secret(",
                         "static b32 link_status(void)")
-    #   lib.util.c's, spelled as it is there: the length of the literal.
+    #   The scan uses both prefix tests: string_has_prefix, lib.util.c's,
+    #   spelled as it is there (the length of the literal), for the words it
+    #   looks for, and host_starts, as host.c has it, for the namespace.
     starts = ("#define string_has_prefix(text, literal) "
-              "(!string_compare_max((text), literal, sizeof(literal) - 1))\n")
+              "(!string_compare_max((text), literal, sizeof(literal) - 1))\n" +
+              src_slice(host, "static bool host_starts(", "/* The words a switch is set by"))
     driver = shim + r"""
 static b32 string_compare_max(const void *one, const void *two, positive size)
 {
