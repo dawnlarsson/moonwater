@@ -16,6 +16,11 @@
 #define NETWORK_TRY_AGAIN (-11)
 #define NETWORK_NANOSECONDS 1000000000
 
+/* How many datagrams a loop that waits for one answer may throw away before
+   it gives the answer up: a peer able to keep a socket readable must not buy
+   unbounded parsing and system calls inside one deadline. */
+#define NETWORK_DISCARD_MAX 64
+
 typedef struct
 {
         positive began;
@@ -115,6 +120,40 @@ static bipolar network_wait_writable_until(
     bipolar handle, const network_deadline address_to deadline)
 {
         return network_wait_until(handle, SYSTEM_POLL_WRITE, deadline);
+}
+
+/* What network_receive_next answers when the deadline went by with nothing to
+   read: no errno is as large as this. */
+#define NETWORK_SILENT (-4096)
+
+/* The next datagram to reach handle before the deadline, cut to room (the
+   length is what it was, MSG_TRUNC's way, so a longer one says so): that
+   length, NETWORK_SILENT when the deadline went by first, or the error that
+   ended the wait or the receive. One a signal cut is asked for again. A peer
+   is filled for the datagram, with its size, when asked for; sntp's, which
+   reads the stamps the kernel leaves beside a datagram, is its own. */
+static bipolar network_receive_next(
+    bipolar handle, p8 address_to into, positive room,
+    socket_address_internet address_to peer, p32 address_to peer_size,
+    const network_deadline address_to deadline)
+{
+        for (;;)
+        {
+                bipolar ready = network_wait_readable_until(handle, deadline);
+                bipolar got;
+
+                if (ready <= 0)
+                        return ready ? ready : NETWORK_SILENT;
+                if (peer)
+                {
+                        memory_fill(peer, 0, sizeof *peer);
+                        address_to peer_size = sizeof *peer;
+                }
+                got = socket_receive((b32)handle, into, room, MSG_TRUNC, peer,
+                                     peer_size);
+                if (got != NETWORK_INTERRUPTED)
+                        return got;
+        }
 }
 
 /* What is already queued, taken without waiting; an interrupted receive

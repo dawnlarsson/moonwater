@@ -53553,8 +53553,8 @@ static fn dns_policy_server(bipolar datagram, positive mode, b32 report,
                 if (mode == 6 || mode == 7)
                 {
                         p16 honest = network_load_16(reply);
-                        positive junk = mode == 6 ? DNS_DISCARD_MAX
-                                                  : DNS_DISCARD_MAX + 1;
+                        positive junk = mode == 6 ? NETWORK_DISCARD_MAX
+                                                  : NETWORK_DISCARD_MAX + 1;
 
                         network_store_16(reply, (p16)(honest ^ 0xffff));
                         for (positive i = 0; i < junk; i++)
@@ -66247,7 +66247,7 @@ static fn leasing_datagrams(void)
                            address_of deadline));
 
         network_store_32(packet + 4, 124);
-        for (positive at = 0; at < DHCP_DISCARD_MAX; at++)
+        for (positive at = 0; at < NETWORK_DISCARD_MAX; at++)
                 check("DHCP exact-budget wrong transaction queues",
                       socket_send((b32)sender, packet, 300, 0,
                                   address_of receiver_at,
@@ -66264,7 +66264,7 @@ static fn leasing_datagrams(void)
                            address_of deadline));
 
         network_store_32(packet + 4, 124);
-        for (positive at = 0; at <= DHCP_DISCARD_MAX; at++)
+        for (positive at = 0; at <= NETWORK_DISCARD_MAX; at++)
                 check("DHCP over-budget wrong transaction queues",
                       socket_send((b32)sender, packet, 300, 0,
                                   address_of receiver_at,
@@ -76406,6 +76406,61 @@ static fn wifi_password_checks(void)
         check("text that ends is read no further than its end",
               !memory_from_hex(into, "ab\0cd", 2) && into[0] == 0xab && into[1] == 0x77 &&
                   !memory_from_hex(into, "abc", 2));
+
+        {
+                //      RFC 4648 6: every length to the padding it takes.
+                static const string_address vector[] = {"", "Zg==", "Zm8=", "Zm9v", "Zm9vYg==",
+                                                        "Zm9vYmE=", "Zm9vYmFy"};
+                p8 text[16];
+                p8 back[8];
+                bool loose;
+                bool good = true;
+
+                for (positive count = 0; count < array_count(vector); count++)
+                {
+                        memory_fill(text, 0x55, sizeof(text));
+                        memory_into_base64(text, (const p8 address_to) "foobar", count);
+                        good = good && !string_compare(text, vector[count]) &&
+                               text[base64_length(count) + 1] == 0x55 &&
+                               memory_from_base64(back, vector[count], base64_length(count), count,
+                                                  address_of loose) &&
+                               !loose && !memory_compare(back, "foobar", count);
+                }
+                check("base64 is RFC 4648's, to the padding, and reads back", good);
+                check("a last character with bits past the bytes is read, and said",
+                      memory_from_base64(back, "Zh==", 4, 1, address_of loose) && loose &&
+                          back[0] == 'f' &&
+                          memory_from_base64(back, "Zm9=", 4, 2, address_of loose) && loose);
+                check("text that is not the base64 of that many bytes is not",
+                      !memory_from_base64(back, "Zg=", 3, 1, address_of loose) &&
+                          !memory_from_base64(back, "Zg==", 4, 2, address_of loose) &&
+                          !memory_from_base64(back, "Zm9v", 4, 2, address_of loose) &&
+                          !memory_from_base64(back, "Z=g=", 4, 1, address_of loose) &&
+                          !memory_from_base64(back, "Zg=A", 4, 1, address_of loose) &&
+                          !memory_from_base64(back, "Z-9v", 4, 3, address_of loose) &&
+                          !memory_from_base64(back, "Z\0" "9v", 4, 3, address_of loose));
+        }
+
+        {
+                p8 values[256];
+                p8 word[8];
+
+                alphabet_values(values, (string_address)BASE64_ALPHABET, 64);
+                check("an alphabet's bytes are their places, and the others none",
+                      values['A'] == 0 && values['Z'] == 25 && values['a'] == 26 &&
+                          values['9'] == 61 && values['+'] == 62 && values['/'] == 63 &&
+                          values['-'] == 255 && values['='] == 255 && values[0] == 255 &&
+                          values[255] == 255);
+                check("pieces that fit are one string, the first may be the place it goes",
+                      string_join(word, sizeof(word), "ab", "", "cde") &&
+                          !string_compare(word, "abcde") &&
+                          string_join(word, sizeof(word), word, "f") &&
+                          !string_compare(word, "abcdef") &&
+                          string_join(word, 7, "abc", "def") && !string_compare(word, "abcdef"));
+                check("a piece that does not fit is told, and what did is there",
+                      !string_join(word, 6, "abc", "def") && !string_compare(word, "abcde") &&
+                          !string_join(word, 3, "abc", "d") && !string_join(word, 4, "abcd", ""));
+        }
 }
 
 //      What the machine's own pass waits after a join that failed for the

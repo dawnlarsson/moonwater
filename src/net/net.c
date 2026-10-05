@@ -58,7 +58,6 @@
 #define NETLINK_HEADER 16
 #define NETLINK_DATAGRAM_MAX (16u * 1024u * 1024u)
 #define NETLINK_TRANSACTION_SECONDS 10
-#define NETLINK_DISCARD_MAX 64
 
 #define NLM_REQUEST 0x0001
 #define NLM_ACK 0x0004
@@ -700,7 +699,7 @@ static bipolar netlink_walk(b32 handle, netlink_buffer address_to request,
                         return -1;
                 if (turn.done)
                         return turn.status;
-                if (!turn.matched && discarded++ == NETLINK_DISCARD_MAX)
+                if (!turn.matched && discarded++ == NETWORK_DISCARD_MAX)
                         return -1;
         }
 }
@@ -1414,7 +1413,6 @@ static COLD bipolar netlink_leases_on(b32 handle,
 //      encoder needs more jumps than a name has labels.
 #define DNS_NAME_MAX 255
 #define DNS_POINTER_HOPS 127
-#define DNS_DISCARD_MAX 64
 //      Everything the caller may want to tell apart.
 #define DNS_OK 0
 #define DNS_NO_SERVER (-1)
@@ -2163,20 +2161,15 @@ static COLD bipolar dns_query_once(p32 server, p16 port, string_address name,
         {
                 positive available;
 
-                got = network_wait_readable_until(handle, address_of deadline);
+                got = network_receive_next(handle, reply, sizeof reply, null, null,
+                                           address_of deadline);
 
-                if (got <= 0)
+                if (got == NETWORK_SILENT)
                 {
-                        if (!got && edns)
+                        if (edns)
                                 failure = DNS_EDNS_SILENT;
                         goto failed;
                 }
-
-                got = socket_receive((b32)handle, reply, sizeof reply,
-                                     MSG_TRUNC, 0, 0);
-
-                if (got == NETWORK_INTERRUPTED)
-                        continue;
                 if (got < 0)
                 {
                         /* ICMP port unreachable arrives as ECONNREFUSED on
@@ -2199,7 +2192,7 @@ static COLD bipolar dns_query_once(p32 server, p16 port, string_address name,
                                 failure = DNS_CASE_FOLDED;
                                 goto failed;
                         }
-                        if (discarded++ == DNS_DISCARD_MAX)
+                        if (discarded++ == NETWORK_DISCARD_MAX)
                         {
                                 /* A peer able to keep this socket readable
                                    must not buy unbounded parse/syscall work
@@ -11168,7 +11161,6 @@ static bipolar http_fetch_to(string_address start, bipolar dest, bool check_cert
 
 #define DHCP_CLIENT_PORT 68
 #define DHCP_SERVER_PORT 67
-#define DHCP_DISCARD_MAX 64
 
 #define DHCP_HEAD 236
 #define DHCP_COOKIE 0x63825363
@@ -11805,31 +11797,19 @@ static COLD bool dhcp_receive(bipolar handle, p8 address_to packet, positive roo
                          socket_address_internet address_to accepted_peer,
                          const network_deadline address_to deadline)
 {
-        bipolar got;
         positive discarded = 0;
 
         for (;;)
         {
-                got = network_wait_readable_until(handle, deadline);
-
-                if (got <= 0)
-                        return false;
-
                 socket_address_internet peer;
-                p32 peer_size = sizeof peer;
+                p32 peer_size;
+                bipolar got = network_receive_next(handle, packet, room, address_of peer,
+                                                   address_of peer_size, deadline);
 
-                memory_fill(address_of peer, 0, sizeof peer);
-                got = socket_receive((b32)handle, packet, room, MSG_TRUNC,
-                                     address_of peer, address_of peer_size);
-
-                if (got == NETWORK_INTERRUPTED)
-                        continue;
                 if (got < 0)
                         return false;
-                if (!got)
-                        goto discard;
 
-                if ((positive)got <= room &&
+                if (got && (positive)got <= room &&
                     dhcp_peer_matches(address_of peer, peer_size,
                                       expected_peer, any_peer_host) &&
                     dhcp_read(packet, (positive)got, transaction, hardware,
@@ -11839,8 +11819,7 @@ static COLD bool dhcp_receive(bipolar handle, p8 address_to packet, positive roo
                                 *accepted_peer = peer;
                         return true;
                 }
-        discard:
-                if (discarded++ == DHCP_DISCARD_MAX)
+                if (discarded++ == NETWORK_DISCARD_MAX)
                         return false;
         }
 }
@@ -11868,7 +11847,7 @@ static COLD bipolar dhcp_complete(bipolar handle, p8 address_to packet,
                     (kind == DHCP_NAK ||
                      dhcp_lease_take(lease, address_of answer)))
                         return kind == DHCP_ACK ? DHCP_OK : DHCP_REFUSED;
-                else if (discarded++ == DHCP_DISCARD_MAX)
+                else if (discarded++ == NETWORK_DISCARD_MAX)
                         break;
 
         return DHCP_NO_OFFER;
@@ -11999,7 +11978,7 @@ static bipolar dhcp_ask(string_address device, p8 address_to hardware,
                 {
                         if (kind != DHCP_OFFER || !dhcp_lease_usable(lease))
                         {
-                                if (discarded++ == DHCP_DISCARD_MAX)
+                                if (discarded++ == NETWORK_DISCARD_MAX)
                                         break;
                                 continue;
                         }

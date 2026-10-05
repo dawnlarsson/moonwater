@@ -133,11 +133,6 @@ static fn checksum_modes_reset()
         checksum_base64_read = false;
 }
 
-static positive checksum_base64_length(positive bytes)
-{
-        return (bytes + 2) / 3 * 4;
-}
-
 /* A base64 digest whose last character carries bits past the digest is
    still a digest to coreutils, which compares spellings: it is read, and it
    can never match. */
@@ -147,42 +142,12 @@ static bool checksum_base64_loose;
 static bool checksum_base64_decode(string_address text, positive length,
                                    positive bytes, p8 address_to expected)
 {
-        static const p8 alphabet[] =
-            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        positive padding = (3 - bytes % 3) % 3;
-        positive made = 0;
-        positive bits = 0;
-        positive held = 0;
+        bool loose = false;
 
-        if (length != checksum_base64_length(bytes))
+        if (!memory_from_base64(expected, text, length, bytes, address_of loose))
                 return false;
-
-        for (positive at = 0; at < length; at++)
-        {
-                if (at >= length - padding)
-                {
-                        if (text[at] != '=')
-                                return false;
-                        continue;
-                }
-
-                string_address place = string_first_of((string_address)alphabet, text[at]);
-
-                if (!place || !text[at])
-                        return false;
-                held = held << 6 | (positive)(place - (string_address)alphabet);
-                bits += 6;
-                if (bits >= 8)
-                {
-                        bits -= 8;
-                        if (made < bytes)
-                                expected[made++] = (p8)(held >> bits);
-                        held &= ((positive)1 << bits) - 1;
-                }
-        }
-
-        checksum_base64_loose = held != 0;
-        return made == bytes;
+        checksum_base64_loose = loose;
+        return true;
 }
 
 /* The digest of a record, hex or (for cksum) base64, at its width. */
@@ -1130,7 +1095,7 @@ static bool checksum_line_parse(const checksum_algorithm address_to algorithm,
                                 width = token / 2;
                         else if (checksum_base64_read)
                                 for (positive bytes = 1; bytes <= 64 && !width; bytes++)
-                                        if (checksum_base64_length(bytes) == token &&
+                                        if (base64_length(bytes) == token &&
                                             (3 - bytes % 3) % 3 == paddings)
                                                 width = bytes;
 

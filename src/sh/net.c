@@ -1687,11 +1687,10 @@ static COLD bipolar net_dhcp_apart(string_address device, p8 address_to hardware
         bool renew = exchange == NET_DHCP_RENEW || exchange == NET_DHCP_REBIND;
         bool heard;
 
-        if (system_call_2(syscall(pipe2), (positive)ends, O_CLOEXEC) < 0)
+        bipolar child = system_child_fork(ends, O_CLOEXEC);
+
+        if (child < 0)
                 return DHCP_NO_SOCKET;
-
-        bipolar child = system_fork();
-
         if (child == 0)
         {
                 dhcp_apart = ends[1];
@@ -1707,7 +1706,6 @@ static COLD bipolar net_dhcp_apart(string_address device, p8 address_to hardware
                 system_call_1(syscall(exit_group), 0);
         }
 
-        system_close(ends[1]);
         //      dhcp_ask's twenty attempts can each wait out a DISCOVER
         //      and a REQUEST, 150 s in all, after a CSPRNG that may take
         //      a second; a renewal is its own wait, and a DECLINE is one
@@ -1715,8 +1713,7 @@ static COLD bipolar net_dhcp_apart(string_address device, p8 address_to hardware
         bool watching = exchange == NET_DHCP_DISCOVER && net_wake_watch >= 0;
         bipolar waited = -1;
 
-        heard = child > 0 &&
-                network_deadline_begin(address_of deadline,
+        heard = network_deadline_begin(address_of deadline,
                                        renew ? wait + 5
                                        : exchange == NET_DHCP_DECLINE ? 5
                                        : watching ? NET_DHCP_WATCH_SECONDS
@@ -1726,12 +1723,7 @@ static COLD bipolar net_dhcp_apart(string_address device, p8 address_to hardware
                      : network_wait_readable_until(ends[0], address_of deadline)) > 0 &&
                 system_read_retry((positive)ends[0], address_of answer,
                                   sizeof answer) == (bipolar)sizeof answer;
-        if (child > 0)
-        {
-                system_call_2(syscall(kill), (positive)child, SIGKILL);
-                system_call_4(syscall(wait4), (positive)child, 0, 0, 0);
-        }
-        system_close(ends[0]);
+        system_child_reap(child, ends[0], true);
 
         if (!heard)
         {

@@ -1765,10 +1765,8 @@ typedef struct
 
 static const encoding_codec encoding_codecs[] = {
     {null, 0, 0, 0, false, false},
-    {(string_address)"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/",
-     6, 3, 4, true, false},
-    {(string_address)"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_",
-     6, 3, 4, true, false},
+    {(string_address)BASE64_ALPHABET, 6, 3, 4, true, false},
+    {(string_address)BASE64URL_ALPHABET, 6, 3, 4, true, false},
     {(string_address)"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567",
      5, 5, 8, true, false},
     {(string_address)"0123456789ABCDEFGHIJKLMNOPQRSTUV",
@@ -1992,10 +1990,7 @@ static b32 encoding_decode(const encoding_codec address_to codec,
         bool padded = false;
         bool valid = true;
 
-        memory_fill(values, 255, sizeof(values));
-
-        for (positive value = 0; value < symbols; value++)
-                values[codec->alphabet[value]] = (p8)value;
+        alphabet_values(values, codec->alphabet, symbols);
 
         // Hexadecimal reads in either case, as GNU's base16 decoder does.
         if (codec->bits == 4)
@@ -2274,9 +2269,7 @@ static b32 z85_decode(bool ignore_garbage)
         positive made = 0;
         bool valid = true;
 
-        memory_fill(values, 255, sizeof(values));
-        for (positive at = 0; at < 85; at++)
-                values[z85_alphabet[at]] = (p8)at;
+        alphabet_values(values, (string_address)z85_alphabet, 85);
 
         while (valid && text_fill())
         {
@@ -3596,9 +3589,7 @@ static b32 base58_decode(bool ignore_garbage)
         positive ones = 0;
         bool valid = true;
 
-        memory_fill(values, 255, sizeof(values));
-        for (positive at = 0; at < 58; at++)
-                values[base58_alphabet[at]] = (p8)at;
+        alphabet_values(values, (string_address)base58_alphabet, 58);
 
         while (valid && text_fill())
         {

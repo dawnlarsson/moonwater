@@ -181,51 +181,24 @@ static bipolar link_decimal(string_address text)
 
 // Store --------------------------------------------------------------
 
-static const char link_alphabet[] =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
 /*
         A key as WireGuard writes one: 44 characters of base64, ten whole
-        groups and a last one of two bytes, padded. lib.c's codec does the
-        groups; the tail is one more group of the two bytes and a zero.
+        groups and a last one of two bytes, padded.
 */
 static fn link_key_text(p8 address_to key, p8 address_to text)
 {
-        p8 last[3] = {key[30], key[31], 0};
-
-        memory_encode_power2(text, key, 10, (string_address)link_alphabet, 6);
-        memory_encode_power2(text + 40, last, 1, (string_address)link_alphabet,
-                             6);
-        text[43] = '=';
-        text[44] = 0;
+        memory_into_base64(text, key, 32);
 }
 
+//      The last character carries two bits the key does not use; a text with
+//      them set is some other text.
 static bool link_key_parse(string_address text, p8 address_to key)
 {
-        static p8 values[256];
-        p8 quad[4];
-        p8 last[3];
+        bool loose;
 
-        if (!values[0])
-        {
-                memory_fill(values, 255, sizeof values);
-                for (positive at = 0; at < 64; at++)
-                        values[(p8)link_alphabet[at]] = (p8)at;
-        }
-        if (string_length(text) != 44 || text[43] != '=' ||
-            memory_decode_power2(key, text, 10, values, 6) != 10)
-                return false;
-
-        //      The last character carries two bits the key does not use; a
-        //      text with them set is some other text, and decodes them into
-        //      the third byte here.
-        memory_copy(quad, text + 40, 3);
-        quad[3] = 'A';
-        if (memory_decode_power2(last, quad, 1, values, 6) != 1 || last[2])
-                return false;
-        key[30] = last[0];
-        key[31] = last[1];
-        return true;
+        return memory_from_base64(key, text, string_length(text), 32,
+                                  address_of loose) &&
+               !loose;
 }
 
 /*

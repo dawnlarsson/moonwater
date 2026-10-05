@@ -1944,6 +1944,47 @@ static COLD bool kmsg_write(bipolar handle, const address_any text,
                                 KMSG_LEVEL_BYTES + length) ==
                KMSG_LEVEL_BYTES + length;
 }
+
+/*
+        A child that answers over a pipe, and the end of one that is no longer
+        wanted. Its work is the caller's: the DHCP exchange that waits for the
+        answer to arrive and the machine's clock query that is asked after
+        again in the loop both fork here and end there, and only how they
+        wait between differs.
+
+        In the child this returns 0 with the write end in ends[1] and the
+        read end closed; in the parent the child's pid, with the read end in
+        ends[0] and the write end closed. Negative with nothing left open when
+        there was no pipe or no child.
+*/
+static bipolar system_child_fork(b32 address_to ends, positive flags)
+{
+        bipolar pid;
+
+        if (system_pipe(ends, flags) < 0)
+                return -1;
+        pid = system_fork();
+        if (pid < 0)
+        {
+                system_close(ends[0]);
+                system_close(ends[1]);
+                return pid;
+        }
+        system_close(ends[pid ? 1 : 0]);
+        return pid;
+}
+
+/* The child ended (unless it has ended itself, which a pipe that read its
+   answer says), its pipe closed and its pid waited for. */
+static fn system_child_reap(bipolar pid, bipolar answer, bool force)
+{
+        positive status = 0;
+
+        if (force)
+                system_call_2(syscall(kill), (positive)pid, SIGKILL);
+        system_close(answer);
+        (void)system_wait4_retry(pid, address_of status, 0, null);
+}
 #endif
 
 /* The common moving byte store.  Naming the three words once also names the
@@ -2298,6 +2339,122 @@ failed:
         ({ __auto_type _byte_store = (store);                                \
            array_store_release(_byte_store->bytes, _byte_store->room,         \
                                _byte_store->used); })
+
+#ifndef KERNEL_MODE
+/* The pieces, in order, in room bytes at into, which may be the first of
+   them, and is then already in place and only added to: copying a string over
+   itself is what string_copy_bounded does not allow. False when they do not
+   all fit, and into then holds what did. One cut short is some other name, so
+   the answer is asked before it is opened. */
+static inline bool string_join_bounded(p8 address_to into, positive room,
+                                       string_address address_to pieces)
+{
+        if (pieces[0] != into &&
+            string_copy_bounded(into, pieces[0], room) >= room)
+                return false;
+        for (positive at = 1; pieces[at]; at++)
+                if (string_append_bounded(into, pieces[at], room) >= room)
+                        return false;
+        return true;
+}
+
+#define string_join(into, room, ...) \
+        string_join_bounded(into, room, (string_address[]){__VA_ARGS__, null})
+
+/*
+        base64, once. The letters and digits are the alphabet of RFC 4648
+        both of its spellings share; they differ in the last two symbols.
+        The text of a key, a digest or a stream is read and written from
+        these and from nothing retyped.
+*/
+#define BASE64_LETTERS \
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+#define BASE64_ALPHABET BASE64_LETTERS "+/"
+#define BASE64URL_ALPHABET BASE64_LETTERS "-_"
+
+/* What each byte stands for in an alphabet of symbols symbols: the index of
+   the symbol it is, and 255 for a byte that is none, which is the table
+   memory_decode_power2 reads. */
+static inline fn alphabet_values(p8 address_to values, string_address alphabet,
+                                 positive symbols)
+{
+        memory_fill(values, 255, 256);
+        for (positive at = 0; at < symbols; at++)
+                values[(p8)alphabet[at]] = (p8)at;
+}
+
+/* The characters of the padded base64 of bytes bytes. */
+static inline positive base64_length(positive bytes)
+{
+        return (bytes + 2) / 3 * 4;
+}
+
+/* The padded base64 of bytes bytes, written as base64_length(bytes)
+   characters and a terminator. */
+static inline fn memory_into_base64(p8 address_to text, const p8 address_to bytes,
+                                    positive count)
+{
+        positive whole = count / 3;
+        positive rest = count - whole * 3;
+
+        memory_encode_power2(text, (address_any)bytes, whole,
+                             (string_address)BASE64_ALPHABET, 6);
+        text += whole * 4;
+        if (rest)
+        {
+                p8 last[3] = {bytes[whole * 3], rest > 1 ? bytes[whole * 3 + 1] : 0, 0};
+                p8 quad[4];
+
+                memory_encode_power2(quad, last, 1, (string_address)BASE64_ALPHABET, 6);
+                for (positive at = 0; at < 4; at++)
+                        text[at] = at <= rest ? quad[at] : '=';
+                text += 4;
+        }
+        text[0] = end;
+}
+
+/* Whether text is the padded base64 of exactly bytes bytes, which are then
+   written to into. loose is whether its last character carries bits past
+   the bytes: the text is the bytes' all the same, and no encoder wrote it. */
+static inline bool memory_from_base64(p8 address_to into, string_address text,
+                                      positive length, positive bytes,
+                                      bool address_to loose)
+{
+        p8 values[256];
+        positive padding = (3 - bytes % 3) % 3;
+        positive made = 0;
+        positive bits = 0;
+        positive held = 0;
+
+        if (length != base64_length(bytes))
+                return false;
+
+        alphabet_values(values, (string_address)BASE64_ALPHABET, 64);
+        for (positive at = 0; at < length; at++)
+        {
+                if (at >= length - padding)
+                {
+                        if (text[at] != '=')
+                                return false;
+                        continue;
+                }
+                if (values[(p8)text[at]] == 255)
+                        return false;
+                held = held << 6 | values[(p8)text[at]];
+                bits += 6;
+                if (bits >= 8)
+                {
+                        bits -= 8;
+                        if (made < bytes)
+                                into[made++] = (p8)(held >> bits);
+                        held &= ((positive)1 << bits) - 1;
+                }
+        }
+
+        address_to loose = held != 0;
+        return made == bytes;
+}
+#endif
 
 /* What TIOCGWINSZ fills and TIOCSWINSZ reads. A kernel build has the
    kernel's own struct winsize and constants; a freestanding one has to

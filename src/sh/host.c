@@ -368,15 +368,8 @@ static b32 host_fail(string_address what, bipolar error)
         return 1;
 }
 
-/* Both halves must fit, or into is truncated and the answer says so. A left
-   that is into is already in place, and is only added to: copying a string over
-   itself is what string_copy_bounded does not allow. */
-static bool host_join(p8 address_to into, positive room, string_address left,
-                      string_address right)
-{
-        return (into == left || string_copy_bounded(into, left, room) < room) &&
-               string_append_bounded(into, right, room) < room;
-}
+/* Both halves must fit, or into is truncated and the answer says so. */
+#define host_join string_join
 
 static bool host_starts(string_address text, string_address prefix)
 {
@@ -7297,21 +7290,12 @@ static fn radio_hex4(p8 address_to into, p32 value)
         into[4] = end;
 }
 
-/* directory/name/leaf, or false if it does not fit. */
-static bool radio_sys_path(p8 address_to into, positive room, string_address directory,
-                           string_address name, string_address leaf)
-{
-        return host_join(into, room, directory, (string_address) "/") &&
-               string_append_bounded(into, name, room) < room &&
-               string_append_bounded(into, leaf, room) < room;
-}
-
 static bipolar radio_sys_read(string_address directory, string_address name,
                               string_address leaf, p8 address_to into, positive room)
 {
         p8 path[256];
 
-        if (!radio_sys_path(path, sizeof(path), directory, name, leaf))
+        if (!string_join(path, sizeof(path), directory, "/", name, leaf))
         {
                 into[0] = end;
                 return -1;
@@ -7329,8 +7313,7 @@ static fn radio_sys_driver(string_address directory, string_address name,
         positive from = 0;
 
         into[0] = end;
-        if (!radio_sys_path(path, sizeof(path), directory, name,
-                            (string_address) "/driver"))
+        if (!string_join(path, sizeof(path), directory, "/", name, (string_address) "/driver"))
                 return;
         got = system_read_link_at(AT_FDCWD, path, target, sizeof(target) - 1);
         if (got <= 0)
@@ -7431,8 +7414,7 @@ static bool radio_net_visit(string_address directory, string_address name,
 {
         p8 path[256];
 
-        if (radio_sys_path(path, sizeof(path), directory, name,
-                           (string_address) "/phy80211") &&
+        if (string_join(path, sizeof(path), directory, "/", name, (string_address) "/phy80211") &&
             system_access_at(AT_FDCWD, path, 0) >= 0)
         {
                 *(bool address_to)context = true;
@@ -9692,7 +9674,6 @@ static fn radio_reap(void)
 
 static fn radio_wifi_keep(void)
 {
-        radio_last last;
         bipolar lock;
         bipolar child;
         bool lost = false;
@@ -9927,14 +9908,6 @@ static b32 host_radio(string_address address_to arguments, positive count)
 #define TUNE_SYS_BATTERY "/sys/class/power_supply"
 #define TUNE_SYS_PROFILE "/sys/firmware/acpi/platform_profile"
 #define TUNE_SYS_POWER "/sys/power"
-
-static bool tune_path(p8 address_to into, positive room, string_address first,
-                      string_address second, string_address third)
-{
-        return string_copy_bounded(into, first, room) < room &&
-               string_append_bounded(into, second, room) < room &&
-               string_append_bounded(into, third, room) < room;
-}
 
 /* Whether a file can be opened to be read, closing it. */
 static bool tune_exists(string_address path)
@@ -10282,10 +10255,10 @@ static b32 tune_brightness(string_address address_to arguments, positive count)
         host_each_entry(TUNE_SYS_BACKLIGHT, tune_backlight_visit, address_of panel);
         string_copy(name, panel.name);
         if (!panel.rank ||
-            !tune_path(maximum_path, sizeof(maximum_path), TUNE_SYS_BACKLIGHT "/", (string_address)name,
-                       "/max_brightness") ||
-            !tune_path(current_path, sizeof(current_path), TUNE_SYS_BACKLIGHT "/", (string_address)name,
-                       "/brightness") ||
+            !string_join(maximum_path, sizeof(maximum_path), TUNE_SYS_BACKLIGHT "/",
+                         (string_address)name, "/max_brightness") ||
+            !string_join(current_path, sizeof(current_path), TUNE_SYS_BACKLIGHT "/",
+                         (string_address)name, "/brightness") ||
             !tune_number(maximum_path, address_of maximum) || !maximum ||
             !tune_number(current_path, address_of current))
         {
@@ -10337,8 +10310,8 @@ static bool tune_battery_visit(string_address directory, string_address name, ad
         if (tune_says(directory, name, "/type", "Battery") &&
             !tune_says(directory, name, "/scope", "Device"))
         {
-                bool limited = radio_sys_path(path, sizeof(path), directory, name,
-                                              "/charge_control_end_threshold") &&
+                bool limited = string_join(path, sizeof(path), directory, "/", name,
+                                           "/charge_control_end_threshold") &&
                                tune_exists(path);
 
                 tune_choose((tune_choice address_to)context, name, limited ? 2 : 1);
@@ -10363,8 +10336,8 @@ static bipolar tune_charge_apply(string_address percent_text)
 
         if (!tune_battery(name, sizeof(name)))
                 return failed;
-        if (!tune_path(path, sizeof(path), TUNE_SYS_BATTERY "/", (string_address)name,
-                       "/charge_control_end_threshold"))
+        if (!string_join(path, sizeof(path), TUNE_SYS_BATTERY "/", (string_address)name,
+                         "/charge_control_end_threshold"))
                 return -ERROR_INVALID;
         return tune_write(path, percent_text);
 }
@@ -10396,13 +10369,15 @@ static b32 tune_charge(string_address address_to arguments, positive count)
 
         if (count == 2)
         {
-                have_limit = tune_path(path, sizeof(path), TUNE_SYS_BATTERY "/", (string_address)name,
-                                       "/charge_control_end_threshold") &&
+                have_limit = string_join(path, sizeof(path), TUNE_SYS_BATTERY "/",
+                                         (string_address)name, "/charge_control_end_threshold") &&
                              tune_number(path, address_of limit);
-                if (tune_path(path, sizeof(path), TUNE_SYS_BATTERY "/", (string_address)name, "/capacity"))
+                if (string_join(path, sizeof(path), TUNE_SYS_BATTERY "/", (string_address)name,
+                                "/capacity"))
                         (void)tune_number(path, address_of capacity);
                 status[0] = end;
-                if (tune_path(path, sizeof(path), TUNE_SYS_BATTERY "/", (string_address)name, "/status"))
+                if (string_join(path, sizeof(path), TUNE_SYS_BATTERY "/", (string_address)name,
+                                "/status"))
                         (void)tune_word(path, status, sizeof(status));
                 string_format(log, host_label "battery %p%%, %s", capacity, (string_address)status);
                 if (have_limit)
@@ -10460,19 +10435,19 @@ static bool tune_profile_visit(string_address directory, string_address name, ad
         p8 policy[160];
 
         if (!tune_is_cpu(name) ||
-            !tune_path(policy, sizeof(policy), directory, "/", name) ||
+            !string_join(policy, sizeof(policy), directory, "/", name) ||
             string_append_bounded(policy, "/cpufreq/", sizeof(policy)) >= sizeof(policy))
                 return true;
-        if (profile->governor && tune_path(path, sizeof(path), (string_address)policy,
-                                           "scaling_available_governors", "") &&
+        if (profile->governor && string_join(path, sizeof(path), (string_address)policy,
+                                             "scaling_available_governors") &&
             tune_lists(path, profile->governor) &&
-            tune_path(path, sizeof(path), (string_address)policy, "scaling_governor", ""))
+            string_join(path, sizeof(path), (string_address)policy, "scaling_governor"))
                 profile->written += tune_write(path, profile->governor) >= 0;
-        if (profile->preference && tune_path(path, sizeof(path), (string_address)policy,
-                                             "energy_performance_available_preferences", "") &&
+        if (profile->preference && string_join(path, sizeof(path), (string_address)policy,
+                                               "energy_performance_available_preferences") &&
             tune_lists(path, profile->preference) &&
-            tune_path(path, sizeof(path), (string_address)policy,
-                      "energy_performance_preference", ""))
+            string_join(path, sizeof(path), (string_address)policy,
+                        "energy_performance_preference"))
                 profile->written += tune_write(path, profile->preference) >= 0;
         return true;
 }
@@ -10580,7 +10555,8 @@ static bool tune_online_visit(string_address directory, string_address name, add
         p8 word[4];
 
         if (tune_is_cpu(name))
-                *(positive address_to)context += !tune_path(path, sizeof(path), directory, "/", name) ||
+                *(positive address_to)context += !string_join(path, sizeof(path), directory, "/",
+                                                              name) ||
                                                  string_append_bounded(path, "/online", sizeof(path)) >= sizeof(path) ||
                                                  !tune_word(path, word, sizeof(word)) || word[0] == '1';
         return true;
@@ -10650,7 +10626,8 @@ static b32 tune_cpu(string_address address_to arguments, positive count)
                 bipolar failed;
 
                 positive_into_string(text, number);
-                failed = tune_path(path, sizeof(path), TUNE_SYS_CPU "/cpu", (string_address)text, "/online")
+                failed = string_join(path, sizeof(path), TUNE_SYS_CPU "/cpu", (string_address)text,
+                                     "/online")
                              ? tune_write(path, string_equals(arguments[2], "online") ? "1" : "0")
                              : -ENOENT;
                 if (failed == -ENOENT)
@@ -10683,11 +10660,13 @@ static bool tune_usb_keyboard(string_address bus, string_address name)
                 p8 tail[40];
                 p8 number[4] = {(p8)('0' + interface), 0, 0, 0};
 
-                if (!tune_path(tail, sizeof(tail), "/", name, ":1.") ||
+                if (!string_join(tail, sizeof(tail), "/", name, ":1.") ||
                     string_append_bounded(tail, (string_address)number, sizeof(tail)) >= sizeof(tail) ||
-                    !tune_path(path, sizeof(path), bus, (string_address)tail, "/bInterfaceClass") ||
+                    !string_join(path, sizeof(path), bus, (string_address)tail,
+                                 "/bInterfaceClass") ||
                     !tune_word(path, word, sizeof(word)) || !string_equals((string_address)word, "03") ||
-                    !tune_path(path, sizeof(path), bus, (string_address)tail, "/bInterfaceProtocol") ||
+                    !string_join(path, sizeof(path), bus, (string_address)tail,
+                                 "/bInterfaceProtocol") ||
                     !tune_word(path, word, sizeof(word)) || !string_equals((string_address)word, "01"))
                         continue;
                 return true;
@@ -10704,7 +10683,7 @@ static bool tune_wake_visit(string_address directory, string_address name, addre
         //      An interface's own name, 1-2:1.0, has no wakeup file.
         if (*(bool address_to)context && (string_first_of(name, ':') || !tune_usb_keyboard(directory, name)))
                 return true;
-        if (!tune_path(path, sizeof(path), directory, "/", name) ||
+        if (!string_join(path, sizeof(path), directory, "/", name) ||
             string_append_bounded(path, "/power/wakeup", sizeof(path)) >= sizeof(path))
                 return true;
         if (tune_word(path, word, sizeof(word)) && string_equals((string_address)word, "disabled") &&
@@ -10744,7 +10723,7 @@ static bool tune_source_visit(string_address directory, string_address name, add
         if (sources->kept == TUNE_WAKE_MOST || string_length(name) >= sizeof(source->name))
                 return true;
         string_copy(source->name, name);
-        if (!radio_sys_path(path, sizeof(path), directory, name, "/event_count") ||
+        if (!string_join(path, sizeof(path), directory, "/", name, "/event_count") ||
             !tune_number(path, address_of source->count))
                 source->count = 0;
         sources->kept++;
@@ -10781,7 +10760,8 @@ static fn tune_wake_report(tune_sources address_to before, p8 address_to text)
                                 was = before->source[then].count;
                 if (after.source[at].count == was)
                         continue;
-                if (!radio_sys_path(path, sizeof(path), TUNE_WAKE_CLASS, after.source[at].name, "/name") ||
+                if (!string_join(path, sizeof(path), TUNE_WAKE_CLASS, "/", after.source[at].name,
+                                 "/name") ||
                     !tune_word(path, label, sizeof(label)))
                         string_copy_bounded(label, after.source[at].name, sizeof(label));
                 string_append_bounded(text, " ", TUNE_LOG_ROOM);
@@ -10880,7 +10860,7 @@ static fn tune_sleep_stats(p8 address_to text)
                 p8 number[24];
                 positive value = 0;
 
-                if (!tune_path(path, sizeof(path), TUNE_SYS_POWER "/suspend_stats/", names[at], "") ||
+                if (!string_join(path, sizeof(path), TUNE_SYS_POWER "/suspend_stats/", names[at]) ||
                     !tune_number(path, address_of value))
                         continue;
                 positive_into_string(number, value);
@@ -10916,7 +10896,7 @@ static bool tune_light_visit(string_address directory, string_address name, addr
         if (lights->kept == TUNE_BACKLIGHTS || string_length(name) >= sizeof(light->name))
                 return true;
         string_copy(light->name, name);
-        if (!radio_sys_path(path, sizeof(path), directory, name, "/brightness") ||
+        if (!string_join(path, sizeof(path), directory, "/", name, "/brightness") ||
             !tune_number(path, address_of light->level))
                 light->level = TUNE_NO_LEVEL;
         lights->kept++;
@@ -10947,12 +10927,12 @@ static fn tune_backlight_restore(tune_lights address_to lights)
                 p8 path[160];
                 positive blank = 0;
 
-                if (radio_sys_path(path, sizeof(path), TUNE_SYS_BACKLIGHT, name, "/bl_power") &&
+                if (string_join(path, sizeof(path), TUNE_SYS_BACKLIGHT, "/", name, "/bl_power") &&
                     tune_number(path, address_of blank) && blank &&
                     tune_write(path, "0") >= 0)
                         host_say(log, host_label "backlight %s was blanked, unblanked\n", name);
                 if (lights->light[at].level == TUNE_NO_LEVEL ||
-                    !radio_sys_path(path, sizeof(path), TUNE_SYS_BACKLIGHT, name, "/brightness"))
+                    !string_join(path, sizeof(path), TUNE_SYS_BACKLIGHT, "/", name, "/brightness"))
                         continue;
                 //      Written even when the file already says so: it is the value
                 //      the class device last stored, not what the panel is doing.
@@ -11222,7 +11202,6 @@ static b32 tune_hibernate_verb(string_address address_to arguments, positive cou
 #define SNTP_SECONDS 2
 #define SNTP_SAMPLES 5
 #define SNTP_SERVERS 3
-#define SNTP_DISCARD_MAX 64
 #define SNTP_UNIX 2208988800u
 #define SNTP_LI_VN_MODE 0x23
 #define SNTP_NANOSECONDS 1000000000ull
@@ -12418,13 +12397,13 @@ static HOT bipolar sntp_exchange(b32 handle,
                                 the deadline ran out.
                         */
                         (void)sntp_transmit_stamp(handle, mine, spare);
-                        if (discarded++ == SNTP_DISCARD_MAX)
+                        if (discarded++ == NETWORK_DISCARD_MAX)
                                 return SNTP_NO_REPLY;
                         continue;
                 }
                 if_rare (received < SNTP_PACKET || (MOONWATER_STRICT >= STRICT_TIGHT && received != SNTP_PACKET))
                 {
-                        if (discarded++ == SNTP_DISCARD_MAX)
+                        if (discarded++ == NETWORK_DISCARD_MAX)
                                 return SNTP_NO_REPLY;
                         continue;
                 }
@@ -12433,7 +12412,7 @@ static HOT bipolar sntp_exchange(b32 handle,
                                             most, into);
                 if_rare (verdict == SNTP_NO_REPLY)
                 {
-                        if (discarded++ == SNTP_DISCARD_MAX)
+                        if (discarded++ == NETWORK_DISCARD_MAX)
                                 return SNTP_NO_REPLY;
                         continue;
                 }
@@ -12595,32 +12574,21 @@ typedef struct
 static bipolar locale_child_fork(locale_child address_to child)
 {
         b32 ends[2];
-        bipolar pid;
+        bipolar pid = system_child_fork(ends, O_CLOEXEC | O_NONBLOCK);
 
-        if (system_pipe(ends, O_CLOEXEC | O_NONBLOCK) < 0)
-                return -1;
-        pid = system_fork();
         if (pid < 0)
-        {
-                system_close(ends[0]);
-                system_close(ends[1]);
                 return pid;
-        }
         if (!pid)
         {
-                positive keep = (positive)ends[1];
-
-                system_close(ends[0]);
                 child->pid = 0;
                 child->answer = ends[1];
                 //      Nothing of the machine process stays open in it: a copy
                 //      of a descriptor of its lives as long as the query does,
                 //      and the machine's attachment on /dev/spark once lived
                 //      with it.
-                (void)descriptors_close_except(3, (p32)keep, descriptors_none);
+                (void)descriptors_close_except(3, (p32)ends[1], descriptors_none);
                 return 0;
         }
-        system_close(ends[1]);
         child->pid = pid;
         child->answer = ends[0];
         return pid;
@@ -12636,13 +12604,9 @@ static DEAD_END fn locale_child_end(locale_child address_to child, p8 code)
 //      A query nobody wants any more, ended and waited for.
 static fn locale_child_stop(locale_child address_to child)
 {
-        positive status = 0;
-
         if (child->pid <= 0)
                 return;
-        system_call_2(syscall(kill), (positive)child->pid, SIGKILL);
-        system_close(child->answer);
-        (void)system_wait4_retry(child->pid, address_of status, 0, null);
+        system_child_reap(child->pid, child->answer, true);
         child->pid = 0;
         child->answer = -1;
 }
@@ -12652,7 +12616,6 @@ static fn locale_child_stop(locale_child address_to child)
 static bipolar locale_child_poll(locale_child address_to child)
 {
         p8 code = 1;
-        positive status = 0;
         bipolar got;
 
         if (child->pid <= 0)
@@ -12662,10 +12625,7 @@ static bipolar locale_child_poll(locale_child address_to child)
                 return LOCALE_CHILD_RUNNING;
         //      The byte or the end of file says it is done; any other
         //      answer of read says nothing, and is not waited for.
-        if (got < 0)
-                system_call_2(syscall(kill), (positive)child->pid, SIGKILL);
-        system_close(child->answer);
-        (void)system_wait4_retry(child->pid, address_of status, 0, null);
+        system_child_reap(child->pid, child->answer, got < 0);
         child->pid = 0;
         child->answer = -1;
         return got == 1 ? code : 1;
@@ -15080,7 +15040,6 @@ static b32 host_locale(string_address address_to arguments, positive count)
         host_need_root();
         return locale_keyboard_set(word);
 }
-
 
 /*
         Bound events, and the init and exit lists, as one verb.
