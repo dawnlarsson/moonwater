@@ -301,8 +301,9 @@ static bipolar host_read_state(string_address path, p8 address_to into,
         return file_slurp_regular_at(AT_FDCWD, path, into, capacity, O_NOFOLLOW);
 }
 
-/* A state word as host_read_state reads it, without its newline or the blanks
-   after it; negative, and empty, when the file is not there or not a plain one. */
+/* A state word as host_read_state reads it, without its line end or the blanks
+   after it (a file edited with a CRLF is the word it says); negative, and empty,
+   when the file is not there or not a plain one. */
 static bipolar host_read_word(string_address path, p8 address_to into, positive room)
 {
         bipolar got = host_read_state(path, into, room);
@@ -312,7 +313,8 @@ static bipolar host_read_word(string_address path, p8 address_to into, positive 
                 into[0] = end;
                 return got;
         }
-        while (got > 0 && (into[got - 1] == '\n' || into[got - 1] == ' '))
+        while (got > 0 && (into[got - 1] == '\n' || into[got - 1] == '\r' ||
+                           into[got - 1] == ' '))
                 into[--got] = end;
         return got;
 }
@@ -11738,21 +11740,11 @@ static COLD bipolar sntp_query_at(p32 server, bool filter, bipolar most,
 static COLD bipolar sntp_query(string_address name, bool filter, bipolar most,
                                sntp_sample address_to answer)
 {
-        bipolar numeric;
-        p32 host = 0;
-        bipolar found;
+        //      The name or the address as the HTTP client takes it, which is
+        //      the one place a host is looked up.
+        p32 host = name && name[0] ? http_lookup(name) : 0;
 
-        if (!name || !name[0])
-                return SNTP_NO_SERVER;
-        numeric = string_to_host(name);
-        if (numeric >= 0)
-                return sntp_query_at((p32)numeric, filter, most, answer);
-
-        found = dns_resolve_any((string_address) "/etc/resolv.conf", name,
-                                address_of host, SNTP_SECONDS);
-        if (found != DNS_OK)
-                return SNTP_NO_SERVER;
-        return sntp_query_at(host, filter, most, answer);
+        return host ? sntp_query_at(host, filter, most, answer) : SNTP_NO_SERVER;
 }
 
 #endif
@@ -11765,6 +11757,7 @@ static COLD bipolar sntp_query(string_address name, bool filter, bipolar most,
 #define LOCALE_NTP_SAMPLING_PATH "/root/ntp.sampling"
 #define LOCALE_KEYBOARD_PATH "/root/keyboard"
 #define LOCALE_NTP_DEFAULT_SERVER "pool.ntp.org"
+#define LOCALE_NTP_SERVER_ROOM 80
 #define LOCALE_NTP_RETRY_LEAST 1
 #define LOCALE_NTP_RETRY_MOST 900
 #define LOCALE_NTP_AGAIN 1800
@@ -11912,6 +11905,33 @@ static bipolar locale_child_poll(locale_child address_to child)
         return got == 1 ? code : 1;
 }
 
+//      A query forked to run task, whose answer is the byte it ends with: the
+//      child never comes back from here. False when there was no child to
+//      make, which the caller waits out as it does a query that failed.
+typedef p8 (*locale_task)(address_any context);
+
+static bool locale_child_run(locale_child address_to child, locale_task task,
+                             address_any context)
+{
+        bipolar forked = locale_child_fork(child);
+
+        if (!forked)
+                locale_child_end(child, task(context));
+        return forked > 0;
+}
+
+//      Seconds from now, in the boot clock's nanoseconds.
+static p64 locale_after(p64 now, positive seconds)
+{
+        return now + (p64)seconds * SNTP_NANOSECONDS;
+}
+
+//      A wait doubled, to at most the longest it is allowed.
+static positive locale_doubled(positive wait, positive most)
+{
+        return wait * 2 < most ? wait * 2 : most;
+}
+
 static p64 locale_ntp_next;
 static positive locale_ntp_retry = LOCALE_NTP_RETRY_LEAST;
 /*
@@ -11925,40 +11945,46 @@ static p64 locale_ntp_synced;
 static positive locale_ntp_every = LOCALE_NTP_AGAIN_FIRST;
 static locale_child locale_ntp_child = {0, -1};
 
-static fn locale_ntp_keep(bool online);
+static fn locale_ntp_keep(bool online, bool synced, p64 now);
 static bipolar locale_ntp_apply(bool by_hand);
 
 //      What the last answer moved the clock by, and who gave it, for the
 //      person who asked by hand. The scheduled queries run in a child and
 //      nobody reads these there.
 static bipolar locale_ntp_moved_ns;
-static p8 locale_ntp_answered[80];
+static p8 locale_ntp_answered[LOCALE_NTP_SERVER_ROOM];
 
-//      A word from /root, read as state is: a FIFO or a link planted at the
-//      name on the data partition is no word, and cannot stop the command.
-static fn locale_word(string_address path, p8 address_to into, positive room)
+/*
+        What a setting says to a caller who cannot read it. /root is root's,
+        and what a machine nobody has told anything answers -- ntp on, UTC,
+        the layout us -- is a fact about that machine and not about a caller
+        who could not look: it says so instead.
+*/
+#define LOCALE_NEEDS_ROOT "(needs root)"
+
+static bool locale_readable(string_address path, p8 address_to into,
+                            positive room)
 {
-        bipolar got = host_read_state(path, into, room);
-        positive length;
+        bipolar got = host_read_word(path, into, room);
 
-        if (got < 0)
-        {
-                into[0] = end;
-                return;
-        }
-        length = string_length(into);
-        while (length && (into[length - 1] == '\n' || into[length - 1] == '\r'))
-                into[--length] = end;
+        return got != -EACCES && got != -EPERM;
+}
+
+//      A switch as it is said: on with nothing set, and whatever else it
+//      holds is off.
+static string_address locale_switch_say(string_address path)
+{
+        p8 word[16];
+
+        if (!locale_readable(path, word, sizeof(word)))
+                return (string_address)LOCALE_NEEDS_ROOT;
+        return !word[0] || string_equals(word, "on") ? (string_address) "on"
+                                                     : (string_address) "off";
 }
 
 static bool locale_switch_on(string_address path)
 {
-        p8 word[16];
-
-        locale_word(path, word, sizeof(word));
-        if (!word[0])
-                return true;
-        return string_equals(word, "on");
+        return !string_equals(locale_switch_say(path), "off");
 }
 
 static bool locale_ntp_wanted(void)
@@ -12120,6 +12146,15 @@ static fn locale_zone_title(string_address zone, p8 address_to into,
                                       room);
 }
 
+//      The zone in force is the one the machine keeps: a TZ in the caller's
+//      environment (sudo's env_keep, ssh's AcceptEnv) is the caller's own, and
+//      read here it set the before and after of a change, and the offset the
+//      kernel is told, to a zone nobody chose for the machine.
+static fn locale_zone_own(void)
+{
+        (void)unsetenv((string_address) "TZ");
+}
+
 //      The wall clock now, in the zone in force, with its abbreviation.
 static fn locale_zone_moment(p8 address_to into, positive room)
 {
@@ -12147,10 +12182,10 @@ static fn locale_zone_mode(p8 address_to into, positive room)
 {
         p8 zone[80];
 
-        locale_word(LOCALE_ZONE_MODE_PATH, into, room);
+        host_read_word(LOCALE_ZONE_MODE_PATH, into, room);
         if (into[0])
                 return;
-        locale_word(CLOCK_ZONE_PATH, zone, sizeof(zone));
+        host_read_word(CLOCK_ZONE_PATH, zone, sizeof(zone));
         if (zone[0])
                 string_copy_bounded(into, "manual", room);
 }
@@ -12183,16 +12218,31 @@ static fn locale_zone_how(p8 address_to into, positive room)
                                     room);
 }
 
-static b32 locale_zone_status(void)
+//      The zone as it is shown and how it came to be, or false when /root is
+//      not the caller's to read.
+static bool locale_zone_read(p8 address_to title, positive title_room,
+                             p8 address_to how, positive how_room)
 {
         p8 zone[80];
+
+        if (!locale_readable(CLOCK_ZONE_PATH, zone, sizeof(zone)))
+                return false;
+        locale_zone_title(zone, title, title_room);
+        locale_zone_how(how, how_room);
+        return true;
+}
+
+static b32 locale_zone_status(void)
+{
         p8 title[128];
         p8 how[48];
         p8 when[48];
 
-        locale_word(CLOCK_ZONE_PATH, zone, sizeof(zone));
-        locale_zone_title(zone, title, sizeof(title));
-        locale_zone_how(how, sizeof(how));
+        if (!locale_zone_read(title, sizeof(title), how, sizeof(how)))
+        {
+                host_say(log, host_label "timezone " LOCALE_NEEDS_ROOT "\n");
+                return 0;
+        }
         locale_zone_moment(when, sizeof(when));
         string_format(log, host_label "timezone %s " TERM_DIM "%s" TERM_RESET
                                       "\n", title, how);
@@ -12323,22 +12373,22 @@ static bipolar locale_zone_write(string_address zone, string_address mode,
                                  bool by_hand)
 {
         bipolar lock = host_lock(LOCALE_LOCK_PATH, true);
-        bipolar failed;
+        bool manual = host_starts(mode, "manual");
+        bipolar failed = 0;
 
         if (lock < 0)
                 return lock;
         if (!by_hand && locale_zone_manual())
                 failed = -EBUSY;
-        else if (host_starts(mode, "manual"))
-        {
-                failed = radio_write_word(LOCALE_ZONE_MODE_PATH, mode);
-                if (failed >= 0)
-                        failed = radio_write_word(CLOCK_ZONE_PATH, zone);
-        }
         else
         {
-                failed = radio_write_word(CLOCK_ZONE_PATH, zone);
-                if (failed >= 0)
+                if (manual)
+                        failed = radio_write_word(LOCALE_ZONE_MODE_PATH, mode);
+                //      No zone is the mode alone: auto asked of a zone that
+                //      was typed keeps the zone until the network names one.
+                if (failed >= 0 && zone)
+                        failed = radio_write_word(CLOCK_ZONE_PATH, zone);
+                if (failed >= 0 && !manual)
                         failed = radio_write_word(LOCALE_ZONE_MODE_PATH, mode);
         }
         radio_unlock(lock);
@@ -12359,7 +12409,7 @@ static b32 locale_zone_store(string_address zone, string_address mode)
         p8 old_shown[80];
         bipolar failed;
 
-        locale_word(CLOCK_ZONE_PATH, was, sizeof(was));
+        host_read_word(CLOCK_ZONE_PATH, was, sizeof(was));
         locale_zone_describe(was, old_shown, sizeof(old_shown));
         locale_zone_moment(before, sizeof(before));
 
@@ -12782,8 +12832,8 @@ static bipolar locale_auto_take(locale_auto_answer address_to answer,
         p8 was[80];
         p8 mode[48];
 
-        locale_word(CLOCK_ZONE_PATH, was, sizeof(was));
-        locale_word(LOCALE_ZONE_MODE_PATH, mode, sizeof(mode));
+        host_read_word(CLOCK_ZONE_PATH, was, sizeof(was));
+        host_read_word(LOCALE_ZONE_MODE_PATH, mode, sizeof(mode));
         if (loud)
                 return locale_zone_store(answer->zone, answer->mode) ? -1 : 0;
         if (string_equals(was, answer->zone) &&
@@ -12811,15 +12861,19 @@ static b32 locale_zone_auto(void)
         p8 zone[80];
         bipolar status;
 
-        if (locale_zone_manual() &&
-            radio_write_word(LOCALE_ZONE_MODE_PATH, "auto") < 0)
-                return host_fail("timezone", -1);
+        if (locale_zone_manual())
+        {
+                bipolar kept = locale_zone_write(null, "auto", true);
+
+                if (kept < 0)
+                        return host_fail("timezone", kept);
+        }
         locale_network(network, sizeof(network));
         status = locale_auto_ask(address_of answer);
         if (status)
         {
                 locale_auto_asked(null);
-                locale_word(CLOCK_ZONE_PATH, zone, sizeof(zone));
+                host_read_word(CLOCK_ZONE_PATH, zone, sizeof(zone));
                 host_say(log_error, host_label "timezone auto: Cloudflare "
                                     "could not be asked (%s); keeping %s "
                                     "until the network answers\n",
@@ -12838,9 +12892,29 @@ static p64 locale_auto_next;
 static positive locale_auto_wait = LOCALE_AUTO_LEAST;
 static locale_child locale_auto_child = {0, -1};
 
-static fn locale_auto_keep(bool ntp_wanted, string_address network)
+//      The question put to Cloudflare in the child, for the network it was
+//      forked on: 0 when the zone was taken.
+static p8 locale_auto_task(address_any network)
 {
-        p64 now = system_clock_ns(HOST_CLOCK_BOOTTIME);
+        locale_auto_answer answer;
+        bool took = !locale_auto_ask(address_of answer) &&
+                    !locale_auto_take(address_of answer, false);
+
+        if (took)
+                locale_auto_asked((string_address)network);
+        return took ? 0 : 1;
+}
+
+//      A question that was not put or not answered waits, longer each time.
+static fn locale_auto_failed(p64 now)
+{
+        locale_auto_next = locale_after(now, locale_auto_wait);
+        locale_auto_wait = locale_doubled(locale_auto_wait, LOCALE_AUTO_MOST);
+}
+
+static fn locale_auto_keep(bool ntp_wanted, bool synced, p64 now,
+                           string_address network)
+{
         bipolar ended = locale_child_poll(address_of locale_auto_child);
         p8 asked[LOCALE_NETWORK_ROOM];
 
@@ -12848,46 +12922,48 @@ static fn locale_auto_keep(bool ntp_wanted, string_address network)
                 return;
         if (ended != LOCALE_CHILD_IDLE)
         {
-                locale_auto_next = now + (p64)locale_auto_wait * 1000000000ull;
-                locale_auto_wait = ended ? (locale_auto_wait * 2 > LOCALE_AUTO_MOST
-                                                ? LOCALE_AUTO_MOST
-                                                : locale_auto_wait * 2)
-                                         : LOCALE_AUTO_LEAST;
-                if (!ended)
-                        locale_auto_next = now + (p64)LOCALE_AUTO_LEAST *
-                                                     1000000000ull;
+                if (ended)
+                        locale_auto_failed(now);
+                else
+                {
+                        locale_auto_next = locale_after(now, LOCALE_AUTO_LEAST);
+                        locale_auto_wait = LOCALE_AUTO_LEAST;
+                }
                 return;
         }
-        if (locale_zone_manual())
-                return;
-        //      A certificate is only as good as the clock that checks it:
-        //      while NTP is on and has not set it, wait a minute for it.
-        if (ntp_wanted && !locale_clock_synced() &&
-            now < (p64)LOCALE_AUTO_CLOCK_WAIT * 1000000000ull)
-                return;
+        //      With no network there is nothing to ask, and nothing to read
+        //      a file for.
         if (!network[0])
                 return;
-        locale_word(LOCALE_ZONE_NETWORK_PATH, asked, sizeof(asked));
+        //      The network is looked at once in a while and not at every
+        //      turn: what it was asked about and whether the zone was typed
+        //      are two files read, and neither changes without a new network
+        //      -- which clears this wait -- or a hand that has asked itself.
+        if (locale_auto_next && now < locale_auto_next)
+                return;
+        host_read_word(LOCALE_ZONE_NETWORK_PATH, asked, sizeof(asked));
         if (locale_network_same(network, asked))
         {
                 //      The gateway's address arrived after the answer did.
                 if (string_length(network) > string_length(asked))
                         locale_auto_asked(network);
+                locale_auto_next = locale_after(now, LOCALE_AUTO_LEAST);
                 return;
         }
-        if (locale_auto_next && now < locale_auto_next)
+        //      A certificate is only as good as the clock that checks it:
+        //      while NTP is on and has not set it, wait a minute for it.
+        if (ntp_wanted && !synced &&
+            now < locale_after(0, LOCALE_AUTO_CLOCK_WAIT))
                 return;
-
-        if (!locale_child_fork(address_of locale_auto_child))
+        if (locale_zone_manual())
         {
-                locale_auto_answer answer;
-                bool took = !locale_auto_ask(address_of answer) &&
-                            !locale_auto_take(address_of answer, false);
-
-                if (took)
-                        locale_auto_asked(network);
-                locale_child_end(address_of locale_auto_child, took ? 0 : 1);
+                locale_auto_next = locale_after(now, LOCALE_AUTO_LEAST);
+                return;
         }
+
+        if (!locale_child_run(address_of locale_auto_child, locale_auto_task,
+                              (address_any)network))
+                locale_auto_failed(now);
 }
 
 /*
@@ -12905,8 +12981,7 @@ static b32 locale_time_status(void)
         gmtime_r(address_of stamp, address_of broken);
         strftime(when, sizeof(when), "%Y-%m-%d %H:%M:%S", address_of broken);
         string_format(log, "  utc   %s\n", when);
-        host_say(log, "  ntp %s, %s\n",
-                 locale_ntp_wanted() ? "on" : "off",
+        host_say(log, "  ntp %s, %s\n", locale_switch_say(LOCALE_NTP_PATH),
                  locale_clock_synced() ? "synchronised" : "waiting");
         return 0;
 }
@@ -13380,9 +13455,19 @@ static bipolar locale_ntp_take(string_address server,
         from, and waiting for the others is a minute on a machine whose
         network is slow to come.
 */
+//      Whether the server at address is one of the first count of heard.
+static bool locale_ntp_heard(const sntp_sample address_to heard, positive count,
+                             p32 address)
+{
+        for (positive at = 0; at < count; at++)
+                if (heard[at].address == address)
+                        return true;
+        return false;
+}
+
 static bipolar locale_ntp_walk(bool by_hand)
 {
-        p8 server[80];
+        p8 server[LOCALE_NTP_SERVER_ROOM];
         bipolar failed = SNTP_NO_SERVER;
         positive at;
         bool filter = locale_ntp_sampling_wanted();
@@ -13405,7 +13490,7 @@ static bipolar locale_ntp_walk(bool by_hand)
         positive heard_count = 0;
         positive wanted;
 
-        locale_word(LOCALE_NTP_SERVER_PATH, server, sizeof(server));
+        host_read_word(LOCALE_NTP_SERVER_PATH, server, sizeof(server));
         if (server[0])
         {
                 failed = locale_ntp_ask((string_address)server, filter, most,
@@ -13426,21 +13511,14 @@ static bipolar locale_ntp_walk(bool by_hand)
                         continue;
                 failed = locale_ntp_ask((string_address)locale_ntp_fallback[at],
                                         filter, most, heard + heard_count);
-                if (failed >= 0)
-                {
-                        bool again = false;
-
-                        //      Another name for a server already heard from
-                        //      is that server saying it again: the network's
-                        //      resolver can name every one of these the same
-                        //      host. It is not counted, and the next name is
-                        //      asked.
-                        for (positive earlier = 0; earlier < heard_count; earlier++)
-                                again |= heard[earlier].address ==
-                                         heard[heard_count].address;
-                        if (!again)
-                                heard_from[heard_count++] = (b32)at;
-                }
+                //      Another name for a server already heard from is that
+                //      server saying it again: the network's resolver can
+                //      name every one of these the same host. It is not
+                //      counted, and the next name is asked.
+                if (failed >= 0 &&
+                    !locale_ntp_heard(heard, heard_count,
+                                      heard[heard_count].address))
+                        heard_from[heard_count++] = (b32)at;
                 else if (failed == SNTP_RATE_LIMITED)
                         rated = true;
                 else if (failed == SNTP_DENIED)
@@ -13492,27 +13570,32 @@ static bipolar locale_ntp_apply(bool by_hand)
         return failed;
 }
 
+//      The server asked first: the one named, or the pool's name.
+static string_address locale_ntp_server_say(p8 address_to into, positive room)
+{
+        if (!locale_readable(LOCALE_NTP_SERVER_PATH, into, room))
+                return (string_address)LOCALE_NEEDS_ROOT;
+        if (!into[0])
+                string_copy_bounded(into, LOCALE_NTP_DEFAULT_SERVER, room);
+        return (string_address)into;
+}
+
 static b32 locale_ntp_status(void)
 {
-        p8 server[80];
-        bool wanted = locale_ntp_wanted();
-        bool synced = locale_clock_synced();
+        p8 server[LOCALE_NTP_SERVER_ROOM];
 
-        locale_word(LOCALE_NTP_SERVER_PATH, server, sizeof(server));
-        if (!server[0])
-                string_copy_bounded(server, LOCALE_NTP_DEFAULT_SERVER,
-                                    sizeof(server));
         host_say(log, host_label "ntp %s, %s, sampling %s, %s\n",
-                 wanted ? "on" : "off", server,
-                 locale_ntp_sampling_wanted() ? "on" : "off",
-                 synced ? "synchronised" : "waiting");
+                 locale_switch_say(LOCALE_NTP_PATH),
+                 locale_ntp_server_say(server, sizeof(server)),
+                 locale_switch_say(LOCALE_NTP_SAMPLING_PATH),
+                 locale_clock_synced() ? "synchronised" : "waiting");
         return 0;
 }
 
 static b32 locale_ntp_sampling_status(void)
 {
         host_say(log, host_label "ntp sampling %s\n",
-                 locale_ntp_sampling_wanted() ? "on" : "off");
+                 locale_switch_say(LOCALE_NTP_SAMPLING_PATH));
         return 0;
 }
 
@@ -13520,11 +13603,15 @@ static b32 locale_ntp_sampling_status(void)
 //      at once.
 static b32 locale_ntp_set(bool sampling, string_address word)
 {
+        bipolar kept;
+
         if (!string_equals(word, "on") && !string_equals(word, "off"))
                 return host_usage();
-        if (radio_write_word(sampling ? LOCALE_NTP_SAMPLING_PATH : LOCALE_NTP_PATH,
-                             word) < 0)
-                return host_fail("ntp", -1);
+        kept = radio_write_word(sampling ? LOCALE_NTP_SAMPLING_PATH
+                                         : LOCALE_NTP_PATH,
+                                word);
+        if (kept < 0)
+                return host_fail("ntp", kept);
         if (!sampling && string_equals(word, "on"))
         {
                 locale_ntp_next = 0;
@@ -13533,6 +13620,63 @@ static b32 locale_ntp_set(bool sampling, string_address word)
         }
         host_say(log, host_label "ntp %s%s\n", sampling ? "sampling " : "",
                  word);
+        return 0;
+}
+
+/*
+        moonwater ntp server [NAME|auto]: the server asked first. A name or a
+        dotted address that fits the word the walk reads it into, and not a
+        longer one cut to fit; auto goes back to the pool and the names
+        beside it.
+*/
+static bool locale_ntp_server_ok(string_address name)
+{
+        positive length = string_length(name);
+
+        if (!length || length >= LOCALE_NTP_SERVER_ROOM ||
+            !byte_is_alnum((p8)name[0]) || string_equals(name, "auto"))
+                return false;
+        for (positive at = 0; at < length; at++)
+                if (!byte_is_alnum((p8)name[at]) && name[at] != '.' &&
+                    name[at] != '-')
+                        return false;
+        return true;
+}
+
+static b32 locale_ntp_server_status(void)
+{
+        p8 server[LOCALE_NTP_SERVER_ROOM];
+        string_address said = locale_ntp_server_say(server, sizeof(server));
+
+        host_say(log, host_label "ntp server %s\n", said);
+        return 0;
+}
+
+static b32 locale_ntp_server_set(string_address name)
+{
+        bool automatic = string_equals(name, "auto");
+        bipolar kept;
+
+        if (!automatic && !locale_ntp_server_ok(name))
+                return host_refuse("%s is not a server name: letters, digits, "
+                                   "dots and hyphens, under 80 characters, or "
+                                   "auto for the pool\n", name);
+        if (automatic)
+        {
+                kept = system_remove_at(AT_FDCWD, LOCALE_NTP_SERVER_PATH, 0);
+                if (kept == -ENOENT)
+                        kept = 0;
+        }
+        else
+                kept = radio_write_word(LOCALE_NTP_SERVER_PATH, name);
+        if (kept < 0)
+                return host_fail("ntp server", kept);
+        //      Asked of the new server at once, as `ntp on` does.
+        if (locale_ntp_wanted() && locale_ntp_apply(true) < 0)
+                host_say(log, host_label "ntp server %s, waiting for a "
+                                         "reply\n", name);
+        else
+                host_say(log, host_label "ntp server %s\n", name);
         return 0;
 }
 
@@ -13554,7 +13698,7 @@ static bool locale_keyboard_ok(string_address name)
         return false;
 }
 
-static b32 locale_keyboard_live(string_address name)
+static bipolar locale_keyboard_live(string_address name)
 {
         struct canvas_control control;
 
@@ -13571,21 +13715,51 @@ static b32 locale_keyboard_live(string_address name)
         return host_spark_once(SPARK_IOCTL_CANVAS, address_of control, FILE_READ);
 }
 
-static b32 locale_keyboard_status(void)
+//      The layout Canvas has, when it can be asked, and else the one that
+//      is kept: us when none is, and nothing when it is not the caller's to
+//      read.
+static string_address locale_keyboard_say(p8 address_to name, positive room)
 {
-        p8 name[16];
         struct canvas_control control;
+        bool readable = locale_readable(LOCALE_KEYBOARD_PATH, name, room);
 
-        locale_word(LOCALE_KEYBOARD_PATH, name, sizeof(name));
-        if (!name[0])
-                string_copy_bounded(name, "us", sizeof(name));
         memory_zero(address_of control, sizeof(control));
         control.request = SPARK_CANVAS_LAYOUT;
         if (host_spark_once(SPARK_IOCTL_CANVAS, address_of control, FILE_READ) >= 0 &&
             control.master_command[0])
-                string_copy_bounded(name, control.master_command, sizeof(name));
-        host_say(log, host_label "keyboard %s\n", name);
+                string_copy_bounded(name, control.master_command, room);
+        else if (!readable)
+                return (string_address)LOCALE_NEEDS_ROOT;
+        else if (!name[0])
+                string_copy_bounded(name, "us", room);
+        return (string_address)name;
+}
+
+static b32 locale_keyboard_status(void)
+{
+        p8 name[16];
+
+        host_say(log, host_label "keyboard %s\n",
+                 locale_keyboard_say(name, sizeof(name)));
         return 0;
+}
+
+//      The three lines `status` shows of this region's settings.
+static fn locale_status_lines(void)
+{
+        p8 title[128];
+        p8 how[48];
+        p8 keyboard[16];
+
+        if (locale_zone_read(title, sizeof(title), how, sizeof(how)))
+                string_format(log, "  timezone %s %s\n", title, how);
+        else
+                string_format(log, "  timezone " LOCALE_NEEDS_ROOT "\n");
+        string_format(log, "  ntp %s, sampling %s\n",
+                      locale_switch_say(LOCALE_NTP_PATH),
+                      locale_switch_say(LOCALE_NTP_SAMPLING_PATH));
+        string_format(log, "  keyboard %s\n",
+                      locale_keyboard_say(keyboard, sizeof(keyboard)));
 }
 
 static b32 locale_keyboard_list(void)
@@ -13602,13 +13776,29 @@ static b32 locale_keyboard_list(void)
 
 static b32 locale_keyboard_set(string_address name)
 {
+        bipolar live;
+        bipolar kept;
+
         if (!locale_keyboard_ok(name))
                 return host_refuse("unknown keyboard layout %s -- "
                                    "moonwater keyboard list shows them\n",
                                    name);
-        if (radio_write_word(LOCALE_KEYBOARD_PATH, name) < 0)
-                return host_fail("keyboard", -1);
-        (void)locale_keyboard_live(name);
+        //      Canvas first: its refusal of a layout it does not have keeps
+        //      nothing, and a machine with no Canvas to ask (a device that is
+        //      not there) takes the layout when it starts.
+        live = locale_keyboard_live(name);
+        if (live == -EINVAL)
+                return host_refuse("Canvas has no keyboard layout %s\n", name);
+        kept = radio_write_word(LOCALE_KEYBOARD_PATH, name);
+        if (kept < 0)
+                return host_fail("keyboard", kept);
+        if (live < 0 && live != -ENOENT)
+        {
+                host_say(log_error, host_label "keyboard %s is saved, but "
+                                    "Canvas did not take it: %s\n",
+                         name, file_reason(live));
+                return 1;
+        }
         host_say(log, host_label "keyboard %s\n", name);
         return 0;
 }
@@ -13638,32 +13828,30 @@ static fn locale_ntp_schedule(bipolar ended, bool synced, p64 now)
                 //      had the time to.
                 locale_ntp_retry = LOCALE_NTP_RETRY_LEAST;
                 locale_ntp_synced = now;
-                locale_ntp_next = now + (p64)locale_ntp_every * 1000000000ull;
-                locale_ntp_every = locale_ntp_every * 2 < LOCALE_NTP_AGAIN
-                                       ? locale_ntp_every * 2
-                                       : LOCALE_NTP_AGAIN;
+                locale_ntp_next = locale_after(now, locale_ntp_every);
+                locale_ntp_every = locale_doubled(locale_ntp_every,
+                                                  LOCALE_NTP_AGAIN);
         }
         else if (ended == LOCALE_NTP_EXIT_RATE)
         {
                 locale_ntp_retry = LOCALE_NTP_RETRY_MOST;
-                locale_ntp_next = now + (p64)LOCALE_NTP_RATE_AGAIN * 1000000000ull;
+                locale_ntp_next = locale_after(now, LOCALE_NTP_RATE_AGAIN);
         }
         else if (ended == LOCALE_NTP_EXIT_LONG)
-                locale_ntp_next = now + (p64)LOCALE_NTP_AGAIN * 1000000000ull;
+                locale_ntp_next = locale_after(now, LOCALE_NTP_AGAIN);
         else if (ended != LOCALE_CHILD_IDLE)
         {
                 //      Doubling from a second to a quarter of an hour: a
                 //      machine that cannot reach a server does not walk
                 //      seven names every eight seconds for ever.
-                locale_ntp_next = now + (p64)locale_ntp_retry * 1000000000ull;
-                locale_ntp_retry = locale_ntp_retry * 2 < LOCALE_NTP_RETRY_MOST
-                                       ? locale_ntp_retry * 2
-                                       : LOCALE_NTP_RETRY_MOST;
+                locale_ntp_next = locale_after(now, locale_ntp_retry);
+                locale_ntp_retry = locale_doubled(locale_ntp_retry,
+                                                  LOCALE_NTP_RETRY_MOST);
         }
         else if (locale_ntp_synced && !synced &&
                  locale_ntp_retry == LOCALE_NTP_RETRY_LEAST &&
-                 locale_ntp_next > now + LOCALE_NTP_RETRY_LEAST * 1000000000ull)
-                locale_ntp_next = now + LOCALE_NTP_RETRY_LEAST * 1000000000ull;
+                 locale_ntp_next > locale_after(now, LOCALE_NTP_RETRY_LEAST))
+                locale_ntp_next = locale_after(now, LOCALE_NTP_RETRY_LEAST);
 }
 
 /*
@@ -13676,9 +13864,21 @@ static bool locale_ntp_on;
 static bool locale_online_held;
 static p8 locale_network_held[LOCALE_NETWORK_ROOM];
 
-static fn locale_ntp_keep(bool online)
+//      The walk in the child, and the class of what became of it.
+static p8 locale_ntp_task(address_any context)
 {
-        p64 now = system_clock_ns(HOST_CLOCK_BOOTTIME);
+        bipolar failed = locale_ntp_apply(false);
+
+        (void)context;
+        return failed >= 0 ? 0
+               : failed == SNTP_RATE_LIMITED ? LOCALE_NTP_EXIT_RATE
+               : failed == SNTP_DENIED || failed > SNTP_ANSWER
+                   ? LOCALE_NTP_EXIT_LONG
+                   : 1;
+}
+
+static fn locale_ntp_keep(bool online, bool synced, p64 now)
+{
         bipolar ended;
 
         //      `ntp off` ends a query in flight and waits for it: left to
@@ -13692,23 +13892,16 @@ static fn locale_ntp_keep(bool online)
         ended = locale_child_poll(address_of locale_ntp_child);
         if (ended == LOCALE_CHILD_RUNNING)
                 return;
-        locale_ntp_schedule(ended, locale_clock_synced(), now);
+        locale_ntp_schedule(ended, synced, now);
         if (ended != LOCALE_CHILD_IDLE || (locale_ntp_next && now < locale_ntp_next) ||
             !online)
                 return;
 
-        if (!locale_child_fork(address_of locale_ntp_child))
-        {
-                bipolar failed = locale_ntp_apply(false);
-
-                locale_child_end(address_of locale_ntp_child,
-                                 failed >= 0 ? 0
-                                 : failed == SNTP_RATE_LIMITED
-                                     ? LOCALE_NTP_EXIT_RATE
-                                 : failed == SNTP_DENIED || failed > SNTP_ANSWER
-                                     ? LOCALE_NTP_EXIT_LONG
-                                     : 1);
-        }
+        //      No child to make is a query that failed: a machine out of
+        //      processes does not ask four times a second.
+        if (!locale_child_run(address_of locale_ntp_child, locale_ntp_task,
+                              null))
+                locale_ntp_schedule(1, synced, now);
 }
 
 static fn locale_restore(void)
@@ -13716,7 +13909,9 @@ static fn locale_restore(void)
         p8 zone[80];
         p8 keyboard[16];
 
-        locale_word(CLOCK_ZONE_PATH, zone, sizeof(zone));
+        locale_zone_own();
+
+        host_read_word(CLOCK_ZONE_PATH, zone, sizeof(zone));
         if (zone[0])
         {
                 tzset();
@@ -13725,7 +13920,7 @@ static fn locale_restore(void)
                 (void)bowl_write_localtime_all(null);
         }
 
-        locale_word(LOCALE_KEYBOARD_PATH, keyboard, sizeof(keyboard));
+        host_read_word(LOCALE_KEYBOARD_PATH, keyboard, sizeof(keyboard));
         if (keyboard[0])
                 locale_keyboard_live(keyboard);
 
@@ -13742,7 +13937,8 @@ static fn locale_restore(void)
         //      stepped the clock twice.
         locale_ntp_on = locale_ntp_wanted();
         if (host_machine_self && locale_ntp_on)
-                locale_ntp_keep(true);
+                locale_ntp_keep(true, locale_clock_synced(),
+                                system_clock_ns(HOST_CLOCK_BOOTTIME));
 }
 
 /*
@@ -13790,6 +13986,8 @@ static fn locale_recover(void)
 {
         p8 network[LOCALE_NETWORK_ROOM];
         bool online = locale_network(network, sizeof(network));
+        bool synced;
+        p64 now;
 
         (void)locale_zone_kernel();
         locale_ntp_on = locale_ntp_wanted();
@@ -13808,8 +14006,10 @@ static fn locale_recover(void)
         locale_online_held = online;
         string_copy_bounded(locale_network_held, network,
                             sizeof(locale_network_held));
-        locale_ntp_keep(online);
-        locale_auto_keep(locale_ntp_on, network);
+        synced = locale_clock_synced();
+        now = system_clock_ns(HOST_CLOCK_BOOTTIME);
+        locale_ntp_keep(online, synced, now);
+        locale_auto_keep(locale_ntp_on, synced, now, network);
 }
 
 /*
@@ -13997,7 +14197,7 @@ static p8 name_unsaved[NAME_ROOM];
    saved at the end: false when /root would not take it. */
 static bool name_ensure(p8 address_to into, positive room, bool address_to rolled)
 {
-        locale_word(NAME_PATH, into, room);
+        host_read_word(NAME_PATH, into, room);
         address_to rolled = !name_valid(into);
 
         if (!address_to rolled)
@@ -14107,6 +14307,8 @@ static b32 host_locale(string_address address_to arguments, positive count)
         string_address verb = arguments[1];
         string_address word = count > 2 ? arguments[2] : null;
 
+        locale_zone_own();
+
         if (string_equals(verb, "time"))
         {
                 if (count == 2)
@@ -14135,6 +14337,15 @@ static b32 host_locale(string_address address_to arguments, positive count)
         {
                 if (count == 2)
                         return locale_ntp_status();
+                if (string_equals(word, "server"))
+                {
+                        if (count == 3)
+                                return locale_ntp_server_status();
+                        if (count != 4)
+                                return host_usage();
+                        host_need_root("moonwater");
+                        return locale_ntp_server_set(arguments[3]);
+                }
                 if (string_equals(word, "sampling"))
                 {
                         if (count == 3)
@@ -14630,6 +14841,7 @@ static fn host_usage_write(writer out)
                  HOST_ROW("timezone auto", "               ", "from the network [auto]: one Cloudflare")
                  "                              " TERM_DIM "request per network joined" TERM_RESET "\n"
                  HOST_ROW("ntp [on|off]", "                ", "set the clock from the network [on]")
+                 HOST_ROW("ntp server [NAME|auto]", "      ", "who is asked first: a name or address [auto]")
                  HOST_ROW("ntp sampling [on|off]", "       ", "keep the lowest-delay sample of five [on]")
                  HOST_ROW("link [pair|NAME|help]", "       ", "link machines by a code, then a terminal or a command on any, by name")
                  HOST_ROW("keyboard [LAYOUT|list]", "      ", "Canvas keys: us uk de se no dk fi fr es it")
@@ -14787,33 +14999,12 @@ static b32 host_status(void)
         if (host_canvas_request(SPARK_CANVAS_STATUS, address_of canvas) >= 0)
                 host_canvas_write("  ", address_of canvas);
 
-        {
-                p8 zone[80];
-                p8 keyboard[16];
-
-                p8 shown[128];
-                p8 how[48];
-
-                locale_word(CLOCK_ZONE_PATH, zone, sizeof(zone));
-                locale_word(LOCALE_KEYBOARD_PATH, keyboard, sizeof(keyboard));
-                locale_zone_title(zone, shown, sizeof(shown));
-                locale_zone_how(how, sizeof(how));
-                string_format(log, "  timezone %s %s\n", shown, how);
-                string_format(log, "  ntp %s, sampling %s\n",
-                              locale_ntp_wanted() ? (string_address) "on"
-                                                  : (string_address) "off",
-                              locale_ntp_sampling_wanted()
-                                  ? (string_address) "on"
-                                  : (string_address) "off");
-                string_format(log, "  keyboard %s\n",
-                              keyboard[0] ? (string_address)keyboard
-                                          : (string_address) "us");
-        }
+        locale_status_lines();
 
         {
                 p8 name[NAME_ROOM];
 
-                locale_word(NAME_PATH, name, sizeof(name));
+                host_read_word(NAME_PATH, name, sizeof(name));
                 if (name_valid(name))
                         string_format(log, "  name %s\n", name);
         }

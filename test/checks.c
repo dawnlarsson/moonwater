@@ -86966,7 +86966,7 @@ static fn machine_ntp_child(void)
         bipolar held = system_open_at(AT_FDCWD, "/dev/null", O_RDONLY);
         locale_child child = {0, -1};
 
-        for (positive at = 0; at < 300; at++)
+        for (positive at = 0; at < 1000; at++)
         {
                 bipolar ended;
 
@@ -87017,13 +87017,122 @@ static fn machine_ntp_child(void)
         }
         check("`ntp off` with a query in flight ends it and waits for it",
               locale_ntp_child.pid > 0);
-        locale_ntp_keep(true);
+        locale_ntp_keep(true, false, system_clock_ns(HOST_CLOCK_BOOTTIME));
         check("so no pid is kept, no pipe, and no child is left",
               locale_ntp_child.pid == 0 && locale_ntp_child.answer < 0 &&
                   system_call_4(syscall(wait4), (positive)-1,
                                 (positive)address_of status, 1, 0) == -ECHILD);
         check("and the machine sleeps its whole wake again",
               locale_wake_ms(3000) == 3000);
+}
+
+static p8 machine_task_none(address_any context)
+{
+        (void)context;
+        return 0;
+}
+
+/*
+        A machine that cannot make a process (out of them, out of memory)
+        waits that out as it does a query that failed, instead of trying
+        again at the next look, four times a second. The soft limit on
+        processes is set to none and a fork tried; a caller that is not held
+        by it (root) has nothing to prove here.
+*/
+static fn machine_ntp_no_child(void)
+{
+        positive held[2];
+        positive none[2];
+        positive status = 0;
+        bipolar probe;
+        locale_child child = {0, -1};
+        p64 next = locale_ntp_next;
+        positive retry = locale_ntp_retry;
+        bool on = locale_ntp_on;
+        p64 later = locale_auto_next;
+        positive wait = locale_auto_wait;
+        p64 now = system_clock_ns(HOST_CLOCK_BOOTTIME);
+
+        if (system_call_4(syscall(prlimit64), 0, 6, 0, (positive)held) < 0)
+                return;
+        none[0] = 0;
+        none[1] = held[1];
+        if (system_call_4(syscall(prlimit64), 0, 6, (positive)none, 0) < 0)
+                return;
+        probe = system_fork();
+        if (!probe)
+                system_call_1(syscall(exit), 0);
+        if (probe > 0)
+        {
+                (void)system_wait4_retry(probe, address_of status, 0, null);
+                (void)system_call_4(syscall(prlimit64), 0, 6, (positive)held, 0);
+                log_direct(str("machine: no-child assertion NOT RUN -- the process limit does not hold this user\n"));
+                return;
+        }
+
+        locale_ntp_on = true;
+        locale_ntp_next = 0;
+        locale_ntp_retry = LOCALE_NTP_RETRY_LEAST;
+        check("a fork that fails makes no query to wait for",
+              locale_child_run(address_of child, machine_task_none, null) == false &&
+                  child.pid <= 0);
+        locale_ntp_keep(true, false, system_clock_ns(HOST_CLOCK_BOOTTIME));
+        check("a machine that cannot make a child waits that out as a query that failed",
+              locale_ntp_next > now && locale_ntp_next - now <=
+                  (p64)LOCALE_NTP_RETRY_LEAST * 1000000000ull + 1000000000ull &&
+                  locale_ntp_retry == 2 * LOCALE_NTP_RETRY_LEAST &&
+                  locale_ntp_child.pid <= 0);
+        {
+                p64 due = locale_ntp_next;
+
+                locale_ntp_keep(true, false, system_clock_ns(HOST_CLOCK_BOOTTIME));
+                check("and does not try again before it is due",
+                      locale_ntp_next == due &&
+                          locale_ntp_retry == 2 * LOCALE_NTP_RETRY_LEAST);
+        }
+
+        //      A machine whose zone was typed does not ask at all.
+        if (!locale_zone_manual())
+        {
+                locale_auto_next = 0;
+                locale_auto_wait = LOCALE_AUTO_LEAST;
+                locale_auto_keep(false, true, system_clock_ns(HOST_CLOCK_BOOTTIME),
+                                 "lo 0100007F");
+                check("the zone's question is waited out the same way, and longer each time",
+                      locale_auto_next > now &&
+                          locale_auto_wait == 2 * LOCALE_AUTO_LEAST &&
+                          locale_auto_child.pid <= 0);
+        }
+
+        (void)system_call_4(syscall(prlimit64), 0, 6, (positive)held, 0);
+        locale_ntp_on = on;
+        locale_ntp_next = next;
+        locale_ntp_retry = retry;
+        locale_auto_next = later;
+        locale_auto_wait = wait;
+}
+
+/*
+        A server that answers under two names is one server. The walk asks
+        the next name when the one it has is an address it has already heard
+        from, so that three names of one host are not three servers agreeing.
+*/
+static fn machine_ntp_heard(void)
+{
+        sntp_sample row[3] = {{0}};
+
+        row[0].address = 0x0a000001;
+        row[1].address = 0x0a000002;
+        check("nothing is heard from before the first answer",
+              !locale_ntp_heard(row, 0, 0x0a000001));
+        check("an address that answered is heard from",
+              locale_ntp_heard(row, 1, 0x0a000001));
+        check("another is not",
+              !locale_ntp_heard(row, 1, 0x0a000002) &&
+                  locale_ntp_heard(row, 2, 0x0a000002));
+        check("and only the answers counted are looked at",
+              !locale_ntp_heard(row, 1, 0x0a000002) &&
+                  !locale_ntp_heard(row, 2, 0x0a000003));
 }
 
 static fn machine_sntp(void)
@@ -87035,6 +87144,8 @@ static fn machine_sntp(void)
         sntp_datagram_framing();
         machine_ntp_schedule();
         machine_ntp_child();
+        machine_ntp_no_child();
+        machine_ntp_heard();
 
         /* Case 0 refuses blocking getrandom: the stamp fails untouched and
            the exchange returns before any send. Case 1 refuses only

@@ -41475,11 +41475,17 @@ def harness_moonwater_cli(argv):
                                for name in nodes) +
                        f": > {sandbox}/dev/rfkill && ln -s /proc/self/fd {sandbox}/dev/fd && ")
 
-        def session(script):
-            """Run a script in the sandbox; its lines, and whether it finished."""
+        def session(script, nobody=False):
+            """Run a script in the sandbox; its lines, and whether it finished.
+            With nobody the script runs as nobody: a user namespace of its own,
+            made before the chroot (which one cannot be made from) with its caps kept
+            for the chroot to use, and nothing mapped, so the effective user is not
+            root and holds an owner's rights over what the namespace's root owns
+            and no more."""
             wrapper = (f"mount --rbind /usr {sandbox}/usr && {private_dev}"
                        f"mount --rbind /proc {sandbox}/proc && "
-                       f"exec chroot {sandbox} /usr/bin/sh -c 'cd / && . /tmp/script'")
+                       f"exec {'unshare -U --keep-caps ' if nobody else ''}chroot {sandbox} "
+                       "/usr/bin/sh -c 'cd / && . /tmp/script'")
             (sandbox / "tmp/script").write_text(script)
             try:
                 ran = subprocess.run(["unshare", "-Urmnu", "--fork", "sh", "-c", wrapper],
@@ -42492,6 +42498,121 @@ while True:
                              "power and charge ones too), the link's key and switch, and the bowls",
                              line)
 
+        # The clock's verbs and what they say. A TZ in the caller's environment
+        # is the caller's and not the machine's zone (sudo's env_keep and ssh's
+        # AcceptEnv carry one in); a caller who cannot read /root is told so
+        # rather than shown the answer of a machine nobody has set up; a
+        # keyboard layout Canvas could not take is not reported as taken; and
+        # the server asked first is a verb, whole or refused.
+        locale_say = say
+        script = ("rm -f /root/timezone /root/timezone.mode /root/ntp /root/ntp.sampling "
+                  "/root/ntp.server /root/keyboard /root/wired.power\n"
+                  "echo '@@ tz'; TZ=JST-9 timeout 20 /tmp/moonwater timezone +1 2>&1; echo \"@@status $?\"\n"
+                  "echo '@@ tz time'; TZ=JST-9 timeout 20 /tmp/moonwater time 2>&1; echo \"@@status $?\"\n"
+                  "printf 'off\\r\\n' > /root/wired.power\n" + locale_say("wired") +
+                  "rm -f /root/wired.power /root/timezone /root/timezone.mode\n")
+        #       What a machine nobody has told anything says, then what it says to a
+        #       caller with no right to look: /root at mode 000 is closed to nobody.
+        readers = ("ntp", "ntp sampling", "ntp server", "timezone", "time", "keyboard", "status")
+        script += "".join(f"echo '@@ open {verb}'; timeout 20 /tmp/moonwater {verb} 2>&1; "
+                          "echo \"@@status $?\"\n" for verb in readers)
+        script += ("echo off > /root/ntp; echo off > /root/ntp.sampling; echo de > /root/keyboard\n"
+                   "echo Europe/Paris > /root/timezone; echo manual > /root/timezone.mode\n"
+                   "chmod 000 /root\n")
+        lines, finished = session(script)
+        asked = "".join(f"echo '@@ shut {verb}'; timeout 20 /tmp/moonwater {verb} 2>&1; "
+                        "echo \"@@status $?\"\n" for verb in readers)
+        lines += session(asked, nobody=True)[0]
+        lines += session("chmod 700 /root\n")[0]
+        asked = asked.replace("@@ shut", "@@ kept")
+        lines += session(asked, nobody=True)[0]
+        #       A /dev/spark that is a plain file takes the open and refuses the
+        #       ioctl, which is a Canvas that did not take the layout.
+        script = (": > /dev/spark\n" + locale_say("keyboard fr") +
+                  "echo \"@@kept $(cat /root/keyboard)\"\nrm -f /dev/spark\n")
+        script += ("echo off > /root/ntp; rm -f /root/ntp.server\n" + locale_say("ntp server") +
+                   locale_say("ntp server time.example.net") +
+                   "echo \"@@word $(cat /root/ntp.server)\"\n" + locale_say("ntp server") +
+                   locale_say("ntp server " + "x" * 80) + locale_say("ntp server bad/name") +
+                   locale_say("ntp server a b") + locale_say("ntp server -x") +
+                   locale_say("ntp server .x") + locale_say('ntp server ""') +
+                   "echo \"@@word $(cat /root/ntp.server)\"\n" + locale_say("ntp server " + "x" * 79) +
+                   "echo \"@@word $(wc -c < /root/ntp.server)\"\n" +
+                   locale_say("ntp server auto") +
+                   "echo \"@@word $(test -e /root/ntp.server && echo kept || echo none)\"\n" +
+                   locale_say("ntp server auto") +
+                   "echo \"@@back $(timeout 20 /tmp/moonwater ntp server 2>&1)\"\n")
+        #       One query at a time: the clock is moved by what a query measured,
+        #       so two that measured before either applied would move it twice. A
+        #       hand's `time sync` against a query that holds the lock says so and
+        #       waits for it.
+        script += ("mkdir -p /run/moonwater; echo 127.0.0.1 > /root/ntp.server; echo se > /root/timezone\n"
+                   "echo manual > /root/timezone.mode\n"
+                   "(flock /run/moonwater/ntp.lock sleep 3) &\nsleep 0.5\ns=$(date +%s)\n" +
+                   locale_say("time sync") + "echo \"@@took $(( $(date +%s) - s ))\"\nwait\n"
+                   "rm -f /root/ntp.server /root/timezone /root/timezone.mode\n")
+        more, done = session(script)
+        lines += more
+        finished = finished and done
+        seen = answers(lines)
+        text = lambda name: "\n".join(seen.get(name, {}).get("out", []))
+        check(finished, "the clock verbs' session finished", "")
+        check("+01" in text("tz").split("after", 1)[-1] and "JST" not in text("tz"),
+              "a TZ in the caller's environment is not the zone a change is shown in", text("tz"))
+        check("JST" not in text("tz time"), "nor the zone the clock is read in", text("tz time"))
+        check("wired off" in text("wired"), "a state word edited with a CRLF is the word it says",
+              text("wired"))
+        wants = {"ntp": ("ntp off", "sampling off"), "ntp sampling": ("sampling off",),
+                 "ntp server": (), "timezone": ("Europe/Paris", "manual"), "time": ("Europe/Paris",),
+                 "keyboard": ("keyboard de",), "status": ("Europe/Paris", "ntp off", "keyboard de")}
+        for verb in readers:
+            shut, kept = text(f"shut {verb}"), text(f"kept {verb}")
+            check((verb == "status" or seen.get(f"shut {verb}", {}).get("status") == 0) and
+                  "(needs root)" in shut,
+                  f"moonwater {verb} says /root is root's to a caller who cannot read it", shut[:300])
+            check(not any(word in shut for word in ("Europe/", "pool.ntp.org", "ntp on", "sampling on",
+                                                    "keyboard us", "UTC (auto")),
+                  f"and does not give that caller a default as the answer of {verb}", shut[:300])
+            check("(needs root)" not in kept and all(word in kept for word in wants[verb]),
+                  f"moonwater {verb} says what is kept to the one who can read it", kept[:300])
+        took = [int(line.split()[1]) for line in lines if line.startswith("@@took ")]
+        check("another query is running; waiting for it" in text("time sync") and took and took[0] >= 2 and took[0] <= 12,
+              "a hand's time sync waits for the query that holds the lock, and says so",
+              (took, text("time sync")))
+        check("pool.ntp.org" in text("open ntp server") and "ntp on" in text("open ntp"),
+              "a machine nobody has set up says its defaults, as the facts they are",
+              text("open ntp") + text("open ntp server"))
+        check("keyboard us" in text("open keyboard") and "(auto, waiting" in text("open timezone"),
+              "and so does its keyboard and its zone", text("open keyboard") + text("open timezone"))
+        check(seen.get("keyboard fr", {}).get("status") == 1 and "saved, but Canvas did not" in text("keyboard fr")
+              and "@@kept fr" in lines,
+              "a layout Canvas did not take is saved and said not taken", text("keyboard fr"))
+        words = [line[len("@@word "):] for line in lines if line.startswith("@@word ")]
+        check(seen.get("ntp server", {}).get("status") == 0 and "pool.ntp.org" in text("ntp server"),
+              "ntp server says the pool when none is named", text("ntp server"))
+        check(seen.get("ntp server time.example.net", {}).get("status") == 0 and
+              words[:1] == ["time.example.net"] and "time.example.net" in text("ntp server time.example.net"),
+              "ntp server NAME keeps the name and says it", repr(words[:1]))
+        for bad in ("x" * 80, "bad/name", "a b", "-x", ".x", '""'):
+            check(seen.get("ntp server " + bad, {}).get("status") not in (0, None) and
+                  words[1:2] == ["time.example.net"],
+                  f"ntp server {bad[:12]} is refused and keeps the server that was", repr(words[1:2]))
+        check(seen.get("ntp server " + "x" * 79, {}).get("status") == 0 and words[2:3] == ["80"],
+              "a name of 79 characters is kept whole", repr(words[2:3]))
+        check(seen.get("ntp server auto", {}).get("status") == 0 and words[3:4] == ["none"] and
+              any(line.startswith("@@back ") and "pool.ntp.org" in line for line in lines),
+              "ntp server auto takes the name off and the pool is asked again", repr(words[3:4]))
+        #       The layouts the command offers are the ones Canvas has: a name the
+        #       command takes that the kernel refuses is a layout saved and never
+        #       applied, and one only the kernel has is a layout nobody can pick.
+        table = set(re.findall(r'\{"(\w+)"\}', re.search(
+            r"locale_keyboards\[\] = \{(.*?)\};", (HARNESS_ROOT / "src/sh/host.c").read_text(), re.S).group(1)))
+        layout_body = (HARNESS_ROOT / "src/canvas/canvas.c").read_text().split(
+            "static long canvas_layout_set", 1)[1].split("\n}\n", 1)[0]
+        check(table and table == set(re.findall(r'strcmp\(name, "(\w+)"\)', layout_body)),
+              "the layouts moonwater keyboard offers are the ones Canvas takes",
+              sorted(table ^ set(re.findall(r'strcmp\(name, "(\w+)"\)', layout_body))))
+
         # The switches and lists the command keeps in /root, drawn as runs of
         # verbs against a model of what each leaves: the words of wifi,
         # wired and bluetooth, the internet preference, ntp and its sampling,
@@ -42679,6 +42800,7 @@ while True:
         planted = [("wifi.power", "wifi on"), ("wired.power", "wired off"),
                    ("bluetooth.power", "bluetooth off"), ("internet", "priority internet wifi"),
                    ("ntp", "ntp off"), ("ntp.sampling", "ntp sampling off"), ("keyboard", "keyboard de"),
+                   ("ntp.server", "ntp server time.example.net"),
                    ("timezone", "timezone se"), ("timezone.mode", "timezone se"),
                    ("wifi", "wifi add linkednet passpass1"), ("bluetooth", "bluetooth add linkeddev"),
                    ("tune", "charge limit 80")]
@@ -42711,6 +42833,7 @@ while True:
                   ("internet", "priority internet wifi", "priority internet"),
                   ("ntp", "ntp off", "ntp"),
                   ("ntp.sampling", "ntp sampling off", "ntp"),
+                  ("ntp.server", "ntp server time.example.net", "ntp server"),
                   ("keyboard", "keyboard de", "keyboard"),
                   ("timezone", "timezone se", "timezone"),
                   ("timezone.mode", "timezone se", "timezone"),
