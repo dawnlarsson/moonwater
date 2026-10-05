@@ -18829,9 +18829,7 @@ static b32 ul_flock_poll(b32 handle, p8 kind, positive timeout, bool fcntl,
                 }
 
                 positive left = timeout - elapsed;
-                positive nap = left < 10000000 ? left : 10000000;
-                timespec span = {nap / 1000000000, nap % 1000000000};
-                system_call_2(syscall(nanosleep), (positive)address_of span, 0);
+                process_nap_ns(left < 10000000 ? left : 10000000);
         }
 }
 

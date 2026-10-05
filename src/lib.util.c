@@ -35343,6 +35343,21 @@ static b32 usleep(p32 microseconds)
         return nanosleep(address_of span, null);
 }
 
+/*
+        One nap of so many nanoseconds, cut short by whatever interrupts it:
+        the timespec every poll loop and wait slice built for itself, and
+        nobody was owed the remainder of.
+*/
+static fn process_nap_ns(positive nanoseconds)
+{
+        timespec span;
+
+        span.tv_sec = nanoseconds / 1000000000;
+        span.tv_nsec = nanoseconds % 1000000000;
+
+        nanosleep(address_of span, null);
+}
+
 //      -- names in the file system ------------------------------------------
 
 /*

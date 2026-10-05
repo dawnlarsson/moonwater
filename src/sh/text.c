@@ -10489,13 +10489,6 @@ static bool tail_any_live()
         return false;
 }
 
-static fn tail_nap(positive nanoseconds)
-{
-        timespec span = {nanoseconds / 1000000000, nanoseconds % 1000000000};
-
-        system_call_2(syscall(nanosleep), (positive)address_of span, 0);
-}
-
 /*
         tail_forever: every round fstats each file, copies what grew, says
         when a regular file shrank, and writes the header of whichever file
@@ -10666,7 +10659,7 @@ static b32 tail_polled(bool headers, bool okay)
                                         continue;
                         }
 
-                        tail_nap(tail_sleep_ns);
+                        process_nap_ns(tail_sleep_ns);
                 }
         }
 

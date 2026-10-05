@@ -368,11 +368,13 @@ static b32 host_fail(string_address what, bipolar error)
         return 1;
 }
 
-/* Both halves must fit, or into is truncated and the answer says so. */
+/* Both halves must fit, or into is truncated and the answer says so. A left
+   that is into is already in place, and is only added to: copying a string over
+   itself is what string_copy_bounded does not allow. */
 static bool host_join(p8 address_to into, positive room, string_address left,
                       string_address right)
 {
-        return string_copy_bounded(into, left, room) < room &&
+        return (into == left || string_copy_bounded(into, left, room) < room) &&
                string_append_bounded(into, right, room) < room;
 }
 
@@ -389,9 +391,7 @@ static bipolar host_onoff(string_address word)
 
 static fn host_pause(p64 nanoseconds)
 {
-        timespec span = {nanoseconds / 1000000000, nanoseconds % 1000000000};
-
-        sleep(address_of span);
+        process_nap_ns(nanoseconds);
 }
 
 /* The bytes of a word a file held, its newline and the blanks after it taken off
@@ -931,14 +931,21 @@ static bool host_session_disk(p8 address_to into, positive room)
 
 static bool host_name_valid(string_address name)
 {
-        if (!*name || string_length(name) >= HOST_NAME_ROOM)
-                return false;
+        positive length = string_length(name);
 
-        for (; *name; name++)
-                if (!byte_is_alnum(*name) && *name != '-' && *name != '_')
-                        return false;
+        return length && length < HOST_NAME_ROOM &&
+               string_span_of_set(name, "abcdefghijklmnopqrstuvwxyz"
+                                        "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_") == length;
+}
 
-        return true;
+/* Whether a block device's sysfs attribute (/ro, /removable) reads 1. */
+static bool host_block_flag(string_address sysfs, string_address attribute)
+{
+        p8 path[HOST_PATH_ROOM];
+        p8 text[8];
+
+        return host_join(path, sizeof(path), sysfs, attribute) &&
+               host_read_kernel(path, text, sizeof(text)) > 0 && string_equals(text, "1");
 }
 
 /* The whole disk a block device belongs to: itself, unless it is a partition. */
@@ -1492,22 +1499,48 @@ static bool host_unmount(string_address target)
         return system_call_2(syscall(umount2), (positive)target, 0) >= 0;
 }
 
-static fn host_install_read(host_install address_to install)
+typedef bool (*host_image_visitor)(string_address path, address_any opaque);
+
+/*
+        The image a FAT partition keeps, looked at where it lies: the
+        partition is mounted read-only at where, look is given the image's
+        path, and the mount is let go of. False when the partition would not
+        mount; what look finds it hands back through opaque. The search that
+        keeps the one it found mounted, and the check that unmounts the
+        partition to read it from the disk, are not this.
+*/
+static bool host_with_image(string_address name, string_address where,
+                            host_image_visitor look, address_any opaque)
 {
         p8 path[HOST_PATH_ROOM];
 
+        if (host_mount(name, where, "vfat", HOST_READ_ONLY) < 0)
+                return false;
+
+        if (host_join(path, sizeof(path), where, HOST_IMAGE))
+                look(path, opaque);
+
+        host_unmount(where);
+        return true;
+}
+
+static bool host_install_build_visit(string_address path, address_any opaque)
+{
+        host_install address_to install = (host_install address_to)opaque;
+
+        install->readable = host_image_build(path, install->build,
+                                             sizeof(install->build));
+        return install->readable;
+}
+
+static fn host_install_read(host_install address_to install)
+{
         install->readable = false;
         install->build[0] = end;
 
-        if (!host_install_refresh(install) ||
-            host_mount(install->system, HOST_LOOK, "vfat", HOST_READ_ONLY) < 0)
-                return;
-
-        if (host_join(path, sizeof(path), HOST_LOOK, HOST_IMAGE))
-                install->readable = host_image_build(path, install->build,
-                                                     sizeof(install->build));
-
-        host_unmount(HOST_LOOK);
+        if (host_install_refresh(install))
+                host_with_image(install->system, HOST_LOOK, host_install_build_visit,
+                                install);
 }
 
 typedef struct
@@ -2118,15 +2151,12 @@ static b32 host_run(string_address address_to argv)
                 system_call_1(syscall(exit), 127);
         }
 
-        do
-                reaped = system_call_4(syscall(wait4), child,
-                                       (positive)address_of status, 0, 0);
-        while (reaped == -4);
+        reaped = system_wait4_retry(child, address_of status, 0, null);
 
         if (reaped < 0)
                 return host_fail(argv[0], reaped);
 
-        if (status)
+        if (wait_status_code(status))
                 return host_refuse("%s did not finish\n", argv[0]);
 
         return 0;
@@ -2501,14 +2531,9 @@ static fn host_partuuid(p8 address_to into, p8 address_to guid)
 {
         p8 uuid[16];
 
-        uuid[0] = guid[3];
-        uuid[1] = guid[2];
-        uuid[2] = guid[1];
-        uuid[3] = guid[0];
-        uuid[4] = guid[5];
-        uuid[5] = guid[4];
-        uuid[6] = guid[7];
-        uuid[7] = guid[6];
+        network_store_32(uuid, storage_le32(guid));
+        network_store_16(uuid + 4, storage_le16(guid + 4));
+        network_store_16(uuid + 6, storage_le16(guid + 6));
         memory_copy(uuid + 8, guid + 8, 8);
         storage_uuid_bytes(into, uuid);
 }
@@ -2804,12 +2829,10 @@ static b32 host_install_locked(string_address asked, bool removable)
             system_access_at(AT_FDCWD, path, 0) >= 0)
                 return host_refuse("%s is a partition; name the whole disk\n", name);
 
-        if (host_join(path, sizeof(path), sysfs, "/ro") &&
-            host_read_kernel(path, text, sizeof(text)) > 0 && string_equals(text, "1"))
+        if (host_block_flag(sysfs, "/ro"))
                 return host_refuse("%s is read-only\n", name);
 
-        if (!removable && host_join(path, sizeof(path), sysfs, "/removable") &&
-            host_read_kernel(path, text, sizeof(text)) > 0 && string_equals(text, "1"))
+        if (!removable && host_block_flag(sysfs, "/removable"))
                 return host_refuse("%s is removable media; moonwater setup "
                                    "install DISK removable takes it\n", name);
 
@@ -2934,13 +2957,23 @@ static b32 host_install_locked(string_address asked, bool removable)
 
         memory_copy(identity.uuid, random, 16);
         memory_copy(identity.hash_seed, random + 16, 16);
-        tools_uuid_version(identity.uuid, 6, 4);
-        tools_uuid_version(identity.hash_seed, 6, 4);
-        tools_uuid_version(random + 32, 7, 4);
         memory_copy(parts[0].unique, random + 48, 16);
         memory_copy(parts[1].unique, random + 64, 16);
-        tools_uuid_version(parts[0].unique, 7, 4);
-        tools_uuid_version(parts[1].unique, 7, 4);
+
+        //      Version 4, as the filesystems write theirs (byte 6) and as a
+        //      GPT GUID does (byte 7).
+        {
+                const struct
+                {
+                        p8 address_to bytes;
+                        positive version_at;
+                } random_ids[] = {{identity.uuid, 6},   {identity.hash_seed, 6},
+                                  {random + 32, 7},     {parts[0].unique, 7},
+                                  {parts[1].unique, 7}};
+
+                for (positive at = 0; at < array_count(random_ids); at++)
+                        tools_uuid_version(random_ids[at].bytes, random_ids[at].version_at, 4);
+        }
         identity.time = (p32)(system_clock_ns(HOST_CLOCK_REALTIME) / 1000000000);
         identity.label = "moonwater";
 
@@ -3140,14 +3173,7 @@ static b32 host_install_disk(string_address asked, bool removable)
 
 // Bindings ------------------------------------------------------
 
-/*
-        One request to a bound event. SET when `command` is not null, then
-        the kernel copies the row back. A command too long is handed over
-        whole, cut at the size without a terminator, so the kernel's own
-        refusal answers. The listing and boot apply keep the file open;
-        opening once per event was twenty-two trips through /dev/spark for
-        `moonwater bind` with no arguments.
-*/
+/* One ioctl of /dev/spark, the device opened for it and let go of. */
 static bipolar host_spark_once(unsigned int command, void *request, unsigned int flags)
 {
         bipolar device = system_open_at(AT_FDCWD, SPARK_DEVICE, flags | O_CLOEXEC);
@@ -3196,6 +3222,14 @@ static bipolar host_bind_ioctl(bipolar device, unsigned int op, unsigned int eve
                                 control);
 }
 
+/*
+        One request to a bound event, the device opened for it alone. SET when
+        `command` is not null, then the kernel copies the row back. A command
+        too long is handed over whole, cut at the size without a terminator, so
+        the kernel's own refusal answers. The listing and boot apply keep the
+        file open (host_bind_ioctl); opening once per event was twenty-two trips
+        through /dev/spark for `moonwater bind` with no arguments.
+*/
 static bipolar host_bind_request(unsigned int op, unsigned int event,
                                  string_address command,
                                  struct bind_control address_to control)
@@ -3712,45 +3746,58 @@ typedef struct
         host_settings found;
 } host_settings_search;
 
+typedef struct
+{
+        host_settings_search address_to search;
+        string_address name;
+        string_address partuuid;
+} host_settings_look;
+
+static bool host_settings_image_visit(string_address path, address_any opaque)
+{
+        host_settings_look address_to look = (host_settings_look address_to)opaque;
+        host_settings_search address_to search = look->search;
+        p8 build[HOST_BUILD_ROOM];
+        host_settings newest;
+
+        if (!host_image_build(path, build, sizeof(build)) ||
+            !string_equals(build, search->build) ||
+            host_settings_image(path, address_of newest) < 0 ||
+            (search->session &&
+             (newest.generation != search->session->generation ||
+              memory_compare(newest.medium, search->session->medium,
+                             sizeof(newest.medium)))))
+                return false;
+
+        if (!search->count)
+        {
+                string_copy(search->name, look->name);
+                string_copy(search->partuuid, look->partuuid);
+                memory_copy_apart(address_of search->found, address_of newest,
+                                  SPARK_SETTINGS_SLOT);
+        }
+        else if (search->count == 1)
+                string_copy(search->other, look->name);
+
+        search->count++;
+        return true;
+}
+
 /* A FAT partition whose image is this build and, when asked, this session's copy. */
 static bool host_settings_visit(storage_identity address_to identity,
                                 address_any opaque)
 {
-        host_settings_search address_to search = (host_settings_search address_to)opaque;
-        string_address name = identity->path + sizeof("/dev/") - 1;
-        p8 path[HOST_PATH_ROOM];
-        p8 build[HOST_BUILD_ROOM];
-        host_settings newest;
+        host_settings_look look;
 
-        if (!string_equals(identity->type, "vfat") || !host_name_valid(name) ||
-            host_mount(name, HOST_MEDIUM, "vfat", HOST_READ_ONLY) < 0)
-                return true;
+        look.search = (host_settings_search address_to)opaque;
+        look.name = identity->path + sizeof("/dev/") - 1;
+        look.partuuid = identity->partuuid_length ? (string_address)identity->partuuid
+                                                  : (string_address) "";
 
-        if (host_join(path, sizeof(path), HOST_MEDIUM, HOST_IMAGE) &&
-            host_image_build(path, build, sizeof(build)) &&
-            string_equals(build, search->build) &&
-            host_settings_image(path, address_of newest) >= 0 &&
-            (!search->session ||
-             (newest.generation == search->session->generation &&
-              !memory_compare(newest.medium, search->session->medium,
-                              sizeof(newest.medium)))))
-        {
-                if (!search->count)
-                {
-                        string_copy(search->name, name);
-                        string_copy(search->partuuid, identity->partuuid_length
-                                                          ? (string_address)identity->partuuid
-                                                          : (string_address) "");
-                        memory_copy_apart(address_of search->found, address_of newest,
-                                          SPARK_SETTINGS_SLOT);
-                }
-                else if (search->count == 1)
-                        string_copy(search->other, name);
+        if (string_equals(identity->type, "vfat") && host_name_valid(look.name))
+                host_with_image(look.name, HOST_MEDIUM, host_settings_image_visit,
+                                address_of look);
 
-                search->count++;
-        }
-
-        host_unmount(HOST_MEDIUM);
         return true;
 }
 
@@ -3827,22 +3874,17 @@ typedef struct
         b32 blocks[HOST_SETTINGS_BLOCKS];
         positive size;
         positive target;
+        p64 seen;
+        string_address failed;
 } host_settings_place;
 
 /* The partition blocks under the slot a write goes over, as its filesystem names them. */
-static string_address host_settings_map(string_address name,
-                                        host_settings_place address_to place)
+static bool host_settings_map_visit(string_address path, address_any opaque)
 {
-        p8 path[HOST_PATH_ROOM];
+        host_settings_place address_to place = (host_settings_place address_to)opaque;
         string_address failed = null;
-        bipolar handle = -ERROR_INVALID;
+        bipolar handle = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC);
         b32 size = 0;
-
-        if (host_mount(name, HOST_MEDIUM, "vfat", HOST_READ_ONLY) < 0)
-                return "could not be mounted";
-
-        if (host_join(path, sizeof(path), HOST_MEDIUM, HOST_IMAGE))
-                handle = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC);
 
         if (handle < 0)
                 failed = "has no image";
@@ -3870,8 +3912,36 @@ static string_address host_settings_map(string_address name,
         if (handle >= 0)
                 system_close(handle);
 
-        host_unmount(HOST_MEDIUM);
-        return failed;
+        place->failed = failed;
+        return !failed;
+}
+
+static string_address host_settings_map(string_address name,
+                                        host_settings_place address_to place)
+{
+        place->failed = "could not be mounted";
+        host_with_image(name, HOST_MEDIUM, host_settings_map_visit, place);
+        return place->failed;
+}
+
+/* The slots as the disk has them, the image's pages dropped first, and where in
+   the image the section was (0 for an image with none). */
+static bool host_settings_read_back(string_address path, address_any opaque)
+{
+        host_settings_place address_to place = (host_settings_place address_to)opaque;
+        bipolar handle = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC);
+
+        place->seen = 0;
+        if (handle >= 0)
+        {
+                system_call_4(syscall(fadvise64), (positive)handle, 0, 0,
+                              HOST_FADVISE_DONTNEED);
+                if (!host_settings_slots(handle, place->slots, address_of place->seen))
+                        place->seen = 0;
+                system_close(handle);
+        }
+
+        return place->seen;
 }
 
 /*
@@ -3892,19 +3962,16 @@ static string_address host_settings_write(string_address name, string_address pa
         storage_mount_table table;
         p8 device[HOST_NAME_ROOM + 8];
         p8 path[HOST_PATH_ROOM];
-        p8 text[8];
         p8 block[HOST_SETTINGS_PAGE];
         string_address failed = null;
         bipolar handle;
-        p64 offset = 0;
         b32 newest;
 
         if (!host_join(device, sizeof(device), "/dev/", name) ||
-            !host_join(path, sizeof(path), "/sys/class/block/", name) ||
-            !host_join(path, sizeof(path), path, "/ro"))
+            !host_join(path, sizeof(path), "/sys/class/block/", name))
                 return "has a name too long to write";
 
-        if (host_read_kernel(path, text, sizeof(text)) > 0 && string_equals(text, "1"))
+        if (host_block_flag(path, "/ro"))
                 return "is read-only";
 
         //      The name was found some time ago, and a disk comes and goes.
@@ -3983,25 +4050,10 @@ static string_address host_settings_write(string_address name, string_address pa
         if (failed)
                 return failed;
 
-        if (host_mount(name, HOST_MEDIUM, "vfat", HOST_READ_ONLY) < 0)
+        if (!host_with_image(name, HOST_MEDIUM, host_settings_read_back, address_of place))
                 return "was written, and could not be mounted again to check it";
 
-        handle = host_join(path, sizeof(path), HOST_MEDIUM, HOST_IMAGE)
-                     ? system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC)
-                     : -ERROR_INVALID;
-
-        if (handle >= 0)
-        {
-                system_call_4(syscall(fadvise64), (positive)handle, 0, 0,
-                              HOST_FADVISE_DONTNEED);
-                if (!host_settings_slots(handle, place.slots, address_of offset))
-                        offset = 0;
-                system_close(handle);
-        }
-
-        host_unmount(HOST_MEDIUM);
-
-        if (offset != place.offset ||
+        if (place.seen != place.offset ||
             memory_compare(place.slots + place.target, address_of slot,
                            SPARK_SETTINGS_SLOT) ||
             spark_settings_newest(place.slots) != (b32)place.target)
@@ -4417,22 +4469,30 @@ static bipolar host_settings_stamp(string_address path, host_settings address_to
         return failed;
 }
 
+typedef struct
+{
+        host_settings address_to into;
+        b32 found;
+} host_settings_found;
+
+static bool host_settings_found_visit(string_address path, address_any opaque)
+{
+        host_settings_found address_to look = (host_settings_found address_to)opaque;
+
+        look->found = host_settings_image(path, look->into);
+        return look->found >= 0;
+}
+
 /* The settings an install's own image starts with. */
 static bool host_settings_install(host_install address_to install,
                                   host_settings address_to into)
 {
-        p8 path[HOST_PATH_ROOM];
-        b32 found = -1;
+        host_settings_found look = {into, -1};
 
-        if (!host_install_refresh(install) ||
-            host_mount(install->system, HOST_LOOK, "vfat", HOST_READ_ONLY) < 0)
-                return false;
-
-        if (host_join(path, sizeof(path), HOST_LOOK, HOST_IMAGE))
-                found = host_settings_image(path, into);
-
-        host_unmount(HOST_LOOK);
-        return found >= 0;
+        return host_install_refresh(install) &&
+               host_with_image(install->system, HOST_LOOK, host_settings_found_visit,
+                               address_of look) &&
+               look.found >= 0;
 }
 
 // Events --------------------------------------------------------
