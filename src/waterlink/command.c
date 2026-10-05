@@ -408,7 +408,7 @@ static b32 link_add_locked(string_address name, string_address text,
 
         crypto_forget(address_of me, sizeof me);
         if (own)
-                return host_refuse("that is this machine's own key%s\n", "");
+                return host_refuse("that is this machine's own key\n");
 
         if (place && !link_parse_place(place, peer.address, address_of peer.port))
                 return host_refuse("%s is not an address this can reach\n",
@@ -451,9 +451,8 @@ static b32 link_add_locked(string_address name, string_address text,
         else
         {
                 if (peers.count >= LINK_PEERS_MAX)
-                        return host_refuse("this machine is linked with %s "
-                                           "machines already\n",
-                                           "64");
+                        return host_refuse("this machine is linked with 64 "
+                                           "machines already\n");
                 peers.peer[peers.count++] = peer;
         }
 
@@ -584,7 +583,7 @@ static b32 link_switch(bool on, bool say)
         {
                 (void)link_lock_signal(15);
                 if (!link_wait_owner(false))
-                        return host_refuse("the listener did not stop%s\n", "");
+                        return host_refuse("the listener did not stop\n");
                 if (say)
                 {
                         string_format(log, host_label "link off; sessions closed\n");
@@ -601,9 +600,8 @@ static b32 link_switch(bool on, bool say)
         if (link_lock_owner() <= 0)
                 link_serve_start(true);
         if (!link_wait_owner(true))
-                return host_refuse("the listener did not start: is udp %s "
-                                   "taken?\n",
-                                   "22348");
+                return host_refuse("the listener did not start: is udp 22348 "
+                                   "taken?\n");
 
         link_key_text(me.public, key);
         crypto_forget(address_of me, sizeof me);
@@ -677,8 +675,7 @@ static b32 link_group_join(string_address address_to words, positive count)
                                      address_of good);
                 if (!good)
                         return host_refuse("a grant is one of shell run files "
-                                           "log%s\n",
-                                           "");
+                                           "log\n");
                 granted = true;
         }
         /*      A secret typed here is in /proc/PID/cmdline, which every user
@@ -694,7 +691,7 @@ static b32 link_group_join(string_address address_to words, positive count)
                         memory_copy(made, secret, length + 1);
                 crypto_forget(secret, length);
                 if (length >= sizeof made)
-                        return host_refuse("that secret is too long%s\n", "");
+                        return host_refuse("that secret is too long\n");
                 secret = (string_address)made;
         }
 
@@ -731,9 +728,8 @@ static b32 link_group_join(string_address address_to words, positive count)
                         link_peers_unlock(lock);
                         crypto_forget(made, sizeof made);
                         crypto_forget(address_of groups, sizeof groups);
-                        return host_refuse("this machine is in %s groups "
-                                           "already\n",
-                                           "8");
+                        return host_refuse("this machine is in 8 groups "
+                                           "already\n");
                 }
                 record = groups.record + groups.count++;
                 memory_zero(record, sizeof(address_to record));
@@ -1107,15 +1103,13 @@ static b32 link_pair_wait(p32 mark, string_address namespace,
         link_before_restore(before);
         if (closed)
                 return host_refuse("the machine that used the code was already "
-                                   "linked, and keeps what it may do%s: "
-                                   "moonwater link shows it\n",
-                                   "");
+                                   "linked, and keeps what it may do: "
+                                   "moonwater link shows it\n");
         link_pair_close(mark);
         if (stopped)
-                return host_refuse("stopped, and the code no longer works%s\n", "");
-        return host_refuse("nobody used the code%s: both machines have to be on "
-                           "one network, and a code lasts five minutes\n",
-                           "");
+                return host_refuse("stopped, and the code no longer works\n");
+        return host_refuse("nobody used the code: both machines have to be on "
+                           "one network, and a code lasts five minutes\n");
 }
 
 //      The code in the groups file and the listener on, or why not.
@@ -1126,7 +1120,7 @@ static b32 link_pair_start(string_address namespace, p8 address_to code,
         bipolar opened = link_pair_open(namespace, code, expect, mark);
 
         if (opened == -ENOSPC)
-                return host_refuse("this machine is in %s groups already\n", "8");
+                return host_refuse("this machine is in 8 groups already\n");
         if (opened < 0)
                 return host_refuse("%s could not be written\n", LINK_GROUPS_PATH);
         link_before_take(before);
@@ -1239,7 +1233,7 @@ static b32 link_main(string_address address_to arguments, positive count)
         //      anyone else the page would say "nobody linked" of a machine
         //      that has a dozen.
         if (!bowl_is_root())
-                return host_refuse("%s needs root\n", "moonwater link");
+                return host_refuse("moonwater link needs root\n");
 
         if (!verb)
                 return link_status();

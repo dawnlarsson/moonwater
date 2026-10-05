@@ -2660,7 +2660,7 @@ static b32 host_machine_run(void)
         b32 answer = HOST_MACHINE_ENDED;
 
         if (!bowl_is_root())
-                return host_refuse("%s needs root\n", "moonwater machine");
+                return host_refuse("moonwater machine needs root\n");
 
         host_state_ready();
         system_call_1(syscall(chdir), (positive)(string_address) "/root");

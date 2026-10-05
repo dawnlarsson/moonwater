@@ -3169,8 +3169,7 @@ static b32 link_client_run(string_address name, p8 kind,
 
         if (link_identity(address_of link_self.me, false) < 0)
                 return host_refuse("this machine has no link key; "
-                                   "moonwater link on makes one%s\n",
-                                   "");
+                                   "moonwater link on makes one\n");
 
         link_peers_load(address_of peers);
         peer = link_peer_named(address_of peers, name);
@@ -3236,8 +3235,7 @@ static b32 link_client_run(string_address name, p8 kind,
 
                         if (request_length + length + 1 > LINK_REQUEST_MAX)
                                 return host_refuse("the command is longer than "
-                                                   "%s bytes\n",
-                                                   "1024");
+                                                   "1024 bytes\n");
                         if (at)
                                 request[request_length++] = ' ';
                         memory_copy(request + request_length, words[at],

@@ -221,12 +221,13 @@ static b32 host_wipe(void);
                         return host_refuse("%s needs root\n", what); \
         } while (0)
 
-static b32 host_refuse(string_address text, string_address name)
-{
-        string_format(log_error, host_label);
-        host_say(log_error, text, name);
-        return 1;
-}
+// A refusal, in the voice of the rest: the label, the words and what they name.
+#define host_refuse(...) \
+        ({ \
+                string_format(log_error, host_label); \
+                host_say(log_error, __VA_ARGS__); \
+                (b32)1; \
+        })
 
 static b32 host_fail(string_address what, bipolar error)
 {
@@ -1664,7 +1665,7 @@ static b32 host_update_locked(host_install address_to install)
         b32 failed;
 
         if (!host_running_build(running, sizeof(running)))
-                return host_refuse("%s cannot read its own build\n", "moonwater");
+                return host_refuse("moonwater cannot read its own build\n");
 
         if (!host_install_refresh(install))
                 return host_refuse("%s is no longer here\n", install->disk);
@@ -2444,7 +2445,7 @@ static b32 host_install_locked(string_address asked, bool removable)
                                    "another disk starts from a live session\n", kept);
 
         if (!host_running_build(running, sizeof(running)))
-                return host_refuse("%s cannot read its own build\n", "moonwater");
+                return host_refuse("moonwater cannot read its own build\n");
 
         /*      Read before anything is mounted to look for the image: an
                 install takes this session's settings, which is how what was
@@ -4447,12 +4448,12 @@ static b32 host_canvas(string_address address_to arguments, positive count)
                 //      text console, without the right to close one, or with no
                 //      Canvas in the kernel, it made the refusal after it a lie.
                 if (!bowl_is_root())
-                        return host_refuse("turning Canvas off needs root (CAP_SYS_ADMIN)%s\n", "");
+                        return host_refuse("turning Canvas off needs root (CAP_SYS_ADMIN)\n");
                 failed = host_canvas_request(SPARK_CANVAS_STATUS, address_of control);
                 if (failed < 0)
                         return host_fail(SPARK_DEVICE, failed);
                 if (!control.running)
-                        return host_refuse("Canvas is already off%s\n", "");
+                        return host_refuse("Canvas is already off\n");
 
                 host_say(log, host_label "Canvas off: every window closes, this one too. "
                                          "On the text console, moonwater canvas on "
@@ -4462,9 +4463,9 @@ static b32 host_canvas(string_address address_to arguments, positive count)
 
                 failed = host_canvas_request(SPARK_CANVAS_OFF, address_of control);
                 if (failed == -EPERM)
-                        return host_refuse("turning Canvas off needs root (CAP_SYS_ADMIN)%s\n", "");
+                        return host_refuse("turning Canvas off needs root (CAP_SYS_ADMIN)\n");
                 if (failed == -EALREADY)
-                        return host_refuse("Canvas is already off%s\n", "");
+                        return host_refuse("Canvas is already off\n");
                 if (failed < 0)
                         return host_fail("canvas off", failed);
 
@@ -4484,9 +4485,9 @@ static b32 host_canvas(string_address address_to arguments, positive count)
         {
                 failed = host_canvas_request(SPARK_CANVAS_ON, address_of control);
                 if (failed == -EPERM)
-                        return host_refuse("turning Canvas on needs root (CAP_SYS_ADMIN)%s\n", "");
+                        return host_refuse("turning Canvas on needs root (CAP_SYS_ADMIN)\n");
                 if (failed == -EALREADY)
-                        return host_refuse("Canvas is already on%s\n", "");
+                        return host_refuse("Canvas is already on\n");
                 if (failed == -EBUSY)
                 {
                         if (control.master_command[0] && !control.master_pid)
@@ -4506,7 +4507,7 @@ static b32 host_canvas(string_address address_to arguments, positive count)
                         return 1;
                 }
                 if (failed == -ENODEV)
-                        return host_refuse("there is no display for Canvas to start on%s\n", "");
+                        return host_refuse("there is no display for Canvas to start on\n");
                 if (failed < 0)
                         return host_fail("canvas on", failed);
 
@@ -4658,11 +4659,11 @@ static b32 host_bios(string_address address_to arguments, positive count)
         host_need_root("moonwater bios reboot");
         if (offered == -ENODEV)
                 return host_refuse("this machine did not start from UEFI firmware, so "
-                                   "there is no setup to restart into%s\n", "");
+                                   "there is no setup to restart into\n");
         if (offered < 0)
                 return host_fail("firmware setup", offered);
         if (!offered)
-                return host_refuse("this firmware offers no setup screen at the next boot%s\n", "");
+                return host_refuse("this firmware offers no setup screen at the next boot\n");
 
         if (host_bios_set())
                 return 1;
@@ -8317,7 +8318,7 @@ static b32 radio_wifi_bring(bool say)
 
                 return radio_wifi_why(why, sizeof(why))
                            ? host_refuse("wifi: %s\n", why)
-                           : host_refuse("no wireless interface%s\n", "");
+                           : host_refuse("no wireless interface\n");
         }
         if (say)
                 return radio_join_said(failed)
@@ -8410,7 +8411,7 @@ static b32 radio_wifi_enter(string_address ssid, string_address pass)
         b32 switched;
 
         if (stored == -E2BIG)
-                return host_refuse("too many saved networks%s\n", "");
+                return host_refuse("too many saved networks\n");
         if (stored == -EFBIG)
                 return host_refuse("%s is too long to change here\n", NET_WIFI_LIST);
         if (stored < 0)
@@ -8433,8 +8434,7 @@ static b32 radio_wifi_enter(string_address ssid, string_address pass)
                                            radio_security_words[heard->security]);
                 if (heard->security != RADIO_OPEN && !pass_length)
                         return host_refuse("saved with no password, but it "
-                                           "asks for one%s\n",
-                                           "");
+                                           "asks for one\n");
         }
 
         /*      No radio at all is not one that is still arriving: the join's
@@ -8448,16 +8448,15 @@ static b32 radio_wifi_enter(string_address ssid, string_address pass)
                 return radio_wifi_why(why, sizeof(why))
                            ? host_refuse("saved; wifi: %s\n", why)
                            : host_refuse("saved, but there is no "
-                                         "wireless interface%s\n",
-                                         "");
+                                         "wireless interface\n");
         if (failed == -113)
-                return host_refuse("saved, but it is not in range%s\n", "");
+                return host_refuse("saved, but it is not in range\n");
         if (radio_join_said(failed))
         {
                 if (failed == -110 &&
                     radio_air_take(address_of air, RADIO_AIR_CACHED) &&
                     air.count && !radio_air_find(address_of air, ssid))
-                        return host_refuse("saved, but it is not in range%s\n", "");
+                        return host_refuse("saved, but it is not in range\n");
                 return host_refuse("saved, but the network %s\n",
                                    radio_join_words(failed));
         }
@@ -8478,17 +8477,15 @@ static b32 radio_wifi_add(string_address ssid, string_address pass)
         b32 result;
 
         if (!ssid_length || ssid_length > RADIO_SSID_MOST)
-                return host_refuse("that network name is empty or too long%s\n",
-                                   "");
+                return host_refuse("that network name is empty or too long\n");
         if (pass_length > RADIO_PASS_MOST)
-                return host_refuse("that password is too long%s\n", "");
+                return host_refuse("that password is too long\n");
         if (pass_length && (pass_length < 8 ||
                             (pass_length == 64 && !radio_hex_key(pass))))
                 return host_refuse("a WPA password is 8 to 63 characters, "
-                                   "or a key of 64 hex digits%s\n",
-                                   "");
+                                   "or a key of 64 hex digits\n");
         if (!radio_text_shown(ssid) || (pass_length && !radio_text_shown(pass)))
-                return host_refuse("that network name cannot be stored%s\n", "");
+                return host_refuse("that network name cannot be stored\n");
 
         /*      The radio lock from here, before the network is saved: the
                 machine's own pass, finding it saved and nothing joined,
@@ -8582,8 +8579,7 @@ static b32 radio_wifi_remove(string_address ssid)
         b32 result;
 
         if (!ssid_length || ssid_length > RADIO_SSID_MOST)
-                return host_refuse("that network name is empty or too long%s\n",
-                                   "");
+                return host_refuse("that network name is empty or too long\n");
 
         lock = radio_lock(true);
         if (lock < 0)
@@ -8794,10 +8790,9 @@ static b32 radio_bluetooth_edit(string_address identity, bool add)
         bool found = false;
 
         if (!length || length > 128)
-                return host_refuse("that bluetooth name is empty or too long%s\n",
-                                   "");
+                return host_refuse("that bluetooth name is empty or too long\n");
         if (add && !radio_text_shown(identity))
-                return host_refuse("that bluetooth name cannot be stored%s\n", "");
+                return host_refuse("that bluetooth name cannot be stored\n");
 
         lock = radio_lock(true);
         if (lock < 0)
@@ -8844,7 +8839,7 @@ static b32 radio_bluetooth_edit(string_address identity, bool add)
         if (failed == 1)
                 return host_refuse("no remembered bluetooth device is called %s\n", identity);
         if (failed == 2)
-                return host_refuse("too many saved bluetooth devices%s\n", "");
+                return host_refuse("too many saved bluetooth devices\n");
         if (failed == 4)
                 return host_refuse("%s is too long to change here\n", NET_BLUETOOTH_LIST);
         if (failed)
@@ -9077,7 +9072,7 @@ static b32 host_radio(string_address address_to arguments, positive count)
 
         mutate = count > 2;
         if (mutate && !bowl_is_root())
-                return host_refuse("%s needs root\n", "moonwater");
+                return host_refuse("moonwater needs root\n");
         power = count == 3 ? host_onoff(word) : -1;
 
         if (string_equals(verb, "wired"))
@@ -9114,15 +9109,14 @@ static b32 host_radio(string_address address_to arguments, positive count)
                                                         count == 4) < 0)
                                 {
                                         crypto_forget(pass, sizeof(pass));
-                                        return host_refuse("nothing saved%s\n", "");
+                                        return host_refuse("nothing saved\n");
                                 }
                         }
                         else
                         {
                                 length = string_length(arguments[4]);
                                 if (length >= sizeof(pass))
-                                        return host_refuse("that password is too long%s\n",
-                                                           "");
+                                        return host_refuse("that password is too long\n");
                                 memory_copy(pass, arguments[4], length + 1);
                                 crypto_forget(arguments[4], length);
                         }
@@ -9526,7 +9520,7 @@ static b32 tune_brightness(string_address address_to arguments, positive count)
                        "/brightness") ||
             !tune_number(maximum_path, address_of maximum) || !maximum ||
             !tune_number(current_path, address_of current))
-                return host_refuse("this machine has no backlight to set%s\n", "");
+                return host_refuse("this machine has no backlight to set\n");
 
         if (count == 2)
         {
@@ -9614,7 +9608,7 @@ static b32 tune_charge(string_address address_to arguments, positive count)
         bool have_limit;
 
         if (!tune_battery(name, sizeof(name)))
-                return host_refuse("this machine has no battery%s\n", "");
+                return host_refuse("this machine has no battery\n");
 
         if (count == 2)
         {
@@ -9648,7 +9642,7 @@ static b32 tune_charge(string_address address_to arguments, positive count)
 
                         number = string_digits_max(arguments[3], 4, address_of used);
                         if (arguments[3][used] || number < 20 || number > 100)
-                                return host_refuse("a charge limit is 20 to 100 percent%s\n", "");
+                                return host_refuse("a charge limit is 20 to 100 percent\n");
                 }
                 {
                         p8 text[8];
@@ -9657,9 +9651,9 @@ static b32 tune_charge(string_address address_to arguments, positive count)
                         failed = tune_charge_apply((string_address)text);
                         if (failed < 0)
                                 return failed == -ENODEV
-                                           ? host_refuse("this machine has no battery%s\n", "")
+                                           ? host_refuse("this machine has no battery\n")
                                            : failed == -ENOENT
-                                                 ? host_refuse("this battery has no charge limit%s\n", "")
+                                                 ? host_refuse("this battery has no charge limit\n")
                                                  : host_fail("charge", failed);
                         //      A limit of a full charge is the default: nothing to bring back.
                         if (tune_remember("charge.limit", number == 100 ? (string_address)"" : (string_address)text))
@@ -9755,7 +9749,7 @@ static b32 tune_power(string_address address_to arguments, positive count)
                 (void)tune_word(TUNE_SYS_CPU "/cpu0/cpufreq/energy_performance_preference", preference,
                                 sizeof(preference));
                 if (!profile[0] && !governor[0])
-                        return host_refuse("this machine has no power profile to set%s\n", "");
+                        return host_refuse("this machine has no power profile to set\n");
                 kept[0] = end;
                 (void)tune_kept("power", kept, sizeof(kept));
                 string_format(log, host_label "power %s", kept[0] ? (string_address)kept : (string_address)"(not set here)");
@@ -9774,7 +9768,7 @@ static b32 tune_power(string_address address_to arguments, positive count)
                 return host_usage();
         host_need_root("moonwater power");
         if (!tune_power_apply(arguments[2]))
-                return host_refuse("this machine has no power profile to set%s\n", "");
+                return host_refuse("this machine has no power profile to set\n");
         if (tune_remember("power", arguments[2]))
                 return 1;
         host_say(log, host_label "power %s\n", arguments[2]);
@@ -9845,8 +9839,8 @@ static b32 tune_cpu(string_address address_to arguments, positive count)
                 host_need_root("moonwater cpu");
                 failed = boost ? tune_cpu_boost(on) : tune_cpu_smt(on);
                 if (failed == -ENOENT)
-                        return host_refuse(boost ? "this machine has no boost switch%s\n"
-                                                 : "this machine has no SMT switch%s\n", "");
+                        return host_refuse(boost ? "this machine has no boost switch\n"
+                                                 : "this machine has no SMT switch\n");
                 if (failed < 0)
                         return host_fail(boost ? "cpu boost" : "cpu smt", failed);
                 //      Both default to on: nothing to bring back then.
@@ -9866,9 +9860,9 @@ static b32 tune_cpu(string_address address_to arguments, positive count)
                 host_need_root("moonwater cpu");
                 number = string_digits_max(arguments[3], 5, address_of used);
                 if (arguments[3][used])
-                        return host_refuse("a cpu is a number of at most five digits%s\n", "");
+                        return host_refuse("a cpu is a number of at most five digits\n");
                 if (!number)
-                        return host_refuse("cpu 0 stays%s\n", "");
+                        return host_refuse("cpu 0 stays\n");
                 bipolar failed;
 
                 positive_into_string(text, number);
@@ -9876,7 +9870,7 @@ static b32 tune_cpu(string_address address_to arguments, positive count)
                              ? tune_write(path, string_equals(arguments[2], "online") ? "1" : "0")
                              : -ENOENT;
                 if (failed == -ENOENT)
-                        return host_refuse("that cpu cannot be switched%s\n", "");
+                        return host_refuse("that cpu cannot be switched\n");
                 if (failed < 0)
                         return host_fail("cpu", failed);
                 host_say(log, host_label "cpu %s %p\n", arguments[2], number);
@@ -10216,8 +10210,8 @@ static b32 tune_suspend(string_address verb, string_address state)
 
         if (!tune_lists(TUNE_SYS_POWER "/state", state))
                 return host_refuse(string_equals(state, "mem")
-                                       ? "this kernel does not offer sleep%s\n"
-                                       : "this kernel does not offer hibernate%s\n", "");
+                                       ? "this kernel does not offer sleep\n"
+                                       : "this kernel does not offer hibernate\n");
         host_need_root(string_equals(state, "mem") ? "moonwater sleep" : "moonwater hibernate");
         //      So a sleep that never wakes leaves the device it stopped at in the
         //      log, and what they were is put back when it is over.
@@ -14561,8 +14555,7 @@ static b32 host_bind_told(unsigned int event, string_address command)
                                    control.name[0] ? (string_address)control.name
                                                    : (string_address)"that event");
         if (failed == -ENAMETOOLONG)
-                return host_refuse("that command is longer than the %s a bound event holds\n",
-                                   "255 bytes");
+                return host_refuse("that command is longer than the 255 bytes a bound event holds\n");
         if (failed < 0)
                 return host_fail(SPARK_DEVICE, failed);
 
@@ -14657,8 +14650,7 @@ static b32 host_bind(string_address address_to arguments, positive count)
 
         if (!host_settings_words(text, sizeof(text), arguments + words, count - words,
                                  address_of length))
-                return host_refuse("that command is longer than the %s a bound event holds\n",
-                                   "255 bytes");
+                return host_refuse("that command is longer than the 255 bytes a bound event holds\n");
 
         return host_bind_tell(event, text);
 }
@@ -15172,7 +15164,7 @@ static b32 host_main()
                 if (!host_starts(verdict, "ask ") ||
                     system_rename_at(AT_FDCWD, HOST_QUESTION, AT_FDCWD,
                                      HOST_QUESTION_TAKEN, 0) < 0)
-                        return host_refuse("there is nothing to ask%s\n", "");
+                        return host_refuse("there is nothing to ask\n");
 
                 host_question(verdict + 4);
         }
