@@ -21999,46 +21999,54 @@ static fn clock_tz_load_localtime(void)
                 clock_history_rules = true;
 }
 
-static fn clock_tz_load_file(void)
+/*
+        What the zone file says, as the one line it holds without the line
+        end, and how long that is; negative when there is no such file or it
+        cannot be read. Nonblocking: a FIFO at the name would hold every
+        program that asks the time of day until somebody wrote to it.
+*/
+static bipolar clock_zone_load(p8 address_to into, positive room)
 {
-        p8 text[80];
         bipolar handle;
         bipolar got;
-        positive used = 0;
 
-        //      Nonblocking: a FIFO at the name would hold every program
-        //      that asks the time of day until somebody wrote to it.
         handle = system_call_4(syscall(openat), AT_FDCWD,
                                (positive)(string_address)CLOCK_ZONE_PATH,
                                O_RDONLY | O_NONBLOCK | O_CLOEXEC, 0);
         if (handle < 0)
+                return handle;
+        do
+                got = system_call_3(syscall(read), (positive)handle,
+                                    (positive)into, room - 1);
+        while (got == -4);
+        system_call_1(syscall(close), (positive)handle);
+        if (got < 0)
+                return got;
+        while (got > 0 && (into[got - 1] == '\n' || into[got - 1] == '\r'))
+                got--;
+        into[got] = 0;
+        return got;
+}
+
+static fn clock_tz_load_file(void)
+{
+        p8 text[80];
+        bipolar used = clock_zone_load(text, sizeof(text));
+        string_address posix;
+
+        if (used < 0)
         {
                 clock_tz_load_localtime();
                 return;
         }
-        do
-                got = system_call_3(syscall(read), (positive)handle,
-                                    (positive)(text + used),
-                                    sizeof(text) - 1 - used);
-        while (got == -4);
-        system_call_1(syscall(close), (positive)handle);
-        if (got < 0)
-                return;
-        used += (positive)got;
-        while (used && (text[used - 1] == '\n' || text[used - 1] == '\r'))
-                used--;
-        text[used] = 0;
         if (!used)
                 return;
-        {
-                string_address posix = clock_zone_posix(text);
-
-                if (!posix)
-                        posix = text;
-                if (!clock_tz_parse(posix))
-                        clock_tz_reset();
-                clock_history_of(text);
-        }
+        posix = clock_zone_posix(text);
+        if (!posix)
+                posix = text;
+        if (!clock_tz_parse(posix))
+                clock_tz_reset();
+        clock_history_of(text);
 }
 
 /*

@@ -2579,17 +2579,9 @@ static b32 bowl_write_localtime_at(string_address path)
 {
         p8 zone[80];
         p8 file[512];
-        bipolar got = file_slurp(CLOCK_ZONE_PATH, zone, sizeof(zone));
         positive length;
 
-        if (got <= 0)
-                return 0;
-        if ((positive)got >= sizeof(zone))
-                got = (bipolar)(sizeof(zone) - 1);
-        while (got > 0 && (zone[got - 1] == '\n' || zone[got - 1] == '\r'))
-                got--;
-        zone[got] = end;
-        if (!zone[0])
+        if (clock_zone_load(zone, sizeof(zone)) <= 0)
                 return 0;
 
         length = clock_zone_tzif(zone, file, sizeof(file));
