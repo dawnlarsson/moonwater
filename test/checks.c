@@ -74939,7 +74939,9 @@ static fn groups_scrub_edges(void)
                       string_equals(groups.record[0].namespace, "office") &&
                       string_equals(groups.record[1].namespace, "office") &&
                       groups.record[1].may == 6 &&
-                      !memory_compare(groups.record[1].key, three[2].key, 32));
+                      !memory_compare(groups.record[1].key, three[2].key, 32) &&
+                      memory_span_byte(groups.record[0].check, 0, 32) == 32 &&
+                      memory_span_byte(groups.record[1].check, 0, 32) == 32);
 
         //      Not a file to write: others can read it, or it is not whole,
         //      or it is a link to one.
@@ -74995,6 +74997,64 @@ static fn groups_scrub_edges(void)
                       back[1].check[31] == 0 && back[2].check[0] == 0xa5 &&
                       back[2].may == 6);
         (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
+}
+
+//      The records of a file keep the names that could have been paired, and
+//      the last record takes the place of one that could not (the peers and
+//      the groups read their files through the same walk).
+static fn records_named(void)
+{
+        struct waterlink_peer peer[4];
+        positive count = 4;
+        positive at = __builtin_offsetof(struct waterlink_peer, name);
+        static const string_address names[4] = {"alice", "pair", "bob", "-x"};
+
+        memory_zero(peer, sizeof peer);
+        for (positive i = 0; i < 4; i++)
+                string_copy((string_address)peer[i].name, names[i]);
+        peer[2].may = 6;
+        link_records_named((p8 address_to)peer, address_of count,
+                           sizeof peer[0], at, WATERLINK_NAME_MAX);
+        check("sec: a record whose name is a word of the command or starts with a "
+              "dash is dropped and the last in its place, the one that takes "
+              "its place judged too",
+              count == 2 && string_equals((string_address)peer[0].name, "alice") &&
+                      string_equals((string_address)peer[1].name, "bob") &&
+                      peer[1].may == 6);
+
+        count = 2;
+        string_copy((string_address)peer[1].name, "pair");
+        link_records_named((p8 address_to)peer, address_of count,
+                           sizeof peer[0], at, WATERLINK_NAME_MAX);
+        check("sec: a last record that is no name is dropped and nothing is "
+              "moved over itself",
+              count == 1 && string_equals((string_address)peer[0].name, "alice"));
+
+        count = 3;
+        string_copy((string_address)peer[0].name, "a b");
+        string_copy((string_address)peer[1].name, "");
+        string_copy((string_address)peer[2].name, "x\ny");
+        link_records_named((p8 address_to)peer, address_of count,
+                           sizeof peer[0], at, WATERLINK_NAME_MAX);
+        check("sec: records that are all no name leave none", count == 0);
+
+        memory_zero(peer, sizeof peer);
+        memory_fill(peer[0].name, 'a', sizeof peer[0].name);
+        string_copy((string_address)peer[1].name, "next");
+        count = 2;
+        link_records_named((p8 address_to)peer, address_of count,
+                           sizeof peer[0], at, WATERLINK_NAME_MAX);
+        check("sec: a name with no end is cut at its room, kept, and the "
+              "record beside it is not touched",
+              count == 2 && peer[0].name[WATERLINK_NAME_MAX - 1] == 0 &&
+                      string_length((string_address)peer[0].name) ==
+                              WATERLINK_NAME_MAX - 1 &&
+                      string_equals((string_address)peer[1].name, "next"));
+
+        count = 0;
+        link_records_named((p8 address_to)peer, address_of count,
+                           sizeof peer[0], at, WATERLINK_NAME_MAX);
+        check("sec: no records, none made", count == 0);
 }
 
 //      Discovery labels are published only when every one was drawn.
@@ -75922,6 +75982,7 @@ b32 main(void)
         nearby_address();
         nearby_tick();
         groups_scrub_edges();
+        records_named();
         labels();
         wpa_key();
         wifi_source_checks();

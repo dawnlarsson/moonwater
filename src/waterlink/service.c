@@ -251,6 +251,29 @@ static bool link_name_good(string_address name)
         return true;
 }
 
+/*      Records read from a file keep only the names that could have been
+        paired: the name is cut at its room, and a record whose name
+        link_name_good refuses is replaced by the last one, so the order is
+        not kept. The peers and the groups both read their files through
+        this. */
+static fn link_records_named(p8 address_to records, positive address_to count,
+                             positive size, positive name_at, positive room)
+{
+        for (positive at = 0; at < address_to count; at++)
+        {
+                p8 address_to record = records + at * size;
+
+                record[name_at + room - 1] = 0;
+                if (link_name_good((string_address)(record + name_at)))
+                        continue;
+                (address_to count)--;
+                if (at != address_to count)
+                        memory_copy(record, records + address_to count * size,
+                                    size);
+                at--;
+        }
+}
+
 /* Everything waterlink keeps is records only root may read: the key, the
    peers, the groups and the listener's state. Refuse a partial, oversized,
    linked, non-root-owned or publicly accessible file rather than
@@ -408,15 +431,10 @@ static bipolar link_peers_read(link_peers address_to peers)
 
         //      A record with a name that could not have been paired is dropped
         //      rather than printed.
-        for (positive at = 0; at < peers->count; at++)
-        {
-                peers->peer[at].name[WATERLINK_NAME_MAX - 1] = 0;
-                if (!link_name_good(peers->peer[at].name))
-                {
-                        peers->peer[at] = peers->peer[--peers->count];
-                        at--;
-                }
-        }
+        link_records_named((p8 address_to)peers->peer, address_of peers->count,
+                           sizeof(struct waterlink_peer),
+                           __builtin_offsetof(struct waterlink_peer, name),
+                           WATERLINK_NAME_MAX);
         return 0;
 }
 

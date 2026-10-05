@@ -108,17 +108,16 @@ bool link_groups_load(link_groups address_to groups)
         groups->count = got / sizeof(struct link_group_record);
         for (positive at = 0; at < groups->count; at++)
         {
-                groups->record[at].namespace[WATERLINK_NAMESPACE_MAX - 1] = 0;
                 old |= memory_span_byte(groups->record[at].check, 0,
                                         sizeof groups->record[at].check) !=
                        sizeof groups->record[at].check;
                 memory_zero(groups->record[at].check, sizeof groups->record[at].check);
-                if (!link_name_good(groups->record[at].namespace))
-                {
-                        groups->record[at] = groups->record[--groups->count];
-                        at--;
-                }
         }
+        link_records_named((p8 address_to)groups->record,
+                           address_of groups->count,
+                           sizeof(struct link_group_record),
+                           __builtin_offsetof(struct link_group_record, namespace),
+                           WATERLINK_NAMESPACE_MAX);
         return !old || link_groups_scrub(got / sizeof(struct link_group_record));
 }
 
@@ -248,15 +247,13 @@ static fn link_name_for(link_peers address_to peers, p8 address_to offered,
                         p8 address_to key, p8 address_to name)
 {
         p8 base[WATERLINK_NAME_MAX];
-        positive length;
 
         //      Every byte of the name is written, the tail after its end
         //      too: the caller keeps the whole buffer in a file.
         memory_zero(name, WATERLINK_NAME_MAX);
         offered[WATERLINK_NAME_MAX - 1] = 0;
         memory_zero(base, sizeof base);
-        length = string_length((string_address)offered);
-        memory_copy(base, offered, length);
+        string_copy((string_address)base, (string_address)offered);
         if (!link_name_good((string_address)base))
                 string_copy((string_address)base, "machine");
 
